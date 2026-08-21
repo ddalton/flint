@@ -24,7 +24,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 crate=$(cd "$here/../spdk-csi-driver" && pwd)
 dest="$crate/docker/prebuilt"
 
-BINS="csi-driver flint-nfs-server flint-pnfs-mds flint-pnfs-ds flint-lite-operator"
+BINS="csi-driver flint-nfs-server flint-pnfs-mds flint-pnfs-ds flint-lite-operator flint-hub-gateway"
 
 # Newest thing that can change a binary. Cargo.lock matters as much as
 # src/ — a dependency bump with no source edit still changes the output.

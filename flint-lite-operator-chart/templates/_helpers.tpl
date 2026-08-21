@@ -44,3 +44,23 @@ having one default instead of N pinned specs.
 {{- define "flint-lite-operator.hubImage" -}}
 {{- .Values.hubImage | default (printf "dilipdalton/flint-pnfs:%s" .Chart.AppVersion) }}
 {{- end }}
+
+{{/* flint-hub-gateway: its own name and labels, so it is never selected
+     by the operator's Service or PDB and vice versa. */}}
+{{- define "flint-lite-operator.gatewayName" -}}
+{{- printf "%s-gateway" (include "flint-lite-operator.name" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "flint-lite-operator.gatewaySelectorLabels" -}}
+app.kubernetes.io/name: {{ include "flint-lite-operator.gatewayName" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{- define "flint-lite-operator.gatewayLabels" -}}
+helm.sh/chart: {{ include "flint-lite-operator.chart" . }}
+{{ include "flint-lite-operator.gatewaySelectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}

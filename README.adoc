@@ -12,8 +12,11 @@ clusters — no SPDK, no dedicated hardware, no CRDs. See
 `flint-lite-chart/README.md` and `docs/flint-lite.md`. For a FLEET of
 them (bucket-per-tenant workspaces), `flint-lite-operator-chart/` adds
 one `FlintShare` custom resource per volume — see
-`docs/flint-lite-operator.md`. Everything below this line concerns the
-full CSI driver.
+`docs/flint-lite-operator.md`. To reach those hubs' HTTP file APIs from
+outside the cluster, the same chart can run `flint-hub-gateway`: one
+door that resolves a project id to its share, wakes it if it is parked,
+and proxies the file routes — see `docs/flint-hub-gateway.md`.
+Everything below this line concerns the full CSI driver.
 
 == Prerequisites
 

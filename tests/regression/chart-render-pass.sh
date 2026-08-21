@@ -141,6 +141,86 @@ else
   fail "the API rule's port changed — if monitoring.port is now honoured, delete this check"
 fi
 
+# -- 4. the gateway: it must refuse to render without credentials -----
+#
+# `flint-hub-gateway` reaches every project's files. Three shapes must
+# be refused at TEMPLATE time rather than discovered as a CrashLoop or,
+# far worse, as a running open proxy:
+#   - no inbound token     -> anyone who reaches the Service reads everything
+#   - no hub credential    -> every upstream call is unauthenticated
+#   - both hub credentials -> ambiguous which the fleet was provisioned with
+#
+# The binary refuses all three too. This asserts the CHART refuses them,
+# because a chart that renders a broken Deployment turns a config
+# mistake into a pull-image-and-crashloop instead of a helm error.
+GW="--set gateway.enabled=true"
+refuses() {
+  local label="$1"; shift
+  if helm template t "$ROOT/flint-lite-operator-chart" "$@" >/dev/null 2>"$TMP/gw-err.txt"; then
+    fail "$label: rendered anyway"
+  else
+    pass "$label"
+  fi
+}
+refuses "gateway without an inbound token is refused" $GW
+refuses "gateway without a hub credential is refused" $GW --set gateway.tokenSecretRef=t
+refuses "gateway with BOTH hub credentials is refused" $GW --set gateway.tokenSecretRef=t \
+        --set gateway.rootKeySecretRef=r --set gateway.hubTokenSecretRef=h
+
+# And the valid shape renders, so the refusals above are the guards and
+# not a template that never works.
+if helm template t "$ROOT/flint-lite-operator-chart" $GW \
+      --set gateway.tokenSecretRef=t --set gateway.rootKeySecretRef=r \
+      >"$TMP/gw.yaml" 2>"$TMP/gw-err.txt"; then
+  pass "gateway renders with a token and a root key"
+else
+  fail "gateway does not render even when configured"; head -3 "$TMP/gw-err.txt"
+fi
+
+# The numeric args must not reach clap in scientific notation. helm
+# renders a bare 5368709120 as 5.36870912e+09, which clap rejects at
+# startup -- a CrashLoop that no lint and no `helm template` exit status
+# would have caught. This one already happened.
+if grep -qE -- '--max-upload-bytes=[0-9]+$' "$TMP/gw.yaml"; then
+  pass "maxUploadBytes renders as an integer, not scientific notation"
+else
+  fail "maxUploadBytes is not a plain integer: $(grep -o -- '--max-upload-bytes=[^ ]*' "$TMP/gw.yaml")"
+fi
+
+# The gateway must never be granted Secrets. That grant is what the
+# derived-token design exists to avoid: the workspace namespaces hold
+# the tenants' S3 credentials next to the API tokens. Nor create/delete
+# on shares -- provisioning a project is the front door's decision.
+python3 "$ROOT/tests/regression/lib/gateway-role-check.py" "$TMP/gw.yaml"
+if [ $? -eq 0 ]; then pass "the gateway role grants no Secrets and cannot create or delete shares"; else fail "the gateway role is too wide"; fi
+
+# With BOTH the policy and the gateway on, the hub's 8080 rule must
+# admit the gateway. Nobody would have to remember to repeat its
+# selector in apiClientSelectors -- but if the auto-peer ever regresses,
+# the symptom is every file request timing out with the policy looking
+# fine, so it is pinned here.
+if helm template t "$ROOT/flint-lite-operator-chart" $GW \
+      --set gateway.tokenSecretRef=t --set gateway.rootKeySecretRef=r \
+      --set networkPolicy.enabled=true --set 'networkPolicy.hubNamespaces={workspaces}' \
+      -s templates/networkpolicy.yaml >"$TMP/gw-np.yaml" 2>"$TMP/gw-np-err.txt"; then
+  if grep -q 'flint-lite-operator-gateway' "$TMP/gw-np.yaml"; then
+    pass "the hub's 8080 rule admits the gateway automatically"
+  else
+    fail "networkPolicy is on and the gateway is NOT admitted to 8080 — every file request would time out"
+  fi
+else
+  fail "networkpolicy.yaml does not render with the gateway on"; head -3 "$TMP/gw-np-err.txt"
+fi
+
+# The token mount must stay a WHOLE-DIRECTORY projection. A subPath
+# mount is frozen at pod start, which would silently return the inbound
+# token to boot-time behaviour with nothing failing.
+if grep -A3 'mountPath: /etc/flint/gateway-token' "$TMP/gw.yaml" | grep -q 'subPath'; then
+  fail "the gateway token is mounted with subPath -- rotation would silently stop working"
+else
+  pass "the gateway token is a whole-directory mount (rotation stays live)"
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then echo "chart render pass: ALL GREEN"; exit 0; fi
 echo "chart render pass: $fails FAILED"; exit 1

@@ -117,6 +117,124 @@ frontDoor:
   # service actually runs.
   namespace: ""
 
+# flint-hub-gateway — ONE externally-reachable door in front of every
+# hub's file API. Off by default; most installs drive FlintShares with
+# kubectl and mount NFS, and need none of this.
+#
+# WHY IT EXISTS. A hub's file API answers at `status.apiEndpoint`, which
+# is a HEADLESS in-cluster Service name: addressable, deliberately not
+# routable. The operator refuses to render anything routable per share —
+# 3000 ClusterIPs exhaust a GKE-default /20 below the fleet size already
+# validated, and the failure lands on the CONSUMER Service so new shares
+# stop being mountable; and NetworkPolicy cannot be relied on as the
+# guard (off by default, silently ignored by some CNIs). See
+# docs/plans/hub-api-service-design.md.
+#
+# One gateway CAN be guarded — put an Ingress with TLS in front of it,
+# or a NetworkPolicy, or both — so exposure is concentrated in one
+# object instead of spread across the fleet. That is the whole trade.
+#
+# It runs from the OPERATOR IMAGE with a different command, so enabling
+# it pulls no new image.
+#
+# WHAT IT PROXIES: `/v1/projects/{id}/files*` and nothing else. The
+# hub's unauthenticated `/status` — tier recovery point, epoch holder,
+# NFS client list — has no route through it, by construction rather
+# than by filtering.
+gateway:
+  enabled: false
+
+  # Callers authenticate to the gateway with a Bearer token from this
+  # Secret's `token` key, in the RELEASE namespace. Required.
+  # Projected as a whole directory and re-read every 10s, so rotating
+  # it is a Secret edit with no restart.
+  #
+  #   kubectl -n flint-system create secret generic flint-gateway-token \
+  #     --from-literal=token="$(openssl rand -base64 32)"
+  tokenSecretRef: ""
+
+  # How the gateway credentials itself TO the hubs. Exactly one of:
+  #
+  # rootKeySecretRef — a Secret with key `key` holding >=32 bytes. Each
+  #   share's token is HMAC-SHA256(root, endpoint:bucket:keyPrefix:version),
+  #   so one key produces every hub's credential and there is nothing to
+  #   store or fan out. Whoever PROVISIONS a share must write the same
+  #   value into that share's token Secret — use the binary itself as
+  #   the oracle so there is only one implementation:
+  #
+  #     flint-hub-gateway --root-key-file=/path/key \
+  #       --derive-token ',my-bucket,proj-a/,1'
+  #
+  #   Revoke ONE project by bumping its `flint.io/api-token-version`
+  #   annotation and rewriting that share's Secret.
+  #
+  # hubTokenSecretRef — a Secret with key `token`: one value every hub
+  #   accepts. Simpler, and it gives up single-project revocation.
+  #   Injected via env, so rotating it needs a rollout.
+  #
+  # Either way the gateway is granted NO access to Secrets in the
+  # workspace namespaces — those hold the tenants' S3 credentials
+  # (docs/plans/file-api-fleet-auth.md §5).
+  rootKeySecretRef: ""
+  hubTokenSecretRef: ""
+
+  # Namespaces to resolve projects in. "" = all. With "", a project id
+  # claimed by two shares in two namespaces is REFUSED (409) rather
+  # than tie-broken — serving one tenant's files to someone asking for
+  # the other's is worse than being unavailable.
+  watchNamespace: ""
+
+  # Prepended to a project id to derive its FlintShare name, for shares
+  # that predate the `flint.io/project-id` label. The label wins when
+  # both are present.
+  sharePrefix: "fs-"
+
+  # Seconds a request waits for a parked share to come back. The wake
+  # is armed either way and PERSISTS, so a timeout costs the caller a
+  # retry rather than the wake. An idle-suspended share is back in
+  # ~20-30s; a hibernated one is a full DR import and will time out
+  # here by design. 0 = never wait.
+  wakeWaitSecs: 25
+
+  # Proxy no mutating operation. A browse-only UI needs none of them,
+  # and this is the difference between a compromise that reads every
+  # project and one that rewrites them. Turn it on if you can.
+  readOnly: false
+
+  maxUploadBytes: 5368709120     # 5Gi, matching the hub's own default
+  upstreamTimeoutSecs: 30        # response HEADERS only; bodies stream untimed
+
+  # Two replicas by default. There is no lease and none is needed: the
+  # gateway's only write is a wake annotation, which is idempotent and
+  # level-triggered, so two replicas racing it converge.
+  replicas: 2
+
+  service:
+    # THE ONE ROUTABLE OBJECT in the flint-lite surface. ClusterIP by
+    # default: put an Ingress in front of it so the hop from outside is
+    # TLS-terminated and authenticated at the edge as well. Setting
+    # LoadBalancer here publishes a door onto every project's files —
+    # do it only with the token, a NetworkPolicy and an audit story all
+    # in place.
+    type: ClusterIP
+    port: 8090
+    annotations: {}
+
+  logLevel: ""      # "" = inherit the chart-level logLevel
+  # Sized for a proxy, not a control plane: the reflector store is the
+  # same ~12 KiB per share the operator carries (~35 MiB at 3000), and
+  # bodies STREAM rather than buffer, so concurrent downloads do not
+  # scale memory with file size.
+  resources:
+    requests:
+      cpu: 200m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  nodeSelector: {}
+  tolerations: []
+  podAnnotations: {}
+
 rbac:
   # Create the ClusterRole/Binding. The operator needs cluster scope:
   # shares live in tenant namespaces and uniqueness spans all of them.

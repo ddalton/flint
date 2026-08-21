@@ -1,0 +1,230 @@
+{{- if .Values.gateway.enabled }}
+{{- /*
+flint-hub-gateway — ONE door in front of every hub's file API.
+
+WHY IT IS IN THIS CHART. It is a fleet-scope singleton, like the
+operator, and it reads the same CRD. Its RBAC is a strict subset of the
+front door's role that already lives here. It also ships in the SAME
+IMAGE as the operator (same crate, same build), so there is no second
+image to pin, publish or keep in step — only a different `command`.
+
+WHAT IT IS NOT. It is not the operator, and shares nothing with it at
+runtime: its own ServiceAccount, its own ClusterRole, its own pods. It
+holds no leader lease because it writes almost nothing — a wake
+annotation patch is idempotent and level-triggered, so two replicas
+racing it converge.
+
+THE ONE THING TO GET RIGHT ON INSTALL. `service.type` here is the only
+place in the whole flint-lite surface that is MEANT to be routable, and
+that is a deliberate inversion: the operator refuses to render a
+routable Service per share (see docs/plans/hub-api-service-design.md),
+because 3000 of them cannot be guarded and would exhaust the service
+CIDR. One gateway can be guarded — by an Ingress with TLS, by a
+NetworkPolicy, by whatever fronts it — so exposure is concentrated here
+rather than spread over the fleet.
+*/}}
+{{- if not .Values.gateway.tokenSecretRef }}
+{{- fail "gateway.enabled requires gateway.tokenSecretRef — a Secret with key `token` holding the credential CALLERS must present. There is no unauthenticated mode: this pod can reach every project's files." }}
+{{- end }}
+{{- if and (not .Values.gateway.rootKeySecretRef) (not .Values.gateway.hubTokenSecretRef) }}
+{{- fail "gateway.enabled requires gateway.rootKeySecretRef (derive one token per share) or gateway.hubTokenSecretRef (one token every hub accepts). Without one, every call to a hub would be unauthenticated." }}
+{{- end }}
+{{- if and .Values.gateway.rootKeySecretRef .Values.gateway.hubTokenSecretRef }}
+{{- fail "gateway.rootKeySecretRef and gateway.hubTokenSecretRef are alternatives; setting both leaves it ambiguous which credential the fleet's hubs were provisioned with." }}
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "flint-lite-operator.gatewayName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.gatewayLabels" . | nindent 4 }}
+---
+{{- if .Values.rbac.create }}
+{{- /*
+Read the fleet, and touch one annotation. That is the whole grant.
+
+NO SECRETS, and that is the point of the derived-token design: a
+gateway that could `get secrets` in the workspace namespaces would hold
+every tenant's S3 credentials, which sit in the same namespaces as the
+per-share API tokens. See docs/plans/file-api-fleet-auth.md §5.
+
+No `create` (the front door provisions projects, not this), no
+`delete`, no `update` — `patch` is enough for the wake annotation and
+cannot rewrite a spec wholesale.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "flint-lite-operator.gatewayName" . }}
+  labels:
+    {{- include "flint-lite-operator.gatewayLabels" . | nindent 4 }}
+rules:
+  - apiGroups: ["flint.io"]
+    resources: ["flintshares"]
+    verbs: ["get", "list", "watch", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "flint-lite-operator.gatewayName" . }}
+  labels:
+    {{- include "flint-lite-operator.gatewayLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "flint-lite-operator.gatewayName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flint-lite-operator.gatewayName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "flint-lite-operator.gatewayName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.gatewayLabels" . | nindent 4 }}
+  {{- with .Values.gateway.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.gateway.service.type }}
+  selector:
+    {{- include "flint-lite-operator.gatewaySelectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.gateway.service.port }}
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flint-lite-operator.gatewayName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.gatewayLabels" . | nindent 4 }}
+spec:
+  replicas: {{ int .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      {{- include "flint-lite-operator.gatewaySelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "flint-lite-operator.gatewaySelectorLabels" . | nindent 8 }}
+      {{- with .Values.gateway.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "flint-lite-operator.gatewayName" . }}
+      {{- if gt (int .Values.gateway.replicas) 1 }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "flint-lite-operator.gatewaySelectorLabels" . | nindent 20 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: gateway
+          image: {{ include "flint-lite-operator.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The SAME image as the operator, a different binary in it.
+          command: ["/usr/local/bin/flint-hub-gateway"]
+          args:
+            - --listen=0.0.0.0:8090
+            {{- with .Values.gateway.watchNamespace }}
+            - --namespace={{ . }}
+            {{- end }}
+            - --share-prefix={{ .Values.gateway.sharePrefix }}
+            - --token-file=/etc/flint/gateway-token/token
+            {{- if .Values.gateway.rootKeySecretRef }}
+            - --root-key-file=/etc/flint/gateway-root/key
+            {{- end }}
+            - --wake-wait-secs={{ .Values.gateway.wakeWaitSecs }}
+            - --read-only={{ .Values.gateway.readOnly }}
+            - --max-upload-bytes={{ int64 .Values.gateway.maxUploadBytes }}
+            - --upstream-timeout-secs={{ .Values.gateway.upstreamTimeoutSecs }}
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.gateway.logLevel | default .Values.logLevel | default "info" | quote }}
+            {{- if .Values.gateway.hubTokenSecretRef }}
+            # The shared-token alternative. An env-sourced value is
+            # boot-time — rotating it needs a rollout, unlike the
+            # file-projected inbound token above.
+            - name: FLINT_GATEWAY_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.hubTokenSecretRef }}
+                  key: token
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8090
+              protocol: TCP
+          volumeMounts:
+            # WHOLE DIRECTORY, never subPath. A subPath mount is frozen
+            # at pod start, which would silently return the inbound
+            # token to boot-time behaviour with nothing failing — the
+            # same constraint the hub's own token mount carries.
+            - name: gateway-token
+              mountPath: /etc/flint/gateway-token
+              readOnly: true
+            {{- if .Values.gateway.rootKeySecretRef }}
+            - name: gateway-root
+              mountPath: /etc/flint/gateway-root
+              readOnly: true
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            # /readyz is False until the share cache has listed. Before
+            # that every project would 404 — read by a caller as "this
+            # project does not exist" rather than "ask again shortly" —
+            # so this must keep the pod out of the Service.
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          {{- with .Values.gateway.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: gateway-token
+          secret:
+            secretName: {{ .Values.gateway.tokenSecretRef }}
+        {{- if .Values.gateway.rootKeySecretRef }}
+        - name: gateway-root
+          secret:
+            secretName: {{ .Values.gateway.rootKeySecretRef }}
+        {{- end }}
+      {{- with .Values.gateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

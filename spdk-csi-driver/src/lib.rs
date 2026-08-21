@@ -48,6 +48,7 @@ pub mod reserved_devices;  // Device reservation for direct SPDK access (device 
 pub mod state_backend;  // Persistence trait + impls for NFSv4/pNFS server state (Phase B)
 pub mod tier;  // S3 cold tier (L2) — design of record: docs/plans/s3-tier-l2-design-review.md
 pub mod lite_operator;  // flint-lite operator: the FlintShare CRD + its reconcile (docs/plans/flint-lite-operator-plan.md)
+pub mod lite_gateway;  // flint-hub-gateway: one door in front of every hub's file API (docs/flint-hub-gateway.md)
 
 /// Install the process-wide rustls crypto provider. **Call this first
 /// in every binary that opens a TLS connection through rustls** — in

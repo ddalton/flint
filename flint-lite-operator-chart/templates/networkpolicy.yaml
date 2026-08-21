@@ -82,6 +82,20 @@ spec:
           podSelector:
             matchLabels:
               {{- include "flint-lite-operator.selectorLabels" $ | nindent 14 }}
+        {{- if $.Values.gateway.enabled }}
+        # flint-hub-gateway, admitted automatically. Both halves are
+        # rendered by this chart, so making an operator remember to
+        # repeat the gateway's selector in apiClientSelectors would only
+        # produce a fleet-wide outage the first time someone forgot —
+        # and one whose symptom (every file request times out) points at
+        # the gateway rather than at the policy.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $.Release.Namespace }}
+          podSelector:
+            matchLabels:
+              {{- include "flint-lite-operator.gatewaySelectorLabels" $ | nindent 14 }}
+        {{- end }}
         {{- range $.Values.networkPolicy.apiClientCIDRs }}
         - ipBlock:
             cidr: {{ . | quote }}

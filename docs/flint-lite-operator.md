@@ -330,6 +330,14 @@ a person is about to use one. This section is the contract between it
 and the operator. Everything here is deliberately boring: the front
 door speaks plain Kubernetes, and the operator does the rest.
 
+> **If all your front door wants is to browse files, you may not need
+> this contract at all.** `flint-hub-gateway` implements the whole loop
+> below — resolve, wake, wait, dial — behind one HTTP endpoint, so the
+> project service holds one bearer token instead of a Kubernetes client
+> and a per-share credential store. It ships in the operator's own
+> image; see `docs/flint-hub-gateway.md`. Read on if your front door
+> also *creates* projects, which the gateway deliberately cannot do.
+
 ### One project, one name, one prefix
 
 Derive the share's name from the project id — `fs-<project-id>` — and

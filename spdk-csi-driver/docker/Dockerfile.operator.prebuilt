@@ -4,9 +4,9 @@
 #
 #   for T in x86_64 aarch64; do
 #     cargo zigbuild --release --target $T-unknown-linux-musl \
-#       --bin flint-lite-operator; done
-#   # stage: docker/prebuilt/amd64/flint-lite-operator   (from x86_64)
-#   #        docker/prebuilt/arm64/flint-lite-operator   (from aarch64)
+#       --bin flint-lite-operator --bin flint-hub-gateway; done
+#   # stage: docker/prebuilt/amd64/{flint-lite-operator,flint-hub-gateway}
+#   #        docker/prebuilt/arm64/{flint-lite-operator,flint-hub-gateway}
 #   for A in amd64 arm64; do
 #     docker build --platform linux/$A -f docker/Dockerfile.operator.prebuilt \
 #       --build-arg BIN_DIR=docker/prebuilt \
@@ -32,6 +32,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY ${BIN_DIR}/${TARGETARCH}/flint-lite-operator /usr/local/bin/flint-lite-operator
+
+# flint-hub-gateway rides in the SAME image. Same crate, same build —
+# and one fewer image to publish, sign, scan and keep in step at
+# release, which is where a second image actually costs something. The
+# chart picks the binary with `command:`; the two processes share
+# nothing at runtime (different ServiceAccount, different RBAC,
+# different pods), so this is packaging and not coupling.
+COPY ${BIN_DIR}/${TARGETARCH}/flint-hub-gateway /usr/local/bin/flint-hub-gateway
 
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/flint-lite-operator"]
