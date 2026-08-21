@@ -286,11 +286,26 @@ GET  flintshares/fs-<id>          → 404? create it
 PATCH metadata.annotations         → flint.io/requested-at: <now, RFC3339>
                                      flint.io/wake-intent: warm   (optional)
 poll GET until .status.phase == Ready
-read .status.address               → mount it, or call the file API
+read .status.address               → mount it (NFS only — see below)
 ```
 
-Four things about that loop:
+Five things about that loop:
 
+- **`status.address` is the NFS door and ONLY the NFS door.** It is
+  `host:2049` — derived from the consumer Service, which carries exactly
+  one port (`render.rs:465-472`). The file API listens on a separate
+  port (`monitoring.port`, default 8080) that is in **no Service at
+  all**: it is a bare `containerPort`, deliberately kept off the
+  consumer Service because that Service may be a `LoadBalancer` and this
+  API can rewrite any file in the project (`crd.rs:331-336`,
+  `render.rs:575-578`). Dialling `status.address` on 8080 reaches a
+  ClusterIP that declares no such port and is refused.
+  So there is no published endpoint for the file API today. The only
+  supported caller is in-cluster and reaches the hub **by pod IP**,
+  which is what the operator itself does (`hubstatus.rs:318`). A front
+  door must resolve the pod for itself and re-resolve it after every
+  roll. See `docs/plans/hub-api-service-design.md` for the design that
+  closes this.
 - **The wake is explicit and the annotation is the whole mechanism.**
   An NFS operation against a suspended hub does not wake it — it hangs,
   because there is nothing listening to notice. The file API is the
@@ -664,11 +679,22 @@ Things worth knowing before you wire it up:
   rotation cost, where the root key must not live, and the endgame
   (audience-scoped ServiceAccount tokens) that would remove the
   per-share Secret entirely.
-- **A token change does not roll the hub.** The value is resolved once
-  before the listener binds, and `checksum/creds` covers only
-  `credentialsSecretRef` — so a rotated token reaches a running hub only
-  when something else restarts the pod. Suspend and resume is the cheap
-  bounce.
+- **A token change does not roll the hub, and does not need to.** The
+  hub re-reads `tokenFile` every 10s and the auth filter reads the
+  current value PER REQUEST, so a rotation lands on the next request
+  rather than the next pod (`fileapi/token.rs:58`, `fileapi/mod.rs:593`).
+  Write the Secret and you are done: no bounce, and none of the ~90s of
+  grace a bounce costs every mounted NFS client. `checksum/creds` still
+  covers only `credentialsSecretRef`, which is now correct rather than a
+  gap — nothing should roll the hub for a token.
+  **Two things are still boot-time.** Whether the routes are mounted at
+  all is decided once: with no token at startup there is no route table,
+  so `/files*` answers 404 and adding a token later DOES need a restart
+  (`config.rs:874`). And an env-sourced token (`FLINT_FILE_API_TOKEN`
+  with no `tokenSecretRef`) is never re-read — there is no file behind
+  it, so `refresh()` returns immediately (`config.rs:914`,
+  `token.rs:111`). Rotation is live only for the projected-file path,
+  which is the one the chart and the operator use.
 - **It refuses with 503 until the phase reaches `Serving`.** A listing
   taken mid-import would show a partial tree as though it were the whole
   one.

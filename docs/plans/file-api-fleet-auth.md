@@ -32,7 +32,8 @@ namespaces — see §5.
 | one token per hub, compared with `constant_time_eq` | `pnfs/mds/fileapi/mod.rs:573-588` |
 | token resolved from `tokenFile`, else `$FLINT_FILE_API_TOKEN` | `pnfs/config.rs:865-900` |
 | no token ⇒ routes are **not mounted** (404, not 401) | `pnfs/config.rs:872`, `fileapi/mod.rs:580` |
-| resolved **once**, before the listener binds | `pnfs/mds/server.rs:647` |
+| token value re-read every 10s, compared **per request** | `fileapi/token.rs:58`, `fileapi/mod.rs:593` |
+| whether the routes exist at all: decided **once**, before the listener binds | `pnfs/mds/server.rs:647` |
 | Secret projected read-only at `/etc/flint/api-token/token` | `lite_operator/render.rs:310, 635` |
 | routes refuse with 503 until phase is `Serving`/`Sweeping` | `fileapi/mod.rs:441-457` |
 
@@ -41,13 +42,18 @@ Three consequences that shape everything below:
 1. **The token is an opaque string.** The hub does no parsing, no format check,
    no expiry — it compares bytes. Any derivation scheme the caller likes works
    without touching the hub.
-2. **A rotation needs a pod restart.** The value is read at boot and captured
-   into the route table. Editing the Secret refreshes the projected file but not
-   the running process, and `checksum/creds` — the annotation that turns a
-   Secret rotation into a rollout — covers only `credentialsSecretRef`, and only
-   on a tiered share (`lite_operator/reconcile.rs:844-853`). Nothing rolls the
-   hub when the API token changes. The tempting fix — hash the token Secret in
-   too, so a rotation rolls the pod — is the wrong trade; see §9.
+2. **A rotation is live — this section's original claim is obsolete.** It said
+   a rotation needed a pod restart. That was true when this note was written and
+   stopped being true in `c72faea`: `TokenSource` re-reads the projected file
+   every 10s and the auth filter compares against `current()` per request, so a
+   rotation lands on the next request. Nothing rolls the hub for a token and
+   nothing should — `checksum/creds` still covering only `credentialsSecretRef`
+   is now the correct behaviour rather than the gap §9 called it.
+   **The boot-time fact that remains** is a different one, and it is the one that
+   matters for provisioning order: with no token at startup the route table is
+   never assembled, so `/files*` is 404 and turning the API on later needs a
+   restart. Env-sourced tokens also stay boot-time — no file, nothing to
+   re-read (`config.rs:914`).
 3. **There is exactly one token.** `resolve_token()` returns `Option<String>`,
    so a hub cannot accept a fleet credential *and* a project-scoped one at the
    same time. See §9.
@@ -237,8 +243,13 @@ HMAC to TokenRequest changes that function's body and nothing above it.
 
 ## 9. Open items
 
-- **Re-read the token instead of restarting the hub. This is the highest-value
-  change here.** The value is resolved once at boot
+- **~~Re-read the token instead of restarting the hub.~~ SHIPPED in `c72faea`.**
+  `TokenSource` holds the value behind an `RwLock`, re-reads `tokenFile` on a
+  10s interval (`fileapi/token.rs:58`) and the auth filter takes `current()` per
+  request (`fileapi/mod.rs:593`). A rotation costs nothing: no bounce, no
+  stalled mounts, no fleet split. What remains open below was the rest of the
+  original item, and the paragraph it replaced read:
+  the value is resolved once at boot
   (`pnfs/mds/server.rs:647`) and captured into the auth filter
   (`pnfs/mds/fileapi/mod.rs:468, 573`), so a rotation reaches a running hub only
   via a restart — and a restart stalls every mounted client (§6). Resolve it
