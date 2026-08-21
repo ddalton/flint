@@ -87,7 +87,7 @@ spec:
             cidr: {{ . | quote }}
         {{- end }}
         {{- range $.Values.networkPolicy.apiClientSelectors }}
-        - {{ toYaml . | nindent 8 | trim }}
+        - {{ toYaml . | nindent 10 | trim }}
         {{- end }}
       ports:
         - protocol: TCP
