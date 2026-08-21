@@ -171,7 +171,7 @@
 
     <rect x="876" y="272" width="324" height="60" rx="8" class="bx-violet"/>
     <text xml:space="preserve" class="mn" x="892" y="298">:8080  status + file API</text>
-    <text xml:space="preserve" class="tx" x="892" y="318">off by default · never on the Service</text>
+    <text xml:space="preserve" class="tx" x="892" y="318">opt-in · needs a bearer token · never on the Service</text>
 
     <circle cx="882" cy="362" r="2.5" fill="#94a3b8"/><text xml:space="preserve" class="tx" x="894" y="366">single replica · strategy: Recreate</text>
     <circle cx="882" cy="386" r="2.5" fill="#94a3b8"/><text xml:space="preserve" class="tx" x="894" y="390">exclusive flock ⇒ never two hubs on one disk</text>
@@ -215,6 +215,7 @@
     <line class="ln-blue" x1="372" y1="544" x2="696" y2="544" marker-start="url(#p1-ab)" marker-end="url(#p1-ab)"/>
     <text xml:space="preserve" class="tl ctr c-blue" x="534" y="532">NFSv4.2 over TCP :2049</text>
     <text xml:space="preserve" class="tx ctr" x="534" y="568">hard mount · nconnect ≥ 2, always</text>
+    <text xml:space="preserve" class="tx ctr c-ink" x="534" y="590">no auth on 2049 — the network is the boundary</text>
 
     <polyline class="ln-violet" points="648,196 742,196 742,302 852,302" marker-end="url(#p1-av)"/>
     <text xml:space="preserve" class="tx ctr c-violet" x="695" y="188">HTTPS · Bearer</text>
@@ -227,6 +228,9 @@
     <b>The two doors are deliberately separate:</b> :2049 is on the Service and may become a LoadBalancer; :8080 can rewrite every file in the share, so it stays ClusterIP-only and never joins it.
     Each HTTP endpoint is an NFS compound dispatched in-process, not a second reader of the directory — so it inherits eviction handling, the write gate, symlink rules and the tier's capture notes.
     A cold file read through either door hydrates from the bucket first: NFS parks the caller with <code>NFS4ERR_DELAY</code>, HTTP answers <code>503 + Retry-After</code>.
+    <b>They are secured differently, and only one of them has a credential.</b> The file API needs a bearer token per share and mounts no routes at all without one — <code>404</code>, not <code>401</code>.
+    Port 2049 is AUTH_SYS: the client asserts its own uid and the server takes it, so POSIX modes are enforced against a self-declared identity and <b>reachability is the boundary</b>.
+    That control is <code>networkPolicy</code> in both charts — off by default, admitting nothing when both client lists are empty, and silently ignored by a CNI that does not enforce it.
   </figcaption>
   </figure>
 </section>
