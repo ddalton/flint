@@ -1,0 +1,837 @@
+<title>Flint-lite Architecture</title>
+
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  /* ---------- tokens: chrome adapts to the viewer's theme; the plates are paper ---------- */
+  :root{
+    --canvas:#e9edf2; --canvas-edge:#d3dae3;
+    --ink:#161b22; --muted:#5b6672; --rule:#cfd7e0;
+    --accent:#1a5f9e; --accent-dim:#4a7fae;
+    --sheet:#ffffff; --sheet-edge:#dbe2ea;
+    --paper-ink:#0f172a; --paper-muted:#475569;
+    --shadow:0 1px 2px rgba(16,24,40,.07), 0 14px 34px -14px rgba(16,24,40,.22);
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --canvas:#0f1319; --canvas-edge:#232b35;
+      --ink:#e7ecf2; --muted:#98a3b0; --rule:#28303a;
+      --accent:#7cb3e4; --accent-dim:#5c90bd;
+      --sheet-edge:#2b333e;
+      --shadow:0 1px 2px rgba(0,0,0,.55), 0 20px 44px -18px rgba(0,0,0,.75);
+    }
+  }
+  :root[data-theme="dark"]{
+    --canvas:#0f1319; --canvas-edge:#232b35;
+    --ink:#e7ecf2; --muted:#98a3b0; --rule:#28303a;
+    --accent:#7cb3e4; --accent-dim:#5c90bd;
+    --sheet-edge:#2b333e;
+    --shadow:0 1px 2px rgba(0,0,0,.55), 0 20px 44px -18px rgba(0,0,0,.75);
+  }
+
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--canvas); color:var(--ink);
+    font-family:"IBM Plex Sans", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    font-size:15px; line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1240px; margin:0 auto; padding:48px 24px 72px; display:flex; flex-direction:column; gap:40px;}
+
+  /* ---------- masthead ---------- */
+  .masthead{display:flex; flex-direction:column; gap:14px; border-top:2px solid var(--ink); padding-top:18px;}
+  .eyebrow{
+    font-family:"IBM Plex Mono", ui-monospace, Menlo, monospace;
+    font-size:11px; font-weight:500; letter-spacing:.16em; text-transform:uppercase; color:var(--muted);
+  }
+  .masthead h1{
+    margin:0; font-size:clamp(28px, 4vw, 42px); font-weight:600; letter-spacing:-0.02em;
+    line-height:1.1; text-wrap:balance;
+  }
+  .masthead .lede{margin:0; max-width:70ch; color:var(--muted); font-size:16px;}
+  .meta{
+    display:flex; flex-wrap:wrap; gap:8px 20px; padding-top:4px;
+    font-family:"IBM Plex Mono", ui-monospace, Menlo, monospace; font-size:11.5px; color:var(--muted);
+    font-variant-numeric:tabular-nums;
+  }
+  .meta span{white-space:nowrap;}
+
+  .toc{display:flex; flex-wrap:wrap; gap:10px; padding-top:6px;}
+  .toc a{
+    display:inline-flex; align-items:baseline; gap:9px; text-decoration:none; color:var(--ink);
+    border:1px solid var(--rule); border-radius:999px; padding:7px 15px 7px 12px;
+    font-size:13px; background:transparent; transition:border-color .15s ease, color .15s ease;
+  }
+  .toc a b{
+    font-family:"IBM Plex Mono", ui-monospace, Menlo, monospace;
+    font-weight:500; font-size:11px; color:var(--accent); letter-spacing:.04em;
+  }
+  .toc a:hover{border-color:var(--accent); color:var(--accent);}
+  a:focus-visible{outline:2px solid var(--accent); outline-offset:3px; border-radius:4px;}
+  @media (prefers-reduced-motion: reduce){ *{transition:none !important;} }
+
+  /* ---------- plates ---------- */
+  .plate{
+    background:var(--sheet); color:var(--paper-ink);
+    border:1px solid var(--sheet-edge); border-radius:6px; box-shadow:var(--shadow);
+    padding:32px 34px 30px; scroll-margin-top:24px;
+    display:flex; flex-direction:column; gap:18px;
+  }
+  .plate-head{display:flex; flex-direction:column; gap:8px; border-bottom:1px solid #e2e8f0; padding-bottom:14px;}
+  .plate-head .eyebrow{color:#64748b;}
+  .plate-head h2{margin:0; font-size:23px; font-weight:600; letter-spacing:-0.015em; color:#0f172a; text-wrap:balance;}
+  .plate-head p{margin:0; max-width:78ch; font-size:14px; color:var(--paper-muted);}
+  .figwrap{overflow-x:auto; padding-bottom:4px;}
+  .figwrap svg{display:block; width:100%; min-width:900px; height:auto;}
+  .caption{
+    margin:0; max-width:82ch; font-size:12.5px; line-height:1.65; color:var(--paper-muted);
+    border-top:1px solid #e2e8f0; padding-top:14px;
+  }
+  .caption b{color:#0f172a; font-weight:600;}
+  .caption code, .colophon code{
+    font-family:"IBM Plex Mono", ui-monospace, Menlo, monospace; font-size:11.5px;
+  }
+  .caption code{color:#0f172a;}
+
+  /* ---------- colophon ---------- */
+  .colophon{
+    border-top:1px solid var(--rule); padding-top:18px; display:flex; flex-direction:column; gap:8px;
+    font-size:13px; color:var(--muted); max-width:80ch;
+  }
+  .colophon code{color:var(--ink);}
+  .colophon .eyebrow{margin-bottom:2px;}
+
+  @media (max-width: 720px){
+    .wrap{padding:32px 14px 56px; gap:28px;}
+    .plate{padding:22px 16px 20px; border-radius:4px;}
+  }
+
+  /* ---------- the drawings: ink on paper, one face throughout ---------- */
+  svg text{font-family:"Helvetica Neue", Helvetica, Arial, sans-serif; fill:#0f172a;}
+  .tt  { font-size: 15px; font-weight: 600; }
+  .th  { font-size: 13px; font-weight: 600; }
+  .tl  { font-size: 12.5px; }
+  .ts  { font-size: 11px; fill: #64748b; }
+  .tsb { font-size: 11px; font-weight: 600; fill: #475569; }
+  .thv { font-size: 11.5px; font-weight: 600; fill: #6d4aa8; }
+  .tx  { font-size: 10.5px; fill: #64748b; }
+  .txs { font-size: 10px; fill: #64748b; }
+  .mn  { font-family: Menlo, "SF Mono", monospace; font-size: 11.5px; }
+  .mns { font-family: Menlo, "SF Mono", monospace; font-size: 10.5px; }
+  .ctr { text-anchor: middle; }
+  .end { text-anchor: end; }
+  .c-blue { fill: #1a5f9e; }
+  .c-violet { fill: #6d4aa8; }
+  .c-ochre { fill: #8f5e0f; }
+  .c-ink { fill: #0f172a; }
+  .bx        { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.4; }
+  .bx-slate  { fill: #f1f5f9; stroke: #94a3b8; stroke-width: 1.4; }
+  .bx-blue   { fill: #e9f2fa; stroke: #1a5f9e; stroke-width: 1.6; }
+  .bx-violet { fill: #f0eafb; stroke: #6d4aa8; stroke-width: 1.6; }
+  .bx-ochre  { fill: #fbf2de; stroke: #a06b12; stroke-width: 1.6; }
+  .bx-vo     { fill: #ffffff; stroke: #6d4aa8; stroke-width: 1.4; }
+  .bx-oo     { fill: #fffdf7; stroke: #a06b12; stroke-width: 1.8; }
+  .bx-hub    { fill: #f7fbfe; stroke: #1a5f9e; stroke-width: 2; }
+  .grp       { fill: none;    stroke: #94a3b8; stroke-width: 1.4; stroke-dasharray: 6 5; }
+  .grpw      { fill: #ffffff; stroke: #94a3b8; stroke-width: 1.4; stroke-dasharray: 6 5; }
+  .bx-dashv  { fill: #f0eafb; stroke: #6d4aa8; stroke-width: 1.6; stroke-dasharray: 6 4; }
+  .band      { fill: #f8fafc; stroke: #e2e8f0; stroke-width: 1.4; }
+  .ln        { stroke: #475569; stroke-width: 1.6; fill: none; }
+  .ln-blue   { stroke: #1a5f9e; stroke-width: 2.6; fill: none; }
+  .ln-violet { stroke: #6d4aa8; stroke-width: 1.8; fill: none; }
+  .ln-ochre  { stroke: #a06b12; stroke-width: 1.8; fill: none; }
+  .dash      { stroke-dasharray: 5 4; }
+  .hair      { stroke: #e2e8f0; stroke-width: 1; }
+</style>
+
+<div class="wrap">
+  <header class="masthead">
+    <span class="eyebrow">flint-lite · engineering plates</span>
+    <h1>Flint-lite Architecture</h1>
+    <p class="lede">A share is one pod, one disk and one bucket prefix. The interesting parts are the seams: which door serves whom, who is allowed to write the bucket, and what it costs to keep a project nobody is using.</p>
+    <div class="meta">
+      <span>4 plates</span><span>A3 landscape</span><span>docs/flint-lite-architecture.pdf</span><span>sources: docs/flint-lite.md · docs/flint-lite-operator.md</span>
+    </div>
+    <nav class="toc" aria-label="Plates">
+      <a href="#plate-1"><b>1</b>Architecture</a>
+      <a href="#plate-2"><b>2</b>Control Plane</a>
+      <a href="#plate-3"><b>3</b>Consumer Provisioning</a>
+      <a href="#plate-4"><b>4</b>Lifecycle</a>
+    </nav>
+  </header>
+  <article class="plate" id="plate-1">
+    <header class="plate-head">
+      <span class="eyebrow">Plate 1 — architecture</span>
+      <h2>Flint-lite — one hub, one project</h2>
+      <p>A single pod serves real POSIX over NFSv4.2. The PVC is the working set, an S3 prefix is the durability, and a second listener exposes the same filesystem over HTTP for callers that cannot mount.</p>
+    </header>
+    <figure class="figwrap" style="margin:0">
+      <svg viewBox="0 0 1600 800" role="img" aria-label="A consumer cluster mounts the flint-lite hub over NFSv4.2 on port 2049 through a Service; the hub pod runs flint-pnfs-mds in standalone mode with a second HTTP listener on 8080 for status and a file API; the hub writes to an RWO PVC and publishes to, hydrates from, and holds an epoch lease in an S3 bucket prefix.">
+    <defs>
+      <marker id="p1-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
+      <marker id="p1-av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6d4aa8"/></marker>
+      <marker id="p1-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
+      <marker id="p1-an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    </defs>
+
+    <!-- ============ consumer cluster ============ -->
+    <rect x="44" y="104" width="340" height="650" rx="14" class="grp" opacity="0.4"/>
+    <rect x="30" y="118" width="340" height="650" rx="14" class="grpw"/>
+    <text xml:space="preserve" class="th" x="48" y="146">Consumer cluster</text>
+    <text xml:space="preserve" class="tx" x="48" y="164">nothing from flint installed</text>
+
+    <rect x="52" y="182" width="300" height="56" rx="8" class="bx"/>
+    <text xml:space="preserve" class="tl ctr" x="202" y="206">PersistentVolumeClaim</text>
+    <text xml:space="preserve" class="mns ctr" x="202" y="226">accessModes: [ReadWriteMany]</text>
+
+    <line class="ln" x1="202" y1="240" x2="202" y2="258" marker-end="url(#p1-an)"/>
+    <text xml:space="preserve" class="tx" x="212" y="254">bound</text>
+
+    <rect x="52" y="262" width="300" height="72" rx="8" class="bx"/>
+    <text xml:space="preserve" class="tl ctr" x="202" y="288">PersistentVolume</text>
+    <text xml:space="preserve" class="mns ctr" x="202" y="308">nfs: { server: &lt;hub&gt;, path: / }</text>
+    <text xml:space="preserve" class="tx ctr" x="202" y="326">nfsvers=4.1 · hard · nconnect=4</text>
+
+    <rect x="52" y="356" width="300" height="330" rx="10" class="bx-slate"/>
+    <text xml:space="preserve" class="th" x="68" y="380">Node</text>
+    <text xml:space="preserve" class="tx" x="68" y="398">kubelet mounts once per node</text>
+
+    <rect x="68" y="414" width="84" height="54" rx="7" class="bx"/>
+    <rect x="162" y="414" width="84" height="54" rx="7" class="bx"/>
+    <rect x="256" y="414" width="84" height="54" rx="7" class="bx"/>
+    <text xml:space="preserve" class="tl ctr" x="110" y="446">pod</text>
+    <text xml:space="preserve" class="tl ctr" x="204" y="446">pod</text>
+    <text xml:space="preserve" class="tl ctr" x="298" y="446">pod</text>
+    <line class="ln" x1="110" y1="470" x2="110" y2="498" marker-end="url(#p1-an)"/>
+    <line class="ln" x1="204" y1="470" x2="204" y2="498" marker-end="url(#p1-an)"/>
+    <line class="ln" x1="298" y1="470" x2="298" y2="498" marker-end="url(#p1-an)"/>
+
+    <rect x="68" y="502" width="272" height="78" rx="8" class="bx-blue"/>
+    <text xml:space="preserve" class="tl ctr" x="204" y="530">kernel NFS client</text>
+    <text xml:space="preserve" class="mns ctr" x="204" y="552">nfsvers=4.1 · nconnect=4</text>
+
+    <text xml:space="preserve" class="tx" x="68" y="612">one mount per node — pods share it</text>
+    <text xml:space="preserve" class="tx" x="68" y="628">and its page cache</text>
+    <text xml:space="preserve" class="tx" x="68" y="650">cross-node coherence is the hub's job</text>
+
+    <text xml:space="preserve" class="tx" x="48" y="716">the PVC comes from recipe A or B</text>
+    <text xml:space="preserve" class="tx" x="48" y="732">— see page 3</text>
+
+    <!-- ============ middle column: front door + HTTP surface ============ -->
+    <rect x="402" y="118" width="246" height="88" rx="9" class="bx-violet"/>
+    <text xml:space="preserve" class="tl ctr" x="525" y="150">Front door / control plane</text>
+    <text xml:space="preserve" class="tx ctr" x="525" y="172">the service that owns projects</text>
+
+    <rect x="402" y="226" width="246" height="244" rx="9" class="bx-vo"/>
+    <text xml:space="preserve" class="thv" x="414" y="250">hub HTTP :8080 — Bearer token</text>
+    <line class="hair" x1="414" y1="260" x2="636" y2="260"/>
+    <text xml:space="preserve" class="mns" x="414" y="282">GET</text>    <text xml:space="preserve" class="mns" x="478" y="282">/status</text>
+    <text xml:space="preserve" class="mns" x="414" y="307">GET</text>    <text xml:space="preserve" class="mns" x="478" y="307">/files</text>
+    <text xml:space="preserve" class="mns" x="414" y="332">GET</text>    <text xml:space="preserve" class="mns" x="478" y="332">/files/content</text>
+    <text xml:space="preserve" class="mns" x="414" y="357">PUT</text>    <text xml:space="preserve" class="mns" x="478" y="357">/files/content</text>
+    <text xml:space="preserve" class="mns" x="414" y="382">DELETE</text> <text xml:space="preserve" class="mns" x="478" y="382">/files/content</text>
+    <text xml:space="preserve" class="mns" x="414" y="407">POST</text>   <text xml:space="preserve" class="mns" x="478" y="407">/files/folder</text>
+    <text xml:space="preserve" class="mns" x="414" y="432">POST</text>   <text xml:space="preserve" class="mns" x="478" y="432">/files/move</text>
+    <text xml:space="preserve" class="tx" x="414" y="456">every /files call counts as activity</text>
+
+    <text xml:space="preserve" class="tx" x="402" y="490">ClusterIP-only — never on the NFS Service</text>
+    <text xml:space="preserve" class="tx" x="402" y="506">/status is deliberately NOT activity</text>
+
+    <line class="ln-blue" x1="440" y1="622" x2="474" y2="622" marker-end="url(#p1-ab)"/>
+    <text xml:space="preserve" class="tl" x="486" y="626">NFS data plane</text>
+    <line class="ln-violet" x1="440" y1="650" x2="474" y2="650" marker-end="url(#p1-av)"/>
+    <text xml:space="preserve" class="tl" x="486" y="654">HTTP control / file API</text>
+    <line class="ln-ochre" x1="440" y1="678" x2="474" y2="678" marker-end="url(#p1-ao)"/>
+    <text xml:space="preserve" class="tl" x="486" y="682">S3 durability</text>
+
+    <text xml:space="preserve" class="tx" x="402" y="722">Consumers never get bucket credentials —</text>
+    <text xml:space="preserve" class="tx" x="402" y="738">the bucket trusts one principal: the hub.</text>
+
+    <!-- ============ hub cluster ============ -->
+    <rect x="680" y="118" width="560" height="650" rx="14" class="grpw"/>
+    <text xml:space="preserve" class="th" x="696" y="146">Hub cluster</text>
+    <text xml:space="preserve" class="tx" x="696" y="164">one FlintShare (or one helm release) per project</text>
+
+    <rect x="700" y="506" width="124" height="76" rx="8" class="bx-slate"/>
+    <text xml:space="preserve" class="tl ctr" x="762" y="536">Service</text>
+    <text xml:space="preserve" class="mns ctr" x="762" y="556">:2049</text>
+    <text xml:space="preserve" class="tx ctr" x="762" y="600">ClusterIP · or LB</text>
+    <line class="ln-blue" x1="826" y1="544" x2="852" y2="544" marker-end="url(#p1-ab)"/>
+
+    <rect x="856" y="206" width="364" height="430" rx="10" class="bx-hub"/>
+    <text xml:space="preserve" class="tt" x="876" y="238">flint-lite hub</text>
+    <text xml:space="preserve" class="mns" x="876" y="258">flint-pnfs-mds · mode: standalone</text>
+    <line class="hair" x1="856" y1="266" x2="1220" y2="266"/>
+
+    <rect x="876" y="272" width="324" height="60" rx="8" class="bx-violet"/>
+    <text xml:space="preserve" class="mn" x="892" y="298">:8080  status + file API</text>
+    <text xml:space="preserve" class="tx" x="892" y="318">off by default · never on the Service</text>
+
+    <circle cx="882" cy="362" r="2.5" fill="#94a3b8"/><text xml:space="preserve" class="tx" x="894" y="366">single replica · strategy: Recreate</text>
+    <circle cx="882" cy="386" r="2.5" fill="#94a3b8"/><text xml:space="preserve" class="tx" x="894" y="390">exclusive flock ⇒ never two hubs on one disk</text>
+    <circle cx="882" cy="410" r="2.5" fill="#94a3b8"/><text xml:space="preserve" class="tx" x="894" y="414">config parsed once at boot (a change rolls the pod)</text>
+    <circle cx="882" cy="434" r="2.5" fill="#94a3b8"/><text xml:space="preserve" class="tx" x="894" y="438">epoch guard: one hub per bucket prefix</text>
+
+    <rect x="876" y="506" width="324" height="76" rx="8" class="bx-blue"/>
+    <text xml:space="preserve" class="mn" x="892" y="534">:2049  NFSv4.2 server</text>
+    <text xml:space="preserve" class="tx" x="892" y="556">byte-range locks · close-to-open · atomic rename</text>
+
+    <line class="ln" x1="1038" y1="638" x2="1038" y2="660" marker-end="url(#p1-an)"/>
+
+    <rect x="856" y="664" width="364" height="78" rx="8" class="bx-slate"/>
+    <text xml:space="preserve" class="mn" x="876" y="692">PVC  &lt;share&gt;-data · RWO</text>
+    <text xml:space="preserve" class="tx" x="876" y="714">working set + state.db (a cache, not the copy)</text>
+
+    <!-- ============ S3 ============ -->
+    <rect x="1300" y="270" width="280" height="340" rx="10" class="bx-oo"/>
+    <text xml:space="preserve" class="th" x="1320" y="298">S3 bucket</text>
+    <text xml:space="preserve" class="mns" x="1320" y="320">s3://my-team-flint/tenant-a/</text>
+    <rect x="1320" y="344" width="240" height="76" rx="8" class="bx-ochre"/>
+    <text xml:space="preserve" class="tl ctr" x="1440" y="372">published generations</text>
+    <text xml:space="preserve" class="tx ctr" x="1440" y="392">one prefix = one volume = one hub</text>
+    <rect x="1320" y="440" width="240" height="76" rx="8" class="bx-ochre"/>
+    <text xml:space="preserve" class="mn ctr" x="1440" y="468">.flint/</text>
+    <text xml:space="preserve" class="tx ctr" x="1440" y="490">epoch cell · DR manifest</text>
+    <text xml:space="preserve" class="tx" x="1320" y="546">durability lives here —</text>
+    <text xml:space="preserve" class="tx" x="1320" y="562">RPO = the flush cadence.</text>
+    <text xml:space="preserve" class="tx" x="1320" y="584">Losing the PVC is a rebuild,</text>
+    <text xml:space="preserve" class="tx" x="1320" y="600">not a loss.</text>
+
+    <line class="ln-ochre" x1="1224" y1="360" x2="1296" y2="360" marker-end="url(#p1-ao)"/>
+    <text xml:space="preserve" class="tx ctr c-ochre" x="1260" y="350">publish</text>
+    <line class="ln-ochre" x1="1296" y1="446" x2="1224" y2="446" marker-end="url(#p1-ao)"/>
+    <text xml:space="preserve" class="tx ctr c-ochre" x="1260" y="436">hydrate</text>
+    <line class="ln-ochre dash" x1="1224" y1="532" x2="1296" y2="532" marker-start="url(#p1-ao)" marker-end="url(#p1-ao)"/>
+    <text xml:space="preserve" class="tx ctr c-ochre" x="1260" y="522">epoch lease</text>
+
+    <!-- ============ connectors drawn last, so panels never paint over them ============ -->
+    <!-- ============ NFS wire ============ -->
+    <line class="ln-blue" x1="372" y1="544" x2="696" y2="544" marker-start="url(#p1-ab)" marker-end="url(#p1-ab)"/>
+    <text xml:space="preserve" class="tl ctr c-blue" x="534" y="532">NFSv4.2 over TCP :2049</text>
+    <text xml:space="preserve" class="tx ctr" x="534" y="568">hard mount · nconnect ≥ 2, always</text>
+
+    <polyline class="ln-violet" points="648,196 742,196 742,302 852,302" marker-end="url(#p1-av)"/>
+    <text xml:space="preserve" class="tx ctr c-violet" x="695" y="188">HTTPS · Bearer</text>
+    <line class="ln-violet dash" x1="648" y1="302" x2="742" y2="302" opacity="0.55"/>
+
+  </svg>
+    </figure>
+    <p class="caption"><b>One hub is the coherence authority for one tree</b> — two hubs over one prefix is split-brain, which the store-side epoch lease fences and the operator refuses up front.
+    <b>nconnect ≥ 2 is not optional:</b> without it the kernel opens exactly one connection and silently refuses every additional trunk — no error, on either side, ever.
+    <b>The two doors are deliberately separate:</b> :2049 is on the Service and may become a LoadBalancer; :8080 can rewrite every file in the share, so it stays ClusterIP-only and never joins it.
+    Each HTTP endpoint is an NFS compound dispatched in-process, not a second reader of the directory — so it inherits eviction handling, the write gate, symlink rules and the tier's capture notes.
+    A cold file read through either door hydrates from the bucket first: NFS parks the caller with <code>NFS4ERR_DELAY</code>, HTTP answers <code>503 + Retry-After</code>.</p>
+  </article>
+  <article class="plate" id="plate-2">
+    <header class="plate-head">
+      <span class="eyebrow">Plate 2 — control plane</span>
+      <h2>The flint-lite operator — a fleet of shares</h2>
+      <p>One custom resource per project replaces one helm release per project. The operator re-renders the same four objects from the CR on every pass — there is no reusable release state to go stale, and nothing it does ever reaches the bucket.</p>
+    </header>
+    <figure class="figwrap" style="margin:0">
+      <svg viewBox="0 0 1600 820" role="img" aria-label="A FlintShare custom resource is watched by the flint-lite operator, which arbitrates uniqueness, renders four Kubernetes objects (ConfigMap, PVC, Service, Deployment), repairs drift, runs the idle ladder and publishes status; the Deployment runs the hub pod, which talks to the S3 bucket prefix that the operator itself never touches.">
+    <defs>
+      <marker id="p2-an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+      <marker id="p2-av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6d4aa8"/></marker>
+      <marker id="p2-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
+    </defs>
+
+    <!-- ============ the CR ============ -->
+    <rect x="30" y="70" width="390" height="470" rx="10" class="bx"/>
+    <text xml:space="preserve" class="th" x="48" y="98">FlintShare — one per project</text>
+    <text xml:space="preserve" class="tx" x="48" y="116">flint.io/v1alpha1 · namespaced</text>
+    <line class="hair" x1="48" y1="128" x2="402" y2="128"/>
+    <text xml:space="preserve" class="mns" x="48" y="152">metadata:</text>
+    <text xml:space="preserve" class="mns" x="48" y="171">  name: fs-tenant-a</text>
+    <text xml:space="preserve" class="mns" x="48" y="190">  labels:</text>
+    <text xml:space="preserve" class="mns" x="48" y="209">    flint.io/project-id: tenant-a</text>
+    <text xml:space="preserve" class="mns" x="48" y="228">  annotations:</text>
+    <text xml:space="preserve" class="mns c-violet" x="48" y="247">    flint.io/requested-at: &lt;now&gt;</text>
+    <text xml:space="preserve" class="mns" x="48" y="266">spec:</text>
+    <text xml:space="preserve" class="mns" x="48" y="285">  bucket: my-team-flint</text>
+    <text xml:space="preserve" class="mns" x="48" y="304">  keyPrefix: tenant-a/    # immutable</text>
+    <text xml:space="preserve" class="mns" x="48" y="323">  credentialsSecretRef: flint-s3</text>
+    <text xml:space="preserve" class="mns" x="48" y="342">  persistence: { size: 20Gi }</text>
+    <text xml:space="preserve" class="mns" x="48" y="361">  monitoring:</text>
+    <text xml:space="preserve" class="mns" x="48" y="380">    enabled: true</text>
+    <text xml:space="preserve" class="mns" x="48" y="399">    fileApi: { enabled: true }</text>
+    <text xml:space="preserve" class="mns" x="48" y="418">  idle:</text>
+    <text xml:space="preserve" class="mns" x="48" y="437">    suspendAfterSecs: 900</text>
+    <text xml:space="preserve" class="mns" x="48" y="456">    hibernateAfterSecs: 86400</text>
+    <text xml:space="preserve" class="mns" x="48" y="475">  settings:               # typed</text>
+    <text xml:space="preserve" class="mns" x="48" y="494">    hydrateWarmAfterImport: true</text>
+    <text xml:space="preserve" class="tx" x="30" y="570">a typo in <tspan class="mns">settings</tspan> is refused at admission —</text>
+    <text xml:space="preserve" class="tx" x="30" y="586">the knobs are schema, not a free-form map</text>
+    <text xml:space="preserve" class="tx" x="30" y="608">bucket and keyPrefix are immutable once set</text>
+
+    <line class="ln" x1="424" y1="300" x2="484" y2="300" marker-end="url(#p2-an)"/>
+    <text xml:space="preserve" class="tx ctr" x="454" y="290">watch</text>
+
+    <!-- ============ the operator ============ -->
+    <rect x="490" y="70" width="350" height="470" rx="10" class="bx-violet"/>
+    <text xml:space="preserve" class="th" x="508" y="98">flint-lite-operator</text>
+    <text xml:space="preserve" class="tx" x="508" y="116">namespace flint-system · Deployment</text>
+    <text xml:space="preserve" class="tx" x="508" y="132">2 replicas, leader-elected</text>
+    <line class="hair" x1="508" y1="142" x2="822" y2="142"/>
+
+    <rect x="508" y="156" width="314" height="58" rx="8" class="bx"/>
+    <circle cx="528" cy="185" r="11" fill="#6d4aa8"/><text class="txs ctr" style="fill:#ffffff" x="528" y="189">1</text>
+    <text xml:space="preserve" class="tl" x="548" y="180">arbitrate</text>
+    <text xml:space="preserve" class="tx" x="548" y="200">at most one share per bucket subtree</text>
+
+    <rect x="508" y="224" width="314" height="58" rx="8" class="bx"/>
+    <circle cx="528" cy="253" r="11" fill="#6d4aa8"/><text class="txs ctr" style="fill:#ffffff" x="528" y="257">2</text>
+    <text xml:space="preserve" class="tl" x="548" y="248">render</text>
+    <text xml:space="preserve" class="tx" x="548" y="268">four objects from the CR + defaults</text>
+
+    <rect x="508" y="292" width="314" height="58" rx="8" class="bx"/>
+    <circle cx="528" cy="321" r="11" fill="#6d4aa8"/><text class="txs ctr" style="fill:#ffffff" x="528" y="325">3</text>
+    <text xml:space="preserve" class="tl" x="548" y="316">repair drift</text>
+    <text xml:space="preserve" class="tx" x="548" y="336">re-renders every pass; no release state</text>
+
+    <rect x="508" y="360" width="314" height="58" rx="8" class="bx"/>
+    <circle cx="528" cy="389" r="11" fill="#6d4aa8"/><text class="txs ctr" style="fill:#ffffff" x="528" y="393">4</text>
+    <text xml:space="preserve" class="tl" x="548" y="384">run the idle ladder</text>
+    <text xml:space="preserve" class="tx" x="548" y="404">polls the hub's /status, then decides</text>
+
+    <rect x="508" y="428" width="314" height="58" rx="8" class="bx"/>
+    <circle cx="528" cy="457" r="11" fill="#6d4aa8"/><text class="txs ctr" style="fill:#ffffff" x="528" y="461">5</text>
+    <text xml:space="preserve" class="tl" x="548" y="452">publish status</text>
+    <text xml:space="preserve" class="tx" x="548" y="472">phase · address · serverId · conditions</text>
+
+    <text xml:space="preserve" class="tx" x="490" y="570">liveness is the leader Lease's renewTime —</text>
+    <text xml:space="preserve" class="tx" x="490" y="586">a share cannot wake while nothing reconciles</text>
+    <text xml:space="preserve" class="tx" x="490" y="608">reconcile concurrency is capped, deliberately</text>
+
+    <line class="ln" x1="844" y1="300" x2="904" y2="300" marker-end="url(#p2-an)"/>
+    <text xml:space="preserve" class="tx ctr" x="874" y="290">apply</text>
+
+    <!-- ============ rendered objects ============ -->
+    <rect x="910" y="70" width="330" height="470" rx="12" class="grpw"/>
+    <text xml:space="preserve" class="th" x="928" y="98">renders exactly four objects</text>
+    <text xml:space="preserve" class="tx" x="928" y="116">the same four the lite chart renders</text>
+
+    <rect x="928" y="140" width="294" height="76" rx="8" class="bx"/>
+    <text xml:space="preserve" class="tl" x="944" y="166">ConfigMap</text>
+    <text xml:space="preserve" class="mns" x="944" y="186">mds.yaml</text>
+    <text xml:space="preserve" class="tx" x="944" y="206">hashed into checksum/config</text>
+
+    <rect x="928" y="232" width="294" height="76" rx="8" class="bx-slate"/>
+    <text xml:space="preserve" class="tl" x="944" y="258">PersistentVolumeClaim</text>
+    <text xml:space="preserve" class="mns" x="944" y="278">&lt;share&gt;-data · RWO · 20Gi</text>
+    <text xml:space="preserve" class="tx" x="944" y="298">no ownerRef — never GC'd</text>
+
+    <rect x="928" y="324" width="294" height="76" rx="8" class="bx"/>
+    <text xml:space="preserve" class="tl" x="944" y="350">Service</text>
+    <text xml:space="preserve" class="mns" x="944" y="370">:2049</text>
+    <text xml:space="preserve" class="tx" x="944" y="390">ClusterIP · NodePort · LoadBalancer</text>
+
+    <rect x="928" y="416" width="294" height="76" rx="8" class="bx"/>
+    <text xml:space="preserve" class="tl" x="944" y="442">Deployment</text>
+    <text xml:space="preserve" class="mns" x="944" y="462">replicas: 1 · strategy: Recreate</text>
+    <text xml:space="preserve" class="tx" x="944" y="482">the hub pod itself</text>
+
+    <text xml:space="preserve" class="tx" x="928" y="518">a golden test fails the build if</text>
+    <text xml:space="preserve" class="tx" x="928" y="534">chart and operator ever diverge</text>
+
+    <line class="ln" x1="1226" y1="454" x2="1286" y2="454" marker-end="url(#p2-an)"/>
+    <text xml:space="preserve" class="tx ctr" x="1256" y="444">runs</text>
+
+    <!-- ============ S3 ============ -->
+    <rect x="1290" y="110" width="290" height="250" rx="10" class="bx-oo"/>
+    <text xml:space="preserve" class="th" x="1310" y="140">S3 bucket prefix</text>
+    <text xml:space="preserve" class="mns" x="1310" y="160">s3://my-team-flint/tenant-a/</text>
+    <rect x="1310" y="178" width="250" height="64" rx="8" class="bx-ochre"/>
+    <text xml:space="preserve" class="tl ctr" x="1435" y="204">published generations</text>
+    <text xml:space="preserve" class="tx ctr" x="1435" y="224">durability + DR manifest</text>
+    <rect x="1310" y="254" width="250" height="64" rx="8" class="bx-ochre"/>
+    <text xml:space="preserve" class="mn ctr" x="1435" y="280">.flint/</text>
+    <text xml:space="preserve" class="tx ctr" x="1435" y="300">epoch cell — one hub per prefix</text>
+    <text xml:space="preserve" class="tx" x="1310" y="340">the operator never touches the bucket</text>
+
+    <line class="ln-ochre" x1="1360" y1="428" x2="1360" y2="364" marker-end="url(#p2-ao)"/>
+    <text xml:space="preserve" class="tx end c-ochre" x="1352" y="400">publish</text>
+    <line class="ln-ochre" x1="1512" y1="364" x2="1512" y2="428" marker-end="url(#p2-ao)"/>
+    <text xml:space="preserve" class="tx c-ochre" x="1520" y="400">hydrate</text>
+
+    <!-- ============ hub ============ -->
+    <rect x="1290" y="430" width="290" height="200" rx="10" class="bx-hub"/>
+    <text xml:space="preserve" class="tt" x="1310" y="462">flint-lite hub</text>
+    <text xml:space="preserve" class="mns" x="1310" y="482">one pod · one project</text>
+    <rect x="1310" y="498" width="250" height="52" rx="7" class="bx-blue"/>
+    <text xml:space="preserve" class="mn" x="1326" y="522">:2049  NFSv4.2</text>
+    <text xml:space="preserve" class="tx" x="1326" y="540">on the Service</text>
+    <rect x="1310" y="560" width="250" height="52" rx="7" class="bx-violet"/>
+    <text xml:space="preserve" class="mn" x="1326" y="584">:8080  status + files</text>
+    <text xml:space="preserve" class="tx" x="1326" y="602">the operator polls this</text>
+
+    <polyline class="ln-violet dash" points="1290,586 862,586 862,389 824,389" marker-end="url(#p2-av)" opacity="0.8"/>
+    <text xml:space="preserve" class="tx ctr c-violet" x="1076" y="578">GET /status — is it idle? is it clean?</text>
+
+    <!-- ============ bottom band ============ -->
+    <rect x="30" y="660" width="1550" height="146" rx="12" class="band"/>
+
+    <text xml:space="preserve" class="th" x="54" y="690">Three things it will not do</text>
+    <text xml:space="preserve" class="tx" x="54" y="714">1 · It never touches a bucket. Deleting a share deletes</text>
+    <text xml:space="preserve" class="tx" x="54" y="730">      Kubernetes objects; S3 is exactly as durable as before.</text>
+    <text xml:space="preserve" class="tx" x="54" y="752">2 · It never garbage-collects a PVC — the claim carries no</text>
+    <text xml:space="preserve" class="tx" x="54" y="768">      ownerReference, deliberately.</text>
+    <text xml:space="preserve" class="tx" x="54" y="790">3 · It will not run two hubs on one bucket subtree.</text>
+
+    <text xml:space="preserve" class="th" x="600" y="690">The fleet is one command</text>
+    <text xml:space="preserve" class="mns" x="600" y="716">$ kubectl get flintshares -A</text>
+    <text xml:space="preserve" class="mns" x="600" y="740">NAMESPACE    NAME       PHASE           ADDRESS</text>
+    <text xml:space="preserve" class="mns" x="600" y="758">workspaces   tenant-a   Ready           tenant-a.workspaces.svc:2049</text>
+    <text xml:space="preserve" class="mns" x="600" y="776">workspaces   tenant-b   Starting</text>
+    <text xml:space="preserve" class="mns" x="600" y="794">workspaces   tenant-c   IdleSuspended</text>
+
+    <text xml:space="preserve" class="th" x="1120" y="690">The front-door contract</text>
+    <text xml:space="preserve" class="mns" x="1120" y="716">GET   flintshares/fs-&lt;id&gt; → 404? create</text>
+    <text xml:space="preserve" class="mns c-violet" x="1120" y="736">PATCH flint.io/requested-at: &lt;now&gt;</text>
+    <text xml:space="preserve" class="mns" x="1120" y="756">poll  until .status.phase == Ready</text>
+    <text xml:space="preserve" class="mns" x="1120" y="776">read  .status.address, .status.serverId</text>
+    <text xml:space="preserve" class="tx" x="1120" y="796">a changed serverId means a fresh PVC — remount</text>
+  </svg>
+    </figure>
+    <p class="caption"><b>Derive the share's name from the project id</b> (<code>fs-&lt;project-id&gt;</code>) and label it <code>flint.io/project-id</code> — that is what makes ensure-live idempotent: two front-door replicas racing a first touch issue the same create, one gets <code>409 AlreadyExists</code>, and both proceed.
+    <b>Uniqueness is enforced from the controller's cache</b>, not by the API server: Kubernetes cannot express "at most one share per <code>(endpoint, bucket, prefix subtree)</code>" in CEL, since both CEL and a ValidatingAdmissionPolicy see one object.
+    Oldest wins; the loser goes <code>Failed</code> with a <code>Conflict</code> condition and gets no hub.
+    <b>That enforcement stops at the cluster boundary.</b> Two clusters each admit a share on one prefix and neither sees the other — and the store-side epoch only catches it when the prefixes are <i>equal</i>, because <code>tenant-a/</code> and <code>tenant-a/sub/</code> mint different epoch objects and never contend. Own prefix allocation upstream of Kubernetes.</p>
+  </article>
+  <article class="plate" id="plate-3">
+    <header class="plate-head">
+      <span class="eyebrow">Plate 3 — consumer provisioning</span>
+      <h2>Giving client pods a PVC — two recipes</h2>
+      <p>Consumers install nothing from flint either way: the data path is the node kernel's NFS client. The choice is only who mints the PV — you, once, by hand; or a stock provisioner, once per workspace.</p>
+    </header>
+    <figure class="figwrap" style="margin:0">
+      <svg viewBox="0 0 1600 800" role="img" aria-label="Recipe A pins one static in-tree nfs PersistentVolume to the hub root so every pod shares one tree. Recipe B runs the nfs-subdir-external-provisioner, which watches PVCs, makes a fresh subdirectory on the hub and mints a PV bound to it. Both recipes end in the same data path: the node kernel NFS client to the hub Service on 2049.">
+    <defs>
+      <marker id="p3-an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+      <marker id="p3-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
+      <marker id="p3-av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6d4aa8"/></marker>
+      <marker id="p3-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
+    </defs>
+
+    <!-- ================= recipe A ================= -->
+    <rect x="30" y="60" width="740" height="470" rx="12" class="bx"/>
+    <text xml:space="preserve" class="tt" x="54" y="94">Recipe A — static PV, zero install</text>
+    <text xml:space="preserve" class="tx" x="54" y="116">one PV pinned to the hub's root; every pod shares one namespace</text>
+
+    <rect x="56" y="150" width="170" height="56" rx="8" class="bx-slate"/>
+    <text xml:space="preserve" class="tl ctr" x="141" y="184">admin / GitOps</text>
+    <line class="ln" x1="228" y1="178" x2="294" y2="178" marker-end="url(#p3-an)"/>
+    <text xml:space="preserve" class="tx ctr" x="261" y="168">apply</text>
+
+    <rect x="300" y="142" width="250" height="76" rx="8" class="bx"/>
+    <text xml:space="preserve" class="tl ctr" x="425" y="170">PersistentVolume</text>
+    <text xml:space="preserve" class="mns ctr" x="425" y="190">nfs: { server, path: / }</text>
+    <text xml:space="preserve" class="tx ctr" x="425" y="208">nfsvers=4.1 · hard · nconnect=4</text>
+
+    <line class="ln" x1="425" y1="268" x2="425" y2="222" marker-end="url(#p3-an)"/>
+    <text xml:space="preserve" class="tx" x="438" y="250">bound 1:1</text>
+
+    <rect x="300" y="270" width="250" height="76" rx="8" class="bx"/>
+    <text xml:space="preserve" class="tl ctr" x="425" y="298">PVC</text>
+    <text xml:space="preserve" class="mns ctr" x="425" y="318">storageClassName: ""</text>
+    <text xml:space="preserve" class="tx ctr" x="425" y="336">volumeName pins this PV</text>
+
+    <rect x="300" y="396" width="74" height="54" rx="7" class="bx"/>
+    <rect x="388" y="396" width="74" height="54" rx="7" class="bx"/>
+    <rect x="476" y="396" width="74" height="54" rx="7" class="bx"/>
+    <text xml:space="preserve" class="tl ctr" x="337" y="428">pod</text>
+    <text xml:space="preserve" class="tl ctr" x="425" y="428">pod</text>
+    <text xml:space="preserve" class="tl ctr" x="513" y="428">pod</text>
+    <line class="ln" x1="337" y1="394" x2="337" y2="352" marker-end="url(#p3-an)"/>
+    <line class="ln" x1="425" y1="394" x2="425" y2="352" marker-end="url(#p3-an)"/>
+    <line class="ln" x1="513" y1="394" x2="513" y2="352" marker-end="url(#p3-an)"/>
+
+    <text xml:space="preserve" class="tx" x="300" y="480">every pod mounts the same claim and sees the hub's root —</text>
+    <text xml:space="preserve" class="tx" x="300" y="496">one shared workspace, no extra moving parts</text>
+
+    <rect x="580" y="142" width="170" height="204" rx="8" class="bx-slate"/>
+    <text xml:space="preserve" class="tsb" x="596" y="168">what a pod sees</text>
+    <text xml:space="preserve" class="mns" x="596" y="196">/</text>
+    <text xml:space="preserve" class="mns" x="596" y="216">├── shared/</text>
+    <text xml:space="preserve" class="mns" x="596" y="236">├── agents/</text>
+    <text xml:space="preserve" class="mns" x="596" y="256">└── ...</text>
+    <text xml:space="preserve" class="tx" x="596" y="290">the hub's export root,</text>
+    <text xml:space="preserve" class="tx" x="596" y="306">directly</text>
+    <line class="ln dash" x1="552" y1="180" x2="578" y2="180" opacity="0.6"/>
+
+    <!-- ================= recipe B ================= -->
+    <rect x="810" y="60" width="760" height="470" rx="12" class="bx"/>
+    <text xml:space="preserve" class="tt" x="834" y="94">Recipe B — a PVC per workspace</text>
+    <text xml:space="preserve" class="tx" x="834" y="116">the stock nfs-subdir-external-provisioner mints a fresh subdirectory per claim</text>
+
+    <rect x="836" y="150" width="284" height="76" rx="8" class="bx"/>
+    <text xml:space="preserve" class="tl ctr" x="978" y="178">PersistentVolume</text>
+    <text xml:space="preserve" class="mns ctr" x="978" y="198">path: /workspaces/ws-…</text>
+    <text xml:space="preserve" class="tx ctr" x="978" y="216">created by the provisioner</text>
+
+    <line class="ln" x1="978" y1="268" x2="978" y2="230" marker-end="url(#p3-an)"/>
+    <text xml:space="preserve" class="tx" x="991" y="254">bound</text>
+
+    <rect x="836" y="270" width="284" height="76" rx="8" class="bx"/>
+    <text xml:space="preserve" class="tl ctr" x="978" y="298">PVC</text>
+    <text xml:space="preserve" class="mns ctr" x="978" y="318">storageClassName: flint-lite</text>
+    <text xml:space="preserve" class="tx ctr" x="978" y="336">one per workspace</text>
+
+    <rect x="836" y="390" width="84" height="54" rx="7" class="bx"/>
+    <rect x="930" y="390" width="84" height="54" rx="7" class="bx"/>
+    <rect x="1024" y="390" width="84" height="54" rx="7" class="bx"/>
+    <text xml:space="preserve" class="tl ctr" x="878" y="422">pod</text>
+    <text xml:space="preserve" class="tl ctr" x="972" y="422">pod</text>
+    <text xml:space="preserve" class="tl ctr" x="1066" y="422">pod</text>
+    <line class="ln" x1="878" y1="388" x2="878" y2="352" marker-end="url(#p3-an)"/>
+    <line class="ln" x1="972" y1="388" x2="972" y2="352" marker-end="url(#p3-an)"/>
+    <line class="ln" x1="1066" y1="388" x2="1066" y2="352" marker-end="url(#p3-an)"/>
+
+    <text xml:space="preserve" class="tx" x="836" y="478">each claim gets its own subtree</text>
+    <text xml:space="preserve" class="tx" x="836" y="494">of the one hub export</text>
+
+    <rect x="1180" y="250" width="370" height="96" rx="8" class="bx-dashv"/>
+    <text xml:space="preserve" class="tl ctr" x="1365" y="282">nfs-subdir-external-provisioner</text>
+    <text xml:space="preserve" class="tx ctr" x="1365" y="304">one small Deployment in the consumer cluster</text>
+    <text xml:space="preserve" class="tx ctr" x="1365" y="324">control path only — never in the data path</text>
+
+    <line class="ln-violet" x1="1122" y1="308" x2="1176" y2="308" marker-end="url(#p3-av)"/>
+    <text xml:space="preserve" class="tx ctr c-violet" x="1149" y="298">watches</text>
+
+    <polyline class="ln-violet" points="1200,248 1200,188 1124,188" marker-end="url(#p3-av)"/>
+    <text xml:space="preserve" class="tx c-violet" x="1210" y="192">creates the PV</text>
+
+    <line class="ln-violet" x1="1365" y1="348" x2="1365" y2="388" marker-end="url(#p3-av)"/>
+    <text xml:space="preserve" class="tx c-violet" x="1378" y="374">mkdir a subdirectory</text>
+
+    <rect x="1180" y="392" width="370" height="126" rx="8" class="bx-slate"/>
+    <text xml:space="preserve" class="tsb" x="1196" y="418">on the hub</text>
+    <text xml:space="preserve" class="mns" x="1196" y="444">/workspaces/</text>
+    <text xml:space="preserve" class="mns" x="1196" y="466">├── ws-team-a-pvc-8f21/</text>
+    <text xml:space="preserve" class="mns" x="1196" y="488">└── ws-team-b-pvc-3c07/</text>
+
+    <!-- ================= shared data path ================= -->
+    <rect x="30" y="570" width="1540" height="210" rx="12" class="band"/>
+    <text xml:space="preserve" class="th" x="54" y="604">Both recipes end in the same data path</text>
+    <text xml:space="preserve" class="tx" x="54" y="622">the provisioner mints directories and PVs; it never carries a byte</text>
+
+    <rect x="70" y="650" width="250" height="100" rx="9" class="bx-blue"/>
+    <text xml:space="preserve" class="tl ctr" x="195" y="684">Node</text>
+    <text xml:space="preserve" class="tx ctr" x="195" y="704">kernel NFS client</text>
+    <text xml:space="preserve" class="mns ctr" x="195" y="726">nconnect=4 · hard</text>
+
+    <line class="ln-blue" x1="324" y1="700" x2="394" y2="700" marker-end="url(#p3-ab)"/>
+    <text xml:space="preserve" class="tx ctr" x="359" y="690">:2049</text>
+
+    <rect x="398" y="665" width="160" height="70" rx="8" class="bx-slate"/>
+    <text xml:space="preserve" class="tl ctr" x="478" y="696">Service</text>
+    <text xml:space="preserve" class="mns ctr" x="478" y="716">:2049</text>
+
+    <line class="ln-blue" x1="562" y1="700" x2="632" y2="700" marker-end="url(#p3-ab)"/>
+
+    <rect x="636" y="650" width="250" height="100" rx="9" class="bx-hub"/>
+    <text xml:space="preserve" class="tl ctr" x="761" y="690">flint-lite hub</text>
+    <text xml:space="preserve" class="tx ctr" x="761" y="712">one pod, one process</text>
+
+    <line class="ln" x1="890" y1="700" x2="960" y2="700" marker-end="url(#p3-an)"/>
+    <text xml:space="preserve" class="tx ctr" x="925" y="690">files</text>
+
+    <rect x="964" y="665" width="180" height="70" rx="8" class="bx-slate"/>
+    <text xml:space="preserve" class="tl ctr" x="1054" y="696">PVC (RWO)</text>
+    <text xml:space="preserve" class="tx ctr" x="1054" y="716">the working set</text>
+
+    <line class="ln-ochre" x1="1148" y1="700" x2="1234" y2="700" marker-start="url(#p3-ao)" marker-end="url(#p3-ao)"/>
+    <text xml:space="preserve" class="tx ctr" x="1191" y="690">publish / hydrate</text>
+
+    <rect x="1238" y="665" width="250" height="70" rx="8" class="bx-oo"/>
+    <text xml:space="preserve" class="tl ctr" x="1363" y="696">S3 bucket prefix</text>
+    <text xml:space="preserve" class="tx ctr" x="1363" y="716">durability</text>
+  </svg>
+    </figure>
+    <p class="caption"><b>The same <code>nconnect</code> caveat applies to both recipes</b> — recipe B passes mount options straight to the node's mount, so leaving it out gets one connection per node and no error saying so.
+    <b>Recipe A is one shared tree;</b> recipe B is StorageClass semantics on top of it, so pick B when each workspace should be isolated and minted on demand, A when the point is that everybody sees the same files.
+    Kubelet mounts once per node: pods co-scheduled on a node share one kernel client and one page cache, while cross-node and cross-cluster coherence — locks, close-to-open — is the hub's job.
+    <b>Either way, a suspended hub is not woken by a mount.</b> A hard mount against a scaled-to-zero share hangs, because there are no endpoints and nothing to notice the attempt — which is why the wake annotation is written before an address is handed to anyone.</p>
+  </article>
+  <article class="plate" id="plate-4">
+    <header class="plate-head">
+      <span class="eyebrow">Plate 4 — lifecycle</span>
+      <h2>Starting, winding down, waking</h2>
+      <p>A tiered hub does real work before its listener binds, and the operator winds an unused share down in two rungs — each opt-in, each giving back something different. Nothing in the data path ever starts a hub.</p>
+    </header>
+    <figure class="figwrap" style="margin:0">
+      <svg viewBox="0 0 1600 920" role="img" aria-label="A hub boots through the phases starting, claimingEpoch, importing, reconciling and serving, with the HTTP status listener binding first and NFS last. The idle ladder then moves a share from Ready to IdleSuspended (replicas zero, PVC kept) to HibernateVerifying to Hibernated (PVC deleted), and a requested-at annotation wakes it back to Ready. Suspending requires both the front door heartbeat and the hub's own idle clock to agree.">
+    <defs>
+      <marker id="p4-an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+      <marker id="p4-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
+      <marker id="p4-av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6d4aa8"/></marker>
+    </defs>
+
+    <!-- ================= boot ================= -->
+    <text xml:space="preserve" class="th" x="30" y="40">Starting a hub — what happens before port 2049 opens</text>
+
+    <line class="ln-violet" x1="125" y1="90" x2="125" y2="70"/>
+    <text xml:space="preserve" class="tx ctr c-violet" x="125" y="62">:8080 /status binds here</text>
+    <line class="ln-blue" x1="1037" y1="90" x2="1037" y2="70"/>
+    <text xml:space="preserve" class="tx ctr c-blue" x="1037" y="62">:2049 binds here</text>
+
+    <rect x="30"  y="96" width="190" height="60" rx="8" class="bx-slate"/>
+    <rect x="258" y="96" width="190" height="60" rx="8" class="bx-slate"/>
+    <rect x="486" y="96" width="190" height="60" rx="8" class="bx-slate"/>
+    <rect x="714" y="96" width="190" height="60" rx="8" class="bx-slate"/>
+    <rect x="942" y="96" width="190" height="60" rx="8" class="bx-blue"/>
+    <text xml:space="preserve" class="mn ctr" x="125"  y="132">starting</text>
+    <text xml:space="preserve" class="mn ctr" x="353"  y="132">claimingEpoch</text>
+    <text xml:space="preserve" class="mn ctr" x="581"  y="132">importing</text>
+    <text xml:space="preserve" class="mn ctr" x="809"  y="132">reconciling</text>
+    <text xml:space="preserve" class="mn ctr" x="1037" y="132">serving</text>
+    <line class="ln" x1="222" y1="126" x2="254" y2="126" marker-end="url(#p4-an)"/>
+    <line class="ln" x1="450" y1="126" x2="482" y2="126" marker-end="url(#p4-an)"/>
+    <line class="ln" x1="678" y1="126" x2="710" y2="126" marker-end="url(#p4-an)"/>
+    <line class="ln" x1="906" y1="126" x2="938" y2="126" marker-end="url(#p4-an)"/>
+
+    <text xml:space="preserve" class="tx ctr" x="125"  y="176">the process is up</text>
+    <text xml:space="preserve" class="tx ctr" x="353"  y="176">may wait out a dead</text>
+    <text xml:space="preserve" class="tx ctr" x="353"  y="192">holder's lease (~60s)</text>
+    <text xml:space="preserve" class="tx ctr" x="581"  y="176">DR manifest → the whole</text>
+    <text xml:space="preserve" class="tx ctr" x="581"  y="192">tree, from one GET</text>
+    <text xml:space="preserve" class="tx ctr" x="809"  y="176">local state</text>
+    <text xml:space="preserve" class="tx ctr" x="1037" y="176">clients may mount</text>
+
+    <rect x="1180" y="76" width="390" height="120" rx="9" class="bx-slate"/>
+    <text xml:space="preserve" class="tx" x="1196" y="104">A pod in Running / not-Ready is working, not stuck.</text>
+    <text xml:space="preserve" class="tx" x="1196" y="126">The startupProbe budgets 60 × 10s for all of it.</text>
+    <text xml:space="preserve" class="tx" x="1196" y="148">Killing a Starting hub kills a takeover or an import.</text>
+    <text xml:space="preserve" class="tx" x="1196" y="170">Poll /status: it tells importing from wedged.</text>
+
+    <line class="hair" x1="30" y1="224" x2="1570" y2="224"/>
+
+    <!-- ================= the ladder ================= -->
+    <text xml:space="preserve" class="th" x="30" y="262">The idle ladder — each rung gives back something different</text>
+
+    <polyline class="ln-violet" points="110,344 110,308 260,308 260,344" marker-end="url(#p4-av)"/>
+    <text xml:space="preserve" class="tx ctr c-violet" x="185" y="300">keepalive — re-touch requested-at</text>
+
+    <rect x="40"   y="346" width="290" height="156" rx="10" class="bx-hub"/>
+    <text xml:space="preserve" class="tt ctr" x="185" y="382">Ready</text>
+    <text xml:space="preserve" class="tl ctr" x="185" y="408">1 pod · PVC · Service · CR</text>
+    <text xml:space="preserve" class="tx ctr" x="185" y="428">serving NFS and HTTP</text>
+    <rect x="60" y="448" width="250" height="34" rx="6" class="bx-blue"/>
+    <text xml:space="preserve" class="tx ctr c-blue" x="185" y="470">costs: compute + disk</text>
+
+    <rect x="430"  y="346" width="290" height="156" rx="10" class="bx"/>
+    <text xml:space="preserve" class="tt ctr" x="575" y="382">IdleSuspended</text>
+    <text xml:space="preserve" class="tl ctr" x="575" y="408">replicas 0 · the PVC stays</text>
+    <text xml:space="preserve" class="tx ctr" x="575" y="428">CR, Service, ConfigMap kept</text>
+    <rect x="450" y="448" width="250" height="34" rx="6" class="bx-slate"/>
+    <text xml:space="preserve" class="tx ctr" x="575" y="470">costs: disk only</text>
+
+    <rect x="820"  y="346" width="290" height="156" rx="10" class="bx-dashv"/>
+    <text xml:space="preserve" class="th ctr" x="965" y="378">HibernateVerifying</text>
+    <text xml:space="preserve" class="tx ctr" x="965" y="402">1 · scale back to ONE</text>
+    <text xml:space="preserve" class="tx ctr" x="965" y="422">2 · poll /status until rpoClean</text>
+    <text xml:space="preserve" class="tx ctr" x="965" y="442">3 · scale to zero, let it drain</text>
+    <text xml:space="preserve" class="tx ctr" x="965" y="462">4 · wait for the pod to be gone</text>
+    <text xml:space="preserve" class="tx ctr" x="965" y="486">verify-then-delete, never assume</text>
+
+    <rect x="1210" y="346" width="290" height="156" rx="10" class="bx"/>
+    <text xml:space="preserve" class="tt ctr" x="1355" y="382">Hibernated</text>
+    <text xml:space="preserve" class="tl ctr" x="1355" y="408">the PVC is deleted</text>
+    <text xml:space="preserve" class="tx ctr" x="1355" y="428">the bucket is the only copy</text>
+    <rect x="1230" y="448" width="250" height="34" rx="6" class="bx-ochre"/>
+    <text xml:space="preserve" class="tx ctr c-ochre" x="1355" y="470">costs: S3 only</text>
+
+    <line class="ln" x1="332" y1="390" x2="426" y2="390" marker-end="url(#p4-an)"/>
+    <text xml:space="preserve" class="tx ctr"  x="379" y="360">idle ≥</text>
+    <text xml:space="preserve" class="txs ctr" x="379" y="376">suspendAfterSecs</text>
+
+    <line class="ln" x1="722" y1="390" x2="816" y2="390" marker-end="url(#p4-an)"/>
+    <text xml:space="preserve" class="tx ctr"  x="769" y="360">down ≥</text>
+    <text xml:space="preserve" class="txs ctr" x="769" y="376">hibernateAfterSecs</text>
+
+    <line class="ln" x1="1112" y1="390" x2="1206" y2="390" marker-end="url(#p4-an)"/>
+    <text xml:space="preserve" class="tx ctr"  x="1159" y="360">rpoClean true</text>
+    <text xml:space="preserve" class="txs ctr" x="1159" y="376">→ delete the PVC</text>
+
+    <polyline class="ln-violet" points="575,504 575,552 230,552 230,506" marker-end="url(#p4-av)"/>
+    <text xml:space="preserve" class="tx ctr c-violet" x="402" y="570">wake — annotate flint.io/requested-at · Ready in ~41s</text>
+
+    <polyline class="ln-violet" points="1355,504 1355,612 140,612 140,506" marker-end="url(#p4-av)"/>
+    <text xml:space="preserve" class="tx ctr c-violet" x="760" y="632">wake from Hibernated — the PVC is re-created, the bucket manifest imported, the full lease waited out · ~79s</text>
+
+    <text xml:space="preserve" class="tx" x="30" y="668">Nothing in the data path wakes a share: an NFS mount against a scaled-to-zero hub hangs, the file API answers 503 fast. Something must write the annotation — and a share cannot wake while no operator is reconciling.</text>
+    <text xml:space="preserve" class="tx" x="30" y="686">spec.lifecycle: Suspended is an admin decision and a wake request does NOT override it — the phase reads Suspended, not IdleSuspended, so a front door can tell "will wake on request" from "never coming back".</text>
+
+    <line class="hair" x1="30" y1="706" x2="1570" y2="706"/>
+
+    <!-- ================= two signals ================= -->
+    <text xml:space="preserve" class="th" x="30" y="742">Suspending needs two independent signals to agree</text>
+
+    <rect x="40" y="752" width="300" height="58" rx="8" class="bx"/>
+    <text xml:space="preserve" class="tl" x="56" y="776">the front door's heartbeat is stale</text>
+    <text xml:space="preserve" class="mns" x="56" y="796">flint.io/requested-at</text>
+
+    <rect x="40" y="822" width="300" height="58" rx="8" class="bx"/>
+    <text xml:space="preserve" class="tl" x="56" y="846">the hub agrees it is idle</text>
+    <text xml:space="preserve" class="mns" x="56" y="866">activity.idleSecs ≥ threshold</text>
+
+    <line class="ln" x1="342" y1="781" x2="382" y2="802" marker-end="url(#p4-an)"/>
+    <line class="ln" x1="342" y1="851" x2="382" y2="832" marker-end="url(#p4-an)"/>
+
+    <rect x="386" y="782" width="84" height="70" rx="8" class="bx-violet"/>
+    <text xml:space="preserve" class="tl ctr" x="428" y="823">AND</text>
+
+    <line class="ln" x1="472" y1="817" x2="516" y2="817" marker-end="url(#p4-an)"/>
+
+    <rect x="520" y="787" width="230" height="60" rx="8" class="bx-blue"/>
+    <text xml:space="preserve" class="tl ctr" x="635" y="812">scale to zero</text>
+    <text xml:space="preserve" class="tx ctr" x="635" y="832">keep the PVC</text>
+
+    <text xml:space="preserve" class="tx" x="30" y="904">A hub that cannot be polled is never suspended — an unreachable hub is an unknown hub, not an idle one, and HubReachable says so.</text>
+
+    <!-- ================= what each rung holds ================= -->
+    <text xml:space="preserve" class="th" x="800" y="742">What each rung still holds</text>
+    <circle cx="1332" cy="738" r="7" fill="#1a5f9e"/>
+    <text xml:space="preserve" class="tx" x="1346" y="742">held</text>
+    <circle cx="1400" cy="738" r="7" fill="#ffffff" stroke="#94a3b8" stroke-width="1.4"/>
+    <text xml:space="preserve" class="tx" x="1414" y="742">released</text>
+
+    <text xml:space="preserve" class="tx ctr" x="1180" y="770">CR</text>
+    <text xml:space="preserve" class="tx ctr" x="1290" y="770">Svc + CM</text>
+    <text xml:space="preserve" class="tx ctr" x="1400" y="770">PVC</text>
+    <text xml:space="preserve" class="tx ctr" x="1510" y="770">Pod</text>
+    <line class="hair" x1="800" y1="780" x2="1560" y2="780"/>
+
+    <text xml:space="preserve" class="tl" x="800" y="804">Ready</text>
+    <circle cx="1180" cy="800" r="7" fill="#1a5f9e"/>
+    <circle cx="1290" cy="800" r="7" fill="#1a5f9e"/>
+    <circle cx="1400" cy="800" r="7" fill="#1a5f9e"/>
+    <circle cx="1510" cy="800" r="7" fill="#1a5f9e"/>
+    <line class="hair" x1="800" y1="818" x2="1560" y2="818"/>
+
+    <text xml:space="preserve" class="tl" x="800" y="842">IdleSuspended</text>
+    <circle cx="1180" cy="838" r="7" fill="#1a5f9e"/>
+    <circle cx="1290" cy="838" r="7" fill="#1a5f9e"/>
+    <circle cx="1400" cy="838" r="7" fill="#1a5f9e"/>
+    <circle cx="1510" cy="838" r="7" fill="#ffffff" stroke="#94a3b8" stroke-width="1.4"/>
+    <line class="hair" x1="800" y1="856" x2="1560" y2="856"/>
+
+    <text xml:space="preserve" class="tl" x="800" y="880">Hibernated</text>
+    <circle cx="1180" cy="876" r="7" fill="#1a5f9e"/>
+    <circle cx="1290" cy="876" r="7" fill="#1a5f9e"/>
+    <circle cx="1400" cy="876" r="7" fill="#ffffff" stroke="#94a3b8" stroke-width="1.4"/>
+    <circle cx="1510" cy="876" r="7" fill="#ffffff" stroke="#94a3b8" stroke-width="1.4"/>
+
+    <text xml:space="preserve" class="tx" x="800" y="904">Deleting the CR drops every object — an archived project costs zero Kubernetes objects. The bucket is never touched, under any policy.</text>
+  </svg>
+    </figure>
+    <p class="caption"><b>The two rungs are not one setting with two numbers.</b> Suspend keeps the disk, so waking is a pod start and an epoch re-claim on the same <code>state.db</code> — safe for any share, tiered or not. Hibernate deletes the PVC, so it requires <code>spec.bucket</code> and waking is a full DR import.
+    <b>Hibernation is verified at drain time, not assumed:</b> the hub exits 0 whether or not it flushed and scale-to-zero destroys the pod, so the operator scales back to one and waits for <code>rpoClean</code> before it deletes anything. <code>rpoClean: null</code> — a share with no bucket — is a refusal, not a pass.
+    <b>Hibernated wakes are slower than they look</b> (~79s against ~13s for the same-identity case): destroying the volume destroys the <code>serverId</code>, so self-recognition cannot short-circuit the lease and the claim waits out the full <code>lease_misses × heartbeat</code>. Every long-parked project pays that on its first open.
+    <b>Do not keepalive from a liveness poller.</b> <code>/status</code> is deliberately not activity and the file API deliberately is — a UI that refreshes a listing on a timer pins its project awake forever, and a conditional GET answering <code>304</code> pins it exactly as hard.</p>
+  </article>
+  <footer class="colophon">
+    <span class="eyebrow">colophon</span>
+    <p style="margin:0">Every plate is hand-authored SVG — no diagram library, no runtime. The same file prints to A3 landscape through headless Chrome (<code>--print-to-pdf</code>), which is where <code>docs/flint-lite-architecture.pdf</code> comes from.</p>
+    <p style="margin:0">Numbers on plate 4 are measured, not estimated: ~41s to wake from <code>IdleSuspended</code>, ~79s from <code>Hibernated</code> against ~13s for the same-identity case. The drawings follow <code>docs/flint-lite.md</code> and <code>docs/flint-lite-operator.md</code>; when those change, redraw rather than annotate.</p>
+  </footer>
+</div>
