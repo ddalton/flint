@@ -3197,14 +3197,21 @@ mod tests {
         // retry many times, but it must not spin forever.
         const MAX_ATTEMPTS: usize = 5_000;
 
-        // Coherence oracle, and it applies to the CONDITIONAL arm only.
+        // Monotonic-length oracle, and it applies to the CONDITIONAL
+        // arm only.
         //
         // Under `If-Match` the file's length can never go down: a writer
         // that read N bytes writes N+1 only if its VERIFY still names
-        // the N-byte version. A read returning fewer bytes than one
-        // already observed would therefore mean the body and the
-        // validator came from different versions — the coherence bug
-        // this API fixes by re-stat'ing after the read.
+        // the N-byte version. So a read issued after N bytes were
+        // observed must see at least N — anything less means a write
+        // went backwards.
+        //
+        // It does NOT check the body against its validator, whatever an
+        // earlier message here claimed: that property is enforced by the
+        // download's terminal change-check, which refuses a mid-read
+        // change rather than returning a mismatched 200, and it is
+        // pinned by `drill_leg4_a_tag_never_names_two_contents` and by
+        // `a_streamed_download_whose_file_changes_fails_the_stream`.
         //
         // In the UNCONDITIONAL arm shrinking is not a bug, it is the
         // whole point: a writer that read a stale short body writes it
@@ -3228,18 +3235,43 @@ mod tests {
                             attempts < MAX_ATTEMPTS,
                             "writer {w} round {r} never landed in {MAX_ATTEMPTS} attempts"
                         );
+                        // SAMPLE BEFORE THE READ, publish after. The
+                        // order is the whole correctness of this oracle.
+                        //
+                        // Publishing and comparing in one `fetch_max`
+                        // after the read compares THIS read's body
+                        // against a mark another task may have published
+                        // in between — and a task can be descheduled
+                        // between its body landing and its publish, so
+                        // the two are not the same instant. That version
+                        // failed ~1-in-8 under an 8-way contended VM
+                        // (and ~1-in-4 inside a loaded full suite) on a
+                        // correct server: the read had simply linearized
+                        // earlier than the mark it was judged against.
+                        //
+                        // Sampled first, the bound is sound in the only
+                        // direction it needs: a value published before
+                        // this read was ISSUED describes a version the
+                        // file already had, and an append-only file
+                        // guarded by If-Match never shrinks, so this
+                        // read must see at least that much. A publish
+                        // landing between the load and the read only
+                        // weakens the bound — it can never invent a
+                        // failure.
+                        let seen_before =
+                            high_water.load(std::sync::atomic::Ordering::SeqCst);
                         let (body, tag) =
                             read_body(&api, &path).await.expect("file vanished");
-                        let seen_max = high_water
-                            .fetch_max(body.len(), std::sync::atomic::Ordering::SeqCst);
                         assert!(
-                            !conditional || body.len() >= seen_max,
-                            "writer {w} round {r}: read {} bytes under tag {tag} after {} \
-                             were already visible — the body and the validator describe \
-                             different versions",
+                            !conditional || body.len() >= seen_before,
+                            "writer {w} round {r}: read {} bytes under tag {tag}, but {} \
+                             were already visible BEFORE this read was issued — an \
+                             If-Match-guarded append-only file must never shrink",
                             body.len(),
-                            seen_max
+                            seen_before
                         );
+                        high_water
+                            .fetch_max(body.len(), std::sync::atomic::Ordering::SeqCst);
                         let mut next = body;
                         next.push(b'x');
                         let tag = conditional.then_some(tag);
