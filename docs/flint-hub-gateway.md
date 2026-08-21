@@ -462,7 +462,7 @@ mint and carries a fleet-wide blast radius of its own).
 
 ## Verification
 
-- `cargo test --lib lite_gateway` — 71 tests. The proxy ones stand up
+- `cargo test --lib lite_gateway` — 73 tests. The proxy ones stand up
   **two independent fake hubs on real ports**, bind the gateway on a
   third, and drive it with a real HTTP client; each hub names itself in
   every response, so a cross-routed request fails on the body the caller

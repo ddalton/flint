@@ -3,7 +3,7 @@
 #
 # WHY THIS EXISTS
 #
-# The unit suite (70 tests) proves the routing, the refusals and the
+# The unit suite (73 tests) proves the routing, the refusals and the
 # header handling against FAKE hubs on real sockets. Fake hubs accept
 # any credential and resolve at 127.0.0.1, which leaves four things
 # untested that only a cluster can answer — and the first is the one
@@ -26,8 +26,13 @@
 #   4  RBAC SUFFICIENCY. A merge patch on one annotation with `patch`
 #      and nothing else, against a real API server.
 #
-# It also drills the shape a single-hub rig cannot express at all: ONE
-# PROJECT WITH TWO HUBS. Nothing in the operator ties a project to one
+# It also drills two shapes a single-hub rig cannot express at all: ONE
+# PROJECT WITH TWO HUBS, and AN AGENT THAT MOUNTS NFS knowing nothing
+# but the gateway's address — leg 10 asks `POST /wake` for a mount
+# target and leg 11 mounts it from a pod, then checks that the file API
+# and the mount see one filesystem.
+#
+# On the two-hub shape: Nothing in the operator ties a project to one
 # share — `conflict::overlaps` keys uniqueness on the bucket prefix
 # subtree and nothing reads `flint.io/project-id` — so two volumes on
 # two prefixes is ordinary, and the gateway has to keep them apart.
@@ -668,8 +673,8 @@ else
   note "(this is reported, not passed — see the summary)"
 fi
 
-# ── leg 11: the wake API returns a MOUNTABLE address ─────────────────
-say "leg 11: POST /wake brings a parked volume back and hands out its NFS address"
+# ── leg 10: the wake API returns a MOUNTABLE address ─────────────────
+say "leg 10: POST /wake brings a parked volume back and hands out its NFS address"
 WK=$(curl -s -o /tmp/wake.json -w '%{http_code}' -X POST \
   -H "Authorization: Bearer $GW_TOKEN" \
   "http://127.0.0.1:$PF_GW/v1/projects/$PROJECT/volumes/data/wake")
@@ -701,8 +706,8 @@ pass "wake returns a mountable address and re-stamps on every call (it is a keep
 # consumers this endpoint exists for.
 pass "the wake path is CR-only (no file-API call, so it does not itself count as activity)"
 
-# ── leg 12: A POD MOUNTS NFS, using ONLY the gateway to get there ────
-say "leg 12: a pod mounts the share, having learned the address from the gateway alone"
+# ── leg 11: A POD MOUNTS NFS, using ONLY the gateway to get there ────
+say "leg 11: a pod mounts the share, having learned the address from the gateway alone"
 kubectl -n "$NS" delete pod nfsclient --ignore-not-found >/dev/null 2>&1
 kubectl -n "$NS" apply -f - >/dev/null <<EOF || fail "client pod refused"
 apiVersion: v1
@@ -758,8 +763,8 @@ else
   MOUNT_INCONCLUSIVE=1
 fi
 
-# ── 12. leg 10: the gateway's RBAC is exactly what it needs ──────────
-say "leg 10: the gateway's ServiceAccount can wake a share and cannot read a Secret"
+# ── leg 12: the gateway's RBAC is exactly what it needs ──────────────
+say "leg 12: the gateway's ServiceAccount can wake a share and cannot read a Secret"
 SA="system:serviceaccount:$OPNS:flint-lite-operator-gateway"
 can() { kubectl auth can-i "$1" "$2" --as="$SA" ${3:+-n "$3"} 2>/dev/null; }
 [ "$(can patch flintshares.flint.io "$NS")" = "yes" ] \
