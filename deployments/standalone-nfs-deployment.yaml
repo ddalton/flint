@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: nfs
-        image: docker-sandbox.infra.cloudera.com/ddalton/flint-driver:latest
+        image: dilipdalton/flint-driver:latest
         imagePullPolicy: Always
         command: ["/usr/local/bin/flint-nfs-server"]
         args:

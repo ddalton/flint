@@ -112,7 +112,7 @@ impl NfsConfig {
         // This simplifies deployment - only one image to build/maintain
         let repository = env::var("NFS_IMAGE_REPOSITORY")
             .unwrap_or_else(|_| env::var("IMAGE_REPOSITORY")
-                .unwrap_or_else(|_| "docker-sandbox.infra.cloudera.com/ddalton".to_string()));
+                .unwrap_or_else(|_| "dilipdalton".to_string()));
         let name = env::var("NFS_IMAGE_NAME")
             .unwrap_or_else(|_| env::var("CSI_DRIVER_IMAGE_NAME")
                 .unwrap_or_else(|_| "flint-driver".to_string()));

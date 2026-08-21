@@ -51,15 +51,15 @@ the output table.
 
 ```bash
 # 1. Build + push the pNFS image to a registry the cluster can pull.
-#    (Existing build script in `deployments/build-and-deploy-fixes.sh`
-#    handles this; the bench reuses the resulting image tag.)
+#    (`make build-pnfs` builds the binaries; scripts/publish-images.sh
+#    pushes them. The bench reuses the resulting image tag.)
 
 # 2. Set node names + run.
 export KUBECONFIG=~/.kube/your-cluster
 export MDS_NODE=worker-1
 export DS_NODES="worker-2 worker-3"
 export CLIENT_NODE=worker-4
-export PNFS_IMAGE=docker-sandbox.infra.cloudera.com/ddalton/pnfs:latest
+export PNFS_IMAGE=dilipdalton/flint-pnfs:latest
 
 make test-pnfs-cross-host
 

@@ -35,7 +35,7 @@ Snapshot support notes:
     StorageClass for volumes that need snapshots.
 
 See the full README for prerequisites, disk-init, and StorageClass
-examples: https://github.com/cloudera/flint
+examples: https://github.com/ddalton/flint
 
 (Looking for the standalone flint-lite hub? It moved to its own chart:
 flint-lite-chart/ — see docs/flint-lite.md.)

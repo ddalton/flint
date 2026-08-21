@@ -214,7 +214,7 @@ fn test_device_id_hashing() {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     
-    let device_id_string = "cdrv-1.vpc.cloudera.com-ds";
+    let device_id_string = "flint-pnfs-ds-0";
     
     let mut hasher = DefaultHasher::new();
     device_id_string.hash(&mut hasher);
