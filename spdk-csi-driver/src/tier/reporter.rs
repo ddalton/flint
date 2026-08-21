@@ -93,6 +93,15 @@ pub struct Gauges {
     pub evicted_bytes: u64,
     /// None while the space gauge is not live.
     pub headroom_bytes: Option<u64>,
+    /// What the manifest says this project costs to hold. `None` until
+    /// a manifest has been read or built — deliberately not zero, which
+    /// would read as an empty project and is the wrong number to size
+    /// a PVC against.
+    pub logical_bytes: Option<u64>,
+    /// The largest single object. The PVC's hard floor: a claim smaller
+    /// than this plus the reserve contains files that can never be read
+    /// here, and every touch of one answers NOSPC.
+    pub largest_object_bytes: Option<u64>,
     /// used-bytes growth across this interval (0 when shrinking).
     pub used_growth_bytes: u64,
     pub mpu_count: usize,
@@ -361,6 +370,10 @@ pub fn spawn(
             g.evicted_bytes = eb;
             g.hydration_inflight = crate::tier::hydrate::inflight_count();
             g.hydration_blocked = crate::tier::hydrate::blocked_count();
+            if let Some(inv) = crate::tier::manifest::latest_inventory() {
+                g.logical_bytes = Some(inv.logical_bytes);
+                g.largest_object_bytes = Some(inv.largest_object_bytes);
+            }
             g.warm_inflight = crate::tier::hydrate::warm_inflight();
             g.epoch = guard.current();
             g.epoch_renew_age_secs = guard.renew_age_secs();

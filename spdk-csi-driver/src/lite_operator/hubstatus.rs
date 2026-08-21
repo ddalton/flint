@@ -116,6 +116,13 @@ pub struct Gauges {
     /// transient the hub will work through.
     #[serde(default)]
     pub hydration_blocked: usize,
+    /// What the manifest says the project costs to hold, and the single
+    /// largest object in it. `None` on a hub that has not read or built
+    /// a manifest yet — never conflate with zero.
+    #[serde(default)]
+    pub logical_bytes: Option<u64>,
+    #[serde(default)]
+    pub largest_object_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

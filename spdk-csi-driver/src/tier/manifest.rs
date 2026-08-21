@@ -134,7 +134,70 @@ pub struct Built {
     pub skipped_special: usize,
 }
 
+/// What the manifest says this project costs to hold.
+///
+/// Both numbers are taken from the manifest's OWN entries, which means
+/// they describe what the bucket can rebuild — a file written but not
+/// yet published counts into `beyond_rpo`, not into these. That is the
+/// right basis for sizing a PVC: it is exactly the set a DR wake would
+/// have to pull back.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Inventory {
+    /// Sum of every file entry's size.
+    pub logical_bytes: u64,
+    /// The single largest file. The PVC's HARD FLOOR: below
+    /// `largest_object_bytes` plus the reserve there are files in this
+    /// project that can never be read here, however much eviction runs.
+    pub largest_object_bytes: u64,
+    pub files: usize,
+}
+
+/// Tally an entry list. Directories and symlinks carry no size and
+/// contribute nothing.
+pub fn inventory_of(entries: &[Entry]) -> Inventory {
+    let mut inv = Inventory::default();
+    for e in entries {
+        if e.kind != EntryKind::File {
+            continue;
+        }
+        let n = e.size.unwrap_or(0);
+        inv.files += 1;
+        inv.logical_bytes = inv.logical_bytes.saturating_add(n);
+        inv.largest_object_bytes = inv.largest_object_bytes.max(n);
+    }
+    inv
+}
+
+static INVENTORY: std::sync::OnceLock<std::sync::RwLock<Option<Inventory>>> =
+    std::sync::OnceLock::new();
+
+fn inventory_slot() -> &'static std::sync::RwLock<Option<Inventory>> {
+    INVENTORY.get_or_init(|| std::sync::RwLock::new(None))
+}
+
+/// Publish an inventory. Called from the two places that ever hold a
+/// full entry list: the barrier build, and the import seed — so the
+/// number is live from the first import rather than only after a hub
+/// has survived long enough to write a barrier of its own.
+pub fn record_inventory(inv: Inventory) {
+    if let Ok(mut slot) = inventory_slot().write() {
+        *slot = Some(inv);
+    }
+}
+
+/// The latest inventory. `None` = no manifest has been built or read
+/// yet, which must never be reported as an empty project.
+pub fn latest_inventory() -> Option<Inventory> {
+    inventory_slot().read().ok().and_then(|i| *i)
+}
+
 impl Built {
+    /// This snapshot's inventory.
+    pub fn inventory(&self) -> Inventory {
+        inventory_of(&self.entries)
+    }
+
     /// Content digest for the skip-unchanged check — over everything
     /// EXCEPT seq/epoch/written_unix (those change every barrier;
     /// re-uploading an identical tree for them would put the manifest
@@ -161,6 +224,7 @@ pub fn build(export_root: &Path, gens: &HashMap<(u64, u64), GenRecord>) -> std::
     // Deterministic serialization: digest-stable and parents-first for
     // the restore (a strict path prefix sorts before its extensions).
     b.entries.sort_by(|a, z| a.path.cmp(&z.path));
+    record_inventory(b.inventory());
     Ok(b)
 }
 
@@ -314,6 +378,17 @@ pub async fn seed_full(store: &dyn ObjectStore, key_prefix: &str) -> ManifestSee
         Ok((meta, bytes)) => match Manifest::parse(&bytes) {
             Ok(m) => {
                 debug!("tier manifest: seeded at seq {} (etag {})", m.seq, meta.etag);
+                // Publish the project's size from the document we just
+                // read, so a hub that has not yet written a barrier of
+                // its own can still answer "how big is this project" —
+                // which is precisely the question a fresh DR wake is
+                // asked, and the moment the answer matters most.
+                let inv = inventory_of(&m.entries);
+                info!(
+                    "tier manifest: project holds {} file(s), {} bytes, largest {} bytes",
+                    inv.files, inv.logical_bytes, inv.largest_object_bytes
+                );
+                record_inventory(inv);
                 let w = WriterState { seq: m.seq, etag: Some(meta.etag), last_digest: None };
                 ManifestSeed::Present(Box::new(m), w)
             }
@@ -485,6 +560,75 @@ mod tests {
             size,
             copy_allowed: true,
         }
+    }
+
+    fn file_entry(path: &str, size: Option<u64>) -> Entry {
+        Entry {
+            path: path.into(),
+            kind: EntryKind::File,
+            mode: 0o100644,
+            uid: 0,
+            gid: 0,
+            mtime_unix: 0,
+            key: Some(path.into()),
+            generation: Some(1),
+            etag: Some("e".into()),
+            crc64_b64: None,
+            size,
+            target: None,
+        }
+    }
+
+    fn dir_entry(path: &str) -> Entry {
+        Entry {
+            path: path.into(),
+            kind: EntryKind::Dir,
+            mode: 0o40755,
+            uid: 0,
+            gid: 0,
+            mtime_unix: 0,
+            key: None,
+            generation: None,
+            etag: None,
+            crc64_b64: None,
+            size: None,
+            target: None,
+        }
+    }
+
+    /// The two sizing numbers are a SUM and a MAX, and confusing them
+    /// is the whole risk: a project of many small files and one of a
+    /// single huge file can share a total while needing very different
+    /// disks. The largest object is the hard floor; the sum is only the
+    /// cache-hit-rate question.
+    #[test]
+    fn inventory_separates_the_total_from_the_floor() {
+        let inv = inventory_of(&[
+            dir_entry("d"),
+            file_entry("d/a", Some(10)),
+            file_entry("d/b", Some(4_000)),
+            file_entry("d/c", Some(30)),
+        ]);
+        assert_eq!(inv.files, 3, "directories are not files");
+        assert_eq!(inv.logical_bytes, 4_040);
+        assert_eq!(
+            inv.largest_object_bytes, 4_000,
+            "the floor is the MAX, never the sum or the last entry seen"
+        );
+    }
+
+    /// Non-file entries carry no size, and a file entry from an older
+    /// writer may carry none either. Neither may be counted as a real
+    /// object, and neither may panic.
+    #[test]
+    fn inventory_ignores_entries_without_a_size() {
+        let inv = inventory_of(&[dir_entry("d"), file_entry("d/x", None)]);
+        assert_eq!(inv.logical_bytes, 0);
+        assert_eq!(inv.largest_object_bytes, 0);
+        assert_eq!(inv.files, 1, "it is still a file, it just claims no bytes");
+
+        let empty = inventory_of(&[]);
+        assert_eq!(empty, Inventory::default());
     }
 
     #[tokio::test]

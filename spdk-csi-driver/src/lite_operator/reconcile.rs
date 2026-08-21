@@ -1291,6 +1291,15 @@ async fn drive_idle_ladder(
                 // because the hub's own log is the only other place it
                 // appears, and nobody reads a healthy share's log.
                 let blocked = snap.gauges.as_ref().map_or(0, |g| g.hydration_blocked);
+                // Name the size to raise it TO. "Too small" without a
+                // number sends a reader to the hub's log to find one,
+                // and the hub already knows it from the manifest.
+                let floor = snap
+                    .gauges
+                    .as_ref()
+                    .and_then(|g| g.largest_object_bytes)
+                    .map(|b| format!(" — the largest is {b} bytes"))
+                    .unwrap_or_default();
                 set_condition(
                     conds,
                     if blocked > 0 {
@@ -1300,8 +1309,8 @@ async fn drive_idle_ladder(
                             "ObjectExceedsVolume",
                             Some(format!(
                                 "{blocked} object(s) in the bucket are larger than this \
-                                 volume minus its reserve and can never be read here — \
-                                 raise spec.persistence.size past the largest one"
+                                 volume minus its reserve and can never be read here{floor}; \
+                                 raise spec.persistence.size past it"
                             )),
                             generation,
                         )
