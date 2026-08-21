@@ -800,7 +800,15 @@ pub struct FileApiConfig {
     pub enabled: bool,
 
     /// File holding the bearer token — a projected Secret, so rotating
-    /// it does not mean rebuilding the pod spec. Read once at startup.
+    /// it does not mean rebuilding the pod spec.
+    ///
+    /// Read at startup to decide whether the routes are served at all,
+    /// and then re-read on a timer while the hub runs
+    /// (`mds::fileapi::token`), so a rotation does not need a pod
+    /// restart — which would stall every mounted client on the share.
+    /// This requires the Secret to stay mounted as a whole directory: a
+    /// `subPath` mount is frozen at pod start and would silently make
+    /// the token boot-time again.
     #[serde(rename = "tokenFile", default)]
     pub token_file: Option<String>,
 
@@ -897,6 +905,19 @@ impl FileApiConfig {
                 None
             }
         }
+    }
+}
+
+impl FileApiConfig {
+    /// The file the token was read from, when it came from one.
+    ///
+    /// `None` for an env-sourced token, which cannot change under a
+    /// running process — there is nothing to re-read.
+    pub fn token_path(&self) -> Option<std::path::PathBuf> {
+        self.token_file
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .map(std::path::PathBuf::from)
     }
 }
 

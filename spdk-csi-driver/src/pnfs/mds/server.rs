@@ -648,8 +648,16 @@ impl MetadataServer {
             let fs = Arc::new(super::fileapi::hubfs::HubFs::new(
                 self.base_dispatcher.clone(),
             ));
+            // Re-read while we run, so rotating the Secret does not mean
+            // restarting the hub — which would stall every mounted
+            // client on this share. See `fileapi::token`.
+            let source = super::fileapi::token::TokenSource::new(
+                token,
+                self.monitoring.file_api.token_path(),
+            );
+            let _ = super::fileapi::token::spawn_refresher(Arc::clone(&source));
             let cfg = super::fileapi::ApiConfig {
-                token: Some(token),
+                token: Some(source),
                 max_upload_bytes: self.monitoring.file_api.max_upload_bytes,
                 max_download_bytes: self.monitoring.file_api.max_download_bytes,
                 hydrate_wait_secs: self.monitoring.file_api.hydrate_wait_secs,

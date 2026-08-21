@@ -94,8 +94,10 @@
 //! rule is written here next to the feature that invites it.
 
 pub mod hubfs;
+pub mod token;
 
 use hubfs::{Entry, FsError, FsPath, HubFs, Precondition};
+use token::TokenSource;
 use crate::nfs::v4::protocol::Nfs4Status;
 use bytes::Bytes;
 use std::sync::Arc;
@@ -109,7 +111,13 @@ pub struct ApiConfig {
     /// Absent = the API is not served at all. It is never optional-auth:
     /// an unauthenticated read-write file API on a volume is not a
     /// degraded mode, it is a breach.
-    pub token: Option<String>,
+    ///
+    /// A [`TokenSource`] rather than a `String`, so a rotated Secret
+    /// reaches a running hub without a restart — see [`token`], which
+    /// explains why a restart is the wrong price for a credential
+    /// change. Whether the routes exist at all is still decided once, at
+    /// boot: absent here means no route table.
+    pub token: Option<Arc<TokenSource>>,
     /// Largest single upload accepted, in bytes.
     pub max_upload_bytes: u64,
     /// Largest single download served in one request. A browse click can
@@ -571,17 +579,20 @@ fn raw_routes(
 /// A configured-but-absent token is a hard refusal, not a fallback to
 /// open: this route table can rewrite any file in the project.
 fn auth_filter(
-    token: Option<String>,
+    token: Option<Arc<TokenSource>>,
 ) -> impl Filter<Extract = ((),), Error = warp::Rejection> + Clone {
     warp::header::optional::<String>("authorization").and_then(move |given: Option<String>| {
-        let expected = token.clone();
+        let source = token.clone();
         async move {
-            let Some(expected) = expected else {
+            let Some(source) = source else {
                 // No token configured: the route table is not mounted in
                 // that case, so this is unreachable — deny anyway rather
                 // than depend on a caller elsewhere getting it right.
                 return Err(warp::reject::custom(Unauthorized));
             };
+            // Read per request, not per router: a rotation lands on the
+            // next request rather than the next pod.
+            let expected = source.current();
             let ok = given
                 .as_deref()
                 .and_then(|h| h.strip_prefix("Bearer "))
@@ -1524,7 +1535,7 @@ mod tests {
 
     fn tiny_threshold() -> ApiConfig {
         ApiConfig {
-            token: Some(TOKEN.to_string()),
+            token: Some(TokenSource::fixed(TOKEN)),
             stream_threshold_bytes: 64 * 1024,
             ..Default::default()
         }
@@ -1645,7 +1656,7 @@ mod tests {
     #[tokio::test]
     async fn the_download_cap_still_refuses_before_streaming() {
         let cfg = ApiConfig {
-            token: Some(TOKEN.to_string()),
+            token: Some(TokenSource::fixed(TOKEN)),
             stream_threshold_bytes: 1024,
             max_download_bytes: 4096,
             ..Default::default()
@@ -1769,7 +1780,7 @@ mod tests {
         Arc<HubFs>,
         TempDir,
     ) {
-        harness_with(ApiConfig { token: Some(TOKEN.to_string()), ..Default::default() }, None).await
+        harness_with(ApiConfig { token: Some(TokenSource::fixed(TOKEN)), ..Default::default() }, None).await
     }
 
     async fn harness_with(
@@ -1822,6 +1833,57 @@ mod tests {
             .reply(&api)
             .await;
         assert_eq!(res.status(), 401);
+    }
+
+    /// Rotating the projected Secret takes effect on the NEXT REQUEST,
+    /// against a router that was never rebuilt.
+    ///
+    /// This is the whole point of `token::TokenSource`. The token used
+    /// to be captured at boot, so a rotation reached a running hub only
+    /// through a pod restart — and restarting a hub stalls every mounted
+    /// client on that share until the new pod answers. Paying an NFS
+    /// availability event to change an HTTP credential coupled the two
+    /// doors; this test is what keeps them apart.
+    #[tokio::test]
+    async fn a_rotated_token_takes_effect_without_a_restart() {
+        let dir = TempDir::new().unwrap();
+        let token_path = dir.path().join("token");
+        std::fs::write(&token_path, "first").unwrap();
+
+        let source = TokenSource::new("first", Some(token_path.clone()));
+        let (api, _fs, _t) = harness_with(
+            ApiConfig { token: Some(Arc::clone(&source)), ..Default::default() },
+            None,
+        )
+        .await;
+
+        let get = |tok: &'static str| {
+            let api = api.clone();
+            async move {
+                warp::test::request()
+                    .method("GET")
+                    .path("/files?path=/")
+                    .header("authorization", format!("Bearer {tok}"))
+                    .reply(&api)
+                    .await
+                    .status()
+            }
+        };
+
+        assert_eq!(get("first").await, 200, "the boot token must work");
+        assert_eq!(get("second").await, 401, "the future token must not work yet");
+
+        // What the kubelet does when the Secret is edited.
+        std::fs::write(&token_path, "second").unwrap();
+        assert!(source.refresh(), "the refresher must see the rotation");
+
+        // Same router, same process, no restart.
+        assert_eq!(get("second").await, 200, "the rotated token must be accepted");
+        assert_eq!(
+            get("first").await,
+            401,
+            "the old token must stop working — otherwise a rotation revokes nothing"
+        );
     }
 
     /// The whole surface, exercised as a caller would: create a folder,
@@ -2163,7 +2225,7 @@ mod tests {
         std::fs::write(temp.path().join("big.bin"), vec![7u8; 4096]).unwrap();
         let (api, _fs, _t) = harness_with(
             ApiConfig {
-                token: Some(TOKEN.to_string()),
+                token: Some(TokenSource::fixed(TOKEN)),
                 max_download_bytes: 1024,
                 ..Default::default()
             },
@@ -2238,7 +2300,7 @@ mod tests {
         let dispatcher = Arc::new(CompoundDispatcher::new(fh_mgr, state_mgr, lock_mgr));
         let api = routes(
             Arc::new(HubFs::new(dispatcher)),
-            ApiConfig { token: Some(TOKEN.to_string()), ..Default::default() },
+            ApiConfig { token: Some(TokenSource::fixed(TOKEN)), ..Default::default() },
         );
 
         let res = warp::test::request()
@@ -2284,7 +2346,7 @@ mod tests {
         let status = Arc::new(HubStatus::new());
         let api = routes_gated(
             Arc::new(HubFs::new(dispatcher)),
-            ApiConfig { token: Some(TOKEN.to_string()), ..Default::default() },
+            ApiConfig { token: Some(TokenSource::fixed(TOKEN)), ..Default::default() },
             status.clone(),
         );
 
