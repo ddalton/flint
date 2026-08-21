@@ -478,8 +478,24 @@ pub fn routes_gated(
             }
         },
     );
-    gate.and(raw_routes(fs, cfg))
-        .map(|_, r: warp::reply::Response| r)
+    // AUTH RUNS FIRST, and the ordering is the point. `gate` rejects
+    // with `NotReady(phase)`, which `recover` turns into a 503 NAMING
+    // THE PHASE — so with the gate in front, any stranger who can reach
+    // the port could read the hub's lifecycle state (Starting,
+    // ClaimingEpoch, Importing, Draining) without presenting a
+    // credential, on a socket that also serves an unauthenticated
+    // `/status`. Behind auth, a caller with no valid token gets 401 and
+    // learns nothing; a caller WITH one still gets the 503 and the
+    // Retry-After, which is the whole value of the gate.
+    //
+    // `raw_routes` checks the same token again per route. That is a
+    // second `constant_time_eq` on a request that is about to do file
+    // I/O, and it is deliberate: the routes must stay safe when
+    // composed directly by `routes()`, which has no gate in front.
+    let auth = auth_filter(cfg.token.clone());
+    auth.and(gate)
+        .and(raw_routes(fs, cfg))
+        .map(|_, _, r: warp::reply::Response| r)
         .recover(recover)
         .unify()
         .map(|r: warp::reply::Response| r)
@@ -2353,6 +2369,85 @@ mod tests {
             .await;
         assert_eq!(res.status(), 200);
         assert_eq!(res.body().as_ref(), b"yes");
+    }
+
+    /// **The phase gate must not answer a stranger.**
+    ///
+    /// `routes_gated` rejects with `NotReady(phase)` and `recover` turns
+    /// that into a 503 that NAMES the phase. With the gate composed in
+    /// front of auth — which is how it shipped — anyone who could reach
+    /// the port could read the hub's lifecycle state without presenting
+    /// a credential: Starting, ClaimingEpoch, Importing, Draining. On a
+    /// socket that also serves an unauthenticated `/status`, that is a
+    /// second, quieter oracle for the same class of fact.
+    ///
+    /// Auth now runs first. An unauthenticated caller learns 401 and
+    /// nothing else, in EVERY phase — including the phases where the
+    /// hub would have refused it anyway, which is exactly the case
+    /// where the old ordering leaked most freely.
+    #[tokio::test]
+    async fn an_unauthenticated_caller_cannot_read_the_phase_off_the_gate() {
+        use crate::pnfs::mds::status::{HubPhase, HubStatus};
+
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("a.txt"), b"x").unwrap();
+        let fh_mgr = Arc::new(FileHandleManager::new(temp.path().to_path_buf()));
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        state_mgr.load_from_backend().await.unwrap();
+        let lock_mgr = Arc::new(LockManager::new());
+        let dispatcher = Arc::new(CompoundDispatcher::new(fh_mgr, state_mgr, lock_mgr));
+        let status = Arc::new(HubStatus::new());
+        let api = routes_gated(
+            Arc::new(HubFs::new(dispatcher)),
+            ApiConfig { token: Some(TokenSource::fixed(TOKEN)), ..Default::default() },
+            status.clone(),
+        );
+
+        for phase in [
+            HubPhase::Starting,
+            HubPhase::ClaimingEpoch,
+            HubPhase::Importing,
+            HubPhase::Reconciling,
+            HubPhase::Draining,
+            HubPhase::Serving,
+            HubPhase::Sweeping,
+        ] {
+            status.set_phase(phase);
+
+            // No credential at all.
+            let res = warp::test::request()
+                .method("GET")
+                .path("/files?path=/")
+                .reply(&api)
+                .await;
+            assert_eq!(
+                res.status(),
+                401,
+                "phase {phase:?}: an unauthenticated caller must get 401, not a \
+                 503 naming the phase"
+            );
+            assert!(
+                res.headers().get("retry-after").is_none(),
+                "phase {phase:?}: retry-after would confirm the phase gate fired, \
+                 which is the leak in a different shape"
+            );
+            let body = String::from_utf8_lossy(res.body()).to_lowercase();
+            for leak in ["starting", "claiming", "importing", "reconciling", "draining"] {
+                assert!(
+                    !body.contains(leak),
+                    "phase {phase:?}: the body names the phase to a stranger: {body}"
+                );
+            }
+
+            // A WRONG credential must be indistinguishable from none.
+            let res = warp::test::request()
+                .method("GET")
+                .path("/files?path=/")
+                .header("authorization", "Bearer not-the-token")
+                .reply(&api)
+                .await;
+            assert_eq!(res.status(), 401, "phase {phase:?}: a bad token must be 401");
+        }
     }
 
     /// The API shares a listener with `/status`, which binds before the
