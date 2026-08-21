@@ -34,7 +34,7 @@
 //! still fences those; this layer catches the mistakes people
 //! actually make.
 
-use super::crd::FlintShare;
+use super::crd::{ConflictRelation, ConflictWith, FlintShare};
 
 /// The storage a share owns, normalized for comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +92,146 @@ pub fn overlaps(a: &ShareKey, b: &ShareKey) -> bool {
     a.endpoint == b.endpoint
         && a.bucket == b.bucket
         && (a.prefix.starts_with(&b.prefix) || b.prefix.starts_with(&a.prefix))
+}
+
+/// Set by the front door on a share it wants cleared away.
+///
+/// `keyPrefix` is CEL-immutable, so a share that loses arbitration
+/// cannot be edited into a legal one — the only fix is delete and
+/// recreate. But the CR name is derived from the project id, so
+/// `create` returns AlreadyExists against the refused object, and the
+/// front-door role deliberately has no `delete` ("project deletion is a
+/// decision, and this role is held by a web service handling untrusted
+/// input"). Without a path out, one typo'd prefix wedges that project
+/// id until a cluster-admin runs kubectl.
+///
+/// So the front door asks, with a verb it already holds (`patch`), and
+/// the operator — which can actually check what the share owns —
+/// decides.
+pub const ANN_ABANDON: &str = "flint.io/abandon";
+
+/// What to do about an abandon request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AbandonVerdict {
+    /// Not asked for. The overwhelmingly common case.
+    NotRequested,
+    /// Asked for and refused; the string is why, for an event.
+    Refused(String),
+    /// Asked for, and this share owns nothing. Delete the CR.
+    Delete,
+}
+
+/// Decide an abandon request.
+///
+/// # Why a claim is the whole gate
+///
+/// There are two kinds of loser and they are not interchangeable.
+///
+/// A share that lost on its FIRST reconcile owns nothing at all — the
+/// conflict check runs before any child is created, so there is no
+/// Deployment, no claim, and no epoch (it never started, so it never
+/// claimed one). Deleting it removes a row and nothing else.
+///
+/// A share DEMOTED LATER — its endpoint converged onto an older
+/// share's, the one case `spec.endpoint` is deliberately mutable for —
+/// has a PVC holding local data, and has already published into the
+/// bucket. Deleting that is a decision about data, which is exactly
+/// what the front-door role is documented as not being allowed to make.
+///
+/// So: refuse if anything exists. A missing claim is a stronger signal
+/// than any condition, because conditions are a snapshot of the last
+/// reconcile while the claim is the thing that would actually be lost.
+pub fn abandon_plan(
+    share: &FlintShare,
+    rejected: bool,
+    claim_exists: bool,
+    deployment_exists: bool,
+) -> AbandonVerdict {
+    let asked = share
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(ANN_ABANDON))
+        .is_some_and(|v| v == "true");
+    if !asked {
+        return AbandonVerdict::NotRequested;
+    }
+    if !rejected {
+        return AbandonVerdict::Refused(
+            "only a share refused for a bucket-subtree conflict can be abandoned, and this \
+             one is not in conflict — remove the annotation"
+                .into(),
+        );
+    }
+    if claim_exists || deployment_exists {
+        return AbandonVerdict::Refused(format!(
+            "this share has run: PersistentVolumeClaim {} and/or its Deployment still \
+             exist, so it may hold the only local copy of data and has already published \
+             to the bucket. Deleting it is a decision about data — make it deliberately, \
+             not through the {} annotation",
+            super::render::names(share).claim,
+            ANN_ABANDON
+        ));
+    }
+    AbandonVerdict::Delete
+}
+
+/// What the loser is told about the winner, as a field instead of a
+/// sentence.
+///
+/// Two decisions live here, both of which want a test rather than a
+/// comment at the call site:
+///
+/// **Whether a redirect is possible at all.** `overlaps` is symmetric,
+/// so losing says nothing about which way the two prefixes nest. A
+/// winner ABOVE this share already serves these bytes and a consumer
+/// can be pointed at it with a sub-path; a winner BELOW it serves only
+/// part of what was asked for, and there is nothing to point at. The
+/// caller cannot infer that from the fact of losing.
+///
+/// **Whether the address may be disclosed.** Same namespace only. See
+/// [`ConflictWith`] — a hub's export has no per-client authentication,
+/// so an address is a capability, and this field must never tell a
+/// reader something they could not already read for themselves.
+pub fn redirect(loser: &FlintShare, winner: &FlintShare) -> ConflictWith {
+    let mine = loser.spec.prefix();
+    let theirs = winner.spec.prefix();
+    let same_ns = loser.metadata.namespace == winner.metadata.namespace;
+
+    let relation = if mine == theirs {
+        ConflictRelation::Same
+    } else if mine.starts_with(theirs) {
+        ConflictRelation::Ancestor
+    } else {
+        ConflictRelation::Descendant
+    };
+
+    // Only for a winner ABOVE us, and only when its prefix ends at a
+    // path boundary. `overlaps` compares raw strings on purpose (so
+    // `tenant-a` collides with `tenant-abc` exactly as it would in S3),
+    // which means a prefix that does not end in `/` can "contain"
+    // another mid-segment. CEL refuses that shape on the way in, but a
+    // sub-path derived from it would be a wrong path rather than an
+    // absent one, and this field is meant to be acted on.
+    let sub_path = match relation {
+        ConflictRelation::Ancestor if theirs.is_empty() || theirs.ends_with('/') => {
+            mine.strip_prefix(theirs).map(str::to_string)
+        }
+        _ => None,
+    };
+
+    ConflictWith {
+        namespace: winner.metadata.namespace.clone().unwrap_or_default(),
+        name: winner.metadata.name.clone().unwrap_or_default(),
+        prefix: theirs.to_string(),
+        relation,
+        sub_path,
+        address: if same_ns {
+            winner.status.as_ref().and_then(|s| s.address.clone())
+        } else {
+            None
+        },
+    }
 }
 
 /// What the reconcile should do about this share.
@@ -479,6 +619,163 @@ mod tests {
     /// different share whenever the lex-first is not the oldest — and
     /// the winner is published in the rejection message and in
     /// `status`, so naming the wrong one is a user-visible lie.
+    // --- abandon_plan() ----------------------------------------------
+
+    fn with_abandon(mut s: FlintShare, v: &str) -> FlintShare {
+        s.metadata
+            .annotations
+            .get_or_insert_with(Default::default)
+            .insert(ANN_ABANDON.into(), v.into());
+        s
+    }
+
+    #[test]
+    fn an_unannotated_share_is_never_abandoned() {
+        let s = share_at("ws", "mine", "t/", None);
+        assert_eq!(abandon_plan(&s, true, false, false), AbandonVerdict::NotRequested);
+        // ...and neither is one whose annotation is not the literal "true".
+        let s2 = with_abandon(share_at("ws", "mine", "t/", None), "yes");
+        assert_eq!(abandon_plan(&s2, true, false, false), AbandonVerdict::NotRequested);
+    }
+
+    #[test]
+    fn a_refused_share_that_owns_nothing_is_deleted() {
+        let s = with_abandon(share_at("ws", "mine", "t/", None), "true");
+        assert_eq!(abandon_plan(&s, true, false, false), AbandonVerdict::Delete);
+    }
+
+    #[test]
+    fn a_healthy_share_is_never_abandoned_however_annotated() {
+        // The annotation is written by a web service. If it could delete
+        // a share that is serving, the front door would hold exactly the
+        // power its role is documented as withholding.
+        let s = with_abandon(share_at("ws", "mine", "t/", None), "true");
+        match abandon_plan(&s, false, false, false) {
+            AbandonVerdict::Refused(why) => assert!(
+                why.contains("not in conflict"),
+                "the refusal must say why: {why}"
+            ),
+            other => panic!("a share that did not lose arbitration was {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_loser_that_has_already_run_is_refused_because_it_owns_data() {
+        // The dangerous case: a share demoted LATER by an endpoint
+        // change has a PVC holding local data and has already published
+        // into the bucket. Deleting that is a decision about data.
+        let s = with_abandon(share_at("ws", "mine", "t/", None), "true");
+        for (claim, dep) in [(true, false), (false, true), (true, true)] {
+            match abandon_plan(&s, true, claim, dep) {
+                AbandonVerdict::Refused(why) => assert!(
+                    why.contains("has run"),
+                    "the refusal must name the hazard: {why}"
+                ),
+                other => panic!("a share owning claim={claim} dep={dep} was {other:?}"),
+            }
+        }
+    }
+
+    // --- redirect() ------------------------------------------------
+
+    /// Built by deserialization rather than by struct literal: the
+    /// spec has no `Default` on purpose (a new field must make every
+    /// construction site think), and this way the helper also exercises
+    /// the same serde path the API server feeds the controller.
+    fn share_at(ns: &str, name: &str, prefix: &str, addr: Option<&str>) -> FlintShare {
+        let mut v = serde_json::json!({
+            "apiVersion": "flint.io/v1alpha1",
+            "kind": "FlintShare",
+            "metadata": { "namespace": ns, "name": name },
+            "spec": { "bucket": "shared", "persistence": { "size": "1Gi" } },
+        });
+        if !prefix.is_empty() {
+            v["spec"]["keyPrefix"] = serde_json::Value::String(prefix.into());
+        }
+        if let Some(a) = addr {
+            v["status"] = serde_json::json!({ "address": a });
+        }
+        serde_json::from_value(v).expect("test share")
+    }
+
+    #[test]
+    fn a_winner_above_us_is_a_redirect_with_a_sub_path() {
+        let loser = share_at("ws", "mine", "tenant-x/nested/", None);
+        let winner = share_at("ws", "theirs", "tenant-x/", Some("theirs.ws.svc:2049"));
+        let r = redirect(&loser, &winner);
+        assert_eq!(r.relation, ConflictRelation::Ancestor);
+        assert_eq!(r.sub_path.as_deref(), Some("nested/"));
+        assert_eq!(r.address.as_deref(), Some("theirs.ws.svc:2049"));
+        assert_eq!(r.name, "theirs");
+        assert_eq!(r.prefix, "tenant-x/");
+    }
+
+    #[test]
+    fn a_winner_below_us_is_not_a_redirect_at_all() {
+        // We asked for tenant-x/; they serve only tenant-x/nested/.
+        // There is no hub covering the difference, and saying "mount
+        // theirs" would quietly hand over a SUBSET of what was asked
+        // for — the one failure a consumer would not notice.
+        let loser = share_at("ws", "mine", "tenant-x/", None);
+        let winner = share_at("ws", "theirs", "tenant-x/nested/", Some("theirs.ws.svc:2049"));
+        let r = redirect(&loser, &winner);
+        assert_eq!(r.relation, ConflictRelation::Descendant);
+        assert_eq!(r.sub_path, None, "there is nothing to descend into");
+    }
+
+    #[test]
+    fn an_equal_prefix_redirects_to_the_export_root() {
+        let loser = share_at("ws", "mine", "tenant-x/", None);
+        let winner = share_at("ws", "theirs", "tenant-x/", Some("theirs.ws.svc:2049"));
+        let r = redirect(&loser, &winner);
+        assert_eq!(r.relation, ConflictRelation::Same);
+        assert_eq!(r.sub_path, None, "the root needs no sub-path");
+        assert_eq!(r.address.as_deref(), Some("theirs.ws.svc:2049"));
+    }
+
+    #[test]
+    fn a_cross_namespace_winner_is_named_but_never_addressed() {
+        // The address is a capability: the hub's NFS export has no
+        // per-client authentication. Naming the owner is already in the
+        // condition message; handing over a mount target is not.
+        let loser = share_at("team-b", "mine", "tenant-x/nested/", None);
+        let winner = share_at("team-a", "theirs", "tenant-x/", Some("theirs.team-a.svc:2049"));
+        let r = redirect(&loser, &winner);
+        assert_eq!(r.namespace, "team-a");
+        assert_eq!(r.name, "theirs");
+        assert_eq!(r.relation, ConflictRelation::Ancestor);
+        assert_eq!(
+            r.address, None,
+            "a cross-namespace address would answer a typo'd prefix with a pointer at \
+             another tenant's live data"
+        );
+        // ...and the rest is still useful: you know who to ask.
+        assert_eq!(r.sub_path.as_deref(), Some("nested/"));
+    }
+
+    #[test]
+    fn a_whole_bucket_winner_still_yields_a_usable_sub_path() {
+        let loser = share_at("ws", "mine", "tenant-x/", None);
+        let winner = share_at("ws", "theirs", "", Some("theirs.ws.svc:2049"));
+        let r = redirect(&loser, &winner);
+        assert_eq!(r.relation, ConflictRelation::Ancestor);
+        assert_eq!(r.sub_path.as_deref(), Some("tenant-x/"));
+    }
+
+    #[test]
+    fn a_mid_segment_containment_yields_no_sub_path() {
+        // `overlaps` compares raw strings on purpose, so `tenant-a`
+        // contains `tenant-abc`. CEL refuses a prefix without a
+        // trailing slash on the way in, but if it ever arrives, a
+        // sub-path derived from it would be a WRONG path rather than an
+        // absent one — and this field is meant to be acted on.
+        let loser = share_at("ws", "mine", "tenant-abc/", None);
+        let winner = share_at("ws", "theirs", "tenant-a", Some("theirs.ws.svc:2049"));
+        let r = redirect(&loser, &winner);
+        assert_eq!(r.relation, ConflictRelation::Ancestor);
+        assert_eq!(r.sub_path, None, "\"bc/\" is not a path beneath anything");
+    }
+
     #[test]
     fn a_broad_prefix_is_rejected_by_the_oldest_of_several_descendants() {
         // `tenant-b/` is OLDER; `tenant-a/` sorts first lexically.

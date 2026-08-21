@@ -44,7 +44,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
-use super::conflict::{self, Admission, Candidate};
+use super::conflict::{self, Admission, Candidate, ANN_ABANDON};
 use super::hubstatus;
 use super::idle::{self, Decision, IdleState};
 use super::persistence;
@@ -744,15 +744,55 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
         .and_then(|s| s.conditions.clone())
         .unwrap_or_default();
 
+    let names = render::names(&share);
     let deployments: Api<Deployment> = Api::namespaced(ctx.client.clone(), &ns);
-    let existing_dep = get_opt(deployments.get(&render::names(&share).deployment)).await?;
+    let existing_dep = get_opt(deployments.get(&names.deployment)).await?;
 
     // --- 1. Does anyone else own this bucket subtree? ------------------
     // Before anything is created: a duplicate that never reconciles is
     // a duplicate that can never take over.
-    let (_fleet_state, table) = admit_table(&ctx);
+    let (fleet_state, table) = admit_table(&ctx);
     if let Admission::Rejected { winner, message } = table.verdict(&Candidate::of(&share)) {
         warn!(share = %name, %winner, "refusing to reconcile: bucket subtree already owned");
+
+        // Has the front door asked us to clear this away? `keyPrefix` is
+        // immutable and the CR name is derived from the project id, so a
+        // refused share cannot be edited OR replaced — without this the
+        // project id is wedged until a cluster-admin runs kubectl.
+        let claims: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), &ns);
+        let claim_exists = get_opt(claims.get(&names.claim)).await?.is_some();
+        match conflict::abandon_plan(&share, true, claim_exists, existing_dep.is_some()) {
+            conflict::AbandonVerdict::Delete => {
+                warn!(share = %name, %winner, "abandon requested and this share owns nothing — deleting the CR");
+                event(
+                    &ctx,
+                    &share,
+                    EventType::Normal,
+                    "Abandoned",
+                    &format!(
+                        "deleting this FlintShare at the owner's request ({ANN_ABANDON}): \
+                         it lost the bucket subtree to {winner} and owns no claim, no \
+                         Deployment and no epoch. The project id is free to be declared \
+                         again with a corrected prefix."
+                    ),
+                )
+                .await;
+                let shares: Api<FlintShare> = Api::namespaced(ctx.client.clone(), &ns);
+                match shares.delete(&name, &DeleteParams::default()).await {
+                    Ok(_) => {}
+                    Err(kube::Error::Api(e)) if e.code == 404 => {}
+                    Err(e) => return Err(e.into()),
+                }
+                // The finalizer takes it from here; nothing to requeue.
+                return Ok(Action::await_change());
+            }
+            conflict::AbandonVerdict::Refused(why) => {
+                warn!(share = %name, "abandon refused: {why}");
+                event(&ctx, &share, EventType::Warning, "AbandonRefused", &why).await;
+            }
+            conflict::AbandonVerdict::NotRequested => {}
+        }
+
         // An already-running loser must STOP. Skipping it would leave
         // exactly the hub that takes the prefix over when the winner
         // dies for a lease window.
@@ -762,12 +802,50 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
             // (and thereby endorsing) a spec we have just refused.
             deployments
                 .patch(
-                    &render::names(&share).deployment,
+                    &names.deployment,
                     &PatchParams::default(),
                     &Patch::Merge(json!({"spec": {"replicas": 0}})),
                 )
                 .await?;
+            //
+            // KNOWN LIMITATION, measured rather than assumed: this is an
+            // ORDINARY termination, so SIGTERM runs the hub's
+            // `graceful_shutdown` — drain, a final flush tick, a
+            // manifest barrier, and an epoch release — and for a loser
+            // those publishes land in the WINNER's subtree.
+            //
+            // An operator cannot close that window. Force-deleting the
+            // pod does NOT SIGKILL: `grace_period_seconds: 0` removes
+            // the pod object from the API without waiting for the
+            // kubelet, which then stops the container through its normal
+            // path, SIGTERM first. Drilled against a real bucket, that
+            // bought ~2 SECONDS (a clean hub finishes its epilogue in
+            // ~370ms and releases either way) — not worth a cluster-wide
+            // `pods/delete` grant, and worse, it invited the belief that
+            // the hole was closed. See
+            // tests/regression/overlap-two-cluster-kind.sh leg 2.
+            //
+            // The fence belongs in the HUB: probe the ancestor chain
+            // before claiming and before publishing, and refuse a
+            // subtree an ancestor lease already covers (S12 in
+            // docs/plans/flint-lite-fleet-scale-plan.md). That is also
+            // the only thing that covers the cross-cluster and
+            // kubectl-bypass cases this check cannot see at all.
         }
+        // The winner as a FIELD, not a sentence to regex out of the
+        // condition message. `winner` is "namespace/name" and the fleet
+        // state is the reflector snapshot the verdict was computed from,
+        // so this costs no API call and cannot disagree with the verdict.
+        let redirect = fleet_state
+            .iter()
+            .find(|c| {
+                format!(
+                    "{}/{}",
+                    c.metadata.namespace.clone().unwrap_or_default(),
+                    c.metadata.name.clone().unwrap_or_default()
+                ) == winner
+            })
+            .map(|w| conflict::redirect(&share, w));
         event(&ctx, &share, EventType::Warning, "Conflict", &message).await;
         set_condition(
             &mut conds,
@@ -786,6 +864,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
                 observed_generation: generation,
                 claim_name: None,
                 server_id: carry_server_id(&share, None),
+                conflict_with: redirect,
                 conditions: Some(conds),
             },
         )
@@ -797,7 +876,20 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
         condition("Conflict", false, "Unique", None, generation),
     );
 
-    let names = render::names(&share);
+    // An abandon request on a share that is NOT in conflict. The delete
+    // path above is unreachable from here by construction, so without
+    // this the annotation is met with total silence — and silence is the
+    // one answer a front door cannot act on: it sets the annotation,
+    // waits for the row to disappear, and cannot tell "refused" from
+    // "the operator is wedged". `abandon_plan` is a pure annotation
+    // lookup when nothing is asked, so this costs a map probe per
+    // reconcile.
+    if let conflict::AbandonVerdict::Refused(why) =
+        conflict::abandon_plan(&share, false, false, false)
+    {
+        warn!(share = %name, "abandon refused: {why}");
+        event(&ctx, &share, EventType::Warning, "AbandonRefused", &why).await;
+    }
 
     // --- 2. Adoption fence --------------------------------------------
     if names.claim_is_adopted {
@@ -825,6 +917,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
                     observed_generation: generation,
                     claim_name: Some(names.claim.clone()),
                     server_id: carry_server_id(&share, None),
+                    conflict_with: None,
                     conditions: Some(conds),
                 },
             )
@@ -1142,6 +1235,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
                 observed_generation: generation,
                 claim_name: Some(names.claim.clone()),
                 server_id: carry_server_id(&share, None),
+                conflict_with: None,
                 conditions: Some(conds),
             },
         )
@@ -1203,6 +1297,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
             observed_generation: generation,
             claim_name: Some(names.claim.clone()),
             server_id: carry_server_id(&share, idle_outcome.server_id.clone()),
+            conflict_with: None,
             conditions: Some(conds.clone()),
         },
     )
@@ -2170,6 +2265,56 @@ async fn cleanup(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
     let ns = share.namespace().unwrap_or_default();
     let names = render::names(&share);
     let reclaim = share.spec.reclaim.clone().unwrap_or_default();
+
+    // STOP ADVERTISING A MOUNT TARGET — first, before the reclaim work.
+    //
+    // A finalizer keeps this object readable for as long as cleanup
+    // takes, with whatever status it last had. The documented
+    // ensure-live recipe is `GET → 404? create it`, so a front door
+    // gets a 200 here, skips the create, polls, sees `Ready`, and hands
+    // a client `status.address`. Owner GC is still waiting on the
+    // finalizer, so the Service and Deployment are up and that mount
+    // SUCCEEDS — and then the objects are collected out from under a
+    // hard NFS mount.
+    //
+    // `address: None` is a removal, not a no-op: status is applied by
+    // this field manager with `force`, so a field omitted from the
+    // apply is pruned from the object.
+    let mut conds: Vec<ShareCondition> = share
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.clone())
+        .unwrap_or_default();
+    let why = format!("the FlintShare is being deleted (reclaim: {reclaim:?})");
+    set_condition(
+        &mut conds,
+        condition("Terminating", true, "Deleting", why.clone(), share.metadata.generation),
+    );
+    set_condition(
+        &mut conds,
+        condition("Ready", false, "Terminating", why, share.metadata.generation),
+    );
+    if let Err(e) = write_status(
+        &ctx,
+        &share,
+        FlintShareStatus {
+            phase: Some(Phase::Terminating),
+            address: None,
+            observed_generation: share.metadata.generation,
+            claim_name: Some(names.claim.clone()),
+            server_id: carry_server_id(&share, None),
+            conflict_with: None,
+            conditions: Some(conds),
+        },
+    )
+    .await
+    {
+        // Never block the reclaim on the status write. Honoring
+        // `reclaim` is the finalizer's actual job; a stale address is
+        // the lesser failure, and the object is about to vanish anyway.
+        warn!(share = %share.name_any(), error = %e,
+              "could not clear status.address before cleanup — continuing");
+    }
 
     match reclaim {
         Reclaim::Retain => {

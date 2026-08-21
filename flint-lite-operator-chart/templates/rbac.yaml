@@ -43,9 +43,19 @@ metadata:
     {{- include "flint-lite-operator.labels" . | nindent 4 }}
 rules:
   # The API this operator serves.
+  # `delete` is used on EXACTLY ONE path: a share that lost bucket-subtree
+  # arbitration, carries the owner's `flint.io/abandon: "true"`, and owns
+  # nothing — no claim, no Deployment, no epoch. It exists because
+  # `keyPrefix` is CEL-immutable and the CR name is derived from the
+  # project id, so a refused share can be neither edited nor replaced;
+  # without a path out, one typo'd prefix wedges that project id until a
+  # cluster-admin runs kubectl. The verb sits HERE rather than on the
+  # front-door role on purpose: the operator can check what the share
+  # owns before acting, and a web service handling untrusted input
+  # cannot.
   - apiGroups: ["flint.io"]
     resources: ["flintshares"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "list", "watch", "update", "patch", "delete"]
   - apiGroups: ["flint.io"]
     resources: ["flintshares/status", "flintshares/finalizers"]
     verbs: ["get", "update", "patch"]
@@ -67,6 +77,13 @@ rules:
   # Pods: read-only, and only to answer two questions — is this hub
   # still pre-listener, and is a foreign writer still mounting the
   # claim we are about to adopt?
+  #
+  # Deliberately NOT `delete`. Force-deleting a conflict loser was
+  # tried and reverted: it does not SIGKILL (the API object goes
+  # without waiting for the kubelet, which then terminates the
+  # container normally), so it bought ~2s of a shutdown epilogue that
+  # a clean hub finishes in ~370ms. A cluster-wide pod-delete grant is
+  # not worth that, and the real fence belongs in the hub.
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]

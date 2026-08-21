@@ -60,6 +60,7 @@ use serde::{Deserialize, Serialize};
     printcolumn = r#"{"name":"ADDRESS","type":"string","jsonPath":".status.address"}"#,
     printcolumn = r#"{"name":"BUCKET","type":"string","jsonPath":".spec.bucket"}"#,
     printcolumn = r#"{"name":"PREFIX","type":"string","jsonPath":".spec.keyPrefix"}"#,
+    printcolumn = r#"{"name":"CONFLICT","type":"string","jsonPath":".status.conflictWith.name"}"#,
     // The front door's index. A share's Kubernetes name is derived
     // (`fs-<project-id>`), so this is what makes the mapping legible
     // from the cluster side without decoding names by eye.
@@ -631,6 +632,59 @@ pub struct TierSettings {
     pub hydrate_warm_concurrency: Option<usize>,
 }
 
+/// Which way the winner's prefix sits relative to this share's — and
+/// therefore whether a redirect is even possible.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ConflictRelation {
+    /// The winner owns EXACTLY this prefix. Mount its export root.
+    Same,
+    /// The winner owns a prefix ABOVE this one, so it already serves
+    /// these bytes: mount its export root and use `subPath`.
+    Ancestor,
+    /// The winner owns a prefix BELOW this one. There is nothing to
+    /// redirect to — this share asked for MORE than the winner serves,
+    /// and no hub covers the difference.
+    Descendant,
+}
+
+/// The share that owns this bucket subtree, as a machine-readable
+/// field rather than a sentence to regex out of a condition message.
+///
+/// # Why the address is conditional
+///
+/// A hub's NFS export has no per-client authentication: whoever can
+/// reach `status.address` can read the tree. Publishing a winner's
+/// address into a LOSER's status therefore hands out a mount target,
+/// and arbitration is fleet-wide across namespaces — so doing it
+/// unconditionally would let a typo'd prefix in one namespace be
+/// answered with a pointer at another tenant's live data.
+///
+/// The rule is that this field may only tell a reader something they
+/// could already have read for themselves: the address is set ONLY
+/// when the winner is in the SAME namespace, where anyone able to read
+/// this CR can read the winner's too. Across namespaces the winner is
+/// still NAMED — that much is already in the condition message — and
+/// resolving the name to an address is left to a caller that holds
+/// the wider read, which is the point at which it becomes an
+/// authorization decision instead of a side effect.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictWith {
+    pub namespace: String,
+    pub name: String,
+    /// The key prefix the winner owns.
+    pub prefix: String,
+    pub relation: ConflictRelation,
+    /// This share's prefix relative to the winner's export root —
+    /// present only for `Ancestor`, and only when the winner's prefix
+    /// ends at a path boundary, so it is always a usable path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_path: Option<String>,
+    /// Where the winner serves. Same namespace only — see above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+}
+
 /// Observed state. Everything here is derived — the operator never
 /// asks the user to write status, and never reads it back as input.
 #[derive(KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -672,6 +726,16 @@ pub struct FlintShareStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_id: Option<String>,
 
+    /// Set while `Conflict` is True: who owns this bucket subtree, and
+    /// whether this share's bytes are already being served by them.
+    ///
+    /// The `Conflict` condition's message has always named the winner
+    /// in prose. This is the same fact in a shape a front door can act
+    /// on without a regex — and it carries the two things the sentence
+    /// never did: whether a redirect is possible at all, and where to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_with: Option<ConflictWith>,
+
     /// Standard conditions (`Ready`, `ConfigCurrent`, `Conflict`,
     /// `AdoptionBlocked`), upstream field-for-field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -710,6 +774,18 @@ pub enum Phase {
     /// Refused: another share owns this bucket subtree, or adoption is
     /// blocked. See conditions.
     Failed,
+    /// The CR is being deleted and the finalizer is honoring `reclaim`.
+    ///
+    /// Reported because a front door cannot infer it: the finalizer
+    /// keeps the object in the API (and in the operator's reflector)
+    /// with its last status intact, so an ensure-live loop written as
+    /// `GET → 404? create it` gets a **200**, skips the create, polls,
+    /// and reads whatever phase the share last had. Owner GC has not
+    /// run yet either, so the Deployment and Service are still up and
+    /// the mount would even succeed — right up until they are
+    /// collected under a hard NFS mount. `status.address` is cleared
+    /// on entry to this phase for the same reason.
+    Terminating,
 }
 
 /// A metav1.Condition mirror (same field names, same semantics).
@@ -1079,7 +1155,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["PHASE", "ADDRESS", "BUCKET", "PREFIX", "PROJECT", "AGE"]
+            vec!["PHASE", "ADDRESS", "BUCKET", "PREFIX", "CONFLICT", "PROJECT", "AGE"]
         );
         // PROJECT is priority 1 — `kubectl get flintshares` stays
         // narrow and `-o wide` shows the front door's index.

@@ -2,7 +2,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    flint.io/crd-schema-version: '4'
+    flint.io/crd-schema-version: '6'
   name: flintshares.flint.io
 spec:
   group: flint.io
@@ -27,6 +27,9 @@ spec:
       type: string
     - jsonPath: .spec.keyPrefix
       name: PREFIX
+      type: string
+    - jsonPath: .status.conflictWith.name
+      name: CONFLICT
       type: string
     - jsonPath: .metadata.labels['flint.io/project-id']
       name: PROJECT
@@ -634,6 +637,50 @@ spec:
                   type: object
                 nullable: true
                 type: array
+              conflictWith:
+                description: |-
+                  Set while `Conflict` is True: who owns this bucket subtree, and
+                  whether this share's bytes are already being served by them.
+
+                  The `Conflict` condition's message has always named the winner
+                  in prose. This is the same fact in a shape a front door can act
+                  on without a regex — and it carries the two things the sentence
+                  never did: whether a redirect is possible at all, and where to.
+                nullable: true
+                properties:
+                  address:
+                    description: Where the winner serves. Same namespace only — see above.
+                    nullable: true
+                    type: string
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                  prefix:
+                    description: The key prefix the winner owns.
+                    type: string
+                  relation:
+                    description: |-
+                      Which way the winner's prefix sits relative to this share's — and
+                      therefore whether a redirect is even possible.
+                    enum:
+                    - Same
+                    - Ancestor
+                    - Descendant
+                    type: string
+                  subPath:
+                    description: |-
+                      This share's prefix relative to the winner's export root —
+                      present only for `Ancestor`, and only when the winner's prefix
+                      ends at a path boundary, so it is always a usable path.
+                    nullable: true
+                    type: string
+                required:
+                - name
+                - namespace
+                - prefix
+                - relation
+                type: object
               observedGeneration:
                 description: The `.metadata.generation` this status describes.
                 format: int64
@@ -652,6 +699,7 @@ spec:
                 - Hibernated
                 - Reprovisioning
                 - Failed
+                - Terminating
                 nullable: true
                 type: string
               serverId:

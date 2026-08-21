@@ -209,7 +209,7 @@ kubectl -n "$OPNS" rollout status deployment/flint-lite-operator --timeout=180s 
 kubectl wait --for=condition=established --timeout=60s crd/flintshares.flint.io >/dev/null 2>&1 \
   || fail "the CRD never became Established"
 STAMP=$(kubectl get crd flintshares.flint.io -o jsonpath='{.metadata.annotations.flint\.io/crd-schema-version}')
-[ "$STAMP" = "4" ] || fail "CRD schema stamp is '$STAMP', expected 4 (reprovision + autoExpand)"
+[ "$STAMP" = "6" ] || fail "CRD schema stamp is '$STAMP', expected 6 (reprovision + autoExpand + Terminating + conflictWith)"
 pass "operator up, CRD stamped at schema $STAMP"
 
 # ── a share, on a deliberately over-sized claim ──────────────────────

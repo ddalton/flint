@@ -25,6 +25,12 @@
 #   7  conflict: a second share on a nested prefix, in another
 #      namespace, is Failed with a Conflict condition and NO Deployment;
 #      deleting the winner promotes it
+#  7b  a share demoted while RUNNING (its endpoint converged onto an
+#      older share's) is scaled to zero and its pod goes away, while the
+#      winner is untouched. KNOWN LIMITATION, drilled against a real
+#      bucket in overlap-two-cluster-kind.sh leg 2: that shutdown is
+#      GRACEFUL, so the loser still runs its epilogue into the winner's
+#      subtree. No operator can prevent it; S12 is the fix
 #   8  the operator repairs a hand-mangled CRD schema on restart
 #   9  the hub's own HTTP surface: /status answers on the pod IP and
 #      reports rpoClean as null (never true) with no bucket, and the
@@ -40,6 +46,10 @@
 #      back, and an admin's spec.lifecycle: Suspended outranks it
 #  12  reclaim: Retain keeps the PVC when the share is deleted, and the
 #      three owned children are garbage collected; Delete removes it
+# 12b  a share held in deletion by a finalizer reports Terminating and
+#      has WITHDRAWN status.address — the ensure-live recipe is
+#      `GET -> 404? create`, so it gets a 200 here and must not be
+#      handed a mount target that is being collected
 #  13  adoption: a share adopts a live helm release IN PLACE (one
 #      Deployment, same PVC, same data), and a differently-named share
 #      is fenced with AdoptionBlocked instead of double-mounting
@@ -450,6 +460,22 @@ kubectl -n "$NS2" get deployment intruder >/dev/null 2>&1 \
   && fail "the loser got a Deployment — that is the hub that takes the prefix over"
 pass "loser Failed with a Conflict naming $NS/owner, and no Deployment at all"
 
+# The same fact as a FIELD. A front door has to act on this without a
+# regex over an English sentence.
+cw() { kubectl -n "$NS2" get flintshare intruder -o jsonpath="{.status.conflictWith.$1}" 2>/dev/null; }
+[ "$(cw namespace)" = "$NS" ]     || fail "conflictWith.namespace is '$(cw namespace)', expected $NS"
+[ "$(cw name)" = "owner" ]        || fail "conflictWith.name is '$(cw name)', expected owner"
+[ "$(cw prefix)" = "tenant-x/" ]  || fail "conflictWith.prefix is '$(cw prefix)'"
+[ "$(cw relation)" = "Ancestor" ] || fail "conflictWith.relation is '$(cw relation)', expected Ancestor"
+[ "$(cw subPath)" = "nested/" ]   || fail "conflictWith.subPath is '$(cw subPath)', expected nested/"
+# ...and the address is WITHHELD, because the winner is in another
+# namespace. A hub's NFS export has no per-client auth, so an address is
+# a capability: answering a typo'd prefix with one would hand this
+# namespace a working mount of the other tenant's live data.
+[ -z "$(cw address)" ] \
+  || fail "conflictWith.address leaked a CROSS-NAMESPACE mount target: $(cw address)"
+pass "conflictWith names the winner and the sub-path, and withholds the cross-namespace address"
+
 kubectl -n "$NS" delete flintshare owner --wait=true >/dev/null 2>&1
 for i in $(seq 1 45); do
   P=$(kubectl -n "$NS2" get flintshare intruder -o jsonpath='{.status.phase}' 2>/dev/null)
@@ -459,6 +485,198 @@ done
 [ "${P:-}" != "Failed" ] || fail "deleting the winner did not promote the survivor (still $P)"
 kubectl -n "$NS2" delete flintshare intruder --wait=true >/dev/null 2>&1
 pass "deleting the winner promoted the survivor"
+
+# ── 8b. a RUNNING loser is FENCED, not drained ───────────────────────
+say "leg 7b: a share demoted while running is killed, not gracefully flushed"
+# Leg 7's loser never got a Deployment, so it never exercised the
+# dangerous half. This one does. Two nested prefixes under DIFFERENT
+# endpoints are both admitted (overlap requires the same endpoint), so
+# both get a hub; converging the endpoints demotes the younger one WHILE
+# IT IS RUNNING. spec.endpoint is mutable precisely so this is possible
+# — the CRD says so in as many words.
+#
+# What must NOT happen: an ordinary scale-to-zero. That is a graceful
+# SIGTERM, and the hub's shutdown drains, ticks the flush orchestrator
+# one last time and writes a manifest barrier — into the subtree the
+# arbitration is protecting.
+kubectl apply -f - >/dev/null <<EOF || fail "applying elder failed"
+apiVersion: flint.io/v1alpha1
+kind: FlintShare
+metadata: { name: elder, namespace: $NS }
+spec:
+  bucket: shared-bucket
+  keyPrefix: tenant-z/
+  endpoint: http://alpha.invalid:9000
+  persistence: { size: 1Gi }
+EOF
+sleep 3   # creationTimestamp has 1s granularity; make the elder unambiguous
+kubectl apply -f - >/dev/null <<EOF || fail "applying younger failed"
+apiVersion: flint.io/v1alpha1
+kind: FlintShare
+metadata: { name: younger, namespace: $NS }
+spec:
+  bucket: shared-bucket
+  keyPrefix: tenant-z/nested/
+  endpoint: http://beta.invalid:9000
+  persistence: { size: 1Gi }
+EOF
+for i in $(seq 1 60); do
+  YPOD=$(kubectl -n "$NS" get pods -l flint.io/share=younger -o name 2>/dev/null | head -1)
+  [ -n "$YPOD" ] && break
+  sleep 2
+done
+# The precondition IS the anti-vacuity guard: with no pod there is
+# nothing to fence and every assertion below would pass by not looking.
+[ -n "${YPOD:-}" ] || fail "the younger share never got a pod — nothing to fence, the leg proves nothing"
+kubectl -n "$NS" get deployment elder >/dev/null 2>&1 \
+  || fail "elder was refused — the differing endpoints did not keep the two apart"
+pass "two nested prefixes under different endpoints both run ($YPOD)"
+
+kubectl -n "$NS" patch flintshare younger --type=merge \
+  -p '{"spec":{"endpoint":"http://alpha.invalid:9000"}}' >/dev/null \
+  || fail "converging the endpoint was refused"
+for i in $(seq 1 45); do
+  P=$(kubectl -n "$NS" get flintshare younger -o jsonpath='{.status.phase}' 2>/dev/null)
+  [ "$P" = "Failed" ] && break
+  sleep 2
+done
+[ "${P:-}" = "Failed" ] \
+  || fail "a running share on a now-overlapping subtree was NOT demoted (phase ${P:-<none>})"
+
+# `{.items[*].reason}` then grep, NOT a `?(@.reason==...)` filter: the
+# flat form is the one disk-resize-kind.sh already proves works against
+# this API server, and an instrument bug here would read exactly like
+# the product bug this leg exists to catch.
+reasons_for() { kubectl -n "$NS" get events --field-selector "involvedObject.name=$1" \
+  -o jsonpath='{.items[*].reason}' 2>/dev/null; }
+for i in $(seq 1 30); do
+  LEFT=$(kubectl -n "$NS" get pods -l flint.io/share=younger -o name 2>/dev/null | grep -c .)
+  [ "${LEFT:-1}" = "0" ] && break
+  sleep 2
+done
+[ "${LEFT:-1}" = "0" ] || fail "the losing hub pod is still running"
+REPL=$(kubectl -n "$NS" get deployment younger -o jsonpath='{.spec.replicas}' 2>/dev/null)
+[ "${REPL:-1}" = "0" ] || fail "the demoted share is still at replicas=${REPL:-<none>}"
+
+# Anti-vacuity, the other way: demotion is conditional on LOSING. The
+# winner is the same age, in the same namespace, on the same bucket.
+W_REPL=$(kubectl -n "$NS" get deployment elder -o jsonpath='{.spec.replicas}' 2>/dev/null)
+[ "${W_REPL:-0}" = "1" ] || fail "the WINNER was scaled down too (replicas=${W_REPL:-<none>}) — demotion is not conditional on losing"
+pass "the running loser was scaled to zero and its pod is gone; the winner untouched"
+
+# The demoted share is also the ANTI-VACUITY case for the abandon
+# annotation, and it costs nothing extra here. `younger` lost, so it
+# genuinely IS a conflict loser — the only kind that may be abandoned —
+# but it has a PVC and a Deployment, which means it may hold the only
+# local copy of bytes it has already published into the bucket. The
+# front door must not be able to delete that by setting a label.
+kubectl -n "$NS" annotate flintshare younger flint.io/abandon=true --overwrite >/dev/null
+for i in $(seq 1 30); do
+  REFUSED=$(reasons_for younger | tr ' ' '\n' | grep -c '^AbandonRefused$')
+  [ "${REFUSED:-0}" -gt 0 ] && break
+  sleep 2
+done
+[ "${REFUSED:-0}" -gt 0 ] \
+  || fail "abandon on a share that HAS RUN produced no AbandonRefused event (reasons: $(reasons_for younger))"
+kubectl -n "$NS" get flintshare younger >/dev/null 2>&1 \
+  || fail "abandon DELETED a share holding a PVC and a Deployment — that is a decision about data, not a label"
+WHY=$(kubectl -n "$NS" get events --field-selector involvedObject.name=younger \
+  -o jsonpath='{.items[*].message}' 2>/dev/null)
+[ "$(echo "$WHY" | tr ' ' '\n' | grep -c 'younger-data')" -gt 0 ] \
+  || fail "the refusal does not name the claim that blocked it: $WHY"
+pass "abandon refused for a loser that has run: the CR survives and the event names its claim"
+
+kubectl -n "$NS" delete flintshare younger elder --wait=true >/dev/null 2>&1
+kubectl -n "$NS" delete pvc younger-data elder-data --wait=false >/dev/null 2>&1
+
+# ── 8c. the front door clears away a share it should never have made ─
+say "leg 7c: an abandoned loser is deleted, and its project id is free again"
+# `keyPrefix` is immutable (leg 4 proves the API server refuses to move
+# it) and the CR name is derived from the project id, so a share refused
+# for conflict can be neither edited NOR replaced: the id is wedged
+# until a cluster-admin runs kubectl. The abandon annotation is the
+# front door's own remedy, and it is deliberately narrow — leg 7b holds
+# the half that must be REFUSED.
+kubectl apply -f - >/dev/null <<EOF || fail "applying the abandon winner failed"
+apiVersion: flint.io/v1alpha1
+kind: FlintShare
+metadata: { name: keeper, namespace: $NS }
+spec:
+  bucket: abandon-bucket
+  keyPrefix: proj/
+  persistence: { size: 1Gi }
+EOF
+sleep 3   # creationTimestamp has 1s granularity; make the winner unambiguous
+kubectl apply -f - >/dev/null <<EOF || fail "applying the abandon loser failed"
+apiVersion: flint.io/v1alpha1
+kind: FlintShare
+metadata: { name: typo, namespace: $NS }
+spec:
+  bucket: abandon-bucket
+  keyPrefix: proj/sub/
+  persistence: { size: 1Gi }
+EOF
+for i in $(seq 1 45); do
+  P=$(kubectl -n "$NS" get flintshare typo -o jsonpath='{.status.phase}' 2>/dev/null)
+  [ "$P" = "Failed" ] && break
+  sleep 2
+done
+[ "${P:-}" = "Failed" ] || fail "the abandon loser was not refused at all (phase ${P:-<none>})"
+kubectl -n "$NS" get pvc typo-data >/dev/null 2>&1 \
+  && fail "the loser has a PVC — this leg would then be re-testing leg 7b's case, not this one"
+pass "loser Failed, owning no claim and no Deployment"
+
+# ANTI-VACUITY, first direction: the annotation is not a delete button.
+# A share that is NOT in conflict must survive it — and must be TOLD so,
+# because the front door sets this and then waits for the row to vanish.
+# Silence here is indistinguishable from a wedged operator.
+kubectl -n "$NS" annotate flintshare keeper flint.io/abandon=true --overwrite >/dev/null
+for i in $(seq 1 30); do
+  R=$(reasons_for keeper | tr ' ' '\n' | grep -c '^AbandonRefused$')
+  [ "${R:-0}" -gt 0 ] && break
+  sleep 2
+done
+[ "${R:-0}" -gt 0 ] \
+  || fail "abandon on a HEALTHY share was silently ignored — a front door would wait forever"
+kubectl -n "$NS" get flintshare keeper >/dev/null 2>&1 \
+  || fail "abandon DELETED a healthy share that legitimately owns its prefix"
+kubectl -n "$NS" annotate flintshare keeper flint.io/abandon- >/dev/null
+pass "a healthy share refuses the annotation and says why"
+
+# The path itself.
+kubectl -n "$NS" annotate flintshare typo flint.io/abandon=true --overwrite >/dev/null
+for i in $(seq 1 45); do
+  kubectl -n "$NS" get flintshare typo >/dev/null 2>&1 || break
+  sleep 2
+done
+kubectl -n "$NS" get flintshare typo >/dev/null 2>&1 \
+  && { kubectl -n "$NS" get flintshare typo -o yaml | tail -20; \
+       fail "the abandoned loser was NOT deleted"; }
+pass "the abandoned loser is gone"
+
+# ...and the whole point of it: the project id is reusable, so the same
+# project can be declared again on a prefix that does not collide.
+kubectl apply -f - >/dev/null <<EOF || fail "re-creating the project on a corrected prefix failed"
+apiVersion: flint.io/v1alpha1
+kind: FlintShare
+metadata: { name: typo, namespace: $NS }
+spec:
+  bucket: abandon-bucket
+  keyPrefix: other/
+  persistence: { size: 1Gi }
+EOF
+P=""
+for i in $(seq 1 45); do
+  P=$(kubectl -n "$NS" get flintshare typo -o jsonpath='{.status.phase}' 2>/dev/null)
+  [ -n "$P" ] && [ "$P" != "Failed" ] && break
+  sleep 2
+done
+{ [ -n "${P:-}" ] && [ "$P" != "Failed" ]; } \
+  || fail "the re-created project is still Failed (phase ${P:-<none>}) — the id is still wedged"
+pass "the same project id, on a corrected prefix, is admitted (phase $P)"
+
+kubectl -n "$NS" delete flintshare typo keeper --wait=true >/dev/null 2>&1
+kubectl -n "$NS" delete pvc typo-data keeper-data --wait=false >/dev/null 2>&1
 
 # ── 9. the operator repairs its own CRD ──────────────────────────────
 say "leg 8: a hand-mangled CRD schema is repaired on operator restart"
@@ -498,10 +716,21 @@ kubectl -n "$NS" rollout status deployment/tenant-a --timeout=180s >/dev/null 2>
 # Everything below runs INSIDE the cluster, against the pod IP. The
 # status port is deliberately not on the Service, so this is the only
 # way to reach it — which is the property being asserted.
-HUBPOD=$(kubectl -n "$NS" get pods -l flint.io/share=tenant-a \
-  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+# Resolve the pod on EVERY call, never once into a variable. A hub that
+# rolls mid-leg (an edit, a checksum change, a restart) invalidates a
+# captured name, and every later exec then fails with `NotFound` — which
+# reads exactly like "the hub never answered" while the hub is in fact
+# healthy under a new name. Ready-gated, so a pod that is up but still
+# pre-listener is not chosen either.
+hubpod_of() {
+  kubectl -n "${2:-$NS}" get pods -l "flint.io/share=$1" \
+    --field-selector=status.phase=Running \
+    -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}' \
+    2>/dev/null | awk '{print $1}'
+}
+HUBPOD=$(hubpod_of tenant-a)
 [ -n "$HUBPOD" ] || fail "no hub pod found for tenant-a"
-kexec() { kubectl -n "$NS" exec "$HUBPOD" -- sh -c "$1"; }
+kexec() { kubectl -n "$NS" exec "$(hubpod_of tenant-a)" -- sh -c "$1"; }
 # curl, never BusyBox wget: wget cannot issue PUT, and the status-code
 # assertions below want the code itself rather than scraped headers.
 # `-f` turns a non-2xx into a non-zero exit for the calls that must
@@ -514,7 +743,18 @@ for i in $(seq 1 30); do
   [ "$PH" = "serving" ] && break
   sleep 2
 done
-[ "${PH:-}" = "serving" ] || fail "/status never reported phase serving (got '${PH:-<none>}')"
+if [ "${PH:-}" != "serving" ]; then
+  echo "  --- tenant-a pods ---";        kubectl -n "$NS" get pods -l flint.io/share=tenant-a -o wide
+  echo "  --- replicasets ---";          kubectl -n "$NS" get rs -l flint.io/share=tenant-a
+  echo "  --- recent events ---";        kubectl -n "$NS" get events --field-selector involvedObject.name=tenant-a -o custom-columns=REASON:.reason,MSG:.message --sort-by=.lastTimestamp | tail -15
+  echo "  --- operator log ---";         kubectl -n "$OPNS" logs deployment/flint-lite-operator --tail=60 2>/dev/null | grep -i tenant-a | tail -20
+  fail "/status never reported phase serving (got '${PH:-<none>}')"
+fi
+# One ReplicaSet generation per deliberate edit. More than that means
+# something is rolling the hub on its own, and every exec-based leg
+# below would be racing it.
+RSGEN=$(kubectl -n "$NS" get rs -l flint.io/share=tenant-a --no-headers 2>/dev/null | grep -c .)
+echo "  (tenant-a replicasets: $RSGEN)"
 
 # rpoClean must be NULL for a tier-off share — never true. A controller
 # reading absence as "clean" would delete the only copy of the data.
@@ -664,8 +904,7 @@ kubectl -n "$NS" patch flintshare tenant-a --type=merge \
 # nothing to do with what it tests.
 kubectl -n "$NS" rollout status deployment/tenant-a --timeout=120s >/dev/null 2>&1 \
   || fail "the hub is not settled after arming the ladder"
-HUBPOD=$(kubectl -n "$NS" get pods -l flint.io/share=tenant-a \
-  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+HUBPOD=$(hubpod_of tenant-a)
 [ -n "$HUBPOD" ] || fail "no running hub pod for tenant-a"
 
 # Wait until the HUB itself says it is past the threshold. Without this
@@ -957,6 +1196,60 @@ kubectl -n "$NS" get pvc ephemeral-data >/dev/null 2>&1 \
   && fail "reclaim: Delete left the PVC behind"
 pass "reclaim: Delete removed the claim"
 
+# ── 13b. a Terminating share stops advertising a mount target ────────
+say "leg 13b: a share being deleted reports Terminating and withdraws its address"
+# A finalizer keeps a deleted CR READABLE for as long as cleanup takes,
+# with whatever status it last had — and the documented ensure-live
+# recipe is `GET -> 404? create it`, so a front door gets a 200 here,
+# skips the create, polls, and reads Ready. Owner GC is still waiting on
+# the finalizer too, so the Service and Deployment are up and that mount
+# SUCCEEDS, right until they are collected under a hard NFS mount.
+#
+# A holding finalizer of our own pins the object in that window, so this
+# is an assertion rather than a race against cleanup.
+kubectl apply -f - >/dev/null <<EOF || fail "applying the doomed share failed"
+apiVersion: flint.io/v1alpha1
+kind: FlintShare
+metadata: { name: doomed, namespace: $NS }
+spec:
+  persistence: { size: 1Gi }
+EOF
+for i in $(seq 1 60); do
+  ADDR=$(kubectl -n "$NS" get flintshare doomed -o jsonpath='{.status.address}' 2>/dev/null)
+  [ -n "$ADDR" ] && break
+  sleep 2
+done
+# Anti-vacuity: a share that never advertised an address cannot prove
+# that deletion withdraws one.
+[ -n "${ADDR:-}" ] || fail "doomed never advertised an address — nothing to withdraw"
+pass "doomed is serving at $ADDR"
+
+kubectl -n "$NS" patch flintshare doomed --type=json \
+  -p '[{"op":"add","path":"/metadata/finalizers/-","value":"e2e.flint.io/hold"}]' >/dev/null \
+  || fail "could not add the holding finalizer"
+kubectl -n "$NS" delete flintshare doomed --wait=false >/dev/null 2>&1
+for i in $(seq 1 45); do
+  P=$(kubectl -n "$NS" get flintshare doomed -o jsonpath='{.status.phase}' 2>/dev/null)
+  [ "$P" = "Terminating" ] && break
+  sleep 2
+done
+[ "${P:-}" = "Terminating" ] \
+  || fail "a deleting share reports phase '${P:-<none>}', not Terminating"
+# The hazard is precisely that this GET still succeeds.
+kubectl -n "$NS" get flintshare doomed >/dev/null 2>&1 \
+  || fail "the object vanished — the holding finalizer did not hold, so this leg proved nothing"
+ADDR2=$(kubectl -n "$NS" get flintshare doomed -o jsonpath='{.status.address}' 2>/dev/null)
+[ -z "${ADDR2:-}" ] \
+  || fail "a deleting share still advertises '$ADDR2' — a front door would mount a hub that is going away"
+pass "Terminating, address withdrawn, and the object still answers a GET"
+
+kubectl -n "$NS" patch flintshare doomed --type=json \
+  -p '[{"op":"remove","path":"/metadata/finalizers"}]' >/dev/null 2>&1
+for i in $(seq 1 30); do
+  kubectl -n "$NS" get flintshare doomed >/dev/null 2>&1 || break
+  sleep 2
+done
+
 # ...but an ADOPTED claim is the user's, and reclaim does not reach it.
 # `spec.existingClaim` and `reclaim: Delete` are both the user's words
 # and they contradict each other; hibernate has always resolved that by
@@ -1094,5 +1387,10 @@ echo " window, suspended an unmounted one and woke it with a single"
 echo " annotation, served the front door's ensure-live loop idempotently"
 echo " from zero, consumed a wake-intent without rolling the hub, kept"
 echo " a Retain PVC through deletion, refused to delete an adopted one,"
-echo " and adopted a live helm release without double-mounting a claim."
+echo " stopped a running conflict loser without touching the winner,"
+echo " deleted an abandoned loser that owned nothing while refusing"
+echo " the same request from a healthy share and from one holding a"
+echo " claim, withdrew a deleting share's address before a"
+echo " front door could mount it, and adopted a live helm release without"
+echo " double-mounting a claim."
 echo "══════════════════════════════════════════════════════════════════"

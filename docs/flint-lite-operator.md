@@ -129,6 +129,71 @@ in whatever database allocates them. There is no way to add that check
 here, and `spec.bucket`/`spec.keyPrefix` are immutable once set, so a
 wrong prefix is a byte migration rather than an edit.
 
+### What a loser is told, and how it gets out
+
+A refused share carries the winner as a **field**, not only as an
+English sentence a front door would have to regex:
+
+```yaml
+status:
+  phase: Failed
+  conflictWith:
+    namespace: workspaces
+    name: owner
+    prefix: tenant-x/
+    relation: Ancestor      # Same | Ancestor | Descendant
+    subPath: nested/
+    address: owner.workspaces.svc.cluster.local:2049
+```
+
+`relation` is the part a caller cannot infer from the refusal alone.
+Overlap is symmetric, so losing says nothing about which way the two
+prefixes nest — and the two directions have different remedies. A
+winner **above** you already serves your bytes, so `subPath` tells a
+consumer where to look inside its export. A winner **below** you serves
+only part of what you asked for, and there is nothing to point at:
+`subPath` is absent.
+
+`address` is populated **only when the winner is in the same
+namespace**. A hub's NFS export has no per-client authentication, so an
+address is a capability; answering a mistyped prefix with one would
+hand the caller a working mount of another tenant's live data. Across
+namespaces the field is withheld and the rest of the row still answers
+"who has it".
+
+**Getting out of a refusal.** `keyPrefix` is immutable and the CR name
+is normally derived from the project id, so a refused share can be
+neither edited nor replaced — the id is wedged until someone with
+cluster access deletes the row. The remedy is an annotation:
+
+```
+kubectl annotate flintshare <name> flint.io/abandon=true
+```
+
+The operator deletes the CR, and only under all of:
+
+- the annotation is exactly `"true"`;
+- the share **lost arbitration on this reconcile** — a healthy share is
+  refused with an `AbandonRefused` warning and left alone;
+- it owns **no PersistentVolumeClaim** and **no Deployment**.
+
+That last condition is the whole gate. A share refused on its first
+reconcile owns nothing — the conflict check runs before any child is
+created, so there is no claim, no Deployment, and no epoch — and
+deleting it removes a row. A share **demoted later**, because its
+endpoint converged onto an older share's, has a PVC that may hold the
+only local copy of bytes it has already published. Deleting that is a
+decision about data, and it is deliberately not something an annotation
+can make: the request is refused with an event naming the claim that
+blocked it. A missing claim is a stronger signal than any condition,
+because conditions are a snapshot of the last reconcile while the claim
+is the thing that would actually be lost.
+
+This is the only path on which the operator deletes a FlintShare, and
+it is never taken on the operator's own initiative — the annotation is
+a request from whoever owns the row. Nothing else deletes a CR: not
+idle-suspend, not hibernate, not ever.
+
 ## Lifecycle and status
 
 `spec.lifecycle: Suspended` scales the hub to zero and keeps the PVC —

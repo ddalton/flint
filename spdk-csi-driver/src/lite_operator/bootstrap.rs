@@ -55,7 +55,11 @@ pub const SCHEMA_VERSION_ANNOTATION: &str = "flint.io/crd-schema-version";
 ///   `status.phase` is an ENUM in the schema, so an operator on `2`
 ///   would refuse to store a value its CRD does not list.
 /// - `4` — `spec.persistence.autoExpand` and its two CEL rules.
-pub const SCHEMA_VERSION: u32 = 4;
+/// - `5` — the `Terminating` phase. Same reasoning as `3`: the phase
+///   is an ENUM in the schema, so an operator on `4` would refuse to
+///   store it.
+/// - `6` — `status.conflictWith` and the CONFLICT printer column.
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// The CRD this binary would install, annotated with its schema
 /// version. Identical to what `crdgen` prints and what the chart
