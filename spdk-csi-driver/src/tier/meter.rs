@@ -131,6 +131,19 @@ counters! {
     /// Wall-clock milliseconds of COMPLETED restores (A12 reporter:
     /// delta ÷ hydrations_completed delta = average restore latency).
     hydration_millis,
+    /// A DEMAND restore found no headroom and camped for another
+    /// cycle. Transient by design — the watermark pass is expected to
+    /// free space — but a rate that never falls is a read that never
+    /// returns, and before this counter existed that state was
+    /// visible only in the log.
+    hydration_space_waits,
+    /// A DEMAND restore was refused permanently: the object is larger
+    /// than the whole volume minus the reserve, so no amount of
+    /// eviction can ever admit it. The read answers NOSPC instead of
+    /// waiting forever. Non-zero means the PVC is too small for the
+    /// project's largest object, which is a sizing bug, not a load
+    /// spike.
+    hydration_blocked,
     /// Warm fill (bulk hydration): items dropped at the space bound
     /// (watermark − margin, pending bytes counted) — the fill stops
     /// rather than fight eviction.
@@ -201,6 +214,8 @@ pub enum Counter {
     ImportStubs,
     ImportSkippedTombstoned,
     HydrationMillis,
+    HydrationSpaceWaits,
+    HydrationBlocked,
     WarmSkippedSpace,
     WarmAbandoned,
     GateExcludeTimeouts,
@@ -249,6 +264,8 @@ impl Counter {
             Counter::ImportStubs => &import_stubs,
             Counter::ImportSkippedTombstoned => &import_skipped_tombstoned,
             Counter::HydrationMillis => &hydration_millis,
+            Counter::HydrationSpaceWaits => &hydration_space_waits,
+            Counter::HydrationBlocked => &hydration_blocked,
             Counter::WarmSkippedSpace => &warm_skipped_space,
             Counter::WarmAbandoned => &warm_abandoned,
             Counter::GateExcludeTimeouts => &gate_exclude_timeouts,

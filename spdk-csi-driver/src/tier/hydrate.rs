@@ -145,6 +145,15 @@ pub struct Hydrator {
     /// marker (a 412 adopt rewrites its size).
     warm_admitted: std::sync::atomic::AtomicU64,
     inflight: DashMap<(u64, u64), Arc<Inflight>>,
+    /// Objects this volume can never hold: value is the object size.
+    ///
+    /// Not a cache of a slow answer — it is the record that a content
+    /// lane must answer NOSPC rather than DELAY for this inode, which
+    /// is the difference between a read that fails and a read that
+    /// hangs forever. Entries are re-evaluated on every request (a PVC
+    /// can be expanded under a running hub) and dropped the moment the
+    /// object becomes admissible or its bytes land by any other route.
+    blocked: DashMap<(u64, u64), u64>,
 }
 
 // ── the global the handlers reach ────────────────────────────────────
@@ -181,6 +190,7 @@ pub fn install(
         cfg,
         handle: tokio::runtime::Handle::current(),
         inflight: DashMap::new(),
+        blocked: DashMap::new(),
     });
     *active().write().unwrap() = Some(Arc::clone(&h));
     INSTALLED.store(true, Ordering::Relaxed);
@@ -230,24 +240,77 @@ pub(crate) fn local_for_tests(
         warm: Arc::new(tokio::sync::Semaphore::new(16)),
         warm_admitted: std::sync::atomic::AtomicU64::new(0),
         inflight: DashMap::new(),
+        blocked: DashMap::new(),
     })
+}
+
+/// What a caller must do about an evicted file it just touched.
+///
+/// The two arms are the difference between a read that eventually
+/// serves and a read that never returns, so this is `#[must_use]`: a
+/// lane that ignores it answers DELAY for an object the volume can
+/// never hold, and the client retries until someone kills it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a Blocked verdict must be answered NOSPC, not DELAY"]
+pub enum Verdict {
+    /// A restore is running or queued — answer `NFS4ERR_DELAY` and let
+    /// the client retry.
+    Queued,
+    /// The object is larger than this volume minus its reserve, so no
+    /// amount of eviction will ever admit it — answer `NFS4ERR_NOSPC`.
+    /// Carries the object's size for the log.
+    Blocked(u64),
 }
 
 /// Request hydration of an evicted file. Sync and cheap — callable
 /// from the blocking closures at the marker-consult sites. Idempotent:
 /// an in-flight restore absorbs the request (a WRITE trigger upgrades
 /// its priority).
-pub fn request(dev: u64, ino: u64, path: &Path, trigger: Trigger) {
-    let Some(h) = current() else { return };
+pub fn request(dev: u64, ino: u64, path: &Path, trigger: Trigger) -> Verdict {
+    let Some(h) = current() else { return Verdict::Queued };
     request_on(&h, dev, ino, path, trigger)
 }
 
 /// [`request`] against an explicit hydrator (the testable half — the
 /// module's drills run LOCAL hydrators to keep out of other tests'
 /// global installs).
-pub(crate) fn request_on(h: &Arc<Hydrator>, dev: u64, ino: u64, path: &Path, trigger: Trigger) {
+pub(crate) fn request_on(
+    h: &Arc<Hydrator>,
+    dev: u64,
+    ino: u64,
+    path: &Path,
+    trigger: Trigger,
+) -> Verdict {
     if !evict::is_evicted(dev, ino) {
-        return;
+        return Verdict::Queued;
+    }
+    // Decide impossibility HERE rather than leaving it to the restore
+    // task. The check is a cheap read of the cached gauge, and taking
+    // it on the request means the FIRST touch of an oversized object
+    // answers NOSPC — camping for one 5s cycle before saying the same
+    // thing would be a worse answer arrived at more slowly.
+    //
+    // Re-evaluated every time, never trusted from the map: a PVC can
+    // be expanded under a running hub, and a stale block would keep
+    // refusing an object that now fits.
+    if let Some(meta) = evict::marker_meta(dev, ino) {
+        if !crate::tier::space::hydration_ever_possible(path, meta.size) {
+            if h.blocked.insert((dev, ino), meta.size).is_none() {
+                meter::bump(Counter::HydrationBlocked);
+                error!(
+                    "tier hydrate: {} is {} bytes — larger than this volume minus its \
+                     reserve, so no eviction can ever make room. Answering NOSPC rather \
+                     than waiting forever; the bucket still holds the object, and \
+                     expanding the PVC past it makes this read work.",
+                    path.display(),
+                    meta.size,
+                );
+            }
+            return Verdict::Blocked(meta.size);
+        }
+        // Fits now — drop any standing block (PVC expanded, or the
+        // object was replaced by a smaller one).
+        h.blocked.remove(&(dev, ino));
     }
     use dashmap::mapref::entry::Entry;
     let fresh = match h.inflight.entry((dev, ino)) {
@@ -272,13 +335,32 @@ pub(crate) fn request_on(h: &Arc<Hydrator>, dev: u64, ino: u64, path: &Path, tri
         }
     };
     if let Some(inflight) = fresh {
-        let hh = Arc::clone(&h);
+        let hh = Arc::clone(h);
         let p = path.to_path_buf();
         meter::bump(Counter::HydrationsStarted);
         h.handle.spawn(async move {
             run(hh, dev, ino, p, inflight).await;
         });
     }
+    Verdict::Queued
+}
+
+/// Is this inode one the volume can never hold? The content lanes ask
+/// on the paths that do not go through [`request`].
+pub fn is_blocked(dev: u64, ino: u64) -> bool {
+    current().is_some_and(|h| is_blocked_on(&h, dev, ino))
+}
+
+/// [`is_blocked`] against an explicit hydrator — the module's drills
+/// run LOCAL hydrators, which the global accessor cannot see.
+pub(crate) fn is_blocked_on(h: &Arc<Hydrator>, dev: u64, ino: u64) -> bool {
+    h.blocked.contains_key(&(dev, ino))
+}
+
+/// How many objects are currently un-hydratable at this PVC size — the
+/// reporter gauge and the hub's `/status`.
+pub fn blocked_count() -> usize {
+    current().map(|h| h.blocked.len()).unwrap_or(0)
 }
 
 /// Queue a WARM (bulk-fill) restore. Mirrors [`request`]'s dedup but
@@ -535,6 +617,24 @@ pub(crate) async fn run(
                 // headroom-minus-reserve (the watermark pass may be
                 // freeing space right now). Path-scoped to the root.
                 if !crate::tier::space::admit_hydration(&path, meta.size) {
+                    // Belt-and-braces against the request-time gate: a
+                    // marker adopted mid-flight (the 412 S3-WINS path)
+                    // can grow the object under us, so re-decide here
+                    // rather than camping on a size nobody re-checked.
+                    if !crate::tier::space::hydration_ever_possible(&path, meta.size) {
+                        if h.blocked.insert((dev, ino), meta.size).is_none() {
+                            meter::bump(Counter::HydrationBlocked);
+                        }
+                        error!(
+                            "tier hydrate: {} is {} bytes and cannot fit this volume — \
+                             giving up; further touches answer NOSPC",
+                            path.display(),
+                            meta.size,
+                        );
+                        drop(_permit);
+                        return;
+                    }
+                    meter::bump(Counter::HydrationSpaceWaits);
                     warn!(
                         "tier hydrate: {} needs {} bytes past the reserve — waiting",
                         path.display(),
@@ -593,6 +693,8 @@ pub(crate) async fn run(
                     // must see the fill's own landed bytes.
                     crate::tier::space::refresh_now();
                 }
+                // Whatever the block said, the bytes are here.
+                h.blocked.remove(&(dev, ino));
                 meter::bump(Counter::HydrationsCompleted);
                 meter::add(Counter::HydrationBytes, bytes);
                 meter::add(Counter::HydrationMillis, began.elapsed().as_millis() as u64);
@@ -1053,6 +1155,7 @@ mod tests {
             warm: Arc::new(tokio::sync::Semaphore::new(warm_concurrency.max(1))),
             warm_admitted: std::sync::atomic::AtomicU64::new(0),
             inflight: DashMap::new(),
+            blocked: DashMap::new(),
         })
     }
 
@@ -1507,7 +1610,7 @@ mod tests {
         // Warm pool exhausted → a demand restore still runs.
         let _warm_hog = Arc::clone(&h.warm).acquire_owned().await.unwrap();
         drop(shared_hog);
-        request_on(&h, dev_d, ino_d, &r.root.join("pool-d.bin"), Trigger::Read);
+        let _ = request_on(&h, dev_d, ino_d, &r.root.join("pool-d.bin"), Trigger::Read);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while evict::is_evicted(dev_d, ino_d) {
             assert!(
@@ -1543,7 +1646,7 @@ mod tests {
         assert!(evict::is_evicted(dev, ino), "hogged warm pool: still cold");
 
         // The client arrives (request()'s Occupied arm): absorb.
-        request_on(&h, dev, ino, &f, Trigger::Read);
+        let _ = request_on(&h, dev, ino, &f, Trigger::Read);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while evict::is_evicted(dev, ino) {
             assert!(
@@ -1606,6 +1709,114 @@ mod tests {
             // A racing global-Space install admitted it: try again.
         }
         assert!(observed, "space refusal never observed across 5 attempts");
+    }
+
+    /// An object bigger than the volume is REFUSED, not camped on.
+    ///
+    /// This is the livelock the demand lane used to have: `admit_hydration`
+    /// says "no room" and the restore sleeps 5s and tries again, forever,
+    /// while every content lane answers DELAY and a hard mount hangs with
+    /// no error and no counter. Eviction cannot rescue it — the object is
+    /// larger than the whole disk minus the reserve, so freeing every
+    /// other byte still leaves it inadmissible.
+    ///
+    /// Asserts the three things that make it a refusal rather than a
+    /// slow wait: the verdict is Blocked (the lane turns that into
+    /// NOSPC), no restore task is left running, and it is COUNTED.
+    #[tokio::test]
+    async fn an_oversized_object_is_refused_rather_than_camped_on() {
+        let r = rig();
+        let h = local_hydrator(&r, 2);
+        let mut observed = false;
+        for i in 0..5u32 {
+            // reserve > disk ⇒ nothing can ever be admitted here.
+            crate::tier::space::configure(crate::tier::space::SpaceConfig {
+                root: r.root.clone(),
+                reserve_bytes: u64::MAX,
+                watermark_pct: 85,
+                ballast_path: None,
+                ballast_bytes: 0,
+            })
+            .unwrap();
+            let name = format!("huge{}.bin", i);
+            let (dev, ino, _k) = evicted_file(&r, &name, vec![0xABu8; 400]).await;
+            let path = r.root.join(&name);
+            let before = crate::tier::meter::snapshot();
+            let verdict = request_on(&h, dev, ino, &path, Trigger::Read);
+            if verdict == Verdict::Queued {
+                continue; // a racing global-Space install admitted it
+            }
+
+            assert_eq!(verdict, Verdict::Blocked(400), "the size travels with the refusal");
+            assert!(is_blocked_on(&h, dev, ino), "the lane must be able to ask later");
+            assert_eq!(h.blocked.len(), 1);
+            let after = crate::tier::meter::snapshot();
+            assert!(
+                after.hydration_blocked > before.hydration_blocked,
+                "a permanent refusal must be counted, or it is invisible"
+            );
+            // The decisive one: nothing was spawned, so there is no 5s
+            // camp running behind this answer.
+            assert!(
+                h.inflight.is_empty(),
+                "a blocked request must not leave a restore looping"
+            );
+            assert!(evict::is_evicted(dev, ino), "the stub is untouched — the bucket is still truth");
+            observed = true;
+            break;
+        }
+        assert!(observed, "the refusal was never observed across 5 attempts");
+    }
+
+    /// The block is a statement about the CURRENT volume size, so
+    /// growing the PVC has to clear it. Re-requesting re-decides from
+    /// the live gauge rather than trusting the map, and the same file
+    /// that was refused now restores.
+    #[tokio::test]
+    async fn expanding_the_volume_clears_a_block_and_the_file_restores() {
+        let r = rig();
+        let h = local_hydrator(&r, 2);
+        crate::tier::space::configure(crate::tier::space::SpaceConfig {
+            root: r.root.clone(),
+            reserve_bytes: u64::MAX,
+            watermark_pct: 85,
+            ballast_path: None,
+            ballast_bytes: 0,
+        })
+        .unwrap();
+        let (dev, ino, _k) = evicted_file(&r, "grow.bin", vec![0xC3u8; 350]).await;
+        let path = r.root.join("grow.bin");
+        if request_on(&h, dev, ino, &path, Trigger::Read) != Verdict::Blocked(350) {
+            return; // racing install admitted it; the sibling test covers the refusal
+        }
+        assert!(is_blocked_on(&h, dev, ino));
+
+        // "Expand the PVC": a reserve the real disk can cover.
+        crate::tier::space::configure(crate::tier::space::SpaceConfig {
+            root: r.root.clone(),
+            reserve_bytes: 0,
+            watermark_pct: 85,
+            ballast_path: None,
+            ballast_bytes: 0,
+        })
+        .unwrap();
+        assert_eq!(
+            request_on(&h, dev, ino, &path, Trigger::Read),
+            Verdict::Queued,
+            "a re-request must re-decide from the live gauge, not the cached block"
+        );
+        assert!(!is_blocked_on(&h, dev, ino), "the block must be dropped, not merely bypassed");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while evict::is_evicted(dev, ino) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the unblocked file never restored"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), vec![0xC3u8; 350]);
+        wait_inflight_empty(&h, 5).await;
     }
 
     /// WARM_MAX_ATTEMPTS bounds a warm item that can never restore

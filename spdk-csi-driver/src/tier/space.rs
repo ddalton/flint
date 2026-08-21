@@ -179,6 +179,32 @@ pub fn admit_hydration(path: &Path, len: u64) -> bool {
     s.headroom() >= len || headroom_for_refusal(&s) >= len
 }
 
+/// Could an object of `len` bytes EVER be hydrated into this volume?
+///
+/// This is the question [`admit_hydration`] cannot answer. A refusal
+/// there means "not right now" and the caller waits, because the
+/// watermark pass may be freeing space this second. But eviction
+/// reclaims only what is already local, so for an object larger than
+/// the whole filesystem minus the reserve there is nothing to free
+/// that would ever help: evicting every other byte still leaves
+/// headroom below `len`. Waiting on that is a livelock, and the client
+/// sees it as a read that never returns.
+///
+/// Deliberately measured against `total`, not `avail` — the answer has
+/// to be a property of the volume rather than of the moment, or it
+/// would flap with ordinary cache pressure and turn a slow read into a
+/// spurious ENOSPC. A false here is permanent for as long as the PVC
+/// is this size; expanding it makes the same object admissible, which
+/// is why the block is re-evaluated on every request rather than
+/// cached forever.
+pub fn hydration_ever_possible(path: &Path, len: u64) -> bool {
+    let Some(s) = current() else { return true };
+    if !path.starts_with(&s.cfg.root) {
+        return true;
+    }
+    s.ever_possible(len)
+}
+
 /// The gap the warm fill keeps below the eviction watermark: fill and
 /// eviction must never share an operating region, or a fill under
 /// pressure becomes a hydrate/evict churn loop.
@@ -254,6 +280,15 @@ impl Space {
     /// The pure half of [`admit_warm`] (unit-tested via `force_gauge`
     /// — the public fn's unconditional refresh would overwrite a
     /// forced gauge with real statvfs numbers).
+    /// The volume-shaped half of [`hydration_ever_possible`], split out
+    /// so it can be tested without installing a global.
+    fn ever_possible(&self, len: u64) -> bool {
+        self.total
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.cfg.reserve_bytes)
+            >= len
+    }
+
     fn admit_warm_after_refresh(&self, len: u64, pending: u64) -> bool {
         let add = len.saturating_add(pending);
         if self.headroom() < add {
@@ -438,6 +473,43 @@ mod tests {
             above_watermark: AtomicBool::new(false),
             ballast_present: AtomicBool::new(false),
         }
+    }
+
+    /// The "can this EVER fit" question is a property of the volume,
+    /// not of the moment — so it reads `total`, never `avail`.
+    ///
+    /// The distinction is the whole point: a full disk with a small
+    /// object must answer YES (eviction will free the room and the
+    /// caller should wait), while an empty disk with an oversized
+    /// object must answer NO (nothing will ever free enough, and a
+    /// caller that waits waits forever). An implementation that used
+    /// `avail` would inverse both, so this fixes avail at 0 and total
+    /// high, where the two answers disagree.
+    #[test]
+    fn ever_possible_asks_about_the_volume_not_the_moment() {
+        let d = tempfile::tempdir().unwrap();
+        let s = local(cfg(d.path(), 256));
+        s.total.store(1000, Ordering::Relaxed);
+        s.avail_raw.store(0, Ordering::Relaxed); // disk is FULL right now
+
+        assert!(s.ever_possible(744), "744 = total - reserve: the largest that fits");
+        assert!(
+            s.ever_possible(1),
+            "a full disk must still say a small object is possible — eviction is what frees it"
+        );
+        assert!(!s.ever_possible(745), "one byte past the reserve can never fit");
+        assert!(!s.ever_possible(u64::MAX));
+    }
+
+    /// A reserve larger than the disk saturates to zero rather than
+    /// wrapping — the shape that would otherwise admit everything.
+    #[test]
+    fn ever_possible_saturates_when_the_reserve_exceeds_the_disk() {
+        let d = tempfile::tempdir().unwrap();
+        let s = local(cfg(d.path(), u64::MAX));
+        s.total.store(1000, Ordering::Relaxed);
+        assert!(!s.ever_possible(1));
+        assert!(s.ever_possible(0), "a zero-length object always fits");
     }
 
     #[test]

@@ -1331,12 +1331,23 @@ impl IoOperationHandler {
                 use std::os::unix::fs::MetadataExt;
                 if crate::tier::evict::is_evicted(metadata.dev(), metadata.ino()) {
                     // Step 11: this READ is the hydration trigger.
-                    crate::tier::hydrate::request(
-                        metadata.dev(),
-                        metadata.ino(),
-                        &path,
-                        crate::tier::hydrate::Trigger::Read,
-                    );
+                    // A Blocked verdict means no eviction can ever make
+                    // room for this object, so DELAY would be a promise
+                    // the volume cannot keep — the client would retry
+                    // until something killed it.
+                    if let crate::tier::hydrate::Verdict::Blocked(size) =
+                        crate::tier::hydrate::request(
+                            metadata.dev(),
+                            metadata.ino(),
+                            &path,
+                            crate::tier::hydrate::Trigger::Read,
+                        )
+                    {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::StorageFull,
+                            format!("tier: {size} bytes cannot fit this volume"),
+                        ));
+                    }
                     crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,
@@ -1382,12 +1393,19 @@ impl IoOperationHandler {
                     metadata.ino(),
                     marker_cycle_began,
                 ) {
-                    crate::tier::hydrate::request(
-                        metadata.dev(),
-                        metadata.ino(),
-                        &path,
-                        crate::tier::hydrate::Trigger::Read,
-                    );
+                    if let crate::tier::hydrate::Verdict::Blocked(size) =
+                        crate::tier::hydrate::request(
+                            metadata.dev(),
+                            metadata.ino(),
+                            &path,
+                            crate::tier::hydrate::Trigger::Read,
+                        )
+                    {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::StorageFull,
+                            format!("tier: {size} bytes cannot fit this volume"),
+                        ));
+                    }
                     crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,
@@ -1421,6 +1439,10 @@ impl IoOperationHandler {
                     // Step 10: evicted file — the client retries until
                     // hydration (step 11) restores the bytes.
                     std::io::ErrorKind::WouldBlock => Nfs4Status::Delay,
+                    // An object this volume can never hold. NOSPC is
+                    // terminal on purpose: DELAY would be a promise to
+                    // serve bytes that will never fit.
+                    std::io::ErrorKind::StorageFull => Nfs4Status::NoSpc,
                     _ => Nfs4Status::Io,
                 };
                 // Step 11: park the RPC up to the hold bound before
@@ -1704,12 +1726,23 @@ impl IoOperationHandler {
                         // write's trigger carries WRITE priority
                         // (step-9 finding 2: bound the fsync park).
                         if let Some(p) = cap_path.as_deref() {
-                            crate::tier::hydrate::request(
-                                md.dev(),
-                                md.ino(),
-                                p,
-                                crate::tier::hydrate::Trigger::Write,
-                            );
+                            // The write barrier hydrates first, so an
+                            // object that can never land here can never
+                            // be written through either — NOSPC now
+                            // beats a DELAY the volume cannot honour.
+                            if let crate::tier::hydrate::Verdict::Blocked(size) =
+                                crate::tier::hydrate::request(
+                                    md.dev(),
+                                    md.ino(),
+                                    p,
+                                    crate::tier::hydrate::Trigger::Write,
+                                )
+                            {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::StorageFull,
+                                    format!("tier: {size} bytes cannot fit this volume"),
+                                ));
+                            }
                         }
                         crate::tier::meter::bump(
                             crate::tier::meter::Counter::EvictedOpDelays,
@@ -1790,6 +1823,10 @@ impl IoOperationHandler {
                     // A4 gate refusal: the file is mid-evict/hydrate;
                     // the client retries after a short delay.
                     std::io::ErrorKind::WouldBlock => Nfs4Status::Delay,
+                    // An object this volume can never hold. NOSPC is
+                    // terminal on purpose: DELAY would be a promise to
+                    // serve bytes that will never fit.
+                    std::io::ErrorKind::StorageFull => Nfs4Status::NoSpc,
                     _ => Nfs4Status::Io,
                 });
                 // Step 11: park before the DELAY (see the READ arm).

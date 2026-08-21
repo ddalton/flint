@@ -549,12 +549,18 @@ fn apply_settable_attrs_inner(
         {
             use std::os::unix::fs::MetadataExt;
             if crate::tier::evict::is_evicted(lmeta.dev(), lmeta.ino()) {
-                crate::tier::hydrate::request(
-                    lmeta.dev(),
-                    lmeta.ino(),
-                    path,
-                    crate::tier::hydrate::Trigger::Write,
-                );
+                // Blocked ⇒ NOSPC, not DELAY: parking a truncate on a
+                // restore that can never be admitted wedges the caller.
+                if let crate::tier::hydrate::Verdict::Blocked(_) =
+                    crate::tier::hydrate::request(
+                        lmeta.dev(),
+                        lmeta.ino(),
+                        path,
+                        crate::tier::hydrate::Trigger::Write,
+                    )
+                {
+                    return (applied, Some(Nfs4Status::NoSpc));
+                }
                 crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
                 return (applied, Some(Nfs4Status::Delay));
             }

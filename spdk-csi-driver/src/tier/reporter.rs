@@ -81,6 +81,11 @@ pub struct Gauges {
     /// 0 when nothing is dirty.
     pub oldest_unflushed_secs: u64,
     pub hydration_inflight: usize,
+    /// Objects the PVC can never hold at its current size. Non-zero is
+    /// a sizing fault, not load: every touch of one answers NOSPC, and
+    /// no amount of eviction changes that. Expanding the claim past the
+    /// largest object clears it.
+    pub hydration_blocked: usize,
     /// WARM (bulk-fill) restores among the inflight — the fill's
     /// live progress signal.
     pub warm_inflight: usize,
@@ -355,6 +360,7 @@ pub fn spawn(
             g.evicted_files = ef;
             g.evicted_bytes = eb;
             g.hydration_inflight = crate::tier::hydrate::inflight_count();
+            g.hydration_blocked = crate::tier::hydrate::blocked_count();
             g.warm_inflight = crate::tier::hydrate::warm_inflight();
             g.epoch = guard.current();
             g.epoch_renew_age_secs = guard.renew_age_secs();

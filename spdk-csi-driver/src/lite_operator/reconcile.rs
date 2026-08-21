@@ -1285,6 +1285,36 @@ async fn drive_idle_ladder(
                         generation,
                     ),
                 );
+                // A sizing fault the hub cannot work through: some
+                // object in the bucket is bigger than this PVC can ever
+                // hold, so every read of it answers NOSPC. Said here
+                // because the hub's own log is the only other place it
+                // appears, and nobody reads a healthy share's log.
+                let blocked = snap.gauges.as_ref().map_or(0, |g| g.hydration_blocked);
+                set_condition(
+                    conds,
+                    if blocked > 0 {
+                        condition(
+                            "HydrationUnblocked",
+                            false,
+                            "ObjectExceedsVolume",
+                            Some(format!(
+                                "{blocked} object(s) in the bucket are larger than this \
+                                 volume minus its reserve and can never be read here — \
+                                 raise spec.persistence.size past the largest one"
+                            )),
+                            generation,
+                        )
+                    } else {
+                        condition(
+                            "HydrationUnblocked",
+                            true,
+                            "WithinVolume",
+                            None,
+                            generation,
+                        )
+                    },
+                );
                 verdict
             }
             Err(why) => {

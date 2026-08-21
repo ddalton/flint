@@ -92,18 +92,34 @@ fn same_file(a: &std::fs::File, b: &std::fs::File) -> std::io::Result<bool> {
 
 /// Step 11: fire a hydration request from an fd + path (the perfops
 /// closures hold files, not identities).
-fn request_by_file(f: &std::fs::File, path: &std::path::Path, t: crate::tier::hydrate::Trigger) {
+fn request_by_file(
+    f: &std::fs::File,
+    path: &std::path::Path,
+    t: crate::tier::hydrate::Trigger,
+) -> crate::tier::hydrate::Verdict {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         if let Ok(md) = f.metadata() {
-            crate::tier::hydrate::request(md.dev(), md.ino(), path, t);
+            return crate::tier::hydrate::request(md.dev(), md.ino(), path, t);
         }
+        crate::tier::hydrate::Verdict::Queued
     }
     #[cfg(not(unix))]
     {
         let _ = (f, path, t);
+        crate::tier::hydrate::Verdict::Queued
     }
+}
+
+/// The error a lane returns for an object this volume can never hold.
+/// `StorageFull` is what the perfops status map already turns into
+/// `NFS4ERR_NOSPC`.
+fn blocked_err(size: u64) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::StorageFull,
+        format!("tier: {size} bytes cannot fit this volume"),
+    )
 }
 
 #[cfg(not(unix))]
@@ -704,11 +720,19 @@ impl PerfOperationHandler {
             {
                 let mut parked = false;
                 if crate::tier::evict::file_is_evicted(&src_file) {
-                    request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read);
+                    if let crate::tier::hydrate::Verdict::Blocked(size) =
+                        request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read)
+                    {
+                        return Err(blocked_err(size));
+                    }
                     parked = true;
                 }
                 if crate::tier::evict::file_is_evicted(&dst_file) {
-                    request_by_file(&dst_file, &dst_path, crate::tier::hydrate::Trigger::Write);
+                    if let crate::tier::hydrate::Verdict::Blocked(size) =
+                        request_by_file(&dst_file, &dst_path, crate::tier::hydrate::Trigger::Write)
+                    {
+                        return Err(blocked_err(size));
+                    }
                     parked = true;
                 }
                 if parked {
@@ -781,7 +805,11 @@ impl PerfOperationHandler {
             // (FlintTierMarker's find). DELAY discards the partial
             // copy and the retry re-copies hydrated bytes over it.
             if !crate::tier::evict::file_read_window_intact(&src_file, marker_cycle_began) {
-                request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read);
+                if let crate::tier::hydrate::Verdict::Blocked(size) =
+                    request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read)
+                {
+                    return Err(blocked_err(size));
+                }
                 crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
@@ -1040,11 +1068,19 @@ impl PerfOperationHandler {
             {
                 let mut parked = false;
                 if crate::tier::evict::file_is_evicted(&src_file) {
-                    request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read);
+                    if let crate::tier::hydrate::Verdict::Blocked(size) =
+                        request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read)
+                    {
+                        return Err(blocked_err(size));
+                    }
                     parked = true;
                 }
                 if crate::tier::evict::file_is_evicted(&dst_file) {
-                    request_by_file(&dst_file, &dst_path, crate::tier::hydrate::Trigger::Write);
+                    if let crate::tier::hydrate::Verdict::Blocked(size) =
+                        request_by_file(&dst_file, &dst_path, crate::tier::hydrate::Trigger::Write)
+                    {
+                        return Err(blocked_err(size));
+                    }
                     parked = true;
                 }
                 if parked {
@@ -1079,7 +1115,11 @@ impl PerfOperationHandler {
             // C2's order covers the eviction, the cycle guard the
             // completed evict+hydrate cycle — FlintTierMarker's find).
             if !crate::tier::evict::file_read_window_intact(&src_file, marker_cycle_began) {
-                request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read);
+                if let crate::tier::hydrate::Verdict::Blocked(size) =
+                    request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read)
+                {
+                    return Err(blocked_err(size));
+                }
                 crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
@@ -1244,7 +1284,11 @@ impl PerfOperationHandler {
                 // stub is not an operation on the data. Step 11: DELAY
                 // triggers hydration with write priority.
                 if crate::tier::evict::file_is_evicted(&file) {
-                    request_by_file(&file, &p, crate::tier::hydrate::Trigger::Write);
+                    if let crate::tier::hydrate::Verdict::Blocked(size) =
+                        request_by_file(&file, &p, crate::tier::hydrate::Trigger::Write)
+                    {
+                        return Err(blocked_err(size));
+                    }
                     crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,
@@ -1293,6 +1337,11 @@ impl PerfOperationHandler {
             }
             // A4 gate refusal: the file is mid-evict/hydrate.
             Ok(Err(e)) if e.kind() == std::io::ErrorKind::WouldBlock => Nfs4Status::Delay,
+            // Un-hydratable object. Matched on `kind` BEFORE the arm
+            // below, which reads `raw_os_error` — this error is
+            // synthesized rather than an errno, so it carries none and
+            // would otherwise fall through to a bare IO.
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::StorageFull => Nfs4Status::NoSpc,
             Ok(Err(e)) => {
                 warn!("ALLOCATE/DEALLOCATE on {:?} failed: {}", path, e);
                 match e.raw_os_error() {

@@ -97,6 +97,25 @@ pub struct HubSnapshot {
     /// namespace was NOT restored. Nothing may publish from this hub.
     #[serde(default)]
     pub import_refused: Option<String>,
+    /// The tier gauges, of which the operator reads exactly one today.
+    /// `None` = a hub too old to publish them, or one whose reporter
+    /// has not run its first collection yet — neither is "zero".
+    #[serde(default)]
+    pub gauges: Option<Gauges>,
+}
+
+/// The subset of the hub's tier gauges the operator acts on. Everything
+/// else in that document stays the hub's business; adding a field here
+/// is a decision to make the operator depend on it.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Gauges {
+    /// Objects larger than this PVC can ever hold. Every touch of one
+    /// answers NOSPC and no eviction will ever change that, so it is a
+    /// sizing fault the operator should say out loud rather than a
+    /// transient the hub will work through.
+    #[serde(default)]
+    pub hydration_blocked: usize,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
