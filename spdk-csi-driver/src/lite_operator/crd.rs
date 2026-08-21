@@ -388,6 +388,25 @@ pub struct PersistenceSpec {
     /// driver's RWO volume works; the hub writes plain files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_class_name: Option<String>,
+
+    /// Let a SHRINK of `size` reprovision the disk instead of being
+    /// refused. Absent = off, and off is the safe default: Kubernetes
+    /// cannot shrink a claim, so the only way to honour a smaller size
+    /// is to destroy the volume and make a new one.
+    ///
+    /// This is never a silent operation. It runs the same
+    /// verify-then-delete the hibernate rung uses — the hub must first
+    /// prove the bucket can rebuild the tree (`rpoClean`) — and it is
+    /// REFUSED outright for a share with no `bucket` (whose PVC is the
+    /// only copy) and for an adopted `existingClaim` (which the
+    /// operator did not create and does not get to delete).
+    ///
+    /// The cost is a wake: the new disk is empty, so the hub imports
+    /// the bucket and hydrates on demand, and every mounted client sees
+    /// a new `serverId` and must remount. Turn it on deliberately, for
+    /// a share whose disk you actually intend to resize downward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reprovision_on_shrink: Option<bool>,
 }
 
 /// How consumers reach the hub.
@@ -633,6 +652,12 @@ pub enum Phase {
     /// Scaled to zero AND the PVC deleted — the bucket is the only
     /// copy. Waking is a full DR import.
     Hibernated,
+    /// The disk is being rebuilt at a smaller size, because
+    /// `persistence.reprovisionOnShrink` is on and `persistence.size`
+    /// went down. The share is briefly down and comes back on a NEW,
+    /// empty claim, so a consumer must expect a fresh `serverId` and a
+    /// DR import — the same contract as waking from `Hibernated`.
+    Reprovisioning,
     /// Refused: another share owns this bucket subtree, or adoption is
     /// blocked. See conditions.
     Failed,
@@ -858,6 +883,8 @@ mod tests {
             persistence: PersistenceSpec {
                 size: "20Gi".into(),
                 storage_class_name: None,
+
+                reprovision_on_shrink: None,
             },
             service: None,
             image: None,

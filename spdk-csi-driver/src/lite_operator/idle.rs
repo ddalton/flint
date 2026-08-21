@@ -64,6 +64,19 @@ pub enum IdleState {
     /// operator restart mid-verification has to know it was verifying,
     /// or it would either delete unverified or wake the share for good.
     HibernateVerifying,
+    /// A SHRINK of `persistence.size` was accepted and the hub is up,
+    /// being asked to prove the bucket can rebuild the tree before its
+    /// disk is destroyed. Same proof the hibernate rung demands, and
+    /// for the same reason — but it must NOT abort on a wake request
+    /// the way hibernation does. Hibernation comes down because nobody
+    /// wanted the share, so "someone wants it" is a real reason to stop.
+    /// A reprovision was asked for explicitly; a keepalive from the very
+    /// front door that asked is not a change of mind.
+    ReprovisionVerifying,
+    /// Verified. Scaled to zero so the pod unmounts, after which the
+    /// claim is deleted and the state returns to `Active` — where the
+    /// render creates a NEW claim at the smaller size.
+    ReprovisionDraining,
 }
 
 impl IdleState {
@@ -73,6 +86,8 @@ impl IdleState {
             IdleState::Suspended => "Suspended",
             IdleState::Hibernated => "Hibernated",
             IdleState::HibernateVerifying => "HibernateVerifying",
+            IdleState::ReprovisionVerifying => "ReprovisionVerifying",
+            IdleState::ReprovisionDraining => "ReprovisionDraining",
         }
     }
 
@@ -82,13 +97,32 @@ impl IdleState {
             "Suspended" => IdleState::Suspended,
             "Hibernated" => IdleState::Hibernated,
             "HibernateVerifying" => IdleState::HibernateVerifying,
+            "ReprovisionVerifying" => IdleState::ReprovisionVerifying,
+            "ReprovisionDraining" => IdleState::ReprovisionDraining,
             _ => return None,
         })
     }
 
     /// Does this state mean the hub should be scaled to zero?
+    ///
+    /// `ReprovisionDraining` is here and `ReprovisionVerifying` is not,
+    /// and that is the whole two-step: the hub has to be UP to be asked
+    /// whether its bucket is current, and DOWN to let go of the claim.
     pub fn is_down(self) -> bool {
-        matches!(self, IdleState::Suspended | IdleState::Hibernated)
+        matches!(
+            self,
+            IdleState::Suspended | IdleState::Hibernated | IdleState::ReprovisionDraining
+        )
+    }
+
+    /// Is a disk reprovision in progress? The ladder must not evaluate
+    /// idleness for one — suspending or hibernating midway would strand
+    /// a share between two disks.
+    pub fn is_reprovisioning(self) -> bool {
+        matches!(
+            self,
+            IdleState::ReprovisionVerifying | IdleState::ReprovisionDraining
+        )
     }
 }
 
@@ -369,7 +403,7 @@ mod tests {
                 region: None,
                 credentials_secret_ref: None,
                 import_on_start: None,
-                persistence: PersistenceSpec { size: "20Gi".into(), storage_class_name: None },
+                persistence: PersistenceSpec { size: "20Gi".into(), storage_class_name: None, reprovision_on_shrink: None },
                 service: None,
                 image: None,
                 log_level: None,

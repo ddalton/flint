@@ -267,6 +267,10 @@ fn settled_requeue(share: &FlintShare, state: IdleState) -> Duration {
         // from here today (`verify_and_hibernate` short-circuits with
         // its own action) and cheap to keep right if that changes.
         IdleState::HibernateVerifying => REQUEUE_PROGRESS,
+        // A disk rebuild in flight. Progress, never steady state — and
+        // the one ladder position where a slow re-check is a share
+        // sitting with no disk at all.
+        IdleState::ReprovisionVerifying | IdleState::ReprovisionDraining => REQUEUE_PROGRESS,
     }
 }
 
@@ -410,10 +414,18 @@ pub fn claim_plan(
     existing: Option<&PersistentVolumeClaim>,
     want: &str,
     adopted: bool,
-    hibernated: bool,
+    state: IdleState,
 ) -> ClaimPlan {
-    if hibernated {
+    if state == IdleState::Hibernated {
         return ClaimPlan::Hibernated;
+    }
+    // A rebuild in flight owns this claim. Applying here would either
+    // re-declare the old size over the new one or, worse, recreate the
+    // claim the drain just deleted — and a share would come back on a
+    // disk nobody asked for. The driver puts the state back to Active
+    // when it is done, and the very next pass applies normally.
+    if state.is_reprovisioning() {
+        return ClaimPlan::Skip;
     }
     if adopted {
         return ClaimPlan::Skip;
@@ -601,6 +613,12 @@ pub fn phase_of(
     match idle_state {
         IdleState::Hibernated => return Phase::Hibernated,
         IdleState::Suspended => return Phase::IdleSuspended,
+        // Reported for BOTH halves of the rebuild, including the one
+        // where the pod is up: a consumer that reads Ready here would
+        // mount a hub whose disk is about to be destroyed under it.
+        IdleState::ReprovisionVerifying | IdleState::ReprovisionDraining => {
+            return Phase::Reprovisioning
+        }
         _ => {}
     }
     let status = dep.and_then(|d| d.status.as_ref());
@@ -984,7 +1002,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
         existing_pvc.as_ref(),
         &share.spec.persistence.size,
         names.claim_is_adopted,
-        idle::state_of(&share) == idle::IdleState::Hibernated,
+        idle::state_of(&share),
     ) {
         ClaimPlan::Apply => {
             if let Some(pvc) = rendered.pvc.clone() {
@@ -999,10 +1017,32 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
         // now would leave an empty disk that a waking hub could not tell
         // from a restore that had already run.
         ClaimPlan::Hibernated => {}
+        // Opted in, and eligible: rebuild the disk at the smaller
+        // size instead of refusing forever. Only ever STARTED from
+        // Active — `claim_plan` skips outright once a rebuild is in
+        // flight, so this cannot re-trigger itself while running.
+        ClaimPlan::ShrinkRefused { have, want }
+            if shrink_reprovision_ok(&share, names.claim_is_adopted) =>
+        {
+            let msg = format!(
+                "persistence.size {want} is smaller than the existing claim's {have}, and                  persistence.reprovisionOnShrink is on — verifying the bucket can rebuild this                  volume before destroying the disk. The share will come back on a NEW empty                  claim: expect a fresh serverId and a DR import."
+            );
+            warn!(share = %share.name_any(), "{msg}");
+            event(&ctx, &share, EventType::Warning, "ReprovisionStarted", &msg).await;
+            set_idle_state(&ctx, &share, &ns, IdleState::ReprovisionVerifying, false).await?;
+            return Ok(Action::requeue(REQUEUE_PROGRESS));
+        }
         ClaimPlan::ShrinkRefused { have, want } => {
+            let hint = if names.claim_is_adopted {
+                " The claim is adopted, so the operator will not rebuild it either."
+            } else if share.spec.bucket.is_none() {
+                " Without spec.bucket this PVC is the only copy, so it cannot be rebuilt from                   anywhere — reprovisionOnShrink is refused for tier-off shares."
+            } else {
+                " Set persistence.reprovisionOnShrink to rebuild the disk at the smaller size                   instead (verified against the bucket first, and it costs a wake)."
+            };
             let msg = format!(
                 "persistence.size {want} is smaller than the existing claim's {have}; Kubernetes \
-                 cannot shrink a PVC. The hub keeps {have}."
+                 cannot shrink a PVC. The hub keeps {have}.{hint}"
             );
             event(&ctx, &share, EventType::Warning, "ShrinkRefused", &msg).await;
             set_condition(
@@ -1353,6 +1393,14 @@ async fn drive_idle_ladder(
         return verify_and_hibernate(ctx, share, names, dep, conds).await;
     }
 
+    // A disk rebuild in flight. Runs BEFORE any idleness evaluation:
+    // suspending or hibernating a share midway through would strand it
+    // between two disks, and a wake request must not abort it either
+    // (see `IdleState::ReprovisionVerifying`).
+    if state.is_reprovisioning() {
+        return drive_reprovision(ctx, share, names, dep, conds, state).await;
+    }
+
     let now = chrono::Utc::now();
 
     // A request stamp from the future beyond any plausible skew is a
@@ -1462,6 +1510,7 @@ async fn drive_idle_ladder(
         IdleState::Suspended => Phase::IdleSuspended,
         IdleState::Hibernated => Phase::Hibernated,
         IdleState::HibernateVerifying => Phase::Ready,
+        IdleState::ReprovisionVerifying | IdleState::ReprovisionDraining => Phase::Reprovisioning,
         IdleState::Active => Phase::Starting,
     };
     Ok(IdleOutcome {
@@ -1560,6 +1609,176 @@ async fn verify_and_hibernate(
         condition("IdleEligible", true, "Hibernating", Some(note), generation),
     );
     Ok(IdleOutcome { phase: Phase::Hibernated, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)), server_id: None })
+}
+
+/// Rebuild a share's disk at a smaller size.
+///
+/// The same verify-then-delete the hibernate rung uses, and for the
+/// same reason: the operator holds no bucket credentials, so it cannot
+/// check for itself that the tree is recoverable — it has to ask the
+/// hub. Two durable steps, because the hub must be UP to answer and
+/// DOWN to release the claim.
+///
+/// Deliberately NOT abortable by `requested-at`. Hibernation aborts on
+/// a wake because it came down for want of interest, so interest is a
+/// real reason to stop. This was asked for explicitly, and the front
+/// door's own keepalive is not a change of mind — aborting on it would
+/// make the feature unusable on exactly the shares someone is using.
+async fn drive_reprovision(
+    ctx: &Arc<Ctx>,
+    share: &Arc<FlintShare>,
+    names: &render::Names,
+    dep: Option<&Deployment>,
+    conds: &mut Vec<ShareCondition>,
+    state: IdleState,
+) -> Result<IdleOutcome> {
+    let ns = share.namespace().unwrap_or_default();
+    let generation = share.metadata.generation;
+
+    if state == IdleState::ReprovisionVerifying {
+        let snap = match poll_hub(ctx, share, &ns, names, dep).await {
+            Ok(s) => s,
+            Err(why) => {
+                // Still coming up, or unreachable. WAIT — never destroy
+                // a disk we could not ask about.
+                set_condition(
+                    conds,
+                    condition("HubReachable", false, "PollFailed", Some(why), generation),
+                );
+                return Ok(IdleOutcome {
+                    phase: Phase::Reprovisioning,
+                    short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)),
+                    server_id: None,
+                });
+            }
+        };
+        if let Err(why) = snap.hibernatable() {
+            // Not recoverable yet. Stay up and keep flushing. This arm
+            // stands between a resize and a lost project, so it says so
+            // rather than retrying in silence.
+            warn!(share = %share.name_any(), "reprovision deferred: {why}");
+            event(
+                ctx,
+                share,
+                EventType::Warning,
+                "ReprovisionDeferred",
+                &format!("not rebuilding the disk: {why}"),
+            )
+            .await;
+            set_condition(
+                conds,
+                condition("PersistenceCurrent", false, "NotRecoverable", Some(why), generation),
+            );
+            return Ok(IdleOutcome {
+                phase: Phase::Reprovisioning,
+                short_circuit: Some(Action::requeue(REQUEUE_BLOCKED)),
+                server_id: None,
+            });
+        }
+        set_idle_state(ctx, share, &ns, IdleState::ReprovisionDraining, false).await?;
+        let note = format!(
+            "the bucket can rebuild this volume (rpoClean, epoch {}); scaling to zero to \
+             release the claim, then recreating it at {}",
+            snap.epoch.as_ref().and_then(|e| e.number).unwrap_or(0),
+            share.spec.persistence.size,
+        );
+        info!(share = %share.name_any(), "{note}");
+        event(ctx, share, EventType::Normal, "ReprovisionVerified", &note).await;
+        set_condition(
+            conds,
+            condition("PersistenceCurrent", false, "Reprovisioning", Some(note), generation),
+        );
+        return Ok(IdleOutcome {
+            phase: Phase::Reprovisioning,
+            short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)),
+            server_id: None,
+        });
+    }
+
+    // ReprovisionDraining: the render has us at zero replicas. Wait for
+    // the pod to be genuinely gone before touching the claim — deleting
+    // one a pod still mounts just parks it in Terminating, where an
+    // interrupted operator cannot tell a finished drain from an
+    // aborted one. Same rule as the hibernate reclaim.
+    let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
+    let still_running = pods
+        .list(&ListParams::default())
+        .await?
+        .items
+        .iter()
+        .any(|p| pod_is_ours(dep, p) && pod_mounts_claim(p, &names.claim));
+    if still_running {
+        return Ok(IdleOutcome {
+            phase: Phase::Reprovisioning,
+            short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)),
+            server_id: None,
+        });
+    }
+
+    let claims: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), &ns);
+    if get_opt(claims.get(&names.claim)).await?.is_some() {
+        claims.delete(&names.claim, &Default::default()).await?;
+        let note = format!(
+            "PVC {} deleted — recreating it at {}. The bucket is the only copy until the \
+             import finishes.",
+            names.claim, share.spec.persistence.size,
+        );
+        warn!(share = %share.name_any(), "{note}");
+        event(ctx, share, EventType::Normal, "DiskReclaimed", &note).await;
+        // Not Active yet: the claim may linger in Terminating, and
+        // returning to Active while it does would re-apply the OLD
+        // object and resurrect the old size. Come back and check.
+        return Ok(IdleOutcome {
+            phase: Phase::Reprovisioning,
+            short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)),
+            server_id: None,
+        });
+    }
+
+    // Gone. Back to Active — the next pass renders a fresh claim at the
+    // new size and starts the hub, which imports from the bucket.
+    set_idle_state(ctx, share, &ns, IdleState::Active, false).await?;
+    let note = format!(
+        "disk rebuilt at {} — the hub is starting and will import from the bucket. Every \
+         client must remount: the serverId is new.",
+        share.spec.persistence.size,
+    );
+    info!(share = %share.name_any(), "{note}");
+    event(ctx, share, EventType::Normal, "Reprovisioned", &note).await;
+    set_condition(
+        conds,
+        condition("PersistenceCurrent", true, "Reprovisioned", Some(note), generation),
+    );
+    Ok(IdleOutcome {
+        phase: Phase::Starting,
+        short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)),
+        server_id: None,
+    })
+}
+
+/// May a shrink rebuild this share's disk?
+///
+/// Three independent refusals, and each is a data-safety statement
+/// rather than a policy preference:
+///
+/// - **Not opted in.** Destroying a volume is not something to infer
+///   from an edit to a size field.
+/// - **No bucket.** A tier-off share's PVC is the only copy of its
+///   data. There is nothing to rebuild it from, so this would be a
+///   delete dressed up as a resize.
+/// - **Adopted claim.** The operator did not create it and does not get
+///   to delete it — the same rule the hibernate reclaim follows.
+///
+/// Started only from `Active`: a rebuild already in flight must not
+/// restart itself, and one must never begin under an admin's
+/// `lifecycle: Suspended`, where the hub is down and cannot be asked
+/// whether the bucket is current.
+pub fn shrink_reprovision_ok(share: &FlintShare, adopted: bool) -> bool {
+    share.spec.persistence.reprovision_on_shrink.unwrap_or(false)
+        && share.spec.bucket.is_some()
+        && !adopted
+        && idle::state_of(share) == IdleState::Active
+        && share.spec.lifecycle.clone().unwrap_or_default() == Lifecycle::Active
 }
 
 /// Patch the ladder's durable position onto the CR.
@@ -1940,6 +2159,8 @@ mod tests {
                 persistence: PersistenceSpec {
                     size: "20Gi".into(),
                     storage_class_name: None,
+
+                    reprovision_on_shrink: None,
                 },
                 service: None,
                 image: None,
@@ -1974,6 +2195,118 @@ mod tests {
         assert!(quantity_bytes("1Gi") > quantity_bytes("1G"));
     }
 
+    fn shrinkable(opt_in: bool, bucket: bool) -> FlintShare {
+        let mut s = share_named("sh");
+        s.spec.persistence.size = "5Gi".into();
+        s.spec.persistence.reprovision_on_shrink = Some(opt_in);
+        if bucket {
+            s.spec.bucket = Some("b".into());
+        }
+        s
+    }
+
+    fn at_state(mut s: FlintShare, st: IdleState) -> FlintShare {
+        s.metadata.annotations = Some(BTreeMap::from([(
+            idle::ANN_IDLE_STATE.to_string(),
+            st.as_str().to_string(),
+        )]));
+        s
+    }
+
+    /// The two-step, and getting it backwards is the bug: the hub has
+    /// to be UP to be asked whether the bucket is current, and DOWN
+    /// before anything may take its claim away.
+    #[test]
+    fn only_the_draining_half_of_a_reprovision_scales_to_zero() {
+        assert!(!IdleState::ReprovisionVerifying.is_down(), "must stay up to be polled");
+        assert!(IdleState::ReprovisionDraining.is_down(), "must go down to release the claim");
+        assert!(IdleState::ReprovisionVerifying.is_reprovisioning());
+        assert!(IdleState::ReprovisionDraining.is_reprovisioning());
+        assert!(!IdleState::HibernateVerifying.is_reprovisioning());
+        assert!(!IdleState::Active.is_reprovisioning());
+    }
+
+    /// The ladder's position is carried in an annotation, so a state
+    /// that does not survive a write/read round trip is one an operator
+    /// restart forgets — mid-rebuild, with a share between two disks.
+    #[test]
+    fn the_reprovision_states_survive_the_annotation_round_trip() {
+        for st in [IdleState::ReprovisionVerifying, IdleState::ReprovisionDraining] {
+            let s = at_state(share_named("rt"), st);
+            assert_eq!(idle::state_of(&s), st, "{} did not round-trip", st.as_str());
+        }
+    }
+
+    /// While a rebuild is in flight the claim belongs to the driver.
+    /// An Apply here would re-declare the OLD size over the new one, or
+    /// recreate the very claim the drain just deleted — either way the
+    /// share comes back on a disk nobody asked for.
+    #[test]
+    fn a_reprovision_in_flight_keeps_the_apply_path_off_the_claim() {
+        for st in [IdleState::ReprovisionVerifying, IdleState::ReprovisionDraining] {
+            assert_eq!(
+                claim_plan(Some(&pvc_of("100Gi")), "5Gi", false, st),
+                ClaimPlan::Skip,
+                "{} must not touch the claim",
+                st.as_str()
+            );
+            // The post-delete moment: no claim, still mid-rebuild.
+            assert_eq!(claim_plan(None, "5Gi", false, st), ClaimPlan::Skip);
+        }
+        // ...and the instant it finishes, the fresh claim is applied at
+        // the SMALLER size. This is the whole point of the feature.
+        assert_eq!(claim_plan(None, "5Gi", false, IdleState::Active), ClaimPlan::Apply);
+    }
+
+    /// Three independent refusals, each a data-safety statement. Every
+    /// one is asserted alone against an otherwise-eligible share, so a
+    /// predicate that dropped any single conjunct fails here.
+    #[test]
+    fn a_shrink_rebuild_is_refused_unless_every_guard_agrees() {
+        assert!(
+            shrink_reprovision_ok(&shrinkable(true, true), false),
+            "opted in, tiered, own claim, Active — the one eligible shape"
+        );
+        assert!(
+            !shrink_reprovision_ok(&shrinkable(false, true), false),
+            "not opted in: destroying a volume is not inferred from a size edit"
+        );
+        assert!(
+            !shrink_reprovision_ok(&shrinkable(true, false), false),
+            "no bucket: the PVC is the only copy, so this would be a delete, not a resize"
+        );
+        assert!(
+            !shrink_reprovision_ok(&shrinkable(true, true), true),
+            "adopted claim: the operator did not create it and does not delete it"
+        );
+    }
+
+    /// A rebuild starts from Active and nowhere else. Re-entering from
+    /// its own states would restart it forever, and starting under an
+    /// admin's Suspended would ask a hub that is not running.
+    #[test]
+    fn a_shrink_rebuild_starts_only_from_a_running_share() {
+        for st in [
+            IdleState::ReprovisionVerifying,
+            IdleState::ReprovisionDraining,
+            IdleState::Suspended,
+            IdleState::Hibernated,
+            IdleState::HibernateVerifying,
+        ] {
+            assert!(
+                !shrink_reprovision_ok(&at_state(shrinkable(true, true), st), false),
+                "must not (re)start from {}",
+                st.as_str()
+            );
+        }
+        let mut admin_down = shrinkable(true, true);
+        admin_down.spec.lifecycle = Some(Lifecycle::Suspended);
+        assert!(
+            !shrink_reprovision_ok(&admin_down, false),
+            "an admin's Suspended means the hub is down and cannot be asked"
+        );
+    }
+
     fn pvc_of(size: &str) -> PersistentVolumeClaim {
         PersistentVolumeClaim {
             spec: Some(PersistentVolumeClaimSpec {
@@ -1995,11 +2328,11 @@ mod tests {
     /// look broken for a spec the user can simply correct.
     #[test]
     fn a_smaller_size_is_refused_rather_than_retried_forever() {
-        assert_eq!(claim_plan(None, "20Gi", false, false), ClaimPlan::Apply);
-        assert_eq!(claim_plan(Some(&pvc_of("20Gi")), "20Gi", false, false), ClaimPlan::Apply);
-        assert_eq!(claim_plan(Some(&pvc_of("20Gi")), "100Gi", false, false), ClaimPlan::Apply);
+        assert_eq!(claim_plan(None, "20Gi", false, IdleState::Active), ClaimPlan::Apply);
+        assert_eq!(claim_plan(Some(&pvc_of("20Gi")), "20Gi", false, IdleState::Active), ClaimPlan::Apply);
+        assert_eq!(claim_plan(Some(&pvc_of("20Gi")), "100Gi", false, IdleState::Active), ClaimPlan::Apply);
         assert_eq!(
-            claim_plan(Some(&pvc_of("100Gi")), "20Gi", false, false),
+            claim_plan(Some(&pvc_of("100Gi")), "20Gi", false, IdleState::Active),
             ClaimPlan::ShrinkRefused {
                 have: "100Gi".into(),
                 want: "20Gi".into()
@@ -2007,7 +2340,7 @@ mod tests {
         );
         // An adopted claim is someone else's declaration; we bind to
         // it, we do not re-declare it.
-        assert_eq!(claim_plan(Some(&pvc_of("100Gi")), "20Gi", true, false), ClaimPlan::Skip);
+        assert_eq!(claim_plan(Some(&pvc_of("100Gi")), "20Gi", true, IdleState::Active), ClaimPlan::Skip);
     }
 
     #[test]
@@ -2725,12 +3058,12 @@ mod tests {
     #[test]
     fn a_hibernated_share_does_not_get_its_pvc_recreated() {
         assert_eq!(
-            claim_plan(None, "20Gi", false, true),
+            claim_plan(None, "20Gi", false, IdleState::Hibernated),
             ClaimPlan::Hibernated,
             "a hibernated share must not have its claim re-applied"
         );
         // And the ordinary path is untouched.
-        assert_eq!(claim_plan(None, "20Gi", false, false), ClaimPlan::Apply);
+        assert_eq!(claim_plan(None, "20Gi", false, IdleState::Active), ClaimPlan::Apply);
     }
 
     /// The front door has to be able to tell "will wake if I ask" from

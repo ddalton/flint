@@ -807,6 +807,8 @@ mod tests {
             persistence: PersistenceSpec {
                 size: "20Gi".into(),
                 storage_class_name: None,
+
+                reprovision_on_shrink: None,
             },
             service: None,
             image: None,

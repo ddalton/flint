@@ -2,7 +2,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    flint.io/crd-schema-version: '2'
+    flint.io/crd-schema-version: '3'
   name: flintshares.flint.io
 spec:
   group: flint.io
@@ -257,6 +257,26 @@ spec:
                   (durable data lives in the bucket), for the WHOLE DATASET when
                   it is off.
                 properties:
+                  reprovisionOnShrink:
+                    description: |-
+                      Let a SHRINK of `size` reprovision the disk instead of being
+                      refused. Absent = off, and off is the safe default: Kubernetes
+                      cannot shrink a claim, so the only way to honour a smaller size
+                      is to destroy the volume and make a new one.
+
+                      This is never a silent operation. It runs the same
+                      verify-then-delete the hibernate rung uses — the hub must first
+                      prove the bucket can rebuild the tree (`rpoClean`) — and it is
+                      REFUSED outright for a share with no `bucket` (whose PVC is the
+                      only copy) and for an adopted `existingClaim` (which the
+                      operator did not create and does not get to delete).
+
+                      The cost is a wake: the new disk is empty, so the hub imports
+                      the bucket and hydrates on demand, and every mounted client sees
+                      a new `serverId` and must remount. Turn it on deliberately, for
+                      a share whose disk you actually intend to resize downward.
+                    nullable: true
+                    type: boolean
                   size:
                     description: |-
                       Requested size, e.g. `20Gi`. Required — capacity is a decision,
@@ -596,6 +616,7 @@ spec:
                 - Suspended
                 - IdleSuspended
                 - Hibernated
+                - Reprovisioning
                 - Failed
                 nullable: true
                 type: string

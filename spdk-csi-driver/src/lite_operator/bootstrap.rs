@@ -50,7 +50,11 @@ pub const SCHEMA_VERSION_ANNOTATION: &str = "flint.io/crd-schema-version";
 /// - `1` — as shipped in 1.28.0.
 /// - `2` — `spec.service.advertiseAddress` and its CEL rule, plus
 ///   `status.serverId`.
-pub const SCHEMA_VERSION: u32 = 2;
+/// - `3` — `spec.persistence.reprovisionOnShrink`, and the
+///   `Reprovisioning` phase. The phase matters as much as the field:
+///   `status.phase` is an ENUM in the schema, so an operator on `2`
+///   would refuse to store a value its CRD does not list.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// The CRD this binary would install, annotated with its schema
 /// version. Identical to what `crdgen` prints and what the chart
