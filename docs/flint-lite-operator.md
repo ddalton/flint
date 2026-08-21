@@ -365,14 +365,29 @@ default, because capacity is a decision. One project, one hub pod, one
 claim, nothing shared between projects. That is what makes
 `kubectl delete flintshare` a complete cleanup.
 
-The claim being `ReadWriteOnce` is not by itself the guard against two
-hubs on one disk — RWO is enforced per *node*, and a Deployment will
-happily start a replacement while the old pod is still terminating. So
-the strategy is `Recreate` (the operator never deliberately runs two)
-and the hub takes an exclusive `flock` on its state directory for the
-life of the process, which is the fence that also covers the cases the
-operator cannot see: evictions, node drains, and
-`kubectl delete pod`.
+One claim per project is a statement about provisioning, not about how
+many things may mount it. **`ReadWriteOnce` means a single NODE, not a
+single pod** — two pods co-scheduled on one node may both mount the
+same RWO claim, and Kubernetes considers that legal.
+
+That matters because `strategy: Recreate` only covers deliberate
+rollouts, where the Deployment kills the old pod before making the new
+one. It does not cover a pod deleted out of band — an eviction, a node
+drain, `kubectl delete pod`, or a wake landing mid-drain — because the
+ReplicaSet stops counting a terminating pod as active and replaces it
+at once. If that replacement lands on another node the attach layer
+blocks it and the pod sits `Pending` on a Multi-Attach error, which is
+noisy but safe. If it lands on the SAME node, nothing in Kubernetes
+stops it.
+
+So the actual fence is the hub's own exclusive `flock` on
+`<state-dir>/flint-hub.lock`, held for the life of the process. The
+kernel drops it at exit, crash included, so a dead hub never blocks its
+replacement, and the acquire waits ~grace plus slack to cover the
+normal handoff from a draining incumbent. `ReadWriteOncePod` would make
+the same-node case a hard refusal at admission and is worth considering
+as belt-and-braces — it is not a substitute, since it depends on the
+CSI driver honouring it.
 
 The exception is `spec.existingClaim`, which adopts a claim the
 operator did not create. It then never re-declares that claim's size or
