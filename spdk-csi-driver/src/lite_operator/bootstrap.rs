@@ -54,7 +54,8 @@ pub const SCHEMA_VERSION_ANNOTATION: &str = "flint.io/crd-schema-version";
 ///   `Reprovisioning` phase. The phase matters as much as the field:
 ///   `status.phase` is an ENUM in the schema, so an operator on `2`
 ///   would refuse to store a value its CRD does not list.
-pub const SCHEMA_VERSION: u32 = 3;
+/// - `4` — `spec.persistence.autoExpand` and its two CEL rules.
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// The CRD this binary would install, annotated with its schema
 /// version. Identical to what `crdgen` prints and what the chart

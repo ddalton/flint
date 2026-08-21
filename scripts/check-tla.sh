@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# One hundred and seventy-four runs, ALL required.
+# One hundred and eighty-one runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -19,8 +19,9 @@
 #
 #   71 FlintReplication   33 FlintComposition   15 FlintExtents
 #   11 FlintExtentsProbe   8 FlintTierEpoch     7 FlintTruncate
-#    7 FlintTierSession    7 FlintTierMarker    5 FlintAdmission
-#    4 FlintSnapshots      3 FlintClaims        3 FlintA2Probe)
+#    7 FlintTierSession    7 FlintTierMarker    7 FlintShareDisk
+#    5 FlintAdmission      4 FlintSnapshots     3 FlintClaims
+#    3 FlintA2Probe)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -1017,6 +1018,26 @@ mutation_run FlintComposition FlintCompositionProbeMarkFirst.cfg "composition ma
 mutation_run FlintComposition FlintCompositionProbeBill.cfg "composition witness bill probe (the etcd decision's availability cost COLLECTED by TLC at MaxCrashes=0: a healthy composer suspended because only its path to the witness failed — the WaitsPrice pattern in probe form; the TTL is the knob, replicas=1 never pays)" "ProbeHealthySuspend"
 strict_run   FlintComposition FlintCompositionLiveWitness.cfg "composition tranche-4 liveness strict (SpecLiveW = SpecLive + cuts HEAL: all four progress theorems hold with a cut in the world — promotions, rebuilds, fences and redirects all complete after the control plane returns; the run whose first execution forced ResumeServing)"
 liveness_mutation_run FlintComposition FlintCompositionNoWitness.cfg "no-witness mutation (SpecLive withholding exactly the heal obligation = the shipped two-sqlite world, where a witness that never heals is a witness that never existed: the survivor is healthy, in-sync, client-reachable and witnessless, and promotion parks forever — the 9fcdd05 finding as a lasso, the NoActor pattern)"
+
+# ── FlintShareDisk.tla — the operator's ladder over one share's PVC ────
+#
+# Two features now destroy or resize a volume (hibernate; reprovision-on-
+# shrink) and a third changes the size under both (auto-expand), driven by
+# a level-triggered reconciler against a hub that can die, a front door
+# that stamps wakes, and a user editing spec. The kind drill samples one
+# interleaving per leg; this enumerates them.
+#
+# What it established that review did not: the rpoClean poll is NOT what
+# makes the delete safe — the DRAIN is. Dropping the poll gate with the
+# drain intact loses nothing, so there is deliberately no NoVerify run
+# (a mutation that cannot lose proves nothing).
+strict_run FlintShareDisk FlintShareDisk.cfg "share-disk strict breadth (drain-before-delete, verify, oscillation + adopt guards ON: no unverified delete, no discarded shrink, no adopted delete)"
+strict_run FlintShareDisk FlintShareDiskLive.cfg "share-disk liveness (a started rebuild reaches Active on a claim at the requested size)"
+mutation_run FlintShareDisk FlintShareDiskVacuity.cfg "share-disk VACUITY PROBE (required-fail: a rebuild must be reachable, or every rebuild theorem passes by never firing — the first config of this module did exactly that)" "NoRebuildEverHappened"
+mutation_run FlintShareDisk FlintShareDiskNoDrain.cfg "share-disk drain mutation (DrainFirst=FALSE: delete as soon as replicas hit zero, without waiting the pod out — a live project's unflushed bytes go with the claim)" "Inv_NoUnverifiedDelete"
+mutation_run FlintShareDisk FlintShareDiskNoGuard.cfg "share-disk oscillation mutation (GuardOscillation=FALSE: auto-expand grows the rebuild straight back, so the outage bought nothing and the user's shrink was silently discarded)" "Inv_ShrinkHonoured"
+mutation_run FlintShareDisk FlintShareDiskNoAdoptGuard.cfg "share-disk adopted mutation (AdoptGuard=FALSE: a claim the operator never created is deleted by the rebuild path)" "Inv_NeverDeleteAdopted"
+liveness_mutation_run FlintShareDisk FlintShareDiskAbortOnWake.cfg "share-disk abort mutation (AbortOnWake=TRUE = hibernation's behaviour: a front door keepaliving on its own cadence cancels the rebuild forever, and the share sits on the disk it was told to shrink)"
 
 # ── FlintTierEpoch.tla — the flint-lite S3-tier volume epoch (A8) ──────
 # Model-after-code-after-drill: L2 step 7 shipped (f9bc737), chaos phases

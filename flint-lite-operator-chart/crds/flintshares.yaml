@@ -2,7 +2,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    flint.io/crd-schema-version: '3'
+    flint.io/crd-schema-version: '4'
   name: flintshares.flint.io
 spec:
   group: flint.io
@@ -257,6 +257,36 @@ spec:
                   (durable data lives in the bucket), for the WHOLE DATASET when
                   it is off.
                 properties:
+                  autoExpand:
+                    description: |-
+                      Grow the claim to fit the project, instead of making someone
+                      guess `size` up front. Absent = off.
+                    nullable: true
+                    properties:
+                      bufferPercent:
+                        description: |-
+                          Headroom over the project's logical size, in percent. Absent =
+                          100 (twice the project). Growth is one-way and a PVC cannot be
+                          shrunk, so this buys quiet at the cost of disk — 0 is legal and
+                          means "exactly the project", which will expand again on the
+                          next write.
+                        format: uint32
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
+                      enabled:
+                        description: Absent = off.
+                        nullable: true
+                        type: boolean
+                      maxSize:
+                        description: |-
+                          Hard ceiling. REQUIRED when enabled: expansion cannot be undone
+                          without a reprovision, so an unbounded rule is a bill nobody
+                          agreed to. The claim stops here and the share says so in
+                          `PersistenceCurrent` rather than growing quietly.
+                        nullable: true
+                        type: string
+                    type: object
                   reprovisionOnShrink:
                     description: |-
                       Let a SHRINK of `size` reprovision the disk instead of being
@@ -545,6 +575,10 @@ spec:
               rule: '!has(self.credentialsSecretRef) || has(self.bucket)'
             - message: spec.idle.hibernateAfterSecs needs spec.bucket — hibernation deletes the PVC, and without a bucket that PVC is the only copy of the data
               rule: '!has(self.idle) || !has(self.idle.hibernateAfterSecs) || has(self.bucket)'
+            - message: spec.persistence.autoExpand needs spec.bucket — the size comes from the bucket's manifest
+              rule: '!has(self.persistence.autoExpand) || !has(self.persistence.autoExpand.enabled) || !self.persistence.autoExpand.enabled || has(self.bucket)'
+            - message: spec.persistence.autoExpand.maxSize is required when autoExpand is enabled — growth cannot be undone without a reprovision
+              rule: '!has(self.persistence.autoExpand) || !has(self.persistence.autoExpand.enabled) || !self.persistence.autoExpand.enabled || has(self.persistence.autoExpand.maxSize)'
             - message: spec.service.advertiseAddress must be host:port — e.g. hub.example.internal:2049, 10.0.4.7:2049, or [2001:db8::1]:2049 for IPv6
               rule: '!has(self.service) || !has(self.service.advertiseAddress) || self.service.advertiseAddress.matches(''^[^:]+:[0-9]+$'') || (self.service.advertiseAddress.startsWith(''['') && self.service.advertiseAddress.matches(''^.+]:[0-9]+$''))'
           status:

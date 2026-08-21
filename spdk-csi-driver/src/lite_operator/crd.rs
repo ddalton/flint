@@ -101,6 +101,16 @@ use serde::{Deserialize, Serialize};
 #[x_kube(validation = Rule::new(
     "!has(self.idle) || !has(self.idle.hibernateAfterSecs) || has(self.bucket)")
     .message("spec.idle.hibernateAfterSecs needs spec.bucket — hibernation deletes the PVC, and without a bucket that PVC is the only copy of the data"))]
+// Auto-expand sizes the claim from the MANIFEST, so a share with no
+// bucket has nothing to size against — and a rule with no ceiling grows
+// a disk with no agreed limit. Both are refused at admission rather
+// than discovered on a bill.
+#[x_kube(validation = Rule::new(
+    "!has(self.persistence.autoExpand) || !has(self.persistence.autoExpand.enabled) || !self.persistence.autoExpand.enabled || has(self.bucket)")
+    .message("spec.persistence.autoExpand needs spec.bucket — the size comes from the bucket's manifest"))]
+#[x_kube(validation = Rule::new(
+    "!has(self.persistence.autoExpand) || !has(self.persistence.autoExpand.enabled) || !self.persistence.autoExpand.enabled || has(self.persistence.autoExpand.maxSize)")
+    .message("spec.persistence.autoExpand.maxSize is required when autoExpand is enabled — growth cannot be undone without a reprovision"))]
 // `advertiseAddress` is copied into `status.address` verbatim and
 // mounted by consumers, so a malformed one is a mount failure in
 // somebody else's cluster with nothing local to look at. Require the
@@ -407,6 +417,45 @@ pub struct PersistenceSpec {
     /// a share whose disk you actually intend to resize downward.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reprovision_on_shrink: Option<bool>,
+
+    /// Grow the claim to fit the project, instead of making someone
+    /// guess `size` up front. Absent = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_expand: Option<AutoExpandSpec>,
+}
+
+/// Size the disk from what the bucket actually holds.
+///
+/// The hub publishes two numbers once it has read a manifest: the
+/// project's total logical bytes, and its largest single object. This
+/// turns them into a claim size, so `size` becomes a STARTING point
+/// rather than a guess that has to be right.
+///
+/// The operator never writes `spec` — the target lives in an
+/// operator-owned annotation, and `size` stays exactly what the user
+/// set. Editing `size` discards the target and starts over from the
+/// new number, so the user's edit always wins.
+#[derive(KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoExpandSpec {
+    /// Absent = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+
+    /// Headroom over the project's logical size, in percent. Absent =
+    /// 100 (twice the project). Growth is one-way and a PVC cannot be
+    /// shrunk, so this buys quiet at the cost of disk — 0 is legal and
+    /// means "exactly the project", which will expand again on the
+    /// next write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buffer_percent: Option<u32>,
+
+    /// Hard ceiling. REQUIRED when enabled: expansion cannot be undone
+    /// without a reprovision, so an unbounded rule is a bill nobody
+    /// agreed to. The claim stops here and the share says so in
+    /// `PersistenceCurrent` rather than growing quietly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_size: Option<String>,
 }
 
 /// How consumers reach the hub.
@@ -885,6 +934,7 @@ mod tests {
                 storage_class_name: None,
 
                 reprovision_on_shrink: None,
+                    auto_expand: None,
             },
             service: None,
             image: None,

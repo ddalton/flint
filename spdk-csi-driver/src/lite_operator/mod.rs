@@ -44,5 +44,6 @@ pub mod conflict;
 pub mod crd;
 pub mod hubstatus;
 pub mod idle;
+pub mod persistence;
 pub mod reconcile;
 pub mod render;

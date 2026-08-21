@@ -97,11 +97,30 @@ pub struct HubSnapshot {
     /// namespace was NOT restored. Nothing may publish from this hub.
     #[serde(default)]
     pub import_refused: Option<String>,
-    /// The tier gauges, of which the operator reads exactly one today.
-    /// `None` = a hub too old to publish them, or one whose reporter
-    /// has not run its first collection yet — neither is "zero".
+    /// The tier sub-document. NESTED, because that is where the hub
+    /// actually puts it (`status.rs` `TierDoc`) — reading `gauges` off
+    /// the top level parsed cleanly and silently yielded None forever,
+    /// which is how auto-expand shipped inert and how the
+    /// HydrationUnblocked condition reported "fine" without ever having
+    /// looked. serde's `#[serde(default)]` makes a wrong path
+    /// indistinguishable from an absent value, so this shape is now
+    /// pinned by a test against a REAL document.
+    #[serde(default)]
+    pub tier: Option<TierDoc>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TierDoc {
     #[serde(default)]
     pub gauges: Option<Gauges>,
+}
+
+impl HubSnapshot {
+    /// The tier gauges, wherever they live in the document.
+    pub fn gauges(&self) -> Option<&Gauges> {
+        self.tier.as_ref()?.gauges.as_ref()
+    }
 }
 
 /// The subset of the hub's tier gauges the operator acts on. Everything
@@ -560,5 +579,68 @@ mod tests {
             r#"{"phase":"serving","sweep":{"completed":false},"activity":{"idleSecs":99999}}"#,
         );
         assert!(s.suspendable(60).is_err());
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+
+    /// A REAL `/status`, captured from a hub running in the kind drill.
+    ///
+    /// This fixture exists because of a bug it would have caught for
+    /// free. `HubSnapshot` declared `gauges` at the top level; the hub
+    /// publishes them under `tier`. Every field is `#[serde(default)]`
+    /// — as it must be, so an older hub's missing fields do not fail
+    /// the parse — which means a WRONG PATH deserializes cleanly and
+    /// yields `None` forever. Auto-expand shipped inert that way, and
+    /// the HydrationUnblocked condition reported "fine" without ever
+    /// having looked at anything.
+    ///
+    /// There WAS already a hand-written fixture here, and it had the
+    /// nesting right — but it set `"gauges": null`, so no assertion
+    /// ever pulled a value through that path and the wrong field
+    /// declaration sat under it undisturbed. That is the lesson worth
+    /// keeping: the fixture's shape was never the weak point, the
+    /// missing assertion was. A test that parses a document without
+    /// reading the field you depend on proves only that serde does not
+    /// crash.
+    ///
+    /// Using a REAL document on top of that is belt-and-braces against
+    /// the other half — a fixture invented from the same mistaken model
+    /// as the code would agree with the bug. Refresh it by curling
+    /// `/status` on a live hub.
+    #[test]
+    fn the_operator_reads_a_real_hub_status_document() {
+        let raw = include_str!("../../tests/fixtures/hub-status.json");
+        let snap: HubSnapshot =
+            serde_json::from_str(raw).expect("a real /status must parse");
+
+        assert_eq!(snap.phase, HubPhase::Serving);
+        assert_eq!(snap.rpo_clean, Some(true));
+        assert!(snap.server_id.is_some(), "serverId is part of the contract");
+
+        // The whole point: the gauges must actually be FOUND.
+        let g = snap
+            .gauges()
+            .expect("the tier gauges must be reachable — this is the bug");
+        assert_eq!(
+            g.logical_bytes,
+            Some(629_145_600),
+            "the project's size drives auto-expand and must not read as absent"
+        );
+        assert_eq!(g.largest_object_bytes, Some(104_857_600));
+        assert_eq!(g.hydration_blocked, 0);
+    }
+
+    /// The other half of the trap: absence must stay distinguishable
+    /// from zero. A hub too old to publish gauges yields None, and
+    /// auto-expand must decline to size a disk against "I do not know"
+    /// rather than treating it as an empty project.
+    #[test]
+    fn an_absent_tier_block_is_none_not_zero() {
+        let snap: HubSnapshot =
+            serde_json::from_str(r#"{"phase":"serving"}"#).expect("sparse doc parses");
+        assert!(snap.gauges().is_none(), "no tier block ⇒ no gauges, not zeroed ones");
     }
 }

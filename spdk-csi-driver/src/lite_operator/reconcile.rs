@@ -47,6 +47,7 @@ use tracing::{info, warn};
 use super::conflict::{self, Admission, Candidate};
 use super::hubstatus;
 use super::idle::{self, Decision, IdleState};
+use super::persistence;
 use super::crd::{FlintShare, FlintShareStatus, Lifecycle, Phase, Reclaim, RestartPolicy, ShareCondition};
 use super::render::{self, RenderDefaults};
 
@@ -998,9 +999,14 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
 
     let claims: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), &ns);
     let existing_pvc = get_opt(claims.get(&names.claim)).await?;
+    // The EFFECTIVE size: `spec.persistence.size` unless auto-expand
+    // has recorded a bigger target for that exact size. The operator
+    // never writes spec, so the target rides an annotation — see
+    // `lite_operator::persistence`.
+    let want_size = persistence::effective_size(&share);
     match claim_plan(
         existing_pvc.as_ref(),
-        &share.spec.persistence.size,
+        &want_size,
         names.claim_is_adopted,
         idle::state_of(&share),
     ) {
@@ -1008,7 +1014,34 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
             if let Some(pvc) = rendered.pvc.clone() {
                 // NO ownerReference, ever. See the module doc: owner GC
                 // does not know what Retain means.
-                claims.patch(&names.claim, &pp, &Patch::Apply(&pvc)).await?;
+                match claims.patch(&names.claim, &pp, &Patch::Apply(&pvc)).await {
+                    Ok(_) => {}
+                    // A GROWTH the storage refuses. Overwhelmingly this
+                    // is a StorageClass without `allowVolumeExpansion`,
+                    // which no amount of retrying fixes — and failing
+                    // the whole reconcile would take the rest of the
+                    // share's convergence down with it, over a disk
+                    // that is merely smaller than we wanted.
+                    Err(kube::Error::Api(e)) if e.code == 422 || e.code == 403 => {
+                        let msg = format!(
+                            "the claim could not be resized to {want_size}: {}. The hub keeps                              its current disk; if this is a StorageClass without                              allowVolumeExpansion, no retry will help.",
+                            e.message
+                        );
+                        warn!(share = %share.name_any(), "{msg}");
+                        event(&ctx, &share, EventType::Warning, "ExpansionRefused", &msg).await;
+                        set_condition(
+                            &mut conds,
+                            condition(
+                                "PersistenceCurrent",
+                                false,
+                                "ExpansionRefused",
+                                Some(msg),
+                                generation,
+                            ),
+                        );
+                    }
+                    Err(e) => return Err(e.into()),
+                }
             }
         }
         ClaimPlan::Skip => {}
@@ -1033,7 +1066,12 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
             return Ok(Action::requeue(REQUEUE_PROGRESS));
         }
         ClaimPlan::ShrinkRefused { have, want } => {
-            let hint = if names.claim_is_adopted {
+            let hint = if auto_expand_would_undo_it(&share) {
+                " persistence.autoExpand is on with a higher maxSize, so a rebuild at the \
+                  smaller size would be grown straight back — an outage and a DR import that \
+                  change nothing. Lower autoExpand.maxSize to the size you want, or turn \
+                  autoExpand off."
+            } else if names.claim_is_adopted {
                 " The claim is adopted, so the operator will not rebuild it either."
             } else if share.spec.bucket.is_none() {
                 " Without spec.bucket this PVC is the only copy, so it cannot be rebuilt from                   anywhere — reprovisionOnShrink is refused for tier-off shares."
@@ -1269,7 +1307,14 @@ async fn drive_idle_ladder(
     // ladder, and no wake outstanding. The overwhelmingly common case,
     // and it must cost nothing — in particular NO status poll, which is
     // a network round trip per share per reconcile across the fleet.
-    if cfg.is_none() && state == IdleState::Active {
+    //
+    // Auto-expand is the second reason to need that round trip: the
+    // size it computes comes from the hub's manifest gauges and from
+    // nowhere else. It is opt-in, so only the shares that asked for it
+    // pay the poll — but forgetting it here is silent, and it was:
+    // this branch is why the first drill run watched a 1Gi claim sit
+    // at 1Gi under a 600 MiB project, with every unit test passing.
+    if !needs_hub_poll(share, state) {
         return Ok(IdleOutcome {
             phase: ladder_phase.unwrap_or(Phase::Pending),
             short_circuit: None,
@@ -1330,13 +1375,19 @@ async fn drive_idle_ladder(
                 // hold, so every read of it answers NOSPC. Said here
                 // because the hub's own log is the only other place it
                 // appears, and nobody reads a healthy share's log.
-                let blocked = snap.gauges.as_ref().map_or(0, |g| g.hydration_blocked);
+                // Size the disk from what the bucket holds, if asked
+                // to. Runs here because this is where the hub's
+                // manifest numbers arrive; the annotation it writes is
+                // read by the render on the NEXT pass, which is what
+                // actually grows the claim.
+                maybe_auto_expand(ctx, share, &ns, names, conds, &snap, generation).await?;
+
+                let blocked = snap.gauges().map_or(0, |g| g.hydration_blocked);
                 // Name the size to raise it TO. "Too small" without a
                 // number sends a reader to the hub's log to find one,
                 // and the hub already knows it from the manifest.
                 let floor = snap
-                    .gauges
-                    .as_ref()
+                    .gauges()
                     .and_then(|g| g.largest_object_bytes)
                     .map(|b| format!(" — the largest is {b} bytes"))
                     .unwrap_or_default();
@@ -1756,6 +1807,129 @@ async fn drive_reprovision(
     })
 }
 
+/// Does this share need its hub asked for `/status` this pass?
+///
+/// A poll is a network round trip per share per reconcile, so the
+/// default answer is no and the exceptions are enumerated. There are
+/// exactly three, and the third is the one that is easy to forget:
+///
+/// 1. an idle policy — the ladder's whole input is the hub's activity;
+/// 2. a ladder position other than Active — something is in flight;
+/// 3. **auto-expand** — the size it computes comes from the hub's
+///    manifest gauges and from nowhere else.
+///
+/// Pinned by a test because the failure is silent. The first drill run
+/// of auto-expand watched a 1Gi claim sit at 1Gi under a 600 MiB
+/// project, with every unit test green, purely because this function's
+/// third arm did not exist.
+pub fn needs_hub_poll(share: &FlintShare, state: IdleState) -> bool {
+    if share.spec.idle.is_some() || state != IdleState::Active {
+        return true;
+    }
+    share
+        .spec
+        .persistence
+        .auto_expand
+        .as_ref()
+        .is_some_and(|a| a.enabled.unwrap_or(false))
+}
+
+/// Grow the claim to fit the project, when `autoExpand` says to.
+///
+/// Writes a TARGET, never the claim directly and never `spec`. The
+/// render reads that target on the next pass and applies it as an
+/// ordinary size — so expansion travels the same path as any other
+/// size change, and there is exactly one place that decides how big a
+/// claim should be.
+///
+/// Every refusal is reported rather than retried in silence, because
+/// the two that matter most are invisible otherwise: a StorageClass
+/// without `allowVolumeExpansion` rejects the patch, and a claim at
+/// `maxSize` stops growing while the project keeps growing.
+async fn maybe_auto_expand(
+    ctx: &Arc<Ctx>,
+    share: &Arc<FlintShare>,
+    ns: &str,
+    names: &render::Names,
+    conds: &mut Vec<ShareCondition>,
+    snap: &hubstatus::HubSnapshot,
+    generation: Option<i64>,
+) -> Result<()> {
+    let Some(ae) = share.spec.persistence.auto_expand.as_ref() else {
+        return Ok(());
+    };
+    if !ae.enabled.unwrap_or(false) || names.claim_is_adopted {
+        return Ok(());
+    }
+    // Mid-rebuild the claim belongs to the reprovision driver.
+    if idle::state_of(share).is_reprovisioning() {
+        return Ok(());
+    }
+    // The hub has not read a manifest yet. `None` is not zero: sizing a
+    // disk against "I do not know" is how a project gets a 1Gi claim.
+    let (Some(logical), Some(largest)) = (
+        snap.gauges().and_then(|g| g.logical_bytes),
+        snap.gauges().and_then(|g| g.largest_object_bytes),
+    ) else {
+        return Ok(());
+    };
+    let Some(max_bytes) = ae.max_size.as_deref().and_then(quantity_bytes) else {
+        return Ok(()); // CEL requires it; nothing to do without one
+    };
+
+    // Measure against what is PROVISIONED, not what spec asks for —
+    // that is what an expansion has to beat to be worth an API write.
+    let current = persistence::effective_size(share);
+    let Some(current_bytes) = quantity_bytes(&current) else { return Ok(()) };
+
+    let inv = persistence::Inventory { logical_bytes: logical, largest_object_bytes: largest };
+    let buffer = ae.buffer_percent.unwrap_or(persistence::DEFAULT_BUFFER_PCT);
+
+    let Some(target_bytes) = persistence::expand_to(inv, buffer, current_bytes, max_bytes) else {
+        // Nothing to do — but say so when the reason is the ceiling
+        // rather than "big enough", or a project silently stops being
+        // able to cache itself.
+        let wanted = persistence::wanted_bytes(inv, buffer);
+        if wanted > max_bytes {
+            let msg = format!(
+                "autoExpand is capped: this project wants {} but maxSize is {}. The disk stays \
+                 at {} and the tier evicts more to fit.",
+                persistence::as_gi(wanted),
+                ae.max_size.clone().unwrap_or_default(),
+                current,
+            );
+            set_condition(
+                conds,
+                condition("PersistenceCurrent", true, "AtMaxSize", Some(msg), generation),
+            );
+        }
+        return Ok(());
+    };
+
+    let target = persistence::as_gi(target_bytes);
+    let basis = share.spec.persistence.size.clone();
+    let patch = serde_json::json!({ "metadata": { "annotations": {
+        persistence::ANN_SIZE_TARGET: persistence::format_target(&basis, &target)
+    }}});
+    Api::<FlintShare>::namespaced(ctx.client.clone(), ns)
+        .patch(&share.name_any(), &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
+        .await?;
+
+    let msg = format!(
+        "growing the disk {current} → {target}: the project holds {} with a {buffer}% buffer \
+         (largest object {}). spec.persistence.size is unchanged at {basis}.",
+        persistence::as_gi(logical as u128),
+        persistence::as_gi(largest as u128),
+    );
+    info!(share = %share.name_any(), "{msg}");
+    event(ctx, share, EventType::Normal, "AutoExpanding", &msg).await;
+    set_condition(
+        conds,
+        condition("PersistenceCurrent", false, "Expanding", Some(msg), generation),
+    );
+    Ok(())
+}
+
 /// May a shrink rebuild this share's disk?
 ///
 /// Three independent refusals, and each is a data-safety statement
@@ -1779,6 +1953,40 @@ pub fn shrink_reprovision_ok(share: &FlintShare, adopted: bool) -> bool {
         && !adopted
         && idle::state_of(share) == IdleState::Active
         && share.spec.lifecycle.clone().unwrap_or_default() == Lifecycle::Active
+        && !auto_expand_would_undo_it(share)
+}
+
+/// Would auto-expand simply grow this shrink back?
+///
+/// The two features pull in opposite directions and, left alone, they
+/// LOOP: the user lowers `size`, the rebuild destroys the disk and
+/// imports the project onto a smaller one, auto-expand then measures
+/// the same project and grows straight back to where it started. The
+/// net effect is an outage and a DR import that change nothing — and it
+/// repeats every time the user tries again.
+///
+/// So the ceiling has to come down with the size. `maxSize` clamps what
+/// auto-expand may ever ask for, which makes this decidable from spec
+/// alone — no inventory, no poll, no ordering question about which
+/// controller ran first. Lower the ceiling to the size you want and the
+/// shrink goes through; leave it high and the share says why it will
+/// not.
+pub fn auto_expand_would_undo_it(share: &FlintShare) -> bool {
+    let Some(ae) = share.spec.persistence.auto_expand.as_ref() else {
+        return false;
+    };
+    if !ae.enabled.unwrap_or(false) {
+        return false;
+    }
+    // No ceiling means unbounded growth, so it would certainly undo it.
+    // (CEL requires one when enabled; this is the belt.)
+    let Some(max) = ae.max_size.as_deref().and_then(quantity_bytes) else {
+        return true;
+    };
+    match quantity_bytes(&share.spec.persistence.size) {
+        Some(want) => max > want,
+        None => true,
+    }
 }
 
 /// Patch the ladder's durable position onto the CR.
@@ -2161,6 +2369,7 @@ mod tests {
                     storage_class_name: None,
 
                     reprovision_on_shrink: None,
+                    auto_expand: None,
                 },
                 service: None,
                 image: None,
@@ -2256,6 +2465,127 @@ mod tests {
         // ...and the instant it finishes, the fresh claim is applied at
         // the SMALLER size. This is the whole point of the feature.
         assert_eq!(claim_plan(None, "5Gi", false, IdleState::Active), ClaimPlan::Apply);
+    }
+
+    fn with_auto_expand(mut s: FlintShare, max: &str) -> FlintShare {
+        s.spec.persistence.auto_expand = Some(crate::lite_operator::crd::AutoExpandSpec {
+            enabled: Some(true),
+            buffer_percent: None,
+            max_size: Some(max.into()),
+        });
+        s
+    }
+
+    /// Auto-expand reads the hub's manifest gauges and nothing else,
+    /// so a share that never gets polled never grows — silently, with
+    /// every other test still green. That is exactly what the first
+    /// drill run of this feature did.
+    #[test]
+    fn an_auto_expand_share_is_polled_even_with_no_idle_policy() {
+        let plain = share_named("p");
+        assert!(
+            !needs_hub_poll(&plain, IdleState::Active),
+            "the common case must still cost nothing"
+        );
+
+        let ae = with_auto_expand(share_named("p"), "50Gi");
+        assert!(
+            needs_hub_poll(&ae, IdleState::Active),
+            "auto-expand needs the gauges, so it needs the poll"
+        );
+
+        // Off means off: no poll bought by merely mentioning the block.
+        let mut off = with_auto_expand(share_named("p"), "50Gi");
+        off.spec.persistence.auto_expand.as_mut().unwrap().enabled = Some(false);
+        assert!(!needs_hub_poll(&off, IdleState::Active));
+
+        // The other two reasons still stand on their own.
+        assert!(needs_hub_poll(&plain, IdleState::Suspended));
+        let mut idle_cfg = share_named("p");
+        idle_cfg.spec.idle = Some(crate::lite_operator::crd::IdleSpec {
+            suspend_after_secs: Some(900),
+            hibernate_after_secs: None,
+            suspend_with_sessions: None,
+        });
+        assert!(needs_hub_poll(&idle_cfg, IdleState::Active));
+    }
+
+    /// The interaction that loops if nobody guards it: the user lowers
+    /// `size`, the rebuild destroys the disk and imports onto a smaller
+    /// one, and auto-expand measures the same project and grows right
+    /// back. An outage and a DR import that change nothing — repeatable
+    /// every time the user tries again.
+    ///
+    /// The ceiling has to come down with the size, which makes it
+    /// decidable from spec alone: no inventory, no poll, no question
+    /// about which ran first.
+    #[test]
+    fn a_shrink_is_refused_when_auto_expand_would_grow_it_straight_back() {
+        // size 5Gi, ceiling 50Gi: the rebuild would be undone.
+        let looped = with_auto_expand(shrinkable(true, true), "50Gi");
+        assert!(auto_expand_would_undo_it(&looped));
+        assert!(
+            !shrink_reprovision_ok(&looped, false),
+            "a rebuild that auto-expand will undo must not run"
+        );
+
+        // Ceiling lowered to the requested size: the shrink sticks, so
+        // it is allowed. `shrinkable` asks for 5Gi.
+        let agreed = with_auto_expand(shrinkable(true, true), "5Gi");
+        assert!(!auto_expand_would_undo_it(&agreed));
+        assert!(shrink_reprovision_ok(&agreed, false), "ceiling agrees — let it through");
+
+        // A ceiling BELOW the size cannot grow it back either.
+        let under = with_auto_expand(shrinkable(true, true), "2Gi");
+        assert!(!auto_expand_would_undo_it(&under));
+
+        // Auto-expand off: the guard must not fire at all.
+        let mut off = with_auto_expand(shrinkable(true, true), "50Gi");
+        off.spec.persistence.auto_expand.as_mut().unwrap().enabled = Some(false);
+        assert!(!auto_expand_would_undo_it(&off));
+        assert!(shrink_reprovision_ok(&off, false));
+    }
+
+    /// `spec` stays the user's. The target rides an annotation, and the
+    /// BASIS is what makes "the operator grew past spec" distinguishable
+    /// from "the user wants something smaller" — without it both are
+    /// just `size < target` and the user could never shrink.
+    #[test]
+    fn an_edit_to_size_always_beats_a_recorded_target() {
+        let mut s = share_named("ae");
+        s.spec.persistence.size = "5Gi".into();
+        assert_eq!(persistence::effective_size(&s), "5Gi", "no target yet");
+
+        // The operator grew it, recording the size it grew FROM.
+        s.metadata.annotations = Some(BTreeMap::from([(
+            persistence::ANN_SIZE_TARGET.to_string(),
+            persistence::format_target("5Gi", "40Gi"),
+        )]));
+        assert_eq!(persistence::effective_size(&s), "40Gi", "the target is in force");
+
+        // The user edits size. The basis no longer matches, so their
+        // number wins — this is what lets a shrink happen at all.
+        s.spec.persistence.size = "8Gi".into();
+        assert_eq!(
+            persistence::effective_size(&s),
+            "8Gi",
+            "a stale basis must discard the target, or the user can never shrink"
+        );
+
+        // A target SMALLER than spec is ignored rather than shrinking.
+        s.spec.persistence.size = "80Gi".into();
+        s.metadata.annotations = Some(BTreeMap::from([(
+            persistence::ANN_SIZE_TARGET.to_string(),
+            persistence::format_target("80Gi", "40Gi"),
+        )]));
+        assert_eq!(persistence::effective_size(&s), "80Gi", "a target never shrinks a claim");
+
+        // Garbage in the annotation falls back to spec instead of panicking.
+        s.metadata.annotations = Some(BTreeMap::from([(
+            persistence::ANN_SIZE_TARGET.to_string(),
+            "nonsense".to_string(),
+        )]));
+        assert_eq!(persistence::effective_size(&s), "80Gi");
     }
 
     /// Three independent refusals, each a data-safety statement. Every

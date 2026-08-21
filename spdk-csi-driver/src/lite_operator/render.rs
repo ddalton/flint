@@ -420,7 +420,11 @@ pub fn pvc(share: &FlintShare) -> Option<PersistentVolumeClaim> {
             resources: Some(VolumeResourceRequirements {
                 requests: Some(BTreeMap::from([(
                     "storage".to_string(),
-                    Quantity(share.spec.persistence.size.clone()),
+                    // The EFFECTIVE size — auto-expand records its
+                    // target in an annotation rather than in spec, so
+                    // rendering the raw spec value here would undo
+                    // every expansion on the next apply.
+                    Quantity(crate::lite_operator::persistence::effective_size(share)),
                 )])),
                 ..Default::default()
             }),
@@ -809,6 +813,7 @@ mod tests {
                 storage_class_name: None,
 
                 reprovision_on_shrink: None,
+                    auto_expand: None,
             },
             service: None,
             image: None,

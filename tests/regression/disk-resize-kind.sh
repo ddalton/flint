@@ -90,7 +90,7 @@ wait_phase() {
 }
 
 echo "══════════════════════════════════════════════════════════════════"
-echo " reprovision-on-shrink — the resize Kubernetes cannot do"
+echo " disk resize — grow to fit, shrink by rebuild"
 echo "══════════════════════════════════════════════════════════════════"
 
 for t in kind kubectl helm docker aws curl; do
@@ -138,6 +138,20 @@ kubectl cluster-info >/dev/null 2>&1 || fail "kind cluster never came up"
 for i in "$HUBIMG" "$OPIMG"; do
   kind load docker-image "$i" --name "$CLUSTER" >/dev/null 2>&1 || fail "kind load $i failed"
 done
+# KIND'S DEFAULT StorageClass HAS EXPANSION OFF. Without this patch the
+# API server REFUSES every PVC resize, the operator reports
+# ExpansionRefused (correctly), and leg 6 watches a 1Gi claim sit at 1Gi
+# under a 600 MiB project — a product that works, failing a drill that
+# cannot see it work. Cost this drill two runs to find.
+#
+# What this does and does not prove: local-path accepts the larger
+# REQUEST but never resizes the backing directory, so `.status.capacity`
+# stays put. That is fine here — local-path enforces no size at all, and
+# what leg 6 tests is the operator's decision and its apply. A real CSI
+# expansion completing end to end needs a cloud cluster and is not
+# claimed by this drill.
+kubectl patch storageclass standard -p '{"allowVolumeExpansion":true}' >/dev/null 2>&1 \
+  || fail "could not enable volume expansion on the default StorageClass"
 kubectl create namespace "$NS" >/dev/null 2>&1
 kubectl -n "$NS" apply -f - >/dev/null <<EOF || fail "MinIO manifests refused"
 apiVersion: apps/v1
@@ -195,7 +209,7 @@ kubectl -n "$OPNS" rollout status deployment/flint-lite-operator --timeout=180s 
 kubectl wait --for=condition=established --timeout=60s crd/flintshares.flint.io >/dev/null 2>&1 \
   || fail "the CRD never became Established"
 STAMP=$(kubectl get crd flintshares.flint.io -o jsonpath='{.metadata.annotations.flint\.io/crd-schema-version}')
-[ "$STAMP" = "3" ] || fail "CRD schema stamp is '$STAMP', expected 3 (the reprovision schema)"
+[ "$STAMP" = "4" ] || fail "CRD schema stamp is '$STAMP', expected 4 (reprovision + autoExpand)"
 pass "operator up, CRD stamped at schema $STAMP"
 
 # ── a share, on a deliberately over-sized claim ──────────────────────
@@ -344,5 +358,144 @@ case " $(events_of plain) " in
   *) fail "no ShrinkRefused event on the tier-off share: $(events_of plain)" ;;
 esac
 
+# ── leg 6: auto-expand grows a deliberately under-sized claim ────────
+say "leg 6: autoExpand grows a 1Gi claim to fit the project"
+kubectl -n "$NS" apply -f - >/dev/null <<EOF || fail "FlintShare grow refused"
+apiVersion: flint.io/v1alpha1
+kind: FlintShare
+metadata: { name: grow }
+spec:
+  bucket: $BUCKET
+  keyPrefix: grow1/
+  endpoint: http://minio.$NS.svc:9000
+  region: us-east-1
+  credentialsSecretRef: s3creds
+  settings:
+    flushFloorSecs: 3
+    epochHeartbeatSecs: 2
+    epochLeaseMisses: 3
+  persistence:
+    size: 1Gi
+    autoExpand:
+      enabled: true
+      bufferPercent: 100
+      maxSize: 8Gi
+  monitoring:
+    enabled: true
+    fileApi:
+      enabled: true
+      tokenSecretRef: api-token
+EOF
+wait_phase grow Ready 300
+[ "$(claim_size grow)" = "1Gi" ] || fail "grow started at $(claim_size grow), expected 1Gi"
+# Ready is read off the Deployment, so it passes even when the operator
+# cannot reach the hub at all — and auto-expand's ONLY input is that
+# poll. Assert the poll works, or leg 6 is testing less than it looks.
+POLLED=""
+for _ in $(seq 1 60); do
+  POLLED=$(kubectl -n "$NS" get flintshare grow \
+    -o jsonpath='{range .status.conditions[?(@.type=="HubReachable")]}{.status}{end}' 2>/dev/null)
+  [ "$POLLED" = "True" ] && break
+  sleep 2
+done
+[ "$POLLED" = "True" ] || fail "HubReachable is '$POLLED' — the operator never polled, so auto-expand has no input"
+pass "HubReachable=True — the operator is actually reading /status"
+GUID=$(claim_uid grow)
+
+# Put ~600 MiB in. With a 100% buffer that wants ~1.2Gi > 1Gi, so the
+# operator must raise the target. Written through the file API in
+# chunks so the hub's manifest reflects real object sizes.
+GPOD=$(kubectl -n "$NS" get pod -l flint.io/share=grow -o jsonpath='{.items[0].metadata.name}')
+[ -n "$GPOD" ] || fail "no hub pod for share grow"
+for i in 1 2 3 4 5 6; do
+  kubectl -n "$NS" exec "$GPOD" -- sh -c \
+    "head -c 104857600 /dev/zero | curl -sf -X PUT -H 'Authorization: Bearer $API_TOKEN' \
+     --data-binary @- 'http://127.0.0.1:8080/files/content?path=blob$i.bin'" >/dev/null \
+    || fail "PUT blob$i.bin failed"
+done
+pass "600 MiB written"
+
+# The gauges must be REACHABLE by the operator, not merely published.
+# A wrong field path deserializes cleanly to None and disables
+# auto-expand silently — which is exactly how this drill first failed.
+# POLLED, not sampled once. Two things have to happen first and
+# neither is instant: a manifest barrier must run (that is what tallies
+# the inventory) and the tier reporter must collect (60s interval). A
+# single immediate read finds nothing and says so — which is how this
+# assertion first failed, on a hub that was working fine.
+SEEN=""
+for _ in $(seq 1 90); do
+  SEEN=$(kubectl -n "$NS" exec "$GPOD" -- sh -c \
+    "curl -sf http://127.0.0.1:8080/status" 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["tier"]["gauges"]["logicalBytes"])' 2>/dev/null)
+  [ -n "$SEEN" ] && [ "$SEEN" -gt 0 ] 2>/dev/null && break
+  sleep 3
+done
+[ -n "$SEEN" ] && [ "$SEEN" -gt 0 ] 2>/dev/null \
+  || fail "the hub never published tier.gauges.logicalBytes ('$SEEN') — auto-expand has nothing to size against"
+pass "hub reports logicalBytes=$SEEN"
+
+GREW=no
+for _ in $(seq 1 180); do
+  cur=$(claim_size grow)
+  [ "$cur" != "1Gi" ] && { GREW=yes; break; }
+  sleep 2
+done
+[ "$GREW" = yes ] || fail "the claim never grew past 1Gi (still $(claim_size grow))"
+pass "claim grew 1Gi → $(claim_size grow)"
+# Growth is an EXPANSION, not a rebuild: same PVC object throughout.
+[ "$(claim_uid grow)" = "$GUID" ] \
+  || fail "the PVC was replaced — auto-expand must EXPAND, never rebuild"
+pass "same PVC uid $GUID — expanded in place, no data movement"
+# spec is the user's and must be untouched.
+SPECSZ=$(kubectl -n "$NS" get flintshare grow -o jsonpath='{.spec.persistence.size}')
+[ "$SPECSZ" = "1Gi" ] || fail "the operator wrote spec.persistence.size ($SPECSZ) — it must not"
+pass "spec.persistence.size still 1Gi — the target rides an annotation"
+case " $(events_of grow) " in
+  *" AutoExpanding "*) pass "the growth was announced" ;;
+  *) fail "no AutoExpanding event: $(events_of grow)" ;;
+esac
+
+# ── leg 7: the two features do not fight ─────────────────────────────
+say "leg 7: a shrink that autoExpand would undo is refused, not looped"
+# The size must genuinely CHANGE. spec.persistence.size is still 1Gi
+# (auto-expand never writes spec), so re-setting it to 1Gi asks for
+# nothing and no shrink is ever requested — which is how this leg first
+# failed, reporting a missing event for a shrink that never happened.
+# 1536Mi is a real edit, below the 8Gi ceiling, so the guard must fire.
+kubectl -n "$NS" patch flintshare grow --type=merge \
+  -p '{"spec":{"persistence":{"reprovisionOnShrink":true,"size":"1536Mi"}}}' >/dev/null \
+  || fail "patch failed"
+BEFORE_UID=$(claim_uid grow)
+sleep 45
+[ "$(claim_uid grow)" = "$BEFORE_UID" ] \
+  || fail "the disk was rebuilt — autoExpand will simply grow it back, so this is an outage for nothing"
+case " $(events_of grow) " in
+  *" ShrinkRefused "*) pass "refused, with the reason — no rebuild/regrow loop" ;;
+  *) fail "no ShrinkRefused event: $(events_of grow)" ;;
+esac
+# And the escape hatch works: bring the ceiling down to the size asked
+# for, and the same shrink goes through.
+kubectl -n "$NS" patch flintshare grow --type=merge \
+  -p '{"spec":{"persistence":{"autoExpand":{"maxSize":"1536Mi"}}}}' >/dev/null || fail "patch failed"
+REBUILT=no
+for _ in $(seq 1 240); do
+  [ "$(claim_uid grow)" != "$BEFORE_UID" ] && { REBUILT=yes; break; }
+  sleep 1
+done
+[ "$REBUILT" = yes ] || fail "lowering maxSize did not release the shrink"
+# The uid changing only proves the claim was replaced. Wait for the NEW
+# one to exist and assert its size — read too early it is still being
+# recreated and reports empty, which passes while proving nothing.
+NEWSZ=""
+for _ in $(seq 1 120); do
+  NEWSZ=$(claim_size grow)
+  [ -n "$NEWSZ" ] && break
+  sleep 2
+done
+[ "$NEWSZ" = "1536Mi" ] \
+  || fail "the rebuilt claim is '$NEWSZ', expected 1536Mi — the shrink did not land"
+pass "ceiling lowered → the shrink went through (uid changed, claim now $NEWSZ)"
+
 echo
-echo "REPROVISION ON SHRINK: all legs passed — the disk shrank, the bytes survived"
+echo "REPROVISION + AUTOEXPAND: all legs passed — the disk grew, shrank, and kept its bytes"
