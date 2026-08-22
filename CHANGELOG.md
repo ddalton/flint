@@ -10,6 +10,205 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [1.35.0] - 2026-08-21
+
+The gateway release. Every hub already served an HTTP file API, but
+reaching one meant knowing its in-cluster address and holding its
+per-share bearer token — so a projects service that browses 3000 of
+them needed 3000 addresses and 3000 credentials. `flint-hub-gateway`
+is one door in front of all of them.
+
+### Added — flint-hub-gateway
+
+- **One addressable door for every hub's file API**, off by default
+  (`gateway.enabled`). It ships **inside the `flint-lite-operator`
+  image** — same crate, same build, a different `command` — so
+  enabling it pulls no new image and there is no second thing to
+  publish, scan and keep in step.
+
+- **One credential instead of one per project.** Each share's token is
+  `HMAC-SHA256(root, endpoint:bucket:keyPrefix:version)`, so a single
+  root key derives every hub's credential and there is nothing to store
+  or fan out. Whoever provisions a share writes the same value into
+  that share's Secret; `flint-hub-gateway --derive-for <ns>/<name>`
+  reads the CR and prints what the serving gateway will compute, so
+  there is one implementation and not two. Revoke one project by
+  bumping its `flint.io/api-token-version` annotation.
+
+- **A project may have several volumes.** Addressed as
+  `/v1/projects/<id>/volumes/<v>/files*`, resolved from
+  `flint.io/project-id` + `flint.io/volume-id`. Nothing in the operator
+  reads the project id — uniqueness keys on the bucket prefix subtree —
+  so N hubs per project was always legal and is now addressable. A bare
+  path on a multi-volume project answers **409 naming the choice**,
+  never a silent pick.
+
+- **`/status` is unreachable through it, by construction.** The hub
+  serves an unauthenticated `/status` on the same listener as the file
+  API — tier recovery point, epoch holder, lease list, lifecycle phase.
+  The gateway's verb table is a closed enum whose upstream path is a
+  `&'static str`, so no caller byte reaches the path and no request
+  shape — including handwritten `..` traversal that `reqwest`
+  normalises away — can reach it.
+
+- **RBAC is `get,list,watch,patch` on flintshares and nothing else.**
+  No Secrets, which is the point: the workspace namespaces hold every
+  tenant's S3 credentials beside the per-share API tokens. No `create`
+  (provisioning stays the front door's decision), no `delete`, no
+  `update`.
+
+- **`POST …/wake`** returns a mountable `{address, serverId}` and
+  **re-stamps on every call — it is the keepalive**. The idle ladder
+  suspends when the wake annotation is stale AND the hub's own activity
+  clock is quiet, and **an agent holding an NFS mount while computing
+  in memory trips both**. A suspended share under a `hard` mount blocks
+  in uninterruptible sleep and nothing wakes it, because an NFS client
+  cannot write a Kubernetes annotation. Pair with
+  `idle.suspendWithSessions: false`, which is opt-in — the default
+  suspends even while a client holds a lease.
+
+- **`?wake=false` for fleet crawls.** A projects service iterating
+  every project must not start 2700 parked hubs, each `Hibernated` one
+  a full DR import. It refuses with `503 Parked` and no `Retry-After`,
+  in under a second, stamping nothing. A typo is a `400`, never a
+  default. `GET …/volumes` touches no hub at all and reports `serving`
+  per volume.
+
+- **Bodies stream, in both directions.** Measured through a 128Mi
+  container: a 256 MiB round trip moved peak RSS from 10 MiB to 12 MiB,
+  byte-identical, with the checksum as the guard that anything moved at
+  all. A cold read relays the hub's `503` **with its `Retry-After`
+  intact** rather than substituting a bare 502 at the proxy's own
+  deadline — a download waits the hub's `hydrateWaitSecs` plus a
+  margin, because the two budgets otherwise race and default to the
+  same 30s.
+
+### Added — operator
+
+- **`status.apiEndpoint`: an addressable door for the hub's 8080.** A
+  per-share **headless** Service (`clusterIP: None`), because 3000
+  routable Services cannot be guarded and would exhaust the service
+  CIDR. Exposure is concentrated in the one gateway instead.
+
+- **A conflict loser is told who won.** `status.conflictWith` carries
+  `{namespace, name, prefix, relation, subPath}` and a `CONFLICT`
+  printer column — machine-readable, instead of a sentence to regex out
+  of a condition message. The address is published **only when the
+  winner is in the same namespace**, since handing out a mount target
+  across namespaces would answer a typo'd prefix with a pointer at
+  another tenant's live data.
+
+- **`/status` now says whether the file API is actually serving.** A
+  `fileApi.enabled: true` share whose token Secret uses the wrong KEY
+  produced a hub indistinguishable from a healthy one: the route table
+  is never assembled, so every `/files*` call answers **404, not 401**,
+  while `/status` answers 200 on the same socket and the pod is Ready.
+  `fileApi.routesMounted` distinguishes the three cases, and absent
+  still means "never asked for".
+
+### Fixed
+
+- **The hub's phase gate answered strangers before auth ran.** The gate
+  composed ahead of authentication, and it rejects with a 503 whose
+  body NAMES the phase — so anyone who could reach the port learned
+  `Starting`, `ClaimingEpoch`, `Importing`, `Reconciling` or `Draining`
+  without a credential, and the `Retry-After` confirmed the gate had
+  fired even when the body did not. Those are exactly the phases that
+  say a share is mid-DR-import or mid-drain. Auth runs first now; a
+  valid token still gets the 503 and the `Retry-After`, which is the
+  whole value of the gate.
+
+- **`.flint/` was reserved only at depth 1, not throughout the tree.**
+  Flush and import both tested only the first path component, so
+  `nested/.flint/epoch` read as an ordinary client file in both
+  directions. Reachable when one share's prefix is an ancestor of
+  another's — the case the store-side epoch **cannot** fence, because
+  it keys on the exact prefix string so `t/` and `t/sub/` never contend
+  — and then import materializes the inner share's live control objects
+  as client files, and flush publishes them back over that share's live
+  epoch cell. Neither side ever errored. Reserved at every depth now;
+  nothing legitimate is refused.
+
+- **`networkPolicy.apiClientSelectors` had never produced a valid
+  peer.** One `nindent` short, and it failed in two shapes: two keys
+  (the shape a real front door needs) aborted `helm template`
+  outright, while one key — the shape the operator guide documented —
+  rendered *successfully* as `{podSelector: null, matchLabels: {…}}`,
+  which is not a NetworkPolicyPeer. An empty podSelector selects every
+  pod in the namespace and the stray `matchLabels` is ignored, so the
+  rule admitted something nobody wrote and helm exited 0. Any claim
+  that a browse front door was admitted to a hub's 8080 by selectors
+  was false in the field.
+
+### Security
+
+- Eight kubeconfigs are no longer tracked, and internal hostnames are
+  gone from the tree. This repository is public.
+
+### Upgrading
+
+- **⚠ CRD schema version 4 → 6.** The self-bootstrap refuses to
+  downgrade a newer schema, so a mixed fleet is safe, but a 1.34.0
+  operator does not know `status.conflictWith` or `status.apiEndpoint`.
+- The gateway is **off by default**; nothing changes for an install
+  that does not set `gateway.enabled`.
+- Enabling `networkPolicy` admits the gateway to the hubs' 8080
+  automatically. That peer fails **closed** — a wrong selector times
+  out every file request while the policy still reads correctly — so
+  it is now asserted against an enforcing CNI rather than only
+  rendered.
+
+## [1.34.0] - 2026-08-20
+
+The disk-sizing release. **This section was reconstructed after the
+fact**: 1.34.0 was tagged and published without a changelog entry, and
+the release policy requires one because the GitHub release notes
+mirror it verbatim. The content below comes from the chart's own image
+notes, written at the time.
+
+### Added
+
+- **`persistence.autoExpand`** grows a share's claim from what the
+  bucket actually holds. The hub publishes the project's
+  `logicalBytes` and `largestObjectBytes`; the operator sizes against
+  them (`bufferPercent` default 100, `maxSize` required). Growth is an
+  in-place expansion — same PVC, no data movement, no outage. **The
+  operator still does not write spec**: the target rides an annotation
+  recording the `persistence.size` it came from, so editing size always
+  wins. ⚠ Needs a StorageClass with `allowVolumeExpansion: true`, or
+  the API server refuses and the share reports `ExpansionRefused`.
+- **`persistence.reprovisionOnShrink`** honours a smaller size by
+  rebuilding the disk: verify the bucket can restore the tree, release
+  the claim, create a new one, import. Refused for a share with no
+  bucket (its PVC is the only copy) and for an adopted `existingClaim`.
+  New `Reprovisioning` phase; costs a wake, so a fresh `serverId` and
+  every client remounts. Deliberately **not** abortable by
+  `requested-at` — a rebuild was asked for explicitly.
+- The two cannot fight: a shrink that `autoExpand` would simply grow
+  back is refused with its reason, rather than spending an outage and a
+  DR import to end up where it started.
+
+### Fixed
+
+- **⚠ A shipped bug: an object larger than the PVC minus its reserve
+  hung the read FOREVER.** The demand hydration lane could not tell "no
+  room now" from "no room ever" and treated the first as wait — but
+  eviction reclaims only what is already local, so that wait could
+  never end. The marker stayed set, every content lane answered
+  `NFS4ERR_DELAY`, and a hard mount hung with no error, no counter and
+  no condition. Now `NOSPC` at request time, counted, and surfaced as a
+  `HydrationUnblocked` condition naming the size to raise the claim
+  past.
+- The operator read the hub's tier gauges from the **wrong path** (top
+  level, not under `tier`). With `#[serde(default)]` a wrong path
+  parses cleanly and yields `None` forever, so `HydrationUnblocked`
+  reported a vacuous `True` and `autoExpand` would have shipped inert.
+
+### Upgrading
+
+- **⚠ CRD schema version 2 → 4.** A 1.33.0 operator does not know the
+  `Reprovisioning` phase, and `status.phase` is a schema enum.
+
 ## [1.33.0] - 2026-08-20
 
 The fleet-survival release. The flint-lite operator can now hold its
@@ -1957,6 +2156,11 @@ neither tag represents a supported upgrade source.
 No security advisories at this release.
 
 [Unreleased]: https://github.com/ddalton/flint/compare/v1.30.0...HEAD
+[1.35.0]: https://github.com/ddalton/flint/compare/v1.34.0...v1.35.0
+[1.34.0]: https://github.com/ddalton/flint/compare/v1.33.0...v1.34.0
+[1.33.0]: https://github.com/ddalton/flint/compare/v1.32.0...v1.33.0
+[1.32.0]: https://github.com/ddalton/flint/compare/v1.31.0...v1.32.0
+[1.31.0]: https://github.com/ddalton/flint/compare/v1.30.0...v1.31.0
 [1.30.0]: https://github.com/ddalton/flint/compare/v1.29.0...v1.30.0
 [1.5.0]: https://github.com/ddalton/flint/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/ddalton/flint/compare/v1.3.0...v1.4.0
