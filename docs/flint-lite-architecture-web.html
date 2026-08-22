@@ -161,8 +161,8 @@
   <article class="plate" id="plate-1">
     <header class="plate-head">
       <span class="eyebrow">Plate 1 — architecture</span>
-      <h2>Flint-lite — one hub, one project</h2>
-      <p>A single pod serves real POSIX over NFSv4.2. The PVC is the working set, an S3 prefix is the durability, and a second listener exposes the same filesystem over HTTP for callers that cannot mount — reached through one gateway rather than one address per project.</p>
+      <h2>Flint-lite — one hub, one volume</h2>
+      <p>A single pod serves real POSIX over NFSv4.2. The PVC is the working set, an S3 prefix is the durability, and a second listener exposes the same filesystem over HTTP for callers that cannot mount — reached through one gateway rather than one address per hub. One hub serves exactly one prefix; a project that needs several volumes has several hubs.</p>
     </header>
     <figure class="figwrap" style="margin:0">
       <svg viewBox="0 0 1600 800" role="img" aria-label="A consumer cluster mounts the flint-lite hub over NFSv4.2 on port 2049 through a Service; the hub pod runs flint-pnfs-mds in standalone mode with a second HTTP listener on 8080 for status and a file API; the hub writes to an RWO PVC and publishes to, hydrates from, and holds an epoch lease in an S3 bucket prefix. An optional flint-hub-gateway stands in front of the HTTP listener as a single addressable door for the whole fleet, and cannot proxy the status route.">
@@ -226,7 +226,7 @@
     <rect x="402" y="198" width="246" height="72" rx="9" class="bx-violet"/>
     <text xml:space="preserve" class="tl ctr" x="525" y="224">flint-hub-gateway</text>
     <text xml:space="preserve" class="tx ctr" x="525" y="244">optional · one door for the whole fleet</text>
-    <text xml:space="preserve" class="tx ctr" x="525" y="261">holds one credential, not one per project</text>
+    <text xml:space="preserve" class="tx ctr" x="525" y="261">holds one credential, not one per hub</text>
 
     <line class="ln-violet" x1="525" y1="272" x2="525" y2="280" marker-end="url(#p1-av)"/>
 
@@ -258,7 +258,7 @@
     <!-- ============ hub cluster ============ -->
     <rect x="680" y="118" width="560" height="650" rx="14" class="grpw"/>
     <text xml:space="preserve" class="th" x="696" y="146">Hub cluster</text>
-    <text xml:space="preserve" class="tx" x="696" y="164">one FlintShare (or one helm release) per project</text>
+    <text xml:space="preserve" class="tx" x="696" y="164">one FlintShare per volume — a project may have several</text>
 
     <rect x="700" y="506" width="124" height="76" rx="8" class="bx-slate"/>
     <text xml:space="preserve" class="tl ctr" x="762" y="536">Service</text>
@@ -338,7 +338,7 @@
     <header class="plate-head">
       <span class="eyebrow">Plate 2 — control plane</span>
       <h2>The flint-lite operator — a fleet of shares</h2>
-      <p>One custom resource per project replaces one helm release per project. The operator re-renders the same four objects from the CR on every pass — there is no reusable release state to go stale, and nothing it does ever reaches the bucket.</p>
+      <p>One custom resource replaces one helm release, per hub. The operator re-renders the same four objects from the CR on every pass — there is no reusable release state to go stale, and nothing it does ever reaches the bucket.</p>
     </header>
     <figure class="figwrap" style="margin:0">
       <svg viewBox="0 0 1600 820" role="img" aria-label="A FlintShare custom resource is watched by the flint-lite operator, which arbitrates uniqueness, renders four Kubernetes objects (ConfigMap, PVC, Service, Deployment), repairs drift, runs the idle ladder and publishes status; the Deployment runs the hub pod, which talks to the S3 bucket prefix that the operator itself never touches.">
@@ -350,7 +350,7 @@
 
     <!-- ============ the CR ============ -->
     <rect x="30" y="70" width="390" height="470" rx="10" class="bx"/>
-    <text xml:space="preserve" class="th" x="48" y="98">FlintShare — one per project</text>
+    <text xml:space="preserve" class="th" x="48" y="98">FlintShare — one per volume</text>
     <text xml:space="preserve" class="tx" x="48" y="116">flint.io/v1alpha1 · namespaced</text>
     <line class="hair" x1="48" y1="128" x2="402" y2="128"/>
     <text xml:space="preserve" class="mns" x="48" y="152">metadata:</text>
@@ -469,7 +469,7 @@
     <!-- ============ hub ============ -->
     <rect x="1290" y="430" width="290" height="200" rx="10" class="bx-hub"/>
     <text xml:space="preserve" class="tt" x="1310" y="462">flint-lite hub</text>
-    <text xml:space="preserve" class="mns" x="1310" y="482">one pod · one project</text>
+    <text xml:space="preserve" class="mns" x="1310" y="482">one pod · one volume</text>
     <rect x="1310" y="498" width="250" height="52" rx="7" class="bx-blue"/>
     <text xml:space="preserve" class="mn" x="1326" y="522">:2049  NFSv4.2</text>
     <text xml:space="preserve" class="tx" x="1326" y="540">on the Service</text>
@@ -506,9 +506,9 @@
     <text xml:space="preserve" class="tx c-violet" x="1120" y="814">with a gateway in front, the middle three are one POST …/wake</text>
   </svg>
     </figure>
-    <p class="caption"><b>Derive the share's name from the project id</b> (<code>fs-&lt;project-id&gt;</code>) and label it <code>flint.io/project-id</code> — that is what makes ensure-live idempotent: two front-door replicas racing a first touch issue the same create, one gets <code>409 AlreadyExists</code>, and both proceed.
+    <p class="caption"><b>Label the share <code>flint.io/project-id</code></b>, and <code>flint.io/volume-id</code> too once a project owns more than one — those labels are what the gateway resolves <code>/v1/projects/&lt;id&gt;/volumes/&lt;v&gt;</code> against, and <code>volume-id</code> defaults to the CR name. Deriving the name from the project id (<code>fs-&lt;project-id&gt;</code>) still works for a single-volume project and is what makes ensure-live idempotent: two front-door replicas racing a first touch issue the same create, one gets <code>409 AlreadyExists</code>, and both proceed.
     <b>Uniqueness is enforced from the controller's cache</b>, not by the API server: Kubernetes cannot express "at most one share per <code>(endpoint, bucket, prefix subtree)</code>" in CEL, since both CEL and a ValidatingAdmissionPolicy see one object.
-    Oldest wins; the loser goes <code>Failed</code> with a <code>Conflict</code> condition and gets no hub.
+    Oldest wins; the loser goes <code>Failed</code> with a <code>Conflict</code> condition and gets no hub. <b>The project id is not part of that key</b>, and nothing in the operator reads it — which is precisely why one project may own several volumes: they collide only if their prefixes do.
     <b>That enforcement stops at the cluster boundary.</b> Two clusters each admit a share on one prefix and neither sees the other — and the store-side epoch only catches it when the prefixes are <i>equal</i>, because <code>tenant-a/</code> and <code>tenant-a/sub/</code> mint different epoch objects and never contend. Own prefix allocation upstream of Kubernetes.</p>
   </article>
   <article class="plate" id="plate-3">
