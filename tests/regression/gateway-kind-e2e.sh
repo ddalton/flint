@@ -646,6 +646,56 @@ if [ -n "$WOKE" ]; then
   REPL=$(kubectl -n "$NS" get deploy -l flint.io/share="fs-$PROJECT-models" \
     -o jsonpath='{.items[0].spec.replicas}' 2>/dev/null)
   note "parked at replicas=$REPL"
+
+  # ── the crawl guard, WHILE IT IS STILL PARKED ──────────────────────
+  #
+  # Deliberately here rather than after the wake below: this way the
+  # SAME share at the SAME moment gives two different answers, and the
+  # only difference is `wake=false`. Run afterwards it proved nothing —
+  # the volume was Ready by then, so a 200 was correct and the leg
+  # failed on its own ordering.
+  say "leg 9b: wake=false refuses a parked volume instead of starting it"
+  ANN_BEFORE=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-models" -o json \
+    | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" flint.io/requested-at)
+  C0=$(date +%s)
+  code=$(gw GET "/v1/projects/$PROJECT/volumes/models/files?path=/&wake=false")
+  C1=$(date +%s)
+  [ "$code" = "503" ] || fail "wake=false on a parked volume returned $code, expected 503"
+  grep -q 'Parked' /tmp/gw-body.txt || fail "the 503 did not say Parked: $(gwbody)"
+  [ $((C1 - C0)) -lt 10 ] \
+    || fail "wake=false waited out the wake budget ($((C1 - C0))s) — a crawl would stall"
+  ANN_AFTER=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-models" -o json \
+    | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" flint.io/requested-at)
+  [ "$ANN_BEFORE" = "$ANN_AFTER" ] \
+    || fail "wake=false STAMPED the wake annotation ('$ANN_BEFORE' -> '$ANN_AFTER')"
+  R1=$(kubectl -n "$NS" get deploy -l flint.io/share="fs-$PROJECT-models" \
+    -o jsonpath='{.items[0].spec.replicas}' 2>/dev/null)
+  [ "$R1" = "0" ] || fail "wake=false brought the hub back up (replicas=$R1)"
+  pass "wake=false refuses in $((C1 - C0))s, stamps nothing, hub stays at replicas=0"
+
+  # A typo must NOT read as "yes, wake" — that mistake's blast radius is
+  # every parked share in the fleet.
+  code=$(gw GET "/v1/projects/$PROJECT/volumes/models/files?path=/&wake=fasle")
+  [ "$code" = "400" ] || fail "an unreadable wake= value returned $code, expected 400"
+
+  # The LISTING endpoint never wakes anything either — the cheapest
+  # fleet-crawl primitive, and it reports `serving` per volume.
+  code=$(gw GET "/v1/projects/$PROJECT/volumes")
+  [ "$code" = "200" ] || fail "volume listing returned $code"
+  echo "$(gwbody)" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+by={v["volume"]: v for v in d["volumes"]}
+assert by["models"]["serving"] is False, by["models"]
+assert by["data"]["serving"] is True, by["data"]
+' || fail "the listing misreports which volumes are serving: $(gwbody)"
+  R1=$(kubectl -n "$NS" get deploy -l flint.io/share="fs-$PROJECT-models" \
+    -o jsonpath='{.items[0].spec.replicas}' 2>/dev/null)
+  [ "$R1" = "0" ] || fail "listing volumes woke a parked hub (replicas=$R1)"
+  pass "listing volumes reports serving per volume and wakes nothing"
+
+  # ── and NOW the same share, same moment, without wake=false ────────
+  say "leg 9c: the same parked volume, woken by an ordinary file request"
   T0=$(date +%s)
   code=$(gw GET "/v1/projects/$PROJECT/volumes/models/files?path=/")
   T1=$(date +%s)
@@ -709,50 +759,6 @@ else
   note "the volume did not park within the budget; the wake timing leg is INCONCLUSIVE"
   note "(this is reported, not passed — see the summary)"
 fi
-
-# ── leg 9b: a fleet crawl must not start every parked hub ────────────
-say "leg 9b: wake=false refuses a parked volume instead of starting it"
-# `models` is parked from the leg above. A project service listing every
-# project must be able to look without waking: at fleet size that is
-# 2700 hubs, and for hibernated ones a DR import from S3 each.
-ANN_BEFORE=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-models" -o json \
-  | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" flint.io/requested-at)
-T0=$(date +%s)
-code=$(gw GET "/v1/projects/$PROJECT/volumes/models/files?path=/&wake=false")
-T1=$(date +%s)
-[ "$code" = "503" ] || fail "wake=false on a parked volume returned $code, expected 503"
-grep -q 'Parked' /tmp/gw-body.txt || fail "the 503 did not say Parked: $(gwbody)"
-[ $((T1 - T0)) -lt 10 ] \
-  || fail "wake=false waited out the wake budget ($((T1 - T0))s) — a crawl would stall"
-ANN_AFTER=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-models" -o json \
-  | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" flint.io/requested-at)
-[ "$ANN_BEFORE" = "$ANN_AFTER" ] \
-  || fail "wake=false STAMPED the wake annotation ('$ANN_BEFORE' -> '$ANN_AFTER')"
-REPL=$(kubectl -n "$NS" get deploy -l flint.io/share="fs-$PROJECT-models" \
-  -o jsonpath='{.items[0].spec.replicas}' 2>/dev/null)
-[ "$REPL" = "0" ] || fail "wake=false brought the hub back up (replicas=$REPL)"
-pass "wake=false refuses in $((T1 - T0))s, stamps nothing, and leaves the hub at replicas=0"
-
-# A typo must NOT read as "yes, wake" — that mistake's blast radius is
-# every parked share in the fleet.
-code=$(gw GET "/v1/projects/$PROJECT/volumes/models/files?path=/&wake=fasle")
-[ "$code" = "400" ] || fail "an unreadable wake= value returned $code, expected 400"
-
-# And the LISTING endpoint never wakes anything either — it is the
-# cheapest fleet-crawl primitive and reports `serving` per volume.
-code=$(gw GET "/v1/projects/$PROJECT/volumes")
-[ "$code" = "200" ] || fail "volume listing returned $code"
-echo "$(gwbody)" | python3 -c '
-import json,sys
-d=json.load(sys.stdin)
-by={v["volume"]: v for v in d["volumes"]}
-assert by["models"]["serving"] is False, by["models"]
-assert by["data"]["serving"] is True, by["data"]
-' || fail "the listing misreports which volumes are serving: $(gwbody)"
-REPL=$(kubectl -n "$NS" get deploy -l flint.io/share="fs-$PROJECT-models" \
-  -o jsonpath='{.items[0].spec.replicas}' 2>/dev/null)
-[ "$REPL" = "0" ] || fail "listing volumes woke a parked hub (replicas=$REPL)"
-pass "listing volumes reports serving per volume and wakes nothing"
 
 # ── leg 10: the wake API returns a MOUNTABLE address ─────────────────
 say "leg 10: POST /wake brings a parked volume back and hands out its NFS address"

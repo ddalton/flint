@@ -274,10 +274,20 @@ path, which writes no annotations at all, so it survives and holds the
 ladder's first signal — which is the whole basis of the agent-mount
 contract below.
 
-`wakeWaitSecs` (default 25) bounds how long one request will hold. An
-idle-suspended share is back in roughly 20–30s. A hibernated one is a
-full DR import from the bucket and will time out here by design — a UI
-should show that as "restoring", not as an error.
+`wakeWaitSecs` (default 25) bounds how long one request will hold.
+
+**Measured**: an `IdleSuspended` share came back and served the request
+in **11s** (`gateway-kind-e2e.sh` leg 9, kind, single node). Read that
+as a floor rather than a typical figure — the hub image was already on
+the node. A first wake onto a node that has to PULL the image adds the
+pull time, and a share whose startup claims a contested epoch waits out
+the previous holder's lease before its listener binds. Both of those can
+exceed 25s, and both fail correctly: a retryable 503 whose wake has
+already been armed.
+
+A `Hibernated` share is a full DR import from the bucket and will
+time out here by design — a UI should show that as "restoring", not as
+an error.
 
 **The wait watches the CR, never the hub.** This is not an optimisation.
 A file-API call *counts as activity* on a share — including a 304 — so a
