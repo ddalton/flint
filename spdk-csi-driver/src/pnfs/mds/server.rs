@@ -174,7 +174,43 @@ impl MetadataServer {
         // of the NFS state, so they survive MDS restart.
         fh_manager.attach_backend(Arc::clone(&backend)).await;
 
-        let state_mgr = Arc::new(StateManager::new("", Arc::clone(&backend)));
+        // The server identity is the PERSISTENT server id, not "".
+        //
+        // An empty volume_id lands in `ClientManager::new`'s
+        // `volume_id.is_empty()` arm, which returns the CONSTANTS
+        // `server_owner = "flint-nfs"` and
+        // `server_scope = "flint-nfs-standalone"`. Every flint-lite hub
+        // in existence therefore advertised one identity, while each
+        // mints clientids from 1 out of its own table.
+        //
+        // That is exactly the hazard the derivation's own comment
+        // warns about: the kernel's `nfs4_detect_session_trunking`
+        // treats same-owner servers as ONE server across addresses and
+        // demands EXCHANGE_ID return the same clientid on every one. An
+        // agent mounting two workspaces presents two unrelated hubs
+        // under a single identity, and they agree only by
+        // counter-coincidence — the same failure that made restarted
+        // DSes churn EXCHANGE_ID forever (2026-07-06).
+        //
+        // `get_or_init_server_id` is already the right value: unique
+        // per volume and STABLE across restarts, because it lives in
+        // the state.db on the PVC — which is what lets a client's state
+        // survive a restart. The non-empty arm needs no change; the
+        // MDS simply never supplied a value. Nothing else consumes
+        // `volume_id`: it reaches `ClientManager::new` and feeds only
+        // these two strings.
+        //
+        // ⚠ UPGRADE: a hub that has already served clients changes its
+        // advertised identity once, on the restart that adopts this
+        // build. Clients see a different server and re-establish state
+        // rather than reclaiming it — an availability blip on a hard
+        // mount, in the restart window the upgrade already costs. The
+        // alternative is leaving two workspaces able to alias each
+        // other's client state, which is a correctness bug.
+        let state_mgr = Arc::new(StateManager::new(
+            &server_id.to_string(),
+            Arc::clone(&backend),
+        ));
         
         // Initialize lock manager
         let lock_mgr = Arc::new(LockManager::new());

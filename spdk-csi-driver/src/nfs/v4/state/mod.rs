@@ -275,6 +275,66 @@ mod tests {
     /// test-pnfs-restart`) will mirror at the process level. If
     /// this passes, the in-process plumbing is sound and the
     /// remaining work is plumbing config + the e2e harness.
+    /// Every hub that does not share a client table MUST advertise a
+    /// unique `server_owner`. The kernel's `nfs4_detect_session_trunking`
+    /// treats same-owner servers as ONE server reachable at several
+    /// addresses and requires EXCHANGE_ID to return the same clientid on
+    /// every one — which two independent hubs, each counting from 1, can
+    /// only satisfy by coincidence.
+    ///
+    /// The pNFS MDS passed `""` here, so EVERY flint-lite hub advertised
+    /// the constants `flint-nfs` / `flint-nfs-standalone`. An agent
+    /// mounting two workspaces therefore presented the kernel with one
+    /// identity at two addresses. It now passes its PERSISTENT server id
+    /// (`get_or_init_server_id`, which lives in the state.db on the PVC,
+    /// so it is unique per volume and stable across restarts).
+    #[test]
+    fn two_hubs_must_not_advertise_the_same_server_identity() {
+        use crate::state_backend::MemoryBackend;
+        // The mds arm builds its owner from the shard id and ignores
+        // volume_id entirely, which would make this vacuous.
+        assert!(
+            std::env::var("PNFS_MODE").is_err(),
+            "this test only means something in the standalone arm"
+        );
+        let b1: Arc<dyn StateBackend> = Arc::new(MemoryBackend::new());
+        let b2: Arc<dyn StateBackend> = Arc::new(MemoryBackend::new());
+        let a = StateManager::new("16435955404748484869", b1);
+        let b = StateManager::new("8295498220999890219", b2);
+
+        assert_ne!(
+            a.clients.server_owner(),
+            b.clients.server_owner(),
+            "two hubs advertised one server_owner — a client mounting both would \
+             demand clientid parity they can only meet by coincidence"
+        );
+        assert_ne!(
+            a.clients.server_scope(),
+            b.clients.server_scope(),
+            "two hubs advertised one server_scope"
+        );
+    }
+
+    /// The trap itself, pinned so the next caller sees it: an EMPTY
+    /// volume_id collapses every hub onto one shared identity. This is
+    /// what the MDS did, and it is why `server.rs` now passes the
+    /// persistent server id rather than `""`.
+    #[test]
+    fn an_empty_volume_id_collapses_every_hub_onto_one_identity() {
+        use crate::state_backend::MemoryBackend;
+        assert!(
+            std::env::var("PNFS_MODE").is_err(),
+            "this test only means something in the standalone arm"
+        );
+        let b1: Arc<dyn StateBackend> = Arc::new(MemoryBackend::new());
+        let b2: Arc<dyn StateBackend> = Arc::new(MemoryBackend::new());
+        let a = StateManager::new("", b1);
+        let b = StateManager::new("", b2);
+        assert_eq!(a.clients.server_owner(), b.clients.server_owner());
+        assert_eq!(a.clients.server_owner(), "flint-nfs");
+        assert_eq!(a.clients.server_scope(), b"flint-nfs-standalone");
+    }
+
     #[tokio::test]
     async fn test_state_manager_reload_from_shared_backend() {
         use crate::state_backend::MemoryBackend;
