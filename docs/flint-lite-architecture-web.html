@@ -162,10 +162,10 @@
     <header class="plate-head">
       <span class="eyebrow">Plate 1 — architecture</span>
       <h2>Flint-lite — one hub, one project</h2>
-      <p>A single pod serves real POSIX over NFSv4.2. The PVC is the working set, an S3 prefix is the durability, and a second listener exposes the same filesystem over HTTP for callers that cannot mount.</p>
+      <p>A single pod serves real POSIX over NFSv4.2. The PVC is the working set, an S3 prefix is the durability, and a second listener exposes the same filesystem over HTTP for callers that cannot mount — reached through one gateway rather than one address per project.</p>
     </header>
     <figure class="figwrap" style="margin:0">
-      <svg viewBox="0 0 1600 800" role="img" aria-label="A consumer cluster mounts the flint-lite hub over NFSv4.2 on port 2049 through a Service; the hub pod runs flint-pnfs-mds in standalone mode with a second HTTP listener on 8080 for status and a file API; the hub writes to an RWO PVC and publishes to, hydrates from, and holds an epoch lease in an S3 bucket prefix.">
+      <svg viewBox="0 0 1600 800" role="img" aria-label="A consumer cluster mounts the flint-lite hub over NFSv4.2 on port 2049 through a Service; the hub pod runs flint-pnfs-mds in standalone mode with a second HTTP listener on 8080 for status and a file API; the hub writes to an RWO PVC and publishes to, hydrates from, and holds an epoch lease in an S3 bucket prefix. An optional flint-hub-gateway stands in front of the HTTP listener as a single addressable door for the whole fleet, and cannot proxy the status route.">
     <defs>
       <marker id="p1-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
       <marker id="p1-av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6d4aa8"/></marker>
@@ -216,25 +216,34 @@
     <text xml:space="preserve" class="tx" x="48" y="716">the PVC comes from recipe A or B</text>
     <text xml:space="preserve" class="tx" x="48" y="732">— see page 3</text>
 
-    <!-- ============ middle column: front door + HTTP surface ============ -->
-    <rect x="402" y="118" width="246" height="88" rx="9" class="bx-violet"/>
-    <text xml:space="preserve" class="tl ctr" x="525" y="150">Front door / control plane</text>
-    <text xml:space="preserve" class="tx ctr" x="525" y="172">the service that owns projects</text>
+    <!-- ====== middle column: front door · gateway · HTTP surface ====== -->
+    <rect x="402" y="118" width="246" height="66" rx="9" class="bx-violet"/>
+    <text xml:space="preserve" class="tl ctr" x="525" y="145">Front door / control plane</text>
+    <text xml:space="preserve" class="tx ctr" x="525" y="166">the service that owns projects</text>
 
-    <rect x="402" y="226" width="246" height="244" rx="9" class="bx-vo"/>
-    <text xml:space="preserve" class="thv" x="414" y="250">hub HTTP :8080 — Bearer token</text>
-    <line class="hair" x1="414" y1="260" x2="636" y2="260"/>
-    <text xml:space="preserve" class="mns" x="414" y="282">GET</text>    <text xml:space="preserve" class="mns" x="478" y="282">/status</text>
-    <text xml:space="preserve" class="mns" x="414" y="307">GET</text>    <text xml:space="preserve" class="mns" x="478" y="307">/files</text>
-    <text xml:space="preserve" class="mns" x="414" y="332">GET</text>    <text xml:space="preserve" class="mns" x="478" y="332">/files/content</text>
-    <text xml:space="preserve" class="mns" x="414" y="357">PUT</text>    <text xml:space="preserve" class="mns" x="478" y="357">/files/content</text>
-    <text xml:space="preserve" class="mns" x="414" y="382">DELETE</text> <text xml:space="preserve" class="mns" x="478" y="382">/files/content</text>
-    <text xml:space="preserve" class="mns" x="414" y="407">POST</text>   <text xml:space="preserve" class="mns" x="478" y="407">/files/folder</text>
-    <text xml:space="preserve" class="mns" x="414" y="432">POST</text>   <text xml:space="preserve" class="mns" x="478" y="432">/files/move</text>
-    <text xml:space="preserve" class="tx" x="414" y="456">every /files call counts as activity</text>
+    <line class="ln-violet" x1="525" y1="186" x2="525" y2="196" marker-end="url(#p1-av)"/>
 
-    <text xml:space="preserve" class="tx" x="402" y="490">ClusterIP-only — never on the NFS Service</text>
-    <text xml:space="preserve" class="tx" x="402" y="506">/status is deliberately NOT activity</text>
+    <rect x="402" y="198" width="246" height="72" rx="9" class="bx-violet"/>
+    <text xml:space="preserve" class="tl ctr" x="525" y="224">flint-hub-gateway</text>
+    <text xml:space="preserve" class="tx ctr" x="525" y="244">optional · one door for the whole fleet</text>
+    <text xml:space="preserve" class="tx ctr" x="525" y="261">holds one credential, not one per project</text>
+
+    <line class="ln-violet" x1="525" y1="272" x2="525" y2="280" marker-end="url(#p1-av)"/>
+
+    <rect x="402" y="282" width="246" height="194" rx="9" class="bx-vo"/>
+    <text xml:space="preserve" class="thv" x="414" y="304">hub HTTP :8080 — Bearer token</text>
+    <line class="hair" x1="414" y1="313" x2="636" y2="313"/>
+    <text xml:space="preserve" class="mns" x="414" y="333">GET</text>    <text xml:space="preserve" class="mns" x="478" y="333">/status</text>       <text xml:space="preserve" class="tx" x="566" y="333">not proxied</text>
+    <text xml:space="preserve" class="mns" x="414" y="352">GET</text>    <text xml:space="preserve" class="mns" x="478" y="352">/files</text>
+    <text xml:space="preserve" class="mns" x="414" y="371">GET</text>    <text xml:space="preserve" class="mns" x="478" y="371">/files/content</text>
+    <text xml:space="preserve" class="mns" x="414" y="390">PUT</text>    <text xml:space="preserve" class="mns" x="478" y="390">/files/content</text>
+    <text xml:space="preserve" class="mns" x="414" y="409">DELETE</text> <text xml:space="preserve" class="mns" x="478" y="409">/files/content</text>
+    <text xml:space="preserve" class="mns" x="414" y="428">POST</text>   <text xml:space="preserve" class="mns" x="478" y="428">/files/folder</text>
+    <text xml:space="preserve" class="mns" x="414" y="447">POST</text>   <text xml:space="preserve" class="mns" x="478" y="447">/files/move</text>
+    <text xml:space="preserve" class="tx" x="414" y="466">every /files call counts as activity</text>
+
+    <text xml:space="preserve" class="tx" x="402" y="496">ClusterIP-only — never on the NFS Service</text>
+    <text xml:space="preserve" class="tx" x="402" y="512">/status is NOT activity, and never proxied</text>
 
     <line class="ln-blue" x1="440" y1="622" x2="474" y2="622" marker-end="url(#p1-ab)"/>
     <text xml:space="preserve" class="tl" x="486" y="626">NFS data plane</text>
@@ -310,8 +319,8 @@
     <text xml:space="preserve" class="tx ctr" x="534" y="568">hard mount · nconnect ≥ 2, always</text>
     <text xml:space="preserve" class="tx ctr c-ink" x="534" y="590">no auth on 2049 — the network is the boundary</text>
 
-    <polyline class="ln-violet" points="648,196 742,196 742,302 852,302" marker-end="url(#p1-av)"/>
-    <text xml:space="preserve" class="tx ctr c-violet" x="695" y="188">HTTPS · Bearer</text>
+    <polyline class="ln-violet" points="648,234 742,234 742,302 852,302" marker-end="url(#p1-av)"/>
+    <text xml:space="preserve" class="tx ctr c-violet" x="695" y="226">HTTPS · Bearer</text>
     <line class="ln-violet dash" x1="648" y1="302" x2="742" y2="302" opacity="0.55"/>
 
   </svg>
@@ -494,6 +503,7 @@
     <text xml:space="preserve" class="mns" x="1120" y="756">poll  until .status.phase == Ready</text>
     <text xml:space="preserve" class="mns" x="1120" y="776">read  .status.address, .status.serverId</text>
     <text xml:space="preserve" class="tx" x="1120" y="796">a changed serverId means a fresh PVC — remount</text>
+    <text xml:space="preserve" class="tx c-violet" x="1120" y="814">with a gateway in front, the middle three are one POST …/wake</text>
   </svg>
     </figure>
     <p class="caption"><b>Derive the share's name from the project id</b> (<code>fs-&lt;project-id&gt;</code>) and label it <code>flint.io/project-id</code> — that is what makes ensure-live idempotent: two front-door replicas racing a first touch issue the same create, one gets <code>409 AlreadyExists</code>, and both proceed.
