@@ -72,6 +72,11 @@ const REQUEUE_BLOCKED: Duration = Duration::from_secs(30);
 /// objects on a 300s beat to conclude nothing had happened.
 const REQUEUE_PARKED: Duration = Duration::from_secs(1800);
 
+/// The hub's default `terminationGracePeriodSeconds` (see
+/// `render::Defaults`). The reclaim follow-up must be well inside it.
+#[cfg(test)]
+const RENDER_GRACE_FLOOR: Duration = Duration::from_secs(120);
+
 /// How long a settled share may be left alone.
 ///
 /// For a share with the idle ladder armed, this interval IS the
@@ -1277,10 +1282,15 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
     // Driven from here rather than inside the decision because it has
     // to happen on a LATER reconcile: the hub needs its whole
     // termination grace period to flush and release the epoch.
-    if idle::state_of(&share) == IdleState::Hibernated
-        && reclaim_hibernated_disk(&ctx, &share, &ns, &names, Some(&dep)).await?
-    {
-        return Ok(Action::requeue(REQUEUE_SETTLED));
+    if idle::state_of(&share) == IdleState::Hibernated {
+        // `Draining` must come back soon: falling through parked the
+        // share at REQUEUE_PARKED still holding the disk it had just
+        // announced it was releasing. `Idle` (adopted / already gone /
+        // a wake pending) falls through to the ladder, exactly as before.
+        let outcome = reclaim_hibernated_disk(&ctx, &share, &ns, &names, Some(&dep)).await?;
+        if let Some(after) = requeue_after_reclaim(outcome) {
+            return Ok(Action::requeue(after));
+        }
     }
 
     // --- 5b. The idle ladder --------------------------------------------
@@ -2237,6 +2247,45 @@ async fn set_idle_state(
     Ok(())
 }
 
+/// What one hibernate-reclaim attempt concluded.
+///
+/// This was a `bool`, and the bool could not carry the one distinction
+/// that decides how soon to come back: "the pod is still draining" and
+/// "there is nothing here to do" were both `false`. The caller parked
+/// on either, so a drain that outlived the single 15s follow-up left the
+/// disk allocated until `REQUEUE_PARKED` (1800s) — with nothing
+/// scheduled to notice the pod had gone, because Pods are not watched.
+/// Measured on runbu 2026-08-22: `Hibernated` at 19:44:21, pod gone
+/// ~19:44:53, PVC still `Bound` eleven minutes later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReclaimOutcome {
+    /// The claim was deleted on this pass.
+    Deleted,
+    /// The hub pod still mounts the claim. The drain is sized by
+    /// `terminationGracePeriodSeconds` — 120s by default, deliberately,
+    /// so a real flush can finish — which is far longer than the 15s
+    /// follow-up `verify_and_hibernate` schedules. So this has to be
+    /// re-checked soon rather than parked.
+    Draining,
+    /// Nothing for the operator to do: the claim is adopted (it is the
+    /// user's), a wake is already pending, or it is already gone.
+    Idle,
+}
+
+/// How soon to come back after one reclaim attempt.
+///
+/// `None` = nothing scheduled here; the caller's normal ladder requeue
+/// applies (which parks a `Hibernated` share at `REQUEUE_PARKED`).
+/// Pulled out of the match so the rule that actually broke — never park
+/// while the drain is still in flight — is asserted rather than implied.
+fn requeue_after_reclaim(o: ReclaimOutcome) -> Option<Duration> {
+    match o {
+        ReclaimOutcome::Deleted => Some(REQUEUE_SETTLED),
+        ReclaimOutcome::Draining => Some(REQUEUE_PROGRESS),
+        ReclaimOutcome::Idle => None,
+    }
+}
+
 /// Delete a hibernated share's PVC, once its pod is genuinely gone.
 ///
 /// Separate from the decision above and driven from the main apply
@@ -2251,11 +2300,11 @@ async fn reclaim_hibernated_disk(
     ns: &str,
     names: &render::Names,
     dep: Option<&Deployment>,
-) -> Result<bool> {
+) -> Result<ReclaimOutcome> {
     // Adopted claims are the user's. The operator did not create it and
     // does not get to delete it.
     if names.claim_is_adopted {
-        return Ok(false);
+        return Ok(ReclaimOutcome::Idle);
     }
     // A wake landed between the hibernate decision and this reclaim.
     // The data is in the bucket either way — the verification proved
@@ -2263,7 +2312,7 @@ async fn reclaim_hibernated_disk(
     // only turn a pod-start wake into a full DR import. Let the ladder
     // process the request instead.
     if idle::requested_at(share).is_some() {
-        return Ok(false);
+        return Ok(ReclaimOutcome::Idle);
     }
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
     let all = pods.list(&ListParams::default()).await?.items;
@@ -2272,11 +2321,11 @@ async fn reclaim_hibernated_disk(
         .any(|p| pod_is_ours(dep, p) && pod_mounts_claim(p, &names.claim));
     if still_running {
         // Draining. The grace period is sized for a real flush.
-        return Ok(false);
+        return Ok(ReclaimOutcome::Draining);
     }
     let claims: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), ns);
     if get_opt(claims.get(&names.claim)).await?.is_none() {
-        return Ok(false); // already reclaimed
+        return Ok(ReclaimOutcome::Idle); // already reclaimed
     }
     claims.delete(&names.claim, &Default::default()).await?;
     let note = format!(
@@ -2286,7 +2335,7 @@ async fn reclaim_hibernated_disk(
     );
     warn!(share = %share.name_any(), "{note}");
     event(ctx, share, EventType::Normal, "DiskReclaimed", &note).await;
-    Ok(true)
+    Ok(ReclaimOutcome::Deleted)
 }
 
 /// Find this share's hub pod and ask it for `/status`.
@@ -2814,6 +2863,38 @@ mod tests {
         );
         s.metadata.namespace = Some("ws".into());
         s
+    }
+
+    /// The hibernate reclaim needs a LATER reconcile, and for a while
+    /// nothing scheduled one: a drain still in flight fell through to
+    /// the ladder, which parks a `Hibernated` share at `REQUEUE_PARKED`
+    /// (1800s). Nothing rescued it — Pods are not watched, so the hub
+    /// pod finally going away raises no event. Measured on runbu
+    /// 2026-08-22: `Hibernated` at 19:44:21, pod gone ~19:44:53, PVC
+    /// still Bound eleven minutes later; one forced reconcile deleted it
+    /// in under 200ms. The grace period is 120s by default, so the lone
+    /// 15s follow-up loses that race essentially always.
+    #[test]
+    fn a_draining_reclaim_is_never_parked() {
+        assert_eq!(
+            requeue_after_reclaim(ReclaimOutcome::Draining),
+            Some(REQUEUE_PROGRESS),
+            "a drain in flight must be re-checked promptly, not parked"
+        );
+        assert_eq!(
+            requeue_after_reclaim(ReclaimOutcome::Deleted),
+            Some(REQUEUE_SETTLED)
+        );
+        assert_eq!(
+            requeue_after_reclaim(ReclaimOutcome::Idle),
+            None,
+            "adopted / already-gone / wake-pending still falls through to the ladder"
+        );
+        assert!(
+            REQUEUE_PROGRESS < RENDER_GRACE_FLOOR,
+            "the follow-up must be well inside a default termination grace period, \
+             or the reclaim keeps missing the drain"
+        );
     }
 
     #[test]
