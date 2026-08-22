@@ -80,6 +80,17 @@ pub struct Space {
     free: AtomicU64,
     /// Raw f_bavail × frsize (reserve NOT yet subtracted).
     avail_raw: AtomicU64,
+    /// Bytes admitted by [`admit_bytes`] since the last gauge refresh.
+    ///
+    /// The gauge is a 2 s snapshot, and a fast writer outruns it: the
+    /// D8 drill leg put 600 MiB onto 539 MiB free, got 201 on every
+    /// chunk, drove `df` to 0 and consumed the whole reserve with
+    /// `nospcWriteRefusals` still 0 — because each ~1 MiB WRITE was
+    /// admitted against a snapshot that had not yet seen its
+    /// predecessors. `admit_warm` sixty lines below already carries
+    /// exactly this accounting for bulk hydration (its `pending`
+    /// argument); demand writes had none.
+    admitted_since_refresh: AtomicU64,
     files_total: AtomicU64,
     files_free: AtomicU64,
     files_avail: AtomicU64,
@@ -115,6 +126,7 @@ pub fn configure(cfg: SpaceConfig) -> std::io::Result<Arc<Space>> {
         total: AtomicU64::new(0),
         free: AtomicU64::new(0),
         avail_raw: AtomicU64::new(0),
+        admitted_since_refresh: AtomicU64::new(0),
         files_total: AtomicU64::new(0),
         files_free: AtomicU64::new(0),
         files_avail: AtomicU64::new(0),
@@ -157,10 +169,21 @@ pub fn admit_bytes(path: &Path, len: u64) -> Result<(), NoSpace> {
     if !path.starts_with(&s.cfg.root) {
         return Ok(());
     }
-    if s.headroom() >= len.max(4096) {
+    let need = len.max(4096);
+    // The cached gauge must cover this write PLUS everything admitted
+    // since it was taken. Without that second term a writer faster than
+    // the 2 s refresher admits straight through the reserve (D8).
+    if s.admits_from_cache(need) {
+        s.note_admitted(need);
         return Ok(());
     }
-    if headroom_for_refusal(&s) >= len.max(4096) {
+    // Deliberately re-checked WITHOUT `inflight`: the refresh above
+    // reads real numbers that already include those writes, so adding
+    // the tally again would double-count and refuse writes that fit.
+    // The tally's whole job is to force this statvfs early enough —
+    // it must never be the thing that decides a refusal.
+    if headroom_for_refusal(&s) >= need {
+        s.note_admitted(need);
         return Ok(());
     }
     meter::bump(Counter::NospcWriteRefusals);
@@ -289,6 +312,20 @@ impl Space {
             >= len
     }
 
+    /// The cached-gauge half of [`admit_bytes`]: does the snapshot
+    /// cover this write ON TOP OF everything admitted since it was
+    /// taken? Split out so the D8 regression can be exercised without
+    /// installing a process-global gauge — the suite runs in parallel.
+    fn admits_from_cache(&self, need: u64) -> bool {
+        let inflight = self.admitted_since_refresh.load(Ordering::Relaxed);
+        self.headroom() >= need.saturating_add(inflight)
+    }
+
+    /// Record bytes this admission is about to allow.
+    fn note_admitted(&self, need: u64) {
+        self.admitted_since_refresh.fetch_add(need, Ordering::Relaxed);
+    }
+
     fn admit_warm_after_refresh(&self, len: u64, pending: u64) -> bool {
         let add = len.saturating_add(pending);
         if self.headroom() < add {
@@ -325,6 +362,9 @@ impl Space {
         self.total.store(total, Ordering::Relaxed);
         self.free.store(free, Ordering::Relaxed);
         self.avail_raw.store(avail, Ordering::Relaxed);
+        // This reading already accounts for everything admitted before
+        // it, so the in-flight tally starts again from here.
+        self.admitted_since_refresh.store(0, Ordering::Relaxed);
         self.files_total.store(sv.files() as u64, Ordering::Relaxed);
         self.files_free.store(sv.files_free() as u64, Ordering::Relaxed);
         self.files_avail.store(sv.files_available() as u64, Ordering::Relaxed);
@@ -467,6 +507,7 @@ mod tests {
             total: AtomicU64::new(0),
             free: AtomicU64::new(0),
             avail_raw: AtomicU64::new(0),
+            admitted_since_refresh: AtomicU64::new(0),
             files_total: AtomicU64::new(0),
             files_free: AtomicU64::new(0),
             files_avail: AtomicU64::new(0),
@@ -565,6 +606,71 @@ mod tests {
         assert!(v.total_bytes > 0, "statvfs must report a real filesystem size");
         assert!(v.avail_bytes > 0 && v.avail_bytes <= v.total_bytes);
         assert!(v.files_total > 0);
+    }
+
+    /// D8, the drill leg that put 600 MiB onto 539 MiB free and got
+    /// **201 on every chunk** — `df` to 0, the whole reserve gone,
+    /// `nospcWriteRefusals` still 0.
+    ///
+    /// The gauge is a 2 s snapshot and a streaming PUT arrives as many
+    /// small WRITEs, so every chunk was measured against a reading that
+    /// had not yet seen its predecessors. This asserts the cached half
+    /// STOPS admitting once the snapshot's headroom is spoken for —
+    /// which is what forces the real statvfs that then refuses.
+    #[test]
+    fn d8_a_fast_writer_cannot_outrun_the_stale_gauge() {
+        const MIB: u64 = 1024 * 1024;
+        let dir = tempfile::TempDir::new().unwrap();
+        // The drill's exact shape: 539 MiB avail, 256 MiB reserve, so
+        // 283 MiB of real headroom.
+        let s = local(cfg(dir.path(), 256 * MIB));
+        s.force_gauge(1024 * MIB, 539 * MIB);
+        assert_eq!(s.headroom(), 283 * MIB);
+
+        // 600 × 1 MiB, and the gauge NEVER refreshes — that is the
+        // point, the writer is faster than the refresher.
+        let mut admitted = 0u64;
+        for _ in 0..600 {
+            if !s.admits_from_cache(MIB) {
+                break;
+            }
+            s.note_admitted(MIB);
+            admitted += MIB;
+        }
+
+        assert_eq!(
+            admitted,
+            283 * MIB,
+            "the cached gauge admitted {admitted} bytes against 283 MiB of headroom — \
+             before the in-flight tally this was the full 600 MiB and the reserve was gone"
+        );
+        assert!(
+            !s.admits_from_cache(MIB),
+            "once headroom is spoken for the cache must stop admitting, so the next \
+             write pays for a real statvfs instead of riding a stale reading"
+        );
+    }
+
+    /// The tally must never be what refuses a write — only what forces
+    /// the statvfs early. A real reading already includes those bytes,
+    /// so counting them again would refuse writes that genuinely fit.
+    #[test]
+    fn the_inflight_tally_resets_on_a_real_reading() {
+        const MIB: u64 = 1024 * 1024;
+        let dir = tempfile::TempDir::new().unwrap();
+        let s = local(cfg(dir.path(), 0));
+        s.force_gauge(1024 * MIB, 100 * MIB);
+        s.note_admitted(100 * MIB);
+        assert!(!s.admits_from_cache(MIB), "headroom is fully spoken for");
+
+        // A real statvfs over the (empty) temp dir: whatever it reads,
+        // the tally starts again from it.
+        s.refresh();
+        assert_eq!(
+            s.admitted_since_refresh.load(Ordering::Relaxed),
+            0,
+            "a fresh reading already accounts for prior admissions"
+        );
     }
 
     #[test]
