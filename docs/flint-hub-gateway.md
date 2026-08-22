@@ -410,6 +410,16 @@ deletes the PVC — every stateid the client holds then refers to a server
 generation that no longer exists. A changed `serverId` means *remount*,
 not resume.
 
+⚠️ **It can be absent, and absent is not "changed".** The operator
+writes `status.serverId` from its own `/status` poll of the hub, so
+immediately after a wake the field may not be populated yet — the drill
+sees exactly this, a `/wake` that returns a good `address` and no
+`serverId`. Treat it the way the gateway treats `hubPhase`: absent means
+NOT OBSERVED. Compare two values you actually have; never treat
+`None → Some(x)` as a generation change, or every first wake becomes a
+spurious remount. If you need certainty before trusting old handles,
+poll `/wake` again until the field appears.
+
 **`keepaliveSecs`**, and the `mountWarning` beside it, are the sharp
 edge. The idle ladder suspends when two signals agree: the wake
 annotation is stale **and** the hub's own activity clock is quiet. An
