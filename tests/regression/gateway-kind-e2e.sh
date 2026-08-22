@@ -652,8 +652,25 @@ if [ -n "$WOKE" ]; then
   ELAPSED=$((T1 - T0))
   ANN=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-models" -o json \
     | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" flint.io/requested-at)
-  [ -n "$ANN" ] || fail "the gateway did not arm flint.io/requested-at — RBAC or the patch is wrong"
-  note "wake armed at $ANN; the request took ${ELAPSED}s and answered $code"
+  note "request took ${ELAPSED}s, answered $code; requested-at='$ANN'"
+  if [ -z "$ANN" ]; then
+    # EVIDENCE BEFORE THE VERDICT. This assertion fired twice with
+    # nothing to look at and the cluster already torn down, which sent
+    # the investigation to the wrong place both times. The gateway logs
+    # "wake requested" on success and "wake request failed" with the API
+    # error on failure — that one line is the whole answer.
+    echo "  ── what the gateway answered ──"; gwbody | head -c 600; echo
+    echo "  ── gateway log ──"
+    kubectl -n "$OPNS" logs -l app.kubernetes.io/name=flint-lite-operator-gateway \
+      --tail=40 2>/dev/null
+    echo "  ── the share, as the gateway would have seen it ──"
+    kubectl -n "$NS" get flintshare "fs-$PROJECT-models" \
+      -o jsonpath='{.metadata.annotations}{"\n"}{.status.phase}{"\n"}' 2>/dev/null
+    echo "  ── can the gateway SA patch it? ──"
+    kubectl auth can-i patch flintshares.flint.io \
+      --as="system:serviceaccount:$OPNS:flint-lite-operator-gateway" -n "$NS"
+    fail "the gateway did not arm flint.io/requested-at"
+  fi
   case "$code" in
     200) pass "a parked volume was woken BY A FILE REQUEST and served in ${ELAPSED}s" ;;
     503) grep -q 'Waking' /tmp/gw-body.txt \
