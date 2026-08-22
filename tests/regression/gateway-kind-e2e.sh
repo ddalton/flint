@@ -32,6 +32,29 @@
 # target and leg 11 mounts it from a pod, then checks that the file API
 # and the mount see one filesystem.
 #
+# Legs 13-15 close three more, all of them properties of the RUNNING
+# process rather than of the routing table:
+#
+#   13 MEMORY UNDER LOAD. `stream_body` and `relay` claim never to hold
+#      a body. A container limit several times smaller than the body
+#      turns that claim into a pass/fail: buffer it and the kernel ends
+#      the argument. Paired with a round-trip checksum, because flat
+#      memory is also what transferring nothing looks like.
+#   14 THE COLD-READ 503. A download of an evicted file makes the hub
+#      pull it back from S3 and, past `hydrateWaitSecs`, answer 503 with
+#      a `Retry-After`. Two ways to get this wrong: drop the header, or
+#      time out first and substitute a 502 — after which a browse UI
+#      cannot tell "coming, ask again" from "this hub is broken".
+#      `header_deadline` exists for the second and had never run.
+#   15 NETWORKPOLICY, ENFORCED. The operator chart adds a gateway peer
+#      to the hubs' 8080 rule automatically. Until this leg that peer
+#      had only ever been RENDERED, and it fails CLOSED — a wrong
+#      selector times out every file request in the fleet while the
+#      policy still reads correctly. kind's kindnetd enforces
+#      NetworkPolicy as of v0.32.0, so this needs no second CNI; on a
+#      rig whose CNI ignores it the leg reports INCONCLUSIVE rather
+#      than claiming a security property it did not observe.
+#
 # On the two-hub shape: Nothing in the operator ties a project to one
 # share — `conflict::overlaps` keys uniqueness on the bucket prefix
 # subtree and nothing reads `flint.io/project-id` — so two volumes on
@@ -62,6 +85,15 @@ HUBIMG=flint-lite-dev:local
 OPIMG=flint-lite-operator-dev:local
 BUCKET=flint-gw-drill
 PROJECT=proj-a
+# A SECOND project, one volume, for the bulk-transfer and cold-read
+# legs. Separate so that nothing legs 1-12 assert about proj-a's volume
+# set can be disturbed by it.
+PROJECT2=proj-b
+# The body legs 13-14 push through the proxy, in MiB. Must be a
+# multiple of 8 (the seed block below) and comfortably larger than
+# GW_MEM_LIMIT or leg 13 cannot fail.
+BULK_MB=${BULK_MB:-256}
+GW_MEM_LIMIT=${GW_MEM_LIMIT:-128Mi}
 MINIO_USER=flintdrill
 MINIO_PASS=flintdrill123
 PF_S3=39100
@@ -70,6 +102,13 @@ PF_S3_PID=""
 PF_GW_PID=""
 KUBECONFIG_FILE="$(mktemp -t flint-gw-kubeconfig.XXXXXX)"
 export KUBECONFIG="$KUBECONFIG_FILE"
+
+# macOS ships `shasum`, Linux ships `sha256sum`; this drill is run on
+# both.
+sha() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
 
 say()  { echo; echo "── $*"; }
 pass() { echo "  ✓ $*"; }
@@ -96,35 +135,84 @@ cleanup() {
 }
 trap cleanup EXIT
 
-pf_s3() {
-  [ -n "$PF_S3_PID" ] && kill "$PF_S3_PID" 2>/dev/null
-  kubectl -n "$NS" port-forward svc/minio "$PF_S3:9000" >/dev/null 2>&1 &
-  PF_S3_PID=$!
-  for _ in $(seq 1 20); do
-    curl -sf "http://127.0.0.1:$PF_S3/minio/health/live" >/dev/null && return 0
+# THE PORT-FORWARD IS RESTARTED, NOT JUST WAITED ON.
+#
+# `kubectl port-forward` exits on its own when it is started against a
+# pod that is still settling — and once it has exited, polling its port
+# for another twenty seconds cannot do anything but fail. That is a
+# whole run lost to a rig fault that looks like a broken product: run
+# 11 of this drill died at "MinIO port-forward never became healthy"
+# with MinIO Running, 1/1, and answering /minio/health/live perfectly
+# well the moment anyone asked it by hand.
+#
+# So the inner loop gives up the moment the forwarder is gone, and the
+# outer loop starts a new one.
+pf_wait() {   # pf_wait <pid-var-name> <health url> <tries>
+  local pid="$1" url="$2" tries="$3" _
+  for _ in $(seq 1 "$tries"); do
+    curl -sf "$url" >/dev/null && return 0
+    kill -0 "$pid" 2>/dev/null || return 1   # forwarder died; caller respawns
     sleep 1
   done
-  fail "MinIO port-forward never became healthy"
+  return 1
+}
+
+pf_s3() {
+  [ -n "$PF_S3_PID" ] && kill "$PF_S3_PID" 2>/dev/null
+  for _ in 1 2 3; do
+    kubectl -n "$NS" port-forward svc/minio "$PF_S3:9000" >/dev/null 2>&1 &
+    PF_S3_PID=$!
+    pf_wait "$PF_S3_PID" "http://127.0.0.1:$PF_S3/minio/health/live" 20 && return 0
+    kill "$PF_S3_PID" 2>/dev/null
+  done
+  kubectl -n "$NS" get pod -l app=minio -o wide
+  fail "MinIO port-forward never became healthy after three attempts"
 }
 
 pf_gw() {
   [ -n "$PF_GW_PID" ] && kill "$PF_GW_PID" 2>/dev/null
-  kubectl -n "$OPNS" port-forward svc/flint-lite-operator-gateway "$PF_GW:8090" \
-    >/dev/null 2>&1 &
-  PF_GW_PID=$!
-  for _ in $(seq 1 30); do
-    curl -sf "http://127.0.0.1:$PF_GW/healthz" >/dev/null && return 0
-    sleep 1
+  for _ in 1 2 3; do
+    kubectl -n "$OPNS" port-forward svc/flint-lite-operator-gateway "$PF_GW:8090" \
+      >/dev/null 2>&1 &
+    PF_GW_PID=$!
+    pf_wait "$PF_GW_PID" "http://127.0.0.1:$PF_GW/healthz" 30 && return 0
+    kill "$PF_GW_PID" 2>/dev/null
   done
-  fail "gateway port-forward never became healthy"
+  kubectl -n "$OPNS" get pod -l app.kubernetes.io/name=flint-lite-operator-gateway -o wide
+  fail "gateway port-forward never became healthy after three attempts"
 }
 
-# curl through the gateway. Prints "<status> <body>".
+# THE DRILL'S OWN HOP IS NOT THE PRODUCT, AND MUST NOT BE REPORTED AS IT.
+#
+# `kubectl port-forward` binds ONE POD and dies with it. Legs 14 and 15
+# each roll the gateway Deployment, so the pod this forward is pinned to
+# is replaced underneath it — and every subsequent request then answers
+# HTTP 000, which is curl saying it never got a response at all.
+#
+# That cost a run: leg 15 reported "the gateway can no longer reach the
+# hub under the policy — the auto-added peer does not match", printed
+# the policy and the pod labels side by side as evidence, and the two
+# MATCHED. The gateway was serving that request in 12ms the whole time.
+# A harness that blames the product for its own broken transport is
+# worse than no harness.
+#
+# So 000 is never an answer here. Re-establish and ask again; a second
+# 000 is reported as what it is.
+gw_alive() { curl -sf --max-time 5 "http://127.0.0.1:$PF_GW/healthz" >/dev/null || pf_gw; }
+
+# curl through the gateway. Prints the status; body lands in gw-body.
 gw() {
   local method="$1" path="$2"; shift 2
-  curl -s -o /tmp/gw-body.txt -w '%{http_code}' -X "$method" \
-    -H "Authorization: Bearer $GW_TOKEN" "$@" \
-    "http://127.0.0.1:$PF_GW$path"
+  local code
+  code=$(curl -s -o /tmp/gw-body.txt -w '%{http_code}' -X "$method" \
+    -H "Authorization: Bearer $GW_TOKEN" "$@" "http://127.0.0.1:$PF_GW$path")
+  if [ "$code" = "000" ]; then
+    note "no response at all — the drill's port-forward dropped; re-establishing"
+    pf_gw
+    code=$(curl -s -o /tmp/gw-body.txt -w '%{http_code}' -X "$method" \
+      -H "Authorization: Bearer $GW_TOKEN" "$@" "http://127.0.0.1:$PF_GW$path")
+  fi
+  echo "$code"
 }
 gwbody() { cat /tmp/gw-body.txt; }
 
@@ -161,7 +249,9 @@ FROM alpine:3.20
 # curl is for the TEST, not the product: the anti-vacuity control in
 # leg 5 talks to the hub DIRECTLY, and alpine's BusyBox wget cannot
 # issue PUT or DELETE at all. The shipped hub image has no curl.
-RUN apk add --no-cache curl ca-certificates
+# netcat is for leg 15: NetworkPolicy closes 2049 as well as 8080, and
+# a TCP probe is the only way to see that without a kernel mount.
+RUN apk add --no-cache curl ca-certificates netcat-openbsd
 COPY flint-pnfs-mds /usr/local/bin/flint-pnfs-mds
 EOF
 cat >"$IMGDIR/Dockerfile.op" <<'EOF'
@@ -245,14 +335,31 @@ ROOT_KEY="drill-root-key-0123456789abcdef0123456789abcdef"
 kubectl -n "$OPNS" create secret generic flint-gateway-root \
   --from-literal=key="$ROOT_KEY" >/dev/null || fail "root key Secret refused"
 
-helm install flint-lite-operator "$OP_CHART" -n "$OPNS" \
-  --set image.ref="$OPIMG" --set hubImage="$HUBIMG" \
-  --set gateway.enabled=true \
-  --set gateway.tokenSecretRef=flint-gateway-token \
-  --set gateway.rootKeySecretRef=flint-gateway-root \
-  --set gateway.replicas=1 \
-  --set gateway.wakeWaitSecs=60 \
-  >/tmp/gw-e2e-helm.log 2>&1 || { tail -25 /tmp/gw-e2e-helm.log; fail "helm install failed"; }
+# ONE function for every helm call in this drill, carrying the WHOLE
+# flag set each time. Legs 14 and 15 both upgrade this release, and
+# `--reuse-values` is never used: it reads the OLD chart's computed
+# values, which has silently reverted a knob in this repo's drills
+# before — here it would drop `gateway.enabled` and take the rest of
+# the run with it.
+#
+# THE MEMORY LIMIT IS PART OF THE TEST. Leg 13 pushes a body several
+# times this size through the proxy; a gateway that buffered it would
+# be OOMKilled, and that is the whole assertion. The chart's default
+# (512Mi) is too generous for the drill's file size to be decisive.
+helm_up() {   # helm_up [extra --set flags...]
+  helm upgrade --install flint-lite-operator "$OP_CHART" -n "$OPNS" \
+    --set image.ref="$OPIMG" --set hubImage="$HUBIMG" \
+    --set gateway.enabled=true \
+    --set gateway.tokenSecretRef=flint-gateway-token \
+    --set gateway.rootKeySecretRef=flint-gateway-root \
+    --set gateway.replicas=1 \
+    --set gateway.wakeWaitSecs=60 \
+    --set gateway.resources.requests.cpu=100m \
+    --set gateway.resources.requests.memory=64Mi \
+    --set gateway.resources.limits.memory="$GW_MEM_LIMIT" \
+    "$@" >/tmp/gw-e2e-helm.log 2>&1
+}
+helm_up || { tail -25 /tmp/gw-e2e-helm.log; fail "helm install failed"; }
 kubectl -n "$OPNS" rollout status deployment/flint-lite-operator --timeout=120s >/dev/null 2>&1 \
   || { kubectl -n "$OPNS" describe pod -l app.kubernetes.io/name=flint-lite-operator | tail -20
        fail "operator never became Ready"; }
@@ -319,6 +426,12 @@ kubectl -n "$NS" create secret generic tok-data --from-literal=token="$TOK_DATA"
   || fail "token Secret refused"
 kubectl -n "$NS" create secret generic tok-models --from-literal=token="$TOK_MODELS" >/dev/null \
   || fail "token Secret refused"
+TOK_BULK=$(derive "$PROJECT2/bulk/")
+kubectl -n "$NS" create secret generic tok-bulk --from-literal=token="$TOK_BULK" >/dev/null \
+  || fail "token Secret refused"
+TOK_COLD=$(derive "$PROJECT2/cold/")
+kubectl -n "$NS" create secret generic tok-cold --from-literal=token="$TOK_COLD" >/dev/null \
+  || fail "token Secret refused"
 
 mkshare() {  # mkshare <name> <volume>
   kubectl -n "$NS" apply -f - >/dev/null <<EOF || fail "FlintShare $1 refused"
@@ -349,7 +462,87 @@ EOF
 mkshare "fs-$PROJECT-data" data
 mkshare "fs-$PROJECT-models" models
 
-for s in "fs-$PROJECT-data" "fs-$PROJECT-models"; do
+# ── a SECOND project, two volumes, for legs 13 and 14 ────────────────
+#
+# Separate from proj-a so nothing legs 1-12 assert about its volume set
+# can be disturbed, and split in two because the two legs want opposite
+# things from the tier: leg 13 needs a file that STAYS put while a
+# ${BULK_MB} MiB round trip runs over it, and leg 14 needs one that is
+# guaranteed COLD.
+#
+# WHY `watermarkPct: 1` AND NOT A SIZE. The obvious version of this
+# picks a watermark from the claim size — 1Gi disk, a ${BULK_MB} MiB
+# file, put the mark in between. That is wrong here, and quietly:
+# kind's default StorageClass is local-path, which backs a PVC with a
+# hostPath and does not enforce `persistence.size` at all. The hub's
+# `statvfs` therefore reports the NODE's filesystem (~58 GiB, ~8% used
+# on a fresh Docker VM), where a ${BULK_MB} MiB file moves the used
+# percentage by less than half a point and no size-derived mark would
+# ever fire. `1` is above no real filesystem's floor, so the pass is
+# permanently armed and evicts each file as soon as it is clean —
+# which is the property leg 14 actually needs. Demand hydration is
+# admitted on HEADROOM (`space::admit_hydration`), not on the
+# watermark, so an always-armed pass does not wedge the read back.
+#
+#   hydrateWaitSecs: 0        the FIRST Delay on a cold read is 503,
+#                             with no race to lose against a MinIO in
+#                             the same cluster. Leg 14b raises it.
+#   hydrateFetchParallel: 1   the cold-read fan-out is what makes a
+#                             real restore fast; off, a ${BULK_MB} MiB
+#                             whole-file GET is guaranteed to outlive
+#                             the one-second deadline leg 14b squeezes
+#                             the gateway down to.
+#   hydrateWarmAfterImport: false  otherwise the hub restart in leg 14b
+#                             bulk-restores the tree and the cold file
+#                             is warm again before anything asks.
+mkvol2() {  # mkvol2 <volume> <extra fileApi yaml> <extra settings yaml>
+  kubectl -n "$NS" apply -f - >/dev/null <<EOF || fail "FlintShare $1 refused"
+apiVersion: flint.io/v1alpha1
+kind: FlintShare
+metadata:
+  name: fs-$PROJECT2-$1
+  labels:
+    flint.io/project-id: $PROJECT2
+    flint.io/volume-id: $1
+spec:
+  bucket: $BUCKET
+  keyPrefix: $PROJECT2/$1/
+  endpoint: http://minio.$NS.svc:9000
+  region: us-east-1
+  credentialsSecretRef: flint-tier-s3
+  persistence:
+    size: 4Gi
+  monitoring:
+    enabled: true
+    fileApi:
+      enabled: true
+      tokenSecretRef: tok-$1
+$2
+  settings:
+    flushFloorSecs: 3
+$3
+EOF
+}
+# leg 13's volume: ordinary tier settings, so a published file is NOT
+# snatched out from under the round trip.
+mkvol2 bulk "" ""
+# leg 14's volume: always-armed eviction and a deliberately slow restore.
+mkvol2 cold "      hydrateWaitSecs: 0" "    watermarkPct: 1
+    ballastBytes: 0
+    hydrateFetchParallel: 1
+    hydrateWarmAfterImport: false"
+
+# A structural CRD PRUNES unknown fields SILENTLY, so read back the two
+# that leg 14 is built on. Getting either wrong turns the leg into a
+# wait for something that was never armed.
+GOT=$(kubectl -n "$NS" get flintshare "fs-$PROJECT2-cold" -o jsonpath='{.spec.settings.watermarkPct}')
+[ "$GOT" = "1" ] || fail "spec.settings.watermarkPct did not stick (got '$GOT') — pruned by the schema"
+GOT=$(kubectl -n "$NS" get flintshare "fs-$PROJECT2-cold" \
+  -o jsonpath='{.spec.monitoring.fileApi.hydrateWaitSecs}')
+[ "$GOT" = "0" ] || fail "spec.monitoring.fileApi.hydrateWaitSecs did not stick (got '$GOT')"
+
+for s in "fs-$PROJECT-data" "fs-$PROJECT-models" \
+         "fs-$PROJECT2-bulk" "fs-$PROJECT2-cold"; do
   for i in $(seq 1 60); do
     ph=$(kubectl -n "$NS" get flintshare "$s" -o jsonpath='{.status.phase}' 2>/dev/null)
     [ "$ph" = "Ready" ] && break
@@ -393,7 +586,7 @@ note "apiEndpoint $EP_DATA -> pod ip(s) $EPS"
 # A debug pod on the cluster network — the ONLY way to prove the hub
 # itself accepts the derived token, independently of the gateway.
 kubectl -n "$NS" run gwdebug --image="$HUBIMG" --restart=Never \
-  --command -- sleep 3600 >/dev/null 2>&1
+  --command -- sleep 10800 >/dev/null 2>&1
 kubectl -n "$NS" wait --for=condition=ready pod/gwdebug --timeout=120s >/dev/null 2>&1 \
   || fail "debug pod never became Ready"
 dbg() { kubectl -n "$NS" exec gwdebug -- sh -c "$1" 2>/dev/null; }
@@ -540,7 +733,11 @@ say "leg 7: a write through the gateway lands in the bucket under its OWN prefix
 # down before anyone could ask. The hub publishes its own recovery
 # point, so poll THAT: `rpo.dirtyFiles` going to zero with
 # `manifestCurrent` true is the hub saying the bytes are in the bucket.
-rpo() { dbg "curl -s '$EP_DATA/status'" | python3 "$REPO_ROOT/tests/regression/lib/hub-rpo.py"; }
+rpo_at() { dbg "curl -s '$1/status'" | python3 "$REPO_ROOT/tests/regression/lib/hub-rpo.py"; }
+rpo() { rpo_at "$EP_DATA"; }
+# One dotted field out of a hub's /status — see lib/hub-gauge.py for
+# why this is a file and not an inlined heredoc.
+gauge_at() { dbg "curl -s '$1/status'" | python3 "$REPO_ROOT/tests/regression/lib/hub-gauge.py" "$2"; }
 CLEAN=""
 for i in $(seq 1 40); do
   R=$(rpo)
@@ -799,13 +996,19 @@ kubectl -n "$NS" delete pod nfsclient --ignore-not-found >/dev/null 2>&1
 kubectl -n "$NS" apply -f - >/dev/null <<EOF || fail "client pod refused"
 apiVersion: v1
 kind: Pod
-metadata: { name: nfsclient }
+metadata:
+  name: nfsclient
+  # leg 15 opens a NetworkPolicy hole for exactly this pod and proves
+  # the hole admits it while the debug pod beside it stays shut out.
+  labels: { app: nfsclient }
 spec:
   restartPolicy: Never
   containers:
     - name: c
       image: alpine:3.20
-      command: ["sh","-c","apk add --no-cache nfs-utils >/dev/null 2>&1; sleep 3600"]
+      # netcat as well as the nfs client: leg 15 probes 2049 from this
+      # pod to prove the policy's nfsClientSelectors hole admits it.
+      command: ["sh","-c","apk add --no-cache nfs-utils netcat-openbsd >/dev/null 2>&1; sleep 10800"]
       securityContext:
         privileged: true
 EOF
@@ -869,7 +1072,488 @@ can() { kubectl auth can-i "$1" "$2" --as="$SA" ${3:+-n "$3"} 2>/dev/null; }
 [ "$(can get pods "$NS")" = "no" ] || fail "the gateway can read pods"
 pass "get/list/watch/patch on flintshares, and nothing else"
 
-# ── 13. summary ──────────────────────────────────────────────────────
+# Disarm the idle ladder leg 9 armed. Legs 13-15 count hub pods and
+# their restarts; a share that parks and wakes underneath them turns
+# that arithmetic into a coin flip, and the resulting failure would
+# read as "the NetworkPolicy killed a hub".
+kubectl -n "$NS" patch flintshare "fs-$PROJECT-models" --type=json \
+  -p '[{"op":"remove","path":"/spec/idle"}]' >/dev/null 2>&1
+
+# ── leg 13: a big body CROSSES the gateway, it does not sit in it ─────
+say "leg 13: a ${BULK_MB} MiB body crosses the gateway under a ${GW_MEM_LIMIT} limit"
+# THE CONTROL FOR THE WHOLE LEG, AND IT COMES FIRST. "The gateway was
+# not OOMKilled" is a statement about nothing at all if the container
+# has no limit, or a limit larger than the body. A values typo or a
+# chart edit would produce exactly that, and this leg would go green
+# while testing whether a machine with 16 GB can hold 256 MB.
+LIM=$(kubectl -n "$OPNS" get deploy flint-lite-operator-gateway \
+  -o jsonpath='{.spec.template.spec.containers[0].resources.limits.memory}')
+[ -n "$LIM" ] || fail "the gateway has NO memory limit — leg 13 cannot fail, so it proves nothing"
+LIM_MB=$(python3 -c "
+import re
+m = re.match(r'^(\d+)(Mi|Gi|M|G)?\$', '$LIM')
+mult = {'Mi': 1, 'Gi': 1024, 'M': 1, 'G': 1024}.get(m.group(2), 0) if m else 0
+print(int(m.group(1)) * mult if mult else 0)")
+[ "${LIM_MB:-0}" -gt 0 ] || fail "could not read the gateway's memory limit ('$LIM')"
+[ "$LIM_MB" -lt "$BULK_MB" ] \
+  || fail "the limit (${LIM_MB}Mi) is not smaller than the body (${BULK_MB}Mi) — a buffered body would FIT, so this leg cannot fail"
+note "limit ${LIM_MB}Mi vs a ${BULK_MB}Mi body — buffering either direction needs $(python3 -c "print(round($BULK_MB/$LIM_MB,1))")x the limit"
+
+# Incompressible-ish and cheap: an 8 MiB random block, repeated. Random
+# bytes matter here because the round-trip checksum below is the proof
+# that the transfer HAPPENED — and a body of zeros can be produced by
+# accident in more ways than one.
+dd if=/dev/urandom of=/tmp/gw-seed.bin bs=1048576 count=8 >/dev/null 2>&1 \
+  || fail "could not generate the seed block"
+: > /tmp/gw-bulk.bin
+for _ in $(seq 1 $((BULK_MB / 8))); do cat /tmp/gw-seed.bin >> /tmp/gw-bulk.bin; done
+SUM_IN=$(sha /tmp/gw-bulk.bin)
+SIZE_IN=$(wc -c < /tmp/gw-bulk.bin | tr -d ' ')
+note "body $SIZE_IN bytes, sha256 ${SUM_IN:0:16}…"
+
+gw_pod()      { kubectl -n "$OPNS" get pod -l app.kubernetes.io/name=flint-lite-operator-gateway \
+                  -o jsonpath='{.items[0].metadata.name}'; }
+gw_restarts() { kubectl -n "$OPNS" get pod -l app.kubernetes.io/name=flint-lite-operator-gateway \
+                  -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}'; }
+gw_lastterm() { kubectl -n "$OPNS" get pod -l app.kubernetes.io/name=flint-lite-operator-gateway \
+                  -o jsonpath='{.items[0].status.containerStatuses[0].lastState.terminated.reason}'; }
+# cgroup v2 first, then v1. Best effort: the NUMBER is informative, the
+# OOMKill is the assertion.
+gw_peak_mb()  { kubectl -n "$OPNS" exec "$(gw_pod)" -- sh -c \
+                  'cat /sys/fs/cgroup/memory.peak 2>/dev/null || cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null' \
+                  2>/dev/null | tr -d '\r\n' | awk 'NF{printf "%d", $1/1048576}'; }
+
+R0=$(gw_restarts); P0=$(gw_pod); PEAK0=$(gw_peak_mb)
+note "before: pod $P0 restarts=$R0 peak=${PEAK0:-?}Mi"
+
+T0=$(date +%s)
+code=$(gw PUT "/v1/projects/$PROJECT2/volumes/bulk/files/content?path=/bulk.bin" \
+  -H 'Content-Type: application/octet-stream' --data-binary @/tmp/gw-bulk.bin)
+T1=$(date +%s)
+R1=$(gw_restarts)
+if [ "$R1" != "$R0" ]; then
+  fail "the gateway container RESTARTED during a ${BULK_MB}Mi upload (restarts $R0 -> $R1, last termination: $(gw_lastterm)) — the request body is being buffered, not streamed"
+fi
+case "$code" in
+  200|201) ;;
+  *) echo "  ── gateway log ──"
+     kubectl -n "$OPNS" logs -l app.kubernetes.io/name=flint-lite-operator-gateway --tail=30 2>/dev/null
+     fail "the ${BULK_MB}Mi upload returned $code: $(gwbody)" ;;
+esac
+pass "PUT ${BULK_MB}Mi in $((T1 - T0))s, gateway not restarted (upload streams)"
+
+gw_alive
+T0=$(date +%s)
+code=$(curl -s -o /tmp/gw-bulk-out.bin -w '%{http_code}' \
+  -H "Authorization: Bearer $GW_TOKEN" \
+  "http://127.0.0.1:$PF_GW/v1/projects/$PROJECT2/volumes/bulk/files/content?path=/bulk.bin")
+T1=$(date +%s)
+R2=$(gw_restarts)
+if [ "$R2" != "$R0" ]; then
+  fail "the gateway container RESTARTED during a ${BULK_MB}Mi download (restarts $R0 -> $R2, last termination: $(gw_lastterm)) — the response body is being buffered, not streamed"
+fi
+[ "$code" = "200" ] || fail "the ${BULK_MB}Mi download returned $code"
+
+# THE ANTI-VACUITY GUARD. Flat memory is exactly what a gateway that
+# transferred NOTHING would also show. The round trip has to be
+# byte-for-byte, or "it streamed" is a claim about an empty pipe.
+SIZE_OUT=$(wc -c < /tmp/gw-bulk-out.bin | tr -d ' ')
+[ "$SIZE_OUT" = "$SIZE_IN" ] \
+  || fail "round trip returned $SIZE_OUT bytes, sent $SIZE_IN — the transfer is short, so the memory result means nothing"
+SUM_OUT=$(sha /tmp/gw-bulk-out.bin)
+[ "$SUM_OUT" = "$SUM_IN" ] || fail "round trip corrupted the body ($SUM_IN -> $SUM_OUT)"
+PEAK1=$(gw_peak_mb)
+note "after: restarts=$R2 peak=${PEAK1:-?}Mi (was ${PEAK0:-?}Mi)"
+if [ -n "$PEAK1" ] && [ "$PEAK1" -gt 0 ] 2>/dev/null; then
+  [ "$PEAK1" -lt "$BULK_MB" ] \
+    || fail "peak RSS ${PEAK1}Mi reached the body size — that is buffering"
+fi
+pass "${BULK_MB}Mi round trip is byte-identical, gateway peak ${PEAK1:-?}Mi under a ${LIM_MB}Mi limit"
+rm -f /tmp/gw-bulk-out.bin /tmp/gw-seed.bin
+
+# ── leg 14: a COLD read is a RELAYED 503, not a gateway 502 ──────────
+say "leg 14: a cold read relays the hub's 503 + Retry-After"
+EP_COLD=$(kubectl -n "$NS" get flintshare "fs-$PROJECT2-cold" -o jsonpath='{.status.apiEndpoint}')
+[ -n "$EP_COLD" ] || fail "the cold share published no apiEndpoint"
+
+# THREE files, and the reason is the whole shape of this leg.
+#
+# `bulk.bin` is the big one: leg 14b needs a restore slow enough to
+# outlive a one-second deadline. The two small probes exist so that the
+# gateway's question and the hub's control question are asked of
+# DIFFERENT FILES. A cold read triggers a restore, so two probes of the
+# same file are two different moments and the second one's answer says
+# nothing about the first — which is how the previous version of this
+# leg failed: it took the status from one request and the Retry-After
+# from another, and blamed the gateway for a header that may well have
+# belonged to a 200. Same mistake as 5122410.
+code=$(gw PUT "/v1/projects/$PROJECT2/volumes/cold/files/content?path=/bulk.bin" \
+  -H 'Content-Type: application/octet-stream' --data-binary @/tmp/gw-bulk.bin)
+case "$code" in 200|201) ;; *) fail "seeding the cold volume returned $code: $(gwbody)" ;; esac
+echo "probe-for-the-gateway" > /tmp/gw-probe.txt
+for f in probe-gw.bin probe-hub.bin; do
+  code=$(gw PUT "/v1/projects/$PROJECT2/volumes/cold/files/content?path=/$f" \
+    --data-binary @/tmp/gw-probe.txt)
+  case "$code" in 200|201) ;; *) fail "seeding $f returned $code: $(gwbody)" ;; esac
+done
+
+# Published first — the evict pass only takes CLEAN files, so a dirty
+# one sits hot forever and the leg would wait for a cold read that can
+# never happen.
+CLEAN=""
+for i in $(seq 1 60); do
+  case "$(rpo_at "$EP_COLD")" in *"rpoClean=True"*) CLEAN=1; break ;; esac
+  sleep 5
+done
+[ -n "$CLEAN" ] || {
+  dbg "curl -s '$EP_COLD/status'" | head -c 800; echo
+  fail "the cold volume never published ($(rpo_at "$EP_COLD"))"; }
+note "published: $(rpo_at "$EP_COLD")"
+
+# And now the always-armed watermark pass has to take it. Polled with a
+# budget and reported INCONCLUSIVE rather than failed if it does not:
+# eviction eligibility is the tier's business, not the gateway's, and a
+# hard failure here would send the reader after the wrong component.
+EVICTED=""
+for i in $(seq 1 36); do
+  N=$(gauge_at "$EP_COLD" tier.gauges.evictedFiles)
+  case "$N" in ''|0|1|2) ;; *) EVICTED=$N; break ;; esac
+  sleep 5
+done
+
+if [ -z "$EVICTED" ]; then
+  note "nothing was evicted within the budget — the cold-read leg is INCONCLUSIVE"
+  note "headroom=$(gauge_at "$EP_COLD" tier.gauges.headroomBytes) evicted=$(gauge_at "$EP_COLD" tier.gauges.evictedFiles)"
+  echo "  ── the hub's own view ──"; dbg "curl -s '$EP_COLD/status'" | head -c 900; echo
+  echo "  ── the tier config the operator rendered ──"
+  kubectl -n "$NS" get cm -l flint.io/share="fs-$PROJECT2-cold" -o yaml 2>/dev/null \
+    | grep -A 30 'tier' | head -35
+  COLD_INCONCLUSIVE=1
+else
+  note "the watermark pass evicted $EVICTED file(s) — every seeded file is now a stub"
+
+  # THE HEADLINE. hydrateWaitSecs is 0, so the hub answers the first
+  # NFS4ERR_DELAY with 503 + Retry-After. What is under test is that
+  # the GATEWAY hands BOTH back: a proxy that dropped the header, or
+  # that timed out first and substituted its own 502, leaves a browse
+  # UI unable to tell "coming, ask again" from "this hub is broken",
+  # and the only safe reading of a bare 503 is the second one.
+  #
+  # ONE REQUEST, CAPTURED WHOLE. Status, headers and body come out of
+  # the SAME exchange — reading the status from one call and the
+  # header from a second is how the previous version of this leg
+  # produced a failure nobody could attribute, after a 40-minute run
+  # that tore its own cluster down.
+  gw_full() {  # gw_full <path> -> prints "<status> <retry-after>"
+    local st ra
+    gw_alive
+    st=$(curl -s -D /tmp/gw-hdrs.txt -o /tmp/gw-body.txt -w '%{http_code}' \
+      -H "Authorization: Bearer $GW_TOKEN" "http://127.0.0.1:$PF_GW$1")
+    ra=$(tr -d '\r' < /tmp/gw-hdrs.txt | awk 'tolower($1)=="retry-after:"{print $2}')
+    echo "$st ${ra:-NONE}"
+  }
+  # Two calls, ONE exchange: the first makes the request and saves its
+  # headers in the pod, the second reads that file. Deliberately not one
+  # command producing "<status> <header>" — `$(...)` strips a trailing
+  # space, so a MISSING header would come back looking exactly like the
+  # status code, and the leg would report a value it never received.
+  hub_code() {
+    dbg "curl -s -D /tmp/h.txt -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer $TOK_COLD' '$EP_COLD$1'"
+  }
+  hub_ra() {
+    dbg "tr -d '\r' < /tmp/h.txt | grep -i '^retry-after:' | cut -d' ' -f2"
+  }
+
+  # The hub's own answer FIRST, to a file the gateway will never touch.
+  # Without it a missing header cannot be attributed: a hub that never
+  # sent one and a gateway that dropped one look identical from here.
+  HUB_CODE=$(hub_code "/files/content?path=/probe-hub.bin")
+  HUB_RA=$(hub_ra); HUB_RA=${HUB_RA:-NONE}
+  HUBSAYS="$HUB_CODE $HUB_RA"
+  note "hub direct, on its own probe file: HTTP $HUB_CODE retry-after=${HUB_RA:-NONE}"
+  [ "$HUB_CODE" = "503" ] \
+    || fail "the hub answered $HUB_CODE to a cold read of its own — nothing below can be attributed to the gateway"
+  [ "$HUB_RA" != "NONE" ] \
+    || fail "the HUB sent no Retry-After on a cold read — this is the hub's fileapi::err_reply, not the gateway"
+
+  # And now the gateway, on ITS own probe file.
+  GWSAYS=$(gw_full "/v1/projects/$PROJECT2/volumes/cold/files/content?path=/probe-gw.bin")
+  GW_CODE=${GWSAYS%% *}; GW_RA=${GWSAYS##* }
+  if [ "$GW_CODE" != "503" ] || [ "$GW_RA" = "NONE" ]; then
+    echo "  ── the whole response the gateway sent ──"
+    tr -d '\r' < /tmp/gw-hdrs.txt
+    echo "  ── body ──"; head -c 400 /tmp/gw-body.txt; echo
+    echo "  ── the hub, to the same shape of request ──"; echo "$HUBSAYS"
+    echo "  ── gateway log ──"
+    kubectl -n "$OPNS" logs -l app.kubernetes.io/name=flint-lite-operator-gateway \
+      --tail=25 2>/dev/null
+  fi
+  [ "$GW_CODE" = "503" ] \
+    || fail "a cold read answered $GW_CODE through the gateway while the hub answered $HUB_CODE"
+  [ "$GW_RA" != "NONE" ] \
+    || fail "the gateway DROPPED the hub's Retry-After (hub sent $HUB_RA) — a caller cannot tell a hydrating file from a broken hub"
+  # The body has to be the HUB's error and not one the gateway invented.
+  # Those two are indistinguishable by status alone and they mean
+  # opposite things about where the fault is.
+  grep -q 'Delay' /tmp/gw-body.txt \
+    || fail "the 503 body is not the hub's Delay error — the gateway manufactured this 503: $(cat /tmp/gw-body.txt)"
+  note "gateway: HTTP $GW_CODE retry-after=$GW_RA, body $(head -c 60 /tmp/gw-body.txt)"
+
+  # CONTROL (b): the same volume, a WARM file, through the same
+  # gateway. A share that was simply broken would 503 for this too.
+  echo "warm-file-contents" > /tmp/gw-warm.txt
+  code=$(gw PUT "/v1/projects/$PROJECT2/volumes/cold/files/content?path=/warm.txt" \
+    --data-binary @/tmp/gw-warm.txt)
+  case "$code" in 200|201) ;; *) fail "writing the warm control file returned $code" ;; esac
+  code=$(gw GET "/v1/projects/$PROJECT2/volumes/cold/files/content?path=/warm.txt")
+  [ "$code" = "200" ] \
+    || fail "a WARM file in the same volume answered $code — the 503 above is the share, not the file"
+  pass "cold read -> 503 + Retry-After $GW_RA, relayed from the hub (which sent $HUB_RA); a warm file in the same volume is 200"
+
+  # ── leg 14b: the gateway's own deadline must not beat the hub's ────
+  #
+  # `header_deadline` exists because the two budgets are both 30s by
+  # default and RACE. If the gateway fires first the caller gets a 502
+  # with no Retry-After — the same failure the headline above is
+  # about, arriving from the other side. It has never run against a
+  # real hydration.
+  #
+  # Forced rather than waited for: the share gets a REAL hydrate budget
+  # (30s) and the gateway is squeezed to a 1s configured deadline. With
+  # hydrateFetchParallel at 1 the restore is a single sequential GET of
+  # ${BULK_MB} MiB, so it outlives that second by construction — a
+  # gateway WITHOUT the download extension answers 502 and this leg
+  # fails.
+  say "leg 14b: a cold read outlives the gateway's configured deadline and still succeeds"
+  kubectl -n "$NS" patch flintshare "fs-$PROJECT2-cold" --type=merge \
+    -p '{"spec":{"monitoring":{"fileApi":{"hydrateWaitSecs":30}}}}' >/dev/null \
+    || fail "hydrateWaitSecs patch refused"
+  OLDHUB=$(kubectl -n "$NS" get pod -l flint.io/share="fs-$PROJECT2-cold" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  helm_up --set gateway.upstreamTimeoutSecs=1 \
+    || { tail -20 /tmp/gw-e2e-helm.log; fail "helm upgrade (upstreamTimeoutSecs=1) failed"; }
+  kubectl -n "$OPNS" rollout status deployment/flint-lite-operator-gateway --timeout=120s \
+    >/dev/null 2>&1 || fail "the gateway never rolled to upstreamTimeoutSecs=1"
+  # Read it back off the pod spec. A --set that did not land would
+  # leave the gateway on its 30s default and make the whole sub-leg
+  # vacuous — it would pass without ever creating the race.
+  kubectl -n "$OPNS" get deploy flint-lite-operator-gateway \
+    -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -q -- '--upstream-timeout-secs=1' \
+    || fail "the gateway is not running with --upstream-timeout-secs=1 — leg 14b would prove nothing"
+  pf_gw
+  # The hub restarts on the config change; wait for a NEW pod back in
+  # Ready. hydrateWarmAfterImport is off, so /bulk.bin is still a stub.
+  RDY=""
+  for i in $(seq 1 40); do
+    NEWHUB=$(kubectl -n "$NS" get pod -l flint.io/share="fs-$PROJECT2-cold" \
+      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    RDY=$(kubectl -n "$NS" get flintshare "fs-$PROJECT2-cold" -o jsonpath='{.status.phase}')
+    [ "$RDY" = "Ready" ] && [ -n "$NEWHUB" ] && [ "$NEWHUB" != "$OLDHUB" ] && break
+    sleep 5
+  done
+  [ "$RDY" = "Ready" ] || fail "the cold hub never came back after the hydrate-budget change (phase=$RDY)"
+  EP_COLD=$(kubectl -n "$NS" get flintshare "fs-$PROJECT2-cold" -o jsonpath='{.status.apiEndpoint}')
+
+  # ONE BYTE. The assertion is about the response HEADERS arriving
+  # late, not about moving ${BULK_MB} MiB through a port-forward — the
+  # hub still has to pull the whole object back from S3 before it can
+  # answer even this.
+  gw_alive
+  RESP=$(curl -s -o /dev/null -w '%{http_code} %{time_total}' \
+    -H "Authorization: Bearer $GW_TOKEN" -H 'Range: bytes=0-0' \
+    "http://127.0.0.1:$PF_GW/v1/projects/$PROJECT2/volumes/cold/files/content?path=/bulk.bin")
+  RCODE=${RESP%% *}; RTIME=${RESP##* }
+  note "cold ranged read: HTTP $RCODE in ${RTIME}s (the gateway's configured deadline is 1s)"
+  # 502 is the ONLY answer that fails this. Both 200/206 (the hub
+  # hydrated and served) and a relayed 503 (the hub spent its own 30s
+  # and gave up) mean the gateway waited past its own one-second
+  # deadline, which is the entire claim. A 502 is the gateway's own
+  # timeout, and it is what a missing `header_deadline` produces.
+  case "$RCODE" in
+    502) fail "the gateway timed out at its OWN 1s deadline and answered 502 — header_deadline is not extending the download budget past the hub's hydrate wait" ;;
+    200|206) ;;
+    503) note "the hub spent its own 30s budget and answered 503; the gateway still did not cut in at 1s" ;;
+    *) fail "the cold ranged read answered $RCODE" ;;
+  esac
+  if python3 -c "import sys; sys.exit(0 if float('$RTIME') > 1.2 else 1)"; then
+    pass "a cold read took ${RTIME}s — well past the gateway's 1s deadline — and still returned $RCODE"
+  else
+    note "hydration finished in ${RTIME}s, inside the gateway's own 1s deadline"
+    note "the race was NOT exercised — this half is INCONCLUSIVE (raise BULK_MB)"
+    DEADLINE_INCONCLUSIVE=1
+  fi
+  helm_up || { tail -20 /tmp/gw-e2e-helm.log; fail "helm upgrade (restore) failed"; }
+  kubectl -n "$OPNS" rollout status deployment/flint-lite-operator-gateway --timeout=120s \
+    >/dev/null 2>&1 || fail "the gateway never rolled back to its normal timeout"
+  pf_gw
+fi
+
+# ── leg 15: the NetworkPolicy is ENFORCED, and admits the gateway ────
+say "leg 15: NetworkPolicy closes the hub, and the gateway is on the right side of it"
+# WHAT HAS NEVER BEEN TESTED. The operator chart auto-adds a gateway
+# peer to the hubs' 8080 rule when gateway.enabled is set, so nobody has
+# to remember it. Until this leg, that peer had only ever been RENDERED
+# — chart-render-pass.sh greps the YAML — and it fails CLOSED: get the
+# selector wrong and every file request in the fleet times out, with the
+# policy still reading exactly right.
+HUBIP=$(kubectl -n "$NS" get pod -l flint.io/share="fs-$PROJECT-data" \
+  -o jsonpath='{.items[0].status.podIP}')
+[ -n "$HUBIP" ] || fail "no pod ip for the data hub"
+probe8080() { dbg "curl -s -o /dev/null -w '%{http_code}' --max-time 6 'http://$HUBIP:8080/status'"; }
+probe2049() { dbg "nc -z -w 4 $HUBIP 2049 >/dev/null 2>&1 && echo OPEN || echo SHUT"; }
+
+# BEFORE, so that AFTER means something.
+[ "$(probe8080)" = "200" ] || fail "the debug pod cannot reach the hub's 8080 BEFORE any policy — leg 15 has no baseline"
+[ "$(probe2049)" = "OPEN" ] || fail "the debug pod cannot reach the hub's 2049 BEFORE any policy — leg 15 has no baseline"
+pass "baseline: an arbitrary pod in $NS reaches the hub on both 8080 and 2049"
+
+# SUMS, not the pod-by-pod string: a pod set that changes for some
+# other reason would otherwise read as a restart, and the failure
+# message would blame the policy.
+sum_restarts() {  # sum_restarts <namespace> <name label>
+  kubectl -n "$1" get pod -l "app.kubernetes.io/name=$2" \
+    -o jsonpath='{.items[*].status.containerStatuses[*].restartCount}' \
+    | awk '{t=0; for (i=1;i<=NF;i++) t+=$i; print t+0}'
+}
+hub_restarts() { sum_restarts "$NS" flint-lite; }
+op_restarts()  { sum_restarts "$OPNS" flint-lite-operator; }
+HUB_R0=$(hub_restarts); OP_R0=$(op_restarts)
+
+helm_up --set networkPolicy.enabled=true --set "networkPolicy.hubNamespaces={$NS}" \
+  || { tail -25 /tmp/gw-e2e-helm.log; fail "helm upgrade (networkPolicy) failed"; }
+kubectl -n "$NS" get netpol flint-lite-operator-hubs >/dev/null 2>&1 \
+  || { kubectl -n "$NS" get netpol; fail "the hub NetworkPolicy was not created in $NS"; }
+kubectl -n "$OPNS" get netpol flint-lite-operator-deny-ingress >/dev/null 2>&1 \
+  || fail "the operator's deny-ingress policy was not created"
+sleep 10
+
+# THE ENFORCEMENT CONTROL. Every assertion below is about traffic being
+# BLOCKED, and on a CNI that ignores NetworkPolicy every one of them
+# would pass by accident — which is why no leg in this repo has ever
+# asserted one. kind's kindnetd enforces as of v0.32.0; if this rig's
+# CNI does not, the leg says so and stops rather than reporting a
+# security property it did not observe.
+SHUT=""
+for i in $(seq 1 6); do
+  [ "$(probe8080)" != "200" ] && { SHUT=1; break; }
+  sleep 5
+done
+if [ -z "$SHUT" ]; then
+  note "an arbitrary pod still reaches the hub's 8080 with the policy in place"
+  note "this CNI does not enforce NetworkPolicy — leg 15 is INCONCLUSIVE, not passed"
+  NETPOL_INCONCLUSIVE=1
+else
+  pass "the policy is ENFORCED: an arbitrary pod in $NS can no longer reach the hub's 8080"
+
+  # KUBELET'S PROBES, CHECKED FIRST AND ON PURPOSE.
+  #
+  # All three hub probes are TCP checks against 2049 (render.rs `tcp()`
+  # — readiness, liveness, and the tiered startup probe all use it),
+  # and the policy's 2049 rule is OMITTED ENTIRELY when no NFS client
+  # peers are configured. So a CNI that subjected kubelet's probe
+  # connections to pod ingress policy would make turning this policy on
+  # enough to fail every hub's liveness and kill it, forever, fleetwide.
+  #
+  # MEASURED, not assumed: on kindnet a pod with TCP probes on 2049
+  # under a deny-all ingress policy stayed Ready with zero restarts,
+  # while a peer pod was blocked from that same port and reached it
+  # again the moment the policy came off. So kubelet is exempt HERE.
+  # It is a property of the CNI rather than of Kubernetes, which is why
+  # this stays an assertion rather than becoming a comment.
+  #
+  # It runs BEFORE the gateway assertion below because it would
+  # otherwise surface THERE: a hub that goes NotReady leaves its
+  # EndpointSlice, the headless name stops resolving, and the gateway
+  # answers 502 — which reads as "the gateway peer is wrong" and sends
+  # the reader to entirely the wrong place.
+  sleep 45
+  HUB_R1=$(hub_restarts)
+  NOTREADY=$(kubectl -n "$NS" get pod -l app.kubernetes.io/name=flint-lite \
+    -o jsonpath='{range .items[*]}{.metadata.name}={range .status.conditions[?(@.type=="Ready")]}{.status}{end}{" "}{end}' 2>/dev/null \
+    | tr ' ' '\n' | grep '=False' | tr '\n' ' ')
+  if [ "${HUB_R1:-0}" -gt "${HUB_R0:-0}" ] || [ -n "$NOTREADY" ]; then
+    echo "  ── hub pods ──"; kubectl -n "$NS" get pod -l app.kubernetes.io/name=flint-lite
+    echo "  ── the policy's ingress rules ──"
+    kubectl -n "$NS" get netpol flint-lite-operator-hubs \
+      -o jsonpath='{.spec.ingress}{"\n"}'
+    echo
+    echo "  DIAGNOSIS: every hub probe is a TCP check on 2049, and this"
+    echo "  policy has no 2049 rule because networkPolicy.nfsClientCIDRs"
+    echo "  and .nfsClientSelectors are both empty. On a CNI that applies"
+    echo "  pod ingress policy to kubelet, that closes the probe path."
+    echo "  The fix is to list the node CIDRs in nfsClientCIDRs."
+    fail "hubs stopped passing their probes under the policy (restarts $HUB_R0 -> $HUB_R1; not-ready: ${NOTREADY:-none})"
+  fi
+  pass "hub probes survive the policy (restarts $HUB_R0 -> $HUB_R1, all pods Ready)"
+
+  # THE HEADLINE: the auto-wired gateway peer. If this fails, the peer
+  # selector is wrong and every file request in a policy-enabled fleet
+  # times out.
+  gw_alive
+  code=$(gw GET "/v1/projects/$PROJECT/volumes/data/files/content?path=/hello.txt")
+  [ "$code" = "000" ] \
+    && fail "no response from the gateway at all, twice — that is THIS DRILL's port-forward, not the policy. Nothing here is a statement about the peer."
+  if [ "$code" != "200" ]; then
+    echo "  ── the policy as rendered ──"
+    kubectl -n "$NS" get netpol flint-lite-operator-hubs -o yaml | sed -n '1,60p'
+    echo "  ── the gateway pod's labels (what the peer must match) ──"
+    kubectl -n "$OPNS" get pod -l app.kubernetes.io/name=flint-lite-operator-gateway \
+      -o jsonpath='{.items[0].metadata.labels}{"\n"}'
+    echo "  ── the release namespace's labels (the namespaceSelector) ──"
+    kubectl get ns "$OPNS" -o jsonpath='{.metadata.labels}{"\n"}'
+    fail "the gateway can no longer reach the hub under the policy (HTTP $code) — the auto-added peer does not match"
+  fi
+  grep -q 'second-write\|data-volume-contents\|from-the-mount' /tmp/gw-body.txt \
+    || fail "the gateway answered 200 but with the wrong bytes: $(gwbody)"
+  pass "THE GATEWAY STILL REACHES EVERY HUB — the peer the chart adds automatically is correct"
+
+  # 2049 is closed too, and nothing configured a client set.
+  [ "$(probe2049)" = "SHUT" ] \
+    || fail "2049 is still open to an arbitrary pod with no nfsClient peers configured — the rule fell open"
+  pass "2049 is closed: an unconfigured client set admits nobody, not everybody"
+
+  # THE OPERATOR'S OWN POLLS. It reaches each hub's 8080 by pod ip for
+  # rpoClean, idleness and lease counts; a hub it cannot poll is an
+  # unknown hub that never suspends. That failure is silent — no
+  # restart, no event, just an idle ladder that stops firing — so the
+  # condition is what has to be read.
+  OP_R1=$(op_restarts)
+  [ "${OP_R1:-0}" -le "${OP_R0:-0}" ] \
+    || fail "the operator restarted under its own deny-ingress policy ($OP_R0 -> $OP_R1)"
+  UNREACH=$(kubectl -n "$NS" get flintshare -o json \
+    | python3 "$REPO_ROOT/tests/regression/lib/share-unreachable.py")
+  case "$UNREACH" in
+    UNREADABLE*) fail "could not read the shares to check HubReachable ($UNREACH) — this assertion would otherwise PASS BY NOT LOOKING" ;;
+    "") ;;
+    *) fail "the operator cannot poll its hubs under the policy: $UNREACH — its own peer is wrong" ;;
+  esac
+  pass "the operator still polls its hubs through the policy (no HubReachable=False)"
+
+  # AND THE HOLES OPEN. A policy that only ever denies is half a test:
+  # the rules have to admit the peer they name, and only that peer.
+  helm_up --set networkPolicy.enabled=true --set "networkPolicy.hubNamespaces={$NS}" \
+    --set 'networkPolicy.nfsClientSelectors[0].podSelector.matchLabels.app=nfsclient' \
+    || { tail -25 /tmp/gw-e2e-helm.log; fail "helm upgrade (nfs hole) failed"; }
+  sleep 10
+  OPENED=""
+  for i in $(seq 1 6); do
+    R=$(kubectl -n "$NS" exec nfsclient -- sh -c "nc -z -w 4 $HUBIP 2049 >/dev/null 2>&1 && echo OPEN || echo SHUT" 2>/dev/null)
+    [ "$R" = "OPEN" ] && { OPENED=1; break; }
+    sleep 5
+  done
+  [ -n "$OPENED" ] || {
+    kubectl -n "$NS" get netpol flint-lite-operator-hubs -o yaml | sed -n '1,40p'
+    fail "the nfsClientSelectors hole did NOT admit the pod it names"; }
+  [ "$(probe2049)" = "SHUT" ] \
+    || fail "opening 2049 for one pod opened it for every pod — the peer list is not being applied"
+  pass "an nfsClientSelectors peer is admitted on 2049 while the pod beside it stays shut out"
+
+  # Leave the cluster as it was found, so KEEP=1 is usable for anything
+  # after this leg.
+  helm_up || { tail -20 /tmp/gw-e2e-helm.log; fail "helm upgrade (policy off) failed"; }
+fi
+
+# ── 16. summary ──────────────────────────────────────────────────────
 echo
 echo "══════════════════════════════════════════════════════════════════"
 echo " gateway kind e2e: ALL LEGS PASSED"
@@ -881,6 +1565,13 @@ echo "   · one project / two hubs stays separated, all the way into S3"
 echo "   · /status is unreachable through the gateway while plainly served"
 echo "   · the gateway's RBAC wakes shares and cannot read a Secret"
 echo "   · POST /wake returns a mountable address and re-stamps as a keepalive"
+if [ -z "${COLD_INCONCLUSIVE:-}" ]; then
+  echo "   · a cold read relays the hub's 503 + Retry-After, never a bare 502"
+fi
+if [ -z "${NETPOL_INCONCLUSIVE:-}" ]; then
+  echo "   · NetworkPolicy shuts the hub to everyone but the operator and the gateway"
+fi
+echo "   · a ${BULK_MB} MiB body crosses the proxy under a ${GW_MEM_LIMIT} limit, byte-identical"
 if [ -z "${MOUNT_INCONCLUSIVE:-}" ]; then
   echo "   · a POD mounted the share from that address; both doors see one filesystem"
 fi
@@ -894,4 +1585,23 @@ if [ -n "${MOUNT_INCONCLUSIVE:-}" ]; then
   echo " INCONCLUSIVE: the pod could not mount NFS on this kind node."
   echo " That is the rig's kernel, not the product — rerun on a node with"
   echo " an nfs4 client, or use the Lima client the other harnesses use."
+fi
+if [ -n "${COLD_INCONCLUSIVE:-}" ]; then
+  echo
+  echo " INCONCLUSIVE: the watermark pass never evicted, so no file was"
+  echo " cold and the 503 relay was not exercised. That is filesystem"
+  echo " arithmetic on a 1Gi claim, not the product — raise BULK_MB or"
+  echo " lower fs-$PROJECT2-bulk's spec.settings.watermarkPct and rerun."
+fi
+if [ -n "${DEADLINE_INCONCLUSIVE:-}" ]; then
+  echo
+  echo " INCONCLUSIVE: hydration finished inside the gateway's squeezed"
+  echo " 1s deadline, so leg 14b never made the two budgets race."
+  echo " Raise BULK_MB so the restore takes longer than a second."
+fi
+if [ -n "${NETPOL_INCONCLUSIVE:-}" ]; then
+  echo
+  echo " INCONCLUSIVE: this cluster's CNI does not enforce NetworkPolicy,"
+  echo " so leg 15 observed nothing. kind's kindnetd enforces from"
+  echo " v0.32.0; on an older kind, install Calico or Cilium first."
 fi

@@ -1270,6 +1270,7 @@ mod tests {
                           b: Bytes,
                           log: HubLog| {
             let hdr = |n: &str| h.get(n).and_then(|v| v.to_str().ok()).map(String::from);
+            let cold = q.contains("cold.bin");
             log.0.lock().unwrap().push(Seen {
                 method: m.to_string(),
                 path: p.as_str().to_string(),
@@ -1285,6 +1286,23 @@ mod tests {
             // makes a cross-routed request visible in the response a
             // caller sees, rather than only in a log the test happens
             // to check.
+            // A COLD FILE. The real hub answers a download of an
+            // evicted file `503 {"error":"Delay","nfs_status":"Delay"}`
+            // with a `Retry-After`, once `hydrateWaitSecs` is spent
+            // (`fileapi::err_reply`). Nothing in this rig could produce
+            // that shape before, so nothing tested whether the gateway
+            // hands BOTH halves back — and the kind drill found the
+            // header missing with the status and body intact.
+            if cold {
+                let mut res = warp::reply::Response::new(
+                    format!(r#"{{"error":"Delay","nfs_status":"Delay","hub":"{name}"}}"#).into(),
+                );
+                *res.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+                res.headers_mut().insert("retry-after", "2".parse().unwrap());
+                res.headers_mut().insert("content-type", "application/json".parse().unwrap());
+                res.headers_mut().insert("x-hub-internal", "leaked".parse().unwrap());
+                return res;
+            }
             let body = if p.as_str() == "/status" {
                 // The marker. If this ever reaches a caller the gateway
                 // has failed at its whole job.
@@ -1665,6 +1683,61 @@ mod tests {
         // send both, which the assertions above prove it can.
         assert!(!res.headers().contains_key("x-hub-internal"), "leaked an internal header");
         assert!(!res.headers().contains_key("set-cookie"), "leaked a Set-Cookie from a hub");
+    }
+
+    /// A COLD READ IS A RETRYABLE 503, AND BOTH HALVES HAVE TO ARRIVE.
+    ///
+    /// A download of an evicted file makes the hub pull it back from S3.
+    /// Past `hydrateWaitSecs` it gives up and answers
+    /// `503 {"error":"Delay"}` with a `Retry-After` — a normal outcome a
+    /// browse UI handles by asking again. The status alone is not enough:
+    /// without the header the caller cannot tell "coming, ask again"
+    /// from "this hub is broken", and the only safe reading of a bare
+    /// 503 is the second one.
+    ///
+    /// `retry-after` has been in `RESPONSE_HEADERS` since the first
+    /// commit and `relay` copies the whole allowlist, so this test
+    /// should never have been able to fail — which is exactly why it is
+    /// worth having. It did not exist until the kind drill asked the
+    /// question, and nothing else here can: every other fake-hub answer
+    /// is a 200.
+    #[tokio::test]
+    async fn a_hubs_503_reaches_the_caller_with_its_retry_after() {
+        let r = ready_rig().await;
+        let res = req()
+            .method("GET")
+            .path("/v1/projects/proj-a/files/content?path=/cold.bin")
+            .reply(&routes(r.gw.clone()))
+            .await;
+        assert_eq!(res.status(), 503, "a hub's 503 must be relayed, not rewritten");
+        assert_eq!(
+            res.headers().get("retry-after").map(|v| v.to_str().unwrap()),
+            Some("2"),
+            "the hub's Retry-After was dropped — a caller cannot tell a hydrating file \
+             from a broken hub"
+        );
+        // It is the HUB's 503 and not one the gateway made up. Those
+        // two are indistinguishable by status alone, and they mean
+        // opposite things about where the fault is.
+        let body = String::from_utf8_lossy(res.body()).to_string();
+        assert!(body.contains("hub-a"), "the body did not come from the hub: {body}");
+        assert!(body.contains("Delay"), "the hub's error was rewritten: {body}");
+        // The allowlist still applies on the error path.
+        assert!(!res.headers().contains_key("x-hub-internal"), "leaked an internal header");
+
+        // ANTI-VACUITY: the same gateway, the same hub, an ordinary
+        // path. Without this, a gateway that answered 503 to everything
+        // would pass the assertions above.
+        let ok = req()
+            .method("GET")
+            .path("/v1/projects/proj-a/files?path=/")
+            .reply(&routes(r.gw.clone()))
+            .await;
+        assert_eq!(ok.status(), 200, "the rig cannot serve anything at all");
+        assert!(
+            ok.headers().get("retry-after").is_none(),
+            "a 200 carried a Retry-After — the header is not coming from the hub"
+        );
     }
 
     #[tokio::test]

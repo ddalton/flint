@@ -499,6 +499,27 @@ requiring an operator to repeat the gateway's selector in
 `apiClientSelectors` would only produce an outage the first time someone
 forgot.
 
+That peer **fails closed**, which is worth knowing before you turn the
+policy on: if the selector does not match, nothing errors and nothing
+logs — every file request simply times out, while the policy still
+reads exactly right. Leg 15 of the cluster drill is there for that one
+sentence. It enables the policy against a real CNI, proves an arbitrary
+pod can no longer reach a hub's 8080, and then proves the gateway
+still can. Two things it also establishes, because a policy that only
+denies is half a control:
+
+- **kubelet's probes and the operator's polls cross it.** A policy that
+  blocked either would not look like a security bug; it would look like
+  hubs restarting forever and an idle ladder that never fires.
+- **2049 admits nobody until you name somebody.** With
+  `nfsClientCIDRs`/`nfsClientSelectors` unset the rule is omitted
+  entirely rather than rendered with an empty peer list, because an
+  ingress rule with no peers admits *everyone*.
+
+The policy is per-namespace, so `networkPolicy.hubNamespaces` has to
+list every namespace that holds shares. One that is missing is simply
+unprotected, and nothing in the chart can detect it.
+
 ### Turn `readOnly` on if you can
 
 A browse UI needs no mutating verb. `gateway.readOnly: true` is the
@@ -543,7 +564,7 @@ mint and carries a fleet-wide blast radius of its own).
 
 ## Verification
 
-- `cargo test --lib lite_gateway` — 88 tests. The proxy ones stand up
+- `cargo test --lib lite_gateway` — 89 tests. The proxy ones stand up
   **two independent fake hubs on real ports**, bind the gateway on a
   third, and drive it with a real HTTP client; each hub names itself in
   every response, so a cross-routed request fails on the body the caller
@@ -560,6 +581,23 @@ mint and carries a fleet-wide blast radius of its own).
   hubs, real S3 (in-cluster MinIO), one project with two volumes, and
   the four things no local test can answer (the derived token against a
   real hub, the headless endpoint resolving, the wake path, RBAC).
+  Legs 13-15 add the three that are properties of the running process
+  rather than of the routing table:
+  - **Memory under load.** A body several times the container's limit
+    is pushed through and pulled back. `stream_body` and `relay` claim
+    never to hold one; a limit smaller than the body lets the kernel
+    settle the argument. Paired with a round-trip checksum, because
+    flat memory is also what transferring nothing looks like.
+  - **The cold-read 503.** A download of an evicted file is answered
+    503 + `Retry-After` by the hub, and the gateway has to hand back
+    both. Leg 14b then squeezes the gateway to a one-second deadline
+    against a deliberately slow restore, which is the only way to make
+    `header_deadline` fail if it is wrong — without it the caller gets
+    a 502 with no `Retry-After` on every cold read.
+  - **NetworkPolicy, enforced.** See *Install* above. kind's kindnetd
+    enforces NetworkPolicy as of v0.32.0, so this needs no second CNI;
+    on a rig whose CNI ignores it the leg reports INCONCLUSIVE rather
+    than claiming a property it did not observe.
 - `tests/regression/chart-render-pass.sh` — the chart's three refusals,
   the RBAC (no Secrets, no create, no delete), the whole-directory token
   mount, the auto-admitted NetworkPolicy peer, and that
