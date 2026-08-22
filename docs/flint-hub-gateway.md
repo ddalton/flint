@@ -259,6 +259,21 @@ gateway never becomes a field owner and never fights whoever else writes
 it. The wake **persists**, so a request that times out has still made
 the share come back; the caller retries and does not need to ask again.
 
+**The annotation itself does not persist, and that trips people up.**
+The operator deletes it the moment it honours the wake
+(`reconcile.rs`: *"the NEXT idle window starts from the hub's own
+activity clock rather than from a stale heartbeat"*). So looking for
+`flint.io/requested-at` after a wake and finding nothing means it
+worked, not that it failed — check `replicas` and `status.phase`
+instead. This cost two drill runs before it was understood.
+
+It does not weaken the keepalive: the clear happens only on the
+down→Active transition, and `Decision::Wake` is reachable only when the
+share is down. A stamp on a **running** share takes the `Stay`/`Hold`
+path, which writes no annotations at all, so it survives and holds the
+ladder's first signal — which is the whole basis of the agent-mount
+contract below.
+
 `wakeWaitSecs` (default 25) bounds how long one request will hold. An
 idle-suspended share is back in roughly 20–30s. A hibernated one is a
 full DR import from the bucket and will time out here by design — a UI
