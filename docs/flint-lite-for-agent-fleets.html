@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Flint-lite for agent fleets</title>
+<style>
+  @page { size: A4 portrait; margin: 16mm 15mm 14mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body {
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: #0f172a; font-size: 10.5px; line-height: 1.55;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  h1 { font-size: 25px; font-weight: 600; letter-spacing: -0.015em; margin: 0 0 6px; }
+  h2 { font-size: 15px; font-weight: 600; margin: 22px 0 8px; padding-bottom: 5px;
+       border-bottom: 1.5px solid #0f172a; break-after: avoid; page-break-after: avoid; }
+  h3 { font-size: 12px; font-weight: 600; margin: 15px 0 6px; color: #1a5f9e;
+       break-after: avoid; page-break-after: avoid; }
+  p { margin: 0 0 8px; }
+  .kicker { font-size: 10px; font-weight: 600; letter-spacing: .14em;
+            text-transform: uppercase; color: #1a5f9e; margin: 0 0 8px; }
+  .dek { font-size: 12.5px; color: #475569; margin: 0 0 12px; line-height: 1.5; }
+  .dek b { color: #0f172a; font-weight: 600; }
+  .masthead { border-bottom: 2.5px solid #0f172a; padding-bottom: 12px; margin-bottom: 14px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 4px 20px; font-size: 9.5px; color: #64748b;
+          font-family: Menlo, "SF Mono", monospace; margin-top: 10px; }
+  .meta b { color: #475569; font-weight: 600; }
+
+  code, pre, .console, td.m { font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; }
+  code { font-family: Menlo, "SF Mono", Consolas, monospace; font-size: 9.5px;
+         background: #f1f5f9; padding: .5px 3px; border-radius: 2px; }
+  pre { font-family: Menlo, "SF Mono", Consolas, monospace; font-size: 8.8px; line-height: 1.5;
+        background: #f8fafc; border: 1px solid #e2e8f0; border-left: 2.5px solid #1a5f9e;
+        border-radius: 2px; padding: 8px 10px; margin: 0 0 9px; white-space: pre-wrap;
+        word-break: break-word; break-inside: avoid; page-break-inside: avoid; }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .cm { color: #94a3b8; font-style: italic; }
+  .kw { color: #1a5f9e; }
+  .hl { color: #a03a18; font-weight: 600; }
+
+  .note { border: 1px solid #a03a18; background: #fdf4f0; border-radius: 2px;
+          padding: 8px 10px; margin: 0 0 10px; break-inside: avoid; page-break-inside: avoid; }
+  .note.info { border-color: #1a5f9e; background: #eff6fb; }
+  .note.good { border-color: #1c7a53; background: #eef7f2; }
+  .note .lb { font-size: 8.5px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+              color: #a03a18; display: block; margin-bottom: 4px; }
+  .note.info .lb { color: #1a5f9e; }
+  .note.good .lb { color: #1c7a53; }
+  .note p { margin: 0 0 5px; font-size: 10px; }
+  .note p:last-child { margin-bottom: 0; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 9.5px; margin: 0 0 10px;
+          break-inside: avoid; page-break-inside: avoid; }
+  th, td { text-align: left; padding: 4.5px 8px 4.5px 0; border-bottom: 1px solid #e2e8f0;
+           vertical-align: top; }
+  th { font-size: 8.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+       color: #64748b; border-bottom: 1.5px solid #94a3b8; }
+  td.m { font-family: Menlo, "SF Mono", monospace; font-size: 9px; }
+  .yes { color: #1c7a53; font-weight: 600; }
+  .no  { color: #a03a18; font-weight: 600; }
+
+  figure { margin: 0 0 12px; break-inside: avoid; page-break-inside: avoid; }
+  figure svg { width: 100%; height: auto; display: block; }
+  figcaption { font-size: 9px; line-height: 1.5; color: #475569; margin-top: 6px;
+               border-top: 1px solid #e2e8f0; padding-top: 5px; }
+  figcaption b { color: #0f172a; font-weight: 600; }
+
+  svg text { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; fill: #0f172a; }
+  .th2 { font-size: 12px; font-weight: 600; }
+  .tl  { font-size: 11px; }
+  .ts  { font-size: 9.5px; fill: #64748b; }
+  .tsb { font-size: 9.5px; font-weight: 600; fill: #475569; }
+  .mn  { font-family: Menlo, "SF Mono", monospace; font-size: 9.5px; }
+  .mns { font-family: Menlo, "SF Mono", monospace; font-size: 8.5px; }
+  .ctr { text-anchor: middle; }
+  .end { text-anchor: end; }
+  .bx        { fill: #fff; stroke: #cbd5e1; stroke-width: 1.2; }
+  .bx-blue   { fill: #e9f2fa; stroke: #1a5f9e; stroke-width: 1.5; }
+  .bx-violet { fill: #f0eafb; stroke: #6d4aa8; stroke-width: 1.5; }
+  .bx-ochre  { fill: #fbf2de; stroke: #a06b12; stroke-width: 1.5; }
+  .bx-red    { fill: #fdf0ec; stroke: #a03a18; stroke-width: 1.5; }
+  .bx-green  { fill: #eaf5ef; stroke: #1c7a53; stroke-width: 1.5; }
+  .grp       { fill: none; stroke: #94a3b8; stroke-width: 1.2; stroke-dasharray: 5 4; }
+  .ln        { stroke: #475569; stroke-width: 1.4; fill: none; }
+  .ln-blue   { stroke: #1a5f9e; stroke-width: 2.2; fill: none; }
+  .ln-violet { stroke: #6d4aa8; stroke-width: 2.2; fill: none; }
+  .ln-red    { stroke: #a03a18; stroke-width: 2; fill: none; stroke-dasharray: 5 4; }
+  .ln-green  { stroke: #1c7a53; stroke-width: 2; fill: none; }
+  .c-blue { fill: #1a5f9e; } .c-violet { fill: #6d4aa8; } .c-red { fill: #a03a18; }
+  .c-green { fill: #1c7a53; } .c-ochre { fill: #8f5e0f; }
+  .avoid { break-inside: avoid; page-break-inside: avoid; }
+  .newpage { break-before: page; page-break-before: always; }
+  footer { margin-top: 16px; padding-top: 6px; border-top: 1.5px solid #0f172a;
+           font-size: 8.5px; color: #64748b; font-family: Menlo, monospace; }
+</style>
+</head>
+<body>
+
+<div class="masthead">
+  <p class="kicker">Setup guide</p>
+  <h1>Flint-lite for agent fleets</h1>
+  <p class="dek">A shared POSIX filesystem for agent workspaces, durable in <b>your own S3 bucket</b>, that scales to zero when nobody is using it. Your harness writes over REST; your agents read through a mounted PVC that pulls from S3 on first touch.</p>
+  <div class="meta">
+    <span><b>IMAGES</b> 1.35.0</span>
+    <span><b>CHART</b> flint-lite-operator 0.2.6</span>
+    <span><b>BUCKET</b> must exist, versioning on</span>
+    <span><b>ON AGENT CLUSTERS</b> nothing</span>
+  </div>
+</div>
+
+<figure>
+<svg viewBox="0 0 760 300" role="img" aria-label="The two doors into one filesystem">
+  <rect class="grp" x="8" y="8" width="744" height="284" rx="5"/>
+  <text class="ts" x="18" y="24">one workspace = one FlintShare = one hub = one bucket prefix</text>
+
+  <!-- harness -->
+  <rect class="bx-violet" x="24" y="44" width="150" height="52" rx="4"/>
+  <text class="th2 ctr" x="99" y="66">your harness</text>
+  <text class="ts ctr" x="99" y="82">the write path</text>
+
+  <!-- gateway -->
+  <rect class="bx-violet" x="248" y="44" width="150" height="52" rx="4"/>
+  <text class="th2 ctr" x="323" y="64">flint-hub-gateway</text>
+  <text class="mns ctr" x="323" y="80">one token, one door</text>
+
+  <!-- hub -->
+  <rect class="bx-blue" x="468" y="96" width="176" height="92" rx="4"/>
+  <text class="th2 ctr" x="556" y="118">the hub</text>
+  <text class="ts ctr" x="556" y="133">NFSv4.2 server, one pod</text>
+  <text class="mns ctr" x="556" y="152">:2049  NFS</text>
+  <text class="mns ctr" x="556" y="167">:8080  file API</text>
+
+  <!-- agents -->
+  <rect class="bx-ochre" x="24" y="196" width="150" height="52" rx="4"/>
+  <text class="th2 ctr" x="99" y="218">agent pods</text>
+  <text class="ts ctr" x="99" y="234">the read path</text>
+
+  <!-- PVC + bucket -->
+  <rect class="bx" x="452" y="214" width="96" height="46" rx="4"/>
+  <text class="tsb ctr" x="500" y="233">PVC</text>
+  <text class="ts ctr" x="500" y="248">the cache</text>
+  <rect class="bx-green" x="620" y="214" width="96" height="46" rx="4"/>
+  <text class="tsb ctr" x="668" y="233">S3 bucket</text>
+  <text class="ts ctr" x="668" y="248">durability</text>
+
+  <!-- arrows -->
+  <defs>
+    <marker id="av" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#6d4aa8"/></marker>
+    <marker id="ao" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#a06b12"/></marker>
+    <marker id="ab" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#1a5f9e"/></marker>
+    <marker id="ag" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#1c7a53"/></marker>
+  </defs>
+  <line class="ln-violet" x1="174" y1="70" x2="242" y2="70" marker-end="url(#av)"/>
+  <text class="mns ctr c-violet" x="208" y="63">REST</text>
+  <path class="ln-violet" d="M398,70 L556,70 L556,94" marker-end="url(#av)"/>
+  <text class="mns ctr c-violet" x="470" y="63">Bearer</text>
+
+  <path class="ln" style="stroke:#a06b12;stroke-width:2.2" d="M174,222 L440,222 L440,150 L466,150" marker-end="url(#ao)"/>
+  <text class="mns c-ochre" x="182" y="214">NFS mount — the Service ClusterIP</text>
+
+  <!-- hub writes to its cache; the cache exchanges with the bucket -->
+  <path class="ln-blue" d="M500,188 L500,212" marker-end="url(#ab)"/>
+  <path class="ln-green" d="M552,228 L616,228" marker-end="url(#ag)"/>
+  <text class="mns ctr c-green" x="583" y="222">flush</text>
+  <path class="ln-green" d="M618,248 L550,248" marker-end="url(#ag)"/>
+  <text class="mns ctr c-green" x="583" y="262">hydrate</text>
+</svg>
+<figcaption><b>Two doors, one filesystem.</b> The REST API is dispatched in-process through the hub's own NFS compound dispatcher — not a second reader of the export directory — so both doors inherit the same locking, eviction handling and export confinement. <b>The PVC is a cache and the bucket is the durability story</b>: a file that is not local yet is fetched from S3 on first touch, and a lost PVC is a rebuild rather than a loss.</figcaption>
+</figure>
+<table>
+<tr><th style="width:26%">Before you start</th><th></th></tr>
+<tr><td><b>An S3 bucket</b></td><td>Must already exist, <b>versioning on</b>. Nothing here creates or deletes buckets.</td></tr>
+<tr><td><b>Kubernetes</b></td><td>1.25+, with <code>kubectl</code> and <code>helm</code>.</td></tr>
+<tr><td><b>On mounting nodes</b></td><td>An NFS client (<code>mount.nfs4</code>). Ships on Amazon Linux 2023, Ubuntu, GKE COS, AKS. Check Bottlerocket and Talos.</td></tr>
+</table>
+
+<h2>1 &nbsp; Install the operator and the gateway</h2>
+<p>Both come from one chart and one image — the gateway is the same binary with a different command, so enabling it pulls nothing extra.</p>
+<pre><code>kubectl create namespace flint-system
+kubectl -n flint-system create secret generic flint-gateway-token \
+  --from-literal=token="$(openssl rand -base64 32)"
+kubectl -n flint-system create secret generic flint-gateway-root \
+  --from-literal=key="$(openssl rand -base64 48)"
+
+helm install flint-lite-operator \
+  oci://registry-1.docker.io/dilipdalton/flint-lite-operator <span class="kw">--version 0.2.6</span> \
+  -n flint-system \
+  --set gateway.enabled=true \
+  --set gateway.tokenSecretRef=flint-gateway-token \
+  --set gateway.rootKeySecretRef=flint-gateway-root</code></pre>
+<p>The chart <b>refuses to render</b> without an inbound token, without a hub credential, or with both hub credentials set — a misconfiguration is a <code>helm</code> error, not a running open proxy. Put an Ingress with TLS in front of the gateway; <code>gateway.service.type</code> is <code>ClusterIP</code> by default and should stay that way.</p>
+<div class="note info"><span class="lb">The gateway exists only in chart 0.2.6 and later</span>
+<p>Older charts accept <code>--set gateway.enabled=true</code> and render nothing, with no error. If the gateway Deployment never appears, check <code>helm show chart</code> first.</p></div>
+
+<h2>Credentials, end to end</h2>
+<p>Four credentials exist and they are not interchangeable. This is the whole set — nothing else needs one.</p>
+<table>
+<tr><th>Credential</th><th>Who holds it</th><th>Created by</th></tr>
+<tr><td><b>Bucket keys</b></td><td>the hub</td><td>you — MinIO or a real bucket, below</td></tr>
+<tr><td><b>Gateway token</b></td><td>your harness</td><td><code>openssl rand</code>, step 1</td></tr>
+<tr><td><b>Gateway root key</b></td><td>the gateway only</td><td><code>openssl rand</code>, step 1</td></tr>
+<tr><td><b>Per-share API token</b></td><td>the hub + the gateway</td><td>derived, step 3</td></tr>
+</table>
+
+<h3>Dev: MinIO in-cluster</h3>
+<p>The quickest working setup, and the one every drill in this repo runs against. No cloud account, no IAM.</p>
+<pre><code>kubectl create ns minio
+kubectl -n minio apply -f - &lt;&lt;'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: minio }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: minio } }
+  template:
+    metadata: { labels: { app: minio } }
+    spec:
+      containers:
+        - name: minio
+          image: quay.io/minio/minio
+          args: ["server", "/data"]
+          env:
+            - { name: MINIO_ROOT_USER,     value: "flintdev" }
+            - { name: MINIO_ROOT_PASSWORD, value: "flintdev123" }
+          ports: [{ containerPort: 9000 }]
+          volumeMounts: [{ name: data, mountPath: /data }]
+      volumes: [{ name: data, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: minio }
+spec:
+  selector: { app: minio }
+  ports: [{ port: 9000, targetPort: 9000 }]
+EOF
+
+<span class="cm"># bucket + versioning, through a port-forward</span>
+kubectl -n minio port-forward svc/minio 9000:9000 &amp;
+export AWS_ACCESS_KEY_ID=flintdev AWS_SECRET_ACCESS_KEY=flintdev123 AWS_DEFAULT_REGION=us-east-1
+aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://flint-dev
+aws --endpoint-url http://127.0.0.1:9000 s3api put-bucket-versioning \
+  --bucket flint-dev --versioning-configuration Status=Enabled
+
+<span class="cm"># the Secret is the same shape everywhere — AWS_* names, verbatim</span>
+kubectl -n workspaces create secret generic flint-s3 \
+  --from-literal=<span class="hl">AWS_ACCESS_KEY_ID</span>=flintdev \
+  --from-literal=<span class="hl">AWS_SECRET_ACCESS_KEY</span>=flintdev123</code></pre>
+<p>Then <code>spec.endpoint</code> is the only line that differs from a real-S3 share:</p>
+<pre><code><span class="kw">spec</span>:
+  bucket: flint-dev
+  endpoint: http://minio.minio.svc:9000   <span class="cm"># forces path-style addressing</span>
+  region: us-east-1                       <span class="cm"># any value MinIO accepts</span>
+  credentialsSecretRef: flint-s3</code></pre>
+<div class="note"><span class="lb">A dev setup hides the permission problem</span>
+<p>MinIO's root user can do everything, so the grants in step 2 are never exercised until you move to a real bucket. That is exactly how the missing <code>s3:ListBucketMultipartUploads</code> went unnoticed — every local drill passed. Budget a first-boot failure on your first real bucket, and read the hub's log: it names the action.</p></div>
+
+<h3>Production: a bucket-scoped identity</h3>
+<p>Create the bucket with versioning on, then an identity scoped to that bucket only carrying the grants listed in step 2. On AWS: <code>s3api create-bucket</code> + <code>put-bucket-versioning</code>, then <code>iam create-user</code> / <code>put-user-policy</code> / <code>create-access-key</code>; the key pair goes into <code>flint-s3</code> under the <code>AWS_*</code> names. With <b>IRSA</b>, omit <code>credentialsSecretRef</code> and annotate the hub's ServiceAccount with a role ARN carrying the same policy. Any S3-compatible store — Ceph RGW, MinIO in production — works identically through <code>spec.endpoint</code>.</p>
+
+<h3>How your harness gets its token</h3>
+<pre><code>kubectl -n flint-system get secret flint-gateway-token \
+  -o jsonpath='{.data.token}' | base64 -d</code></pre>
+<p>That single value authenticates every REST call for every project. It is the <b>only</b> credential your harness needs — it never sees a per-share token and never needs bucket keys.</p>
+
+<h3>Rotating any of them</h3>
+<table>
+<tr><th>What</th><th>How</th><th>Restart?</th></tr>
+<tr><td>Gateway token</td><td>edit the Secret; re-read every 10s</td><td class="yes">no</td></tr>
+<tr><td>Per-share token</td><td>bump <code>flint.io/api-token-version</code>, rewrite that Secret</td><td class="yes">no</td></tr>
+<tr><td>Bucket keys</td><td>rewrite <code>flint-s3</code>; label it <code>flint.io/credentials=true</code> so the operator notices at once</td><td class="yes">no</td></tr>
+<tr><td>Gateway root key</td><td>rewrite, then re-derive <b>every</b> share's token</td><td class="no">gateway rollout</td></tr>
+</table>
+<p>The root key is the only fleet-wide rotation — every per-share token is a function of it, so change it least often.</p>
+
+<h2>2 &nbsp; Create a workspace</h2>
+<p><b>You write this resource yourself.</b> The gateway can read and wake shares but is denied <code>create</code> and <code>delete</code> on purpose, so whatever owns projects decides a workspace exists.</p>
+<pre><code>kubectl -n workspaces create secret generic flint-s3 \
+  --from-literal=<span class="hl">AWS_ACCESS_KEY_ID</span>=... --from-literal=<span class="hl">AWS_SECRET_ACCESS_KEY</span>=...</code></pre>
+<div class="note"><span class="lb">Key names are load-bearing</span>
+<p>The secret is loaded with <code>envFrom</code>, so its <b>keys become environment variables verbatim</b>. Name one <code>accessKeyId</code> and the SDK has no credentials at all; the hub crash-loops with <code>tier: bucket posture refused: bucket &lt;name&gt; unreachable</code> — which names <b>the bucket, not the credentials</b>.</p></div>
+<pre><code><span class="kw">apiVersion</span>: flint.io/v1alpha1
+<span class="kw">kind</span>: FlintShare
+<span class="kw">metadata</span>:
+  name: fs-proj-a
+  namespace: workspaces
+  labels: { flint.io/project-id: proj-a }
+<span class="kw">spec</span>:
+  bucket: my-team-flint          <span class="cm"># must exist, versioning ON</span>
+  keyPrefix: proj-a/             <span class="cm"># immutable, must end in "/"</span>
+  credentialsSecretRef: flint-s3 <span class="cm"># absent = IRSA / instance role</span>
+  persistence: { size: 50Gi }    <span class="cm"># the CACHE, not the corpus</span>
+  monitoring:
+    enabled: true
+    fileApi: { enabled: true, tokenSecretRef: flint-api-token }
+  settings: { hydrateFetchParallel: 6 }</code></pre>
+<p><b>One prefix, one volume, one hub.</b> The operator refuses a second share on the same bucket subtree across every namespace — two live hubs on one prefix is a cross-tenant data leak the moment one is judged dead and the other takes over.</p>
+
+<h3>What the credentials must be allowed to do</h3>
+<p>A sensible-looking least-privilege policy is <b>not</b> enough. The hub refuses to start rather than run half-configured, and names the missing action:</p>
+<pre><code>❌ tier: bucket posture refused: <span class="hl">s3:ListBucketMultipartUploads</span> denied
+   — the A9 startup sweep cannot run: 403 AccessDenied</code></pre>
+<table>
+<tr><th>Scope</th><th>Actions</th></tr>
+<tr><td class="m">bucket</td><td class="m">ListBucket · GetBucketLocation · GetBucketVersioning · ListBucketVersions · <b>ListBucketMultipartUploads</b> · GetLifecycleConfiguration</td></tr>
+<tr><td class="m">bucket/*</td><td class="m">GetObject · PutObject · DeleteObject · GetObjectVersion · DeleteObjectVersion · AbortMultipartUpload · ListMultipartUploadParts</td></tr>
+</table>
+<p><code>ListBucketMultipartUploads</code> is <b>bucket-level</b>, which is what makes it easy to miss — every other multipart permission is object-level. A <code>cannot read lifecycle configuration</code> line is a <i>warning</i>, not an error: the hub starts, but cannot verify an MPU-abort rule exists.</p>
+
+<h2>3 &nbsp; Give the share its API token</h2>
+<p>The gateway holds no per-hub secrets — each hub's credential is derived from that share's identity, so one root key produces every credential and the gateway needs no access to Secrets in your workspace namespaces.</p>
+<pre><code>kubectl -n flint-system exec deploy/flint-lite-operator-gateway -- \
+  flint-hub-gateway --root-key-file=/etc/flint/gateway-root/key \
+  <span class="kw">--derive-for</span> workspaces/fs-proj-a
+
+kubectl -n workspaces create secret generic flint-api-token --from-literal=token="&lt;value&gt;"</code></pre>
+<p><b>Prefer <code>--derive-for</code> to typing the binding.</b> It reads the resource, so it cannot disagree with what the serving gateway computes. The manual form is the one step with no feedback: an omitted endpoint, a missing trailing slash, or a wrong version each yields a token that is perfectly valid, perfectly wrong, and rejected by every request.</p>
+<p>Order does not matter — the token Secret is a projected volume, so a share created first waits in <code>ContainerCreating</code> and starts when the Secret lands. <b>A share does not reach <code>Ready</code> until its token exists</b>: if one is stuck, check the Secret before anything else.</p>
+
+<h2>4 &nbsp; Write through the REST API</h2>
+<pre><code>GET    /v1/projects/{id}/volumes
+POST   /v1/projects/{id}/wake                 <span class="cm">→ address, keepaliveSecs, mountWarning</span>
+GET    /v1/projects/{id}/files?path=&amp;recursive=&amp;cursor=
+GET    /v1/projects/{id}/files/content?path=  <span class="cm">[Range, If-None-Match]</span>
+PUT    /v1/projects/{id}/files/content?path=  <span class="cm">[If-Match, If-None-Match]</span>
+DELETE /v1/projects/{id}/files/content?path=  <span class="cm">[If-Match]</span>
+POST   /v1/projects/{id}/files/folder | /files/move</code></pre>
+<p>One <code>Authorization: Bearer</code> header. Every object carries an <code>ETag</code>: read it, edit, write back under <code>If-Match</code>, and a competing write answers <code>412</code> instead of silently losing your edit. Bodies <b>stream</b> in both directions — memory does not scale with file size. There is <b>no route to <code>/status</code></b>, of any shape.</p>
+<h2>5 &nbsp; Read through a mounted PVC</h2>
+
+<figure>
+<svg viewBox="0 0 760 214" role="img" aria-label="Why status.address does not work in a PersistentVolume">
+  <text class="tsb" x="8" y="14">An in-tree <tspan class="mn">nfs:</tspan> volume is resolved by KUBELET, ON THE NODE — not by the pod, and not by cluster DNS.</text>
+
+  <rect class="bx-red" x="8" y="30" width="366" height="172" rx="4"/>
+  <text class="th2 c-red" x="22" y="50">✗  status.address</text>
+  <rect class="bx" x="22" y="62" width="338" height="30" rx="3"/>
+  <text class="mns" x="34" y="81">server: fs-proj-a.workspaces.svc.cluster.local</text>
+  <path class="ln-red" d="M191,92 L191,116" marker-end="url(#ar)"/>
+  <rect class="bx" x="66" y="118" width="250" height="28" rx="3"/>
+  <text class="ts ctr" x="191" y="136">the node's resolver — no cluster DNS</text>
+  <path class="ln-red" d="M191,146 L191,166" marker-end="url(#ar)"/>
+  <text class="tsb ctr c-red" x="191" y="182">pod HANGS in ContainerCreating</text>
+  <text class="ts ctr" x="191" y="195">no event on kind · one FailedMount on AL2023</text>
+
+  <rect class="bx-green" x="386" y="30" width="366" height="172" rx="4"/>
+  <text class="th2 c-green" x="400" y="50">✓  the Service ClusterIP</text>
+  <rect class="bx" x="400" y="62" width="338" height="30" rx="3"/>
+  <text class="mns" x="412" y="81">server: 10.96.200.117</text>
+  <path class="ln-green" d="M569,92 L569,116" marker-end="url(#ag2)"/>
+  <rect class="bx" x="444" y="118" width="250" height="28" rx="3"/>
+  <text class="ts ctr" x="569" y="136">kube-proxy programs it on every node</text>
+  <path class="ln-green" d="M569,146 L569,166" marker-end="url(#ag2)"/>
+  <text class="tsb ctr c-green" x="569" y="182">mounts, unprivileged, non-root</text>
+  <text class="mns ctr" x="569" y="195">kubectl get svc fs-proj-a -o jsonpath='{.spec.clusterIP}'</text>
+
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#a03a18"/></marker>
+    <marker id="ag2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#1c7a53"/></marker>
+  </defs>
+</svg>
+<figcaption><b>The address is the whole game.</b> The ClusterIP is stable for the life of the Service — suspend and hibernate both keep it, only deleting the share releases it. For agents in <b>another cluster or on-premises</b>, publish a LoadBalancer or NodePort address with <code>spec.service.advertiseAddress</code> instead; a bare host is refused at admission, because an NFS client handed one silently uses 2049.</figcaption>
+</figure>
+
+<pre><code><span class="kw">apiVersion</span>: v1
+<span class="kw">kind</span>: PersistentVolume
+<span class="kw">metadata</span>: { name: proj-a }
+<span class="kw">spec</span>:
+  capacity: { storage: 100Gi }        <span class="cm"># informational for NFS</span>
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  mountOptions: [nfsvers=4.1, proto=tcp, hard, <span class="hl">nconnect=4</span>, noatime, <span class="hl">sec=sys</span>]
+  nfs:
+    server: <span class="hl">10.96.200.117</span>             <span class="cm"># the ClusterIP, not the DNS name</span>
+    path: /                           <span class="cm"># the SERVER ROOT</span></code></pre>
+<p>Agent pods then mount the claim like any other volume — <b>no privilege, no root, no extra images</b>, with <code>runAsUser</code>/<code>runAsGroup</code>/<code>fsGroup</code> set. Kubelet mounts once per node, so pods on one node share a kernel client and page cache.</p>
+
+<div class="note"><span class="lb">Two mount options that fail silently</span>
+<p><b><code>nconnect&gt;=2</code></b> — without it the kernel opens exactly one connection and silently refuses every additional trunk. No error, on either side, ever.</p>
+<p><b><code>sec=sys</code></b> — without it the kernel negotiates <code>sec=null</code> and sends <b>no credential at all</b>. Measured on the same server, one option apart:</p>
+</div>
+<table>
+<tr><th></th><th>sec=null <span style="font-weight:400;text-transform:none;letter-spacing:0">(the default you get)</span></th><th>sec=sys</th></tr>
+<tr><td>File created by a uid-1000 pod</td><td class="m no">owned 0:0</td><td class="m yes">owned 1000:1000</td></tr>
+<tr><td>Non-root pod writing into root-owned 0755</td><td class="no">succeeds</td><td class="yes">obeys the mode</td></tr>
+<tr><td>Effective identity of every client</td><td class="no">root</td><td class="yes">the pod's own uid</td></tr>
+</table>
+<p>The mount carries <b>no credentials</b> and there is no root-squash: identity is whatever the client asserts. <b>Reachability is therefore the access control</b> — anything that can route to port 2049 can claim any uid, so keep hubs on the cluster network and use <code>networkPolicy</code> to name your agent pods.</p>
+
+<h3>Cold reads: what an agent experiences</h3>
+<p>At the disk watermark (default 85%) cold files truncate to stubs. Metadata stays truthful — <code>ls -l</code> and <code>df</code> show logical sizes — so a tree looks complete whether or not it is local. The first read parks the client until the <b>whole file</b> restores; kernel clients retry silently and the application just sees a slow open. Restores issue up to <code>hydrateFetchParallel</code> (default 6) ranged GETs concurrently.</p>
+<div class="note good"><span class="lb">Verified end to end</span>
+<p>With the file confirmed gone from local disk — the hub's own copy at <b>0 bytes, 0 blocks</b>, the data only in the bucket — an agent read it back through the mount <b>byte-identical</b>, with no error and nothing in its way.</p></div>
+<p>If your agents sweep the tree (<code>grep -r</code>, a build, a full index), set <code>hydrateWarmAfterImport: true</code> and the hub bulk-restores every stub after an import, smallest first. Off by default, because a fill re-downloads every byte.</p>
+
+<h2>6 &nbsp; The workspace lifecycle</h2>
+
+<figure>
+<svg viewBox="0 0 760 210" role="img" aria-label="The idle ladder: suspend keeps the disk, hibernate deletes it">
+  <rect class="bx-blue" x="14" y="44" width="150" height="62" rx="4"/>
+  <text class="th2 ctr" x="89" y="68">Ready</text>
+  <text class="ts ctr" x="89" y="84">hub running</text>
+  <text class="ts ctr" x="89" y="97">PVC + bucket</text>
+
+  <rect class="bx-ochre" x="290" y="44" width="170" height="62" rx="4"/>
+  <text class="th2 ctr" x="375" y="66">IdleSuspended</text>
+  <text class="ts ctr" x="375" y="82">replicas 0</text>
+  <text class="tsb ctr c-ochre" x="375" y="97">PVC KEPT</text>
+
+  <rect class="bx-red" x="586" y="44" width="160" height="62" rx="4"/>
+  <text class="th2 ctr" x="666" y="66">Hibernated</text>
+  <text class="ts ctr" x="666" y="82">replicas 0</text>
+  <text class="tsb ctr c-red" x="666" y="97">PVC DELETED</text>
+
+  <defs>
+    <marker id="af" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#475569"/></marker>
+    <marker id="aw" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#1c7a53"/></marker>
+  </defs>
+  <line class="ln" x1="164" y1="66" x2="288" y2="66" marker-end="url(#af)"/>
+  <text class="mns ctr" x="224" y="58">suspendAfterSecs</text>
+  <line class="ln" x1="460" y1="66" x2="584" y2="66" marker-end="url(#af)"/>
+  <text class="mns ctr" x="520" y="58">hibernateAfterSecs</text>
+
+  <path class="ln-green" d="M375,106 L375,140 L75,140 L75,104" marker-end="url(#aw)"/>
+  <text class="tsb ctr c-green" x="232" y="154">wake — a pod start on the same disk</text>
+  <path class="ln-green" d="M666,106 L666,176 L40,176 L40,104" marker-end="url(#aw)" style="stroke-dasharray:5 4"/>
+  <text class="tsb ctr c-green" x="400" y="192">wake — a full DR import: the bucket is the only copy</text>
+
+  <text class="ts" x="14" y="24">Off by default. Each rung is opt-in on its own, and a share suspends only when BOTH signals agree:</text>
+  <text class="ts" x="14" y="37">the wake annotation is stale AND the hub's own activity clock is quiet.</text>
+</svg>
+<figcaption><b>Suspend and hibernate are not one setting with two numbers.</b> Suspend keeps the PVC, so waking is seconds. Hibernate deletes it, so the bucket becomes the only copy and waking is a full restore — which is why it requires <code>spec.bucket</code> and is verified before the disk is destroyed. <b>The CR is never deleted by either.</b></figcaption>
+</figure>
+
+<pre><code><span class="kw">spec</span>:
+  idle:
+    suspendAfterSecs: 900             <span class="cm"># 15m quiet → scale to zero, keep the PVC</span>
+    <span class="hl">suspendWithSessions: false</span>        <span class="cm"># the protective value is OPT-IN</span></code></pre>
+
+<div class="note"><span class="lb">An agent that thinks for twenty minutes trips both signals</span>
+<p>It touches nothing on the filesystem, so the hub sees an idle share; nothing stamps the wake annotation, so the front door looks absent. The hub scales to zero underneath a live <code>hard</code> mount — and a <code>hard</code> mount whose server is gone blocks in uninterruptible sleep. <b>An NFS client cannot write a Kubernetes annotation, so nothing wakes it.</b> Not data loss; an indefinite hang.</p></div>
+
+<p>Set <code>suspendWithSessions: false</code> <i>and</i> heartbeat with <code>POST /wake</code>, which re-stamps on every call even when the share is already <code>Ready</code> and tells you how often to call it:</p>
+<table>
+<tr><th>Field in the wake reply</th><th>What to do with it</th></tr>
+<tr><td class="m">keepaliveSecs</td><td>the interval to call <code>/wake</code> at — half the suspend budget, so one missed beat survives</td></tr>
+<tr><td class="m">mountWarning</td><td>present exactly when this share can be scaled to zero under a live mount. A provisioning error, not advice</td></tr>
+<tr><td class="m">serverId</td><td>changes after a hibernate ⇒ remount, not resume. Absent means <i>not observed</i>, never <i>changed</i></td></tr>
+</table>
+<p>Do <b>not</b> heartbeat by polling files: <code>/status</code> is deliberately not activity and the file API deliberately is, so a UI refreshing a listing on a timer pins that project awake forever. For a fleet crawl that must not start thousands of hubs, add <code>?wake=false</code> — it refuses with <code>503 Parked</code> instead of waking anything.</p>
+
+<h3>Tearing a workspace down</h3>
+<p><b>Unmount before you remove the server.</b> A <code>hard</code> mount whose server disappears puts clients into uninterruptible sleep; those processes cannot be killed, and on a node this can wedge the container runtime itself. Scale consumers to zero, confirm nothing holds the claim, <i>then</i> delete the <code>FlintShare</code>. If you are already wedged, bring the <b>server</b> back — the blocked I/O completes and the processes exit normally.</p>
+<h2>7 &nbsp; Cloud and on-premises</h2>
+<p>Everything above is identical everywhere. Four things differ by platform, and all four live in the <code>FlintShare</code>.</p>
+<table>
+<tr><th style="width:22%">What</th><th>Set it to</th></tr>
+<tr><td><b>Hub cache disk</b></td><td class="m">persistence.storageClassName: gp3 <span class="cm">/ csi-cinder-high-speed / rook-ceph-block</span></td></tr>
+<tr><td><b>AWS with IRSA</b></td><td>omit <code>credentialsSecretRef</code> entirely — absent means ambient (env / IRSA / IMDS)</td></tr>
+<tr><td><b>Ceph RGW, MinIO</b></td><td class="m">spec.endpoint: https://rgw.corp.internal:8443 <span class="cm"># forces path-style</span></td></tr>
+<tr><td><b>Reaching the hub</b></td><td>same cluster → Service ClusterIP; elsewhere → LoadBalancer / NodePort via <code>spec.service.advertiseAddress</code></td></tr>
+</table>
+<p><code>spec.endpoint</code> is what makes a non-AWS store work, and <b>it participates in the share's identity</b> — it is part of the derived API token, so changing it invalidates every token for that share. Prefer a flat or peered network to a load balancer: NFS is one long-lived TCP flow and quiet periods are normal, so an LB that reaps idle connections breaks mounts that were working. Keep hub and agents in one availability zone where you can; inter-AZ bytes are billed in both directions.</p>
+
+<h2>What the two doors guarantee about each other</h2>
+<p>They are one filesystem — the REST API dispatches in-process through the same server the mount talks to. The timing is NFS timing:</p>
+<ul style="margin:0 0 9px; padding-left:16px">
+<li><b>A REST write shows up on an established mount immediately</b>, as long as the agent opens the file to look. Measured under a second for both a new file and an overwrite: every <code>open()</code> revalidates with the server, so the attribute cache does not sit between your harness and your agents.</li>
+<li>Staleness is real in two cases: <b>a file the agent holds open</b> across the write, and <b>a cached directory listing</b> (up to <code>acdirmax</code>, 60s).</li>
+<li><b><code>If-Match</code> is detection between API callers, not exclusion against the mount.</b> Two REST writers get <code>412</code>; a REST writer racing a mounted writer is ordered by the server but the ETag will not save you.</li>
+<li>An <b>ETag changes when a file is evicted or hydrated</b>, because both rewrite the local inode. Treat a lone <code>412</code> as "re-read before you write".</li>
+</ul>
+
+<h2>What this is not</h2>
+<table>
+<tr><td style="width:32%"><b>Not a parallel filesystem</b></td><td>One hub is one pod and one NIC. If a single pod's bandwidth is your ceiling, the full pNFS profile speaks the same protocol and stores the same volume format — graduating is adding data servers, not migrating.</td></tr>
+<tr><td><b>Not multi-writer across regions</b></td><td>Keep hub and agents in one AZ where you can.</td></tr>
+<tr><td><b>Not a bucket manager</b></td><td>Create the bucket, turn versioning on, hold the lifecycle policy yourself.</td></tr>
+<tr><td><b>Not a place for secrets</b></td><td>Anything that can reach 2049 can read the tree as any uid.</td></tr>
+</table>
+
+<h2>How this guide was verified</h2>
+<p>Every instruction here was executed against a real cluster by <code>tests/regression/agent-fleet-doc-drill.sh</code>, which runs the guide's own commands rather than a paraphrase. Each claim is paired with a control that would fail if the product were broken — a leg that only shows the good case proves nothing.</p>
+<table>
+<tr><th style="width:46%">Claim</th><th>Its control</th></tr>
+<tr><td>Wrong <code>AWS_*</code> key names never reach Ready</td><td>a share built on <code>accessKeyId</code> crash-loops</td></tr>
+<tr><td>Nothing in the YAML is silently pruned</td><td>every field read back after admission</td></tr>
+<tr><td>A <code>.svc.cluster.local</code> server does not mount</td><td>pod stuck Pending; the ClusterIP mounts in the same leg</td></tr>
+<tr><td><code>sec=sys</code> is load-bearing</td><td>same pod, one option removed ⇒ 0:0 instead of 1000:1000</td></tr>
+<tr><td>REST writes reach a live mount</td><td>new file and overwrite, both under a second</td></tr>
+<tr><td>Eviction really hydrates from S3</td><td>the hub's local copy at 0 bytes / 0 blocks before the read</td></tr>
+<tr><td><code>suspendWithSessions: false</code> holds a share up</td><td>an unprotected control share <b>did</b> suspend under a live mount</td></tr>
+</table>
+
+<footer>flint-lite · operator chart 0.2.6 · images 1.35.0 · full reference: docs/flint-lite-for-agent-fleets.md</footer>
+</body>
+</html>
