@@ -123,7 +123,7 @@ with no fence anywhere and no error on either side. Equal prefixes at
 least serialize into a takeover; nested ones do not.
 
 So if shares are created from more than one cluster, uniqueness has to
-be owned upstream of Kubernetes — one prefix per project, never nested,
+be owned upstream of Kubernetes — one prefix per VOLUME, never nested,
 never reused, `UNIQUE` on the normalized `(endpoint, bucket, prefix)`
 in whatever database allocates them. There is no way to add that check
 here, and `spec.bucket`/`spec.keyPrefix` are immutable once set, so a
@@ -445,15 +445,18 @@ share sat at `IdleSuspended` for 245s untouched, then reached `Ready`
 re-written. "It fails safe, only a delete hangs" is wrong — run two
 replicas, and see *Is the operator alive?* below.
 
-### One project, one hub, one disk
+### One share, one hub, one disk
 
 Every share gets **its own PVC**: `<share>-data`, `ReadWriteOnce`,
 sized by `spec.persistence.size`, which is required — there is no
-default, because capacity is a decision. One project, one hub pod, one
-claim, nothing shared between projects. That is what makes
-`kubectl delete flintshare` a complete cleanup.
+default, because capacity is a decision. One share, one hub pod, one
+claim, nothing shared between shares. That is what makes
+`kubectl delete flintshare` a complete cleanup. (A project may own
+several shares — uniqueness keys on the bucket prefix subtree and
+nothing here reads `flint.io/project-id` — so "one claim" is per
+volume, not per project.)
 
-One claim per project is a statement about provisioning, not about how
+One claim per share is a statement about provisioning, not about how
 many things may mount it. **`ReadWriteOnce` means a single NODE, not a
 single pod** — two pods co-scheduled on one node may both mount the
 same RWO claim, and Kubernetes considers that legal.
