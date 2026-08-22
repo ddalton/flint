@@ -38,8 +38,8 @@ Writing through the mount also works; see
 | An S3 bucket | must already exist, **versioning on**. Nothing here creates or deletes buckets. |
 | Kubernetes | 1.25+, `kubectl` and `helm` |
 | On every node that will mount | an NFS client (`mount.nfs4`) — see [node prerequisite](#the-one-node-prerequisite) |
-| Images | `1.35.0` |
-| Chart | `flint-lite-operator` `0.2.6` |
+| Images | `1.35.1` |
+| Chart | `flint-lite-operator` `0.2.7` |
 
 ## 1. Install the operator and the gateway
 
@@ -61,7 +61,7 @@ kubectl -n flint-system create secret generic flint-gateway-root \
 
 helm install flint-lite-operator \
   oci://registry-1.docker.io/dilipdalton/flint-lite-operator \
-  --version 0.2.6 \
+  --version 0.2.7 \
   -n flint-system \
   --set gateway.enabled=true \
   --set gateway.tokenSecretRef=flint-gateway-token \
