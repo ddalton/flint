@@ -652,8 +652,34 @@ if [ -n "$WOKE" ]; then
   ELAPSED=$((T1 - T0))
   ANN=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-models" -o json \
     | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" flint.io/requested-at)
-  note "request took ${ELAPSED}s, answered $code; requested-at='$ANN'"
-  if [ -z "$ANN" ]; then
+  note "request took ${ELAPSED}s, answered $code; requested-at='$ANN' (expected empty)"
+  # ASSERT THE OUTCOME, NOT THE MECHANISM.
+  #
+  # An earlier version of this leg required `flint.io/requested-at` to
+  # still be set after the request, and failed twice against a gateway
+  # whose unit tests prove it emits exactly that merge patch. The
+  # annotation is DELIBERATELY TRANSIENT: `reconcile.rs` clears it the
+  # moment it honours the wake ("the NEXT idle window starts from the
+  # hub's own activity clock rather than from a stale heartbeat"), and
+  # the gateway waits up to wakeWaitSecs for the share to come back — so
+  # by the time this reads it, the operator has always removed it.
+  #
+  # What is observable, and what actually matters, is that the hub came
+  # back: replicas 0 -> 1 and the phase left IdleSuspended.
+  #
+  # (A keepalive stamp on a RUNNING share is NOT cleared — that path
+  # returns Stay/Hold and writes no annotations — so the keepalive
+  # contract is unaffected by this.)
+  WOKE_REPL=""
+  for i in $(seq 1 30); do
+    R2=$(kubectl -n "$NS" get deploy -l flint.io/share="fs-$PROJECT-models" \
+      -o jsonpath='{.items[0].spec.replicas}' 2>/dev/null)
+    [ "$R2" = "1" ] && { WOKE_REPL=1; break; }
+    sleep 2
+  done
+  PH2=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-models" -o jsonpath='{.status.phase}')
+  note "after the request: replicas=$R2 phase=$PH2"
+  if [ -z "$WOKE_REPL" ]; then
     # EVIDENCE BEFORE THE VERDICT. This assertion fired twice with
     # nothing to look at and the cluster already torn down, which sent
     # the investigation to the wrong place both times. The gateway logs
@@ -669,8 +695,9 @@ if [ -n "$WOKE" ]; then
     echo "  ── can the gateway SA patch it? ──"
     kubectl auth can-i patch flintshares.flint.io \
       --as="system:serviceaccount:$OPNS:flint-lite-operator-gateway" -n "$NS"
-    fail "the gateway did not arm flint.io/requested-at"
+    fail "the request did not bring the hub back (replicas=$R2, phase=$PH2)"
   fi
+  pass "a file request on a parked volume brought its hub back: replicas 0 -> 1"
   case "$code" in
     200) pass "a parked volume was woken BY A FILE REQUEST and served in ${ELAPSED}s" ;;
     503) grep -q 'Waking' /tmp/gw-body.txt \
