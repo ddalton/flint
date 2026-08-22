@@ -95,7 +95,7 @@ impl Default for RenderDefaults {
             // Matches flint-lite-chart's appVersion. The operator image
             // and the hub image version together are the fleet's
             // upgrade unit.
-            image: "dilipdalton/flint-pnfs:1.35.0".to_string(),
+            image: "dilipdalton/flint-pnfs:1.35.1".to_string(),
             image_pull_policy: "IfNotPresent".to_string(),
             // 60 x 10s = 10 minutes of pre-listener work: an epoch claim
             // that waits out a dead holder's lease plus a DR import that

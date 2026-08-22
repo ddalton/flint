@@ -6,8 +6,8 @@ type: application
 # 0.2.0: the settings schema gained hydrateWarmAfterImport +
 # hydrateWarmConcurrency (and 1.27.0 ships hydrateFetchParallel's
 # fan-out) — pin chart and image together.
-version: 0.4.6
+version: 0.4.7
 # The hub image tag this chart defaults to — 1.26.0 was the first
 # release carrying `mode: standalone` and the S3 tier; 1.27.0 adds the
 # cold-read fan-out and the warm fill.
-appVersion: "1.35.0"
+appVersion: "1.35.1"

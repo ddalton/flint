@@ -10,6 +10,76 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [1.35.1] - 2026-08-22
+
+Four fixes, two of which cost data or client state rather than time.
+Nothing new — the SemVer surface (CSI gRPC verbs, StorageClass
+`parameters`, `volume_context` keys) is unchanged.
+
+### Fixed — the tier
+
+- **A hub that could not read the bucket's manifest could still publish
+  an empty one over it.** On a manifest it cannot parse, the hub logs
+  "The hub will serve an empty export; do NOT let it publish over the
+  bucket" — and nothing enforced that. `set_import_refused` wrote a
+  status string read only by two status surfaces, the flush loop was
+  spawned unconditionally twelve lines later, and every tick ended in
+  `write_manifest_barrier`, whose only guard was the epoch fence.
+  Directories, symlinks and every mode/uid/gid exist **only** in the
+  manifest, so one barrier from an empty export erases the tree's shape;
+  `rpo::evaluate` then reports clean and the idle ladder deletes the PVC
+  holding the last copy. The orchestrator now carries a publish fence,
+  checked before the epoch check and again inside the barrier itself.
+
+- **The write reserve was defeated by write speed** (drill item D8).
+  `admit_bytes` compared a 2s-stale gauge against one write's length, and
+  it is called **per WRITE op**, not per PUT — so a streaming write had
+  each chunk admitted against a snapshot that had not seen its
+  predecessors. Measured: 600 MiB onto 539 MiB free returned 201 on
+  every chunk and consumed the whole reserve with `nospcWriteRefusals`
+  still 0. Admissions are now tallied against the cached gauge, which
+  forces a real `statvfs` before the reserve is spent. The tally never
+  decides a refusal — that is still made on fresh numbers, so this
+  cannot produce a false NOSPC. Cluster-measured on a 1Gi volume with a
+  991 MiB PUT: unfixed left 158 MiB of a 256 MiB reserve, fixed left 256.
+
+### Fixed — pNFS
+
+- **Every flint-lite hub advertised the same NFS server identity.** The
+  MDS passed an empty `volume_id`, landing in the arm that returns the
+  constants `flint-nfs` / `flint-nfs-standalone`, while each hub mints
+  clientids from 1 out of its own table. The kernel's
+  `nfs4_detect_session_trunking` treats same-owner servers as one server
+  across addresses and requires EXCHANGE_ID to return the same clientid
+  on each, so an agent mounting **two workspaces** was handed two
+  unrelated hubs under one identity. The hub now advertises its
+  persistent server id, which already lives in the state.db on the PVC
+  and is therefore stable across restarts.
+  **Upgrade note:** a hub that has already served clients changes its
+  advertised identity once, on the restart that adopts this build.
+  Clients re-establish state rather than reclaiming it — a stall on a
+  hard mount, within the restart the upgrade already costs.
+
+### Fixed — the operator
+
+- **Hibernation released the disk up to 30 minutes late.** The reclaim
+  runs on a later reconcile because the hub needs its full termination
+  grace to drain, but only one follow-up was scheduled (15s) against a
+  120s default grace, and on that near-certain miss the share fell into
+  the parked requeue (1800s). Nothing rescued it: Pods are not watched,
+  so the hub pod finally disappearing raised no event. Measured before
+  the fix: `Hibernated` at 19:44:21, PVC still Bound eleven minutes
+  later. After: reclaimed 11s after `Hibernated`. No data was ever at
+  risk — but `status.phase: Hibernated` read as "disk released" while it
+  was still allocated.
+
+### Added — tests
+
+- Seven regression drills under `tests/regression/`, including a
+  fence-and-identity drill whose control is wired into its exit code: it
+  runs the same legs against the previous image and **fails if they pass
+  there**.
+
 ## [1.35.0] - 2026-08-21
 
 The gateway release. Every hub already served an HTTP file API, but
@@ -2155,7 +2225,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.30.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.35.1...HEAD
+[1.35.1]: https://github.com/ddalton/flint/compare/v1.35.0...v1.35.1
 [1.35.0]: https://github.com/ddalton/flint/compare/v1.34.0...v1.35.0
 [1.34.0]: https://github.com/ddalton/flint/compare/v1.33.0...v1.34.0
 [1.33.0]: https://github.com/ddalton/flint/compare/v1.32.0...v1.33.0
