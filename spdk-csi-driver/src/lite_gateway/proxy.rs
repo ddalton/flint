@@ -650,6 +650,10 @@ async fn serve(
     if let Err(bad) = resolve::validate_project_id(&project) {
         return json_err(StatusCode::BAD_REQUEST, "BadProjectId", bad.message(), None);
     }
+    let may_wake = match route::wake_allowed(&q) {
+        Ok(v) => v,
+        Err(why) => return json_err(StatusCode::BAD_REQUEST, "BadWakeParam", &why, None),
+    };
 
     if let Some(v) = volume.as_deref() {
         // A volume id becomes part of a label match, never part of an
@@ -669,6 +673,29 @@ async fn serve(
     match resolve::decide(&view) {
         Decision::Dial(_) => {}
         Decision::Refuse(r) => return from_refusal(&r),
+        // `wake=false` refuses BOTH the arming and the wait. A crawl
+        // over a fleet must not block on 300 shares coming up any more
+        // than it should start 2700 that were not.
+        Decision::Wake | Decision::Wait if !may_wake => {
+            let phase = view
+                .phase
+                .as_ref()
+                .map(|p| format!("{p:?}"))
+                .unwrap_or_else(|| "unreported".into());
+            return json_err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Parked",
+                &format!(
+                    "this share is {phase} and you asked not to wake it (wake=false). \
+                     It will not come back on its own; retry without wake=false, or POST \
+                     .../wake."
+                ),
+                // Deliberately NO Retry-After: nothing is on a timer
+                // here, and a Retry-After would tell a crawler to come
+                // back and find exactly the same thing.
+                None,
+            );
+        }
         Decision::Wake => {
             if let Err(res) = arm_wake(&gw, &view).await {
                 return *res;
@@ -1696,6 +1723,115 @@ mod tests {
         assert!(res.headers().contains_key("retry-after"), "a 503 must say when to come back");
     }
 
+    /// THE FLEET-CRAWL GUARD.
+    ///
+    /// A project service listing every project is a different caller
+    /// from a person clicking one. At the design fleet size — 3000
+    /// shares, ~300 live — a crawl that woke what it touched would
+    /// start 2700 hubs, and for the `Hibernated` ones that is a full DR
+    /// import from S3 each: real billed egress, a thundering herd
+    /// against an operator bounded to 32 concurrent reconciles, and
+    /// then 2700 hubs sitting awake until the ladder walks them back
+    /// down.
+    ///
+    /// `wake=false` refuses instead — and refuses the WAIT too, so a
+    /// crawl does not block on shares that are already coming up.
+    #[tokio::test]
+    async fn wake_false_refuses_a_parked_share_instead_of_starting_it() {
+        for phase in ["IdleSuspended", "Hibernated", "Pending", "Starting"] {
+            let r = rig(
+                vec![share_json("fs-proj-a", "proj-a", phase, Some("HUB"))],
+                false,
+                // A wake budget that would be VERY obvious if it were
+                // waited out.
+                30,
+            )
+            .await;
+            let started = std::time::Instant::now();
+            let res = req()
+                .method("GET")
+                .path("/v1/projects/proj-a/files?path=/&wake=false")
+                .reply(&routes(r.gw.clone()))
+                .await;
+            assert_eq!(res.status(), 503, "{phase}");
+            let body = String::from_utf8_lossy(res.body()).to_string();
+            assert!(body.contains("Parked"), "{phase}: {body}");
+            assert!(body.contains(phase), "{phase}: the caller needs the phase: {body}");
+            assert!(
+                res.headers().get("retry-after").is_none(),
+                "{phase}: a Retry-After would send a crawler back to find the same thing"
+            );
+            assert!(r.log.all().is_empty(), "{phase}: it dialled a parked hub");
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "{phase}: wake=false waited out the wake budget"
+            );
+        }
+    }
+
+    /// The default is unchanged, and it has to be: a person clicking a
+    /// project expects it to open. Only the crawler opts out.
+    #[tokio::test]
+    async fn a_parked_share_is_still_woken_when_wake_is_not_disabled() {
+        for q in ["", "&wake=true", "&wake=1"] {
+            let r = rig(
+                vec![share_json("fs-proj-a", "proj-a", "IdleSuspended", Some("HUB"))],
+                false,
+                1,
+            )
+            .await;
+            let res = req()
+                .method("GET")
+                .path(&format!("/v1/projects/proj-a/files?path=/{q}"))
+                .reply(&routes(r.gw.clone()))
+                .await;
+            // The wake PATCH fails in this rig (no API server), so this
+            // is 503 either way — but the REASON is what distinguishes
+            // "I tried to wake it" from "I refused to".
+            assert_eq!(res.status(), 503, "{q:?}");
+            let body = String::from_utf8_lossy(res.body()).to_string();
+            assert!(
+                !body.contains("Parked"),
+                "{q:?} refused instead of attempting a wake: {body}"
+            );
+        }
+    }
+
+    /// A serving share is unaffected — `wake=false` is about parked
+    /// shares, not about refusing traffic.
+    #[tokio::test]
+    async fn wake_false_still_serves_a_share_that_is_already_up() {
+        let r = ready_rig().await;
+        let res = req()
+            .method("GET")
+            .path("/v1/projects/proj-a/files?path=/&wake=false")
+            .reply(&routes(r.gw.clone()))
+            .await;
+        assert_eq!(res.status(), 200);
+        // And the control parameter did not reach the hub.
+        assert_eq!(r.log.all()[0].query, "path=%2F");
+    }
+
+    /// A typo must not read as "yes, wake" — that mistake's blast
+    /// radius is every parked share in the fleet.
+    #[tokio::test]
+    async fn an_unreadable_wake_parameter_is_a_400_not_a_default() {
+        let r = rig(
+            vec![share_json("fs-proj-a", "proj-a", "IdleSuspended", Some("HUB"))],
+            false,
+            1,
+        )
+        .await;
+        let res = req()
+            .method("GET")
+            .path("/v1/projects/proj-a/files?path=/&wake=fasle")
+            .reply(&routes(r.gw.clone()))
+            .await;
+        assert_eq!(res.status(), 400);
+        assert!(String::from_utf8_lossy(res.body()).contains("BadWakeParam"));
+        assert!(r.log.all().is_empty());
+    }
+
     /// `Suspended` is an ADMIN decision the CRD says a wake request does
     /// not override. A gateway that armed the annotation anyway would be
     /// quietly reversing an operator.
@@ -2571,5 +2707,288 @@ mod tests {
         assert_eq!(res.status(), 200);
         assert!(res.text().await.unwrap().contains(r#""hub":"hub-v""#));
         assert_eq!(log.paths(), vec!["/files"]);
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // THE WAKE ENDPOINT, DRIVEN THROUGH THE ROUTE TABLE
+    //
+    // Everything above tests `decide_for` — the DECISION. None of it
+    // executes `wake_share`, which is the code that actually patches
+    // the annotation and shapes the reply. So these stand up a fake API
+    // SERVER as well as fake hubs, point a real `kube::Client` at it,
+    // and assert on what it received.
+    //
+    // That matters for one property in particular: the patch must be a
+    // MERGE patch touching one annotation. Server-side apply would make
+    // the gateway a field owner and start a tug-of-war with whatever
+    // front door also writes `flint.io/requested-at` — and nothing
+    // short of watching the request body catches that.
+    // ───────────────────────────────────────────────────────────────
+
+    #[derive(Clone, Default)]
+    struct ApiLog(Arc<Mutex<Vec<(String, String, String)>>>); // method, path, body
+
+    impl ApiLog {
+        fn patches(&self) -> Vec<(String, String, String)> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(m, _, _)| m == "PATCH")
+                .cloned()
+                .collect()
+        }
+    }
+
+    /// A stand-in API server that accepts the wake patch.
+    async fn fake_apiserver(log: ApiLog, share: FlintShare) -> String {
+        let body = serde_json::to_string(&share).expect("share serialises");
+        let route = warp::method()
+            .and(warp::path::full())
+            .and(warp::header::headers_cloned())
+            .and(warp::body::bytes())
+            .map(move |m: warp::http::Method,
+                       p: warp::path::FullPath,
+                       h: HeaderMap,
+                       b: Bytes| {
+                log.0.lock().unwrap().push((
+                    m.to_string(),
+                    // The content type IS the assertion for merge-vs-SSA,
+                    // so it rides along with the path.
+                    format!(
+                        "{} [{}]",
+                        p.as_str(),
+                        h.get("content-type")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                    ),
+                    String::from_utf8_lossy(&b).to_string(),
+                ));
+                let mut res = warp::reply::Response::new(body.clone().into());
+                res.headers_mut()
+                    .insert("content-type", "application/json".parse().unwrap());
+                res
+            });
+        let (addr, srv) = warp::serve(route).bind_ephemeral(([127, 0, 0, 1], 0));
+        tokio::spawn(srv);
+        format!("http://{addr}")
+    }
+
+    struct WakeRig {
+        gw: Arc<Gateway>,
+        hub: HubLog,
+        api: ApiLog,
+    }
+
+    async fn wake_rig(share: FlintShare) -> WakeRig {
+        crate::install_crypto_provider();
+        let hub = HubLog::default();
+        let hub_url = fake_hub(hub.clone(), "hub-a").await;
+        let mut share = share;
+        if let Some(st) = share.status.as_mut() {
+            if st.api_endpoint.as_deref() == Some("HUB") {
+                st.api_endpoint = Some(hub_url);
+            }
+        }
+        let api = ApiLog::default();
+        let api_url = fake_apiserver(api.clone(), share.clone()).await;
+        let client = kube::Client::try_from(kube::Config::new(
+            api_url.parse().expect("uri"),
+        ))
+        .expect("client");
+        let gw = Arc::new(Gateway {
+            client,
+            store: store_of(vec![share]),
+            cfg: Config {
+                namespace: None,
+                share_name_prefix: "fs-".into(),
+                wake_wait: Duration::from_secs(0),
+                read_only: false,
+                max_upload_bytes: 1024 * 1024,
+                upstream_timeout: Duration::from_secs(5),
+            },
+            minter: Minter::Shared("hub-token".into()),
+            inbound: TokenSource::fixed(INBOUND),
+            http: upstream_client(Duration::from_secs(2)).expect("http"),
+            ready: Arc::new(AtomicBool::new(true)),
+        });
+        WakeRig { gw, hub, api }
+    }
+
+    fn mountable(phase: &str, file_api: bool, idle: Option<(u64, Option<bool>)>) -> FlintShare {
+        let mut status = serde_json::json!({
+            "phase": phase,
+            "address": "10.96.1.7:2049",
+            "serverId": "srv-1",
+        });
+        if file_api {
+            status["apiEndpoint"] = serde_json::json!("HUB");
+            status["conditions"] = serde_json::json!([{
+                "type": "ApiEndpointPublished", "status": "True", "reason": "InCluster",
+                "lastTransitionTime": "2026-08-21T00:00:00Z"
+            }]);
+        }
+        let mut spec = serde_json::json!({"persistence": {"size": "1Gi"}});
+        if let Some((after, with_sessions)) = idle {
+            let mut i = serde_json::json!({"suspendAfterSecs": after});
+            if let Some(w) = with_sessions {
+                i["suspendWithSessions"] = serde_json::json!(w);
+            }
+            spec["idle"] = i;
+        }
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "flint.io/v1alpha1", "kind": "FlintShare",
+            "metadata": {
+                "name": "fs-proj-a", "namespace": "workspaces",
+                "labels": {"flint.io/project-id": "proj-a"},
+            },
+            "spec": spec,
+            "status": status
+        }))
+        .expect("share")
+    }
+
+    /// The happy path, and the shape of the patch.
+    #[tokio::test]
+    async fn wake_returns_a_mount_address_and_merge_patches_one_annotation() {
+        let r = wake_rig(mountable("Ready", true, Some((600, None)))).await;
+        let res = req()
+            .method("POST")
+            .path("/v1/projects/proj-a/wake")
+            .reply(&routes(r.gw.clone()))
+            .await;
+        assert_eq!(res.status(), 200, "{}", String::from_utf8_lossy(res.body()));
+        let body: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
+        assert_eq!(body["address"], "10.96.1.7:2049");
+        assert_eq!(body["serverId"], "srv-1");
+        assert_eq!(body["phase"], "Ready");
+        assert_eq!(body["requested"], true);
+        // The agent is told how often to come back WITHOUT having to
+        // read the share's spec itself.
+        assert_eq!(body["keepaliveSecs"], 300, "half the 600s budget");
+        assert_eq!(body["suspendAfterSecs"], 600);
+        // …and warned, because this share suspends even with a lease.
+        assert!(
+            body["mountWarning"].as_str().unwrap().contains("suspendWithSessions"),
+            "{body}"
+        );
+
+        // ONE patch, MERGE, one annotation, no spec.
+        let patches = r.api.patches();
+        assert_eq!(patches.len(), 1, "{patches:?}");
+        let (_, path, patch_body) = &patches[0];
+        assert!(
+            path.contains("/apis/flint.io/v1alpha1/namespaces/workspaces/flintshares/fs-proj-a"),
+            "{path}"
+        );
+        assert!(
+            path.contains("application/merge-patch+json"),
+            "the wake must be a MERGE patch — server-side apply would make the gateway a \
+             field owner and fight the front door for the annotation: {path}"
+        );
+        let j: serde_json::Value = serde_json::from_str(patch_body).unwrap();
+        assert!(j["metadata"]["annotations"]["flint.io/requested-at"].is_string(), "{j}");
+        assert!(j["spec"].is_null(), "the wake patch must not touch spec: {j}");
+
+        // A wake is a CONTROL operation: it must not dial the hub,
+        // because a file-API call counts as activity and this endpoint
+        // exists for callers that make none.
+        assert!(r.hub.all().is_empty(), "the wake dialled the hub");
+    }
+
+    /// THE NFS-ONLY SHARE, end to end through the route table.
+    ///
+    /// `monitoring.fileApi` is off by default, so this is the ordinary
+    /// case for a share that exists to be mounted. The first cut
+    /// refused it with `FileApiDisabled`.
+    #[tokio::test]
+    async fn wake_works_for_a_share_with_no_file_api_at_all() {
+        let r = wake_rig(mountable("Ready", false, None)).await;
+        let res = req()
+            .method("POST")
+            .path("/v1/projects/proj-a/wake")
+            .reply(&routes(r.gw.clone()))
+            .await;
+        assert_eq!(res.status(), 200, "{}", String::from_utf8_lossy(res.body()));
+        let body: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
+        assert_eq!(body["address"], "10.96.1.7:2049");
+        assert!(body["apiEndpoint"].is_null(), "there is no file API on this share");
+        // No ladder configured, so nothing to keep alive against.
+        assert!(body["keepaliveSecs"].is_null());
+        assert!(body["mountWarning"].is_null());
+        assert_eq!(r.api.patches().len(), 1);
+    }
+
+    /// An admin suspend is refused BEFORE anything is stamped. A
+    /// leftover `requested-at` that means nothing reads like a pending
+    /// wake to whoever looks next.
+    #[tokio::test]
+    async fn wake_refuses_an_admin_suspend_without_stamping_anything() {
+        let r = wake_rig(mountable("Suspended", true, None)).await;
+        let res = req()
+            .method("POST")
+            .path("/v1/projects/proj-a/wake")
+            .reply(&routes(r.gw.clone()))
+            .await;
+        assert_eq!(res.status(), 409);
+        assert!(String::from_utf8_lossy(res.body()).contains("AdminSuspended"));
+        assert!(r.api.patches().is_empty(), "it stamped a share it then refused");
+        assert!(r.hub.all().is_empty());
+    }
+
+    #[tokio::test]
+    async fn wake_needs_a_credential_and_refuses_an_unknown_project() {
+        let r = wake_rig(mountable("Ready", true, None)).await;
+        let bare = warp::test::request()
+            .method("POST")
+            .path("/v1/projects/proj-a/wake")
+            .reply(&routes(r.gw.clone()))
+            .await;
+        assert_eq!(bare.status(), 401);
+        assert!(r.api.patches().is_empty(), "an unauthenticated call reached the API server");
+
+        let missing = req()
+            .method("POST")
+            .path("/v1/projects/nope/wake")
+            .reply(&routes(r.gw.clone()))
+            .await;
+        assert_eq!(missing.status(), 404);
+        assert!(r.api.patches().is_empty());
+    }
+
+    /// It stamps EVERY time, including on a share that is already up.
+    /// An endpoint that only stamped when parked would leave the quiet
+    /// mount — the case it exists for — exactly as exposed.
+    #[tokio::test]
+    async fn wake_stamps_again_on_a_share_that_is_already_ready() {
+        let r = wake_rig(mountable("Ready", true, Some((60, None)))).await;
+        for _ in 0..3 {
+            let res = req()
+                .method("POST")
+                .path("/v1/projects/proj-a/wake")
+                .reply(&routes(r.gw.clone()))
+                .await;
+            assert_eq!(res.status(), 200);
+        }
+        assert_eq!(r.api.patches().len(), 3, "a keepalive must stamp on every call");
+    }
+
+    /// A read-only gateway still wakes. `readOnly` refuses mutating
+    /// FILE operations; a browse UI cannot browse a parked project, so
+    /// blocking the wake would make the posture unusable.
+    #[tokio::test]
+    async fn a_read_only_gateway_can_still_wake_a_share() {
+        let mut r = wake_rig(mountable("Ready", true, None)).await;
+        {
+            let gw = Arc::get_mut(&mut r.gw).expect("sole owner");
+            gw.cfg.read_only = true;
+        }
+        let res = req()
+            .method("POST")
+            .path("/v1/projects/proj-a/wake")
+            .reply(&routes(r.gw.clone()))
+            .await;
+        assert_eq!(res.status(), 200, "a read-only gateway must still be able to wake");
+        assert_eq!(r.api.patches().len(), 1);
     }
 }

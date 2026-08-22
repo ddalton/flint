@@ -129,6 +129,48 @@ impl Verb {
     }
 }
 
+/// Gateway-only query parameters: consumed here, never forwarded.
+///
+/// Safe by construction rather than by remembering: [`Verb::query_keys`]
+/// is an allowlist, and no verb lists these, so they are dropped from
+/// the upstream query without any code needing to strip them. A test
+/// pins that.
+pub const GATEWAY_QUERY_KEYS: &[&str] = &["wake"];
+
+/// Whether this request may wake a parked share.
+///
+/// **Default true, and the default is the safe direction for a person.**
+/// Someone clicking a project expects it to open; refusing because the
+/// hub is parked would make the idle ladder visible to end users as an
+/// error.
+///
+/// `wake=false` exists for the OTHER caller: a project service crawling
+/// every project to render a list. At the design fleet size that is
+/// 3000 shares of which ~300 are live, so a crawl that woke what it
+/// touched would start 2700 hubs — and for the `Hibernated` ones that
+/// is a full DR import from S3 each, which is real, billed egress and a
+/// thundering herd against an operator bounded to 32 concurrent
+/// reconciles. They would then all sit awake until the ladder walked
+/// them back down.
+///
+/// An unparseable value is an ERROR rather than a default, and that
+/// asymmetry is deliberate: silently reading `wake=fasle` as "yes,
+/// wake" is precisely the typo whose blast radius is the whole parked
+/// fleet.
+pub fn wake_allowed(pairs: &[(String, String)]) -> Result<bool, String> {
+    let Some((_, v)) = pairs.iter().find(|(k, _)| k == "wake") else {
+        return Ok(true);
+    };
+    match v.trim().to_ascii_lowercase().as_str() {
+        "false" | "0" | "no" | "off" => Ok(false),
+        "true" | "1" | "yes" | "on" => Ok(true),
+        other => Err(format!(
+            "wake={other:?} is not a boolean. Use wake=false to refuse rather than wake a \
+             parked share; omit it to wake on demand."
+        )),
+    }
+}
+
 /// Response headers copied back to the caller, by name.
 ///
 /// An allowlist rather than a copy-everything-minus-hop-by-hop, because
@@ -266,6 +308,43 @@ mod tests {
         assert_eq!(q, "path=..%2Fstatus");
         let url = upstream_url("http://h:8080", Verb::Download, &q);
         assert_eq!(url, "http://h:8080/files/content?path=..%2Fstatus");
+    }
+
+    /// The crawl guard: `wake` must never reach a hub, and it must
+    /// never be silently misread.
+    #[test]
+    fn the_wake_control_is_consumed_by_the_gateway_and_never_forwarded() {
+        for v in ALL {
+            for key in GATEWAY_QUERY_KEYS {
+                assert!(
+                    !v.query_keys().contains(key),
+                    "{v:?} forwards the gateway-only parameter {key:?} to the hub"
+                );
+            }
+        }
+        // …and concretely, through the filter.
+        let q = filter_query(
+            Verb::List,
+            &[("path".into(), "/".into()), ("wake".into(), "false".into())],
+        );
+        assert_eq!(q, "path=%2F", "wake leaked into the upstream query");
+    }
+
+    #[test]
+    fn wake_defaults_to_true_and_refuses_a_value_it_cannot_read() {
+        assert_eq!(wake_allowed(&[]), Ok(true));
+        assert_eq!(wake_allowed(&[("path".into(), "/".into())]), Ok(true));
+        for yes in ["true", "1", "yes", "on", "TRUE", " True "] {
+            assert_eq!(wake_allowed(&[("wake".into(), yes.into())]), Ok(true), "{yes}");
+        }
+        for no in ["false", "0", "no", "off", "FALSE", " False "] {
+            assert_eq!(wake_allowed(&[("wake".into(), no.into())]), Ok(false), "{no}");
+        }
+        // A typo must NOT read as "yes, wake" — that is the one whose
+        // blast radius is every parked share in the fleet.
+        for junk in ["fasle", "", "maybe", "2", "null"] {
+            assert!(wake_allowed(&[("wake".into(), junk.into())]).is_err(), "{junk:?}");
+        }
     }
 
     #[test]

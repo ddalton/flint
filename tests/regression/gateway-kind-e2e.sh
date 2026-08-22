@@ -650,8 +650,8 @@ if [ -n "$WOKE" ]; then
   code=$(gw GET "/v1/projects/$PROJECT/volumes/models/files?path=/")
   T1=$(date +%s)
   ELAPSED=$((T1 - T0))
-  ANN=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-models" \
-    -o jsonpath='{.metadata.annotations.flint\.io/requested-at}')
+  ANN=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-models" -o json \
+    | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" flint.io/requested-at)
   [ -n "$ANN" ] || fail "the gateway did not arm flint.io/requested-at — RBAC or the patch is wrong"
   note "wake armed at $ANN; the request took ${ELAPSED}s and answered $code"
   case "$code" in
@@ -665,6 +665,50 @@ else
   note "the volume did not park within the budget; the wake timing leg is INCONCLUSIVE"
   note "(this is reported, not passed — see the summary)"
 fi
+
+# ── leg 9b: a fleet crawl must not start every parked hub ────────────
+say "leg 9b: wake=false refuses a parked volume instead of starting it"
+# `models` is parked from the leg above. A project service listing every
+# project must be able to look without waking: at fleet size that is
+# 2700 hubs, and for hibernated ones a DR import from S3 each.
+ANN_BEFORE=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-models" -o json \
+  | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" flint.io/requested-at)
+T0=$(date +%s)
+code=$(gw GET "/v1/projects/$PROJECT/volumes/models/files?path=/&wake=false")
+T1=$(date +%s)
+[ "$code" = "503" ] || fail "wake=false on a parked volume returned $code, expected 503"
+grep -q 'Parked' /tmp/gw-body.txt || fail "the 503 did not say Parked: $(gwbody)"
+[ $((T1 - T0)) -lt 10 ] \
+  || fail "wake=false waited out the wake budget ($((T1 - T0))s) — a crawl would stall"
+ANN_AFTER=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-models" -o json \
+  | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" flint.io/requested-at)
+[ "$ANN_BEFORE" = "$ANN_AFTER" ] \
+  || fail "wake=false STAMPED the wake annotation ('$ANN_BEFORE' -> '$ANN_AFTER')"
+REPL=$(kubectl -n "$NS" get deploy -l flint.io/share="fs-$PROJECT-models" \
+  -o jsonpath='{.items[0].spec.replicas}' 2>/dev/null)
+[ "$REPL" = "0" ] || fail "wake=false brought the hub back up (replicas=$REPL)"
+pass "wake=false refuses in $((T1 - T0))s, stamps nothing, and leaves the hub at replicas=0"
+
+# A typo must NOT read as "yes, wake" — that mistake's blast radius is
+# every parked share in the fleet.
+code=$(gw GET "/v1/projects/$PROJECT/volumes/models/files?path=/&wake=fasle")
+[ "$code" = "400" ] || fail "an unreadable wake= value returned $code, expected 400"
+
+# And the LISTING endpoint never wakes anything either — it is the
+# cheapest fleet-crawl primitive and reports `serving` per volume.
+code=$(gw GET "/v1/projects/$PROJECT/volumes")
+[ "$code" = "200" ] || fail "volume listing returned $code"
+echo "$(gwbody)" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+by={v["volume"]: v for v in d["volumes"]}
+assert by["models"]["serving"] is False, by["models"]
+assert by["data"]["serving"] is True, by["data"]
+' || fail "the listing misreports which volumes are serving: $(gwbody)"
+REPL=$(kubectl -n "$NS" get deploy -l flint.io/share="fs-$PROJECT-models" \
+  -o jsonpath='{.items[0].spec.replicas}' 2>/dev/null)
+[ "$REPL" = "0" ] || fail "listing volumes woke a parked hub (replicas=$REPL)"
+pass "listing volumes reports serving per volume and wakes nothing"
 
 # ── leg 10: the wake API returns a MOUNTABLE address ─────────────────
 say "leg 10: POST /wake brings a parked volume back and hands out its NFS address"
@@ -682,13 +726,13 @@ note "address=$ADDR serverId=${SRVID:0:16}…"
 # The wake endpoint is ALSO the keepalive, so it must stamp even when
 # the share was already up — that is the whole point for a consumer
 # that holds a mount and does no file I/O.
-BEFORE=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-data" \
-  -o jsonpath='{.metadata.annotations.flint\.io/requested-at}')
+BEFORE=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-data" -o json \
+  | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" flint.io/requested-at)
 sleep 2
 curl -s -o /dev/null -X POST -H "Authorization: Bearer $GW_TOKEN" \
   "http://127.0.0.1:$PF_GW/v1/projects/$PROJECT/volumes/data/wake"
-AFTER=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-data" \
-  -o jsonpath='{.metadata.annotations.flint\.io/requested-at}')
+AFTER=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-data" -o json \
+  | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" flint.io/requested-at)
 [ -n "$AFTER" ] || fail "the wake endpoint never stamped flint.io/requested-at"
 [ "$BEFORE" != "$AFTER" ] \
   || fail "a second wake did not re-stamp — it is not a keepalive, so a quiet mount would be suspended under"

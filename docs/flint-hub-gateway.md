@@ -32,6 +32,7 @@ the fleet. That is the whole trade. See
 ```
 GET    /v1/projects/{id}/volumes                      list a project's volumes
 POST   /v1/projects/{id}[/volumes/{vol}]/wake         bring it up, and keep it up
+                                                      (…/files* also takes &wake=false)
 
 GET    /v1/projects/{id}[/volumes/{vol}]/files?path=&recursive=&cursor=&limit=
 GET    /v1/projects/{id}[/volumes/{vol}]/files/content?path=   [Range, If-None-Match]
@@ -269,6 +270,48 @@ gateway that polled hubs to find out whether they were up would pin
 awake every share it ever touched and quietly disable the idle ladder
 the fleet's economics rest on.
 
+### Browsing wakes a hub. Crawling the fleet must not.
+
+**A file request on a parked share wakes it.** That is the right
+default: someone clicking a project expects it to open, and refusing
+because the hub happens to be scaled to zero would make the idle ladder
+visible to end users as an error.
+
+**The exception is a project service iterating over every project.** At
+the design fleet size — 3000 shares, of which ~300 are live — a crawl
+that woke what it touched would start 2700 hubs. For the `Hibernated`
+ones that is a full DR import from the bucket each: real billed egress,
+a thundering herd against an operator bounded to 32 concurrent
+reconciles, and then 2700 hubs sitting awake until the ladder walks them
+back down one at a time.
+
+So a crawl passes `wake=false`:
+
+```
+GET /v1/projects/{id}/volumes/{v}/files?path=/&wake=false
+  200  served — the share was already up
+  503  {"reason":"Parked","error":"this share is IdleSuspended and you asked
+        not to wake it (wake=false) …"}     ← no Retry-After, deliberately
+```
+
+`wake=false` refuses the **wait** as well as the wake, so a crawl does
+not block on shares that happen to be starting. There is no
+`Retry-After`, because nothing is on a timer — coming back later finds
+exactly the same thing until someone asks for the share.
+
+An unreadable value (`wake=fasle`) is a **400, not a default**. The
+asymmetry is deliberate: silently reading a typo as "yes, wake" is the
+mistake whose blast radius is the entire parked fleet.
+
+`wake` is consumed by the gateway and never forwarded — structurally, not
+by stripping: [`Verb::query_keys`] is an allowlist and no verb names it.
+
+**The cheaper crawl is `GET /v1/projects/{id}/volumes`.** It never
+touches a hub at all, so it neither wakes a parked volume nor counts as
+activity against a live one, and each row carries `serving`. A project
+service rendering a list wants that first, and `wake=false` only for the
+volumes it then decides to look inside.
+
 ### `POST …/wake` — for consumers that mount, and for keeping them alive
 
 File requests wake a share on their own; this endpoint exists for the
@@ -462,7 +505,7 @@ mint and carries a fleet-wide blast radius of its own).
 
 ## Verification
 
-- `cargo test --lib lite_gateway` — 73 tests. The proxy ones stand up
+- `cargo test --lib lite_gateway` — 87 tests. The proxy ones stand up
   **two independent fake hubs on real ports**, bind the gateway on a
   third, and drive it with a real HTTP client; each hub names itself in
   every response, so a cross-routed request fails on the body the caller
