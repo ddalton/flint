@@ -57,7 +57,7 @@ use crate::lite_operator::idle::ANN_REQUESTED_AT;
 use crate::pnfs::mds::fileapi::token::TokenSource;
 
 use super::derive::Minter;
-use super::resolve::{self, Decision, Lookup, Refusal, ShareView};
+use super::resolve::{self, Decision, Door, Lookup, Refusal, ShareView};
 use super::route::{self, Verb, RESPONSE_HEADERS};
 
 /// Everything the gateway was started with.
@@ -534,7 +534,7 @@ async fn wake_share(
     }
 
     // Wait for it, on the CR.
-    let view = match wait_for_ready(&gw, &project, volume.as_deref()).await {
+    let view = match wait_for_ready(&gw, &project, volume.as_deref(), Door::Nfs).await {
         Ok(v) => v,
         Err(res) => return *res,
     };
@@ -551,9 +551,11 @@ async fn wake_share(
         keepalive_secs: resolve::keepalive_secs(&view),
         mount_warning: resolve::mount_hazard(&view),
     };
+    // `Door::Nfs` already refused an absent address, so reaching here
+    // with none is not possible — but saying 200 with no `address`
+    // would send a caller to parse a field that is not there, and a
+    // belt-and-braces check on the field a mount depends on is cheap.
     if body.address.is_none() {
-        // Ready with no address is not something a caller can mount, and
-        // saying 200 would send it to parse a field that is not there.
         return json_err(
             StatusCode::SERVICE_UNAVAILABLE,
             "NoAddress",
@@ -671,15 +673,17 @@ async fn serve(
             if let Err(res) = arm_wake(&gw, &view).await {
                 return *res;
             }
-            match wait_for_ready(&gw, &project, volume.as_deref()).await {
+            match wait_for_ready(&gw, &project, volume.as_deref(), Door::FileApi).await {
                 Ok(v) => view = v,
                 Err(res) => return *res,
             }
         }
-        Decision::Wait => match wait_for_ready(&gw, &project, volume.as_deref()).await {
-            Ok(v) => view = v,
-            Err(res) => return *res,
-        },
+        Decision::Wait => {
+            match wait_for_ready(&gw, &project, volume.as_deref(), Door::FileApi).await {
+                Ok(v) => view = v,
+                Err(res) => return *res,
+            }
+        }
     }
 
     let endpoint = match resolve::decide(&view) {
@@ -870,11 +874,12 @@ async fn wait_for_ready(
     gw: &Gateway,
     project: &str,
     volume: Option<&str>,
+    door: Door,
 ) -> Result<ShareView, Box<warp::reply::Response>> {
     let deadline = tokio::time::Instant::now() + gw.cfg.wake_wait;
     loop {
         let view = look_up(gw, project, volume)?;
-        match resolve::decide(&view) {
+        match resolve::decide_for(&view, door) {
             Decision::Dial(_) => return Ok(view),
             Decision::Refuse(r) => return Err(Box::new(from_refusal(&r))),
             Decision::Wake | Decision::Wait => {}

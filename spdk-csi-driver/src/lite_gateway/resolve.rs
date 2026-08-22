@@ -291,6 +291,30 @@ fn refuse_later(
 /// 4. **Then the endpoint**, which is the only step that can fail for a
 ///    share that is otherwise perfectly healthy.
 pub fn decide(v: &ShareView) -> Decision {
+    decide_for(v, Door::FileApi)
+}
+
+/// Which of the hub's two doors a caller is asking about.
+///
+/// The phase half of the decision is identical for both — a
+/// `Terminating` share serves neither, a parked one wakes for either.
+/// The doors differ only in the last step, and they differ in a way
+/// that matters: **an NFS-only share has no `apiEndpoint` at all**.
+///
+/// That is not an edge case. `monitoring.fileApi` is off by default, so
+/// a plain NFS share — which is the primary consumer shape — publishes
+/// no file-API endpoint, and a wake request that insisted on one would
+/// refuse the very shares it exists to bring up. The first cut of
+/// `/wake` did exactly that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Door {
+    /// `status.apiEndpoint` — the HTTP file API.
+    FileApi,
+    /// `status.address` — `host:2049`, what a consumer mounts.
+    Nfs,
+}
+
+pub fn decide_for(v: &ShareView, door: Door) -> Decision {
     if v.deleting || v.phase == Some(Phase::Terminating) {
         return refuse(
             410,
@@ -346,7 +370,24 @@ pub fn decide(v: &ShareView) -> Decision {
         Phase::Ready => {}
     }
 
-    // Ready. The endpoint is the last thing that can be missing, and
+    // Ready. Now the doors part.
+    if door == Door::Nfs {
+        // `status.address` is withdrawn by the operator on `Failed` and
+        // `Terminating`, both already refused above — so an absent
+        // address here means the Service has not published one yet,
+        // which is a wait rather than a refusal.
+        return match v.address.as_deref() {
+            Some(a) if !a.is_empty() => Decision::Dial(a.to_string()),
+            _ => refuse_later(
+                503,
+                "NoAddress",
+                "the share is up but has published no NFS address yet",
+                5,
+            ),
+        };
+    }
+
+    // The file API's endpoint is the last thing that can be missing, and
     // the operator already recorded WHY on the condition — so the
     // caller gets that reason rather than a bare "no endpoint".
     match v.api_endpoint.as_deref() {
@@ -1123,6 +1164,93 @@ mod tests {
     /// mount hangs with no path back.
     ///
     /// So the caller is TOLD, at the moment it asks for an address.
+    /// THE NFS-ONLY SHARE.
+    ///
+    /// `monitoring.fileApi` is OFF by default, so a plain NFS share —
+    /// the primary consumer shape — publishes no `apiEndpoint` at all.
+    /// The first cut of `/wake` judged every request at the file-API
+    /// door, so it refused those shares with `FileApiDisabled`: the
+    /// wake endpoint could not wake the exact shares it exists for.
+    #[test]
+    fn an_nfs_only_share_is_wakeable_even_though_it_has_no_api_endpoint() {
+        let mut v = ShareView {
+            namespace: "ws".into(),
+            name: "fs-p".into(),
+            phase: Some(Phase::Ready),
+            address: Some("10.96.1.7:2049".into()),
+            // No file API: no endpoint, and the operator says why.
+            api_endpoint: None,
+            api_condition: Some((
+                false,
+                "NotConfigured".into(),
+                "spec.monitoring.fileApi is not enabled".into(),
+            )),
+            ..Default::default()
+        };
+
+        // The file-API door refuses it, and should.
+        match decide_for(&v, Door::FileApi) {
+            Decision::Refuse(r) => assert_eq!(r.reason, "FileApiDisabled"),
+            d => panic!("the file API door must refuse a share with no file API: {d:?}"),
+        }
+        // The NFS door serves it.
+        assert_eq!(
+            decide_for(&v, Door::Nfs),
+            Decision::Dial("10.96.1.7:2049".into()),
+            "an NFS-only share must be reachable at the NFS door"
+        );
+
+        // And the phase half is shared: both doors agree on parked,
+        // admin-suspended and terminating.
+        for (phase, want) in [
+            (Phase::IdleSuspended, Decision::Wake),
+            (Phase::Hibernated, Decision::Wake),
+            (Phase::Starting, Decision::Wait),
+        ] {
+            v.phase = Some(phase.clone());
+            assert_eq!(decide_for(&v, Door::Nfs), want, "{phase:?} at the NFS door");
+            assert_eq!(decide_for(&v, Door::FileApi), want, "{phase:?} at the API door");
+        }
+        v.phase = Some(Phase::Suspended);
+        for door in [Door::Nfs, Door::FileApi] {
+            match decide_for(&v, door) {
+                Decision::Refuse(r) => assert_eq!(r.reason, "AdminSuspended", "{door:?}"),
+                d => panic!("{door:?}: {d:?}"),
+            }
+        }
+        v.phase = Some(Phase::Ready);
+        v.deleting = true;
+        for door in [Door::Nfs, Door::FileApi] {
+            match decide_for(&v, door) {
+                Decision::Refuse(r) => assert_eq!(r.status, 410, "{door:?}"),
+                d => panic!("{door:?}: {d:?}"),
+            }
+        }
+    }
+
+    /// Ready but the Service has not published an address yet is a
+    /// WAIT, not a refusal — `status.address` is withdrawn only on
+    /// Failed and Terminating, and both are already refused above.
+    #[test]
+    fn a_ready_share_with_no_address_yet_is_retryable_at_the_nfs_door() {
+        let v = ShareView {
+            phase: Some(Phase::Ready),
+            address: None,
+            api_endpoint: Some("http://x:8080".into()),
+            ..Default::default()
+        };
+        match decide_for(&v, Door::Nfs) {
+            Decision::Refuse(r) => {
+                assert_eq!(r.status, 503);
+                assert_eq!(r.reason, "NoAddress");
+                assert_eq!(r.retry_after, Some(5));
+            }
+            d => panic!("{d:?}"),
+        }
+        // The file API door is unaffected — the two doors are independent.
+        assert!(matches!(decide_for(&v, Door::FileApi), Decision::Dial(_)));
+    }
+
     #[test]
     fn a_share_that_can_be_suspended_under_a_mount_says_so() {
         // The ladder is off: nothing to warn about.

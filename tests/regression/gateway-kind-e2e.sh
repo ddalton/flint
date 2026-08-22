@@ -540,18 +540,11 @@ say "leg 7: a write through the gateway lands in the bucket under its OWN prefix
 # down before anyone could ask. The hub publishes its own recovery
 # point, so poll THAT: `rpo.dirtyFiles` going to zero with
 # `manifestCurrent` true is the hub saying the bytes are in the bucket.
-rpo() { dbg "curl -s '$EP_DATA/status'" | python3 -c '
-import json,sys
-try: d=json.load(sys.stdin)
-except Exception: print("unparseable"); raise SystemExit
-r=d.get("rpo") or {}
-print(f"clean={d.get(\"rpoClean\")} dirty={r.get(\"dirtyFiles\")} "
-      f"manifestCurrent={r.get(\"manifestCurrent\")} tomb={r.get(\"tombstones\")}")
-'; }
+rpo() { dbg "curl -s '$EP_DATA/status'" | python3 "$REPO_ROOT/tests/regression/lib/hub-rpo.py"; }
 CLEAN=""
 for i in $(seq 1 40); do
   R=$(rpo)
-  case "$R" in *"clean=True"*) CLEAN=1; break ;; esac
+  case "$R" in *"rpoClean=True"*) CLEAN=1; break ;; esac
   [ $((i % 8)) -eq 0 ] && note "rpo: $R"
   sleep 5
 done
