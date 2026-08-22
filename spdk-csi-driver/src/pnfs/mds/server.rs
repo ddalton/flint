@@ -1059,6 +1059,15 @@ impl MetadataServer {
                      manifest object or restore from a versioned copy, then restart."
                 );
                 self.status.set_import_refused(why.clone());
+                // Make the sentence above true. Setting a status string
+                // gated nothing: the flush loop span unconditionally
+                // below and every tick ended in a manifest barrier, so
+                // a transient GET failure on the manifest was enough to
+                // publish an EMPTY tree over a real one — losing every
+                // directory, symlink and mode/uid/gid, which live only
+                // in the manifest — after which rpo::evaluate reports
+                // clean and the idle ladder reclaims the disk.
+                orch.fence_publishing(why);
             }
             if let Some(rep) = outcome.report {
                 // `is_some()` — NOT `stubs_created > 0`, which would

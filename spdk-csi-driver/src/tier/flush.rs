@@ -243,6 +243,22 @@ pub struct FlushOrchestrator {
     /// it at entry AND immediately before the publish; `None` from
     /// `current()` forbids publishing.
     epoch: Arc<crate::tier::epoch::EpochGuard>,
+    /// Set when the start-up import REFUSED — the bucket HAS a manifest
+    /// and this hub could not read it.
+    ///
+    /// The export being served is then EMPTY and does not describe the
+    /// bucket, so anything published from it is a lie about the tree.
+    /// The barrier is the dangerous half: directories, symlinks and
+    /// every mode/uid/gid live ONLY in the manifest, so one barrier
+    /// over a real manifest erases them, `rpo::evaluate` then reports
+    /// clean, and the idle ladder reclaims the disk that held the last
+    /// copy. `server.rs` already logs "do NOT let it publish over the
+    /// bucket" at the refusal; this is what makes that true.
+    ///
+    /// Deliberately one-way and process-local: the retry is a restart
+    /// with a readable manifest, which is exactly what the intent note
+    /// left behind arranges.
+    publish_fenced: std::sync::atomic::AtomicBool,
     generations: DashMap<(u64, u64), GenRecord>,
     last_flush: DashMap<(u64, u64), Instant>,
     /// Step 12 (A12): the DR manifest writer's guard/seq state; the
@@ -271,6 +287,7 @@ impl FlushOrchestrator {
             backend,
             cfg,
             epoch,
+            publish_fenced: std::sync::atomic::AtomicBool::new(false),
             generations: DashMap::new(),
             last_flush: DashMap::new(),
             manifest: tokio::sync::Mutex::new(crate::tier::manifest::WriterState::default()),
@@ -678,8 +695,32 @@ impl FlushOrchestrator {
     /// One scheduling pass: tombstones first (A7 — a renamed file's
     /// publish at its new key depends on the covered object being
     /// gone), then the durable dirty set.
+    /// Forbid every publish for the life of this process.
+    ///
+    /// Called when the start-up import refused: this hub is serving an
+    /// empty export over a bucket that has real content.
+    pub fn fence_publishing(&self, why: &str) {
+        self.publish_fenced
+            .store(true, std::sync::atomic::Ordering::Release);
+        warn!(
+            "tier flush: publishing FENCED for this process — {why}. The export does not \
+             describe the bucket, so no file and no manifest barrier will be written. \
+             Fix the manifest object (or restore a versioned copy) and restart."
+        );
+    }
+
+    pub fn is_publish_fenced(&self) -> bool {
+        self.publish_fenced
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub async fn tick(&self) -> TickReport {
         let mut report = TickReport::default();
+        // BEFORE the epoch check: this hub may legitimately hold the
+        // epoch and still have nothing truthful to say about the tree.
+        if self.is_publish_fenced() {
+            return report;
+        }
         if self.epoch.current().is_none() {
             // Fenced (A8): nothing may publish. The dirty set stays
             // durable; the fence event itself already logged loudly.
@@ -734,6 +775,12 @@ impl FlushOrchestrator {
     /// manifest when the tree/RPO changed. Failure is non-fatal (the
     /// previous manifest stays the RPO record one barrier longer).
     pub async fn write_manifest_barrier(&self) {
+        // An unreadable manifest at import ⇒ never describe the tree.
+        // Guarded here as well as in `tick`, because this is the call
+        // that destroys data and it is `pub`.
+        if self.is_publish_fenced() {
+            return;
+        }
         // Fenced mid-tick ⇒ no barrier: a deposed hub must not
         // describe a bucket it no longer owns.
         let Some(epoch) = self.epoch.current() else { return };
@@ -1692,6 +1739,51 @@ mod tests {
     /// next manifest barrier publishes a manifest naming NO files.
     /// Observed on a real cluster: 33 rows loaded, 33 counted beyond
     /// RPO, manifest cut from 7919 bytes to 534.
+    /// A hub that could not read the bucket's manifest at start serves
+    /// an EMPTY export. `server.rs` logs "do NOT let it publish over
+    /// the bucket" — and, until this fence, nothing enforced it:
+    /// `set_import_refused` wrote a status string whose only readers
+    /// are two status surfaces, the flush loop spawned unconditionally,
+    /// and every tick ended in `write_manifest_barrier`.
+    ///
+    /// One barrier from an empty tree replaces a real manifest with one
+    /// naming no files. Directories, symlinks and every mode/uid/gid
+    /// exist ONLY in the manifest, so they are gone; `rpo::evaluate`
+    /// then reports clean and the idle ladder reclaims the disk that
+    /// held the last copy.
+    #[tokio::test]
+    async fn a_refused_import_may_never_publish_a_barrier() {
+        let r = rig(1 << 20, 1 << 20);
+
+        // The bucket already has a real manifest. Whatever this hub
+        // does next, it must not be replaced from an empty export.
+        let key = "t/.flint/manifest";
+        r.mem.raw_put(key, Bytes::from_static(b"REAL MANIFEST"), vec![]);
+
+        // The import refused, so the hub is serving an empty tree.
+        r.orch.fence_publishing("manifest unreadable (test)");
+        assert!(r.orch.is_publish_fenced());
+
+        // A full tick, and the barrier called directly — it is `pub`,
+        // so the guard has to hold on that path too.
+        let rep = r.orch.tick().await;
+        r.orch.write_manifest_barrier().await;
+
+        let (_, after) = r
+            .mem
+            .get_whole(key, None)
+            .await
+            .expect("the manifest must still exist");
+        assert_eq!(
+            &after[..],
+            b"REAL MANIFEST",
+            "a fenced hub overwrote the bucket's manifest from an empty export — \
+             this is the path that erases every directory, symlink and mode"
+        );
+        assert_eq!(rep.published, 0, "a fenced hub published a file");
+        assert_eq!(rep.examined, 0, "a fenced tick must not even walk the dirty set");
+    }
+
     #[tokio::test]
     async fn a_drifted_export_device_re_homes_its_generation_rows() {
         let r = rig(1024, 256);
