@@ -392,14 +392,19 @@ pub fn routes(
             .and(warp::path!("files" / "folder"))
             .and(warp::post())
             .and(a.clone())
+            // The query is parsed even though `Verb::Folder` forwards
+            // none of it: `wake` is a GATEWAY control, and a documented
+            // parameter that is silently ignored on two of six routes is
+            // a footgun rather than a simplification.
+            .and(query())
             .and(warp::header::headers_cloned())
             .and(warp::body::content_length_limit(64 * 1024))
             .and(warp::body::bytes())
-            .then(move |t: Target, _, h: warp::http::HeaderMap, b: Bytes| {
+            .then(move |t: Target, _, q: Vec<(String, String)>, h: warp::http::HeaderMap, b: Bytes| {
                 let gw = gw.clone();
                 async move {
                     let fwd = pick_headers(&h, Verb::Folder);
-                    serve(gw, t.0, t.1, Verb::Folder, vec![], &fwd, Payload::Buffered(b)).await
+                    serve(gw, t.0, t.1, Verb::Folder, q, &fwd, Payload::Buffered(b)).await
                 }
             })
     };
@@ -410,14 +415,15 @@ pub fn routes(
             .and(warp::path!("files" / "move"))
             .and(warp::post())
             .and(a)
+            .and(query())
             .and(warp::header::headers_cloned())
             .and(warp::body::content_length_limit(64 * 1024))
             .and(warp::body::bytes())
-            .then(move |t: Target, _, h: warp::http::HeaderMap, b: Bytes| {
+            .then(move |t: Target, _, q: Vec<(String, String)>, h: warp::http::HeaderMap, b: Bytes| {
                 let gw = gw.clone();
                 async move {
                     let fwd = pick_headers(&h, Verb::Move);
-                    serve(gw, t.0, t.1, Verb::Move, vec![], &fwd, Payload::Buffered(b)).await
+                    serve(gw, t.0, t.1, Verb::Move, q, &fwd, Payload::Buffered(b)).await
                 }
             })
     };
@@ -1766,6 +1772,48 @@ mod tests {
                 started.elapsed() < Duration::from_secs(5),
                 "{phase}: wake=false waited out the wake budget"
             );
+        }
+    }
+
+    /// `wake=false` must mean the same thing on all six routes. A
+    /// documented parameter honoured on four of them is worse than one
+    /// that does not exist.
+    #[tokio::test]
+    async fn every_file_route_honours_wake_false() {
+        let cases: Vec<(&str, &str, &str)> = vec![
+            ("GET", "/v1/projects/proj-a/files?path=/&wake=false", ""),
+            ("GET", "/v1/projects/proj-a/files/content?path=/a&wake=false", ""),
+            ("PUT", "/v1/projects/proj-a/files/content?path=/a&wake=false", "x"),
+            ("DELETE", "/v1/projects/proj-a/files/content?path=/a&wake=false", ""),
+            ("POST", "/v1/projects/proj-a/files/folder?wake=false", "{}"),
+            ("POST", "/v1/projects/proj-a/files/move?wake=false", "{}"),
+        ];
+        for (m, path, body) in cases {
+            let r = rig(
+                vec![share_json("fs-proj-a", "proj-a", "IdleSuspended", Some("HUB"))],
+                false,
+                30,
+            )
+            .await;
+            let started = std::time::Instant::now();
+            let res = req()
+                .method(m)
+                .path(path)
+                .header("content-type", "application/json")
+                .body(body)
+                .reply(&routes(r.gw.clone()))
+                .await;
+            assert_eq!(res.status(), 503, "{m} {path}");
+            assert!(
+                String::from_utf8_lossy(res.body()).contains("Parked"),
+                "{m} {path}: {}",
+                String::from_utf8_lossy(res.body())
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "{m} {path} waited out the wake budget"
+            );
+            assert!(r.log.all().is_empty(), "{m} {path} dialled a parked hub");
         }
     }
 

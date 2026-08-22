@@ -305,6 +305,9 @@ mistake whose blast radius is the entire parked fleet.
 
 `wake` is consumed by the gateway and never forwarded — structurally, not
 by stripping: [`Verb::query_keys`] is an allowlist and no verb names it.
+All six file routes honour it, including `folder` and `move`, which
+forward no query of their own: a documented parameter honoured on four
+of six routes is worse than one that does not exist.
 
 **The cheaper crawl is `GET /v1/projects/{id}/volumes`.** It never
 touches a hub at all, so it neither wakes a parked volume nor counts as
@@ -505,7 +508,7 @@ mint and carries a fleet-wide blast radius of its own).
 
 ## Verification
 
-- `cargo test --lib lite_gateway` — 87 tests. The proxy ones stand up
+- `cargo test --lib lite_gateway` — 88 tests. The proxy ones stand up
   **two independent fake hubs on real ports**, bind the gateway on a
   third, and drive it with a real HTTP client; each hub names itself in
   every response, so a cross-routed request fails on the body the caller
