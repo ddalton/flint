@@ -631,6 +631,23 @@ To check a running fleet, read the identity each client actually sends
 and count the distinct values. If the count is lower than the number of
 clients, you have a collision.
 
+**A second reason, which shows up only when something goes wrong.** State
+loss on a collision is the obvious hazard, but a shared name also breaks
+the server's ability to *tell you* about a loss. When a lease expires, the
+server may release that client's locks — that is deliberate, and it is
+what lets a partitioned cluster's ranges become available again. The
+protocol's way of reporting it is a status flag on the next `SEQUENCE`,
+and that flag is addressed to a **client id**, not to a cluster. Two
+clusters sharing one `co_ownerid` share one client id, so whichever
+cluster's traffic arrives first can consume the notification — and the
+cluster that actually lost the range never hears about it. It carries on
+believing it holds a lock the hub has already handed to someone else.
+
+Unique client names are what make that report deliverable to the cluster
+it concerns. This is a modelled result, not a measured one: see
+`formal/FlintClientIdentityLeaseNotify.cfg` and its `...Unique`
+counterpart, which differ in exactly that one setting.
+
 ### Credentials and permissions on the mount
 
 **The mount carries no credentials.** There is no secret, no key, no
