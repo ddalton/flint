@@ -61,7 +61,15 @@ Two corrections you need, because the leading design got them wrong in a way tha
 
 **Yes — and it must, because hibernate is the strictly more destructive rung with the strictly weaker precondition.** Verified: `hibernatable()` (`/Users/ddalton/github/flint/spdk-csi-driver/src/lite_operator/hubstatus.rs:251-288`) reads only `rpo_clean == Some(true) && epoch.held` — no `phase == Serving`, no `import_refused`, no `sweep.completed`, no clients — while `suspendable()` (`:213-233`) checks four things. And step 1, the decision to *begin* hibernating, returns at `/Users/ddalton/github/flint/spdk-csi-driver/src/lite_operator/idle.rs:294-321`, before `hub_quiet` (`:357`) and before the sessions guard (`:365`), on two annotations and no live signal — the caller structurally cannot supply either, hardcoding `Err("the hub is scaled to zero")` at `reconcile.rs:1590`. Its escalation deletes the PVC, which mints a new `serverId` and invalidates every stateid the partitioned client holds.
 
-The latch covers it: `flint.io/unwitnessed-suspend` blocks `BeginHibernate` indefinitely, and the escape is a wake or an explicit annotation removal. The asymmetry is deliberate — **the suspend hold is bounded because holding costs compute; the hibernate latch is unbounded because holding costs only the disk, while releasing costs a stale mount in a cluster you cannot reach.** Note the suspend still happens under the latch, so the expensive half of the saving is still delivered.
+The latch covers it: `flint.io/unwitnessed-suspend` blocks `BeginHibernate` indefinitely, and the escape is a wake or an explicit annotation removal. The asymmetry is deliberate — **the suspend hold is bounded because holding costs compute; the hibernate latch is unbounded because releasing costs a stale mount in a
+cluster you cannot reach.** ⚠ **But holding does NOT cost "only the disk" —
+that justification is false against shipped code.** A latched share sits in
+`Suspended` PAST its hibernate rung, so in `settled_requeue`
+(`reconcile.rs:259-268`) `after.saturating_sub(down_for)` is 0 and the
+`.clamp(REQUEUE_PROGRESS, REQUEUE_PARKED)` floors it at **15s — 120× the
+1800s parked rate, indefinitely**. The latch's real price is a per-reconcile
+RATE term, which is the class the fleet-scale plan names as every blocker in
+this operator. Cost the latch at fleet scale before building it. Note the suspend still happens under the latch, so the expensive half of the saving is still delivered.
 
 ---
 

@@ -86,7 +86,7 @@ Baseline: 3000 CRs, 300 live, 2700 parked, 300s cadence.
 
 | # | Blocker | Measured / derived |
 |---|---|---|
-| B1 | **`conflict::admit` is O(rank²) per reconcile**, re-deriving a constant | 13.0 ms median share, 51.1 ms newest, at N=3000. **0.17 core steady; 3.5 cores at the legal clamp floor.** Chart requests **50m**. Full-fleet sweep N³/6 ≈ 4.5e9 calls ≈ **46–52 CPU-seconds** |
+| B1 | ✅ RETIRED by S5 (`e0c26d1`, v1.33.0) — `conflict::admit` now has **no production call site at all** (the only calls left are past `mod tests`, `conflict.rs:522`); `AdmitTable` replaced it. Was: **O(rank²) per reconcile**, re-deriving a constant | 13.0 ms median share, 51.1 ms newest, at N=3000. **0.17 core steady; 3.5 cores at the legal clamp floor.** Chart requests **50m**. Full-fleet sweep N³/6 ≈ 4.5e9 calls ≈ **46–52 CPU-seconds** |
 | B2 | **Self-triggering reconcile loop.** Two condition *messages* embed a ticking seconds counter, so status changes on most reconciles, which fires the operator's own FlintShare watch | amplification **1/(1−min(1,d))**. 1.11x at d=0.1s — invisible in a 4-share drill. **Unbounded at d≥1s**, and d rises with fleet size. Positive feedback |
 | B3 | **Unbounded controller concurrency** (`Config::default().concurrency == 0`) × a ~750 KB whole-fleet snapshot per in-flight reconcile | **2.2–3.3 GB transient** against a **256Mi** limit. Cold start at 3000 CRs is a deterministic OOMKill |
 | B4 | **Unconditional writes**: 4 SSA applies + 1 status apply per reconcile, no diff gate | **50 writes/s with nothing changing**; 1000 writes/s at the clamp floor |
@@ -158,7 +158,7 @@ absent from the fleet. **A1**: indexed verdict ≡ `conflict::admit`,
 including the named winner. **A2** guards against a benchmark that
 silently stopped generating 3000 shares.
 
-### S5 — Arbitration becomes a table built once per fleet change *(days, dep S4)*
+### S5 — Arbitration becomes a table built once per fleet change *(days, dep S4)* — ✅ LANDED e0c26d1 (v1.33.0)
 Kills B1: ~1.6 ms whole-fleet build + ~12 ns per-reconcile lookup,
 replacing 13–51 ms per reconcile.
 
@@ -183,7 +183,14 @@ replacing 13–51 ms per reconcile.
 > store age-rank per admitted prefix and take the **minimum `created`
 > over the ancestor candidate plus the descendant RANGE**
 > `set.range(p..).take_while(|s| s.starts_with(p))` — not the first
-> successor. **Do not budget or land S5 until the lemma is restated.**
+> successor. **RESTATED AND LANDED — `e0c26d1`, shipped v1.33.0.** The corrected
+> lemma is carried in the code that implements it
+> (`conflict.rs:358-383`), including this counterexample verbatim:
+> the ancestor direction is exact (`range(..p).next_back()`), the
+> descendant direction takes the MINIMUM AGE RANK over `[p, p+)`.
+> Because `admitted` is built in age order the rank IS the index,
+> so no timestamp re-comparison is needed. This gate no longer
+> applies and must not be used to hold S9/S13.
 >
 > **[review, MAJOR] The table would also go stale.** The draft rebuilt
 > it in the FlintShare `.watches()` mapper, which is fed by a

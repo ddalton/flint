@@ -598,7 +598,7 @@ In order of what to look at:
    condition carries the reason it was held or the fact that it was
    not, in words.
 2. Events: `IdleSuspended`, `Woken`, `HibernateStarted`,
-   `SuspendedWithActiveSessions`, `ImplausibleRequest`.
+   `ImplausibleRequest`.
 3. `.status.phase` — `IdleSuspended` (the ladder did it, a wake
    request will bring it back) versus `Suspended` (an admin set
    `spec.lifecycle`, and a wake request will NOT override it).
