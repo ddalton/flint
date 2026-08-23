@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# One hundred and eighty-one runs, ALL required.
+# One hundred and ninety-six runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -17,11 +17,11 @@
 #   awk '/^(strict_run|mutation_run|liveness_mutation_run)[ ]/ {print $2}' \
 #     scripts/check-tla.sh | sort | uniq -c | sort -rn
 #
-#   71 FlintReplication   33 FlintComposition   15 FlintExtents
-#   11 FlintExtentsProbe   8 FlintTierEpoch     7 FlintTruncate
-#    7 FlintTierSession    7 FlintTierMarker    7 FlintShareDisk
-#    5 FlintAdmission      4 FlintSnapshots     3 FlintClaims
-#    3 FlintA2Probe)
+#   71 FlintReplication    33 FlintComposition    15 FlintExtents
+#   15 FlintClientIdentity   11 FlintExtentsProbe    8 FlintTierEpoch
+#    7 FlintTruncate        7 FlintShareDisk       7 FlintTierMarker
+#    7 FlintTierSession     5 FlintAdmission       4 FlintSnapshots
+#    3 FlintA2Probe         3 FlintClaims)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -44,6 +44,12 @@
 # FlintTierMarker.tla — the flint-lite eviction-marker visibility
 # protocol (evict/hydrate/read/crash over one file; chaos bugs 3+4 as
 # mutations); documented at the bottom of this file, next to its runs.
+#
+# FlintClientIdentity.tla — the NFSv4.1 client-record lifecycle keyed on a
+# co_ownerid that is NOT unique, plus (ModelLease) the 90s lease and its
+# two-phase sweep; model AFTER code AFTER the many-clusters drill, which
+# found three defects in this one machine by hand in an afternoon.
+# Documented at the bottom of this file, next to its runs.
 #
 # FlintTierSession.tla — the multi-volume hub's TWO-LEVEL LEASE (one
 # session cell per hub, volume cells naming {hub, session generation};
@@ -1190,5 +1196,46 @@ mutation_run FlintClientIdentity FlintClientIdentityLockLeak.cfg   "cascade-lock
 # means the module has stopped testing what it claims to.
 strict_run FlintClientIdentity FlintClientIdentityNoCollide.cfg "client-identity ABSTRACTION PROBE (Collide=FALSE with all three defects ON: unique owners make every theorem here vacuous)"
 strict_run FlintClientIdentity FlintClientIdentityNconnect1.cfg "client-identity SINGLE-CONNECTION PROBE (case-4 defect ON at nconnect=1: case 4 never fires, which is why pynfs EID5f misses it)"
+
+# THE LEASE DIMENSION (ModelLease).  Added when the identity fixes raised a
+# question the rig could not answer: the 90s lease and its sweep are the
+# OTHER half of this machine, and `courtesy_release_expired` runs at the top
+# of EVERY COMPOUND and reaps EVERY expired client — not the caller's.  On
+# one cluster that is nearly invisible.  With several clusters on one hub it
+# means cluster B's traffic is what releases cluster A's locks while A's own
+# renewal is in flight on another thread, and `renew_lease` is documented
+# LOCK-FREE ("per-client locking only, not global").
+#
+# The sweep is NOT atomic.  `courtesy_release_expired` reads
+# get_expired_clients(), strips those clients' locks, and then calls
+# cleanup_expired() — which reads get_expired_clients() A SECOND TIME to
+# decide whose sessions, stateids and client record to destroy.  That has
+# two distinct consequences and each gets its own run, because run together
+# the shorter one masks the longer.
+#
+# No clock is modelled: a lease lapses by a nondeterministic action, which is
+# strictly weaker than assuming any particular 90s/30s relationship and so
+# cannot be an artifact of the numbers.  The numbers are exactly what a rig
+# cannot control, which is why the L4 kind leg could watch the timer work and
+# still say nothing about any of this.
+mutation_run FlintClientIdentity FlintClientIdentityLeaseOrphan.cfg "lease-sweep ORPHANED LOCK (the sweep strips locks in phase 1 and retires the record in phase 2; a lock granted in between has no client, no lease, and no reaper — remove_client_locks only ever iterates EXPIRED LEASES)" "Inv_NoOrphanLocks"
+mutation_run FlintClientIdentity FlintClientIdentityLeaseSilent.cfg "lease-sweep SILENT LOSS (a SEQUENCE landing between the sweep's two reads renews the lease, so phase 2 skips the client: its locks are already gone, its session survives, and status_flags is hardcoded 0 — it is never told)" "Inv_LockLossIsDetectable"
+
+# FIX A vs FIX B.  A makes the sweep atomic — one reading, locks and record
+# together — and closes BOTH consequences at the cost of one fewer call.  B
+# leaves the race and reports the revocation in sr_status_flags, which needs
+# server state that does not exist today (the sweep keeps no record of WHAT
+# it revoked) and closes only the second.  B also carries a hazard of its
+# own, and the LeaseNotify pair is the machine-checked form of it.
+strict_run FlintClientIdentity FlintClientIdentityLeaseAtomic.cfg "lease-sweep FIX A: one atomic sweep — every invariant must hold"
+mutation_run FlintClientIdentity FlintClientIdentityLeaseNotify.cfg "lease-sweep FIX B UNDER A COLLISION: sr_status_flags is addressed to a CLIENTID, and two clusters sharing a co_ownerid share one — so a2's SEQUENCE consumes the flag and a1, which actually lost the range, is never told" "Inv_LockLossIsDetectable"
+strict_run FlintClientIdentity FlintClientIdentityLeaseNotifyUnique.cfg "lease-sweep FIX B WITH UNIQUE CLIENT NAMES (the SAME cfg with Collide=FALSE — nfs4_unique_id is a PRECONDITION for a revocation being deliverable to the cluster it concerns)"
+
+# THE ONE PLACE THE TWO DIMENSIONS MEET, and an open question since the
+# module was written: a sweep landing mid-handshake, retiring an incumbent
+# between a mount's two EXCHANGE_IDs while the case-5 obligation is recorded
+# against the clientid it is destroying.
+strict_run FlintClientIdentity FlintClientIdentityLeaseHandshake.cfg "lease sweep landing MID-HANDSHAKE (nconnect=2 trunking probe + the lease dimension, everything fixed — the obligation carry must survive a concurrent sweep)"
+mutation_run FlintClientIdentity FlintClientIdentityLeaseHandshakeProbe.cfg "MID-HANDSHAKE VACUITY PROBE (same constants: TLC must reach a state where an agent is mid-EXCHANGE_ID while a sweep sits between its two steps — if this goes green the run above is vacuous and the question it answers is open again)" "Probe_SweepLandsMidHandshake"
 
 echo "TLA GATE PASSED"

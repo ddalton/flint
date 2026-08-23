@@ -2,7 +2,7 @@
 
 Twelve spec modules plus two probe modules (`FlintA2Probe`, `FlintExtentsProbe` —
 ghost-witness overlays on `FlintReplication` / `FlintExtents`), one gate
-(`scripts/check-tla.sh`, **one hundred and eighty-nine** TLC runs).
+(`scripts/check-tla.sh`, **one hundred and ninety-six** TLC runs).
 
 Both counts here have drifted before, in both files, because nothing
 regenerated them. They do now:
@@ -1295,6 +1295,96 @@ the only thing that reaps locks*, which iterates expired **leases**.
 collectable by nothing, survives restart (locks are persisted and
 re-seeded), and denies its range to every client in every cluster for the
 life of the volume.
+
+### The lease dimension — three more shipped defects, and a design result
+
+Added 2026-08-22, after the identity fixes raised a question no rig could
+answer. The 90s lease and its sweep are the *other* half of this machine,
+and `courtesy_release_expired` runs at the top of **every** COMPOUND and
+reaps **every** expired client — not the caller's. On one cluster that is
+nearly invisible. With several clusters on one hub it means cluster B's
+traffic is what releases cluster A's locks, while A's own renewal is in
+flight on another thread and `renew_lease` is documented lock-free
+("per-client locking only, not global").
+
+No clock is modelled. A lease lapses by a nondeterministic action, which
+is strictly weaker than assuming any particular 90s/30s relationship and
+therefore cannot be an artifact of the numbers — and the numbers are
+exactly what a rig cannot control, which is why the L4 kind leg could
+watch the timer work and still say nothing about any of this.
+
+The sweep is not atomic: it reads `get_expired_clients()`, strips those
+clients' locks, then calls `cleanup_expired()`, which reads
+`get_expired_clients()` **a second time** to decide whose record to
+destroy. That has two distinct consequences, and each gets its own run
+because run together the shorter masks the longer:
+
+| run | what it walks | invariant |
+|---|---|---|
+| `LeaseOrphan` | a lock granted between the two phases has no client, no lease and no reaper — permanently | `Inv_NoOrphanLocks` |
+| `LeaseSilent` | a SEQUENCE between the two reads renews the lease, phase 2 skips the client, its locks are already gone, `status_flags` is 0 — it is never told | `Inv_LockLossIsDetectable` |
+
+Both counterexamples need a **second agent**, which is the topology
+showing up inside the trace rather than in the framing around it.
+
+**A third defect fell out of the model's shape rather than a run.** The
+conditional owner-index removal — fix 3 from the drill — went in on
+`remove_client_internal` and stopped there. The public `remove_client`,
+reached from DESTROY_CLIENTID, the lease sweep *and* the case-5 cascade,
+kept its unconditional `owner_to_id.remove`. The model applies its index
+guard at every removal site uniformly, so `IndexBlind` states the
+property for all of them at once and the asymmetry had nowhere to hide.
+That is the argument for a model over a test in one line: a test walks
+the site it was written for.
+
+#### Fix A beat fix B, and the model is why
+
+| run | posture | result |
+|---|---|---|
+| `LeaseAtomic` | retire the record, *then* strip the locks, from one reading | holds |
+| `LeaseNotify` | keep the race, report it in `sr_status_flags` | **fails** |
+| `LeaseNotifyUnique` | the same, with `Collide = FALSE` | holds |
+
+`LeaseNotify` and `LeaseNotifyUnique` differ in exactly one constant, so
+the difference is attributable. The counterexample is the interesting
+part: a1 and a2 are in different clusters sharing one `co_ownerid`, so
+`Inv_OneConfirmedPerOwner` correctly collapses them onto **one clientid**
+— and a2's SEQUENCE then consumes the flag. a1, the cluster that actually
+lost the range, is never told. `sr_status_flags` is addressed to a
+clientid, and under a collision a clientid is not a cluster.
+
+This is a result about a *fix*, not a shipped defect: flint sets no flags
+at all today. There are two ways out — RFC 8881 makes these flags sticky
+until the client resolves the condition, so both sessions would see it;
+or give every client a unique `nfs4_unique_id`, which the agent-fleet
+guide already mandates on other grounds. The second is the machine-checked
+form of a claim the guide makes for a different reason entirely: unique
+client names are not only about one cluster stealing another's state,
+they are a **precondition for a revocation ever being deliverable to the
+cluster it concerns**.
+
+Fix A needs none of that reasoning, and it is one *fewer* call. It ships.
+
+#### What the model checks is the fix as shipped, not an idealisation
+
+`AtomicSweep = TRUE` is deliberately modelled as two ordered steps —
+`SweepRetire` then `SweepStrip` — because that is what the code does. A
+single indivisible action would have been easier and would have checked
+something flint does not implement.
+
+That fidelity costs two invariant weakenings, both written down in the
+module rather than quietly applied. `Inv_NoOrphanLocks` and
+`Inv_LocksReapable` both admit `stripPending`, the window between
+retiring the record and stripping the locks, in which a lock really does
+exist with no client and no lease behind it. What makes that window sound
+rather than an orphan is that the thing which closes it is *already
+scheduled* — the next statement in the same loop, no await between — and
+that no new lock can enter, because `TakeLock` requires a live client and
+the client is gone. The shipped order has a window too, and it is the
+mirror image: opened by the strip, closed by a re-read that may decide to
+do nothing at all, with the client **alive** throughout. That asymmetry
+is the entire reason the order is what it is, and stating it as a
+weakening is what keeps the theorem honest about it.
 
 ### State space — three agents runs fully, and why it did not at first
 
