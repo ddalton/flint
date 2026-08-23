@@ -146,6 +146,38 @@ fn bump_change_counter(f: &std::fs::File) {
 #[cfg(not(unix))]
 fn bump_change_counter(_f: &std::fs::File) {}
 
+/// Record a COPY that mutated its destination and then could not finish.
+///
+/// Every exit path out of the copy loop that has already written bytes
+/// must come through here. The loop calls `write_at` directly and
+/// nothing rolls those bytes back, so an early return leaves the
+/// destination holding copied data. If the tier is not told, three
+/// things are wrong at once: the change attribute still reports the old
+/// value, so a client's cached view of the file is stale; the file is
+/// not in the dirty set, so the flusher will never publish it; and
+/// `rpoClean` stays true — which is the single flag the operator
+/// consults before DELETING THE PVC.
+///
+/// Noting a range that a later retry re-copies is harmless: the capture
+/// is a dirty mark, not a diff. Failing to note it is not recoverable,
+/// because nothing else on any path will notice the file changed.
+///
+/// `total_copied == 0` means the destination was never touched, and
+/// marking it dirty then would publish a file for no reason.
+fn note_partial_copy(dst_file: &std::fs::File, dst_offset: u64, total_copied: u64) {
+    if total_copied == 0 {
+        return;
+    }
+    bump_change_counter(dst_file);
+    crate::tier::capture::note_file(
+        dst_file,
+        crate::tier::capture::Mutation::Write {
+            offset: dst_offset,
+            len: total_copied,
+        },
+    );
+}
+
 /// Copy a byte range with positioned I/O. Returns bytes actually copied,
 /// which is short only when the source ends early.
 fn copy_range(
@@ -772,11 +804,24 @@ impl PerfOperationHandler {
                 let remaining = count - total_copied;
                 let to_read = std::cmp::min(remaining, CHUNK_SIZE as u64) as usize;
 
-                // Read from source at current position
-                let bytes_read = src_file.read_at(
+                // Read from source at current position.
+                //
+                // `?` HERE MUST NOT SKIP THE DIRTY NOTE. Once the loop
+                // has written anything, an error exit leaves the
+                // destination mutated; if the tier is not told, the file
+                // reads as clean and `rpoClean` stays true. ENOSPC is
+                // the reachable case — a COPY that fills the disk is
+                // exactly what the write reserve exists to bound.
+                let bytes_read = match src_file.read_at(
                     &mut buffer[..to_read],
                     src_offset + total_copied
-                )?;
+                ) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        note_partial_copy(&dst_file, dst_offset, total_copied);
+                        return Err(e);
+                    }
+                };
 
                 if bytes_read == 0 {
                     // The source shrank under us (the range was validated
@@ -786,10 +831,16 @@ impl PerfOperationHandler {
                 }
 
                 // Write to destination at current position
-                let bytes_written = dst_file.write_at(
+                let bytes_written = match dst_file.write_at(
                     &buffer[..bytes_read],
                     dst_offset + total_copied
-                )?;
+                ) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        note_partial_copy(&dst_file, dst_offset, total_copied);
+                        return Err(e);
+                    }
+                };
 
                 total_copied += bytes_written as u64;
 
@@ -807,6 +858,22 @@ impl PerfOperationHandler {
             // (FlintTierMarker's find). DELAY discards the partial
             // copy and the retry re-copies hydrated bytes over it.
             if !crate::tier::evict::file_read_window_intact(&src_file, marker_cycle_began) {
+                // THE DESTINATION HAS ALREADY BEEN MUTATED. The loop
+                // above ran `write_at`; nothing here rolls it back, and
+                // the comment's "the retry re-copies hydrated bytes over
+                // it" is a hope about the client, not a property of the
+                // server. Bailing out without recording the mutation
+                // leaves the destination holding copied bytes with a
+                // stale change attribute and NO dirty mark — so the tier
+                // believes the file is clean and `rpoClean` stays true,
+                // which is precisely the flag that authorises hibernate
+                // to delete the PVC. MARKER_CYCLE is process-global, so
+                // ANY eviction anywhere in the volume can land here.
+                //
+                // Record what actually happened before refusing. A
+                // later retry re-copies and notes it again, which is
+                // harmless; failing to note it at all is not.
+                note_partial_copy(&dst_file, dst_offset, total_copied);
                 if let crate::tier::hydrate::Verdict::Blocked(size) =
                     request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read)
                 {
@@ -1617,6 +1684,80 @@ impl PerfOperationHandler {
 
 #[cfg(test)]
 mod tests {
+
+    /// A COPY that mutated its destination and then bailed must say so.
+    ///
+    /// The COPY op's loop calls `write_at` directly and nothing rolls
+    /// those bytes back, so EVERY early exit after the first write
+    /// leaves the destination changed. Three such exits exist: the
+    /// post-copy source re-consult (the marker cycle changed —
+    /// `MARKER_CYCLE` is process-global, so any eviction anywhere in the
+    /// volume lands here), and the `read_at`/`write_at` error paths, of
+    /// which ENOSPC is the reachable one, being exactly what the tier's
+    /// write reserve exists to bound.
+    ///
+    /// Leaving any of them unrecorded is not a cosmetic loss. The change
+    /// attribute keeps reporting the old value, so a client's cached
+    /// view is stale; the file never enters the dirty set, so the
+    /// flusher will never publish it; and `rpoClean` stays true — the
+    /// one flag the operator consults before deleting the PVC. The
+    /// bucket then holds the previous generation and the divergent local
+    /// bytes are destroyed, with nothing having reported a problem.
+    ///
+    /// SCOPE, stated plainly: this pins the helper's contract. That all
+    /// three exit paths route through it is established by reading the
+    /// loop, not by this test — the loop lives inside a `spawn_blocking`
+    /// closure in an async op handler and is not callable directly.
+    #[tokio::test]
+    async fn a_partial_copy_records_the_bytes_it_already_wrote() {
+        // Queues into the PROCESS-GLOBAL capture queue; `drain_pending`
+        // takes ALL of it, so hold the guard for the whole body.
+        let _excl = crate::tier::capture::test_exclusive();
+        crate::tier::capture::force_enable();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("dst.bin");
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(4096).unwrap();
+
+        let (dev, ino) = {
+            use std::os::unix::fs::MetadataExt;
+            let md = f.metadata().unwrap();
+            (md.dev(), md.ino())
+        };
+        crate::tier::capture::forget(dev, ino);
+
+        // Nothing was written: marking it dirty would publish a file for
+        // no reason.
+        super::note_partial_copy(&f, 0, 0);
+        assert!(
+            !crate::tier::capture::is_queued(dev, ino),
+            "a copy that wrote nothing must not be recorded as a mutation",
+        );
+
+        // ANTI-VACUITY: the queue must be capable of holding this inode
+        // at all, or the assert above passes for the wrong reason.
+        crate::tier::capture::note_file(
+            &f,
+            crate::tier::capture::Mutation::Write { offset: 0, len: 1 },
+        );
+        assert!(
+            crate::tier::capture::is_queued(dev, ino),
+            "capture cannot queue this inode — the test proves nothing",
+        );
+        crate::tier::capture::forget(dev, ino);
+        assert!(!crate::tier::capture::is_queued(dev, ino), "reset failed");
+
+        // Bytes did land, so the tier has to know — even though the
+        // operation as a whole is about to fail.
+        super::note_partial_copy(&f, 512, 1024);
+        assert!(
+            crate::tier::capture::is_queued(dev, ino),
+            "a copy that wrote bytes and then bailed MUST record the mutation; \
+             otherwise the file reads as clean, rpoClean stays true, and the \
+             disk is eligible for reclaim with the bytes unpublished",
+        );
+    }
     use super::*;
     use crate::nfs::v4::state::StateType;
     use tempfile::TempDir;
