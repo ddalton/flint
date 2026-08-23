@@ -38,6 +38,7 @@ Writing through the mount also works; see
 | An S3 bucket | must already exist, **versioning on**. Nothing here creates or deletes buckets. |
 | Kubernetes | 1.25+, `kubectl` and `helm` |
 | On every node that will mount | an NFS client (`mount.nfs4`) — see [node prerequisite](#the-one-node-prerequisite) |
+| If more than one cluster mounts one hub | **globally unique hostnames across the fleet** — see [one hub, many clusters](#one-hub-many-clusters-give-every-client-a-unique-name) |
 | Images | `1.35.1` |
 | Chart | `flint-lite-operator` `0.2.7` |
 
@@ -571,6 +572,64 @@ $ kubectl describe pod agent | tail -3
 Most managed node images (GKE COS, EKS AL2023, AKS Ubuntu) ship it.
 Minimal images may not; install `nfs-common` (Debian/Ubuntu) or
 `nfs-utils` (RHEL family) in your node bootstrap.
+
+### One hub, many clusters: give every client a unique name
+
+This is the common shape — agents in several clusters, all mounting the
+same hub — and it has a prerequisite that is easy to miss because
+nothing reports it.
+
+**An NFSv4.1 client identifies itself by hostname and nothing else.** The
+Linux client builds its `co_ownerid` as:
+
+```
+Linux NFSv4.2 <nodename>
+```
+
+No address. No cluster. No uniquifier, unless you set one. And RFC 8881
+requires the server to treat an identical `co_ownerid` as *the same
+client coming back after a reboot* — so flint cannot tell two clusters
+apart, and is not permitted to guess.
+
+The collision is not exotic. A fleet that applies one manifest in every
+cluster gets the same pod names in every cluster, and two clusters built
+from the same template on the same VPC CIDR get the same node names.
+Captured from two clusters mounting one hub, byte-identical:
+
+```console
+$ tcpdump -r mount.pcap -A | grep 'Linux NFSv4'
+cluster B → Linux NFSv4.2 agent
+cluster C → Linux NFSv4.2 agent
+```
+
+When it happens, the second client's mount is read as the first one
+rebooting, and the first one's session and open state are discarded. The
+hub says so, but at `info`, and it reads like routine housekeeping:
+
+```console
+EXCHANGE_ID: case 5 (client reboot detected) — deferring cleanup of clientid 36
+```
+
+**Which name matters depends on who mounts.** A `PersistentVolume` is
+mounted by kubelet in the node's namespace, so the identity is the
+**node's** hostname. A pod that runs `mount` itself uses the **pod's**
+hostname. Whichever applies, it has to be unique across every cluster
+that mounts this hub — not just within one.
+
+Two ways to get there:
+
+- **Name the nodes uniquely.** Include the cluster name in the node
+  hostname. If your clusters share a VPC CIDR and derive hostnames from
+  the private IP, they *will* collide.
+- **Set the uniquifier.** `nfs.nfs4_unique_id=<something-unique>` as a
+  kernel module parameter on each node — a drop-in under
+  `/etc/modprobe.d/`, applied at node bootstrap. Read it back at
+  `/sys/fs/nfs/net/nfs_client/identifier`; `(null)` means it is not set
+  and the hostname is doing all the work.
+
+To check a running fleet, read the identity each client actually sends
+and count the distinct values. If the count is lower than the number of
+clients, you have a collision.
 
 ### Credentials and permissions on the mount
 
