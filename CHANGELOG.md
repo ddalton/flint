@@ -10,6 +10,179 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [1.36.0] - 2026-08-23
+
+**The many-clusters release.** The common shape for an agent fleet is
+several k8s clusters mounting one hub, and it had never been drilled at
+cluster level. Doing so found six defects, all shipped, all in the same
+place: NFSv4 client identity is `Linux NFSv4.<minor> <nodename>` and
+nothing else, so two clusters routinely present byte-identical bytes and
+the server is required by RFC 8881 §18.35.5 to read the second as the
+first one rebooting.
+
+Minor rather than patch for one reason: `phase: Ready` now carries an
+additional precondition. Nothing on the declared SemVer surface (CSI gRPC
+verbs, StorageClass `parameters`, `volume_context` keys) changed, but a
+share's observable status did, and a version number is a poor place to
+hide that.
+
+### Fixed — NFSv4 client identity, one hub and many clusters
+
+- **A colliding `co_ownerid` cost another cluster its locks, permanently.**
+  The RFC 8881 case-5 cascade tore down sessions, stateids, delegations
+  and the client record but not the locks — and structurally could not,
+  because the session handler held no reference to the lock table. Since
+  `remove_client` drops the lease first, and the only reaper iterates
+  expired *leases*, what was left behind was unreachable by every code
+  path there is. Persisted and re-seeded at startup, so a restart did not
+  clear it either, and the range was refused to every agent in every
+  cluster for the life of the volume.
+- **An `nconnect >= 2` mount silently dropped the case-5 cleanup
+  obligation.** The Linux client sends one EXCHANGE_ID per connection for
+  trunking detection, so the second one hits case 4, replaces the
+  unconfirmed record, and started the replacement's `pending_replaces` at
+  `None`. This cut both ways: it *masked* the cross-cluster steal, which
+  is why a rig kept failing to reproduce it, while breaking reboot cleanup
+  for everyone. pynfs EID5f passes over it because it uses one connection.
+- **The owner-index guard reached one removal site of four.** The
+  conditional removal went in on the EXCHANGE_ID replacement path and
+  stopped there; the public `remove_client` — reached from
+  DESTROY_CLIENTID, the lease sweep and the case-5 cascade — kept an
+  unconditional remove, so a departing client evicted a *live* peer and
+  that peer's next EXCHANGE_ID minted a second clientid for an owner that
+  already had one.
+
+### Fixed — the lease sweep
+
+- **A sweep that stripped a client's locks could then decline to retire
+  it.** `courtesy_release_expired` read the expired set, stripped those
+  clients' locks, then called `cleanup_expired()`, which read the expired
+  set *a second time*. `renew_lease` is lock-free, so a SEQUENCE landing
+  between the two reads renewed the lease and the second read no longer
+  saw the client: its locks were already gone, its session and stateids
+  survived, and `sr_status_flags` is hardcoded 0 — so nothing told it. It
+  carried on believing it held a byte range the server had handed away.
+- **A lock granted mid-sweep was orphaned forever.** Stripping locks
+  before retiring the record left a window in which a lock could still be
+  granted to a client the sweep was about to destroy — after which it had
+  no client, no lease and no reaper. The record is now retired first,
+  which closes the window because `LOCK` can no longer be founded on a
+  client that is gone.
+- Both were found by TLC, not by review, and neither is reachable with a
+  single client: both counterexamples require a second agent, because the
+  sweep runs at the top of every COMPOUND and reaps *every* expired
+  client rather than the caller's.
+
+### Fixed — the operator
+
+- **`Ready` could be reported with no address.** The phase was decided
+  from `available_replicas` alone while `status.address` was resolved
+  separately, so a `type: LoadBalancer` share with no `advertiseAddress`
+  published `Ready` with a null address for as long as the cloud provider
+  took to populate `status.loadBalancer.ingress` — minutes, on AWS, and
+  cross-cluster consumers are exactly the population that needs a
+  LoadBalancer. The address is now an input to the phase.
+- **The lite chart's NetworkPolicy admitted the wrong port.** It rendered
+  `.Values.service.port`, so a non-default port admitted the Service's
+  port while the pod listens on 2049 — every allowlisted CIDR denied.
+- **`nfsClientCIDRs` cannot restrict cross-cluster consumers**, and both
+  charts said it could. With `externalTrafficPolicy` unset, kube-proxy
+  SNATs: measured 1486 of 1486 connections arriving from the hub's own
+  gateway address and none from either remote node. Corrected in place
+  rather than removed, because the knob still works for same-cluster
+  consumers.
+
+### Fixed — the front door told cross-cluster consumers the wrong thing
+
+- **`mountHazard` was `null` in exactly the configuration a real cluster
+  proved unsafe.** The gateway returned "no hazard" whenever
+  `suspendWithSessions: false` was set, on the reasoning that "the ladder
+  will hold while any client holds a lease". It does not: a lease
+  *expires*, so a client that is partitioned rather than gone stops
+  renewing, the count reaches zero on its own, and the guard stops
+  guarding — which the CRD's own documentation says two files away, and
+  which was measured across a one-way packet cut as guard-holding at
+  t=49–99, lease 1 → 0 at t=99, suspended at t=111 with the mount still
+  held. Both branches now warn, and both lead with the keepalive, because
+  that call crosses a different network path from the mount and so still
+  arrives when the mount's path is cut. Wire-visible: `mountWarning`
+  appears where it was previously null.
+- The unit test asserting that silence was itself pinning the defect
+  (`assert_eq!(mount_hazard(...), None)`); it now asserts the requirement,
+  with an anti-vacuity check that the two branches still say different
+  things.
+- **`activeLeases` is documented as "unexpired NFSv4 leases" and is not.**
+  It is `LeaseManager::active_count`, which is `leases.len()` — lease
+  *rows*, including expired-but-unswept ones — so it runs up to one 30s
+  sweep behind. The error is in the protective direction and is precisely
+  why the drill's guard survived to t=99 rather than lapsing at the 90s
+  lease, which is the reason it could not be left wrong: anything
+  reasoning about how long the guard lasts must add the sweep interval.
+
+### Added — a design of record for idle-suspend under a remote mount
+
+- `docs/plans/idle-suspend-cross-cluster-design.md`, from a 20-agent
+  design workflow. **Not implemented, deliberately.** Its own verdict is
+  that a hub-side signal *narrows* this window and cannot close it: at the
+  wire, a hard node loss and a partition are the same event, and any rule
+  that holds for one holds for the other for as long as it cannot tell
+  them apart. The remaining work changes idle behaviour and cost on a
+  pure-spot fleet and includes a deliberately unbounded hibernate latch —
+  trades to be made deliberately, not inherited from a release.
+- It also corrected two things worth recording: a credential-free wake
+  path already ships (`flint-hub-gateway`'s `/wake`, one bearer token, no
+  Kubernetes credential) and was simply absent from the documentation a
+  cross-cluster operator would read; and the obvious fix — hold when a
+  client vanishes without saying goodbye — would have partly reverted the
+  periodic lease reaper added three days earlier, which exists because a
+  partitioned share sat pinned awake for 770 seconds.
+
+### Added — a formal model of the client-record lifecycle
+
+- `formal/FlintClientIdentity.tla`, 15 gate runs, written because the
+  drill found three defects in one state machine by hand in an afternoon
+  — that density, not a design question, is the signal that says model it.
+  It then found three more, including the one-removal-site-of-four above,
+  which it caught by *shape* rather than by a run: the model applies its
+  index guard at every removal site uniformly, so the asymmetry in the
+  code had nowhere to hide.
+- Two required-pass vacuity probes keep it honest. `NoCollide` runs with
+  unique owners and **all three defects switched back on** and finds
+  nothing, which is the machine-checked statement that the natural
+  abstraction makes every theorem in the module vacuous. `Nconnect1` does
+  the same from the other side and explains the pynfs gap.
+- The lease dimension models no clock at all — a lease lapses by a
+  nondeterministic action — so no result can be an artifact of the 90s/30s
+  numbers, which is exactly what a rig cannot control.
+- One design result worth knowing before implementing the obvious fix:
+  `sr_status_flags` is addressed to a **client id**, and two clusters
+  sharing a `co_ownerid` share one, so a revocation notice can be consumed
+  by the wrong cluster entirely. Unique client names are a *precondition*
+  for that report being deliverable, not merely a way to avoid state loss.
+- Gate: 189 → 196 runs, 14 spec modules.
+
+### Added — tests
+
+- `tests/regression/many-clusters-one-hub.sh`, a three-cluster drill:
+  baseline, identity collision (counting distinct owner *byte arrays*,
+  since the hub logs them as `{:?}` and grepping for the literal string
+  matches nothing), the idle ladder, and a partition leg driven with
+  `iptables -j DROP` — AWS security groups are stateful and cannot
+  express a one-way cut.
+- The partition leg carries a control: a connected, quiet share at 3.4x
+  the idle threshold that never suspends. Without it the leg would pass on
+  a hub that suspended for any reason at all.
+
+### Documentation
+
+- The agent-fleet guide gains "One hub, many clusters: give every client a
+  unique name" — the wire capture, which name matters for a
+  kubelet-mounted PV versus a pod that mounts itself, and how to audit a
+  running fleet.
+- **The guide's HTML and PDF never contained that warning at all.** They
+  were known to be stale; they were in fact missing the single most
+  important item for the shared-hub case. Both regenerated.
+
 ## [1.35.1] - 2026-08-22
 
 Four fixes, two of which cost data or client state rather than time.
@@ -2226,6 +2399,7 @@ neither tag represents a supported upgrade source.
 No security advisories at this release.
 
 [Unreleased]: https://github.com/ddalton/flint/compare/v1.35.1...HEAD
+[1.36.0]: https://github.com/ddalton/flint/compare/v1.35.1...v1.36.0
 [1.35.1]: https://github.com/ddalton/flint/compare/v1.35.0...v1.35.1
 [1.35.0]: https://github.com/ddalton/flint/compare/v1.34.0...v1.35.0
 [1.34.0]: https://github.com/ddalton/flint/compare/v1.33.0...v1.34.0
