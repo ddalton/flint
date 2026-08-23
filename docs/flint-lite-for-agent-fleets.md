@@ -723,11 +723,26 @@ Two more consequences worth designing around:
   --set 'networkPolicy.nfsClientSelectors[0].podSelector.matchLabels.app=agent'
   ```
 
-  Two ways to get a policy that reads correctly and protects nothing:
+  Three ways to get a policy that reads correctly and protects nothing:
   **`hubNamespaces` defaults to `[]`**, so enabling the policy without
-  it guards no hub at all; and several CNIs ignore NetworkPolicy in
-  silence, so confirm yours enforces it before relying on it. The
-  gateway is admitted to the hubs' 8080 automatically — you do not
+  it guards no hub at all; several CNIs ignore NetworkPolicy in
+  silence, so confirm yours enforces it before relying on it; and the
+  third one is specific to the shape this guide recommends —
+
+  **`nfsClientCIDRs` cannot express a client in another cluster.**
+  Nothing sets `externalTrafficPolicy`, so kube-proxy SNATs a NodePort
+  or LoadBalancer client to an address in the **hub's own** cluster
+  before the packet reaches the pod. Captured on a three-cluster rig:
+  **1486 of 1486** connections from two remote clusters arrived as the
+  hub cluster's gateway, and none as either remote node. So listing the
+  remote CIDRs denies the address the traffic actually comes from —
+  an outage — while listing the local one admits everyone who can reach
+  the NodePort. Neither is the control you wanted. **Bound
+  cross-cluster reach at the network layer instead: VPC peering, a
+  security group, or a gateway in front.** Inside one cluster, where
+  clients arrive as themselves, the selectors above work as written.
+
+  The gateway is admitted to the hubs' 8080 automatically — you do not
   repeat its selector.
 - **With `sec=sys`, files are owned by the uid that created them.** Run
   every agent for one workspace under the **same** `runAsUser` and
@@ -825,6 +840,14 @@ published with `spec.service.advertiseAddress`.
 Prefer a flat or peered network to a load balancer. NFS is one
 long-lived TCP flow and quiet periods are normal, so an LB that reaps
 idle connections will break mounts that were working fine.
+
+**Whichever you choose, the reachability boundary is not
+`nfsClientCIDRs`** — a client from another cluster does not arrive as
+itself. See [credentials and permissions on the
+mount](#credentials-and-permissions-on-the-mount); the short version is
+that kube-proxy rewrites the source to an address in the hub's own
+cluster, so the boundary has to be drawn by peering, a security group,
+or a gateway.
 
 ### An NFS client on the nodes
 

@@ -68,7 +68,7 @@
 <section class="page">
   <header class="ph">
     <h1>Flint-lite — one hub, one volume</h1>
-    <span class="kicker">1 / 4 · architecture</span>
+    <span class="kicker">1 / 5 · architecture</span>
   </header>
   <p class="dek">A single pod serves real POSIX over NFSv4.2. The PVC is the working set, an S3 prefix is the durability, and a second listener exposes the same filesystem over HTTP for callers that cannot mount — reached through one gateway rather than one address per hub. One hub serves exactly one prefix; a project that needs several volumes has several hubs.</p>
   <figure>
@@ -246,7 +246,7 @@
 <section class="page">
   <header class="ph">
     <h1>The flint-lite operator — a fleet of shares</h1>
-    <span class="kicker">2 / 4 · control plane</span>
+    <span class="kicker">2 / 5 · control plane</span>
   </header>
   <p class="dek">One custom resource replaces one helm release, per hub. The operator re-renders the same four objects from the CR on every pass — there is no reusable release state to go stale, and nothing it does ever reaches the bucket.</p>
   <figure>
@@ -425,7 +425,7 @@
 <section class="page">
   <header class="ph">
     <h1>Giving client pods a PVC — two recipes</h1>
-    <span class="kicker">3 / 4 · consumer provisioning</span>
+    <span class="kicker">3 / 5 · consumer provisioning</span>
   </header>
   <p class="dek">Consumers install nothing from flint either way: the data path is the node kernel's NFS client. The choice is only who mints the PV — you, once, by hand; or a stock provisioner, once per workspace.</p>
   <figure>
@@ -582,7 +582,7 @@
 <section class="page">
   <header class="ph">
     <h1>Starting, winding down, waking</h1>
-    <span class="kicker">4 / 4 · lifecycle</span>
+    <span class="kicker">4 / 5 · lifecycle</span>
   </header>
   <p class="dek">A tiered hub does real work before its listener binds, and the operator winds an unused share down in two rungs — each opt-in, each giving back something different. Nothing in the data path ever starts a hub.</p>
   <figure>
@@ -755,6 +755,146 @@
     <b>Hibernation is verified at drain time, not assumed:</b> the hub exits 0 whether or not it flushed and scale-to-zero destroys the pod, so the operator scales back to one and waits for <code>rpoClean</code> before it deletes anything. <code>rpoClean: null</code> — a share with no bucket — is a refusal, not a pass.
     <b>Hibernated wakes are slower than they look</b> (~79s against ~13s for the same-identity case): destroying the volume destroys the <code>serverId</code>, so self-recognition cannot short-circuit the lease and the claim waits out the full <code>lease_misses × heartbeat</code>. Every long-parked project pays that on its first open.
     <b>Do not keepalive from a liveness poller.</b> <code>/status</code> is deliberately not activity and the file API deliberately is — a UI that refreshes a listing on a timer pins its project awake forever, and a conditional GET answering <code>304</code> pins it exactly as hard.
+  </figcaption>
+  </figure>
+</section>
+<section class="page">
+  <header class="ph">
+    <h1>One hub, many clusters</h1>
+    <span class="kicker">5 / 5 · shared hub</span>
+  </header>
+  <p class="dek">One hub can serve agents in several clusters at once — the wire is ordinary NFSv4.2 and the hub does not know or care how many clusters are on it. What changes is that three things the protocol and the chart cannot supply become the fleet's responsibility: a unique name per client, a reachability boundary that is not <code>nfsClientCIDRs</code>, and a keepalive so a partitioned cluster's live agents are not mistaken for idle ones.</p>
+  <figure>
+  <svg viewBox="0 0 1600 800" role="img" aria-label="Two consumer clusters whose nodes share the hostname agent-7 both present the identical NFSv4 client identity 'Linux NFSv4.2 agent-7' to one hub. RFC 8881 case 5 obliges the server to read the second as the first rebooting and discard the incumbent's state. The hub cluster exposes a Service on port 2049 whose advertiseAddress is what remote clusters mount, in front of a single hub pod that owns the epoch lease, backed by a PVC working set and an S3 prefix for durability. Below, three cards state what the fleet must supply: unique client names, a network-layer reachability boundary because kube-proxy SNATs remote clients to the hub cluster's own gateway, and a wake keepalive for remote mounts.">
+    <defs>
+      <marker id="p5-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
+      <marker id="p5-av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6d4aa8"/></marker>
+      <marker id="p5-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
+      <marker id="p5-an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    </defs>
+
+    <rect x="30" y="56" width="360" height="170" rx="14" class="grpw"/>
+    <text xml:space="preserve" class="th" x="48" y="84">Consumer cluster A</text>
+    <text xml:space="preserve" class="tx" x="48" y="102">nothing from flint installed</text>
+    <rect x="48" y="112" width="324" height="98" rx="8" class="bx-slate"/>
+    <text xml:space="preserve" class="th" x="64" y="136">Node — hostname <tspan class="mn">agent-7</tspan></text>
+    <rect x="64" y="146" width="292" height="52" rx="7" class="bx-blue"/>
+    <text xml:space="preserve" class="tl ctr" x="210" y="168">kernel NFS client</text>
+    <text xml:space="preserve" class="mns ctr" x="210" y="188">Linux NFSv4.2 agent-7</text>
+
+    <rect x="30" y="286" width="360" height="170" rx="14" class="grpw"/>
+    <text xml:space="preserve" class="th" x="48" y="314">Consumer cluster B</text>
+    <text xml:space="preserve" class="tx" x="48" y="332">a different cluster, a different kubelet</text>
+    <rect x="48" y="342" width="324" height="98" rx="8" class="bx-slate"/>
+    <text xml:space="preserve" class="th" x="64" y="366">Node — hostname <tspan class="mn">agent-7</tspan></text>
+    <rect x="64" y="376" width="292" height="52" rx="7" class="bx-blue"/>
+    <text xml:space="preserve" class="tl ctr" x="210" y="398">kernel NFS client</text>
+    <text xml:space="preserve" class="mns ctr" x="210" y="418">Linux NFSv4.2 agent-7</text>
+
+    <path class="ln-ochre" d="M390,171 L420,171 L420,214 L448,214" marker-end="url(#p5-ao)"/>
+    <path class="ln-ochre" d="M390,401 L420,401 L420,300 L448,300" marker-end="url(#p5-ao)"/>
+
+    <rect x="450" y="166" width="304" height="182" rx="10" class="bx-oo"/>
+    <text xml:space="preserve" class="th ctr c-ochre" x="602" y="194">Identical bytes on the wire</text>
+    <text xml:space="preserve" class="tx ctr" x="602" y="218">the identity is the hostname —</text>
+    <text xml:space="preserve" class="tx ctr" x="602" y="236">there is no cluster in it</text>
+    <text xml:space="preserve" class="tx ctr" x="602" y="262">RFC 8881 §18.35.5 case 5: the server</text>
+    <text xml:space="preserve" class="tx ctr" x="602" y="280">MUST read the second as the first</text>
+    <text xml:space="preserve" class="tx ctr" x="602" y="298">REBOOTING</text>
+    <text xml:space="preserve" class="tsb ctr" x="602" y="324">⇒ the incumbent's locks and opens go</text>
+    <text xml:space="preserve" class="txs ctr" x="602" y="342">six defects in 1.36.0 traced to this one cause</text>
+
+    <line class="ln-blue" x1="754" y1="257" x2="796" y2="257" marker-end="url(#p5-ab)"/>
+    <text xml:space="preserve" class="txs ctr" x="775" y="248">NFSv4.2</text>
+
+    <rect x="800" y="56" width="470" height="400" rx="14" class="grpw"/>
+    <text xml:space="preserve" class="th" x="818" y="84">Hub cluster</text>
+    <text xml:space="preserve" class="tx" x="818" y="102">one hub is the coherence authority for the tree</text>
+
+    <rect x="818" y="114" width="434" height="80" rx="9" class="bx-violet"/>
+    <text xml:space="preserve" class="tl ctr" x="1035" y="140">Service :2049</text>
+    <text xml:space="preserve" class="mns ctr" x="1035" y="160">spec.service.advertiseAddress</text>
+    <text xml:space="preserve" class="tx ctr" x="1035" y="180">the routable door remote clusters mount</text>
+
+    <line class="ln-violet" x1="1035" y1="194" x2="1035" y2="210" marker-end="url(#p5-av)"/>
+
+    <rect x="818" y="212" width="434" height="132" rx="10" class="bx-hub"/>
+    <text xml:space="preserve" class="th ctr" x="1035" y="240">the hub — one pod, one prefix</text>
+    <text xml:space="preserve" class="tx ctr" x="1035" y="262">leases · locks · close-to-open · delegations</text>
+    <text xml:space="preserve" class="tx ctr" x="1035" y="280">holds the epoch lease; a second hub is fenced</text>
+    <text xml:space="preserve" class="mns ctr" x="1035" y="304">status.address — published only once known</text>
+    <text xml:space="preserve" class="txs ctr" x="1035" y="324">1.36.0: Ready is never reported without an address</text>
+
+    <line class="ln" x1="920" y1="344" x2="920" y2="360" marker-end="url(#p5-an)"/>
+    <line class="ln-ochre" x1="1150" y1="344" x2="1150" y2="360" marker-end="url(#p5-ao)"/>
+    <rect x="818" y="362" width="205" height="74" rx="8" class="bx"/>
+    <text xml:space="preserve" class="tl ctr" x="920" y="390">PVC</text>
+    <text xml:space="preserve" class="tx ctr" x="920" y="412">the working set</text>
+    <rect x="1047" y="362" width="205" height="74" rx="8" class="bx-ochre"/>
+    <text xml:space="preserve" class="tl ctr" x="1150" y="390">S3 prefix</text>
+    <text xml:space="preserve" class="tx ctr" x="1150" y="412">the durability</text>
+
+    <rect x="1300" y="114" width="270" height="230" rx="10" class="band"/>
+    <text xml:space="preserve" class="th" x="1318" y="142">A hub does not count clusters</text>
+    <text xml:space="preserve" class="tx" x="1318" y="168">It sees clients, and a client is a name.</text>
+    <text xml:space="preserve" class="tx" x="1318" y="186">Nothing in the protocol, the CRD or</text>
+    <text xml:space="preserve" class="tx" x="1318" y="204">the chart makes a second cluster</text>
+    <text xml:space="preserve" class="tx" x="1318" y="222">visible as a second cluster.</text>
+    <text xml:space="preserve" class="tx" x="1318" y="248">So every guarantee below is one the</text>
+    <text xml:space="preserve" class="tx" x="1318" y="266">FLEET supplies, not one the hub can</text>
+    <text xml:space="preserve" class="tx" x="1318" y="284">enforce for you.</text>
+    <text xml:space="preserve" class="txs" x="1318" y="312">Same wire, same hub, same code —</text>
+    <text xml:space="preserve" class="txs" x="1318" y="328">only the operating contract changes.</text>
+
+    <line class="hair" x1="30" y1="474" x2="1570" y2="474"/>
+    <text xml:space="preserve" class="tsb" x="30" y="494">WHAT THE FLEET MUST SUPPLY — three things the protocol and the chart cannot do for you</text>
+
+    <rect x="30" y="506" width="500" height="280" rx="10" class="bx"/>
+    <text xml:space="preserve" class="th c-blue" x="48" y="534">1 · Give every client a unique name</text>
+    <text xml:space="preserve" class="tx" x="48" y="560">The identity is the hostname and nothing else, so two</text>
+    <text xml:space="preserve" class="tx" x="48" y="578">clusters that share a node name are ONE client to the</text>
+    <text xml:space="preserve" class="tx" x="48" y="596">hub. Uniqueness has to hold across every cluster that</text>
+    <text xml:space="preserve" class="tx" x="48" y="614">mounts it — a fleet-wide property, not a per-cluster one.</text>
+    <text xml:space="preserve" class="tsb" x="48" y="642">Do either:</text>
+    <text xml:space="preserve" class="mns" x="48" y="666">hostname = &lt;cluster&gt;-&lt;node&gt;</text>
+    <text xml:space="preserve" class="mns" x="48" y="688">nfs.nfs4_unique_id=&lt;cluster&gt;</text>
+    <text xml:space="preserve" class="txs" x="48" y="716">The second is a kernel module parameter set on the</text>
+    <text xml:space="preserve" class="txs" x="48" y="732">CLIENT node. It survives a rename and is the safer</text>
+    <text xml:space="preserve" class="txs" x="48" y="748">choice when you do not control node naming.</text>
+
+    <rect x="550" y="506" width="500" height="280" rx="10" class="bx"/>
+    <text xml:space="preserve" class="th c-ochre" x="568" y="534">2 · Bound reachability at the network layer</text>
+    <text xml:space="preserve" class="tx" x="568" y="560">Port 2049 is AUTH_SYS — the client asserts its own uid</text>
+    <text xml:space="preserve" class="tx" x="568" y="578">and the server takes it, so reachability IS the boundary.</text>
+    <text xml:space="preserve" class="tsb" x="568" y="606">But nfsClientCIDRs cannot draw it.</text>
+    <text xml:space="preserve" class="tx" x="568" y="630">Nothing sets externalTrafficPolicy, so kube-proxy SNATs</text>
+    <text xml:space="preserve" class="tx" x="568" y="648">a NodePort or LB client to an address in the HUB's own</text>
+    <text xml:space="preserve" class="tx" x="568" y="666">cluster before the packet ever reaches the pod.</text>
+    <text xml:space="preserve" class="tsb" x="568" y="694">Measured on a three-cluster rig: 1486 of 1486</text>
+    <text xml:space="preserve" class="tx" x="568" y="712">connections from two remote clusters arrived as the hub</text>
+    <text xml:space="preserve" class="tx" x="568" y="730">cluster's gateway — none as either remote node.</text>
+    <text xml:space="preserve" class="txs" x="568" y="756">Listing remote CIDRs is an outage; listing the local one</text>
+    <text xml:space="preserve" class="txs" x="568" y="772">admits everyone. Use peering, SGs, or a gateway.</text>
+
+    <rect x="1070" y="506" width="500" height="280" rx="10" class="bx"/>
+    <text xml:space="preserve" class="th c-violet" x="1088" y="534">3 · Give a remote mount a keepalive</text>
+    <text xml:space="preserve" class="tx" x="1088" y="560">The idle ladder suspends a share on quiet, and a</text>
+    <text xml:space="preserve" class="tx" x="1088" y="578">partitioned cluster's busy agents look exactly like</text>
+    <text xml:space="preserve" class="tx" x="1088" y="596">quiet ones from the hub's side.</text>
+    <text xml:space="preserve" class="tsb" x="1088" y="624">suspendWithSessions defaults to suspending anyway:</text>
+    <text xml:space="preserve" class="tx" x="1088" y="648">the protective value is false, and it is opt-in. Read</text>
+    <text xml:space="preserve" class="tx" x="1088" y="666">the name literally.</text>
+    <text xml:space="preserve" class="tx" x="1088" y="694">Even set, it only NARROWS the window — leases EXPIRE,</text>
+    <text xml:space="preserve" class="tx" x="1088" y="712">so a long enough partition drops the count to zero and</text>
+    <text xml:space="preserve" class="tx" x="1088" y="730">the guard stops guarding.</text>
+    <text xml:space="preserve" class="tsb" x="1088" y="758">Drive POST /wake every keepaliveSecs from the thing</text>
+    <text xml:space="preserve" class="tx" x="1088" y="776">that actually knows whether work is happening.</text>
+  </svg>
+  <figcaption>
+    <b>The hub is unchanged; the operating contract is not.</b> Serving several clusters needs no different image, chart or mode — which is exactly why the three requirements above are easy to miss until something breaks.
+    <b>An address only the hub cluster can route is not an address.</b> Remote consumers mount <code>spec.service.advertiseAddress</code> verbatim; everything the operator can derive on its own is in-cluster-only. Deriving harder is not the answer — being told is.
+    <b>Address uniqueness is not arbitrated.</b> Two shares may advertise the same address and both report <code>Conflict=False (Unique)</code>: that condition covers bucket-prefix overlap, so it is a true statement about storage and says nothing at all about addresses.
+    <b>The failure mode is silent by construction.</b> A colliding client gets no error — the protocol says it is the same client returning, so the server does the correct thing with a false premise and the loser's state is simply gone.
   </figcaption>
   </figure>
 </section>
