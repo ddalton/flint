@@ -897,8 +897,28 @@ impl ClientManager {
     /// LOCK-FREE: Removal doesn't block other operations
     pub fn remove_client(&self, client_id: u64) {
         if let Some((_, client)) = self.clients.remove(&client_id) {
-            // Remove from owner map
-            self.owner_to_id.remove(&client.owner);
+            // Remove from the owner map ONLY IF IT STILL NAMES US — the
+            // same guard, and for the same reason, as
+            // `remove_client_internal`. `co_ownerid` is `Linux
+            // NFSv4.<minor> <nodename>` and nothing else, so one key can
+            // name several live clients from different clusters.
+            //
+            // This one was MISSED when that guard was added: the fix went
+            // in on the EXCHANGE_ID replacement path only, and this
+            // function is reached from three others — DESTROY_CLIENTID
+            // (dispatcher), the lease sweep (`cleanup_expired_ids`), and
+            // the case-5 cascade (`handle_create_session`). Every one of
+            // them could evict a LIVE peer from the index, after which
+            // that peer's next EXCHANGE_ID takes the no-record arm and
+            // mints a SECOND clientid for an owner that already has one.
+            //
+            // Found by TLC rather than by review: the model applies its
+            // index guard at every removal site uniformly, so
+            // `FlintClientIdentityIndexBlind.cfg` states the property for
+            // all of them at once and the asymmetry in the code had
+            // nowhere to hide.
+            self.owner_to_id
+                .remove_if(&client.owner, |_, &id| id == client_id);
 
             // Remove lease
             self.lease_manager.remove_lease(client_id);
@@ -1163,6 +1183,82 @@ mod tests {
         assert_eq!(
             client_mgr.mark_reclaim_complete(99999),
             ReclaimCompleteOutcome::NoSuchClient,
+        );
+    }
+
+    /// MANY CLUSTERS, ONE HUB: removing a client must not evict a LIVE
+    /// peer that shares its `co_ownerid` from the owner index.
+    ///
+    /// The guard for this went in on `remove_client_internal` — the
+    /// EXCHANGE_ID record-replacement path — and stopped there. The public
+    /// `remove_client` kept an unconditional `owner_to_id.remove(&owner)`,
+    /// and it is reached from three other places: DESTROY_CLIENTID
+    /// (`dispatcher.rs`), the lease sweep (`cleanup_expired_ids`), and the
+    /// case-5 cascade (`handle_create_session`). On any of them a departing
+    /// client deletes whatever the entry currently names — which after a
+    /// case-5 handover is the WINNER.
+    ///
+    /// The consequence is not a tidy-up failure. The evicted peer is still
+    /// mounted and still serving; its next EXCHANGE_ID finds no record for
+    /// its own owner, takes the `(false, None)` arm, and mints a SECOND
+    /// clientid for an owner that already has one — which is exactly the
+    /// duplicate `Inv_OneConfirmedPerOwner` exists to forbid.
+    ///
+    /// Found by TLC, not by review: `FlintClientIdentity.tla` applies its
+    /// index guard at EVERY removal site uniformly, so
+    /// `FlintClientIdentityIndexBlind.cfg` states the property for all of
+    /// them at once and the asymmetry in the code had nowhere to hide.
+    #[test]
+    fn removing_a_client_must_not_evict_a_live_peer_from_the_owner_index() {
+        let lease_mgr = Arc::new(LeaseManager::new());
+        let mgr = ClientManager::new(lease_mgr, "test-vol", crate::state_backend::memory_backend());
+        // One co_ownerid, two clusters. `Linux NFSv4.<minor> <nodename>` and
+        // nothing else — captured byte-identical on the wire from two kind
+        // clusters mounting one hub.
+        let owner = b"Linux NFSv4.2 agent".to_vec();
+        let princ = b"sys:agent:0".to_vec();
+
+        // Cluster A mounts and confirms; the index names A.
+        let a = new_id(mgr.exchange_id(owner.clone(), 111, 0, princ.clone()));
+        mgr.mark_confirmed(a);
+
+        // Cluster B arrives with the same owner and a fresh verifier => case
+        // 5. It gets its own record and the index now names B.
+        let b = new_id(mgr.exchange_id(owner.clone(), 222, 0, princ.clone()));
+        mgr.mark_confirmed(b);
+        assert_ne!(a, b, "case 5 must allocate a distinct record");
+
+        // Now A departs. DESTROY_CLIENTID, a lease sweep, or the case-5
+        // cascade — all three land here.
+        mgr.remove_client(a);
+
+        // THE REQUIREMENT, stated as what B can still observe: B is live and
+        // confirmed, so its next EXCHANGE_ID (same owner, same verifier) is a
+        // RENEWAL of B — case 1 — and must not mint anything.
+        match mgr.exchange_id(owner.clone(), 222, 0, princ.clone()) {
+            ExchangeIdOutcome::ExistingConfirmed { client_id, .. } => assert_eq!(
+                client_id, b,
+                "B must renew its own record, not be handed someone else's",
+            ),
+            other => panic!(
+                "A's departure evicted LIVE peer {} from the owner index: B's own \
+                 EXCHANGE_ID came back {:?} instead of renewing it",
+                b, other,
+            ),
+        }
+
+        // ANTI-VACUITY. The guard must be conditional, not simply absent:
+        // removing the client the index DOES name has to clear it, or a
+        // departed clientid would be handed to the next arrival forever.
+        mgr.remove_client(b);
+        assert!(
+            matches!(
+                mgr.exchange_id(owner.clone(), 333, 0, princ.clone()),
+                ExchangeIdOutcome::NewUnconfirmed { .. }
+            ),
+            "with no live client on this owner the index must be empty, so the \
+             next EXCHANGE_ID allocates — a guard that never removes is just as \
+             broken as one that always does",
         );
     }
 

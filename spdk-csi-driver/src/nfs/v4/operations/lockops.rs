@@ -1821,7 +1821,10 @@ mod tests {
 
         // Cluster C's agent mounts: same owner bytes, its own boot
         // verifier, TWO connections.
-        let c1 = handler.handle_exchange_id(eid(222), &CompoundContext::new(2));
+        // Connection 1 of the trunking probe. Its outcome is deliberately
+        // unused: what matters is that it FIRED, because it is the one that
+        // takes on the case-5 obligation the next connection must carry.
+        let _c1 = handler.handle_exchange_id(eid(222), &CompoundContext::new(2));
         let c2 = handler.handle_exchange_id(eid(222), &CompoundContext::new(2));
         assert_ne!(c2.clientid, victim, "the newcomer must get its own clientid");
         // The connection that actually confirms is the LAST one.
