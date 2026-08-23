@@ -606,6 +606,7 @@ pub fn phase_of(
     dep: Option<&Deployment>,
     blocked: bool,
     idle_state: IdleState,
+    address_known: bool,
 ) -> Phase {
     if blocked {
         return Phase::Failed;
@@ -631,7 +632,26 @@ pub fn phase_of(
     let available = status.and_then(|s| s.available_replicas).unwrap_or(0);
     let replicas = status.and_then(|s| s.replicas).unwrap_or(0);
     match (available, replicas) {
-        (a, _) if a >= 1 => Phase::Ready,
+        // A serving pod is not enough. `Ready` is what a consumer waits
+        // on before reading `status.address` and mounting it, so
+        // reporting Ready without an address hands them nothing — the
+        // same reason `ReprovisionVerifying` above is not Ready with a
+        // pod up.
+        //
+        // This is not hypothetical: for `type: LoadBalancer` with no
+        // `advertiseAddress`, `address_of` returns None until the cloud
+        // provider populates `status.loadBalancer.ingress`, which on AWS
+        // is minutes after the pod is available. A share that reported
+        // Ready in that window published a null address.
+        //
+        // It cannot wedge a share. The ClusterIP path derives the
+        // address from the Service's own name and port, so it resolves
+        // as soon as the Service is observed; an explicit
+        // `advertiseAddress` resolves immediately; and a LoadBalancer
+        // that never provisions SHOULD stay Starting, which is both
+        // correct and diagnosable.
+        (a, _) if a >= 1 && address_known => Phase::Ready,
+        (a, _) if a >= 1 => Phase::Starting,
         (_, r) if r >= 1 => Phase::Starting,
         _ => Phase::Pending,
     }
@@ -1363,7 +1383,26 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
         resolve_api_endpoint(&ctx, &share, &ns, &names, generation).await?;
     set_condition(&mut conds, api_cond);
     let lifecycle = share.spec.lifecycle.clone().unwrap_or_default();
-    let phase = phase_of(lifecycle.clone(), Some(&dep), false, idle::state_of(&share));
+    // Resolved BEFORE the phase, because it is an input to it: Ready
+    // means mountable, and there is nothing to mount without this.
+    let address = svc_live.as_ref().and_then(|s| {
+        address_of(
+            s,
+            &ns,
+            share
+                .spec
+                .service
+                .as_ref()
+                .and_then(|sv| sv.advertise_address.as_deref()),
+        )
+    });
+    let phase = phase_of(
+        lifecycle.clone(),
+        Some(&dep),
+        false,
+        idle::state_of(&share),
+        address.is_some(),
+    );
     let ready = phase == Phase::Ready;
     set_condition(
         &mut conds,
@@ -1397,17 +1436,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
         &share,
         FlintShareStatus {
             phase: Some(phase.clone()),
-            address: svc_live.as_ref().and_then(|s| {
-                address_of(
-                    s,
-                    &ns,
-                    share
-                        .spec
-                        .service
-                        .as_ref()
-                        .and_then(|sv| sv.advertise_address.as_deref()),
-                )
-            }),
+            address: address.clone(),
             api_endpoint,
             // NEVER carried forward. `None` here means "not observed on
             // this pass", and a stale phase would be indistinguishable
@@ -3333,20 +3362,73 @@ mod tests {
             available_replicas: Some(0),
             ..Default::default()
         });
-        assert_eq!(phase_of(Lifecycle::Active, Some(&dep), false, IdleState::Active), Phase::Starting);
+        assert_eq!(phase_of(Lifecycle::Active, Some(&dep), false, IdleState::Active, true), Phase::Starting);
 
         dep.status = Some(DeploymentStatus {
             replicas: Some(1),
             available_replicas: Some(1),
             ..Default::default()
         });
-        assert_eq!(phase_of(Lifecycle::Active, Some(&dep), false, IdleState::Active), Phase::Ready);
+        assert_eq!(phase_of(Lifecycle::Active, Some(&dep), false, IdleState::Active, true), Phase::Ready);
         assert_eq!(
-            phase_of(Lifecycle::Suspended, Some(&dep), false, IdleState::Active),
+            phase_of(Lifecycle::Suspended, Some(&dep), false, IdleState::Active, true),
             Phase::Suspended
         );
-        assert_eq!(phase_of(Lifecycle::Active, None, false, IdleState::Active), Phase::Pending);
-        assert_eq!(phase_of(Lifecycle::Active, Some(&dep), true, IdleState::Active), Phase::Failed);
+        assert_eq!(phase_of(Lifecycle::Active, None, false, IdleState::Active, true), Phase::Pending);
+        assert_eq!(phase_of(Lifecycle::Active, Some(&dep), true, IdleState::Active, true), Phase::Failed);
+    }
+
+    /// READY MEANS MOUNTABLE, so it must not be reported without an
+    /// address.
+    ///
+    /// `Ready` is what a consumer waits on before reading
+    /// `status.address`; publishing Ready with a null address hands them
+    /// nothing to mount. The window is real rather than theoretical: for
+    /// `type: LoadBalancer` with no `advertiseAddress`, `address_of`
+    /// returns None until the cloud provider populates
+    /// `status.loadBalancer.ingress` — minutes after the pod goes
+    /// available on AWS — and the phase used to be decided from
+    /// `available_replicas` alone.
+    #[test]
+    fn ready_is_never_reported_without_an_address() {
+        let mut dep = dep_with_checksum(None, None);
+        dep.status = Some(DeploymentStatus {
+            replicas: Some(1),
+            available_replicas: Some(1),
+            ..Default::default()
+        });
+
+        // The pod is serving, but nothing knows where to send anyone yet.
+        assert_eq!(
+            phase_of(Lifecycle::Active, Some(&dep), false, IdleState::Active, false),
+            Phase::Starting,
+            "a serving pod with no resolvable address is Starting, not Ready — \
+             a consumer that mounted status.address here would mount nothing",
+        );
+
+        // ANTI-VACUITY: the address is the ONLY thing that changed, and it
+        // is enough. Without this the assertion above would also pass on a
+        // phase_of that never returns Ready at all.
+        assert_eq!(
+            phase_of(Lifecycle::Active, Some(&dep), false, IdleState::Active, true),
+            Phase::Ready,
+            "and the same deployment IS Ready once the address resolves",
+        );
+
+        // The address does not outrank the states that already refuse
+        // Ready for their own reasons — it is one more precondition, not a
+        // replacement for them.
+        for (idle, want) in [
+            (IdleState::Suspended, Phase::IdleSuspended),
+            (IdleState::Hibernated, Phase::Hibernated),
+            (IdleState::ReprovisionVerifying, Phase::Reprovisioning),
+        ] {
+            assert_eq!(
+                phase_of(Lifecycle::Active, Some(&dep), false, idle, true),
+                want,
+                "a known address must not promote {idle:?} to Ready",
+            );
+        }
     }
 
     #[test]
@@ -3910,26 +3992,26 @@ mod tests {
     fn an_admin_suspend_and_an_idle_suspend_report_different_phases() {
         let dep = dep_with_checksum(None, None);
         assert_eq!(
-            phase_of(Lifecycle::Suspended, Some(&dep), false, IdleState::Active),
+            phase_of(Lifecycle::Suspended, Some(&dep), false, IdleState::Active, true),
             Phase::Suspended
         );
         assert_eq!(
-            phase_of(Lifecycle::Active, Some(&dep), false, IdleState::Suspended),
+            phase_of(Lifecycle::Active, Some(&dep), false, IdleState::Suspended, true),
             Phase::IdleSuspended
         );
         assert_eq!(
-            phase_of(Lifecycle::Active, Some(&dep), false, IdleState::Hibernated),
+            phase_of(Lifecycle::Active, Some(&dep), false, IdleState::Hibernated, true),
             Phase::Hibernated
         );
         // An admin's decision outranks the ladder's.
         assert_eq!(
-            phase_of(Lifecycle::Suspended, Some(&dep), false, IdleState::Suspended),
+            phase_of(Lifecycle::Suspended, Some(&dep), false, IdleState::Suspended, true),
             Phase::Suspended,
             "spec.lifecycle wins, and reports as such"
         );
         // And a conflict loser is Failed regardless of either.
         assert_eq!(
-            phase_of(Lifecycle::Active, Some(&dep), true, IdleState::Suspended),
+            phase_of(Lifecycle::Active, Some(&dep), true, IdleState::Suspended, true),
             Phase::Failed
         );
     }
