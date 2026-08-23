@@ -293,6 +293,7 @@ impl CompoundDispatcher {
     ///    dropping to 0 the instant a single compound arrived. With
     ///    `suspendWithSessions: false` that pins the share awake for
     ///    good.
+    ///
     /// ONE reading of the expired set, and the record dies BEFORE the locks
     /// are stripped. Both halves of that sentence are load-bearing, and both
     /// were wrong; TLC found each as its own counterexample.
