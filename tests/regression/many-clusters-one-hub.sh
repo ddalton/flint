@@ -353,6 +353,93 @@ X "$CB" agent "pkill -f 'while :' " >/dev/null 2>&1
 ka -n "$NS" patch flintshare $SHARE --type=json \
   -p '[{"op":"remove","path":"/spec/idle"}]' >/dev/null 2>&1
 
+# ── L4 ─ a partition revokes the guard that exists for partitions ──────
+# `suspendWithSessions: false` is the PROTECTIVE value: it refuses to
+# suspend while any client holds a lease, and the CRD names cross-cluster
+# mounts as the case it is for. It is implemented as
+#
+#     suspend_with_sessions == Some(false) && sessions_live == Some(true)
+#
+# and `sessions_live` is `activeLeases > 0` read from the hub. The hub
+# retires a lease it has not heard from in 90s. So a client that is
+# UNREACHABLE — the only situation in which suspending under it is
+# unrecoverable — stops counting as a session after one lease window,
+# and the guard silently stops applying.
+#
+# The operator cannot see this. It polls the hub's POD IP on the HUB
+# cluster's own network, so the path between the agent clusters and the
+# hub is outside every input the ladder reads. Throughout the partition
+# the hub answers /status perfectly.
+#
+# ORACLE: the operator's OWN `IdleEligible` message, sampled across the
+# partition. It must never stop reading "a client still holds a lease"
+# while the client is still mounted and still wants the hub.
+#
+# ANTI-VACUITY, and it is the whole leg: the CONTROL runs first and must
+# hold the share up for 3x the threshold with the client CONNECTED. If
+# `suspendWithSessions: false` did not work at all, the partition arm
+# would suspend too and look identical. The control is what makes the
+# difference attributable to the partition rather than to a guard that
+# never worked.
+say "L4: does suspendWithSessions:false survive a partition?"
+ka -n "$NS" patch flintshare $SHARE --type=merge \
+  -p '{"spec":{"idle":{"suspendAfterSecs":60,"suspendWithSessions":false}}}' >/dev/null 2>&1
+mount_at "$CB" agent >/dev/null 2>&1
+idle_reason() { ka -n "$NS" get flintshare $SHARE -o jsonpath='{.status.conditions}' 2>/dev/null \
+  | jq -r '.[]|select(.type=="IdleEligible")|.message' 2>/dev/null; }
+idle_state()  { ka -n "$NS" get flintshare $SHARE -o jsonpath='{.metadata.annotations.flint\.io/idle-state}' 2>/dev/null; }
+
+note "CONTROL: client CONNECTED and quiet, 3x the 60s threshold"
+CTRL_SUSPENDED=""
+for i in $(seq 1 18); do
+  case "$(idle_state)" in Suspended|Hibernated) CTRL_SUSPENDED=$((i*10)); break ;; esac
+  sleep 10
+done
+if [ -n "$CTRL_SUSPENDED" ]; then
+  bad "CONTROL FAILED: suspended at ${CTRL_SUSPENDED}s with a reachable client — the guard does \
+not work at all, so the partition arm proves nothing. L4 VOID."
+else
+  pass "CONTROL: 180s at 3x the threshold, never suspended ($(idle_reason))"
+
+  note "TEST: same share, same setting, cluster $CB partitioned from the hub"
+  # AWS security groups are STATEFUL — revoking a rule does NOT cut an
+  # ESTABLISHED flow. iptables DROP does. Pod egress is FORWARDed rather
+  # than locally generated, so both chains, inserted at position 1.
+  NODE_B="$CB-control-plane"
+  docker exec "$NODE_B" iptables -I OUTPUT 1 -d "$ADDR_HOST" -j DROP
+  docker exec "$NODE_B" iptables -I FORWARD 1 -d "$ADDR_HOST" -j DROP
+  CUT=$(X "$CB" agent "timeout 6 nc -z -w5 $ADDR_HOST $NODEPORT && echo REACHABLE || echo CUT" | tr -d ' \r\n')
+  if [ "$CUT" != "CUT" ]; then
+    bad "the partition did not take ($CUT) — L4 VOID"
+  else
+    GUARD_SEEN=""; LEASE_ZERO=""; P_SUSPENDED=""
+    for i in $(seq 1 26); do
+      T=$((i*12))
+      R=$(idle_reason)
+      case "$R" in *"still holds a lease"*) GUARD_SEEN=1 ;; esac
+      L=$(ka -n "$NS" logs statuspoll --tail=1 2>/dev/null | awk '{print $2}')
+      [ -z "$LEASE_ZERO" ] && [ "$L" = "0" ] && LEASE_ZERO=$T
+      case "$(idle_state)" in Suspended|Hibernated) P_SUSPENDED=$T; break ;; esac
+      sleep 12
+    done
+    docker exec "$NODE_B" iptables -D OUTPUT -d "$ADDR_HOST" -j DROP 2>/dev/null
+    docker exec "$NODE_B" iptables -D FORWARD -d "$ADDR_HOST" -j DROP 2>/dev/null
+    # The guard must be seen ENGAGING, or the suspend proves only that
+    # the client went quiet — not that a working guard was revoked.
+    if [ -z "$GUARD_SEEN" ]; then
+      bad "never observed the guard engaging during the partition — L4 VOID"
+    elif [ -n "$P_SUSPENDED" ]; then
+      bad "CONFIRMED: the guard engaged, then the lease was retired at ~${LEASE_ZERO:-?}s and the \
+share SUSPENDED at ~${P_SUSPENDED}s — under a client that is still mounted and still wants it"
+      note "the client's cluster has no path to flint.io/requested-at, so nothing there can wake it"
+    else
+      pass "the guard held for the whole partition — suspendWithSessions:false is partition-safe"
+    fi
+    sleep 15
+    note "after healing: phase=$(ka -n "$NS" get flintshare $SHARE -o jsonpath='{.status.phase}')"
+  fi
+fi
+
 # ── summary ────────────────────────────────────────────────────────────
 echo
 echo "══════════════════════════════════════════════════════════════════"
