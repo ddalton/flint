@@ -2407,6 +2407,17 @@ No security advisories at this release.
 [1.32.0]: https://github.com/ddalton/flint/compare/v1.31.0...v1.32.0
 [1.31.0]: https://github.com/ddalton/flint/compare/v1.30.0...v1.31.0
 [1.30.0]: https://github.com/ddalton/flint/compare/v1.29.0...v1.30.0
+[1.29.0]: https://github.com/ddalton/flint/compare/v1.28.0...v1.29.0
+[1.28.0]: https://github.com/ddalton/flint/compare/v1.27.0...v1.28.0
+[1.27.0]: https://github.com/ddalton/flint/compare/v1.26.0...v1.27.0
+[1.26.0]: https://github.com/ddalton/flint/compare/v1.25.2...v1.26.0
+[1.25.2]: https://github.com/ddalton/flint/compare/v1.25.1...v1.25.2
+[1.25.1]: https://github.com/ddalton/flint/compare/v1.25.0...v1.25.1
+[1.25.0]: https://github.com/ddalton/flint/compare/v1.24.0...v1.25.0
+[1.24.0]: https://github.com/ddalton/flint/compare/v1.23.0...v1.24.0
+[1.23.0]: https://github.com/ddalton/flint/compare/v1.22.0...v1.23.0
+[1.22.0]: https://github.com/ddalton/flint/compare/v1.21.0...v1.22.0
+[1.6.0]: https://github.com/ddalton/flint/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/ddalton/flint/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/ddalton/flint/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/ddalton/flint/compare/v1.2.0...v1.3.0

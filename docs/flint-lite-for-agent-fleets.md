@@ -39,8 +39,8 @@ Writing through the mount also works; see
 | Kubernetes | 1.25+, `kubectl` and `helm` |
 | On every node that will mount | an NFS client (`mount.nfs4`) — see [node prerequisite](#the-one-node-prerequisite) |
 | If more than one cluster mounts one hub | **globally unique hostnames across the fleet** — see [one hub, many clusters](#one-hub-many-clusters-give-every-client-a-unique-name) |
-| Images | `1.35.1` |
-| Chart | `flint-lite-operator` `0.2.7` |
+| Images | `1.36.0` |
+| Chart | `flint-lite-operator` `0.2.8` |
 
 ## 1. Install the operator and the gateway
 
@@ -62,7 +62,7 @@ kubectl -n flint-system create secret generic flint-gateway-root \
 
 helm install flint-lite-operator \
   oci://registry-1.docker.io/dilipdalton/flint-lite-operator \
-  --version 0.2.7 \
+  --version 0.2.8 \
   -n flint-system \
   --set gateway.enabled=true \
   --set gateway.tokenSecretRef=flint-gateway-token \

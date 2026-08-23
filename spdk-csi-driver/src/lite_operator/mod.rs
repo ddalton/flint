@@ -47,3 +47,92 @@ pub mod idle;
 pub mod persistence;
 pub mod reconcile;
 pub mod render;
+
+/// The published guide must pin the chart it documents.
+///
+/// `docs/flint-lite-for-agent-fleets.md` is a copy-paste install: a
+/// reader runs its `helm install --version X` verbatim. When a release
+/// bumps the chart and the guide keeps the old pin, that reader
+/// silently installs the PREVIOUS operator — every fix in the release
+/// they just read about is absent, and nothing anywhere says so. That
+/// is exactly how the guide came to advertise chart 0.2.7 / images
+/// 1.35.1 on the day 0.2.8 / 1.36.0 shipped.
+///
+/// The doc drill (`tests/regression/agent-fleet-doc-drill.sh`) cannot
+/// catch this: it supplies its OWN `CHART_VER` rather than reading the
+/// guide's, so it proves the PROCEDURE works while the stated versions
+/// drift freely. This is the missing half — it proves the NUMBERS are
+/// the ones we ship.
+///
+/// The `.html` is checked with the `.md` because both are published and
+/// the `.pdf` is rendered FROM the html, so html parity is the cheapest
+/// place to catch all three going stale together.
+#[cfg(test)]
+mod guide_pins {
+    const CHART: &str = include_str!("../../../flint-lite-operator-chart/Chart.yaml");
+    const GUIDE_MD: &str = include_str!("../../../docs/flint-lite-for-agent-fleets.md");
+    const GUIDE_HTML: &str = include_str!("../../../docs/flint-lite-for-agent-fleets.html");
+
+    /// `key: value` from Chart.yaml, unquoted. Deliberately not a YAML
+    /// parse: two fields, and a dependency here would be the only one.
+    fn field(key: &str) -> String {
+        CHART
+            .lines()
+            .find_map(|l| l.strip_prefix(key))
+            .unwrap_or_else(|| panic!("{key} missing from flint-lite-operator-chart/Chart.yaml"))
+            .trim()
+            .trim_matches('"')
+            .to_string()
+    }
+
+    #[test]
+    fn the_guide_pins_the_chart_and_images_it_documents() {
+        let chart_version = field("version:");
+        let app_version = field("appVersion:");
+
+        // Guard the guard: if the chart ever stops reporting a real
+        // version, every assertion below would pass against "".
+        assert!(
+            !chart_version.is_empty() && !app_version.is_empty(),
+            "read empty versions from Chart.yaml — the assertions below would be vacuous"
+        );
+
+        for (needle, what) in [
+            (format!("| Images | `{app_version}` |"), "the images row"),
+            (
+                format!("| Chart | `flint-lite-operator` `{chart_version}` |"),
+                "the chart row",
+            ),
+            (format!("--version {chart_version} \\"), "the helm install pin"),
+        ] {
+            assert!(
+                GUIDE_MD.contains(&needle),
+                "docs/flint-lite-for-agent-fleets.md is stale: {what} does not say `{needle}`.\n\
+                 The chart is version {chart_version} / appVersion {app_version}. A reader \
+                 copy-pasting this guide would install the wrong operator.\n\
+                 Fix the .md AND the .html, then re-render the .pdf from the html."
+            );
+        }
+
+        for (needle, what) in [
+            (
+                format!("<span><b>IMAGES</b> {app_version}</span>"),
+                "the html header images pin",
+            ),
+            (
+                format!("<span><b>CHART</b> flint-lite-operator {chart_version}</span>"),
+                "the html header chart pin",
+            ),
+            (
+                format!("operator chart {chart_version} · images {app_version}"),
+                "the html footer",
+            ),
+        ] {
+            assert!(
+                GUIDE_HTML.contains(&needle),
+                "docs/flint-lite-for-agent-fleets.html is stale: {what} does not say \
+                 `{needle}`. Re-render the .pdf from the html once fixed."
+            );
+        }
+    }
+}
