@@ -908,6 +908,88 @@ mod tests {
         assert_eq!(client_mgr.active_count(), 1);
     }
 
+
+    /// An `nconnect >= 2` mount silently DISCARDS the RFC 8881 §18.35.5
+    /// case-5 deferred cleanup, so a rebooted client's old state is never
+    /// proactively torn down.
+    ///
+    /// Observed on a three-cluster rig before it was understood here. The
+    /// Linux client opens one connection per `nconnect` and sends
+    /// EXCHANGE_ID on each for session-trunking detection, so the server
+    /// sees TWO EXCHANGE_IDs with the same owner and the same verifier
+    /// before any CREATE_SESSION arrives:
+    ///
+    ///   EXCHANGE_ID #1  case 5   -> allocate 37, pending_replaces = 36
+    ///   EXCHANGE_ID #2  case 4   -> 37 is unconfirmed, so REMOVE it and
+    ///                               allocate 38 ... with no pending_replaces
+    ///   CREATE_SESSION  on 38    -> mark_confirmed returns None
+    ///
+    /// Case 4 is right to replace an unconfirmed record — that is what the
+    /// RFC says — but `allocate_client` starts `pending_replaces` at
+    /// `None`, so the obligation the previous EXCHANGE_ID took on is
+    /// dropped on the floor. Client 36 is never discarded.
+    ///
+    /// Two consequences, in opposite directions, which is why this is
+    /// worth pinning rather than just fixing quietly:
+    ///
+    ///  - It MASKS the cross-cluster clientid steal. With `nconnect >= 2`
+    ///    — the driver's default and what the guide mandates — a
+    ///    colliding co_ownerid from another cluster begins the steal and
+    ///    never finishes it, so the incumbent survives. That is why the
+    ///    steal is far harder to reproduce than reading
+    ///    `handle_create_session` suggests.
+    ///  - It BREAKS reboot cleanup for everyone, one cluster or many. The
+    ///    pre-reboot client keeps its sessions, stateids and locks until
+    ///    its lease expires, instead of being discarded the moment the
+    ///    new one confirms. Pynfs EID5f passes because it uses a single
+    ///    connection.
+    #[test]
+    #[ignore = "PINS AN OPEN DEFECT: case 4 drops the case-5 pending_replaces, so an \
+                nconnect>=2 mount never triggers the deferred cleanup. Asserts the \
+                REQUIREMENT, so it goes green with the fix. Run with --ignored."]
+    fn an_nconnect_trunking_probe_drops_the_case_5_cleanup_obligation() {
+        let lease_mgr = Arc::new(LeaseManager::new());
+        let mgr = ClientManager::new(lease_mgr, "test-vol", crate::state_backend::memory_backend());
+        let owner = b"Linux NFSv4.2 agent".to_vec();
+        let princ = b"sys:agent:0".to_vec();
+
+        // The incumbent: mounted, confirmed, holding state.
+        let incumbent = new_id(mgr.exchange_id(owner.clone(), 111, 0, princ.clone()));
+        mgr.mark_confirmed(incumbent);
+
+        // Connection 1 of the newcomer's nconnect=2 mount. Same owner,
+        // fresh verifier => case 5, which takes on the obligation to
+        // discard `incumbent` once the newcomer confirms.
+        let first = new_id(mgr.exchange_id(owner.clone(), 222, 0, princ.clone()));
+        assert_eq!(
+            mgr.get_client(first).and_then(|c| c.pending_replaces),
+            Some(incumbent),
+            "case 5 must record the incumbent it is replacing",
+        );
+
+        // Connection 2 of the SAME mount — the trunking probe. Same owner,
+        // same verifier, and `first` is still unconfirmed => case 4.
+        let second = new_id(mgr.exchange_id(owner.clone(), 222, 0, princ.clone()));
+        assert_ne!(second, first, "case 4 replaces the unconfirmed record");
+
+        // THE DEFECT: the obligation did not travel to the record that
+        // actually gets confirmed.
+        assert_eq!(
+            mgr.get_client(second).and_then(|c| c.pending_replaces),
+            Some(incumbent),
+            "case 4 must CARRY FORWARD the pending replacement it is superseding; \
+             dropping it means the confirmed client owes no cleanup and the \
+             pre-reboot client is never discarded",
+        );
+
+        // Which is what CREATE_SESSION consumes.
+        assert_eq!(
+            mgr.mark_confirmed(second),
+            Some(incumbent),
+            "the confirming CREATE_SESSION must report the client to tear down",
+        );
+    }
+
     #[test]
     fn test_exchange_id_replaces_unconfirmed() {
         // Until CREATE_SESSION confirms a client, RFC 8881 §18.35.5 case 4

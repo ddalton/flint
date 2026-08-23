@@ -1716,6 +1716,147 @@ mod tests {
             .is_none());
     }
 
+
+    /// MANY CLUSTERS, ONE HUB: the case-5 clientid steal leaks the
+    /// victim's byte-range locks, and nothing can ever reap them.
+    ///
+    /// This is not a hypothetical collision. On NFSv4.1+ the Linux
+    /// client's co_ownerid is `"Linux NFSv4.<minor> <nodename>"` and
+    /// NOTHING ELSE — no address, no cluster, no uniquifier unless
+    /// `nfs.nfs4_unique_id` is set on the node. A fleet that runs one
+    /// agent manifest in every cluster therefore presents ONE identity
+    /// from all of them. Captured on the wire from two kind clusters
+    /// mounting one hub, both sent the same 19 bytes:
+    ///
+    ///     Linux NFSv4.2 agent
+    ///
+    /// `ClientManager::exchange_id` keys on those bytes alone
+    /// (`owner_to_id.get(&owner)`), so the second cluster reads as the
+    /// first REBOOTING: RFC 8881 §18.35.5 case 5. On the newcomer's
+    /// CREATE_SESSION the incumbent is torn down —
+    /// `destroy_client_sessions`, `remove_client_stateids`,
+    /// `cleanup_client_delegations`, `remove_client`.
+    ///
+    /// `remove_client_locks` is NOT in that list, and it cannot be:
+    /// `SessionOperationHandler` holds only a `StateManager` and has no
+    /// reference to the `LockManager` at all.
+    ///
+    /// What makes it permanent rather than merely untidy is the reaper.
+    /// `remove_client_locks` has exactly one production caller —
+    /// `courtesy_release_expired`, which iterates
+    /// `leases.get_expired_clients()`. `remove_client` has already
+    /// dropped the victim's lease, so the victim's id can never appear
+    /// in that list again. The rows are persisted and re-seeded at every
+    /// startup, so a hub restart does not clear them either.
+    ///
+    /// The asserts below are the three separable claims. Each would pass
+    /// on its own for an innocent reason, which is why all three are
+    /// here: locks survive the steal, the reaper cannot see them, and a
+    /// THIRD client with a distinct identity — nothing to do with the
+    /// collision — is denied the range forever.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "PINS AN OPEN DEFECT: the case-5 cascade never releases the victim's \
+                locks and nothing can reap them. Asserts the REQUIREMENT, so it goes \
+                green the moment the cascade releases locks. Run with --ignored."]
+    async fn a_stolen_clientid_leaks_its_locks_forever() {
+        let state = Arc::new(StateManager::new_in_memory(""));
+        let locks = LockManager::new();
+
+        // Both clusters send these identical bytes.
+        let owner = b"Linux NFSv4.2 agent".to_vec();
+        let principal = b"sys:agent:0".to_vec();
+
+        // Cluster B's agent mounts first and takes an exclusive lock.
+        use crate::nfs::v4::state::client::ExchangeIdOutcome;
+        let victim = match state.clients.exchange_id(owner.clone(), 111, 0, principal.clone()) {
+            ExchangeIdOutcome::NewUnconfirmed { client_id, .. } => client_id,
+            other => panic!("first mount should allocate a new client, got {:?}", other),
+        };
+        state.clients.mark_confirmed(victim);
+        locks.add_lock(mk_lock(1, victim, 0, 1024));
+        assert_eq!(locks.get_client_locks(victim).len(), 1, "victim holds its lock");
+
+        // Cluster C's agent mounts. Same owner, same principal, its own
+        // boot verifier — case 5.
+        let thief = match state.clients.exchange_id(owner.clone(), 222, 0, principal.clone()) {
+            ExchangeIdOutcome::NewUnconfirmed { client_id, .. } => client_id,
+            other => panic!("collision should allocate a replacement client, got {:?}", other),
+        };
+        assert_ne!(thief, victim, "the two clusters must get distinct clientids");
+
+        // Exactly the cascade `SessionOperationHandler::handle_create_session`
+        // runs, reproduced here because that handler cannot reach the
+        // LockManager to do any more than this.
+        let replaced = state.clients.mark_confirmed(thief);
+        assert_eq!(replaced, Some(victim), "case 5 must discard the incumbent");
+        state.sessions.destroy_client_sessions(victim);
+        state.stateids.remove_client_stateids(victim);
+        state.delegations.cleanup_client_delegations(victim);
+        state.clients.remove_client(victim);
+
+        // The client is gone. Its state must have gone with it.
+        assert!(state.clients.get_client(victim).is_none(), "victim client destroyed");
+
+        // ANTI-VACUITY, FIRST: this manager must be capable of reporting a
+        // conflict at all. An untouched range is free, and the range under
+        // test WAS held a moment ago — so a later "granted" cannot be a
+        // manager that grants everything.
+        assert!(
+            locks
+                .check_conflicts(
+                    b"/data/file",
+                    &LockRange { offset: 8192, length: 1024 },
+                    LockType::Write,
+                    None,
+                )
+                .is_none(),
+            "an unrelated range must be free — otherwise this test proves nothing",
+        );
+
+        // 1. THE REQUIREMENT: destroying a client releases its locks.
+        assert_eq!(
+            locks.get_client_locks(victim).len(),
+            0,
+            "a destroyed client's locks must be released with the rest of its state; \
+             today they are not, and `SessionOperationHandler` cannot release them \
+             because it holds no reference to the LockManager",
+        );
+
+        // 2. THE REQUIREMENT: whatever is left must still be reapable.
+        //    `remove_client` drops the lease, and the only caller of
+        //    `remove_client_locks` iterates expired LEASES — so anything
+        //    surviving step 1 can never be collected by anything.
+        assert!(
+            locks.get_client_locks(victim).is_empty()
+                || state.leases.get_expired_clients().contains(&victim),
+            "locks that outlive their client must remain reachable by the reaper; \
+             courtesy_release_expired iterates expired leases and remove_client \
+             already deleted this one",
+        );
+
+        // 3. THE REQUIREMENT, and the consequence for the fleet: a third
+        //    agent, in a third cluster, with a DISTINCT hostname and no
+        //    part in the collision, must be granted the range.
+        let verdict = locks.check_conflicts(
+            b"/data/file",
+            &LockRange { offset: 0, length: 1024 },
+            LockType::Write,
+            None,
+        );
+        if let Some(ref d) = verdict {
+            assert!(
+                state.clients.get_client(d.client_id).is_some(),
+                "DENIED by clientid {}, which the server cannot resolve — the \
+                 definitive signature of a phantom lock: the range is now refused \
+                 to every agent in every cluster, for the life of the volume, and \
+                 no LOCKU can clear it because the holder's lock stateid was \
+                 deleted with the rest of its state",
+                d.client_id,
+            );
+        }
+        assert!(verdict.is_none(), "an innocent third client must be granted the range");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn client_lock_wipe_deletes_persisted_records() {
         let backend = memory_backend();
