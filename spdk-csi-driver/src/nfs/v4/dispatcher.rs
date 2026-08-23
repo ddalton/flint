@@ -293,13 +293,43 @@ impl CompoundDispatcher {
     ///    dropping to 0 the instant a single compound arrived. With
     ///    `suspendWithSessions: false` that pins the share awake for
     ///    good.
+    /// ONE reading of the expired set, and the record dies BEFORE the locks
+    /// are stripped. Both halves of that sentence are load-bearing, and both
+    /// were wrong; TLC found each as its own counterexample.
+    ///
+    /// ONE READING (`formal/FlintClientIdentityLeaseSilent.cfg`). This used
+    /// to call `cleanup_expired()`, which re-read `get_expired_clients()` and
+    /// made a SECOND, independent decision about who was expired — after
+    /// this loop had already stripped locks based on the first. `renew_lease`
+    /// is lock-free, so a SEQUENCE arriving in between renews the lease and
+    /// the second reading no longer sees the client: locks gone, session and
+    /// stateids intact, and `status_flags` hardcoded 0 so nothing told it.
+    ///
+    /// RECORD FIRST (`formal/FlintClientIdentityLeaseOrphan.cfg`). Stripping
+    /// locks first leaves a window in which a lock can still be GRANTED to a
+    /// client this sweep is about to destroy. Once it is destroyed that lock
+    /// has no client, no lease, and no reaper — `remove_client_locks` is
+    /// reached only by iterating expired LEASES, and this id no longer has
+    /// one. The row is persisted and re-seeded at startup, so the range is
+    /// denied to everyone, permanently. That is the CascadeLocks defect's
+    /// failure mode reached by a second route, which is the argument for
+    /// fixing the sweep rather than the site. Retiring the record first
+    /// closes the window: with the client and its sessions gone, no further
+    /// LOCK can be granted to that id, so nothing can arrive after the strip.
+    ///
+    /// Neither counterexample is reachable with one client. Both need a
+    /// SECOND agent, because this runs at the top of every COMPOUND and reaps
+    /// EVERY expired client rather than the caller's — with several clusters
+    /// on one hub, it is the other cluster's traffic that releases this
+    /// cluster's locks.
     pub fn courtesy_release_expired(&self) -> usize {
         let expired = self.state_mgr.leases.get_expired_clients();
+        if expired.is_empty() {
+            return 0;
+        }
+        self.state_mgr.cleanup_expired_ids(&expired);
         for cid in &expired {
             self.lock_mgr.remove_client_locks(*cid);
-        }
-        if !expired.is_empty() {
-            self.state_mgr.cleanup_expired();
         }
         expired.len()
     }
@@ -4132,6 +4162,114 @@ fn minor_version_2_opcode(op: &Operation) -> Option<u32> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// A LOCK GRANTED WHILE THE SWEEP IS BETWEEN ITS TWO HALVES MUST NOT BE
+    /// ORPHANED.
+    ///
+    /// `courtesy_release_expired` used to strip the expired clients' locks
+    /// FIRST and retire their records afterwards. A lock granted in that
+    /// window belongs to a client that is about to be destroyed — and once it
+    /// is, that lock has no client, no lease, and no reaper:
+    /// `remove_client_locks` is reached only by iterating expired LEASES, and
+    /// the id no longer has one. The row is persisted and re-seeded at every
+    /// startup, so the range is refused to everyone, permanently. That is the
+    /// case-5 cascade's failure mode reached by a second route, which is the
+    /// argument for fixing the sweep rather than the site.
+    ///
+    /// Found by TLC — `formal/FlintClientIdentityLeaseOrphan.cfg`. Note the
+    /// model needs a SECOND agent to reach it, because the sweep runs at the
+    /// top of every COMPOUND and reaps EVERY expired client rather than the
+    /// caller's: with several clusters on one hub it is the other cluster's
+    /// traffic that strips this cluster's locks.
+    ///
+    /// WHAT EACH HALF OF THIS TEST IS WORTH, stated because they are not
+    /// worth the same. Part 1 pins the post-condition of the real sweep and
+    /// would hold in either order, since a unit test cannot schedule the
+    /// race. Part 2 is the one that pins the ORDER: it drives the same two
+    /// public calls the sweep drives, in each order, with the lock granted in
+    /// between — and only one order survives it. That the interleaving is
+    /// reachable at all is the model's claim, not this test's.
+    #[test]
+    fn a_lock_granted_mid_sweep_must_not_be_orphaned() {
+        use crate::nfs::v4::operations::lockops::{Lock, LockRange, LockType};
+        use crate::nfs::v4::state::client::ExchangeIdOutcome;
+        use crate::nfs::v4::protocol::StateId;
+
+        let mk_lock = |client_id: u64| Lock {
+            stateid: StateId { seqid: 1, other: [7u8; 12] },
+            client_id,
+            owner: b"Linux NFSv4.2 agent".to_vec(),
+            filehandle: b"/data/shared.db".to_vec(),
+            lock_type: LockType::Write,
+            range: LockRange { offset: 0, length: 4096 },
+        };
+        let seed = |d: &CompoundDispatcher| {
+            let id = match d.state_mgr.clients.exchange_id(
+                b"Linux NFSv4.2 agent".to_vec(), 1, 0, Vec::new(),
+            ) {
+                ExchangeIdOutcome::NewUnconfirmed { client_id, .. } => client_id,
+                other => panic!("expected NewUnconfirmed, got {:?}", other),
+            };
+            d.state_mgr.clients.mark_confirmed(id);
+            d.lock_mgr.add_lock(mk_lock(id));
+            d.state_mgr.leases.expire_now(id);
+            id
+        };
+
+        // ---- PART 1: the real sweep's post-condition. ----
+        let (d, _t) = create_test_dispatcher();
+        let victim = seed(&d);
+        assert_eq!(d.courtesy_release_expired(), 1, "the sweep must retire it");
+        assert!(d.state_mgr.clients.get_client(victim).is_none());
+        assert_eq!(
+            d.lock_mgr.get_client_locks(victim).len(), 0,
+            "a swept client must leave no locks",
+        );
+        // The orphan's DEFINING property, and why "left behind" means
+        // "left forever": once the id has no lease, the expired-lease list
+        // can never name it again, and that list is the only way anything
+        // reaches `remove_client_locks`.
+        assert!(
+            !d.state_mgr.leases.get_expired_clients().contains(&victim),
+            "the reaper's only input can no longer see this id — so anything \
+             left behind here is unreachable by every code path there is",
+        );
+
+        // ---- PART 2: the ordering, with the lock granted in the window. ----
+        // THE OLD ORDER — strip, then retire.
+        let (old, _t2) = create_test_dispatcher();
+        let v_old = seed(&old);
+        let snap: Vec<u64> = old.state_mgr.leases.get_expired_clients();
+        old.lock_mgr.remove_client_locks(v_old);
+        old.lock_mgr.add_lock(mk_lock(v_old)); // granted in the window
+        old.state_mgr.cleanup_expired_ids(&snap);
+        assert_eq!(
+            old.lock_mgr.get_client_locks(v_old).len(), 1,
+            "ANTI-VACUITY: in the old order the window is real and the lock \
+             IS orphaned — if this ever reads 0, part 2 proves nothing",
+        );
+        assert!(
+            old.state_mgr.clients.get_client(v_old).is_none(),
+            "...and it is orphaned precisely because its client is gone",
+        );
+
+        // THE FIXED ORDER — retire, then strip. The window closes because
+        // there is no longer a client to grant a lock to.
+        let (new, _t3) = create_test_dispatcher();
+        let v_new = seed(&new);
+        let snap: Vec<u64> = new.state_mgr.leases.get_expired_clients();
+        new.state_mgr.cleanup_expired_ids(&snap);
+        assert!(
+            new.state_mgr.clients.get_client(v_new).is_none(),
+            "the record is retired FIRST, so no further LOCK can be founded \
+             on it — that is what closes the window",
+        );
+        new.lock_mgr.remove_client_locks(v_new);
+        assert_eq!(
+            new.lock_mgr.get_client_locks(v_new).len(), 0,
+            "and the strip that follows collects everything granted before it",
+        );
+    }
 
     fn create_test_dispatcher() -> (CompoundDispatcher, TempDir) {
         let temp_dir = TempDir::new().unwrap();

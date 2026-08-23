@@ -223,7 +223,30 @@ impl LeaseManager {
             .collect()
     }
 
+    /// Force a lease to be expired.
+    ///
+    /// TEST ONLY. The alternative is a 90-second sleep, which is why the
+    /// `StateManager` cleanup tests carry the comment "We can't easily test
+    /// actual lease expiration without waiting 90+ seconds" and then check
+    /// only that cleanup does not crash. The sweep's real behaviour was
+    /// therefore never exercised by a unit test at all.
+    #[cfg(test)]
+    pub fn expire_now(&self, client_id: u64) {
+        if let Some(mut lease) = self.leases.get_mut(&client_id) {
+            lease.expires_at = Instant::now() - Duration::from_secs(1);
+        }
+    }
+
     /// Cleanup expired leases
+    ///
+    /// ⚠ NO PRODUCTION CALLER, deliberately. `StateManager::cleanup_expired_ids`
+    /// used to call this and it was a bug: it retires every CURRENTLY-expired
+    /// lease, which is a wider set than the snapshot the caller acted on, so a
+    /// client that lapsed after the snapshot lost its lease without its record,
+    /// stateids or locks being cleaned — and could never be swept again, since
+    /// `get_expired_clients` iterates leases and it no longer had one.
+    /// `remove_client` drops each lease individually, exactly scoped to the
+    /// snapshot. Reach for that, not this.
     ///
     /// LOCK-FREE: Uses DashMap's retain with per-shard locking
     pub fn cleanup_expired(&self) {

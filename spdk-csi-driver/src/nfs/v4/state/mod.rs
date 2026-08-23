@@ -125,15 +125,53 @@ impl StateManager {
     /// Removes expired leases and their associated sessions and clients.
     /// This should be called periodically (e.g., every 30 seconds) to prevent
     /// resource leaks from clients that stop responding.
+    ///
+    /// Prefer [`Self::cleanup_expired_ids`] when the caller has ALREADY read
+    /// `get_expired_clients()` and acted on it. Re-reading it here is a
+    /// second, independent decision about who is expired, and `renew_lease`
+    /// is documented LOCK-FREE ("per-client locking only, not global") — so
+    /// a SEQUENCE arriving between the two reads changes the answer. See the
+    /// note on `cleanup_expired_ids`.
     pub fn cleanup_expired(&self) {
-        // First, collect expired client IDs before removing leases
         let expired_clients = self.leases.get_expired_clients();
+        self.cleanup_expired_ids(&expired_clients);
+    }
 
-        // Now cleanup expired leases (this removes them from the lease manager)
-        self.leases.cleanup_expired();
-
-        // For each expired client, cleanup associated sessions and client state
-        for client_id in expired_clients {
+    /// Retire exactly the clients the caller decided were expired.
+    ///
+    /// The `&[u64]` is the whole point. `courtesy_release_expired` used to
+    /// call `cleanup_expired()`, which re-read `get_expired_clients()` and so
+    /// made its OWN decision about who was expired — while the caller had
+    /// already stripped those clients' locks against the first reading.
+    /// `renew_lease` is lock-free, so a SEQUENCE landing between the two
+    /// reads renews the lease and the second reading no longer sees the
+    /// client. Its locks were already gone; its session, stateids and client
+    /// record survived; and `status_flags` is hardcoded 0, so nothing told
+    /// it. That is a client still holding a session and still believing it
+    /// owns a byte range the server has already handed to someone else.
+    ///
+    /// Found by TLC — `formal/FlintClientIdentityLeaseSilent.cfg`, which
+    /// reproduces it as LeaseLapse → SweepLocks → Sequence → SweepState. The
+    /// counterexample needs a SECOND agent, because the sweep runs at the top
+    /// of every COMPOUND and reaps EVERY expired client, not the caller's: it
+    /// is the other cluster's traffic that strips this cluster's locks.
+    ///
+    /// Following through on the first reading means a client that renews at
+    /// exactly the wrong moment loses its session and must recover. That is a
+    /// real cost and it is the right trade: the alternative is not "it keeps
+    /// working", it is "it keeps working WITHOUT the locks it thinks it
+    /// holds". BADSESSION is a path every NFS client already implements.
+    pub fn cleanup_expired_ids(&self, expired_clients: &[u64]) {
+        // NOTE there is deliberately no `self.leases.cleanup_expired()`
+        // here. That call retires every CURRENTLY-expired lease, which is a
+        // wider set than the snapshot: a client whose lease lapsed after the
+        // snapshot was taken would lose its lease here and never appear in
+        // `expired_clients`, so its record, stateids and locks would not be
+        // cleaned — and it could never be swept again either, because
+        // `get_expired_clients()` iterates leases and it no longer has one.
+        // `remove_client` drops each client's lease below, which is exactly
+        // scoped to the snapshot.
+        for &client_id in expired_clients {
             // Destroy all sessions for this client
             self.sessions.destroy_client_sessions(client_id);
 
@@ -205,6 +243,65 @@ mod tests {
         // Since no leases have expired, clients and sessions should still exist
         assert_eq!(state_mgr.clients.active_count(), 1);
         assert_eq!(state_mgr.sessions.active_count(), 1);
+    }
+
+    /// A SWEEP THAT HAS STARTED MUST FINISH, even if the client renews.
+    ///
+    /// `courtesy_release_expired` reads `get_expired_clients()` and strips
+    /// those clients' locks. It then used to call `cleanup_expired()`, which
+    /// re-read `get_expired_clients()` — a SECOND, independent decision about
+    /// who was expired. `renew_lease` is documented LOCK-FREE ("per-client
+    /// locking only, not global"), so a SEQUENCE landing between the two
+    /// reads renews the lease and the second read no longer sees the client:
+    /// its locks are already gone, its session and stateids survive, and
+    /// `status_flags` is hardcoded 0 so nothing tells it. The client goes on
+    /// believing it holds a byte range the server has handed to someone else.
+    ///
+    /// This test needs no expired lease at all, and that is the point: a
+    /// perfectly healthy lease IS the post-renewal state. Passing the id in
+    /// the snapshot must be enough to retire it.
+    ///
+    /// Found by TLC — `formal/FlintClientIdentityLeaseSilent.cfg` walks it as
+    /// LeaseLapse -> SweepLocks -> Sequence -> SweepState. The counterexample
+    /// needs a SECOND agent, because the sweep runs at the top of every
+    /// COMPOUND and reaps EVERY expired client rather than the caller's: with
+    /// several clusters on one hub it is the other cluster's traffic that
+    /// strips this cluster's locks.
+    #[test]
+    fn a_sweep_must_follow_through_on_the_reading_it_started_from() {
+        let state_mgr = StateManager::new_in_memory("");
+        let mk = |owner: &[u8]| match state_mgr.clients.exchange_id(owner.to_vec(), 1, 0, Vec::new()) {
+            crate::nfs::v4::state::client::ExchangeIdOutcome::NewUnconfirmed { client_id, .. } => client_id,
+            other => panic!("expected NewUnconfirmed, got {:?}", other),
+        };
+        let renewer = mk(b"Linux NFSv4.2 agent-a");
+        let bystander = mk(b"Linux NFSv4.2 agent-b");
+
+        // The snapshot the sweep took. `renewer` was expired when it was
+        // read; by now it has renewed, so its lease is live again — which is
+        // exactly the state this assertion is made against.
+        assert!(
+            state_mgr.leases.is_valid(renewer),
+            "the renewal has landed: this lease is live, and the old code \
+             would therefore have skipped it",
+        );
+        state_mgr.cleanup_expired_ids(&[renewer]);
+
+        assert!(
+            state_mgr.clients.get_client(renewer).is_none(),
+            "a client whose locks were already stripped must be retired too — \
+             skipping it is not 'it keeps working', it is 'it keeps working \
+             without the locks it thinks it holds'",
+        );
+
+        // ANTI-VACUITY: the snapshot must be respected in BOTH directions.
+        // A cleanup that simply retired everything would pass the assertion
+        // above and be far worse than the defect.
+        assert!(
+            state_mgr.clients.get_client(bystander).is_some(),
+            "a client the sweep never read must be untouched",
+        );
+        assert!(state_mgr.leases.is_valid(bystander), "and must keep its lease");
     }
 
     #[test]
