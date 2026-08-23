@@ -1179,7 +1179,7 @@ mutation_run FlintTierSession FlintTierSessionProbeStale.cfg "tier-session stale
 # same point from the other side, and explains why pynfs EID5f passes over the
 # case-4 defect: with a single connection case 4 never fires at all.
 strict_run FlintClientIdentity FlintClientIdentity.cfg     "client-identity strict breadth (colliding co_ownerid, nconnect=2, all three fixes ON)"
-strict_run FlintClientIdentity FlintClientIdentityDeep.cfg "client-identity strict breadth, THREE agents on one owner (a third cluster on the same hub)"
+strict_run FlintClientIdentity FlintClientIdentityDeep.cfg "client-identity strict breadth, THREE agents on one owner at full mount depth (a third cluster on the same hub)"
 strict_run FlintClientIdentity FlintClientIdentityNconnect3.cfg "client-identity nconnect=3 (the fixes must hold past the 2 connections the unit tests walk)"
 
 mutation_run FlintClientIdentity FlintClientIdentityCaseFour.cfg  "case-4 mutation (CarryObligation=FALSE: the nconnect trunking probe drops the case-5 obligation, so the confirming CREATE_SESSION owes no cleanup)" "Inv_OneConfirmedPerOwner"

@@ -1296,6 +1296,41 @@ collectable by nothing, survives restart (locks are persisted and
 re-seeded), and denies its range to every client in every cluster for the
 life of the volume.
 
+### State space — three agents runs fully, and why it did not at first
+
+Written naively, three agents on one owner passed **36 million distinct
+states without terminating**. Almost none of that was protocol: it was
+bookkeeping TLC could distinguish and the protocol could not.
+
+- **Dead records kept their fields.** A removed clientid held its owner,
+  verifier, confirmed bit and pending obligation forever, so two
+  behaviours differing only in a corpse's leftovers counted apart.
+  Nothing reads a dead id — every use is guarded by `live`.
+- **Clientids came from a monotonic counter**, so "allocated five ids"
+  was distinguishable from "allocated four" even when the reachable
+  configuration was identical: the space grew with *history* rather than
+  with state. Ids are now recycled from the lowest unreferenced one.
+- **Verifiers were globally unique**, which costs a dimension and buys
+  nothing — a verifier matters only through equality with an incumbent's.
+  Per-mount verifiers are also a *refinement*: two agents can now
+  coincidentally share one, which is the case-1 renewal arm firing across
+  a collision, an interleaving the global counter made unreachable.
+
+| config | naive | canonical |
+|---|---|---|
+| 2 agents, MaxMounts=2 | 23,177 | **2,082** |
+| 3 agents, MaxMounts=1 | 74,110 | **2,839** |
+| 3 agents, MaxMounts=2 | 36M+, never converged | **407,098, converges** |
+
+The recycling had a sting, and TLC found it in one run: `superseded` is a
+ghost holding a raw id, so recycling that id made the ghost alias a live
+record it had never referred to, and the strict run failed
+`Inv_ObligationHonoured` on a trace that looked like a real defect and
+was not. A ghost holding a raw id is sound only while that id cannot be
+recycled underneath it — `Referenced` now includes `superseded`. One
+reading to diagnose; a subtler aliasing artifact could have been argued
+about for an afternoon.
+
 Out of scope, deliberately: sequence-id/replay caching (§18.36.4 — a
 different machine with its own drills), back channels, and the wire.
 Locks are modelled only as "client `c` holds one", because the defect is

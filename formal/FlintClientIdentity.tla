@@ -93,59 +93,71 @@ CONSTANTS
   MaxLocks
 
 NoId == 0
+NoOwner == "none"
 
-\* Owner strings.  With Collide every agent maps onto one key, which is
-\* what a fleet applying one manifest per cluster actually produces.
 OwnerOf(a) == IF Collide THEN "shared" ELSE a
 Owners == { OwnerOf(a) : a \in Agents }
 
-\* Clientids are minted from a counter, exactly as ClientManager does.
-MaxId == Cardinality(Agents) * MaxMounts * NConnect + 1
+(***************************************************************************)
+(* STATE-SPACE SHAPE.  Three choices below are canonicalisation, not       *)
+(* semantics, and they are the difference between a run that converges and *)
+(* one that does not.  At three agents this module first passed 36 MILLION *)
+(* distinct states without terminating; almost all of that was bookkeeping *)
+(* TLC could see but the protocol could not.  With all three in place the  *)
+(* same configuration settles at ~407k and converges — 2 agents fell from  *)
+(* 23,177 distinct states to 2,082 — so three clusters on one hub is a     *)
+(* routine gate run rather than something to bound away.                   *)
+(*                                                                         *)
+(*   1. DEAD RECORDS ARE ERASED.  Every removed clientid used to keep its  *)
+(*      owner / verifier / confirmed / pending forever.  Two behaviours    *)
+(*      differing only in what a dead id's garbage happens to hold are the *)
+(*      same behaviour, and nothing reads a dead id — every use is guarded *)
+(*      by membership in `live`.                                           *)
+(*                                                                         *)
+(*   2. CLIENTIDS ARE REUSED.  A monotonic counter makes "allocated five   *)
+(*      ids" distinguishable from "allocated four" even when the reachable *)
+(*      configuration is identical, so the space grows with HISTORY rather *)
+(*      than with state.  `FreeId` takes the lowest id nothing references  *)
+(*      — not live, not any agent's handle, not an outstanding obligation. *)
+(*      The real ClientManager does mint monotonically, but the identity   *)
+(*      of a clientid is not a protocol property: only its relationships   *)
+(*      are, and those are preserved.                                      *)
+(*                                                                         *)
+(*   3. VERIFIERS ARE PER-MOUNT, NOT GLOBAL.  A boot verifier matters only *)
+(*      through EQUALITY with an incumbent's, so a globally increasing     *)
+(*      counter (which never repeats, and therefore never lets a genuine   *)
+(*      renewal be tested twice) buys nothing and costs a dimension.  It   *)
+(*      is now the agent's mount number, bounded by MaxMounts.  This is a  *)
+(*      REFINEMENT, not only a shrink: two agents can now coincidentally   *)
+(*      share a verifier, which is the case-1 renewal arm firing across a  *)
+(*      collision — a real interleaving the global counter made            *)
+(*      unreachable.                                                       *)
+(***************************************************************************)
+MaxId == Cardinality(Agents) * 2 + 1
 Ids == 1..MaxId
 
 VARIABLES
-  live,        \* SUBSET Ids — the client table
-  owner,       \* [Ids -> Owners]
-  verifier,    \* [Ids -> Nat]      the client's boot verifier
-  confirmed,   \* [Ids -> BOOLEAN]  a CREATE_SESSION landed
-  pending,     \* [Ids -> Ids \cup {NoId}]  pending_replaces
-  ownerIdx,    \* [Owners -> Ids \cup {NoId}]  owner_to_id
-  locks,       \* SUBSET Ids — clientids holding a lock
-  leases,      \* SUBSET Ids — clientids with a live lease
-  nextId,
-  vctr,        \* globally unique boot verifiers
-  st,          \* [Agents -> {"idle","exchanging","mounted"}]
-  cur,         \* [Agents -> Ids \cup {NoId}]  id its last EXCHANGE_ID produced
-  conns,       \* [Agents -> Nat]  EXCHANGE_IDs issued this mount
-  vmine,       \* [Agents -> Nat]  this mount's boot verifier
-  mounts,      \* [Agents -> Nat]
-  nlocks,
-  superseded   \* GHOST [Agents -> Ids \cup {NoId}] — what this mount's
-               \* handshake DECIDED to discard, recorded independently of
-               \* whether the implementation kept the obligation.
+  live, owner, verifier, confirmed, pending, ownerIdx, locks, leases,
+  st, cur, conns, vmine, mounts, nlocks, superseded
 
 vars == << live, owner, verifier, confirmed, pending, ownerIdx, locks,
-           leases, nextId, vctr, st, cur, conns, vmine, mounts, nlocks,
-           superseded >>
+           leases, st, cur, conns, vmine, mounts, nlocks, superseded >>
 
 TypeOK ==
   /\ live \subseteq Ids
   /\ locks \subseteq Ids
   /\ leases \subseteq Ids
-  /\ nextId \in 1..(MaxId + 1)
   /\ st \in [Agents -> {"idle","exchanging","mounted"}]
 
 Init ==
   /\ live = {}
-  /\ owner = [i \in Ids |-> "shared"]
+  /\ owner = [i \in Ids |-> NoOwner]
   /\ verifier = [i \in Ids |-> 0]
   /\ confirmed = [i \in Ids |-> FALSE]
   /\ pending = [i \in Ids |-> NoId]
   /\ ownerIdx = [o \in Owners |-> NoId]
   /\ locks = {}
   /\ leases = {}
-  /\ nextId = 1
-  /\ vctr = 1
   /\ st = [a \in Agents |-> "idle"]
   /\ cur = [a \in Agents |-> NoId]
   /\ conns = [a \in Agents |-> 0]
@@ -154,69 +166,75 @@ Init ==
   /\ nlocks = 0
   /\ superseded = [a \in Agents |-> NoId]
 
+\* The lowest clientid nothing refers to.
+\*
+\* `superseded` MUST be in here, and TLC is why.  Without it the strict
+\* run failed Inv_ObligationHonoured on a trace that looked like a real
+\* defect and was not: a1's handshake recorded an obligation against
+\* clientid 1, clientid 1 was removed, and then FreeId handed 1 straight
+\* back for a1's NEXT client — so the ghost aliased a live record it had
+\* never referred to.  A ghost holding a raw id is only sound while that
+\* id cannot be recycled underneath it.  The counterexample cost one
+\* reading; a subtler aliasing artifact could have been argued about for
+\* an afternoon, which is the standing reason this repo runs mutations.
+Referenced ==
+  live \cup { cur[a] : a \in Agents } \cup { pending[i] : i \in live }
+       \cup { superseded[a] : a \in Agents }
+FreeId ==
+  LET avail == Ids \ Referenced
+  IN IF avail = {} THEN NoId ELSE CHOOSE i \in avail : \A j \in avail : i =< j
+
 (***************************************************************************)
-(* `remove_client_internal`, as an operator over a candidate index.  The   *)
-(* whole of fix 3 is the guard: clear the entry only when it still names   *)
-(* the departing client.  Locks are DELIBERATELY not touched here — that   *)
-(* is the code, and `Inv_LocksReapable` is what makes the omission         *)
-(* visible.                                                                *)
+(* `remove_client_internal`.  Fix 3 is the whole of the guard: clear the   *)
+(* owner index only when it still names the departing client.  Locks are   *)
+(* DELIBERATELY untouched — that is the code, and Inv_LocksReapable is     *)
+(* what makes the omission visible.                                        *)
 (***************************************************************************)
 IdxAfterRemove(idx, id) ==
   IF CondIndexRemove
   THEN IF idx[owner[id]] = id THEN [idx EXCEPT ![owner[id]] = NoId] ELSE idx
   ELSE [idx EXCEPT ![owner[id]] = NoId]
 
-(***************************************************************************)
-(* A fresh mount: a new boot verifier, and the connection counter reset.   *)
-(* `superseded` is cleared because the ghost tracks THIS handshake.        *)
-(***************************************************************************)
 StartMount(a) ==
   /\ st[a] = "idle"
   /\ mounts[a] < MaxMounts
-  /\ nextId <= MaxId
   /\ st' = [st EXCEPT ![a] = "exchanging"]
   /\ conns' = [conns EXCEPT ![a] = 0]
-  /\ vmine' = [vmine EXCEPT ![a] = vctr]
-  /\ vctr' = vctr + 1
+  /\ vmine' = [vmine EXCEPT ![a] = mounts[a] + 1]
   /\ mounts' = [mounts EXCEPT ![a] = mounts[a] + 1]
   /\ cur' = [cur EXCEPT ![a] = NoId]
   /\ superseded' = [superseded EXCEPT ![a] = NoId]
   /\ UNCHANGED << live, owner, verifier, confirmed, pending, ownerIdx,
-                  locks, leases, nextId, nlocks >>
+                   locks, leases, nlocks >>
 
-(***************************************************************************)
-(* EXCHANGE_ID on one connection.  The arms are client.rs's, with the      *)
-(* principal always equal (see the header).                               *)
-(***************************************************************************)
 ExchangeId(a) ==
   LET o   == OwnerOf(a)
       ex  == ownerIdx[o]
-      new == nextId
+      new == FreeId
   IN
   /\ st[a] = "exchanging"
   /\ conns[a] < NConnect
-  /\ nextId <= MaxId
   /\ \/ /\ ex = NoId                      \* no record: allocate
+        /\ new # NoId
         /\ live' = live \cup {new}
         /\ owner' = [owner EXCEPT ![new] = o]
         /\ verifier' = [verifier EXCEPT ![new] = vmine[a]]
         /\ confirmed' = [confirmed EXCEPT ![new] = FALSE]
         /\ pending' = [pending EXCEPT ![new] = NoId]
         /\ ownerIdx' = [ownerIdx EXCEPT ![o] = new]
-        /\ nextId' = nextId + 1
         /\ cur' = [cur EXCEPT ![a] = new]
         /\ UNCHANGED << leases, superseded >>
      \/ /\ ex # NoId
         /\ ~confirmed[ex]                 \* CASE 4: replace the unconfirmed
+        /\ new # NoId
         /\ LET inherited == IF CarryObligation THEN pending[ex] ELSE NoId
            IN /\ live' = (live \ {ex}) \cup {new}
-              /\ owner' = [owner EXCEPT ![new] = o]
-              /\ verifier' = [verifier EXCEPT ![new] = vmine[a]]
-              /\ confirmed' = [confirmed EXCEPT ![new] = FALSE]
-              /\ pending' = [pending EXCEPT ![new] = inherited]
+              /\ owner' = [owner EXCEPT ![new] = o, ![ex] = NoOwner]
+              /\ verifier' = [verifier EXCEPT ![new] = vmine[a], ![ex] = 0]
+              /\ confirmed' = [confirmed EXCEPT ![new] = FALSE, ![ex] = FALSE]
+              /\ pending' = [pending EXCEPT ![new] = inherited, ![ex] = NoId]
               /\ ownerIdx' = [IdxAfterRemove(ownerIdx, ex) EXCEPT ![o] = new]
               /\ leases' = leases \ {ex}
-              /\ nextId' = nextId + 1
               /\ cur' = [cur EXCEPT ![a] = new]
               /\ UNCHANGED superseded
      \/ /\ ex # NoId
@@ -224,31 +242,25 @@ ExchangeId(a) ==
         /\ verifier[ex] = vmine[a]        \* CASE 1: renewal, reuse the id
         /\ cur' = [cur EXCEPT ![a] = ex]
         /\ UNCHANGED << live, owner, verifier, confirmed, pending, ownerIdx,
-                        leases, nextId, superseded >>
+                         leases, superseded >>
      \/ /\ ex # NoId
         /\ confirmed[ex]
         /\ verifier[ex] # vmine[a]        \* CASE 5: the incumbent "rebooted"
+        /\ new # NoId
         /\ live' = live \cup {new}
         /\ owner' = [owner EXCEPT ![new] = o]
         /\ verifier' = [verifier EXCEPT ![new] = vmine[a]]
         /\ confirmed' = [confirmed EXCEPT ![new] = FALSE]
         /\ pending' = [pending EXCEPT ![new] = ex]
         /\ ownerIdx' = [ownerIdx EXCEPT ![o] = new]
-        /\ nextId' = nextId + 1
-        /\ cur' = [cur EXCEPT ![a] = new]
         /\ leases' = leases
+        /\ cur' = [cur EXCEPT ![a] = new]
         \* The GHOST records the obligation the RFC imposes, whatever the
         \* implementation then does with `pending`.
         /\ superseded' = [superseded EXCEPT ![a] = ex]
   /\ conns' = [conns EXCEPT ![a] = conns[a] + 1]
-  /\ UNCHANGED << locks, st, vmine, mounts, vctr, nlocks >>
+  /\ UNCHANGED << locks, st, vmine, mounts, nlocks >>
 
-(***************************************************************************)
-(* CREATE_SESSION.  `mark_confirmed` returns the pending replacement and   *)
-(* the handler cascades.  CascadeLocks is fix 2: release the victim's      *)
-(* locks BEFORE the record goes, because `remove_client` drops the lease   *)
-(* and the only reaper iterates expired leases.                            *)
-(***************************************************************************)
 CreateSession(a) ==
   LET id  == cur[a]
       old == pending[id]
@@ -257,20 +269,24 @@ CreateSession(a) ==
   /\ conns[a] = NConnect
   /\ id # NoId
   /\ id \in live
-  /\ confirmed' = [confirmed EXCEPT ![id] = TRUE]
-  /\ pending' = [pending EXCEPT ![id] = NoId]
   /\ IF old # NoId /\ old \in live
      THEN /\ live' = live \ {old}
           /\ ownerIdx' = IdxAfterRemove(ownerIdx, old)
           /\ locks' = IF CascadeLocks THEN locks \ {old} ELSE locks
           /\ leases' = (leases \ {old}) \cup {id}
+          /\ confirmed' = [confirmed EXCEPT ![id] = TRUE, ![old] = FALSE]
+          /\ pending' = [pending EXCEPT ![id] = NoId, ![old] = NoId]
+          /\ owner' = [owner EXCEPT ![old] = NoOwner]
+          /\ verifier' = [verifier EXCEPT ![old] = 0]
      ELSE /\ live' = live
           /\ ownerIdx' = ownerIdx
           /\ locks' = locks
           /\ leases' = leases \cup {id}
+          /\ confirmed' = [confirmed EXCEPT ![id] = TRUE]
+          /\ pending' = [pending EXCEPT ![id] = NoId]
+          /\ UNCHANGED << owner, verifier >>
   /\ st' = [st EXCEPT ![a] = "mounted"]
-  /\ UNCHANGED << owner, verifier, nextId, vctr, cur, conns, vmine, mounts,
-                  nlocks, superseded >>
+  /\ UNCHANGED << cur, conns, vmine, mounts, nlocks, superseded >>
 
 TakeLock(a) ==
   /\ st[a] = "mounted"
@@ -279,13 +295,10 @@ TakeLock(a) ==
   /\ locks' = locks \cup {cur[a]}
   /\ nlocks' = nlocks + 1
   /\ UNCHANGED << live, owner, verifier, confirmed, pending, ownerIdx,
-                  leases, nextId, vctr, st, cur, conns, vmine, mounts,
-                  superseded >>
+                   leases, st, cur, conns, vmine, mounts, superseded >>
 
-(***************************************************************************)
-(* DESTROY_CLIENTID — a clean unmount.  This is the action that, without   *)
-(* fix 3, evicts a LIVE peer from the owner index.                         *)
-(***************************************************************************)
+\* DESTROY_CLIENTID — a clean unmount.  Without fix 3 this is the action
+\* that evicts a LIVE peer from the owner index.
 Unmount(a) ==
   /\ st[a] = "mounted"
   /\ cur[a] \in live
@@ -293,17 +306,18 @@ Unmount(a) ==
   /\ ownerIdx' = IdxAfterRemove(ownerIdx, cur[a])
   /\ leases' = leases \ {cur[a]}
   /\ locks' = locks \ {cur[a]}
+  /\ owner' = [owner EXCEPT ![cur[a]] = NoOwner]
+  /\ verifier' = [verifier EXCEPT ![cur[a]] = 0]
+  /\ confirmed' = [confirmed EXCEPT ![cur[a]] = FALSE]
+  /\ pending' = [pending EXCEPT ![cur[a]] = NoId]
   /\ st' = [st EXCEPT ![a] = "idle"]
   /\ cur' = [cur EXCEPT ![a] = NoId]
   /\ superseded' = [superseded EXCEPT ![a] = NoId]
-  /\ UNCHANGED << owner, verifier, confirmed, pending, nextId, vctr, conns,
-                  vmine, mounts, nlocks >>
+  /\ UNCHANGED << conns, vmine, mounts, nlocks >>
 
-(***************************************************************************)
-(* `courtesy_release_expired`: the ONLY production caller of               *)
-(* remove_client_locks, and it iterates EXPIRED LEASES.  So it can only    *)
-(* ever reach a clientid that still has one.                               *)
-(***************************************************************************)
+\* `courtesy_release_expired`: the ONLY production caller of
+\* remove_client_locks, and it iterates EXPIRED LEASES — so it can only
+\* ever reach a clientid that still has one.
 LeaseExpire(id) ==
   /\ id \in leases
   /\ id \in live
@@ -312,8 +326,11 @@ LeaseExpire(id) ==
   /\ live' = live \ {id}
   /\ ownerIdx' = IdxAfterRemove(ownerIdx, id)
   /\ leases' = leases \ {id}
-  /\ UNCHANGED << owner, verifier, confirmed, pending, nextId, vctr, st,
-                  cur, conns, vmine, mounts, nlocks, superseded >>
+  /\ owner' = [owner EXCEPT ![id] = NoOwner]
+  /\ verifier' = [verifier EXCEPT ![id] = 0]
+  /\ confirmed' = [confirmed EXCEPT ![id] = FALSE]
+  /\ pending' = [pending EXCEPT ![id] = NoId]
+  /\ UNCHANGED << st, cur, conns, vmine, mounts, nlocks, superseded >>
 
 Next ==
   \/ \E a \in Agents : StartMount(a)
@@ -332,9 +349,9 @@ Spec == Init /\ [][Next]_vars
 \* A lock must not outlive the client that holds it.
 Inv_NoOrphanLocks == \A id \in locks : id \in live
 
-\* And whatever holds one must remain reachable by the reaper, which
-\* iterates expired LEASES.  A lock whose client has no lease can never
-\* be collected by anything, survives restarts (locks are persisted and
+\* And whatever holds one must stay reachable by the reaper, which
+\* iterates expired LEASES.  A lock whose client has no lease can never be
+\* collected by anything, survives restart (locks are persisted and
 \* re-seeded), and denies its range to every other client forever.
 Inv_LocksReapable == \A id \in locks : id \in leases
 
@@ -350,7 +367,7 @@ Inv_OneConfirmedPerOwner ==
   \A i, j \in live :
     (confirmed[i] /\ confirmed[j] /\ owner[i] = owner[j]) => i = j
 
-\* A handshake that decided to supersede an incumbent must have actually
+\* A handshake that decided to supersede an incumbent must actually have
 \* discarded it by the time the mount completes.  Stated against the
 \* GHOST, so dropping `pending_replaces` cannot make it vacuously true.
 Inv_ObligationHonoured ==
