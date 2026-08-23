@@ -173,9 +173,21 @@ pub struct Rpo {
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Nfs {
-    /// Unexpired NFSv4 leases. `None` = the hub did not say, which is
-    /// NOT zero: an absent count must never be read as "nobody is
-    /// mounted" by a predicate that scales hubs to zero.
+    /// NFSv4 lease ROWS — `LeaseManager::active_count`, which is
+    /// `self.leases.len()`. NOT "unexpired leases", which is what this
+    /// said and what the ladder's reasoning was built on: a lease that
+    /// has expired but not yet been swept is still counted, so this runs
+    /// up to one sweep interval (30s) behind the truth.
+    ///
+    /// The error is in the protective direction, and that is exactly why
+    /// it must not stay: it is the reason the cluster drill's guard
+    /// survived to t=99 rather than lapsing at the 90s lease. Anything
+    /// reasoning about how long the guard lasts has to add the sweep
+    /// interval, not just the lease time.
+    ///
+    /// `None` = the hub did not say, which is NOT zero: an absent count
+    /// must never be read as "nobody is mounted" by a predicate that
+    /// scales hubs to zero.
     #[serde(default)]
     pub active_leases: Option<usize>,
 }

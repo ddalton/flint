@@ -626,18 +626,47 @@ pub fn find<T: AsRef<FlintShare> + Clone>(
 /// out at 3am.
 pub fn mount_hazard(v: &ShareView) -> Option<String> {
     let after = v.suspend_after_secs?;
-    if v.suspend_with_sessions == Some(false) {
-        // Opted into the lease guard: the ladder will hold while any
-        // client holds a lease.
-        return None;
-    }
     let every = (after / 2).max(1);
+    if v.suspend_with_sessions == Some(false) {
+        // This used to return None, on the reasoning that the caller had
+        // "opted into the lease guard: the ladder will hold while any
+        // client holds a lease". That is not what the guard does, and the
+        // CRD says so two files away: leases EXPIRE, so a long enough
+        // partition drops the count to zero on its own and the guard stops
+        // guarding (crd.rs, `suspend_with_sessions`). It narrows the
+        // window; it does not close it.
+        //
+        // Measured on a real cluster across an `iptables -j DROP`: the
+        // guard held from t=49 to t=99 reporting "a client still holds a
+        // lease", the lease then expired 1 -> 0 at t=99, and the share
+        // SUSPENDED at t=111 under a client that was still there. A
+        // control share — connected, quiet, 3.4x the threshold — never
+        // suspended, which is what makes that attributable to the
+        // partition.
+        //
+        // So the one configuration this function called safe is the
+        // configuration the drill proved unsafe, and it told a mounting
+        // consumer nothing at all. Warn in both branches; the keepalive is
+        // the remedy that works, because it crosses a different network
+        // path from the mount and so survives a partition of the mount's.
+        return Some(format!(
+            "this share holds off suspending while an NFS client holds a lease \
+(spec.idle.suspendWithSessions: false), but a lease EXPIRES: a client that is \
+partitioned rather than gone stops renewing, the count reaches zero on its own, and \
+the share then suspends after {after}s of quiet with the mount still held. The guard \
+narrows that window, it does not close it. POST this endpoint every {every}s while \
+the mount is held — that call crosses a different path from the mount, so it still \
+arrives when the mount's path is cut."
+        ));
+    }
     Some(format!(
         "this share suspends after {after}s of quiet even while an NFS client holds a \
 lease (spec.idle.suspendWithSessions is not false). A mount held open without file \
 I/O will be scaled to zero underneath it, and nothing will wake it, because an NFS \
-client cannot write the wake annotation. Either set spec.idle.suspendWithSessions: \
-false, or POST this endpoint again every {every}s while the mount is held."
+client cannot write the wake annotation. POST this endpoint again every {every}s \
+while the mount is held. Setting spec.idle.suspendWithSessions: false narrows the \
+window but does not close it — a partitioned client's lease expires and the guard \
+stops guarding — so it is not a substitute for the keepalive."
     ))
 }
 
@@ -1271,12 +1300,33 @@ mod tests {
             assert_eq!(keepalive_secs(&v), Some(300), "half the budget, so one miss survives");
         }
 
-        // Opted in: the ladder holds while a lease is live.
-        assert_eq!(mount_hazard(&with_idle(Some(600), Some(false))), None);
-        // …but the keepalive interval is still reported, because the
-        // lease guard protects a MOUNT and not an agent that unmounted
-        // and still wants the share up.
-        assert_eq!(keepalive_secs(&with_idle(Some(600), Some(false))), Some(300));
+        // OPTED IN, AND STILL A HAZARD. This assertion used to read
+        // `== None`, on the belief that "the ladder holds while a lease is
+        // live" — pinning the very behaviour that made the gateway silent
+        // in the one configuration a real cluster proved unsafe.
+        //
+        // A lease EXPIRES. A client that is partitioned rather than gone
+        // stops renewing, the count reaches zero on its own, and the guard
+        // stops guarding: measured across an `iptables -j DROP` as guard
+        // holding t=49-99, lease 1 -> 0 at t=99, SUSPENDED at t=111 with
+        // the mount still held. The CRD's own doc says the same thing
+        // ("it narrows the window; it does not close it").
+        let v = with_idle(Some(600), Some(false));
+        let why = mount_hazard(&v)
+            .expect("suspendWithSessions: false narrows the window, it does not close it — \
+                     a consumer about to mount must still be told");
+        assert!(why.contains("EXPIRES"), "the warning must say WHY the guard lapses: {why}");
+        assert!(why.contains("600s"), "{why}");
+        // The remedy has to be the one that survives a partition of the
+        // mount's path, which is the keepalive on the OTHER path — not
+        // the flag the caller has already set.
+        assert!(why.contains("every 300s"), "the warning must name the keepalive: {why}");
+        assert_eq!(keepalive_secs(&v), Some(300));
+
+        // ANTI-VACUITY: the two branches must still say DIFFERENT things,
+        // or a warning that fires for everyone tells a caller nothing.
+        let not_opted = mount_hazard(&with_idle(Some(600), None)).unwrap();
+        assert_ne!(why, not_opted, "the opted-in warning must be specific to the lease-guard case");
     }
 
     #[test]

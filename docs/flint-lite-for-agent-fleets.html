@@ -409,6 +409,15 @@ POST   /v1/projects/{id}/files/folder | /files/move</code></pre>
 <div class="note info"><span class="lb">A second reason, which only shows up when something goes wrong</span>
 <p>State loss is the obvious hazard. The subtler one is that a shared name breaks the server's ability to <b>tell you</b> about a loss. When a lease expires the server may release that client's locks — deliberate, and what lets a partitioned cluster's ranges become available again. It reports that as a status flag on the next <code>SEQUENCE</code>, and that flag is addressed to a <b>client id</b>, not to a cluster. Two clusters sharing one identity share one client id, so whichever cluster's traffic arrives first consumes the notification, and the cluster that actually lost the range never hears about it — carrying on believing it holds a lock the hub has already handed to someone else.</p></div>
 
+<h3>If you enable idle-suspend, a remote mount needs a keepalive</h3>
+<p>The idle ladder scales a quiet hub to zero so it stops costing anything. That is safe when the consumer is in the same cluster and unsafe when it is not, and the reason is worth understanding rather than working around.</p>
+<p><code>suspendWithSessions: false</code> looks like the answer — it refuses to suspend while any client holds a lease. It narrows the window; it does not close it. <b>A lease expires.</b> A cluster that is partitioned rather than gone stops renewing, the count reaches zero on its own, and the guard stops guarding.</p>
+<div class="note"><span class="lb">Measured across a one-way packet cut</span>
+<p>The guard held from <b>t=49 to t=99</b> reporting "a client still holds a lease"; the lease lapsed <b>1 → 0 at t=99</b>; the share <b>suspended at t=111</b> with the mount still held. A control share — connected, quiet, at 3.4x the idle threshold — never suspended, which is what makes that attributable to the partition and not to the clock.</p>
+<p>Healing the partition does not recover it. The mount stays hung, and the wake is an annotation on a custom resource in the <b>hub's</b> API server — which a workload cluster has no credential for, and no copy of the CRD.</p></div>
+<p><b>The remedy is a keepalive on a different path from the mount.</b> Deploy <code>flint-hub-gateway</code> and have your harness call <code>POST /v1/projects/{id}/volumes/{v}/wake</code> every <code>keepaliveSecs</code> while a mount is held. It needs one bearer token and no Kubernetes credential, it stamps the request on every call so it wakes <i>and</i> keeps alive, and because it crosses a different network path from the mount it still arrives when the mount's path is cut. The gateway is off by default, so this is something you turn on deliberately.</p>
+<p>If you cannot run that keepalive, leave the ladder off for shares mounted from another cluster. A hub that stays up costs money; a hub that suspends under a remote mount costs an outage nothing in that cluster can clear.</p>
+
 <h2>6 &nbsp; The workspace lifecycle</h2>
 
 <figure>

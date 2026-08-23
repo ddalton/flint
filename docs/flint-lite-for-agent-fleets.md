@@ -648,6 +648,41 @@ it concerns. This is a modelled result, not a measured one: see
 `formal/FlintClientIdentityLeaseNotify.cfg` and its `...Unique`
 counterpart, which differ in exactly that one setting.
 
+### If you enable idle-suspend, a remote mount needs a keepalive
+
+The idle ladder scales a quiet hub to zero to stop it costing anything.
+That is safe when the consumer is in the same cluster and unsafe when it
+is not, and the reason is worth understanding rather than working around.
+
+`suspendWithSessions: false` looks like the answer — it refuses to suspend
+while any client holds a lease. It narrows the window; it does not close
+it. **A lease expires.** A cluster that is partitioned rather than gone
+stops renewing, the count reaches zero on its own, and the guard stops
+guarding. Measured across a one-way packet cut: the guard held from t=49
+to t=99 reporting "a client still holds a lease", the lease lapsed 1 → 0
+at t=99, and the share suspended at t=111 with the mount still held. A
+control share — connected, quiet, at 3.4x the idle threshold — never
+suspended, which is what makes that attributable to the partition and not
+to the clock.
+
+Healing the partition does not recover it. The mount stays hung, and the
+wake is an annotation on a custom resource in the **hub's** API server —
+which a workload cluster has no credential for, and no copy of the CRD.
+
+**The remedy is a keepalive on a different path from the mount.** Deploy
+`flint-hub-gateway` and have your harness call
+`POST /v1/projects/{id}/volumes/{v}/wake` every `keepaliveSecs` while a
+mount is held. It needs one bearer token and no Kubernetes credential, it
+stamps the request on every call so it wakes *and* keeps alive, and
+because it crosses a different network path from the mount it still
+arrives when the mount's path is cut. The gateway is off by default, so
+this is something you turn on deliberately.
+
+If you cannot run that keepalive, leave the ladder off for shares that are
+mounted from another cluster. A hub that stays up costs money; a hub that
+suspends under a remote mount costs an outage nothing in that cluster can
+clear.
+
 ### Credentials and permissions on the mount
 
 **The mount carries no credentials.** There is no secret, no key, no
