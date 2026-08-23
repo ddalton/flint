@@ -1,8 +1,8 @@
-# Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, the pNFS truncate gate, the block-layout extent allocator, the block admission layer, the block serving-composition machine, the S3-tier volume epoch, the S3-tier eviction marker, and the multi-volume hub's session lease
+# Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, the pNFS truncate gate, the block-layout extent allocator, the block admission layer, the block serving-composition machine, the S3-tier volume epoch, the S3-tier eviction marker, the multi-volume hub's session lease, and the NFSv4 client-record lifecycle
 
-Ten spec modules plus two probe modules (`FlintA2Probe`, `FlintExtentsProbe` —
+Twelve spec modules plus two probe modules (`FlintA2Probe`, `FlintExtentsProbe` —
 ghost-witness overlays on `FlintReplication` / `FlintExtents`), one gate
-(`scripts/check-tla.sh`, **one hundred and seventy-three** TLC runs).
+(`scripts/check-tla.sh`, **one hundred and eighty-nine** TLC runs).
 
 Both counts here have drifted before, in both files, because nothing
 regenerated them. They do now:
@@ -1234,3 +1234,73 @@ The model checks the design, not the Rust. The campaign drills and the
 ledger oracle remain the check on the axioms (P4 exists because a
 transport assumption, not a design step, was wrong) — the audit above
 converts the raid1 axioms from believed to cited.
+
+
+## `FlintClientIdentity.tla` — the NFSv4 client record, keyed on a name that is not unique
+
+Model after code after the drill, and it exists because of a density
+signal rather than a design question: the many-clusters drill
+(2026-08-22) found **three defects in this one state machine by hand, in
+an afternoon**. Three in one machine is not three bugs, it is a machine
+nobody had enumerated. All three were fixed with tests — but a test
+speaks only for the paths it walks, and the question the fixes could not
+answer was whether they are *complete* across the interleavings the
+tests never reach. That is what this module is for, and
+`FlintClientIdentityNconnect3.cfg` is the answer: the case-4
+carry-forward holds at three connections, not just the two the unit test
+mounts with.
+
+**The load-bearing abstraction is that `co_ownerid` is a MANY-TO-ONE
+key**, and this repo has been burned three times by getting an
+abstraction wrong, so it is stated as a run rather than a warning. On
+NFSv4.1+ the Linux client builds its identity as `Linux NFSv4.<minor>
+<nodename>` and nothing else — no address, no cluster, no uniquifier
+unless `nfs4_unique_id` is set on the node — so two agent pods in two
+clusters present the same bytes. That was captured byte-identical on the
+wire from two kind clusters mounting one hub, with nothing contrived
+about the setup: the pods simply had the same name, as a fleet applying
+one manifest per cluster guarantees. RFC 8881 §18.35.5 then *requires*
+the server to read it as one client returning, so flint cannot refuse
+the collision; it can only decline to lose state over it.
+
+Two runs exist purely to keep the module honest, and both must find
+nothing:
+
+- **`NoCollide`** — owners unique, and **all three defects switched back
+  on**. It passes. That is the machine-checked statement that the
+  natural abstraction makes every theorem here vacuous.
+- **`Nconnect1`** — the case-4 defect on, with a single connection. It
+  passes too, and explains why pynfs EID5f sails over the defect: with
+  one connection case 4 never fires.
+
+The three mutations are the shipped code before each fix:
+
+| mutation | what it restores | invariant TLC must break |
+|---|---|---|
+| `CarryObligation=FALSE` | case 4 replaces an unconfirmed record and starts `pending_replaces` at None, dropping the obligation case 5 took one connection earlier | `Inv_OneConfirmedPerOwner` |
+| `CondIndexRemove=FALSE` | `remove_client_internal` clears the owner index unconditionally, so a departing client evicts a live peer | `Inv_IndexCoversLiveOwners` |
+| `CascadeLocks=FALSE` | the case-5 cascade takes sessions, stateids, delegations and the record — but not the locks | `Inv_NoOrphanLocks` |
+
+TLC sharpened the first one. The hand-written ghost invariant
+(`Inv_ObligationHonoured`, "a handshake that decided to supersede must
+actually have discarded") was written expecting to be the one that
+broke; TLC instead reached `Inv_OneConfirmedPerOwner` — two *confirmed*
+records for one co_ownerid, which RFC 8881 forbids outright and is a
+strictly more fundamental statement of the same harm.
+
+`Inv_LocksReapable` is the invariant with the most teeth per line: it is
+not enough that a leaked lock be findable, it must remain reachable *by
+the only thing that reaps locks*, which iterates expired **leases**.
+`remove_client` takes the lease first, so anything surviving it is
+collectable by nothing, survives restart (locks are persisted and
+re-seeded), and denies its range to every client in every cluster for the
+life of the volume.
+
+Out of scope, deliberately: sequence-id/replay caching (§18.36.4 — a
+different machine with its own drills), back channels, and the wire.
+Locks are modelled only as "client `c` holds one", because the defect is
+that they *outlive* `c`, not anything about ranges. The principal is
+always equal, because AUTH_SYS derives it from the same nodename — so a
+co_ownerid collision is a principal collision too, and the arms that turn
+on a principal mismatch cannot arise in the situation this module is
+about.

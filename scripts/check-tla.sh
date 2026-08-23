@@ -1158,4 +1158,37 @@ mutation_run FlintTierSession FlintTierSessionNoRotate.cfg "tier-session rotatio
 mutation_run FlintTierSession FlintTierSessionNoDrain.cfg "tier-session drain mutation (DrainOnRelease=FALSE: the release straggler lands under the next owner's reign — clean release skips the lease wait, so the successor can already be holding)" "Inv_NoStragglerLand"
 mutation_run FlintTierSession FlintTierSessionProbeStale.cfg "tier-session stale-land probe (RESIDUAL required-fail: depose+takeover interleaves between plan and land — bounded by the fence, arbitrated by the data plane's stamps)" "Inv_NoStaleLand"
 
+# FlintClientIdentity.tla — the NFSv4.1 client-record lifecycle keyed on an
+# identity that is NOT unique (client.rs exchange_id / remove_client_internal,
+# session.rs handle_create_session's case-5 cascade).  MODEL AFTER CODE AFTER
+# THE DRILL, and written because the many-clusters drill found THREE defects
+# in this one machine by hand in an afternoon.  Three in one machine is not
+# three bugs; it is a machine nobody had enumerated.  All three are fixed and
+# tested, but a test speaks only for the paths it walks: the open question was
+# whether the fixes are COMPLETE across interleavings the tests do not reach.
+# Nconnect3 answers it.
+#
+# THE LOAD-BEARING ABSTRACTION is that co_ownerid is a MANY-TO-ONE key.  On
+# NFSv4.1+ the Linux client builds it as `Linux NFSv4.<minor> <nodename>` and
+# nothing else, so two agent pods in two clusters present the same bytes —
+# captured byte-identical on the wire from two kind clusters mounting one hub.
+# RFC 8881 18.35.5 then REQUIRES the server to read that as one client
+# returning.  The NoCollide run is the machine-checked statement that getting
+# this abstraction wrong makes the whole module vacuous: with owners unique
+# and ALL THREE defects switched back on, nothing fails.  Nconnect1 is the
+# same point from the other side, and explains why pynfs EID5f passes over the
+# case-4 defect: with a single connection case 4 never fires at all.
+strict_run FlintClientIdentity FlintClientIdentity.cfg     "client-identity strict breadth (colliding co_ownerid, nconnect=2, all three fixes ON)"
+strict_run FlintClientIdentity FlintClientIdentityDeep.cfg "client-identity strict breadth, THREE agents on one owner (a third cluster on the same hub)"
+strict_run FlintClientIdentity FlintClientIdentityNconnect3.cfg "client-identity nconnect=3 (the fixes must hold past the 2 connections the unit tests walk)"
+
+mutation_run FlintClientIdentity FlintClientIdentityCaseFour.cfg  "case-4 mutation (CarryObligation=FALSE: the nconnect trunking probe drops the case-5 obligation, so the confirming CREATE_SESSION owes no cleanup)" "Inv_OneConfirmedPerOwner"
+mutation_run FlintClientIdentity FlintClientIdentityIndexBlind.cfg "owner-index mutation (CondIndexRemove=FALSE: a departing client clears the index entry that names a LIVE peer sharing the co_ownerid)" "Inv_IndexCoversLiveOwners"
+mutation_run FlintClientIdentity FlintClientIdentityLockLeak.cfg   "cascade-lock mutation (CascadeLocks=FALSE: the case-5 cascade takes the lease before the locks, so the only reaper — which iterates expired leases — can never reach them)" "Inv_NoOrphanLocks"
+
+# REQUIRED-PASS VACUITY PROBES.  Both must find NOTHING, and a failure here
+# means the module has stopped testing what it claims to.
+strict_run FlintClientIdentity FlintClientIdentityNoCollide.cfg "client-identity ABSTRACTION PROBE (Collide=FALSE with all three defects ON: unique owners make every theorem here vacuous)"
+strict_run FlintClientIdentity FlintClientIdentityNconnect1.cfg "client-identity SINGLE-CONNECTION PROBE (case-4 defect ON at nconnect=1: case 4 never fires, which is why pynfs EID5f misses it)"
+
 echo "TLA GATE PASSED"
