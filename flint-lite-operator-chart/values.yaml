@@ -86,8 +86,17 @@ networkPolicy:
 
   # Who may reach a hub's 2049. Kubelet-driven mounts arrive from the
   # NODE ip, so node CIDRs are usually what you want; a podSelector
-  # cannot express that client set. Cross-cluster consumers (the
-  # advertiseAddress case) are always CIDRs. EMPTY ADMITS NOTHING.
+  # cannot express that client set. EMPTY ADMITS NOTHING.
+  #
+  # ⚠ IT CANNOT RESTRICT CROSS-CLUSTER CONSUMERS (the advertiseAddress
+  # case). Nothing sets externalTrafficPolicy, so kube-proxy SNATs a
+  # NodePort/LB client to a node address in the HUB's cluster before the
+  # packet reaches the pod. Measured on a three-cluster rig: 1486 of
+  # 1486 connections from two remote clusters arrived as the hub
+  # cluster's own gateway, none as either remote node. Listing remote
+  # CIDRs here is an outage; listing the local one admits everyone who
+  # can reach the NodePort. Restrict cross-cluster reach at the network
+  # layer (peering, security groups, a gateway), not here.
   nfsClientCIDRs: []
   nfsClientSelectors: []      # NetworkPolicyPeer objects, verbatim
 

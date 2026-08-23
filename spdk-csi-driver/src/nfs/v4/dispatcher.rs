@@ -121,7 +121,8 @@ impl CompoundDispatcher {
         // file handler can share its open-fd view (F17b: GETATTR serves
         // renamed-over-but-open files via fstat instead of STALE).
         let pnfs_enabled = pnfs_handler.is_some();
-        let session_handler = SessionOperationHandler::new(state_mgr.clone());
+        let session_handler = SessionOperationHandler::new(state_mgr.clone())
+            .with_lock_manager(lock_mgr.clone());
         let io_handler = IoOperationHandler::new(state_mgr.clone(), fh_mgr.clone());
         let file_handler = FileOperationHandler::new(fh_mgr.clone(), pnfs_enabled)
             .with_pnfs_handler(pnfs_handler.clone())

@@ -581,9 +581,41 @@ impl ClientManager {
                 // Case 4 — replace the unconfirmed record. The old clientid
                 // was never made usable (no CREATE_SESSION succeeded), so we
                 // can drop it without disturbing any live state.
+                //
+                // BUT IT MAY OWE A CLEANUP. An `nconnect >= 2` mount sends
+                // EXCHANGE_ID on every connection for trunking detection, so
+                // the sequence on a reboot (or a co_ownerid collision) is:
+                //
+                //   #1  case 5 -> allocate B, pending_replaces = A
+                //   #2  case 4 -> B is unconfirmed, replace it with C
+                //
+                // If C starts life with `pending_replaces: None`, the
+                // obligation case 5 took on is dropped on the floor and A is
+                // never discarded — its sessions, stateids and locks survive
+                // until its lease expires. Since nconnect>=2 is the driver
+                // default and what the guide mandates, that made the RFC 8881
+                // §18.35.5 deferred cleanup effectively dead code. Pynfs EID5f
+                // misses it because it uses a single connection.
                 debug!("EXCHANGE_ID: case 4 (replace unconfirmed) — drop client {}", c.client_id);
+                let inherited = c.pending_replaces;
                 let _ = self.remove_client_internal(c.client_id);
-                self.allocate_client(owner, verifier, flags, principal)
+                let outcome = self.allocate_client(owner, verifier, flags, principal);
+                if let (Some(prev), ExchangeIdOutcome::NewUnconfirmed { client_id, .. }) =
+                    (inherited, &outcome)
+                {
+                    debug!(
+                        "EXCHANGE_ID: case 4 carries the case-5 obligation forward — \
+                         client {} now owes cleanup of {}",
+                        client_id, prev,
+                    );
+                    if let Some(mut new_c) = self.clients.get_mut(client_id) {
+                        new_c.pending_replaces = Some(prev);
+                        let snap = new_c.clone();
+                        drop(new_c);
+                        self.persist(&snap);
+                    }
+                }
+                outcome
             }
             (false, Some(c)) => {
                 // Confirmed record. Distinguish the four (verf, princ) cases.
@@ -746,7 +778,18 @@ impl ClientManager {
     /// from the public API. Used during EXCHANGE_ID record replacement.
     fn remove_client_internal(&self, client_id: u64) -> Option<Client> {
         if let Some((_, client)) = self.clients.remove(&client_id) {
-            self.owner_to_id.remove(&client.owner);
+            // ONLY IF IT STILL POINTS AT THIS CLIENT. `co_ownerid` is
+            // `Linux NFSv4.<minor> <nodename>` and nothing else, so two
+            // agent pods in two different clusters routinely present the
+            // SAME owner bytes — one key, several clients. An
+            // unconditional remove here deletes whatever the entry
+            // currently names, which after a case-5 handover is the
+            // WINNER: the departing client evicts a live peer from the
+            // index, and that peer's next EXCHANGE_ID then takes the
+            // `(false, None)` arm and mints a second clientid instead of
+            // renewing or replacing its own.
+            self.owner_to_id
+                .remove_if(&client.owner, |_, &id| id == client_id);
             self.lease_manager.remove_lease(client_id);
             self.persist_delete(client_id);
             Some(client)
@@ -944,9 +987,6 @@ mod tests {
     ///    new one confirms. Pynfs EID5f passes because it uses a single
     ///    connection.
     #[test]
-    #[ignore = "PINS AN OPEN DEFECT: case 4 drops the case-5 pending_replaces, so an \
-                nconnect>=2 mount never triggers the deferred cleanup. Asserts the \
-                REQUIREMENT, so it goes green with the fix. Run with --ignored."]
     fn an_nconnect_trunking_probe_drops_the_case_5_cleanup_obligation() {
         let lease_mgr = Arc::new(LeaseManager::new());
         let mgr = ClientManager::new(lease_mgr, "test-vol", crate::state_backend::memory_backend());

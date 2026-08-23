@@ -13,6 +13,7 @@
 
 use crate::nfs::v4::protocol::*;
 use crate::nfs::v4::state::StateManager;
+use crate::nfs::v4::operations::lockops::LockManager;
 use crate::nfs::v4::compound::{ChannelAttrs, CompoundContext};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -222,12 +223,27 @@ pub struct DestroySessionRes {
 /// Session operation handler
 pub struct SessionOperationHandler {
     state_mgr: Arc<StateManager>,
+    /// The lock table, so the case-5 deferred cleanup can actually
+    /// finish. Without it this handler could tear down a client's
+    /// sessions, stateids, delegations and record while leaving its
+    /// byte-range locks behind — and nothing could ever reap them,
+    /// because the only reaper iterates EXPIRED LEASES and
+    /// `remove_client` has already deleted the lease.
+    lock_mgr: Option<Arc<LockManager>>,
 }
 
 impl SessionOperationHandler {
     /// Create a new session operation handler
     pub fn new(state_mgr: Arc<StateManager>) -> Self {
-        Self { state_mgr }
+        Self { state_mgr, lock_mgr: None }
+    }
+
+    /// Give the handler the lock table. The dispatcher already owns one;
+    /// this is what lets `handle_create_session` complete the case-5
+    /// cascade instead of leaking the victim's locks.
+    pub fn with_lock_manager(mut self, lock_mgr: Arc<LockManager>) -> Self {
+        self.lock_mgr = Some(lock_mgr);
+        self
     }
 
     /// Handle EXCHANGE_ID operation
@@ -504,6 +520,25 @@ impl SessionOperationHandler {
             self.state_mgr.sessions.destroy_client_sessions(old_id);
             self.state_mgr.stateids.remove_client_stateids(old_id);
             self.state_mgr.delegations.cleanup_client_delegations(old_id);
+            // LOCKS BEFORE THE CLIENT RECORD. `remove_client` drops the
+            // lease, and the only production caller of
+            // `remove_client_locks` iterates `get_expired_clients()` —
+            // which reads the lease map. Anything still holding a lock
+            // after `remove_client` can therefore never be collected by
+            // anything, survives a restart (locks are persisted and
+            // re-seeded at startup), and denies its range to every other
+            // client forever, naming a clientid the server can no longer
+            // resolve. The holder cannot release it either: its lock
+            // stateid went with `remove_client_stateids` above.
+            if let Some(locks) = &self.lock_mgr {
+                locks.remove_client_locks(old_id);
+            } else {
+                warn!(
+                    "CREATE_SESSION: case-5 cleanup of client {} has NO lock manager — \
+                     any locks it held are now unreachable",
+                    old_id,
+                );
+            }
             self.state_mgr.clients.remove_client(old_id);
         }
 

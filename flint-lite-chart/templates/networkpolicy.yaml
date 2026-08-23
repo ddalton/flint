@@ -35,7 +35,18 @@ spec:
     # mount (an `nfs:` PV, or nfs-subdir-external-provisioner), so a pod
     # selector cannot express that client set — hence the CIDR list.
     # In-pod mounts come from the pod IP and want the selector list.
-    # Cross-cluster consumers are always CIDRs.
+    #
+    # ⚠ THIS CANNOT RESTRICT CROSS-CLUSTER CONSUMERS. Nothing sets
+    # `externalTrafficPolicy` on the Service, so kube-proxy SNATs a
+    # NodePort/LoadBalancer client to a node address in THIS cluster
+    # before the packet reaches the pod, and the policy evaluates that
+    # rewritten source. Measured on a three-cluster rig: 1486 of 1486
+    # connections from two remote clusters arrived as the hub cluster's
+    # own gateway address, and zero as either remote node. So the only
+    # CIDR that admits a remote cluster is this cluster's own — which
+    # admits everyone who can reach the NodePort. Listing remote CIDRs
+    # here is an outage; listing the local one is a vacuous control.
+    # Restrict cross-cluster reach at the network layer instead.
     - from:
         {{- range .Values.networkPolicy.nfsClientCIDRs }}
         - ipBlock:
@@ -45,8 +56,22 @@ spec:
         - {{ toYaml . | nindent 10 | trim }}
         {{- end }}
       ports:
+        # THE POD'S PORT, NOT THE SERVICE'S. NetworkPolicy is enforced at
+        # the endpoint, after kube-proxy has already DNAT'd, so this must
+        # match what the container listens on — `targetPort: 2049` in
+        # hub.yaml, hardcoded, and NFS_PORT in the operator's render.
+        # Writing `.Values.service.port` here means the moment anyone
+        # uses the port-per-project shape that `advertiseAddress` exists
+        # to serve (`service.port: 2149`), the policy admits 2149 against
+        # a pod listening on 2049 and every correctly-listed CIDR is
+        # denied — while `kubectl get netpol -o yaml` shows exactly the
+        # CIDR the admin expected, which is what makes it hard to see.
+        # This is the mirror of the bug already caught in the other rule
+        # (render.rs: "The chart's own NetworkPolicy hardcodes 8080
+        # against a free `spec.monitoring.port`"). The operator chart has
+        # always had it right.
         - protocol: TCP
-          port: {{ .Values.service.port }}
+          port: 2049
 {{- end }}
 {{- if and .Values.monitoring.enabled (or .Values.networkPolicy.apiClientCIDRs .Values.networkPolicy.apiClientSelectors) }}
     # /status, /health and the file API. This surface can rewrite any
