@@ -477,32 +477,104 @@ except OSError as e:
 PY" | tr -d '\r')
   echo "  newcomer's result: $C_RESULT"
 
+  # THE ORACLE, REWRITTEN 2026-08-23, and the reason is worth recording
+  # because it is the exact anti-pattern this repo keeps re-learning.
+  #
+  # This leg used to score C_REFUSED as PASS: "the incumbent's lock
+  # SURVIVED". It did survive — because of a BUG. The case-5 cascade tore
+  # down A's sessions, stateids, delegations and client record but NOT its
+  # locks, and could not: the session handler held no reference to the lock
+  # table. So what refused C was a PHANTOM — a lock naming a clientid the
+  # server had already destroyed, which A could never LOCKU and no reaper
+  # could ever collect (the only reaper iterates expired LEASES, and
+  # remove_client had dropped A's lease). Persisted and re-seeded at
+  # startup, it denied that range to every client in every cluster forever.
+  #
+  # The leg's two anti-vacuity guards (distinct superblock, case 5 logged)
+  # could not see this: neither asks whether the surviving lock still
+  # belongs to a client the server can RESOLVE. A leg that cannot tell
+  # "legitimately held" from "unreapable phantom" reads a bug as a pass.
+  #
+  # WHAT IS ACTUALLY ACHIEVABLE. RFC 8881 §18.35.5 case 5 is mandatory:
+  # same co_ownerid + fresh verifier + same principal IS "the client
+  # rebooted", and the server MUST discard the incumbent's state. It is
+  # not permitted to disambiguate by source address. So C acquiring is
+  # CORRECT — and identity collision really is state theft. That is a
+  # DEPLOYMENT hazard, fixed by unique client names
+  # (docs/flint-lite-for-agent-fleets.md, "One hub, many clusters"), not a
+  # server bug the server is allowed to fix.
+  #
+  # What the server DOES owe, and what this leg now tests:
+  #   1. the incumbent's state is released COMPLETELY and REAPABLY, so no
+  #      phantom outlives it; and
+  #   2. the range is usable afterwards by a client that can be resolved.
   case "$C_RESULT" in
-    C_REFUSED)
-      pass "the incumbent's lock SURVIVED a REAL owner collision (case 5 above) — the newcomer was refused"
-      echo "  note: RFC 8881 case 5 means the server read the newcomer as A"
-      echo "  RESTARTING. A's lock came through this one collision intact, but"
-      echo "  a SUSTAINED collision (a crash-looping same-named pod in another"
-      echo "  cluster) would have the two evicting and reclaiming each other"
-      echo "  indefinitely. This leg proves one exchange, not steady state." ;;
     C_TOOK_A_LOCK_A_STILL_HOLDS)
-      fail "IDENTITY COLLISION IS SILENT DATA CORRUPTION: a client that merely shares hostname '$HOST_A' was granted a lock the incumbent still holds, with no error on either side. Two same-named pods in two workload clusters would corrupt each other's writes. Client identity must be made unique per consumer BEFORE any cross-cluster mount ships." ;;
+      pass "the newcomer acquired the range — RFC 8881 case 5, the incumbent's state was discarded"
+      echo "  this is CORRECT per spec and CATASTROPHIC between machines:"
+      echo "  two same-named pods in two clusters WILL take each other's locks."
+      echo "  The fix is unique client identity per consumer (nfs4_unique_id),"
+      echo "  not anything the server is permitted to do." ;;
+    C_REFUSED)
+      fail "the newcomer was REFUSED after a genuine case-5 collision. The \
+server destroyed A's client record (case 5 above) but something still holds \
+A's range — which is the unreapable-phantom shape: a lock naming a clientid \
+the server can no longer resolve, which A cannot release and no reaper can \
+collect, denying this range to every client in every cluster permanently. \
+Check the case-5 cascade releases locks (session.rs handle_create_session \
+must hold a LockManager reference)." ;;
     *)
       fail "the colliding client failed in an unexpected way ($C_RESULT) — neither refusal nor takeover; investigate before drawing any conclusion" ;;
   esac
 
-  # A learning nothing about a takeover is the worst shape of this bug.
+  # NO PHANTOM SURVIVED. The decisive check, and the one the old oracle
+  # lacked: after the incumbent lets go, the range must be usable again by
+  # a client the server can resolve. C is that client — distinct
+  # nfs_client (asserted above), its own live session.
+  #
+  # Pre-fix this FAILS, and fails for the right reason: A's orphaned lock
+  # is still in the table, A's LOCKU cannot reach it (its clientid is
+  # gone), so the range is refused forever. That differential is what
+  # makes this assertion worth making.
+  vm "pkill -f cc-alias-a.py 2>/dev/null; true"
+  sleep 2
+  RECLAIM=$(vm "nsenter --net=/var/run/netns/$NETNS_C python3 - <<'PY'
+import fcntl, errno
+f = open('$MNT_C/shared.bin', 'r+b')
+try:
+    fcntl.lockf(f, fcntl.LOCK_UN, 4096, 8192)
+except OSError:
+    pass
+try:
+    fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB, 4096, 8192)
+    print('RANGE_USABLE')
+    fcntl.lockf(f, fcntl.LOCK_UN, 4096, 8192)
+except OSError as e:
+    print('RANGE_DENIED_%d' % e.errno)
+PY" | tr -d '\r')
+  [ "$RECLAIM" = "RANGE_USABLE" ] \
+    || fail "after the incumbent released, the range is STILL refused \
+($RECLAIM) — a lock outlived the client that held it, and nothing left can \
+reap it. This is the permanent-denial shape, not a transient."
+  pass "no phantom outlived the collision — the range is usable by a resolvable client"
+
+  # A crash in the incumbent would mean the takeover was not merely
+  # silent but destructive to it.
   if vm "grep -q Traceback /tmp/cc-alias-a.log 2>/dev/null"; then
     vm "tail -3 /tmp/cc-alias-a.log"
     fail "the incumbent's lock holder CRASHED during the collision"
   fi
-  pass "the incumbent survived the collision without an error of its own"
+  pass "the incumbent did not crash"
 fi
 
 echo
 echo "══════════════════════════════════════════════════════════════════"
 echo " PASS — two distinct clients shared one volume: coherent, locked,"
-echo " tool-exercised, DS-direct. This is the multi-cluster premise —"
-echo " and a third client sharing a hostname did not silently inherit"
-echo " the first one's locks."
+echo " tool-exercised, DS-direct. This is the multi-cluster premise."
+echo
+echo " And a third client sharing a hostname DID take the first one's"
+echo " lock — correctly, per RFC 8881 case 5, which is why unique client"
+echo " identity is a deployment REQUIREMENT and not a recommendation."
+echo " What the server owes it discharged: nothing was left behind that"
+echo " could not be reaped."
 echo "══════════════════════════════════════════════════════════════════"
