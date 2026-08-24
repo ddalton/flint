@@ -733,10 +733,30 @@ impl IoOperationHandler {
                             let want_gid = if expl_gid.is_none() { Some(gid) } else { None };
                             if want_uid.is_some() || want_gid.is_some() {
                                 let p = file_path.clone();
-                                let _ = tokio::task::spawn_blocking(move || {
+                                // Best effort by design — a chown failure
+                                // must not fail the OPEN — but NOT silent.
+                                // This used to discard the result entirely,
+                                // so a server without CAP_CHOWN handed the
+                                // client NFS4_OK for a file owned by the
+                                // SERVER instead of the caller, with nothing
+                                // logged anywhere. Measured: strip the
+                                // capability and every file lands 65532:988
+                                // instead of the caller's uid, silently.
+                                // The wrong answer is worse than the refusal,
+                                // so at minimum it must be visible.
+                                if let Ok(Err(e)) = tokio::task::spawn_blocking(move || {
                                     std::os::unix::fs::chown(&p, want_uid, want_gid)
                                 })
-                                .await;
+                                .await
+                                {
+                                    warn!(
+                                        "OPEN(create): chown {:?} to {:?}:{:?} failed: {} — \
+                                         the file is owned by the SERVER, not the caller. \
+                                         Ownership-sensitive workloads will refuse to run. \
+                                         Grant CAP_CHOWN (see the chart's securityContext).",
+                                        file_path, want_uid, want_gid, e
+                                    );
+                                }
                             }
                         }
                     }

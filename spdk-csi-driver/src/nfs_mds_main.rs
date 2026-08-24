@@ -153,6 +153,13 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
         Some(root) => spdk_csi_driver::nfs::fence::arm_from_env(root, 59),
         None => warn!("F33 self-fencing NOT armed: no exports configured"),
     }
+    // Finding 7 — see the matching call in `nfs_main.rs`. Both
+    // front-ends report, because the whole point of §1.1 is that a
+    // mechanism present on one and absent from the other is invisible
+    // until it costs something.
+    if let Some(root) = &fence_root {
+        spdk_csi_driver::nfs::privilege::report_at_startup(root);
+    }
     // The status surface is off unless the deployment asks for it. It
     // binds before the tier starts, so the epoch-claim and import
     // phases — the long, pre-listener part of startup — are visible to

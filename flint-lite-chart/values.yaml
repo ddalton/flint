@@ -215,5 +215,73 @@ resources:
   requests:
     cpu: 100m
     memory: 128Mi
+# ─────────────────────────── Security context ────────────────────────────
+# Audit finding 7. The hub had NO securityContext at all — a default root
+# container — while the operator and the gateway in this same repo both
+# run as uid 65532. The one workload that touches every tenant's bytes
+# was the only one left unhardened.
+#
+# ── Does it actually need root? No. Measured 2026-08-24. ──
+#
+# The hub was believed to require root. It does not. Running as uid 65532
+# on Linux, with the four capabilities below granted as FILE capabilities
+# on the binary, pynfs 4.1 scored 171 passed / 0 failed / 91 skipped —
+# identical to the root run — and all 45 objects the suite created were
+# owned by the CALLER (503:1000), not by the server. The control arm,
+# same uid with the capabilities stripped, produced 65532:988 for every
+# one of them and logged nothing.
+#
+# What it needs is the CAPABILITIES, not uid 0:
+#   CHOWN         stamp the caller's AUTH_SYS identity on created objects
+#                 (postgres checks st_uid == geteuid and refuses to start
+#                 otherwise; a mode-0700 dir locks out its own creator)
+#   DAC_OVERRIDE  read/write files it does not own, after that chown
+#   FOWNER        chmod/utimes on files it does not own
+#   FSETID        preserve setuid/setgid across a chown
+#
+# NET_BIND_SERVICE is deliberately absent: NFS is 2049, not privileged.
+# Add it if you move the listener below 1024.
+#
+# ⚠ DAC_READ_SEARCH is absent and is required by `FLINT_FH_KERNEL=1`:
+# kernel inode handles resolve through `open_by_handle_at(2)`
+# (`nfs/v4/fh_kernel.rs:31`). That path is off by default, so the
+# capability is not granted for a feature nobody runs. Turning
+# FLINT_FH_KERNEL on means adding DAC_READ_SEARCH in the same change.
+securityContext:
+  enabled: true
+
+  # ── Why this still defaults to 0 ──
+  # Kubernetes has NO ambient capabilities, so a non-root container does
+  # not get an effective capability from `capabilities.add` alone — the
+  # BINARY must carry file capabilities. `docker/Dockerfile.pnfs` setcaps
+  # them, but only from the image that ships with this chart. Pin an
+  # older image (or `--reuse-values` past an upgrade) and `runAsNonRoot`
+  # would produce a hub that cannot chown, which shows up as a whole
+  # export owned by the wrong uid rather than as a failure.
+  #
+  # So the default stays 0 until the file-capability image has been
+  # verified on a live cluster. Flipping it is these two values, and the
+  # server tells you at startup whether it worked: `nfs::privilege`
+  # probes chown on boot and logs loudly when it is denied.
+  #
+  #   runAsUser: 65532
+  #   runAsNonRoot: true
+  runAsUser: 0
+  runAsNonRoot: false
+
+  # Off by default: the state DB, export mount and tier scratch are all
+  # volume-backed, but a deployment may carry a sidecar or image that
+  # writes to the root filesystem, and a hub that will not start is worse
+  # than one whose rootfs is writable. Turn it on and test your own
+  # configuration.
+  readOnlyRootFilesystem: false
+
+  capabilities:
+    - CHOWN
+    - DAC_OVERRIDE
+    - FOWNER
+    - FSETID
+  seccompProfile: RuntimeDefault
+
 nodeSelector: {}
 nameOverride: ""

@@ -3243,14 +3243,27 @@ impl FileOperationHandler {
                 if let Some((uid, gid)) = ctx.unix_cred {
                     let p = obj_path.clone();
                     let is_symlink = op.objtype == Nfs4FileType::Symlink;
-                    let _ = tokio::task::spawn_blocking(move || {
+                    // Best effort, but not silent — see the matching note in
+                    // OPEN(create). Without CAP_CHOWN the new directory is
+                    // owned by the server, and a 0700 directory then locks
+                    // its own creator out, which is exactly the failure this
+                    // stamp exists to prevent.
+                    if let Ok(Err(e)) = tokio::task::spawn_blocking(move || {
                         if is_symlink {
                             std::os::unix::fs::lchown(&p, Some(uid), Some(gid))
                         } else {
                             std::os::unix::fs::chown(&p, Some(uid), Some(gid))
                         }
                     })
-                    .await;
+                    .await
+                    {
+                        warn!(
+                            "CREATE: chown {:?} to {}:{} failed: {} — the object is owned \
+                             by the SERVER, not its creator. A mode-0700 directory now \
+                             locks its creator out. Grant CAP_CHOWN.",
+                            obj_path, uid, gid, e
+                        );
+                    }
                 }
 
                 // Apply the requested createattrs (mode, explicit owner —

@@ -150,6 +150,44 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/usr/local/bin/flint-pnfs-mds"]
           args: ["--config", "/etc/flint/mds.yaml"]
+          {{- if .Values.securityContext.enabled }}
+          # Audit finding 7. The hub is the one workload in this chart
+          # that touches every tenant's bytes, and it was the only one
+          # with no securityContext at all — while the operator and the
+          # gateway both set runAsNonRoot/runAsUser 65532. It ran as a
+          # DEFAULT-CAPABILITY root container.
+          #
+          # It cannot simply be made non-root. An NFS server serving
+          # many uids must chown to arbitrary owners (SETATTR owner,
+          # `fileops.rs` lchown/chown), read and write files it does not
+          # own, and preserve setuid/setgid bits. That is CHOWN,
+          # DAC_OVERRIDE, FOWNER and FSETID — with anything less it
+          # serves wrong answers rather than failing loudly, which is
+          # the worse outcome.
+          #
+          # So the posture is: still uid 0, but EXPLICITLY, with the
+          # ~14-capability default set reduced to those four, privilege
+          # escalation off, and the runtime seccomp profile on. That
+          # drops NET_RAW, MKNOD, SYS_CHROOT, SETFCAP, SETPCAP,
+          # AUDIT_WRITE and the rest, none of which this server uses.
+          #
+          # `runAsNonRoot: false` is stated rather than omitted so a
+          # cluster policy that rejects it fails at admission, where an
+          # operator can read the reason — instead of at the first
+          # cross-uid chown, which surfaces as a client-visible EPERM
+          # with no obvious cause.
+          securityContext:
+            runAsUser: {{ .Values.securityContext.runAsUser }}
+            runAsNonRoot: {{ .Values.securityContext.runAsNonRoot }}
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
+            capabilities:
+              drop: ["ALL"]
+              add:
+                {{- toYaml .Values.securityContext.capabilities | nindent 16 }}
+            seccompProfile:
+              type: {{ .Values.securityContext.seccompProfile }}
+          {{- end }}
           env:
             - name: RUST_LOG
               value: {{ .Values.logLevel | default "info" | quote }}

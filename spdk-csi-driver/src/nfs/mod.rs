@@ -33,6 +33,7 @@ pub mod rpcsec_gss;   // RPCSEC_GSS authentication (Kerberos support)
 pub mod pipeline;     // Per-connection RPC pipelining (RFC 8881 §2.10.6)
 pub mod activity;     // Client-activity signal (the idle-lifecycle input)
 pub mod fence;        // F33: backing-store self-fencing watchdog
+pub mod privilege;       // startup probe: can this server chown? (finding 7)
 pub mod volume_marker; // F30: volume-identity marker (export must prove its id)
 pub mod server_v4;    // NFSv4.2 TCP server
 pub mod v4;           // NFSv4.2 implementation (COMPLETE)

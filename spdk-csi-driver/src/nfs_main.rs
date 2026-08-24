@@ -185,6 +185,11 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // FLINT_FENCE_DEADLINE_SECS, 0 disables) so a slow-but-live store
     // under load never trips it.
     spdk_csi_driver::nfs::fence::arm_from_env(&args.export_path, 58);
+    // Finding 7: say whether this process can stamp caller identity on
+    // the objects it creates. Both create paths are best-effort by
+    // design, so without this the answer is invisible until someone
+    // notices a whole export owned by the server's own uid.
+    spdk_csi_driver::nfs::privilege::report_at_startup(&args.export_path);
 
     info!("");
     info!("📊 Configuration:");

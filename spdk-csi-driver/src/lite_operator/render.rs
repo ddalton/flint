@@ -649,6 +649,78 @@ pub fn api_endpoint(share: &FlintShare, namespace: &str) -> Option<String> {
     Some(format!("http://{name}.{namespace}.svc.cluster.local:{port}"))
 }
 
+/// The hub container's security context — the operator's copy of what
+/// `flint-lite-chart/templates/hub.yaml` sets, and it must stay
+/// identical to it (the parity test enforces that).
+///
+/// # The hub does not need root. Measured 2026-08-24.
+///
+/// It was believed to. It does not. Running as uid 65532 on Linux with
+/// exactly these four capabilities granted as FILE capabilities, pynfs
+/// 4.1 scored 171/0/91 — identical to the root run — and every object
+/// the suite created was owned by the CALLER, not the server. The
+/// control arm, same uid with the capabilities stripped, put all of them
+/// under the server's own uid and logged nothing.
+///
+/// What it needs is the capabilities, not uid 0:
+///   * `CHOWN` — stamp the caller's AUTH_SYS identity on created objects
+///   * `DAC_OVERRIDE` — read/write files it does not own after that chown
+///   * `FOWNER` — chmod/utimes on files it does not own
+///   * `FSETID` — preserve setuid/setgid across a chown
+///
+/// # Why it still runs as 0 here
+///
+/// Kubernetes has no ambient capabilities, so a non-root container gets
+/// nothing from `capabilities.add` alone — the binary must carry file
+/// capabilities. `docker/Dockerfile.pnfs` setcaps them, but only in the
+/// image that ships with this version. Against an older pinned image,
+/// `runAsNonRoot` yields a hub that cannot chown, and that surfaces as
+/// an export quietly owned by the wrong uid rather than as a failure.
+/// `nfs::privilege` probes chown at startup and says so, which is what
+/// makes moving the default safe to attempt — but it has not been
+/// verified on a live cluster yet, so the default has not moved.
+///
+/// NET_BIND_SERVICE is deliberately absent: 2049 is not privileged.
+///
+/// DAC_READ_SEARCH is also absent, and it is the one to remember:
+/// `FLINT_FH_KERNEL=1` resolves handles through `open_by_handle_at(2)`,
+/// which requires it (`nfs/v4/fh_kernel.rs:31`). That path is off by
+/// default, so granting it now would widen the blast radius for a
+/// feature nobody runs. Turning FH_KERNEL on means adding it here too.
+fn hub_security_context() -> k8s_openapi::api::core::v1::SecurityContext {
+    use k8s_openapi::api::core::v1::{Capabilities, SeccompProfile, SecurityContext};
+    SecurityContext {
+        run_as_user: Some(0),
+        // Stated, not omitted, so a cluster policy that forbids it
+        // fails at admission where the reason is legible — rather than
+        // at the first cross-uid chown, which reaches the client as a
+        // bare EPERM.
+        run_as_non_root: Some(false),
+        allow_privilege_escalation: Some(false),
+        // Stated explicitly to match the chart, which always renders it.
+        // `false` is also the Kubernetes default, so this changes no
+        // behaviour — it keeps the two renderers byte-identical, which
+        // is what the parity test is for. The chart exposes it as a
+        // knob (`securityContext.readOnlyRootFilesystem`); the operator
+        // has no CRD field for it yet, so it tracks the chart default.
+        read_only_root_filesystem: Some(false),
+        capabilities: Some(Capabilities {
+            drop: Some(vec!["ALL".to_string()]),
+            add: Some(vec![
+                "CHOWN".to_string(),
+                "DAC_OVERRIDE".to_string(),
+                "FOWNER".to_string(),
+                "FSETID".to_string(),
+            ]),
+        }),
+        seccomp_profile: Some(SeccompProfile {
+            type_: "RuntimeDefault".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 /// The hub Deployment.
 ///
 /// `selector_override` exists for adoption: a Deployment's selector is
@@ -923,6 +995,17 @@ pub fn deployment(
                         startup_probe,
                         volume_mounts: Some(volume_mounts),
                         resources,
+                        // Audit finding 7, operator half. The chart's
+                        // hub.yaml and THIS function are two independent
+                        // renderers of the same pod, and hardening only
+                        // one is the §1.1 mistake: a mechanism present on
+                        // one front-end and absent from the other, with
+                        // nothing to make the divergence visible. An
+                        // operator-managed share is the common case in
+                        // production, so this is the half that matters
+                        // more. Keep the two in step — `hub_security_context`
+                        // documents why each capability is here.
+                        security_context: Some(hub_security_context()),
                         ..Default::default()
                     }],
                     volumes: Some(volumes),

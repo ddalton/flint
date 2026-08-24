@@ -48,11 +48,49 @@ RUN apt-get update && apt-get install -y \
     # for as long as the bug existed. tests/k8s/pnfs-drills/truncate-recall.sh
     # reads the CB_COMPOUND status directly and hard-fails without this.
     tcpdump \
+    # setcap, for the file capabilities below.
+    libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy BOTH binaries to the runtime image
 COPY --from=builder /app/target/release/flint-pnfs-mds /usr/local/bin/
 COPY --from=builder /app/target/release/flint-pnfs-ds /usr/local/bin/
+
+# ── Audit finding 7: make running as a non-root uid POSSIBLE ─────────────
+#
+# The hub was believed to require root. It does not. Measured on Linux
+# (2026-08-24), server as uid 65532 with exactly these four capabilities
+# as FILE capabilities, pynfs 4.1 scored 171 passed / 0 failed / 91
+# skipped — identical to the root run — and every one of the 45 objects
+# the suite created came out owned by the CALLER (503:1000), not by the
+# server. The control arm, same uid with the capabilities stripped, put
+# all of them at 65532:988 and logged nothing at all.
+#
+# What the server genuinely needs, and why each:
+#   CHOWN        stamp the caller's AUTH_SYS identity on created objects
+#                (ioops.rs OPEN(create), fileops.rs CREATE). Without it
+#                postgres refuses to start on its own data directory and
+#                a mode-0700 directory locks out its creator.
+#   DAC_OVERRIDE read and write files it does not own, after that chown
+#   FOWNER       chmod/utimes on files it does not own (SETATTR)
+#   FSETID       preserve setuid/setgid across a chown
+#
+# FILE capabilities specifically, because Kubernetes has no ambient
+# capabilities: a container running as a non-root uid does NOT get an
+# effective capability from `securityContext.capabilities.add` alone.
+# Without this setcap, `runAsNonRoot: true` silently produces a server
+# that cannot chown — which is why `nfs::privilege` probes it at startup
+# and says so in the log.
+#
+# These are inert while the container runs as uid 0, so adding them
+# changes nothing for the current default; it removes the reason the
+# default cannot move.
+RUN setcap cap_chown,cap_dac_override,cap_fowner,cap_fsetid=ep \
+      /usr/local/bin/flint-pnfs-mds \
+ && setcap cap_chown,cap_dac_override,cap_fowner,cap_fsetid=ep \
+      /usr/local/bin/flint-pnfs-ds \
+ && getcap /usr/local/bin/flint-pnfs-mds | grep -q cap_chown \
+ || (echo "setcap did not take — the image cannot run non-root" && exit 1)
 
 # Expose ports for both MDS and DS
 # (only the relevant ports will be used depending on which binary runs)

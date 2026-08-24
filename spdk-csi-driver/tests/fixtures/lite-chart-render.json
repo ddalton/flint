@@ -103,6 +103,26 @@
                       "memory": "1Gi"
                     }
                   },
+                  "securityContext": {
+                    "allowPrivilegeEscalation": false,
+                    "capabilities": {
+                      "add": [
+                        "CHOWN",
+                        "DAC_OVERRIDE",
+                        "FOWNER",
+                        "FSETID"
+                      ],
+                      "drop": [
+                        "ALL"
+                      ]
+                    },
+                    "readOnlyRootFilesystem": false,
+                    "runAsNonRoot": false,
+                    "runAsUser": 0,
+                    "seccompProfile": {
+                      "type": "RuntimeDefault"
+                    }
+                  },
                   "startupProbe": {
                     "failureThreshold": 90,
                     "periodSeconds": 10,
@@ -358,6 +378,26 @@
                       "memory": "128Mi"
                     }
                   },
+                  "securityContext": {
+                    "allowPrivilegeEscalation": false,
+                    "capabilities": {
+                      "add": [
+                        "CHOWN",
+                        "DAC_OVERRIDE",
+                        "FOWNER",
+                        "FSETID"
+                      ],
+                      "drop": [
+                        "ALL"
+                      ]
+                    },
+                    "readOnlyRootFilesystem": false,
+                    "runAsNonRoot": false,
+                    "runAsUser": 0,
+                    "seccompProfile": {
+                      "type": "RuntimeDefault"
+                    }
+                  },
                   "volumeMounts": [
                     {
                       "mountPath": "/etc/flint",
@@ -542,6 +582,26 @@
                     "requests": {
                       "cpu": "100m",
                       "memory": "128Mi"
+                    }
+                  },
+                  "securityContext": {
+                    "allowPrivilegeEscalation": false,
+                    "capabilities": {
+                      "add": [
+                        "CHOWN",
+                        "DAC_OVERRIDE",
+                        "FOWNER",
+                        "FSETID"
+                      ],
+                      "drop": [
+                        "ALL"
+                      ]
+                    },
+                    "readOnlyRootFilesystem": false,
+                    "runAsNonRoot": false,
+                    "runAsUser": 0,
+                    "seccompProfile": {
+                      "type": "RuntimeDefault"
                     }
                   },
                   "startupProbe": {
@@ -754,6 +814,26 @@
                       "memory": "128Mi"
                     }
                   },
+                  "securityContext": {
+                    "allowPrivilegeEscalation": false,
+                    "capabilities": {
+                      "add": [
+                        "CHOWN",
+                        "DAC_OVERRIDE",
+                        "FOWNER",
+                        "FSETID"
+                      ],
+                      "drop": [
+                        "ALL"
+                      ]
+                    },
+                    "readOnlyRootFilesystem": false,
+                    "runAsNonRoot": false,
+                    "runAsUser": 0,
+                    "seccompProfile": {
+                      "type": "RuntimeDefault"
+                    }
+                  },
                   "startupProbe": {
                     "failureThreshold": 60,
                     "periodSeconds": 10,
@@ -863,5 +943,5 @@
       "values": "tier:\n  enabled: true\n  bucket: my-team-flint\n  keyPrefix: tenant-a/\n  endpoint: http://minio.minio:9000\n  region: us-east-1\n  credentialsSecret: flint-s3\n  importOnStart: true\n"
     }
   },
-  "chartSha256": "a573332db4345c1aee31107898cc512a06385ae3c8d256eac09bc6b9c93cf9b4"
+  "chartSha256": "81c2b4241020c172ed99b10bbd99376cac29b1fd843c5894c3b7e38a0de1578e"
 }
