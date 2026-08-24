@@ -260,13 +260,30 @@ pub struct IoOperationHandler {
 impl IoOperationHandler {
     /// Create a new I/O operation handler
     pub fn new(state_mgr: Arc<StateManager>, fh_mgr: Arc<FileHandleManager>) -> Self {
-        // Generate write verifier (used to detect server reboots)
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let write_verifier = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        
+        // The write verifier exists for exactly one purpose: telling a
+        // client its UNSTABLE writes did not survive a server restart
+        // (RFC 8881 §18.32.3) so it re-sends them. That gives it two
+        // obligations pulling opposite ways: CONSTANT within one
+        // process lifetime (see write_verifier() — a per-call value is
+        // the Linux 6.8 COPY infinite loop), and DISTINCT across any
+        // two lifetimes. Wall-clock SECONDS delivered neither robustly:
+        // a supervised restart completing within the same second
+        // re-minted an IDENTICAL verifier, the client matched COMMIT
+        // against it, dropped its dirty pages, and the never-resent
+        // data was gone — silently, with no wire anomaly to observe
+        // (kubelet's first restart has no backoff, so sub-second is the
+        // COMMON case, not the corner). Nanoseconds mixed with fresh
+        // per-process entropy make a repeat across incarnations
+        // impossible in practice, clock steps included.
+        let write_verifier = {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64;
+            nanos ^ rand::random::<u64>()
+        };
+
         Self {
             state_mgr,
             fh_mgr,
@@ -2645,6 +2662,41 @@ mod tests {
         let state_mgr = Arc::new(StateManager::new_in_memory(""));
         let handler = IoOperationHandler::new(state_mgr, fh_mgr.clone());
         (handler, fh_mgr, temp_dir)
+    }
+
+    /// The write verifier's two obligations, pinned CLOCK-INDEPENDENTLY.
+    ///
+    /// Across incarnations: the shipped mint was wall-clock SECONDS, so
+    /// any two server processes started within one second shared a
+    /// verifier — a client holding uncommitted UNSTABLE data matched
+    /// COMMIT against the impostor, dropped its dirty pages, and never
+    /// re-sent. A tight construction loop lands every handler in the
+    /// same second (mostly the same millisecond), so under that mint
+    /// this test fails by construction rather than by racing a second
+    /// boundary — two handlers straddling a tick would pass vacuously.
+    ///
+    /// Within one incarnation: WRITE, COMMIT and COPY must report ONE
+    /// value for the life of the process — a changing verifier is the
+    /// documented Linux 6.8 COPY+COMMIT infinite resend loop.
+    #[test]
+    fn write_verifier_differs_across_incarnations_and_holds_within_one() {
+        let mut seen = std::collections::HashSet::new();
+        let mut handlers = Vec::new();
+        for i in 0..64 {
+            let (h, _fh, t) = create_test_handler();
+            assert!(
+                seen.insert(h.write_verifier()),
+                "incarnation {i} re-minted an earlier verifier — a same-second \
+                 restart would silently discard clients' uncommitted UNSTABLE data"
+            );
+            handlers.push((h, t));
+        }
+        let (h, _t) = &handlers[0];
+        assert_eq!(
+            h.write_verifier(),
+            h.write_verifier(),
+            "the verifier must be constant within one incarnation"
+        );
     }
 
     #[tokio::test]
