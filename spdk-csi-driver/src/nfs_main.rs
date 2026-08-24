@@ -184,20 +184,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // fail over. Deadline is generous (default 90s; env
     // FLINT_FENCE_DEADLINE_SECS, 0 disables) so a slow-but-live store
     // under load never trips it.
-    if let Some(deadline) = spdk_csi_driver::nfs::fence::deadline_from_env() {
-        let interval = std::cmp::min(deadline / 6, std::time::Duration::from_secs(10));
-        spdk_csi_driver::nfs::fence::spawn_with_probe(
-            spdk_csi_driver::nfs::fence::heartbeat_probe(&args.export_path),
-            deadline,
-            interval,
-            // fence_exit FINs every socket before exiting — the exit can
-            // wedge forever behind D-state threads on the fenced store
-            // (F33b, runz 3.6), but the FINs always reach the clients.
-            spdk_csi_driver::nfs::fence::fence_exit(58),
-        );
-    } else {
-        info!("F33 self-fencing DISABLED (FLINT_FENCE_DEADLINE_SECS=0)");
-    }
+    spdk_csi_driver::nfs::fence::arm_from_env(&args.export_path, 58);
 
     info!("");
     info!("📊 Configuration:");

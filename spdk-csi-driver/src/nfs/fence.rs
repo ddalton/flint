@@ -189,6 +189,46 @@ pub fn fence_exit(exit_code: i32) -> impl FnOnce(u64) + Send + 'static {
     }
 }
 
+/// Arm F33 self-fencing from the environment, or log that it is off.
+///
+/// The ONE arming path for every flint NFS front-end. Both
+/// `flint-nfs-server` (`nfs_main.rs`) and `flint-pnfs-mds` /
+/// the flint-lite hub (`nfs_mds_main.rs`) call this; previously only
+/// the former armed the fence at all, so the exact scenario this module
+/// exists for — a node-level failure that stops kubelet but not the pod,
+/// leaving this process alive with wedged I/O while clients hang on
+/// established TCP flows (observed at 93 minutes, see the module docs) —
+/// was completely unprotected on the binary that flint-lite ships.
+///
+/// `exit_code` is the process exit status used when the fence trips;
+/// callers pass a value distinct per front-end so the cause is legible
+/// in a pod's `lastState.terminated.exitCode`.
+pub fn arm_from_env(export_root: &PathBuf, exit_code: i32) {
+    match deadline_from_env() {
+        Some(deadline) => {
+            let interval = std::cmp::min(deadline / 6, Duration::from_secs(10));
+            info!(
+                deadline_secs = deadline.as_secs(),
+                export = ?export_root,
+                "F33 self-fencing ARMED"
+            );
+            spawn_with_probe(
+                heartbeat_probe(export_root),
+                deadline,
+                interval,
+                // fence_exit FINs every socket before exiting — the exit
+                // can wedge forever behind D-state threads on the fenced
+                // store (F33b, runz 3.6), but the FINs always reach the
+                // clients.
+                fence_exit(exit_code),
+            );
+        }
+        None => {
+            info!("F33 self-fencing DISABLED (FLINT_FENCE_DEADLINE_SECS=0)");
+        }
+    }
+}
+
 /// Spawn the prober + monitor threads. Generic over the probe and the
 /// fence action so tests can inject both; production passes
 /// [`heartbeat_probe`] and a process-exit closure. The monitor calls

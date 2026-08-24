@@ -12,7 +12,7 @@
 use clap::Parser;
 use spdk_csi_driver::pnfs::{PnfsConfig, PnfsMode};
 use std::path::PathBuf;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Parser, Debug)]
 #[command(name = "flint-pnfs-mds")]
@@ -134,7 +134,25 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
     // Create and start MDS
     info!("⚙️  Initializing Metadata Server...");
     let monitoring = config.monitoring.clone();
+    // F33 probes the backing store through the export root, so capture
+    // it before `exports` moves into the server. Multi-export MDS
+    // deployments fence on the FIRST export: the failure this guards
+    // against is the node's backing store going away underneath the
+    // process, which takes every export with it. A hub (standalone) has
+    // exactly one.
+    let fence_root: Option<std::path::PathBuf> =
+        exports.first().map(|e| std::path::PathBuf::from(&e.path));
     let mut mds = spdk_csi_driver::pnfs::mds::MetadataServer::new(mds_config, exports).await?;
+    // F33: backing-store self-fencing, armed through the same shared
+    // path `flint-nfs-server` uses. Without this the hub stays alive
+    // with wedged I/O on an isolated node while every hard mount hangs
+    // — the 93-minute orphan recorded in `nfs::fence`'s module docs —
+    // because process exit is what lets clients RST and fail over.
+    // Exit code 59 (vs 58 in nfs_main) identifies which front-end fenced.
+    match &fence_root {
+        Some(root) => spdk_csi_driver::nfs::fence::arm_from_env(root, 59),
+        None => warn!("F33 self-fencing NOT armed: no exports configured"),
+    }
     // The status surface is off unless the deployment asks for it. It
     // binds before the tier starts, so the epoch-claim and import
     // phases — the long, pre-listener part of startup — are visible to
