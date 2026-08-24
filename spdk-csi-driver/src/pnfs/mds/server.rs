@@ -48,6 +48,12 @@ pub struct MetadataServer {
     /// `LayoutRecord`s and bump the instance counter. Same `Arc` the
     /// state managers are using.
     backend: Arc<dyn crate::state_backend::StateBackend>,
+    /// A prior state DB existed and could not be used, so this
+    /// incarnation starts blind. `load_persisted_state` hands it to
+    /// `load_from_backend`, which must NOT shortcut the grace period in
+    /// that case: an empty load caused by LOST state is exactly when
+    /// clients may hold opens and locks we cannot see.
+    state_lost: bool,
     /// The read-only status surface. Populated as subsystems come up
     /// and served on the health port when monitoring is enabled.
     status: Arc<super::status::HubStatus>,
@@ -505,6 +511,7 @@ impl MetadataServer {
         let gss_manager = Arc::new(RpcSecGssManager::new(keytab_path));
 
         Ok(Self {
+            state_lost,
             config,
             export_path,
             device_registry,
@@ -566,7 +573,7 @@ impl MetadataServer {
         // route the records into the right sub-managers and bump the
         // monotonic counters past the highest observed ids.
         self.state_mgr
-            .load_from_backend()
+            .load_from_backend(self.state_lost)
             .await
             .map_err(|e| crate::pnfs::Error::Config(format!("load state: {}", e)))?;
 

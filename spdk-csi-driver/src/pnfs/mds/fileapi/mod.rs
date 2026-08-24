@@ -1839,7 +1839,7 @@ mod tests {
         let temp = dir.unwrap_or_else(|| TempDir::new().unwrap());
         let fh_mgr = Arc::new(FileHandleManager::new(temp.path().to_path_buf()));
         let state_mgr = Arc::new(StateManager::new_in_memory(""));
-        state_mgr.load_from_backend().await.unwrap();
+        state_mgr.load_from_backend(false).await.unwrap();
         let lock_mgr = Arc::new(LockManager::new());
         let dispatcher = Arc::new(CompoundDispatcher::new(fh_mgr, state_mgr, lock_mgr));
         let fs = Arc::new(HubFs::new(dispatcher));
@@ -2393,7 +2393,7 @@ mod tests {
         std::fs::write(temp.path().join("a.txt"), b"x").unwrap();
         let fh_mgr = Arc::new(FileHandleManager::new(temp.path().to_path_buf()));
         let state_mgr = Arc::new(StateManager::new_in_memory(""));
-        state_mgr.load_from_backend().await.unwrap();
+        state_mgr.load_from_backend(false).await.unwrap();
         let lock_mgr = Arc::new(LockManager::new());
         let dispatcher = Arc::new(CompoundDispatcher::new(fh_mgr, state_mgr, lock_mgr));
         let status = Arc::new(HubStatus::new());
@@ -2464,7 +2464,7 @@ mod tests {
         std::fs::write(temp.path().join("a.txt"), b"x").unwrap();
         let fh_mgr = Arc::new(FileHandleManager::new(temp.path().to_path_buf()));
         let state_mgr = Arc::new(StateManager::new_in_memory(""));
-        state_mgr.load_from_backend().await.unwrap();
+        state_mgr.load_from_backend(false).await.unwrap();
         let lock_mgr = Arc::new(LockManager::new());
         let dispatcher = Arc::new(CompoundDispatcher::new(fh_mgr, state_mgr, lock_mgr));
         let status = Arc::new(HubStatus::new());

@@ -85,7 +85,11 @@ impl StateManager {
     /// `STALE_CLIENTID` / `BAD_STATEID`. `LayoutManager` is loaded
     /// separately by the pNFS startup path because it lives outside
     /// the NFSv4 `state` module.
-    pub async fn load_from_backend(&self) -> Result<(), StateBackendError> {
+    /// `state_lost` is the caller's "a prior state database existed and
+    /// could not be used" signal (a quarantined-and-recreated `state.db`).
+    /// It is the difference between the two ways a load comes back empty,
+    /// and they need opposite handling — see the grace decision below.
+    pub async fn load_from_backend(&self, state_lost: bool) -> Result<(), StateBackendError> {
         let clients = self.backend.list_clients().await?;
         let sessions = self.backend.list_sessions().await?;
         let stateids = self.backend.list_stateids().await?;
@@ -101,15 +105,40 @@ impl StateManager {
             n_s,
             n_st,
         );
-        // Nothing survived into this incarnation, so nothing can be
-        // reclaimed, so the grace period guards nothing. Sitting in it
-        // anyway costs 90 seconds of NFS4ERR_GRACE on every OPEN —
-        // which on a hub woken from hibernation (fresh PVC, empty state
-        // database) is every single wake. Reads still serve throughout,
-        // so the symptom is the confusing one: browsing works and
-        // saving does not.
-        if n_c == 0 && n_s == 0 && n_st == 0 {
+        // An empty load means nothing can be reclaimed, so the grace
+        // period guards nothing and sitting in it is pure cost: on a hub
+        // woken from hibernation (fresh PVC, empty state database) it is
+        // 90 seconds of refused writes on every single wake, while reads
+        // serve throughout — the confusing symptom where browsing works
+        // and saving does not. The hub's own file API is the caller that
+        // feels it, since it dispatches in-process with no session and so
+        // can never be "reclaim complete".
+        //
+        // But EMPTY and LOST are not the same thing, and only one of them
+        // is safe to shortcut. A quarantined-and-recreated state.db also
+        // loads empty, and that is the case where grace matters MOST:
+        // clients out there may hold opens and byte-range locks this
+        // incarnation has no record of, and ending grace lets a second
+        // client take a range whose holder we have forgotten — silently,
+        // because the lock stateid still validates. So the shortcut is
+        // taken only when the emptiness is innocent.
+        //
+        // (This does not make pynfs RECC3 pass. RECC3 opens against a
+        // fresh server and expects NFS4ERR_GRACE, which conflicts with
+        // the deliberate contract that a hub with nothing to reclaim
+        // accepts writes at once — pinned by
+        // `a_hub_with_no_state_to_reclaim_accepts_writes_immediately`
+        // and its 503 twin. Reconciling all three needs the file API to
+        // gate on "is anything reclaimable" rather than on the grace
+        // period itself; recorded, not attempted here.)
+        if !state_lost && n_c == 0 && n_s == 0 && n_st == 0 {
             self.leases.end_grace();
+        } else if state_lost {
+            tracing::warn!(
+                "state was LOST (prior database unusable) — holding the grace \
+                 period even though nothing loaded: clients may hold opens and \
+                 locks this incarnation cannot see"
+            );
         }
         Ok(())
     }
@@ -205,6 +234,47 @@ impl Default for StateManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An empty load may only shortcut the grace period when the
+    /// emptiness is INNOCENT.
+    ///
+    /// Both arms load exactly nothing, so a check that only looked at
+    /// the record counts cannot tell them apart — which is the bug this
+    /// pins. `state_lost` is the difference:
+    ///
+    /// - fresh volume / hibernate wake: nothing ever existed, grace
+    ///   guards nothing, and holding it costs a window of refused writes
+    ///   on every wake (the hub's own file API dispatches with no
+    ///   session, so it can never be "reclaim complete" and eats the
+    ///   whole window). Shortcut it.
+    /// - quarantined state.db: the tables are empty because the state
+    ///   was LOST, and clients out there may still hold opens and locks
+    ///   this incarnation cannot see. Ending grace there lets a second
+    ///   client take a range whose holder has been forgotten — silently,
+    ///   since the lock stateid still validates. Hold it.
+    #[tokio::test]
+    async fn grace_is_shortcut_only_when_an_empty_load_is_innocent() {
+        // Innocent empty: nothing was ever there.
+        let fresh = StateManager::new_in_memory("vol");
+        assert!(fresh.leases.in_grace_period(), "a server starts in grace");
+        fresh.load_from_backend(false).await.expect("empty load must succeed");
+        assert!(
+            !fresh.leases.in_grace_period(),
+            "a hub with nothing to reclaim must not sit in grace — that is the \
+             hibernate-wake outage, where reads serve and every write is refused"
+        );
+
+        // Guilty empty: a prior database existed and could not be used.
+        // Identical record counts; opposite required behaviour.
+        let lost = StateManager::new_in_memory("vol");
+        lost.load_from_backend(true).await.expect("empty load must succeed");
+        assert!(
+            lost.leases.in_grace_period(),
+            "state was LOST, so the empty tables prove nothing — grace must be \
+             HELD or a second client can take a range whose pre-restart holder \
+             this incarnation has no record of"
+        );
+    }
 
     #[test]
     fn test_cleanup_expired_removes_clients_and_sessions() {
@@ -484,7 +554,7 @@ mod tests {
         assert_eq!(mgr2.clients.active_count(), 0);
         assert_eq!(mgr2.sessions.active_count(), 0);
 
-        mgr2.load_from_backend().await.expect("load must succeed");
+        mgr2.load_from_backend(false).await.expect("load must succeed");
 
         // Post-load: client is back with mark_confirmed intact —
         // EXCHANGE_ID after restart will return this same client_id

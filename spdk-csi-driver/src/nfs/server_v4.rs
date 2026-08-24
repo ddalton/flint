@@ -58,6 +58,11 @@ pub struct NfsServer {
     gss_manager: Arc<RpcSecGssManager>,
     state_mgr: Arc<StateManager>,
     lock_mgr: Arc<LockManager>,
+    /// A prior state DB existed and could not be used, so this
+    /// incarnation starts blind. `serve()` hands it to
+    /// `load_from_backend`, which must NOT shortcut the grace period in
+    /// that case — see the comment there.
+    state_lost: bool,
 }
 
 /// Pick the NFSv4 state persistence target.
@@ -158,7 +163,7 @@ impl NfsServer {
         let keytab_path = std::env::var("KRB5_KTNAME").ok();
         let gss_manager = Arc::new(RpcSecGssManager::new(keytab_path));
 
-        Ok(Self { config, dispatcher, gss_manager, state_mgr, lock_mgr })
+        Ok(Self { config, dispatcher, gss_manager, state_mgr, lock_mgr, state_lost })
     }
 
     /// Start the NFSv4.2 server (TCP only - NFSv4 doesn't use UDP)
@@ -184,7 +189,7 @@ impl NfsServer {
             Ok(n) => info!("📈 NFSv4 server instance #{} for this volume (persisted counter)", n),
             Err(e) => tracing::warn!("NFSv4 instance counter unavailable: {}", e),
         }
-        if let Err(e) = self.state_mgr.load_from_backend().await {
+        if let Err(e) = self.state_mgr.load_from_backend(self.state_lost).await {
             tracing::error!("NFSv4 state restore failed ({}) — starting with empty state", e);
             // Lock state is lost with the rest: refuse NEW locks during
             // grace so a second client can't take a range whose
@@ -882,7 +887,7 @@ mod state_persistence_tests {
 
         // ── Incarnation 2: same DB file, fresh managers ─────────────
         let mgr2 = StateManager::new("vol-rt", select_state_backend("", &export).0);
-        mgr2.load_from_backend().await.unwrap();
+        mgr2.load_from_backend(false).await.unwrap();
 
         // Stateids survive — a retransmitted WRITE with the pre-bounce
         // stateid resolves instead of BAD_STATEID.
