@@ -297,6 +297,7 @@ impl SessionOperationHandler {
 
         // RFC 8881 §18.35.5 client-record state machine. Principal is the
         // RPC-level identity of the caller; an empty Vec for AUTH_NONE.
+
         use crate::nfs::v4::state::client::ExchangeIdOutcome;
         let outcome = self.state_mgr.clients.exchange_id(
             op.client_owner,
@@ -350,16 +351,18 @@ impl SessionOperationHandler {
             debug!("EXCHANGE_ID: Server mode = Standalone NFS (no pNFS)");
         }
 
-        // Echo back ALL client capability flags (RFC 8881 Section 18.35.3)
-        if op.flags & exchgid_flags::SUPP_MOVED_REFER != 0 {
-            response_flags |= exchgid_flags::SUPP_MOVED_REFER;
-        }
-        if op.flags & exchgid_flags::SUPP_MOVED_MIGR != 0 {
-            response_flags |= exchgid_flags::SUPP_MOVED_MIGR;
-        }
-        if op.flags & exchgid_flags::BIND_PRINC_STATEID != 0 {
-            response_flags |= exchgid_flags::BIND_PRINC_STATEID;
-        }
+        // A capability flag in the REPLY is a server PROMISE, not an
+        // echo (RFC 8881 §18.35.3): SUPP_MOVED_REFER/MIGR say this
+        // server may answer NFS4ERR_MOVED and serve fs_locations
+        // referrals; BIND_PRINC_STATEID says stateids are
+        // principal-bound and enforced. This server implements none of
+        // those — fs_locations is a constant, nothing ever returns
+        // MOVED, and stateids are not principal-checked — and the old
+        // blanket echo advertised all three to any client that asked,
+        // arming never-tested client recovery paths against a server
+        // that cannot serve them. The reply is clamped to what the
+        // server actually does; a client's flags express ITS support,
+        // and declining them is the ordinary negotiated outcome.
 
         // If this is an existing client (confirmed), set CONFIRMED_R flag
         if !is_new {
@@ -1674,6 +1677,43 @@ mod tests {
             res.fore_chan_attrs.max_response_size_cached
         );
         assert_eq!(replay.fore_chan_attrs.max_requests, res.fore_chan_attrs.max_requests);
+    }
+
+
+    /// A reply capability flag is a server PROMISE. The old handler
+    /// echoed SUPP_MOVED_REFER / SUPP_MOVED_MIGR / BIND_PRINC_STATEID
+    /// back to any client that asked, advertising referral, migration,
+    /// and principal-bound-stateid machinery that does not exist —
+    /// fs_locations is a constant, nothing ever answers NFS4ERR_MOVED,
+    /// and stateids are not principal-checked. A client told its server
+    /// does referrals keeps recovery paths armed that this server can
+    /// never satisfy.
+    #[test]
+    fn exchange_id_reply_never_advertises_unimplemented_capabilities() {
+        use crate::nfs::v4::protocol::exchgid_flags;
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let handler = SessionOperationHandler::new(state_mgr);
+        const UNIMPLEMENTED: u32 = exchgid_flags::SUPP_MOVED_REFER
+            | exchgid_flags::SUPP_MOVED_MIGR
+            | exchgid_flags::BIND_PRINC_STATEID;
+        let res = handler.handle_exchange_id(
+            ExchangeIdOp {
+                client_owner: b"cap-client".to_vec(),
+                verifier: 1,
+                flags: UNIMPLEMENTED,
+                state_protect: 0,
+                client_impl_id: None,
+            },
+            &CompoundContext::new(1),
+        );
+        assert_eq!(res.status, Nfs4Status::Ok);
+        assert_eq!(
+            res.flags & UNIMPLEMENTED,
+            0,
+            "the reply advertised referral/migration/principal-binding support the \
+             server does not implement (reply flags = 0x{:x})",
+            res.flags
+        );
     }
 
     /// Store-time backstop: a reply larger than the negotiated cached
