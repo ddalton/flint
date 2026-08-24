@@ -95,7 +95,7 @@ fn select_state_backend(
     setting: &str,
     export_path: &Path,
 ) -> (Arc<dyn crate::state_backend::StateBackend>, bool) {
-    use crate::state_backend::{memory_backend, SqliteBackend};
+    use crate::state_backend::memory_backend;
 
     if setting.eq_ignore_ascii_case("memory") {
         info!("💾 NFSv4 state: in-memory (FLINT_NFS_STATE=memory) — no restart survival");
@@ -106,36 +106,12 @@ fn select_state_backend(
     } else {
         PathBuf::from(setting)
     };
-    // Whether a previous incarnation left state behind — distinguishes
-    // "fresh volume, nothing to lose" from "state existed and is gone".
-    let had_prior_state = db_path.exists();
-    if let Some(dir) = db_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            tracing::error!("NFSv4 state dir {:?} not creatable ({}) — falling back to in-memory state", dir, e);
-            return (memory_backend(), had_prior_state);
-        }
-    }
-    match SqliteBackend::open_durable(&db_path) {
-        Ok(b) => {
-            info!("💾 NFSv4 state: persistent at {:?} (synchronous=FULL)", db_path);
-            (Arc::new(b), false)
-        }
-        Err(e) => {
-            tracing::error!("NFSv4 state DB {:?} unusable ({}) — moving it aside and recreating", db_path, e);
-            let quarantine = db_path.with_extension("db.unusable");
-            let _ = std::fs::rename(&db_path, &quarantine);
-            match SqliteBackend::open_durable(&db_path) {
-                Ok(b) => {
-                    tracing::warn!("NFSv4 state DB recreated (prior state lost; old file at {:?})", quarantine);
-                    (Arc::new(b), had_prior_state)
-                }
-                Err(e) => {
-                    tracing::error!("NFSv4 state DB recreate failed ({}) — falling back to in-memory state", e);
-                    (memory_backend(), had_prior_state)
-                }
-            }
-        }
-    }
+    // This front-end's DB is always pure bookkeeping — `flint-nfs-server`
+    // serves a plain export with no layouts, no placements and no tier —
+    // so the quarantine policy applies unconditionally here. The
+    // mechanism is shared with the hub's standalone arm; see
+    // `open_durable_or_quarantine` for when it must NOT be used.
+    crate::state_backend::open_durable_or_quarantine(&db_path)
 }
 
 impl NfsServer {

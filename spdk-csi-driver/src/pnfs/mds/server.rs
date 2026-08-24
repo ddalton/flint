@@ -148,8 +148,32 @@ impl MetadataServer {
         // `Arc<dyn StateBackend>` is also used by `LayoutManager`
         // below so all four record kinds (client / session / stateid
         // / layout) round-trip through the same store.
-        let backend = crate::pnfs::config::PnfsConfig::build_state_backend(&config.state)
+        // Unusable-DB policy is driven by what the database HOLDS, not by
+        // which binary is running. A standalone hub with the tier off
+        // stores only bookkeeping (clients / sessions / stateids / locks
+        // / fh-mappings), all of which a client re-establishes — so it
+        // quarantines and recreates rather than crash-looping forever on
+        // a share whose data is entirely intact (reachable from a plain
+        // image rollback: there are no migrations, `sqlite.rs:236`).
+        // Everything else keeps the loud refusal, because the DB is a
+        // data map: layouts / placements / extents on the pNFS and block
+        // lanes, and `tier_evicted` / `tier_generation` on a tiered hub,
+        // where a recreate turns an evicted stub into a 0-byte NFS4_OK
+        // read that the flush path then republishes over the intact S3
+        // object. Same reasoning as the F67 xattr branch below.
+        let bookkeeping_only = config.standalone && config.tier.is_none();
+        let (backend, state_lost) =
+            crate::pnfs::config::PnfsConfig::build_state_backend_with_policy(
+                &config.state,
+                bookkeeping_only,
+            )
             .map_err(|e| crate::pnfs::Error::Config(format!("state backend: {}", e)))?;
+        if state_lost {
+            tracing::warn!(
+                "state DB was unreadable and has been recreated — pre-restart NFSv4 \
+                 state is LOST. New byte-range locks are gated for the grace period."
+            );
+        }
 
         // Pull the persistent server id BEFORE constructing the
         // FileHandleManager so its `instance_id` survives MDS

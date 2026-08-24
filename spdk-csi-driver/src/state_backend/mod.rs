@@ -246,6 +246,87 @@ pub fn memory_backend() -> Arc<dyn StateBackend> {
     Arc::new(MemoryBackend::new())
 }
 
+/// Open `db_path` durably, or — if it is unusable — move it aside and
+/// recreate it. Returns the backend plus `state_lost: true` when a prior
+/// database existed and could not be used, so the caller can gate the
+/// state whose loss is not self-announcing (see
+/// [`crate::nfs::v4::operations::lockops::LockManager::bring_up`]).
+///
+/// ## Call this ONLY where the database is pure bookkeeping
+///
+/// Quarantining is right when everything in the DB is state a client can
+/// re-establish: clients, sessions, stateids, byte-range locks, v2
+/// filehandle mappings. Losing those degrades exactly one bounce, and a
+/// permanent CrashLoopBackOff on an otherwise-intact share is far worse.
+///
+/// It is WRONG — and this function must not be called — when the DB is a
+/// *data map*, because recreating it silently misreads live data instead
+/// of stopping loudly:
+///
+/// - **pNFS / block volumes**: layouts, pinned placements and extent rows.
+///   Fresh placements minted over live striped data is F67's silent
+///   zeros, and the fence's only positive record goes with it.
+/// - **A tiered hub**: `tier_evicted`, `tier_generation`, `tier_dirty`,
+///   `tier_flush_intent`, `tier_tombstone`. Losing `tier_evicted` means a
+///   stub whose bytes live in S3 is no longer known to be evicted, so it
+///   READs as zero bytes with `NFS4_OK` — and the still-working flush
+///   path then republishes that emptiness over the intact object.
+///
+/// Both callers therefore decide the policy and call this only for the
+/// bookkeeping case; the mechanism lives here so it cannot drift between
+/// them.
+pub fn open_durable_or_quarantine(
+    db_path: &std::path::Path,
+) -> (Arc<dyn StateBackend>, bool) {
+    // Whether a previous incarnation left state behind — distinguishes
+    // "fresh volume, nothing to lose" from "state existed and is gone".
+    let had_prior_state = db_path.exists();
+    if let Some(dir) = db_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            tracing::error!(
+                "NFSv4 state dir {:?} not creatable ({}) — falling back to in-memory state",
+                dir,
+                e
+            );
+            return (memory_backend(), had_prior_state);
+        }
+    }
+    match SqliteBackend::open_durable(db_path) {
+        Ok(b) => {
+            tracing::info!(
+                "💾 NFSv4 state: persistent at {:?} (synchronous=FULL)",
+                db_path
+            );
+            (Arc::new(b), false)
+        }
+        Err(e) => {
+            tracing::error!(
+                "NFSv4 state DB {:?} unusable ({}) — moving it aside and recreating",
+                db_path,
+                e
+            );
+            let quarantine = db_path.with_extension("db.unusable");
+            let _ = std::fs::rename(db_path, &quarantine);
+            match SqliteBackend::open_durable(db_path) {
+                Ok(b) => {
+                    tracing::warn!(
+                        "NFSv4 state DB recreated (prior state lost; old file at {:?})",
+                        quarantine
+                    );
+                    (Arc::new(b), had_prior_state)
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "NFSv4 state DB recreate failed ({}) — falling back to in-memory state",
+                        e
+                    );
+                    (memory_backend(), had_prior_state)
+                }
+            }
+        }
+    }
+}
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 

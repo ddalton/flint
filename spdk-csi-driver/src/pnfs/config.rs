@@ -1080,6 +1080,49 @@ impl PnfsConfig {
     /// `StateManager` and `LayoutManager`. Sqlite path defaults to
     /// `/var/lib/flint-pnfs/state.db`; B.4-and-later operators
     /// override via `state.config.path`.
+    /// `bookkeeping_only` selects the unusable-DB policy, and the caller
+    /// owns that judgement because only it knows what the database
+    /// holds. `false` (pNFS/block, or ANY tiered hub) keeps the loud
+    /// refusal: that DB is a data map — layouts, pinned placements and
+    /// extent rows, or the tier's `tier_evicted`/`tier_generation` —
+    /// and recreating it silently misreads live data (F67 zeros; an
+    /// evicted stub reading as 0 bytes with NFS4_OK and then being
+    /// republished over the intact S3 object). `true` (a standalone hub
+    /// with the tier off) quarantines and recreates instead, because
+    /// everything in it is state a client re-establishes and a
+    /// permanent CrashLoopBackOff on an intact share is the worse
+    /// failure. Returns `state_lost` alongside the backend so the
+    /// caller can gate lock state through `LockManager::bring_up`.
+    pub fn build_state_backend_with_policy(
+        cfg: &StateConfig,
+        bookkeeping_only: bool,
+    ) -> Result<(std::sync::Arc<dyn crate::state_backend::StateBackend>, bool), String> {
+        // The quarantine arm only applies to a real on-disk sqlite DB;
+        // `memory` has nothing to move aside.
+        if bookkeeping_only && matches!(cfg.backend, StateBackend::Sqlite) {
+            let path = cfg
+                .config
+                .get("path")
+                .cloned()
+                .unwrap_or_else(|| "/var/lib/flint-pnfs/state.db".to_string());
+            let p = std::path::Path::new(&path);
+            if let Some(dir) = p.parent() {
+                if !dir.as_os_str().is_empty() {
+                    std::fs::create_dir_all(dir)
+                        .map_err(|e| format!("create dir {}: {}", dir.display(), e))?;
+                    // Single occupancy still applies — the quarantine
+                    // must happen while we hold it, or a second process
+                    // could be mid-open on the file we rename.
+                    crate::state_backend::hold_single_occupancy(dir)?;
+                }
+            }
+            let (backend, state_lost) =
+                crate::state_backend::open_durable_or_quarantine(p);
+            return Ok((backend, state_lost));
+        }
+        Self::build_state_backend(cfg).map(|b| (b, false))
+    }
+
     pub fn build_state_backend(
         cfg: &StateConfig,
     ) -> Result<std::sync::Arc<dyn crate::state_backend::StateBackend>, String> {
@@ -1498,6 +1541,87 @@ config: {}
         let backend2 = PnfsConfig::build_state_backend(&sqlite_cfg).unwrap();
         assert_eq!(backend2.get_instance_counter().await.unwrap(), 1);
         assert_eq!(backend2.increment_instance_counter().await.unwrap(), 2);
+    }
+
+    /// The unusable-DB policy is risk-based, and BOTH directions matter.
+    ///
+    /// `bookkeeping_only = true` (a standalone hub with the tier off)
+    /// must quarantine a corrupt DB and come up with `state_lost`, so an
+    /// intact share is not held down by a permanent CrashLoopBackOff.
+    /// `false` (pNFS/block, or ANY tiered hub) must still REFUSE, because
+    /// that database is a data map and recreating it silently misreads
+    /// live data (F67 zeros; an evicted stub reading 0 bytes NFS4_OK and
+    /// then republished over the intact S3 object).
+    #[tokio::test]
+    async fn unusable_state_db_policy_is_risk_based() {
+        fn corrupt_db_cfg(dir: &std::path::Path) -> (StateConfig, std::path::PathBuf) {
+            let path = dir.join("state.db");
+            // Not a SQLite file at all — open_durable must fail on it.
+            std::fs::write(&path, b"this is not a sqlite database").unwrap();
+            let mut cfg = StateConfig {
+                backend: StateBackend::Sqlite,
+                config: std::collections::HashMap::new(),
+            };
+            cfg.config
+                .insert("path".to_string(), path.to_string_lossy().into_owned());
+            (cfg, path)
+        }
+
+        // Anti-vacuity: prove the fixture really is unusable, or both
+        // arms below would be testing nothing.
+        let probe = tempfile::tempdir().unwrap();
+        let (probe_cfg, _) = corrupt_db_cfg(probe.path());
+        assert!(
+            PnfsConfig::build_state_backend(&probe_cfg).is_err(),
+            "fixture is not actually a corrupt DB — the policy test would be vacuous"
+        );
+
+        // Data-map case: must refuse, leaving the file untouched.
+        let keep = tempfile::tempdir().unwrap();
+        let (keep_cfg, keep_path) = corrupt_db_cfg(keep.path());
+        assert!(
+            PnfsConfig::build_state_backend_with_policy(&keep_cfg, false).is_err(),
+            "a data-map DB (pNFS/block, or a tiered hub) must REFUSE, not recreate"
+        );
+        assert_eq!(
+            std::fs::read(&keep_path).unwrap(),
+            b"this is not a sqlite database",
+            "the refusal must leave the operator's DB exactly where it was"
+        );
+
+        // Bookkeeping-only case: quarantine, recreate, report state_lost.
+        let fix = tempfile::tempdir().unwrap();
+        let (fix_cfg, fix_path) = corrupt_db_cfg(fix.path());
+        let (backend, state_lost) =
+            PnfsConfig::build_state_backend_with_policy(&fix_cfg, true).unwrap();
+        assert!(
+            state_lost,
+            "a recreated DB lost prior state — the caller must gate new locks"
+        );
+        // It is a working DB now...
+        assert_eq!(backend.increment_instance_counter().await.unwrap(), 1);
+        // ...and the corrupt original was preserved, not deleted.
+        let quarantined = fix_path.with_extension("db.unusable");
+        assert_eq!(
+            std::fs::read(&quarantined).unwrap(),
+            b"this is not a sqlite database",
+            "the unusable DB must be moved aside for diagnosis, never destroyed"
+        );
+
+        // A HEALTHY db must never report state_lost under either policy —
+        // otherwise every ordinary restart would gate locks for grace.
+        let ok = tempfile::tempdir().unwrap();
+        let mut ok_cfg = StateConfig {
+            backend: StateBackend::Sqlite,
+            config: std::collections::HashMap::new(),
+        };
+        ok_cfg.config.insert(
+            "path".to_string(),
+            ok.path().join("state.db").to_string_lossy().into_owned(),
+        );
+        let (_b, lost) =
+            PnfsConfig::build_state_backend_with_policy(&ok_cfg, true).unwrap();
+        assert!(!lost, "a healthy DB must not report state_lost");
     }
 }
 
