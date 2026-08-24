@@ -27,6 +27,7 @@ pub mod operations;       // NFSv4 operations - DONE
 pub mod dispatcher;       // COMPOUND dispatcher - DONE
 pub mod back_channel;     // Per-connection writer for v4.1 callbacks (CB_LAYOUTRECALL etc.)
 pub mod change_counter;   // Per-file monotonic change attr (userspace i_version, F14)
+pub mod metadata_sync;    // fsync the parent dirent after CREATE/REMOVE/RENAME/LINK (blocker 2)
 pub mod cb_compound;      // CB_COMPOUND XDR + ONC RPC framing for the v4.1 callback channel
 
 pub use protocol::*;

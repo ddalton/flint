@@ -3169,6 +3169,28 @@ impl FileOperationHandler {
 
         match create_result {
             Ok(_) => {
+                // Blocker 2: the object exists, but the DIRENT that names
+                // it lives in the parent and is not durable until the
+                // parent is fsynced. Committing before the ACK is what
+                // `nfsd` does (`commit_metadata`), and it matters more
+                // here than for content: NFSv4 has a write verifier that
+                // lets a client discover lost UNSTABLE writes, and NO
+                // equivalent for the namespace. A client that is told
+                // NFS4_OK for a CREATE will never ask again.
+                if let Err(e) =
+                    crate::nfs::v4::metadata_sync::commit_parent_of(&obj_path).await
+                {
+                    warn!(
+                        "CREATE: {:?} created but committing the parent dirent failed: {} \
+                         — refusing to ACK an operation that is not durable",
+                        obj_path, e
+                    );
+                    return CreateRes {
+                        status: Nfs4Status::Io,
+                        change_info: None,
+                        attrset: vec![],
+                    };
+                }
                 // F14: new object + new parent dirent.
                 crate::nfs::v4::change_counter::bump_path(&obj_path);
                 if let Some(parent) = obj_path.parent() {
@@ -3352,6 +3374,19 @@ impl FileOperationHandler {
 
                 match result {
                     Ok(_) => {
+                        // Blocker 2: the unlink is not durable until the
+                        // parent is. An ACKed REMOVE that rolls back
+                        // resurrects a file the client believes is gone.
+                        if let Err(e) =
+                            crate::nfs::v4::metadata_sync::commit_parent_of(&target_path).await
+                        {
+                            warn!(
+                                "REMOVE: {:?} unlinked but committing the parent failed: {} \
+                                 — refusing to ACK an operation that is not durable",
+                                target_path, e
+                            );
+                            return RemoveRes { status: Nfs4Status::Io, change_info: None };
+                        }
                         self.fh_mgr.note_fs_remove(&target_path);
                         // F14: removed dirent mutates the parent.
                         crate::nfs::v4::change_counter::bump_path(&parent_path);
@@ -3547,6 +3582,25 @@ impl FileOperationHandler {
         // Perform the rename.
         match tokio::fs::rename(&source_path, &dest_path).await {
             Ok(_) => {
+                // Blocker 2: a rename mutates TWO parents, and both must
+                // be stable before the ACK. Committing only one leaves a
+                // crash window in which the file is reachable under both
+                // names, or neither. `commit_dirs` skips the second when
+                // the rename is within one directory.
+                {
+                    let sp = source_path.parent().unwrap_or(&source_path).to_path_buf();
+                    let dp = dest_path.parent().unwrap_or(&dest_path).to_path_buf();
+                    if let Err(e) =
+                        crate::nfs::v4::metadata_sync::commit_dirs(&sp, &dp).await
+                    {
+                        warn!(
+                            "RENAME: {:?} -> {:?} succeeded but committing the parents \
+                             failed: {} — refusing to ACK an operation that is not durable",
+                            source_path, dest_path, e
+                        );
+                        return rename_err(Nfs4Status::Io);
+                    }
+                }
                 // Keep the filehandle tables truthful: v2 (id-based)
                 // handles follow the file; stale v1 cache entries for
                 // the old subtree are dropped.
@@ -3672,6 +3726,17 @@ impl FileOperationHandler {
         // Create hard link
         match tokio::fs::hard_link(&file_path, &link_path).await {
             Ok(_) => {
+                // Blocker 2: the new dirent lives in the link's parent.
+                if let Err(e) =
+                    crate::nfs::v4::metadata_sync::commit_parent_of(&link_path).await
+                {
+                    warn!(
+                        "LINK: {:?} -> {:?} created but committing the parent failed: {} \
+                         — refusing to ACK an operation that is not durable",
+                        link_path, file_path, e
+                    );
+                    return LinkRes { status: Nfs4Status::Io, change_info: None };
+                }
                 debug!("LINK: Successfully created hard link {:?} -> {:?}", link_path, file_path);
                 // F14: the linked file's nlink/ctime changed and the
                 // target parent gained a dirent.

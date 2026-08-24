@@ -625,6 +625,32 @@ impl IoOperationHandler {
                         file_path
                     );
 
+                    // Blocker 2: OPEN(create) is a namespace operation
+                    // when — and only when — it actually made a dirent.
+                    // Opening a file that already existed changes no
+                    // name, so it must not pay an fsync; this is the
+                    // hot path for every read.
+                    if !existed {
+                        if let Err(e) =
+                            crate::nfs::v4::metadata_sync::commit_parent_of(&file_path).await
+                        {
+                            warn!(
+                                "OPEN(create): {:?} created but committing the parent \
+                                 dirent failed: {} — refusing to ACK an operation that \
+                                 is not durable",
+                                file_path, e
+                            );
+                            return OpenRes {
+                                status: Nfs4Status::Io,
+                                stateid: None,
+                                change_info: None,
+                                result_flags: 0,
+                                delegation: OpenDelegationType::None,
+                                attrset: vec![],
+                            };
+                        }
+                    }
+
                     // Apply createattrs: everything on a fresh create;
                     // only the size request (O_TRUNC) when the file
                     // already existed — other attrs are ignored then.
