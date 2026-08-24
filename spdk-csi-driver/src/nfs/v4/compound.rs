@@ -948,8 +948,14 @@ impl CompoundRequest {
             return Ok(Self { tag, tag_valid, minor_version, operations: Vec::new(), wire_size: 0 });
         }
 
-        // Decode operation count
-        let op_count = decoder.decode_u32()? as usize;
+        // Decode operation count. Bounded against the bytes actually
+        // left: each op is at least a 4-byte opcode, so a larger count
+        // cannot be honoured no matter what it claims. Unbounded, this
+        // fed Vec::with_capacity straight from an unauthenticated frame.
+        let op_count = decoder.decode_u32()?;
+        let op_count = crate::nfs::xdr::checked_array_len(
+            op_count, decoder.remaining(), 4, "COMPOUND argarray",
+        )?;
         tracing::trace!("DEBUG CompoundRequest::decode: After op_count decode (={}): {} bytes remaining", op_count, decoder.remaining());
         debug!("COMPOUND: tag='{}', minor_version={}, op_count={}", tag, minor_version, op_count);
 
@@ -1135,6 +1141,9 @@ impl CompoundRequest {
                 let bitmap_len = decoder.decode_u32()?;
                 tracing::trace!("DEBUG SETATTR: bitmap_len={}, {} bytes after", bitmap_len, decoder.remaining());
                 
+                let bitmap_len = crate::nfs::xdr::checked_array_len(
+                    bitmap_len, decoder.remaining(), 4, "bitmap4",
+                )? as u32;
                 let mut bitmap_words = Vec::with_capacity(bitmap_len as usize);
                 for _ in 0..bitmap_len {
                     bitmap_words.push(decoder.decode_u32()?);
@@ -1171,6 +1180,9 @@ impl CompoundRequest {
                 // dispatcher can decode it once and compare.
                 use bytes::{BytesMut, BufMut};
                 let bitmap_len = decoder.decode_u32()?;
+                let bitmap_len = crate::nfs::xdr::checked_array_len(
+                    bitmap_len, decoder.remaining(), 4, "bitmap4",
+                )? as u32;
                 let mut bitmap_words = Vec::with_capacity(bitmap_len as usize);
                 for _ in 0..bitmap_len {
                     bitmap_words.push(decoder.decode_u32()?);
@@ -1674,7 +1686,11 @@ impl CompoundRequest {
             }
             opcode::TEST_STATEID => {
                 // Decode array of stateids to test
-                let count = decoder.decode_u32()? as usize;
+                let count = decoder.decode_u32()?;
+                // stateid4 = seqid(4) + other[12] = 16 bytes each.
+                let count = crate::nfs::xdr::checked_array_len(
+                    count, decoder.remaining(), 16, "TEST_STATEID stateids",
+                )?;
                 let mut stateids = Vec::with_capacity(count);
                 for _ in 0..count {
                     stateids.push(decoder.decode_stateid()?);
@@ -2901,6 +2917,72 @@ mod tests {
     use crate::nfs::xdr::XdrDecoder;
     use bytes::{BytesMut, BufMut};
     use crate::nfs::v4::operations::Fattr4;
+
+    /// Every wire-fed array count must be bounded BEFORE it reaches
+    /// `Vec::with_capacity`.
+    ///
+    /// Counts were read straight off the wire and used as a capacity
+    /// with no bound: a ~30-byte unauthenticated COMPOUND claiming
+    /// `op_count = 0xFFFFFFFF` asked for a multi-hundred-GiB allocation
+    /// from any host that can reach port 2049. Decode runs before the
+    /// RPC credential is inspected, and AUTH_SYS authenticates nothing,
+    /// so there is no gate in front of it.
+    ///
+    /// Each case here is a distinct call site. They assert the frame is
+    /// REFUSED rather than merely "does not crash" — a test that only
+    /// checked for a panic would pass on the unbounded code, since the
+    /// allocation is lazy on Linux and the loop errors out on the next
+    /// byte anyway.
+    #[test]
+    fn wire_array_counts_are_bounded_before_allocating() {
+        // A count that cannot possibly be described by the bytes left.
+        const LIE: u32 = 0xFFFF_FFFF;
+
+        // -- site 1: COMPOUND argarray (the reachable one, pre-auth) ----
+        let mut b = BytesMut::new();
+        b.put_u32(0);      // tag<> empty
+        b.put_u32(1);      // minorversion 1
+        b.put_u32(LIE);    // op_count — and then nothing at all
+        let err = CompoundRequest::decode(XdrDecoder::new(b.freeze()))
+            .expect_err("an impossible op_count must be refused");
+        assert!(
+            err.contains("argarray") || err.contains("exceeds"),
+            "op_count must be refused by the bound, got: {err}"
+        );
+
+        // -- site 2: SETATTR bitmap4 ------------------------------------
+        let mut b = BytesMut::new();
+        b.put_u32(0); b.put_u32(0); b.put_u32(0); // stateid seqid + other(12)
+        b.put_u32(0); b.put_u32(0);
+        b.put_u32(LIE); // bitmap_len
+        let mut d = XdrDecoder::new(b.freeze());
+        assert!(
+            CompoundRequest::decode_operation(&mut d, opcode::SETATTR).is_err(),
+            "SETATTR bitmap4 length must be refused"
+        );
+
+        // -- site 3: TEST_STATEID stateid array -------------------------
+        let mut b = BytesMut::new();
+        b.put_u32(LIE);
+        let mut d = XdrDecoder::new(b.freeze());
+        assert!(
+            CompoundRequest::decode_operation(&mut d, opcode::TEST_STATEID).is_err(),
+            "TEST_STATEID array length must be refused"
+        );
+
+        // -- the bound itself, both directions --------------------------
+        use crate::nfs::xdr::checked_array_len;
+        // Refuses the impossible...
+        assert!(checked_array_len(LIE, 12, 4, "t").is_err());
+        assert!(checked_array_len(3, 12, 4, "t").is_ok()); // 3 x 4B fits in 12B
+        assert!(checked_array_len(4, 12, 4, "t").is_err()); // 4 x 4B does not
+        // ...and must NOT refuse anything that could actually decode.
+        // This is the anti-vacuity half: a bound of "always reject" or a
+        // small magic constant would pass every assert above and break
+        // legitimate traffic. 1024 ops in 4 KiB is legal.
+        assert_eq!(checked_array_len(1024, 4096, 4, "t").unwrap(), 1024);
+        assert_eq!(checked_array_len(0, 0, 4, "t").unwrap(), 0);
+    }
 
     /// CREATE must carry the client's `createattrs` off the wire.
     ///

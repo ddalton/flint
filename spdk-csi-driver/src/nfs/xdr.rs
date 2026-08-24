@@ -131,6 +131,46 @@ pub struct XdrDecoder {
     buf: Bytes,
 }
 
+/// The largest array length `remaining` wire bytes could legitimately
+/// describe.
+///
+/// Every XDR array element occupies at least `min_elem_bytes` on the
+/// wire, so a declared count above `remaining / min_elem_bytes` is a lie
+/// no matter what it claims. That makes this a self-tuning bound rather
+/// than a magic constant: it can never reject traffic that could
+/// actually be decoded, and it needs no per-call-site tuning.
+///
+/// It exists because array counts were read straight off the wire and
+/// handed to `Vec::with_capacity` BEFORE any per-element bounds check.
+/// A ~30-byte unauthenticated COMPOUND declaring `op_count = 0xFFFFFFFF`
+/// therefore asked for a multi-hundred-GiB allocation from any host with
+/// TCP reach to port 2049 — decode runs before the RPC credential is
+/// even looked at, and AUTH_SYS authenticates nothing anyway. Measured:
+/// on Linux with the default `vm.overcommit_memory=0` the reservation
+/// is lazy and the server survives, so this is a memory-amplification
+/// vector rather than an instant remote kill in that configuration — but
+/// it aborts under strict overcommit, and a 4 MiB frame packed with real
+/// opcodes commits hundreds of MiB per request with no connection cap in
+/// front of it. Several sibling sites already guarded their counts; this
+/// makes the rule uniform instead of applied at some sites and not others.
+pub fn checked_array_len(
+    count: u32,
+    remaining: usize,
+    min_elem_bytes: usize,
+    what: &str,
+) -> Result<usize, String> {
+    let count = count as usize;
+    let ceiling = remaining / min_elem_bytes.max(1);
+    if count > ceiling {
+        return Err(format!(
+            "{what}: declared array length {count} exceeds what {remaining} \
+             remaining bytes can describe (at {min_elem_bytes} bytes/element, max {ceiling})"
+        ));
+    }
+    Ok(count)
+}
+
+
 impl XdrDecoder {
     pub fn new(buf: Bytes) -> Self {
         Self { buf }
@@ -221,7 +261,10 @@ impl XdrDecoder {
     where
         F: Fn(&mut Self) -> Result<T, String>,
     {
-        let count = self.decode_u32()? as usize;
+        let count = self.decode_u32()?;
+        // The element decoder is opaque to us, so assume the smallest an
+        // XDR element can be (4 bytes). See `checked_array_len`.
+        let count = checked_array_len(count, self.remaining(), 4, "decode_array")?;
         let mut result = Vec::with_capacity(count);
 
         for _ in 0..count {

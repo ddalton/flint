@@ -136,7 +136,10 @@ impl Nfs4XdrDecoder for XdrDecoder {
     }
 
     fn decode_bitmap(&mut self) -> Result<Vec<u32>, String> {
-        let count = self.decode_u32()? as usize;
+        let count = self.decode_u32()?;
+        let count = crate::nfs::xdr::checked_array_len(
+            count, self.remaining(), 4, "bitmap4",
+        )?;
         let mut bitmap = Vec::with_capacity(count);
         for _ in 0..count {
             bitmap.push(self.decode_u32()?);

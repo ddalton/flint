@@ -505,7 +505,11 @@ pub fn decode_cb_reply(
     let tag_bytes = dec.decode_opaque().map_err(CbReplyError::Xdr)?;
     let tag = String::from_utf8(tag_bytes.to_vec()).unwrap_or_default();
 
-    let resarray_len = dec.decode_u32().map_err(CbReplyError::Xdr)? as usize;
+    let resarray_len = dec.decode_u32().map_err(CbReplyError::Xdr)?;
+    let resarray_len = crate::nfs::xdr::checked_array_len(
+        resarray_len, dec.remaining(), 4, "CB_COMPOUND resarray",
+    )
+    .map_err(CbReplyError::Xdr)?;
     let mut results = Vec::with_capacity(resarray_len);
     for _ in 0..resarray_len {
         results.push(decode_cb_result(&mut dec)?);
