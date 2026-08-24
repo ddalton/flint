@@ -1426,7 +1426,18 @@ impl IoOperationHandler {
         // Perform positioned read using blocking I/O
         // Uses positioned I/O (pread) for concurrent access without seek
         let offset = op.offset;
-        let count = op.count as usize;
+        // `count` is a raw wire u32 (up to 4 GiB) that sizes the read
+        // buffer below, otherwise bounded only by FILE size — and
+        // multi-GB files are this product's headline content, so a
+        // ~100-byte frame declaring count=0xFFFFFFFF forced a
+        // gigabyte-scale allocation. The session's response cap
+        // (REP_TOO_BIG) is enforced only AFTER encoding — after the
+        // allocation. Clamp to the server's response ceiling first: a
+        // short READ is legal (the client resumes from eof=false), no
+        // negotiated session cap exceeds this constant, and a reply
+        // above it could never be sent anyway.
+        let count = (op.count as usize)
+            .min(super::session::SERVER_MAX_RESPONSE as usize);
         let fd_cache = Arc::clone(&self.fd_cache);
         let stateid_other = op.stateid.other;
 
@@ -2697,6 +2708,62 @@ mod tests {
             h.write_verifier(),
             "the verifier must be constant within one incarnation"
         );
+    }
+
+    /// A READ `count` is attacker-chosen up to 4 GiB and used to size a
+    /// heap allocation bounded otherwise only by file size; the
+    /// response-size gate (REP_TOO_BIG) runs after encoding — after the
+    /// allocation. Against a file larger than the response ceiling, a
+    /// count=0xFFFFFFFF READ must come back clamped to the ceiling
+    /// (short reads are legal; the client resumes from eof=false),
+    /// never sized to the file. Observed red pre-clamp: 4 MiB returned
+    /// for one ~100-byte request frame.
+    #[tokio::test]
+    async fn read_count_is_clamped_to_the_response_ceiling() {
+        use crate::nfs::v4::operations::session::SERVER_MAX_RESPONSE;
+        // The eviction registry is process-global and keyed (dev, ino);
+        // a concurrent tier test's marker can land on this TempDir
+        // file's reused inode and turn the READ into a Delay. Hold the
+        // tier rig lock so no marker-planting test overlaps this one.
+        let _excl = crate::tier::capture::test_exclusive();
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+
+        // A file 4x larger than the response ceiling.
+        let big_path = fh_mgr.get_export_path().join("big.bin");
+        let f = std::fs::File::create(&big_path).unwrap();
+        f.set_len(4 * SERVER_MAX_RESPONSE as u64).unwrap();
+        drop(f);
+        ctx.current_fh = Some(fh_mgr.path_to_filehandle(&big_path).unwrap());
+
+        let open_res = handler
+            .handle_open(
+                OpenOp {
+                    seqid: 0,
+                    share_access: OPEN4_SHARE_ACCESS_READ,
+                    share_deny: OPEN4_SHARE_DENY_NONE,
+                    owner: b"amp-owner".to_vec(),
+                    openhow: OpenHow::NoCreate,
+                    claim: OpenClaim::Fh,
+                },
+                &mut ctx,
+            )
+            .await;
+        let stateid = open_res.stateid.unwrap();
+
+        let res = handler
+            .handle_read(ReadOp { stateid, offset: 0, count: u32::MAX }, &ctx)
+            .await;
+        assert_eq!(res.status, Nfs4Status::Ok);
+        let data = res.data;
+        assert!(
+            data.len() <= SERVER_MAX_RESPONSE as usize,
+            "count=0xFFFFFFFF returned {} bytes — the allocation tracked the FILE, \
+             not the response ceiling (the ~100-byte-frame-to-gigabytes amplification)",
+            data.len()
+        );
+        assert!(!data.is_empty(), "the clamp must not turn the read into an empty reply");
+        assert!(!res.eof, "a clamped read mid-file must report eof=false so the client resumes");
     }
 
     #[tokio::test]
