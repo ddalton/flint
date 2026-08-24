@@ -319,6 +319,21 @@ test-nfs-42: ## Run the NFSv4.2 conformance tests (ALLOC1-3, COPY5)
 	limactl cp $(LIMA_VM):/tmp/pynfs42.json /tmp/flint-pynfs42-results.json
 	@python3 scripts/check-pynfs42.py /tmp/flint-pynfs42-results.json
 
+.PHONY: test-authz-drill
+test-authz-drill: ## Leg A1: cross-uid authorization gate (seconds) — runs against flint AND knfsd as a control
+	# Two arms, and the control is the point. knfsd MUST be green: an
+	# assertion it also fails is this drill being wrong about POSIX, not
+	# the server being wrong. Measured 2026-08-24: knfsd 9/9, flint 2/9.
+	limactl copy tests/lima/pnfs/access-authz-drill.sh $(LIMA_VM):/tmp/access-authz-drill.sh
+	@limactl shell $(LIMA_VM) -- sudo bash -lc 'chmod +x /tmp/access-authz-drill.sh; \
+	   /tmp/access-authz-drill.sh /mnt/knfsd/pjd knfsd' \
+	  || { echo "VOID: the knfsd CONTROL arm failed — the drill is wrong about POSIX, fix it there"; exit 1; }
+	@limactl shell $(LIMA_VM) -- sudo bash -lc '/tmp/access-authz-drill.sh /mnt/pjd/tmp/pjd flint'
+
+.PHONY: test-pjdfstest
+test-pjdfstest: ## Leg A0: full pjdfstest (8798 assertions) vs flint, differenced against a knfsd control (~7 min)
+	bash tests/lima/pnfs/pjdfstest-differential.sh
+
 .PHONY: test-nfs-frag
 test-nfs-frag: ## Force fragmented WRITE (T1) — large file via dd over NFS
 	limactl shell $(LIMA_VM) -- sudo bash -lc '\

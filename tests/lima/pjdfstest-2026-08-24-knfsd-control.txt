@@ -1,0 +1,417 @@
+/opt/pjdfstest/tests/chflags/00.t .......... ok
+/opt/pjdfstest/tests/chflags/01.t .......... ok
+/opt/pjdfstest/tests/chflags/02.t .......... ok
+/opt/pjdfstest/tests/chflags/03.t .......... ok
+/opt/pjdfstest/tests/chflags/04.t .......... ok
+/opt/pjdfstest/tests/chflags/05.t .......... ok
+/opt/pjdfstest/tests/chflags/06.t .......... ok
+/opt/pjdfstest/tests/chflags/07.t .......... ok
+/opt/pjdfstest/tests/chflags/08.t .......... ok
+/opt/pjdfstest/tests/chflags/09.t .......... ok
+/opt/pjdfstest/tests/chflags/10.t .......... ok
+/opt/pjdfstest/tests/chflags/11.t .......... ok
+/opt/pjdfstest/tests/chflags/12.t .......... ok
+/opt/pjdfstest/tests/chflags/13.t .......... ok
+/opt/pjdfstest/tests/chmod/00.t ............ 
+not ok 117 - tried 'stat pjdfstest_fd54b851ffeafd964100583f80dfbef6 mode', expected 0755, got 02755
+Failed 1/119 subtests 
+/opt/pjdfstest/tests/chmod/01.t ............ ok
+/opt/pjdfstest/tests/chmod/02.t ............ ok
+/opt/pjdfstest/tests/chmod/03.t ............ ok
+/opt/pjdfstest/tests/chmod/04.t ............ ok
+/opt/pjdfstest/tests/chmod/05.t ............ ok
+/opt/pjdfstest/tests/chmod/06.t ............ ok
+/opt/pjdfstest/tests/chmod/07.t ............ ok
+/opt/pjdfstest/tests/chmod/08.t ............ ok
+/opt/pjdfstest/tests/chmod/09.t ............ ok
+/opt/pjdfstest/tests/chmod/10.t ............ ok
+/opt/pjdfstest/tests/chmod/11.t ............ ok
+/opt/pjdfstest/tests/chmod/12.t ............ ok
+/opt/pjdfstest/tests/chown/00.t ............ 
+not ok 107 - tried '-u 65534 -g 65532,65531 chown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65531', expected 0, got EPERM
+not ok 108 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 118 - tried '-u 65534 -g 65532,65531 chown pjdfstest_b51e49731a612c5768f5cad5cc274469 65534 65531', expected 0, got EPERM
+not ok 119 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 120 - tried 'stat pjdfstest_b51e49731a612c5768f5cad5cc274469 uid,gid', expected 65534,65531, got 65534,65532
+not ok 129 - tried '-u 65534 -g 65532,65531 lchown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65531', expected 0, got EPERM
+not ok 130 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 137 - tried '-u 65534 -g 65532,65531 chown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65531', expected 0, got EPERM
+not ok 138 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 148 - tried '-u 65534 -g 65532,65531 chown pjdfstest_b51e49731a612c5768f5cad5cc274469 65534 65531', expected 0, got EPERM
+not ok 149 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 150 - tried 'stat pjdfstest_b51e49731a612c5768f5cad5cc274469 uid,gid', expected 65534,65531, got 65534,65532
+not ok 159 - tried '-u 65534 -g 65532,65531 lchown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65531', expected 0, got EPERM
+not ok 160 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 167 - tried '-u 65534 -g 65532,65531 chown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65531', expected 0, got EPERM
+not ok 168 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 178 - tried '-u 65534 -g 65532,65531 chown pjdfstest_b51e49731a612c5768f5cad5cc274469 65534 65531', expected 0, got EPERM
+not ok 179 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 180 - tried 'stat pjdfstest_b51e49731a612c5768f5cad5cc274469 uid,gid', expected 65534,65531, got 65534,65532
+not ok 189 - tried '-u 65534 -g 65532,65531 lchown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65531', expected 0, got EPERM
+not ok 190 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 197 - tried '-u 65534 -g 65532,65531 chown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65531', expected 0, got EPERM
+not ok 198 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 208 - tried '-u 65534 -g 65532,65531 chown pjdfstest_b51e49731a612c5768f5cad5cc274469 65534 65531', expected 0, got EPERM
+not ok 209 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 210 - tried 'stat pjdfstest_b51e49731a612c5768f5cad5cc274469 uid,gid', expected 65534,65531, got 65534,65532
+not ok 219 - tried '-u 65534 -g 65532,65531 lchown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65531', expected 0, got EPERM
+not ok 220 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 227 - tried '-u 65534 -g 65532,65531 chown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65531', expected 0, got EPERM
+not ok 228 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 238 - tried '-u 65534 -g 65532,65531 chown pjdfstest_b51e49731a612c5768f5cad5cc274469 65534 65531', expected 0, got EPERM
+not ok 239 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 240 - tried 'stat pjdfstest_b51e49731a612c5768f5cad5cc274469 uid,gid', expected 65534,65531, got 65534,65532
+not ok 249 - tried '-u 65534 -g 65532,65531 lchown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65531', expected 0, got EPERM
+not ok 250 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 257 - tried '-u 65534 -g 65532,65531 chown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65531', expected 0, got EPERM
+not ok 258 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 268 - tried '-u 65534 -g 65532,65531 chown pjdfstest_b51e49731a612c5768f5cad5cc274469 65534 65531', expected 0, got EPERM
+not ok 269 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 270 - tried 'stat pjdfstest_b51e49731a612c5768f5cad5cc274469 uid,gid', expected 65534,65531, got 65534,65532
+not ok 279 - tried '-u 65534 -g 65532,65531 lchown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65531', expected 0, got EPERM
+not ok 280 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 287 - tried '-u 65534 -g 65532,65531 lchown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65531', expected 0, got EPERM
+not ok 288 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 uid,gid', expected 65534,65531, got 65534,65532
+not ok 598 - tried '-u 65534 -g 65533,65532 chown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65532', expected 0, got EPERM
+not ok 599 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 601 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 613 - tried '-u 65534 -g 65533,65532 chown pjdfstest_b51e49731a612c5768f5cad5cc274469 65534 65532', expected 0, got EPERM
+not ok 614 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 615 - tried 'stat pjdfstest_b51e49731a612c5768f5cad5cc274469 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 617 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 618 - tried 'stat pjdfstest_b51e49731a612c5768f5cad5cc274469 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 634 - tried '-u 65534 -g 65533,65532 lchown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65532', expected 0, got EPERM
+not ok 635 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 637 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 649 - tried '-u 65534 -g 65533,65532 chown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65532', expected 0, got EPERM
+not ok 652 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 664 - tried '-u 65534 -g 65533,65532 chown pjdfstest_b51e49731a612c5768f5cad5cc274469 65534 65532', expected 0, got EPERM
+not ok 668 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 669 - tried 'stat pjdfstest_b51e49731a612c5768f5cad5cc274469 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 685 - tried '-u 65534 -g 65533,65532 lchown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65532', expected 0, got EPERM
+not ok 688 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 700 - tried '-u 65534 -g 65533,65532 chown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65532', expected 0, got EPERM
+not ok 701 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 703 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 715 - tried '-u 65534 -g 65533,65532 chown pjdfstest_b51e49731a612c5768f5cad5cc274469 65534 65532', expected 0, got EPERM
+not ok 716 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 717 - tried 'stat pjdfstest_b51e49731a612c5768f5cad5cc274469 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 719 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 720 - tried 'stat pjdfstest_b51e49731a612c5768f5cad5cc274469 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 736 - tried '-u 65534 -g 65533,65532 lchown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65532', expected 0, got EPERM
+not ok 737 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 739 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 751 - tried '-u 65534 -g 65533,65532 chown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65532', expected 0, got EPERM
+not ok 752 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 754 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 766 - tried '-u 65534 -g 65533,65532 chown pjdfstest_b51e49731a612c5768f5cad5cc274469 65534 65532', expected 0, got EPERM
+not ok 767 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 768 - tried 'stat pjdfstest_b51e49731a612c5768f5cad5cc274469 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 770 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 771 - tried 'stat pjdfstest_b51e49731a612c5768f5cad5cc274469 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 787 - tried '-u 65534 -g 65533,65532 lchown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65532', expected 0, got EPERM
+not ok 788 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 790 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 802 - tried '-u 65534 -g 65533,65532 chown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65532', expected 0, got EPERM
+not ok 803 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 805 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 817 - tried '-u 65534 -g 65533,65532 chown pjdfstest_b51e49731a612c5768f5cad5cc274469 65534 65532', expected 0, got EPERM
+not ok 818 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 819 - tried 'stat pjdfstest_b51e49731a612c5768f5cad5cc274469 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 821 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 822 - tried 'stat pjdfstest_b51e49731a612c5768f5cad5cc274469 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 838 - tried '-u 65534 -g 65533,65532 lchown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65532', expected 0, got EPERM
+not ok 839 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 841 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 853 - tried '-u 65534 -g 65533,65532 chown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65532', expected 0, got EPERM
+not ok 854 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 856 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 868 - tried '-u 65534 -g 65533,65532 chown pjdfstest_b51e49731a612c5768f5cad5cc274469 65534 65532', expected 0, got EPERM
+not ok 869 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 870 - tried 'stat pjdfstest_b51e49731a612c5768f5cad5cc274469 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 872 - tried 'stat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 873 - tried 'stat pjdfstest_b51e49731a612c5768f5cad5cc274469 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+not ok 889 - tried '-u 65534 -g 65533,65532 lchown pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 65534 65532', expected 0, got EPERM
+not ok 890 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 0555,65534,65532, got 06555,65534,65533
+not ok 892 - tried 'lstat pjdfstest_5c5a4b04551d4c7449cdecaadd102ff4 mode,uid,gid', expected 06555,65534,65532, got 06555,65534,65533
+Failed 106/1280 subtests 
+	(19 TODO tests unexpectedly succeeded)
+/opt/pjdfstest/tests/chown/01.t ............ ok
+/opt/pjdfstest/tests/chown/02.t ............ ok
+/opt/pjdfstest/tests/chown/03.t ............ ok
+/opt/pjdfstest/tests/chown/04.t ............ ok
+/opt/pjdfstest/tests/chown/05.t ............ ok
+/opt/pjdfstest/tests/chown/06.t ............ ok
+/opt/pjdfstest/tests/chown/07.t ............ ok
+/opt/pjdfstest/tests/chown/08.t ............ ok
+/opt/pjdfstest/tests/chown/09.t ............ ok
+/opt/pjdfstest/tests/chown/10.t ............ ok
+/opt/pjdfstest/tests/ftruncate/00.t ........ ok
+/opt/pjdfstest/tests/ftruncate/01.t ........ ok
+/opt/pjdfstest/tests/ftruncate/02.t ........ ok
+/opt/pjdfstest/tests/ftruncate/03.t ........ ok
+/opt/pjdfstest/tests/ftruncate/04.t ........ ok
+/opt/pjdfstest/tests/ftruncate/05.t ........ ok
+/opt/pjdfstest/tests/ftruncate/06.t ........ ok
+/opt/pjdfstest/tests/ftruncate/07.t ........ ok
+/opt/pjdfstest/tests/ftruncate/08.t ........ ok
+/opt/pjdfstest/tests/ftruncate/09.t ........ ok
+/opt/pjdfstest/tests/ftruncate/10.t ........ ok
+/opt/pjdfstest/tests/ftruncate/11.t ........ ok
+/opt/pjdfstest/tests/ftruncate/12.t ........ ok
+/opt/pjdfstest/tests/ftruncate/13.t ........ ok
+/opt/pjdfstest/tests/ftruncate/14.t ........ ok
+/opt/pjdfstest/tests/granular/00.t ......... ok
+/opt/pjdfstest/tests/granular/01.t ......... ok
+/opt/pjdfstest/tests/granular/02.t ......... ok
+/opt/pjdfstest/tests/granular/03.t ......... ok
+/opt/pjdfstest/tests/granular/04.t ......... ok
+/opt/pjdfstest/tests/granular/05.t ......... ok
+/opt/pjdfstest/tests/granular/06.t ......... ok
+/opt/pjdfstest/tests/link/00.t ............. 
+not ok 135
+not ok 136
+not ok 142
+not ok 143
+not ok 149
+not ok 150
+not ok 156
+not ok 157
+not ok 163
+not ok 164
+Failed 10/202 subtests 
+/opt/pjdfstest/tests/link/01.t ............. ok
+/opt/pjdfstest/tests/link/02.t ............. ok
+/opt/pjdfstest/tests/link/03.t ............. ok
+/opt/pjdfstest/tests/link/04.t ............. ok
+/opt/pjdfstest/tests/link/05.t ............. ok
+/opt/pjdfstest/tests/link/06.t ............. ok
+/opt/pjdfstest/tests/link/07.t ............. ok
+/opt/pjdfstest/tests/link/08.t ............. ok
+/opt/pjdfstest/tests/link/09.t ............. ok
+/opt/pjdfstest/tests/link/10.t ............. ok
+/opt/pjdfstest/tests/link/11.t ............. ok
+/opt/pjdfstest/tests/link/12.t ............. ok
+/opt/pjdfstest/tests/link/13.t ............. ok
+/opt/pjdfstest/tests/link/14.t ............. ok
+/opt/pjdfstest/tests/link/15.t ............. ok
+/opt/pjdfstest/tests/link/16.t ............. ok
+/opt/pjdfstest/tests/link/17.t ............. ok
+/opt/pjdfstest/tests/mkdir/00.t ............ ok
+/opt/pjdfstest/tests/mkdir/01.t ............ ok
+/opt/pjdfstest/tests/mkdir/02.t ............ ok
+/opt/pjdfstest/tests/mkdir/03.t ............ ok
+/opt/pjdfstest/tests/mkdir/04.t ............ ok
+/opt/pjdfstest/tests/mkdir/05.t ............ ok
+/opt/pjdfstest/tests/mkdir/06.t ............ ok
+/opt/pjdfstest/tests/mkdir/07.t ............ ok
+/opt/pjdfstest/tests/mkdir/08.t ............ ok
+/opt/pjdfstest/tests/mkdir/09.t ............ ok
+/opt/pjdfstest/tests/mkdir/10.t ............ ok
+/opt/pjdfstest/tests/mkdir/11.t ............ ok
+/opt/pjdfstest/tests/mkdir/12.t ............ ok
+/opt/pjdfstest/tests/mkfifo/00.t ........... ok
+/opt/pjdfstest/tests/mkfifo/01.t ........... ok
+/opt/pjdfstest/tests/mkfifo/02.t ........... ok
+/opt/pjdfstest/tests/mkfifo/03.t ........... ok
+/opt/pjdfstest/tests/mkfifo/04.t ........... ok
+/opt/pjdfstest/tests/mkfifo/05.t ........... ok
+/opt/pjdfstest/tests/mkfifo/06.t ........... ok
+/opt/pjdfstest/tests/mkfifo/07.t ........... ok
+/opt/pjdfstest/tests/mkfifo/08.t ........... ok
+/opt/pjdfstest/tests/mkfifo/09.t ........... ok
+/opt/pjdfstest/tests/mkfifo/10.t ........... ok
+/opt/pjdfstest/tests/mkfifo/11.t ........... ok
+/opt/pjdfstest/tests/mkfifo/12.t ........... ok
+/opt/pjdfstest/tests/mknod/00.t ............ ok
+/opt/pjdfstest/tests/mknod/01.t ............ ok
+/opt/pjdfstest/tests/mknod/02.t ............ ok
+/opt/pjdfstest/tests/mknod/03.t ............ ok
+/opt/pjdfstest/tests/mknod/04.t ............ ok
+/opt/pjdfstest/tests/mknod/05.t ............ ok
+/opt/pjdfstest/tests/mknod/06.t ............ ok
+/opt/pjdfstest/tests/mknod/07.t ............ ok
+/opt/pjdfstest/tests/mknod/08.t ............ ok
+/opt/pjdfstest/tests/mknod/09.t ............ ok
+/opt/pjdfstest/tests/mknod/10.t ............ ok
+/opt/pjdfstest/tests/mknod/11.t ............ ok
+/opt/pjdfstest/tests/open/00.t ............. ok
+/opt/pjdfstest/tests/open/01.t ............. ok
+/opt/pjdfstest/tests/open/02.t ............. ok
+/opt/pjdfstest/tests/open/03.t ............. ok
+/opt/pjdfstest/tests/open/04.t ............. ok
+/opt/pjdfstest/tests/open/05.t ............. ok
+/opt/pjdfstest/tests/open/06.t ............. ok
+/opt/pjdfstest/tests/open/07.t ............. 
+not ok 6 - tried '-u 65534 -g 65534 open pjdfstest_22bf204ffa76a80ac23ec77c5aa30965 O_RDONLY,O_TRUNC', expected EACCES, got 0
+not ok 8 - tried '-u 65533 -g 65534 open pjdfstest_22bf204ffa76a80ac23ec77c5aa30965 O_RDONLY,O_TRUNC', expected EACCES, got 0
+not ok 10 - tried '-u 65533 -g 65533 open pjdfstest_22bf204ffa76a80ac23ec77c5aa30965 O_RDONLY,O_TRUNC', expected EACCES, got 0
+not ok 23 - tried '-u 65534 -g 65534 open pjdfstest_22bf204ffa76a80ac23ec77c5aa30965 O_RDONLY : fstat 0 size', expected 1, got 0
+Failed 4/25 subtests 
+/opt/pjdfstest/tests/open/08.t ............. ok
+/opt/pjdfstest/tests/open/09.t ............. ok
+/opt/pjdfstest/tests/open/10.t ............. ok
+/opt/pjdfstest/tests/open/11.t ............. ok
+/opt/pjdfstest/tests/open/12.t ............. ok
+/opt/pjdfstest/tests/open/13.t ............. ok
+/opt/pjdfstest/tests/open/14.t ............. ok
+/opt/pjdfstest/tests/open/15.t ............. ok
+/opt/pjdfstest/tests/open/16.t ............. ok
+/opt/pjdfstest/tests/open/17.t ............. ok
+/opt/pjdfstest/tests/open/18.t ............. ok
+/opt/pjdfstest/tests/open/19.t ............. ok
+/opt/pjdfstest/tests/open/20.t ............. ok
+/opt/pjdfstest/tests/open/21.t ............. ok
+/opt/pjdfstest/tests/open/22.t ............. ok
+/opt/pjdfstest/tests/open/23.t ............. ok
+/opt/pjdfstest/tests/open/24.t ............. ok
+/opt/pjdfstest/tests/open/25.t ............. ok
+/opt/pjdfstest/tests/open/26.t ............. ok
+/opt/pjdfstest/tests/posix_fallocate/00.t .. ok
+/opt/pjdfstest/tests/rename/00.t ........... ok
+/opt/pjdfstest/tests/rename/01.t ........... ok
+/opt/pjdfstest/tests/rename/02.t ........... ok
+/opt/pjdfstest/tests/rename/03.t ........... ok
+/opt/pjdfstest/tests/rename/04.t ........... ok
+/opt/pjdfstest/tests/rename/05.t ........... ok
+/opt/pjdfstest/tests/rename/06.t ........... ok
+/opt/pjdfstest/tests/rename/07.t ........... ok
+/opt/pjdfstest/tests/rename/08.t ........... ok
+/opt/pjdfstest/tests/rename/09.t ........... ok
+/opt/pjdfstest/tests/rename/10.t ........... ok
+/opt/pjdfstest/tests/rename/11.t ........... ok
+/opt/pjdfstest/tests/rename/12.t ........... ok
+/opt/pjdfstest/tests/rename/13.t ........... ok
+/opt/pjdfstest/tests/rename/14.t ........... ok
+/opt/pjdfstest/tests/rename/15.t ........... ok
+/opt/pjdfstest/tests/rename/16.t ........... ok
+/opt/pjdfstest/tests/rename/17.t ........... ok
+/opt/pjdfstest/tests/rename/18.t ........... ok
+/opt/pjdfstest/tests/rename/19.t ........... ok
+/opt/pjdfstest/tests/rename/20.t ........... ok
+/opt/pjdfstest/tests/rename/21.t ........... ok
+/opt/pjdfstest/tests/rename/22.t ........... ok
+/opt/pjdfstest/tests/rename/23.t ........... ok
+/opt/pjdfstest/tests/rename/24.t ........... 
+not ok 8 - tried 'lstat pjdfstest_e6489b9d11a3557856a1bf8c79b919f2 nlink', expected 2, got 3
+Failed 1/13 subtests 
+/opt/pjdfstest/tests/rmdir/00.t ............ 
+not ok 8
+not ok 9
+Failed 2/10 subtests 
+/opt/pjdfstest/tests/rmdir/01.t ............ ok
+/opt/pjdfstest/tests/rmdir/02.t ............ ok
+/opt/pjdfstest/tests/rmdir/03.t ............ ok
+/opt/pjdfstest/tests/rmdir/04.t ............ ok
+/opt/pjdfstest/tests/rmdir/05.t ............ ok
+/opt/pjdfstest/tests/rmdir/06.t ............ ok
+/opt/pjdfstest/tests/rmdir/07.t ............ ok
+/opt/pjdfstest/tests/rmdir/08.t ............ ok
+/opt/pjdfstest/tests/rmdir/09.t ............ ok
+/opt/pjdfstest/tests/rmdir/10.t ............ ok
+/opt/pjdfstest/tests/rmdir/11.t ............ ok
+/opt/pjdfstest/tests/rmdir/12.t ............ ok
+/opt/pjdfstest/tests/rmdir/13.t ............ ok
+/opt/pjdfstest/tests/rmdir/14.t ............ ok
+/opt/pjdfstest/tests/rmdir/15.t ............ ok
+/opt/pjdfstest/tests/symlink/00.t .......... ok
+/opt/pjdfstest/tests/symlink/01.t .......... ok
+/opt/pjdfstest/tests/symlink/02.t .......... ok
+/opt/pjdfstest/tests/symlink/03.t .......... ok
+/opt/pjdfstest/tests/symlink/04.t .......... ok
+/opt/pjdfstest/tests/symlink/05.t .......... ok
+/opt/pjdfstest/tests/symlink/06.t .......... ok
+/opt/pjdfstest/tests/symlink/07.t .......... ok
+/opt/pjdfstest/tests/symlink/08.t .......... ok
+/opt/pjdfstest/tests/symlink/09.t .......... ok
+/opt/pjdfstest/tests/symlink/10.t .......... ok
+/opt/pjdfstest/tests/symlink/11.t .......... ok
+/opt/pjdfstest/tests/symlink/12.t .......... ok
+/opt/pjdfstest/tests/truncate/00.t ......... ok
+/opt/pjdfstest/tests/truncate/01.t ......... ok
+/opt/pjdfstest/tests/truncate/02.t ......... ok
+/opt/pjdfstest/tests/truncate/03.t ......... ok
+/opt/pjdfstest/tests/truncate/04.t ......... ok
+/opt/pjdfstest/tests/truncate/05.t ......... ok
+/opt/pjdfstest/tests/truncate/06.t ......... ok
+/opt/pjdfstest/tests/truncate/07.t ......... ok
+/opt/pjdfstest/tests/truncate/08.t ......... ok
+/opt/pjdfstest/tests/truncate/09.t ......... ok
+/opt/pjdfstest/tests/truncate/10.t ......... ok
+/opt/pjdfstest/tests/truncate/11.t ......... ok
+/opt/pjdfstest/tests/truncate/12.t ......... ok
+/opt/pjdfstest/tests/truncate/13.t ......... ok
+/opt/pjdfstest/tests/truncate/14.t ......... ok
+/opt/pjdfstest/tests/unlink/00.t ........... 
+not ok 74
+not ok 75
+not ok 80
+not ok 81
+not ok 86
+not ok 87
+not ok 92
+not ok 93
+not ok 98
+not ok 99
+not ok 104
+not ok 105
+Failed 12/112 subtests 
+/opt/pjdfstest/tests/unlink/01.t ........... ok
+/opt/pjdfstest/tests/unlink/02.t ........... ok
+/opt/pjdfstest/tests/unlink/03.t ........... ok
+/opt/pjdfstest/tests/unlink/04.t ........... ok
+/opt/pjdfstest/tests/unlink/05.t ........... ok
+/opt/pjdfstest/tests/unlink/06.t ........... ok
+/opt/pjdfstest/tests/unlink/07.t ........... ok
+/opt/pjdfstest/tests/unlink/08.t ........... ok
+/opt/pjdfstest/tests/unlink/09.t ........... ok
+/opt/pjdfstest/tests/unlink/10.t ........... ok
+/opt/pjdfstest/tests/unlink/11.t ........... ok
+/opt/pjdfstest/tests/unlink/12.t ........... ok
+/opt/pjdfstest/tests/unlink/13.t ........... ok
+/opt/pjdfstest/tests/unlink/14.t ........... 
+not ok 4 - tried 'open pjdfstest_a9fb5996a8f65c34af0492744ad4d4f0 O_RDONLY : unlink pjdfstest_a9fb5996a8f65c34af0492744ad4d4f0 : fstat 0 nlink', expected 0, got 1
+Failed 1/7 subtests 
+/opt/pjdfstest/tests/utimensat/00.t ........ ok
+/opt/pjdfstest/tests/utimensat/01.t ........ ok
+/opt/pjdfstest/tests/utimensat/02.t ........ ok
+/opt/pjdfstest/tests/utimensat/03.t ........ ok
+/opt/pjdfstest/tests/utimensat/04.t ........ ok
+/opt/pjdfstest/tests/utimensat/05.t ........ ok
+/opt/pjdfstest/tests/utimensat/06.t ........ ok
+/opt/pjdfstest/tests/utimensat/07.t ........ ok
+/opt/pjdfstest/tests/utimensat/08.t ........ ok
+/opt/pjdfstest/tests/utimensat/09.t ........ ok
+
+Test Summary Report
+-------------------
+/opt/pjdfstest/tests/chmod/00.t          (Wstat: 0 Tests: 119 Failed: 1)
+  Failed test:  117
+/opt/pjdfstest/tests/chown/00.t          (Wstat: 0 Tests: 1280 Failed: 106)
+  Failed tests:  107-108, 118-120, 129-130, 137-138, 148-150
+                159-160, 167-168, 178-180, 189-190, 197-198
+                208-210, 219-220, 227-228, 238-240, 249-250
+                257-258, 268-270, 279-280, 287-288, 598-599
+                601, 613-615, 617-618, 634-635, 637, 649
+                652, 664, 668-669, 685, 688, 700-701, 703
+                715-717, 719-720, 736-737, 739, 751-752
+                754, 766-768, 770-771, 787-788, 790, 802-803
+                805, 817-819, 821-822, 838-839, 841, 853-854
+                856, 868-870, 872-873, 889-890, 892
+  TODO passed:   1054, 1058, 1064, 1069, 1073, 1079, 1084
+                1088, 1094, 1099, 1103, 1109, 1114, 1118
+                1124, 1129, 1133, 1139, 1144
+/opt/pjdfstest/tests/link/00.t           (Wstat: 0 Tests: 202 Failed: 10)
+  Failed tests:  135-136, 142-143, 149-150, 156-157, 163-164
+/opt/pjdfstest/tests/open/07.t           (Wstat: 0 Tests: 25 Failed: 4)
+  Failed tests:  6, 8, 10, 23
+/opt/pjdfstest/tests/rename/24.t         (Wstat: 0 Tests: 13 Failed: 1)
+  Failed test:  8
+/opt/pjdfstest/tests/rmdir/00.t          (Wstat: 0 Tests: 10 Failed: 2)
+  Failed tests:  8-9
+/opt/pjdfstest/tests/unlink/00.t         (Wstat: 0 Tests: 112 Failed: 12)
+  Failed tests:  74-75, 80-81, 86-87, 92-93, 98-99, 104-105
+/opt/pjdfstest/tests/unlink/14.t         (Wstat: 0 Tests: 7 Failed: 1)
+  Failed test:  4
+Files=238, Tests=8798, 165 wallclock secs ( 0.75 usr  0.24 sys + 15.04 cusr 10.00 csys = 26.03 CPU)
+Result: FAIL
