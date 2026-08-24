@@ -1,7 +1,16 @@
 {
-  "_note": "Ceilings for flint-ONLY pjdfstest failures (differenced against a knfsd control run on the same rig). Two numbers because the server has two postures: FLINT_NFS_ENFORCE_PERMISSIONS defaults to warn, under which permission checks are evaluated and logged but never enforced, so the failure count is the pre-fix one BY DESIGN.",
+  "_note": "Ceilings for flint-ONLY pjdfstest failures, differenced against a knfsd control on the same rig. Two numbers because the server has two postures: FLINT_NFS_ENFORCE_PERMISSIONS defaults to warn, under which permission checks are evaluated and logged but never enforced — so the default-mode count is the pre-fix one BY DESIGN, not a regression.",
   "flint_only_max": 645,
-  "flint_only_max_enforcing": 254,
+  "flint_only_max_enforcing": 239,
   "measured": "2026-08-24",
-  "knfsd_control_failures": 149
+  "knfsd_control_failures": 149,
+  "_enforcing_breakdown": {
+    "special-file stand-ins (deliberate)": 148,
+    "EIO on ~4KB paths (pre-existing, unrelated)": 52,
+    "ENOENT (mostly stand-in fallout)": 20,
+    "other": 13,
+    "authorization still missing": 4,
+    "EEXIST": 2,
+    "_comment": "Authorization was 265 of 646 before the checks landed and is 4 now. What remains is dominated by CREATE(SOCK|FIFO|BLK|CHR) being a regular-file STAND-IN — a deliberate choice (mknod needs root and a CSI export must not let callers dereference host devices) — and by a separate pre-existing bug returning EIO on paths near PATH_MAX. Neither is an authorization gap; do not read the total as one."
+  }
 }

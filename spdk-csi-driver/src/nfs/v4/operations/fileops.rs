@@ -2578,9 +2578,27 @@ impl FileOperationHandler {
                         return SetAttrRes { status: st, attrsset: vec![] };
                     }
                 }
+                // Times split into two rules, and POSIX really does
+                // distinguish them:
+                //   UTIME_NOW  (SetTime::ServerTime) — write OR owner
+                //   explicit   (SetTime::ClientTime) — OWNER only, EPERM
+                // Treating both as owner-or-write let a mere write-permission
+                // holder stamp arbitrary timestamps on someone else's file
+                // (utimensat/07.t, 6 assertions). Treating both as
+                // owner-only denied `utimensat UTIME_NOW` by a writer.
+                let sets_explicit_time = matches!(decoded.atime, Some(SetTime::ClientTime { .. }))
+                    || matches!(decoded.mtime, Some(SetTime::ClientTime { .. }));
+                if sets_explicit_time {
+                    if let Err(st) = authz::check_chmod(cred.as_ref(), &md, &path) {
+                        return SetAttrRes { status: st, attrsset: vec![] };
+                    }
+                }
                 if decoded.size.is_some() || decoded.atime.is_some() || decoded.mtime.is_some() {
+                    // owner-OR-write — see `check_owner_or_write`.
+                    // Requiring plain write denied `ftruncate` on a
+                    // mode-0000 file the caller had just created.
                     if let Err(st) =
-                        authz::check(cred.as_ref(), &md, authz::W, "SETATTR", &path)
+                        authz::check_owner_or_write(cred.as_ref(), &md, "SETATTR", &path)
                     {
                         return SetAttrRes { status: st, attrsset: vec![] };
                     }
@@ -3184,6 +3202,28 @@ impl FileOperationHandler {
         } else {
             (parent_path.join(&op.objname), None)
         };
+
+        // ── §2A leg A3: the CREATE family ───────────────────────────
+        // mkdir, mkfifo, mknod and symlink all put a NEW NAME into
+        // `parent_path`, so they need write+execute on it — the same
+        // rule REMOVE and LINK use, and the last of the 14 remaining
+        // authorization assertions pjdfstest flags (mkdir/06, mkfifo/06,
+        // mknod/06, symlink/06 are literally "create in a directory you
+        // may not write, expected EACCES, got 0").
+        {
+            use crate::nfs::v4::authz;
+            if let Ok(pmd) = std::fs::metadata(&parent_path) {
+                if let Err(st) = authz::check(
+                    ctx.cred().as_ref(),
+                    &pmd,
+                    authz::W | authz::X,
+                    "CREATE",
+                    &parent_path,
+                ) {
+                    return CreateRes { status: st, change_info: None, attrset: vec![] };
+                }
+            }
+        }
 
         // A10 admission: refuse new-object creation with NOSPC past
         // the reserve (one relaxed load when the tier is off).

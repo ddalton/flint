@@ -278,6 +278,55 @@ pub fn check_chown(
     }
 }
 
+/// SETATTR size/times rule: **owner OR write**, not write alone.
+///
+/// Two pjdfstest assertions caught the naive version denying operations
+/// that must succeed:
+///
+///   * `open F O_CREAT,O_RDWR 0 : ftruncate 0 0` — a file created mode
+///     `0000` by its own owner. POSIX checks permission at OPEN and the
+///     descriptor stays valid; NFSv4 sends the truncate as a separate
+///     SETATTR, by which time the mode bits say no to everyone.
+///   * `utimensat ... UTIME_NOW` — POSIX allows the OWNER to touch
+///     timestamps without write permission.
+///
+/// Requiring plain write turned both into NFS4ERR_ACCESS. Getting this
+/// wrong is how a security fix becomes an availability incident, which
+/// is exactly what `Mode::Warn` exists to surface before it ships.
+pub fn check_owner_or_write(
+    cred: Option<&Cred>,
+    md: &std::fs::Metadata,
+    what: &str,
+    path: &std::path::Path,
+) -> Result<(), Nfs4Status> {
+    let m = mode();
+    if m == Mode::Off {
+        return Ok(());
+    }
+    let Some(cred) = cred else { return Ok(()) };
+    #[cfg(unix)]
+    {
+        let (fuid, fgid, bits) = ident_of(md);
+        if cred.is_root() || cred.uid == fuid || permits(cred, fuid, fgid, bits, W) {
+            return Ok(());
+        }
+        match m {
+            Mode::Enforce => {
+                warn!("DENIED {what} on {:?} for uid={} (file {}:{} mode {:o})",
+                      path, cred.uid, fuid, fgid, bits);
+                Err(Nfs4Status::Access)
+            }
+            _ => {
+                warn!("WOULD DENY {what} on {:?} for uid={} — {ENV} not enforcing.",
+                      path, cred.uid);
+                Ok(())
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    { let _ = (cred, md, what, path); Ok(()) }
+}
+
 /// Mode-change rule (SETATTR mode): owner or root only.
 pub fn check_chmod(
     cred: Option<&Cred>,
