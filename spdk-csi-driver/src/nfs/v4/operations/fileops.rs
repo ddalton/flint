@@ -2496,6 +2496,167 @@ impl FileOperationHandler {
     }
 
     /// Handle READDIR operation
+    /// Enumerate directory names starting immediately AFTER `cookie`,
+    /// using the filesystem's OWN directory offsets as NFS cookies.
+    ///
+    /// This is the technique knfsd uses, and it is what makes a cookie
+    /// mean "this entry" instead of "the Nth slot of whatever ordering
+    /// this call happened to produce". `telldir` is taken *after* each
+    /// entry, which is exactly NFSv4 cookie semantics: a later READDIR
+    /// carrying that cookie resumes with the following entry.
+    ///
+    /// It replaces a design that re-enumerated and re-`stat`ed the ENTIRE
+    /// directory on every call and then discarded everything before a
+    /// positional index — O(entries) syscalls per call, so O(entries²)
+    /// per full listing, and silently wrong the moment the directory
+    /// changed underneath an outstanding cookie.
+    ///
+    /// `.` and `..` are skipped, preserving the previous behaviour
+    /// (`tokio::fs::read_dir` never yielded them and NFSv4 clients
+    /// synthesise them).
+    ///
+    /// Returns the batch plus whether the directory stream was exhausted.
+    ///
+    /// # Why this is Linux-only
+    ///
+    /// The technique requires `telldir` offsets to stay valid across
+    /// *separate* `opendir` calls, which POSIX does not promise. Measured
+    /// 2026-08-23: on Linux/ext4 a cookie taken after the 3rd entry
+    /// (`2027179489069696846`) re-opens and seeks back to exactly the
+    /// right entry; on macOS/APFS the same sequence yields cookie `0`
+    /// and seeks back to `.`. Using it there would page forever over the
+    /// same entries. Non-Linux therefore keeps the positional
+    /// enumerator below, paired with a fine-grained `cookieverf` so a
+    /// concurrent mutation is *detected* (NFS4ERR_NOT_SAME → the client
+    /// restarts) rather than silently skipping entries. Both platforms
+    /// are correct; only Linux is also O(1)-resume.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn read_dir_from_cookie(
+        dir: &Path,
+        cookie: u64,
+        max_names: usize,
+    ) -> std::io::Result<(Vec<(String, u64)>, bool)> {
+        use std::ffi::{CStr, CString};
+        use std::os::unix::ffi::OsStrExt;
+
+        let c_path = CString::new(dir.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has NUL"))?;
+
+        // RAII so the stream is closed on EVERY exit path — early return,
+        // `?`, or panic. `nix` would have given this for free, but its
+        // `dir` module exposes only ino/name/file_type and no
+        // telldir/seekdir, so it cannot express a stable cookie at all.
+        struct DirStream(*mut libc::DIR);
+        impl Drop for DirStream {
+            fn drop(&mut self) {
+                // SAFETY: constructed only from a non-null opendir result
+                // and never closed elsewhere.
+                unsafe { libc::closedir(self.0) };
+            }
+        }
+
+        // SAFETY: `c_path` is a valid NUL-terminated path for the duration
+        // of the call.
+        let raw = unsafe { libc::opendir(c_path.as_ptr()) };
+        if raw.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let stream = DirStream(raw);
+        let dirp = stream.0;
+
+        // `cookie == 0` means "from the beginning" (RFC 8881 §18.23.3),
+        // which is where a freshly-opened stream already sits.
+        if cookie != 0 {
+            // SAFETY: dirp is a live DIR* from opendir above.
+            unsafe { libc::seekdir(dirp, cookie as libc::c_long) };
+        }
+
+        let mut out = Vec::new();
+        let mut eof = false;
+        loop {
+            if out.len() >= max_names {
+                break;
+            }
+            // readdir(3) returns NULL for BOTH end-of-stream and error,
+            // distinguishing them only by errno, so clear it first. The
+            // accessor is libc-specific: glibc/musl expose
+            // `__errno_location`, the BSDs (macOS) expose `__error`.
+            // Getting this wrong would make a real I/O error read as a
+            // clean end-of-directory — a truncated listing reported as
+            // complete, which is the very class of bug being fixed here.
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            unsafe {
+                *libc::__errno_location() = 0
+            };
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            unsafe {
+                *libc::__error() = 0
+            };
+            // SAFETY: dirp is live; the returned entry is owned by the
+            // stream and is only read before the next readdir call.
+            let ent = unsafe { libc::readdir(dirp) };
+            if ent.is_null() {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error().unwrap_or(0) != 0 {
+                    return Err(err);
+                }
+                eof = true;
+                break;
+            }
+            // SAFETY: `ent` is non-null and points at a valid dirent.
+            let name_bytes = unsafe { CStr::from_ptr((*ent).d_name.as_ptr()) }.to_bytes();
+            // The cookie for THIS entry is the stream position after it.
+            // SAFETY: dirp is live.
+            let next = unsafe { libc::telldir(dirp) } as u64;
+
+            if name_bytes == b"." || name_bytes == b".." {
+                continue;
+            }
+            // Cookie 0 is reserved to mean "start of directory", so an
+            // entry can never be handed out with it. This should not
+            // occur (telldir after a successful readdir is past the
+            // first entry), but handing it out would make the client
+            // restart the listing forever.
+            if next == 0 {
+                continue;
+            }
+            out.push((String::from_utf8_lossy(name_bytes).into_owned(), next));
+        }
+
+        drop(stream);
+        Ok((out, eof))
+    }
+
+    /// Non-Linux fallback: positional cookies over a full enumeration.
+    ///
+    /// Same signature as the Linux enumerator so the handler has exactly
+    /// one code path. Cookies here are 1-based positions, which shift if
+    /// the directory changes — so correctness depends on the
+    /// `cookieverf` refusing a stale resume, and that verifier is
+    /// nanosecond-granular for precisely this reason. Dev/test only;
+    /// flint-lite ships on Linux.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    fn read_dir_from_cookie(
+        dir: &Path,
+        cookie: u64,
+        max_names: usize,
+    ) -> std::io::Result<(Vec<(String, u64)>, bool)> {
+        let mut all = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            all.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        let start = cookie as usize;
+        let mut out = Vec::new();
+        for (idx, name) in all.iter().enumerate().skip(start) {
+            if out.len() >= max_names {
+                return Ok((out, false));
+            }
+            out.push((name.clone(), (idx + 1) as u64));
+        }
+        Ok((out, true))
+    }
+
     pub async fn handle_readdir(
         &self,
         op: ReadDirOp,
@@ -2642,10 +2803,19 @@ impl FileOperationHandler {
         // This allows clients to detect if directory changed between READDIR calls
         let current_cookieverf = match dir_metadata.modified() {
             Ok(mtime) => {
-                // Convert SystemTime to u64 (seconds since UNIX_EPOCH)
+                // NANOSECONDS, not seconds. At second granularity any
+                // mutation landing in the same wall-clock second as the
+                // previous READDIR left the verifier unchanged, so the
+                // server confirmed "directory unchanged" while positional
+                // cookies had already shifted — and a file that existed
+                // for the whole listing was silently omitted from an
+                // NFS4_OK reply (pinned by
+                // `readdir_does_not_skip_entries_when_dir_changes_in_one_second`).
+                // Sub-second churn is the normal case for the fleet
+                // workload, not an edge case.
                 mtime.duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or(std::time::Duration::from_secs(0))
-                    .as_secs()
+                    .as_nanos() as u64
             }
             Err(_) => {
                 // Fallback if mtime not available (shouldn't happen on Unix)
@@ -2670,11 +2840,26 @@ impl FileOperationHandler {
             debug!("READDIR: cookieverf validated successfully");
         }
 
-        // Open the directory
-        let mut dir_stream = match tokio::fs::read_dir(&dir_path).await {
-            Ok(d) => d,
-            Err(e) => {
-                warn!("READDIR: Failed to open directory: {}", e);
+        // Enumerate from the client's cookie using the filesystem's own
+        // directory offsets. Only the entries we may actually return get
+        // fetched, and only those get `stat`ed — the old path walked and
+        // stat'ed the whole directory on every single call.
+        //
+        // The batch cap bounds one call's work; `maxcount`/`dircount`
+        // below usually stop us well before it. A batch that ends without
+        // `eof` simply means the next READDIR resumes at the last cookie.
+        const READDIR_BATCH: usize = 1024;
+        let scan_dir = dir_path.clone();
+        let scan_cookie = op.cookie;
+        let scanned = tokio::task::spawn_blocking(move || {
+            Self::read_dir_from_cookie(&scan_dir, scan_cookie, READDIR_BATCH)
+        })
+        .await;
+
+        let (names, stream_eof) = match scanned {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                warn!("READDIR: Failed to read directory: {}", e);
                 let status = if e.kind() == std::io::ErrorKind::NotFound {
                     Nfs4Status::NoEnt
                 } else if e.kind() == std::io::ErrorKind::PermissionDenied {
@@ -2682,8 +2867,12 @@ impl FileOperationHandler {
                 } else {
                     Nfs4Status::Io
                 };
+                return ReadDirRes { status, cookieverf: 0, entries: vec![], eof: true };
+            }
+            Err(e) => {
+                warn!("READDIR: directory scan task failed: {}", e);
                 return ReadDirRes {
-                    status,
+                    status: Nfs4Status::Io,
                     cookieverf: 0,
                     entries: vec![],
                     eof: true,
@@ -2691,40 +2880,29 @@ impl FileOperationHandler {
             }
         };
 
-        // Collect all directory entries first (needed for cookie handling)
-        let mut all_entries = Vec::new();
-        while let Ok(Some(entry)) = dir_stream.next_entry().await {
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            let entry_path = entry.path();
+        debug!("READDIR: scanned {} entries from cookie {} (stream_eof={})",
+               names.len(), op.cookie, stream_eof);
 
-            // Get metadata for this entry
+        // Stat only what we scanned. An entry that vanishes between the
+        // scan and the stat is dropped from THIS reply, exactly as before
+        // — but it no longer shifts anyone else's cookie, because cookies
+        // come from the directory stream rather than from this vector's
+        // indices.
+        let mut all_entries = Vec::with_capacity(names.len());
+        for (file_name, entry_cookie) in names {
+            let entry_path = dir_path.join(&file_name);
             let mut snapshot = match AttributeSnapshot::from_path(&entry_path).await {
                 Ok(s) => s,
                 Err(e) => {
                     debug!("READDIR: Failed to stat '{}': {}, skipping", file_name, e);
-                    continue; // Skip entries we can't stat
+                    continue;
                 }
             };
-
             // Same correction as GETATTR: a READDIR carrying attributes
             // must not report a striped file as fully unallocated either.
             self.correct_space_used(&mut snapshot);
-
-            all_entries.push((file_name, snapshot));
+            all_entries.push((file_name, entry_cookie, snapshot));
         }
-
-        debug!("READDIR: Found {} entries in directory", all_entries.len());
-
-        // Handle cookie-based pagination
-        // cookie=0 means start from beginning
-        // cookie>0 means resume from that position (1-indexed)
-        let start_idx = if op.cookie == 0 {
-            0
-        } else {
-            // Cookie is 1-indexed position of NEXT entry to return
-            // So cookie=3 means we already returned entries 1,2 and should start at 3
-            op.cookie as usize
-        };
 
         // Build response entries with attribute encoding
         let mut response_entries = Vec::new();
@@ -2736,14 +2914,11 @@ impl FileOperationHandler {
         const BASE_RESPONSE_SIZE: usize = 20;
         let maxcount_limit = op.maxcount.saturating_sub(BASE_RESPONSE_SIZE as u32) as usize;
 
-        for (idx, (file_name, snapshot)) in all_entries.iter().enumerate() {
-            // Skip entries before our start position
-            if idx < start_idx {
-                continue;
-            }
-
-            // Calculate cookie for this entry (1-indexed position of NEXT entry)
-            let cookie = (idx + 1) as u64;
+        for (file_name, entry_cookie, snapshot) in all_entries.iter() {
+            // The cookie is the directory stream's own offset past this
+            // entry — stable across calls and across mutation elsewhere
+            // in the directory.
+            let cookie = *entry_cookie;
 
             // Encode attributes based on client's request
             let (attr_vals, supported_bitmap) = encode_attributes_from_snapshot(
@@ -2815,8 +2990,10 @@ impl FileOperationHandler {
             dir_bytes_used += dir_bytes_contribution;
         }
 
-        // Determine if we've reached EOF
-        let eof = start_idx + response_entries.len() >= all_entries.len();
+        // EOF only when the directory stream itself was exhausted AND we
+        // encoded everything we scanned. If a size limit cut the batch
+        // short, the client resumes from the last entry's cookie.
+        let eof = stream_eof && response_entries.len() == all_entries.len();
 
         debug!("READDIR: Returning {} entries, eof={}, total_bytes={}",
                response_entries.len(), eof, total_bytes);
@@ -3698,6 +3875,178 @@ mod tests {
             "grow must dirty the zero-filled gap"
         );
         assert_eq!(cap.min_size, Some(500), "the watermark survives the regrow");
+    }
+
+    /// READDIR pagination must not drop entries when the directory is
+    /// mutated between calls **within the same wall-clock second**.
+    ///
+    /// The shipped design made this unreachable-to-detect: the cookie was
+    /// a positional index into a fresh re-enumeration, and `cookieverf`
+    /// was `mtime.as_secs()`. A delete before the client's resume point
+    /// shifts every later index down by one, while a second-granularity
+    /// verifier still says "unchanged" — so the server resumes at a stale
+    /// index and an entry is skipped with NFS4_OK and no error anywhere.
+    /// A listing of a busy directory silently returns fewer files than it
+    /// contains, which reads to an application as "the file isn't there".
+    ///
+    /// The directory mtime is pinned to a fixed value across the mutation
+    /// so the same-second collision is deterministic rather than a race.
+    #[tokio::test]
+    async fn readdir_does_not_skip_entries_when_dir_changes_in_one_second() {
+        use filetime::{set_file_mtime, FileTime};
+
+        let (handler, temp) = create_test_handler();
+        let dir = temp.path();
+        for i in 0..60 {
+            std::fs::write(dir.join(format!("f{i:02}")), b"x").unwrap();
+        }
+        // Pin mtime so both calls compute an identical second-granularity
+        // cookieverf no matter how fast the test runs.
+        let pinned = FileTime::from_unix_time(1_700_000_000, 0);
+        set_file_mtime(dir, pinned).unwrap();
+
+        let mut ctx = CompoundContext::new(0);
+        handler.handle_putrootfh(PutRootFhOp, &mut ctx);
+
+        // First page: ask for a small maxcount so the server must paginate.
+        let first = handler
+            .handle_readdir(
+                ReadDirOp {
+                    cookie: 0,
+                    cookieverf: 0,
+                    dircount: 256,
+                    maxcount: 256,
+                    attr_request: vec![],
+                },
+                &ctx,
+            )
+            .await;
+        assert_eq!(first.status, Nfs4Status::Ok);
+        assert!(!first.entries.is_empty(), "first page must return entries");
+        assert!(!first.eof, "test needs a directory that spans >1 READDIR");
+
+        let resume = first.entries.last().unwrap().cookie;
+        let mut seen: Vec<String> = first.entries.iter().map(|e| e.name.clone()).collect();
+
+        // Mutate: remove an entry the client has ALREADY been given. This
+        // shifts the index space under the outstanding cookie.
+        std::fs::remove_file(dir.join(&seen[0])).unwrap();
+        // Same wall-clock SECOND, different nanoseconds — exactly what a
+        // real mutation looks like. The shipped verifier truncated to
+        // seconds and so could not tell this apart from "unchanged".
+        set_file_mtime(dir, FileTime::from_unix_time(1_700_000_000, 500_000_000)).unwrap();
+
+        // Resume with the cookie and verifier the server just handed out.
+        let second = handler
+            .handle_readdir(
+                ReadDirOp {
+                    cookie: resume,
+                    cookieverf: first.cookieverf,
+                    dircount: 65536,
+                    maxcount: 65536,
+                    attr_request: vec![],
+                },
+                &ctx,
+            )
+            .await;
+
+        // Either answer is legal: finish the listing correctly, or refuse
+        // with NFS4ERR_NOT_SAME so the client restarts. What is NOT legal
+        // is answering OK while silently omitting a file that was present
+        // the whole time.
+        if second.status == Nfs4Status::NotSame {
+            return; // correct: the client will restart the listing
+        }
+        assert_eq!(second.status, Nfs4Status::Ok);
+        seen.extend(second.entries.iter().map(|e| e.name.clone()));
+
+        let survivors: std::collections::HashSet<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        let seen_set: std::collections::HashSet<String> = seen.iter().cloned().collect();
+        let missed: Vec<&String> = survivors.difference(&seen_set).collect();
+        assert!(
+            missed.is_empty(),
+            "READDIR answered OK but silently skipped {} file(s) that existed \
+             for the whole listing: {:?} (returned {} names for {} survivors)",
+            missed.len(),
+            missed,
+            seen_set.len(),
+            survivors.len()
+        );
+        // Duplicates matter as much as omissions, and this assert exists
+        // because its absence let a real regression through: an earlier
+        // cut of the stable-cookie work paged forever over the same
+        // entries on a platform whose cookies do not survive re-open, and
+        // a skip-only oracle called that a pass.
+        assert_eq!(
+            seen.len(),
+            seen_set.len(),
+            "READDIR returned duplicate entries across pages: {} names, {} unique",
+            seen.len(),
+            seen_set.len()
+        );
+    }
+
+    /// A full paginated listing must TERMINATE and visit each entry
+    /// exactly once, with no mutation involved at all.
+    ///
+    /// This is the plain-vanilla property; it is separated from the
+    /// mutation test above because a cookie scheme can satisfy one and
+    /// not the other. A cookie that does not advance loops here while
+    /// skipping nothing.
+    #[tokio::test]
+    async fn readdir_pagination_terminates_and_visits_each_entry_once() {
+        let (handler, temp) = create_test_handler();
+        let dir = temp.path();
+        for i in 0..40 {
+            std::fs::write(dir.join(format!("p{i:02}")), b"x").unwrap();
+        }
+        let mut ctx = CompoundContext::new(0);
+        handler.handle_putrootfh(PutRootFhOp, &mut ctx);
+
+        let mut seen: Vec<String> = Vec::new();
+        let mut cookie = 0u64;
+        let mut verf = 0u64;
+        // A correct listing needs a handful of pages; the cap is a
+        // loop-breaker so a non-advancing cookie fails loudly instead of
+        // hanging the suite.
+        let mut pages = 0;
+        loop {
+            pages += 1;
+            assert!(pages <= 50, "pagination did not terminate after 50 pages — \
+                    cookie is not advancing (saw {} names)", seen.len());
+            let res = handler
+                .handle_readdir(
+                    ReadDirOp {
+                        cookie,
+                        cookieverf: verf,
+                        dircount: 256,
+                        maxcount: 256,
+                        attr_request: vec![],
+                    },
+                    &ctx,
+                )
+                .await;
+            assert_eq!(res.status, Nfs4Status::Ok, "page {pages} failed");
+            assert!(
+                !res.entries.is_empty() || res.eof,
+                "a non-eof page returned zero entries — the client would spin"
+            );
+            seen.extend(res.entries.iter().map(|e| e.name.clone()));
+            if res.eof {
+                break;
+            }
+            cookie = res.entries.last().unwrap().cookie;
+            verf = res.cookieverf;
+        }
+
+        let unique: std::collections::HashSet<&String> = seen.iter().collect();
+        assert_eq!(unique.len(), 40, "every entry exactly once; got {} unique", unique.len());
+        assert_eq!(seen.len(), 40, "no entry repeated across pages; got {}", seen.len());
+        assert!(pages > 1, "test needs a listing that actually paginates");
     }
 
     fn create_test_handler() -> (FileOperationHandler, TempDir) {
