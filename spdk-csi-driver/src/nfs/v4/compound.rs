@@ -799,6 +799,10 @@ pub struct CompoundContext {
     /// backing object so ownership round-trips for permission-sensitive
     /// workloads; GETATTR already reports the backing uid/gid.
     pub unix_cred: Option<(u32, u32)>,
+    /// Supplementary groups from the AUTH_SYS credential. Separate from
+    /// `unix_cred` so the two chown-stamp call sites keep their simple
+    /// tuple; permission checking builds a full `authz::Cred` from both.
+    pub unix_gids: Vec<u32>,
     /// "Current stateid" within this COMPOUND (RFC 8881 §16.2.3.1.2).
     /// Updated after every state-changing op (OPEN, LOCK, LOCKU,
     /// OPEN_DOWNGRADE). When a subsequent op carries the magic sentinel
@@ -830,6 +834,17 @@ pub const CURRENT_STATEID_SENTINEL: StateId = StateId {
 };
 
 impl CompoundContext {
+    /// The caller's AUTH_SYS identity as a permission-checking
+    /// credential, or `None` when there is no uid to evaluate
+    /// (AUTH_NONE, RPCSEC_GSS, or the hub's own in-process file API).
+    pub fn cred(&self) -> Option<crate::nfs::v4::authz::Cred> {
+        self.unix_cred.map(|(uid, gid)| crate::nfs::v4::authz::Cred {
+            uid,
+            gid,
+            gids: self.unix_gids.clone(),
+        })
+    }
+
     pub fn new(minor_version: u32) -> Self {
         Self {
             current_fh: None,
@@ -841,6 +856,7 @@ impl CompoundContext {
             cache_slot: None,
             principal: Vec::new(),
             unix_cred: None,
+            unix_gids: Vec::new(),
             current_stateid: None,
             back_channel: None,
         }
@@ -2044,16 +2060,36 @@ fn encode_lock_denied(
     }
 }
 
+/// The flavors SECINFO advertises, in PREFERENCE ORDER.
+///
+/// ⚠ THE ORDER IS THE SECURITY POLICY. A client picks the first entry it
+/// supports, so whatever is listed first is what the mount will actually
+/// use. AUTH_NONE was listed FIRST, and the consequence was measured
+/// 2026-08-24: a stock `mount -t nfs -o vers=4.1` against flint
+/// negotiated **`sec=null`**, confirmed in `/proc/mounts`. Every
+/// operation then arrives with NO credential — no uid, no gid, nothing —
+/// so the server cannot evaluate permissions even in principle, and
+/// `ctx.unix_cred` is `None` for the whole mount.
+///
+/// That is the floor under the whole authorization gap: it is not merely
+/// that ACCESS did not check, it is that there was nothing to check
+/// against. It also silently defeats the chown-the-caller stamp, since
+/// there is no caller identity to stamp.
+///
+/// AUTH_SYS therefore goes first, matching knfsd (whose default export
+/// is `sec=sys`). AUTH_NONE is kept, LAST, so a client that genuinely
+/// has nothing else still works — but no client that can do better will
+/// choose it.
 fn encode_secinfo_flavors(encoder: &mut XdrEncoder) {
-    encoder.encode_u32(3); // 3 flavors
-    encoder.encode_u32(0); // AUTH_NONE
-    encoder.encode_u32(1); // AUTH_SYS
+    encoder.encode_u32(3); // 3 flavors, in preference order
+    encoder.encode_u32(1); // AUTH_SYS   — first: carries a uid to check
     encoder.encode_u32(6); // RPCSEC_GSS
     // Kerberos V5 OID (1.2.840.113554.1.2.2)
     let krb5_oid = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
     encoder.encode_opaque(&krb5_oid);
     encoder.encode_u32(0); // QOP
     encoder.encode_u32(1); // service = rpc_gss_svc_none
+    encoder.encode_u32(0); // AUTH_NONE — LAST, see the note above
 }
 
 impl CompoundResponse {
@@ -3364,15 +3400,31 @@ mod tests {
     #[test]
     fn test_secinfo_encoded_response_carries_three_flavors() {
         // Both SECINFO and SECINFO_NO_NAME share the same success
-        // body: array<secinfo4>. We always advertise AUTH_NONE,
-        // AUTH_SYS, RPCSEC_GSS(Kerberos V5).
+        // body: array<secinfo4>.
+        //
+        // ⚠ THE ORDER IS THE ASSERTION. A client takes the FIRST flavor
+        // it supports, so whichever is listed first is what every mount
+        // actually uses. This test previously pinned AUTH_NONE first and
+        // passed happily while a stock `mount -t nfs -o vers=4.1`
+        // negotiated `sec=null` — every operation arriving with no uid,
+        // no gid and no identity of any kind, which no amount of
+        // permission checking can recover from. Measured and confirmed
+        // in /proc/mounts, 2026-08-24.
+        //
+        // AUTH_SYS must come FIRST (matching knfsd, whose default export
+        // is sec=sys). AUTH_NONE stays LAST so a client with nothing
+        // else still works, and no client that can do better picks it.
         let mut encoder = XdrEncoder::new();
         encode_secinfo_flavors(&mut encoder);
         let mut d = XdrDecoder::new(encoder.finish());
         assert_eq!(d.decode_u32().unwrap(), 3, "3 flavors");
-        assert_eq!(d.decode_u32().unwrap(), 0, "AUTH_NONE");
-        assert_eq!(d.decode_u32().unwrap(), 1, "AUTH_SYS");
-        assert_eq!(d.decode_u32().unwrap(), 6, "RPCSEC_GSS");
+        assert_eq!(
+            d.decode_u32().unwrap(),
+            1,
+            "AUTH_SYS MUST be advertised first — it is the first flavor a client will \
+             take, and it is the only one of the three that carries a uid to check"
+        );
+        assert_eq!(d.decode_u32().unwrap(), 6, "RPCSEC_GSS second");
         let oid = d.decode_opaque().unwrap();
         assert_eq!(
             oid.as_ref(),
@@ -3381,6 +3433,12 @@ mod tests {
         );
         assert_eq!(d.decode_u32().unwrap(), 0, "QOP");
         assert_eq!(d.decode_u32().unwrap(), 1, "service=rpc_gss_svc_none");
+        assert_eq!(
+            d.decode_u32().unwrap(),
+            0,
+            "AUTH_NONE must be LAST — advertising it first is how this server spent its \
+             whole life negotiating sec=null"
+        );
     }
 
     #[test]

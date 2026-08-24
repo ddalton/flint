@@ -2254,18 +2254,84 @@ impl FileOperationHandler {
             }
         };
 
-        let supported = ACCESS4_READ | ACCESS4_LOOKUP | ACCESS4_MODIFY |
-                       ACCESS4_EXTEND | ACCESS4_DELETE | ACCESS4_EXECUTE;
-        let mut granted = op.access & supported;
+        // ── §2A leg A2: ACCESS used to be a mirror ──────────────────
+        //
+        // This was `supported = 0x3f; granted = op.access & supported`,
+        // plus an unconditional EXECUTE for directories. It returned
+        // whatever the client asked for and never consulted the caller,
+        // the owner or the mode. RFC 8881 §18.1 defines ACCESS as the
+        // rights "that a user, as identified by the credentials in the
+        // request, has" — so the answer has to depend on the request's
+        // credentials, which this now does.
+        //
+        // Two separate corrections:
+        //
+        // 1. `supported` is the subset of the REQUESTED bits that are
+        //    meaningful for this object type, not a fixed 0x3f. RFC 8881
+        //    makes `supported` the bits the server could evaluate, and
+        //    pynfs 4.0's st_access asserts `supported ⊆ requested` —
+        //    which the old literal violated for every mask but 0x3f.
+        //    LOOKUP and DELETE are meaningless on a regular file;
+        //    EXECUTE is meaningless on a directory (where traversal is
+        //    LOOKUP). Reporting them was the "not meaningful bits"
+        //    failure in the same suite.
+        //
+        // 2. `granted` is what the mode bits actually permit this
+        //    caller. The unconditional directory EXECUTE is gone: it
+        //    granted traversal of a 0700 directory to everyone.
+        let metadata = tokio::fs::metadata(&path).await.ok();
+        let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
 
-        // CRITICAL: Directories always need EXECUTE permission for VFS traversal
-        // Even if client doesn't request it, VFS will check MAY_EXEC later
-        if let Ok(metadata) = tokio::fs::metadata(&path).await {
-            if metadata.is_dir() {
-                granted |= ACCESS4_EXECUTE;
-                debug!("   → Directory: always granting EXECUTE for VFS traversal");
+        let meaningful = if is_dir {
+            ACCESS4_READ | ACCESS4_LOOKUP | ACCESS4_MODIFY | ACCESS4_EXTEND | ACCESS4_DELETE
+        } else {
+            ACCESS4_READ | ACCESS4_MODIFY | ACCESS4_EXTEND | ACCESS4_EXECUTE
+        };
+        let supported = op.access & meaningful;
+
+        let granted = match (&metadata, ctx.cred()) {
+            (Some(md), cred_opt) => {
+                use crate::nfs::v4::authz;
+                // No credential (AUTH_NONE, GSS, the hub's own file API)
+                // means there is no uid to evaluate, so the honest answer
+                // is the old one — everything the object type supports.
+                match cred_opt {
+                    None => supported,
+                    Some(cred) => {
+                        let (fuid, fgid, bits) = authz::ident_of(md);
+                        let ok = |want: u32| authz::permits(&cred, fuid, fgid, bits, want);
+                        let mut g = 0u32;
+                        if supported & ACCESS4_READ != 0 && ok(authz::R) { g |= ACCESS4_READ; }
+                        if supported & ACCESS4_LOOKUP != 0 && ok(authz::X) { g |= ACCESS4_LOOKUP; }
+                        if supported & ACCESS4_MODIFY != 0 && ok(authz::W) { g |= ACCESS4_MODIFY; }
+                        if supported & ACCESS4_EXTEND != 0 && ok(authz::W) { g |= ACCESS4_EXTEND; }
+                        if supported & ACCESS4_EXECUTE != 0 && ok(authz::X) { g |= ACCESS4_EXECUTE; }
+                        // DELETE is permission on the PARENT, not on the
+                        // object: whether a name can be removed depends on
+                        // write+execute of the directory holding it, and
+                        // on the sticky bit.
+                        if supported & ACCESS4_DELETE != 0 {
+                            let parent_ok = path
+                                .parent()
+                                .and_then(|p| std::fs::metadata(p).ok())
+                                .map(|pmd| {
+                                    let (puid, pgid, pbits) = authz::ident_of(&pmd);
+                                    authz::permits(&cred, puid, pgid, pbits, authz::W | authz::X)
+                                        && authz::sticky_permits(&cred, &pmd, md)
+                                })
+                                .unwrap_or(false);
+                            if parent_ok { g |= ACCESS4_DELETE; }
+                        }
+                        // In Warn mode the server must behave exactly as
+                        // it did before, or enabling the evaluation would
+                        // itself be the behaviour change it exists to
+                        // measure.
+                        if authz::mode() == authz::Mode::Enforce { g } else { supported }
+                    }
+                }
             }
-        }
+            (None, _) => supported,
+        };
 
         debug!("✅ ACCESS on REGULAR FILE/DIR - granting: mask=0x{:02x}", granted);
         debug!("   READ={}, LOOKUP={}, MODIFY={}, EXTEND={}, DELETE={}, EXECUTE={}",
@@ -2483,6 +2549,44 @@ impl FileOperationHandler {
                 return SetAttrRes { status, attrsset: vec![] };
             }
         };
+
+        // ── §2A leg A3: SETATTR authorization ───────────────────────
+        //
+        // chown and chmod do NOT follow the rwx rule and must not be
+        // checked with it: POSIX makes changing a file's uid root-only,
+        // lets the owner change the gid only to a group they belong to,
+        // and restricts the mode to the owner. Write permission on the
+        // file is irrelevant to all three. Their absence is 217 of the
+        // 645 pjdfstest assertions flint fails and knfsd passes — and
+        // "any client may chown any file to anyone" is a
+        // privilege-escalation primitive, not merely a conformance gap.
+        //
+        // Size and times take the ordinary write check.
+        {
+            use crate::nfs::v4::authz;
+            let cred = ctx.cred();
+            if let Ok(md) = std::fs::symlink_metadata(&path) {
+                if decoded.owner.is_some() || decoded.owner_group.is_some() {
+                    if let Err(st) = authz::check_chown(
+                        cred.as_ref(), &md, decoded.owner, decoded.owner_group, &path,
+                    ) {
+                        return SetAttrRes { status: st, attrsset: vec![] };
+                    }
+                }
+                if decoded.mode.is_some() {
+                    if let Err(st) = authz::check_chmod(cred.as_ref(), &md, &path) {
+                        return SetAttrRes { status: st, attrsset: vec![] };
+                    }
+                }
+                if decoded.size.is_some() || decoded.atime.is_some() || decoded.mtime.is_some() {
+                    if let Err(st) =
+                        authz::check(cred.as_ref(), &md, authz::W, "SETATTR", &path)
+                    {
+                        return SetAttrRes { status: st, attrsset: vec![] };
+                    }
+                }
+            }
+        }
 
         let (applied, err) = apply_settable_attrs_offloaded(path.clone(), decoded).await;
         debug!("SETATTR: applied attrs {:?} on {:?} (err={:?})", applied, path, err);
@@ -3379,6 +3483,39 @@ impl FileOperationHandler {
                         use std::os::unix::fs::MetadataExt;
                         (metadata.dev(), metadata.ino())
                     });
+                // ── §2A leg A3 ──────────────────────────────────────
+                // Removing a NAME is permission on the directory that
+                // holds it, not on the object: write+execute on the
+                // parent. And in a sticky directory (the 1777 /tmp
+                // shape) that is still not enough — only the file's
+                // owner, the directory's owner, or root may unlink,
+                // which is the whole point of the sticky bit.
+                {
+                    use crate::nfs::v4::authz;
+                    let cred = ctx.cred();
+                    if let Ok(pmd) = std::fs::metadata(&parent_path) {
+                        if let Err(st) = authz::check(
+                            cred.as_ref(), &pmd, authz::W | authz::X, "REMOVE", &parent_path,
+                        ) {
+                            return RemoveRes { status: st, change_info: None };
+                        }
+                        if let Some(c) = cred.as_ref() {
+                            if authz::mode() == authz::Mode::Enforce
+                                && !authz::sticky_permits(c, &pmd, &metadata)
+                            {
+                                warn!(
+                                    "DENIED REMOVE of {:?}: sticky directory, and uid {} owns \
+                                     neither the file nor the directory",
+                                    target_path, c.uid
+                                );
+                                return RemoveRes {
+                                    status: Nfs4Status::Access,
+                                    change_info: None,
+                                };
+                            }
+                        }
+                    }
+                }
                 let result = if metadata.is_dir() {
                     tokio::fs::remove_dir(&target_path).await
                 } else {
@@ -3593,6 +3730,43 @@ impl FileOperationHandler {
         }
 
         // Perform the rename.
+        // ── §2A leg A3 ──────────────────────────────────────────────
+        // A rename removes a name from one directory and creates one in
+        // another, so it needs write+execute on BOTH — and the sticky
+        // rule on the source, for the same reason REMOVE does.
+        {
+            use crate::nfs::v4::authz;
+            let cred = ctx.cred();
+            for (dir, what) in [
+                (source_path.parent(), "RENAME(source)"),
+                (dest_path.parent(), "RENAME(target)"),
+            ] {
+                if let Some(d) = dir {
+                    if let Ok(dmd) = std::fs::metadata(d) {
+                        if let Err(st) =
+                            authz::check(cred.as_ref(), &dmd, authz::W | authz::X, what, d)
+                        {
+                            return rename_err(st);
+                        }
+                    }
+                }
+            }
+            if let (Some(c), Some(sp), Ok(vmd)) = (
+                cred.as_ref(),
+                source_path.parent(),
+                std::fs::symlink_metadata(&source_path),
+            ) {
+                if let Ok(pmd) = std::fs::metadata(sp) {
+                    if authz::mode() == authz::Mode::Enforce
+                        && !authz::sticky_permits(c, &pmd, &vmd)
+                    {
+                        warn!("DENIED RENAME of {:?}: sticky source directory", source_path);
+                        return rename_err(Nfs4Status::Access);
+                    }
+                }
+            }
+        }
+
         match tokio::fs::rename(&source_path, &dest_path).await {
             Ok(_) => {
                 // Blocker 2: a rename mutates TWO parents, and both must
@@ -3735,6 +3909,22 @@ impl FileOperationHandler {
 
         // Build path for new link
         let link_path = target_dir_path.join(&op.newname);
+
+        // ── §2A leg A3: the new name lands in target_dir_path ───────
+        {
+            use crate::nfs::v4::authz;
+            if let Ok(dmd) = std::fs::metadata(&target_dir_path) {
+                if let Err(st) = authz::check(
+                    ctx.cred().as_ref(),
+                    &dmd,
+                    authz::W | authz::X,
+                    "LINK",
+                    &target_dir_path,
+                ) {
+                    return LinkRes { status: st, change_info: None };
+                }
+            }
+        }
 
         // Create hard link
         match tokio::fs::hard_link(&file_path, &link_path).await {

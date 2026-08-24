@@ -106,6 +106,35 @@ impl Auth {
         Some((uid, gid))
     }
 
+    /// The caller's SUPPLEMENTARY groups (`authsys_parms.gids<16>`).
+    ///
+    /// These were decoded and discarded until permission checking
+    /// existed, at which point they stop being cosmetic: a user whose
+    /// access to a file comes from a supplementary group is WRONGLY
+    /// DENIED without them, which turns a security fix into an
+    /// availability bug. RFC 5531 caps the array at 16; anything longer
+    /// is a malformed frame and is truncated rather than trusted.
+    pub fn unix_gids(&self) -> Vec<u32> {
+        if self.flavor != AuthFlavor::Unix {
+            return Vec::new();
+        }
+        let mut dec = XdrDecoder::new(self.body.clone());
+        if dec.decode_u32().is_err() { return Vec::new(); }          // stamp
+        if dec.decode_opaque().is_err() { return Vec::new(); }       // machinename
+        if dec.decode_u32().is_err() { return Vec::new(); }          // uid
+        if dec.decode_u32().is_err() { return Vec::new(); }          // gid
+        let Ok(n) = dec.decode_u32() else { return Vec::new() };
+        let n = (n as usize).min(16);
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            match dec.decode_u32() {
+                Ok(g) => out.push(g),
+                Err(_) => break,
+            }
+        }
+        out
+    }
+
     /// Compute a principal identity from this credential.
     ///
     /// Used by EXCHANGE_ID's RFC 8881 §18.35.5 client-record state machine

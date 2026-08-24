@@ -726,10 +726,11 @@ async fn handle_compound(
     // AUTH_SYS (uid, gid) — file-creating ops stamp it onto the backing
     // object so ownership round-trips (postgres-class workloads check it).
     let unix_cred = call.cred.unix_uid_gid();
+    let unix_gids = call.cred.unix_gids();
 
     // Dispatch to COMPOUND handler
     let compound_resp = dispatcher
-        .dispatch_compound_with_cred(compound_req, principal, unix_cred, Some(Arc::clone(&back_channel)))
+        .dispatch_compound_with_cred(compound_req, principal, unix_cred, unix_gids, Some(Arc::clone(&back_channel)))
         .await;
 
     debug!("COMPOUND result: status={:?}, {} results",

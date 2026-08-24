@@ -1,1 +1,7 @@
-{"flint_only_max": 645}
+{
+  "_note": "Ceilings for flint-ONLY pjdfstest failures (differenced against a knfsd control run on the same rig). Two numbers because the server has two postures: FLINT_NFS_ENFORCE_PERMISSIONS defaults to warn, under which permission checks are evaluated and logged but never enforced, so the failure count is the pre-fix one BY DESIGN.",
+  "flint_only_max": 645,
+  "flint_only_max_enforcing": 254,
+  "measured": "2026-08-24",
+  "knfsd_control_failures": 149
+}

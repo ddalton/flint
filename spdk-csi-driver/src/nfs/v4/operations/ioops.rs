@@ -609,6 +609,59 @@ impl IoOperationHandler {
                     attrset: vec![],
                 };
             }
+            // ── §2A leg A3: OPEN authorization ──────────────────────
+            //
+            // 82 of the 645 pjdfstest assertions flint fails and knfsd
+            // passes are here — `open FILE O_RDONLY, expected EACCES,
+            // got 0`. Any client could open any file regardless of its
+            // mode, because the only check was the kernel's, performed
+            // as the SERVER's identity.
+            //
+            // An OPEN that CREATES is permission on the parent directory
+            // (write+execute); an OPEN of an existing file is permission
+            // on the file, in the directions the share reservation asks
+            // for. share_access: 1 = READ, 2 = WRITE, 3 = BOTH.
+            {
+                use crate::nfs::v4::authz;
+                let cred = ctx.cred();
+                if existed {
+                    if let Ok(md) = std::fs::metadata(&file_path) {
+                        let mut want = 0u32;
+                        if op.share_access & 1 != 0 { want |= authz::R; }
+                        if op.share_access & 2 != 0 { want |= authz::W; }
+                        if want != 0 {
+                            if let Err(st) =
+                                authz::check(cred.as_ref(), &md, want, "OPEN", &file_path)
+                            {
+                                return OpenRes {
+                                    status: st,
+                                    stateid: None,
+                                    change_info: None,
+                                    result_flags: 0,
+                                    delegation: OpenDelegationType::None,
+                                    attrset: vec![],
+                                };
+                            }
+                        }
+                    }
+                } else if let Some(parent) = file_path.parent() {
+                    if let Ok(pmd) = std::fs::metadata(parent) {
+                        if let Err(st) = authz::check(
+                            cred.as_ref(), &pmd, authz::W | authz::X, "OPEN(create)", parent,
+                        ) {
+                            return OpenRes {
+                                status: st,
+                                stateid: None,
+                                change_info: None,
+                                result_flags: 0,
+                                delegation: OpenDelegationType::None,
+                                attrset: vec![],
+                            };
+                        }
+                    }
+                }
+            }
+
             // read+write: this fd is seeded into the fd-cache below and
             // must serve BOTH directions (a write-only fd turns a later
             // READ through the cache into EBADF).
@@ -987,6 +1040,41 @@ impl IoOperationHandler {
                     // In a full implementation, we would wait for clients to return delegations
                     // For now, we just mark them as recalled and proceed
                 }
+            }
+        }
+
+        // ── §2A leg A3: the NO-CREATE OPEN path ─────────────────────
+        //
+        // There are TWO open paths, and the first version of this fix
+        // patched only the create-capable one — so a plain
+        // open-for-write of an existing file sailed straight past the
+        // check while chown and chmod were correctly denied. That is the
+        // §1.1 shape (a mechanism present on one path and absent from
+        // the sibling) reproduced inside the fix for it, and it was
+        // caught only because the drill kept failing on exactly one
+        // assertion. Both paths check now.
+        {
+            use crate::nfs::v4::authz;
+            if let Some(tp) = target_path.as_ref() {
+              if let Ok(md) = std::fs::metadata(tp) {
+                let mut want = 0u32;
+                if op.share_access & 1 != 0 { want |= authz::R; }
+                if op.share_access & 2 != 0 { want |= authz::W; }
+                if want != 0 {
+                    if let Err(st) = authz::check(
+                        ctx.cred().as_ref(), &md, want, "OPEN(no-create)", tp,
+                    ) {
+                        return OpenRes {
+                            status: st,
+                            stateid: None,
+                            change_info: None,
+                            result_flags: 0,
+                            delegation: OpenDelegationType::None,
+                            attrset: vec![],
+                        };
+                    }
+                }
+              }
             }
         }
 
