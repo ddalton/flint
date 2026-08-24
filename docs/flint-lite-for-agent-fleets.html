@@ -102,8 +102,8 @@
   <h1>Flint-lite for agent fleets</h1>
   <p class="dek">A shared POSIX filesystem for agent workspaces, durable in <b>your own S3 bucket</b>, that scales to zero when nobody is using it. Your harness writes over REST; your agents read through a mounted PVC that pulls from S3 on first touch.</p>
   <div class="meta">
-    <span><b>IMAGES</b> 1.36.0</span>
-    <span><b>CHART</b> flint-lite-operator 0.2.8</span>
+    <span><b>IMAGES</b> 1.37.0</span>
+    <span><b>CHART</b> flint-lite-operator 0.2.9</span>
     <span><b>BUCKET</b> must exist, versioning on</span>
     <span><b>ON AGENT CLUSTERS</b> nothing</span>
   </div>
@@ -188,7 +188,7 @@ kubectl -n flint-system create secret generic flint-gateway-root \
   --from-literal=key="$(openssl rand -base64 48)"
 
 helm install flint-lite-operator \
-  oci://registry-1.docker.io/dilipdalton/flint-lite-operator <span class="kw">--version 0.2.8</span> \
+  oci://registry-1.docker.io/dilipdalton/flint-lite-operator <span class="kw">--version 0.2.9</span> \
   -n flint-system \
   --set gateway.enabled=true \
   --set gateway.tokenSecretRef=flint-gateway-token \
@@ -521,6 +521,6 @@ POST   /v1/projects/{id}/files/folder | /files/move</code></pre>
 <tr><td><code>suspendWithSessions: false</code> holds a share up</td><td>an unprotected control share <b>did</b> suspend under a live mount</td></tr>
 </table>
 
-<footer>flint-lite · operator chart 0.2.8 · images 1.36.0 · full reference: docs/flint-lite-for-agent-fleets.md</footer>
+<footer>flint-lite · operator chart 0.2.9 · images 1.37.0 · full reference: docs/flint-lite-for-agent-fleets.md</footer>
 </body>
 </html>

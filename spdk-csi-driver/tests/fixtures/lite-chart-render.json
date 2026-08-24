@@ -11,8 +11,8 @@
             "app.kubernetes.io/instance": "flint-lite",
             "app.kubernetes.io/managed-by": "Helm",
             "app.kubernetes.io/name": "flint-lite",
-            "app.kubernetes.io/version": "1.36.0",
-            "helm.sh/chart": "flint-lite-0.4.8"
+            "app.kubernetes.io/version": "1.37.0",
+            "helm.sh/chart": "flint-lite-0.4.9"
           },
           "name": "flint-lite",
           "namespace": "flint"
@@ -67,7 +67,7 @@
                       "value": "us-east-1"
                     }
                   ],
-                  "image": "dilipdalton/flint-pnfs:1.36.0",
+                  "image": "dilipdalton/flint-pnfs:1.37.0",
                   "imagePullPolicy": "IfNotPresent",
                   "livenessProbe": {
                     "initialDelaySeconds": 10,
@@ -165,8 +165,8 @@
             "app.kubernetes.io/instance": "flint-lite",
             "app.kubernetes.io/managed-by": "Helm",
             "app.kubernetes.io/name": "flint-lite",
-            "app.kubernetes.io/version": "1.36.0",
-            "helm.sh/chart": "flint-lite-0.4.8"
+            "app.kubernetes.io/version": "1.37.0",
+            "helm.sh/chart": "flint-lite-0.4.9"
           },
           "name": "flint-lite-data",
           "namespace": "flint"
@@ -195,8 +195,8 @@
             "app.kubernetes.io/instance": "flint-lite",
             "app.kubernetes.io/managed-by": "Helm",
             "app.kubernetes.io/name": "flint-lite",
-            "app.kubernetes.io/version": "1.36.0",
-            "helm.sh/chart": "flint-lite-0.4.8"
+            "app.kubernetes.io/version": "1.37.0",
+            "helm.sh/chart": "flint-lite-0.4.9"
           },
           "name": "flint-lite",
           "namespace": "flint"
@@ -277,8 +277,8 @@
             "app.kubernetes.io/instance": "flint-lite",
             "app.kubernetes.io/managed-by": "Helm",
             "app.kubernetes.io/name": "flint-lite",
-            "app.kubernetes.io/version": "1.36.0",
-            "helm.sh/chart": "flint-lite-0.4.8"
+            "app.kubernetes.io/version": "1.37.0",
+            "helm.sh/chart": "flint-lite-0.4.9"
           },
           "name": "flint-lite",
           "namespace": "flint"
@@ -329,7 +329,7 @@
                       }
                     }
                   ],
-                  "image": "dilipdalton/flint-pnfs:1.36.0",
+                  "image": "dilipdalton/flint-pnfs:1.37.0",
                   "imagePullPolicy": "IfNotPresent",
                   "livenessProbe": {
                     "initialDelaySeconds": 10,
@@ -399,8 +399,8 @@
             "app.kubernetes.io/instance": "flint-lite",
             "app.kubernetes.io/managed-by": "Helm",
             "app.kubernetes.io/name": "flint-lite",
-            "app.kubernetes.io/version": "1.36.0",
-            "helm.sh/chart": "flint-lite-0.4.8"
+            "app.kubernetes.io/version": "1.37.0",
+            "helm.sh/chart": "flint-lite-0.4.9"
           },
           "name": "flint-lite-data",
           "namespace": "flint"
@@ -425,8 +425,8 @@
             "app.kubernetes.io/instance": "flint-lite",
             "app.kubernetes.io/managed-by": "Helm",
             "app.kubernetes.io/name": "flint-lite",
-            "app.kubernetes.io/version": "1.36.0",
-            "helm.sh/chart": "flint-lite-0.4.8"
+            "app.kubernetes.io/version": "1.37.0",
+            "helm.sh/chart": "flint-lite-0.4.9"
           },
           "name": "flint-lite",
           "namespace": "flint"
@@ -463,8 +463,8 @@
             "app.kubernetes.io/instance": "flint-lite",
             "app.kubernetes.io/managed-by": "Helm",
             "app.kubernetes.io/name": "flint-lite",
-            "app.kubernetes.io/version": "1.36.0",
-            "helm.sh/chart": "flint-lite-0.4.8"
+            "app.kubernetes.io/version": "1.37.0",
+            "helm.sh/chart": "flint-lite-0.4.9"
           },
           "name": "flint-lite",
           "namespace": "flint"
@@ -515,7 +515,7 @@
                       }
                     }
                   ],
-                  "image": "dilipdalton/flint-pnfs:1.36.0",
+                  "image": "dilipdalton/flint-pnfs:1.37.0",
                   "imagePullPolicy": "IfNotPresent",
                   "livenessProbe": {
                     "initialDelaySeconds": 10,
@@ -592,8 +592,8 @@
             "app.kubernetes.io/instance": "flint-lite",
             "app.kubernetes.io/managed-by": "Helm",
             "app.kubernetes.io/name": "flint-lite",
-            "app.kubernetes.io/version": "1.36.0",
-            "helm.sh/chart": "flint-lite-0.4.8"
+            "app.kubernetes.io/version": "1.37.0",
+            "helm.sh/chart": "flint-lite-0.4.9"
           },
           "name": "flint-lite-data",
           "namespace": "flint"
@@ -618,8 +618,8 @@
             "app.kubernetes.io/instance": "flint-lite",
             "app.kubernetes.io/managed-by": "Helm",
             "app.kubernetes.io/name": "flint-lite",
-            "app.kubernetes.io/version": "1.36.0",
-            "helm.sh/chart": "flint-lite-0.4.8"
+            "app.kubernetes.io/version": "1.37.0",
+            "helm.sh/chart": "flint-lite-0.4.9"
           },
           "name": "flint-lite",
           "namespace": "flint"
@@ -662,8 +662,8 @@
             "app.kubernetes.io/instance": "flint-lite",
             "app.kubernetes.io/managed-by": "Helm",
             "app.kubernetes.io/name": "flint-lite",
-            "app.kubernetes.io/version": "1.36.0",
-            "helm.sh/chart": "flint-lite-0.4.8"
+            "app.kubernetes.io/version": "1.37.0",
+            "helm.sh/chart": "flint-lite-0.4.9"
           },
           "name": "flint-lite",
           "namespace": "flint"
@@ -725,7 +725,7 @@
                       }
                     }
                   ],
-                  "image": "dilipdalton/flint-pnfs:1.36.0",
+                  "image": "dilipdalton/flint-pnfs:1.37.0",
                   "imagePullPolicy": "IfNotPresent",
                   "livenessProbe": {
                     "initialDelaySeconds": 10,
@@ -802,8 +802,8 @@
             "app.kubernetes.io/instance": "flint-lite",
             "app.kubernetes.io/managed-by": "Helm",
             "app.kubernetes.io/name": "flint-lite",
-            "app.kubernetes.io/version": "1.36.0",
-            "helm.sh/chart": "flint-lite-0.4.8"
+            "app.kubernetes.io/version": "1.37.0",
+            "helm.sh/chart": "flint-lite-0.4.9"
           },
           "name": "flint-lite-data",
           "namespace": "flint"
@@ -828,8 +828,8 @@
             "app.kubernetes.io/instance": "flint-lite",
             "app.kubernetes.io/managed-by": "Helm",
             "app.kubernetes.io/name": "flint-lite",
-            "app.kubernetes.io/version": "1.36.0",
-            "helm.sh/chart": "flint-lite-0.4.8"
+            "app.kubernetes.io/version": "1.37.0",
+            "helm.sh/chart": "flint-lite-0.4.9"
           },
           "name": "flint-lite",
           "namespace": "flint"
@@ -863,5 +863,5 @@
       "values": "tier:\n  enabled: true\n  bucket: my-team-flint\n  keyPrefix: tenant-a/\n  endpoint: http://minio.minio:9000\n  region: us-east-1\n  credentialsSecret: flint-s3\n  importOnStart: true\n"
     }
   },
-  "chartSha256": "154e2db86089cb95ff083fe576b3a824e5b6ba417de634bc4792257f44dd6a11"
+  "chartSha256": "a573332db4345c1aee31107898cc512a06385ae3c8d256eac09bc6b9c93cf9b4"
 }

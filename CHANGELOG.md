@@ -10,6 +10,99 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [1.37.0] - 2026-08-24
+
+**The conformance release.** The NFS server was written from scratch and
+had only ever been measured by one suite, pynfs, whose last recorded run
+was four months and 17,827 insertions ago. Pointing a second suite at it
+— `nfstest`, and only two of its seventeen tools — found three shipped
+bugs in an afternoon. Re-running pynfs found that three of the four
+failures it had recorded as "deliberately deferred" were already fixed
+and nobody had noticed, and the fourth was misdiagnosed. pynfs is now
+**171 passed, 0 failed, 91 skipped** — the first clean run this server
+has had, against a Linux server running as root, which is the only
+posture whose results are attributable.
+
+Minor rather than patch: `CREATE` now honours attributes it previously
+discarded, and a directory listing returns cookies of a different shape.
+Nothing on the declared SemVer surface (CSI gRPC verbs, StorageClass
+`parameters`, `volume_context` keys) changed.
+
+### Fixed — the NFSv4 wire, found by pointing a second suite at it
+
+- **Every byte-range lock from a non-zero offset to end-of-file was
+  refused.** `length == 0` was treated as the to-EOF sentinel; RFC 8881
+  §18.10.3 says the sentinel is all 1s and that zero is invalid. A Linux
+  client sends all 1s, so `offset.checked_add(u64::MAX)` overflowed for
+  every offset above zero and answered NFS4ERR_INVAL — the plain `fcntl`
+  `l_len = 0` idiom. Offset 0 worked, which is why it survived: the one
+  case anyone tries by hand is the one case that works. LOCKT and LOCKU
+  had no range validation at all; an unvalidated LOCKU trims nothing and
+  still answers NFS4_OK, so a client believes it released a lock it still
+  holds. `nfstest_lock`: 324 failures to **5296/5296**.
+- **`mkdir(0700)` produced a world-readable directory.** The COMPOUND
+  decoder parsed `createattrs` and threw them away — "consumed for wire
+  alignment" — and the dispatcher handed the handler a hardcoded empty
+  attribute set, so every requested mode was dropped and every directory
+  came out `0755`. The handler was correct the whole time, which is why a
+  unit test at that level passed with the bug fully present.
+- **A directory listing could silently omit a file.** READDIR cookies
+  were positions in a fresh re-enumeration, and the cookie verifier had
+  one-second granularity, so a mutation in the same wall-clock second
+  shifted every later index while the verifier still said "unchanged" —
+  an entry present for the whole listing was left out of an NFS4_OK
+  reply. Cookies now come from the directory stream's own offsets and
+  the verifier is nanosecond-granular. The old design also re-`stat`ed
+  the entire directory on every call, so a full listing cost
+  O(entries²) syscalls.
+- **A non-reclaim OPEN succeeded during the grace period.** Grace
+  answered two questions with one boolean: whether the window is open,
+  and whether anything is reclaimable. These are now separate, so an
+  unreclaimed 4.1 client sees NFS4ERR_GRACE (RFC 8881 §18.51.3) while
+  the hub's own file API — which dispatches with no session and can
+  never *be* reclaim-complete — is held only when something really is
+  reclaimable. Closes pynfs RECC3.
+- **Unbounded allocation from an unauthenticated frame.** Array counts
+  were read off the wire and passed to `Vec::with_capacity` before any
+  bounds check, so a ~30-byte COMPOUND declaring `op_count = 0xFFFFFFFF`
+  requested a multi-hundred-GiB allocation from any host that can reach
+  port 2049 — decode runs before the RPC credential is inspected. On
+  Linux with default overcommit the reservation is lazy and the server
+  survives, so this is memory amplification rather than a remote kill in
+  that configuration; it aborts under strict overcommit. Bounded at all
+  six unguarded sites against what the remaining bytes could describe.
+
+### Fixed — the hub and the standalone server had drifted apart
+
+The flint-lite hub runs `flint-pnfs-mds`, not `flint-nfs-server`. Three
+recovery hooks had been wired into the latter only.
+
+- **Byte-range locks were never persisted or restored on the hub.** The
+  lock *stateids* survived and EXCHANGE_ID answered CONFIRMED_R, so a
+  client concluded "session lost, state intact", never reclaimed, and was
+  never told — while a second client's conflicting LOCK was granted. Both
+  front-ends now bind and restore through one call, so the two cannot
+  drift again.
+- **F33 self-fencing was never armed by the binary flint-lite ships.** A
+  node fault that stops kubelet but not the pod left the process alive
+  with wedged I/O while clients hung on established flows.
+- **An unusable `state.db` crash-looped the hub on a share whose data was
+  intact.** Reachable from an ordinary image rollback, since there are no
+  migrations. Now quarantined and recreated when the database holds only
+  bookkeeping, and still refused when it is a data map (pNFS/block
+  volumes, or any tiered hub, where `tier_evicted` rows decide whether a
+  file reads as its contents or as zero bytes).
+
+### Changed
+
+- CI runs `cargo test --lib --tests`. Roughly 49 integration tests were
+  compiling and passing and were never being executed by the job.
+- `make test-nfs-protocol` is gated by `scripts/check-pynfs.py` against a
+  committed floor, and no longer ends in `|| true` — under which a suite
+  that collapsed to zero passes, or never started, still exited 0.
+- `tests/delegation_test.rs` deleted: two tests that printed a list of
+  assertions living in another module and then called `assert!(true)`.
+
 ## [1.36.0] - 2026-08-23
 
 **The many-clusters release.** The common shape for an agent fleet is
@@ -2399,6 +2492,7 @@ neither tag represents a supported upgrade source.
 No security advisories at this release.
 
 [Unreleased]: https://github.com/ddalton/flint/compare/v1.35.1...HEAD
+[1.37.0]: https://github.com/ddalton/flint/compare/v1.36.0...v1.37.0
 [1.36.0]: https://github.com/ddalton/flint/compare/v1.35.1...v1.36.0
 [1.35.1]: https://github.com/ddalton/flint/compare/v1.35.0...v1.35.1
 [1.35.0]: https://github.com/ddalton/flint/compare/v1.34.0...v1.35.0
