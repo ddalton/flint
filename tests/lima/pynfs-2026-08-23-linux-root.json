@@ -1,6 +1,6 @@
 {
     "errors": 0,
-    "failures": 1,
+    "failures": 0,
     "name": "all",
     "skipped": 91,
     "testcase": [
@@ -8,25 +8,25 @@
             "classname": "st_courtesy",
             "code": "COUR6",
             "name": "testShareReservationDB03",
-            "time": "100.05366444587708"
+            "time": "100.02738356590271"
         },
         {
             "classname": "st_courtesy",
             "code": "COUR5",
             "name": "testShareReservationDB02",
-            "time": "100.04816126823425"
+            "time": "100.03496384620667"
         },
         {
             "classname": "st_courtesy",
             "code": "COUR4",
             "name": "testShareReservationDB01",
-            "time": "0.0187528133392334"
+            "time": "0.023148059844970703"
         },
         {
             "classname": "st_courtesy",
             "code": "COUR3",
             "name": "testShareReservation00",
-            "time": "100.05647420883179"
+            "time": "100.05108833312988"
         },
         {
             "classname": "st_courtesy",
@@ -39,7 +39,7 @@
             "classname": "st_courtesy",
             "code": "COUR2",
             "name": "testLockSleepLock",
-            "time": "100.04469323158264"
+            "time": "100.05970978736877"
         },
         {
             "classname": "st_courtesy",
@@ -339,25 +339,25 @@
             "classname": "st_current_stateid",
             "code": "CSID3",
             "name": "testOpenWriteClose",
-            "time": "0.011389017105102539"
+            "time": "0.013807058334350586"
         },
         {
             "classname": "st_current_stateid",
             "code": "CSID8",
             "name": "testOpenSetattr",
-            "time": "0.007983207702636719"
+            "time": "0.013626337051391602"
         },
         {
             "classname": "st_current_stateid",
             "code": "CSID10",
             "name": "testOpenSaveFHLookupRestoreFHClose",
-            "time": "0.0070455074310302734"
+            "time": "0.007989645004272461"
         },
         {
             "classname": "st_current_stateid",
             "code": "CSID5",
             "name": "testOpenLookupClose",
-            "time": "0.006342649459838867"
+            "time": "0.00994729995727539"
         },
         {
             "classname": "st_current_stateid",
@@ -370,31 +370,31 @@
             "classname": "st_current_stateid",
             "code": "CSID9",
             "name": "testOpenFreestateidClose",
-            "time": "0.006121397018432617"
+            "time": "0.00908350944519043"
         },
         {
             "classname": "st_current_stateid",
             "code": "CSID1",
             "name": "testOpenAndClose",
-            "time": "0.005650520324707031"
+            "time": "0.00963282585144043"
         },
         {
             "classname": "st_current_stateid",
             "code": "CSID4",
             "name": "testLockWriteLocku",
-            "time": "0.006728649139404297"
+            "time": "0.038956642150878906"
         },
         {
             "classname": "st_current_stateid",
             "code": "CSID2",
             "name": "testLockLockU",
-            "time": "0.006360530853271484"
+            "time": "0.011782407760620117"
         },
         {
             "classname": "st_current_stateid",
             "code": "CSID6",
             "name": "testCloseNoStateid",
-            "time": "0.006732463836669922"
+            "time": "0.010560750961303711"
         },
         {
             "classname": "st_block",
@@ -505,259 +505,259 @@
             "classname": "st_putfh",
             "code": "PUTFH1s",
             "name": "testSocket",
-            "time": "0.005258083343505859"
+            "time": "0.023145675659179688"
         },
         {
             "classname": "st_putfh",
             "code": "PUTFH1a",
             "name": "testLink",
-            "time": "0.004876852035522461"
+            "time": "0.00690150260925293"
         },
         {
             "classname": "st_putfh",
             "code": "PUTFH1r",
             "name": "testFile",
-            "time": "0.004992246627807617"
+            "time": "0.00878453254699707"
         },
         {
             "classname": "st_putfh",
             "code": "PUTFH1f",
             "name": "testFifo",
-            "time": "0.005664825439453125"
+            "time": "0.0074498653411865234"
         },
         {
             "classname": "st_putfh",
             "code": "PUTFH1d",
             "name": "testDir",
-            "time": "0.009618043899536133"
+            "time": "0.007896184921264648"
         },
         {
             "classname": "st_putfh",
             "code": "PUTFH1c",
             "name": "testChar",
-            "time": "0.004972219467163086"
+            "time": "0.007428884506225586"
         },
         {
             "classname": "st_putfh",
             "code": "PUTFH1b",
             "name": "testBlock",
-            "time": "0.004873514175415039"
+            "time": "0.008027076721191406"
         },
         {
             "classname": "st_putfh",
             "code": "PUTFH2",
             "name": "testBadHandle",
-            "time": "0.0036008358001708984"
+            "time": "0.010462045669555664"
         },
         {
             "classname": "st_rename",
             "code": "RNM6",
             "name": "testZeroLengthOldname",
-            "time": "0.00840902328491211"
+            "time": "0.0208742618560791"
         },
         {
             "classname": "st_rename",
             "code": "RNM7",
             "name": "testZeroLengthNewname",
-            "time": "0.007124423980712891"
+            "time": "0.012646198272705078"
         },
         {
             "classname": "st_rename",
             "code": "RNM1s",
             "name": "testValidSocket",
-            "time": "0.012308359146118164"
+            "time": "0.02722001075744629"
         },
         {
             "classname": "st_rename",
             "code": "RNM1a",
             "name": "testValidLink",
-            "time": "0.010608196258544922"
+            "time": "0.024397611618041992"
         },
         {
             "classname": "st_rename",
             "code": "RNM1r",
             "name": "testValidFile",
-            "time": "0.012576103210449219"
+            "time": "0.03118300437927246"
         },
         {
             "classname": "st_rename",
             "code": "RNM1f",
             "name": "testValidFifo",
-            "time": "0.010212421417236328"
+            "time": "0.021676301956176758"
         },
         {
             "classname": "st_rename",
             "code": "RNM1d",
             "name": "testValidDir",
-            "time": "0.010107755661010742"
+            "time": "0.030045509338378906"
         },
         {
             "classname": "st_rename",
             "code": "RNM1c",
             "name": "testValidChar",
-            "time": "0.010982036590576172"
+            "time": "0.03480410575866699"
         },
         {
             "classname": "st_rename",
             "code": "RNM1b",
             "name": "testValidBlock",
-            "time": "0.0220339298248291"
+            "time": "0.016986846923828125"
         },
         {
             "classname": "st_rename",
             "code": "RNM21",
             "name": "testStaleRename",
-            "time": "0.011446714401245117"
+            "time": "0.017654895782470703"
         },
         {
             "classname": "st_rename",
             "code": "RNM2s",
             "name": "testSfhSocket",
-            "time": "0.005818367004394531"
+            "time": "0.009409904479980469"
         },
         {
             "classname": "st_rename",
             "code": "RNM2a",
             "name": "testSfhLink",
-            "time": "0.006058216094970703"
+            "time": "0.01836371421813965"
         },
         {
             "classname": "st_rename",
             "code": "RNM2r",
             "name": "testSfhFile",
-            "time": "0.006589651107788086"
+            "time": "0.012914180755615234"
         },
         {
             "classname": "st_rename",
             "code": "RNM2f",
             "name": "testSfhFifo",
-            "time": "0.0065822601318359375"
+            "time": "0.012888193130493164"
         },
         {
             "classname": "st_rename",
             "code": "RNM2c",
             "name": "testSfhChar",
-            "time": "0.006235361099243164"
+            "time": "0.013147115707397461"
         },
         {
             "classname": "st_rename",
             "code": "RNM2b",
             "name": "testSfhBlock",
-            "time": "0.006448268890380859"
+            "time": "0.007718324661254883"
         },
         {
             "classname": "st_rename",
             "code": "RNM19",
             "name": "testSelfRenameFile",
-            "time": "0.012499332427978516"
+            "time": "0.009644508361816406"
         },
         {
             "classname": "st_rename",
             "code": "RNM18",
             "name": "testSelfRenameDir",
-            "time": "0.008145570755004883"
+            "time": "0.008316993713378906"
         },
         {
             "classname": "st_rename",
             "code": "RNM5",
             "name": "testNonExistent",
-            "time": "0.007544040679931641"
+            "time": "0.012655019760131836"
         },
         {
             "classname": "st_rename",
             "code": "RNM4",
             "name": "testNoSfh",
-            "time": "0.004432201385498047"
+            "time": "0.007906436920166016"
         },
         {
             "classname": "st_rename",
             "code": "RNM20",
             "name": "testLinkRename",
-            "time": "0.010228633880615234"
+            "time": "0.013170242309570312"
         },
         {
             "classname": "st_rename",
             "code": "RNM17",
             "name": "testFileToFullDir",
-            "time": "0.010872125625610352"
+            "time": "0.01562976837158203"
         },
         {
             "classname": "st_rename",
             "code": "RNM15",
             "name": "testFileToFile",
-            "time": "0.012067556381225586"
+            "time": "0.023632287979125977"
         },
         {
             "classname": "st_rename",
             "code": "RNM14",
             "name": "testFileToDir",
-            "time": "0.00984048843383789"
+            "time": "0.016807079315185547"
         },
         {
             "classname": "st_rename",
             "code": "RNM10",
             "name": "testDotsOldname",
-            "time": "0.010747671127319336"
+            "time": "0.01401972770690918"
         },
         {
             "classname": "st_rename",
             "code": "RNM11",
             "name": "testDotsNewname",
-            "time": "0.014572858810424805"
+            "time": "0.012951135635375977"
         },
         {
             "classname": "st_rename",
             "code": "RNM12",
             "name": "testDirToObj",
-            "time": "0.009935140609741211"
+            "time": "0.016788959503173828"
         },
         {
             "classname": "st_rename",
             "code": "RNM16",
             "name": "testDirToFullDir",
-            "time": "0.012009382247924805"
+            "time": "0.015151500701904297"
         },
         {
             "classname": "st_rename",
             "code": "RNM13",
             "name": "testDirToDir",
-            "time": "0.0108489990234375"
+            "time": "0.01457357406616211"
         },
         {
             "classname": "st_rename",
             "code": "RNM3s",
             "name": "testCfhSocket",
-            "time": "0.008221864700317383"
+            "time": "0.011836767196655273"
         },
         {
             "classname": "st_rename",
             "code": "RNM3a",
             "name": "testCfhLink",
-            "time": "0.007154226303100586"
+            "time": "0.007975339889526367"
         },
         {
             "classname": "st_rename",
             "code": "RNM3r",
             "name": "testCfhFile",
-            "time": "0.007130861282348633"
+            "time": "0.007806539535522461"
         },
         {
             "classname": "st_rename",
             "code": "RNM3f",
             "name": "testCfhFifo",
-            "time": "0.006924152374267578"
+            "time": "0.010939836502075195"
         },
         {
             "classname": "st_rename",
             "code": "RNM3c",
             "name": "testCfhChar",
-            "time": "0.00690150260925293"
+            "time": "0.008763790130615234"
         },
         {
             "classname": "st_rename",
             "code": "RNM3b",
             "name": "testCfhBlock",
-            "time": "0.007687568664550781"
+            "time": "0.009431600570678711"
         },
         {
             "classname": "st_rename",
@@ -784,55 +784,55 @@
             "classname": "st_lookupp",
             "code": "LKPP1s",
             "name": "testSock",
-            "time": "0.00513768196105957"
+            "time": "0.005280733108520508"
         },
         {
             "classname": "st_lookupp",
             "code": "LKPP3",
             "name": "testNoFH",
-            "time": "0.003843069076538086"
+            "time": "0.005253314971923828"
         },
         {
             "classname": "st_lookupp",
             "code": "LKPP2",
             "name": "testLookuppRoot",
-            "time": "0.007143259048461914"
+            "time": "0.00484013557434082"
         },
         {
             "classname": "st_lookupp",
             "code": "LKPP1d",
             "name": "testLookupp",
-            "time": "0.0045206546783447266"
+            "time": "0.004117012023925781"
         },
         {
             "classname": "st_lookupp",
             "code": "LKPP1a",
             "name": "testLink",
-            "time": "0.004872322082519531"
+            "time": "0.004132747650146484"
         },
         {
             "classname": "st_lookupp",
             "code": "LKPP1r",
             "name": "testFile",
-            "time": "0.0039501190185546875"
+            "time": "0.008313179016113281"
         },
         {
             "classname": "st_lookupp",
             "code": "LKPP1f",
             "name": "testFifo",
-            "time": "0.0042231082916259766"
+            "time": "0.0055539608001708984"
         },
         {
             "classname": "st_lookupp",
             "code": "LKPP1c",
             "name": "testChar",
-            "time": "0.004311084747314453"
+            "time": "0.0050313472747802734"
         },
         {
             "classname": "st_lookupp",
             "code": "LKPP1b",
             "name": "testBlock",
-            "time": "0.0036122798919677734"
+            "time": "0.005134105682373047"
         },
         {
             "classname": "st_getdevicelist",
@@ -894,7 +894,7 @@
             "classname": "st_verify",
             "code": "VF1r",
             "name": "testMandFile",
-            "time": "0.006418466567993164"
+            "time": "0.0076863765716552734"
         },
         {
             "classname": "st_delegation",
@@ -970,269 +970,265 @@
             "classname": "st_open",
             "code": "OPEN1",
             "name": "testSupported",
-            "time": "0.0055561065673828125"
+            "time": "0.0077800750732421875"
         },
         {
             "classname": "st_open",
             "code": "OPEN2",
             "name": "testServerStateSeqid",
-            "time": "0.0069026947021484375"
+            "time": "0.012514114379882812"
         },
         {
             "classname": "st_open",
             "code": "OPEN30",
             "name": "testReadWrite",
-            "time": "0.007616758346557617"
+            "time": "0.014586925506591797"
         },
         {
             "classname": "st_open",
             "code": "OPEN7",
             "name": "testOPENClaimFH",
-            "time": "0.010140419006347656"
+            "time": "0.01322484016418457"
         },
         {
             "classname": "st_open",
             "code": "OPEN6",
             "name": "testEXCLUSIVE4AtNameAttribute",
-            "time": "0.0067365169525146484"
+            "time": "0.012120962142944336"
         },
         {
             "classname": "st_open",
             "code": "OPEN8",
             "name": "testCloseWithZeroSeqid",
-            "time": "0.0061719417572021484"
+            "time": "0.007164478302001953"
         },
         {
             "classname": "st_open",
             "code": "OPEN31",
             "name": "testAnonReadWrite",
-            "time": "0.010789632797241211"
+            "time": "0.008473396301269531"
         },
         {
             "classname": "st_trunking",
             "code": "TRUNK2",
             "name": "testUseTwoSessions",
-            "time": "0.011319398880004883"
+            "time": "0.010331392288208008"
         },
         {
             "classname": "st_trunking",
             "code": "TRUNK1",
             "name": "testTwoSessions",
-            "time": "0.004441499710083008"
+            "time": "0.007392406463623047"
         },
         {
             "classname": "st_sequence",
             "code": "SEQ7",
             "name": "testTooManyOps",
-            "time": "0.004683256149291992"
+            "time": "0.008468151092529297"
         },
         {
             "classname": "st_sequence",
             "code": "SEQ1",
             "name": "testSupported",
-            "time": "0.0044863224029541016"
+            "time": "0.00402069091796875"
         },
         {
             "classname": "st_sequence",
             "code": "SEQ12",
             "name": "testSessionidSequenceidSlotid",
-            "time": "0.0038089752197265625"
+            "time": "0.005486249923706055"
         },
         {
             "classname": "st_sequence",
             "code": "SEQ6",
             "name": "testRequestTooBig",
-            "time": "0.0035545825958251953"
+            "time": "0.004912137985229492"
         },
         {
             "classname": "st_sequence",
             "code": "SEQ10b",
             "name": "testReplayCache007",
-            "time": "0.006787776947021484"
+            "time": "0.013160228729248047"
         },
         {
             "classname": "st_sequence",
             "code": "SEQ9f",
             "name": "testReplayCache006",
-            "time": "0.003968477249145508"
+            "time": "0.0059659481048583984"
         },
         {
             "classname": "st_sequence",
             "code": "SEQ9e",
             "name": "testReplayCache005",
-            "time": "0.004420042037963867"
+            "time": "0.0052776336669921875"
         },
         {
             "classname": "st_sequence",
             "code": "SEQ9d",
             "name": "testReplayCache004",
-            "time": "0.004349708557128906"
+            "time": "0.005305290222167969"
         },
         {
             "classname": "st_sequence",
             "code": "SEQ9c",
             "name": "testReplayCache003",
-            "time": "0.003958702087402344"
+            "time": "0.005257368087768555"
         },
         {
             "classname": "st_sequence",
             "code": "SEQ9b",
             "name": "testReplayCache002",
-            "time": "0.0070459842681884766"
+            "time": "0.009136676788330078"
         },
         {
             "classname": "st_sequence",
             "code": "SEQ9a",
             "name": "testReplayCache001",
-            "time": "0.00433802604675293"
+            "time": "0.010339498519897461"
         },
         {
             "classname": "st_sequence",
             "code": "SEQ11",
             "name": "testOpNotInSession",
-            "time": "0.0017707347869873047"
+            "time": "0.003920555114746094"
         },
         {
             "classname": "st_sequence",
             "code": "SEQ2",
             "name": "testNotFirst",
-            "time": "0.006579875946044922"
+            "time": "0.005034446716308594"
         },
         {
             "classname": "st_sequence",
             "code": "SEQ4",
             "name": "testImplicitBind",
-            "time": "0.004945278167724609"
+            "time": "0.008300304412841797"
         },
         {
             "classname": "st_sequence",
             "code": "SEQ8",
             "name": "testBadSlot",
-            "time": "0.00336456298828125"
+            "time": "0.004756450653076172"
         },
         {
             "classname": "st_sequence",
             "code": "SEQ5",
             "name": "testBadSession",
-            "time": "0.0008323192596435547"
+            "time": "0.0009131431579589844"
         },
         {
             "classname": "st_sequence",
             "code": "SEQ13",
             "name": "testBadSequenceidAtSlot",
-            "time": "0.004656553268432617"
+            "time": "0.008852720260620117"
         },
         {
             "classname": "st_secinfo",
             "code": "SEC2",
             "name": "testSupported2",
-            "time": "0.0067577362060546875"
+            "time": "0.010011434555053711"
         },
         {
             "classname": "st_secinfo",
             "code": "SEC1",
             "name": "testSupported",
-            "time": "0.00664210319519043"
+            "time": "0.007692813873291016"
         },
         {
             "classname": "st_secinfo_no_name",
             "code": "SECNN4",
             "name": "testSupported4",
-            "time": "0.004280567169189453"
+            "time": "0.003967761993408203"
         },
         {
             "classname": "st_secinfo_no_name",
             "code": "SECNN3",
             "name": "testSupported3",
-            "time": "0.003759622573852539"
+            "time": "0.004244327545166016"
         },
         {
             "classname": "st_secinfo_no_name",
             "code": "SECNN2",
             "name": "testSupported2",
-            "time": "0.004140138626098633"
+            "time": "0.00399327278137207"
         },
         {
             "classname": "st_secinfo_no_name",
             "code": "SECNN1",
             "name": "testSupported",
-            "time": "0.0034780502319335938"
+            "time": "0.004593372344970703"
         },
         {
             "classname": "st_reclaim_complete",
             "code": "RECC1",
             "name": "testSupported",
-            "time": "0.004816293716430664"
+            "time": "0.00565648078918457"
         },
         {
             "classname": "st_reclaim_complete",
             "code": "RECC2",
             "name": "testReclaimAfterRECC",
-            "time": "0.006594181060791016"
+            "time": "0.0071086883544921875"
         },
         {
             "classname": "st_reclaim_complete",
             "code": "RECC3",
-            "failure": {
-                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_reclaim_complete.py\", line 70, in testOpenBeforeRECC\n    check(res, NFS4ERR_GRACE)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_GETFH should return NFS4ERR_GRACE, instead got NFS4_OK\n",
-                "message": "OP_GETFH should return NFS4ERR_GRACE, instead got NFS4_OK"
-            },
             "name": "testOpenBeforeRECC",
-            "time": "0.003942012786865234"
+            "time": "0.00488591194152832"
         },
         {
             "classname": "st_reclaim_complete",
             "code": "RECC4",
             "name": "testDoubleRECC",
-            "time": "0.0053348541259765625"
+            "time": "0.004759073257446289"
         },
         {
             "classname": "st_destroy_clientid",
             "code": "DESCID1",
             "name": "testSupported",
-            "time": "0.0021588802337646484"
+            "time": "0.003587007522583008"
         },
         {
             "classname": "st_destroy_clientid",
             "code": "DESCID2",
             "name": "testDestroyCIDWS",
-            "time": "0.0045812129974365234"
+            "time": "0.0068819522857666016"
         },
         {
             "classname": "st_destroy_clientid",
             "code": "DESCID8",
             "name": "testDestroyCIDTwice",
-            "time": "0.0023097991943359375"
+            "time": "0.0042133331298828125"
         },
         {
             "classname": "st_destroy_clientid",
             "code": "DESCID5",
             "name": "testDestroyCIDSessionB",
-            "time": "0.003400087356567383"
+            "time": "0.0059087276458740234"
         },
         {
             "classname": "st_destroy_clientid",
             "code": "DESCID7",
             "name": "testDestroyCIDNotOnly",
-            "time": "0.0007581710815429688"
+            "time": "0.0012705326080322266"
         },
         {
             "classname": "st_destroy_clientid",
             "code": "DESCID6",
             "name": "testDestroyCIDCSession",
-            "time": "0.003351926803588867"
+            "time": "0.004900932312011719"
         },
         {
             "classname": "st_destroy_clientid",
             "code": "DESCID3",
             "name": "testDestroyBadCIDWS",
-            "time": "0.0007433891296386719"
+            "time": "0.001253366470336914"
         },
         {
             "classname": "st_destroy_clientid",
             "code": "DESCID4",
             "name": "testDestroyBadCIDIS",
-            "time": "0.003770112991333008"
+            "time": "0.004775285720825195"
         },
         {
             "classname": "st_destroy_session",
@@ -1245,7 +1241,7 @@
             "classname": "st_destroy_session",
             "code": "DSESS1",
             "name": "testDestroyBasic",
-            "time": "0.008126020431518555"
+            "time": "0.009842634201049805"
         },
         {
             "classname": "st_destroy_session",
@@ -1286,151 +1282,151 @@
             "classname": "st_create_session",
             "code": "CSESS28",
             "name": "testTooSmallMaxReq",
-            "time": "0.0022890567779541016"
+            "time": "0.003046751022338867"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS25",
             "name": "testTooSmallMaxRS",
-            "time": "0.0020477771759033203"
+            "time": "0.0020372867584228516"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS2b",
             "name": "testSupported2b",
-            "time": "0.006002187728881836"
+            "time": "0.0073893070220947266"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS2",
             "name": "testSupported2",
-            "time": "0.0053637027740478516"
+            "time": "0.0064547061920166016"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS1",
             "name": "testSupported1",
-            "time": "0.0029201507568359375"
+            "time": "0.007122993469238281"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS6",
             "name": "testReplay2",
-            "time": "0.002512216567993164"
+            "time": "0.005575418472290039"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS5b",
             "name": "testReplay1b",
-            "time": "0.00389862060546875"
+            "time": "0.008509635925292969"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS5a",
             "name": "testReplay1a",
-            "time": "0.00453639030456543"
+            "time": "0.006241559982299805"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS5",
             "name": "testReplay1",
-            "time": "0.0031843185424804688"
+            "time": "0.004035234451293945"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS27",
             "name": "testRepTooBigToCache",
-            "time": "0.0026481151580810547"
+            "time": "0.0037689208984375"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS26",
             "name": "testRepTooBig",
-            "time": "0.00465846061706543"
+            "time": "0.005800962448120117"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS19",
             "name": "testRdmaArray2",
-            "time": "0.0022268295288085938"
+            "time": "0.0022056102752685547"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS18",
             "name": "testRdmaArray1",
-            "time": "0.002852916717529297"
+            "time": "0.0049283504486083984"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS17",
             "name": "testRdmaArray0",
-            "time": "0.0028586387634277344"
+            "time": "0.004421710968017578"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS10",
             "name": "testPrincipalCollision2",
-            "time": "0.0025844573974609375"
+            "time": "0.0031960010528564453"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS9",
             "name": "testPrincipalCollision1",
-            "time": "0.001981019973754883"
+            "time": "0.005484580993652344"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS23",
             "name": "testNotOnlyOp",
-            "time": "0.002233743667602539"
+            "time": "0.002332448959350586"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS3",
             "name": "testNoExchange",
-            "time": "0.0010941028594970703"
+            "time": "0.001903533935546875"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS22",
             "name": "testMaxreqs",
-            "time": "0.003412485122680664"
+            "time": "0.006897449493408203"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS200",
             "name": "testManyClients",
-            "time": "0.036501407623291016"
+            "time": "0.03877711296081543"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS29",
             "name": "testDRCMemLeak",
-            "time": "6.3570990562438965"
+            "time": "7.361085414886475"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS24",
             "name": "testCsr_sequence",
-            "time": "0.003367900848388672"
+            "time": "0.00450444221496582"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS4",
             "name": "testContrivedReplay",
-            "time": "0.0019583702087402344"
+            "time": "0.002434253692626953"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS16a",
             "name": "testCbSecParmsDec",
-            "time": "0.003014087677001953"
+            "time": "0.0031528472900390625"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS16",
             "name": "testCbSecParms",
-            "time": "0.0032529830932617188"
+            "time": "0.0029764175415039062"
         },
         {
             "classname": "st_create_session",
@@ -1450,19 +1446,19 @@
             "classname": "st_create_session",
             "code": "CSESS8",
             "name": "testBadSeqnum2",
-            "time": "0.0028450489044189453"
+            "time": "0.0030837059020996094"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS7",
             "name": "testBadSeqnum1",
-            "time": "0.0025298595428466797"
+            "time": "0.002751588821411133"
         },
         {
             "classname": "st_create_session",
             "code": "CSESS15",
             "name": "testBadFlag",
-            "time": "0.0019075870513916016"
+            "time": "0.002016305923461914"
         },
         {
             "classname": "st_copy",
@@ -1475,31 +1471,31 @@
             "classname": "st_compound",
             "code": "COMP1",
             "name": "testZeroOps",
-            "time": "0.0009670257568359375"
+            "time": "0.0015521049499511719"
         },
         {
             "classname": "st_compound",
             "code": "COMP5",
             "name": "testUndefined",
-            "time": "0.0030684471130371094"
+            "time": "0.003306865692138672"
         },
         {
             "classname": "st_compound",
             "code": "COMP4b",
             "name": "testInvalidMinor2",
-            "time": "0.0006728172302246094"
+            "time": "0.0007638931274414062"
         },
         {
             "classname": "st_compound",
             "code": "COMP4a",
             "name": "testInvalidMinor",
-            "time": "0.0006949901580810547"
+            "time": "0.0007596015930175781"
         },
         {
             "classname": "st_compound",
             "code": "COMP2",
             "name": "testGoodTag",
-            "time": "0.0007493495941162109"
+            "time": "0.000850677490234375"
         },
         {
             "classname": "st_compound",
@@ -1512,73 +1508,73 @@
             "classname": "st_exchange_id",
             "code": "EID6",
             "name": "testUpdateNonexistant",
-            "time": "0.0010423660278320312"
+            "time": "0.0012302398681640625"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID6h",
             "name": "testUpdate111",
-            "time": "0.0033652782440185547"
+            "time": "0.003912925720214844"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID6g",
             "name": "testUpdate110",
-            "time": "0.0033130645751953125"
+            "time": "0.003626585006713867"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID6f",
             "name": "testUpdate101",
-            "time": "0.003368377685546875"
+            "time": "0.0038292407989501953"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID6e",
             "name": "testUpdate100",
-            "time": "0.003524303436279297"
+            "time": "0.003932476043701172"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID6d",
             "name": "testUpdate011",
-            "time": "0.001844644546508789"
+            "time": "0.002000093460083008"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID6c",
             "name": "testUpdate010",
-            "time": "0.0019407272338867188"
+            "time": "0.0022735595703125"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID6b",
             "name": "testUpdate001",
-            "time": "0.0019233226776123047"
+            "time": "0.002504587173461914"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID6a",
             "name": "testUpdate000",
-            "time": "0.0018787384033203125"
+            "time": "0.0020973682403564453"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID1b",
             "name": "testSupported2",
-            "time": "0.0035402774810791016"
+            "time": "0.004064321517944336"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID7",
             "name": "testSupported1a",
-            "time": "0.0008237361907958984"
+            "time": "0.0008127689361572266"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID1",
             "name": "testSupported",
-            "time": "0.0007855892181396484"
+            "time": "0.0009129047393798828"
         },
         {
             "classname": "st_exchange_id",
@@ -1591,88 +1587,88 @@
             "classname": "st_exchange_id",
             "code": "EID8",
             "name": "testNotOnlyOp",
-            "time": "0.0008165836334228516"
+            "time": "0.0008537769317626953"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID5h",
             "name": "testNoUpdate111",
-            "time": "0.003341197967529297"
+            "time": "0.0037794113159179688"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID5g",
             "name": "testNoUpdate110",
-            "time": "0.00505375862121582"
+            "time": "0.007137298583984375"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID5fb",
             "name": "testNoUpdate101b",
-            "time": "0.0061223506927490234"
+            "time": "0.006737232208251953"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID5f",
             "name": "testNoUpdate101",
-            "time": "0.006599903106689453"
+            "time": "0.007626771926879883"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID5e",
             "name": "testNoUpdate100",
-            "time": "0.0051174163818359375"
+            "time": "0.005502939224243164"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID5d",
             "name": "testNoUpdate011",
-            "time": "0.0025534629821777344"
+            "time": "0.003212451934814453"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID5c",
             "name": "testNoUpdate010",
-            "time": "0.002516031265258789"
+            "time": "0.0038161277770996094"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID5b",
             "name": "testNoUpdate001",
-            "time": "0.0024628639221191406"
+            "time": "0.0032362937927246094"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID5a",
             "name": "testNoUpdate000",
-            "time": "0.002566814422607422"
+            "time": "0.003700733184814453"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID2",
             "name": "testNoImplId",
-            "time": "0.0007557868957519531"
+            "time": "0.0009250640869140625"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID3",
             "name": "testLongArray",
-            "time": "0.0004911422729492188"
+            "time": "0.0007798671722412109"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID9",
             "name": "testLeasePeriod",
-            "time": "101.03133583068848"
+            "time": "101.0632073879242"
         },
         {
             "classname": "st_exchange_id",
             "code": "EID4",
             "name": "testBadFlags",
-            "time": "0.0016789436340332031"
+            "time": "0.007032632827758789"
         }
     ],
     "tests": 262,
-    "time": 508.5081617832184,
-    "timestamp": "2026-08-23 20:06:07.928215"
+    "time": 509.9774057865143,
+    "timestamp": "2026-08-23 20:56:45.856455"
 }

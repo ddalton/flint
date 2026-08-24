@@ -105,39 +105,34 @@ impl StateManager {
             n_s,
             n_st,
         );
-        // An empty load means nothing can be reclaimed, so the grace
-        // period guards nothing and sitting in it is pure cost: on a hub
-        // woken from hibernation (fresh PVC, empty state database) it is
-        // 90 seconds of refused writes on every single wake, while reads
-        // serve throughout — the confusing symptom where browsing works
-        // and saving does not. The hub's own file API is the caller that
-        // feels it, since it dispatches in-process with no session and so
-        // can never be "reclaim complete".
+        // Grace is a WINDOW and "can anyone reclaim" is a FACT, and the
+        // two were previously collapsed into one decision: an empty load
+        // ended grace outright. That is wrong in both directions.
         //
-        // But EMPTY and LOST are not the same thing, and only one of them
-        // is safe to shortcut. A quarantined-and-recreated state.db also
-        // loads empty, and that is the case where grace matters MOST:
-        // clients out there may hold opens and byte-range locks this
-        // incarnation has no record of, and ending grace lets a second
-        // client take a range whose holder we have forgotten — silently,
-        // because the lock stateid still validates. So the shortcut is
-        // taken only when the emptiness is innocent.
+        // Ending it is unsafe when the emptiness is not innocent. A
+        // quarantined-and-recreated state.db also loads zero of
+        // everything, and that is exactly when clients may hold opens and
+        // byte-range locks this incarnation has no record of — ending
+        // grace lets a second client take a range whose holder has been
+        // forgotten, silently, because the lock stateid still validates.
         //
-        // (This does not make pynfs RECC3 pass. RECC3 opens against a
-        // fresh server and expects NFS4ERR_GRACE, which conflicts with
-        // the deliberate contract that a hub with nothing to reclaim
-        // accepts writes at once — pinned by
-        // `a_hub_with_no_state_to_reclaim_accepts_writes_immediately`
-        // and its 503 twin. Reconciling all three needs the file API to
-        // gate on "is anything reclaimable" rather than on the grace
-        // period itself; recorded, not attempted here.)
-        if !state_lost && n_c == 0 && n_s == 0 && n_st == 0 {
-            self.leases.end_grace();
-        } else if state_lost {
+        // Keeping it is wrong for callers that cannot reclaim by
+        // construction. The hub's own file API dispatches in-process with
+        // minor_version 0 and no session, so it can never be "reclaim
+        // complete"; holding it in grace is a window of refused writes on
+        // every hibernate wake while reads serve normally — browsing
+        // works and saving does not.
+        //
+        // So the window now always runs (RFC 8881 §18.51.3 wants
+        // NFS4ERR_GRACE for an unreclaimed 4.1 client, pynfs RECC3), and
+        // the fact is recorded separately for the OPEN gate to consult.
+        let anything_reclaimable = state_lost || n_c > 0 || n_s > 0 || n_st > 0;
+        self.leases.set_anything_reclaimable(anything_reclaimable);
+        if state_lost {
             tracing::warn!(
-                "state was LOST (prior database unusable) — holding the grace \
-                 period even though nothing loaded: clients may hold opens and \
-                 locks this incarnation cannot see"
+                "state was LOST (prior database unusable) — treating this volume \
+                 as reclaimable even though nothing loaded: clients may hold opens \
+                 and locks this incarnation cannot see"
             );
         }
         Ok(())
@@ -235,45 +230,56 @@ impl Default for StateManager {
 mod tests {
     use super::*;
 
-    /// An empty load may only shortcut the grace period when the
-    /// emptiness is INNOCENT.
+    /// An empty load must record whether anything is RECLAIMABLE — and
+    /// must not end the grace WINDOW to say it.
     ///
-    /// Both arms load exactly nothing, so a check that only looked at
-    /// the record counts cannot tell them apart — which is the bug this
-    /// pins. `state_lost` is the difference:
+    /// Both arms load exactly nothing, so a check that looked only at
+    /// the record counts cannot tell them apart. `state_lost` is the
+    /// difference, and the two need opposite answers:
     ///
-    /// - fresh volume / hibernate wake: nothing ever existed, grace
-    ///   guards nothing, and holding it costs a window of refused writes
-    ///   on every wake (the hub's own file API dispatches with no
-    ///   session, so it can never be "reclaim complete" and eats the
-    ///   whole window). Shortcut it.
+    /// - fresh volume / hibernate wake: nothing ever existed, so a
+    ///   caller that cannot reclaim by construction (the in-process file
+    ///   API, no session, no RECLAIM_COMPLETE in 4.0) has nothing to
+    ///   wait for and must not be held — otherwise every wake refuses
+    ///   writes for the whole window while reads serve.
     /// - quarantined state.db: the tables are empty because the state
-    ///   was LOST, and clients out there may still hold opens and locks
-    ///   this incarnation cannot see. Ending grace there lets a second
-    ///   client take a range whose holder has been forgotten — silently,
-    ///   since the lock stateid still validates. Hold it.
+    ///   was LOST. Clients may still hold opens and byte-range locks
+    ///   this incarnation cannot see, so everything waits.
+    ///
+    /// In BOTH arms the grace window itself keeps running: a 4.1 client
+    /// that has not sent RECLAIM_COMPLETE must still get NFS4ERR_GRACE
+    /// (RFC 8881 §18.51.3, pynfs RECC3). Ending the window was the old
+    /// conflation of "nobody can reclaim" with "grace is over".
     #[tokio::test]
-    async fn grace_is_shortcut_only_when_an_empty_load_is_innocent() {
+    async fn an_empty_load_records_reclaimability_without_ending_grace() {
         // Innocent empty: nothing was ever there.
         let fresh = StateManager::new_in_memory("vol");
-        assert!(fresh.leases.in_grace_period(), "a server starts in grace");
+        assert!(
+            fresh.leases.anything_reclaimable(),
+            "before any load the server must assume the worst"
+        );
         fresh.load_from_backend(false).await.expect("empty load must succeed");
         assert!(
-            !fresh.leases.in_grace_period(),
-            "a hub with nothing to reclaim must not sit in grace — that is the \
-             hibernate-wake outage, where reads serve and every write is refused"
+            !fresh.leases.anything_reclaimable(),
+            "a hub with nothing to reclaim must say so, or the file API is held \
+             for the whole window and the hibernate wake refuses every write"
+        );
+        assert!(
+            fresh.leases.in_grace_period(),
+            "the grace WINDOW still runs — a 4.1 client that has not reclaimed \
+             must still see NFS4ERR_GRACE (RECC3). Ending it here was the bug."
         );
 
         // Guilty empty: a prior database existed and could not be used.
-        // Identical record counts; opposite required behaviour.
+        // Identical record counts; opposite required answer.
         let lost = StateManager::new_in_memory("vol");
         lost.load_from_backend(true).await.expect("empty load must succeed");
         assert!(
-            lost.leases.in_grace_period(),
-            "state was LOST, so the empty tables prove nothing — grace must be \
-             HELD or a second client can take a range whose pre-restart holder \
-             this incarnation has no record of"
+            lost.leases.anything_reclaimable(),
+            "state was LOST, so empty tables prove nothing — everything waits, or \
+             a second client takes a range whose holder we have forgotten"
         );
+        assert!(lost.leases.in_grace_period(), "and the window runs here too");
     }
 
     #[test]

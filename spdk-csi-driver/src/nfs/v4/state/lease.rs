@@ -86,6 +86,15 @@ pub struct LeaseManager {
     /// Set when the grace period has been ended early — see
     /// [`LeaseManager::end_grace`].
     grace_ended: std::sync::atomic::AtomicBool,
+    /// Whether any client could still be holding state this incarnation
+    /// would have to honour — i.e. records were loaded, OR the state was
+    /// LOST so we cannot tell. Distinct from `in_grace_period`: grace is
+    /// a WINDOW, this is a FACT about the volume. A hub that provably has
+    /// nothing to reclaim is still in its grace window (RFC 8881 §18.51.3
+    /// wants NFS4ERR_GRACE for an unreclaimed 4.1 client), but callers
+    /// that cannot reclaim by construction — the in-process file API —
+    /// have nothing to wait for and must not be held.
+    anything_reclaimable: std::sync::atomic::AtomicBool,
 }
 
 impl LeaseManager {
@@ -108,6 +117,10 @@ impl LeaseManager {
             server_start,
             grace_period,
             grace_ended: std::sync::atomic::AtomicBool::new(false),
+            // Conservative until a load says otherwise: a server that has
+            // not yet inspected its backend does not KNOW whether anyone
+            // can reclaim, and guessing "no" is the unsafe direction.
+            anything_reclaimable: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
@@ -129,6 +142,23 @@ impl LeaseManager {
     /// outside: browsing works, saving does not.
     ///
     /// One-way and idempotent.
+    /// Record whether anything could still be reclaimed. Called once by
+    /// `StateManager::load_from_backend`, which is the only place that
+    /// knows both the record counts and whether the state was lost.
+    pub fn set_anything_reclaimable(&self, yes: bool) {
+        self.anything_reclaimable
+            .store(yes, std::sync::atomic::Ordering::Relaxed);
+        if !yes {
+            info!("nothing to reclaim on this volume — callers that cannot reclaim are not held by grace");
+        }
+    }
+
+    /// See [`LeaseManager::anything_reclaimable`]'s field docs.
+    pub fn anything_reclaimable(&self) -> bool {
+        self.anything_reclaimable
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn end_grace(&self) {
         if !self.grace_ended.swap(true, std::sync::atomic::Ordering::Relaxed) {
             info!("grace period ended early — no client state to reclaim");

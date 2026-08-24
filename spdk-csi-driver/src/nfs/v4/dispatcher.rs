@@ -1388,7 +1388,33 @@ impl CompoundDispatcher {
                         );
                         return OperationResult::Open(Nfs4Status::NoGrace, None);
                     }
-                } else if in_grace && !already_complete {
+                } else if in_grace
+                    && !already_complete
+                    && (client_id.is_some()
+                        || self.state_mgr.leases.anything_reclaimable())
+                {
+                    // Two different callers reach this branch and they
+                    // need different answers.
+                    //
+                    // A 4.1 client with a session is gated on grace
+                    // unconditionally: RFC 8881 §18.51.3 requires
+                    // NFS4ERR_GRACE for a non-reclaim OPEN before its
+                    // RECLAIM_COMPLETE, whether or not this server
+                    // happens to hold reclaimable records (pynfs RECC3).
+                    //
+                    // A caller with NO session is the hub's own file API,
+                    // dispatching minor_version 0 in-process. It cannot
+                    // reclaim — RECLAIM_COMPLETE does not exist in 4.0
+                    // and it has no client record — so holding it for the
+                    // whole window buys nothing WHEN there is nothing to
+                    // reclaim, and costs the hibernate-wake outage where
+                    // reads serve and every write is refused. When
+                    // something IS reclaimable it must still wait, or it
+                    // could write over a range an NFS client is about to
+                    // reclaim a lock on.
+                    //
+                    // Hence: session ⇒ always gated; no session ⇒ gated
+                    // only while `anything_reclaimable`.
                     warn!(
                         "OPEN claim_type={} rejected: server in grace, client hasn't done RECLAIM_COMPLETE",
                         claim.claim_type,
