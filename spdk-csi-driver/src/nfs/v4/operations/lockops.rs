@@ -199,6 +199,32 @@ impl Lock {
 pub struct LockOwnerKey {
     pub client_id: u64,
     pub owner: Vec<u8>,
+    /// The file the canonical stateid was minted for. NFSv4's lock
+    /// stateid is per (lock-owner, file); the reverse lookup a reclaim
+    /// needs ("which canonical stands for this owner on THIS file")
+    /// is ambiguous without it.
+    pub filehandle: Vec<u8>,
+}
+
+/// `lock_type` value marking a persisted row as a CANONICAL-stateid →
+/// owner registration rather than a byte-range entry. Deliberately
+/// outside the wire range (1..=4): an OLDER build restoring a DB that
+/// carries these rows skips them with its unknown-lock_type warning
+/// instead of misreading them as ranges — no schema bump, rollback
+/// stays safe.
+const OWNER_REGISTRATION_LOCK_TYPE: u32 = 0xFC;
+
+/// The be64 counter inside a minted internal entry key
+/// ([`LockManager::mint_entry_stateid`]'s `[0xFC,'l','k',0,be64(n)]`
+/// layout), or `None` for any other key shape — canonical stateids,
+/// synthetic test keys, rows from builds predating the
+/// canonical/internal split.
+fn minted_entry_counter(other: &[u8; 12]) -> Option<u64> {
+    if other[..4] == [0xFC, b'l', b'k', 0] {
+        Some(u64::from_be_bytes(other[4..12].try_into().expect("8 bytes")))
+    } else {
+        None
+    }
 }
 
 pub struct LockManager {
@@ -276,7 +302,29 @@ impl LockManager {
     /// loudly rather than guessed at.
     pub fn load_records(&self, records: Vec<LockRecord>) {
         let mut loaded = 0usize;
+        let mut owners = 0usize;
+        let mut max_minted: u64 = 0;
         for record in &records {
+            if let Some(n) = minted_entry_counter(&record.other) {
+                max_minted = max_minted.max(n);
+            }
+            if record.lock_type == OWNER_REGISTRATION_LOCK_TYPE {
+                // A canonical-stateid → owner registration persisted by
+                // `register_owner_stateid`. Without re-seeding this map,
+                // every restart orphaned the client's held stateid: the
+                // stateid TABLE validated it (persisted), but LOCKU and
+                // exist-owner LOCK resolved no owner → BAD_STATEID,
+                // while TEST_STATEID said Ok and FREE_STATEID said
+                // LOCKS_HELD — non-converging recovery, and the restored
+                // range rows denied the range to everyone forever.
+                self.stateid_owners.insert(record.other, LockOwnerKey {
+                    client_id: record.client_id,
+                    owner: record.owner.clone(),
+                    filehandle: record.filehandle.clone(),
+                });
+                owners += 1;
+                continue;
+            }
             match Lock::from_record(record) {
                 Some(lock) => {
                     self.insert_in_memory(lock);
@@ -290,8 +338,23 @@ impl LockManager {
                 }
             }
         }
-        if loaded > 0 {
-            info!("LockManager restored {} byte-range locks from backend", loaded);
+        // Never re-mint a restored entry key. The counter restarts at 1
+        // with the process, and every generation mints the SAME byte
+        // keys — so without this bump, post-restart lock traffic
+        // silently OVERWRITES restored locks in memory (plain DashMap
+        // insert) and in the backend (`INSERT OR REPLACE`), re-losing
+        // mutual exclusion for exactly the holders persistence exists
+        // to protect. Same pattern as StateIdManager::load_records
+        // bumping next_stateid past the max restored counter.
+        if max_minted > 0 {
+            self.entry_key_counter
+                .fetch_max(max_minted + 1, Ordering::SeqCst);
+        }
+        if loaded > 0 || owners > 0 {
+            info!(
+                "LockManager restored {} byte-range locks and {} owner stateids from backend (entry keys resume past {})",
+                loaded, owners, max_minted
+            );
         }
     }
 
@@ -356,6 +419,7 @@ impl LockManager {
         self.stateid_owners.insert(stateid_key, LockOwnerKey {
             client_id: lock.client_id,
             owner: lock.owner.clone(),
+            filehandle: lock.filehandle.clone(),
         });
         self.locks.insert(stateid_key, lock);
         self.locks_by_fh
@@ -393,9 +457,56 @@ impl LockManager {
 
     /// Register a client-visible (canonical) stateid as standing for
     /// an owner — the map consulted by [`LockManager::resolve_owner`].
-    pub fn register_owner_stateid(&self, other: [u8; 12], client_id: u64, owner: Vec<u8>) {
+    ///
+    /// PERSISTED: the registration is mirrored into the backend as an
+    /// [`OWNER_REGISTRATION_LOCK_TYPE`] row, because the canonical
+    /// stateid itself survives a restart in the stateid table — a
+    /// mapping that does not survive with it leaves the client holding
+    /// a stateid that validates but resolves to nothing.
+    pub fn register_owner_stateid(
+        &self,
+        other: [u8; 12],
+        client_id: u64,
+        owner: Vec<u8>,
+        filehandle: Vec<u8>,
+    ) {
+        if let Some(backend) = &self.backend {
+            backend.enqueue_write(WriteOp::PutLock(LockRecord {
+                other,
+                seqid: 0,
+                client_id,
+                owner: owner.clone(),
+                filehandle: filehandle.clone(),
+                lock_type: OWNER_REGISTRATION_LOCK_TYPE,
+                offset: 0,
+                length: 0,
+            }));
+        }
         self.stateid_owners
-            .insert(other, LockOwnerKey { client_id, owner });
+            .insert(other, LockOwnerKey { client_id, owner, filehandle });
+    }
+
+    /// The client-visible stateid registered for (`client_id`, `owner`)
+    /// on `filehandle`, if any. Internal entry keys are skipped even
+    /// though they sit in the same map: replying one of those is
+    /// precisely the non-converging reclaim wedge this lookup exists to
+    /// prevent — the stateid table cannot validate an internal key, so
+    /// every subsequent op on it fails with BAD_STATEID and no recovery
+    /// path.
+    pub fn canonical_for_owner(
+        &self,
+        client_id: u64,
+        owner: &[u8],
+        filehandle: &[u8],
+    ) -> Option<[u8; 12]> {
+        self.stateid_owners.iter().find_map(|e| {
+            let v = e.value();
+            (minted_entry_counter(e.key()).is_none()
+                && v.client_id == client_id
+                && v.owner.as_slice() == owner
+                && v.filehandle.as_slice() == filehandle)
+                .then(|| *e.key())
+        })
     }
 
     /// Carve `cut` out of every range this owner holds on `filehandle`
@@ -628,8 +739,24 @@ impl LockManager {
         }
 
         // The owner map outlives range entries by design; a departing
-        // client is the one boundary where it must be purged too.
-        self.stateid_owners.retain(|_, v| v.client_id != client_id);
+        // client is the one boundary where it must be purged too — and
+        // since registrations are persisted, their rows go with them
+        // (deleting an internal key here again is an idempotent no-op;
+        // `remove_lock` above already enqueued those).
+        let purged: Vec<[u8; 12]> = self
+            .stateid_owners
+            .iter()
+            .filter(|e| e.value().client_id == client_id)
+            .map(|e| *e.key())
+            .collect();
+        for key in &purged {
+            self.stateid_owners.remove(key);
+        }
+        if let Some(backend) = &self.backend {
+            for key in purged {
+                backend.enqueue_write(WriteOp::DeleteLock(key));
+            }
+        }
     }
 }
 
@@ -822,10 +949,55 @@ impl LockOperationHandler {
                 op.locktype,
                 &range,
             ) {
-                info!("LOCK: reclaim matched restored lock; returning existing stateid");
+                // What to hand back depends on the row's generation:
+                // - A LEGACY row (pre canonical/internal split): its key
+                //   IS the client-visible stateid — return it unchanged.
+                // - An INTERNAL entry key: the stateid table cannot
+                //   validate it, so replying it (the old behavior) wedged
+                //   every subsequent op on the "granted" stateid in
+                //   BAD_STATEID. Reply the owner's CANONICAL stateid,
+                //   restored alongside the range rows — keeping the
+                //   client's `other` even when the stateid-table row is
+                //   missing (the same convention as the exist-owner arm:
+                //   a reply whose `other` differs from what the client
+                //   holds is silently refused and resent forever).
+                // - An internal key with NO canonical anywhere (a DB
+                //   written before registrations were persisted): mint
+                //   and register a fresh one — legal here because a
+                //   new_lock_owner reclaim ESTABLISHES lock state rather
+                //   than updating held state.
+                let reply = if minted_entry_counter(&existing.stateid.other).is_none() {
+                    existing.stateid
+                } else {
+                    match self
+                        .lock_mgr
+                        .canonical_for_owner(client_id, &op.owner, &current_fh.data)
+                    {
+                        Some(other) => self
+                            .state_mgr
+                            .stateids
+                            .update_seqid(&StateId { seqid: 0, other })
+                            .unwrap_or(StateId { seqid: 1, other }),
+                        None => {
+                            let sid = self.state_mgr.stateids.allocate(
+                                StateType::Lock,
+                                client_id,
+                                Some(current_fh.data.clone()),
+                            );
+                            self.lock_mgr.register_owner_stateid(
+                                sid.other,
+                                client_id,
+                                op.owner.clone(),
+                                current_fh.data.clone(),
+                            );
+                            sid
+                        }
+                    }
+                };
+                info!("LOCK: reclaim matched restored lock; returning canonical stateid");
                 return LockRes {
                     status: Nfs4Status::Ok,
-                    stateid: Some(existing.stateid),
+                    stateid: Some(reply),
                     denied: None,
                 };
             }
@@ -927,6 +1099,7 @@ impl LockOperationHandler {
                 canonical.other,
                 client_id,
                 owner_bytes.clone(),
+                current_fh.data.clone(),
             );
             canonical
         } else {
@@ -1954,6 +2127,288 @@ mod tests {
         assert!(mgr2
             .check_conflicts(b"/data/file", &LockRange { offset: 8192, length: 100 }, LockType::Write, None)
             .is_none());
+    }
+
+    /// A production-minted internal entry key, generation-independent.
+    fn entry_key(n: u64) -> [u8; 12] {
+        let mut other = [0u8; 12];
+        other[0] = 0xFC;
+        other[1] = b'l';
+        other[2] = b'k';
+        other[4..12].copy_from_slice(&n.to_be_bytes());
+        other
+    }
+
+    /// THE ENTRY-KEY COLLISION: `entry_key_counter` restarts at 1 with
+    /// the process, and `load_records` used to leave it there — so the
+    /// first post-restart mint produced the exact byte key of a
+    /// restored row still held by a pre-restart client, and both the
+    /// DashMap insert and sqlite's `INSERT OR REPLACE` silently
+    /// replaced that lock with the new one. Mutual exclusion lost
+    /// again, through the restore path 7abc0a5 added to protect it.
+    /// (StateIdManager::load_records always bumped its counter; this
+    /// was the one mint that didn't.)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restored_entry_keys_are_never_reminted() {
+        let backend = memory_backend();
+
+        // Generation 1: alice holds two production-minted locks on
+        // file A across the restart.
+        let mgr1 = LockManager::with_backend(Arc::clone(&backend));
+        for (off, len) in [(0u64, 4096u64), (8192, 4096)] {
+            mgr1.add_lock(Lock {
+                stateid: mgr1.mint_entry_stateid(),
+                client_id: 1,
+                owner: b"alice".to_vec(),
+                filehandle: b"/file-A".to_vec(),
+                lock_type: LockType::Write,
+                range: LockRange { offset: off, length: len },
+            });
+        }
+        settle(&backend, 2).await;
+        drop(mgr1);
+
+        // Generation 2: restart, then ordinary new lock traffic from a
+        // different client on a different file.
+        let mgr2 = LockManager::bring_up(Arc::clone(&backend), false).await;
+        let minted = mgr2.mint_entry_stateid();
+        assert!(
+            minted.other != entry_key(1) && minted.other != entry_key(2),
+            "a post-restart mint re-issued a restored entry key — the restored lock \
+             would be silently overwritten in memory AND in the backend"
+        );
+        mgr2.add_lock(Lock {
+            stateid: minted,
+            client_id: 2,
+            owner: b"bob".to_vec(),
+            filehandle: b"/file-B".to_vec(),
+            lock_type: LockType::Write,
+            range: LockRange { offset: 1 << 40, length: 4096 },
+        });
+        settle(&backend, 3).await;
+
+        // Alice's first range is still guarded on file A...
+        let conflict = mgr2
+            .check_conflicts(b"/file-A", &LockRange { offset: 100, length: 8 }, LockType::Write, None)
+            .expect("the restored lock must still deny its range after new lock traffic");
+        assert_eq!(conflict.owner, b"alice".to_vec());
+        assert_eq!(conflict.filehandle, b"/file-A".to_vec());
+
+        // ...and its durable row still names file A (INSERT OR REPLACE
+        // under a colliding key destroyed exactly this).
+        let rows = backend.list_locks().await.unwrap();
+        assert_eq!(rows.len(), 3, "the new lock must be a NEW row, not a replacement");
+        let row1 = rows
+            .iter()
+            .find(|r| r.other == entry_key(1))
+            .expect("the restored row must still exist under its original key");
+        assert_eq!(row1.filehandle, b"/file-A".to_vec());
+        assert_eq!(row1.owner, b"alice".to_vec());
+    }
+
+    /// THE CANONICAL ORPHAN, map half: the client-visible lock stateid
+    /// survives a restart in the STATEID table, so it validates — but
+    /// the stateid→owner map was memory-only, so LOCKU and exist-owner
+    /// LOCK resolved no owner and answered BAD_STATEID forever, while
+    /// the restored range rows denied the range to every other client.
+    /// Registrations are now persisted and restored.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn canonical_lock_stateid_survives_a_restart() {
+        let backend = memory_backend();
+        let canonical = [0xAB_u8; 12];
+
+        let mgr1 = LockManager::with_backend(Arc::clone(&backend));
+        mgr1.register_owner_stateid(canonical, 42, b"owner-42".to_vec(), b"/db".to_vec());
+        mgr1.add_lock(Lock {
+            stateid: mgr1.mint_entry_stateid(),
+            client_id: 42,
+            owner: b"owner-42".to_vec(),
+            filehandle: b"/db".to_vec(),
+            lock_type: LockType::Write,
+            range: LockRange { offset: 0, length: 1024 },
+        });
+        settle(&backend, 2).await;
+        drop(mgr1);
+
+        let mgr2 = LockManager::bring_up(Arc::clone(&backend), false).await;
+        assert_eq!(
+            mgr2.resolve_owner(&StateId { seqid: 1, other: canonical }),
+            Some((42, b"owner-42".to_vec())),
+            "the canonical stateid must still resolve to its owner after a restart"
+        );
+        // The reverse lookup returns the canonical, never the internal
+        // entry key that shares the same owner in the map.
+        assert_eq!(
+            mgr2.canonical_for_owner(42, b"owner-42", b"/db"),
+            Some(canonical)
+        );
+    }
+
+    /// THE CANONICAL ORPHAN, end to end: LOCK → hub restart → LOCKU
+    /// through the canonical the client was handed, then an exist-owner
+    /// re-LOCK through it — sqlite's ordinary sequence around any
+    /// rollout that catches a transaction in flight.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn locku_succeeds_via_the_canonical_stateid_after_a_restart() {
+        let backend = memory_backend();
+        let temp = TempDir::new().unwrap();
+        let fh_mgr = Arc::new(FileHandleManager::new(temp.path().to_path_buf()));
+        let root = fh_mgr.get_root_fh().unwrap();
+
+        // Generation 1: the client takes a lock through the real
+        // handler path and is handed its canonical stateid.
+        let canonical = {
+            let state = Arc::new(StateManager::new("vol", Arc::clone(&backend)));
+            let locks = LockManager::bring_up(Arc::clone(&backend), false).await;
+            let h = LockOperationHandler::new(state, locks);
+            let mut ctx = CompoundContext::new(0);
+            ctx.session_id = Some(create_test_session(&h, 7));
+            ctx.current_fh = Some(root.clone());
+            let open_sid = create_test_stateid(&h, 7);
+            let res = h.handle_lock(
+                LockOp {
+                    locktype: LockType::Write,
+                    reclaim: false,
+                    offset: 0,
+                    length: 1024,
+                    stateid: open_sid,
+                    owner: b"sqlite".to_vec(),
+                    new_lock_owner: true,
+                    open_seqid: Some(0),
+                },
+                &ctx,
+            );
+            assert_eq!(res.status, Nfs4Status::Ok);
+            res.stateid.unwrap()
+        };
+        settle(&backend, 2).await; // range entry + owner registration
+
+        // Generation 2: restart — fresh managers over the same backend,
+        // a fresh session (sessions are deliberately not restored).
+        let state = Arc::new(StateManager::new("vol", Arc::clone(&backend)));
+        state.load_from_backend(false).await.unwrap();
+        let locks = LockManager::bring_up(Arc::clone(&backend), false).await;
+        let h = LockOperationHandler::new(state, locks);
+        let mut ctx = CompoundContext::new(0);
+        ctx.session_id = Some(create_test_session(&h, 7));
+        ctx.current_fh = Some(root);
+
+        // Pre-fix: validate() passed (the stateid table IS persisted)
+        // but resolve_owner found nothing → BAD_STATEID, with no
+        // recovery path (TEST_STATEID said Ok, FREE_STATEID said
+        // LOCKS_HELD) and the restored rows denying the range forever.
+        let unlocked = h.handle_locku(
+            LockUOp {
+                locktype: LockType::Write,
+                seqid: canonical.seqid,
+                stateid: canonical,
+                offset: 0,
+                length: 1024,
+            },
+            &ctx,
+        );
+        assert_eq!(
+            unlocked.status,
+            Nfs4Status::Ok,
+            "LOCKU through the canonical stateid must survive a hub restart"
+        );
+
+        // exist_lock_owner4 carries no owner bytes on the wire — the
+        // restored map is the only authority for this re-lock.
+        let relock = h.handle_lock(
+            LockOp {
+                locktype: LockType::Write,
+                reclaim: false,
+                offset: 0,
+                length: 512,
+                stateid: unlocked.stateid.unwrap(),
+                owner: Vec::new(),
+                new_lock_owner: false,
+                open_seqid: None,
+            },
+            &ctx,
+        );
+        assert_eq!(
+            relock.status,
+            Nfs4Status::Ok,
+            "exist-owner LOCK via the restored canonical must succeed"
+        );
+    }
+
+    /// THE CANONICAL ORPHAN, reclaim half: the reclaim-match arm used
+    /// to reply with the restored INTERNAL entry key — a stateid the
+    /// stateid table has never seen, so the "successfully reclaimed"
+    /// lock failed validation on its very next use.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reclaim_replies_the_canonical_stateid_not_the_internal_key() {
+        let backend = memory_backend();
+        let temp = TempDir::new().unwrap();
+        let fh_mgr = Arc::new(FileHandleManager::new(temp.path().to_path_buf()));
+        let root = fh_mgr.get_root_fh().unwrap();
+
+        let canonical = {
+            let state = Arc::new(StateManager::new("vol", Arc::clone(&backend)));
+            let locks = LockManager::bring_up(Arc::clone(&backend), false).await;
+            let h = LockOperationHandler::new(state, locks);
+            let mut ctx = CompoundContext::new(0);
+            ctx.session_id = Some(create_test_session(&h, 7));
+            ctx.current_fh = Some(root.clone());
+            let open_sid = create_test_stateid(&h, 7);
+            let res = h.handle_lock(
+                LockOp {
+                    locktype: LockType::Write,
+                    reclaim: false,
+                    offset: 0,
+                    length: 1024,
+                    stateid: open_sid,
+                    owner: b"sqlite".to_vec(),
+                    new_lock_owner: true,
+                    open_seqid: Some(0),
+                },
+                &ctx,
+            );
+            assert_eq!(res.status, Nfs4Status::Ok);
+            res.stateid.unwrap()
+        };
+        settle(&backend, 2).await;
+
+        // Restart; the fresh LeaseManager opens its grace window, in
+        // which the client reclaims the lock it still holds.
+        let state = Arc::new(StateManager::new("vol", Arc::clone(&backend)));
+        state.load_from_backend(false).await.unwrap();
+        let locks = LockManager::bring_up(Arc::clone(&backend), false).await;
+        let h = LockOperationHandler::new(state, locks);
+        let mut ctx = CompoundContext::new(0);
+        ctx.session_id = Some(create_test_session(&h, 7));
+        ctx.current_fh = Some(root);
+        let open_sid = create_test_stateid(&h, 7);
+        let res = h.handle_lock(
+            LockOp {
+                locktype: LockType::Write,
+                reclaim: true,
+                offset: 0,
+                length: 1024,
+                stateid: open_sid,
+                owner: b"sqlite".to_vec(),
+                new_lock_owner: true,
+                open_seqid: Some(0),
+            },
+            &ctx,
+        );
+        assert_eq!(res.status, Nfs4Status::Ok, "reclaim of a restored lock must succeed");
+        let sid = res.stateid.unwrap();
+        assert!(
+            minted_entry_counter(&sid.other).is_none(),
+            "reclaim replied an internal entry key — unusable in every subsequent op"
+        );
+        assert_eq!(
+            sid.other, canonical.other,
+            "the reclaim reply must be the owner's canonical stateid"
+        );
+        assert!(
+            h.state_mgr.stateids.validate(&sid).is_ok(),
+            "the reclaim reply must validate for subsequent I/O"
+        );
     }
 
 
