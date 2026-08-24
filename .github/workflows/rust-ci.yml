@@ -36,6 +36,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: spdk-csi-driver
-      - name: cargo test --lib
+      - name: cargo test --lib --tests
         working-directory: spdk-csi-driver
-        run: cargo test --lib --no-fail-fast
+        # `--tests` runs the integration targets under tests/ as well as
+        # the lib. They were already green and already compiling; the job
+        # simply was not running them, so a regression in the wire-format
+        # suites could land unnoticed.
+        run: cargo test --lib --tests --no-fail-fast

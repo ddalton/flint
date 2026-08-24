@@ -148,12 +148,29 @@ test-nfs-protocol: ## Run full pynfs NFSv4.1 conformance suite (--maketree)
 	chmod 0777 $(NFS_EXPORT)/tmp
 	-limactl shell $(LIMA_VM) -- sudo rm -f /tmp/pynfs.json
 	rm -f /tmp/flint-pynfs-results.json
-	limactl shell $(LIMA_VM) -- bash -lc '\
-	  cd /opt/pynfs/nfs4.1 && \
-	  python3 ./testserver.py $(LIMA_HOST_ADDR):$(NFS_PORT)/tmp \
-	    --maketree --nocleanup --json=/tmp/pynfs.json all || true'
-	limactl cp $(LIMA_VM):/tmp/pynfs.json /tmp/flint-pynfs-results.json
-	@echo "Results: /tmp/flint-pynfs-results.json"
+	# The run's exit status decides this target's status. It used to end
+	# in `|| true`, so a suite that collapsed to zero passes — or never
+	# started — still exited 0 and the target looked green. Capture the
+	# status on its OWN line (a pipeline's status is the last command's,
+	# a trap this repo has paid for more than once), pull the JSON back
+	# either way so a failure is diagnosable, and only then fail.
+	# NO `set -e` here: it would abort on the failing run before the
+	# status could be captured, which is the same class of mistake as
+	# the `|| true` being removed.
+	@limactl shell $(LIMA_VM) -- bash -lc '\
+	    cd /opt/pynfs/nfs4.1 && \
+	    python3 ./testserver.py $(LIMA_HOST_ADDR):$(NFS_PORT)/tmp \
+	      --maketree --nocleanup --json=/tmp/pynfs.json all' \
+	    > /tmp/flint-pynfs-run.log 2>&1; \
+	  limactl cp $(LIMA_VM):/tmp/pynfs.json /tmp/flint-pynfs-results.json || true; \
+	  tail -20 /tmp/flint-pynfs-run.log
+	# The gate is the checker, NOT pynfs's exit status: the suite exits
+	# non-zero while any test fails, and this one has known deferred
+	# failures, so gating on it would be permanently red. The checker
+	# fails on the outcomes that actually matter — a run that did not
+	# happen, and a pass count below the recorded floor. Same shape as
+	# check-pynfs42.py.
+	@python3 scripts/check-pynfs.py /tmp/flint-pynfs-results.json
 
 # ─────────────────── NFS server INSIDE the Lima VM ───────────────────────────
 #
