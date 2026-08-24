@@ -52,26 +52,57 @@ pub enum LockType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LockRange {
     pub offset: u64,
-    pub length: u64,  // 0 means "to EOF"
+    /// Byte count, with [`LockRange::TO_EOF`] (all 1s) meaning "from
+    /// `offset` to the end of file" — the encoding RFC 8881 §18.10.3
+    /// defines and the one a Linux client actually puts on the wire.
+    ///
+    /// A wire length of **0 is invalid** and is refused with
+    /// NFS4ERR_INVAL at the operation handlers. It is still tolerated as
+    /// to-EOF by [`LockRange::end`] purely so rows persisted by an older
+    /// build (which wrongly used 0 as the sentinel) keep the meaning
+    /// they were stored with instead of collapsing to an empty range.
+    pub length: u64,
+}
+
+/// Shared byte-range validation for LOCK / LOCKT / LOCKU.
+///
+/// RFC 8881 §18.10.3 (and §18.11.3 / §18.12.3, which defer to it): a
+/// length of zero is invalid, and a length that is not all 1s must not
+/// overflow when added to the offset. All 1s means "to EOF" and is
+/// exempt. Returning `Err(status)` means the caller must answer with it.
+fn validate_lock_range(offset: u64, length: u64, op: &str) -> Result<(), Nfs4Status> {
+    if length == 0 {
+        warn!("{}: zero-length byte range (offset={}) — NFS4ERR_INVAL", op, offset);
+        return Err(Nfs4Status::Inval);
+    }
+    if length != LockRange::TO_EOF && offset.checked_add(length).is_none() {
+        warn!("{}: byte range overflow (offset={}, length={})", op, offset, length);
+        return Err(Nfs4Status::Inval);
+    }
+    Ok(())
 }
 
 impl LockRange {
+    /// RFC 8881 §18.10.3: a length of all 1s means "to the end of file".
+    pub const TO_EOF: u64 = u64::MAX;
+
+    /// Exclusive end of the range, saturating at [`u64::MAX`].
+    ///
+    /// `offset + length` must never be a bare add: the to-EOF sentinel
+    /// IS `u64::MAX`, so any non-zero offset overflows it — which is
+    /// precisely the arithmetic that made the old code reject every
+    /// "lock from offset N to EOF" request (nfstest_lock, 2026-08-23).
+    fn end(&self) -> u64 {
+        if self.length == Self::TO_EOF || self.length == 0 {
+            u64::MAX
+        } else {
+            self.offset.saturating_add(self.length)
+        }
+    }
+
     /// Check if this range overlaps with another
     pub fn overlaps(&self, other: &LockRange) -> bool {
-        // Special case: length=0 means "to EOF"
-        if self.length == 0 || other.length == 0 {
-            // If either range goes to EOF, check if start positions allow overlap
-            let self_end = if self.length == 0 { u64::MAX } else { self.offset + self.length };
-            let other_end = if other.length == 0 { u64::MAX } else { other.offset + other.length };
-
-            self.offset < other_end && other.offset < self_end
-        } else {
-            // Normal range overlap check
-            let self_end = self.offset + self.length;
-            let other_end = other.offset + other.length;
-
-            self.offset < other_end && other.offset < self_end
-        }
+        self.offset < other.end() && other.offset < self.end()
     }
 
     /// Check if locks conflict (considering lock types)
@@ -733,17 +764,20 @@ impl LockOperationHandler {
             };
         }
 
-        // RFC 5661 §18.10.3: `length == 0` is reserved to mean "lock from
-        // offset to EOF". For any non-zero length, `offset + length` MUST not
-        // overflow u64; if it does, the server MUST return NFS4ERR_INVAL.
-        if op.length != 0 && op.offset.checked_add(op.length).is_none() {
-            warn!("LOCK: byte range overflow (offset={}, length={})",
-                  op.offset, op.length);
-            return LockRes {
-                status: Nfs4Status::Inval,
-                stateid: None,
-                denied: None,
-            };
+        // RFC 8881 §18.10.3: "If the length is zero, or if a length that
+        // is not all 1s would overflow the maximum 64-bit unsigned integer
+        // value, the server MUST return NFS4ERR_INVAL."
+        //
+        // ALL 1s (`LockRange::TO_EOF`) is the to-EOF sentinel and is
+        // exempt from the overflow check; ZERO is invalid. This used to
+        // be stated exactly backwards — 0 was treated as to-EOF and
+        // all-1s went through `checked_add`, which overflows for every
+        // offset > 0. A Linux client asking to lock from any non-zero
+        // offset to EOF (the plain `fcntl` l_len=0 idiom) therefore got
+        // NFS4ERR_INVAL, while offset 0 worked because 0 + MAX does not
+        // overflow. Found by nfstest_lock, 2026-08-23.
+        if let Err(status) = validate_lock_range(op.offset, op.length, "LOCK") {
+            return LockRes { status, stateid: None, denied: None };
         }
 
         let range = LockRange {
@@ -957,6 +991,13 @@ impl LockOperationHandler {
             }
         };
 
+        // Same range rules as LOCK (RFC 8881 §18.11.3 defers to §18.10.3):
+        // zero length invalid, all-1s means to-EOF and is exempt from the
+        // overflow check.
+        if let Err(status) = validate_lock_range(op.offset, op.length, "LOCKT") {
+            return LockTRes { status, denied: None };
+        }
+
         let range = LockRange {
             offset: op.offset,
             length: op.length,
@@ -1036,6 +1077,16 @@ impl LockOperationHandler {
                 };
             }
         };
+
+        // Same range rules as LOCK (RFC 8881 §18.12.3 defers to §18.10.3).
+        // An unvalidated LOCKU is worse than an unvalidated LOCKT: `cut`
+        // drives `trim_owner_range`, so a zero-length or overflowing
+        // range would silently trim nothing (or the wrong span) while
+        // still answering NFS4_OK — the client would believe it had
+        // released a lock it still holds.
+        if let Err(status) = validate_lock_range(op.offset, op.length, "LOCKU") {
+            return LockURes { status, stateid: None };
+        }
 
         let cut = LockRange {
             offset: op.offset,
@@ -1720,6 +1771,57 @@ mod tests {
             lock_type: LockType::Write,
             range: LockRange { offset, length },
         }
+    }
+
+    /// The to-EOF sentinel is all 1s, NOT zero (RFC 8881 §18.10.3), and
+    /// `offset + TO_EOF` must never be a bare add.
+    ///
+    /// Shipped behaviour until 2026-08-23: a Linux client locking from a
+    /// non-zero offset to EOF sends length = all 1s, `checked_add`
+    /// overflowed, and the server answered NFS4ERR_INVAL — so plain
+    /// `fcntl(F_SETLK)` with `l_len = 0` at any non-zero offset failed
+    /// with EINVAL while offset 0 worked. Found by nfstest_lock;
+    /// reproduced against a local-ext4 control at offsets 1/4096/8192.
+    #[test]
+    fn lock_to_eof_is_all_ones_and_never_overflows() {
+        // The wire-level validator: all-1s is legal at ANY offset.
+        for off in [0u64, 1, 4096, 8192, u64::MAX - 1] {
+            assert!(
+                validate_lock_range(off, LockRange::TO_EOF, "LOCK").is_ok(),
+                "lock-to-EOF must be accepted at offset {off}"
+            );
+        }
+        // Zero length is invalid per the RFC...
+        assert_eq!(
+            validate_lock_range(0, 0, "LOCK"),
+            Err(Nfs4Status::Inval),
+            "a zero length must be NFS4ERR_INVAL"
+        );
+        // ...and a genuine (non-sentinel) overflow still is too.
+        assert_eq!(
+            validate_lock_range(u64::MAX - 4, 16, "LOCK"),
+            Err(Nfs4Status::Inval),
+            "offset+length overflow must be NFS4ERR_INVAL"
+        );
+        assert!(validate_lock_range(4096, 4096, "LOCK").is_ok());
+
+        // The range model: a to-EOF lock must actually reach EOF, and
+        // computing its end must not overflow.
+        let to_eof = LockRange { offset: 8192, length: LockRange::TO_EOF };
+        assert_eq!(to_eof.end(), u64::MAX);
+        // It conflicts with anything at or past its offset...
+        assert!(to_eof.overlaps(&LockRange { offset: 1 << 40, length: 8 }));
+        assert!(to_eof.overlaps(&LockRange { offset: 8192, length: 1 }));
+        // ...and with nothing before it. This is the anti-vacuity half:
+        // an `end()` that saturated everything to u64::MAX would make
+        // the previous asserts pass while breaking this one.
+        assert!(!to_eof.overlaps(&LockRange { offset: 0, length: 8192 }));
+        // Two to-EOF locks at different offsets always overlap.
+        assert!(to_eof.overlaps(&LockRange { offset: 0, length: LockRange::TO_EOF }));
+        // Legacy rows persisted with 0 keep their to-EOF meaning.
+        let legacy = LockRange { offset: 100, length: 0 };
+        assert_eq!(legacy.end(), u64::MAX);
+        assert!(!legacy.overlaps(&LockRange { offset: 0, length: 100 }));
     }
 
     /// `bring_up` is the shared path both front-ends use: it must bind
