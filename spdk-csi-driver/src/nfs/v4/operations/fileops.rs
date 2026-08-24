@@ -681,10 +681,71 @@ pub fn io_error_to_nfs4(e: &std::io::Error) -> Nfs4Status {
     if crate::nfs::v4::open_beneath::is_symlink_refusal(e) {
         return Nfs4Status::SymLink;
     }
+    // ENAMETOOLONG has no stable `ErrorKind`, so it fell into the
+    // catch-all and reached the client as NFS4ERR_IO —
+    // `Nfs4Status::NameTooLong` was defined in the protocol enum and
+    // produced at ZERO sites. NFS4ERR_IO tells a client the server hit
+    // a hardware or filesystem fault, which is not recoverable and not
+    // what happened; NFS4ERR_NAMETOOLONG (RFC 8881 §15.1.2) tells it the
+    // name it chose is too long, which is actionable.
+    //
+    // pjdfstest found this: 52 assertions across deep trees came back
+    // EIO where knfsd returns success. The underlying limit — flint
+    // resolves filehandles to ABSOLUTE paths, so a tree the client
+    // builds relatively can exceed PATH_MAX server-side where knfsd's
+    // dentry-based resolution does not — is a separate, larger issue.
+    // This only stops it lying about what went wrong.
+    #[cfg(unix)]
+    if e.raw_os_error() == Some(libc::ENAMETOOLONG) {
+        return Nfs4Status::NameTooLong;
+    }
     match e.kind() {
         std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
         std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
         _ => Nfs4Status::Io,
+    }
+}
+
+#[cfg(test)]
+mod nametoolong_tests {
+    use super::*;
+
+    /// `Nfs4Status::NameTooLong` was defined in the protocol enum and
+    /// produced at ZERO sites: ENAMETOOLONG has no stable `ErrorKind`,
+    /// so it fell into the `_ => Io` catch-all and reached the client as
+    /// NFS4ERR_IO — "the server hit a hardware or filesystem fault",
+    /// which is neither true nor actionable. pjdfstest surfaced it as 52
+    /// assertions on deep trees returning EIO where knfsd returns 0.
+    #[test]
+    #[cfg(unix)]
+    fn enametoolong_is_not_reported_as_io() {
+        let e = std::io::Error::from_raw_os_error(libc::ENAMETOOLONG);
+        assert_eq!(
+            io_error_to_nfs4(&e),
+            Nfs4Status::NameTooLong,
+            "ENAMETOOLONG must map to NFS4ERR_NAMETOOLONG, not NFS4ERR_IO"
+        );
+    }
+
+    /// Anti-vacuity: the arms that were already right must stay right,
+    /// and a genuinely unknown errno must STILL be IO — otherwise the
+    /// test above could pass with the catch-all deleted entirely.
+    #[test]
+    #[cfg(unix)]
+    fn the_other_mappings_are_unchanged() {
+        assert_eq!(
+            io_error_to_nfs4(&std::io::Error::from_raw_os_error(libc::ENOENT)),
+            Nfs4Status::NoEnt
+        );
+        assert_eq!(
+            io_error_to_nfs4(&std::io::Error::from_raw_os_error(libc::EACCES)),
+            Nfs4Status::Access
+        );
+        assert_eq!(
+            io_error_to_nfs4(&std::io::Error::from_raw_os_error(libc::EIO)),
+            Nfs4Status::Io,
+            "an errno with no specific mapping must still be IO"
+        );
     }
 }
 
@@ -3458,7 +3519,10 @@ impl FileOperationHandler {
                     std::io::ErrorKind::AlreadyExists => Nfs4Status::Exist,
                     std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
                     std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
-                    _ => Nfs4Status::Io,
+                    // Fall through to the shared mapper rather than assuming IO:
+                    // it knows ENAMETOOLONG (which has no stable ErrorKind and
+                    // was reaching clients as NFS4ERR_IO) and the symlink refusal.
+                    _ => io_error_to_nfs4(&e),
                 };
                 CreateRes {
                     status,
@@ -3601,7 +3665,10 @@ impl FileOperationHandler {
                             std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
                             std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
                             std::io::ErrorKind::DirectoryNotEmpty => Nfs4Status::NotEmpty,
-                            _ => Nfs4Status::Io,
+                            // Fall through to the shared mapper rather than assuming IO:
+                            // it knows ENAMETOOLONG (which has no stable ErrorKind and
+                            // was reaching clients as NFS4ERR_IO) and the symlink refusal.
+                            _ => io_error_to_nfs4(&e),
                         };
                         RemoveRes {
                             status,
@@ -3876,7 +3943,10 @@ impl FileOperationHandler {
                     std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
                     std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
                     std::io::ErrorKind::AlreadyExists => Nfs4Status::Exist,
-                    _ => Nfs4Status::Io,
+                    // Fall through to the shared mapper rather than assuming IO:
+                    // it knows ENAMETOOLONG (which has no stable ErrorKind and
+                    // was reaching clients as NFS4ERR_IO) and the symlink refusal.
+                    _ => io_error_to_nfs4(&e),
                 };
                 rename_err(status)
             }
@@ -4003,7 +4073,10 @@ impl FileOperationHandler {
                     std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
                     std::io::ErrorKind::AlreadyExists => Nfs4Status::Exist,
                     std::io::ErrorKind::InvalidInput => Nfs4Status::NotDir, // Source is directory
-                    _ => Nfs4Status::Io,
+                    // Fall through to the shared mapper rather than assuming IO:
+                    // it knows ENAMETOOLONG (which has no stable ErrorKind and
+                    // was reaching clients as NFS4ERR_IO) and the symlink refusal.
+                    _ => io_error_to_nfs4(&e),
                 };
                 LinkRes {
                     status,
@@ -4062,7 +4135,10 @@ impl FileOperationHandler {
                     std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
                     std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
                     std::io::ErrorKind::InvalidInput => Nfs4Status::Inval, // Not a symlink
-                    _ => Nfs4Status::Io,
+                    // Fall through to the shared mapper rather than assuming IO:
+                    // it knows ENAMETOOLONG (which has no stable ErrorKind and
+                    // was reaching clients as NFS4ERR_IO) and the symlink refusal.
+                    _ => io_error_to_nfs4(&e),
                 };
                 ReadLinkRes {
                     status,

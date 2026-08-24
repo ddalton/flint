@@ -20,10 +20,15 @@ on:
     paths:
       - 'spdk-csi-driver/**'
       - '.github/workflows/rust-ci.yml'
+      # The authz drill and the config it runs against live here. Without
+      # this the drill could be edited into uselessness and CI would not
+      # even run — the same class as a gate nobody wired up.
+      - 'tests/lima/pnfs/**'
   pull_request:
     paths:
       - 'spdk-csi-driver/**'
       - '.github/workflows/rust-ci.yml'
+      - 'tests/lima/pnfs/**'
 
 jobs:
   lib-tests:
@@ -43,3 +48,98 @@ jobs:
         # simply was not running them, so a regression in the wire-format
         # suites could land unnoticed.
         run: cargo test --lib --tests --no-fail-fast
+
+  # ── Cross-uid authorization, against a REAL kernel NFS mount ──────────────
+  #
+  # The lib suite cannot reach this. Every question here is "what does the
+  # Linux NFS client, running as uid X, get back" — which needs a mount, and
+  # a mount needs a Linux host. The dev rig uses Lima because the workstation
+  # is macOS; this runner IS Linux, so it can do it directly.
+  #
+  # WHY IT EXISTS. pynfs and nfstest_posix both run as a SINGLE uid, so a
+  # server that grants everything to everyone passes them perfectly — flint
+  # scored 171/0/91 while any client could read any file regardless of mode
+  # and chown any file to anyone. Nothing in CI could see that.
+  #
+  # THE CONTROL ARM IS THE DESIGN. The same drill runs against knfsd first.
+  # If knfsd fails it, the RUNNER is broken (no nfs module, mount refused,
+  # setpriv unavailable) — not flint — and the job says so instead of
+  # blaming the change under test. A job that goes red for infrastructure
+  # reasons trains people to ignore it, which is the failure mode this
+  # workflow's own header warns about.
+  authz-drill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install protoc (tonic-build)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: install NFS client + the reference server
+        run: sudo apt-get install -y nfs-common nfs-kernel-server util-linux
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: spdk-csi-driver
+      - name: build the hub
+        working-directory: spdk-csi-driver
+        run: cargo build --bin flint-pnfs-mds
+
+      # ── control arm: knfsd. Must be green or the runner is the problem ──
+      - name: control arm — knfsd
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /srv/knfsd-export /mnt/knfsd
+          sudo chmod 0777 /srv/knfsd-export
+          # no_root_squash: flint does no squashing at all, so squashing here
+          # would make the control fail for a reason flint does not share.
+          echo '/srv/knfsd-export 127.0.0.1/32(rw,sync,no_subtree_check,no_root_squash,fsid=7)' \
+            | sudo tee -a /etc/exports >/dev/null
+          sudo exportfs -ra
+          sudo systemctl restart nfs-kernel-server
+          sleep 3
+          sudo mount -t nfs -o vers=4.1,nolock 127.0.0.1:/srv/knfsd-export /mnt/knfsd
+          sudo mkdir -p /mnt/knfsd/pjd
+          sudo bash tests/lima/pnfs/access-authz-drill.sh /mnt/knfsd/pjd knfsd || {
+            echo "::error::The knfsd CONTROL arm failed. This runner cannot support the"
+            echo "::error::drill (NFS mount, setpriv, uid switching) — this is NOT a"
+            echo "::error::verdict on the change under test. Fix the drill or the runner."
+            exit 1
+          }
+
+      # ── flint, enforcing. This is the actual regression gate ──
+      #
+      # ENFORCE deliberately: the shipped DEFAULT is warn, under which the
+      # server evaluates and logs but denies nothing, so a drill against the
+      # default could never detect a permission regression. The warn-mode
+      # invariant ("evaluates, never denies") is covered by the unit test
+      # `authz::tests::warn_mode_never_denies`.
+      - name: flint — cross-uid authorization
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /srv/flint-mds-export/tmp /srv/flint-mds-state /mnt/flint
+          sudo chmod 0777 /srv/flint-mds-export/tmp
+          sudo env RUST_LOG=warn FLINT_NFS_ENFORCE_PERMISSIONS=1 \
+            ./spdk-csi-driver/target/debug/flint-pnfs-mds \
+            --config tests/lima/pnfs/lite-pynfs.yaml > /tmp/hub.log 2>&1 &
+          for i in $(seq 1 30); do
+            ss -lnt | grep -q ':20490' && break
+            sleep 1
+          done
+          ss -lnt | grep -q ':20490' || { echo "::error::hub never listened"; cat /tmp/hub.log; exit 1; }
+          sudo mount -t nfs -o vers=4.1,port=20490,nolock 127.0.0.1:/ /mnt/flint
+          # The flavor is load-bearing: flint used to advertise AUTH_NONE
+          # first, so a stock mount negotiated sec=null and arrived with NO
+          # uid at all — under which every permission check is vacuously
+          # skipped and this whole job would pass while proving nothing.
+          sec=$(grep ' /mnt/flint ' /proc/mounts | tr ',' '\n' | grep '^sec=' || true)
+          echo "negotiated $sec"
+          test "$sec" = "sec=sys" || {
+            echo "::error::mount negotiated '$sec', not sec=sys — with no credential the"
+            echo "::error::permission checks cannot run and this job would pass vacuously."
+            exit 1
+          }
+          sudo mkdir -p /mnt/flint/tmp/drill
+          sudo bash tests/lima/pnfs/access-authz-drill.sh /mnt/flint/tmp/drill flint
+
+      - name: hub log on failure
+        if: failure()
+        run: tail -60 /tmp/hub.log || true
