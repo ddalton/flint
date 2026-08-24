@@ -2009,16 +2009,21 @@ impl CompoundDispatcher {
             }
 
             // File modification operations
-            Operation::Create { objtype, objname, linkdata } => {
-                use crate::nfs::v4::operations::fileops::{CreateOp, Fattr4 as FileFattr4};
+            Operation::Create { objtype, objname, linkdata, createattrs } => {
+                use crate::nfs::v4::operations::fileops::CreateOp;
                 let op = CreateOp {
                     objtype,
                     objname,
                     linkdata,  // Pass linkdata for symlinks
-                    createattrs: FileFattr4 {
-                        attrmask: Vec::new(),
-                        attr_vals: Vec::new(),
-                    },
+                    // The client's requested attributes, carried from the
+                    // wire. This used to be hardcoded empty while the
+                    // decoder threw the bytes away, so CREATE silently
+                    // ignored every createattr — a `mkdir(0700)` came back
+                    // 0755 (world-readable) and an application that checks
+                    // its own directory permissions, like initdb, refuses
+                    // to run. `handle_create` already applies these and
+                    // reports them in `attrset`.
+                    createattrs,
                 };
                 let res = self.file_handler.handle_create(op, context).await;
                 OperationResult::Create(res.status, res.change_info, res.attrset)

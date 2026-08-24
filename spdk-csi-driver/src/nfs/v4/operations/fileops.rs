@@ -4049,6 +4049,62 @@ mod tests {
         assert!(pages > 1, "test needs a listing that actually paginates");
     }
 
+    /// CREATE(NF4DIR) must honour the mode in `createattrs`.
+    ///
+    /// Measured against a real kernel client on Linux 2026-08-23:
+    /// `mkdir(0700)` / `0777` / `0750` / `0111` ALL came back `0755`
+    /// (= 0777 & ~umask), i.e. the requested mode was dropped entirely
+    /// and the directory got default permissions. A `mkdir(0700)` that
+    /// silently yields a world-readable directory is a privacy failure,
+    /// not just a conformance one.
+    #[tokio::test]
+    async fn create_directory_honours_the_requested_mode() {
+        let (handler, temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        handler.handle_putrootfh(PutRootFhOp, &mut ctx);
+
+        for mode in [0o700u32, 0o750, 0o711, 0o777] {
+            let name = format!("d{mode:o}");
+            // CREATE sets current_fh to the NEW object, so re-root before
+            // each iteration or these nest inside one another.
+            handler.handle_putrootfh(PutRootFhOp, &mut ctx);
+            let res = handler
+                .handle_create(
+                    CreateOp {
+                        objtype: Nfs4FileType::Directory,
+                        objname: name.clone(),
+                        linkdata: None,
+                        createattrs: Fattr4 {
+                            attrmask: attr_numbers_to_bitmap(&[FATTR4_MODE]),
+                            attr_vals: mode.to_be_bytes().to_vec(),
+                        },
+                    },
+                    &mut ctx,
+                )
+                .await;
+            assert_eq!(res.status, Nfs4Status::Ok, "CREATE dir {name} failed");
+            // The server must also SAY it set the mode. `attrset` is a
+            // bitmap4 (vec of WORDS), not a list of attr numbers.
+            let w = (FATTR4_MODE / 32) as usize;
+            let bit = 1u32 << (FATTR4_MODE % 32);
+            assert!(
+                res.attrset.get(w).is_some_and(|word| word & bit != 0),
+                "CREATE({name}) did not report MODE in attrset bitmap: {:?}",
+                res.attrset
+            );
+            use std::os::unix::fs::PermissionsExt;
+            let got = std::fs::metadata(temp.path().join(&name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777;
+            assert_eq!(
+                got, mode,
+                "CREATE(NF4DIR) ignored the requested mode: asked {mode:04o}, got {got:04o}"
+            );
+        }
+    }
+
     fn create_test_handler() -> (FileOperationHandler, TempDir) {
         let temp_dir = TempDir::new().unwrap();
         let export_path = temp_dir.path().to_path_buf();

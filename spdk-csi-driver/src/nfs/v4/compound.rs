@@ -19,6 +19,7 @@
 // Operations like PUTFH set CFH, SAVEFH copies CFH to SFH, RESTOREFH restores.
 
 use super::protocol::*;
+use crate::nfs::v4::operations::Fattr4;
 use super::xdr::{Nfs4XdrDecoder, Nfs4XdrEncoder};
 use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
 use bytes::Bytes;
@@ -261,6 +262,13 @@ pub enum Operation {
         objtype: Nfs4FileType,
         objname: String,
         linkdata: Option<String>,  // For symlinks (NF4LNK)
+        /// createattrs (RFC 8881 §18.4): the attributes the client asks
+        /// the new object to be created with. These used to be decoded
+        /// and DISCARDED ("consumed for wire alignment"), so every
+        /// `mkdir(mode)` landed with default permissions — measured on a
+        /// real kernel client: 0700 / 0750 / 0711 / 0777 all became
+        /// 0755. `handle_create` has always been able to apply them.
+        createattrs: Fattr4,
     },
     Remove(String),              // component name
     Rename {
@@ -1418,15 +1426,19 @@ impl CompoundRequest {
                 };
                 tracing::trace!("DEBUG CREATE: objname='{}'", objname);
 
-                // createattrs (fattr4 = bitmap4 + attrlist4 opaque) — values
-                // currently ignored; the bytes are consumed for wire alignment.
+                // createattrs (fattr4 = bitmap4 + attrlist4 opaque). These
+                // are CARRIED, not discarded: the handler applies them, and
+                // dropping them here is what made every mkdir(mode) land
+                // with default permissions.
                 let bitmap_len = decoder.decode_u32()?;
+                let mut attrmask = Vec::with_capacity(bitmap_len.min(8) as usize);
                 for _ in 0..bitmap_len {
-                    let _ = decoder.decode_u32()?;
+                    attrmask.push(decoder.decode_u32()?);
                 }
-                let _attrs = decoder.decode_opaque()?;
+                let attrs = decoder.decode_opaque()?;
+                let createattrs = Fattr4 { attrmask, attr_vals: attrs.to_vec() };
 
-                Ok(Operation::Create { objtype, objname, linkdata })
+                Ok(Operation::Create { objtype, objname, linkdata, createattrs })
             }
             opcode::REMOVE => {
                 match decode_component(decoder)? {
@@ -2889,6 +2901,66 @@ mod tests {
     use crate::nfs::xdr::XdrDecoder;
     use bytes::{BytesMut, BufMut};
     use crate::nfs::v4::operations::Fattr4;
+
+    /// CREATE must carry the client's `createattrs` off the wire.
+    ///
+    /// The decoder used to parse the bitmap and the attrlist and then
+    /// DISCARD both ("consumed for wire alignment"), while the dispatcher
+    /// handed `handle_create` a hardcoded empty Fattr4. The handler has
+    /// always applied whatever it was given, so a unit test at that level
+    /// passed while every real `mkdir(mode)` on the wire landed with
+    /// default permissions — measured against a Linux kernel client:
+    /// 0700 / 0750 / 0711 / 0777 all came back 0755, i.e. a directory the
+    /// caller asked to be private was world-readable.
+    #[test]
+    fn create_carries_createattrs_off_the_wire() {
+        // CREATE args: type(NF4DIR=2), objname<>, createattrs(bitmap+attrs)
+        let mut buf = BytesMut::new();
+        buf.put_u32(2); // NF4DIR — no type-specific tail for a directory
+        let name = b"workspace";
+        buf.put_u32(name.len() as u32);
+        buf.put_slice(name);
+        buf.put_slice(&[0u8; 3]); // pad 9 -> 12
+        // fattr4: bitmap4 of one word with FATTR4_MODE (33) => word1 bit1.
+        buf.put_u32(2); // two bitmap words
+        buf.put_u32(0);
+        buf.put_u32(1 << 1);
+        // attrlist4: mode 0o700 as a 4-byte opaque
+        buf.put_u32(4);
+        buf.put_u32(0o700);
+
+        let mut dec = XdrDecoder::new(buf.freeze());
+        let op = CompoundRequest::decode_operation(&mut dec, opcode::CREATE)
+            .expect("CREATE must decode");
+
+        match op {
+            Operation::Create { objtype, objname, createattrs, .. } => {
+                assert_eq!(objname, "workspace");
+                assert!(matches!(objtype, Nfs4FileType::Directory));
+                // The whole point: the attrs must SURVIVE the decode.
+                assert_eq!(
+                    createattrs.attrmask,
+                    vec![0u32, 1 << 1],
+                    "createattrs bitmap was dropped by the decoder"
+                );
+                assert_eq!(
+                    createattrs.attr_vals,
+                    0o700u32.to_be_bytes().to_vec(),
+                    "createattrs values were dropped by the decoder"
+                );
+                // And they must decode back to the mode the client asked
+                // for — an attrmask carried without its values would pass
+                // the two asserts above but still lose the mode.
+                let want = crate::nfs::v4::operations::fileops::decode_settable_attrs(
+                    &createattrs.attrmask,
+                    &createattrs.attr_vals,
+                )
+                .expect("createattrs must be decodable");
+                assert_eq!(want.mode, Some(0o700), "mode did not survive end-to-end");
+            }
+            other => panic!("expected Operation::Create, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_getattr_response_encoding() {

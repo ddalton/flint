@@ -677,6 +677,15 @@ impl HubFs {
             objtype: Nfs4FileType::Directory,
             objname: leaf.to_string(),
             linkdata: None,
+            // The HTTP surface exposes no mode, so ask for none and let
+            // the server apply its default. Explicitly empty rather than
+            // incidentally empty: CREATE now honours createattrs, so a
+            // caller-supplied mode would be applied if this API ever
+            // grows one.
+            createattrs: crate::nfs::v4::operations::Fattr4 {
+                attrmask: Vec::new(),
+                attr_vals: Vec::new(),
+            },
         });
         self.compound(ops).await?;
         Ok(())
