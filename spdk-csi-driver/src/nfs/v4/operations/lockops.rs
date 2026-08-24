@@ -271,6 +271,49 @@ impl LockManager {
         self.restored_clean.store(false, Ordering::SeqCst);
     }
 
+    /// The ONE lock-state bring-up path for every flint NFS front-end.
+    ///
+    /// Binds a manager to `backend` **and** restores the persisted lock
+    /// table in a single call, so a front-end cannot obtain a
+    /// LockManager without also obtaining its restore. That coupling is
+    /// the whole point: construction and restore used to be two
+    /// separate hooks wired into `NfsServer` only, and
+    /// `MetadataServer` — the binary the flint-lite hub actually runs
+    /// (`nfs_mds_main.rs` → `pnfs::mds::MetadataServer`) — built a bare
+    /// `LockManager::new()` and never called `list_locks`. Because the
+    /// STATEID table *was* persisted and EXCHANGE_ID answers
+    /// CONFIRMED_R, a client reconnecting after any hub restart
+    /// believed it still held a lock the server had silently forgotten,
+    /// issued no reclaim, was never told, and a second client's
+    /// conflicting LOCK was granted. Two writers, mutual exclusion
+    /// gone, no error at either end.
+    ///
+    /// `state_lost` is the caller's "a prior state DB existed and could
+    /// not be used" signal; combined with an unreadable `list_locks` it
+    /// gates NEW locks for grace (`restored_clean`).
+    pub async fn bring_up(
+        backend: Arc<dyn StateBackend>,
+        state_lost: bool,
+    ) -> Arc<Self> {
+        let mgr = Arc::new(Self::with_backend(Arc::clone(&backend)));
+        if state_lost {
+            // A prior state DB existed but was quarantined/unreadable:
+            // the lock table went with it. Gate new locks in grace.
+            mgr.mark_restore_failed();
+        }
+        match backend.list_locks().await {
+            Ok(records) => mgr.load_records(records),
+            Err(e) => {
+                tracing::error!(
+                    "NFSv4 lock restore failed ({}) — new locks gated for grace",
+                    e
+                );
+                mgr.mark_restore_failed();
+            }
+        }
+        mgr
+    }
+
     /// `false` while running with known-lost lock state.
     pub fn restored_clean(&self) -> bool {
         self.restored_clean.load(Ordering::SeqCst)
@@ -1677,6 +1720,101 @@ mod tests {
             lock_type: LockType::Write,
             range: LockRange { offset, length },
         }
+    }
+
+    /// `bring_up` is the shared path both front-ends use: it must bind
+    /// the backend AND restore in one call. Proves the restore half —
+    /// a `bring_up` that bound the backend but skipped `list_locks`
+    /// (the hub's shipped behaviour) fails here.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bring_up_binds_and_restores_in_one_call() {
+        let backend = memory_backend();
+
+        // Generation 1 persists a lock through the shared path.
+        let mgr1 = LockManager::bring_up(Arc::clone(&backend), false).await;
+        mgr1.add_lock(mk_lock(7, 99, 0, 4096));
+        settle(&backend, 1).await;
+        drop(mgr1);
+
+        // Generation 2 must come back holding it, with no separate
+        // load_records call by the caller.
+        let mgr2 = LockManager::bring_up(Arc::clone(&backend), false).await;
+        assert!(mgr2.restored_clean(), "a clean restore must not gate new locks");
+        let restored = mgr2
+            .get_lock(&StateId { seqid: 0, other: [7; 12] })
+            .expect("bring_up must restore the persisted lock table");
+        assert_eq!(restored.client_id, 99);
+        // Mutual exclusion is authoritative again — the anti-vacuity
+        // half: a manager that "restored" an empty table would find no
+        // conflict here and this assert is what catches it.
+        assert!(
+            mgr2.check_conflicts(
+                b"/data/file",
+                &LockRange { offset: 100, length: 8 },
+                LockType::Write,
+                None
+            )
+            .is_some(),
+            "restored lock must still deny a conflicting range"
+        );
+
+        // state_lost gates new locks even when the table reads clean.
+        let mgr3 = LockManager::bring_up(Arc::clone(&backend), true).await;
+        assert!(!mgr3.restored_clean(), "state_lost must gate new locks for grace");
+    }
+
+    /// Anti-drift guard. Both NFS front-ends MUST obtain their
+    /// LockManager from `bring_up`; a bare `LockManager::new()` in
+    /// production code means a memory-only lock table whose loss is
+    /// SILENT (the stateids persist, EXCHANGE_ID answers CONFIRMED_R,
+    /// the client never reclaims and is never told). That is exactly
+    /// what `pnfs/mds/server.rs` — the binary flint-lite runs — shipped
+    /// with. A behavioural test cannot catch the revert because
+    /// `MetadataServer::new` is far too heavy to construct here, so
+    /// this asserts on the call sites directly, the way the F24
+    /// guard-discipline lint above does.
+    #[test]
+    fn front_ends_build_their_lock_manager_through_bring_up() {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        // The two production front-ends, and the mains that arm them.
+        let front_ends = [
+            base.join("pnfs").join("mds").join("server.rs"),
+            base.join("nfs").join("server_v4.rs"),
+        ];
+        let mut violations = Vec::new();
+        let mut saw_bring_up = 0usize;
+        for f in &front_ends {
+            let text = std::fs::read_to_string(f)
+                .unwrap_or_else(|e| panic!("front-end source unreadable {}: {e}", f.display()));
+            // Convention: unit-test modules sit at the END behind cfg(test).
+            let prod = match text.find("#[cfg(test)]") {
+                Some(i) => &text[..i],
+                None => &text[..],
+            };
+            if prod.contains("LockManager::bring_up") {
+                saw_bring_up += 1;
+            }
+            for (n, line) in prod.lines().enumerate() {
+                if line.contains("LockManager::new()") {
+                    violations.push(format!("{}:{}: {}", f.display(), n + 1, line.trim()));
+                }
+            }
+        }
+        // Anti-vacuity: if the walk found nothing at all, the paths are
+        // wrong and the lint would pass by not looking.
+        assert_eq!(
+            saw_bring_up,
+            front_ends.len(),
+            "expected every front-end to call LockManager::bring_up; found {saw_bring_up}. \
+             Either a front-end regressed or this lint's paths are stale"
+        );
+        assert!(
+            violations.is_empty(),
+            "NFS front-end builds a memory-only LockManager — locks will be silently \
+             lost on every restart while the stateid still validates. Use \
+             `LockManager::bring_up(backend, state_lost).await`:\n{}",
+            violations.join("\n")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

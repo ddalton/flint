@@ -143,13 +143,9 @@ impl NfsServer {
         // Locks share the state backend: their stateids always survived a
         // restart (StateIdRecord), so the lock table must too — otherwise
         // post-restart the stateid validates while mutual exclusion is
-        // silently gone.
-        let lock_mgr = Arc::new(LockManager::with_backend(state_mgr.backend()));
-        if state_lost {
-            // A prior state DB existed but was quarantined/unreadable:
-            // the lock table is gone with it. Gate new locks in grace.
-            lock_mgr.mark_restore_failed();
-        }
+        // silently gone. Bind + restore go through the SHARED
+        // `bring_up` so this front-end and `MetadataServer` cannot drift.
+        let lock_mgr = LockManager::bring_up(state_mgr.backend(), state_lost).await;
 
         // Create COMPOUND dispatcher (creates handlers internally)
         let dispatcher = Arc::new(CompoundDispatcher::new(
@@ -195,13 +191,11 @@ impl NfsServer {
             // pre-restart holder we no longer know about.
             self.lock_mgr.mark_restore_failed();
         }
-        match self.state_mgr.backend().list_locks().await {
-            Ok(records) => self.lock_mgr.load_records(records),
-            Err(e) => {
-                tracing::error!("NFSv4 lock restore failed ({}) — new locks gated for grace", e);
-                self.lock_mgr.mark_restore_failed();
-            }
-        }
+        // The lock table itself was bound and restored in `new()` via
+        // the shared `LockManager::bring_up` — still pre-listener, since
+        // `new()` precedes `serve()`. Only the `load_from_backend`
+        // failure trigger above remains here, because that call is what
+        // establishes whether the REST of the state survived.
 
         // NFSv4 doesn't need portmapper registration (uses well-known port 2049)
         // and doesn't need separate MOUNT protocol

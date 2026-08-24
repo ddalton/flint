@@ -236,8 +236,19 @@ impl MetadataServer {
             Arc::clone(&backend),
         ));
         
-        // Initialize lock manager
-        let lock_mgr = Arc::new(LockManager::new());
+        // Initialize lock manager through the SHARED bring-up path that
+        // `NfsServer` uses, so the backend binding and the restore can
+        // never drift apart again. Until this call landed, the hub built
+        // a memory-only manager here and never restored `list_locks`,
+        // while its stateid table WAS persisted — so every restart
+        // silently dropped mutual exclusion with the client none the
+        // wiser (see `LockManager::bring_up` for the full shape).
+        //
+        // `state_lost` comes from the quarantine arm above: when the DB
+        // was recreated, the lock table went with it, so new locks are
+        // refused for grace rather than handing a second client a range
+        // whose pre-restart holder we can no longer see.
+        let lock_mgr = LockManager::bring_up(Arc::clone(&backend), state_lost).await;
 
         // Initialize device registry
         let device_registry = Arc::new(DeviceRegistry::new());
