@@ -44,6 +44,18 @@ use tracing::{debug, info, warn};
 pub(crate) const SERVER_MAX_REQUEST: u32 = 1024 * 1024;
 pub(crate) const SERVER_MAX_RESPONSE: u32 = 1024 * 1024;
 
+/// Ceiling on `ca_maxresponsesize_cached` — the bytes a client can DEMAND
+/// the server pin per slot, for the life of the slot, by sending
+/// `sa_cachethis`. This is the one channel attribute that is a standing
+/// memory grant rather than a per-request buffer: slots × this value is
+/// retained at steady state per session, and sessions are uncapped. Clamped
+/// only to `SERVER_MAX_RESPONSE` (the old behavior), one CREATE_SESSION
+/// could demand 128 slots × 1 MiB ≈ 128 MiB. Every reply a client
+/// legitimately asks to cache is a small non-idempotent result (OPEN,
+/// CLOSE, LOCK, RENAME...); knfsd caps its equivalent near 2 KiB and every
+/// Linux client in the field mounts it, so 16 KiB is generous.
+pub(crate) const SERVER_MAX_RESPONSE_CACHED: u32 = 16 * 1024;
+
 /// Linux NFSv4.1 COMPOUND overheads subtracted from the advertised
 /// fore-channel caps by `nfs4_session_set_rwsize()`. Recorded only so the
 /// test can state the arithmetic; the kernel owns these values, so they are
@@ -560,7 +572,8 @@ impl SessionOperationHandler {
         // and is also ≤ our SERVER_MAX_RESPONSE.
         let negotiated_max_response_cached = op.fore_chan_attrs
             .max_response_size_cached
-            .min(negotiated_max_response);
+            .min(negotiated_max_response)
+            .min(SERVER_MAX_RESPONSE_CACHED);
         // Slot count = ca_maxrequests, capped at our MAX_SLOTS sentinel.
         const SERVER_MAX_REQUESTS: u32 = 128;
         let negotiated_max_requests = op.fore_chan_attrs
@@ -690,11 +703,14 @@ impl SessionOperationHandler {
                 sessionid: session.session_id,
                 sequence: session.sequence,
                 flags: server_flags,
+                // A replay must reproduce the ORIGINAL reply byte for
+                // byte (§18.36.4) — store what the reply actually said,
+                // not constants that merely happened to match it.
                 fore_max_request_size: session.fore_chan_maxrequestsize,
                 fore_max_response_size: session.fore_chan_maxresponsesize,
-                fore_max_response_size_cached: 64 * 1024,
+                fore_max_response_size_cached: session.fore_chan_maxresponsesize_cached,
                 fore_max_operations: session.fore_chan_maxops,
-                fore_max_requests: 128,
+                fore_max_requests: session.fore_chan_maxrequests,
                 back_max_request_size: back_chan_attrs.max_request_size,
                 back_max_response_size: back_chan_attrs.max_response_size,
                 back_max_response_size_cached: back_chan_attrs.max_response_size_cached,
@@ -713,9 +729,15 @@ impl SessionOperationHandler {
                 header_pad_size: 0,
                 max_request_size: session.fore_chan_maxrequestsize,
                 max_response_size: session.fore_chan_maxresponsesize,
-                max_response_size_cached: 64 * 1024,
+                // The values the session actually ENFORCES, not constants:
+                // hardcoding 64 KiB / 128 here advertised a cached window
+                // and a slot range the session had not necessarily granted
+                // — SEQUENCE answers BADSLOT from `fore_chan_maxrequests`,
+                // and the Linux client refuses fore-channel attrs larger
+                // than its own offer.
+                max_response_size_cached: session.fore_chan_maxresponsesize_cached,
                 max_operations: session.fore_chan_maxops,
-                max_requests: 128,
+                max_requests: session.fore_chan_maxrequests,
                 rdma_ird: Vec::new(),
             },
             back_chan_attrs,
@@ -866,10 +888,20 @@ impl SessionOperationHandler {
             }
             crate::nfs::v4::state::session::SeqStatus::New => {
                 // Record where the reply bytes should be cached once the
-                // RPC layer has them. cachethis is a hint — we always cache
-                // for now (matches Linux server behaviour). Honoring the hint
-                // is a perf optimisation we can add later.
-                ctx.cache_slot = Some((op.sessionid, op.slotid));
+                // RPC layer has them — ONLY when the client asked
+                // (sa_cachethis). "We always cache" was the largest
+                // per-session memory term in the server: a session
+                // streaming 1 MiB READ replies retained slots × 1 MiB
+                // (up to ~128 MiB) at steady state, pinning bytes for
+                // replies whose cachethis=false explicitly said the
+                // client will never replay them expecting content. A
+                // replay of an uncached slot is already answered by the
+                // Replay{cached: None} arm above — RETRY_UNCACHED_REP,
+                // RFC 8881 §2.10.6.1.3's exact contract for a request
+                // sent with cachethis=false.
+                if op.cache_this {
+                    ctx.cache_slot = Some((op.sessionid, op.slotid));
+                }
             }
         }
 
@@ -1426,9 +1458,32 @@ mod tests {
         let res = handler.handle_sequence(seq_op, &mut ctx);
         assert_eq!(res.status, Nfs4Status::Ok);
         assert_eq!(res.slotid, 0);
-        // New request → cache slot recorded for the RPC layer.
-        assert_eq!(ctx.cache_slot, Some((create_res.sessionid, 0)));
+        // cachethis=false → NO cache hint. The reply bytes must not be
+        // retained: pinning them regardless (the old "cachethis is a
+        // hint — we always cache") held slots × 1 MiB per session at
+        // steady state from ordinary READ traffic, ~128 MiB against a
+        // 128Mi pod request. The client that sets false has declared it
+        // will never replay this request expecting content.
+        assert_eq!(
+            ctx.cache_slot, None,
+            "a cachethis=false reply must not be pinned in the slot cache"
+        );
         assert!(ctx.replay_reply.is_none());
+
+        // cachethis=true → the hint is recorded for the RPC layer.
+        let mut ctx_cached = CompoundContext::new(1);
+        let res2 = handler.handle_sequence(
+            SequenceOp {
+                sessionid: create_res.sessionid,
+                sequenceid: 2,
+                slotid: 0,
+                highest_slotid: 0,
+                cache_this: true,
+            },
+            &mut ctx_cached,
+        );
+        assert_eq!(res2.status, Nfs4Status::Ok);
+        assert_eq!(ctx_cached.cache_slot, Some((create_res.sessionid, 0)));
         // sr_highest_slotid must advertise the full negotiated slot range
         // (ca_maxrequests - 1), not the highest slot used so far. A Linux
         // client shrinks its slot table to sr_highest_slotid + 1, and a
@@ -1470,7 +1525,7 @@ mod tests {
             sequenceid: 1,
             slotid: 0,
             highest_slotid: 0,
-            cache_this: false,
+            cache_this: true,
         };
         let mut ctx1 = CompoundContext::new(1);
         let res1 = handler.handle_sequence(seq_op1, &mut ctx1);
@@ -1488,7 +1543,7 @@ mod tests {
             sequenceid: 1,
             slotid: 0,
             highest_slotid: 0,
-            cache_this: false,
+            cache_this: true,
         };
         let mut ctx2 = CompoundContext::new(1);
         let res2 = handler.handle_sequence(seq_op2, &mut ctx2);
@@ -1497,6 +1552,174 @@ mod tests {
             ctx2.replay_reply.as_ref().map(|b| b.as_ref()),
             Some(&[0xDE, 0xAD, 0xBE, 0xEFu8][..])
         );
+    }
+
+    /// RFC 8881 §2.10.6.1.3: the replay of a request sent with
+    /// cachethis=false is answered NFS4ERR_RETRY_UNCACHED_REP — never a
+    /// re-execution, never stale bytes. With the hint honored this is
+    /// the STANDING replay path for most Linux traffic, not just the
+    /// resend-before-reply-cached race it was written for.
+    #[test]
+    fn uncached_replay_gets_retry_uncached_rep() {
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let handler = SessionOperationHandler::new(state_mgr.clone());
+        let ex = handler.handle_exchange_id(
+            ExchangeIdOp {
+                client_owner: b"uncached-client".to_vec(),
+                verifier: 1,
+                flags: 0,
+                state_protect: 0,
+                client_impl_id: None,
+            },
+            &CompoundContext::new(1),
+        );
+        let cs = handler.handle_create_session(
+            CreateSessionOp {
+                clientid: ex.clientid,
+                sequence: ex.sequenceid,
+                flags: 0,
+                fore_chan_attrs: ChannelAttrs::default(),
+                back_chan_attrs: ChannelAttrs::default(),
+                cb_program: 0,
+                cb_sec: Vec::new(),
+            },
+            &CompoundContext::new(1),
+        );
+
+        let mut ctx = CompoundContext::new(1);
+        let seq = SequenceOp {
+            sessionid: cs.sessionid,
+            sequenceid: 1,
+            slotid: 0,
+            highest_slotid: 0,
+            cache_this: false,
+        };
+        assert_eq!(handler.handle_sequence(seq, &mut ctx).status, Nfs4Status::Ok);
+        // Nothing was cached (no hint, no RPC-layer store). Replay:
+        let mut ctx2 = CompoundContext::new(1);
+        let replay = handler.handle_sequence(
+            SequenceOp {
+                sessionid: cs.sessionid,
+                sequenceid: 1,
+                slotid: 0,
+                highest_slotid: 0,
+                cache_this: false,
+            },
+            &mut ctx2,
+        );
+        assert_eq!(replay.status, Nfs4Status::RetryUncachedRep);
+        assert!(ctx2.replay_reply.is_none());
+    }
+
+    /// The cached-response window is the one channel attribute that is a
+    /// standing MEMORY GRANT (slots × window, per session, for the
+    /// session's life), so the server clamps it to
+    /// SERVER_MAX_RESPONSE_CACHED — and both the genuine reply and a
+    /// §18.36.4 replay must state the value the session actually
+    /// enforces. The old reply hardcoded 64 KiB / 128 slots regardless
+    /// of negotiation.
+    #[tokio::test]
+    async fn create_session_clamps_the_cached_window_and_replays_it_identically() {
+        use super::*;
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let handler = SessionOperationHandler::new(state_mgr);
+        let ex = handler.handle_exchange_id(
+            ExchangeIdOp {
+                client_owner: b"clamp-client".to_vec(),
+                verifier: 1,
+                flags: 0,
+                state_protect: 0,
+                client_impl_id: None,
+            },
+            &CompoundContext::new(1),
+        );
+        let greedy_offer = ChannelAttrs {
+            header_pad_size: 0,
+            max_request_size: SERVER_MAX_REQUEST,
+            max_response_size: SERVER_MAX_RESPONSE,
+            // The abuse shape: demand the whole response size be
+            // cacheable, on a reduced slot table.
+            max_response_size_cached: SERVER_MAX_RESPONSE,
+            max_operations: 8,
+            max_requests: 64,
+            rdma_ird: Vec::new(),
+        };
+        let mk_op = || CreateSessionOp {
+            clientid: ex.clientid,
+            sequence: ex.sequenceid,
+            flags: 0,
+            fore_chan_attrs: greedy_offer.clone(),
+            back_chan_attrs: ChannelAttrs::default(),
+            cb_program: 0,
+            cb_sec: Vec::new(),
+        };
+        let res = handler.handle_create_session(mk_op(), &CompoundContext::new(1));
+        assert_eq!(res.status, Nfs4Status::Ok);
+        assert_eq!(
+            res.fore_chan_attrs.max_response_size_cached, SERVER_MAX_RESPONSE_CACHED,
+            "a 1 MiB cached-window demand must be clamped — 128 slots × 1 MiB is a \
+             ~128 MiB standing grant from one CREATE_SESSION"
+        );
+        assert_eq!(
+            res.fore_chan_attrs.max_requests, 64,
+            "the reply must advertise the slot range the session enforces (BADSLOT \
+             comes from the negotiated value, not from the hardcoded 128)"
+        );
+
+        // The replay (same csa_sequence) must reproduce the reply.
+        let replay = handler.handle_create_session(mk_op(), &CompoundContext::new(1));
+        assert_eq!(replay.status, Nfs4Status::Ok);
+        assert_eq!(
+            replay.fore_chan_attrs.max_response_size_cached,
+            res.fore_chan_attrs.max_response_size_cached
+        );
+        assert_eq!(replay.fore_chan_attrs.max_requests, res.fore_chan_attrs.max_requests);
+    }
+
+    /// Store-time backstop: a reply larger than the negotiated cached
+    /// window is not pinned (the client broke its own §2.10.6.1.1
+    /// obligation; the ops already ran, so the bounded-memory answer is
+    /// an uncached slot whose replay gets RETRY_UNCACHED_REP).
+    #[test]
+    fn oversize_cached_reply_is_refused_not_pinned() {
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let handler = SessionOperationHandler::new(state_mgr.clone());
+        let ex = handler.handle_exchange_id(
+            ExchangeIdOp {
+                client_owner: b"oversize-client".to_vec(),
+                verifier: 1,
+                flags: 0,
+                state_protect: 0,
+                client_impl_id: None,
+            },
+            &CompoundContext::new(1),
+        );
+        let cs = handler.handle_create_session(
+            CreateSessionOp {
+                clientid: ex.clientid,
+                sequence: ex.sequenceid,
+                flags: 0,
+                fore_chan_attrs: ChannelAttrs::default(),
+                back_chan_attrs: ChannelAttrs::default(),
+                cb_program: 0,
+                cb_sec: Vec::new(),
+            },
+            &CompoundContext::new(1),
+        );
+        let over = vec![0u8; super::SERVER_MAX_RESPONSE_CACHED as usize + 1];
+        let under = vec![1u8, 2, 3];
+        let (stored_over, stored_under) = state_mgr
+            .sessions
+            .get_session_mut(&cs.sessionid, |s| {
+                s.cache_response(0, over);
+                let a = s.get_cached_response(0).is_some();
+                s.cache_response(0, under);
+                let b = s.get_cached_response(0).is_some();
+                (a, b)
+            })
+            .unwrap();
+        assert!(!stored_over, "an oversize reply must not be pinned in the slot cache");
+        assert!(stored_under, "a within-window reply must cache normally");
     }
 
     #[test]

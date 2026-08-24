@@ -247,8 +247,25 @@ impl Session {
         }
     }
 
-    /// Cache a response in a slot (for replay detection)
+    /// Cache a response in a slot (for replay detection).
+    ///
+    /// Refuses a reply larger than the session's negotiated
+    /// `ca_maxresponsesize_cached`: a client that sends `cachethis` on a
+    /// request whose reply exceeds the window IT negotiated has broken
+    /// its own §2.10.6.1.1 obligation, and the operations have already
+    /// executed by the time the encoded size is known — so the
+    /// bounded-memory answer is to cache nothing. A replay then gets
+    /// NFS4ERR_RETRY_UNCACHED_REP instead of pinning arbitrary bytes for
+    /// the life of the slot.
     pub fn cache_response(&mut self, slot_id: u32, response: Vec<u8>) {
+        if response.len() > self.fore_chan_maxresponsesize_cached as usize {
+            tracing::warn!(
+                "slot {}: reply of {} bytes exceeds negotiated maxresponsesize_cached {} — not cached; \
+                 a replay will get RETRY_UNCACHED_REP",
+                slot_id, response.len(), self.fore_chan_maxresponsesize_cached
+            );
+            return;
+        }
         if (slot_id as usize) < self.slots.len() {
             self.slots[slot_id as usize].cached_response = Some(response);
         }
