@@ -1,0 +1,75 @@
+# Leg C1 — the standalone HUB under the conformance suite.
+#
+# WHY THIS FILE EXISTS. Every pynfs number this repo has ever recorded
+# was taken against `flint-nfs-server` (`nfs_main.rs`). flint-lite does
+# not run that binary: it runs `flint-pnfs-mds` with `standalone: true`
+# (`nfs_mds_main.rs`, `flint-lite-chart/templates/hub.yaml`). They share
+# the wire layer but NOT their bring-up, and three recovery mechanisms
+# had drifted apart far enough to ship as defects (locks not persisted,
+# F33 never armed, state.db crash-loop — all fixed in 1.37.0). A
+# conformance number for one is not a conformance number for the other.
+#
+# Differences from `lite.yaml`, and why each is required to POSE the
+# questions the suite asks:
+#
+#   state.backend: sqlite   `lite.yaml` uses `memory`, under which no
+#                           restart, reclaim, lock-persistence or grace
+#                           question can be asked at all — the state is
+#                           gone with the process. The hub ships sqlite.
+#
+#   health.enabled: true    `lite.yaml` disables it, so `/status` cannot
+#                           be probed. The hub ships it enabled.
+#
+# The export lives under /srv (not /tmp) so a tmpfs-backed /tmp cannot
+# quietly change the durability posture underneath the run.
+
+apiVersion: flint.io/v1alpha1
+kind: PnfsConfig
+mode: standalone
+
+mds:
+  bind:
+    address: "0.0.0.0"
+    port: 20490
+
+  layout:
+    type: file
+    stripeSize: 8388608
+    policy: stripe
+
+  dataServers: []
+
+  state:
+    backend: sqlite
+    config:
+      path: /srv/flint-mds-state/state.db
+
+  ha:
+    enabled: false
+    replicas: 1
+    leaderElection: false
+
+exports:
+  - path: /srv/flint-mds-export
+    fsid: 1
+    options: [rw, sync, no_subtree_check]
+    access:
+      - network: 0.0.0.0/0
+        permissions: rw
+
+logging:
+  level: info
+  format: text
+  components:
+    mds: info
+
+monitoring:
+  prometheus:
+    enabled: false
+    port: 0
+    path: /metrics
+  health:
+    enabled: true
+    port: 20491
+    path: /health
+  metrics: []

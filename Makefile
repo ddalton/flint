@@ -211,6 +211,84 @@ nfs-server-vm-stop: ## Stop the in-VM flint-nfs-server
 	-limactl shell $(LIMA_VM) -- sudo systemctl stop flint-nfs-vm
 	-limactl shell $(LIMA_VM) -- sudo systemctl reset-failed flint-nfs-vm
 
+# ───────────── The HUB binary under the suite (leg C1) ──────────────────────
+#
+# Everything above drives `flint-nfs-server`. flint-lite ships
+# `flint-pnfs-mds --standalone`, a DIFFERENT binary with a different
+# bring-up, and until this target existed no external suite had ever
+# been pointed at it. Three recovery mechanisms had already drifted far
+# enough apart to ship as defects. A pynfs number for one front-end is
+# not a pynfs number for the other, and this target is what makes the
+# claim checkable rather than assumed.
+MDS_VM_BIN     := $(CARGO_DIR)/target/$(LIMA_ARCH)-unknown-linux-musl/release/flint-pnfs-mds
+MDS_VM_EXPORT  := /srv/flint-mds-export
+MDS_VM_STATE   := /srv/flint-mds-state
+MDS_VM_CONFIG  := tests/lima/pnfs/lite-pynfs.yaml
+
+.PHONY: pnfs-mds-vm
+pnfs-mds-vm: ## Build+run flint-pnfs-mds --standalone INSIDE the Lima VM as root (the flint-lite hub posture)
+	cd $(CARGO_DIR) && cargo zigbuild --release \
+	  --target $(LIMA_ARCH)-unknown-linux-musl --bin flint-pnfs-mds
+	limactl copy $(MDS_VM_BIN) $(LIMA_VM):/tmp/flint-pnfs-mds-vm
+	limactl copy $(MDS_VM_CONFIG) $(LIMA_VM):/tmp/lite-pynfs.yaml
+	# Root, deliberately: the hub runs as uid 0 today (finding 7), and a
+	# conformance run under a different uid would measure a posture we do
+	# not ship. Any number taken here is a number for the shipped posture.
+	limactl shell $(LIMA_VM) -- sudo bash -lc '\
+	  systemctl stop flint-mds-vm 2>/dev/null || true; \
+	  systemctl reset-failed flint-mds-vm 2>/dev/null || true; \
+	  rm -rf $(MDS_VM_EXPORT) $(MDS_VM_STATE); \
+	  mkdir -p $(MDS_VM_EXPORT)/tmp $(MDS_VM_STATE); \
+	  chmod 0777 $(MDS_VM_EXPORT)/tmp; \
+	  chmod +x /tmp/flint-pnfs-mds-vm; \
+	  systemd-run --unit=flint-mds-vm --collect \
+	    --setenv=FLINT_NFS_GRACE_SECS=900 \
+	    --setenv=RUST_LOG=$${MDS_LOG:-info} \
+	    /tmp/flint-pnfs-mds-vm --config /tmp/lite-pynfs.yaml'
+	@sleep 4
+	# Two assertions, not one. The listener proves something is up; the
+	# STANDALONE banner proves it is the hub posture and not the pNFS one.
+	# Without the second, this target would happily measure a server that
+	# hands out layouts — a different code path — and report it as the
+	# flint-lite number.
+	@limactl shell $(LIMA_VM) -- sudo ss -lntp | grep -q ":$(NFS_PORT)" \
+	  || { echo "FAIL: flint-pnfs-mds is not listening on $(NFS_PORT)"; \
+	       limactl shell $(LIMA_VM) -- sudo journalctl -u flint-mds-vm --no-pager | tail -40; \
+	       exit 1; }
+	@limactl shell $(LIMA_VM) -- sudo journalctl -u flint-mds-vm --no-pager \
+	  | grep -c "Posture: STANDALONE" > /tmp/flint-mds-posture.count; \
+	  test "$$(cat /tmp/flint-mds-posture.count)" -ge 1 \
+	  || { echo "FAIL: server is up but did NOT log the STANDALONE posture — \
+	            this is not the flint-lite hub, and its number must not be quoted as one"; \
+	       exit 1; }
+	@echo "flint-pnfs-mds (STANDALONE) running INSIDE the VM on 0.0.0.0:$(NFS_PORT)"
+
+.PHONY: pnfs-mds-vm-stop
+pnfs-mds-vm-stop: ## Stop the in-VM flint-pnfs-mds
+	-limactl shell $(LIMA_VM) -- sudo systemctl stop flint-mds-vm
+	-limactl shell $(LIMA_VM) -- sudo systemctl reset-failed flint-mds-vm
+
+.PHONY: test-nfs-protocol-mds
+test-nfs-protocol-mds: pnfs-mds-vm ## Leg C1: full pynfs 4.1 suite against the HUB binary (flint-pnfs-mds --standalone), in-VM, as root
+	-limactl shell $(LIMA_VM) -- sudo rm -f /tmp/pynfs-mds.json
+	rm -f /tmp/flint-pynfs-mds-results.json
+	# Same shape as test-nfs-protocol: capture the status on its OWN line
+	# (a pipeline's status is the last command's), pull the JSON back
+	# either way so a failure is diagnosable, and let the checker decide.
+	@limactl shell $(LIMA_VM) -- bash -lc '\
+	    cd /opt/pynfs/nfs4.1 && \
+	    python3 ./testserver.py 127.0.0.1:$(NFS_PORT)/tmp \
+	      --maketree --nocleanup --json=/tmp/pynfs-mds.json all' \
+	    > /tmp/flint-pynfs-mds-run.log 2>&1; \
+	  limactl cp $(LIMA_VM):/tmp/pynfs-mds.json /tmp/flint-pynfs-mds-results.json || true; \
+	  tail -20 /tmp/flint-pynfs-mds-run.log
+	# The hub carries its OWN floor. Sharing the standalone server's
+	# baseline would hide exactly the divergence this leg exists to
+	# measure: if the two binaries drift, one gate over one number cannot
+	# say which one moved.
+	@python3 scripts/check-pynfs.py /tmp/flint-pynfs-mds-results.json \
+	  tests/lima/pynfs-mds-baseline.json
+
 .PHONY: test-nfs-42
 test-nfs-42: ## Run the NFSv4.2 conformance tests (ALLOC1-3, COPY5)
 	# WHY THIS TARGET EXISTS. testserver.py's --minorversion DEFAULTS TO 1
