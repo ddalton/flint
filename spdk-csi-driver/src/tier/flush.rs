@@ -343,6 +343,7 @@ impl FlushOrchestrator {
     /// [`crate::tier::manifest::ManifestSeed`].
     pub async fn startup(&self) -> crate::tier::manifest::ManifestSeed {
         self.heal_generation_device().await;
+        self.heal_evicted_and_dirty_device().await;
         let n = self.load_generations().await;
         let i = self.reconcile_intents().await;
         let seed =
@@ -473,6 +474,181 @@ impl FlushOrchestrator {
              have counted beyond RPO and the next manifest barrier would have published \
              a manifest that names none of them.",
             live_dev, rehomed, dropped
+        );
+    }
+
+    /// Re-home `tier_evicted` and `tier_dirty` rows across the same
+    /// device drift `heal_generation_device` repairs — audit blocker 4.
+    ///
+    /// # Why healing only the generation half made things worse
+    ///
+    /// All three tier tables are keyed `(dev, ino)`, and `dev` is stable
+    /// only by luck: it is the device number of the mounted volume, and
+    /// a CSI restage can hand the volume back on a different minor
+    /// (measured on a real cluster: 66311 → 66312). Only
+    /// `tier_generation` was ever re-homed. The other two were left
+    /// stranded, and the `tier_evicted` half is the destructive one:
+    ///
+    ///   1. A file is evicted. Its local inode is truncated to a stub
+    ///      and `tier_evicted` holds the real size and the bucket key.
+    ///   2. `dev` drifts across a restage.
+    ///   3. `evict::is_evicted(dev, ino)` now MISSES, because the row is
+    ///      filed under the dead device number. The stub is no longer
+    ///      recognised as a stub — it is just an empty file.
+    ///   4. READ returns `(empty, eof)` with NFS4_OK. GETATTR reports
+    ///      size 0. The client is told, authoritatively, that the file
+    ///      is empty. There is no error anywhere.
+    ///   5. Because the GENERATION half *was* healed, the flush path
+    ///      still recognises the file — and republishes that emptiness
+    ///      over the intact S3 object.
+    ///
+    /// Step 5 is what turns a recoverable local miss into permanent
+    /// loss, and it exists *because* the previous fix was partial. A
+    /// half-healed database is worse than an unhealed one: unhealed, the
+    /// flusher would have refused to touch the object at all.
+    ///
+    /// # Re-homing by inode, not by path
+    ///
+    /// Rows carry a `path`, but a file renamed during a drifted boot
+    /// keeps its inode and changes its path — and pruning a row whose
+    /// path merely moved would delete the very row that makes its stub
+    /// readable, which is the data loss this function exists to
+    /// prevent. So the walk is keyed by inode and the path is REPAIRED
+    /// from it. A row survives only if its inode is still live under the
+    /// export root; anything else is a stale row that could collide with
+    /// a reused inode and claim another file's S3 key.
+    ///
+    /// Insert-before-delete, for the reason spelled out in
+    /// `heal_generation_device`: the two keys differ, so the pair can
+    /// coexist, and the worst a crash leaves is a duplicate under a dead
+    /// device number that the next boot re-homes and prunes. Deleting
+    /// first would leave NEITHER row — the bug, made permanent.
+    async fn heal_evicted_and_dirty_device(&self) {
+        let root = self.cfg.export_root.clone();
+        let live_dev = match std::fs::metadata(&root) {
+            Ok(md) => {
+                use std::os::unix::fs::MetadataExt;
+                md.dev()
+            }
+            Err(e) => {
+                warn!("tier flush: cannot stat export root to check evicted/dirty dev: {}", e);
+                return;
+            }
+        };
+
+        let ev_rows = match self.backend.tier_list_evicted().await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("tier flush: cannot read evicted rows to check dev: {}", e);
+                return;
+            }
+        };
+        let dirty_rows = match self.backend.tier_list_dirty().await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("tier flush: cannot read dirty rows to check dev: {}", e);
+                return;
+            }
+        };
+        let ev_stale: Vec<_> = ev_rows.iter().filter(|r| r.dev != live_dev).collect();
+        let dirty_stale: Vec<_> = dirty_rows.iter().filter(|r| r.dev != live_dev).collect();
+        if ev_stale.is_empty() && dirty_stale.is_empty() {
+            return;
+        }
+
+        // A drift is rare; only now pay for the tree walk.
+        let live = match tokio::task::spawn_blocking(move || live_inode_paths(&root)).await {
+            Ok(Ok(map)) => map,
+            _ => {
+                warn!(
+                    "tier flush: evicted/dirty dev drifted but the export walk failed — \
+                     leaving rows alone rather than guessing. Evicted files will read as \
+                     ZERO BYTES until this succeeds; the flusher is the greater hazard \
+                     and it is gated on the generation rows, which are healed separately"
+                );
+                return;
+            }
+        };
+
+        // ── tier_evicted: the destructive half ───────────────────────
+        let (mut ev_rehomed, mut ev_dropped) = (0usize, 0usize);
+        for r in &ev_stale {
+            let Some(live_path) = live.get(&r.ino) else {
+                // The inode is gone from the export entirely. Keeping the
+                // row would let it collide with a future inode reuse and
+                // hand that file this one's S3 key.
+                let _ = self.backend.tier_delete_evicted(r.dev, r.ino).await;
+                ev_dropped += 1;
+                continue;
+            };
+            let row = crate::state_backend::TierEvictedRow {
+                dev: live_dev,
+                ino: r.ino,
+                key: r.key.clone(),
+                generation: r.generation,
+                etag: r.etag.clone(),
+                crc64_b64: r.crc64_b64.clone(),
+                size: r.size,
+                // Repaired from the walk: a rename during a drifted boot
+                // moved the stub, and the stored path would send the
+                // reconciler at nothing.
+                path: live_path.to_string_lossy().into_owned(),
+                evicted_unix: r.evicted_unix,
+                hydrating_unix: r.hydrating_unix,
+            };
+            match self.backend.tier_put_evicted(&row).await {
+                Ok(()) => {
+                    ev_rehomed += 1;
+                    // Only now is it safe: the re-homed twin is durable.
+                    let _ = self.backend.tier_delete_evicted(r.dev, r.ino).await;
+                }
+                Err(e) => warn!(
+                    "tier flush: re-homing evicted row ino {} failed: {} — leaving the \
+                     stale row in place; losing it would make the stub read as zero bytes",
+                    r.ino, e
+                ),
+            }
+        }
+
+        // ── tier_dirty ───────────────────────────────────────────────
+        // A stranded dirty bit is not destructive by itself, but it is
+        // the bit that BLOCKS eviction of a file with unflushed changes.
+        // Stranded, the file looks clean, becomes eviction-eligible, and
+        // its unflushed local changes are discarded in favour of an
+        // older bucket object.
+        let (mut d_rehomed, mut d_dropped) = (0usize, 0usize);
+        for r in &dirty_stale {
+            let Some(live_path) = live.get(&r.ino) else {
+                let _ = self.backend.tier_clear_dirty(r.dev, r.ino).await;
+                d_dropped += 1;
+                continue;
+            };
+            let entry = crate::state_backend::TierDirtyEntry {
+                dev: live_dev,
+                ino: r.ino,
+                path: Some(live_path.to_string_lossy().into_owned()),
+                dirtied_unix: r.dirtied_unix,
+                mark_seq: r.mark_seq,
+            };
+            match self.backend.tier_mark_dirty(std::slice::from_ref(&entry)).await {
+                Ok(()) => {
+                    d_rehomed += 1;
+                    let _ = self.backend.tier_clear_dirty(r.dev, r.ino).await;
+                }
+                Err(e) => warn!(
+                    "tier flush: re-homing dirty row ino {} failed: {} — leaving the \
+                     stale row; losing it would let an unflushed file be evicted",
+                    r.ino, e
+                ),
+            }
+        }
+
+        warn!(
+            "🔧 tier flush: export device changed to {} — re-homed {} evicted row(s) \
+             ({} dropped) and {} dirty row(s) ({} dropped). Without the evicted half, \
+             every evicted file would have read as ZERO BYTES with NFS4_OK and the next \
+             flush would have republished that emptiness over the intact bucket object.",
+            live_dev, ev_rehomed, ev_dropped, d_rehomed, d_dropped
         );
     }
 
@@ -1452,6 +1628,39 @@ async fn read_whole(path: &Path) -> Result<Bytes, String> {
 /// Every inode of a regular file living under `root`, for the
 /// generation-row re-homing prune.
 #[cfg(unix)]
+/// Like [`live_inodes`], but keeps the path each inode was found at so a
+/// re-homed row can have its `path` repaired at the same time. A rename
+/// during a drifted boot changes the path and keeps the inode, so the
+/// stored path is exactly the field that cannot be trusted here.
+///
+/// Last writer wins on a hard-linked inode: any live name reaches the
+/// same bytes, which is all the reconciler needs.
+fn live_inode_paths(
+    root: &std::path::Path,
+) -> std::io::Result<std::collections::HashMap<u64, std::path::PathBuf>> {
+    use std::os::unix::fs::MetadataExt;
+    let mut out = std::collections::HashMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for ent in rd.flatten() {
+            let md = match ent.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if md.is_dir() {
+                stack.push(ent.path());
+            } else if md.is_file() {
+                out.insert(md.ino(), ent.path());
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn live_inodes(root: &std::path::Path) -> std::io::Result<std::collections::HashSet<u64>> {
     use std::os::unix::fs::MetadataExt;
     let mut out = std::collections::HashSet::new();
@@ -1838,6 +2047,177 @@ mod tests {
             built.entries.iter().any(|e| e.key.as_deref() == Some("t/kept.bin")),
             "the manifest must name the file again"
         );
+    }
+
+    /// Blocker 4: the destructive half of the drift.
+    ///
+    /// `heal_generation_device` re-homed only `tier_generation`. The
+    /// `tier_evicted` rows were left stranded under the dead device
+    /// number, and that is the table that decides whether a file reads
+    /// as its contents or as zero bytes. Stranded:
+    ///
+    ///   * the stub is no longer recognised as a stub,
+    ///   * READ returns `(empty, eof)` with NFS4_OK and GETATTR says 0,
+    ///   * and because the generation half WAS healed, the flusher then
+    ///     republishes that emptiness over the intact bucket object.
+    ///
+    /// The partial fix is what makes it permanent. Unhealed, the flusher
+    /// would not have recognised the file at all and the S3 object would
+    /// have survived.
+    #[tokio::test]
+    async fn a_drifted_export_device_re_homes_its_evicted_and_dirty_rows() {
+        let r = rig(1024, 256);
+
+        // An evicted file's local presence IS a stub: zero bytes on
+        // disk, with the real size living in the row.
+        let stub = r.root.join("evicted.bin");
+        std::fs::write(&stub, b"").unwrap();
+        let (live_dev, ino) = ident(&stub);
+
+        let dirty_file = r.root.join("dirty.bin");
+        std::fs::write(&dirty_file, b"unflushed").unwrap();
+        let (_, dino) = ident(&dirty_file);
+
+        let stale_dev = live_dev ^ 0x1;
+
+        let ev = crate::state_backend::TierEvictedRow {
+            dev: stale_dev,
+            ino,
+            key: "t/evicted.bin".into(),
+            generation: 4,
+            etag: "\"cafe\"".into(),
+            crc64_b64: "AAAAAAAAAAA=".into(),
+            size: 4096,
+            // Deliberately WRONG: a rename during the drifted boot moved
+            // the stub, so the stored path is the one field that cannot
+            // be trusted. Re-homing by path would strand this row;
+            // re-homing by inode repairs it.
+            path: "/gone/old/path/evicted.bin".into(),
+            evicted_unix: 900,
+            hydrating_unix: None,
+        };
+        r.backend.tier_put_evicted(&ev).await.unwrap();
+
+        // An evicted row whose inode is NOT live must be dropped, not
+        // re-homed: the inode can be reused, and the row would then hand
+        // an unrelated file this one's bucket key.
+        let ev_orphan = crate::state_backend::TierEvictedRow {
+            ino: ino.wrapping_add(1_000_000),
+            key: "t/vanished.bin".into(),
+            ..ev.clone()
+        };
+        r.backend.tier_put_evicted(&ev_orphan).await.unwrap();
+
+        r.backend
+            .tier_mark_dirty(&[crate::state_backend::TierDirtyEntry {
+                dev: stale_dev,
+                ino: dino,
+                path: None,
+                dirtied_unix: 900,
+                mark_seq: 5,
+            }])
+            .await
+            .unwrap();
+
+        // ── ANTI-VACUITY ────────────────────────────────────────────
+        // Establish that the hazard is REAL in this rig before the fix
+        // runs. Without this the assertions below would pass just as
+        // happily against a build where the drift never happened, and
+        // the test would be proving nothing.
+        let before = r.backend.tier_list_evicted().await.unwrap();
+        assert!(
+            !before.is_empty() && before.iter().all(|row| row.dev != live_dev),
+            "setup is wrong: no evicted row may be reachable under the live device \
+             yet — that unreachability IS the bug, and if it is absent here the \
+             post-conditions below prove nothing"
+        );
+
+        r.orch.startup().await;
+
+        // ── evicted ─────────────────────────────────────────────────
+        let after = r.backend.tier_list_evicted().await.unwrap();
+        let healed = after
+            .iter()
+            .find(|row| row.dev == live_dev && row.ino == ino)
+            .expect("the evicted row must re-home to the live device, or the stub reads as zero bytes");
+        assert_eq!(
+            healed.size, 4096,
+            "the re-homed row must keep the file's REAL size — this is the number GETATTR serves \
+             while the file is evicted, and 0 here is the data-loss report"
+        );
+        assert_eq!(healed.key, "t/evicted.bin", "the bucket key must survive re-homing");
+        assert_eq!(healed.generation, 4);
+        assert_eq!(
+            healed.path,
+            stub.to_string_lossy(),
+            "the path must be REPAIRED from the walk, not carried over — the stored path \
+             was stale and would send the reconciler at nothing"
+        );
+        assert!(
+            !after.iter().any(|row| row.dev == stale_dev && row.ino == ino),
+            "the stale-dev row must be gone, not duplicated"
+        );
+        assert!(
+            !after.iter().any(|row| row.ino == ev_orphan.ino),
+            "an evicted row whose inode is not live must be dropped — kept, it would claim \
+             another file's object after an inode reuse"
+        );
+
+        // ── dirty ───────────────────────────────────────────────────
+        let d_after = r.backend.tier_list_dirty().await.unwrap();
+        let dh = d_after
+            .iter()
+            .find(|row| row.dev == live_dev && row.ino == dino)
+            .expect("the dirty row must re-home, or an unflushed file becomes eviction-eligible");
+        assert_eq!(dh.mark_seq, 5, "the re-homed dirty row keeps its mark sequence");
+        assert_eq!(
+            dh.path.as_deref(),
+            Some(dirty_file.to_string_lossy().as_ref()),
+            "the dirty row's path is filled in from the walk so the flusher can reach it"
+        );
+        assert!(
+            !d_after.iter().any(|row| row.dev == stale_dev && row.ino == dino),
+            "the stale-dev dirty row must be gone, not duplicated"
+        );
+    }
+
+    /// The evicted/dirty re-homing runs on every boot, so it must be
+    /// safe to run twice — and a crash between the insert and the delete
+    /// must leave the next boot able to finish, never a hole.
+    #[tokio::test]
+    async fn re_homing_evicted_rows_is_idempotent() {
+        let r = rig(1024, 256);
+        let stub = r.root.join("evicted.bin");
+        std::fs::write(&stub, b"").unwrap();
+        let (live_dev, ino) = ident(&stub);
+
+        let ev = crate::state_backend::TierEvictedRow {
+            dev: live_dev ^ 0x1,
+            ino,
+            key: "t/evicted.bin".into(),
+            generation: 2,
+            etag: "\"beef\"".into(),
+            crc64_b64: "AAAAAAAAAAA=".into(),
+            size: 8192,
+            path: stub.to_string_lossy().into_owned(),
+            evicted_unix: 900,
+            hydrating_unix: None,
+        };
+        r.backend.tier_put_evicted(&ev).await.unwrap();
+
+        r.orch.startup().await;
+        let first = r.backend.tier_list_evicted().await.unwrap();
+        r.orch.startup().await;
+        let second = r.backend.tier_list_evicted().await.unwrap();
+
+        assert_eq!(first.len(), 1, "one row in, one row out");
+        assert_eq!(
+            first.len(),
+            second.len(),
+            "a second boot must not duplicate the row or drop it"
+        );
+        assert_eq!(second[0].dev, live_dev);
+        assert_eq!(second[0].size, 8192);
     }
 
     /// The re-homing is a MIGRATION, so it has to be safe to run twice —
