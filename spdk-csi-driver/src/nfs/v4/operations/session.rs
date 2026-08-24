@@ -297,6 +297,26 @@ impl SessionOperationHandler {
 
         // RFC 8881 §18.35.5 client-record state machine. Principal is the
         // RPC-level identity of the caller; an empty Vec for AUTH_NONE.
+        // Client-table quota — checked only where the mint would GROW
+        // the table: an unknown owner on the non-update path. A known
+        // owner's EXCHANGE_ID renews/replaces/steals in place and MUST
+        // pass even at the cap (refusing it would break a live mount),
+        // and the UPD path never creates. DELAY, not a terminal error:
+        // the courtesy sweep reclaims records from clients that stopped
+        // renewing, so a legitimate newcomer succeeds on retry.
+        if op.flags & exchgid_flags::UPD_CONFIRMED_REC_A == 0
+            && !self.state_mgr.clients.owner_known(&op.client_owner)
+        {
+            let count = self.state_mgr.clients.client_count();
+            let max = self.state_mgr.quotas.max_clients;
+            if count >= max {
+                warn!(
+                    "EXCHANGE_ID: client table at quota ({count}/{max}) — refusing a NEW \
+                     client with DELAY (FLINT_NFS_MAX_CLIENTS)"
+                );
+                return exchange_id_err(Nfs4Status::Delay);
+            }
+        }
 
         use crate::nfs::v4::state::client::ExchangeIdOutcome;
         let outcome = self.state_mgr.clients.exchange_id(
@@ -555,6 +575,26 @@ impl SessionOperationHandler {
                 );
             }
             self.state_mgr.clients.remove_client(old_id);
+        }
+
+        // Per-client session quota. Each session owns a slot table whose
+        // reply cache is a standing memory grant (bounded per session,
+        // but multiplied here without limit before this check — Linux
+        // uses ONE session per client). Checked after replay/seq
+        // handling so a §18.36.4 replay of an earlier success is never
+        // refused. DELAY: DESTROY_SESSION and the courtesy sweep free
+        // slots, so a client cycling sessions succeeds on retry.
+        {
+            let held = self.state_mgr.sessions.session_count_for_client(op.clientid);
+            let max = self.state_mgr.quotas.max_sessions_per_client;
+            if held >= max {
+                warn!(
+                    "CREATE_SESSION: client {} at session quota ({held}/{max}) — DELAY \
+                     (FLINT_NFS_MAX_SESSIONS_PER_CLIENT)",
+                    op.clientid
+                );
+                return create_session_err(Nfs4Status::Delay);
+            }
         }
 
         // Negotiate session buffer sizes. Take the *minimum* of client-requested
@@ -1679,6 +1719,98 @@ mod tests {
         assert_eq!(replay.fore_chan_attrs.max_requests, res.fore_chan_attrs.max_requests);
     }
 
+    /// B6, client-table quota: a NEW co_ownerid is refused with DELAY
+    /// at the cap; a KNOWN owner must still renew (refusing it breaks a
+    /// live mount); freed capacity re-admits — the DELAY is honest.
+    #[test]
+    fn exchange_id_quota_refuses_new_clients_but_renews_known_ones() {
+        use crate::nfs::v4::state::StateQuotas;
+        let q = StateQuotas {
+            max_clients: 2,
+            max_sessions_per_client: 16,
+            max_stateids_per_client: 65536,
+            max_locks_per_client: 65536,
+        };
+        let state_mgr = Arc::new(StateManager::new_in_memory_with_quotas("", q));
+        let handler = SessionOperationHandler::new(state_mgr.clone());
+        let ex = |owner: &[u8]| {
+            handler.handle_exchange_id(
+                ExchangeIdOp {
+                    client_owner: owner.to_vec(),
+                    verifier: 1,
+                    flags: 0,
+                    state_protect: 0,
+                    client_impl_id: None,
+                },
+                &CompoundContext::new(1),
+            )
+        };
+        assert_eq!(ex(b"c1").status, Nfs4Status::Ok);
+        let c2 = ex(b"c2");
+        assert_eq!(c2.status, Nfs4Status::Ok);
+        assert_eq!(
+            ex(b"c3").status,
+            Nfs4Status::Delay,
+            "a THIRD client identity must be refused at max_clients=2 — the table \
+             was unboundedly mintable by any unauthenticated peer"
+        );
+        assert_eq!(
+            ex(b"c1").status,
+            Nfs4Status::Ok,
+            "a KNOWN owner's EXCHANGE_ID must pass at the cap — it renews in place, \
+             and refusing it would break a live mount"
+        );
+        state_mgr.clients.remove_client(c2.clientid);
+        assert_eq!(
+            ex(b"c3").status,
+            Nfs4Status::Ok,
+            "freed capacity must re-admit — DELAY promised the client a retry works"
+        );
+    }
+
+    /// B6, per-client session quota: the slot-cache grant is bounded per
+    /// session, and this bounds the multiplier.
+    #[test]
+    fn create_session_quota_refuses_the_seventeenth_session() {
+        use crate::nfs::v4::state::StateQuotas;
+        let q = StateQuotas {
+            max_clients: 4096,
+            max_sessions_per_client: 1,
+            max_stateids_per_client: 65536,
+            max_locks_per_client: 65536,
+        };
+        let state_mgr = Arc::new(StateManager::new_in_memory_with_quotas("", q));
+        let handler = SessionOperationHandler::new(state_mgr);
+        let ex = handler.handle_exchange_id(
+            ExchangeIdOp {
+                client_owner: b"one-session".to_vec(),
+                verifier: 1,
+                flags: 0,
+                state_protect: 0,
+                client_impl_id: None,
+            },
+            &CompoundContext::new(1),
+        );
+        let mk = |seq: u32| CreateSessionOp {
+            clientid: ex.clientid,
+            sequence: seq,
+            flags: 0,
+            fore_chan_attrs: ChannelAttrs::default(),
+            back_chan_attrs: ChannelAttrs::default(),
+            cb_program: 0,
+            cb_sec: Vec::new(),
+        };
+        let first = handler.handle_create_session(mk(ex.sequenceid), &CompoundContext::new(1));
+        assert_eq!(first.status, Nfs4Status::Ok);
+        let second =
+            handler.handle_create_session(mk(ex.sequenceid.wrapping_add(1)), &CompoundContext::new(1));
+        assert_eq!(
+            second.status,
+            Nfs4Status::Delay,
+            "a second session at max_sessions_per_client=1 must be refused — each \
+             session multiplies the slot-cache grant"
+        );
+    }
 
     /// A reply capability flag is a server PROMISE. The old handler
     /// echoed SUPP_MOVED_REFER / SUPP_MOVED_MIGR / BIND_PRINC_STATEID

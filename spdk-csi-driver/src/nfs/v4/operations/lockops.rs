@@ -252,6 +252,13 @@ pub struct LockManager {
     /// Enables per-file locking - only locks on same file conflict
     locks_by_fh: DashMap<Vec<u8>, Vec<[u8; 12]>>,
 
+    /// Live range-entry count per client — the number the
+    /// `max_locks_per_client` quota is checked against. Maintained at
+    /// the ONLY two mutation sites (`insert_in_memory`, `remove_lock`),
+    /// which every path — grant, trim/split, restore, client removal —
+    /// funnels through.
+    lock_counts: DashMap<u64, u64>,
+
     /// Persistence target. `None` (tests, `new()`) keeps the historical
     /// memory-only behavior; the server constructs with the shared
     /// state.db backend so locks survive an NFS server-pod restart the
@@ -279,6 +286,7 @@ impl LockManager {
             stateid_owners: DashMap::new(),
             entry_key_counter: std::sync::atomic::AtomicU64::new(1),
             locks_by_fh: DashMap::new(),
+            lock_counts: DashMap::new(),
             backend: None,
             restored_clean: AtomicBool::new(true),
         }
@@ -292,6 +300,7 @@ impl LockManager {
             stateid_owners: DashMap::new(),
             entry_key_counter: std::sync::atomic::AtomicU64::new(1),
             locks_by_fh: DashMap::new(),
+            lock_counts: DashMap::new(),
             backend: Some(backend),
             restored_clean: AtomicBool::new(true),
         }
@@ -421,7 +430,15 @@ impl LockManager {
             owner: lock.owner.clone(),
             filehandle: lock.filehandle.clone(),
         });
-        self.locks.insert(stateid_key, lock);
+        *self.lock_counts.entry(lock.client_id).or_insert(0) += 1;
+        if let Some(prev) = self.locks.insert(stateid_key, lock) {
+            // Never expected (entry keys are unique across generations
+            // since the collision fix) — but a replaced row must not
+            // leave its owner's count inflated forever.
+            if let Some(mut n) = self.lock_counts.get_mut(&prev.client_id) {
+                *n = n.saturating_sub(1);
+            }
+        }
         self.locks_by_fh
             .entry(fh_key)
             .or_insert_with(Vec::new)
@@ -438,6 +455,11 @@ impl LockManager {
         self.locks
             .get(&stateid.other)
             .map(|l| (l.client_id, l.owner.clone()))
+    }
+
+    /// Live range entries this client holds (quota input).
+    pub fn lock_count_for_client(&self, client_id: u64) -> u64 {
+        self.lock_counts.get(&client_id).map(|n| *n).unwrap_or(0)
     }
 
     /// Mint an internal range-entry key. The 0xFC prefix keeps it out
@@ -655,6 +677,9 @@ impl LockManager {
 
         // Remove from filehandle index
         if let Some(ref lock) = lock {
+            if let Some(mut n) = self.lock_counts.get_mut(&lock.client_id) {
+                *n = n.saturating_sub(1);
+            }
             if let Some(mut fh_locks) = self.locks_by_fh.get_mut(&lock.filehandle) {
                 fh_locks.retain(|k| k != &stateid_key);
                 if fh_locks.is_empty() {
@@ -1001,6 +1026,24 @@ impl LockOperationHandler {
                     denied: None,
                 };
             }
+        } else if self.lock_mgr.lock_count_for_client(client_id)
+            >= self.state_mgr.quotas.max_locks_per_client as u64
+        {
+            // Per-client range-entry quota (B6): each granted range is a
+            // DashMap entry plus a persisted state.db row, mintable by
+            // an unauthenticated peer without bound. Reclaims are exempt
+            // (they re-establish counted state); DELAY because LOCKU and
+            // lease expiry free capacity.
+            warn!(
+                "LOCK: client {} at lock quota ({}) — DELAY (FLINT_NFS_MAX_LOCKS_PER_CLIENT)",
+                client_id,
+                self.state_mgr.quotas.max_locks_per_client
+            );
+            return LockRes {
+                status: Nfs4Status::Delay,
+                stateid: None,
+                denied: None,
+            };
         } else if !self.lock_mgr.restored_clean()
             && self.state_mgr.leases.in_grace_period()
         {
@@ -2127,6 +2170,66 @@ mod tests {
         assert!(mgr2
             .check_conflicts(b"/data/file", &LockRange { offset: 8192, length: 100 }, LockType::Write, None)
             .is_none());
+    }
+
+    /// B6, per-client lock quota: granted range entries are refused with
+    /// DELAY at the cap, and LOCKU frees capacity — each entry is memory
+    /// plus a persisted state.db row, mintable without bound before.
+    #[test]
+    fn lock_quota_refuses_at_cap_and_locku_frees_capacity() {
+        use crate::nfs::v4::state::StateQuotas;
+        let q = StateQuotas {
+            max_clients: 4096,
+            max_sessions_per_client: 16,
+            max_stateids_per_client: 65536,
+            max_locks_per_client: 1,
+        };
+        let temp = TempDir::new().unwrap();
+        let fh_mgr = Arc::new(FileHandleManager::new(temp.path().to_path_buf()));
+        let state_mgr = Arc::new(StateManager::new_in_memory_with_quotas("", q));
+        let handler = LockOperationHandler::new(state_mgr, Arc::new(LockManager::new()));
+        let mut ctx = CompoundContext::new(0);
+        ctx.session_id = Some(create_test_session(&handler, 9));
+        ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+        let mk = |off: u64, owner: &[u8], sid: StateId, new_owner: bool| LockOp {
+            locktype: LockType::Write,
+            reclaim: false,
+            offset: off,
+            length: 16,
+            stateid: sid,
+            owner: owner.to_vec(),
+            new_lock_owner: new_owner,
+            open_seqid: Some(0),
+        };
+        let open_sid = create_test_stateid(&handler, 9);
+        let first = handler.handle_lock(mk(0, b"o1", open_sid, true), &ctx);
+        assert_eq!(first.status, Nfs4Status::Ok);
+        let canonical = first.stateid.unwrap();
+
+        let open_sid2 = create_test_stateid(&handler, 9);
+        assert_eq!(
+            handler.handle_lock(mk(4096, b"o2", open_sid2, true), &ctx).status,
+            Nfs4Status::Delay,
+            "a second range entry at max_locks_per_client=1 must be refused"
+        );
+
+        let unlocked = handler.handle_locku(
+            LockUOp {
+                locktype: LockType::Write,
+                seqid: canonical.seqid,
+                stateid: canonical,
+                offset: 0,
+                length: 16,
+            },
+            &ctx,
+        );
+        assert_eq!(unlocked.status, Nfs4Status::Ok);
+        let open_sid3 = create_test_stateid(&handler, 9);
+        assert_eq!(
+            handler.handle_lock(mk(8192, b"o3", open_sid3, true), &ctx).status,
+            Nfs4Status::Ok,
+            "LOCKU must free quota capacity — the counter tracks removals"
+        );
     }
 
     /// A production-minted internal entry key, generation-independent.

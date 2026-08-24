@@ -521,6 +521,20 @@ impl ClientManager {
     ///   1     yes       yes         ne     eq       → NotSame (case 8)
     ///   1     yes       yes         eq     ne       → Perm    (case 9)
     ///   1     yes       yes         ne     ne       → NotSame (case 8 alt)
+    /// Client records held right now, confirmed + unconfirmed — the
+    /// number the `max_clients` quota is checked against.
+    pub fn client_count(&self) -> usize {
+        self.clients.len()
+    }
+
+    /// Whether this co_ownerid already has a record. An EXCHANGE_ID for
+    /// a known owner never grows the client table (it renews, replaces,
+    /// or steals in place), so the quota must not refuse it — refusing
+    /// a live client's renewal at the cap would break its mount.
+    pub fn owner_known(&self, owner: &[u8]) -> bool {
+        self.owner_to_id.contains_key(owner)
+    }
+
     pub fn exchange_id(
         &self,
         owner: Vec<u8>,

@@ -868,6 +868,16 @@ impl StateIdManager {
         }
     }
 
+    /// Stateids this client holds — the number the
+    /// `max_stateids_per_client` quota is checked against. O(1): reads
+    /// the length of the maintained per-client index.
+    pub fn count_for_client(&self, client_id: u64) -> usize {
+        self.client_states
+            .get(&client_id)
+            .map(|l| l.len())
+            .unwrap_or(0)
+    }
+
     /// Get all stateids for a client
     ///
     /// LOCK-FREE: Concurrent reads without blocking

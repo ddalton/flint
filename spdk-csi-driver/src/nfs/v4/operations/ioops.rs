@@ -414,6 +414,23 @@ impl IoOperationHandler {
     ///
     /// Looks up the session (set by SEQUENCE) to determine the client ID.
     /// Falls back to 1 for backward compatibility with tests that don't use SEQUENCE.
+    /// Per-client stateid quota (B6). Checked at OPEN's two mint arms —
+    /// stateids are minted by unauthenticated wire ops and each costs
+    /// memory plus a persisted state.db row. DELAY: CLOSE and lease
+    /// expiry free capacity, so a legitimate client retries through.
+    fn stateid_quota_exhausted(&self, client_id: u64) -> bool {
+        let held = self.state_mgr.stateids.count_for_client(client_id);
+        let max = self.state_mgr.quotas.max_stateids_per_client;
+        if held >= max {
+            warn!(
+                "OPEN: client {client_id} at stateid quota ({held}/{max}) — DELAY \
+                 (FLINT_NFS_MAX_STATEIDS_PER_CLIENT)"
+            );
+            return true;
+        }
+        false
+    }
+
     fn get_client_id_from_context(&self, ctx: &CompoundContext) -> u64 {
         if let Some(session_id) = &ctx.session_id {
             if let Some(session) = self.state_mgr.sessions.get_session(session_id) {
@@ -840,6 +857,16 @@ impl IoOperationHandler {
 
                             // Get client ID from session (set by SEQUENCE operation)
                             let client_id = self.get_client_id_from_context(ctx);
+                            if self.stateid_quota_exhausted(client_id) {
+                                return OpenRes {
+                                    status: Nfs4Status::Delay,
+                                    stateid: None,
+                                    change_info: None,
+                                    result_flags: 0,
+                                    delegation: OpenDelegationType::None,
+                                    attrset: vec![],
+                                };
+                            }
 
                             // RFC 8881 §9.7 share-deny conflict on the
                             // create path. Courtesy-cleanup at the top
@@ -970,6 +997,16 @@ impl IoOperationHandler {
 
         // Get client ID from session (set by SEQUENCE operation)
         let client_id = self.get_client_id_from_context(ctx);
+        if self.stateid_quota_exhausted(client_id) {
+            return OpenRes {
+                status: Nfs4Status::Delay,
+                stateid: None,
+                change_info: None,
+                result_flags: 0,
+                delegation: OpenDelegationType::None,
+                attrset: vec![],
+            };
+        }
 
         // Resolve to the FILE's filehandle for use as the
         // (client, owner, fh) key in `open_states`. For CLAIM_NULL
@@ -2707,6 +2744,49 @@ mod tests {
             h.write_verifier(),
             h.write_verifier(),
             "the verifier must be constant within one incarnation"
+        );
+    }
+
+    /// B6, per-client stateid quota: OPEN's mint arms refuse with DELAY
+    /// at the cap — stateids were mintable without bound by any
+    /// unauthenticated peer, each one memory plus a persisted row.
+    #[tokio::test]
+    async fn open_refuses_with_delay_at_the_stateid_quota() {
+        use crate::nfs::v4::state::StateQuotas;
+        let q = StateQuotas {
+            max_clients: 4096,
+            max_sessions_per_client: 16,
+            max_stateids_per_client: 1,
+            max_locks_per_client: 65536,
+        };
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("f.txt"), b"data").unwrap();
+        let fh_mgr = Arc::new(FileHandleManager::new(temp.path().to_path_buf()));
+        let state_mgr = Arc::new(StateManager::new_in_memory_with_quotas("", q));
+        let handler = IoOperationHandler::new(Arc::clone(&state_mgr), fh_mgr.clone());
+        // The client already holds its one allowed stateid.
+        let _held = state_mgr.stateids.allocate(StateType::Open, 1, None);
+
+        let mut ctx = CompoundContext::new(0);
+        ctx.current_fh = Some(fh_mgr.path_to_filehandle(&temp.path().join("f.txt")).unwrap());
+        let res = handler
+            .handle_open(
+                OpenOp {
+                    seqid: 0,
+                    share_access: OPEN4_SHARE_ACCESS_READ,
+                    share_deny: OPEN4_SHARE_DENY_NONE,
+                    owner: b"quota-owner".to_vec(),
+                    openhow: OpenHow::NoCreate,
+                    claim: OpenClaim::Fh,
+                },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(
+            res.status,
+            Nfs4Status::Delay,
+            "an OPEN past max_stateids_per_client must be refused with DELAY \
+             (CLOSE and lease expiry free capacity)"
         );
     }
 

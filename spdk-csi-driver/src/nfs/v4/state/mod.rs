@@ -30,6 +30,55 @@ pub use delegation::{DelegationManager, Delegation, DelegationType, DelegationSt
 use crate::state_backend::{StateBackend, StateBackendError};
 use std::sync::Arc;
 
+/// Quotas on the server-side NFS state tables. Every table below is
+/// minted by unauthenticated wire ops (AUTH_SYS verifies nothing), each
+/// entry costs memory AND a persisted state.db row on the PVC, and none
+/// had any bound — one TCP-reachable peer could grow them until the hub
+/// OOMed or the volume filled. Refusals are NFS4ERR_DELAY, the knfsd
+/// precedent: retryable, and the courtesy sweep frees capacity from
+/// clients that stopped renewing, so a legitimate burst that hits a cap
+/// succeeds on retry. The caps are quotas, not invariants — a concurrent
+/// race may briefly over-admit by a few entries, which is fine.
+#[derive(Debug, Clone, Copy)]
+pub struct StateQuotas {
+    /// Global cap on client records, confirmed + unconfirmed
+    /// (`FLINT_NFS_MAX_CLIENTS`, default 4096). The load-bearing one:
+    /// minting a fresh client identity is the cheapest unauthenticated
+    /// growth vector, and every record also carries a lease the sweep
+    /// must walk.
+    pub max_clients: usize,
+    /// Sessions per client (`FLINT_NFS_MAX_SESSIONS_PER_CLIENT`,
+    /// default 16; Linux uses 1). Each session owns a slot table whose
+    /// reply cache is a standing grant — without this cap, one client
+    /// multiplies the per-session bound without limit.
+    pub max_sessions_per_client: usize,
+    /// Stateids per client (`FLINT_NFS_MAX_STATEIDS_PER_CLIENT`,
+    /// default 65536) — bounds OPEN/LOCK state and, transitively, the
+    /// persisted lock-owner registrations.
+    pub max_stateids_per_client: usize,
+    /// Byte-range lock entries per client
+    /// (`FLINT_NFS_MAX_LOCKS_PER_CLIENT`, default 65536).
+    pub max_locks_per_client: usize,
+}
+
+impl StateQuotas {
+    pub fn from_env() -> Self {
+        fn env_or(name: &str, default: usize) -> usize {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or(default)
+        }
+        Self {
+            max_clients: env_or("FLINT_NFS_MAX_CLIENTS", 4096),
+            max_sessions_per_client: env_or("FLINT_NFS_MAX_SESSIONS_PER_CLIENT", 16),
+            max_stateids_per_client: env_or("FLINT_NFS_MAX_STATEIDS_PER_CLIENT", 65536),
+            max_locks_per_client: env_or("FLINT_NFS_MAX_LOCKS_PER_CLIENT", 65536),
+        }
+    }
+}
+
 /// NFSv4 state manager - coordinates all state components
 pub struct StateManager {
     pub clients: Arc<ClientManager>,
@@ -37,6 +86,9 @@ pub struct StateManager {
     pub stateids: Arc<StateIdManager>,
     pub leases: Arc<LeaseManager>,
     pub delegations: Arc<DelegationManager>,
+    /// See [`StateQuotas`]. Read by the EXCHANGE_ID / CREATE_SESSION /
+    /// OPEN / LOCK handlers at their mint points.
+    pub quotas: StateQuotas,
     /// Shared persistence target. Each per-component manager holds its
     /// own clone; this field exists so `load_from_backend` and
     /// post-startup helpers can reach the trait without going through
@@ -65,6 +117,7 @@ impl StateManager {
             stateids: stateid_manager,
             leases: lease_manager,
             delegations: delegation_manager,
+            quotas: StateQuotas::from_env(),
             backend,
         }
     }
@@ -75,6 +128,15 @@ impl StateManager {
     /// modules read tighter.
     pub fn new_in_memory(volume_id: &str) -> Self {
         Self::new(volume_id, crate::state_backend::memory_backend())
+    }
+
+    /// Test constructor: an in-memory StateManager with explicit
+    /// [`StateQuotas`] — quota tests need tiny deterministic caps, and
+    /// the env-derived defaults are process-global.
+    pub fn new_in_memory_with_quotas(volume_id: &str, quotas: StateQuotas) -> Self {
+        let mut mgr = Self::new(volume_id, crate::state_backend::memory_backend());
+        mgr.quotas = quotas;
+        mgr
     }
 
     /// Pre-listener hook: pull every persisted record out of the

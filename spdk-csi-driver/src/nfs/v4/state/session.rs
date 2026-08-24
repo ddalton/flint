@@ -461,6 +461,15 @@ impl SessionManager {
     /// Get all sessions for a client
     ///
     /// LOCK-FREE: Concurrent reads without blocking
+    /// Live sessions this client holds — the number the
+    /// `max_sessions_per_client` quota is checked against.
+    pub fn session_count_for_client(&self, client_id: u64) -> usize {
+        self.client_sessions
+            .get(&client_id)
+            .map(|l| l.len())
+            .unwrap_or(0)
+    }
+
     pub fn get_client_sessions(&self, client_id: u64) -> Vec<SessionId> {
         self.client_sessions
             .get(&client_id)
