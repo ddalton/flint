@@ -742,9 +742,21 @@ impl CompoundDispatcher {
         result
     }
 
-    /// The error form of each content-mutating result — the only
-    /// variants that can have queued marks. Anything else passes
-    /// through untouched (the queue only fills from the arms below).
+    /// The error form of each result whose operation can queue tier
+    /// marks. The namespace arms are NOT hypothetical: CREATE queues
+    /// `capture::note_path` for the regular files it makes, and
+    /// REMOVE/RENAME queue identity tombstones — this function's old
+    /// comment claimed "the queue only fills from the arms below" while
+    /// those three fell through `other` unchanged, so a failed durable
+    /// drain still let their NFS4_OK escape. An ACKed CREATE with no
+    /// dirty row is never flushed (absent from every manifest and
+    /// restore); an ACKed REMOVE/RENAME with a lost tombstone can
+    /// resurrect the deleted generation on a later import — precisely
+    /// the silent-divergence class the A3 pre-ack contract exists to
+    /// kill. LINK carries no mark today but is doctored defensively:
+    /// it mutates the namespace, and the cost of a spurious IO on a
+    /// drain failure is nothing next to the cost of this list going
+    /// stale a second time.
     fn tier_unacked(result: OperationResult) -> OperationResult {
         match result {
             OperationResult::Write(..) => OperationResult::Write(Nfs4Status::Io, None),
@@ -754,6 +766,10 @@ impl CompoundDispatcher {
             OperationResult::Deallocate(_) => OperationResult::Deallocate(Nfs4Status::Io),
             OperationResult::Copy(..) => OperationResult::Copy(Nfs4Status::Io, None),
             OperationResult::Clone(_) => OperationResult::Clone(Nfs4Status::Io),
+            OperationResult::Create(..) => OperationResult::Create(Nfs4Status::Io, None, vec![]),
+            OperationResult::Remove(..) => OperationResult::Remove(Nfs4Status::Io, None),
+            OperationResult::Rename(..) => OperationResult::Rename(Nfs4Status::Io, None, None),
+            OperationResult::Link(..) => OperationResult::Link(Nfs4Status::Io, None),
             other => other,
         }
     }
@@ -4509,6 +4525,37 @@ mod tests {
 
     /// Set `current_fh` to a real file in the export and return an Open
     /// stateid bound to it.
+    /// A3's doctor must cover every result whose op queues marks. The
+    /// old match listed only the content arms while CREATE queues
+    /// `capture::note_path` and REMOVE/RENAME queue identity tombstones
+    /// — its own comment claimed the queue "only fills from the arms
+    /// below", so on a failed durable drain those three OKs escaped
+    /// un-doctored: a never-flushed file, or a lost tombstone that
+    /// resurrects a deleted generation on import.
+    #[test]
+    fn tier_unacked_doctors_the_namespace_results_too() {
+        use crate::nfs::v4::compound::OperationResult as R;
+        let namespace: Vec<R> = vec![
+            R::Create(Nfs4Status::Ok, None, vec![7]),
+            R::Remove(Nfs4Status::Ok, None),
+            R::Rename(Nfs4Status::Ok, None, None),
+            R::Link(Nfs4Status::Ok, None),
+        ];
+        for r in namespace {
+            let name = format!("{:?}", r);
+            let doctored = CompoundDispatcher::tier_unacked(r);
+            assert_eq!(
+                doctored.status(),
+                Nfs4Status::Io,
+                "{name}: a failed durable drain must refuse the ack — an escaped OK \
+                 is a file no manifest will ever name, or a tombstone that never lands"
+            );
+        }
+        // The pass-through arm still passes through what queues nothing.
+        let untouched = CompoundDispatcher::tier_unacked(R::GetAttr(Nfs4Status::Ok, None));
+        assert_eq!(untouched.status(), Nfs4Status::Ok);
+    }
+
     /// L2 step 2 (A3): a mutating op's reply must not exist before the
     /// file's durable dirty bit does. Drive a WRITE through the real
     /// dispatch path and assert the bit reached the backend — then that
