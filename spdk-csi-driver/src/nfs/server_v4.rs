@@ -221,11 +221,89 @@ impl NfsServer {
 /// among them — so the two are now one path. Anything MDS-specific
 /// belongs in `CompoundDispatcher`, which already knows whether it is
 /// a pNFS server.
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Connections currently being served, across every front-end that
+/// goes through [`serve_tcp`] (the standalone server AND the hub).
+pub(crate) static ACTIVE_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Default concurrent-connection cap (blocker 6).
+///
+/// Deliberately generous. This is a backstop against runaway fan-out,
+/// not a QoS mechanism: a cap that fires during normal operation would
+/// be a worse bug than the unbounded accept it replaces. At this value
+/// the per-connection buffers are bounded at ~256 MiB and the
+/// per-connection dispatch permits (64 each) at 65,536.
+pub(crate) const DEFAULT_MAX_CONNECTIONS: u64 = 1024;
+
+/// Resolve the cap. Unset → [`DEFAULT_MAX_CONNECTIONS`]; `0` → disabled
+/// (unbounded, the pre-fix behaviour); unparseable → the default, since
+/// a typo in an env var must not silently remove the bound.
+pub(crate) fn max_connections_from_env() -> u64 {
+    match std::env::var("FLINT_NFS_MAX_CONNECTIONS") {
+        Ok(v) => v.trim().parse::<u64>().unwrap_or_else(|_| {
+            warn!(
+                "FLINT_NFS_MAX_CONNECTIONS={:?} is not a number — using the default {}. \
+                 A typo must not silently unbound the server.",
+                v, DEFAULT_MAX_CONNECTIONS
+            );
+            DEFAULT_MAX_CONNECTIONS
+        }),
+        Err(_) => DEFAULT_MAX_CONNECTIONS,
+    }
+}
+
+/// RAII slot in the connection budget.
+///
+/// The release MUST survive a panic in the handler. A leaked slot is
+/// permanent — the counter never comes back down — so a cap built on a
+/// decrement that can be skipped would ratchet toward refusing every
+/// connection, which is a worse failure than having no cap at all.
+/// `Drop` runs while unwinding; a `fetch_sub` at the end of the task
+/// body does not.
+pub(crate) struct ConnSlot;
+
+impl ConnSlot {
+    /// Take a slot, incrementing the live count.
+    pub(crate) fn acquire() -> Self {
+        ACTIVE_CONNECTIONS.fetch_add(1, Ordering::SeqCst);
+        ConnSlot
+    }
+}
+
+impl Drop for ConnSlot {
+    fn drop(&mut self) {
+        ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub(crate) async fn serve_tcp(addr: &str, dispatcher: Arc<CompoundDispatcher>, gss_manager: Arc<RpcSecGssManager>) -> std::io::Result<()> {
-    use std::sync::atomic::{AtomicU64, Ordering};
     
     // Track active connections for debugging concurrent mount issues
-    static ACTIVE_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
+
+    // Blocker 6: an upper bound on concurrently-served connections.
+    //
+    // Before this, `accept` was unbounded and every accepted connection
+    // brought its own 64 dispatch permits (`pipeline::DEFAULT_MAX_INFLIGHT`)
+    // and two 128 KiB buffers. The permits are PER CONNECTION, so more
+    // connections bought MORE concurrency, not less: 100 pods at the
+    // documented `nconnect=4` is 400 connections, ~150 MiB of buffers and
+    // 25,600 permitted concurrent dispatches, against a chart that requests
+    // 100m/128Mi and sets no limit. There was no configuration under which
+    // the hub refused load — it only got slower until it was OOMKilled,
+    // which on a single-replica RWO hub is an outage.
+    //
+    // The cap is deliberately generous: it is a backstop against runaway
+    // fan-out, not a QoS mechanism, and a value that fires in normal
+    // operation would be a worse bug than the one it fixes. At the default
+    // this bounds buffers at ~256 MiB and in-flight dispatches at 65,536.
+    let max_connections: u64 = max_connections_from_env();
+    if max_connections == 0 {
+        info!("FLINT_NFS_MAX_CONNECTIONS=0 — connection cap DISABLED (unbounded accept)");
+    } else {
+        info!("NFS connection cap: {} concurrent (FLINT_NFS_MAX_CONNECTIONS)", max_connections);
+    }
+
     
     let listener = TcpListener::bind(addr).await?;
     info!("✅ NFSv4.2 TCP server listening on {}", addr);
@@ -254,8 +332,28 @@ pub(crate) async fn serve_tcp(addr: &str, dispatcher: Arc<CompoundDispatcher>, g
             }
         };
 
+        // Enforce the cap BEFORE taking a slot. Refusal is a close, not
+        // a queue: holding the socket open would consume the very fd the
+        // cap exists to protect, and a client that cannot connect retries,
+        // whereas a client parked on an accepted-but-unserved connection
+        // hangs indefinitely on a hard mount.
+        if max_connections > 0 {
+            let active_now = ACTIVE_CONNECTIONS.load(Ordering::SeqCst);
+            if active_now >= max_connections {
+                warn!(
+                    "❌ [NFS_SERVER] refusing connection from {} — at the {} connection \
+                     cap (FLINT_NFS_MAX_CONNECTIONS). The listener stays healthy and the \
+                     client will retry; raise the cap if this is legitimate fan-out",
+                    peer, max_connections
+                );
+                drop(stream);
+                continue;
+            }
+        }
+
         connection_count += 1;
-        let active = ACTIVE_CONNECTIONS.fetch_add(1, Ordering::SeqCst) + 1;
+        let _slot = ConnSlot::acquire();
+        let active = ACTIVE_CONNECTIONS.load(Ordering::SeqCst);
         info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         info!("📡 [NFS_SERVER] Connection #{} from {} (Active connections: {})", connection_count, peer, active);
         info!("   Timestamp: {:?}", std::time::SystemTime::now());
@@ -270,14 +368,15 @@ pub(crate) async fn serve_tcp(addr: &str, dispatcher: Arc<CompoundDispatcher>, g
         let gss_manager = gss_manager.clone();
         let conn_id = connection_count;
         tokio::spawn(async move {
+            // Owned by the task: the slot is released when this future is
+            // dropped, whether it returns, errors or panics.
+            let _slot = _slot;
             info!("🚀 [NFS_SERVER] Spawned handler task for connection #{} from {}", conn_id, peer);
             if let Err(e) = handle_tcp_connection(stream, dispatcher, gss_manager, peer, conn_id).await {
                 warn!("❌ [NFS_SERVER] Connection #{} from {} error: {}", conn_id, peer, e);
-                let active = ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::SeqCst) - 1;
-                info!("   Active connections remaining: {}", active);
+                info!("   Active connections remaining: {}", ACTIVE_CONNECTIONS.load(Ordering::SeqCst) - 1);
             } else {
-                let active = ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::SeqCst) - 1;
-                info!("✓ [NFS_SERVER] Connection #{} from {} closed cleanly (Active: {})", conn_id, peer, active);
+                info!("✓ [NFS_SERVER] Connection #{} from {} closed cleanly (Active: {})", conn_id, peer, ACTIVE_CONNECTIONS.load(Ordering::SeqCst) - 1);
             }
         });
     }
@@ -937,4 +1036,91 @@ mod state_persistence_tests {
         let _ = select_state_backend("", dir.path());
         assert!(dir.path().join(".flint-nfs").join("state.db").exists());
     }
+}
+
+#[cfg(test)]
+mod connection_cap_tests {
+    use super::*;
+
+    /// The safety property the whole cap rests on: a slot is released
+    /// even when the handler panics.
+    ///
+    /// This is not a hypothetical. The pre-existing code decremented the
+    /// counter with an explicit `fetch_sub` at the end of the task body,
+    /// on both the Ok and Err arms — neither of which runs if the task
+    /// panics. That was harmless while nothing read the counter. The
+    /// moment a CAP reads it, a leaked slot becomes permanent: the count
+    /// ratchets up, never comes down, and the server ends up refusing
+    /// every connection while looking healthy. That is strictly worse
+    /// than the unbounded accept the cap replaces.
+    #[test]
+    fn a_slot_is_released_even_when_the_holder_panics() {
+        let before = ACTIVE_CONNECTIONS.load(Ordering::SeqCst);
+
+        let r = std::panic::catch_unwind(|| {
+            let _slot = ConnSlot::acquire();
+            assert_eq!(
+                ACTIVE_CONNECTIONS.load(Ordering::SeqCst),
+                before + 1,
+                "acquire must be visible while the slot is held — otherwise the \
+                 assertion below passes for the wrong reason"
+            );
+            panic!("handler blew up mid-connection");
+        });
+
+        assert!(r.is_err(), "the test must actually panic, or it proves nothing");
+        assert_eq!(
+            ACTIVE_CONNECTIONS.load(Ordering::SeqCst),
+            before,
+            "the slot LEAKED across a panic — with a cap in force this ratchets \
+             toward refusing every connection, permanently"
+        );
+    }
+
+    #[test]
+    fn a_slot_is_released_on_the_ordinary_path() {
+        let before = ACTIVE_CONNECTIONS.load(Ordering::SeqCst);
+        {
+            let _slot = ConnSlot::acquire();
+            assert_eq!(ACTIVE_CONNECTIONS.load(Ordering::SeqCst), before + 1);
+        }
+        assert_eq!(ACTIVE_CONNECTIONS.load(Ordering::SeqCst), before);
+    }
+
+    /// A typo must not silently unbound the server. `0` is the only
+    /// value that disables the cap, and it has to be spelled exactly.
+    #[test]
+    fn an_unparseable_cap_falls_back_to_the_default_rather_than_to_unbounded() {
+        // These run in-process with other tests, so scope the env var
+        // tightly and restore it. Serialised by the mutex below.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let restore = std::env::var("FLINT_NFS_MAX_CONNECTIONS").ok();
+
+        std::env::set_var("FLINT_NFS_MAX_CONNECTIONS", "not-a-number");
+        assert_eq!(
+            max_connections_from_env(),
+            DEFAULT_MAX_CONNECTIONS,
+            "a malformed cap must fall back to the DEFAULT, never to 0 — falling \
+             back to 0 would turn a typo into an unbounded server"
+        );
+
+        std::env::set_var("FLINT_NFS_MAX_CONNECTIONS", "");
+        assert_eq!(max_connections_from_env(), DEFAULT_MAX_CONNECTIONS);
+
+        std::env::set_var("FLINT_NFS_MAX_CONNECTIONS", "  32 ");
+        assert_eq!(max_connections_from_env(), 32, "surrounding whitespace must be tolerated");
+
+        std::env::set_var("FLINT_NFS_MAX_CONNECTIONS", "0");
+        assert_eq!(max_connections_from_env(), 0, "0 is the documented opt-out");
+
+        std::env::remove_var("FLINT_NFS_MAX_CONNECTIONS");
+        assert_eq!(max_connections_from_env(), DEFAULT_MAX_CONNECTIONS);
+
+        match restore {
+            Some(v) => std::env::set_var("FLINT_NFS_MAX_CONNECTIONS", v),
+            None => std::env::remove_var("FLINT_NFS_MAX_CONNECTIONS"),
+        }
+    }
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }
