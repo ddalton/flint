@@ -292,7 +292,11 @@ broken).
   tests against MinIO and real S3 (the store trait's MinIO listing
   workaround gets its server-side Prefix back — its "buckets are
   per-volume" justification is invalidated by multi-workspace
-  buckets).
+  buckets). Lifecycle at fleet scale: S3 caps lifecycle rules at
+  1,000/bucket, so prefix-per-project SHARED buckets must use ONE
+  bucket-wide MPU-abort rule (safe — MPU abort is key-agnostic)
+  instead of today's per-prefix rule; bucket-per-project keeps the
+  per-share rule as-is. Bootstrap detects which shape it is in.
 - **Phase 2 — flint-sync**: materializing checkout, scan-diff publish
   barrier, deletes-as-diff, preStop drain + release, budget check.
   Test battery: crash-replacement legs (resurrection bounded by RPO
@@ -393,6 +397,24 @@ CRD surface: RPO stated per mode, measured event rate on the fleet.
 5. Does the projects-service UI read through the deployment proxy or
    through the flint gateway? (Writes go through the gateway either
    way — the HITL path; reads could go either.)
-6. Does the deployment proxy support per-tenant/prefix authz (scoping
-   each workspace token to its subtree)? Decides the enforcement
-   grade: proxy-scoped (strong) vs gateway-validated cooperative.
+6. ~~Does the deployment proxy support per-tenant/prefix authz?~~
+   **DECIDED (user, 2026-08-24): each project gets a dedicated bucket
+   OR a dedicated prefix** — the proxy's tenancy is PROJECT-granular.
+   Consequences:
+   - Cross-project isolation (the privacy + fleet-blast-radius
+     property) is proxy-native: a project's token cannot touch
+     another project's bucket/prefix. This is the isolation that
+     matters at multi-user scale.
+   - The residual is WITHIN-project: agent workspaces of one project
+     share its scope, so the one-writer-per-subtree contract inside
+     a project stays gateway-validated + manifest-CAS cooperative.
+     Accepted for v1: blast radius = one project's own runs, and
+     bucket versioning (hard requirement) makes clobbers recoverable.
+   - Flint supports both shapes natively — a share is
+     {endpoint, bucket, prefix}, and `.flint/` cells sit at the
+     prefix root either way. Bucket-per-project: hard S3-level
+     isolation (rate limits, versioning, lifecycle per project);
+     watch the account bucket quota (10k default). Prefix-per-project
+     in shared buckets: operationally lighter; see the Phase 1
+     lifecycle note (1,000-rules-per-bucket cap) and the new-prefix
+     503 ramp at burst (0c covers it).
