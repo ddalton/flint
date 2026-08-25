@@ -62,16 +62,16 @@
   .note { font-size: 7.5px; color: #52514e; line-height: 1.4; }
   table.avail { margin-top: 0.12in; table-layout: fixed; }
   table.avail th { text-align: left; font-size: 9px; padding: 3px 6px; }
-  table.avail td { text-align: left; vertical-align: top; padding: 5px 6px;
-                   font-size: 8.2px; line-height: 1.4; }
+  table.avail td { text-align: left; vertical-align: top; padding: 3.5px 6px;
+                   font-size: 8px; line-height: 1.38; }
   table.avail td:first-child { white-space: normal; }
   td.ae { font-weight: 650; color: #0b0b0b; font-size: 8.4px; }
   td.ac { color: #52514e; }
   .adot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
           margin-right: 4px; vertical-align: -0.5px; }
-  .beyond p { font-size: 8.4px; color: #52514e; line-height: 1.5; margin-top: 4px;
+  .beyond p { font-size: 8.2px; color: #52514e; line-height: 1.42; margin-top: 3px;
              max-width: 9.6in; }
-  .atake { font-size: 8.6px; color: #52514e; line-height: 1.5; margin-top: 0.12in;
+  .atake { font-size: 8.4px; color: #52514e; line-height: 1.45; margin-top: 0.08in;
            max-width: 8.6in; }
   .foot { margin-top: 0.08in; font-size: 7.5px; color: #898781; line-height: 1.45;
           border-top: 1px solid #e1e0d9; padding-top: 4px; }
@@ -81,7 +81,7 @@
   <h1>Flint front ends — consistency, performance, security, Day-2 operations</h1>
   <p class="deck">Three ways to put one S3 bucket behind agent workloads, compared on four dimensions —
   six factors each (Performance carries a seventh, the workload envelope), scored 0 (weakest) – 5 (strongest) from the architecture docs, adversarially verified
-  per approach. Pages 2–3 give the reason behind every number; page 4 maps availability and notes where other industry implementations would shift the numbers. NFS-over-S3 is charted in both flavors
+  per approach. Pages 2–3 give the reason behind every number; page 4 maps availability, the multicluster-to-one-bucket contract, and where other industry implementations would shift the numbers. NFS-over-S3 is charted in both flavors
   (sec=sys dashed).</p>
   <div class="intro">
   <div class="ib" style="flex:1.25">
@@ -396,7 +396,27 @@
   periods, dirty-set caps — instead of an architecture property.&rdquo; Lean&rsquo;s refinement over FUSE is
   taking the app out of the sidecar&rsquo;s blast radius entirely; its residual concentration point is the
   gateway/proxy pair.</p>
-  <h2 class="rath" style="margin-top:0.18in">Beyond flint — the same archetypes in the industry</h2>
+  <h2 class="rath" style="margin-top:0.14in">Multicluster — many clusters, one bucket</h2>
+  <div class="beyond">
+  <p><b>Hub:</b> coherence survives trivially (one authority) — the contract is network identity. Remote
+  clusters SNAT to one address (1486/1486 measured; nfsClientCIDRs structurally cannot work), per-node NFS
+  client names must be unique across clusters (RFC 8881 case 5 read a colliding name as a reboot and took the
+  incumbent&rsquo;s locks — six 1.37.0 defects, one cause), and remote mounts need a keepalive or idle-suspend
+  kills them. Prefix uniqueness stops at the cluster boundary — equal prefixes contend on the epoch cell,
+  nested ones never meet: allocate prefixes upstream of Kubernetes.</p>
+  <p><b>FUSE / Lean:</b> native — the bucket is the rendezvous and the arbitration state (epoch, claim, lease,
+  manifest CAS, lean&rsquo;s gateway refusal) is store-side, so cross-cluster behaves exactly like cross-pod:
+  no client identity on any wire, no keepalive, nothing to wake. The residual is the same allocation gap —
+  per-cluster webhooks cannot see each other&rsquo;s subtree grants.</p>
+  <p><b>lakeFS:</b> the best client story — HTTP + per-request SigV4 means the NFS identity class simply does
+  not exist; N clusters are N sets of HTTP clients. The pivot moves to the database: every replica must share
+  ONE KV (cross-region, a KV round-trip sits inside every commit CAS), and two independent installs on one
+  namespace are fenced only at CREATE time (ensureStorageNamespace&rsquo;s dummy object, controller.go:2426) —
+  a birth check, not a live lease; past it, each install&rsquo;s uncommitted GC treats the other&rsquo;s staged
+  objects as garbage. In one line: the hub makes multicluster a <i>network-identity</i> problem, the direct
+  modes an <i>allocation</i> problem, lakeFS a <i>database-topology</i> problem — share one KV or don&rsquo;t.</p>
+  </div>
+  <h2 class="rath" style="margin-top:0.12in">Beyond flint — the same archetypes in the industry</h2>
   <div class="beyond">
   <p>These pages are grounded in flint, but the columns model archetypes, and most orderings are
   structural — set by where arbitration, bytes, and credentials live — so they survive across
@@ -428,10 +448,7 @@
   credentials — is roughly lean&rsquo;s designed endgame already shipped, at the price flint-lean
   refuses to pay: an operated KV store (Postgres/DynamoDB) standing beside the bucket.</p>
   </div>
-  <p class="foot">Sources: the measured failure matrix in flint-fuse-architecture.html p4 (hub and FUSE
-  columns), the corrected gateway-outage contract in the lean plan §2.2/§7, the idle-lifecycle and
-  suspend material in flint-lite-architecture.html p4 and the agent-fleets guide, and
-  pnfs-operator-runbook.md for the (dormant, as-designed) Kerberos row.</p>
+  <p class="foot">Sources: fuse-architecture p4 (failure matrix) &middot; lean plan §2.2/§7 (gateway outage) &middot; flint-lite-architecture p4 + fleets guide (idle/suspend) &middot; pnfs-operator-runbook (Kerberos) &middot; lakeFS controller.go:2426 (namespace check).</p>
 </div>
   <div class="page">
   <h1>lakeFS — scored from source</h1>
