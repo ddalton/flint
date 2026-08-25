@@ -25,6 +25,16 @@ set -uo pipefail
 VM=${LIMA_VM:-flint-nfs-client}
 PORT=${NFS_PORT:-20490}
 BASELINE=${BASELINE:-tests/lima/pjdfstest-baseline.json}
+# Overridable because the Lima VM is SHARED: a second session's server
+# may already hold 20490, and starting a second one there fails to bind
+# in a way that looks like flint refusing the drill. Keep the binary,
+# config and export path together — a config naming an export the setup
+# below does not create yields an empty mount and a suite that "passes"
+# by testing nothing.
+MDS_BIN=${MDS_BIN:-/tmp/flint-pnfs-mds-vm}
+MDS_CONFIG=${MDS_CONFIG:-/tmp/lite-pynfs.yaml}
+MDS_EXPORT=${MDS_EXPORT:-/srv/flint-mds-export}
+MDS_STATE=${MDS_STATE:-/srv/flint-mds-state}
 
 vm() { limactl shell "$VM" -- sudo bash -lc "$1"; }
 
@@ -39,14 +49,17 @@ vm 'test -x /opt/pjdfstest/pjdfstest || {
 echo "── arm A: flint ──"
 vm "systemctl stop flint-pjd 2>/dev/null||true; systemctl reset-failed flint-pjd 2>/dev/null||true
     umount -f /mnt/pjd 2>/dev/null||true
-    rm -rf /srv/flint-mds-export /srv/flint-mds-state
-    mkdir -p /srv/flint-mds-export/tmp /srv/flint-mds-state /mnt/pjd
-    chmod 0777 /srv/flint-mds-export/tmp
+    rm -rf $MDS_EXPORT $MDS_STATE
+    mkdir -p $MDS_EXPORT/tmp $MDS_STATE /mnt/pjd
+    chmod 0777 $MDS_EXPORT/tmp
+    chmod +x $MDS_BIN
     systemd-run --unit=flint-pjd --collect --setenv=RUST_LOG=warn \
-      /tmp/flint-pnfs-mds-vm --config /tmp/lite-pynfs.yaml >/dev/null 2>&1
+      $MDS_BIN --config $MDS_CONFIG >/dev/null 2>&1
     sleep 4
-    mount -t nfs -o vers=4.1,port=$PORT,nolock 127.0.0.1:/ /mnt/pjd
+    mount -t nfs -o vers=4.1,port=$PORT,nolock 127.0.0.1:/ /mnt/pjd || exit 9
+    mountpoint -q /mnt/pjd || exit 9
     mkdir -p /mnt/pjd/tmp/pjd
+    rm -f /tmp/pjd-flint.txt
     cd /mnt/pjd/tmp/pjd && timeout 2400 prove -r -f /opt/pjdfstest/tests > /tmp/pjd-flint.txt 2>&1
     echo done" >/dev/null 2>&1
 
@@ -58,12 +71,22 @@ vm "umount -f /mnt/knfsd 2>/dev/null||true
     exportfs -ra; systemctl restart nfs-kernel-server; sleep 3
     mount -t nfs -o vers=4.1,nolock 127.0.0.1:/srv/knfsd-export /mnt/knfsd
     mkdir -p /mnt/knfsd/pjd
+    rm -f /tmp/pjd-knfsd.txt
     cd /mnt/knfsd/pjd && timeout 2400 prove -r -f /opt/pjdfstest/tests > /tmp/pjd-knfsd.txt 2>&1
     echo done" >/dev/null 2>&1
 
 TMP=$(mktemp -d)
 limactl shell "$VM" -- sudo cat /tmp/pjd-flint.txt > "$TMP/flint.txt" 2>/dev/null
 limactl shell "$VM" -- sudo cat /tmp/pjd-knfsd.txt > "$TMP/knfsd.txt" 2>/dev/null
+
+# A transcript with no summary section is a run that died, not a run
+# that passed. Without this, an empty or truncated file parses to zero
+# failures and the differential reports a clean sheet.
+for f in flint knfsd; do
+  grep -q "Test Summary Report\|Result: PASS\|Files=" "$TMP/$f.txt" 2>/dev/null || {
+    echo "FAIL: the $f arm produced no pjdfstest summary — the run died, it did not pass"
+    tail -15 "$TMP/$f.txt"; exit 1; }
+done
 
 python3 - "$TMP/flint.txt" "$TMP/knfsd.txt" "$BASELINE" <<'PYEOF'
 import re, sys, json, os, collections

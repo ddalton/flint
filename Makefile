@@ -334,6 +334,14 @@ test-authz-drill: ## Leg A1: cross-uid authorization gate (seconds) — runs aga
 test-pjdfstest: ## Leg A0: full pjdfstest (8798 assertions) vs flint, differenced against a knfsd control (~7 min)
 	bash tests/lima/pnfs/pjdfstest-differential.sh
 
+.PHONY: test-xfstests
+test-xfstests: ## Leg C10: xfstests generic/ vs flint, differenced against a knfsd control (~40 min)
+	# The suite every in-tree Linux filesystem is gated on. Runs on a
+	# PRIVATE port (24490) and a PRIVATE binary path: 20490 and
+	# /tmp/flint-pnfs-mds-vm belong to the pynfs rig, and this VM is
+	# shared. Override with XFS_GROUP= to scope the run.
+	bash tests/lima/pnfs/xfstests-differential.sh
+
 .PHONY: test-nfs-frag
 test-nfs-frag: ## Force fragmented WRITE (T1) — large file via dd over NFS
 	limactl shell $(LIMA_VM) -- sudo bash -lc '\
