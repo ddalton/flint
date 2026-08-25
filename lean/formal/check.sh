@@ -6,7 +6,7 @@
 # DELIBERATELY SEPARATE from scripts/check-tla.sh (flint's 196-run gate):
 # lean is a separate system.  Same harness discipline, its own runs.
 #
-# Twenty runs, ALL required:
+# Twenty-four runs, ALL required:
 #   - strict runs must complete with every listed invariant green;
 #   - mutation runs must FIND their designated counterexample — a model
 #     that cannot rediscover its bug classes proves nothing;
@@ -110,5 +110,14 @@ mutation_run $M LeanProbeRefusal.cfg          "probe: a HITL write is refused wh
 mutation_run $M LeanProbeAdoptOwn.cfg         "probe: the own-crashed-PUT 412 adoption fires after restart" \
   "Invariant ProbeAdoptOwn is violated"
 
+# ---- tranche 2: the sync verb x barrier product ----------------------------
+strict_run $M LeanSyncHolds.cfg "sync verb: scan-first + locally-dirty-wins holds against the barrier/HITL product"
+mutation_run $M LeanSyncStaleDirt.cfg "sync judging dirt from the LAST BARRIER's snapshot destroys un-scanned live work" \
+  "Invariant Inv_SyncNeverDestroysDirty is violated"
+mutation_run $M LeanProbeSyncApplied.cfg  "probe: sync actually applies a remote change" \
+  "Invariant ProbeSyncApplied is violated"
+mutation_run $M LeanProbeSyncConflict.cfg "probe: sync actually surfaces a dirty-path conflict" \
+  "Invariant ProbeSyncConflict is violated"
+
 echo
-echo "lean formal gate: $PASS/20 runs green"
+echo "lean formal gate: $PASS/24 runs green"

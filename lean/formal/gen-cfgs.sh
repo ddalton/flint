@@ -5,17 +5,19 @@
 set -eu
 cd "$(dirname "$0")"
 
-KEYS="MaxGen MaxSeq MaxHitl MaxBarriers MaxCrashes MaxRestarts AllowStall \
-InboxEnabled MergeCapable ConflictSurfacing WindowCheck Rotation \
-EpochCheck GuardedGC DeletesAfterCAS RematerializeOnRestart"
+KEYS="MaxGen MaxSeq MaxHitl MaxBarriers MaxCrashes MaxRestarts MaxSyncs \
+AllowStall InboxEnabled MergeCapable ConflictSurfacing WindowCheck Rotation \
+EpochCheck GuardedGC DeletesAfterCAS RematerializeOnRestart SyncEnabled \
+SyncScanFirst"
 
 emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   local name=$1 invs=$2; shift 2
   local c_MaxGen=4 c_MaxSeq=6 c_MaxHitl=1 c_MaxBarriers=3
-  local c_MaxCrashes=1 c_MaxRestarts=1 c_AllowStall=FALSE
+  local c_MaxCrashes=1 c_MaxRestarts=1 c_MaxSyncs=0 c_AllowStall=FALSE
   local c_InboxEnabled=TRUE c_MergeCapable=TRUE c_ConflictSurfacing=TRUE
   local c_WindowCheck=TRUE c_Rotation=TRUE c_EpochCheck=TRUE
   local c_GuardedGC=TRUE c_DeletesAfterCAS=TRUE c_RematerializeOnRestart=FALSE
+  local c_SyncEnabled=FALSE c_SyncScanFirst=TRUE
   local kv
   for kv in "$@"; do eval "c_${kv%%=*}=${kv#*=}"; done
   {
@@ -90,3 +92,19 @@ emit LeanProbeRefusal "ProbeRefusal" \
   MaxHitl=0 MaxCrashes=0 MaxRestarts=0 MaxGen=2 MaxBarriers=1
 emit LeanProbeAdoptOwn "ProbeAdoptOwn" \
   MaxHitl=0 MaxCrashes=0 MaxRestarts=1 MaxGen=2 MaxBarriers=2
+
+# ---- tranche 2: the sync verb x barrier product ----------------------------
+# Every cfg above keeps SyncEnabled=FALSE, so Sync is never enabled and the
+# tranche-1 state spaces are preserved by construction (lastDirty stays {}).
+emit LeanSyncHolds "$ALLINV,Inv_SyncNeverDestroysDirty" \
+  SyncEnabled=TRUE MaxSyncs=1 MaxHitl=1 MaxGen=3 MaxBarriers=1 \
+  MaxCrashes=0 MaxRestarts=0
+emit LeanSyncStaleDirt "Inv_SyncNeverDestroysDirty" \
+  SyncEnabled=TRUE SyncScanFirst=FALSE MaxSyncs=1 MaxHitl=1 MaxGen=3 \
+  MaxBarriers=1 MaxCrashes=0 MaxRestarts=0
+emit LeanProbeSyncApplied "ProbeSyncApplied" \
+  SyncEnabled=TRUE MaxSyncs=1 MaxHitl=1 MaxGen=3 MaxBarriers=1 \
+  MaxCrashes=0 MaxRestarts=0
+emit LeanProbeSyncConflict "ProbeSyncConflict" \
+  SyncEnabled=TRUE MaxSyncs=1 MaxHitl=1 MaxGen=3 MaxBarriers=1 \
+  MaxCrashes=0 MaxRestarts=0

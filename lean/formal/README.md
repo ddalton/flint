@@ -17,7 +17,7 @@ a library. Nothing here is wired into `scripts/check-tla.sh`.
 ./gen-cfgs.sh       # regenerate the cfg matrix
 ```
 
-Twenty runs, ALL required: 4 strict (must hold), 8 mutations (must find
+Twenty-four runs, ALL required: 5 strict (must hold), 11 mutations (must find
 their designated counterexample — a model that cannot rediscover its bug
 classes proves nothing), 8 probes (must be violated — each names an
 ACTION via a ghost only that action writes; probe the action, never the
@@ -41,6 +41,7 @@ Invariants:
 | `Inv_NoStragglerInstall` | a deposed writer's manifest CAS never lands | `LeanNoRotate` (no takeover rotation) |
 | `Inv_NoDeposedPut` | a deposed writer's data PUT never lands | `LeanNoEpochCheck` (rotation alone — proves rotation does NOT cover the data path) |
 | `Inv_NoResurrection` | a container restart never resurrects an unpublished delete | `LeanRematerialize` (re-checkout over a live tree) |
+| `Inv_SyncNeverDestroysDirty` | the sync verb never destroys genuinely-dirty local work without surfacing it | `LeanSyncStaleDirt` (sync judging dirt from the last barrier's snapshot) |
 
 Deliberate strict-HOLDS runs (machine-checked design findings, the
 FlintClaimsNoLeader idiom):
@@ -83,6 +84,31 @@ FlintClaimsNoLeader idiom):
    at my last install) does not — collapsing them makes a sidecar
    mistake its own consumed adoption for a foreign entry.
 
+## Tranche 2 (2026-08-25): the sync verb × the barrier
+
+`Sync(s)` joins the module behind `SyncEnabled` (FALSE in every
+tranche-1 cfg, and `lastDirty` is only tracked under it, so those state
+spaces are preserved by construction). The verb is modelled as the
+implementation serializes it: harness-invoked, at `pc = "idle"`,
+against remote truth = the manifest overlaid by live inbox entries.
+
+`SyncScanFirst` is the arm. TRUE = the shipped rule (dirt is judged by
+sync's OWN scan); FALSE = the refuted design (dirt is whatever the last
+barrier's scan froze). **The A/B is genuinely attributive**, which the
+corpus insists on before believing a mutation: with scan-first ON the
+destroying case is *unsatisfiable* — `applicable = changed \ trueDirty`,
+so `p ∈ applicable ∧ p ∈ trueDirty` cannot hold — and
+`LeanSyncHolds` carries the invariant green in exactly the same world
+where `LeanSyncStaleDirt` violates it. The counterexample is the
+review's finding in four steps: agent writes p after the last barrier
+(or before any barrier), a HITL write lands on p, sync judges p
+"clean" from the stale snapshot, and the remote version overwrites the
+agent's un-scanned latest work with no conflict record.
+
+Two probes keep the strict run honest: `ProbeSyncApplied` (sync really
+does apply a remote change) and `ProbeSyncConflict` (it really does
+surface a dirty-path conflict) — both must be violated.
+
 ## Deliberate abstractions (tranche 1 — residuals, not coverage)
 
 - The scan is ATOMIC: the rename-vs-walk race and the
@@ -92,8 +118,11 @@ FlintClaimsNoLeader idiom):
   poll protocol itself is machine-checked in flint's
   `FlintTierEpoch.tla`, and lean's claim loop mirrors it.
 - Checkout ignores hydrate's 412/S3-wins divergence arm.
-- The sync verb, multi-subtree layout (P2/P3), partial checkout,
-  preStop timing, and every perf axis (Phase 0b/0c) are out of scope.
+- Multi-subtree layout (P2/P3), partial checkout, preStop timing, and
+  every perf axis (Phase 0b/0c) are out of scope. (The sync verb moved
+  IN — see tranche 2 above; it is atomic there, which is faithful to
+  the quiescent contract but leaves an agent writing DURING sync
+  unmodelled.)
 - `conflicts` is a set of records: the implementation obligation is
   that a conflict record preserves the BYTES (conflict-suffixed key —
   `lean/sidecar/src/barrier.rs` does this), not just the reference.
@@ -101,13 +130,11 @@ FlintClaimsNoLeader idiom):
   stateless by design, so the window cell IS the coordination — a
   per-replica model adds states, not behaviors, at this abstraction.
 
-## Tranche 2 candidates (in review-priority order)
+## Tranche 3 candidates (in review-priority order)
 
-1. The sync verb × barrier product (scan-first rule; the steady-state
-   destruction finding).
-2. Layout/multi-subtree (P2/P3): root-owner designation, foreign
+1. Layout/multi-subtree (P2/P3): root-owner designation, foreign
    subtree entries at checkout.
-3. Window liveness: the HITL starvation bound (needs fairness — keep
+2. Window liveness: the HITL starvation bound (needs fairness — keep
    it OUT of the safety gate; the WF ping-pong trap lives here).
-4. Refine ClaimB into the poll protocol with a torn heartbeat task
+3. Refine ClaimB into the poll protocol with a torn heartbeat task
    (the self-recognition + rotation composition).

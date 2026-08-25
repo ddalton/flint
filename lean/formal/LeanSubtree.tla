@@ -45,6 +45,7 @@ CONSTANTS
   MaxBarriers,    \* barrier (scan) budget
   MaxCrashes,     \* pod hard-kill budget
   MaxRestarts,    \* container-restart budget
+  MaxSyncs,       \* sync-verb budget
   AllowStall,     \* enable the stall/thaw arm (the straggler world)
   \* ---- protocol arms: TRUE = plan v2; FALSE = the refuted design -------
   InboxEnabled,        \* FALSE: gateway direct-manifest-bump (the v1 reading)
@@ -55,7 +56,12 @@ CONSTANTS
   EpochCheck,          \* per-request epoch validation on sidecar writes
   GuardedGC,           \* HEAD etag-guard before the GC delete
   DeletesAfterCAS,     \* FALSE: v1 order upload -> delete -> CAS
-  RematerializeOnRestart \* TRUE = mutation: re-checkout over a live tree
+  RematerializeOnRestart, \* TRUE = mutation: re-checkout over a live tree
+  \* ---- tranche 2: the sync verb x barrier product ----------------------
+  SyncEnabled,         \* FALSE in every tranche-1 cfg (spaces preserved)
+  SyncScanFirst        \* FALSE: sync judges dirt from the LAST BARRIER's
+                       \* snapshot instead of its own scan (the refuted
+                       \* design; the review's steady-state destruction)
 
 Sidecars == {"A", "B"}
 
@@ -113,6 +119,11 @@ vars == <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox, window,
      upDone   SUBSET Paths    uploaded (or adopted-own) this barrier
      parked   SUBSET Paths    412-parked this barrier
      gcDone   SUBSET Paths    delete-set entries processed this barrier
+     lastDirty SUBSET Paths   the dirt set frozen at the LAST barrier's
+                              scan.  Tracked only under SyncEnabled (it
+                              stays {} otherwise, so every tranche-1
+                              state space is preserved by construction).
+                              This is what the refuted sync reads.
    gh fields:
      amputated  BOOLEAN  an acked HITL write silently lost (either stamp site)
      resurrected BOOLEAN an unpublished delete undone by re-materialize
@@ -158,13 +169,15 @@ Init ==
         instSnap |-> [p \in Paths |-> 0], instSeq |-> 0,
         known |-> {}, scanU |-> {}, scanD |-> {},
         scanGen |-> [p \in Paths |-> 0], upDone |-> {}, parked |-> {},
-        gcDone |-> {}]]
+        gcDone |-> {}, lastDirty |-> {}]]
   /\ hitlAcked = {} /\ conflicts = {}
   /\ gh = [amputated |-> FALSE, resurrected |-> FALSE,
            stragglerInstalls |-> 0, stragglerCas |-> 0, deposedPuts |-> 0,
            barriers |-> 0, done |-> 0, gc |-> 0, refusals |-> 0,
            cited |-> 0, takeovers |-> 0, crashes |-> 0, restarts |-> 0,
-           adoptOwn |-> 0, stallUsed |-> FALSE, nextGen |-> 2, hitl |-> 0]
+           adoptOwn |-> 0, stallUsed |-> FALSE, nextGen |-> 2, hitl |-> 0,
+           syncs |-> 0, syncApplied |-> 0, syncConflicts |-> 0,
+           syncDestroyed |-> FALSE]
 
 ------------------------------------------------------------------------------
 (* Lifecycle *)
@@ -352,6 +365,7 @@ Scan(s) ==
   /\ window = 0 \/ window < sc[s].epoch
   /\ sc' = [sc EXCEPT ![s].pc = "scanned",
        ![s].scanU = USet(s), ![s].scanD = DSet(s),
+       ![s].lastDirty = IF SyncEnabled THEN USet(s) \cup DSet(s) ELSE {},
        ![s].scanGen = [p \in Paths |-> sc[s].local[p]],
        ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
   /\ window' = sc[s].epoch
@@ -592,6 +606,60 @@ Finish(s) ==
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
 
+
+------------------------------------------------------------------------------
+(* TRANCHE 2: the sync verb (v1, HITL) x the barrier.                       *)
+(*                                                                          *)
+(* Harness-invoked, never background, serialized against this sidecar's own *)
+(* barrier (hence pc = "idle").  Sync BEGINS WITH A FULL SCAN: "locally     *)
+(* dirty" means dirty per THAT scan against the baseline, never per the     *)
+(* last barrier's snapshot — otherwise sync honors a remote delete (or      *)
+(* fetches a remote edit) over the agent's un-scanned latest work, which is *)
+(* steady-state destruction of live work by the verb itself.  Policy:       *)
+(* locally-dirty wins; remote changes apply only to locally-clean paths;    *)
+(* every skipped apply is a surfaced conflict, never silent.                *)
+
+Sync(s) ==
+  /\ SyncEnabled
+  /\ Running(s) /\ sc[s].pc = "idle"
+  /\ gh.syncs < MaxSyncs
+  /\ LET
+       \* Ground truth, independent of the arm under test.
+       trueDirty == {p \in Paths : sc[s].local[p] # sc[s].baseline[p]}
+       \* What THIS arm believes is dirty.
+       dirt == IF SyncScanFirst THEN trueDirty ELSE sc[s].lastDirty
+       \* Remote truth = the manifest, overlaid by live inbox entries (a
+       \* HITL write no barrier has re-cited yet is still remote truth).
+       remote(p) == IF \E pr \in inbox : pr[1] = p /\ objects[p] = pr[2]
+                    THEN objects[p] ELSE manifest[p]
+       changed == {p \in Paths : remote(p) # sc[s].instBase[p]}
+       applicable == changed \ dirt
+       conflicted == changed \cap dirt
+       \* A DESTROYING apply: the path was TRULY dirty, sync moved its
+       \* local content anyway (a remote fetch or a remote-delete), and
+       \* no conflict was surfaced for it.  Under SyncScanFirst this is
+       \* unreachable by construction; under the refuted arm it is the
+       \* review's finding.
+       destroys == \E p \in applicable :
+                     /\ p \in trueDirty
+                     /\ remote(p) # sc[s].local[p]
+     IN
+       /\ sc' = [sc EXCEPT
+            ![s].local = [p \in Paths |->
+              IF p \in applicable THEN remote(p) ELSE @[p]],
+            ![s].baseline = [p \in Paths |->
+              IF p \in applicable THEN remote(p) ELSE @[p]],
+            ![s].instBase = [p \in Paths |-> manifest[p]],
+            ![s].known = @ \cup {remote(p) : p \in applicable},
+            ![s].lastDirty = {}]
+       /\ conflicts' = conflicts \cup {<<p, remote(p)>> : p \in conflicted}
+       /\ gh' = [gh EXCEPT !.syncs = @ + 1,
+            !.syncApplied = @ + Cardinality(applicable),
+            !.syncConflicts = @ + Cardinality(conflicted),
+            !.syncDestroyed = @ \/ destroys]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+                 window, hitlAcked>>
+
 ------------------------------------------------------------------------------
 Next ==
   \/ StartA
@@ -605,7 +673,7 @@ Next ==
   \/ \E s \in Sidecars :
        Consume(s) \/ Scan(s) \/ UploadFenced(s) \/ GCDeleteFenced(s)
        \/ PreDeletesDone(s) \/ CASFenced(s) \/ CASMiss(s) \/ CASInstall(s)
-       \/ Finish(s)
+       \/ Finish(s) \/ Sync(s)
 
 Spec == Init /\ [][Next]_vars
 
@@ -638,6 +706,10 @@ Inv_NoDeposedPut == gh.deposedPuts = 0
 \* A container restart never resurrects an unpublished delete.
 Inv_NoResurrection == ~gh.resurrected
 
+\* The sync verb never destroys genuinely-dirty local work without
+\* surfacing it (tranche 2).
+Inv_SyncNeverDestroysDirty == ~gh.syncDestroyed
+
 ------------------------------------------------------------------------------
 (* Non-vacuity probes — each names an ACTION via a ghost that only that
    action writes, and TLC is REQUIRED to violate it (the A2 probe rule:
@@ -652,5 +724,7 @@ ProbeGC               == gh.gc = 0
 ProbeRefusal          == gh.refusals = 0
 ProbeAdoptOwn         == gh.adoptOwn = 0
 ProbeRestart          == gh.restarts = 0
+ProbeSyncApplied      == gh.syncApplied = 0
+ProbeSyncConflict     == gh.syncConflicts = 0
 
 ==============================================================================
