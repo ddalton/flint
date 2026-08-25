@@ -302,8 +302,28 @@ CRD surface: RPO stated per mode, measured event rate on the fleet.
 1. Gateway home: extend `flint-hub-gateway` (recommended — it is
    already the fleet door with the credential and the bearer
    machinery) or a new binary?
+   **DECIDED (user, 2026-08-24): deployment is per-cluster.** The
+   gateway is stateless — every validation input (lease, layout,
+   claim) lives in the bucket — so per-cluster replicas need no
+   coordination; grant latency stays cluster-local and each cluster
+   can bind the gateway to its own ServiceAccount/OIDC trust. The
+   binary-home half (extend vs new) stays open.
 2. v1 large files: presigned multipart, or refuse > 5 GiB in lean
    mode (routing those workspaces to hub/FUSE)?
 3. Auth v1: per-share bearer only, or bearer + SigV4 from day one?
-4. Does the `sync` verb ship in v1 or does v1 refresh only at
-   checkout?
+4. ~~Does the `sync` verb ship in v1?~~
+   **DECIDED (user, 2026-08-24): the `sync` verb ships in v1.**
+   Rationale: the agent harness supports human-in-the-loop — a user
+   uploads or edits files mid-session through the project UI and a
+   long-lived agent must pick them up without being restarted.
+   Design constraints (from the review + this discussion):
+   - Explicit and quiescent only: the agent/harness invokes it at a
+     moment it chooses; there is NO background refresh (online
+     refresh inverts import's pre-listener + local-wins invariants).
+   - Conflict policy v1: locally-dirty files win; remote deletions
+     are honored only on locally-clean paths; conflicts are
+     surfaced to the harness (exit status + report file), never
+     silently merged.
+   - The Phase 0 formal-model gate grows a sync arm: the subtree
+     lease × sync interaction (a sync during another writer's
+     publish window) must be modeled before the verb is coded.
