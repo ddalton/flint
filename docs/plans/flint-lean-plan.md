@@ -41,11 +41,23 @@ governs:
 > **Phase 4 CORE SHIPPED** — `spdk-csi-driver/src/lean_operator/` +
 > `flint-lean-operator` bin (separate controller, shared image):
 > FlintLeanWorkspace CRD, claim/adopt both arms, derived-probe
-> injection brain. Still open: the admission HTTP/TLS wrapper around
-> the injection brain (cert plumbing), multipart compose for >
-> whole_put_max files, routing sidecar barriers through the gateway
-> verbs by default, proxy-shaped 0b/0c re-measure, Phase 6 drill,
-> per-workspace bearers/SigV4, kind e2e for the operator.
+> injection brain, admission webhook (TLS, cert Secret, registration),
+> `flint-lean-chart`, and two kind e2e suites (raw 7/7, chart 8/8).
+> **PHASE 6, KIND HALF SHIPPED** — `lean/e2e/run-chaos.sh`, 12 legs
+> green, record in `docs/plans/flint-lean-chaos-drill.md`. Two
+> corrections it produced, both recorded there: the P5 data-plane
+> residual is now MEASURED (a deposed straggler landed 7.6k further
+> data PUTs after rotation — control plane held, data path did not),
+> and **§2.2's four failure effects are PROXY effects, not gateway
+> effects** (C8 vs C12: a gateway outage costs only "HITL writes
+> fail"), which locates P5 enforcement at the proxy — where the
+> sidecar's writes actually go, and where the epoch already rides in
+> GenerationStamps. Still open: multipart compose for > whole_put_max
+> files, routing sidecar barriers through the gateway verbs by default
+> (the deferral the drill measures the cost of), proxy conformance gate
+> + proxy-shaped 0b/0c re-measure, the three Phase 6 legs kind cannot
+> run (real spot NODE reclaim, burst N≥1000, real-proxy rates),
+> per-workspace bearers/SigV4.
 
 ## 1. Summary and scope
 

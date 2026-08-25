@@ -1,0 +1,7 @@
+# flint-lean-gateway e2e image. In production the gateway ships inside
+# the flint-lite-operator image (same crate, chart picks the binary);
+# the chaos rig gives it its own so a gateway outage leg can scale the
+# gateway to zero without taking the operator down with it.
+FROM busybox:stable
+COPY flint-lean-gateway /usr/local/bin/flint-lean-gateway
+ENTRYPOINT ["/usr/local/bin/flint-lean-gateway"]

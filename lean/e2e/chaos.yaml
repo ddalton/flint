@@ -1,0 +1,283 @@
+# The chaos rig (run-chaos.sh). Deliberately operator-free: these legs
+# drive `flint-sync` subcommands directly so every barrier boundary is
+# under the script's control — a webhook-injected `run` loop publishes
+# on its own clock, which is exactly what a crash-timing drill cannot
+# have. The store half (namespace, MinIO, bucket) comes from minio.yaml.
+#
+# The sync containers run `sleep infinity` and the script execs barriers
+# into them. That is what makes `kill -9` (process crash, emptyDir
+# survives) distinguishable from `delete pod --force` (pod loss,
+# emptyDir gone) — two different rows of the restart matrix, and the
+# difference decides whether the lease self-recognizes or is taken over.
+#
+# Pods: chaos-a runs the legs that need no pod death; chaos-k/chaos-k2
+# are the pod-loss pair; chaos-s/chaos-s2 are the SIGSTOP straggler
+# pair. Separate pods because the successor MUST get a fresh emptyDir —
+# a shared one would self-recognize the lease and skip the takeover
+# path the leg exists to exercise.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lean-gateway
+  namespace: flint-system
+spec:
+  selector: { app: lean-gateway }
+  ports: [{ port: 8091, targetPort: 8091 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lean-gateway
+  namespace: flint-system
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: lean-gateway } }
+  template:
+    metadata: { labels: { app: lean-gateway } }
+    spec:
+      containers:
+        - name: gateway
+          image: flint-lean-gateway:e2e
+          imagePullPolicy: Never
+          env:
+            - { name: FLINT_LEAN_GW_BUCKET, value: agentws }
+            - { name: FLINT_LEAN_GW_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
+            - { name: FLINT_LEAN_GW_TOKEN, value: chaos-drill-token-0123456789 }
+            # One workspace per leg that talks to the gateway: the legs
+            # must not share a subtree, or a crash leg's debris becomes
+            # the next leg's starting state.
+            - name: FLINT_LEAN_GW_WORKSPACES
+              value: "c5=tenants/c5,c6=tenants/c6,c7=tenants/c7,c8=tenants/c8,c11=tenants/c11"
+            - { name: AWS_ACCESS_KEY_ID, value: drill }
+            - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
+            - { name: AWS_REGION, value: us-east-1 }
+            - { name: RUST_LOG, value: info }
+          ports: [{ containerPort: 8091 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8091 }
+            periodSeconds: 2
+---
+# Bucket assertions (the oracle runs OUTSIDE the sidecar: reading the
+# bucket through the sidecar's own code would let one bug hide another).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mc
+  namespace: flint-system
+spec:
+  restartPolicy: Never
+  containers:
+    - name: mc
+      image: minio/mc
+      command: ["/bin/sh", "-c", "sleep 100000"]
+---
+# Gateway assertions: status codes and headers, which busybox wget
+# cannot report.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: curl
+  namespace: flint-system
+spec:
+  restartPolicy: Never
+  containers:
+    - name: curl
+      image: curlimages/curl:latest
+      command: ["/bin/sh", "-c", "sleep 100000"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: chaos-a
+  namespace: default
+spec:
+  # Always: `kill 1` in the sync container must be a CONTAINER restart
+  # over a surviving emptyDir, not a pod replacement.
+  restartPolicy: Always
+  containers:
+    - name: sync
+      image: flint-sync:e2e
+      imagePullPolicy: Never
+      # The sentinel + liveness pair is how a leg forces a CONTAINER
+      # restart. `kill 1` cannot do it: the kernel refuses default-action
+      # signals to PID 1 of a namespace from inside that namespace, so
+      # the obvious gesture is silently a no-op. Touching /work/DIE fails
+      # the probe, kubelet restarts the container, and startup clears the
+      # sentinel so it comes back healthy over the SAME emptyDir.
+      command: ["/bin/sh", "-c", "rm -f /work/DIE; exec sleep infinity"]
+      livenessProbe:
+        exec: { command: ["/bin/sh", "-c", "test ! -f /work/DIE"] }
+        initialDelaySeconds: 2
+        periodSeconds: 2
+        failureThreshold: 1
+      env:
+        - { name: FLINT_SYNC_BUCKET, value: agentws }
+        # Per-leg prefix/root are exported by the script at exec time;
+        # these are the fallbacks so a bare `flint-sync` in the pod is
+        # still runnable by hand during triage.
+        - { name: FLINT_SYNC_PREFIX, value: "tenants/chaos" }
+        - { name: FLINT_SYNC_ROOT, value: /work }
+        - { name: FLINT_SYNC_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
+        - { name: FLINT_SYNC_FLOOR_SECS, value: "5" }
+        # Sequential uploads: a mid-barrier kill has to be able to LAND
+        # between two PUTs, and fan-out 16 collapses that window.
+        - { name: FLINT_SYNC_FANOUT, value: "1" }
+        - { name: AWS_ACCESS_KEY_ID, value: drill }
+        - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
+        - { name: AWS_REGION, value: us-east-1 }
+      volumeMounts: [{ name: work, mountPath: /work }]
+  volumes:
+    - name: work
+      emptyDir: {}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: chaos-k
+  namespace: default
+spec:
+  restartPolicy: Always
+  containers:
+    - name: sync
+      image: flint-sync:e2e
+      imagePullPolicy: Never
+      # The sentinel + liveness pair is how a leg forces a CONTAINER
+      # restart. `kill 1` cannot do it: the kernel refuses default-action
+      # signals to PID 1 of a namespace from inside that namespace, so
+      # the obvious gesture is silently a no-op. Touching /work/DIE fails
+      # the probe, kubelet restarts the container, and startup clears the
+      # sentinel so it comes back healthy over the SAME emptyDir.
+      command: ["/bin/sh", "-c", "rm -f /work/DIE; exec sleep infinity"]
+      livenessProbe:
+        exec: { command: ["/bin/sh", "-c", "test ! -f /work/DIE"] }
+        initialDelaySeconds: 2
+        periodSeconds: 2
+        failureThreshold: 1
+      env:
+        - { name: FLINT_SYNC_BUCKET, value: agentws }
+        - { name: FLINT_SYNC_PREFIX, value: "tenants/chaos" }
+        - { name: FLINT_SYNC_ROOT, value: /work }
+        - { name: FLINT_SYNC_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
+        - { name: FLINT_SYNC_FLOOR_SECS, value: "5" }
+        - { name: FLINT_SYNC_FANOUT, value: "1" }
+        - { name: AWS_ACCESS_KEY_ID, value: drill }
+        - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
+        - { name: AWS_REGION, value: us-east-1 }
+      volumeMounts: [{ name: work, mountPath: /work }]
+  volumes:
+    - name: work
+      emptyDir: {}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: chaos-k2
+  namespace: default
+spec:
+  restartPolicy: Always
+  containers:
+    - name: sync
+      image: flint-sync:e2e
+      imagePullPolicy: Never
+      # The sentinel + liveness pair is how a leg forces a CONTAINER
+      # restart. `kill 1` cannot do it: the kernel refuses default-action
+      # signals to PID 1 of a namespace from inside that namespace, so
+      # the obvious gesture is silently a no-op. Touching /work/DIE fails
+      # the probe, kubelet restarts the container, and startup clears the
+      # sentinel so it comes back healthy over the SAME emptyDir.
+      command: ["/bin/sh", "-c", "rm -f /work/DIE; exec sleep infinity"]
+      livenessProbe:
+        exec: { command: ["/bin/sh", "-c", "test ! -f /work/DIE"] }
+        initialDelaySeconds: 2
+        periodSeconds: 2
+        failureThreshold: 1
+      env:
+        - { name: FLINT_SYNC_BUCKET, value: agentws }
+        - { name: FLINT_SYNC_PREFIX, value: "tenants/chaos" }
+        - { name: FLINT_SYNC_ROOT, value: /work }
+        - { name: FLINT_SYNC_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
+        - { name: FLINT_SYNC_FLOOR_SECS, value: "5" }
+        - { name: FLINT_SYNC_FANOUT, value: "1" }
+        - { name: AWS_ACCESS_KEY_ID, value: drill }
+        - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
+        - { name: AWS_REGION, value: us-east-1 }
+      volumeMounts: [{ name: work, mountPath: /work }]
+  volumes:
+    - name: work
+      emptyDir: {}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: chaos-s
+  namespace: default
+spec:
+  restartPolicy: Always
+  containers:
+    - name: sync
+      image: flint-sync:e2e
+      imagePullPolicy: Never
+      # The sentinel + liveness pair is how a leg forces a CONTAINER
+      # restart. `kill 1` cannot do it: the kernel refuses default-action
+      # signals to PID 1 of a namespace from inside that namespace, so
+      # the obvious gesture is silently a no-op. Touching /work/DIE fails
+      # the probe, kubelet restarts the container, and startup clears the
+      # sentinel so it comes back healthy over the SAME emptyDir.
+      command: ["/bin/sh", "-c", "rm -f /work/DIE; exec sleep infinity"]
+      livenessProbe:
+        exec: { command: ["/bin/sh", "-c", "test ! -f /work/DIE"] }
+        initialDelaySeconds: 2
+        periodSeconds: 2
+        failureThreshold: 1
+      env:
+        - { name: FLINT_SYNC_BUCKET, value: agentws }
+        - { name: FLINT_SYNC_PREFIX, value: "tenants/chaos" }
+        - { name: FLINT_SYNC_ROOT, value: /work }
+        - { name: FLINT_SYNC_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
+        - { name: FLINT_SYNC_FLOOR_SECS, value: "5" }
+        - { name: FLINT_SYNC_FANOUT, value: "1" }
+        - { name: AWS_ACCESS_KEY_ID, value: drill }
+        - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
+        - { name: AWS_REGION, value: us-east-1 }
+      volumeMounts: [{ name: work, mountPath: /work }]
+  volumes:
+    - name: work
+      emptyDir: {}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: chaos-s2
+  namespace: default
+spec:
+  restartPolicy: Always
+  containers:
+    - name: sync
+      image: flint-sync:e2e
+      imagePullPolicy: Never
+      # The sentinel + liveness pair is how a leg forces a CONTAINER
+      # restart. `kill 1` cannot do it: the kernel refuses default-action
+      # signals to PID 1 of a namespace from inside that namespace, so
+      # the obvious gesture is silently a no-op. Touching /work/DIE fails
+      # the probe, kubelet restarts the container, and startup clears the
+      # sentinel so it comes back healthy over the SAME emptyDir.
+      command: ["/bin/sh", "-c", "rm -f /work/DIE; exec sleep infinity"]
+      livenessProbe:
+        exec: { command: ["/bin/sh", "-c", "test ! -f /work/DIE"] }
+        initialDelaySeconds: 2
+        periodSeconds: 2
+        failureThreshold: 1
+      env:
+        - { name: FLINT_SYNC_BUCKET, value: agentws }
+        - { name: FLINT_SYNC_PREFIX, value: "tenants/chaos" }
+        - { name: FLINT_SYNC_ROOT, value: /work }
+        - { name: FLINT_SYNC_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
+        - { name: FLINT_SYNC_FLOOR_SECS, value: "5" }
+        - { name: FLINT_SYNC_FANOUT, value: "1" }
+        - { name: AWS_ACCESS_KEY_ID, value: drill }
+        - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
+        - { name: AWS_REGION, value: us-east-1 }
+      volumeMounts: [{ name: work, mountPath: /work }]
+  volumes:
+    - name: work
+      emptyDir: {}
