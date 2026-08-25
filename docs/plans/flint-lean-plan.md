@@ -1,6 +1,10 @@
 ---
 title: flint-lean — checkout/publish sidecar + stateless write gateway
-status: planned
+status: PLAN OF RECORD (user-ratified 2026-08-24) — lean is the default
+  front end for the agent-harness architecture; the FUSE track is
+  DEPRIORITIZED (docs/flint-fuse-architecture.html stays as the designed
+  escalation for too-large-to-materialize workspaces; no FUSE work
+  scheduled). The hub remains the escalation for live-shared POSIX.
 type: design-impl-spec
 created: 2026-08-24
 architecture: docs/flint-lean-architecture.html (extracted from flint-fuse-architecture page 5)
