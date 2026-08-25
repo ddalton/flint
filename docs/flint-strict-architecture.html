@@ -91,9 +91,9 @@
 
     <rect x="56" y="150" width="216" height="112" rx="8" class="bx"/>
     <text class="tl ctr" x="164" y="176">WRITE / COMMIT</text>
-    <text class="tx ctr" x="164" y="198">page cache + capture intervals,</text>
-    <text class="tx ctr" x="164" y="214">exactly as today — UNSTABLE</text>
-    <text class="tx ctr" x="164" y="230">writes are untouched</text>
+    <text class="tx ctr" x="164" y="198">UNSTABLE writes ack fast; the strict</text>
+    <text class="tx ctr" x="164" y="214">lane tracks their dirty intervals —</text>
+    <text class="tx ctr" x="164" y="230">Linux's COMMIT arrives as (0,0)</text>
     <line class="ln" x1="272" y1="206" x2="304" y2="206" marker-end="url(#s1-an)"/>
 
     <rect x="308" y="150" width="216" height="112" rx="8" class="bx"/>
@@ -112,22 +112,22 @@
 
     <rect x="812" y="150" width="216" height="112" rx="8" class="bx-ochre"/>
     <text class="tl ctr" x="920" y="176">journal object PUT</text>
-    <text class="mns ctr" x="920" y="198">.flint/journal/e7.000041</text>
-    <text class="tx ctr" x="920" y="216">If-None-Match:* on sequenced keys</text>
+    <text class="mns ctr" x="920" y="198">.flint/journal/000041</text>
+    <text class="tx ctr" x="920" y="216">If-None-Match:* · dense, single-flight</text>
     <text class="tsb ctr" x="920" y="236">ack AFTER this lands</text>
 
-    <text class="tx" x="56" y="292">the journal record carries the dirty intervals' BYTES, pread from the working set at commit time —</text>
-    <text class="tx" x="56" y="308">capture already knows the intervals; read-back at fsync is exactly the content fsync promises</text>
-    <text class="tx" x="56" y="334">a parked fsync uses the existing DELAY-parking machinery; write-back paths never enter this lane at all</text>
+    <text class="tx" x="56" y="292">records are built at PUT time: paths bound at APPLY time, bytes pread under a per-file write lock,</text>
+    <text class="tx" x="56" y="308">apply-ordered — coalescing never crosses a truncate/rename; COPY/CLONE → NOTSUPP, boundary RENAME → XDEV</text>
+    <text class="tx" x="56" y="334">parked fsyncs sit behind an ADMISSION BOUND (byte budget + lane semaphore) — a brownout refuses, never stalls the pipeline</text>
 
     <!-- checkpoint interplay -->
     <rect x="40" y="380" width="1000" height="150" rx="10" class="bx"/>
     <text class="tl" x="56" y="406">checkpoints stay exactly what flush barriers are today</text>
     <text class="tx" x="56" y="430">the barrier publishes whole-file generations + the manifest CAS — the BROWSABLE view, unchanged;</text>
-    <text class="tx" x="56" y="446">the manifest gains one field: the journal watermark its checkpoint covers</text>
-    <text class="tx" x="56" y="470">after a checkpoint lands, journal objects at or below the watermark are garbage-collected —</text>
-    <text class="tx" x="56" y="486">replay length is bounded by checkpoint cadence, and an S3 browser sees checkpoints, never the tail</text>
-    <text class="tsb" x="56" y="512">restart with the PVC: replay the tail onto the working set before the listener binds — page 2 removes the PVC</text>
+    <text class="tx" x="56" y="446">each entry gains contained_seq — the watermark is the MIN across strict files, never a frozen global tail</text>
+    <text class="tx" x="56" y="470">(hot files legally skip flushes; a global tail would let GC delete their acked records). GC floors: lagged</text>
+    <text class="tx" x="56" y="486">watermark + rebuild horizon + one full lease; strict files bypass the quiesce skip, keep the 60 s floor</text>
+    <text class="tsb" x="56" y="512">restart with the PVC: replay from the fsynced applied-seq marker (usually nothing) pre-listener — page 2 removes the PVC</text>
 
     <!-- ladders -->
     <rect x="1080" y="104" width="480" height="290" rx="10" class="bx-oo"/>
@@ -146,22 +146,23 @@
     <text class="tx" x="1096" y="370">EFS write latency is low-single-digit ms — strict is the</text>
     <text class="tx" x="1096" y="386">same order for group-committed workloads</text>
 
-    <rect x="1080" y="420" width="480" height="110" rx="10" class="bx-vo"/>
-    <text class="thv" x="1096" y="446">the journal is self-fencing</text>
-    <text class="tx" x="1096" y="468">sequenced create-only keys: a deposed hub's next PUT</text>
-    <text class="tx" x="1096" y="484">collides and loses. Every strict write round-trips the</text>
-    <text class="tx" x="1096" y="500">arbiter — closing the heartbeat-interval residual window</text>
-    <text class="tx" x="1096" y="516">the epoch design documents. Fencing gets STRONGER here.</text>
+    <rect x="1080" y="420" width="480" height="126" rx="10" class="bx-vo"/>
+    <text class="thv" x="1096" y="446">the journal fence — the honest version</text>
+    <text class="tx" x="1096" y="468">create-only keys, three-arm 412 rule (higher epoch ⇒ die;</text>
+    <text class="tx" x="1096" y="484">equal ⇒ own lost reply; lower ⇒ replay it). Acks are LEASE-</text>
+    <text class="tx" x="1096" y="500">BOUNDED: pause on the first failed renew — so a paused</text>
+    <text class="tx" x="1096" y="516">predecessor can't ack into a GC-freed key. Termination is</text>
+    <text class="tx" x="1096" y="532">heartbeat-composed, not a property of the handshake alone.</text>
 
     <!-- cost band -->
     <rect x="40" y="560" width="1520" height="120" rx="10" class="band"/>
     <text class="th" x="56" y="586">cost shape — the group commit is what keeps this sane</text>
-    <text class="tx" x="56" y="610">requests: one PUT per busy window, not per fsync — a CONTINUOUSLY-fsyncing share at a 25 ms window is ~40 PUT/s ≈ $520/mo worst case;</text>
-    <text class="tx" x="56" y="626">bursty real workloads land ~$5–50/mo; an idle share journals nothing. The fsync-churn pathology cannot occur — the window is the throttle.</text>
-    <text class="tx" x="56" y="650">knobs: window (latency vs $), max journal-object size, per-path policy, Express staging. Bytes: journal carries only dirty intervals — a 4 KiB</text>
-    <text class="tx" x="56" y="666">commit journals ~4 KiB, never the file. Checkpoint cadence bounds both replay time and journal storage (GC'd after each barrier).</text>
+    <text class="tx" x="56" y="610">requests: one PUT per busy window — the window ADAPTS toward 25 ms under sustained load, so ~40 PUT/s ≈ $520/mo is a design ceiling,</text>
+    <text class="tx" x="56" y="626">not an accident; bursty real workloads land ~$5–50/mo; an idle share journals nothing. SSE-KMS without Bucket Keys adds ~$0.03/1k PUTs</text>
+    <text class="tx" x="56" y="650">(bootstrap hard-warns); a journal-scoped lifecycle rule reaps noncurrent versions and delete markers. Bytes: records chunk at 8 MiB and an op</text>
+    <text class="tx" x="56" y="666">spills across batches — nothing is refused for size, COMMIT least of all. A 4 KiB commit journals ~4 KiB, never the file.</text>
   </svg>
-  <figcaption><b>The claim, precisely:</b> with strict mode on a path, every acked fsync is durable in regional, multi-AZ S3 before the application proceeds — a strictly stronger statement than EFS makes — while unflagged paths keep today's write-back contract and the bucket's browsable view stays exactly the whole-file checkpoint view it is now. The design is three ideas, all with precedent in this codebase: <b>group commit</b> (the WAL discipline — latency is one PUT regardless of fsync rate, cost is one PUT per busy window), <b>read-back journaling</b> (capture already tracks dirty intervals; the journal preads their bytes at commit time, so no write path is re-plumbed), and <b>sequenced create-only keys</b> (If-None-Match:* — the same conditional-write primitive every publish already uses, arranged so the journal doubles as a fence that is stronger than the epoch heartbeat it complements). What it deliberately does not change: coherence (the hub is still the single authority — strict mode is a durability knob, not a consistency change), the manifest/DR format (one added watermark field), and the consistency contracts' reader-facing statements — an S3 browser still reads checkpoints. The one honest asterisk is Express staging: single-digit-ms fsync at the cost of an AZ-scoped tail RPO if the Express zone dies before the Standard mirror catches up — offered as a knob, never a default.</figcaption>
+  <figcaption><b>The claim, precisely:</b> with strict mode on a path, every acked fsync is durable in regional, multi-AZ S3 before the application proceeds — a strictly stronger statement than EFS makes — while unflagged paths keep today's write-back contract and the bucket's browsable view stays exactly the whole-file checkpoint view it is now. The design is three ideas, all with precedent in this codebase: <b>group commit</b> (the WAL discipline — latency is one PUT regardless of fsync rate, cost is one PUT per busy window), <b>read-back journaling</b> (a strict-lane dirty-interval tracker records UNSTABLE writes at the apply site — COMMIT arrives range-blind — and bytes are pread at PUT time under a per-file lock, paths bound at apply time), and <b>sequenced create-only keys</b> (If-None-Match:* — the same conditional-write primitive every publish already uses, composed honestly with the epoch heartbeat: acks are lease-bounded, and GC keeps lease and rebuild-horizon floors so the fence survives key deletion). What it deliberately does not change: coherence (the hub is still the single authority — strict mode is a durability knob, not a consistency change), the manifest/DR format (per-entry contained_seq, min-derived watermark), and the reader-facing contracts — an S3 browser still reads checkpoints. This page reflects <b>plan v2</b>: a 12-agent adversarial review confirmed 23 findings against v1 (<code>docs/plans/flint-strict-plan.md</code> is the plan of record). The one honest asterisk is Express staging: single-digit-ms fsync at the cost of an AZ-scoped tail RPO if the Express zone dies first — offered as a knob, never a default.</figcaption>
 </section>
 <!-- ============================================================ PAGE 2 -->
 <section class="page">
@@ -169,7 +170,7 @@
     <h1>The rebuildable hub — the PVC demotes to a cache</h1>
     <span class="kicker">2 / 2 · availability</span>
   </header>
-  <p class="dek">Once the journal exists, S3 is the authoritative log and the hub can be rebuilt anywhere from the bucket alone: checkpoint + journal replay + protocol grace. The force-detach wait, the AZ pinning, and the kubelet staging-wedge class all hang off the PVC being load-bearing — and stop existing when it isn't.</p>
+  <p class="dek">Once the journal exists, S3 is the authoritative log and the hub can be rebuilt anywhere from the bucket alone: checkpoint + journal replay + protocol grace. The force-detach wait and the AZ pinning hang off the hub's PVC being load-bearing — and stop existing when it isn't. (The F29 staging wedge is consumer-side CSI state; that row stays.)</p>
   <figure>
   <svg viewBox="0 0 1600 800" role="img" aria-label="Three failover arms compare today's PVC-bound recovery with journal rebuild and a warm standby; a numbered rebuild sequence shows checkpoint import, journal replay, and protocol grace; side panels list which failure rows improve and what deliberately is not in the journal; a bottom band gives the build phases and effort.">
     <defs>
@@ -184,8 +185,8 @@
     <text class="tx" x="72" y="188">pod crash ~13 s · node crash: force-detach up to ~6 min, AZ-pinned, F29 staging wedges need a manual arm</text>
     <rect x="56" y="206" width="708" height="62" rx="7" class="bx-blue"/>
     <text class="tl" x="72" y="228">journal rebuild — successor starts ANYWHERE</text>
-    <text class="tx" x="72" y="248">no volume reattach, no AZ pinning, no kubelet staging state — checkpoint pull + tail replay + grace:</text>
-    <text class="tx" x="72" y="262">tens of seconds, bounded by checkpoint cadence and grace, not by EBS</text>
+    <text class="tx" x="72" y="248">no volume reattach, no AZ pinning — metadata import + strict-file pre-hydration + tail replay + grace:</text>
+    <text class="tx" x="72" y="262">tens of seconds while strict files stay small (hot state) — measured by the drill, not assumed</text>
     <rect x="56" y="270" width="708" height="52" rx="7" class="bx"/>
     <text class="tl" x="72" y="292">warm standby (v2) — a second pod tails the journal continuously</text>
     <text class="tx" x="72" y="312">takeover ≈ fence + grace; the epoch CAS + journal-seq collision already arbitrate who serves</text>
@@ -198,12 +199,13 @@
     <circle class="num" cx="70" cy="440" r="10"/><text class="numt ctr" x="70" y="444">2</text>
     <text class="tx" x="90" y="444">import the last checkpoint: manifest → dirs, symlinks, evicted stubs (the existing DR verb, unchanged)</text>
     <circle class="num" cx="70" cy="470" r="10"/><text class="numt ctr" x="70" y="474">3</text>
-    <text class="tx" x="90" y="474">replay the journal tail — touched files hydrate, journal bytes land at their offsets; idempotent</text>
-    <circle class="num" cx="70" cy="500" r="10"/><text class="numt ctr" x="70" y="504">4</text>
-    <text class="tx" x="90" y="504">fence: first journal PUT at seq N+1 — the old incarnation's straggler collides and loses</text>
-    <circle class="num" cx="70" cy="530" r="10"/><text class="numt ctr" x="70" y="534">5</text>
-    <text class="tx" x="90" y="534">fresh state.db + FULL protocol grace: clients reclaim locks and opens — the B1/B2 reclaim fixes and</text>
-    <text class="tx" x="90" y="550">the B3 verifier are exactly what make this client-transparent (retransmitted WRITEs land, locks return)</text>
+    <text class="tx" x="90" y="474">PRE-HYDRATE every strict file with tail records (the stub contract would truncate replayed bytes),</text>
+    <text class="tx" x="90" y="488">then replay — contiguity-checked, guarded per-file against a checkpoint that ran ahead</text>
+    <circle class="num" cx="70" cy="512" r="10"/><text class="numt ctr" x="70" y="516">4</text>
+    <text class="tx" x="90" y="516">fence: FENCE batch at tail+1, then LIST past it until empty — a pipelining straggler is replayed, then loses</text>
+    <circle class="num" cx="70" cy="540" r="10"/><text class="numt ctr" x="70" y="544">5</text>
+    <text class="tx" x="90" y="544">grace runs FORCED state-lost (a fresh state.db looks innocently clean — grace would never arm):</text>
+    <text class="tx" x="90" y="558">rival locks are refused, clients re-establish; B3's verifier makes un-COMMITted writes resend</text>
     <circle class="num" cx="70" cy="580" r="10"/><text class="numt ctr" x="70" y="584">6</text>
     <text class="tx" x="90" y="584">serve — clients saw a stall and a reboot, never an error; acked strict writes all present</text>
     <text class="tsb" x="56" y="620">recovery ground truth is the BUCKET, not local disk — the state.db corruption and disk-full legs of the</text>
@@ -215,8 +217,8 @@
     <line class="hair" x1="836" y1="142" x2="1544" y2="142"/>
     <text class="tx" x="836" y="166">F4 power loss / F1 crash storms — acked strict writes get a second, independent durability witness</text>
     <text class="tx" x="836" y="186">F8 disk-full, F13 quarantine fallback — recovery no longer trusts the disk that just failed</text>
-    <text class="tx" x="836" y="206">F10 node death — the ~6-min force-detach row is deleted; F29's kubelet staging-wedge class cannot occur</text>
-    <text class="tx" x="836" y="226">split-brain — the epoch heartbeat's documented residual window closes (journal seq is the fence)</text>
+    <text class="tx" x="836" y="206">F10 node death — the ~6-min force-detach row is deleted. F29 is consumer-side CSI staging: that row STAYS</text>
+    <text class="tx" x="836" y="226">split-brain — closed for strict paths by lease-bounded acks + the seq fence (heartbeat-composed, not replaced)</text>
     <line class="hair" x1="836" y1="242" x2="1544" y2="242"/>
     <text class="tx" x="836" y="266">NOT touched: the NFS protocol surface (conformance, quotas, deadlines — the B1–B10 work stands on its</text>
     <text class="tx" x="836" y="282">own and is a PREREQUISITE here, not a beneficiary); coherence (the hub is still the one authority);</text>
@@ -225,8 +227,8 @@
 
     <rect x="820" y="380" width="740" height="130" rx="10" class="bx"/>
     <text class="tl" x="836" y="406">deliberately NOT in the journal</text>
-    <text class="tx" x="836" y="430">sessions, client records, open/lock state — rebuilt by the PROTOCOL (grace + reclaim), not by replay;</text>
-    <text class="tx" x="836" y="446">journaling them would duplicate machinery NFSv4.1 already specifies and this repo already hardened</text>
+    <text class="tx" x="836" y="430">sessions, client records, open/lock state — rebuilt by the PROTOCOL, not by replay; in cache mode the</text>
+    <text class="tx" x="836" y="446">grace is FORCED state-lost, since the reclaim tables died with the volume (NFSv4.1 specifies the rest)</text>
     <text class="tx" x="836" y="470">write-back paths — their contract is unchanged; the journal covers strict paths only, so the tail</text>
     <text class="tx" x="836" y="486">stays small and replay stays fast</text>
 
@@ -240,11 +242,11 @@
     <!-- build band -->
     <rect x="40" y="686" width="1520" height="96" rx="10" class="band"/>
     <text class="th" x="56" y="712">what it takes to build</text>
-    <text class="tx" x="56" y="736">model first (~1 wk): journal-seq fence × epoch × checkpoint watermark — the FlintTierSession discipline. Phase A, strict journal (~4–6 wk):</text>
-    <text class="tx" x="56" y="752">journal writer + group commit ~1.5k lines · fsync parking hooks ~500 · policy ~150 · checkpoint watermark + GC ~300 · replay-on-restart ~400 · drills.</text>
-    <text class="tx" x="56" y="768">Phase B, rebuildable hub (~4 wk): no-PVC rebuild path ~1k · fence rework · operator failover + cache-mode chart · drills. Standby v2: ~2 wk. Ships per-share, opt-in.</text>
+    <text class="tx" x="56" y="736">model first (~1.5–2 wk): the CAS heartbeat × journal handshake × GC floors × replay guards, COMPOSED — v1 scoped the handshake alone and would have</text>
+    <text class="tx" x="56" y="752">verified a vacuous property. Phase A (~6–8 wk): journal writer + fence ~2k · dirty-interval tracker ~400 · hooks (ioops/perfops/fileops) ~700 · admission ~150 ·</text>
+    <text class="tx" x="56" y="768">policy ~200 · watermark + GC + lifecycle ~600 · drills. Phase B (~5–6 wk): cache-mode bootstrap ~1.2k · SpaceConfig byte budget ~200 · fence rework · operator ~400. Standby v2: ~2 wk.</text>
   </svg>
-  <figcaption><b>The build, honestly costed:</b> a formal-model week, then Phase A (~4–6 engineer-weeks) delivers the EFS-exceeding durability guarantee as an opt-in per-share knob with the PVC still present, and Phase B (~4 weeks) makes the PVC a cache and collapses the availability gap; a warm standby is a further ~2 weeks when wanted. Almost every hard prerequisite already exists: capture's dirty intervals, the guarded store trait, the DELAY-parking machinery, manifest/import as the checkpoint verb, the epoch CAS — and, critically, the hardening campaign's own fixes: <b>B1/B2's reclaim correctness and B3's incarnation verifier are what make a rebuilt hub client-transparent</b>, so this design stands on the hardening story rather than competing with it. The division of labor is clean: the CL/F drills earn the right to ship the hub at all; strict mode is the first post-GA milestone, converting the two failure-track rows that drills can only measure (PVC loss, node-death stalls) into rows that no longer exist. And because the journal is tier-engine functionality, the same lane is the strict mode for the lean and FUSE sidecars later — one build, three front ends, with the fencing getting stronger as a side effect.</figcaption>
+  <figcaption><b>The build, honestly costed (v2, post-review):</b> a formal-model fortnight — the model must compose the heartbeat with the handshake, GC, and replay guards — then Phase A (~6–8 engineer-weeks) delivers the EFS-exceeding durability guarantee as an opt-in per-share knob with the PVC still present, and Phase B (~5–6 weeks) makes the PVC a cache and collapses the availability gap; a warm standby is a further ~2 weeks when wanted. The estimates grew from v1 because the adversarial review (23 confirmed findings, 8 critical — folded into <code>docs/plans/flint-strict-plan.md</code>) surfaced real components v1 missed: the strict-lane dirty-interval tracker, admission bounds, the per-file watermark, strict-file pre-hydration, forced-lost grace, and the cache-mode space budget. The hardening interplay, stated precisely: <b>B3's incarnation verifier is a prerequisite for client-transparent rebuilds; B1/B2's reclaim correctness protects PVC-mode restarts; cache mode runs grace forced-lost</b> — so this design stands on the hardening story rather than competing with it. The division of labor is unchanged: the CL/F drills earn the right to ship the hub at all; strict mode is the first post-GA milestone. And because the journal is tier-engine functionality, the same lane is the strict mode for the lean and FUSE sidecars later — one build, three front ends, and for a lean-first fleet the gateway is the natural group-commit point.</figcaption>
 </section>
 </body>
 </html>
