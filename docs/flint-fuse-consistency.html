@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Flint-fuse consistency contract</title>
+<style>
+  @page { size: A3 landscape; margin: 12mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; color: #0f172a; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .page { break-after: page; page-break-after: always; }
+  .page:last-child { break-after: auto; page-break-after: auto; }
+  .ph { border-bottom: 2px solid #0f172a; padding-bottom: 6px; margin-bottom: 14px; display: flex; align-items: baseline; justify-content: space-between; }
+  .ph h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .ph .kicker { font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #64748b; }
+  .dek { font-size: 12px; color: #475569; margin: 0 0 10px; }
+  figure { margin: 0; }
+  figure svg { width: 100%; height: auto; display: block; }
+  figcaption { font-size: 11px; line-height: 1.5; color: #475569; margin-top: 10px; border-top: 1px solid #e2e8f0; padding-top: 8px; }
+  figcaption b { color: #0f172a; font-weight: 600; }
+  code { font-family: Menlo, "SF Mono", Consolas, monospace; font-size: 10.5px; color: #0f172a; }
+  svg text { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; fill: #0f172a; }
+  .tt { font-size: 15px; font-weight: 600; } .th { font-size: 13px; font-weight: 600; } .tl { font-size: 12.5px; }
+  .ts { font-size: 11px; fill: #64748b; } .tsb { font-size: 11px; font-weight: 600; fill: #475569; }
+  .thv { font-size: 11.5px; font-weight: 600; fill: #6d4aa8; } .tho { font-size: 11.5px; font-weight: 600; fill: #8f5e0f; }
+  .thb { font-size: 11.5px; font-weight: 600; fill: #1a5f9e; }
+  .tx { font-size: 10.5px; fill: #64748b; } .txs { font-size: 10px; fill: #64748b; }
+  .mn { font-family: Menlo, "SF Mono", monospace; font-size: 11.5px; } .mns { font-family: Menlo, "SF Mono", monospace; font-size: 10.5px; }
+  .ctr { text-anchor: middle; } .end { text-anchor: end; }
+  .bx { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.4; }
+  .bx-slate { fill: #f1f5f9; stroke: #94a3b8; stroke-width: 1.4; }
+  .bx-blue { fill: #e9f2fa; stroke: #1a5f9e; stroke-width: 1.6; }
+  .bx-violet { fill: #f0eafb; stroke: #6d4aa8; stroke-width: 1.6; }
+  .bx-ochre { fill: #fbf2de; stroke: #a06b12; stroke-width: 1.6; }
+  .bx-vo { fill: #ffffff; stroke: #6d4aa8; stroke-width: 1.4; }
+  .bx-oo { fill: #fffdf7; stroke: #a06b12; stroke-width: 1.8; }
+  .band { fill: #f8fafc; stroke: #e2e8f0; stroke-width: 1.4; }
+  .ln { stroke: #475569; stroke-width: 1.6; fill: none; }
+  .ln-blue { stroke: #1a5f9e; stroke-width: 2.6; fill: none; }
+  .ln-ochre { stroke: #a06b12; stroke-width: 1.8; fill: none; }
+  .dash { stroke-dasharray: 5 4; } .hair { stroke: #e2e8f0; stroke-width: 1; }
+  .dot-o { fill: #a06b12; }
+</style>
+</head>
+<body>
+<section class="page">
+  <header class="ph">
+    <h1>What a successful write means — direct mode</h1>
+    <span class="kicker">consistency contract · FUSE over S3</span>
+  </header>
+  <p class="dek">flint-fuse keeps the same write-back tier but moves it into your pod: full local POSIX inside your own subtree, versioned snapshots for everyone else — and the ack's durability domain shrinks from a crash-surviving PVC to your pod's emptyDir, which lives exactly as long as your pod does.</p>
+  <figure>
+  <svg viewBox="0 0 1600 790" role="img" aria-label="A five-stage ladder traces one write from the app through the sidecar's fsync acknowledgment on the pod's emptyDir to its eventual S3 generation; a matrix states when each observer sees the write; a panel lists what is deliberately not guaranteed, led by: a successful write is not in S3, and there is no PVC behind you either.">
+    <defs>
+      <marker id="c2-an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+      <marker id="c2-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
+    </defs>
+
+    <!-- journey -->
+    <rect x="40" y="104" width="1520" height="272" rx="10" class="band"/>
+    <text class="th" x="56" y="130">the journey of one write — from write() to the bucket</text>
+
+    <rect x="56" y="150" width="252" height="112" rx="8" class="bx"/>
+    <text class="tl ctr" x="182" y="176">write() in the app</text>
+    <text class="tx ctr" x="182" y="198">an ordinary syscall — the mount</text>
+    <text class="tx ctr" x="182" y="214">is a local filesystem via FUSE</text>
+    <text class="tx ctr" x="182" y="230">no network round-trip</text>
+    <line class="ln" x1="308" y1="206" x2="346" y2="206" marker-end="url(#c2-an)"/>
+
+    <rect x="350" y="150" width="252" height="112" rx="8" class="bx"/>
+    <text class="tl ctr" x="476" y="176">the sidecar's working set</text>
+    <text class="tx ctr" x="476" y="198">page cache + dirty capture —</text>
+    <text class="tx ctr" x="476" y="214">intervals logged, durable</text>
+    <text class="tx ctr" x="476" y="230">dirty bit written pre-ack</text>
+    <line class="ln" x1="602" y1="206" x2="640" y2="206" marker-end="url(#c2-an)"/>
+
+    <text class="thb ctr" x="770" y="144">SUCCESS IS REPORTED HERE</text>
+    <rect x="644" y="150" width="252" height="112" rx="8" class="bx-blue"/>
+    <text class="tl ctr" x="770" y="176">fsync ack</text>
+    <text class="tx ctr" x="770" y="198">durable to the pod's emptyDir —</text>
+    <text class="tx ctr" x="770" y="214">survives app, sidecar, container crashes</text>
+    <text class="tsb ctr" x="770" y="236">NOT the pod. NOT S3.</text>
+    <line class="ln" x1="896" y1="206" x2="934" y2="206" marker-end="url(#c2-an)"/>
+
+    <rect x="938" y="150" width="252" height="112" rx="8" class="bx"/>
+    <text class="tl ctr" x="1064" y="176">flush barrier</text>
+    <text class="tx ctr" x="1064" y="198">≤ 60s floor + BOUNDED quiescence</text>
+    <text class="tx ctr" x="1064" y="214">(the FUSE profile); preStop</text>
+    <text class="tx ctr" x="1064" y="230">forces a final barrier</text>
+    <line class="ln-ochre" x1="1190" y1="206" x2="1228" y2="206" marker-end="url(#c2-ao)"/>
+
+    <rect x="1232" y="150" width="252" height="112" rx="8" class="bx-ochre"/>
+    <text class="tl ctr" x="1358" y="176">S3 generation + manifest</text>
+    <text class="tx ctr" x="1358" y="198">If-Match guarded, whole-file —</text>
+    <text class="tx ctr" x="1358" y="214">untorn by construction</text>
+    <text class="tx ctr" x="1358" y="230">the only copy that outlives your pod</text>
+
+    <line class="ln dash" x1="56" y1="292" x2="1484" y2="292"/>
+    <text class="tx ctr" x="182" y="312">t = 0</text>
+    <text class="tx ctr" x="770" y="312">ack — local-disk latency</text>
+    <text class="tx ctr" x="1064" y="312">≤ 60s · or preStop at termination</text>
+    <text class="tx ctr" x="1358" y="312">durable beyond the pod</text>
+    <text class="tx ctr" x="770" y="338">the loss boundary is POD DEATH: spot reclaim past</text>
+    <text class="tx ctr" x="770" y="354">grace, node crash, pod delete — emptyDir goes with it</text>
+    <text class="tx ctr" x="1358" y="338">survives everything —</text>
+    <text class="tx ctr" x="1358" y="354">this IS the workspace</text>
+
+    <!-- matrix -->
+    <rect x="40" y="402" width="900" height="316" rx="10" class="bx"/>
+    <text class="th" x="56" y="428">who sees your write, and when</text>
+    <line class="hair" x1="56" y1="440" x2="924" y2="440"/>
+    <text class="tl" x="56" y="466">you — your pod, your subtree</text>
+    <text class="tx" x="330" y="466">immediately — local POSIX at disk speed</text>
+    <line class="hair" x1="56" y1="480" x2="924" y2="480"/>
+    <text class="tl" x="56" y="506">other containers in your pod</text>
+    <text class="tx" x="330" y="506">immediately — the same mount (HostToContainer)</text>
+    <line class="hair" x1="56" y1="520" x2="924" y2="520"/>
+    <text class="tl" x="56" y="546">another pod reading your subtree</text>
+    <text class="tx" x="330" y="546">after YOUR next flush + THEIR next revalidate — a consistent snapshot at most</text>
+    <text class="tx" x="330" y="562">one flush interval + one revalidation old; never read-your-peers'-writes</text>
+    <line class="hair" x1="56" y1="576" x2="924" y2="576"/>
+    <text class="tl" x="56" y="602">the project service — S3 browser</text>
+    <text class="tx" x="330" y="602">after your flush barrier — untorn whole-file generations; your subtree</text>
+    <text class="tx" x="330" y="618">manifest (seq) is the snapshot</text>
+    <line class="hair" x1="56" y1="632" x2="924" y2="632"/>
+    <text class="tl" x="56" y="658">your replacement pod — clean death</text>
+    <text class="tx" x="330" y="658">everything — preStop drains: flush barrier, tombstones, lease release (~17s)</text>
+    <line class="hair" x1="56" y1="672" x2="924" y2="672"/>
+    <text class="tl" x="56" y="698">your replacement pod — unclean</text>
+    <text class="tx" x="330" y="698">only what was PUBLISHED — plus a 60–110s subtree write-lockout while the</text>
+    <text class="tx" x="330" y="712">dead lease ages out · cross-pod O_EXCL create: strongly consistent (sync PUT)</text>
+
+    <!-- not guaranteed -->
+    <rect x="980" y="402" width="580" height="316" rx="10" class="bx-oo"/>
+    <text class="tho" x="996" y="428">not guaranteed — say these out loud</text>
+    <line class="hair" x1="996" y1="440" x2="1544" y2="440"/>
+    <circle class="dot-o" cx="1002" cy="462" r="3"/>
+    <text class="tsb" x="1014" y="466">a successful write is NOT in S3 — and no PVC stands behind you.</text>
+    <text class="tx" x="1014" y="484">fsync means your pod's emptyDir. The RPO is per POD, and on a</text>
+    <text class="tx" x="1014" y="500">spot fleet, pod death is routine — not a disaster scenario.</text>
+    <circle class="dot-o" cx="1002" cy="522" r="3"/>
+    <text class="tsb" x="1014" y="526">your hottest files are your most at-risk files.</text>
+    <text class="tx" x="1014" y="544">a WAL or log written continuously defers under quiescence; the FUSE</text>
+    <text class="tx" x="1014" y="560">profile BOUNDS the deferral and preStop force-flushes — a hard node crash still drains nothing.</text>
+    <circle class="dot-o" cx="1002" cy="582" r="3"/>
+    <text class="tsb" x="1014" y="586">no cross-pod locks, no shared sqlite / git — refused, not discouraged.</text>
+    <text class="tx" x="1014" y="604">ENOLCK and EXDEV at the FUSE layer; those workloads route to the</text>
+    <text class="tx" x="1014" y="620">hub front end, which remains the coherence authority.</text>
+    <circle class="dot-o" cx="1002" cy="642" r="3"/>
+    <text class="tsb" x="1014" y="646">S3-console writes to your live subtree are out of contract.</text>
+    <text class="tx" x="1014" y="664">same three fates as hub mode — destroyed, undetected, or adopted;</text>
+    <text class="tx" x="1014" y="680">the project role is read-only for a reason.</text>
+    <text class="tsb" x="996" y="698">drain arithmetic: the 120s spot notice publishes ~9–15 GiB at the measured</text>
+    <text class="tsb" x="996" y="712">8–13 s/GiB; the K8s default 30s grace ~2–3 GiB; a hard crash, nothing.</text>
+  </svg>
+  <figcaption><b>The contract in one sentence:</b> inside your subtree, flint-fuse is a local filesystem — lower write latency than NFS, the same write-back posture toward S3 — but the ack's durability domain shrinks from a crash-surviving PVC to a pod-lifetime emptyDir, so the RPO stops being a disaster bound and becomes the everyday loss bound for unclean pod death. Everyone else reads your workspace as versioned snapshots: S3-strong per object, RPO-stale per subtree, revalidated against the manifest ETag. Three consistency upgrades over plain S3-FUSE gateways: writes are locally full POSIX (in-place, rename, private mmap), publishes are CAS-guarded whole-file images that are never torn, and a create can be made globally exclusive on request (O_EXCL as a synchronous If-None-Match:* PUT — the one strongly consistent cross-pod primitive in this mode). Two demotions from hub mode, stated plainly: there is no cross-pod coherence authority, and there is no durable ground under an acked write. Size <code>terminationGracePeriodSeconds</code> and the dirty-set cap together, run an interruption handler, and treat the flush profile as what it now is — a durability contract, not a cost knob.</figcaption>
+</section>
+</body>
+</html>

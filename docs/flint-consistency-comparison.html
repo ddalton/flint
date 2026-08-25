@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Consistency — hub vs direct</title>
+<style>
+  @page { size: A3 landscape; margin: 12mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; color: #0f172a; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .page { break-after: page; page-break-after: always; }
+  .page:last-child { break-after: auto; page-break-after: auto; }
+  .ph { border-bottom: 2px solid #0f172a; padding-bottom: 6px; margin-bottom: 14px; display: flex; align-items: baseline; justify-content: space-between; }
+  .ph h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .ph .kicker { font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #64748b; }
+  .dek { font-size: 12px; color: #475569; margin: 0 0 10px; }
+  figure { margin: 0; }
+  figure svg { width: 100%; height: auto; display: block; }
+  figcaption { font-size: 11px; line-height: 1.5; color: #475569; margin-top: 10px; border-top: 1px solid #e2e8f0; padding-top: 8px; }
+  figcaption b { color: #0f172a; font-weight: 600; }
+  code { font-family: Menlo, "SF Mono", Consolas, monospace; font-size: 10.5px; color: #0f172a; }
+  svg text { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; fill: #0f172a; }
+  .tt { font-size: 15px; font-weight: 600; } .th { font-size: 13px; font-weight: 600; } .tl { font-size: 12.5px; }
+  .ts { font-size: 11px; fill: #64748b; } .tsb { font-size: 11px; font-weight: 600; fill: #475569; }
+  .thv { font-size: 11.5px; font-weight: 600; fill: #6d4aa8; } .tho { font-size: 11.5px; font-weight: 600; fill: #8f5e0f; }
+  .thb { font-size: 11.5px; font-weight: 600; fill: #1a5f9e; }
+  .tx { font-size: 10.5px; fill: #64748b; } .txs { font-size: 10px; fill: #64748b; }
+  .mn { font-family: Menlo, "SF Mono", monospace; font-size: 11.5px; } .mns { font-family: Menlo, "SF Mono", monospace; font-size: 10.5px; }
+  .ctr { text-anchor: middle; } .end { text-anchor: end; }
+  .bx { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.4; }
+  .bx-slate { fill: #f1f5f9; stroke: #94a3b8; stroke-width: 1.4; }
+  .bx-blue { fill: #e9f2fa; stroke: #1a5f9e; stroke-width: 1.6; }
+  .bx-ochre { fill: #fbf2de; stroke: #a06b12; stroke-width: 1.6; }
+  .bx-oo { fill: #fffdf7; stroke: #a06b12; stroke-width: 1.8; }
+  .band { fill: #f8fafc; stroke: #e2e8f0; stroke-width: 1.4; }
+  .hair { stroke: #e2e8f0; stroke-width: 1; }
+  .num { fill: #6d4aa8; }
+  .numt { font-size: 11px; font-weight: 600; fill: #ffffff; }
+  .dot-b { fill: #1a5f9e; }
+  .dot-o { fill: #a06b12; }
+  .dot-g { fill: #ffffff; stroke: #94a3b8; stroke-width: 1.4; }
+</style>
+</head>
+<body>
+<section class="page">
+  <header class="ph">
+    <h1>Consistency — hub vs direct, side by side</h1>
+    <span class="kicker">one page · NFS over S3 vs FUSE over S3</span>
+  </header>
+  <p class="dek">The intuition — "FUSE talks straight to S3, so it should be more consistent" — is reasonable, and it inverts. Consistency is not proximity to the store; it is arbitration. The hub <i>is</i> the arbiter, and removing it is what direct mode trades away. This page asks both modes the same eight questions.</p>
+  <figure>
+  <svg viewBox="0 0 1600 800" role="img" aria-label="Three numbered reasons explain why direct access to S3 does not improve consistency; an eight-row matrix compares hub mode and direct mode on each consistency question; side panels list where direct mode genuinely wins, what is identical in both, and which upgrades exist.">
+
+    <!-- why the intuition inverts -->
+    <rect x="40" y="104" width="1520" height="140" rx="10" class="band"/>
+    <text class="th" x="56" y="130">why “closer to S3” does not mean “more consistent”</text>
+
+    <rect x="56" y="144" width="480" height="86" rx="8" class="bx"/>
+    <circle class="num" cx="76" cy="166" r="10"/><text class="numt ctr" x="76" y="170">1</text>
+    <text class="tl" x="94" y="170">consistency is manufactured, not inherited</text>
+    <text class="tx" x="72" y="192">S3 is strongly consistent per OBJECT. A filesystem is many</text>
+    <text class="tx" x="72" y="207">objects plus metadata — ordering across them requires an</text>
+    <text class="tx" x="72" y="222">authority. Direct mode deliberately runs without one.</text>
+
+    <rect x="560" y="144" width="480" height="86" rx="8" class="bx"/>
+    <circle class="num" cx="580" cy="166" r="10"/><text class="numt ctr" x="580" y="170">2</text>
+    <text class="tl" x="598" y="170">the “extra hop” was the serialization point</text>
+    <text class="tx" x="576" y="192">NFS's round-trip through the hub is exactly where opens,</text>
+    <text class="tx" x="576" y="207">locks and renames get ordered. Removing the hop removes</text>
+    <text class="tx" x="576" y="222">the ordering, not just the latency.</text>
+
+    <rect x="1064" y="144" width="480" height="86" rx="8" class="bx"/>
+    <circle class="num" cx="1084" cy="166" r="10"/><text class="numt ctr" x="1084" y="170">3</text>
+    <text class="tl" x="1102" y="170">the write path never got closer to S3</text>
+    <text class="tx" x="1080" y="192">Both modes ack on local media and publish at flush cadence —</text>
+    <text class="tx" x="1080" y="207">the same tier engine. Direct mode moved the working set into</text>
+    <text class="tx" x="1080" y="222">your pod; it did not move S3 closer.</text>
+
+    <!-- matrix -->
+    <rect x="40" y="270" width="990" height="440" rx="10" class="bx"/>
+    <text class="th" x="56" y="296">the same eight questions, both modes</text>
+    <text class="tsb" x="460" y="322">hub — NFS over S3</text>
+    <text class="tsb" x="740" y="322">direct — FUSE over S3</text>
+    <line class="hair" x1="56" y1="332" x2="1014" y2="332"/>
+    <line class="hair" x1="445" y1="308" x2="445" y2="700"/>
+    <line class="hair" x1="725" y1="308" x2="725" y2="700"/>
+
+    <text class="tl" x="56" y="360">your own writes, your mount</text>
+    <circle class="dot-b" cx="466" cy="356" r="4"/>
+    <text class="tx" x="478" y="352">strong POSIX — every op</text>
+    <text class="tx" x="478" y="367">a network round-trip</text>
+    <circle class="dot-b" cx="746" cy="356" r="4"/>
+    <text class="tx" x="758" y="352">strong POSIX — local disk speed;</text>
+    <text class="tx" x="758" y="367">faster, not stronger</text>
+    <line class="hair" x1="56" y1="378" x2="1014" y2="378"/>
+
+    <text class="tl" x="56" y="406">another client / pod reads your file</text>
+    <circle class="dot-b" cx="466" cy="402" r="4"/>
+    <text class="tx" x="478" y="398">close-to-open — enforced</text>
+    <text class="tx" x="478" y="413">by the hub, every client</text>
+    <circle class="dot-o" cx="746" cy="402" r="4"/>
+    <text class="tx" x="758" y="398">RPO-stale snapshot — at most one</text>
+    <text class="tx" x="758" y="413">flush interval + one revalidate old</text>
+    <line class="hair" x1="56" y1="424" x2="1014" y2="424"/>
+
+    <text class="tl" x="56" y="452">two writers, one file</text>
+    <circle class="dot-b" cx="466" cy="448" r="4"/>
+    <text class="tx" x="478" y="444">serialized — locks and</text>
+    <text class="tx" x="478" y="459">share reservations are real</text>
+    <circle class="dot-o" cx="746" cy="448" r="4"/>
+    <text class="tx" x="758" y="444">out of contract — one writer</text>
+    <text class="tx" x="758" y="459">per subtree, lease-enforced</text>
+    <line class="hair" x1="56" y1="470" x2="1014" y2="470"/>
+
+    <text class="tl" x="56" y="498">locks · O_EXCL · rename</text>
+    <circle class="dot-b" cx="466" cy="494" r="4"/>
+    <text class="tx" x="478" y="490">real across every client</text>
+    <text class="tx" x="478" y="505">of the share</text>
+    <circle class="dot-o" cx="746" cy="494" r="4"/>
+    <text class="tx" x="758" y="490">ENOLCK · O_EXCL as opt-in sync</text>
+    <text class="tx" x="758" y="505">PUT · EXDEV across subtrees</text>
+    <line class="hair" x1="56" y1="516" x2="1014" y2="516"/>
+
+    <text class="tl" x="56" y="544">an acked fsync survives…</text>
+    <circle class="dot-b" cx="466" cy="540" r="4"/>
+    <text class="tx" x="478" y="536">pod and node death —</text>
+    <text class="tx" x="478" y="551">the PVC holds it</text>
+    <circle class="dot-o" cx="746" cy="540" r="4"/>
+    <text class="tx" x="758" y="536">container crashes only —</text>
+    <text class="tx" x="758" y="551">emptyDir dies with the pod</text>
+    <line class="hair" x1="56" y1="562" x2="1014" y2="562"/>
+
+    <text class="tl" x="56" y="590">what an S3 browser sees</text>
+    <circle class="dot-g" cx="466" cy="586" r="4"/>
+    <text class="tx" x="478" y="582">the last flush barrier —</text>
+    <text class="tx" x="478" y="597">untorn whole-file objects</text>
+    <circle class="dot-g" cx="746" cy="586" r="4"/>
+    <text class="tx" x="758" y="582">identical — same engine,</text>
+    <text class="tx" x="758" y="597">same cadence</text>
+    <line class="hair" x1="56" y1="608" x2="1014" y2="608"/>
+
+    <text class="tl" x="56" y="636">staleness when things break</text>
+    <circle class="dot-o" cx="466" cy="632" r="4"/>
+    <text class="tx" x="478" y="628">reads HANG — D-state until</text>
+    <text class="tx" x="478" y="643">the hub comes back</text>
+    <circle class="dot-b" cx="746" cy="632" r="4"/>
+    <text class="tx" x="758" y="628">reads ERROR (ENOTCONN); your</text>
+    <text class="tx" x="758" y="643">own subtree keeps serving</text>
+    <line class="hair" x1="56" y1="654" x2="1014" y2="654"/>
+
+    <text class="tl" x="56" y="682">after a crash + restart</text>
+    <circle class="dot-b" cx="466" cy="678" r="4"/>
+    <text class="tx" x="478" y="674">everything acked — dirty</text>
+    <text class="tx" x="478" y="689">files re-publish whole</text>
+    <circle class="dot-o" cx="746" cy="678" r="4"/>
+    <text class="tx" x="758" y="674">published only — plus a 60–110s</text>
+    <text class="tx" x="758" y="689">lease lockout after unclean death</text>
+
+    <circle class="dot-b" cx="56" cy="734" r="4"/><text class="tx" x="68" y="738">the stronger cell</text>
+    <circle class="dot-o" cx="180" cy="734" r="4"/><text class="tx" x="192" y="738">the weaker / bounded cell</text>
+    <circle class="dot-g" cx="340" cy="734" r="4"/><text class="tx" x="352" y="738">tie</text>
+    <text class="tsb" x="420" y="738">score: every cross-client row belongs to the hub; direct wins latency and failure shape — the S3 rows tie.</text>
+
+    <!-- right panels -->
+    <rect x="1070" y="270" width="490" height="136" rx="10" class="bx-blue"/>
+    <text class="thb" x="1086" y="296">where direct mode genuinely is better</text>
+    <text class="tx" x="1086" y="320">write latency — no network round-trip, no sunrpc</text>
+    <text class="tx" x="1086" y="336">per-connection ceiling on the data path</text>
+    <text class="tx" x="1086" y="358">failure shape — staleness and faults surface as errno,</text>
+    <text class="tx" x="1086" y="374">never as a D-state hang</text>
+    <text class="tx" x="1086" y="396">blast radius — one pod's staleness is one pod's problem</text>
+
+    <rect x="1070" y="426" width="490" height="130" rx="10" class="band"/>
+    <text class="tsb" x="1086" y="452">identical in both — it is the same engine</text>
+    <text class="tx" x="1086" y="476">ack ≠ in S3: both modes are write-back; S3 trails by the</text>
+    <text class="tx" x="1086" y="492">flush cadence (floor 60s) in hub mode and direct mode alike</text>
+    <text class="tx" x="1086" y="514">untorn, CAS-guarded whole-file generations; S3 itself is</text>
+    <text class="tx" x="1086" y="530">strong per object (2020-12) — neither mode changes that</text>
+    <text class="tx" x="1086" y="546">console PUTs against a live tree: the same three fates</text>
+
+    <rect x="1070" y="576" width="490" height="164" rx="10" class="bx-oo"/>
+    <text class="tho" x="1086" y="602">the upgrades — and the ceiling</text>
+    <circle class="dot-o" cx="1092" cy="622" r="3"/>
+    <text class="tx" x="1104" y="626">strict journal mode (both modes): fsync ⇒ in S3 —</text>
+    <text class="tx" x="1104" y="642">group-commit PUT, ~10–50 ms, per-path policy</text>
+    <circle class="dot-o" cx="1092" cy="662" r="3"/>
+    <text class="tx" x="1104" y="666">revalidate-on-open (direct): foreign reads upgrade to</text>
+    <text class="tx" x="1104" y="682">close-to-open — NFS parity for single-writer workspaces</text>
+    <circle class="dot-o" cx="1092" cy="702" r="3"/>
+    <text class="tx" x="1104" y="706">the ceiling: multi-writer coherence needs an arbiter that</text>
+    <text class="tx" x="1104" y="722">answers in ms — building one is rebuilding the hub</text>
+  </svg>
+  <figcaption><b>The precise statement:</b> per S3 <i>object</i>, both modes are equally strong — S3 has been read-after-write consistent since 2020-12 and every flint publish is CAS-guarded and untorn, so "direct to S3" ties the rows the intuition was actually about. Per <i>filesystem</i>, the hub is strictly stronger everywhere two clients meet, because it is the meeting point: close-to-open, byte-range locks, O_EXCL, atomic rename, and multi-writer serialization all exist <i>because</i> every operation takes the extra hop the intuition wanted to remove. Direct mode is stronger only where nobody meets — your own subtree's latency, your independence from everyone else's failures, and the shape of failure itself (an error you can handle instead of a hang you cannot). <b>In one sentence: direct mode is a faster filesystem with weaker company; the hub is a slower filesystem with one shared truth.</b> With the two upgrades — the strict group-commit journal (fsync ⇒ durable in S3, ~10–50 ms, per-path policy) and revalidation-on-open — a single-writer direct-mode workspace reaches NFS-equivalent close-to-open with <i>better</i> durability than today's hub default. The one row that can never transfer is multi-writer coherence: an arbiter that answers in milliseconds is a server by definition, and flint already ships it — the hub.</figcaption>
+</section>
+</body>
+</html>

@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Flint-fuse — no hub, one bucket</title>
+<style>
+  @page { size: A3 landscape; margin: 12mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  body {
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: #0f172a;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .page { break-after: page; page-break-after: always; }
+  .page:last-child { break-after: auto; page-break-after: auto; }
+  .ph { border-bottom: 2px solid #0f172a; padding-bottom: 6px; margin-bottom: 14px; display: flex; align-items: baseline; justify-content: space-between; }
+  .ph h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .ph .kicker { font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #64748b; }
+  .dek { font-size: 12px; color: #475569; margin: 0 0 10px; }
+  figure { margin: 0; }
+  figure svg { width: 100%; height: auto; display: block; }
+  figcaption { font-size: 11px; line-height: 1.5; color: #475569; margin-top: 10px; border-top: 1px solid #e2e8f0; padding-top: 8px; }
+  figcaption b { color: #0f172a; font-weight: 600; }
+  code { font-family: Menlo, "SF Mono", Consolas, monospace; font-size: 10.5px; color: #0f172a; }
+
+  svg text { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; fill: #0f172a; }
+  .tt  { font-size: 15px; font-weight: 600; }
+  .th  { font-size: 13px; font-weight: 600; }
+  .tl  { font-size: 12.5px; }
+  .ts  { font-size: 11px; fill: #64748b; }
+  .tsb { font-size: 11px; font-weight: 600; fill: #475569; }
+  .thv { font-size: 11.5px; font-weight: 600; fill: #6d4aa8; }
+  .tho { font-size: 11.5px; font-weight: 600; fill: #8f5e0f; }
+  .tx  { font-size: 10.5px; fill: #64748b; }
+  .txs { font-size: 10px; fill: #64748b; }
+  .mn  { font-family: Menlo, "SF Mono", monospace; font-size: 11.5px; }
+  .mns { font-family: Menlo, "SF Mono", monospace; font-size: 10.5px; }
+  .ctr { text-anchor: middle; }
+  .end { text-anchor: end; }
+  .c-blue { fill: #1a5f9e; }
+  .c-violet { fill: #6d4aa8; }
+  .c-ochre { fill: #8f5e0f; }
+  .c-ink { fill: #0f172a; }
+
+  .bx        { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.4; }
+  .bx-slate  { fill: #f1f5f9; stroke: #94a3b8; stroke-width: 1.4; }
+  .bx-blue   { fill: #e9f2fa; stroke: #1a5f9e; stroke-width: 1.6; }
+  .bx-violet { fill: #f0eafb; stroke: #6d4aa8; stroke-width: 1.6; }
+  .bx-ochre  { fill: #fbf2de; stroke: #a06b12; stroke-width: 1.6; }
+  .bx-vo     { fill: #ffffff; stroke: #6d4aa8; stroke-width: 1.4; }
+  .bx-oo     { fill: #fffdf7; stroke: #a06b12; stroke-width: 1.8; }
+  .bx-hub    { fill: #f7fbfe; stroke: #1a5f9e; stroke-width: 2; }
+  .grp       { fill: none;    stroke: #94a3b8; stroke-width: 1.4; stroke-dasharray: 6 5; }
+  .grpw      { fill: #ffffff; stroke: #94a3b8; stroke-width: 1.4; stroke-dasharray: 6 5; }
+  .bx-dashv  { fill: #f0eafb; stroke: #6d4aa8; stroke-width: 1.6; stroke-dasharray: 6 4; }
+  .band      { fill: #f8fafc; stroke: #e2e8f0; stroke-width: 1.4; }
+
+  .ln        { stroke: #475569; stroke-width: 1.6; fill: none; }
+  .ln-blue   { stroke: #1a5f9e; stroke-width: 2.6; fill: none; }
+  .ln-violet { stroke: #6d4aa8; stroke-width: 1.8; fill: none; }
+  .ln-ochre  { stroke: #a06b12; stroke-width: 1.8; fill: none; }
+  .dash      { stroke-dasharray: 5 4; }
+  .hair      { stroke: #e2e8f0; stroke-width: 1; }
+  .num       { fill: #6d4aa8; }
+  .numt      { font-size: 11px; font-weight: 600; fill: #ffffff; }
+  .dot-b     { fill: #1a5f9e; }
+  .dot-o     { fill: #a06b12; }
+  .dot-g     { fill: #ffffff; stroke: #94a3b8; stroke-width: 1.4; }
+</style>
+</head>
+<body>
+<!-- ============================================================ PAGE 1 -->
+<section class="page">
+  <header class="ph">
+    <h1>Flint-fuse — no hub, one bucket</h1>
+    <span class="kicker">1 / 5 · architecture</span>
+  </header>
+  <p class="dek">The proposal: no hub. A webhook-injected sidecar runs the same tier engine behind a FUSE mount; agents and the project service reach S3 directly; the bucket format — whole-file objects, <code>.flint/</code> control cells, guarded publishes — is unchanged, so hub-mode and direct-mode volumes stay mutually convertible. Reviewed adversarially against the code on 2026-08-24 (14 agents, 7 dimensions); the corrections are folded into these pages.</p>
+  <figure>
+  <svg viewBox="0 0 1600 810" role="img" aria-label="An agent pod contains an app container and an injected flint-fuse sidecar sharing an emptyDir working set; the sidecar publishes to and hydrates from an S3 bucket whose workspace subtrees each carry their own epoch lease and manifest; the project service browses the bucket with a read-only role; there is no hub.">
+    <defs>
+      <marker id="f1-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
+      <marker id="f1-av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6d4aa8"/></marker>
+      <marker id="f1-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
+      <marker id="f1-an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    </defs>
+
+    <!-- ====== consumer cluster ====== -->
+    <rect x="44" y="96" width="650" height="660" rx="14" class="grp" opacity="0.4"/>
+    <rect x="30" y="110" width="650" height="660" rx="14" class="grpw"/>
+    <text class="th" x="48" y="138">Consumer cluster</text>
+    <text class="tx" x="48" y="156">nothing standing per share — the sidecar exists only inside running agent pods</text>
+
+    <rect x="52" y="176" width="606" height="396" rx="10" class="bx-hub"/>
+    <text class="th" x="68" y="202">agent pod</text>
+    <text class="tx" x="68" y="220">sidecar + volume injected at admission — page 2</text>
+
+    <rect x="76" y="236" width="256" height="150" rx="8" class="bx"/>
+    <text class="tl ctr" x="204" y="262">app container</text>
+    <text class="tx ctr" x="204" y="282">unchanged image · no bucket credentials</text>
+    <text class="mns ctr" x="204" y="306">/workspace</text>
+    <text class="tx ctr" x="204" y="326">mountPropagation: HostToContainer</text>
+    <text class="tx ctr" x="204" y="346">a dead mount is ENOTCONN —</text>
+    <text class="tx ctr" x="204" y="362">an error, never a D-state hang</text>
+
+    <rect x="372" y="236" width="266" height="210" rx="8" class="bx-blue"/>
+    <text class="tl ctr" x="505" y="262">flint-fuse sidecar</text>
+    <text class="mns ctr" x="505" y="282">native sidecar · restartPolicy: Always</text>
+    <text class="tx ctr" x="505" y="302">FUSE front + the tier engine — page 3</text>
+    <text class="tx ctr" x="505" y="320">privileged · Bidirectional · /dev/fuse</text>
+    <text class="tx ctr" x="505" y="338">IRSA token mounted here ONLY</text>
+    <text class="tx ctr" x="505" y="356">startupProbe gates app start</text>
+    <line class="hair" x1="388" y1="368" x2="622" y2="368"/>
+    <text class="tx ctr" x="505" y="388">statfs canary · crash = restart the</text>
+    <text class="tx ctr" x="505" y="404">container in place, never the pod — page 4</text>
+
+    <line class="ln-blue" x1="204" y1="386" x2="204" y2="466" marker-end="url(#f1-ab)"/>
+    <text class="tx" x="214" y="432">POSIX via the FUSE mount</text>
+    <line class="ln-blue" x1="505" y1="446" x2="505" y2="466" marker-end="url(#f1-ab)"/>
+
+    <rect x="76" y="470" width="562" height="86" rx="8" class="bx-slate"/>
+    <text class="tl" x="92" y="496">emptyDir — the working set</text>
+    <text class="tx" x="92" y="516">resident files · evicted stubs · state.db (dirty bits, tombstones, generation rows)</text>
+    <text class="tsb" x="92" y="538">dies with the pod — the RPO lives here (page 4)</text>
+
+    <rect x="52" y="592" width="340" height="64" rx="8" class="bx"/>
+    <text class="tx ctr" x="222" y="618">another agent pod —</text>
+    <text class="tx ctr" x="222" y="636">its own sidecar, its own subtree</text>
+    <text class="tx" x="410" y="612">one writer per workspace subtree —</text>
+    <text class="tx" x="410" y="628">enforced by the subtree lease + IAM,</text>
+    <text class="tx" x="410" y="644">not by hope</text>
+
+    <text class="tx" x="48" y="692">the consumer kernel plays no part — no NFS client, no PVC, no Service</text>
+    <text class="tx" x="48" y="710">kernel floor: plain fuse3 · passthrough / io-uring are accelerators only (page 5)</text>
+
+    <!-- ====== middle column ====== -->
+    <rect x="700" y="118" width="260" height="70" rx="9" class="bx-violet"/>
+    <text class="tl ctr" x="830" y="144">Project service / front door</text>
+    <text class="tx ctr" x="830" y="164">browses the bucket with a plain S3 client</text>
+
+    <line class="ln-violet" x1="830" y1="188" x2="830" y2="206" marker-end="url(#f1-av)"/>
+
+    <rect x="700" y="208" width="260" height="120" rx="9" class="bx-vo"/>
+    <text class="thv" x="712" y="230">read-only prefix role</text>
+    <line class="hair" x1="712" y1="239" x2="948" y2="239"/>
+    <text class="mns" x="712" y="260">GET  /&lt;prefix&gt;?list-type=2</text>
+    <text class="mns" x="712" y="279">GET  /&lt;prefix&gt;&lt;path&gt;</text>
+    <text class="tx" x="712" y="300">writes to a LIVE subtree are out of</text>
+    <text class="tx" x="712" y="316">contract — route via hub or import</text>
+
+    <line class="ln-violet" x1="960" y1="268" x2="996" y2="268" marker-end="url(#f1-av)"/>
+
+    <line class="ln-blue" x1="700" y1="366" x2="734" y2="366" marker-end="url(#f1-ab)"/>
+    <text class="tl" x="746" y="370">POSIX data plane — in-pod FUSE</text>
+    <line class="ln-violet" x1="700" y1="394" x2="734" y2="394" marker-end="url(#f1-av)"/>
+    <text class="tl" x="746" y="398">control — admission · IAM · browse</text>
+    <line class="ln-ochre" x1="700" y1="422" x2="734" y2="422" marker-end="url(#f1-ao)"/>
+    <text class="tl" x="746" y="426">S3 durability + coherence</text>
+
+    <text class="tx" x="700" y="462">every pod holds bucket credentials —</text>
+    <text class="tx" x="700" y="478">prefix-scoped IAM, sidecar-only token</text>
+    <text class="tx" x="700" y="494">placement; the bucket no longer</text>
+    <text class="tx" x="700" y="510">trusts a single principal (page 2)</text>
+
+    <!-- ====== data-plane arrows to the bucket ====== -->
+    <text class="tx ctr" x="840" y="550">publish — If-Match, at flush cadence</text>
+    <line class="ln-ochre" x1="682" y1="558" x2="996" y2="558" marker-end="url(#f1-ao)"/>
+    <text class="tx ctr" x="840" y="586">hydrate on first touch — 8 MiB × fan-out</text>
+    <line class="ln-ochre" x1="996" y1="594" x2="682" y2="594" marker-end="url(#f1-ao)"/>
+    <text class="tx ctr" x="840" y="622">subtree epoch lease — CAS heartbeat · preStop release</text>
+    <line class="ln-ochre dash" x1="682" y1="630" x2="996" y2="630" marker-end="url(#f1-ao)"/>
+
+    <!-- ====== S3 bucket ====== -->
+    <rect x="1000" y="104" width="570" height="666" rx="12" class="bx-oo"/>
+    <text class="tt" x="1020" y="134">S3 bucket</text>
+    <text class="mn" x="1120" y="134">s3://my-team-flint/tenant-a/</text>
+
+    <rect x="1020" y="156" width="256" height="252" rx="10" class="bx-ochre"/>
+    <text class="tl ctr" x="1148" y="182">ws-a/ — workspace subtree</text>
+    <text class="tx ctr" x="1148" y="204">whole-file objects at &lt;path&gt; —</text>
+    <text class="tx ctr" x="1148" y="220">browsable by any S3 client</text>
+    <line class="hair" x1="1036" y1="232" x2="1260" y2="232"/>
+    <text class="mns ctr" x="1148" y="254">.flint/epoch</text>
+    <text class="tx ctr" x="1148" y="270">subtree lease — CAS heartbeat</text>
+    <text class="mns ctr" x="1148" y="294">.flint/manifest</text>
+    <text class="tx ctr" x="1148" y="310">modes · symlinks · {gen, ETag, CRC}</text>
+    <line class="hair" x1="1036" y1="324" x2="1260" y2="324"/>
+    <text class="tx ctr" x="1148" y="346">single writer: the one pod</text>
+    <text class="tx ctr" x="1148" y="362">holding this lease</text>
+    <text class="tx ctr" x="1148" y="386">IAM scope ends at ws-a/</text>
+
+    <rect x="1294" y="156" width="256" height="252" rx="10" class="bx-ochre"/>
+    <text class="tl ctr" x="1422" y="182">ws-b/ — another workspace</text>
+    <text class="tx ctr" x="1422" y="204">another pod, another lease,</text>
+    <text class="tx ctr" x="1422" y="220">same format</text>
+    <line class="hair" x1="1310" y1="232" x2="1534" y2="232"/>
+    <text class="tx ctr" x="1422" y="254">a reader of ws-a/ sees</text>
+    <text class="tx ctr" x="1422" y="270">RPO-consistent snapshots,</text>
+    <text class="tx ctr" x="1422" y="286">at most one flush interval +</text>
+    <text class="tx ctr" x="1422" y="302">one revalidation old — page 3</text>
+    <line class="hair" x1="1310" y1="324" x2="1534" y2="324"/>
+    <text class="tx ctr" x="1422" y="346">cross-pod locks, shared sqlite,</text>
+    <text class="tx ctr" x="1422" y="362">shared git: refused with errno,</text>
+    <text class="tx ctr" x="1422" y="386">routed to the hub front end</text>
+
+    <rect x="1020" y="432" width="530" height="122" rx="10" class="bx-ochre"/>
+    <text class="tl" x="1036" y="458">.flint/ — root control namespace</text>
+    <text class="mns" x="1036" y="482">.flint/claim</text>
+    <text class="tx" x="1140" y="482">share identity, If-None-Match:* at birth — kills prefix-reuse adoption</text>
+    <text class="mns" x="1036" y="504">.flint/layout</text>
+    <text class="tx" x="1140" y="504">the DECLARED non-overlapping subtree set — page 2</text>
+    <text class="mns" x="1036" y="526">root manifest</text>
+    <text class="tx" x="1140" y="526">parent directories · top-level entries</text>
+    <text class="tsb" x="1036" y="546">written only by the operator / provisioner principal — never by a workspace pod</text>
+
+    <text class="tsb" x="1020" y="596">durability AND coherence live here.</text>
+    <text class="tx" x="1020" y="616">the only always-on component is S3 itself — losing every pod</text>
+    <text class="tx" x="1020" y="632">loses at most one flush interval per writer</text>
+    <text class="tx" x="1020" y="656">RPO = flush cadence, now per POD, not per hub</text>
+    <text class="tx" x="1020" y="680">bucket Versioning is a HARD requirement in this mode —</text>
+    <text class="tx" x="1020" y="696">it is the only recovery window CAS cannot provide</text>
+    <text class="tx" x="1020" y="726">bucket policy enforces conditional writes (s3:if-none-match,</text>
+    <text class="tx" x="1020" y="742">GA 2024-11): vandalism becomes auditable forgery, not blind clobber</text>
+  </svg>
+  <figcaption><b>The hub column is gone, and with it the coherence authority.</b> What replaces it is the store's own CAS — If-Match on every publish, a lease cell per workspace — and CAS is detection and fencing, not serialization: it binds only writers that cooperate. The contract therefore narrows to <b>one writer per workspace subtree</b>, and the honest name for what a reader of someone else's subtree sees is <b>per-subtree RPO-consistent snapshots</b>: a consistent image at most one flush interval (~60s floor) plus one revalidation old — the same number that bounds crash loss, so there is one lag to explain, not two. Two things are true at once and both belong in the pitch: there is no share-wide single point of failure left, and per-pod durability is strictly <i>worse</i> than the hub's PVC, because the working set now dies with the pod (page 4). <b>The project service browses read-only, deliberately.</b> A console PUT against a live subtree has three fates, none acceptable: silently destroyed by the writer's local-wins re-publish, undetected until eviction, or — worst — adopted as truth by a later hydration 412 and served to the agent. Write through the hub front end or an explicit import flow. <b>The bucket no longer trusts one principal.</b> Every pod holds prefix-scoped credentials (IRSA, token mounted in the sidecar container only); compared honestly against today's AUTH_SYS-on-:2049 with NetworkPolicy off by default, that <i>narrows</i> cross-tenant reach — while irreducibly widening what a compromised pod can do to its own subtree, <code>.flint/</code> cells included, because flint-fuse itself is the epoch holder and manifest publisher.</figcaption>
+</section>
+
+<!-- ============================================================ PAGE 2 -->
+<section class="page">
+  <header class="ph">
+    <h1>The operator becomes a webhook</h1>
+    <span class="kicker">2 / 5 · control plane</span>
+  </header>
+  <p class="dek">One CR still governs a share, but in direct mode it renders no standing objects — the operator's job becomes admission: allocate non-overlapping subtree prefixes, stamp the claim identity, inject the sidecar into matched pods, and detect the pods that slipped past.</p>
+  <figure>
+  <svg viewBox="0 0 1600 820" role="img" aria-label="A FlintShare custom resource in direct mode feeds a mutating admission webhook that injects a native FUSE sidecar, shared emptyDir, probes and credentials into matched pods; the operator renders nothing standing per share; the webhook's failure policy trade-offs and the unprivileged mount-broker endgame are shown.">
+    <defs>
+      <marker id="f2-av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6d4aa8"/></marker>
+      <marker id="f2-an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    </defs>
+
+    <!-- CR -->
+    <rect x="40" y="130" width="320" height="330" rx="10" class="bx"/>
+    <text class="tl" x="56" y="156">FlintShare — mode: direct</text>
+    <line class="hair" x1="56" y1="166" x2="344" y2="166"/>
+    <text xml:space="preserve" class="mns" x="56" y="188">spec:</text>
+    <text xml:space="preserve" class="mns" x="56" y="207">  bucket: my-team-flint</text>
+    <text xml:space="preserve" class="mns" x="56" y="226">  keyPrefix: tenant-a/  # immutable</text>
+    <text xml:space="preserve" class="mns" x="56" y="245">  mode: direct          # no hub</text>
+    <text xml:space="preserve" class="mns" x="56" y="264">  workspaces:</text>
+    <text xml:space="preserve" class="mns" x="56" y="283">    podSelector: flint.io/workspace</text>
+    <text xml:space="preserve" class="mns" x="56" y="302">    prefixFrom: namespace+sa</text>
+    <text xml:space="preserve" class="mns" x="56" y="321">  flush:                # FUSE profile</text>
+    <text xml:space="preserve" class="mns" x="56" y="340">    floorSecs: 60</text>
+    <text xml:space="preserve" class="mns" x="56" y="359">    dirtySetCapGiB: 10</text>
+    <text xml:space="preserve" class="mns" x="56" y="378">    quiesceBoundSecs: 30</text>
+    <text class="tx" x="56" y="410">the CR becomes policy + layout,</text>
+    <text class="tx" x="56" y="426">not a pod recipe — its flush profile is</text>
+    <text class="tx" x="56" y="442">a durability contract, not a cost knob</text>
+
+    <line class="ln-violet" x1="360" y1="290" x2="396" y2="290" marker-end="url(#f2-av)"/>
+    <text class="tx ctr" x="378" y="280"> </text>
+
+    <!-- operator -->
+    <rect x="400" y="130" width="310" height="400" rx="10" class="bx-violet"/>
+    <text class="tl" x="416" y="156">flint-lite-operator — plus webhook</text>
+    <text class="tx" x="416" y="174">MutatingWebhookConfiguration · TLS · RBAC</text>
+
+    <rect x="416" y="190" width="278" height="56" rx="7" class="bx"/>
+    <circle class="num" cx="434" cy="218" r="10"/><text class="numt ctr" x="434" y="222">1</text>
+    <text class="tl" x="452" y="210">allocate</text>
+    <text class="tx" x="452" y="226">one allocator of subtree prefixes —</text>
+    <text class="tx" x="452" y="240">overlap refused (conflict.rs, extended)</text>
+
+    <rect x="416" y="254" width="278" height="56" rx="7" class="bx"/>
+    <circle class="num" cx="434" cy="282" r="10"/><text class="numt ctr" x="434" y="286">2</text>
+    <text class="tl" x="452" y="274">stamp</text>
+    <text class="tx" x="452" y="290">claim identity at share birth —</text>
+    <text class="tx" x="452" y="304">If-None-Match:* .flint/claim</text>
+
+    <rect x="416" y="318" width="278" height="56" rx="7" class="bx"/>
+    <circle class="num" cx="434" cy="346" r="10"/><text class="numt ctr" x="434" y="350">3</text>
+    <text class="tl" x="452" y="338">inject</text>
+    <text class="tx" x="452" y="354">mutates matched pods at CREATE —</text>
+    <text class="tx" x="452" y="368">the only moment it ever can</text>
+
+    <rect x="416" y="382" width="278" height="56" rx="7" class="bx"/>
+    <circle class="num" cx="434" cy="410" r="10"/><text class="numt ctr" x="434" y="414">4</text>
+    <text class="tl" x="452" y="402">verify</text>
+    <text class="tx" x="452" y="418">labeled pods without a sidecar ⇒</text>
+    <text class="tx" x="452" y="432">alarm — the black-hole detector</text>
+
+    <rect x="416" y="446" width="278" height="56" rx="7" class="bx"/>
+    <circle class="num" cx="434" cy="474" r="10"/><text class="numt ctr" x="434" y="478">5</text>
+    <text class="tl" x="452" y="466">report</text>
+    <text class="tx" x="452" y="482">manifest age per workspace</text>
+    <text class="tx" x="452" y="496">replaces the hub's /status</text>
+
+    <text class="tx" x="400" y="550">failurePolicy: Fail · 2 replicas · PDB</text>
+    <text class="tx" x="400" y="566">scope: namespaceSelector + objectSelector — opt-in only</text>
+
+    <line class="ln-violet" x1="710" y1="330" x2="746" y2="330" marker-end="url(#f2-av)"/>
+
+    <!-- injection recipe -->
+    <rect x="750" y="130" width="360" height="400" rx="10" class="bx-vo"/>
+    <text class="thv" x="762" y="154">what injection adds to a matched pod</text>
+    <line class="hair" x1="762" y1="164" x2="1098" y2="164"/>
+    <text class="mns" x="762" y="186">flint-fuse: native sidecar</text>
+    <text class="tx" x="762" y="202">initContainer · restartPolicy: Always — GA K8s 1.33</text>
+    <text class="mns" x="762" y="226">privileged · /dev/fuse · Bidirectional</text>
+    <text class="tx" x="762" y="242">the one in-pod recipe that lets siblings see the mount</text>
+    <text class="mns" x="762" y="266">emptyDir: flint-ws (sizeLimit set)</text>
+    <text class="tx" x="762" y="282">the working set — page 3's engine lives on it</text>
+    <text class="mns" x="762" y="306">app mounts: /workspace · HostToContainer</text>
+    <text class="tx" x="762" y="322">stamped on EVERY app container's volumeMounts</text>
+    <text class="mns" x="762" y="346">startupProbe: statfs(/workspace)</text>
+    <text class="tx" x="762" y="362">app containers cannot start before the mount is live</text>
+    <text class="mns" x="762" y="386">env: bucket + subtree prefix</text>
+    <text class="tx" x="762" y="402">derived from namespace + ServiceAccount, never a pod</text>
+    <text class="tx" x="762" y="418">annotation; IAM principal tags enforce it independently</text>
+    <text class="mns" x="762" y="442">IRSA token volume: sidecar ONLY</text>
+    <text class="tx" x="762" y="458">app containers hold no credentials (skip-containers)</text>
+    <line class="hair" x1="762" y1="472" x2="1098" y2="472"/>
+    <text class="tx" x="762" y="492">upgrade = pod churn: injection is create-time only —</text>
+    <text class="tx" x="762" y="508">webhook stamps a version label; operator reports stragglers</text>
+
+    <!-- rendered contrast -->
+    <rect x="1150" y="130" width="410" height="400" rx="10" class="band"/>
+    <text class="th" x="1166" y="156">what the operator renders per share</text>
+    <text class="tx" x="1166" y="180">hub mode — four standing objects:</text>
+    <rect x="1166" y="192" width="90" height="40" rx="6" class="bx-slate"/><text class="mns ctr" x="1211" y="216">ConfigMap</text>
+    <rect x="1262" y="192" width="90" height="40" rx="6" class="bx-slate"/><text class="mns ctr" x="1307" y="216">PVC</text>
+    <rect x="1358" y="192" width="90" height="40" rx="6" class="bx-slate"/><text class="mns ctr" x="1403" y="216">Service</text>
+    <rect x="1454" y="192" width="90" height="40" rx="6" class="bx-slate"/><text class="mns ctr" x="1499" y="216">Deploy</text>
+    <text class="tsb" x="1166" y="268">mode: direct — NOTHING standing</text>
+    <text class="tx" x="1166" y="288">zero pods, zero Services, zero PVCs — the sidecar</text>
+    <text class="tx" x="1166" y="304">exists only inside running agent pods</text>
+    <rect x="1166" y="326" width="378" height="118" rx="8" class="bx"/>
+    <text class="tsb" x="1182" y="350">fleet math — 3000 shares</text>
+    <text class="tx" x="1182" y="370">hub: 3000 Services (73% of a /20 CIDR) · 3000 PVCs · the ladder</text>
+    <text class="tx" x="1182" y="386">direct: one webhook, one bucket · idle = Hibernated, structurally</text>
+    <text class="tx" x="1182" y="402">the price: every pod start is a Hibernated-class cold start</text>
+    <text class="tx" x="1182" y="418">epoch heartbeats: 3000 cells at 10s defaults ≈ $3.9k/mo —</text>
+    <text class="tx" x="1182" y="434">lease only while dirty; land tag-filtered version reaping first</text>
+    <text class="tx" x="1166" y="470">the idle LADDER becomes vacuous, and with it the</text>
+    <text class="tx" x="1166" y="486">B6-class inversions and the rpoClean/PVC-delete coupling —</text>
+    <text class="tx" x="1166" y="502">but also hibernate's verify-then-delete witness (page 4)</text>
+
+    <!-- failure modes band -->
+    <rect x="40" y="580" width="1070" height="170" rx="10" class="band"/>
+    <text class="th" x="56" y="606">the webhook's two failure modes — pick Fail</text>
+    <text class="tsb" x="56" y="632">failurePolicy: Fail</text>
+    <text class="tx" x="56" y="650">webhook down ⇒ every matched pod create blocks.</text>
+    <text class="tx" x="56" y="666">an availability regression vs today, where operator-down</text>
+    <text class="tx" x="56" y="682">leaves running hubs serving. Two replicas + PDB, opt-in scope.</text>
+    <text class="tsb" x="560" y="632">failurePolicy: Ignore — worse than an outage</text>
+    <text class="tx" x="560" y="650">an un-injected pod writes into container scratch at the mount</text>
+    <text class="tx" x="560" y="666">path; nothing is captured, nothing ever flushes — a silent</text>
+    <text class="tx" x="560" y="682">data black hole, discovered at the next import.</text>
+    <text class="tx" x="56" y="714">belt-and-braces: workload templates declare the volumeMount against the injected volume — a skipped mutation then fails pod validation loudly instead of silently.</text>
+    <text class="tx" x="56" y="732">the operator's verify pass (4) is the second detector: labeled pods without a sidecar are alarmed, not assumed.</text>
+
+    <!-- unprivileged endgame -->
+    <rect x="1150" y="580" width="410" height="170" rx="10" class="bx-vo"/>
+    <text class="thv" x="1162" y="606">the unprivileged endgame</text>
+    <text class="tx" x="1162" y="630">PSA baseline / restricted refuse privileged sidecars.</text>
+    <text class="tx" x="1162" y="648">the gcsfuse pattern escapes: an unprivileged injected</text>
+    <text class="tx" x="1162" y="664">sidecar + a stateless node broker that open(/dev/fuse)s,</text>
+    <text class="tx" x="1162" y="680">mount(2)s, and passes the fd over a socket.</text>
+    <text class="tx" x="1162" y="702">§7's roll-landmine precedent does not forbid it: restarting</text>
+    <text class="tx" x="1162" y="718">a stateless broker cannot touch established kernel mounts.</text>
+    <text class="tsb" x="1162" y="740">named the production endgame for PSA-restricted fleets.</text>
+  </svg>
+  <figcaption><b>failurePolicy: Fail is the only correct setting</b> — a down webhook blocks matched pod creates (so it runs two replicas behind a PDB, scoped by opt-in selectors, system namespaces excluded), but Ignore is worse than an outage: an un-injected pod writes into its container overlay at the mount path and nothing ever flushes. Declared volumeMounts and the operator's verify pass make that loud. <b>The webhook must not be the security boundary.</b> The subtree prefix derives from namespace + ServiceAccount, and IAM principal-tag conditions enforce the same mapping independently — a forged pod annotation buys nothing, and a webhook bug is caught by a second, unforgeable layer. <b>Two principals split the bucket surface.</b> Workspace principals get prefix-scoped data ops plus prefix-conditioned multipart list/abort — which obliges one engine change: the store's deliberately bucket-wide upload listing (a MinIO workaround whose "buckets are per-volume" justification this design invalidates) regains its server-side Prefix on real S3. Bucket posture — versioning, lifecycle, encryption, bootstrap — belongs to a provisioner principal alone: <code>PutBucketLifecycleConfiguration</code> in a workspace policy is a bucket-wide delete lever, and bootstrap must learn a pre-bootstrapped mode since today it runs on every engine start and refuses startup on the 403 a prefix-scoped policy would hand it. <b>Injection is create-time only:</b> a flint-fuse CVE reaches the fleet by pod churn, so stale-sidecar reporting is part of the operator's job, not an afterthought. And the CR survives — not as a pod recipe but as the layout authority: racing bucket-side claims cannot arbitrate overlap (a parent-scope claim's takeover sweep would fence every child's in-flight publish), so the operator stays the single allocator, exactly the <code>conflict.rs</code> discipline it already enforces for hubs.</figcaption>
+</section>
+
+<!-- ============================================================ PAGE 3 -->
+<section class="page">
+  <header class="ph">
+    <h1>The tier engine moves into the pod</h1>
+    <span class="kicker">3 / 5 · data path</span>
+  </header>
+  <p class="dek"><code>src/tier</code> — capture, durable, gate, flush, evict, hydrate, epoch, manifest, import — ports into the sidecar unchanged; the FUSE front reproduces the NFS front's hook discipline. What does not port is the coherence inversion: reading other writers' work while serving, under leases scoped to subtrees.</p>
+  <figure>
+  <svg viewBox="0 0 1600 830" role="img" aria-label="Inside the flint-fuse sidecar the FUSE front calls the same tier-engine hooks the NFS front calls; a death list of POSIX operations is enforced with errno; the coherence contract is named; the parts that are not reuse — online refresh and subtree-lease semantics — are called out with four preconditions; the write path pipeline runs along the bottom.">
+    <defs>
+      <marker id="f3-an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+      <marker id="f3-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
+    </defs>
+
+    <!-- left: inside the sidecar -->
+    <rect x="40" y="124" width="560" height="470" rx="10" class="bx-hub"/>
+    <text class="th" x="56" y="150">inside flint-fuse — the same engine, a new front</text>
+
+    <rect x="56" y="166" width="528" height="104" rx="8" class="bx-blue"/>
+    <text class="tl" x="72" y="190">FUSE front — fuser ops, the same hook discipline</text>
+    <text class="mns" x="72" y="212">capture::note · gate::enter · space::admit · evict/hydrate · durable drain</text>
+    <text class="tx" x="72" y="232">one note*() from every mutating op — the mutation-completeness invariant</text>
+    <text class="tx" x="72" y="250">refusals block in-handler — no NFS4ERR_DELAY retry dance to translate</text>
+
+    <line class="ln" x1="320" y1="270" x2="320" y2="286" marker-end="url(#f3-an)"/>
+
+    <rect x="56" y="290" width="528" height="146" rx="8" class="bx"/>
+    <text class="tl" x="72" y="314">the tier engine — ports unchanged</text>
+    <text class="tx" x="300" y="314">16,372 lines · zero crate::nfs imports</text>
+    <rect x="72" y="328" width="80" height="24" rx="5" class="bx-slate"/><text class="mns ctr" x="112" y="344">capture</text>
+    <rect x="158" y="328" width="80" height="24" rx="5" class="bx-slate"/><text class="mns ctr" x="198" y="344">durable</text>
+    <rect x="244" y="328" width="80" height="24" rx="5" class="bx-slate"/><text class="mns ctr" x="284" y="344">gate</text>
+    <rect x="330" y="328" width="80" height="24" rx="5" class="bx-slate"/><text class="mns ctr" x="370" y="344">flush</text>
+    <rect x="416" y="328" width="80" height="24" rx="5" class="bx-slate"/><text class="mns ctr" x="456" y="344">evict</text>
+    <rect x="502" y="328" width="80" height="24" rx="5" class="bx-slate"/><text class="mns ctr" x="542" y="344">hydrate</text>
+    <rect x="72" y="360" width="80" height="24" rx="5" class="bx-slate"/><text class="mns ctr" x="112" y="376">epoch</text>
+    <rect x="158" y="360" width="80" height="24" rx="5" class="bx-slate"/><text class="mns ctr" x="198" y="376">manifest</text>
+    <rect x="244" y="360" width="80" height="24" rx="5" class="bx-slate"/><text class="mns ctr" x="284" y="376">import</text>
+    <rect x="330" y="360" width="80" height="24" rx="5" class="bx-slate"/><text class="mns ctr" x="370" y="376">identity</text>
+    <rect x="416" y="360" width="80" height="24" rx="5" class="bx-slate"/><text class="mns ctr" x="456" y="376">space</text>
+    <rect x="502" y="360" width="80" height="24" rx="5" class="bx-slate"/><text class="mns ctr" x="542" y="376">arbitrate</text>
+    <text class="tx" x="72" y="404">the NFS front is simply the other caller of the same free functions —</text>
+    <text class="tx" x="72" y="420">plus one owed shim: eviction's writable-open probe from the FUSE handle table</text>
+
+    <line class="ln" x1="320" y1="436" x2="320" y2="452" marker-end="url(#f3-an)"/>
+
+    <rect x="56" y="456" width="528" height="70" rx="8" class="bx-slate"/>
+    <text class="tl" x="72" y="480">working set on the pod volume</text>
+    <text class="tx" x="72" y="500">resident files · evicted stubs · state.db — space runs in byte-budget</text>
+    <text class="tx" x="72" y="516">mode: statvfs lies on emptyDir, and sizeLimit evicts pods, not writes</text>
+
+    <text class="tsb" x="56" y="552">boot:</text>
+    <rect x="96" y="536" width="150" height="40" rx="6" class="bx"/><text class="tx ctr" x="171" y="552">claim subtree lease</text><text class="txs ctr" x="171" y="566">preStop releases it</text>
+    <line class="ln" x1="246" y1="556" x2="264" y2="556" marker-end="url(#f3-an)"/>
+    <rect x="266" y="536" width="150" height="40" rx="6" class="bx"/><text class="tx ctr" x="341" y="552">import manifest</text><text class="txs ctr" x="341" y="566">stubs, no bytes moved</text>
+    <line class="ln" x1="416" y1="556" x2="434" y2="556" marker-end="url(#f3-an)"/>
+    <rect x="436" y="536" width="148" height="40" rx="6" class="bx"/><text class="tx ctr" x="510" y="552">serve — hydrate</text><text class="txs ctr" x="510" y="566">on first touch</text>
+
+    <text class="tx" x="40" y="616">boot lists nothing: manifest GET first, jittered — a 1000-pod reclaim wave must not LIST an unpartitioned bucket into a 503 storm</text>
+
+    <!-- middle: death list + contract -->
+    <rect x="640" y="124" width="420" height="250" rx="10" class="bx-vo"/>
+    <text class="thv" x="652" y="148">the death list — enforced with errno, not documented</text>
+    <line class="hair" x1="652" y1="158" x2="1048" y2="158"/>
+    <text class="mns" x="652" y="182">fcntl byte-range locks</text><text class="mns end" x="1048" y="182">ENOLCK</text>
+    <text class="mns" x="652" y="206">cross-subtree rename</text><text class="mns end" x="1048" y="206">EXDEV</text>
+    <text class="mns" x="652" y="230">shared-writable mmap</text><text class="mns end" x="1048" y="230">refused</text>
+    <text class="mns" x="652" y="254">O_EXCL create</text><text class="mns end" x="1048" y="254">sync If-None-Match:* PUT</text>
+    <text class="mns" x="652" y="278">shared sqlite / git / flock</text><text class="mns end" x="1048" y="278">→ hub front end</text>
+    <line class="hair" x1="652" y1="292" x2="1048" y2="292"/>
+    <text class="tx" x="652" y="314">silent local success is the enemy: every one of these would</text>
+    <text class="tx" x="652" y="330">“work” in a naive FUSE daemon and lose data at flush — the</text>
+    <text class="tx" x="652" y="346">leg-that-passes-because-of-the-bug class, enforced away.</text>
+
+    <rect x="640" y="398" width="420" height="196" rx="10" class="bx"/>
+    <text class="tl" x="656" y="424">the contract has a name</text>
+    <text class="tsb" x="656" y="448">“per-subtree RPO-consistent snapshots”</text>
+    <text class="tx" x="656" y="472">your subtree — full local POSIX at disk speed</text>
+    <text class="tx" x="656" y="492">a foreign subtree — a consistent snapshot at most one</text>
+    <text class="tx" x="656" y="508">flush interval (~60s floor) + one revalidation old</text>
+    <text class="tx" x="656" y="530">revalidate = conditional GET of the subtree manifest ETag;</text>
+    <text class="tx" x="656" y="546">sweep only when seq advances — pennies at fleet scale,</text>
+    <text class="tx" x="656" y="562">and the same number as the RPO: one lag to explain</text>
+
+    <!-- right: not reuse -->
+    <rect x="1100" y="124" width="460" height="470" rx="10" class="bx-dashv"/>
+    <text class="thv" x="1112" y="150">NOT reuse — the correctness core, models first</text>
+    <text class="tsb" x="1112" y="180">1 · online refresh</text>
+    <text class="tx" x="1112" y="198">inverts import's two load-bearing invariants — pre-listener</text>
+    <text class="tx" x="1112" y="214">only, and local-wins. A reader must ADOPT foreign</text>
+    <text class="tx" x="1112" y="230">generations of clean resident files while serving.</text>
+    <text class="tsb" x="1112" y="258">2 · subtree-lease semantics</text>
+    <text class="tx" x="1112" y="276">cells re-scope mechanically (epoch_key is prefix-parametric;</text>
+    <text class="tx" x="1112" y="292">the MPU takeover fence is scoped by data_prefix) — but</text>
+    <text class="tx" x="1112" y="308">manifest ownership and layout arbitration are new design.</text>
+    <text class="tx" x="1112" y="324">FlintTierSession precedent: the model refuted the naive</text>
+    <text class="tx" x="1112" y="340">lease before code. Same order here.</text>
+    <text class="tsb" x="1112" y="368">3 · four preconditions — before any FUSE-front code</text>
+    <circle class="dot-o" cx="1118" cy="388" r="3"/>
+    <text class="tx" x="1130" y="392">claim identity — .flint/claim at share birth; without it,</text>
+    <text class="tx" x="1130" y="408">prefix-reuse adoption fires on EVERY fresh-state pod boot</text>
+    <circle class="dot-o" cx="1118" cy="428" r="3"/>
+    <text class="tx" x="1130" y="432">per-subtree manifests + a designated root owner — the</text>
+    <text class="tx" x="1130" y="448">single manifest CLOBBERS on the first concurrent barrier</text>
+    <circle class="dot-o" cx="1118" cy="468" r="3"/>
+    <text class="tx" x="1130" y="472">durable removal journal — tombstones die with the pod</text>
+    <text class="tx" x="1130" y="488">while bucket objects survive: deleted files RESURRECT,</text>
+    <text class="tx" x="1130" y="504">git's rename idiom leaves ghost duplicates</text>
+    <circle class="dot-o" cx="1118" cy="524" r="3"/>
+    <text class="tx" x="1130" y="528">space byte-budget mode — statvfs sees the node's shared</text>
+    <text class="tx" x="1130" y="544">disk; kubelet sizeLimit evicts the pod instead of ENOSPC</text>
+    <text class="tsb" x="1112" y="576">each converts an existing open hazard into a routine event.</text>
+
+    <!-- bottom: write path -->
+    <rect x="40" y="646" width="1520" height="120" rx="10" class="band"/>
+    <text class="th" x="56" y="672">the write path — pre-ack durability, guarded publishes</text>
+    <rect x="56" y="686" width="220" height="48" rx="7" class="bx"/>
+    <text class="tl ctr" x="166" y="706">FUSE write</text>
+    <text class="txs ctr" x="166" y="722">capture intervals · durable bit, pre-ack</text>
+    <line class="ln" x1="276" y1="710" x2="304" y2="710" marker-end="url(#f3-an)"/>
+    <rect x="306" y="686" width="220" height="48" rx="7" class="bx"/>
+    <text class="tl ctr" x="416" y="706">flush barrier</text>
+    <text class="txs ctr" x="416" y="722">floor 60s · quiescence BOUNDED (FUSE profile)</text>
+    <line class="ln" x1="526" y1="710" x2="554" y2="710" marker-end="url(#f3-an)"/>
+    <rect x="556" y="686" width="220" height="48" rx="7" class="bx"/>
+    <text class="tl ctr" x="666" y="706">generation assembly</text>
+    <text class="txs ctr" x="666" y="722">UploadPartCopy clean runs · whole-file PUT</text>
+    <line class="ln" x1="776" y1="710" x2="804" y2="710" marker-end="url(#f3-an)"/>
+    <rect x="806" y="686" width="220" height="48" rx="7" class="bx"/>
+    <text class="tl ctr" x="916" y="706">guarded publish</text>
+    <text class="txs ctr" x="916" y="722">If-Match / If-None-Match:* · epoch guard checked</text>
+    <line class="ln" x1="1026" y1="710" x2="1054" y2="710" marker-end="url(#f3-an)"/>
+    <rect x="1056" y="686" width="220" height="48" rx="7" class="bx"/>
+    <text class="tl ctr" x="1166" y="706">manifest CAS</text>
+    <text class="txs ctr" x="1166" y="722">per-subtree · seq++ · the RPO record</text>
+    <line class="ln" x1="1276" y1="710" x2="1304" y2="710" marker-end="url(#f3-an)"/>
+    <rect x="1306" y="686" width="238" height="48" rx="7" class="bx-ochre"/>
+    <text class="tl ctr" x="1425" y="706">whole-file object</text>
+    <text class="txs ctr" x="1425" y="722">browsable at &lt;prefix&gt;/&lt;path&gt;</text>
+    <text class="tx" x="56" y="756">FUSE passthrough (Linux 6.9) and FUSE-over-io-uring (6.14) are opportunistic accelerators only — passthrough routes writes around the daemon and silently breaks capture completeness; v1 ships the classic daemon data path.</text>
+  </svg>
+  <figcaption><b>“Two front ends, one bucket format” is architecturally real</b> — <code>src/tier</code> has zero compile-time coupling to the NFS host, and the seam is a small set of free functions plus one pre-ack drain — but two translations are owed at the front: refusal paths shaped as NFS4ERR_DELAY-and-kernel-retry become in-handler blocking, and eviction's writable-open probe must come from the FUSE handle table instead of the NFS state manager. <b>What is genuinely new is the correctness core, not the plumbing.</b> Online refresh inverts import's two load-bearing invariants (pre-listener only; local-wins), and subtree-lease semantics — manifest ownership, layout arbitration, fence scope — are new design over a proven mechanism; both get formal models before code, the discipline that has three times found the bug living in the abstraction itself. The four preconditions are ordered before any FUSE-front code because each converts a known open hazard into a routine event: fresh-state pods run import's adopt arm on <i>every boot</i> (claim identity); the single per-prefix manifest is last-writer-wins under If-Match, so a second writer amputates every other subtree's metadata on its <i>first</i> barrier (sharding plus a root-manifest owner); tombstones are consumed from local rows that die with the pod (removal journal); and the space engine's watermarks are computed against the wrong filesystem on emptyDir (byte budget). <b>Estimate honestly:</b> the engine is roughly two-thirds of flint-fuse by storage-logic weight, but the missing third contains the two hardest correctness pieces, so schedule weight is closer to half. New code on top: the fuser front ~2–4k lines (hydration is actually <i>simpler</i> than NFS — await in the op instead of the DELAY dance), a ~500-line rehost of the hub's tier bootstrap, the webhook ~1k lines plus cert plumbing.</figcaption>
+</section>
+
+<!-- ============================================================ PAGE 4 -->
+<section class="page">
+  <header class="ph">
+    <h1>The failure-shape trade</h1>
+    <span class="kicker">4 / 5 · failure model</span>
+  </header>
+  <p class="dek">The honest headline is not “no single point of failure.” Hub mode concentrates failure into rare, share-wide, hang-shaped outages; direct mode distributes it into frequent, per-pod, loss-shaped events. The full matrix — including the two rows the proposal creates and the two it deletes.</p>
+  <figure>
+  <svg viewBox="0 0 1600 840" role="img" aria-label="An eight-row failure matrix compares hub mode and FUSE mode across pod, node, daemon, S3, webhook and operator failures; side panels give the RPO arithmetic, the mandated recovery order for a dead FUSE daemon, and the epoch-lease tax on unclean pod death.">
+    <rect x="40" y="104" width="1520" height="76" rx="10" class="band"/>
+    <text class="th" x="56" y="130">not “no single point of failure” — a failure-shape trade</text>
+    <text class="tx" x="56" y="152">hub mode concentrates failure into rare, share-wide, HANG-shaped outages; FUSE mode distributes it into frequent, per-pod, LOSS-shaped events.</text>
+    <text class="tx" x="56" y="168">durability becomes an operational statistic — interruption handlers, grace periods, dirty-set caps — instead of an architecture property.</text>
+
+    <!-- matrix -->
+    <text class="tsb" x="56" y="218">event</text>
+    <text class="tsb" x="296" y="218">hub mode — today (measured)</text>
+    <text class="tsb" x="696" y="218">FUSE mode — proposed</text>
+    <line class="hair" x1="40" y1="228" x2="1100" y2="228"/>
+    <line class="hair" x1="276" y1="204" x2="276" y2="740"/>
+    <line class="hair" x1="676" y1="204" x2="676" y2="740"/>
+
+    <!-- row 1 -->
+    <text class="tl" x="56" y="256">hub pod crash</text>
+    <circle class="dot-b" cx="290" cy="252" r="4"/>
+    <text class="tx" x="302" y="248">restart + epoch re-claim ≈ 13s; clients park</text>
+    <text class="tx" x="302" y="264">and resume — nothing durable at risk (PVC)</text>
+    <circle class="dot-g" cx="690" cy="252" r="4"/>
+    <text class="tx" x="702" y="256">row deleted — there is no hub</text>
+    <line class="hair" x1="40" y1="292" x2="1100" y2="292"/>
+
+    <!-- row 2 -->
+    <text class="tl" x="56" y="320">hub NODE crash</text>
+    <circle class="dot-b" cx="290" cy="316" r="4"/>
+    <text class="tx" x="302" y="312">every client hard-hangs in D-state; Recreate +</text>
+    <text class="tx" x="302" y="328">RWO + ~6 min force-detach; F29's manual arm</text>
+    <circle class="dot-g" cx="690" cy="316" r="4"/>
+    <text class="tx" x="702" y="320">row deleted</text>
+    <line class="hair" x1="40" y1="356" x2="1100" y2="356"/>
+
+    <!-- row 3 -->
+    <text class="tl" x="56" y="384">FUSE daemon crash</text>
+    <circle class="dot-g" cx="290" cy="380" r="4"/>
+    <text class="tx" x="302" y="384">n/a</text>
+    <circle class="dot-b" cx="690" cy="380" r="4"/>
+    <text class="tx" x="702" y="376">ENOTCONN — an error apps can see; restart-in-place recovers the</text>
+    <text class="tx" x="702" y="392">emptyDir dirty set; open fds stay severed — apps reopen</text>
+    <line class="hair" x1="40" y1="420" x2="1100" y2="420"/>
+
+    <!-- row 4 -->
+    <text class="tl" x="56" y="448">agent pod spot reclaim</text>
+    <circle class="dot-g" cx="290" cy="444" r="4"/>
+    <text class="tx" x="302" y="448">mount unaffected — pods reschedule</text>
+    <circle class="dot-o" cx="690" cy="444" r="4"/>
+    <text class="tx" x="702" y="440">preStop drain inside the 120s notice — IF the interruption handler +</text>
+    <text class="tx" x="702" y="456">grace wiring exists; dirty beyond the ~9–15 GiB bound is lost</text>
+    <line class="hair" x1="40" y1="484" x2="1100" y2="484"/>
+
+    <!-- row 5 -->
+    <text class="tl" x="56" y="512">agent NODE crash</text>
+    <circle class="dot-g" cx="290" cy="508" r="4"/>
+    <text class="tx" x="302" y="512">mount unaffected</text>
+    <circle class="dot-o" cx="690" cy="508" r="4"/>
+    <text class="tx" x="702" y="504">drains nothing — loses the unflushed set (hot files: unbounded,</text>
+    <text class="tx" x="702" y="520">see RPO arithmetic) + a 60–110s subtree write-lockout</text>
+    <line class="hair" x1="40" y1="548" x2="1100" y2="548"/>
+
+    <!-- row 6 -->
+    <text class="tl" x="56" y="576">S3 outage / throttle storm</text>
+    <circle class="dot-b" cx="290" cy="572" r="4"/>
+    <text class="tx" x="302" y="568">RPO grows; the PVC rides it out;</text>
+    <text class="tx" x="302" y="584">one coordinated retry queue</text>
+    <circle class="dot-o" cx="690" cy="572" r="4"/>
+    <text class="tx" x="702" y="568">N uncoordinated engines, N× re-fetch of the same objects;</text>
+    <text class="tx" x="702" y="584">outage + reclaim COMPOUND ⇒ that pod's dirty set is gone</text>
+    <line class="hair" x1="40" y1="612" x2="1100" y2="612"/>
+
+    <!-- row 7 -->
+    <text class="tl" x="56" y="640">webhook down</text>
+    <circle class="dot-g" cx="290" cy="636" r="4"/>
+    <text class="tx" x="302" y="640">row does not exist</text>
+    <circle class="dot-b" cx="690" cy="636" r="4"/>
+    <text class="tx" x="702" y="632">Fail: matched pod creates block ·</text>
+    <text class="tx" x="702" y="648">Ignore: the silent black hole — page 2</text>
+    <line class="hair" x1="40" y1="676" x2="1100" y2="676"/>
+
+    <!-- row 8 -->
+    <text class="tl" x="56" y="704">operator down</text>
+    <circle class="dot-b" cx="290" cy="700" r="4"/>
+    <text class="tx" x="302" y="696">running hubs keep serving;</text>
+    <text class="tx" x="302" y="712">wake / reconcile blocked</text>
+    <circle class="dot-g" cx="690" cy="700" r="4"/>
+    <text class="tx" x="702" y="696">nothing standing to break; prefix allocation and</text>
+    <text class="tx" x="702" y="712">stale-sidecar reporting pause</text>
+    <line class="hair" x1="40" y1="740" x2="1100" y2="740"/>
+
+    <circle class="dot-b" cx="56" cy="772" r="4"/><text class="tx" x="68" y="776">availability event — hangs or blocks, nothing durable at risk</text>
+    <circle class="dot-o" cx="420" cy="772" r="4"/><text class="tx" x="432" y="776">durability event — acked data at risk</text>
+    <circle class="dot-g" cx="680" cy="772" r="4"/><text class="tx" x="692" y="776">no impact / not applicable</text>
+
+    <!-- right panels -->
+    <rect x="1130" y="204" width="430" height="196" rx="10" class="bx-oo"/>
+    <text class="tl" x="1146" y="230">the RPO arithmetic</text>
+    <text class="tx" x="1146" y="254">floor 60s — the minimum loss on any unclean death</text>
+    <text class="tx" x="1146" y="274">quiescence skips files written &lt;10s apart — a WAL or agent</text>
+    <text class="tx" x="1146" y="290">log may NEVER have published: a pressure valve is required</text>
+    <text class="tx" x="1146" y="312">preStop drain at the measured publish rate (8–13 s/GiB) ≈</text>
+    <text class="tx" x="1146" y="328">9–15 GiB inside the 120s spot notice — only with an</text>
+    <text class="tx" x="1146" y="344">interruption handler + terminationGracePeriodSeconds ≥ 120</text>
+    <text class="tx" x="1146" y="360">(the K8s default 30s drains ~2–3 GiB) · hard crash drains 0</text>
+    <text class="tsb" x="1146" y="386">state the RPO per mode; measure the event rate on the fleet</text>
+
+    <rect x="1130" y="424" width="430" height="170" rx="10" class="bx"/>
+    <text class="tl" x="1146" y="450">recovery order is a contract</text>
+    <text class="tx" x="1146" y="474">statfs canary — dead FUSE fails FAST; a liveness probe</text>
+    <text class="tx" x="1146" y="490">alone misses a hung-but-alive daemon</text>
+    <text class="tx" x="1146" y="512">restart the sidecar container IN PLACE → reopen the dirty-bit</text>
+    <text class="tx" x="1146" y="528">db → whole-file-dirty recovery flush → only then recycle</text>
+    <text class="tsb" x="1146" y="556">the reflex — restart the pod — destroys exactly the</text>
+    <text class="tsb" x="1146" y="572">dirty set a container restart would have saved</text>
+
+    <rect x="1130" y="618" width="430" height="150" rx="10" class="bx"/>
+    <text class="tl" x="1146" y="644">the lease tax on unclean death</text>
+    <text class="tx" x="1146" y="668">a fresh emptyDir defeats self-recognition — the occupancy</text>
+    <text class="tx" x="1146" y="684">proof is gone: 60s configured, 80–110s measured, before</text>
+    <text class="tx" x="1146" y="700">the subtree is writable again</text>
+    <text class="tx" x="1146" y="722">preStop clean release = the 17s fast path · do NOT retune</text>
+    <text class="tx" x="1146" y="738">the lease instead — 30s×4 was tried and reverted</text>
+  </svg>
+  <figcaption><b>Where FUSE mode is strictly better:</b> read-mostly and single-writer ephemeral workspaces whose dirty sets stay inside what the spot notice can drain (~9–15 GiB at the measured publish rate), whose owners accept losing up to one flush interval of their own recent work when a node dies — in exchange, no workspace ever hangs on another's failure, and a dead mount is an errno, not a D-state. <b>Where it is strictly worse:</b> shared-RWX trees, multi-pod sqlite/git, large-artifact writers, and any lifecycle that gates destructive actions on <code>rpoClean</code> — today's hibernate refuses to delete a PVC it cannot verify; FUSE mode has no equivalent witness, so the bucket (manifest seq and age per workspace, CAS-versioned and readable by a plain S3 client) becomes the only global status surface, and alerting moves there along with webhook-injected per-pod metrics. <b>Do the event-rate arithmetic with fleet numbers, not vibes:</b> on a pure-spot posture, pod terminations are thousands per month against roughly one hub exposure — most drain cleanly through preStop <i>if</i> an interruption handler (aws-node-termination-handler or Karpenter's) converts the 2-minute IMDS notice into prompt eviction, which Kubernetes does not do by itself, and the grace period is genuinely ≥120s. The residual — hard node deaths, oversized dirty sets, hot files the quiescence guard never flushed — is a permanent-loss class hub mode does not have; its rate is a property of the fleet and must be measured there, then stated on the CRD surface as the FUSE-mode RPO contract. The self-recognition fix is <i>not</i> a workspace-stable holder identity — the occupancy lock is precisely what proves the old incarnation is gone, and identity reuse would let a replacement depose a live mid-flush writer. Clean release on preStop, or an external fencing actor that has witnessed pod deletion finality.</figcaption>
+</section>
+
+<!-- ============================================================ PAGE 5 -->
+<section class="page">
+  <header class="ph">
+    <h1>Two front ends, one format</h1>
+    <span class="kicker">5 / 5 · decision</span>
+  </header>
+  <p class="dek">When to route a workload to which front end, what must be measured and modeled before any code, and where the placement dial sits between per-pod isolation and per-node economics.</p>
+  <figure>
+  <svg viewBox="0 0 1600 840" role="img" aria-label="A pick-two triangle places flint hub, flint-fuse, mountpoint-s3 and JuiceFS against browsable buckets, POSIX coherence, and no always-on coordinator; a comparison table scores the four; routing rules and pre-code gates sit at the right; a placement spectrum from per-pod sidecar to per-node mount pod to hub runs along the bottom.">
+    <defs>
+      <marker id="f5-an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    </defs>
+
+    <!-- triangle -->
+    <text class="th" x="40" y="140">pick two — until you narrow “POSIX”</text>
+    <line class="ln" x1="300" y1="180" x2="80" y2="500"/>
+    <line class="ln" x1="300" y1="180" x2="520" y2="500"/>
+    <line class="ln" x1="80" y1="500" x2="520" y2="500"/>
+    <text class="tsb ctr" x="300" y="168">browsable bucket — whole-file objects</text>
+    <text class="tsb" x="40" y="524">full POSIX +</text>
+    <text class="tsb" x="40" y="540">cross-client coherence</text>
+    <text class="tsb end" x="560" y="524">no always-on</text>
+    <text class="tsb end" x="560" y="540">coordinator</text>
+
+    <circle class="dot-b" cx="190" cy="340" r="5"/>
+    <text class="tx end" x="178" y="322">flint hub —</text>
+    <text class="tx end" x="178" y="338">browsable + POSIX;</text>
+    <text class="tx end" x="178" y="354">the coordinator IS the hub</text>
+    <circle class="dot-g" cx="300" cy="500" r="5"/>
+    <text class="tx ctr" x="300" y="470">JuiceFS — POSIX without browsing:</text>
+    <text class="tx ctr" x="300" y="486">chunk soup + a metadata service</text>
+    <circle class="dot-g" cx="410" cy="340" r="5"/>
+    <text class="tx" x="424" y="308">mountpoint-s3 — browsable,</text>
+    <text class="tx" x="424" y="324">no coordinator, but no rename or</text>
+    <text class="tx" x="424" y="340">in-place writes on GP buckets</text>
+    <circle class="dot-o" cx="355" cy="392" r="6"/>
+    <text class="tho" x="288" y="418">flint-fuse — takes all three by</text>
+    <text class="tho" x="288" y="434">narrowing POSIX to ONE writer</text>
+    <text class="tho" x="288" y="450">per subtree</text>
+
+    <text class="tx" x="40" y="576">the triangle is forced by S3's primitives — CAS detects and fences,</text>
+    <text class="tx" x="40" y="592">it never serializes; flint-fuse's move is to shrink the contract</text>
+    <text class="tx" x="40" y="608">until CAS is enough, and route everything larger to the hub.</text>
+
+    <!-- comparison table -->
+    <text class="th" x="620" y="140">four ways to serve a bucket</text>
+    <text class="tsb ctr" x="850" y="168">hub</text>
+    <text class="tsb ctr" x="945" y="168">fuse</text>
+    <text class="tsb ctr" x="1040" y="168">mp-s3</text>
+    <text class="tsb ctr" x="1135" y="168">JuiceFS</text>
+    <line class="hair" x1="620" y1="178" x2="1170" y2="178"/>
+    <text class="tx" x="620" y="204">browsable whole-file bucket</text>
+    <circle class="dot-b" cx="850" cy="200" r="4"/><circle class="dot-b" cx="945" cy="200" r="4"/><circle class="dot-b" cx="1040" cy="200" r="4"/><circle class="dot-g" cx="1135" cy="200" r="4"/>
+    <line class="hair" x1="620" y1="220" x2="1170" y2="220"/>
+    <text class="tx" x="620" y="246">in-place writes + rename</text>
+    <circle class="dot-b" cx="850" cy="242" r="4"/><circle class="dot-b" cx="945" cy="242" r="4"/><circle class="dot-g" cx="1040" cy="242" r="4"/><circle class="dot-b" cx="1135" cy="242" r="4"/>
+    <line class="hair" x1="620" y1="262" x2="1170" y2="262"/>
+    <text class="tx" x="620" y="288">cross-pod locks / shared writers</text>
+    <circle class="dot-b" cx="850" cy="284" r="4"/><circle class="dot-g" cx="945" cy="284" r="4"/><circle class="dot-g" cx="1040" cy="284" r="4"/><circle class="dot-b" cx="1135" cy="284" r="4"/>
+    <line class="hair" x1="620" y1="304" x2="1170" y2="304"/>
+    <text class="tx" x="620" y="330">always-on component</text>
+    <text class="txs ctr" x="850" y="330">the hub</text>
+    <text class="txs ctr" x="945" y="330">S3 only</text>
+    <text class="txs ctr" x="1040" y="330">S3 only</text>
+    <text class="txs ctr" x="1135" y="330">metadata DB</text>
+    <line class="hair" x1="620" y1="346" x2="1170" y2="346"/>
+    <text class="tx" x="620" y="372">idle cost</text>
+    <text class="txs ctr" x="850" y="372">ladder → S3</text>
+    <text class="txs ctr" x="945" y="372">S3, always</text>
+    <text class="txs ctr" x="1040" y="372">S3, always</text>
+    <text class="txs ctr" x="1135" y="372">DB + S3</text>
+    <line class="hair" x1="620" y1="388" x2="1170" y2="388"/>
+    <text class="tx" x="620" y="414">acked-write crash durability</text>
+    <text class="txs ctr" x="850" y="414">PVC</text>
+    <text class="txs ctr" x="945" y="414">flush cadence</text>
+    <text class="txs ctr" x="1040" y="414">n/a</text>
+    <text class="txs ctr" x="1135" y="414">chunk store</text>
+    <line class="hair" x1="620" y1="430" x2="1170" y2="430"/>
+    <text class="tx" x="620" y="456">consumer node needs</text>
+    <text class="txs ctr" x="850" y="456">kernel NFS</text>
+    <text class="txs ctr" x="945" y="456">fuse3 sidecar</text>
+    <text class="txs ctr" x="1040" y="456">FUSE</text>
+    <text class="txs ctr" x="1135" y="456">FUSE + DB</text>
+    <line class="hair" x1="620" y1="472" x2="1170" y2="472"/>
+    <circle class="dot-b" cx="620" cy="498" r="4"/><text class="tx" x="632" y="502">yes</text>
+    <circle class="dot-g" cx="680" cy="498" r="4"/><text class="tx" x="692" y="502">no</text>
+    <text class="tx" x="620" y="536">mountpoint-s3 is the read lane AWS keeps improving —</text>
+    <text class="tx" x="620" y="552">re-run this survey at each of its minor releases; the moat</text>
+    <text class="tx" x="620" y="568">is the working set + guarded publishes + manifest restore,</text>
+    <text class="tx" x="620" y="584">where AWS has shown no motion</text>
+
+    <!-- routing + gates -->
+    <rect x="1200" y="124" width="360" height="150" rx="10" class="bx-blue"/>
+    <text class="tl" x="1216" y="150">route to the hub</text>
+    <text class="tx" x="1216" y="172">shared-RWX trees · multi-pod sqlite / git</text>
+    <text class="tx" x="1216" y="190">large-artifact writers (dirty &gt; ~10 GiB)</text>
+    <text class="tx" x="1216" y="208">anything gating destructive ops on rpoClean</text>
+    <text class="tx" x="1216" y="226">cross-subtree consistency points (EXDEV callers)</text>
+    <text class="tx" x="1216" y="244">zero consumer requirements — kernel NFS only</text>
+
+    <rect x="1200" y="294" width="360" height="140" rx="10" class="bx-ochre"/>
+    <text class="tl" x="1216" y="320">route to flint-fuse</text>
+    <text class="tx" x="1216" y="342">one writer per workspace — the agent-fleet shape</text>
+    <text class="tx" x="1216" y="360">spot-heavy, idle-heavy, thousands of shares</text>
+    <text class="tx" x="1216" y="378">read-mostly shared datasets — via per-NODE</text>
+    <text class="tx" x="1216" y="396">placement (below), not one copy per pod</text>
+    <text class="tx" x="1216" y="414">owners accept losing ≤ one flush of their own work</text>
+
+    <rect x="1200" y="454" width="360" height="216" rx="10" class="bx-oo"/>
+    <text class="tl" x="1216" y="480">gates before any code</text>
+    <circle class="dot-o" cx="1222" cy="500" r="3"/>
+    <text class="tx" x="1234" y="504">measure hydrate WITH the fan-out vs real S3 —</text>
+    <text class="tx" x="1234" y="520">72.5 s/GiB measured pre-fan-out vs 1–13 theoretical;</text>
+    <text class="tx" x="1234" y="536">decides whether per-pod cold start is viable at all</text>
+    <circle class="dot-o" cx="1222" cy="556" r="3"/>
+    <text class="tx" x="1234" y="560">burst rig — N≥1000 correlated pod starts against an</text>
+    <text class="tx" x="1234" y="576">unpartitioned bucket (503 SlowDown during recovery)</text>
+    <circle class="dot-o" cx="1222" cy="596" r="3"/>
+    <text class="tx" x="1234" y="600">formal models — subtree lease + online refresh</text>
+    <text class="tx" x="1234" y="616">(“the abstraction was the bug”, three times now)</text>
+    <circle class="dot-o" cx="1222" cy="636" r="3"/>
+    <text class="tx" x="1234" y="640">page 3's four preconditions landed — claim identity,</text>
+    <text class="tx" x="1234" y="656">manifest sharding, removal journal, space budget</text>
+
+    <!-- placement spectrum -->
+    <rect x="40" y="690" width="1520" height="110" rx="10" class="band"/>
+    <text class="th" x="56" y="716">placement is a dial, not a doctrine</text>
+    <rect x="56" y="728" width="430" height="62" rx="7" class="bx"/>
+    <text class="tl" x="72" y="748">per-POD sidecar</text>
+    <text class="tx" x="72" y="766">max isolation · max duplication — N× hydrate,</text>
+    <text class="tx" x="72" y="782">N× node disk, N× lease; injection via webhook</text>
+    <line class="ln" x1="486" y1="759" x2="526" y2="759" marker-end="url(#f5-an)"/>
+    <rect x="530" y="728" width="460" height="62" rx="7" class="bx"/>
+    <text class="tl" x="546" y="748">per-NODE mount pod</text>
+    <text class="tx" x="546" y="766">one cache, disk, and lease per node — the biggest lever on every</text>
+    <text class="tx" x="546" y="782">duplication term; JuiceFS's own primary shape; §7's placement</text>
+    <line class="ln" x1="990" y1="759" x2="1030" y2="759" marker-end="url(#f5-an)"/>
+    <rect x="1034" y="728" width="430" height="62" rx="7" class="bx-blue"/>
+    <text class="tl" x="1050" y="748">the hub</text>
+    <text class="tx" x="1050" y="766">shared everything — the coherence authority for</text>
+    <text class="tx" x="1050" y="782">shared writers; stays exactly as it ships today</text>
+  </svg>
+  <figcaption><b>Buy fails twice, so build — on what already exists.</b> Every performant S3-FUSE client refuses the write shapes agent workloads need (mountpoint-s3: no rename and no in-place writes on general-purpose buckets — pip, git, and sqlite all die there; goofys dormant since 2022), and every coherent one buys POSIX by reintroducing an always-on metadata service over a non-browsable chunk layout — the hub in another costume, minus the browsable bucket that is flint's differentiator. The closest cache shape, rclone's VFS write-back, has zero cross-client arbitration; its own docs call concurrent mounts a corruption risk. Nothing off the shelf provides browsable whole-file objects + an evicting working set + CAS-lease-guarded publishes + manifest/tombstone restore — and flint owns roughly two-thirds of that middle today. <b>flint-fuse is a third front end, not §7 brought forward:</b> the libflint plan's mount-pod tier is a libflint consumer serving exactly the lock/mmap/multi-writer contract flint-fuse excludes. Build one FUSE daemon with a pluggable backend — <code>tier::</code> over S3 now, libflint coordinates later — and amend §7 to name both, so the two FUSE deliverables converge instead of drifting. Treat FUSE passthrough (Linux 6.9, CAP_SYS_ADMIN, and it bypasses capture) and FUSE-over-io-uring (6.14, no fuser-crate support yet) as opportunistic accelerators, never floors — managed-node kernels in 2026 run 6.1–6.12, and the hub must remain the zero-consumer-requirements path. <b>Keep the placement dial in view:</b> per-NODE mount pods recover the shared cache, disk, and lease that per-POD sidecars multiply — the largest single lever on every duplication term on page 4 — at the cost of pod-level isolation; under one-writer-per-workspace the two placements often coincide anyway. The hub stays. The ladder, for direct-mode shares, simply stops needing to exist.</figcaption>
+</section>
+</body>
+</html>

@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Flint-lite consistency contract</title>
+<style>
+  @page { size: A3 landscape; margin: 12mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; color: #0f172a; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .page { break-after: page; page-break-after: always; }
+  .page:last-child { break-after: auto; page-break-after: auto; }
+  .ph { border-bottom: 2px solid #0f172a; padding-bottom: 6px; margin-bottom: 14px; display: flex; align-items: baseline; justify-content: space-between; }
+  .ph h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .ph .kicker { font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #64748b; }
+  .dek { font-size: 12px; color: #475569; margin: 0 0 10px; }
+  figure { margin: 0; }
+  figure svg { width: 100%; height: auto; display: block; }
+  figcaption { font-size: 11px; line-height: 1.5; color: #475569; margin-top: 10px; border-top: 1px solid #e2e8f0; padding-top: 8px; }
+  figcaption b { color: #0f172a; font-weight: 600; }
+  code { font-family: Menlo, "SF Mono", Consolas, monospace; font-size: 10.5px; color: #0f172a; }
+  svg text { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; fill: #0f172a; }
+  .tt { font-size: 15px; font-weight: 600; } .th { font-size: 13px; font-weight: 600; } .tl { font-size: 12.5px; }
+  .ts { font-size: 11px; fill: #64748b; } .tsb { font-size: 11px; font-weight: 600; fill: #475569; }
+  .thv { font-size: 11.5px; font-weight: 600; fill: #6d4aa8; } .tho { font-size: 11.5px; font-weight: 600; fill: #8f5e0f; }
+  .thb { font-size: 11.5px; font-weight: 600; fill: #1a5f9e; }
+  .tx { font-size: 10.5px; fill: #64748b; } .txs { font-size: 10px; fill: #64748b; }
+  .mn { font-family: Menlo, "SF Mono", monospace; font-size: 11.5px; } .mns { font-family: Menlo, "SF Mono", monospace; font-size: 10.5px; }
+  .ctr { text-anchor: middle; } .end { text-anchor: end; }
+  .bx { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.4; }
+  .bx-slate { fill: #f1f5f9; stroke: #94a3b8; stroke-width: 1.4; }
+  .bx-blue { fill: #e9f2fa; stroke: #1a5f9e; stroke-width: 1.6; }
+  .bx-violet { fill: #f0eafb; stroke: #6d4aa8; stroke-width: 1.6; }
+  .bx-ochre { fill: #fbf2de; stroke: #a06b12; stroke-width: 1.6; }
+  .bx-vo { fill: #ffffff; stroke: #6d4aa8; stroke-width: 1.4; }
+  .bx-oo { fill: #fffdf7; stroke: #a06b12; stroke-width: 1.8; }
+  .band { fill: #f8fafc; stroke: #e2e8f0; stroke-width: 1.4; }
+  .ln { stroke: #475569; stroke-width: 1.6; fill: none; }
+  .ln-blue { stroke: #1a5f9e; stroke-width: 2.6; fill: none; }
+  .ln-ochre { stroke: #a06b12; stroke-width: 1.8; fill: none; }
+  .dash { stroke-dasharray: 5 4; } .hair { stroke: #e2e8f0; stroke-width: 1; }
+  .dot-o { fill: #a06b12; }
+</style>
+</head>
+<body>
+<section class="page">
+  <header class="ph">
+    <h1>What a successful write means — hub mode</h1>
+    <span class="kicker">consistency contract · NFS over S3</span>
+  </header>
+  <p class="dek">flint-lite is a write-back tier: strong POSIX inside the mount, asynchronous durability to S3. Two statements are both true and must never be conflated — an acked write is crash-durable on the hub's PVC immediately, and it is in S3 only after the next flush barrier. This page is the precise version of both.</p>
+  <figure>
+  <svg viewBox="0 0 1600 790" role="img" aria-label="A five-stage ladder traces one write from the client through the hub's acknowledgment on the PVC to its eventual S3 generation; a matrix states when each observer sees the write; a panel lists what is deliberately not guaranteed, led by: a successful NFS write is not in S3.">
+    <defs>
+      <marker id="c1-an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+      <marker id="c1-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
+    </defs>
+
+    <!-- journey -->
+    <rect x="40" y="104" width="1520" height="272" rx="10" class="band"/>
+    <text class="th" x="56" y="130">the journey of one write — from write() to the bucket</text>
+
+    <rect x="56" y="150" width="252" height="112" rx="8" class="bx"/>
+    <text class="tl ctr" x="182" y="176">write() on a client</text>
+    <text class="tx ctr" x="182" y="198">kernel NFS client — may batch</text>
+    <text class="tx ctr" x="182" y="214">(UNSTABLE) until COMMIT</text>
+    <text class="tx ctr" x="182" y="230">visible on this node at once</text>
+    <line class="ln" x1="308" y1="206" x2="346" y2="206" marker-end="url(#c1-an)"/>
+
+    <rect x="350" y="150" width="252" height="112" rx="8" class="bx"/>
+    <text class="tl ctr" x="476" y="176">WRITE at the hub</text>
+    <text class="tx ctr" x="476" y="198">page cache + dirty capture —</text>
+    <text class="tx ctr" x="476" y="214">intervals logged, durable</text>
+    <text class="tx ctr" x="476" y="230">dirty bit queued</text>
+    <line class="ln" x1="602" y1="206" x2="640" y2="206" marker-end="url(#c1-an)"/>
+
+    <text class="thb ctr" x="770" y="144">SUCCESS IS REPORTED HERE</text>
+    <rect x="644" y="150" width="252" height="112" rx="8" class="bx-blue"/>
+    <text class="tl ctr" x="770" y="176">COMMIT / stable-write ack</text>
+    <text class="tx ctr" x="770" y="198">dirty bit durable BEFORE the ack;</text>
+    <text class="tx ctr" x="770" y="214">data sync_all'd to the PVC</text>
+    <text class="tsb ctr" x="770" y="236">NOT in S3 yet</text>
+    <line class="ln" x1="896" y1="206" x2="934" y2="206" marker-end="url(#c1-an)"/>
+
+    <rect x="938" y="150" width="252" height="112" rx="8" class="bx"/>
+    <text class="tl ctr" x="1064" y="176">flush barrier</text>
+    <text class="tx ctr" x="1064" y="198">≤ cadence (floor 60s); quiescence</text>
+    <text class="tx ctr" x="1064" y="214">defers still-hot files</text>
+    <text class="tx ctr" x="1064" y="230">generation taken under the gate</text>
+    <line class="ln-ochre" x1="1190" y1="206" x2="1228" y2="206" marker-end="url(#c1-ao)"/>
+
+    <rect x="1232" y="150" width="252" height="112" rx="8" class="bx-ochre"/>
+    <text class="tl ctr" x="1358" y="176">S3 object + manifest CAS</text>
+    <text class="tx ctr" x="1358" y="198">If-Match guarded, whole-file —</text>
+    <text class="tx ctr" x="1358" y="214">untorn by construction</text>
+    <text class="tx ctr" x="1358" y="230">manifest seq = the RPO record</text>
+
+    <line class="ln dash" x1="56" y1="292" x2="1484" y2="292"/>
+    <text class="tx ctr" x="182" y="312">t = 0</text>
+    <text class="tx ctr" x="770" y="312">ack — a few ms</text>
+    <text class="tx ctr" x="1064" y="312">≤ 60s, + hot-file deferral</text>
+    <text class="tx ctr" x="1358" y="312">durable beyond the cluster</text>
+    <text class="tx ctr" x="770" y="338">survives hub crash, pod reschedule, node crash —</text>
+    <text class="tx ctr" x="770" y="354">anything that leaves the PVC intact</text>
+    <text class="tx ctr" x="1358" y="338">survives PVC loss, hibernate,</text>
+    <text class="tx ctr" x="1358" y="354">cluster loss</text>
+
+    <!-- matrix -->
+    <rect x="40" y="402" width="900" height="316" rx="10" class="bx"/>
+    <text class="th" x="56" y="428">who sees your write, and when</text>
+    <line class="hair" x1="56" y1="440" x2="924" y2="440"/>
+    <text class="tl" x="56" y="466">you — the writing client</text>
+    <text class="tx" x="330" y="466">immediately — your own mount, your own page cache</text>
+    <line class="hair" x1="56" y1="480" x2="924" y2="480"/>
+    <text class="tl" x="56" y="506">pods on the same node</text>
+    <text class="tx" x="330" y="506">immediately — one kernel mount per node, one shared page cache</text>
+    <line class="hair" x1="56" y1="520" x2="924" y2="520"/>
+    <text class="tl" x="56" y="546">a client on another node</text>
+    <text class="tx" x="330" y="546">at close-to-open — the hub is the one coherence authority: opens, byte-range</text>
+    <text class="tx" x="330" y="562">locks, O_EXCL and rename are real across every client of the share</text>
+    <line class="hair" x1="56" y1="576" x2="924" y2="576"/>
+    <text class="tl" x="56" y="602">the project service — S3 browser</text>
+    <text class="tx" x="330" y="602">after the NEXT FLUSH BARRIER — untorn whole-file generations; the bucket is</text>
+    <text class="tx" x="330" y="618">not a point-in-time snapshot; the manifest (seq) is the closest thing to one</text>
+    <line class="hair" x1="56" y1="632" x2="924" y2="632"/>
+    <text class="tl" x="56" y="658">a restarted hub</text>
+    <text class="tx" x="330" y="658">everything acked — the PVC survives; dirty-bit files re-publish whole-file</text>
+    <line class="hair" x1="56" y1="672" x2="924" y2="672"/>
+    <text class="tl" x="56" y="698">after PVC loss</text>
+    <text class="tx" x="330" y="698">everything PUBLISHED; acked writes inside the RPO window are gone — the</text>
+    <text class="tx" x="330" y="712">manifest counts its own loss bound (beyond_rpo)</text>
+
+    <!-- not guaranteed -->
+    <rect x="980" y="402" width="580" height="316" rx="10" class="bx-oo"/>
+    <text class="tho" x="996" y="428">not guaranteed — say these out loud</text>
+    <line class="hair" x1="996" y1="440" x2="1544" y2="440"/>
+    <circle class="dot-o" cx="1002" cy="462" r="3"/>
+    <text class="tsb" x="1014" y="466">a successful NFS write is NOT in S3.</text>
+    <text class="tx" x="1014" y="484">fsync and COMMIT mean the hub's PVC. S3 trails by the flush</text>
+    <text class="tx" x="1014" y="500">cadence — that IS the RPO, and it converts to loss exactly when the PVC is lost.</text>
+    <circle class="dot-o" cx="1002" cy="522" r="3"/>
+    <text class="tsb" x="1014" y="526">there is no fsync-to-S3 verb.</text>
+    <text class="tx" x="1014" y="544">rpoClean (via /status) is the only "everything published" witness —</text>
+    <text class="tx" x="1014" y="560">hibernate refuses to delete a PVC without it.</text>
+    <circle class="dot-o" cx="1002" cy="582" r="3"/>
+    <text class="tsb" x="1014" y="586">S3-side writes against a live hub are out of contract.</text>
+    <text class="tx" x="1014" y="604">three fates: silently destroyed by local-wins, undetected while</text>
+    <text class="tx" x="1014" y="620">resident, or adopted as truth by a hydration 412.</text>
+    <circle class="dot-o" cx="1002" cy="642" r="3"/>
+    <text class="tsb" x="1014" y="646">your hottest files trail the most.</text>
+    <text class="tx" x="1014" y="664">quiescence defers a file written more often than every 10s;</text>
+    <text class="tx" x="1014" y="680">on-close is flush-ELIGIBILITY, not flush-now.</text>
+    <text class="tsb" x="996" y="698">S3 itself is strongly consistent (read-after-write 2020-12, conditional</text>
+    <text class="tsb" x="996" y="712">writes 2024). The lag is flint's write-back working set — by design.</text>
+  </svg>
+  <figcaption><b>The contract in one sentence:</b> inside the mount, flint-lite is strong POSIX with the hub as the single authority; toward S3 it is write-back with a stated, measured lag — an acked write is crash-durable on the PVC immediately, and durable in the bucket only after the next flush barrier. The numbers behind the words: flush floor 60s and quiescence window 10s (env-tunable, the share's flush profile), manifest <code>seq</code> + <code>beyond_rpo</code> as the machine-readable RPO record, and the pre-ack durable dirty bit as the reason a hub crash never loses an acked write — a restart re-publishes every bit-set file whole. The one event that converts the RPO into actual loss is PVC destruction, which is why hibernate is verify-then-delete: it will not destroy the PVC until the bucket has provably caught up. "Losing the PVC is a rebuild, not a loss" is therefore true for published bytes and only for published bytes.</figcaption>
+</section>
+</body>
+</html>
