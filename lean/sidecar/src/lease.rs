@@ -66,14 +66,24 @@ pub async fn claim_step(sc: &mut Sidecar) -> LeanResult<ClaimOutcome> {
             if ours || state.released || (quiet && inc.quiet_polls + 1 >= QUIET_POLLS) {
                 // Self-recognition (same emptyDir), a clean release, or
                 // a lease judged dead across QUIET_POLLS observations.
+                //
+                // Rotation is needed ONLY for the unreleased-foreign
+                // takeover (a possibly-live straggler mid-barrier). A
+                // released cell is a clean handoff — the holder's final
+                // barrier completed before release — and self-
+                // recognition means the previous container's process
+                // (and any in-flight write of its) died with it.
+                // Rotating on those paths is pure manifest churn: at
+                // 100k+ entries it is a multi-MB GET+PUT per claim, it
+                // double-bumps seq, and it defeats the no-change
+                // barrier's early exit (measured on the 0b rig).
+                let rotate = !ours && !state.released;
                 match store.epoch_acquire(&key, &inc.holder_id, Some(&state)).await {
                     Ok(lease) => {
-                        // Takeover fence rotation BEFORE serving (a
-                        // self-recognized restart rotates too — it is
-                        // harmless there and closes the same straggler
-                        // shape for a torn old heartbeat task).
-                        manifest::rotate_for_takeover(store.as_ref(), &sc.cfg, lease.epoch)
-                            .await?;
+                        if rotate {
+                            manifest::rotate_for_takeover(store.as_ref(), &sc.cfg, lease.epoch)
+                                .await?;
+                        }
                         inc.epoch = lease.epoch;
                         inc.last_token = None;
                         inc.quiet_polls = 0;
