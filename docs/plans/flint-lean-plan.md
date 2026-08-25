@@ -1,23 +1,25 @@
 ---
-title: flint-lean — checkout/publish sidecar + stateless write gateway
-status: PLAN OF RECORD (user-ratified 2026-08-24) — lean is the default
-  front end for the agent-harness architecture; the FUSE track is
-  DEPRIORITIZED (docs/flint-fuse-architecture.html stays as the designed
-  escalation for too-large-to-materialize workspaces; no FUSE work
-  scheduled). The hub remains the escalation for live-shared POSIX.
+title: flint-lean — checkout/publish sidecar + control-plane gateway
+status: PLAN OF RECORD, v2 (post-adversarial-review 2026-08-24) — lean is
+  the default front end for the agent-harness architecture; the FUSE track
+  is DEPRIORITIZED (docs/flint-fuse-architecture.html stays as the designed
+  escalation for too-large-to-materialize workspaces). The hub remains the
+  escalation for live-shared POSIX.
 type: design-impl-spec
 created: 2026-08-24
-architecture: docs/flint-lean-architecture.html (extracted from flint-fuse-architecture page 5)
-lineage: 14-agent adversarial review of 2026-08-24 (findings digested in flint-fuse-architecture.html); the preconditions below are re-derivations of that review's findings for the lean shape
+architecture: docs/flint-lean-architecture.html
+lineage: extracted from the 14-agent FUSE review; v2 incorporates its own
+  12-agent adversarial review (6 dimensions x dedicated skeptic; 18
+  CONFIRMED + 5 DOWNGRADED-but-real, 1 refuted — record in §10)
 governs:
   - spdk-csi-driver/src/bin/flint-sync.rs (new — the lean sidecar binary)
-  - spdk-csi-driver/src/tier/ (subtree lease re-scope, claim identity, manifest split, materializing import)
-  - spdk-csi-driver/src/s3_surface/ (new — the one S3-dialect library, three placements)
-  - flint-hub-gateway/ (grows the grade-2 publish-grant arbiter + grade-1 S3 proxy)
-  - src/lite_operator/ (variant: lean injection, layout allocation, claim stamping)
+  - spdk-csi-driver/src/tier/ (subtree lease re-scope, claim identity, manifest split + MERGE writer, materializing import)
+  - spdk-csi-driver/src/s3_surface/ (new — the one S3-dialect library)
+  - flint-hub-gateway/ (control plane: publish intents, inbox, sync diffs, HITL writes)
+  - src/lite_operator/ (lean injection, layout allocation, claim stamping, principal split)
 ---
 
-# flint-lean: checkout/publish + gateway — implementation plan
+# flint-lean: checkout/publish + gateway — implementation plan (v2)
 
 ## 1. Summary and scope
 
@@ -26,395 +28,416 @@ an **unprivileged** sidecar materializes the workspace as plain files at
 pod start, the app runs against a real local filesystem with zero
 interception, and changed files publish at the flush cadence. The
 deployment is **two planes**: a full S3 proxy (existing component, holds
-the real S3 credentials — agents contact it only) is the DATA plane;
-the stateless flint gateway is the CONTROL plane (publish arbitration,
-HITL writes, sync diffs, auth). No FUSE, no privilege, no kernel floor,
-no ENOTCONN class. Pods hold zero bucket credentials.
+the real S3 credentials — agents contact it only; each project has a
+dedicated bucket or prefix) is the DATA plane; the stateless flint
+gateway is the CONTROL plane (publish arbitration, the HITL inbox, sync
+diffs, auth). No FUSE, no privilege, no kernel floor, no ENOTCONN class.
+Pods hold zero bucket credentials.
 
-**v1 scope:** full checkout (no partial/lazy), one writer per workspace
-subtree, GiB-scale workspaces, AWS S3 + MinIO behind the deployment's
-full S3 proxy (grade 1 PRIMARY — presigned grade 2 is an optional later
-optimization), the `sync` verb (HITL). **Non-goals for v1:** FUSE (separate deliverable, its own doc),
-multi-writer coherence (the hub's job, forever), eviction/lazy
-hydration, cross-subtree online refresh while serving, GCS/Azure
-tenancy.
+**v1 scope:** full checkout (no partial/lazy); one writer per workspace
+subtree; workspaces bounded in BOTH axes — bytes (emptyDir budget) and
+**file count (checkout refuses above the measured Phase-0b cap;
+"GiB-scale" alone is not a scope statement)**; files > 64 MiB publish
+via **streaming multipart compose** (the existing `Plan::Compose`
+machinery — proxied, no presigning; `put_whole` is never fed past
+`whole_put_max`, matching the code's own routing); AWS S3 + MinIO behind
+the deployment proxy; the `sync` verb (HITL); **Kubernetes ≥ 1.29
+(native sidecar containers are mandatory, §2.4)**.
 
-**The headline simplifications relative to the FUSE variant** — each one
-is a review finding that narrows or disappears under the lean shape:
+**Simplifications kept from v1 of this plan** (each a FUSE-review
+finding that narrows under the lean shape): no online refresh (sync is
+explicit); no durable REMOVAL journal (full checkout keeps deletes
+RPO-symmetric — but see the emptyDir bookkeeping below, which is NOT
+that journal); no eviction engine.
 
-- **No online refresh in v1.** The FUSE review's hardest new machinery
-  (inverting import's pre-listener + local-wins invariants) is out of
-  scope: a lean pod writes its own subtree and refreshes foreign
-  content only at explicit points (checkout at start; an on-demand
-  `sync` verb that applies the manifest diff to files with no local
-  dirt — local-wins preserved, no invariant inversion).
-- **No durable removal journal in v1.** With FULL checkout, local
-  absence = deletion, so the publish barrier's scan diff carries
-  deletes symmetrically with writes: a pod that dies with unpublished
-  deletes loses them exactly as it loses unpublished writes — the RPO
-  contract, not the resurrection bug. (The FUSE finding — tombstones
-  dying with emptyDir while import's sweep re-ingests the key forever —
-  required a journal because interception-mode capture has no
-  full-tree diff. The journal becomes REQUIRED again the moment
-  partial checkout ships; see §8.)
-- **No sqlite state backend in the sidecar.** The checkout manifest
-  snapshot is the baseline; dirty tracking is in-memory between
-  barriers; a crash degrades to re-checkout (RPO). No durable dirty
-  bit is needed because there is no protocol ack to honor — the app's
-  ack is the local filesystem's.
-- **No eviction engine.** Space handling is a checkout-time budget
-  check (refuse if the manifest Inventory exceeds the emptyDir budget)
-  plus `sizeLimit` — not the watermark/ballast machinery.
+**Revised in v2 (review):** "no sqlite in the sidecar" survives, but
+"no durable sidecar state at all" does not — the sidecar persists
+**plain-file bookkeeping on the emptyDir**: a checkout-complete marker,
+the baseline manifest snapshot (seq + per-entry ETags, rewritten at
+every barrier and sync), a pre-barrier intent journal of (key, new-ETag)
+pairs, and a pod-incarnation holder id. A container restart over a live
+tree is a first-class state (§2.1), not "re-checkout".
 
 ## 2. Components
 
-### 2.1 flint-sync (new bin target, `spdk-csi-driver/src/bin/flint-sync.rs`)
+### 2.1 flint-sync (new bin target)
 
-An ordinary process. Reuses `tier::` as a library:
+An ordinary process reusing `tier::` as a library.
 
-- **checkout** — `tier::import`'s manifest lane with a new
-  `materialize: bytes` mode (today it materializes evicted stubs;
-  lean wants the bytes, fetched with the hydrate fan-out). Applies
-  mode/uid/gid/mtime and symlinks from the manifest as import already
-  does. Refuses if claim identity mismatches (§4 P1) or the budget
-  check fails.
-- **publish barrier** — every `floorSecs` (and on preStop): walk the
-  workspace, diff (path, size, mtime, optionally xxhash for
-  mtime-unreliable trees) against the checkout-baseline manifest plus
-  in-memory dirt; upload changed/new files whole via the existing
-  guarded `put_whole` path (If-Match per key); issue deletes for
-  absent paths; CAS-rewrite the subtree manifest (seq++). Object
-  traffic rides the deployment's S3 proxy (the `ObjectStore` s3
-  backend pointed at the proxy endpoint — the MinIO path); each
-  barrier is validated by a gateway publish-intent first (§2.2). The
-  sidecar holds a proxy token + a gateway bearer, never S3
-  credentials.
-- **lease lifecycle** — claim the subtree cell at start, heartbeat,
-  **clean release in preStop** (the measured 17s replacement path);
-  the fence and self-recognition semantics come from the §4 re-scope.
-- **preStop drain** — final barrier + release, sized against
-  `terminationGracePeriodSeconds` ≥ 120 and the documented drain rate
-  (8–13 s/GiB measured); a dirty-set pressure valve forces an early
-  barrier when unpublished bytes exceed `dirtySetCapGiB`.
-- **sync verb (v1, HITL)** — on invocation (exec/signal/HTTP on
-  localhost, harness-triggered, never background): ask the gateway for
-  the manifest diff since the local baseline seq; apply under the
-  decided policy — locally-dirty files win, remote deletions honored
-  only on locally-clean paths, adds/changes fetched via the proxy;
-  write a machine-readable conflict report + exit status for the
-  harness; advance the local baseline to the synced seq. Runs only
-  between publish barriers (the sidecar serializes sync against its
-  own barrier; the model gate's sync arm covers the cross-writer
-  interleavings).
+**checkout** — `tier::import`'s manifest lane with `materialize: bytes`
+(hydrate fan-out). Verifies claim identity (§4 P1) and BOTH budgets
+(bytes vs the emptyDir sizeLimit; file count vs the v1 cap — the
+manifest `Inventory` already carries both). Writes the
+checkout-complete marker + baseline snapshot LAST. The agent container
+cannot start before the marker exists (§2.4 native-sidecar gating).
 
-### 2.2 Gateway (extend flint-hub-gateway — it is already the fleet's one door)
+**publish barrier** — every `floorSecs` and on preStop:
 
-Stateless; N replicas; everything durable lives in the bucket.
+1. **Consume the inbox first** (§2.2): if the subtree's
+   `.flint/inbox` cell is non-empty, run the forced mini-sync (fetch
+   the listed foreign adds/edits under the sync conflict policy) and
+   advance the baseline. A barrier NEVER runs against an unconsumed
+   inbox — this is what makes HITL uploads structurally
+   un-amputatable.
+2. Scan-diff (path, size, mtime, ctime; optional small-file hash)
+   against the **persisted baseline snapshot — never a re-seeded
+   bucket manifest**. Deletion basis: a path is delete-eligible only
+   if absent in THIS scan AND the previous scan (absence must survive
+   two consecutive scans — the rename-vs-walk race guard) AND present
+   in the sidecar's own baseline.
+3. Write the intent journal (keys + expected ETags) to the emptyDir.
+4. Upload changed/new files: ≤ 64 MiB via guarded `put_whole`
+   (If-Match per key); larger via streaming multipart compose. After
+   each upload, re-stat the source; on drift, re-queue for the next
+   barrier (torn-upload guard — residual risk for forced barriers is
+   documented, §3).
+5. **Manifest CAS** — a MERGE-capable variant of `write_at_barrier`
+   (new code; the reused writer rewrites the whole document from the
+   local walk and cannot merge): three-way merge of baseline vs local
+   vs bucket-current. Foreign entries (present in bucket-current,
+   absent from baseline and local) are PRESERVED and queued into the
+   inbox for the next sync — never dropped, never deleted.
+6. **Deletes last**, after the CAS, as garbage collection of keys the
+   new manifest no longer references — **etag-guarded** (HEAD +
+   compare the baseline ETag; a key whose ETag the sidecar does not
+   recognize is never deleted; note S3 DELETE itself is
+   unconditional, hence the HEAD guard). Reordered from v1
+   (upload→delete→CAS dangled the manifest on crash).
+7. Rewrite the baseline snapshot + clear the intent journal.
 
-- **Grade 2 — publish grant (the one non-S3 verb):** the sidecar POSTs
-  a publish intent {share, subtree, generation, keys+ETags}; the
-  gateway validates (a) lease holdership against the subtree cell,
-  (b) the declared layout (§4 P3), (c) claim identity, (d) every key
-  is inside the subtree and no key touches `.flint/` except the
-  manifest/lease cells the engine owns, then mints short-lived
-  presigned PUTs pinned to exactly those keys with the conditional
-  headers signed in. Bytes go pod → S3 direct. Non-holders are
-  refused, not detected later.
-- **Grade 1 — S3 proxy:** the same policy enforced with bytes
-  transiting the gateway; served by the `s3_surface` library (§2.3) so
-  it is also the fleet's S3-compatible read/write door where presigned
-  flows are awkward (browser uploads, CI).
-- **DECIDED (user, 2026-08-24): grade 1 is PRIMARY.** The deployment
-  runs an S3 proxy that holds the real S3 credentials; agents talk
-  ONLY to the proxy. Consequences:
-  - Presigned minting (grade 2) demotes to an optional optimization —
-    v1 needs no presigning at all. The publish-grant validation
-    (lease, layout, claim, key scoping) runs inline as allow/deny on
-    the proxied PUTs; non-holders are refused at the request.
-  - Flint's arbitration must live IN (or in front of) that proxy —
-    a credential-hiding proxy alone leaves writes cooperative
-    (If-Match detection, not enforcement). The natural shape: the
-    proxy IS the flint gateway (`s3_surface` + grant policy), or the
-    proxy chains to it.
-  - **Hard requirement — conditional-header fidelity:** the proxy
-    MUST pass If-Match / If-None-Match:* / ETags / x-amz-meta-flint-*
-    / checksum headers through untouched, both directions. Every
-    fencing mechanism (epoch CAS, manifest barrier, strict journal)
-    rides those headers; a proxy that strips or synthesizes them
-    breaks fencing SILENTLY. The store-conformance probes run
-    THROUGH the proxy, as a startup gate, not a doc note.
-  - Prefix isolation moves wholesale into the proxy's authz: IAM no
-    longer separates agents (they share the proxy's credential), so
-    the proxy's policy must scope each workspace identity to its
-    subtree — this is now a P-grade precondition, not advice.
-  - Topology: ALL bytes transit the proxy (unlike presigned
-    direct-to-S3), so checkout fan-out is bounded by proxy
-    throughput before S3's — the Phase 0 fan-out/burst measurements
-    must run through a proxy-shaped rig, and the proxy is per-cluster
-    + replicated (it is stateless; the decided per-cluster gateway
-    placement applies to it).
-  - Failure domain grows: proxy down now pauses CHECKOUTS as well as
-    publishes (presigned reads no longer bypass it). Running pods
-    keep serving local files.
-- **The HITL write path (v1):** a user editing/uploading through the
-  projects UI mid-session is a SECOND WRITER entering an agent's
-  subtree. UI writes therefore go through the gateway, which applies
-  them lease-aware: validates against the layout, stamps ETags for
-  If-Match round-trips (the v1.30 conditional-write machinery),
-  refuses or queues while the holder's publish barrier is in flight,
-  and records the write so the next `sync` diff carries it. UI writes
-  never race the sidecar invisibly.
-- **Auth:** agents authenticate to the proxy (bearer v1; the proxy's
-  own mechanism otherwise); SigV4 *verification* in `s3_surface`
-  serves proxy-side validation, and §9 Q3 shrinks to "which token
-  the sidecar presents".
-- **Failure mode by construction:** gateway/proxy down ⇒ checkouts
-  and publishes pause and RPO grows while pods keep serving local
-  files.
+**Per-key 412 policy (was unstated):** on an If-Match 412 during
+upload, HEAD the key and compare the `flush_uuid`/GenerationStamps
+metadata the store already stamps: my own crashed/torn earlier PUT ⇒
+adopt the ETag and continue; foreign (a HITL write) ⇒ **park the path,
+emit it in the conflict report, never If-Match-overwrite an ETag the
+sidecar did not itself publish** — the inherited flush arbitration is
+LOCAL-WINS-overwrite (`flush.rs:1391`) and is explicitly NOT reused
+here. The arbitrate loop is re-derived for flint-sync (it cannot lift
+`flush.rs` wholesale); the same rule covers ambiguous proxy errors
+(response lost after S3 applied the PUT).
 
-### 2.3 s3_surface (new module — ONE dialect, three placements)
+**sync verb (v1, HITL)** — harness-invoked (exec/localhost HTTP),
+never background. **Sync BEGINS with a full scan-diff** — "locally
+dirty" means dirty per THAT scan against the baseline, never per the
+last barrier's snapshot (otherwise sync honors a remote delete over
+the agent's un-scanned latest work). Then: gateway manifest+inbox diff
+since the baseline seq; apply — locally-dirty wins, remote deletions
+only on locally-clean paths, adds/changes fetched via the proxy;
+machine-readable conflict report + exit status; baseline advances.
+Serialized against the sidecar's own barrier.
 
-The decision of record: **every REST/file surface in the system is the
-S3 dialect** — the hub's file API converges onto it (live view), the
-gateway speaks it (fleet door), the localhost sidecar (libflint §8
-adapter 3) is the same library placed a third way, and direct-mode
-non-mount access (FUSE and lean alike) is plain S3 against the bucket
-(published view). Same client code everywhere; the consistency
-contracts (docs/flint-*-consistency.pdf) say which view you are
-reading.
+**Restart matrix (first-class, was the review's top theme):**
 
-Floor (per libflint §8, which this consolidates): SigV4 header +
-presigned validation, ListObjectsV2, Get/Put/Head/Delete + Range,
-conditional writes (If-Match, If-None-Match:*), DeleteObjects, full
-multipart (parts 1–10000, 5 MiB min, out-of-order, re-uploadable).
-The three documented traps are requirements, not surprises: the ETag
-is md5-of-part-md5s + `-N` (the s3proxy #338 breakage class);
-CompleteMultipartUpload's 200-with-error-in-body must be implemented;
-complete-by-concatenation costs 3× IO — the reserve-and-copy decision
-is made explicitly, not inherited.
+| State on wake | Meaning | Action |
+| --- | --- | --- |
+| No marker, empty tree | fresh pod | checkout |
+| No marker, partial tree | checkout crashed (agent never started — gated) | resume checkout (import local-wins = natural resume) |
+| Marker present | container restart over a LIVE tree | **never re-materialize**: reload the persisted baseline, rescan to rebuild dirt, self-recognize the lease via the persisted incarnation id, continue barriers |
 
-Extensions the dialect adds (each one deliberate):
+Re-checkout over a live tree is forbidden: import's local-wins
+protects only PRESENT paths, so it would resurrect the agent's
+unpublished deletes into a running session — an implicit non-quiescent
+sync. The persisted incarnation id is emptyDir-scoped (a replacement
+pod gets a fresh emptyDir ⇒ fresh identity), so it is NOT the
+workspace-stable identity P4 forbids; only the same pod's restarted
+container inherits it, which is exactly when self-supersede is safe.
+The claim-wait bookkeeping {last_token, quiet_polls} also persists so
+container restarts resume the takeover observation instead of
+resetting it.
 
-- **RenameObject** — the S3 Express One Zone verb, served on general
-  buckets by us: atomic on the hub's live view (a real rename under
-  the coherence authority — something no real GP S3 offers), and on
-  the bucket view implemented as guarded copy+delete at the gateway.
-- **posix metadata** — `x-amz-meta-flint-*` stamps, the A12 convention
-  the tier already writes.
-- **activity classification** — data ops count as activity; HEAD and
-  status/listing polls do not, configurable — a polling S3 browser
-  must not pin a share awake (the idle-ladder lesson: a conditional
-  GET answering 304 pins exactly as hard as a 200).
+**lease lifecycle** — claim the subtree cell at start, heartbeat,
+clean release in preStop (the 17 s path). Unclean-death lockout
+(~60–110 s) is ACCEPTED for v1 and the replacement pod's probes are
+budgeted for it (§2.4); the P4 fencing actor is NOT a v1 deliverable
+(its "pod deletion finality" trigger is unsound — force-delete does
+not SIGKILL and a partitioned node's process outlives its pod object;
+deposing on it would manufacture the §2.2 straggler).
 
-Migration: the hub dual-serves `/files` and the S3 dialect for one
-release; `/files` deprecates after the front door moves.
+**preStop drain** — early drain begins at observed
+`deletionTimestamp`; final barrier after the agent exits (native
+sidecar ordering). Sizing is now explicit and operator-enforced:
+`dirtySetCapGiB ≤ (grace − agentExitBudget − release) ×
+proxyMeasuredDrainRate / maxCoScheduledLeanPodsPerNode` — the 8–13
+s/GiB figure predates the proxy and is re-measured in Phase 0b;
+spot reclaim is a NODE event, so co-drained pods share the proxy.
+`dirtySetCapGiB` counts only files smaller than itself — a single hot
+file larger than the cap must not convert the valve into a
+continuous-republish forcing function; such files get a per-file
+publish cooldown instead (the amplification pathology, §6).
+
+### 2.2 Gateway (control plane; per-cluster, stateless, N replicas)
+
+- **Publish intent + the barrier-window/inbox cell.** Statelessness
+  needs a durable coordination substrate: `<subtree>/.flint/inbox` — a
+  CAS cell that is BOTH the HITL inbox and the barrier-window token.
+  The sidecar's intent CAS-marks the window open (with a deadline +
+  epoch, so a dead sidecar cannot wedge HITL past lease expiry) and
+  clears it after the manifest CAS; every replica checks it before
+  admitting a UI write, closing the two-replica race the review proved
+  (a barrier through replica A was invisible to replica B). Starvation
+  bound: after N consecutive HITL refusals, the next barrier admission
+  defers to the pending write.
+- **The HITL write path.** UI writes land as objects plus **inbox
+  entries — never direct manifest edits** (a gateway manifest bump is
+  amputated by the sidecar's next whole-document CAS; the review
+  reproduced this end-to-end three ways). The sidecar consumes the
+  inbox at every barrier (§2.1 step 1) and at every sync; a HITL
+  upload therefore survives any number of barriers without an explicit
+  sync. Refuse-vs-queue during an open window is pinned: refuse with
+  Retry-After derived from the window deadline.
+- **Takeover fence rotation (the straggler fix).** A successor's claim
+  path CAS-rewrites the subtree manifest (seq++, content-identical)
+  BEFORE serving, so a deposed predecessor's in-flight manifest CAS
+  412s — the inherited fences do not cover lean (the MPU sweep aborts
+  only multipart; per-key If-Match has no purchase because a
+  checkout-only successor rotates no data ETags; the epoch residual
+  note in `epoch.rs:28` assumes a PUBLISHING successor). Additionally
+  every sidecar PUT carries its epoch in the GenerationStamps and the
+  gateway's validation is **per-request** (granularity now stated),
+  rejecting writes whose epoch is below the subtree cell's.
+- **Proxy posture (decided):** grade-1 primary; conditional-header
+  fidelity is a conformance GATE, hardened per the review: probes have
+  **must-FAIL arms** (a stale If-Match that MUST 412; If-None-Match:*
+  over an existing key that MUST 412 — stripping is only observable as
+  a forbidden success), enumerate **every proxy replica** (headless
+  Service), re-run on a cadence and on observed proxy version change
+  (refusing barriers while drifted), and cover every op class a fence
+  rides: conditional multipart Complete + its 200-with-error-body,
+  copy-source-if-match, DeleteObjects, ETag stability across
+  PUT/multipart/HEAD/GET.
+- **Auth:** sidecar holds a proxy token + a gateway bearer; SigV4
+  verification arrives with `s3_surface`.
+- **Failure mode (corrected §7):** gateway/proxy down ⇒ publishes
+  pause AND checkouts/restarts wedge AND sync is unavailable AND HITL
+  UI writes fail loudly. Running pods keep serving local files.
+
+### 2.3 s3_surface (ONE dialect, three placements)
+
+Unchanged from v1 of this plan: the S3 dialect everywhere (hub live
+view, gateway door, localhost adapter later); floor = SigV4 +
+conditional writes + full multipart with the three documented traps
+(multipart ETag shape, 200-with-error-in-body, 3× IO concat);
+extensions: RenameObject, `x-amz-meta-flint-*`, activity
+classification. Hub dual-serves `/files` + the dialect for one release.
 
 ### 2.4 Operator / webhook
 
-- CR: `mode: direct` + `variant: lean` (flush profile: floorSecs,
-  dirtySetCapGiB, quiesceBoundSecs — a durability contract, per the
-  consistency docs).
-- **Injection shrinks to:** an emptyDir (sizeLimit from the workspace
-  budget) + an ordinary sidecar container + env + preStop +
-  startupProbe (checkout complete). No privileged, no /dev/fuse, no
-  mount propagation, no broker. failurePolicy: Fail, two replicas,
-  opt-in selectors — unchanged from the FUSE design.
-- **The operator remains the single allocator:** it writes
-  `.flint/claim` (If-None-Match:* at share birth) and `.flint/layout`
-  (the declared, non-overlapping subtree set) with the provisioner
-  principal; the webhook refuses a pod whose subtree is not in the
-  layout; the gateway enforces the same facts independently at grant
-  time — two unforgeable layers, the webhook is not the boundary.
+- **Native sidecar containers are MANDATORY** (initContainer with
+  `restartPolicy: Always`, K8s ≥ 1.29): the startupProbe on a plain
+  container gates nothing the design needs — kubelet starts siblings
+  on `started`, and pod deletion SIGTERMs regular containers in
+  parallel. Native sidecars give both the start gate (agent cannot
+  start before checkout-complete) and the stop ordering (drain scans a
+  quiescent tree after the agent exits). Without the start gate, an
+  early agent's scaffold files are silently clobbered by rename-
+  materialize or published over user data by local-wins — both
+  observed in the review.
+- **Probes derived, never fleet constants:** the webhook computes the
+  sidecar's startupProbe budget from the workspace Inventory × the
+  Phase-0b proxy-measured checkout rate + the unclean-death lockout
+  (~110 s) + headroom; "checkout complete" moves to readiness where
+  claiming states need to hold longer. (The hub's 600 s default kills
+  a 20 GiB checkout at the only measured rate.)
+- **Principal split for bucket-admin ops:** bootstrap (versioning /
+  lifecycle read-write / bucket-wide MPU probe) runs ONLY under the
+  operator/provisioner principal — never in flint-sync. The takeover
+  MPU sweep's `list_uploads` is bucket-wide on the wire
+  (`s3.rs:352` MinIO workaround): through a correctly project-scoped
+  proxy it is DENIED and would fail every claim — the sweep becomes an
+  operator-side job (or the proxy serves a scoped MPU view), and the
+  conformance gate gains an anti-vacuity arm proving a
+  directory-prefixed probe upload is FOUND on MinIO (do not restore
+  the raw server-side Prefix while MinIO is in scope).
+- **Claim adopt arm (was undefined at its hard case):** the claim
+  carries a durable, user-declared project identity from the CR SPEC
+  (stable across CR delete/recreate — never the CR UID). On a 412 at
+  share birth the operator GETs the standing claim: identities equal ⇒
+  adopt (recreate-over-own-data is a designed lifecycle: DR, GitOps,
+  cross-cluster moves); different ⇒ refusing status condition, never
+  on-the-fly adoption. Checkout/intents verify the injected identity
+  against the cell by value. BOTH drill legs ship (adopt-own must
+  succeed; foreign-on-reused-prefix must refuse), each proven to fail
+  against the other arm's naive implementation.
+- CR surface: flush profile (floorSecs, dirtySetCapGiB, per-file
+  cooldown, quiesceBoundSecs) as a durability contract; emptyDir
+  sizeLimit + file-count budget; `failurePolicy: Fail`, two replicas,
+  opt-in selectors.
 
-## 3. What v1 deliberately does NOT solve
+## 3. What v1 deliberately does NOT solve (stated honestly)
 
-- **Cross-pod visibility inside a live workspace**: a foreign reader of
-  a lean subtree reads the bucket (RPO-consistent snapshots) or asks
-  for a `sync`. No flush-to-open promise in v1.
-- **Files > 5 GiB** publish via presigned multipart or are refused in
-  v1 (decide in §9) — a presigned single PUT caps at 5 GiB.
-- **mtime-granularity blindness**: a same-size same-mtime rewrite
-  inside one mtime tick can evade the scan. The barrier records
-  (size, mtime, ctime where available) and optionally hashes small
-  files; the drill battery must include a leg that TRIES to evade the
-  scan and the doc states the residual honestly.
+- Cross-pod live visibility (snapshots + sync only).
+- **Torn whole-file uploads of files written DURING a forced barrier**
+  (preStop under a SIGTERM-ignoring agent, pressure valve): two-pass
+  scan + re-stat + re-queue shrink the window; the residual is
+  documented in the CRD contract. A file hotter than
+  `quiesceBoundSecs` faces the stated dilemma: publish possibly-torn
+  or defer (growing RPO) — the knob picks, the report says which.
+- mtime-granularity scan evasion (unchanged from v1; drill leg tries
+  to evade and the residual is stated).
+- Within-project enforcement is gateway-validated + CAS-cooperative
+  (the proxy's tenancy is project-granular — §9 Q6); bucket
+  versioning makes clobbers recoverable.
 
-## 4. Preconditions (re-derived from the review for the lean shape)
+## 4. Preconditions
 
-- **P1 — claim identity** (`.flint/claim`, If-None-Match:* at share
-  birth; verified by checkout, every grant, every publish). Mandatory
-  before anything else: fresh-state pods run the adopt path on every
-  boot, so prefix-reuse adoption is an every-boot hazard without it.
-  This also closes the standing B12 defect for hub mode.
-- **P2 — per-subtree manifests + a designated root owner** (the
-  operator/provisioner writes the root manifest; subtree manifests at
-  `<subtree>/.flint/manifest`). Required: N writers per prefix and one
-  CAS document is last-writer-wins amputation on the first concurrent
-  barrier.
-- **P3 — declared layout** (`.flint/layout`, operator-owned, CAS):
-  subtree assignment is allocation, not discovery — racing S3-side
-  claims cannot arbitrate overlap, and a parent-scope claim's takeover
-  sweep would fence every child holder's in-flight publish.
-- **P4 — subtree lease re-scope** of `epoch.rs`: cell at
-  `<subtree>/.flint/epoch` (the key is already prefix-parametric; the
-  MPU fence is already scoped by data_prefix), takeover sweep scoped
-  to exactly the subtree, self-recognition semantics decided (a fresh
-  emptyDir cannot self-recognize; preStop release is the fast path;
-  do NOT reuse workspace-stable holder identity — it deposes a live
-  mid-flush writer; an operator-side fencing actor that has witnessed
-  pod deletion finality is the only safe accelerator).
+- **P1 — claim identity** with the §2.4 adopt semantics.
+- **P2 — per-subtree manifests + designated root owner.**
+- **P3 — declared layout** (operator-allocated, CAS).
+- **P4 — subtree lease re-scope** of `epoch.rs` + the §2.2 takeover
+  fence rotation; fencing actor explicitly deferred (v1 accepts the
+  lockout).
+- **P5 (new) — proxy conformance + scoping:** the hardened gate of
+  §2.2, plus the principal split of §2.4, as startup-enforced facts.
+- **Formal model gate:** P3+P4 (lease + layout + grant/handoff,
+  including the deposed-straggler barrier), the **inbox/window cell**,
+  and the **barrier × HITL-write product** (the sync arm alone was too
+  narrow — the review's worst finding lived exactly in the un-modeled
+  product).
 
-**Formal model gate:** P3+P4 (layout + subtree lease, including the
-grant protocol's interaction with lease handoff) get a spec module
-before code — the FlintTierSession precedent refuted the naive lease
-design pre-code, and "the abstraction was the bug" is a three-time
-repeat offender in this repo.
+## 5. Phases (observed-red discipline throughout)
 
-## 5. Phases
+- **Phase 0 — models + measurements:**
+  0a. Formal model per §4.
+  0b. Checkout AND publish rates through a PROXY-SHAPED rig, on two
+      axes: bytes (s/GiB) and **file count (100k and 1M entries: walk
+      wall-time, digest cost, manifest bytes, sidecar peak RSS,
+      barrier duration, HITL-refusal window)** — acceptance numbers,
+      and the v1 file-count cap falls out of them.
+  0c. Burst rig N≥1000 proxy-shaped; acceptance criterion is the
+      BINDING constraint: sustained GB/s per proxy replica (both NIC
+      directions) + the replica-sizing formula
+      `ceil(N×W×2/(T×replica_GBps))`; checkout admission (a
+      gateway-issued concurrency token) so bursts queue instead of
+      timing out probes. A measured proxy bottleneck is the explicit
+      trigger that un-defers grade-2 presigned reads.
+- **Phase 1 — bucket format:** claim (+adopt), layout, manifest split
+  + **merge-capable barrier writer**, inbox/window cell, epoch
+  re-scope. Lifecycle at fleet scale: shared buckets get ONE
+  bucket-wide MPU-abort rule (S3 caps 1,000 rules/bucket);
+  bucket-per-project keeps the per-share rule. Conformance vs MinIO +
+  real S3, through a proxy, with the must-fail arms.
+- **Phase 2 — flint-sync:** checkout/resume, restart matrix, barrier
+  (order, merge, guards, 412 policy, multipart), sync-with-scan,
+  drain. Battery: container-restart-with-unpublished-delete (file must
+  NOT reappear; delete publishes next barrier), crash-replacement,
+  scan-evasion, directory-rename-during-barrier, hot-file-through-
+  preStop, proxy-response-lost mid-barrier (AdoptOwn convergence),
+  git/pip/sqlite e2e.
+- **Phase 3 — gateway:** intent/window/inbox verbs, HITL path, sync
+  diff, per-request epoch validation, bearer + revocation, hardened
+  conformance gate, outage drill asserting ALL FOUR effects (publish
+  pause, checkout wedge, sync dead, UI writes fail with a distinct
+  error), observability deliverables: per-pod RPO gauge
+  (seconds-since-last-barrier + unpublished bytes), publish-failure
+  and checkout-wedged alerts, conflict-report surfacing.
+- **Phase 4 — operator/webhook:** native-sidecar injection, derived
+  probes, layout/claim (+both adopt legs), principal-split bootstrap,
+  operator-side MPU sweep, kind e2e (incl. agent-starts-after-
+  checkout with a plain-container failing control).
+- **Phase 5 — s3_surface on the hub** (unchanged; independent).
+- **Phase 6 — cluster drill:** spot NODE-level reclaim (all pods near
+  cap + one SIGTERM-ignoring agent as the control), hard-kill loss =
+  RPO exactly, claim legs (both arms), HITL-upload-survives-two-
+  barriers-no-sync, UI-edit + agent-edit conflict leg (both versions
+  recoverable, conflict surfaced, never a silent winner), straggler
+  barrier after takeover, burst wave with admission, gateway kill
+  mid-fleet, mixed hub+lean bucket.
 
-Each phase lands with observed-red tests (every leg proven to fail
-against the reverted defect or with a failing control — the
-cluster-drill discipline: 24 of 41 naive legs would have passed if
-broken).
+## 6. Economics (amplification stated, not hidden)
 
-- **Phase 0 — models + measurements** (gates, ~days):
-  0a. Formal model: subtree lease + declared layout + grant protocol.
-  0b. Measure checkout with the hydrate fan-out against real S3
-      (72.5 s/GiB measured pre-fan-out vs 1–13 theoretical — sizes
-      the cold-start claim; publish rate is already measured).
-  0c. Burst rig: N≥1000 correlated checkouts against an unpartitioned
-      bucket (503 SlowDown ramp; jitter + manifest-GET-first).
-  Both 0b and 0c run PROXY-SHAPED (a proxy in front of the store) —
-  all bytes transit the deployment proxy, so its throughput is the
-  binding constraint before S3's.
-- **Phase 1 — bucket format**: claim cell, layout cell, manifest
-  split (subtree + root), epoch re-scope per the model. Conformance
-  tests against MinIO and real S3 (the store trait's MinIO listing
-  workaround gets its server-side Prefix back — its "buckets are
-  per-volume" justification is invalidated by multi-workspace
-  buckets). Lifecycle at fleet scale: S3 caps lifecycle rules at
-  1,000/bucket, so prefix-per-project SHARED buckets must use ONE
-  bucket-wide MPU-abort rule (safe — MPU abort is key-agnostic)
-  instead of today's per-prefix rule; bucket-per-project keeps the
-  per-share rule as-is. Bootstrap detects which shape it is in.
-- **Phase 2 — flint-sync**: materializing checkout, scan-diff publish
-  barrier, deletes-as-diff, preStop drain + release, budget check.
-  Test battery: crash-replacement legs (resurrection bounded by RPO
-  and ONLY by RPO; lease lockout measured; clean-release fast path),
-  scan-evasion leg (§3), git/pip/sqlite single-pod workload e2e on a
-  real workspace.
-- **Phase 3 — gateway**: publish-intent verb + policy (non-holder
-  refused; `.flint/` protected), sync-diff verb, HITL write path,
-  bearer auth + revocation drill, proxy conformance gate (conditional
-  headers through the deployment proxy, probed at startup),
-  gateway-outage drill (publish-pause, pods keep serving, RPO growth
-  observed and bounded). Presigned mint: deferred (§8).
-- **Phase 4 — operator/webhook**: `variant: lean` injection, layout
-  allocation + claim stamping at share birth, verify pass +
-  stale-sidecar reporting, kind e2e (the idle ladder is N/A for lean
-  shares — assert nothing renders standing).
-- **Phase 5 — s3_surface on the hub**: file API v2 dual-serve,
-  RenameObject, posix meta, activity classification; validate with
-  rclone/boto3/aws-cli against a live share and against the bucket;
-  front-door migration notes.
-- **Phase 6 — cluster drill** (runb* tradition, anti-vacuity guards on
-  every leg): spot-reclaim drain within the 2-minute notice
-  (interruption handler + grace wiring as deployment preconditions),
-  hard-kill loss bound = RPO exactly, claim-mismatch refusal,
-  S3-console foreign-write fates, burst wave, gateway kill mid-fleet,
-  mixed posture (hub share + lean shares, one bucket, different
-  prefixes).
+- Idle = S3 only, structurally. Lease cells exist only while a writer
+  runs.
+- Publish amplification is REAL and bounded by policy, not physics: a
+  2 GiB hot file re-uploads whole per barrier (~2.9 TiB/day at 60 s
+  cadence) — hence the per-file cooldown for > `whole_put_max` files,
+  `dirtySetCapGiB` excluding over-cap files, and the CRD stating
+  bytes/day expectations. UploadPartCopy of unchanged ranges for the
+  large-file class is the designed v2 lever.
+- Manifest cost scales with FILE COUNT (whole-document rewrite per
+  changed barrier): the 0b axis measures it; skip-digest-on-no-diff
+  and per-entry serialization caching are v1 mitigations.
+- Checkout: full-workspace GET per pod start through the proxy —
+  Phase 0b/0c numbers × workspace size; per-NODE cache is FUSE/
+  mount-pod territory, out of scope.
 
-Dependency note: Phases 1–2 need only P1–P4; Phase 3 can proceed in
-parallel after the Phase-0 model lands; Phase 5 is independent of 2–4
-and can start any time (it also pays down the file-API convergence
-regardless of lean's fate).
+## 7. Failure model (corrected)
 
-## 6. Economics (shapes, not precision)
-
-- Idle = S3 only, structurally (nothing standing). Lease cells exist
-  only while a writer pod runs and releases on preStop — the FUSE
-  variant's 3000-heartbeating-cells number does not arise.
-- Publish costs: whole-file re-upload of touched files per barrier —
-  the interval-capture precision (UploadPartCopy clean runs) is
-  deliberately given up; bound with `dirtySetCapGiB` and the 60s
-  floor. The fsync-churn pathology cannot occur (no interception —
-  the barrier is the only publisher).
-- Checkout costs: full-workspace GET per pod start — the Phase-0b
-  number times workspace size is the cold-start bill; per-NODE cache
-  reuse is FUSE/mount-pod territory, out of scope here.
-
-## 7. Failure model deltas vs the FUSE variant
-
-Same loss bounds (RPO per pod, preStop drain, hard-crash drains
-nothing) with three rows improved: no ENOTCONN/daemon-crash class at
-all (there is no daemon in the data path); no recovery-order contract
-(nothing to restart in place — the files are just there); gateway
-outage is publish-pause only. One row unchanged and still owed to the
-CRD surface: RPO stated per mode, measured event rate on the fleet.
+Loss bounds: RPO per pod; preStop drain best-effort within the §2.1
+arithmetic; hard crash drains nothing; torn-hot-file residual per §3.
+No ENOTCONN class, no recovery-order contract, no daemon in the data
+path. **Gateway/proxy outage: publishes pause + starting pods wedge +
+sync unavailable + HITL writes fail** (running pods serve local files
+throughout). Container restart: bounded by the restart matrix — no
+resurrection, lease self-recognized, dirt rebuilt by rescan.
 
 ## 8. Explicit deferrals
 
-- Partial checkout (brings back the removal journal AND a
-  checked-out-set record — design before implementing).
-- Presigned grade-2 grants (direct-to-S3 bytes; only if the proxy
-  becomes a measured bottleneck).
-- On-demand foreign-subtree refresh beyond local-wins `sync`.
-- SigV4 pod identity / TokenReview auth at the gateway.
-- Per-NODE shared checkout cache.
-- GCS/Azure surface parity (new store impls + tenancy appendix).
+- Partial checkout (returns the removal journal + checked-out-set).
+- Presigned grade-2 (un-deferred only by a measured 0c proxy
+  bottleneck).
+- On-demand foreign-subtree refresh beyond sync.
+- SigV4 pod identity / TokenReview at the gateway.
+- Per-NODE shared checkout cache; GCS/Azure.
+- UploadPartCopy range publish for large files.
+- P4 fencing actor (needs node-level fencing semantics + the takeover
+  rotation in place first).
 
-## 9. Open questions (user decisions)
+## 9. Decisions and open questions
 
-1. Gateway home: extend `flint-hub-gateway` (recommended — it is
-   already the fleet door with the credential and the bearer
-   machinery) or a new binary?
-   **DECIDED (user, 2026-08-24): deployment is per-cluster.** The
-   gateway is stateless — every validation input (lease, layout,
-   claim) lives in the bucket — so per-cluster replicas need no
-   coordination; grant latency stays cluster-local and each cluster
-   can bind the gateway to its own ServiceAccount/OIDC trust. The
-   binary-home half (extend vs new) stays open.
-2. v1 large files: presigned multipart, or refuse > 5 GiB in lean
-   mode (routing those workspaces to hub/FUSE)?
-3. Auth v1: per-share bearer only, or bearer + SigV4 from day one?
-4. ~~Does the `sync` verb ship in v1?~~
-   **DECIDED (user, 2026-08-24): the `sync` verb ships in v1.**
-   Rationale: the agent harness supports human-in-the-loop — a user
-   uploads or edits files mid-session through the project UI and a
-   long-lived agent must pick them up without being restarted.
-   Design constraints (from the review + this discussion):
-   - Explicit and quiescent only: the agent/harness invokes it at a
-     moment it chooses; there is NO background refresh (online
-     refresh inverts import's pre-listener + local-wins invariants).
-   - Conflict policy v1: locally-dirty files win; remote deletions
-     are honored only on locally-clean paths; conflicts are
-     surfaced to the harness (exit status + report file), never
-     silently merged.
-   - The Phase 0 formal-model gate grows a sync arm: the subtree
-     lease × sync interaction (a sync during another writer's
-     publish window) must be modeled before the verb is coded.
-5. Does the projects-service UI read through the deployment proxy or
-   through the flint gateway? (Writes go through the gateway either
-   way — the HITL path; reads could go either.)
-6. ~~Does the deployment proxy support per-tenant/prefix authz?~~
-   **DECIDED (user, 2026-08-24): each project gets a dedicated bucket
-   OR a dedicated prefix** — the proxy's tenancy is PROJECT-granular.
-   Consequences:
-   - Cross-project isolation (the privacy + fleet-blast-radius
-     property) is proxy-native: a project's token cannot touch
-     another project's bucket/prefix. This is the isolation that
-     matters at multi-user scale.
-   - The residual is WITHIN-project: agent workspaces of one project
-     share its scope, so the one-writer-per-subtree contract inside
-     a project stays gateway-validated + manifest-CAS cooperative.
-     Accepted for v1: blast radius = one project's own runs, and
-     bucket versioning (hard requirement) makes clobbers recoverable.
-   - Flint supports both shapes natively — a share is
-     {endpoint, bucket, prefix}, and `.flint/` cells sit at the
-     prefix root either way. Bucket-per-project: hard S3-level
-     isolation (rate limits, versioning, lifecycle per project);
-     watch the account bucket quota (10k default). Prefix-per-project
-     in shared buckets: operationally lighter; see the Phase 1
-     lifecycle note (1,000-rules-per-bucket cap) and the new-prefix
-     503 ramp at burst (0c covers it).
+1. Gateway home: extend `flint-hub-gateway` (recommended) or new
+   binary — open. **Deployment: per-cluster (DECIDED).**
+2. Large files: **DECIDED by review — streaming multipart compose in
+   v1** (no presigning needed); >5 GiB works; checkout refuses only
+   what Phase 0b says is unpublishable.
+3. Auth v1: bearer only vs + SigV4 — open.
+4. **Sync verb ships in v1 (DECIDED)** — semantics per §2.1.
+5. UI read path: through the proxy or the gateway — open (writes go
+   through the gateway either way).
+6. **Proxy tenancy: project-granular, dedicated bucket or prefix per
+   project (DECIDED).** Cross-project isolation proxy-native;
+   within-project residual accepted for v1 (versioning recovers).
+
+## 10. Review record (2026-08-24, 12 agents, 6 dimensions × verify)
+
+18 CONFIRMED + 5 DOWNGRADED-but-real; 1 refuted. One line each; all
+folded above.
+
+Critical: HITL upload amputated/deleted by the barrier's whole-document
+CAS-rewrite — found independently by THREE dimensions (→ inbox cell +
+merge writer + baseline-pinned deletes, §2.1/§2.2); barrier order
+dangled the manifest + stranded ETags (→ upload→CAS→GC-deletes + intent
+journal + 412 policy); publish-side both-writers collision silently
+LOCAL-WINS overwrites the UI edit via inherited arbitration (→ park +
+conflict report, never overwrite foreign ETags); sync consults dirt
+that cannot exist yet (→ sync begins with a scan); deposed straggler's
+barrier is unfenced — MPU sweep/If-Match/manifest CAS all fence the
+wrong party (→ takeover manifest rotation + per-request epoch
+validation); >64 MiB/5 GiB files check out but can never publish (→
+streaming multipart, `put_whole` never past `whole_put_max`); plain
+sidecar + startupProbe gates neither start nor stop (→ native sidecars
+mandatory, K8s ≥1.29); container restart over a live tree resurrects
+unpublished deletes + 60 s lease lockout (→ restart matrix + emptyDir
+bookkeeping + incarnation id).
+
+Major: two-replica gateway cannot serialize the barrier window (→ the
+window cell); replacement pod crash-loops through the lockout — probe
+budgets reset the observation clock (→ derived probes + persisted
+{last_token, quiet_polls}); claim adopt arm undefined — wedge vs
+adoption dilemma (→ declared identity + both legs); conformance probe
+was startup-only/one-replica/wrong op classes (→ hardened gate);
+bucket-admin ops through a scoped proxy fail the claim path (→
+principal split + operator-side sweep + MinIO anti-vacuity arm);
+scan-vs-mutation races (→ two-pass absence + etag-guarded deletes +
+re-stat); barrier cost scales with file count (→ 0b axis + cap +
+mitigations); whole-file amplification + dirtySetCap inversion (→
+cooldown + cap semantics); drain arithmetic unsound (→ §2.1 formula +
+early drain + node-level spot leg); gateway-outage story
+self-contradictory + probe budgets (→ §7 + derived probes); proxy
+failure mid-barrier spec gap (→ 412/ambiguous policy); 0c oracle
+measured the non-binding constraint (→ replica-sizing acceptance +
+admission).
+
+Refuted (correctly): "partial checkout mass-deletes on container
+restart" — the barrier cannot run without a completed checkout's
+baseline, and import's local-wins makes re-checkout a natural resume;
+the surviving arms (resurrected deletes, lease lockout) are folded.
