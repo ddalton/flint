@@ -510,6 +510,43 @@ async fn window_refuses_hitl_and_expiry_unwedges() {
     inbox::gateway_append(store.as_ref(), &sc.cfg, entry("b.txt")).await.unwrap();
 }
 
+/// Files over whole_put_max go through the streaming multipart compose
+/// (never put_whole): publish, guarded update, and roundtrip must all
+/// hold on that path. whole_put_max is shrunk so a small file takes the
+/// large-file road against MemoryStore's real MPU semantics.
+#[tokio::test]
+async fn large_file_publishes_via_compose_and_roundtrips() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    sc.cfg.whole_put_max = 8; // 8 bytes: everything bigger composes
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+
+    let big_v1: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    write(dir.path(), "model.bin", &big_v1);
+    let r = sc.run_barrier().await.unwrap();
+    assert_eq!(r.uploaded, vec!["model.bin".to_string()]);
+    assert!(r.deferred.is_empty());
+
+    // Roundtrip through a fresh checkout.
+    let dir2 = tempfile::tempdir().unwrap();
+    let mut sc2 = sidecar(&store, dir2.path()).await;
+    sc2.checkout().await.unwrap();
+    assert_eq!(read(dir2.path(), "model.bin").unwrap(), big_v1);
+
+    // Guarded update on the compose path (If-Match the prior etag).
+    let big_v2 = format!("{big_v1}and more\n");
+    write(dir.path(), "model.bin", &big_v2);
+    backdate_baseline(&sc, "model.bin");
+    let r = sc.run_barrier().await.unwrap();
+    assert_eq!(r.uploaded, vec!["model.bin".to_string()]);
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    let cited = &m.manifest.entries["model.bin"];
+    let (_, body) = store.get_whole(&cited.key, Some(&cited.etag)).await.unwrap();
+    assert_eq!(String::from_utf8(body.to_vec()).unwrap(), big_v2);
+}
+
 /// The occupancy lock: a second sidecar over the SAME workspace tree
 /// must refuse to start — self-recognition of the lease is only sound
 /// because the previous process is provably gone (observed live on the

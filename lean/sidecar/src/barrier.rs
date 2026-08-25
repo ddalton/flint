@@ -26,6 +26,9 @@ pub struct BarrierReport {
     pub parked: Vec<String>,
     pub consumed: usize,
     pub foreign_queued: usize,
+    /// Paths whose transfer drifted or was swept mid-compose: nothing
+    /// published, nothing advanced; the next scan re-queues them.
+    pub deferred: Vec<String>,
     pub no_change: bool,
 }
 
@@ -305,6 +308,9 @@ impl Sidecar {
                     })?;
                     report.parked.push(path.clone());
                 }
+                UploadOutcome::Deferred => {
+                    report.deferred.push(path.clone());
+                }
             }
         }
 
@@ -462,6 +468,99 @@ impl Sidecar {
         Ok(report)
     }
 
+    /// The > whole_put_max path: contiguous `PartSource::Local` chunks
+    /// through `compose_generation` (streaming multipart; the store
+    /// aborts its partial assembly on every failure path). The CRC is
+    /// computed by a streaming pass first; a writer racing the compose
+    /// fails server-side validation and the path DEFERS to the next
+    /// barrier — publish-possibly-torn is put_whole's documented
+    /// dilemma, not this path's.
+    #[allow(clippy::too_many_arguments)]
+    async fn upload_compose(
+        &self,
+        path: &str,
+        key: &str,
+        local_path: &Path,
+        size: u64,
+        scanned: &scan::ScanEntry,
+        condition: PutCondition,
+        stamps: GenerationStamps,
+        generation: u64,
+        epoch: u64,
+    ) -> LeanResult<UploadOutcome> {
+        use std::io::Read;
+        // Streaming CRC pass.
+        let mut crc = flint_store::Crc64Nvme::new();
+        {
+            let mut f = std::fs::File::open(local_path)?;
+            let mut buf = vec![0u8; 4 << 20];
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                crc.update(&buf[..n]);
+            }
+        }
+        let crc = crc.finalize();
+
+        // Part grid: within [min_part_size, ...], at most max_parts,
+        // contiguous from 0.
+        let min_part = self.store.min_part_size().max(1);
+        let max_parts = self.store.max_parts().max(1) as u64;
+        let mut chunk = self.cfg.whole_put_max.max(min_part);
+        let need = size.div_ceil(chunk);
+        if need > max_parts {
+            chunk = size.div_ceil(max_parts).div_ceil(min_part) * min_part;
+        }
+        let mut parts = vec![];
+        let mut off = 0u64;
+        while off < size {
+            let len = chunk.min(size - off);
+            parts.push(flint_store::PartSource::Local { offset: off, len });
+            off += len;
+        }
+
+        let spec = flint_store::ComposeSpec {
+            key,
+            local_path,
+            parts,
+            base_key: None,
+            base_etag: None,
+            condition,
+            stamps: stamps.clone(),
+            crc64: crc,
+        };
+        match self.store.compose_generation(&spec).await {
+            Ok(meta) => {
+                Ok(UploadOutcome::published(path, key.to_string(), meta.etag, crc, scanned, generation, epoch))
+            }
+            Err(StoreError::ChecksumMismatch(_)) | Err(StoreError::NoSuchUpload(_)) => {
+                // Drift mid-compose, or the operator sweep aborted us:
+                // nothing published; the next barrier re-queues.
+                Ok(UploadOutcome::Deferred)
+            }
+            Err(StoreError::PreconditionFailed(_)) => {
+                let head = self.store.head(key).await?;
+                let head_stamps = GenerationStamps::from_meta(&head.meta);
+                let own = head_stamps
+                    .as_ref()
+                    .map(|s| s.flush_uuid == stamps.flush_uuid)
+                    .unwrap_or(false);
+                if own || head.crc64_b64.as_deref() == Some(crc64_to_b64(crc).as_str()) {
+                    // Our own torn earlier Complete with these bytes:
+                    // cite it.
+                    let g = head_stamps.map(|s| s.generation).unwrap_or(generation);
+                    return Ok(UploadOutcome::published(
+                        path, key.to_string(), head.etag, crc, scanned, g, epoch,
+                    ));
+                }
+                Ok(UploadOutcome::Parked { foreign_etag: head.etag })
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     async fn upload_one(
         &self,
         path: &str,
@@ -473,8 +572,6 @@ impl Sidecar {
     ) -> LeanResult<UploadOutcome> {
         let key = self.cfg.file_key(path);
         let local_path = self.cfg.root.join(path);
-        let body = std::fs::read(&local_path)?;
-        let crc = crc64_nvme(&body);
         let generation = base.map(|b| b.generation + 1).unwrap_or(1);
         let posix = std::fs::metadata(&local_path).ok().map(|m| PosixStamps::from_metadata(&m));
         let stamps = GenerationStamps {
@@ -487,9 +584,18 @@ impl Sidecar {
             Some(b) => PutCondition::IfMatch(b.etag.clone()),
             None => PutCondition::IfNoneMatchAny,
         };
-        // NOTE v1: whole-object only. Files over cfg.whole_put_max go
-        // through compose_generation (streaming multipart) — wired in
-        // the follow-up; the put_whole path is exact for the battery.
+        let size = std::fs::metadata(&local_path)
+            .map_err(|e| LeanError::State(format!("stat {}: {e}", local_path.display())))?
+            .len();
+        if size > self.cfg.whole_put_max {
+            // Streaming multipart compose: put_whole is never fed past
+            // whole_put_max (unbounded memory + S3's 5 GiB wall).
+            return self
+                .upload_compose(path, &key, &local_path, size, scanned, condition, stamps, generation, epoch)
+                .await;
+        }
+        let body = std::fs::read(&local_path)?;
+        let crc = crc64_nvme(&body);
         match self
             .store
             .put_whole(&key, Bytes::from(body.clone()), &condition, &stamps, crc)
@@ -535,6 +641,10 @@ impl Sidecar {
 enum UploadOutcome {
     Published { entry: LeanEntry, baseline_entry: BaselineEntry },
     Parked { foreign_etag: String },
+    /// The source drifted mid-transfer (checksum refused server-side)
+    /// or the assembly was swept: publish nothing, advance nothing —
+    /// the next scan re-queues the path.
+    Deferred,
 }
 
 impl UploadOutcome {
