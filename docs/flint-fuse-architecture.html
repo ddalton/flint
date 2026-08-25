@@ -75,9 +75,9 @@
 <section class="page">
   <header class="ph">
     <h1>Flint-fuse — no hub, one bucket</h1>
-    <span class="kicker">1 / 5 · architecture</span>
+    <span class="kicker">1 / 6 · architecture</span>
   </header>
-  <p class="dek">The proposal: no hub. A webhook-injected sidecar runs the same tier engine behind a FUSE mount; agents and the project service reach S3 directly; the bucket format — whole-file objects, <code>.flint/</code> control cells, guarded publishes — is unchanged, so hub-mode and direct-mode volumes stay mutually convertible. Reviewed adversarially against the code on 2026-08-24 (14 agents, 7 dimensions); the corrections are folded into these pages.</p>
+  <p class="dek">The proposal: no hub. A webhook-injected sidecar runs the same tier engine behind a FUSE mount; agents and the project service reach S3 directly; the bucket format — whole-file objects, <code>.flint/</code> control cells, guarded publishes — is unchanged, so hub-mode and direct-mode volumes stay mutually convertible. Reviewed adversarially against the code on 2026-08-24 (14 agents, 7 dimensions); the corrections are folded into these pages. A lighter direct-mode variant that needs no FUSE at all — checkout/publish plus a write gateway — is page 5.</p>
   <figure>
   <svg viewBox="0 0 1600 810" role="img" aria-label="An agent pod contains an app container and an injected flint-fuse sidecar sharing an emptyDir working set; the sidecar publishes to and hydrates from an S3 bucket whose workspace subtrees each carry their own epoch lease and manifest; the project service browses the bucket with a read-only role; there is no hub.">
     <defs>
@@ -231,7 +231,7 @@
 <section class="page">
   <header class="ph">
     <h1>The operator becomes a webhook</h1>
-    <span class="kicker">2 / 5 · control plane</span>
+    <span class="kicker">2 / 6 · control plane</span>
   </header>
   <p class="dek">One CR still governs a share, but in direct mode it renders no standing objects — the operator's job becomes admission: allocate non-overlapping subtree prefixes, stamp the claim identity, inject the sidecar into matched pods, and detect the pods that slipped past.</p>
   <figure>
@@ -380,7 +380,7 @@
 <section class="page">
   <header class="ph">
     <h1>The tier engine moves into the pod</h1>
-    <span class="kicker">3 / 5 · data path</span>
+    <span class="kicker">3 / 6 · data path</span>
   </header>
   <p class="dek"><code>src/tier</code> — capture, durable, gate, flush, evict, hydrate, epoch, manifest, import — ports into the sidecar unchanged; the FUSE front reproduces the NFS front's hook discipline. What does not port is the coherence inversion: reading other writers' work while serving, under leases scoped to subtrees.</p>
   <figure>
@@ -524,7 +524,7 @@
 <section class="page">
   <header class="ph">
     <h1>The failure-shape trade</h1>
-    <span class="kicker">4 / 5 · failure model</span>
+    <span class="kicker">4 / 6 · failure model</span>
   </header>
   <p class="dek">The honest headline is not “no single point of failure.” Hub mode concentrates failure into rare, share-wide, hang-shaped outages; direct mode distributes it into frequent, per-pod, loss-shaped events. The full matrix — including the two rows the proposal creates and the two it deletes.</p>
   <figure>
@@ -652,11 +652,138 @@
   <figcaption><b>Where FUSE mode is strictly better:</b> read-mostly and single-writer ephemeral workspaces whose dirty sets stay inside what the spot notice can drain (~9–15 GiB at the measured publish rate), whose owners accept losing up to one flush interval of their own recent work when a node dies — in exchange, no workspace ever hangs on another's failure, and a dead mount is an errno, not a D-state. <b>Where it is strictly worse:</b> shared-RWX trees, multi-pod sqlite/git, large-artifact writers, and any lifecycle that gates destructive actions on <code>rpoClean</code> — today's hibernate refuses to delete a PVC it cannot verify; FUSE mode has no equivalent witness, so the bucket (manifest seq and age per workspace, CAS-versioned and readable by a plain S3 client) becomes the only global status surface, and alerting moves there along with webhook-injected per-pod metrics. <b>Do the event-rate arithmetic with fleet numbers, not vibes:</b> on a pure-spot posture, pod terminations are thousands per month against roughly one hub exposure — most drain cleanly through preStop <i>if</i> an interruption handler (aws-node-termination-handler or Karpenter's) converts the 2-minute IMDS notice into prompt eviction, which Kubernetes does not do by itself, and the grace period is genuinely ≥120s. The residual — hard node deaths, oversized dirty sets, hot files the quiescence guard never flushed — is a permanent-loss class hub mode does not have; its rate is a property of the fleet and must be measured there, then stated on the CRD surface as the FUSE-mode RPO contract. The self-recognition fix is <i>not</i> a workspace-stable holder identity — the occupancy lock is precisely what proves the old incarnation is gone, and identity reuse would let a replacement depose a live mid-flush writer. Clean release on preStop, or an external fencing actor that has witnessed pod deletion finality.</figcaption>
 </section>
 
-<!-- ============================================================ PAGE 5 -->
+<!-- ============================================================ PAGE 5 (lean variant) -->
 <section class="page">
   <header class="ph">
-    <h1>Two front ends, one format</h1>
-    <span class="kicker">5 / 5 · decision</span>
+    <h1>The lean variant — checkout, publish, and a gateway</h1>
+    <span class="kicker">5 / 6 · lean variant</span>
+  </header>
+  <p class="dek">A third option, distinct from FUSE: if the workspace fits on disk, no interception is needed at all. Materialize plain files at pod start, publish changed files at cadence with an unprivileged sidecar, and put write authority in a stateless gateway. Most of FUSE's value at a fraction of its risk surface — same bucket format, same engine.</p>
+  <figure>
+  <svg viewBox="0 0 1600 810" role="img" aria-label="An agent pod holds an app container working on plain files and an unprivileged flint-sync sidecar that checks the workspace out at start and publishes changed files at cadence; a stateless flint-gateway arbitrates publishes by minting presigned PUTs; the bucket format is unchanged; a bottom band lists what the lean variant gives up relative to FUSE.">
+    <defs>
+      <marker id="f6-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
+      <marker id="f6-av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6d4aa8"/></marker>
+      <marker id="f6-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
+    </defs>
+
+    <!-- agent pod -->
+    <rect x="40" y="110" width="560" height="430" rx="10" class="bx-hub"/>
+    <text class="th" x="56" y="136">agent pod — no FUSE anywhere</text>
+
+    <rect x="60" y="156" width="250" height="150" rx="8" class="bx"/>
+    <text class="tl ctr" x="185" y="182">app container</text>
+    <text class="tx ctr" x="185" y="202">unchanged image</text>
+    <text class="mns ctr" x="185" y="226">/workspace</text>
+    <text class="tx ctr" x="185" y="248">PLAIN FILES — a real local</text>
+    <text class="tx ctr" x="185" y="264">filesystem, full POSIX,</text>
+    <text class="tx ctr" x="185" y="280">zero interception</text>
+
+    <rect x="330" y="156" width="250" height="230" rx="8" class="bx-blue"/>
+    <text class="tl ctr" x="455" y="182">flint-sync sidecar</text>
+    <text class="mns ctr" x="455" y="202">ordinary process — UNPRIVILEGED</text>
+    <text class="tx ctr" x="455" y="222">no /dev/fuse · no mount propagation</text>
+    <text class="tx ctr" x="455" y="238">no privileged · no PSA conflict</text>
+    <line class="hair" x1="346" y1="250" x2="564" y2="250"/>
+    <text class="tx ctr" x="455" y="270">checkout at start — the import</text>
+    <text class="tx ctr" x="455" y="286">verb, bytes instead of stubs</text>
+    <text class="tx ctr" x="455" y="306">publish at cadence — mtime/size</text>
+    <text class="tx ctr" x="455" y="322">scan against the manifest</text>
+    <text class="tx ctr" x="455" y="342">preStop: final publish barrier</text>
+    <text class="tx ctr" x="455" y="366">same epoch · claim · manifest</text>
+    <text class="tx ctr" x="455" y="382">machinery, unchanged</text>
+
+    <line class="ln-blue" x1="185" y1="306" x2="185" y2="406" marker-end="url(#f6-ab)"/>
+    <line class="ln-blue" x1="455" y1="386" x2="455" y2="406" marker-end="url(#f6-ab)"/>
+
+    <rect x="60" y="410" width="520" height="64" rx="8" class="bx-slate"/>
+    <text class="tl" x="76" y="436">emptyDir — the whole workspace, materialized</text>
+    <text class="tx" x="76" y="456">must fit the disk budget — the lean variant has no stubs and no eviction</text>
+
+    <text class="tx" x="56" y="502">the FUSE risk class is gone: no ENOTCONN wedge, no restart-in-place</text>
+    <text class="tx" x="56" y="518">choreography, no mount-broker endgame, no kernel floor</text>
+
+    <text class="tx" x="40" y="566">webhook injection shrinks to: an emptyDir + an ordinary sidecar —</text>
+    <text class="tx" x="40" y="582">failurePolicy: Fail still applies; everything on page 2 about</text>
+    <text class="tx" x="40" y="598">privilege, brokers and /dev/fuse simply stops being needed</text>
+
+    <!-- gateway -->
+    <rect x="640" y="110" width="400" height="300" rx="10" class="bx-violet"/>
+    <text class="tl" x="656" y="136">flint-gateway — stateless write authority</text>
+    <text class="tx" x="656" y="156">N replicas behind one Service · no PVC, no epoch of</text>
+    <text class="tx" x="656" y="172">its own, no state — everything durable is in the bucket</text>
+    <line class="hair" x1="656" y1="184" x2="1024" y2="184"/>
+    <text class="thv" x="656" y="206">grade 1 — write proxy</text>
+    <text class="tx" x="656" y="224">bytes transit the gateway; strongest enforcement;</text>
+    <text class="tx" x="656" y="240">pays back a slice of the hub's NIC ceiling</text>
+    <text class="thv" x="656" y="264">grade 2 — presigned arbiter (recommended)</text>
+    <text class="tx" x="656" y="282">the sidecar asks to publish generation N of subtree X;</text>
+    <text class="tx" x="656" y="298">the gateway validates lease + layout + claim identity,</text>
+    <text class="tx" x="656" y="314">then mints short-lived presigned PUTs pinned to</text>
+    <text class="tx" x="656" y="330">exactly those keys — bytes go pod → S3 DIRECT</text>
+    <text class="tsb" x="656" y="356">the cooperative CAS regime becomes ENFORCED:</text>
+    <text class="tx" x="656" y="374">non-holders get no URL; If-Match is required; per-share</text>
+    <text class="tx" x="656" y="390">metering; revocation in seconds — kill the token</text>
+
+    <rect x="640" y="430" width="400" height="110" rx="10" class="band"/>
+    <text class="tsb" x="656" y="456">pods hold ZERO bucket write credentials</text>
+    <text class="tx" x="656" y="476">checkout/hydrate: a read-only prefix role (harmless</text>
+    <text class="tx" x="656" y="492">blast radius), or presigned GETs from the same door</text>
+    <text class="tx" x="656" y="514">page 2's two-principal split and sidecar-only-IRSA</text>
+    <text class="tx" x="656" y="530">machinery becomes unnecessary in this variant</text>
+
+    <text class="tx" x="640" y="566">gateway down ⇒ publishes pause and the RPO grows while pods keep</text>
+    <text class="tx" x="640" y="582">serving local files — far softer than hub-down; reads never depended on it</text>
+
+    <!-- bucket -->
+    <rect x="1080" y="110" width="480" height="300" rx="12" class="bx-oo"/>
+    <text class="tt" x="1100" y="140">S3 bucket</text>
+    <text class="tx" x="1100" y="164">unchanged format: whole-file objects + .flint/ control</text>
+    <text class="tx" x="1100" y="180">cells — hub-mode, FUSE-mode and lean-mode volumes</text>
+    <text class="tx" x="1100" y="196">stay mutually convertible; DR import is the same verb</text>
+    <line class="hair" x1="1100" y1="210" x2="1540" y2="210"/>
+    <text class="mns" x="1100" y="234">.flint/epoch · .flint/manifest · .flint/claim</text>
+    <text class="tx" x="1100" y="258">the gateway is the enforcement point these cells</text>
+    <text class="tx" x="1100" y="274">always lacked — detection becomes refusal</text>
+    <text class="tx" x="1100" y="298">the project service browses exactly as before —</text>
+    <text class="tx" x="1100" y="314">read-only, RPO-consistent snapshots per subtree</text>
+    <text class="tx" x="1100" y="338">strict journal mode composes here too: the gateway</text>
+    <text class="tx" x="1100" y="354">is the natural group-commit point for fsync ⇒ S3</text>
+
+    <line class="ln-violet" x1="600" y1="240" x2="636" y2="240" marker-end="url(#f6-av)"/>
+    <line class="ln-violet" x1="636" y1="278" x2="600" y2="278" marker-end="url(#f6-av)"/>
+    <line class="ln-violet dash" x1="1040" y1="240" x2="1076" y2="240" marker-end="url(#f6-av)"/>
+    <text class="txs" x="1044" y="230">grade 1</text>
+
+    <text class="tx ctr" x="838" y="622">publish — presigned PUT, bytes pod → S3 direct</text>
+    <line class="ln-ochre" x1="600" y1="630" x2="1076" y2="630" marker-end="url(#f6-ao)"/>
+    <text class="tx ctr" x="838" y="656">checkout / hydrate — read-only GETs, direct</text>
+    <line class="ln-ochre" x1="1076" y1="664" x2="600" y2="664" marker-end="url(#f6-ao)"/>
+
+    <!-- what it gives up -->
+    <rect x="40" y="690" width="1520" height="110" rx="10" class="band"/>
+    <text class="th" x="56" y="716">what the lean variant gives up — FUSE is the escalation, not the default</text>
+    <text class="tsb" x="56" y="740">lazy hydration</text>
+    <text class="tx" x="56" y="758">cold start downloads the whole workspace;</text>
+    <text class="tx" x="56" y="774">fine at GiB scale — a partial-checkout</text>
+    <text class="tx" x="56" y="790">path list covers bigger trees</text>
+    <text class="tsb" x="560" y="740">interception-grade capture</text>
+    <text class="tx" x="560" y="758">scan-based publish re-uploads touched files</text>
+    <text class="tx" x="560" y="774">whole — the engine's whole-dirty fallback</text>
+    <text class="tx" x="560" y="790">was already the correctness backstop</text>
+    <text class="tsb" x="1060" y="740">eviction / space management</text>
+    <text class="tx" x="1060" y="758">no stubs: the workspace must fit the</text>
+    <text class="tx" x="1060" y="774">emptyDir budget; TiB-scale or lazy</text>
+    <text class="tx" x="1060" y="790">volumes are FUSE's territory (page 1)</text>
+  </svg>
+  <figcaption><b>This is a third front end, not a FUSE configuration</b> — the app touches plain files on a real local filesystem, and the sidecar is an ordinary unprivileged program running the same engine verbs: <code>import</code> at start (bytes instead of stubs), the flush barrier's whole-file lane at cadence (driven by an mtime/size scan against the manifest instead of capture interception), the same epoch, claim, and manifest machinery. For the agent-workspace shape — code, configs, artifacts, GiB-scale — it is most of FUSE's value with none of FUSE's hard parts: the entire privileged/mount-propagation/ENOTCONN/mount-broker risk section of pages 2 and 4 stops applying, and the kernel floor drops to nothing. <b>The gateway restores the security posture the review said direct mode gives up.</b> With grade 2, "the bucket trusts one principal" is true again — pods hold no write credentials, the cooperative CAS regime becomes enforced arbitration (a non-holder is refused a URL, not merely detected after the fact), revocation returns to seconds, and per-share metering exists again. Its failure mode is publish-pause with growing RPO while pods keep serving — the softest failure shape any component on these pages has. <b>One dialect everywhere:</b> this also argues for converging the hub's file API onto the S3 REST surface (the libflint plan's §8 sidecar adapter, built once, placed three ways — hub listener, localhost sidecar, gateway), so the live view and the published view speak the same protocol and the same tools work against both. <b>Recommendation:</b> lean is the direct-mode entry point; FUSE is the v2 escalation for volumes too large or too lazy to materialize; the hub is unchanged. Same bucket, three front ends, one engine.</figcaption>
+</section>
+
+<!-- ============================================================ PAGE 6 -->
+<section class="page">
+  <header class="ph">
+    <h1>Three front ends, one format</h1>
+    <span class="kicker">6 / 6 · decision</span>
   </header>
   <p class="dek">When to route a workload to which front end, what must be measured and modeled before any code, and where the placement dial sits between per-pod isolation and per-node economics.</p>
   <figure>
@@ -753,12 +880,12 @@
     <text class="tx" x="1216" y="244">zero consumer requirements — kernel NFS only</text>
 
     <rect x="1200" y="294" width="360" height="140" rx="10" class="bx-ochre"/>
-    <text class="tl" x="1216" y="320">route to flint-fuse</text>
-    <text class="tx" x="1216" y="342">one writer per workspace — the agent-fleet shape</text>
+    <text class="tl" x="1216" y="320">route to direct mode</text>
+    <text class="tx" x="1216" y="342">one writer per workspace — the agent-fleet shape;</text>
     <text class="tx" x="1216" y="360">spot-heavy, idle-heavy, thousands of shares</text>
-    <text class="tx" x="1216" y="378">read-mostly shared datasets — via per-NODE</text>
-    <text class="tx" x="1216" y="396">placement (below), not one copy per pod</text>
-    <text class="tx" x="1216" y="414">owners accept losing ≤ one flush of their own work</text>
+    <text class="tx" x="1216" y="378">LEAN (checkout/publish, page 5) by default;</text>
+    <text class="tx" x="1216" y="396">flint-fuse when the volume is too large or too</text>
+    <text class="tx" x="1216" y="414">lazy to materialize · loss bound: ≤ one flush</text>
 
     <rect x="1200" y="454" width="360" height="216" rx="10" class="bx-oo"/>
     <text class="tl" x="1216" y="480">gates before any code</text>
@@ -778,23 +905,28 @@
 
     <!-- placement spectrum -->
     <rect x="40" y="690" width="1520" height="110" rx="10" class="band"/>
-    <text class="th" x="56" y="716">placement is a dial, not a doctrine</text>
-    <rect x="56" y="728" width="430" height="62" rx="7" class="bx"/>
-    <text class="tl" x="72" y="748">per-POD sidecar</text>
-    <text class="tx" x="72" y="766">max isolation · max duplication — N× hydrate,</text>
-    <text class="tx" x="72" y="782">N× node disk, N× lease; injection via webhook</text>
-    <line class="ln" x1="486" y1="759" x2="526" y2="759" marker-end="url(#f5-an)"/>
-    <rect x="530" y="728" width="460" height="62" rx="7" class="bx"/>
-    <text class="tl" x="546" y="748">per-NODE mount pod</text>
-    <text class="tx" x="546" y="766">one cache, disk, and lease per node — the biggest lever on every</text>
-    <text class="tx" x="546" y="782">duplication term; JuiceFS's own primary shape; §7's placement</text>
-    <line class="ln" x1="990" y1="759" x2="1030" y2="759" marker-end="url(#f5-an)"/>
-    <rect x="1034" y="728" width="430" height="62" rx="7" class="bx-blue"/>
-    <text class="tl" x="1050" y="748">the hub</text>
-    <text class="tx" x="1050" y="766">shared everything — the coherence authority for</text>
-    <text class="tx" x="1050" y="782">shared writers; stays exactly as it ships today</text>
+    <text class="th" x="56" y="716">placement is a dial, not a doctrine — lightest that fits, escalate when it stops fitting</text>
+    <rect x="56" y="728" width="346" height="62" rx="7" class="bx"/>
+    <text class="tl" x="72" y="748">lean sidecar (page 5)</text>
+    <text class="tx" x="72" y="766">plain files, unprivileged; checkout +</text>
+    <text class="tx" x="72" y="782">publish via the gateway; GiB workspaces</text>
+    <line class="ln" x1="402" y1="759" x2="424" y2="759" marker-end="url(#f5-an)"/>
+    <rect x="426" y="728" width="346" height="62" rx="7" class="bx"/>
+    <text class="tl" x="442" y="748">per-POD FUSE sidecar</text>
+    <text class="tx" x="442" y="766">lazy stubs + eviction; privileged;</text>
+    <text class="tx" x="442" y="782">for volumes too big to materialize</text>
+    <line class="ln" x1="772" y1="759" x2="794" y2="759" marker-end="url(#f5-an)"/>
+    <rect x="796" y="728" width="346" height="62" rx="7" class="bx"/>
+    <text class="tl" x="812" y="748">per-NODE mount pod</text>
+    <text class="tx" x="812" y="766">one cache, disk and lease per node — the</text>
+    <text class="tx" x="812" y="782">lever on duplication; §7's placement</text>
+    <line class="ln" x1="1142" y1="759" x2="1164" y2="759" marker-end="url(#f5-an)"/>
+    <rect x="1166" y="728" width="346" height="62" rx="7" class="bx-blue"/>
+    <text class="tl" x="1182" y="748">the hub</text>
+    <text class="tx" x="1182" y="766">shared everything — the coherence authority</text>
+    <text class="tx" x="1182" y="782">for shared writers; unchanged</text>
   </svg>
-  <figcaption><b>Buy fails twice, so build — on what already exists.</b> Every performant S3-FUSE client refuses the write shapes agent workloads need (mountpoint-s3: no rename and no in-place writes on general-purpose buckets — pip, git, and sqlite all die there; goofys dormant since 2022), and every coherent one buys POSIX by reintroducing an always-on metadata service over a non-browsable chunk layout — the hub in another costume, minus the browsable bucket that is flint's differentiator. The closest cache shape, rclone's VFS write-back, has zero cross-client arbitration; its own docs call concurrent mounts a corruption risk. Nothing off the shelf provides browsable whole-file objects + an evicting working set + CAS-lease-guarded publishes + manifest/tombstone restore — and flint owns roughly two-thirds of that middle today. <b>flint-fuse is a third front end, not §7 brought forward:</b> the libflint plan's mount-pod tier is a libflint consumer serving exactly the lock/mmap/multi-writer contract flint-fuse excludes. Build one FUSE daemon with a pluggable backend — <code>tier::</code> over S3 now, libflint coordinates later — and amend §7 to name both, so the two FUSE deliverables converge instead of drifting. Treat FUSE passthrough (Linux 6.9, CAP_SYS_ADMIN, and it bypasses capture) and FUSE-over-io-uring (6.14, no fuser-crate support yet) as opportunistic accelerators, never floors — managed-node kernels in 2026 run 6.1–6.12, and the hub must remain the zero-consumer-requirements path. <b>Keep the placement dial in view:</b> per-NODE mount pods recover the shared cache, disk, and lease that per-POD sidecars multiply — the largest single lever on every duplication term on page 4 — at the cost of pod-level isolation; under one-writer-per-workspace the two placements often coincide anyway. The hub stays. The ladder, for direct-mode shares, simply stops needing to exist.</figcaption>
+  <figcaption><b>Buy fails twice, so build — on what already exists.</b> Every performant S3-FUSE client refuses the write shapes agent workloads need (mountpoint-s3: no rename and no in-place writes on general-purpose buckets — pip, git, and sqlite all die there; goofys dormant since 2022), and every coherent one buys POSIX by reintroducing an always-on metadata service over a non-browsable chunk layout — the hub in another costume, minus the browsable bucket that is flint's differentiator. The closest cache shape, rclone's VFS write-back, has zero cross-client arbitration; its own docs call concurrent mounts a corruption risk. Nothing off the shelf provides browsable whole-file objects + an evicting working set + CAS-lease-guarded publishes + manifest/tombstone restore — and flint owns roughly two-thirds of that middle today. <b>flint-fuse is a third front end, not §7 brought forward:</b> the libflint plan's mount-pod tier is a libflint consumer serving exactly the lock/mmap/multi-writer contract flint-fuse excludes. Build one FUSE daemon with a pluggable backend — <code>tier::</code> over S3 now, libflint coordinates later — and amend §7 to name both, so the two FUSE deliverables converge instead of drifting. Treat FUSE passthrough (Linux 6.9, CAP_SYS_ADMIN, and it bypasses capture) and FUSE-over-io-uring (6.14, no fuser-crate support yet) as opportunistic accelerators, never floors — managed-node kernels in 2026 run 6.1–6.12, and the hub must remain the zero-consumer-requirements path. <b>Keep the placement dial in view:</b> the dial now starts a notch earlier — the lean checkout/publish sidecar (page 5) needs no FUSE at all and is the direct-mode entry point; per-POD FUSE is the escalation for volumes too large or too lazy to materialize; per-NODE mount pods recover the shared cache, disk, and lease that per-POD sidecars multiply — the largest single lever on every duplication term on page 4 — at the cost of pod-level isolation. The hub stays. The ladder, for direct-mode shares, simply stops needing to exist.</figcaption>
 </section>
 </body>
 </html>
