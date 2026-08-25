@@ -74,6 +74,14 @@ path = "src/bin/flint_hub_stub.rs"
 # binaries and dep trees; flint-store (crates/flint-store) is the
 # shared layer.
 
+# The flint-lean operator: FlintLeanWorkspace CRD + claim/adopt +
+# native-sidecar injection (docs/plans/flint-lean-plan.md §2.4). Ships
+# in the flint-lite-operator image; SEPARATE controller — no FlintShare
+# coupling (strict mode stays hub-side by construction).
+[[bin]]
+name = "flint-lean-operator"
+path = "src/bin/flint_lean_operator.rs"
+
 # Removed old binaries:
 # - node-agent: now a library module, not standalone binary
 # - spdk-dashboard-backend: replaced by spdk_dashboard_backend_minimal.rs
