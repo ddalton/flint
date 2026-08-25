@@ -253,6 +253,42 @@ pub(crate) fn max_connections_from_env() -> u64 {
     }
 }
 
+/// Default idle-read deadline, seconds (blocker 7 — the cap's other half).
+///
+/// Both `read_exact`s in [`handle_tcp_connection`] used to wait forever,
+/// so a peer that connected and sent nothing — or sent a record marker
+/// and then trickled — pinned its buffers and its blocker-6 connection
+/// slot indefinitely. With the cap in force that converts slowloris from
+/// memory pressure into a clean denial of NEW mounts: fill the cap with
+/// idle sockets and every legitimate client is refused at accept.
+///
+/// The value cannot cut a live mount: an NFSv4.1 client with state
+/// renews its lease via SEQUENCE at a fraction of the 90s lease period
+/// ([`crate::nfs::v4::state::lease::DEFAULT_LEASE_TIME`]), and an idle
+/// nconnect trunk that IS cut reconnects transparently on next use —
+/// ordinary NFS client behaviour, whose replay path B3/B5 pinned.
+/// Precedent: knfsd ages out idle client sockets after ~6 minutes
+/// (sunrpc `svc_age_temp_sockets`); this default matches it.
+pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 360;
+
+/// Resolve the deadline. Unset → [`DEFAULT_IDLE_TIMEOUT_SECS`]; `0` →
+/// disabled (the pre-fix wait-forever behaviour); unparseable → the
+/// default, since a typo must not silently remove the bound.
+pub(crate) fn idle_timeout_from_env() -> Option<std::time::Duration> {
+    let secs = match std::env::var("FLINT_NFS_IDLE_TIMEOUT_SECS") {
+        Ok(v) => v.trim().parse::<u64>().unwrap_or_else(|_| {
+            warn!(
+                "FLINT_NFS_IDLE_TIMEOUT_SECS={:?} is not a number — using the default {}. \
+                 A typo must not silently unbound the server.",
+                v, DEFAULT_IDLE_TIMEOUT_SECS
+            );
+            DEFAULT_IDLE_TIMEOUT_SECS
+        }),
+        Err(_) => DEFAULT_IDLE_TIMEOUT_SECS,
+    };
+    (secs > 0).then(|| std::time::Duration::from_secs(secs))
+}
+
 /// RAII slot in the connection budget.
 ///
 /// The release MUST survive a panic in the handler. A leaked slot is
@@ -302,6 +338,14 @@ pub(crate) async fn serve_tcp(addr: &str, dispatcher: Arc<CompoundDispatcher>, g
         info!("FLINT_NFS_MAX_CONNECTIONS=0 — connection cap DISABLED (unbounded accept)");
     } else {
         info!("NFS connection cap: {} concurrent (FLINT_NFS_MAX_CONNECTIONS)", max_connections);
+    }
+
+    // Blocker 7: the cap's other half. Without a read deadline, idle
+    // sockets occupy capped slots forever — see DEFAULT_IDLE_TIMEOUT_SECS.
+    let idle_timeout = idle_timeout_from_env();
+    match idle_timeout {
+        Some(d) => info!("NFS idle-read deadline: {:?} (FLINT_NFS_IDLE_TIMEOUT_SECS)", d),
+        None => info!("FLINT_NFS_IDLE_TIMEOUT_SECS=0 — idle-read deadline DISABLED (wait forever)"),
     }
 
     
@@ -372,7 +416,7 @@ pub(crate) async fn serve_tcp(addr: &str, dispatcher: Arc<CompoundDispatcher>, g
             // dropped, whether it returns, errors or panics.
             let _slot = _slot;
             info!("🚀 [NFS_SERVER] Spawned handler task for connection #{} from {}", conn_id, peer);
-            if let Err(e) = handle_tcp_connection(stream, dispatcher, gss_manager, peer, conn_id).await {
+            if let Err(e) = handle_tcp_connection(stream, dispatcher, gss_manager, peer, conn_id, idle_timeout).await {
                 warn!("❌ [NFS_SERVER] Connection #{} from {} error: {}", conn_id, peer, e);
                 info!("   Active connections remaining: {}", ACTIVE_CONNECTIONS.load(Ordering::SeqCst) - 1);
             } else {
@@ -389,6 +433,7 @@ async fn handle_tcp_connection(
     gss_manager: Arc<RpcSecGssManager>,
     peer: std::net::SocketAddr,
     conn_id: u64,
+    idle_timeout: Option<std::time::Duration>,
 ) -> std::io::Result<()> {
     use tokio::io::BufWriter;
     use tokio::time::Instant;
@@ -469,9 +514,29 @@ async fn handle_tcp_connection(
         }
         debug!("📥 [NFS_SERVER] Connection #{}: Waiting for RPC message #{} from {}", conn_id, rpc_count + 1, peer);
 
-        // Read RPC record marker (4 bytes)
+        // Read RPC record marker (4 bytes), under the blocker-7 deadline:
+        // this is where an idle connection parks between requests. A
+        // deadline here is an ordinary close, not an error — the peer
+        // simply had nothing to say for the whole window (a live NFS
+        // client renews its lease far more often), and a cut trunk
+        // reconnects transparently on its next use.
         let mut marker_buf = [0u8; 4];
-        match reader.read_exact(&mut marker_buf).await {
+        let marker_res = match idle_timeout {
+            Some(d) => match tokio::time::timeout(d, reader.read_exact(&mut marker_buf)).await {
+                Ok(r) => r,
+                Err(_elapsed) => {
+                    info!(
+                        "⏱️  [NFS_SERVER] Connection #{} from {} idle for {:?} with no \
+                         request — closing to free its slot (FLINT_NFS_IDLE_TIMEOUT_SECS; \
+                         {} RPCs served)",
+                        conn_id, peer, d, rpc_count
+                    );
+                    return Ok(());
+                }
+            },
+            None => reader.read_exact(&mut marker_buf).await,
+        };
+        match marker_res {
             Ok(_) => {
                 debug!("✅ [NFS_SERVER] Connection #{}: Received RPC marker from {}: {:02x?}", conn_id, peer, marker_buf);
             }
@@ -524,7 +589,33 @@ async fn handle_tcp_connection(
         buf.resize(length, 0);
 
         debug!("📥 Reading RPC payload: {} bytes from {}", length, peer);
-        reader.read_exact(&mut buf[..length]).await?;
+        // Blocker 7, mid-request: a peer that sent a marker and then
+        // trickles (or stalls) holds the read loop inside one message.
+        // Unlike the idle case above this is a malformed exchange — the
+        // peer promised `length` bytes and did not deliver — so it is an
+        // error, not a quiet close.
+        match idle_timeout {
+            Some(d) => match tokio::time::timeout(d, reader.read_exact(&mut buf[..length])).await {
+                Ok(r) => {
+                    r?;
+                }
+                Err(_elapsed) => {
+                    warn!(
+                        "⏱️  [NFS_SERVER] Connection #{} from {} stalled mid-request — \
+                         promised {} bytes, did not deliver within {:?} \
+                         (FLINT_NFS_IDLE_TIMEOUT_SECS)",
+                        conn_id, peer, length, d
+                    );
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "RPC payload read stalled past the idle deadline",
+                    ));
+                }
+            },
+            None => {
+                reader.read_exact(&mut buf[..length]).await?;
+            }
+        }
         
         debug!("✅ Received complete RPC message ({} bytes), first 32 bytes: {:02x?}", 
                length, &buf[..std::cmp::min(32, length)]);
@@ -1120,6 +1211,141 @@ mod connection_cap_tests {
         match restore {
             Some(v) => std::env::set_var("FLINT_NFS_MAX_CONNECTIONS", v),
             None => std::env::remove_var("FLINT_NFS_MAX_CONNECTIONS"),
+        }
+    }
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+}
+
+#[cfg(test)]
+mod idle_timeout_tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+
+    /// Accept one connection and serve it with the given deadline.
+    /// Returns the client half and the handler's join handle.
+    async fn one_served_connection(
+        idle: Option<Duration>,
+    ) -> (TcpStream, tokio::task::JoinHandle<std::io::Result<()>>, tempfile::TempDir) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let fh_mgr = Arc::new(FileHandleManager::new(temp.path().to_path_buf()));
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let lock_mgr = Arc::new(LockManager::new());
+        let dispatcher = Arc::new(CompoundDispatcher::new(fh_mgr, state_mgr, lock_mgr));
+        let gss = Arc::new(RpcSecGssManager::new(None));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (served, peer) = listener.accept().await.unwrap();
+        let handle = tokio::spawn(async move {
+            handle_tcp_connection(served, dispatcher, gss, peer, 1, idle).await
+        });
+        (client, handle, temp)
+    }
+
+    /// Read until EOF (or error) with a test-side deadline. Ok(()) means
+    /// the server closed the connection; Err(()) means it did not within
+    /// the window — which is exactly the pre-fix behaviour.
+    async fn server_closed_within(client: &mut TcpStream, window: Duration) -> Result<(), ()> {
+        let mut sink = [0u8; 64];
+        match tokio::time::timeout(window, async {
+            loop {
+                match client.read(&mut sink).await {
+                    Ok(0) => return,        // EOF — server closed
+                    Ok(_) => continue,      // drain anything written
+                    Err(_) => return,       // RST also counts as closed
+                }
+            }
+        })
+        .await
+        {
+            Ok(()) => Ok(()),
+            Err(_) => Err(()),
+        }
+    }
+
+    /// The idle half of blocker 7: a peer that connects and never sends
+    /// a byte must be closed at the deadline, freeing its blocker-6
+    /// slot. Against the reverted defect (no deadline on the marker
+    /// read) the server holds the socket forever and this test fails on
+    /// its bounded wait.
+    #[tokio::test]
+    async fn an_idle_connection_is_closed_at_the_deadline() {
+        let (mut client, handle, _t) =
+            one_served_connection(Some(Duration::from_millis(200))).await;
+        server_closed_within(&mut client, Duration::from_secs(5))
+            .await
+            .expect("an idle connection must be CLOSED at the deadline — it was still open");
+        // The handler treats idle as an ordinary close, not an error:
+        // refusal-by-error would spam the log for every aged-out trunk.
+        assert!(handle.await.unwrap().is_ok(), "idle close must be the Ok path");
+    }
+
+    /// The trickle half: a peer that sends a marker promising 100 bytes
+    /// and then stalls is holding the loop mid-message — closed at the
+    /// deadline, and as an ERROR, because the peer broke its promise.
+    #[tokio::test]
+    async fn a_mid_request_stall_is_closed_at_the_deadline() {
+        let (mut client, handle, _t) =
+            one_served_connection(Some(Duration::from_millis(200))).await;
+        // Last-fragment marker, length 100 — then silence.
+        client.write_all(&(0x8000_0064u32).to_be_bytes()).await.unwrap();
+        client.write_all(&[0u8; 10]).await.unwrap();
+        server_closed_within(&mut client, Duration::from_secs(5))
+            .await
+            .expect("a mid-request stall must be CLOSED at the deadline — it was still open");
+        let res = handle.await.unwrap();
+        assert!(res.is_err(), "a broken promise of bytes is an error, not a quiet close");
+        assert_eq!(res.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    /// The failing control for both tests above: with the deadline
+    /// disabled (the pre-fix behaviour, FLINT_NFS_IDLE_TIMEOUT_SECS=0),
+    /// the same idle connection is NOT closed — proving the two tests
+    /// pass because of the deadline and not because something else
+    /// hangs up idle sockets.
+    #[tokio::test]
+    async fn with_the_deadline_disabled_an_idle_connection_stays_open() {
+        let (mut client, handle, _t) = one_served_connection(None).await;
+        assert!(
+            server_closed_within(&mut client, Duration::from_secs(1)).await.is_err(),
+            "deadline disabled, yet the connection was closed — the other tests \
+             would then pass without the fix, proving nothing"
+        );
+        handle.abort();
+    }
+
+    /// Env-knob semantics, following the connection-cap contract: unset
+    /// → default; 0 → disabled; a typo → the default, never unbounded.
+    #[test]
+    fn an_unparseable_deadline_falls_back_to_the_default_rather_than_to_unbounded() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let restore = std::env::var("FLINT_NFS_IDLE_TIMEOUT_SECS").ok();
+
+        std::env::set_var("FLINT_NFS_IDLE_TIMEOUT_SECS", "not-a-number");
+        assert_eq!(
+            idle_timeout_from_env(),
+            Some(Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS)),
+            "a malformed deadline must fall back to the DEFAULT, never to disabled"
+        );
+
+        std::env::set_var("FLINT_NFS_IDLE_TIMEOUT_SECS", "0");
+        assert_eq!(idle_timeout_from_env(), None, "0 is the documented opt-out");
+
+        std::env::set_var("FLINT_NFS_IDLE_TIMEOUT_SECS", "  45 ");
+        assert_eq!(idle_timeout_from_env(), Some(Duration::from_secs(45)));
+
+        std::env::remove_var("FLINT_NFS_IDLE_TIMEOUT_SECS");
+        assert_eq!(
+            idle_timeout_from_env(),
+            Some(Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS))
+        );
+
+        match restore {
+            Some(v) => std::env::set_var("FLINT_NFS_IDLE_TIMEOUT_SECS", v),
+            None => std::env::remove_var("FLINT_NFS_IDLE_TIMEOUT_SECS"),
         }
     }
 
