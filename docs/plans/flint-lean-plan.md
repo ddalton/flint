@@ -34,12 +34,18 @@ governs:
 > PUT/GET with the window gate, snapshot/status, and the sidecar verbs
 > with PER-REQUEST epoch validation — P5's teeth on every
 > gateway-mediated write). 17-leg battery (`lean/sidecar/src/tests.rs`)
-> against MemoryStore's full conditional semantics. Still open:
-> multipart compose for > whole_put_max files, routing sidecar barriers
-> through the gateway verbs by default (they currently CAS the cells
-> directly through the proxy; the verbs interoperate on the same
-> cells), operator/webhook (Phase 4), Phase 0b/0c measurements, Phase 6
-> drill, per-workspace bearers/SigV4.
+> against MemoryStore's full conditional semantics. **Phase 0b FIRST
+> NUMBERS MEASURED** (`docs/plans/flint-lean-0b-measurements.md` —
+> loopback floors; tentative v1 file-count cap 250k; fan-out +
+> HEAD-tick levers landed and rig-validated; occupancy lock added).
+> **Phase 4 CORE SHIPPED** — `spdk-csi-driver/src/lean_operator/` +
+> `flint-lean-operator` bin (separate controller, shared image):
+> FlintLeanWorkspace CRD, claim/adopt both arms, derived-probe
+> injection brain. Still open: the admission HTTP/TLS wrapper around
+> the injection brain (cert plumbing), multipart compose for >
+> whole_put_max files, routing sidecar barriers through the gateway
+> verbs by default, proxy-shaped 0b/0c re-measure, Phase 6 drill,
+> per-workspace bearers/SigV4, kind e2e for the operator.
 
 ## 1. Summary and scope
 
