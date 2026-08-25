@@ -69,6 +69,13 @@ path = "src/pnfs_csi_cli_main.rs"
 name = "flint-hub-stub"
 path = "src/bin/flint_hub_stub.rs"
 
+# flint-sync: the lean checkout/publish sidecar (plan of record:
+# docs/plans/flint-lean-plan.md; formal model lean/formal/). Runs beside
+# an agent container; no NFS, no daemon in the data path.
+[[bin]]
+name = "flint-sync"
+path = "src/bin/flint_sync.rs"
+
 # Removed old binaries:
 # - node-agent: now a library module, not standalone binary
 # - spdk-dashboard-backend: replaced by spdk_dashboard_backend_minimal.rs

@@ -21,6 +21,18 @@ governs:
 
 # flint-lean: checkout/publish + gateway — implementation plan (v2)
 
+> **Status (2026-08-25):** Phase 0a SHIPPED — `lean/formal/LeanSubtree.tla`,
+> its own 20-run TLC gate (`lean/formal/check.sh`), deliberately separate
+> from flint's `formal/` corpus; the model's findings are recorded in
+> `lean/formal/README.md`. Phase 1+2 CORE SHIPPED — `src/lean/` +
+> the `flint-sync` bin (checkout/restart matrix, 7-step barrier,
+> inbox/window cell, merge-capable manifest writer, 412 park/AdoptOwn
+> policy, guarded GC, claim/rotation lease, sync verb) with a 12-leg
+> battery (`src/lean/tests.rs`) against MemoryStore's full conditional
+> semantics. Still open from this plan: multipart compose for
+> > whole_put_max files, the gateway verbs (Phase 3), operator/webhook
+> (Phase 4), Phase 0b/0c measurements, Phase 6 drill.
+
 ## 1. Summary and scope
 
 The lean variant is a third front end over the unchanged bucket format:
