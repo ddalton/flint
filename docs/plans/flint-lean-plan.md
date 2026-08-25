@@ -106,14 +106,45 @@ Stateless; N replicas; everything durable lives in the bucket.
   transiting the gateway; served by the `s3_surface` library (§2.3) so
   it is also the fleet's S3-compatible read/write door where presigned
   flows are awkward (browser uploads, CI).
-- **Auth:** per-share bearer token v1 (the existing gateway machinery
-  and its seconds-scale revocation); SigV4 verification arrives with
-  `s3_surface`. K8s TokenReview-based pod identity is an open question
-  (§9).
-- **Failure mode by construction:** gateway down ⇒ grants pause ⇒
-  publishes pause and RPO grows while pods keep serving local files.
-  Reads never depend on it (read-only role or presigned GETs minted
-  alongside checkout).
+- **DECIDED (user, 2026-08-24): grade 1 is PRIMARY.** The deployment
+  runs an S3 proxy that holds the real S3 credentials; agents talk
+  ONLY to the proxy. Consequences:
+  - Presigned minting (grade 2) demotes to an optional optimization —
+    v1 needs no presigning at all. The publish-grant validation
+    (lease, layout, claim, key scoping) runs inline as allow/deny on
+    the proxied PUTs; non-holders are refused at the request.
+  - Flint's arbitration must live IN (or in front of) that proxy —
+    a credential-hiding proxy alone leaves writes cooperative
+    (If-Match detection, not enforcement). The natural shape: the
+    proxy IS the flint gateway (`s3_surface` + grant policy), or the
+    proxy chains to it.
+  - **Hard requirement — conditional-header fidelity:** the proxy
+    MUST pass If-Match / If-None-Match:* / ETags / x-amz-meta-flint-*
+    / checksum headers through untouched, both directions. Every
+    fencing mechanism (epoch CAS, manifest barrier, strict journal)
+    rides those headers; a proxy that strips or synthesizes them
+    breaks fencing SILENTLY. The store-conformance probes run
+    THROUGH the proxy, as a startup gate, not a doc note.
+  - Prefix isolation moves wholesale into the proxy's authz: IAM no
+    longer separates agents (they share the proxy's credential), so
+    the proxy's policy must scope each workspace identity to its
+    subtree — this is now a P-grade precondition, not advice.
+  - Topology: ALL bytes transit the proxy (unlike presigned
+    direct-to-S3), so checkout fan-out is bounded by proxy
+    throughput before S3's — the Phase 0 fan-out/burst measurements
+    must run through a proxy-shaped rig, and the proxy is per-cluster
+    + replicated (it is stateless; the decided per-cluster gateway
+    placement applies to it).
+  - Failure domain grows: proxy down now pauses CHECKOUTS as well as
+    publishes (presigned reads no longer bypass it). Running pods
+    keep serving local files.
+- **Auth:** agents authenticate to the proxy (bearer v1; the proxy's
+  own mechanism otherwise); SigV4 *verification* in `s3_surface`
+  serves proxy-side validation, and §9 Q3 shrinks to "which token
+  the sidecar presents".
+- **Failure mode by construction:** gateway/proxy down ⇒ checkouts
+  and publishes pause and RPO grows while pods keep serving local
+  files.
 
 ### 2.3 s3_surface (new module — ONE dialect, three placements)
 
