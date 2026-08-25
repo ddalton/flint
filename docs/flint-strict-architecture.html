@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Flint strict mode — the journal and the rebuildable hub</title>
+<style>
+  @page { size: A3 landscape; margin: 12mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  body {
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: #0f172a;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .page { break-after: page; page-break-after: always; }
+  .page:last-child { break-after: auto; page-break-after: auto; }
+  .ph { border-bottom: 2px solid #0f172a; padding-bottom: 6px; margin-bottom: 14px; display: flex; align-items: baseline; justify-content: space-between; }
+  .ph h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .ph .kicker { font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #64748b; }
+  .dek { font-size: 12px; color: #475569; margin: 0 0 10px; }
+  figure { margin: 0; }
+  figure svg { width: 100%; height: auto; display: block; }
+  figcaption { font-size: 11px; line-height: 1.5; color: #475569; margin-top: 10px; border-top: 1px solid #e2e8f0; padding-top: 8px; }
+  figcaption b { color: #0f172a; font-weight: 600; }
+  code { font-family: Menlo, "SF Mono", Consolas, monospace; font-size: 10.5px; color: #0f172a; }
+
+  svg text { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; fill: #0f172a; }
+  .tt  { font-size: 15px; font-weight: 600; }
+  .th  { font-size: 13px; font-weight: 600; }
+  .tl  { font-size: 12.5px; }
+  .ts  { font-size: 11px; fill: #64748b; }
+  .tsb { font-size: 11px; font-weight: 600; fill: #475569; }
+  .thv { font-size: 11.5px; font-weight: 600; fill: #6d4aa8; }
+  .tho { font-size: 11.5px; font-weight: 600; fill: #8f5e0f; }
+  .tx  { font-size: 10.5px; fill: #64748b; }
+  .txs { font-size: 10px; fill: #64748b; }
+  .mn  { font-family: Menlo, "SF Mono", monospace; font-size: 11.5px; }
+  .mns { font-family: Menlo, "SF Mono", monospace; font-size: 10.5px; }
+  .ctr { text-anchor: middle; }
+  .end { text-anchor: end; }
+  .c-blue { fill: #1a5f9e; }
+  .c-violet { fill: #6d4aa8; }
+  .c-ochre { fill: #8f5e0f; }
+  .c-ink { fill: #0f172a; }
+
+  .bx        { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.4; }
+  .bx-slate  { fill: #f1f5f9; stroke: #94a3b8; stroke-width: 1.4; }
+  .bx-blue   { fill: #e9f2fa; stroke: #1a5f9e; stroke-width: 1.6; }
+  .bx-violet { fill: #f0eafb; stroke: #6d4aa8; stroke-width: 1.6; }
+  .bx-ochre  { fill: #fbf2de; stroke: #a06b12; stroke-width: 1.6; }
+  .bx-vo     { fill: #ffffff; stroke: #6d4aa8; stroke-width: 1.4; }
+  .bx-oo     { fill: #fffdf7; stroke: #a06b12; stroke-width: 1.8; }
+  .bx-hub    { fill: #f7fbfe; stroke: #1a5f9e; stroke-width: 2; }
+  .grp       { fill: none;    stroke: #94a3b8; stroke-width: 1.4; stroke-dasharray: 6 5; }
+  .grpw      { fill: #ffffff; stroke: #94a3b8; stroke-width: 1.4; stroke-dasharray: 6 5; }
+  .bx-dashv  { fill: #f0eafb; stroke: #6d4aa8; stroke-width: 1.6; stroke-dasharray: 6 4; }
+  .band      { fill: #f8fafc; stroke: #e2e8f0; stroke-width: 1.4; }
+
+  .ln        { stroke: #475569; stroke-width: 1.6; fill: none; }
+  .ln-blue   { stroke: #1a5f9e; stroke-width: 2.6; fill: none; }
+  .ln-violet { stroke: #6d4aa8; stroke-width: 1.8; fill: none; }
+  .ln-ochre  { stroke: #a06b12; stroke-width: 1.8; fill: none; }
+  .dash      { stroke-dasharray: 5 4; }
+  .hair      { stroke: #e2e8f0; stroke-width: 1; }
+  .num       { fill: #6d4aa8; }
+  .numt      { font-size: 11px; font-weight: 600; fill: #ffffff; }
+  .dot-b     { fill: #1a5f9e; }
+  .dot-o     { fill: #a06b12; }
+  .dot-g     { fill: #ffffff; stroke: #94a3b8; stroke-width: 1.4; }
+</style>
+</head>
+<body>
+<!-- ============================================================ PAGE 1 -->
+<section class="page">
+  <header class="ph">
+    <h1>Strict mode — fsync becomes an S3 PUT</h1>
+    <span class="kicker">1 / 2 · durability</span>
+  </header>
+  <p class="dek">A per-share, per-path upgrade to the hub: an acked fsync is durable in regional S3 — a stronger guarantee than EFS's replication — bought with a group-committed journal beside the unchanged browsable checkpoints. The UI, the bucket format, and write-back paths are untouched; only flagged paths pay the latency.</p>
+  <figure>
+  <svg viewBox="0 0 1600 800" role="img" aria-label="An fsync on a strict path parks until a group-committed journal object lands in S3 under sequenced create-only keys; checkpoints remain the browsable whole-file generations; ladders compare durability and latency against today's write-back and EFS; a cost band gives the group-commit arithmetic.">
+    <defs>
+      <marker id="s1-an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+      <marker id="s1-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
+    </defs>
+
+    <!-- journey -->
+    <rect x="40" y="104" width="1000" height="250" rx="10" class="band"/>
+    <text class="th" x="56" y="130">the strict write path — nothing changes until fsync</text>
+
+    <rect x="56" y="150" width="216" height="112" rx="8" class="bx"/>
+    <text class="tl ctr" x="164" y="176">WRITE / COMMIT</text>
+    <text class="tx ctr" x="164" y="198">page cache + capture intervals,</text>
+    <text class="tx ctr" x="164" y="214">exactly as today — UNSTABLE</text>
+    <text class="tx ctr" x="164" y="230">writes are untouched</text>
+    <line class="ln" x1="272" y1="206" x2="304" y2="206" marker-end="url(#s1-an)"/>
+
+    <rect x="308" y="150" width="216" height="112" rx="8" class="bx"/>
+    <text class="tl ctr" x="416" y="176">strict-path check</text>
+    <text class="mns ctr" x="416" y="198">checkpoints/** → strict</text>
+    <text class="mns ctr" x="416" y="216">scratch/**     → writeback</text>
+    <text class="tx ctr" x="416" y="236">per-path globs in the share config</text>
+    <line class="ln" x1="524" y1="206" x2="556" y2="206" marker-end="url(#s1-an)"/>
+
+    <rect x="560" y="150" width="216" height="112" rx="8" class="bx-blue"/>
+    <text class="tl ctr" x="668" y="176">group-commit window</text>
+    <text class="tx ctr" x="668" y="198">5–25 ms: every fsync waiting in</text>
+    <text class="tx ctr" x="668" y="214">the window rides ONE PUT —</text>
+    <text class="tx ctr" x="668" y="230">the sqlite/postgres WAL discipline</text>
+    <line class="ln-ochre" x1="776" y1="206" x2="808" y2="206" marker-end="url(#s1-ao)"/>
+
+    <rect x="812" y="150" width="216" height="112" rx="8" class="bx-ochre"/>
+    <text class="tl ctr" x="920" y="176">journal object PUT</text>
+    <text class="mns ctr" x="920" y="198">.flint/journal/e7.000041</text>
+    <text class="tx ctr" x="920" y="216">If-None-Match:* on sequenced keys</text>
+    <text class="tsb ctr" x="920" y="236">ack AFTER this lands</text>
+
+    <text class="tx" x="56" y="292">the journal record carries the dirty intervals' BYTES, pread from the working set at commit time —</text>
+    <text class="tx" x="56" y="308">capture already knows the intervals; read-back at fsync is exactly the content fsync promises</text>
+    <text class="tx" x="56" y="334">a parked fsync uses the existing DELAY-parking machinery; write-back paths never enter this lane at all</text>
+
+    <!-- checkpoint interplay -->
+    <rect x="40" y="380" width="1000" height="150" rx="10" class="bx"/>
+    <text class="tl" x="56" y="406">checkpoints stay exactly what flush barriers are today</text>
+    <text class="tx" x="56" y="430">the barrier publishes whole-file generations + the manifest CAS — the BROWSABLE view, unchanged;</text>
+    <text class="tx" x="56" y="446">the manifest gains one field: the journal watermark its checkpoint covers</text>
+    <text class="tx" x="56" y="470">after a checkpoint lands, journal objects at or below the watermark are garbage-collected —</text>
+    <text class="tx" x="56" y="486">replay length is bounded by checkpoint cadence, and an S3 browser sees checkpoints, never the tail</text>
+    <text class="tsb" x="56" y="512">restart with the PVC: replay the tail onto the working set before the listener binds — page 2 removes the PVC</text>
+
+    <!-- ladders -->
+    <rect x="1080" y="104" width="480" height="290" rx="10" class="bx-oo"/>
+    <text class="tho" x="1096" y="130">the durability ladder — where an acked fsync lives</text>
+    <line class="hair" x1="1096" y1="142" x2="1544" y2="142"/>
+    <text class="tl" x="1096" y="166">today (write-back)</text>
+    <text class="tx" x="1096" y="184">one gp3 volume, one AZ; S3 trails by flush cadence</text>
+    <text class="tl" x="1096" y="212">EFS</text>
+    <text class="tx" x="1096" y="230">synchronously replicated, multi-AZ</text>
+    <text class="tl" x="1096" y="258">strict mode</text>
+    <text class="tsb" x="1096" y="276">regional S3, 11 nines, multi-AZ — ≥ EFS, per acked fsync</text>
+    <line class="hair" x1="1096" y1="292" x2="1544" y2="292"/>
+    <text class="tx" x="1096" y="314">fsync latency: write-back ~0.1–1 ms (local) · strict on S3</text>
+    <text class="tx" x="1096" y="330">Standard ~10–50 ms · strict on Express + async Standard</text>
+    <text class="tx" x="1096" y="346">mirror ~2–8 ms (zone loss re-opens an AZ-scoped tail RPO)</text>
+    <text class="tx" x="1096" y="370">EFS write latency is low-single-digit ms — strict is the</text>
+    <text class="tx" x="1096" y="386">same order for group-committed workloads</text>
+
+    <rect x="1080" y="420" width="480" height="110" rx="10" class="bx-vo"/>
+    <text class="thv" x="1096" y="446">the journal is self-fencing</text>
+    <text class="tx" x="1096" y="468">sequenced create-only keys: a deposed hub's next PUT</text>
+    <text class="tx" x="1096" y="484">collides and loses. Every strict write round-trips the</text>
+    <text class="tx" x="1096" y="500">arbiter — closing the heartbeat-interval residual window</text>
+    <text class="tx" x="1096" y="516">the epoch design documents. Fencing gets STRONGER here.</text>
+
+    <!-- cost band -->
+    <rect x="40" y="560" width="1520" height="120" rx="10" class="band"/>
+    <text class="th" x="56" y="586">cost shape — the group commit is what keeps this sane</text>
+    <text class="tx" x="56" y="610">requests: one PUT per busy window, not per fsync — a CONTINUOUSLY-fsyncing share at a 25 ms window is ~40 PUT/s ≈ $520/mo worst case;</text>
+    <text class="tx" x="56" y="626">bursty real workloads land ~$5–50/mo; an idle share journals nothing. The fsync-churn pathology cannot occur — the window is the throttle.</text>
+    <text class="tx" x="56" y="650">knobs: window (latency vs $), max journal-object size, per-path policy, Express staging. Bytes: journal carries only dirty intervals — a 4 KiB</text>
+    <text class="tx" x="56" y="666">commit journals ~4 KiB, never the file. Checkpoint cadence bounds both replay time and journal storage (GC'd after each barrier).</text>
+  </svg>
+  <figcaption><b>The claim, precisely:</b> with strict mode on a path, every acked fsync is durable in regional, multi-AZ S3 before the application proceeds — a strictly stronger statement than EFS makes — while unflagged paths keep today's write-back contract and the bucket's browsable view stays exactly the whole-file checkpoint view it is now. The design is three ideas, all with precedent in this codebase: <b>group commit</b> (the WAL discipline — latency is one PUT regardless of fsync rate, cost is one PUT per busy window), <b>read-back journaling</b> (capture already tracks dirty intervals; the journal preads their bytes at commit time, so no write path is re-plumbed), and <b>sequenced create-only keys</b> (If-None-Match:* — the same conditional-write primitive every publish already uses, arranged so the journal doubles as a fence that is stronger than the epoch heartbeat it complements). What it deliberately does not change: coherence (the hub is still the single authority — strict mode is a durability knob, not a consistency change), the manifest/DR format (one added watermark field), and the consistency contracts' reader-facing statements — an S3 browser still reads checkpoints. The one honest asterisk is Express staging: single-digit-ms fsync at the cost of an AZ-scoped tail RPO if the Express zone dies before the Standard mirror catches up — offered as a knob, never a default.</figcaption>
+</section>
+<!-- ============================================================ PAGE 2 -->
+<section class="page">
+  <header class="ph">
+    <h1>The rebuildable hub — the PVC demotes to a cache</h1>
+    <span class="kicker">2 / 2 · availability</span>
+  </header>
+  <p class="dek">Once the journal exists, S3 is the authoritative log and the hub can be rebuilt anywhere from the bucket alone: checkpoint + journal replay + protocol grace. The force-detach wait, the AZ pinning, and the kubelet staging-wedge class all hang off the PVC being load-bearing — and stop existing when it isn't.</p>
+  <figure>
+  <svg viewBox="0 0 1600 800" role="img" aria-label="Three failover arms compare today's PVC-bound recovery with journal rebuild and a warm standby; a numbered rebuild sequence shows checkpoint import, journal replay, and protocol grace; side panels list which failure rows improve and what deliberately is not in the journal; a bottom band gives the build phases and effort.">
+    <defs>
+      <marker id="s2-an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    </defs>
+
+    <!-- failover ladder -->
+    <rect x="40" y="104" width="740" height="230" rx="10" class="band"/>
+    <text class="th" x="56" y="130">the failover ladder</text>
+    <rect x="56" y="146" width="708" height="52" rx="7" class="bx"/>
+    <text class="tl" x="72" y="168">today — the PVC is load-bearing</text>
+    <text class="tx" x="72" y="188">pod crash ~13 s · node crash: force-detach up to ~6 min, AZ-pinned, F29 staging wedges need a manual arm</text>
+    <rect x="56" y="206" width="708" height="62" rx="7" class="bx-blue"/>
+    <text class="tl" x="72" y="228">journal rebuild — successor starts ANYWHERE</text>
+    <text class="tx" x="72" y="248">no volume reattach, no AZ pinning, no kubelet staging state — checkpoint pull + tail replay + grace:</text>
+    <text class="tx" x="72" y="262">tens of seconds, bounded by checkpoint cadence and grace, not by EBS</text>
+    <rect x="56" y="270" width="708" height="52" rx="7" class="bx"/>
+    <text class="tl" x="72" y="292">warm standby (v2) — a second pod tails the journal continuously</text>
+    <text class="tx" x="72" y="312">takeover ≈ fence + grace; the epoch CAS + journal-seq collision already arbitrate who serves</text>
+
+    <!-- rebuild sequence -->
+    <rect x="40" y="360" width="740" height="300" rx="10" class="bx-hub"/>
+    <text class="th" x="56" y="386">the rebuild, step by step — no PVC anywhere</text>
+    <circle class="num" cx="70" cy="410" r="10"/><text class="numt ctr" x="70" y="414">1</text>
+    <text class="tx" x="90" y="414">schedule the pod on any node, any AZ — working set on an empty volume (now a cache)</text>
+    <circle class="num" cx="70" cy="440" r="10"/><text class="numt ctr" x="70" y="444">2</text>
+    <text class="tx" x="90" y="444">import the last checkpoint: manifest → dirs, symlinks, evicted stubs (the existing DR verb, unchanged)</text>
+    <circle class="num" cx="70" cy="470" r="10"/><text class="numt ctr" x="70" y="474">3</text>
+    <text class="tx" x="90" y="474">replay the journal tail — touched files hydrate, journal bytes land at their offsets; idempotent</text>
+    <circle class="num" cx="70" cy="500" r="10"/><text class="numt ctr" x="70" y="504">4</text>
+    <text class="tx" x="90" y="504">fence: first journal PUT at seq N+1 — the old incarnation's straggler collides and loses</text>
+    <circle class="num" cx="70" cy="530" r="10"/><text class="numt ctr" x="70" y="534">5</text>
+    <text class="tx" x="90" y="534">fresh state.db + FULL protocol grace: clients reclaim locks and opens — the B1/B2 reclaim fixes and</text>
+    <text class="tx" x="90" y="550">the B3 verifier are exactly what make this client-transparent (retransmitted WRITEs land, locks return)</text>
+    <circle class="num" cx="70" cy="580" r="10"/><text class="numt ctr" x="70" y="584">6</text>
+    <text class="tx" x="90" y="584">serve — clients saw a stall and a reboot, never an error; acked strict writes all present</text>
+    <text class="tsb" x="56" y="620">recovery ground truth is the BUCKET, not local disk — the state.db corruption and disk-full legs of the</text>
+    <text class="tsb" x="56" y="636">failure track get an independent witness they have never had</text>
+
+    <!-- right panels -->
+    <rect x="820" y="104" width="740" height="250" rx="10" class="bx-oo"/>
+    <text class="tho" x="836" y="130">which failure-track rows this improves — and which it does not touch</text>
+    <line class="hair" x1="836" y1="142" x2="1544" y2="142"/>
+    <text class="tx" x="836" y="166">F4 power loss / F1 crash storms — acked strict writes get a second, independent durability witness</text>
+    <text class="tx" x="836" y="186">F8 disk-full, F13 quarantine fallback — recovery no longer trusts the disk that just failed</text>
+    <text class="tx" x="836" y="206">F10 node death — the ~6-min force-detach row is deleted; F29's kubelet staging-wedge class cannot occur</text>
+    <text class="tx" x="836" y="226">split-brain — the epoch heartbeat's documented residual window closes (journal seq is the fence)</text>
+    <line class="hair" x1="836" y1="242" x2="1544" y2="242"/>
+    <text class="tx" x="836" y="266">NOT touched: the NFS protocol surface (conformance, quotas, deadlines — the B1–B10 work stands on its</text>
+    <text class="tx" x="836" y="282">own and is a PREREQUISITE here, not a beneficiary); coherence (the hub is still the one authority);</text>
+    <text class="tx" x="836" y="298">the CL load track (concurrency behavior is orthogonal to where durability lives)</text>
+    <text class="tsb" x="836" y="326">strict mode is the milestone AFTER the hardening drills, standing on them — not a replacement for them</text>
+
+    <rect x="820" y="380" width="740" height="130" rx="10" class="bx"/>
+    <text class="tl" x="836" y="406">deliberately NOT in the journal</text>
+    <text class="tx" x="836" y="430">sessions, client records, open/lock state — rebuilt by the PROTOCOL (grace + reclaim), not by replay;</text>
+    <text class="tx" x="836" y="446">journaling them would duplicate machinery NFSv4.1 already specifies and this repo already hardened</text>
+    <text class="tx" x="836" y="470">write-back paths — their contract is unchanged; the journal covers strict paths only, so the tail</text>
+    <text class="tx" x="836" y="486">stays small and replay stays fast</text>
+
+    <rect x="820" y="536" width="740" height="124" rx="10" class="bx-vo"/>
+    <text class="thv" x="836" y="562">one engine, three front ends — not lite-hub-specific</text>
+    <text class="tx" x="836" y="586">the journal is tier:: functionality: the same lane is the strict mode for lean and FUSE sidecars</text>
+    <text class="tx" x="836" y="602">(their fsync ⇒ S3 story on page 2 of the consistency comparison), and the lean gateway is its</text>
+    <text class="tx" x="836" y="618">natural group-commit point. Build once, every front end inherits the durability knob.</text>
+    <text class="tx" x="836" y="642">out of scope: the full-pNFS/DS posture (the tier is scoped lite-only by design review A1)</text>
+
+    <!-- build band -->
+    <rect x="40" y="686" width="1520" height="96" rx="10" class="band"/>
+    <text class="th" x="56" y="712">what it takes to build</text>
+    <text class="tx" x="56" y="736">model first (~1 wk): journal-seq fence × epoch × checkpoint watermark — the FlintTierSession discipline. Phase A, strict journal (~4–6 wk):</text>
+    <text class="tx" x="56" y="752">journal writer + group commit ~1.5k lines · fsync parking hooks ~500 · policy ~150 · checkpoint watermark + GC ~300 · replay-on-restart ~400 · drills.</text>
+    <text class="tx" x="56" y="768">Phase B, rebuildable hub (~4 wk): no-PVC rebuild path ~1k · fence rework · operator failover + cache-mode chart · drills. Standby v2: ~2 wk. Ships per-share, opt-in.</text>
+  </svg>
+  <figcaption><b>The build, honestly costed:</b> a formal-model week, then Phase A (~4–6 engineer-weeks) delivers the EFS-exceeding durability guarantee as an opt-in per-share knob with the PVC still present, and Phase B (~4 weeks) makes the PVC a cache and collapses the availability gap; a warm standby is a further ~2 weeks when wanted. Almost every hard prerequisite already exists: capture's dirty intervals, the guarded store trait, the DELAY-parking machinery, manifest/import as the checkpoint verb, the epoch CAS — and, critically, the hardening campaign's own fixes: <b>B1/B2's reclaim correctness and B3's incarnation verifier are what make a rebuilt hub client-transparent</b>, so this design stands on the hardening story rather than competing with it. The division of labor is clean: the CL/F drills earn the right to ship the hub at all; strict mode is the first post-GA milestone, converting the two failure-track rows that drills can only measure (PVC loss, node-death stalls) into rows that no longer exist. And because the journal is tier-engine functionality, the same lane is the strict mode for the lean and FUSE sidecars later — one build, three front ends, with the fencing getting stronger as a side effect.</figcaption>
+</section>
+</body>
+</html>
