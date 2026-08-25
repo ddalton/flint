@@ -1,0 +1,42 @@
+flint-lean is installed in namespace {{ .Release.Namespace }}.
+
+{{ if .Values.webhook.enabled -}}
+The mutating webhook is REGISTERED BY THE OPERATOR at startup (it
+carries the caBundle for the cert it generates). Give it a few seconds,
+then confirm:
+
+  kubectl get mutatingwebhookconfiguration flint-lean-inject
+
+{{ end -}}
+Declare a workspace:
+
+  apiVersion: flint.io/v1alpha1
+  kind: FlintLeanWorkspace
+  metadata: { name: proj1 }
+  spec:
+    projectId: team-a/proj1     # DURABLE identity — the claim keys on
+                                # this, never on the CR UID, so delete
+                                # and re-apply ADOPTS its own data
+    bucket: my-bucket
+    keyPrefix: tenants/proj1
+    endpoint: http://s3-proxy.svc:9000
+    credentialsSecretRef: proj1-proxy-creds   # keys AWS_* verbatim
+    floorSecs: 60               # the RPO contract
+    maxFiles: 250000            # the measured v1 cap (0b)
+
+  kubectl get flintleanworkspace proj1
+  # PHASE Claimed | Adopted — or Refused, which means another project
+  # holds that prefix's claim. The operator NEVER adopts a foreign
+  # claim on the fly; resolve it explicitly.
+
+Then opt a pod in with one label:
+
+  metadata:
+    labels:
+      flint.io/lean-workspace: proj1
+
+The webhook injects a NATIVE sidecar (initContainer, restartPolicy
+Always — needs Kubernetes >= 1.29) that materializes the workspace at
+{{ "/workspace" }} before your container starts and publishes snapshots
+at floorSecs. If the workspace is missing or Refused, the pod is
+REFUSED at admission rather than started ungated.

@@ -1,61 +1,6 @@
-# The lean operator e2e stack: MinIO (the stand-in proxy/store), the
-# operator with its webhook, RBAC. The workspace + agent pod live in
-# workspace.yaml (applied after the operator is Ready).
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: flint-system
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: minio
-  namespace: flint-system
-spec:
-  replicas: 1
-  selector: { matchLabels: { app: minio } }
-  template:
-    metadata: { labels: { app: minio } }
-    spec:
-      containers:
-        - name: minio
-          image: minio/minio
-          args: ["server", "/data", "--address", ":9000"]
-          env:
-            - { name: MINIO_ROOT_USER, value: drill }
-            - { name: MINIO_ROOT_PASSWORD, value: drillsecret }
-          ports: [{ containerPort: 9000 }]
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: minio
-  namespace: flint-system
-spec:
-  selector: { app: minio }
-  ports: [{ port: 9000, targetPort: 9000 }]
----
-# Bucket bootstrap (the operator deliberately has no CreateBucket).
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: make-bucket
-  namespace: flint-system
-spec:
-  backoffLimit: 20
-  template:
-    spec:
-      restartPolicy: OnFailure
-      containers:
-        - name: mc
-          image: minio/mc
-          command:
-            - /bin/sh
-            - -c
-            - |
-              until mc alias set m http://minio.flint-system.svc:9000 drill drillsecret; do sleep 2; done
-              mc mb --ignore-existing m/agentws
----
+# The RAW-MANIFEST operator stack (run.sh). The store half — namespace,
+# MinIO, bucket bootstrap, operator credentials — lives in minio.yaml
+# and is shared with the chart e2e (run-chart.sh).
 apiVersion: v1
 kind: ServiceAccount
 metadata:

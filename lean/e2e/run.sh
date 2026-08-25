@@ -14,7 +14,7 @@ PASS=0
 fail() { echo "FAIL: $1"; exit 1; }
 ok() { PASS=$((PASS + 1)); echo "  ok: $1"; }
 
-$K apply -f operator.yaml > /dev/null || fail "apply operator stack"
+$K apply -f minio.yaml -f operator.yaml > /dev/null || fail "apply operator stack"
 $K -n flint-system rollout status deploy/minio --timeout=180s > /dev/null || fail "minio up"
 $K -n flint-system wait --for=condition=complete job/make-bucket --timeout=180s > /dev/null || fail "bucket made"
 $K -n flint-system rollout status deploy/flint-lean-operator --timeout=180s > /dev/null || fail "operator up"

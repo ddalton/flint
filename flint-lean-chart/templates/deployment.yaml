@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flint-lean.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flint-lean.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "flint-lean.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "flint-lean.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "flint-lean.serviceAccountName" . }}
+      containers:
+        - name: operator
+          image: {{ include "flint-lean.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/flint-lean-operator"]
+          env:
+            - name: FLINT_LEAN_OP_IDENTITY
+              valueFrom:
+                fieldRef: { fieldPath: metadata.name }
+{{- if .Values.watchNamespace }}
+            - { name: FLINT_LEAN_OP_NAMESPACE, value: {{ .Values.watchNamespace | quote }} }
+{{- end }}
+{{- if .Values.webhook.enabled }}
+            - { name: FLINT_LEAN_WEBHOOK_SERVICE, value: {{ include "flint-lean.name" . | quote }} }
+            - { name: FLINT_LEAN_WEBHOOK_NAMESPACE, value: {{ .Release.Namespace | quote }} }
+            - { name: FLINT_LEAN_WEBHOOK_LISTEN, value: "0.0.0.0:{{ .Values.webhook.port }}" }
+            - { name: FLINT_LEAN_SIDECAR_IMAGE, value: {{ include "flint-lean.sidecarImage" . | quote }} }
+{{- end }}
+{{- if .Values.endpoint }}
+            - { name: AWS_ENDPOINT_URL, value: {{ .Values.endpoint | quote }} }
+{{- end }}
+            - { name: RUST_LOG, value: "info" }
+{{- if .Values.operatorCredentialsSecret }}
+          envFrom:
+            # Keys must be AWS_* VERBATIM (the ambient credential chain).
+            - secretRef: { name: {{ .Values.operatorCredentialsSecret | quote }} }
+{{- end }}
+{{- if .Values.webhook.enabled }}
+          ports:
+            - { name: webhook, containerPort: {{ .Values.webhook.port }} }
+          readinessProbe:
+            httpGet: { path: /healthz, port: webhook, scheme: HTTPS }
+            periodSeconds: 5
+{{- end }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+{{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+{{- end }}
+{{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+{{- end }}
+{{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+{{- end }}
+{{- if .Values.webhook.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "flint-lean.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flint-lean.labels" . | nindent 4 }}
+spec:
+  # The webhook's endpoints must be operator pods ONLY — the gateway
+  # carries its own selector for exactly this reason.
+  selector: {{- include "flint-lean.selectorLabels" . | nindent 4 }}
+  ports:
+    - { name: webhook, port: {{ .Values.webhook.port }}, targetPort: webhook }
+{{- end }}

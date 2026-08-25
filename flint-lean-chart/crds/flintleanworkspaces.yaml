@@ -1,0 +1,158 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: flintleanworkspaces.flint.io
+spec:
+  group: flint.io
+  names:
+    categories: []
+    kind: FlintLeanWorkspace
+    plural: flintleanworkspaces
+    shortNames:
+    - flw
+    singular: flintleanworkspace
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - jsonPath: .spec.projectId
+      name: PROJECT
+      type: string
+    - jsonPath: .spec.bucket
+      name: BUCKET
+      type: string
+    - jsonPath: .spec.keyPrefix
+      name: PREFIX
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'A lean checkout/publish workspace: full local checkout at pod start, snapshot publishes at the flush floor, zero long-running per-workspace resources'
+        properties:
+          spec:
+            properties:
+              bucket:
+                description: |-
+                  Bucket and subtree prefix (the proxy's tenancy boundary —
+                  project-granular per plan §9 Q6).
+                type: string
+              credentialsSecretRef:
+                description: |-
+                  Secret with the SIDECAR's proxy credentials, keys AWS_* VERBATIM
+                  (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, ...). The
+                  OPERATOR never uses this — bucket-admin ops run under the
+                  operator principal (plan §2.4 principal split).
+                nullable: true
+                type: string
+              endpoint:
+                description: |-
+                  S3 endpoint override (the deployment proxy; MinIO rigs). None =
+                  ambient AWS endpoint resolution.
+                nullable: true
+                type: string
+              expectedBytes:
+                description: |-
+                  Expected inventory, used to DERIVE the sidecar's startupProbe
+                  budget (plan §2.4: probes are derived, never fleet constants —
+                  the hub's 600 s default killed a 20 GiB checkout at the only
+                  measured rate). Unset ⇒ the budgets assume the caps.
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
+              expectedFiles:
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
+              fanout:
+                default: 16
+                description: Bounded upload/checkout concurrency (0b lever; default 16).
+                format: uint64
+                minimum: 0.0
+                type: integer
+              floorSecs:
+                default: 60
+                description: 'Publish cadence floor, seconds: the durability (RPO) contract.'
+                format: uint64
+                minimum: 0.0
+                type: integer
+              image:
+                description: Sidecar image override; None = the operator's default.
+                nullable: true
+                type: string
+              keyPrefix:
+                type: string
+              maxBytes:
+                default: 0
+                description: |-
+                  Checkout budgets. Files defaults to the 0b-measured v1 cap
+                  (docs/plans/flint-lean-0b-measurements.md); 0 = unlimited.
+                format: uint64
+                minimum: 0.0
+                type: integer
+              maxFiles:
+                default: 250000
+                format: uint64
+                minimum: 0.0
+                type: integer
+              mountPath:
+                default: /workspace
+                description: Where the workspace mounts in every container.
+                type: string
+              projectId:
+                description: |-
+                  The durable, user-declared project identity the claim cell
+                  carries (plan P1). Stable across CR delete/recreate — NEVER the
+                  CR UID. Equal identity on a standing claim ⇒ adopt (DR, GitOps,
+                  cross-cluster moves); different ⇒ the CR is Refused.
+                type: string
+              sizeLimitGib:
+                default: 20
+                description: emptyDir sizeLimit for the workspace volume, GiB. 0 = no limit.
+                format: uint64
+                minimum: 0.0
+                type: integer
+            required:
+            - bucket
+            - keyPrefix
+            - projectId
+            type: object
+          status:
+            nullable: true
+            properties:
+              lastVerifiedUnix:
+                description: |-
+                  Unix time of the last successful operator pass (claim verified,
+                  bootstrap posture checked, MPU sweep run).
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
+              message:
+                nullable: true
+                type: string
+              phase:
+                description: Pending | Claimed | Adopted | Refused | Error
+                nullable: true
+                type: string
+              standingProjectId:
+                description: |-
+                  The claim cell's standing identity when Refused (the operator
+                  never adopts a foreign claim on the fly).
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: FlintLeanWorkspace
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

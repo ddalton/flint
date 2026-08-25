@@ -1,0 +1,25 @@
+apiVersion: v2
+name: flint-lean
+description: >-
+  The flint-lean control plane — one FlintLeanWorkspace per project
+  subtree, a mutating webhook that injects the checkout/publish sidecar
+  into opted-in pods, and (optionally) the lean gateway for HITL writes
+  and sync reads. No per-workspace Deployments, PVCs or Services: an
+  idle workspace is bucket objects and nothing else.
+type: application
+
+# Chart version, independent of the flint release train.
+version: 0.1.0
+
+# The flint release whose images this chart runs. The operator and the
+# sidecar ship from the same build and speak the same bucket format —
+# keep them in step.
+appVersion: "1.37.0"
+
+keywords:
+  - s3
+  - agents
+  - checkout-publish
+  - operator
+  - flint
+home: https://github.com/ddalton/flint
