@@ -396,27 +396,7 @@
   periods, dirty-set caps — instead of an architecture property.&rdquo; Lean&rsquo;s refinement over FUSE is
   taking the app out of the sidecar&rsquo;s blast radius entirely; its residual concentration point is the
   gateway/proxy pair.</p>
-  <h2 class="rath" style="margin-top:0.14in">Multicluster — many clusters, one bucket</h2>
-  <div class="beyond">
-  <p><b>Hub:</b> coherence survives trivially (one authority) — the contract is network identity. Remote
-  clusters SNAT to one address (1486/1486 measured; nfsClientCIDRs structurally cannot work), per-node NFS
-  client names must be unique across clusters (RFC 8881 case 5 read a colliding name as a reboot and took the
-  incumbent&rsquo;s locks — six 1.37.0 defects, one cause), and remote mounts need a keepalive or idle-suspend
-  kills them. Prefix uniqueness stops at the cluster boundary — equal prefixes contend on the epoch cell,
-  nested ones never meet: allocate prefixes upstream of Kubernetes.</p>
-  <p><b>FUSE / Lean:</b> native — the bucket is the rendezvous and the arbitration state (epoch, claim, lease,
-  manifest CAS, lean&rsquo;s gateway refusal) is store-side, so cross-cluster behaves exactly like cross-pod:
-  no client identity on any wire, no keepalive, nothing to wake. The residual is the same allocation gap —
-  per-cluster webhooks cannot see each other&rsquo;s subtree grants.</p>
-  <p><b>lakeFS:</b> the best client story — HTTP + per-request SigV4 means the NFS identity class simply does
-  not exist; N clusters are N sets of HTTP clients. The pivot moves to the database: every replica must share
-  ONE KV (cross-region, a KV round-trip sits inside every commit CAS), and two independent installs on one
-  namespace are fenced only at CREATE time (ensureStorageNamespace&rsquo;s dummy object, controller.go:2426) —
-  a birth check, not a live lease; past it, each install&rsquo;s uncommitted GC treats the other&rsquo;s staged
-  objects as garbage. In one line: the hub makes multicluster a <i>network-identity</i> problem, the direct
-  modes an <i>allocation</i> problem, lakeFS a <i>database-topology</i> problem — share one KV or don&rsquo;t.</p>
-  </div>
-  <h2 class="rath" style="margin-top:0.12in">Beyond flint — the same archetypes in the industry</h2>
+  <h2 class="rath" style="margin-top:0.18in">Beyond flint — the same archetypes in the industry</h2>
   <div class="beyond">
   <p>These pages are grounded in flint, but the columns model archetypes, and most orderings are
   structural — set by where arbitration, bytes, and credentials live — so they survive across
@@ -448,7 +428,7 @@
   credentials — is roughly lean&rsquo;s designed endgame already shipped, at the price flint-lean
   refuses to pay: an operated KV store (Postgres/DynamoDB) standing beside the bucket.</p>
   </div>
-  <p class="foot">Sources: fuse-architecture p4 (failure matrix) &middot; lean plan §2.2/§7 (gateway outage) &middot; flint-lite-architecture p4 + fleets guide (idle/suspend) &middot; pnfs-operator-runbook (Kerberos) &middot; lakeFS controller.go:2426 (namespace check).</p>
+  <p class="foot">Sources: fuse-architecture p4 (failure matrix) &middot; lean plan §2.2/§7 (gateway outage) &middot; flint-lite-architecture p4 + fleets guide (idle/suspend) &middot; pnfs-operator-runbook (Kerberos).</p>
 </div>
   <div class="page">
   <h1>lakeFS — scored from source</h1>
@@ -664,5 +644,69 @@
 </div></div>
   <div class="beyond" style="margin-top:0.08in"><p><b>lakeFS beats Lean exactly where the server owns the truth</b> — an acked write is already in S3 plus the KV store before the app sees success (4.5 vs 1.5), API readers see each other&rsquo;s staged writes immediately (3.5 vs 1.5), and branch/merge machinery genuinely arbitrates concurrent writers with per-key conflict refusal (3.5 vs 2.5). The structural reason: it replaced the filesystem with a commit store.</p><p><b>Everything filesystem-shaped inverts.</b> No locks, no rename, no shared sqlite/git across clients (1.5); metadata storms pay HTTPS round-trips against Lean&rsquo;s local-NVMe 5; every POSIX workload needs a full local checkout. The mount that would fix this — Everest, NFS/FUSE write mode — is enterprise and not in this codebase.</p><p><b>On out-of-band writes the two systems are exact mirrors:</b> Lean preserves and surfaces foreign S3 writes through its inbox (4); lakeFS hides them, schedules them for GC deletion, or serves a foreign overwrite corrupt under an unverified stored ETag (1). The object store is lakeFS&rsquo;s private heap, not a shared surface.</p><p><b>As a fleet citizen lakeFS is cheaper than Lean per share</b> — parking is free, consumers featherweight, rolls stateless — but it concentrates what Lean distributes: server/KV death stops the whole API data plane fleet-wide (failure shape 3 vs 3.5), OSS multi-tenancy is one superAdmin (tenancy 1.5 vs 4), and the default-on hooks engine puts writer-authored synchronous webhooks inside the commit path (pkg/actions, 6.4k LOC — flagged by the critic from a subsystem no scorer had read).</p></div>
   <p class="foot">Method: recon &rarr; score &rarr; adversarial verify (file:line evidence, 452 tool calls) &rarr; cross-dimension critique; reconciliation adopted the verifier&rsquo;s misconfig adjustment and the critic&rsquo;s CAS raise, upgrades trim, and two-postures caveat. Evidence basis differs from pages 1&ndash;3: the flint columns are doc-grounded and drill-proven; this column is code-inferred from one commit (4bb11638) of the OSS repo — Everest mount, RBAC, and OIDC/SAML are enterprise deltas noted per cell. Radar overlays show Lean vs lakeFS; the tables carry every column. Post-publication review lowered Day-2 failure shape 4&rarr;3: the two-postures envelope had credited the API/gateway face with lakectl-local&rsquo;s outage behavior.</p>
+</div>
+  <div class="page">
+  <h1>Multicluster — many clusters, one bucket</h1>
+  <p class="deck">The radar scores on page 1 anchor to the single-cluster case — clients co-located with
+  the share&rsquo;s cluster. This page states each approach&rsquo;s multicluster contract and lists the
+  cells that move when clients span clusters. The direct modes and lakeFS are topology-invariant by
+  construction; the hub column is where multicluster costs land.</p>
+  <div class="beyond">
+  <p><b>Hub:</b> coherence survives trivially (one authority) — the contract is network identity. Remote
+  clusters SNAT to one address (1486/1486 measured; nfsClientCIDRs structurally cannot work), per-node NFS
+  client names must be unique across clusters (RFC 8881 case 5 read a colliding name as a reboot and took the
+  incumbent&rsquo;s locks — six 1.37.0 defects, one cause), and remote mounts need a keepalive or idle-suspend
+  kills them. Prefix uniqueness stops at the cluster boundary — equal prefixes contend on the epoch cell,
+  nested ones never meet: allocate prefixes upstream of Kubernetes.</p>
+  <p><b>FUSE / Lean:</b> native — the bucket is the rendezvous and the arbitration state (epoch, claim, lease,
+  manifest CAS, lean&rsquo;s gateway refusal) is store-side, so cross-cluster behaves exactly like cross-pod:
+  no client identity on any wire, no keepalive, nothing to wake. The residual is the same allocation gap —
+  per-cluster webhooks cannot see each other&rsquo;s subtree grants.</p>
+  <p><b>lakeFS:</b> the best client story — HTTP + per-request SigV4 means the NFS identity class simply does
+  not exist; N clusters are N sets of HTTP clients. The pivot moves to the database: every replica must share
+  ONE KV (cross-region, a KV round-trip sits inside every commit CAS), and two independent installs on one
+  namespace are fenced only at CREATE time (ensureStorageNamespace&rsquo;s dummy object, controller.go:2426) —
+  a birth check, not a live lease; past it, each install&rsquo;s uncommitted GC treats the other&rsquo;s staged
+  objects as garbage. In one line: the hub makes multicluster a <i>network-identity</i> problem, the direct
+  modes an <i>allocation</i> problem, lakeFS a <i>database-topology</i> problem — share one KV or don&rsquo;t.</p>
+  </div>
+  
+  <h2 class="rath" style="margin-top:0.16in">What moves — score deltas (single &rarr; multicluster)</h2>
+  <table class="avail">
+    <thead><tr><th style="width:26%">Chart &middot; axis</th><th style="width:12%">Column</th>
+      <th style="width:17%">single &rarr; multi</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td class="ae">Performance &middot; Stream read / write</td><td class="ac">hub sys &middot; krb5p</td>
+        <td class="ac">sys 3.5/3 &rarr; 3/2.5<br>krb5p 2/1.5 &rarr; 1.5/1</td>
+        <td class="ac">cross-cluster RTT on every RPC; one NIC now shared by N clusters&rsquo; clients; often an inter-AZ/region billing path too.</td></tr>
+      <tr><td class="ae">Performance &middot; Small files, Hot loops</td><td class="ac">hub sys &middot; krb5p</td>
+        <td class="ac">sys 1.5/2 &rarr; 1/1.5<br>krb5p 1/1.5 &rarr; 0.5/1</td>
+        <td class="ac">the metadata path is already round-trip-bound (create 12.5&times;, delete 222&times;); every RTT gets longer.</td></tr>
+      <tr><td class="ae">Performance &middot; Small files</td><td class="ac">lakeFS</td>
+        <td class="ac">2.5 &rarr; 2</td>
+        <td class="ac">only when clusters are remote from the lakeFS service; and if replicas span regions, the KV round-trip sits inside every commit CAS.</td></tr>
+      <tr><td class="ae">Day-2 &middot; Failure shape</td><td class="ac">hub (both)</td>
+        <td class="ac">2 &rarr; 1.5</td>
+        <td class="ac">a hub node death now D-state-hangs pods in every mounting cluster — the blast radius multiplies by topology.</td></tr>
+      <tr><td class="ae">Day-2 &middot; Consumer footprint</td><td class="ac">hub sys</td>
+        <td class="ac">4 &rarr; 3</td>
+        <td class="ac">the cross-cluster operating contract lands on consumers: unique per-node client names, a keepalive, a routable advertiseAddress, peering/SGs. (krb5p stays 1 — already the floor.)</td></tr>
+      <tr><td class="ae">Day-2 &middot; Idle lifecycle &amp; wake</td><td class="ac">hub (both)</td>
+        <td class="ac">2.5 &rarr; 2</td>
+        <td class="ac">idle-suspend kills a live remote mount (suspendWithSessions defaults to suspending anyway), and nothing in a remote cluster can write the wake annotation.</td></tr>
+    </tbody>
+  </table>
+  <p class="atake"><b>Unchanged by design:</b> every Consistency cell (the hub&rsquo;s coherence is identical
+  for remote clients; the direct modes&rsquo; contract is already per-subtree snapshots wherever pods run);
+  every FUSE and Lean cell (cross-cluster is cross-pod — the bucket is the rendezvous); krb5p&rsquo;s auth
+  and wire cells (per-user identity survives any network — this is its selling point). And note the
+  <b>sec=sys security cells are already scored at the multicluster boundary</b>: their evidence came from
+  the cross-cluster drills (the 1486/1486 SNAT measurement, &ldquo;nfsClientCIDRs cannot express a client
+  in another cluster&rdquo;), so they take no further delta here.</p>
+  <p class="foot">Sources: the N-clusters-one-hub drill campaign and flint-lite-architecture p5 (the
+  cross-cluster operating contract), the fleets guide performance tables (single-cluster, same-AZ anchor),
+  and lakeFS controller.go:2426 (the create-time namespace check). Deltas are estimates from the measured
+  single-cluster numbers plus the documented cross-cluster mechanics — not re-measured; treat them as the
+  direction and rough size of the shift.</p>
 </div>
 </body></html>
