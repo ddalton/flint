@@ -415,6 +415,18 @@
   aws-s3-sync-style loop does silent last-writer-wins (conflict surfacing &asymp; 1, CAS &asymp; 0), and most
   bucket-native FUSE clients send no conditional writes at all. The sec=sys and krb5p rows, by
   contrast, are textbook industry NFS facts and transfer unchanged.</p>
+  <p><b>lakeFS is the closest whole-system analogue</b> — the same doctrine of one bucket format,
+  several front ends: its S3 gateway is lean&rsquo;s grade-1 proxy, its presigned direct mode is the
+  grade-2 lean deferred, lakectl local is checkout-and-sync, and lakeFS Mount (&ldquo;Everest&rdquo;,
+  enterprise; NFS v3 or FUSE, write support since 0.2.0, a CSI driver in preview) adds a mount front
+  end — though its NFS is local snapshot delivery, not a coherence authority. The contrasts that
+  matter: visibility is explicit-commit, not cadence (&ldquo;other users or mounts will not see your
+  changes until those changes are committed&rdquo;); write-mode POSIX is narrower than plain files (no
+  rename, links, or locks — rename alone disqualifies git loops in-mount) and same-branch concurrent
+  mounts resolve <i>source-wins</i> — a silent winner. Against that, its server-side arbitration —
+  atomic branch commits, first-class merge conflicts, per-user RBAC, clients holding no bucket
+  credentials — is roughly lean&rsquo;s designed endgame already shipped, at the price flint-lean
+  refuses to pay: an operated KV store (Postgres/DynamoDB) standing beside the bucket.</p>
   </div>
   <p class="foot">Sources: the measured failure matrix in flint-fuse-architecture.html p4 (hub and FUSE
   columns), the corrected gateway-outage contract in the lean plan §2.2/§7, the idle-lifecycle and
