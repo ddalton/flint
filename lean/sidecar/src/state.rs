@@ -86,9 +86,20 @@ pub struct ConflictRecord {
 
 pub struct SidecarState {
     dir: PathBuf,
+    /// The state-directory occupancy lock (flock, held for the process
+    /// lifetime). Self-recognition of the lease via the persisted
+    /// incarnation id is only sound because the PREVIOUS process is
+    /// gone — and this lock is what makes that true. Without it, a
+    /// second flint-sync on the same workspace self-recognizes,
+    /// deposes a LIVE sibling, and both write the tree concurrently
+    /// (observed on the 0b rig: a diagnostic re-run raced a live 1M
+    /// checkout into tmp-rename ENOENT collisions). The hub has the
+    /// identical gate (`state_backend::is_single_occupant`).
+    _lock: std::fs::File,
 }
 
 const MARKER: &str = "checkout-complete";
+const LOCK: &str = "lock";
 const BASELINE: &str = "baseline.json";
 const INCARNATION: &str = "incarnation.json";
 const INTENT: &str = "intent.json";
@@ -104,7 +115,25 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> LeanResult<()> {
 impl SidecarState {
     pub fn open(dir: PathBuf) -> LeanResult<SidecarState> {
         fs::create_dir_all(&dir)?;
-        Ok(SidecarState { dir })
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(LOCK))?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // SAFETY: flock on an owned, open fd.
+            let rc = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if rc != 0 {
+                return Err(LeanError::State(format!(
+                    "another flint-sync already holds this workspace ({}): \
+                     refusing to run two sidecars over one tree",
+                    dir.display()
+                )));
+            }
+        }
+        Ok(SidecarState { dir, _lock: lock })
     }
 
     pub fn marker_present(&self) -> bool {

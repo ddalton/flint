@@ -294,6 +294,10 @@ classification. Hub dual-serves `/files` + the dialect for one release.
   or defer (growing RPO) — the knob picks, the report says which.
 - mtime-granularity scan evasion (unchanged from v1; drill leg tries
   to evade and the residual is stated).
+- **Empty directories do not round-trip** (the manifest is file-based;
+  observed on the 0b rig's git e2e — `.git/objects/{info,pack}` etc.
+  vanish across checkout). Benign for git, which recreates them
+  lazily; a dir-marker entry is the v2 lever if a workload needs it.
 - Within-project enforcement is gateway-validated + CAS-cooperative
   (the proxy's tenancy is project-granular — §9 Q6); bucket
   versioning makes clobbers recoverable.

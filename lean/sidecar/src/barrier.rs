@@ -554,11 +554,20 @@ pub(super) fn mtime_of(m: &std::fs::Metadata) -> i64 {
 }
 
 pub(super) fn write_file_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> LeanResult<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    fn ctx(op: &'static str, path: &Path) -> impl FnOnce(std::io::Error) -> super::LeanError {
+        let p = path.display().to_string();
+        move |e| super::LeanError::State(format!("{op} {p}: {e}"))
     }
-    let tmp = path.with_extension("flint-sync-tmp");
-    std::fs::write(&tmp, bytes)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(ctx("mkdir for", path))?;
+    }
+    // NOT with_extension(): that REPLACES the final extension, so
+    // "a.txt" and "a.md" would collide on one tmp name.
+    let tmp = path.with_file_name(format!(
+        "{}.flint-sync-tmp",
+        path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+    ));
+    std::fs::write(&tmp, bytes).map_err(ctx("write tmp for", path))?;
     #[cfg(unix)]
     if let Some(mode) = mode {
         use std::os::unix::fs::PermissionsExt;
@@ -566,6 +575,6 @@ pub(super) fn write_file_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) ->
     }
     #[cfg(not(unix))]
     let _ = mode;
-    std::fs::rename(&tmp, path)?;
+    std::fs::rename(&tmp, path).map_err(ctx("rename into", path))?;
     Ok(())
 }

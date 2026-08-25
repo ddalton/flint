@@ -510,6 +510,22 @@ async fn window_refuses_hitl_and_expiry_unwedges() {
     inbox::gateway_append(store.as_ref(), &sc.cfg, entry("b.txt")).await.unwrap();
 }
 
+/// The occupancy lock: a second sidecar over the SAME workspace tree
+/// must refuse to start — self-recognition of the lease is only sound
+/// because the previous process is provably gone (observed live on the
+/// 0b rig: a concurrent process deposed a live sibling and both wrote
+/// the tree).
+#[tokio::test]
+async fn second_sidecar_on_one_tree_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_for(dir.path());
+    let _held = SidecarState::open(cfg.state_dir()).unwrap();
+    let Err(err) = SidecarState::open(cfg.state_dir()) else {
+        panic!("second open over a held workspace must refuse");
+    };
+    assert!(matches!(err, LeanError::State(_)));
+}
+
 /// Checkout budgets refuse BEFORE materializing; no marker is written.
 #[tokio::test]
 async fn checkout_budget_refuses_before_first_byte() {
