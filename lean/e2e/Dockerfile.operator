@@ -1,0 +1,3 @@
+FROM busybox:stable
+COPY flint-lean-operator /usr/local/bin/flint-lean-operator
+ENTRYPOINT ["/usr/local/bin/flint-lean-operator"]

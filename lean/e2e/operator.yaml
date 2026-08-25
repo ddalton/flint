@@ -1,0 +1,134 @@
+# The lean operator e2e stack: MinIO (the stand-in proxy/store), the
+# operator with its webhook, RBAC. The workspace + agent pod live in
+# workspace.yaml (applied after the operator is Ready).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flint-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: flint-system
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: minio } }
+  template:
+    metadata: { labels: { app: minio } }
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio
+          args: ["server", "/data", "--address", ":9000"]
+          env:
+            - { name: MINIO_ROOT_USER, value: drill }
+            - { name: MINIO_ROOT_PASSWORD, value: drillsecret }
+          ports: [{ containerPort: 9000 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: flint-system
+spec:
+  selector: { app: minio }
+  ports: [{ port: 9000, targetPort: 9000 }]
+---
+# Bucket bootstrap (the operator deliberately has no CreateBucket).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: make-bucket
+  namespace: flint-system
+spec:
+  backoffLimit: 20
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: minio/mc
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until mc alias set m http://minio.flint-system.svc:9000 drill drillsecret; do sleep 2; done
+              mc mb --ignore-existing m/agentws
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flint-lean-operator
+  namespace: flint-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: flint-lean-operator
+rules:
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["create", "get", "patch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations"]
+    verbs: ["create", "get", "patch"]
+  - apiGroups: ["flint.io"]
+    resources: ["flintleanworkspaces"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["flint.io"]
+    resources: ["flintleanworkspaces/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: flint-lean-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: flint-lean-operator
+subjects:
+  - kind: ServiceAccount
+    name: flint-lean-operator
+    namespace: flint-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flint-lean-operator
+  namespace: flint-system
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: flint-lean-operator } }
+  template:
+    metadata: { labels: { app: flint-lean-operator } }
+    spec:
+      serviceAccountName: flint-lean-operator
+      containers:
+        - name: operator
+          image: flint-lean-operator:e2e
+          imagePullPolicy: Never
+          env:
+            - { name: FLINT_LEAN_WEBHOOK_SERVICE, value: flint-lean-operator }
+            - { name: FLINT_LEAN_WEBHOOK_NAMESPACE, value: flint-system }
+            - { name: FLINT_LEAN_SIDECAR_IMAGE, value: "flint-sync:e2e" }
+            # The OPERATOR principal (bucket-admin ops) — MinIO root in
+            # the rig; a scoped role in production.
+            - { name: AWS_ACCESS_KEY_ID, value: drill }
+            - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
+            - { name: AWS_REGION, value: us-east-1 }
+            - { name: RUST_LOG, value: info }
+          ports: [{ containerPort: 9443 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flint-lean-operator
+  namespace: flint-system
+spec:
+  selector: { app: flint-lean-operator }
+  ports: [{ port: 9443, targetPort: 9443 }]

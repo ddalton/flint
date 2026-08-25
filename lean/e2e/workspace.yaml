@@ -1,0 +1,51 @@
+# The workspace CR + the opted-in agent pod (applied once the operator
+# and its webhook are Ready).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lean-proxy-creds
+  namespace: default
+type: Opaque
+stringData:
+  # Keys AWS_* VERBATIM (the sidecar's ambient credential chain).
+  AWS_ACCESS_KEY_ID: drill
+  AWS_SECRET_ACCESS_KEY: drillsecret
+  AWS_REGION: us-east-1
+---
+apiVersion: flint.io/v1alpha1
+kind: FlintLeanWorkspace
+metadata:
+  name: proj1
+  namespace: default
+spec:
+  projectId: team-a/proj1
+  bucket: agentws
+  keyPrefix: tenants/proj1
+  endpoint: http://minio.flint-system.svc:9000
+  credentialsSecretRef: lean-proxy-creds
+  floorSecs: 5
+  expectedBytes: 1048576
+  expectedFiles: 100
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agent-1
+  namespace: default
+  labels:
+    flint.io/lean-workspace: proj1
+spec:
+  restartPolicy: Never
+  containers:
+    - name: agent
+      image: busybox:stable
+      command:
+        - /bin/sh
+        - -c
+        # The agent proves the gate: it can only run once the sidecar's
+        # checkout-complete marker exists (the webhook injects the
+        # workspace mount + the native sidecar ahead of it).
+        - |
+          test -f /workspace/.flint-sync/checkout-complete || { echo "GATE BROKEN: agent started before checkout"; exit 1; }
+          echo hello-from-agent > /workspace/agent.txt
+          sleep 3600

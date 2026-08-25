@@ -1,0 +1,6 @@
+# flint-sync e2e image. busybox (not scratch): the injected
+# startupProbe execs `test -f <marker>` INSIDE this container, so a
+# shell-utils base is load-bearing, not a convenience.
+FROM busybox:stable
+COPY flint-sync /usr/local/bin/flint-sync
+ENTRYPOINT ["/usr/local/bin/flint-sync"]
