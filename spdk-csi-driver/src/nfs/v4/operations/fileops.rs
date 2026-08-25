@@ -699,10 +699,98 @@ pub fn io_error_to_nfs4(e: &std::io::Error) -> Nfs4Status {
     if e.raw_os_error() == Some(libc::ENAMETOOLONG) {
         return Nfs4Status::NameTooLong;
     }
+    // EDQUOT, like ENAMETOOLONG, has no stable `ErrorKind`, so it fell
+    // into the catch-all below and reached the client as NFS4ERR_IO.
+    // NFS4ERR_DQUOT (RFC 8881 §15.1.5) is the actionable answer: the
+    // caller is over its quota, not looking at a broken filesystem.
+    #[cfg(unix)]
+    if e.raw_os_error() == Some(libc::EDQUOT) {
+        return Nfs4Status::DQuot;
+    }
     match e.kind() {
         std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
         std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
+        // ENOSPC. The WRITE paths already answer NFS4ERR_NOSPC
+        // (ioops.rs `StorageFull` arms, operations/mod.rs errno map),
+        // but this shared helper did not — so the THIRTEEN call sites
+        // that route through it (CREATE, MKDIR, LINK, RENAME, SETATTR)
+        // told a client with a full export that the server had hit a
+        // hardware or filesystem fault.
+        //
+        // That distinction is not cosmetic. NFS4ERR_NOSPC surfaces as
+        // ENOSPC, which applications handle; NFS4ERR_IO surfaces as
+        // EIO, which they generally do not. F55 is the precedent in
+        // this repo: EIO on a full volume made postgres PANIC rather
+        // than degrade. A full disk is an expected operating condition
+        // and must read as one.
+        std::io::ErrorKind::StorageFull => Nfs4Status::NoSpc,
         _ => Nfs4Status::Io,
+    }
+}
+
+#[cfg(test)]
+mod nospc_tests {
+    use super::*;
+
+    /// ENOSPC reached the client as NFS4ERR_IO from every call site that
+    /// routes through `io_error_to_nfs4` — CREATE, MKDIR, LINK, RENAME,
+    /// SETATTR. The WRITE paths were already right, which is what hid
+    /// it: a full export answered writes correctly and namespace
+    /// operations with "hardware fault".
+    ///
+    /// EIO is not a synonym for ENOSPC to the software above it. F55 in
+    /// this repo is the precedent — EIO on a full volume made postgres
+    /// PANIC instead of degrading.
+    #[test]
+    fn enospc_is_not_reported_as_io() {
+        let e = std::io::Error::from(std::io::ErrorKind::StorageFull);
+        assert_eq!(
+            io_error_to_nfs4(&e),
+            Nfs4Status::NoSpc,
+            "ENOSPC must map to NFS4ERR_NOSPC, not NFS4ERR_IO"
+        );
+    }
+
+    /// The raw errno must map too, not just the `ErrorKind`. Errors
+    /// built by `from_raw_os_error` are what the syscall wrappers in
+    /// this file actually produce.
+    #[test]
+    #[cfg(unix)]
+    fn raw_enospc_maps_too() {
+        let e = std::io::Error::from_raw_os_error(libc::ENOSPC);
+        assert_eq!(io_error_to_nfs4(&e), Nfs4Status::NoSpc);
+    }
+
+    /// EDQUOT has no stable `ErrorKind`, so it needs the explicit
+    /// raw-errno arm; without it, an over-quota caller is told the
+    /// filesystem is broken.
+    #[test]
+    #[cfg(unix)]
+    fn edquot_is_not_reported_as_io() {
+        let e = std::io::Error::from_raw_os_error(libc::EDQUOT);
+        assert_eq!(
+            io_error_to_nfs4(&e),
+            Nfs4Status::DQuot,
+            "EDQUOT must map to NFS4ERR_DQUOT, not NFS4ERR_IO"
+        );
+    }
+
+    /// Anti-vacuity. These three assertions pass if the function simply
+    /// returns NoSpc for everything, so pin the arms that must NOT have
+    /// moved — including a genuine EIO, which is the value the new arms
+    /// were carved out of.
+    #[test]
+    #[cfg(unix)]
+    fn the_other_arms_did_not_move() {
+        for (errno, want) in [
+            (libc::EIO, Nfs4Status::Io),
+            (libc::ENOENT, Nfs4Status::NoEnt),
+            (libc::EACCES, Nfs4Status::Access),
+            (libc::ENAMETOOLONG, Nfs4Status::NameTooLong),
+        ] {
+            let e = std::io::Error::from_raw_os_error(errno);
+            assert_eq!(io_error_to_nfs4(&e), want, "errno {} remapped", errno);
+        }
     }
 }
 
