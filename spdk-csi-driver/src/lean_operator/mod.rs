@@ -31,3 +31,4 @@
 pub mod crd;
 pub mod inject;
 pub mod reconcile;
+pub mod webhook;

@@ -118,11 +118,13 @@ tower-http = { version = "0.5", features = ["cors"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 anyhow = "1.0"
+base64 = "0.22"
+rcgen = "0.13"  # lean webhook: self-signed CA + serving cert, persisted in a Secret
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 clap = { version = "4.0", features = ["derive", "env"] }  # env: the operator takes its fleet defaults from the pod env
-warp = "0.3"
+warp = { version = "0.3", features = ["tls"] }
 tonic = "0.10"
 prost = "0.12"
 prost-types = "0.12"

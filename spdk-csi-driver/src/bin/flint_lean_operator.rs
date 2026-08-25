@@ -5,15 +5,19 @@
 //! a SEPARATE controller: no FlintShare coupling, no hub lifecycle, no
 //! per-workspace Deployments/PVCs at all. Duties per reconcile: claim
 //! stamping with both adopt arms, bucket posture (operator principal),
-//! the stale-MPU sweep, status. The mutating-webhook HTTP/TLS wrapper
-//! around `lean_operator::inject` is follow-up plumbing (cert
-//! management decision pending); the injection brain itself is built
-//! and unit-tested.
+//! the stale-MPU sweep, status. The mutating webhook (native-sidecar
+//! injection) serves over TLS with operator-generated certs persisted
+//! in a Secret — no cert-manager dependency; see
+//! `lean_operator::webhook`.
 //!
 //! Environment:
-//!   FLINT_LEAN_OP_NAMESPACE   restrict the watch (unset = all)
-//!   FLINT_LEAN_OP_IDENTITY    audit tag stamped into created claims
-//!                             (default: the pod hostname)
+//!   FLINT_LEAN_OP_NAMESPACE        restrict the watch (unset = all)
+//!   FLINT_LEAN_OP_IDENTITY         audit tag stamped into created claims
+//!                                  (default: the pod hostname)
+//!   FLINT_LEAN_WEBHOOK_SERVICE     our Service name; unset = webhook off
+//!   FLINT_LEAN_WEBHOOK_NAMESPACE   Service namespace (default flint-system)
+//!   FLINT_LEAN_WEBHOOK_LISTEN      default 0.0.0.0:9443
+//!   FLINT_LEAN_SIDECAR_IMAGE       injected sidecar image default
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -144,6 +148,36 @@ async fn main() -> anyhow::Result<()> {
             }
             Err(e) => return Err(e.into()),
         }
+    }
+
+    // The mutating webhook: enabled when the chart names our Service.
+    // Cert material lives in a Secret (replicas share it); the
+    // registration (caBundle included) is server-side-applied here.
+    if let Ok(service) = std::env::var("FLINT_LEAN_WEBHOOK_SERVICE") {
+        let ns = std::env::var("FLINT_LEAN_WEBHOOK_NAMESPACE")
+            .unwrap_or_else(|_| "flint-system".into());
+        let listen: std::net::SocketAddr = std::env::var("FLINT_LEAN_WEBHOOK_LISTEN")
+            .unwrap_or_else(|_| "0.0.0.0:9443".into())
+            .parse()?;
+        let image = std::env::var("FLINT_LEAN_SIDECAR_IMAGE")
+            .unwrap_or_else(|_| "flint-sync:latest".into());
+        let bundle =
+            spdk_csi_driver::lean_operator::webhook::ensure_cert_secret(&client, &ns, &service)
+                .await?;
+        spdk_csi_driver::lean_operator::webhook::ensure_webhook_config(
+            &client, &ns, &service, &bundle.ca_pem,
+        )
+        .await?;
+        let wh_client = client.clone();
+        tokio::spawn(spdk_csi_driver::lean_operator::webhook::serve(
+            wh_client,
+            spdk_csi_driver::lean_operator::inject::InjectDefaults { image },
+            listen,
+            bundle,
+        ));
+        info!("lean webhook serving on {listen} as {service}.{ns}.svc");
+    } else {
+        warn!("FLINT_LEAN_WEBHOOK_SERVICE unset — running WITHOUT the injection webhook");
     }
 
     let workspaces: Api<FlintLeanWorkspace> = match std::env::var("FLINT_LEAN_OP_NAMESPACE") {
