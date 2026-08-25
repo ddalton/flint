@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Flint-lean — plain files, one bucket</title>
+<style>
+  @page { size: A3 landscape; margin: 12mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  body {
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: #0f172a;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .page { break-after: page; page-break-after: always; }
+  .page:last-child { break-after: auto; page-break-after: auto; }
+  .ph { border-bottom: 2px solid #0f172a; padding-bottom: 6px; margin-bottom: 14px; display: flex; align-items: baseline; justify-content: space-between; }
+  .ph h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .ph .kicker { font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #64748b; }
+  .dek { font-size: 12px; color: #475569; margin: 0 0 10px; }
+  figure { margin: 0; }
+  figure svg { width: 100%; height: auto; display: block; }
+  figcaption { font-size: 11px; line-height: 1.5; color: #475569; margin-top: 10px; border-top: 1px solid #e2e8f0; padding-top: 8px; }
+  figcaption b { color: #0f172a; font-weight: 600; }
+  code { font-family: Menlo, "SF Mono", Consolas, monospace; font-size: 10.5px; color: #0f172a; }
+
+  svg text { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; fill: #0f172a; }
+  .tt  { font-size: 15px; font-weight: 600; }
+  .th  { font-size: 13px; font-weight: 600; }
+  .tl  { font-size: 12.5px; }
+  .ts  { font-size: 11px; fill: #64748b; }
+  .tsb { font-size: 11px; font-weight: 600; fill: #475569; }
+  .thv { font-size: 11.5px; font-weight: 600; fill: #6d4aa8; }
+  .tho { font-size: 11.5px; font-weight: 600; fill: #8f5e0f; }
+  .tx  { font-size: 10.5px; fill: #64748b; }
+  .txs { font-size: 10px; fill: #64748b; }
+  .mn  { font-family: Menlo, "SF Mono", monospace; font-size: 11.5px; }
+  .mns { font-family: Menlo, "SF Mono", monospace; font-size: 10.5px; }
+  .ctr { text-anchor: middle; }
+  .end { text-anchor: end; }
+  .c-blue { fill: #1a5f9e; }
+  .c-violet { fill: #6d4aa8; }
+  .c-ochre { fill: #8f5e0f; }
+  .c-ink { fill: #0f172a; }
+
+  .bx        { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.4; }
+  .bx-slate  { fill: #f1f5f9; stroke: #94a3b8; stroke-width: 1.4; }
+  .bx-blue   { fill: #e9f2fa; stroke: #1a5f9e; stroke-width: 1.6; }
+  .bx-violet { fill: #f0eafb; stroke: #6d4aa8; stroke-width: 1.6; }
+  .bx-ochre  { fill: #fbf2de; stroke: #a06b12; stroke-width: 1.6; }
+  .bx-vo     { fill: #ffffff; stroke: #6d4aa8; stroke-width: 1.4; }
+  .bx-oo     { fill: #fffdf7; stroke: #a06b12; stroke-width: 1.8; }
+  .bx-hub    { fill: #f7fbfe; stroke: #1a5f9e; stroke-width: 2; }
+  .grp       { fill: none;    stroke: #94a3b8; stroke-width: 1.4; stroke-dasharray: 6 5; }
+  .grpw      { fill: #ffffff; stroke: #94a3b8; stroke-width: 1.4; stroke-dasharray: 6 5; }
+  .bx-dashv  { fill: #f0eafb; stroke: #6d4aa8; stroke-width: 1.6; stroke-dasharray: 6 4; }
+  .band      { fill: #f8fafc; stroke: #e2e8f0; stroke-width: 1.4; }
+
+  .ln        { stroke: #475569; stroke-width: 1.6; fill: none; }
+  .ln-blue   { stroke: #1a5f9e; stroke-width: 2.6; fill: none; }
+  .ln-violet { stroke: #6d4aa8; stroke-width: 1.8; fill: none; }
+  .ln-ochre  { stroke: #a06b12; stroke-width: 1.8; fill: none; }
+  .dash      { stroke-dasharray: 5 4; }
+  .hair      { stroke: #e2e8f0; stroke-width: 1; }
+  .num       { fill: #6d4aa8; }
+  .numt      { font-size: 11px; font-weight: 600; fill: #ffffff; }
+  .dot-b     { fill: #1a5f9e; }
+  .dot-o     { fill: #a06b12; }
+  .dot-g     { fill: #ffffff; stroke: #94a3b8; stroke-width: 1.4; }
+</style>
+</head>
+<body>
+<!-- ============================================================ PAGE 1 -->
+<section class="page">
+  <header class="ph">
+    <h1>Flint-lean — plain files, one bucket</h1>
+    <span class="kicker">1 / 2 · architecture</span>
+  </header>
+  <p class="dek">The third front end over the flint bucket format, split out of the flint-fuse architecture doc: if the workspace fits on disk, no interception is needed at all. Materialize plain files at pod start, publish changed files at cadence with an unprivileged sidecar, and put write authority in a stateless gateway. Most of FUSE's value at a fraction of its risk surface — same bucket format, same engine.</p>
+  <figure>
+  <svg viewBox="0 0 1600 810" role="img" aria-label="An agent pod holds an app container working on plain files and an unprivileged flint-sync sidecar that checks the workspace out at start and publishes changed files at cadence; a stateless flint-gateway arbitrates publishes by minting presigned PUTs; the bucket format is unchanged; a bottom band lists what the lean variant gives up relative to FUSE.">
+    <defs>
+      <marker id="f6-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
+      <marker id="f6-av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6d4aa8"/></marker>
+      <marker id="f6-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
+    </defs>
+
+    <!-- agent pod -->
+    <rect x="40" y="110" width="560" height="430" rx="10" class="bx-hub"/>
+    <text class="th" x="56" y="136">agent pod — no FUSE anywhere</text>
+
+    <rect x="60" y="156" width="250" height="150" rx="8" class="bx"/>
+    <text class="tl ctr" x="185" y="182">app container</text>
+    <text class="tx ctr" x="185" y="202">unchanged image</text>
+    <text class="mns ctr" x="185" y="226">/workspace</text>
+    <text class="tx ctr" x="185" y="248">PLAIN FILES — a real local</text>
+    <text class="tx ctr" x="185" y="264">filesystem, full POSIX,</text>
+    <text class="tx ctr" x="185" y="280">zero interception</text>
+
+    <rect x="330" y="156" width="250" height="230" rx="8" class="bx-blue"/>
+    <text class="tl ctr" x="455" y="182">flint-sync sidecar</text>
+    <text class="mns ctr" x="455" y="202">ordinary process — UNPRIVILEGED</text>
+    <text class="tx ctr" x="455" y="222">no /dev/fuse · no mount propagation</text>
+    <text class="tx ctr" x="455" y="238">no privileged · no PSA conflict</text>
+    <line class="hair" x1="346" y1="250" x2="564" y2="250"/>
+    <text class="tx ctr" x="455" y="270">checkout at start — the import</text>
+    <text class="tx ctr" x="455" y="286">verb, bytes instead of stubs</text>
+    <text class="tx ctr" x="455" y="306">publish at cadence — mtime/size</text>
+    <text class="tx ctr" x="455" y="322">scan against the manifest</text>
+    <text class="tx ctr" x="455" y="342">preStop: final publish barrier</text>
+    <text class="tx ctr" x="455" y="366">same epoch · claim · manifest</text>
+    <text class="tx ctr" x="455" y="382">machinery, unchanged</text>
+
+    <line class="ln-blue" x1="185" y1="306" x2="185" y2="406" marker-end="url(#f6-ab)"/>
+    <line class="ln-blue" x1="455" y1="386" x2="455" y2="406" marker-end="url(#f6-ab)"/>
+
+    <rect x="60" y="410" width="520" height="64" rx="8" class="bx-slate"/>
+    <text class="tl" x="76" y="436">emptyDir — the whole workspace, materialized</text>
+    <text class="tx" x="76" y="456">must fit the disk budget — the lean variant has no stubs and no eviction</text>
+
+    <text class="tx" x="56" y="502">the FUSE risk class is gone: no ENOTCONN wedge, no restart-in-place</text>
+    <text class="tx" x="56" y="518">choreography, no mount-broker endgame, no kernel floor</text>
+
+    <text class="tx" x="40" y="566">webhook injection shrinks to: an emptyDir + an ordinary sidecar —</text>
+    <text class="tx" x="40" y="582">failurePolicy: Fail still applies; everything the FUSE recipe</text>
+    <text class="tx" x="40" y="598">needs for privilege, brokers and /dev/fuse is simply not needed</text>
+
+    <!-- gateway -->
+    <rect x="640" y="110" width="400" height="300" rx="10" class="bx-violet"/>
+    <text class="tl" x="656" y="136">flint-gateway — stateless write authority</text>
+    <text class="tx" x="656" y="156">N replicas behind one Service · no PVC, no epoch of</text>
+    <text class="tx" x="656" y="172">its own, no state — everything durable is in the bucket</text>
+    <line class="hair" x1="656" y1="184" x2="1024" y2="184"/>
+    <text class="thv" x="656" y="206">grade 1 — write proxy</text>
+    <text class="tx" x="656" y="224">bytes transit the gateway; strongest enforcement;</text>
+    <text class="tx" x="656" y="240">pays back a slice of the hub's NIC ceiling</text>
+    <text class="thv" x="656" y="264">grade 2 — presigned arbiter (recommended)</text>
+    <text class="tx" x="656" y="282">the sidecar asks to publish generation N of subtree X;</text>
+    <text class="tx" x="656" y="298">the gateway validates lease + layout + claim identity,</text>
+    <text class="tx" x="656" y="314">then mints short-lived presigned PUTs pinned to</text>
+    <text class="tx" x="656" y="330">exactly those keys — bytes go pod → S3 DIRECT</text>
+    <text class="tsb" x="656" y="356">the cooperative CAS regime becomes ENFORCED:</text>
+    <text class="tx" x="656" y="374">non-holders get no URL; If-Match is required; per-share</text>
+    <text class="tx" x="656" y="390">metering; revocation in seconds — kill the token</text>
+
+    <rect x="640" y="430" width="400" height="110" rx="10" class="band"/>
+    <text class="tsb" x="656" y="456">pods hold ZERO bucket write credentials</text>
+    <text class="tx" x="656" y="476">checkout/hydrate: a read-only prefix role (harmless</text>
+    <text class="tx" x="656" y="492">blast radius), or presigned GETs from the same door</text>
+    <text class="tx" x="656" y="514">the FUSE variant's two-principal split and sidecar-only-</text>
+    <text class="tx" x="656" y="530">IRSA machinery is unnecessary in this variant</text>
+
+    <text class="tx" x="640" y="566">gateway down ⇒ publishes pause and the RPO grows while pods keep</text>
+    <text class="tx" x="640" y="582">serving local files — far softer than hub-down; reads never depended on it</text>
+
+    <!-- bucket -->
+    <rect x="1080" y="110" width="480" height="300" rx="12" class="bx-oo"/>
+    <text class="tt" x="1100" y="140">S3 bucket</text>
+    <text class="tx" x="1100" y="164">unchanged format: whole-file objects + .flint/ control</text>
+    <text class="tx" x="1100" y="180">cells — hub-mode, FUSE-mode and lean-mode volumes</text>
+    <text class="tx" x="1100" y="196">stay mutually convertible; DR import is the same verb</text>
+    <line class="hair" x1="1100" y1="210" x2="1540" y2="210"/>
+    <text class="mns" x="1100" y="234">.flint/epoch · .flint/manifest · .flint/claim</text>
+    <text class="tx" x="1100" y="258">the gateway is the enforcement point these cells</text>
+    <text class="tx" x="1100" y="274">always lacked — detection becomes refusal</text>
+    <text class="tx" x="1100" y="298">the project service browses exactly as before —</text>
+    <text class="tx" x="1100" y="314">read-only, RPO-consistent snapshots per subtree</text>
+    <text class="tx" x="1100" y="338">strict journal mode composes here too: the gateway</text>
+    <text class="tx" x="1100" y="354">is the natural group-commit point for fsync ⇒ S3</text>
+
+    <line class="ln-violet" x1="600" y1="240" x2="636" y2="240" marker-end="url(#f6-av)"/>
+    <line class="ln-violet" x1="636" y1="278" x2="600" y2="278" marker-end="url(#f6-av)"/>
+    <line class="ln-violet dash" x1="1040" y1="240" x2="1076" y2="240" marker-end="url(#f6-av)"/>
+    <text class="txs" x="1044" y="230">grade 1</text>
+
+    <text class="tx ctr" x="838" y="622">publish — presigned PUT, bytes pod → S3 direct</text>
+    <line class="ln-ochre" x1="600" y1="630" x2="1076" y2="630" marker-end="url(#f6-ao)"/>
+    <text class="tx ctr" x="838" y="656">checkout / hydrate — read-only GETs, direct</text>
+    <line class="ln-ochre" x1="1076" y1="664" x2="600" y2="664" marker-end="url(#f6-ao)"/>
+
+    <!-- what it gives up -->
+    <rect x="40" y="690" width="1520" height="110" rx="10" class="band"/>
+    <text class="th" x="56" y="716">what the lean variant gives up — FUSE is the escalation, not the default</text>
+    <text class="tsb" x="56" y="740">lazy hydration</text>
+    <text class="tx" x="56" y="758">cold start downloads the whole workspace;</text>
+    <text class="tx" x="56" y="774">fine at GiB scale — a partial-checkout</text>
+    <text class="tx" x="56" y="790">path list covers bigger trees</text>
+    <text class="tsb" x="560" y="740">interception-grade capture</text>
+    <text class="tx" x="560" y="758">scan-based publish re-uploads touched files</text>
+    <text class="tx" x="560" y="774">whole — the engine's whole-dirty fallback</text>
+    <text class="tx" x="560" y="790">was already the correctness backstop</text>
+    <text class="tsb" x="1060" y="740">eviction / space management</text>
+    <text class="tx" x="1060" y="758">no stubs: the workspace must fit the</text>
+    <text class="tx" x="1060" y="774">emptyDir budget; TiB-scale or lazy</text>
+    <text class="tx" x="1060" y="790">volumes are FUSE's territory (its own doc)</text>
+  </svg>
+  <figcaption><b>This is a third front end, not a FUSE configuration</b> — the app touches plain files on a real local filesystem, and the sidecar is an ordinary unprivileged program running the same engine verbs: <code>import</code> at start (bytes instead of stubs), the flush barrier's whole-file lane at cadence (driven by an mtime/size scan against the manifest instead of capture interception), the same epoch, claim, and manifest machinery. For the agent-workspace shape — code, configs, artifacts, GiB-scale — it is most of FUSE's value with none of FUSE's hard parts: the entire privileged/mount-propagation/ENOTCONN/mount-broker risk section of the FUSE architecture stops applying, and the kernel floor drops to nothing. <b>The gateway restores the security posture the review said direct mode gives up.</b> With grade 2, "the bucket trusts one principal" is true again — pods hold no write credentials, the cooperative CAS regime becomes enforced arbitration (a non-holder is refused a URL, not merely detected after the fact), revocation returns to seconds, and per-share metering exists again. Its failure mode is publish-pause with growing RPO while pods keep serving — the softest failure shape any component on these pages has. <b>One dialect everywhere:</b> this also argues for converging the hub's file API onto the S3 REST surface (the libflint plan's §8 sidecar adapter, built once, placed three ways — hub listener, localhost sidecar, gateway), so the live view and the published view speak the same protocol and the same tools work against both. <b>Recommendation:</b> lean is the direct-mode entry point; FUSE is the escalation for volumes too large or too lazy to materialize; the hub is unchanged. Same bucket, three front ends, one engine. Implementation plan: docs/plans/flint-lean-plan.md.</figcaption>
+</section>
+
+<!-- ============================================================ PAGE 2 -->
+<section class="page">
+  <header class="ph">
+    <h1>One dialect — the S3 surface, three placements</h1>
+    <span class="kicker">2 / 2 · protocol</span>
+  </header>
+  <p class="dek">The decision of record: every REST surface in the system speaks the S3 dialect — the hub's file API converges onto it, the gateway serves it, and direct-mode non-mount access (lean and FUSE alike) is plain S3 against the bucket. One library, three placements; the consistency contracts say which view a client is reading.</p>
+  <figure>
+  <svg viewBox="0 0 1600 720" role="img" aria-label="A single s3_surface library is placed three ways: the hub's live-view listener, the fleet gateway, and a later localhost sidecar; panels list the dialect's deliberate extensions and the multipart traps; a bottom band contrasts the live hub endpoint with the published bucket endpoint.">
+    <defs>
+      <marker id="l2-an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    </defs>
+
+    <rect x="40" y="110" width="380" height="250" rx="10" class="bx-blue"/>
+    <text class="tl" x="56" y="136">s3_surface — built once</text>
+    <line class="hair" x1="56" y1="148" x2="404" y2="148"/>
+    <text class="mns" x="56" y="172">SigV4 (header + presigned) · bearer</text>
+    <text class="mns" x="56" y="194">ListObjectsV2 · Get/Put/Head/Delete · Range</text>
+    <text class="mns" x="56" y="216">If-Match · If-None-Match:* · DeleteObjects</text>
+    <text class="mns" x="56" y="238">multipart: parts 1–10000 · ≥5 MiB · reorder</text>
+    <text class="tx" x="56" y="266">consolidates libflint §8's localhost-gateway floor —</text>
+    <text class="tx" x="56" y="282">one implementation instead of three</text>
+    <text class="tx" x="56" y="304">conformance kit runs against AWS and MinIO</text>
+    <text class="tx" x="56" y="326">the store's bucket-wide MinIO listing workaround</text>
+    <text class="tx" x="56" y="342">regains its server-side Prefix here</text>
+
+    <line class="ln" x1="420" y1="160" x2="456" y2="160" marker-end="url(#l2-an)"/>
+    <line class="ln" x1="420" y1="276" x2="456" y2="276" marker-end="url(#l2-an)"/>
+    <line class="ln" x1="420" y1="392" x2="456" y2="392" marker-end="url(#l2-an)"/>
+
+    <rect x="460" y="110" width="380" height="100" rx="9" class="bx"/>
+    <text class="tl" x="476" y="136">hub :8080 — the LIVE view</text>
+    <text class="tx" x="476" y="158">file API v2: strong, no RPO lag, atomic rename</text>
+    <text class="tx" x="476" y="174">dual-serves /files for one release, then deprecates</text>
+    <text class="tx" x="476" y="192">every data op counts as activity — polls do not</text>
+
+    <rect x="460" y="226" width="380" height="100" rx="9" class="bx-violet"/>
+    <text class="tl" x="476" y="252">flint-gateway — the fleet door</text>
+    <text class="tx" x="476" y="274">grade-1 S3 proxy with policy, plus the ONE non-S3</text>
+    <text class="tx" x="476" y="290">verb: the grade-2 publish grant (presigned mint)</text>
+    <text class="tx" x="476" y="308">bearer auth · seconds-scale revocation</text>
+
+    <rect x="460" y="342" width="380" height="100" rx="9" class="grpw"/>
+    <text class="tl" x="476" y="368">localhost S3 sidecar — later</text>
+    <text class="tx" x="476" y="390">apps that already speak S3, zero kernel path —</text>
+    <text class="tx" x="476" y="406">libflint §8 adapter 3: the same library,</text>
+    <text class="tx" x="476" y="422">placed a third way</text>
+
+    <rect x="880" y="110" width="680" height="196" rx="10" class="bx-oo"/>
+    <text class="tho" x="896" y="136">extensions the dialect adds — each one deliberate</text>
+    <text class="mns" x="896" y="162">RenameObject</text>
+    <text class="tx" x="1050" y="162">the Express One Zone verb, served on general buckets: ATOMIC</text>
+    <text class="tx" x="1050" y="178">on the hub's live view — something no real GP S3 offers</text>
+    <text class="mns" x="896" y="202">x-amz-meta-flint-*</text>
+    <text class="tx" x="1050" y="202">posix stamps (mode/uid/gid/mtime) — the A12 convention</text>
+    <text class="mns" x="896" y="230">activity classes</text>
+    <text class="tx" x="1050" y="230">data ops wake and keep a share awake; HEAD and list polls do</text>
+    <text class="tx" x="1050" y="246">not — a polling browser must not pin a share Ready forever</text>
+    <text class="mns" x="896" y="274">publish grant</text>
+    <text class="tx" x="1050" y="274">POST intent → presigned set — grade 2's only custom verb</text>
+
+    <rect x="880" y="322" width="680" height="120" rx="10" class="band"/>
+    <text class="th" x="896" y="348">the multipart traps are requirements, not surprises</text>
+    <text class="tx" x="896" y="370">the ETag is md5-of-part-md5s + “-N”, never a content MD5 — the s3proxy #338 class</text>
+    <text class="tx" x="896" y="388">CompleteMultipartUpload can return 200 WITH an error in the body — unhandled, SDK retries corrupt state</text>
+    <text class="tx" x="896" y="406">complete-by-concatenation costs 3× IO — reserve-and-copy is an explicit decision, since</text>
+    <text class="tx" x="896" y="422">part sizes are unknown until receipt</text>
+
+    <rect x="40" y="480" width="1520" height="200" rx="10" class="band"/>
+    <text class="th" x="56" y="506">two views, one protocol — the consistency contracts tell them apart</text>
+    <rect x="56" y="522" width="720" height="110" rx="8" class="bx-blue"/>
+    <text class="tl" x="72" y="548">the hub endpoint — the LIVE view</text>
+    <text class="tx" x="72" y="570">strong: close-to-open, locks behind it, atomic rename, no RPO lag — reads and</text>
+    <text class="tx" x="72" y="586">writes land on the working set through the coherence authority</text>
+    <text class="tx" x="72" y="608">who: front doors, editors, anything touching a LIVE shared tree</text>
+    <rect x="800" y="522" width="720" height="110" rx="8" class="bx-ochre"/>
+    <text class="tl" x="816" y="548">the bucket endpoint — the PUBLISHED view</text>
+    <text class="tx" x="816" y="570">RPO-consistent snapshots per subtree; untorn whole-file generations; read-only</text>
+    <text class="tx" x="816" y="586">against live subtrees (a console PUT has three bad fates — consistency doc)</text>
+    <text class="tx" x="816" y="608">who: project browsers, DR, analytics, direct-mode non-mount access</text>
+    <text class="tx" x="56" y="656">direct-mode REST access — lean AND FUSE variants alike — is the bucket endpoint: plain S3, no flint server anywhere in the read path.</text>
+    <text class="tx" x="56" y="672">the same rclone / boto3 / aws-cli invocation works against either endpoint; only the URL and the consistency contract change.</text>
+  </svg>
+  <figcaption><b>Why S3 and not a nicer bespoke API:</b> the ecosystem is the feature — every language has a mature S3 client, presigned flows are understood by every CI system and browser uploader, and the tools people already point at buckets (rclone, boto3, cyberduck, Velero) work against a live flint share the day the dialect ships. The file API was already shaped on S3 semantics — whole-file GET/PUT with ETag and If-Match (the v1.30 conditional-writes work maps one-to-one onto S3's own conditional headers) — so this is a dialect change, not an architecture change. <b>The one thing the hub's live view offers that no real S3 can:</b> assembly under a temp name completed by an atomic RENAME under a deny-both OPEN — an atomic, exclusive multipart-complete, the differentiator the libflint plan already claims for the localhost gateway, inherited here. <b>Migration is dual-serve:</b> the hub answers both <code>/files</code> and the S3 dialect for one release; the front door moves; <code>/files</code> deprecates. Bearer auth stays alongside SigV4 so existing gateway tokens keep working, and revocation keeps its seconds-scale semantics. The activity classification is the one place the dialect must be flint-aware from day one — the idle ladder's lesson stands: a conditional GET answering 304 pins a share exactly as hard as a 200, so what counts as "activity" is declared per verb, not inferred.</figcaption>
+</section>
+</body>
+</html>
