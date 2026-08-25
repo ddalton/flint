@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Flint front ends — radar comparison</title>
+<style>
+  @page { size: 11in 8.5in; margin: 0; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 11in; height: 8.5in; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: #f9f9f7; color: #0b0b0b;
+    padding: 0.42in 0.5in 0.34in;
+    display: flex; flex-direction: column;
+  }
+  h1 { font-size: 21px; font-weight: 650; letter-spacing: -0.01em; }
+  .deck { font-size: 11.5px; color: #52514e; margin-top: 3px; }
+  .row { display: flex; gap: 0.26in; margin-top: 0.16in; }
+  .card {
+    flex: 1; background: #fcfcfb; border: 1px solid rgba(11,11,11,0.10);
+    border-radius: 10px; padding: 12px 14px 10px;
+  }
+  .card h2 { font-size: 14px; font-weight: 650; }
+  .card .sub { font-size: 9.5px; color: #898781; margin-top: 2px; min-height: 22px; }
+  .legend { font-size: 9.5px; color: #52514e; margin-top: 4px; min-height: 14px; }
+  .lg { margin-right: 12px; }
+  .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+        margin-right: 4px; vertical-align: -1px; }
+  svg { width: 100%; display: block; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 9.5px; margin-top: 4px;
+          color: #52514e; }
+  th { font-weight: 600; color: #898781; text-align: right; padding: 2px 4px;
+       border-bottom: 1px solid #e1e0d9; font-size: 8.5px; }
+  th:first-child { text-align: left; }
+  td { padding: 2.5px 4px; text-align: right; border-bottom: 1px solid #e1e0d9;
+       font-variant-numeric: tabular-nums; }
+  td:first-child { text-align: left; }
+  tbody tr:last-child td { border-bottom: none; }
+  .notes { display: flex; gap: 0.26in; margin-top: 0.12in; }
+  .note { flex: 1; font-size: 9px; color: #52514e; line-height: 1.45; }
+  .note ul { margin-left: 12px; }
+  .note li { margin-top: 1px; }
+  .foot { margin-top: auto; font-size: 8.5px; color: #898781; line-height: 1.5;
+          border-top: 1px solid #e1e0d9; padding-top: 6px; }
+</style></head>
+<body>
+  <h1>Flint front ends — consistency, security, Day-2 operations</h1>
+  <p class="deck">Scores 0 (weakest) – 5 (strongest), from the architecture docs:
+  flint-lite / flint-strict, flint-fuse, flint-lean. NFS-over-S3 is shown in two
+  flavors — <b>sec=sys</b> (AUTH_SYS, today&rsquo;s deployment) and <b>krb5p</b> (Kerberos).</p>
+  <div class="row"><div class="card">
+  <h2>NFS-over-S3</h2>
+  <p class="sub">flint-lite hub — NFS server in front, S3 behind</p>
+  <div class="legend"><span class="lg"><span class="sw" style="background:#5598e7"></span>sec=sys</span><span class="lg"><span class="sw" style="background:#184f95"></span>krb5p</span></div>
+  <svg viewBox="0 0 320 300" role="img" aria-label="NFS-over-S3 radar">
+    <polygon points="160.0,130.4 178.7,162.8 141.3,162.8" fill="none" stroke="#e1e0d9" stroke-width="1"/>
+<polygon points="160.0,108.8 197.4,173.6 122.6,173.6" fill="none" stroke="#e1e0d9" stroke-width="1"/>
+<polygon points="160.0,87.2 216.1,184.4 103.9,184.4" fill="none" stroke="#e1e0d9" stroke-width="1"/>
+<polygon points="160.0,65.6 234.8,195.2 85.2,195.2" fill="none" stroke="#e1e0d9" stroke-width="1"/>
+<polygon points="160.0,44.0 253.5,206.0 66.5,206.0" fill="none" stroke="#e1e0d9" stroke-width="1"/>
+<text x="165.0" y="133.4" font-size="8.5" fill="#898781">1</text>
+<text x="165.0" y="90.2" font-size="8.5" fill="#898781">3</text>
+<text x="165.0" y="47.0" font-size="8.5" fill="#898781">5</text>
+    <line x1="160" y1="152" x2="160.0" y2="44.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="160.0" y="34.0" font-size="11" font-weight="600" fill="#52514e" text-anchor="middle">Consistency</text>
+<line x1="160" y1="152" x2="253.5" y2="206.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="261.5" y="220.0" font-size="11" font-weight="600" fill="#52514e" text-anchor="start">Security</text>
+<line x1="160" y1="152" x2="66.5" y2="206.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="58.5" y="220.0" font-size="11" font-weight="600" fill="#52514e" text-anchor="end">Day-2 ops</text>
+    <polygon points="160.0,65.6 188.1,168.2 113.2,179.0" fill="#5598e7" fill-opacity="0.14" stroke="#5598e7" stroke-width="2" stroke-linejoin="round" stroke-dasharray="5 3"/>
+<circle cx="160.0" cy="65.6" r="4" fill="#5598e7" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="188.1" cy="168.2" r="4" fill="#5598e7" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="113.2" cy="179.0" r="4" fill="#5598e7" stroke="#fcfcfb" stroke-width="2"/>
+<polygon points="160.0,65.6 225.5,189.8 131.9,168.2" fill="#184f95" fill-opacity="0.14" stroke="#184f95" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="160.0" cy="65.6" r="4" fill="#184f95" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="225.5" cy="189.8" r="4" fill="#184f95" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="131.9" cy="168.2" r="4" fill="#184f95" stroke="#fcfcfb" stroke-width="2"/>
+  </svg>
+  <table>
+    <thead><tr><th></th><th>Cons.</th><th>Sec.</th><th>Day-2</th></tr></thead>
+    <tbody><tr><td><span class="sw" style="background:#5598e7"></span>sec=sys (AUTH_SYS)</td><td>4</td><td>1.5</td><td>2.5</td></tr><tr><td><span class="sw" style="background:#184f95"></span>krb5p (Kerberos)</td><td>4</td><td>3.5</td><td>1.5</td></tr></tbody>
+  </table>
+</div><div class="card">
+  <h2>FUSE</h2>
+  <p class="sub">flint-fuse — no hub, FUSE client per pod, one bucket</p>
+  <div class="legend legend-empty"></div>
+  <svg viewBox="0 0 320 300" role="img" aria-label="FUSE radar">
+    <polygon points="160.0,130.4 178.7,162.8 141.3,162.8" fill="none" stroke="#e1e0d9" stroke-width="1"/>
+<polygon points="160.0,108.8 197.4,173.6 122.6,173.6" fill="none" stroke="#e1e0d9" stroke-width="1"/>
+<polygon points="160.0,87.2 216.1,184.4 103.9,184.4" fill="none" stroke="#e1e0d9" stroke-width="1"/>
+<polygon points="160.0,65.6 234.8,195.2 85.2,195.2" fill="none" stroke="#e1e0d9" stroke-width="1"/>
+<polygon points="160.0,44.0 253.5,206.0 66.5,206.0" fill="none" stroke="#e1e0d9" stroke-width="1"/>
+<text x="165.0" y="133.4" font-size="8.5" fill="#898781">1</text>
+<text x="165.0" y="90.2" font-size="8.5" fill="#898781">3</text>
+<text x="165.0" y="47.0" font-size="8.5" fill="#898781">5</text>
+    <line x1="160" y1="152" x2="160.0" y2="44.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="160.0" y="34.0" font-size="11" font-weight="600" fill="#52514e" text-anchor="middle">Consistency</text>
+<line x1="160" y1="152" x2="253.5" y2="206.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="261.5" y="220.0" font-size="11" font-weight="600" fill="#52514e" text-anchor="start">Security</text>
+<line x1="160" y1="152" x2="66.5" y2="206.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="58.5" y="220.0" font-size="11" font-weight="600" fill="#52514e" text-anchor="end">Day-2 ops</text>
+    <polygon points="160.0,98.0 216.1,184.4 122.6,173.6" fill="#eb6834" fill-opacity="0.14" stroke="#eb6834" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="160.0" cy="98.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="216.1" cy="184.4" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="122.6" cy="173.6" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+  </svg>
+  <table>
+    <thead><tr><th></th><th>Cons.</th><th>Sec.</th><th>Day-2</th></tr></thead>
+    <tbody><tr><td><span class="sw" style="background:#eb6834"></span>flint-fuse</td><td>2.5</td><td>3</td><td>2</td></tr></tbody>
+  </table>
+</div><div class="card">
+  <h2>Lean</h2>
+  <p class="sub">flint-lean — plain files, one bucket, sync sidecar</p>
+  <div class="legend legend-empty"></div>
+  <svg viewBox="0 0 320 300" role="img" aria-label="Lean radar">
+    <polygon points="160.0,130.4 178.7,162.8 141.3,162.8" fill="none" stroke="#e1e0d9" stroke-width="1"/>
+<polygon points="160.0,108.8 197.4,173.6 122.6,173.6" fill="none" stroke="#e1e0d9" stroke-width="1"/>
+<polygon points="160.0,87.2 216.1,184.4 103.9,184.4" fill="none" stroke="#e1e0d9" stroke-width="1"/>
+<polygon points="160.0,65.6 234.8,195.2 85.2,195.2" fill="none" stroke="#e1e0d9" stroke-width="1"/>
+<polygon points="160.0,44.0 253.5,206.0 66.5,206.0" fill="none" stroke="#e1e0d9" stroke-width="1"/>
+<text x="165.0" y="133.4" font-size="8.5" fill="#898781">1</text>
+<text x="165.0" y="90.2" font-size="8.5" fill="#898781">3</text>
+<text x="165.0" y="47.0" font-size="8.5" fill="#898781">5</text>
+    <line x1="160" y1="152" x2="160.0" y2="44.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="160.0" y="34.0" font-size="11" font-weight="600" fill="#52514e" text-anchor="middle">Consistency</text>
+<line x1="160" y1="152" x2="253.5" y2="206.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="261.5" y="220.0" font-size="11" font-weight="600" fill="#52514e" text-anchor="start">Security</text>
+<line x1="160" y1="152" x2="66.5" y2="206.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="58.5" y="220.0" font-size="11" font-weight="600" fill="#52514e" text-anchor="end">Day-2 ops</text>
+    <polygon points="160.0,108.8 234.8,195.2 94.5,189.8" fill="#1baf7a" fill-opacity="0.14" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="160.0" cy="108.8" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="234.8" cy="195.2" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="94.5" cy="189.8" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+  </svg>
+  <table>
+    <thead><tr><th></th><th>Cons.</th><th>Sec.</th><th>Day-2</th></tr></thead>
+    <tbody><tr><td><span class="sw" style="background:#1baf7a"></span>flint-lean</td><td>2</td><td>4</td><td>3.5</td></tr></tbody>
+  </table>
+</div></div>
+  <div class="notes">
+    <div class="note"><ul><li><b>Consistency 4</b> — the hub is the one coherence authority: real byte-range locks, close-to-open, atomic rename across every client; acked writes are crash-durable on the PVC. Docked for the write-back RPO to S3 — there is no fsync-to-S3 verb until strict mode ships.</li><li><b>Security 1.5 vs 3.5</b> — AUTH_SYS carries no credential: reachability is the boundary, no root-squash, and <code>nfsClientCIDRs</code> is vacuous cross-cluster (1486/1486 connections SNAT'd). krb5p adds proven per-user identity + wire privacy, but leaves prefix-reuse adoption (B12), the root hub container, and pre-auth DoS untouched.</li><li><b>Day-2 2.5 vs 1.5</b> — one hub is a SPOF: node loss means D-state hangs and a ~6-min force-detach. Kerberos adds a KDC, per-node keytabs and rpc.gssd on every client — and the in-tree GSS code is dormant, not wired.</li></ul></div>
+    <div class="note"><ul><li><b>Consistency 2.5</b> — per-subtree RPO-consistent snapshots, one writer per subtree; fsync means the pod's emptyDir, never S3; byte-range locks, shared mmap and cross-subtree rename are refused (ENOLCK / EXDEV).</li><li><b>Security 3</b> — every pod holds prefix-scoped bucket credentials: narrower cross-tenant reach than AUTH_SYS, but a compromised pod owns its subtree's <code>.flint/</code> cells, and the privileged /dev/fuse sidecar conflicts with PSA baseline/restricted.</li><li><b>Day-2 2</b> — nothing standing per share, but loss becomes a per-pod statistic: drain wiring, restart-in-place choreography, an 80–110 s lease lockout on unclean death — and the correctness core is unbuilt (track deprioritized in favor of lean).</li></ul></div>
+    <div class="note"><ul><li><b>Consistency 2</b> — same snapshot contract as FUSE with lower capture fidelity (mtime/size scan, torn-hot-file residual, no O_EXCL primitive) — though the 7-step barrier, inbox and merge manifest are built and TLA+-modeled.</li><li><b>Security 4</b> — pods hold zero bucket write credentials; the bucket trusts one principal again. The gateway turns detection into refusal, revocation returns to seconds, and the sidecar is an ordinary unprivileged process — no PSA conflict.</li><li><b>Day-2 3.5</b> — idle is S3-only structurally, the gateway is stateless N-replica; but gateway/proxy down wedges checkouts, restarts, sync and HITL writes, and publish amplification is real (a hot 2 GiB file ≈ 2.9 TiB/day at 60 s cadence).</li></ul></div>
+  </div>
+  <p class="foot">Scale: 0 (weakest) – 5 (strongest). Scores are a read of the architecture docs at
+  repo HEAD (2026-08-25): flint-lite / flint-strict / flint-fuse / flint-lean architecture pages, the
+  three consistency contracts, the NFS hardening plan and the lean plan of record. The Kerberos flavor
+  is scored <b>as designed, not as shipped</b> — the RPCSEC_GSS (krb5/krb5i/krb5p) implementation is
+  in-tree but dormant (pnfs-operator-runbook.md), and no flint-lite doc wires it; consistency is
+  identical for both NFS flavors because Kerberos changes authentication, not coherence. B1–B6, B8,
+  B10 hardening fixes landed at HEAD are reflected; open items (B12 prefix-reuse, strict-mode journal
+  unbuilt, lean gateway Phase&nbsp;3) are scored as open.</p>
+</body></html>

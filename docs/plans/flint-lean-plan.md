@@ -24,14 +24,22 @@ governs:
 > **Status (2026-08-25):** Phase 0a SHIPPED — `lean/formal/LeanSubtree.tla`,
 > its own 20-run TLC gate (`lean/formal/check.sh`), deliberately separate
 > from flint's `formal/` corpus; the model's findings are recorded in
-> `lean/formal/README.md`. Phase 1+2 CORE SHIPPED — `src/lean/` +
-> the `flint-sync` bin (checkout/restart matrix, 7-step barrier,
-> inbox/window cell, merge-capable manifest writer, 412 park/AdoptOwn
-> policy, guarded GC, claim/rotation lease, sync verb) with a 12-leg
-> battery (`src/lean/tests.rs`) against MemoryStore's full conditional
-> semantics. Still open from this plan: multipart compose for
-> > whole_put_max files, the gateway verbs (Phase 3), operator/webhook
-> (Phase 4), Phase 0b/0c measurements, Phase 6 drill.
+> `lean/formal/README.md`. Phase 1+2 CORE SHIPPED, and Phase 3
+> GATEWAY VERBS SHIPPED — the `flint-lean` crate (`lean/sidecar/`,
+> deliberately its own crate over the extracted `crates/flint-store`
+> layer, so the lean test loop never builds the hub crate): flint-sync
+> (checkout/restart matrix, 7-step barrier, inbox/window cell,
+> merge-capable manifest writer, 412 park/AdoptOwn policy, guarded GC,
+> claim/rotation lease, sync verb) + flint-lean-gateway (HITL
+> PUT/GET with the window gate, snapshot/status, and the sidecar verbs
+> with PER-REQUEST epoch validation — P5's teeth on every
+> gateway-mediated write). 17-leg battery (`lean/sidecar/src/tests.rs`)
+> against MemoryStore's full conditional semantics. Still open:
+> multipart compose for > whole_put_max files, routing sidecar barriers
+> through the gateway verbs by default (they currently CAS the cells
+> directly through the proxy; the verbs interoperate on the same
+> cells), operator/webhook (Phase 4), Phase 0b/0c measurements, Phase 6
+> drill, per-workspace bearers/SigV4.
 
 ## 1. Summary and scope
 

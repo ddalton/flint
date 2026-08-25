@@ -47,7 +47,6 @@ pub mod pnfs_block_session;  // csi-node nvme session management for pnfs-block 
 pub mod reserved_devices;  // Device reservation for direct SPDK access (device plugin use)
 pub mod state_backend;  // Persistence trait + impls for NFSv4/pNFS server state (Phase B)
 pub mod tier;  // S3 cold tier (L2) — design of record: docs/plans/s3-tier-l2-design-review.md
-pub mod lean;  // flint-lean checkout/publish sidecar core — plan of record: docs/plans/flint-lean-plan.md; formal model lean/formal/LeanSubtree.tla
 pub mod lite_operator;  // flint-lite operator: the FlintShare CRD + its reconcile (docs/plans/flint-lite-operator-plan.md)
 pub mod lite_gateway;  // flint-hub-gateway: one door in front of every hub's file API (docs/flint-hub-gateway.md)
 

@@ -63,4 +63,5 @@ pub mod meter;
 pub mod reporter;
 pub mod rpo;
 pub mod space;
-pub mod store;
+pub use flint_store as store;  // extracted to crates/flint-store (2026-08-25); the old path keeps working
+mod s3_acceptance;  // the real-S3 acceptance drill (ignored by default) — stays here: it exercises tier::arbitrate

@@ -40,6 +40,7 @@
 
 pub mod barrier;
 pub mod checkout;
+pub mod gateway;
 pub mod inbox;
 pub mod lease;
 pub mod manifest;
@@ -53,7 +54,7 @@ mod tests;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::tier::store::ObjectStore;
+use flint_store::ObjectStore;
 
 /// Reserved control namespace inside the subtree prefix. Never scanned,
 /// never part of a checkout, never GC'd by the barrier.
@@ -70,7 +71,7 @@ pub const WHOLE_PUT_MAX: u64 = 64 * 1024 * 1024;
 #[derive(Debug, thiserror::Error)]
 pub enum LeanError {
     #[error("store: {0}")]
-    Store(#[from] crate::tier::store::StoreError),
+    Store(#[from] flint_store::StoreError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("state: {0}")]
@@ -144,7 +145,7 @@ pub struct Sidecar {
     pub cfg: LeanConfig,
     pub state: state::SidecarState,
     /// The held lease, once claimed. Barriers refuse to run without it.
-    pub lease: Option<crate::tier::store::EpochLease>,
+    pub lease: Option<flint_store::EpochLease>,
 }
 
 fn now_unix() -> u64 {

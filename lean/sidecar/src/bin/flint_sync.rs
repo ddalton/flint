@@ -21,11 +21,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use spdk_csi_driver::lean::lease::{self, ClaimOutcome};
-use spdk_csi_driver::lean::state::SidecarState;
-use spdk_csi_driver::lean::{LeanConfig, LeanError, Sidecar};
-use spdk_csi_driver::tier::store::s3::S3Store;
-use spdk_csi_driver::tier::store::ObjectStore;
+use flint_lean::lease::{self, ClaimOutcome};
+use flint_lean::state::SidecarState;
+use flint_lean::{LeanConfig, LeanError, Sidecar};
+use flint_store::s3::S3Store;
+use flint_store::ObjectStore;
 
 fn env_req(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| {

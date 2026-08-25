@@ -4,7 +4,7 @@ TLA+/TLC models for **flint-lean** (checkout/publish + gateway — plan of
 record: `docs/plans/flint-lean-plan.md`). Model BEFORE code, the
 FlintExtents posture: the module was written against plan v2 and the
 review's confirmed counterexamples, and the sidecar implementation
-(`spdk-csi-driver/src/lean/`) is written to it.
+(`lean/sidecar/`, the flint-lean crate) is written to it.
 
 **Deliberately separate from `formal/`** (the flint corpus and its
 196-run gate): lean is a separate system that consumes `tier::store` as
@@ -17,7 +17,7 @@ a library. Nothing here is wired into `scripts/check-tla.sh`.
 ./gen-cfgs.sh       # regenerate the cfg matrix
 ```
 
-Twenty runs, ALL required: 5 strict (must hold), 7 mutations (must find
+Twenty runs, ALL required: 4 strict (must hold), 8 mutations (must find
 their designated counterexample — a model that cannot rediscover its bug
 classes proves nothing), 8 probes (must be violated — each names an
 ACTION via a ghost only that action writes; probe the action, never the
@@ -96,7 +96,7 @@ FlintClaimsNoLeader idiom):
   preStop timing, and every perf axis (Phase 0b/0c) are out of scope.
 - `conflicts` is a set of records: the implementation obligation is
   that a conflict record preserves the BYTES (conflict-suffixed key —
-  `src/lean/barrier.rs` does this), not just the reference.
+  `lean/sidecar/src/barrier.rs` does this), not just the reference.
 - Multi-gateway is collapsed into the cell semantics: replicas are
   stateless by design, so the window cell IS the coordination — a
   per-replica model adds states, not behaviors, at this abstraction.

@@ -69,12 +69,10 @@ path = "src/pnfs_csi_cli_main.rs"
 name = "flint-hub-stub"
 path = "src/bin/flint_hub_stub.rs"
 
-# flint-sync: the lean checkout/publish sidecar (plan of record:
-# docs/plans/flint-lean-plan.md; formal model lean/formal/). Runs beside
-# an agent container; no NFS, no daemon in the data path.
-[[bin]]
-name = "flint-sync"
-path = "src/bin/flint_sync.rs"
+# flint-sync and flint-lean-gateway moved to the flint-lean crate
+# (lean/sidecar/) so the lean test loop builds without this crate's
+# binaries and dep trees; flint-store (crates/flint-store) is the
+# shared layer.
 
 # Removed old binaries:
 # - node-agent: now a library module, not standalone binary
@@ -153,6 +151,10 @@ utoipa = { version = "5.5.0", default-features = false, features = ["macros"] }
 # explicit BehaviorVersion in code (no behavior-version-latest feature).
 aws-config = { version = "1.10.1", default-features = false, features = ["rustls", "rt-tokio", "credentials-process"] }
 aws-sdk-s3 = { version = "1.141.0", default-features = false, features = ["rustls", "rt-tokio"] }
+# The extracted store layer (ObjectStore + stamps + memory double + S3
+# backend); re-exported at the old path via `tier::store`. flint-lean
+# depends on the same crate WITHOUT this crate's build.
+flint-store = { path = "../crates/flint-store", features = ["s3"] }
 
 # SPDK Integration - Custom bindings generated for Flint's specific needs
 # No external dependencies - bindings generated from your SPDK v25.05 installation

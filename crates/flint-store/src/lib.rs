@@ -25,8 +25,17 @@
 //!   it does not warn).
 //! - **Assembly failure aborts the assembly** (A9): no backend may
 //!   leave a partial MPU behind on an error path it can reach.
+//!
+//! Extracted from `spdk-csi-driver/src/tier/store/` (2026-08-25) so
+//! flint-lean can depend on the store WITHOUT the hub crate's build
+//! (13 binaries, the aws/kube/nfs dep trees). The hub crate re-exports
+//! this crate at its old path (`crate::tier::store::*`), so every
+//! existing import keeps working. The `s3` backend is feature-gated —
+//! test loops that only need the memory double never build the AWS
+//! SDK.
 
 pub mod memory;
+#[cfg(feature = "s3")]
 pub mod s3;
 
 use async_trait::async_trait;

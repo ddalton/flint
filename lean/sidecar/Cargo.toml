@@ -1,0 +1,42 @@
+# flint-lean: the checkout/publish sidecar (flint-sync) + the lean
+# gateway (flint-lean-gateway). Plan of record:
+# docs/plans/flint-lean-plan.md; formal model: lean/formal/.
+#
+# Deliberately its OWN crate: `cargo test` here builds flint-store's
+# memory double + this crate + a small dep tree — never the hub crate's
+# 13 binaries or the aws/kube/nfs trees. The bins need the real S3
+# backend, so they sit behind the `s3` feature:
+#
+#   cargo test                          # the battery (small, no AWS SDK)
+#   cargo build --release --features s3 # the shippable binaries
+[package]
+name = "flint-lean"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+s3 = ["flint-store/s3"]
+
+[[bin]]
+name = "flint-sync"
+path = "src/bin/flint_sync.rs"
+required-features = ["s3"]
+
+[[bin]]
+name = "flint-lean-gateway"
+path = "src/bin/flint_lean_gateway.rs"
+required-features = ["s3"]
+
+[dependencies]
+flint-store = { path = "../../crates/flint-store" }
+bytes = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+warp = "0.3"
+
+[dev-dependencies]
+tempfile = "3.0"

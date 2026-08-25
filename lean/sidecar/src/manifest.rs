@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::tier::store::{
+use flint_store::{
     crc64_nvme, GenerationStamps, ObjectMeta, ObjectStore, PutCondition, StoreError,
 };
 

@@ -1,0 +1,32 @@
+# The flint object-store layer (ObjectStore trait + stamps + memory
+# test double + the S3 backend), extracted from spdk-csi-driver so
+# flint-lean builds without the hub crate. Versions track the hub
+# crate's Cargo.toml — keep them in step when bumping there.
+[package]
+name = "flint-store"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+# The real S3 backend (aws-sdk). OFF by default so test loops that only
+# need the memory double never build the AWS SDK.
+s3 = ["dep:aws-config", "dep:aws-sdk-s3", "dep:tracing"]
+
+[dependencies]
+async-trait = "0.1"
+bytes = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "1.0"
+tokio = { version = "1.0", features = ["rt", "time", "macros"] }
+uuid = { version = "1.0", features = ["v4"] }
+
+aws-config = { version = "1.10.1", default-features = false, features = ["rustls", "rt-tokio", "credentials-process"], optional = true }
+aws-sdk-s3 = { version = "1.141.0", default-features = false, features = ["rustls", "rt-tokio"], optional = true }
+tracing = { version = "0.1", optional = true }
+
+[dev-dependencies]
+tempfile = "3.0"
+tokio = { version = "1.0", features = ["full", "test-util"] }

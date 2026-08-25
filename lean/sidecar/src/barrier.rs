@@ -8,7 +8,7 @@ use std::path::Path;
 
 use bytes::Bytes;
 
-use crate::tier::store::{
+use flint_store::{
     crc64_nvme, crc64_to_b64, GenerationStamps, PosixStamps, PutCondition, StoreError,
 };
 

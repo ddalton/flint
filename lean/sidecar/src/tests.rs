@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::tier::store::memory::MemoryStore;
-use crate::tier::store::{crc64_nvme, GenerationStamps, ObjectStore, PutCondition};
+use flint_store::memory::MemoryStore;
+use flint_store::{crc64_nvme, GenerationStamps, ObjectStore, PutCondition};
 
 use super::inbox::{self, InboxEntry};
 use super::lease::{self, ClaimOutcome};
@@ -528,6 +528,205 @@ async fn checkout_budget_refuses_before_first_byte() {
     assert!(matches!(err, LeanError::Budget(_)));
     assert!(!sc2.state.marker_present(), "budget refusal must not gate-open the agent");
     assert!(read(dir2.path(), "big.txt").is_none());
+}
+
+// ── the gateway verbs (Phase 3) ──────────────────────────────────────
+
+const GW_TOKEN: &str = "test-bearer-0123456789abcdef";
+
+fn gw_core(store: &Arc<MemoryStore>) -> Arc<super::gateway::GatewayCore> {
+    let mut workspaces = std::collections::BTreeMap::new();
+    workspaces.insert("proj1".to_string(), PREFIX.to_string());
+    Arc::new(super::gateway::GatewayCore {
+        store: store.clone() as Arc<dyn ObjectStore>,
+        workspaces,
+        token: GW_TOKEN.to_string(),
+        max_put_bytes: 8 * 1024 * 1024,
+    })
+}
+
+fn gw_req() -> warp::test::RequestBuilder {
+    warp::test::request().header("authorization", format!("Bearer {GW_TOKEN}"))
+}
+
+/// Auth + tenancy: wrong bearer 401; unknown workspace 404; reserved
+/// and traversal paths refused.
+#[tokio::test]
+async fn gateway_auth_tenancy_and_path_hygiene() {
+    let store = Arc::new(MemoryStore::new());
+    let routes = super::gateway::routes(gw_core(&store));
+
+    let res = warp::test::request()
+        .method("GET")
+        .path("/lean/v1/proj1/status")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 401);
+
+    let res = gw_req().method("GET").path("/lean/v1/nope/status").reply(&routes).await;
+    assert_eq!(res.status(), 404);
+
+    for bad in ["../../etc/passwd", ".flint/lean/manifest", ".flint-sync/baseline.json"] {
+        let res = gw_req()
+            .method("PUT")
+            .path(&format!("/lean/v1/proj1/files/{bad}"))
+            .body("x")
+            .reply(&routes)
+            .await;
+        assert_eq!(res.status(), 400, "path {bad:?} must be refused");
+    }
+}
+
+/// The full HITL flow THROUGH the gateway: PUT lands object + inbox
+/// entry, the sidecar's next barrier consumes and cites it, and the
+/// gateway serves it back — first from the inbox fallback, then from
+/// the manifest citation.
+#[tokio::test]
+async fn gateway_hitl_put_consumed_and_cited_by_barrier() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+
+    let routes = super::gateway::routes(gw_core(&store));
+    let res = gw_req()
+        .method("PUT")
+        .path("/lean/v1/proj1/files/docs/spec.md")
+        .header("x-flint-author", "dilip")
+        .body("user upload via gateway")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 200, "{:?}", res.body());
+
+    // Readable immediately via the inbox fallback (uncited yet).
+    let res = gw_req().method("GET").path("/lean/v1/proj1/files/docs/spec.md").reply(&routes).await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(&res.body()[..], b"user upload via gateway");
+
+    // The barrier consumes + cites; the file lands in the agent tree.
+    sc.run_barrier().await.unwrap();
+    assert_eq!(read(dir.path(), "docs/spec.md").unwrap(), "user upload via gateway");
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert!(m.manifest.entries.contains_key("docs/spec.md"));
+
+    // Still readable — now via the citation.
+    let res = gw_req().method("GET").path("/lean/v1/proj1/files/docs/spec.md").reply(&routes).await;
+    assert_eq!(res.status(), 200);
+}
+
+/// The window gate: a PUT during a live barrier window is refused with
+/// Retry-After; an expired window admits (the dead-sidecar unwedge).
+#[tokio::test]
+async fn gateway_put_refused_while_window_open() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let sc = sidecar(&store, dir.path()).await;
+    let routes = super::gateway::routes(gw_core(&store));
+
+    inbox::open_window(store.as_ref(), &sc.cfg, 1, now_unix() + 120).await.unwrap();
+    let res = gw_req()
+        .method("PUT")
+        .path("/lean/v1/proj1/files/a.txt")
+        .body("x")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 409);
+    assert!(res.headers().contains_key("retry-after"));
+
+    inbox::clear_window(store.as_ref(), &sc.cfg, 1, &[]).await.unwrap();
+    let res = gw_req()
+        .method("PUT")
+        .path("/lean/v1/proj1/files/a.txt")
+        .body("x")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 200);
+
+    inbox::open_window(store.as_ref(), &sc.cfg, 1, now_unix() - 5).await.unwrap();
+    let res = gw_req()
+        .method("PUT")
+        .path("/lean/v1/proj1/files/b.txt")
+        .body("y")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 200, "an expired window must not wedge HITL");
+}
+
+/// P5's teeth: the manifest CAS verb validates the claimed epoch
+/// against the cell PER REQUEST — a deposed epoch is 403 even with a
+/// correct CAS token (the LeanEpochOnlyHolds arm, now enforced).
+#[tokio::test]
+async fn gateway_manifest_cas_rejects_stale_epoch() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await); // epoch 1
+    sc.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1");
+    sc.run_barrier().await.unwrap();
+    let loaded = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+
+    // A successor deposes the cell to epoch 2.
+    let state = store.epoch_read(&sc.cfg.epoch_key()).await.unwrap().unwrap();
+    store.epoch_acquire(&sc.cfg.epoch_key(), "successor", Some(&state)).await.unwrap();
+
+    let routes = super::gateway::routes(gw_core(&store));
+    let mut doc = loaded.manifest.clone();
+    doc.seq += 1;
+    let body = serde_json::json!({
+        "manifest": doc,
+        "expected_etag": loaded.etag,
+        "epoch": 1u64, // the deposed writer's claim
+        "flush_uuid": "straggler",
+    });
+    let res = gw_req().method("POST").path("/lean/v1/proj1/manifest").json(&body).reply(&routes).await;
+    assert_eq!(res.status(), 403, "stale epoch must be refused: {:?}", res.body());
+    let after = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert_eq!(after.manifest.seq, loaded.manifest.seq, "the straggler CAS landed!");
+
+    // The CURRENT epoch with the right token succeeds.
+    let body = serde_json::json!({
+        "manifest": doc,
+        "expected_etag": loaded.etag,
+        "epoch": 2u64,
+        "flush_uuid": "successor",
+    });
+    let res = gw_req().method("POST").path("/lean/v1/proj1/manifest").json(&body).reply(&routes).await;
+    assert_eq!(res.status(), 200, "{:?}", res.body());
+
+    // And a CAS miss reports 409 with the current etag, never blind
+    // re-seed semantics.
+    let res = gw_req().method("POST").path("/lean/v1/proj1/manifest").json(&body).reply(&routes).await;
+    assert_eq!(res.status(), 409);
+}
+
+/// status + snapshot surface the RPO/observability facts.
+#[tokio::test]
+async fn gateway_status_and_snapshot() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1");
+    sc.run_barrier().await.unwrap();
+    hitl_write(&store, &sc.cfg, "pending.txt", "queued", "dilip").await.unwrap();
+
+    let routes = super::gateway::routes(gw_core(&store));
+    let res = gw_req().method("GET").path("/lean/v1/proj1/status").reply(&routes).await;
+    assert_eq!(res.status(), 200);
+    let v: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
+    assert_eq!(v["seq"], 1);
+    assert_eq!(v["inbox_depth"], 1);
+    assert_eq!(v["epoch"], 1);
+    assert!(v["window"].is_null());
+
+    let res = gw_req().method("GET").path("/lean/v1/proj1/snapshot").reply(&routes).await;
+    assert_eq!(res.status(), 200);
+    let v: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
+    assert!(v["manifest"]["entries"]["f.txt"].is_object());
+    assert_eq!(v["inbox"]["entries"][0]["path"], "pending.txt");
 }
 
 /// The sync verb: begins with a scan; locally-dirty wins over a remote

@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use crate::tier::store::{EpochLease, ObjectStore, StoreError};
+use flint_store::{EpochLease, ObjectStore, StoreError};
 
 use super::state::Incarnation;
 use super::{manifest, LeanError, LeanResult, Sidecar};

@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crate::tier::store::{GenerationStamps, PosixStamps, StoreError};
+use flint_store::{GenerationStamps, PosixStamps, StoreError};
 
 use super::barrier::{mtime_of, write_file_atomic};
 use super::state::{BaselineEntry, ConflictRecord};

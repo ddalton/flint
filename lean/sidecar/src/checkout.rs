@@ -15,7 +15,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::tier::store::StoreError;
+use flint_store::StoreError;
 
 use super::barrier::{mtime_of, write_file_atomic};
 use super::manifest;
