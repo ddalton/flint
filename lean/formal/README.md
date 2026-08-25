@@ -13,7 +13,7 @@ a library. Nothing here is wired into `scripts/check-tla.sh`.
 ## Running
 
 ```
-./check.sh          # the 20-run gate (~minutes)
+./check.sh          # the 24-run gate (~minutes)
 ./gen-cfgs.sh       # regenerate the cfg matrix
 ```
 
