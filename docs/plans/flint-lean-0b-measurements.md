@@ -92,6 +92,18 @@ loopback. RSS ≈ 2 × whole_put_max + base, as the buffering predicts.
 6. **Empty directories do not round-trip** (git e2e; recorded in plan
    §3). Benign for git; dir-marker entry is the v2 lever.
 
+## Lever validation (same rig, same day — commit with the levers)
+
+Fan-out (bounded `buffer_unordered`, default 16) + HEAD-not-GET idle
+tick + skip-baseline-rewrite-on-unchanged-scan-set:
+
+| Op | Sequential | With levers | Note |
+| --- | --- | --- | --- |
+| 100k first publish | 117 s | **65 s** | loopback MinIO's single disk is now the wall — through a latency-bound proxy the multiplier approaches the fan-out width |
+| 100k idle tick | 2.8 s / 222 MiB | **1.85 s / 85 MiB** | no manifest parse |
+| 1M fresh checkout | 16 m 24 s | **7 m 05 s** | all 1M files verified |
+| 1M idle tick | 27.5 s / 1.33 GiB | **26.1 s / 762 MiB** | the 264 MiB manifest GET is GONE (the proxy-transfer win); the residual is baseline.json parse (238 MB) + the 1M-file walk — structural v1 costs, ≈6 s at the 250k cap |
+
 ## Tentative v1 caps that fall out (to firm up proxy-shaped)
 
 - **File-count cap: 250k entries** for v1. At 250k the extrapolated

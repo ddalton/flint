@@ -104,6 +104,10 @@ pub struct LeanConfig {
     /// Window deadline slack beyond the barrier start, seconds. A dead
     /// sidecar's window is ignorable past this deadline.
     pub window_slack_secs: u64,
+    /// Bounded concurrency for uploads and checkout fetches. The 0b
+    /// rig measured the sequential loops at 561-854 PUTs/s and
+    /// 1,000-2,000 GETs/s; fan-out multiplies directly against those.
+    pub fanout: usize,
 }
 
 impl LeanConfig {
@@ -116,6 +120,7 @@ impl LeanConfig {
             max_bytes: 0,
             max_files: 0,
             window_slack_secs: 180,
+            fanout: 16,
         }
     }
 

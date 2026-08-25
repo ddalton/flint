@@ -57,6 +57,7 @@ async fn main() {
     cfg.floor_secs = env_u64("FLINT_SYNC_FLOOR_SECS", 60);
     cfg.max_bytes = env_u64("FLINT_SYNC_MAX_BYTES", 0);
     cfg.max_files = env_u64("FLINT_SYNC_MAX_FILES", 0);
+    cfg.fanout = env_u64("FLINT_SYNC_FANOUT", 16).max(1) as usize;
 
     let state = match SidecarState::open(cfg.state_dir()) {
         Ok(s) => s,

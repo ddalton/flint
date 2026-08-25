@@ -66,58 +66,88 @@ impl Sidecar {
             )));
         }
 
+        // Materialize under a bounded fan-out window: each entry's
+        // guarded fetch + atomic write is independent (the 0b rig
+        // measured the sequential loop at ~1,000-2,000 files/s and
+        // 3.3 s/GiB; fan-out multiplies directly against both).
+        struct Fetched {
+            path: String,
+            be: BaselineEntry,
+            skipped: bool,
+            bytes: u64,
+        }
         let mut present: BTreeSet<String> = BTreeSet::new();
-        for (path, entry) in &m.entries {
-            let local = self.cfg.root.join(path);
-            if local.exists() {
-                // Resume: local-wins on present paths.
+        let results: Vec<LeanResult<Fetched>> = {
+            use futures::stream::{self, StreamExt};
+            let this: &super::Sidecar = &*self;
+            stream::iter(m.entries.iter().map(|(path, entry)| {
+                let store = this.store.clone();
+                let local = this.cfg.root.join(path);
+                async move {
+                    if local.exists() {
+                        // Resume: local-wins on present paths.
+                        let st = std::fs::metadata(&local)?;
+                        return Ok(Fetched {
+                            path: path.clone(),
+                            be: BaselineEntry {
+                                etag: entry.etag.clone(),
+                                generation: entry.generation,
+                                size: st.len(),
+                                mtime_unix: mtime_of(&st),
+                            },
+                            skipped: true,
+                            bytes: 0,
+                        });
+                    }
+                    let (meta, body) =
+                        match store.get_whole(&entry.key, Some(&entry.etag)).await {
+                            Ok(ok) => ok,
+                            Err(StoreError::PreconditionFailed(_)) => {
+                                // S3-wins: the object moved past the
+                                // manifest (a HITL write not yet
+                                // re-cited). Adopt the CURRENT version
+                                // — its inbox entry reconciles the
+                                // manifest at the next barrier.
+                                store.get_whole(&entry.key, None).await?
+                            }
+                            Err(StoreError::NotFound(_)) => {
+                                return Err(LeanError::State(format!(
+                                    "manifest cites {} but the object is gone — refusing a \
+                                     silent hole (mixed-writer bucket?)",
+                                    entry.key
+                                )));
+                            }
+                            Err(e) => return Err(e.into()),
+                        };
+                    write_file_atomic(&local, &body, Some(entry.mode))?;
+                    let st = std::fs::metadata(&local)?;
+                    Ok(Fetched {
+                        path: path.clone(),
+                        be: BaselineEntry {
+                            etag: meta.etag.clone(),
+                            generation: entry.generation,
+                            size: st.len(),
+                            mtime_unix: mtime_of(&st),
+                        },
+                        skipped: false,
+                        bytes: body.len() as u64,
+                    })
+                }
+            }))
+            .buffer_unordered(this.cfg.fanout.max(1))
+            .collect()
+            .await
+        };
+        for r in results {
+            let f = r?;
+            if f.skipped {
                 report.skipped_present += 1;
-                present.insert(path.clone());
-                let st = std::fs::metadata(&local)?;
-                baseline.entries.insert(
-                    path.clone(),
-                    BaselineEntry {
-                        etag: entry.etag.clone(),
-                        generation: entry.generation,
-                        size: st.len(),
-                        mtime_unix: mtime_of(&st),
-                    },
-                );
-                continue;
+            } else {
+                report.materialized += 1;
+                report.bytes += f.bytes;
             }
-            let (meta, body) =
-                match self.store.get_whole(&entry.key, Some(&entry.etag)).await {
-                    Ok(ok) => ok,
-                    Err(StoreError::PreconditionFailed(_)) => {
-                        // S3-wins: the object moved past the manifest
-                        // (a HITL write not yet re-cited). Adopt the
-                        // CURRENT version — its inbox entry will
-                        // reconcile the manifest at the next barrier.
-                        self.store.get_whole(&entry.key, None).await?
-                    }
-                    Err(StoreError::NotFound(_)) => {
-                        return Err(LeanError::State(format!(
-                            "manifest cites {} but the object is gone — refusing a silent hole \
-                             (mixed-writer bucket?)",
-                            entry.key
-                        )));
-                    }
-                    Err(e) => return Err(e.into()),
-                };
-            write_file_atomic(&local, &body, Some(entry.mode))?;
-            let st = std::fs::metadata(&local)?;
-            baseline.entries.insert(
-                path.clone(),
-                BaselineEntry {
-                    etag: meta.etag.clone(),
-                    generation: entry.generation,
-                    size: st.len(),
-                    mtime_unix: mtime_of(&st),
-                },
-            );
-            present.insert(path.clone());
-            report.materialized += 1;
-            report.bytes += body.len() as u64;
+            present.insert(f.path.clone());
+            baseline.entries.insert(f.path, f.be);
         }
 
         baseline.seq = m.seq;

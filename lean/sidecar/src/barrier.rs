@@ -207,14 +207,28 @@ impl Sidecar {
             && classified.first_absence.is_empty()
             && !repairs_pending
         {
-            let current = manifest::load(self.store.as_ref(), &self.cfg).await?;
-            let cur_seq = current.as_ref().map(|l| l.manifest.seq).unwrap_or(0);
-            if cur_seq == baseline.seq {
+            // HEAD, never GET: the 0b rig measured the idle tick at 1M
+            // entries as 27 s / 1.3 GiB — dominated by fetching and
+            // parsing a 264 MiB manifest just to read `seq`. The
+            // document ETag against the persisted one answers the same
+            // question for the price of one HEAD.
+            let unchanged = match self.store.head(&self.cfg.manifest_key()).await {
+                Ok(meta) => baseline.manifest_etag.as_deref() == Some(meta.etag.as_str()),
+                Err(StoreError::NotFound(_)) => baseline.manifest_etag.is_none(),
+                Err(e) => return Err(e.into()),
+            };
+            if unchanged {
                 report.no_change = true;
-                report.seq = Some(cur_seq);
-                // prev_scan still advances (the two-scan rule's clock).
-                baseline.prev_scan = scanned.keys().cloned().collect();
-                self.state.save_baseline(&baseline)?;
+                report.seq = Some(baseline.seq);
+                // prev_scan still advances (the two-scan rule's clock) —
+                // but the baseline document (hundreds of MB at 1M
+                // entries) is rewritten only when the scan SET moved.
+                let now_present: std::collections::BTreeSet<String> =
+                    scanned.keys().cloned().collect();
+                if now_present != baseline.prev_scan {
+                    baseline.prev_scan = now_present;
+                    self.state.save_baseline(&baseline)?;
+                }
                 return Ok(report);
             }
         }
@@ -244,15 +258,37 @@ impl Sidecar {
             inbox::drop_entries(self.store.as_ref(), &self.cfg, epoch, &consumed).await?;
         }
 
-        // Step 4: guarded uploads.
+        // Step 4: guarded uploads, fanned out under a bounded window
+        // (each key's guard chain is independent; the 412 policy and
+        // conflict records are applied to the collected results below,
+        // in deterministic path order).
         let mut upserts: BTreeMap<String, LeanEntry> = BTreeMap::new();
         let mut parked: BTreeSet<String> = BTreeSet::new();
         let mut new_baseline_entries: BTreeMap<String, BaselineEntry> = BTreeMap::new();
-        for path in &classified.uploads {
-            match self
-                .upload_one(path, &scanned[path], baseline.entries.get(path), epoch, &flush_uuid, &prior_uuids)
-                .await?
-            {
+        let outcomes: Vec<(String, LeanResult<UploadOutcome>)> = {
+            use futures::stream::{self, StreamExt};
+            let this: &Sidecar = &*self;
+            stream::iter(classified.uploads.iter().map(|path| {
+                let scanned_entry = &scanned[path];
+                let base = baseline.entries.get(path);
+                let flush_uuid = &flush_uuid;
+                let prior_uuids = &prior_uuids;
+                async move {
+                    let r = this
+                        .upload_one(path, scanned_entry, base, epoch, flush_uuid, prior_uuids)
+                        .await;
+                    (path.clone(), r)
+                }
+            }))
+            .buffer_unordered(self.cfg.fanout.max(1))
+            .collect()
+            .await
+        };
+        let mut outcomes = outcomes;
+        outcomes.sort_by(|a, b| a.0.cmp(&b.0));
+        for (path, outcome) in outcomes {
+            let path = &path;
+            match outcome? {
                 UploadOutcome::Published { entry, baseline_entry } => {
                     upserts.insert(path.clone(), entry);
                     new_baseline_entries.insert(path.clone(), baseline_entry);
