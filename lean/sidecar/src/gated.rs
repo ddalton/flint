@@ -143,6 +143,13 @@ impl CitationSource {
     }
 }
 
+/// Re-verify the lease every N paths inside the reaper. The loop is
+/// O(cited) sequential round trips with no renewal arm behind it, so a
+/// long sweep both starves the lease and outlives the holder's right to
+/// delete. 8 keeps the added epoch reads under ~12% of the LISTs the
+/// sweep already pays for.
+const RECLAIM_FENCE_EVERY: usize = 8;
+
 #[derive(Debug, Default)]
 pub struct LaneReport {
     pub staged: Vec<String>,
@@ -654,6 +661,99 @@ impl Sidecar {
     /// interval in which a version-resolving reader can see
     /// boundary-new bytes under old citations. `Inv_BoundaryAtomic`
     /// holds by construction.
+    /// EXACT version reclamation (D8) — the reaper, not lifecycle.
+    ///
+    /// Reclaims ONLY the generations this workspace itself superseded:
+    /// for each cited path, the version its own pending record names as
+    /// `base_version_id`. Everything else — crash remnants, foreign
+    /// writes, a successor's work — is left to the noncurrent backstop.
+    ///
+    /// THE RULE USED TO BE "delete every version of a touched key that
+    /// is neither `keep` nor `is_current`", and that destroys committed
+    /// data. The `is_current` guard protects exactly ONE version, and
+    /// its reasoning ("a foreign write landed between the lane and this
+    /// citation") assumes at most one foreign generation. A successor in
+    /// gated mode does not stop at one: its cadence is stage → cite →
+    /// stage. So a straggler whose CAS landed and which then stalled in
+    /// this loop would find, on resuming, the successor's CITED version
+    /// sitting noncurrent-and-not-`keep` — and delete it. Every cited
+    /// version surviving a deposed straggler is the premise §8 Q2 chose
+    /// versioned staging on ("they destroy nothing"), so the old rule
+    /// falsified the reason the mode exists.
+    ///
+    /// Lifecycle cannot do this job on `files/`: gated staging makes the
+    /// CITED version noncurrent the moment a newer generation is staged,
+    /// so a `NoncurrentVersionExpiration` rule runs a clock against live
+    /// cited data and never reaches the newest uncited bytes, which are
+    /// current. That inversion is why the standing retention is a long
+    /// BACKSTOP and a shorter fleet-wide rule is a refusal condition.
+    pub(crate) async fn reclaim_superseded(
+        &mut self,
+        upserts: &BTreeMap<String, LeanEntry>,
+        installed: &super::manifest::LeanManifest,
+        stage: &PendingStage,
+        report: &mut CitationReport,
+    ) -> LeanResult<()> {
+        for (i, path) in upserts.keys().enumerate() {
+            // The loop is O(cited) round trips and the run loop's
+            // renewal arm cannot fire while it runs (one `select!`, the
+            // chosen branch awaited inline). Renew on our own account,
+            // and re-verify: a straggler that lost the lease mid-loop
+            // must stop deleting, not finish the sweep.
+            if i % RECLAIM_FENCE_EVERY == 0 {
+                self.renew_if_due().await?;
+                self.verify_not_deposed_pub().await?;
+            }
+            // The ONLY version this pass is entitled to reclaim: the one
+            // our own pending record says we superseded. If we cannot
+            // name it we reclaim nothing — the backstop exists for
+            // exactly the remnants we cannot name.
+            let Some(superseded) =
+                stage.entries.get(path).and_then(|pe| pe.base_version_id.clone())
+            else {
+                continue;
+            };
+            if superseded.is_empty() {
+                continue;
+            }
+            // FAIL CLOSED. If the installed manifest does not name a
+            // version for this path — an unversioned backend, a proxy
+            // that stripped the header, a merge that resolved
+            // foreign-wins — then we do not know what is cited, and
+            // reclaiming against it is guesswork.
+            let Some(keep) = installed
+                .entries
+                .get(path)
+                .and_then(|e| e.version_id.clone())
+                .filter(|v| !v.is_empty())
+            else {
+                continue;
+            };
+            // The merge may have resolved foreign-wins onto the very
+            // version we were about to reclaim.
+            if superseded == keep {
+                continue;
+            }
+            let key = self.cfg.file_key(path);
+            let Ok(versions) = self.store.list_versions(&key).await else { continue };
+            let Some(v) = versions
+                .iter()
+                .find(|v| v.key == key && !v.is_delete_marker && v.version_id == superseded)
+            else {
+                continue;
+            };
+            // NEVER the current version. If what we superseded is
+            // somehow current again, a foreign writer restored it and
+            // those are live bytes somebody is about to read.
+            if v.is_current {
+                continue;
+            }
+            let _ = self.store.delete_version(&key, &superseded).await;
+            report.versions_reclaimed += 1;
+        }
+        Ok(())
+    }
+
     pub async fn citation_pass(&mut self, source: CitationSource) -> LeanResult<CitationReport> {
         let epoch = self
             .lease
@@ -968,40 +1068,7 @@ impl Sidecar {
         // bytes, which are current. That inversion is why the standing
         // retention is a long BACKSTOP and a shorter fleet-wide rule is
         // a refusal condition.
-        for path in upserts.keys() {
-            let key = self.cfg.file_key(path);
-            let keep = installed.entries.get(path).and_then(|e| e.version_id.clone());
-            // FAIL CLOSED. If the installed manifest does not name a
-            // version for this path — an unversioned backend, a proxy
-            // that stripped the header, a merge that resolved
-            // foreign-wins — then we do not know what is cited, and
-            // "delete everything we did not recognize" would reap live
-            // cited data. Reclaim NOTHING and let the backstop handle
-            // the remnant.
-            let Some(keep) = keep.filter(|v| !v.is_empty()) else { continue };
-            if let Ok(versions) = self.store.list_versions(&key).await {
-                for v in versions {
-                    if v.key != key || v.is_delete_marker {
-                        continue;
-                    }
-                    if v.version_id == keep {
-                        continue;
-                    }
-                    // NEVER the current version. If current is not what
-                    // we just cited, a foreign write landed between the
-                    // lane and this citation — those are live bytes
-                    // somebody is about to read, not a superseded
-                    // generation. The reaper's job is reclaiming what
-                    // this workspace itself superseded; anything else
-                    // is destruction with extra steps.
-                    if v.is_current {
-                        continue;
-                    }
-                    let _ = self.store.delete_version(&key, &v.version_id).await;
-                    report.versions_reclaimed += 1;
-                }
-            }
-        }
+        self.reclaim_superseded(&upserts, &installed, &stage, &mut report).await?;
 
         // Baseline rewrite.
         for (path, e) in &installed.entries {

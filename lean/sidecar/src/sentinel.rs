@@ -429,7 +429,7 @@ impl Sidecar {
         Ok(())
     }
 
-    fn consume_sentinel(&mut self, verb: Verb) -> LeanResult<bool> {
+    pub(crate) fn consume_sentinel(&mut self, verb: Verb) -> LeanResult<bool> {
         let path = self.control_path(verb.sentinel_name());
         let meta = match std::fs::symlink_metadata(&path) {
             Ok(m) => m,
@@ -581,6 +581,47 @@ impl Sidecar {
             return false;
         }
         pending.nonces.iter().all(|n| ack.nonces.contains(n))
+    }
+
+    /// D2's refused-ack rule for the restarted claimant, which was the last
+    /// open corner of the protocol.
+    ///
+    /// A sidecar SIGKILLed mid-honor runs no cooperative fence path, so
+    /// nothing settles the pending sentinel it left in the emptyDir. If the
+    /// kubelet then restarts it over that surviving tree while a successor
+    /// holds the lease, it blocks in `claim` — the successor's token keeps
+    /// advancing, so quiet polls never accumulate — and `settle_pending_at_
+    /// startup` is unreachable, because that runs only after `claim` returns.
+    /// The agent is left polling an ack that will never come, behind a
+    /// `capabilities.json` that still says `state: "live"` with live verbs.
+    ///
+    /// This process can never honor what it owes. It says so, once, on the
+    /// first Waiting poll: a `refused-fenced` ack per owed verb and a fenced
+    /// marker, so the agent stops waiting and the marker stops lying.
+    ///
+    /// Gated on a pending record actually standing. A fresh replacement pod
+    /// waiting out its 60 s of quiet polls is HEALTHY, not fenced, and its
+    /// emptyDir carries no pending record — so it takes none of this.
+    pub async fn refuse_what_this_incarnation_can_never_honor(&mut self) -> LeanResult<bool> {
+        let mut owed = false;
+        for verb in [Verb::Publish, Verb::Sync] {
+            if self.load_pending(verb)?.is_some() {
+                owed = true;
+            }
+        }
+        if !owed {
+            return Ok(false);
+        }
+        // Who fenced us — one epoch read, on a path taken at most once per
+        // process and only when something is actually owed.
+        let observed = self.store.epoch_read(&self.cfg.epoch_key()).await.ok().flatten().map(|c| c.epoch);
+        for verb in [Verb::Publish, Verb::Sync] {
+            if self.load_pending(verb)?.is_some() {
+                self.refuse_pending(verb, observed)?;
+            }
+        }
+        self.mark_fenced()?;
+        Ok(true)
     }
 
     /// The refused ack (D2). Deposal must never strand a waiting agent.

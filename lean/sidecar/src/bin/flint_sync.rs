@@ -239,6 +239,7 @@ enum Step {
 }
 
 async fn claim(sc: &mut Sidecar) -> Result<(), LeanError> {
+    let mut answered_owed = false;
     loop {
         match lease::claim_step(sc).await? {
             ClaimOutcome::Claimed(lease) => {
@@ -246,6 +247,22 @@ async fn claim(sc: &mut Sidecar) -> Result<(), LeanError> {
                 return Ok(());
             }
             ClaimOutcome::Waiting { quiet_polls } => {
+                if !answered_owed {
+                    answered_owed = true;
+                    match sc.refuse_what_this_incarnation_can_never_honor().await {
+                        Ok(true) => eprintln!(
+                            "flint-sync: a foreign holder stands and this incarnation owes an \
+                             ack it can never honor — refused-fenced written, marker fenced"
+                        ),
+                        Ok(false) => {}
+                        Err(e) => {
+                            // Never let this block the claim: a fresh
+                            // pod must still take over.
+                            answered_owed = false;
+                            eprintln!("flint-sync: could not settle owed acks while waiting: {e}");
+                        }
+                    }
+                }
                 eprintln!("flint-sync: waiting on the standing lease (quiet {quiet_polls}/6)");
                 tokio::time::sleep(Duration::from_secs(10)).await;
             }

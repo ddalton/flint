@@ -1925,6 +1925,97 @@ async fn sync_request_is_carried_never_executed() {
     assert!(!dir.path().join("keep.txt").exists(), "the agent's own sync did not run");
 }
 
+/// U8 — the last open corner of the protocol, and the one the bucket
+/// drill hit from the other side ("a one-shot blocks in `claim` FOREVER").
+///
+/// A sidecar SIGKILLed mid-honor runs no cooperative fence path, so its
+/// pending sentinel is never settled. The kubelet restarts it over the
+/// surviving emptyDir while a successor holds the lease; it blocks in
+/// `claim` (the successor's token keeps advancing, so quiet polls never
+/// accumulate) and `settle_pending_at_startup` is unreachable, because
+/// that runs only AFTER claim returns. The agent is left polling an ack
+/// that will never come, behind a marker that still says `live`.
+#[tokio::test]
+async fn a_restarted_claimant_that_can_never_honor_says_so_instead_of_stranding() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+
+    // The agent declares a boundary; the sidecar consumes it into a
+    // pending record and is SIGKILLed before honoring.
+    touch_sentinel(dir_a.path(), control::PUBLISH, r#"{"nonce":"task-42"}"#);
+    assert!(a.consume_sentinel(Verb::Publish).unwrap(), "the touch was not consumed");
+    assert!(a.load_pending(Verb::Publish).unwrap().is_some(), "no pending record to owe");
+    assert!(a.read_ack(Verb::Publish).is_none(), "an ack already exists — fixture not armed");
+
+    // A successor takes the lease.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    assert!(claim_until_held(&mut b, 10).await, "quiet polls exhausted ⇒ takeover");
+
+    // A restarts over its surviving emptyDir and lands in Waiting: the
+    // live successor means it can never claim, so it can never honor.
+    let outcome = lease::claim_step(&mut a).await.unwrap();
+    assert!(
+        matches!(outcome, lease::ClaimOutcome::Waiting { .. }),
+        "the fixture never armed — A claimed over a live successor"
+    );
+
+    let answered = a.refuse_what_this_incarnation_can_never_honor().await.unwrap();
+    assert!(answered, "nothing was owed — the fixture never armed");
+
+    // THE ASSERTIONS. The agent gets an answer...
+    let ack = a.read_ack(Verb::Publish).expect("the agent is still stranded: no ack");
+    assert_eq!(ack.status, "refused-fenced");
+    assert!(ack.nonces.contains(&"task-42".to_string()), "the ack does not cover the agent's nonce");
+    assert_eq!(ack.observed_epoch, Some(b.lease.as_ref().unwrap().epoch), "the ack names no fencer");
+
+    // ...and the marker stops advertising verbs a zombie cannot serve.
+    let caps: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir_a.path().join(".flint").join("capabilities.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(caps["state"], "fenced", "capabilities.json still says the zombie is live");
+}
+
+/// The other half of the same rule: a FRESH replacement pod waiting out
+/// its 60 s of quiet polls is healthy, not fenced. Nothing is owed in a
+/// fresh emptyDir, so it must take none of this — or every rolling
+/// restart would mark itself fenced on the way up.
+#[tokio::test]
+async fn a_healthy_replacement_waiting_out_quiet_polls_is_not_marked_fenced() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    let posture = b.sentinel_preflight().unwrap();
+    b.write_capabilities(&posture, false).unwrap();
+    // B is fresh and A still holds: B waits.
+    assert!(
+        matches!(lease::claim_step(&mut b).await.unwrap(), lease::ClaimOutcome::Waiting { .. }),
+        "the fixture never armed — B claimed instantly"
+    );
+
+    let answered = b.refuse_what_this_incarnation_can_never_honor().await.unwrap();
+    assert!(!answered, "a healthy replacement marked itself fenced on the way up");
+    assert!(b.read_ack(Verb::Publish).is_none(), "a refused ack appeared with nothing owed");
+    let caps: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir_b.path().join(".flint").join("capabilities.json")).unwrap(),
+    )
+    .unwrap();
+    assert_ne!(caps["state"], "fenced", "a healthy replacement was marked fenced");
+    // And it still takes over on schedule.
+    assert!(claim_until_held(&mut b, 10).await, "the refusal path blocked a legitimate takeover");
+}
+
 // ---------------------------------------------------------------------
 // Phase 3 — gated advance (D6, D7, D8, D13) + the flint-store version
 // surface.
@@ -1936,6 +2027,214 @@ fn gated(sc: &mut Sidecar) {
     sc.cfg.boundary_mode = super::BoundaryMode::Gated;
     sc.cfg.visibility_lag_bound_secs = Some(3600); // the 1-hour-floor trick
     sc.cfg.quiesce_bound_secs = 3600;
+}
+
+/// U2 / §8 Q2's PREMISE. A deposed straggler must not destroy the
+/// SUCCESSOR's cited data.
+///
+/// The old reaper rule was "delete every version of a touched key that
+/// is neither `keep` nor `is_current`". Its `is_current` guard protects
+/// exactly one version, on the assumption that at most one foreign
+/// generation can appear between the lane and the citation. A successor
+/// in gated mode does not stop at one — its cadence is stage → cite →
+/// stage — so a straggler resuming inside the reaper finds the
+/// successor's CITED version sitting noncurrent-and-not-`keep`, and
+/// deletes it.
+///
+/// The plan asserts the opposite in four places ("they destroy
+/// nothing", "non-destructive stragglers"), and it is the premise §8 Q2
+/// chose versioned staging on. Drill leg B12 cannot see this: it freezes
+/// the straggler INSIDE THE UPLOAD LOOP, which is the arm that really is
+/// non-destructive. The reaper arm is never frozen.
+#[tokio::test]
+async fn a_deposed_stragglers_reaper_never_deletes_the_successors_cited_version() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+
+    // A cites G1. This is the manifest A is still holding when it stalls
+    // inside its own reaper.
+    write(dir_a.path(), "w.txt", "G1-FROM-A");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+    let a_installed = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let key = a.cfg.file_key("w.txt");
+    let v1 = a_installed.entries["w.txt"].version_id.clone().unwrap();
+
+    // A stalls. B takes over.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    assert!(claim_until_held(&mut b, 10).await, "quiet polls exhausted ⇒ takeover");
+    b.checkout().await.unwrap();
+    gated(&mut b);
+
+    // B cites G2 — the version whose survival is the whole point.
+    write(dir_b.path(), "w.txt", "G2-CITED-BY-B");
+    b.upload_lane().await.unwrap();
+    b.citation_pass(CitationSource::Sentinel).await.unwrap();
+    let b_installed = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    let v2 = b_installed.entries["w.txt"].version_id.clone().unwrap();
+    assert_ne!(v2, v1, "B cited the same version A did — the fixture never armed");
+
+    // ...and then stages G3, which is the ordinary gated steady state
+    // and is what pushes B's CITED version off `current`.
+    write(dir_b.path(), "w.txt", "G3-STAGED-BY-B");
+    backdate_baseline(&b, "w.txt");
+    b.upload_lane().await.unwrap();
+
+    // ANTI-VACUITY: the fixture must really put B's cited version in the
+    // old rule's kill zone — present, not current, and not A's `keep`.
+    let versions = store.list_versions(&key).await.unwrap();
+    let cited_by_b = versions
+        .iter()
+        .find(|v| v.version_id == v2)
+        .expect("B's cited version vanished before the reaper ran");
+    assert!(!cited_by_b.is_current, "B's cited version is still current — the kill zone is empty");
+    assert!(
+        versions.iter().any(|v| v.is_current && v.version_id != v2 && v.version_id != v1),
+        "nothing newer than B's citation is current — the fixture never armed"
+    );
+
+    // A thaws INSIDE its reaper, holding its own pass's state.
+    let stage_a = a.load_stage().unwrap();
+    let mut upserts = std::collections::BTreeMap::new();
+    upserts.insert("w.txt".to_string(), a_installed.entries["w.txt"].clone());
+    let mut report = Default::default();
+    let _ = a.reclaim_superseded(&upserts, &a_installed, &stage_a, &mut report).await;
+
+    // THE ASSERTION. B's cited version must still be fetchable and
+    // byte-identical: a deposed straggler destroys nothing.
+    let (_, body) = store
+        .get_version(&key, &v2)
+        .await
+        .expect("the straggler's reaper DELETED the successor's cited version");
+    assert_eq!(&body[..], b"G2-CITED-BY-B", "the successor's cited bytes changed");
+
+    // And the successor can still serve its own manifest end to end.
+    let cited = &b_installed.entries["w.txt"];
+    let (_, via_manifest) = store.get_version(&cited.key, cited.version_id.as_ref().unwrap()).await
+        .expect("the successor's manifest dangles after the straggler reaped");
+    assert_eq!(&via_manifest[..], b"G2-CITED-BY-B");
+}
+
+/// The narrowing, stated on its own and without a deposal: the reaper
+/// reclaims what THIS workspace superseded and nothing else. A version
+/// it cannot name in its own pending record is a crash remnant or
+/// somebody else's work, and both belong to the noncurrent backstop.
+#[tokio::test]
+async fn the_reaper_reclaims_only_the_version_its_own_record_names() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+
+    write(dir.path(), "n.txt", "V1");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+    let key = a.cfg.file_key("n.txt");
+    let v1 = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries
+        ["n.txt"]
+        .version_id
+        .clone()
+        .unwrap();
+
+    // ARM 1 — the ordinary supersede cycle. Anti-vacuity on the fix
+    // itself: the narrowed reaper must still do its actual job.
+    write(dir.path(), "n.txt", "V2");
+    backdate_baseline(&a, "n.txt");
+    a.upload_lane().await.unwrap();
+    let r = a.citation_pass(CitationSource::Sentinel).await.unwrap();
+    assert_eq!(r.versions_reclaimed, 1, "the reaper stopped reclaiming anything at all");
+    assert!(
+        store.get_version(&key, &v1).await.is_err(),
+        "the version this workspace superseded was not reclaimed"
+    );
+    let installed = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let v2 = installed.entries["n.txt"].version_id.clone().unwrap();
+
+    // ARM 2 — a version this workspace's record cannot name: the shape
+    // of a crash remnant (the staging PUT landed, the pending record
+    // never did) and of any foreign write.
+    // TWO of them, so the older is NONCURRENT — which is the only shape
+    // the old rule would have swept. One current unnameable version
+    // proves nothing: the old rule skipped `is_current` too.
+    let mut unnameable = vec![];
+    for (n, body) in [(98u64, "UNNAMEABLE-A"), (99, "UNNAMEABLE-B")] {
+        let b = Bytes::from(body);
+        let meta = store
+            .put_whole(
+                &key,
+                b.clone(),
+                &PutCondition::IfMatch(store.head(&key).await.unwrap().etag),
+                &GenerationStamps {
+                    generation: n,
+                    epoch: 0,
+                    flush_uuid: "crash-remnant".into(),
+                    boundary_source: None,
+                    posix: None,
+                },
+                crc64_nvme(&b),
+            )
+            .await
+            .unwrap();
+        unnameable.push(meta.version_id.clone().expect("versioned store"));
+    }
+    let (orphan_noncurrent, orphan_vid) = (unnameable[0].clone(), unnameable[1].clone());
+    // Anti-vacuity: the older remnant really is in the old rule's kill
+    // zone — present, not current, not `keep`.
+    let vs = store.list_versions(&key).await.unwrap();
+    assert!(
+        vs.iter().any(|v| v.version_id == orphan_noncurrent && !v.is_current),
+        "the unnameable remnant is current — the old rule would have skipped it anyway"
+    );
+
+    // Drive the reaper straight, with a record that names v2 as what it
+    // superseded — so the ONLY difference between the two versions on
+    // this key is whether our own record names them.
+    let mut stage = a.load_stage().unwrap();
+    let mut pe = super::gated::PendingEntry {
+        key: key.clone(),
+        etag: installed.entries["n.txt"].etag.clone(),
+        crc64_b64: None,
+        size: 2,
+        mode: 0o644,
+        mtime_unix: 0,
+        generation: 3,
+        epoch: 1,
+        version_id: None,
+        base_version_id: Some(v2.clone()),
+        staged_unix: 0,
+    };
+    pe.version_id = Some(orphan_vid.clone());
+    stage.entries.insert("n.txt".to_string(), pe);
+
+    // `keep` must differ from both, or the guards short-circuit.
+    let mut keep_manifest = installed.clone();
+    keep_manifest.entries.get_mut("n.txt").unwrap().version_id = Some(orphan_vid.clone());
+    let mut upserts = std::collections::BTreeMap::new();
+    upserts.insert("n.txt".to_string(), keep_manifest.entries["n.txt"].clone());
+
+    let mut report = Default::default();
+    a.reclaim_superseded(&upserts, &keep_manifest, &stage, &mut report).await.unwrap();
+
+    // v2 IS named as superseded ⇒ reclaimed. Anti-vacuity for arm 2.
+    assert_eq!(report.versions_reclaimed, 1, "the named superseded version was not reclaimed");
+    assert!(store.get_version(&key, &v2).await.is_err(), "the named version survived");
+    // Nothing else on the key was touched — including the NONCURRENT
+    // remnant, which is precisely what the old rule swept.
+    store
+        .get_version(&key, &orphan_noncurrent)
+        .await
+        .expect("the reaper deleted a NONCURRENT version its own record never named");
+    store
+        .get_version(&key, &orphan_vid)
+        .await
+        .expect("the reaper deleted a version its own record never named");
 }
 
 /// D7 — the premise the whole switch rests on: on a versioned bucket an
