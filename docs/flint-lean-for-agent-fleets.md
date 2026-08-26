@@ -20,7 +20,7 @@ the last published boundary rather than your last write. If that is not
 your shape, see [when not to use lean](#when-not-to-use-lean).
 
 Everything below was run end to end on 2026-08-26 against the published
-`0.2.0` chart. Commands are copy-pasteable, not illustrative.
+chart. Commands are copy-pasteable, not illustrative.
 
 ---
 
@@ -44,7 +44,7 @@ unprivileged container.
 kubectl create namespace flint-system
 
 helm install flint-lean \
-  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.2.0 \
+  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.3.0 \
   -n flint-system
 ```
 
@@ -52,6 +52,20 @@ That installs three things: the `FlintLeanWorkspace` CRD, the operator,
 and a mutating webhook. The webhook provisions **its own TLS certificate
 and `MutatingWebhookConfiguration` at startup** — there is no
 cert-manager dependency and nothing to pre-create.
+
+It pulls two images and nothing else:
+
+| image | pulled by | what runs |
+|---|---|---|
+| `dilipdalton/flint-lean-operator` | the `flint-system` deployment | `flint-lean-operator` — the controller and webhook |
+| `dilipdalton/flint-sync` | every opted-in agent pod | the injected sidecar |
+
+**flint-lean does not install or require flint-lite.** No CSI driver, no
+NFS hub, no `FlintShare` CRD — the chart bundles exactly one CRD and its
+RBAC covers only `flintleanworkspaces`. (The operator image is the same
+build artifact as `flint-lite-operator`, republished under the lean name
+from an identical digest: one image, two names, so nothing is duplicated
+and nothing called "lite" appears in a lean install.)
 
 Check it came up:
 

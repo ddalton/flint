@@ -65,5 +65,36 @@ for spec in "$@"; do
     done
 done
 
+# --- aliases: one image, two names ------------------------------------------
+# flint-lean installs out of the SAME image as flint-lite-operator (same
+# crate, same build; the chart picks the binary), but asking someone to
+# pull "flint-lite-operator" to install flint-lean reads as a dependency
+# it does not have. So the identical manifest list is republished under
+# a lean-shaped name.
+#
+# imagetools create COPIES the index cross-repo (blobs are mounted, not
+# re-uploaded) and preserves the digest, so the alias is provably the
+# same bits — release.sh gates on exactly that equality. Do NOT build
+# here: a rebuild would produce a different digest and the two names
+# would drift, which is the whole failure this is meant to avoid.
+#
+# NOTE the alias name is flint-lean-OPERATOR, not flint-lean:
+# dilipdalton/flint-lean is the OCI repo the Helm chart is pushed to,
+# and mixing a chart artifact and a container image in one repo makes
+# `docker pull` and `helm pull` disagree about what a tag means.
+set -- "flint-lite-operator:flint-lean-operator"
+
+for spec in "$@"; do
+    from=${spec%%:*}
+    to=${spec#*:}
+    echo "=== dilipdalton/$to (alias of $from) ==="
+    for tag in "$ver" "$minor" "$major" latest; do
+        echo "--- alias $to:$tag ---"
+        run docker buildx imagetools create \
+            -t "dilipdalton/$to:$tag" "dilipdalton/$from:$ver"
+    done
+done
+
 echo
 echo "published $ver (+ $minor, $major, latest) for all three images"
+echo "aliased   flint-lite-operator -> flint-lean-operator at the same digest"

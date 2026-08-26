@@ -18,6 +18,16 @@ SPDK target image are untouched and stay at 1.37.0. The CSI chart has
 zero files changed since v1.37.0, and republishing every image at a new
 tag to ship a lean chart would be cost without meaning.
 
+**One image, two names** (chart `0.3.0`). The lean control plane ships in
+the same build artifact as `flint-lite-operator` — same crate, same
+build, the chart picks the binary — but asking someone to pull an image
+called "lite" to install flint-lean reads as a dependency it does not
+have. That image is now also published as `dilipdalton/flint-lean-operator`,
+copied cross-repo from the **identical manifest digest** (no rebuild), and
+the lean chart names it. Nothing else changes: same bits, same tags, and
+`scripts/release.sh` refuses to publish the chart unless the two digests
+are equal, so the names cannot drift.
+
 ### Added
 
 - **Boundary verbs.** An agent declares a coherent point by writing

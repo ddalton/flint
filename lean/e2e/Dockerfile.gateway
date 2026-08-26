@@ -1,5 +1,7 @@
 # flint-lean-gateway e2e image. In production the gateway ships inside
-# the flint-lite-operator image (same crate, chart picks the binary);
+# the operator image, which is published under both flint-lite-operator
+# and flint-lean-operator from one digest (same crate, chart picks the
+# binary and the lean-shaped name);
 # the chaos rig gives it its own so a gateway outage leg can scale the
 # gateway to zero without taking the operator down with it.
 FROM busybox:stable

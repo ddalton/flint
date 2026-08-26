@@ -106,7 +106,7 @@
         └─ flint-sync sidecar ────────────────┴──▶ S3
               injected by a webhook · unprivileged · no /dev/fuse</code></pre>
 <p>The trade, stated up front: the workspace is a <strong>local copy</strong>. It must fit the pod&#x27;s disk, one writer owns it at a time, and other readers see the last published boundary rather than your last write. If that is not your shape, see <a href="#when-not-to-use-lean">when not to use lean</a>.</p>
-<p>Everything below was run end to end on 2026-08-26 against the published <code>0.2.0</code> chart. Commands are copy-pasteable, not illustrative.</p>
+<p>Everything below was run end to end on 2026-08-26 against the published chart. Commands are copy-pasteable, not illustrative.</p>
 <hr>
 <h2>Before you start</h2>
 <table><tr><th></th><th></th></tr><tr><td>An S3 bucket</td><td>must already exist. <strong>Versioning on</strong> if you want gated mode — it is refused without it. Nothing here creates or deletes buckets.</td></tr><tr><td>Kubernetes</td><td><strong>1.29+</strong> — the sidecar is injected as a *native sidecar* (<code>initContainer</code> with <code>restartPolicy: Always</code>), which is 1.29 or newer.</td></tr><tr><td>Tools</td><td><code>kubectl</code>, <code>helm</code> 3.8+ (OCI support)</td></tr><tr><td>Credentials</td><td>see <a href="#credentials">credentials</a> — the agent container never holds one</td></tr></table>
@@ -116,9 +116,12 @@
 <pre><code>kubectl create namespace flint-system
 
 helm install flint-lean \
-  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.2.0 \
+  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.3.0 \
   -n flint-system</code></pre>
 <p>That installs three things: the <code>FlintLeanWorkspace</code> CRD, the operator, and a mutating webhook. The webhook provisions <strong>its own TLS certificate and <code>MutatingWebhookConfiguration</code> at startup</strong> — there is no cert-manager dependency and nothing to pre-create.</p>
+<p>It pulls two images and nothing else:</p>
+<table><tr><th>image</th><th>pulled by</th><th>what runs</th></tr><tr><td><code>dilipdalton/flint-lean-operator</code></td><td>the <code>flint-system</code> deployment</td><td><code>flint-lean-operator</code> — the controller and webhook</td></tr><tr><td><code>dilipdalton/flint-sync</code></td><td>every opted-in agent pod</td><td>the injected sidecar</td></tr></table>
+<p><strong>flint-lean does not install or require flint-lite.</strong> No CSI driver, no NFS hub, no <code>FlintShare</code> CRD — the chart bundles exactly one CRD and its RBAC covers only <code>flintleanworkspaces</code>. (The operator image is the same build artifact as <code>flint-lite-operator</code>, republished under the lean name from an identical digest: one image, two names, so nothing is duplicated and nothing called &quot;lite&quot; appears in a lean install.)</p>
 <p>Check it came up:</p>
 <pre><code>kubectl -n flint-system get pods
 # flint-lean-59d5b4f886-s5hp8   1/1   Running

@@ -1,7 +1,9 @@
 //! `flint-lean-gateway` — the lean control plane's door (plan §2.2,
-//! Phase 3). Ships in the flint-lite-operator image like
-//! flint-hub-gateway does: same crate, same build, the chart picks the
-//! binary. Shares NO runtime state with the hub gateway and resolves
+//! Phase 3). Ships in the operator image like flint-hub-gateway does:
+//! same crate, same build, the chart picks the binary. That image is
+//! published under two names from one digest — flint-lite-operator and
+//! flint-lean-operator — so a lean install pulls nothing called
+//! "lite"; the lean chart names the latter. Shares NO runtime state with the hub gateway and resolves
 //! no FlintShare CRs — lean workspaces are bucket cells, and the
 //! tenancy map is explicit configuration.
 //!

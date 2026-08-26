@@ -12,9 +12,16 @@
 # The operator image. Composed as {repository}/{name}:{tag|appVersion};
 # `ref` overrides the whole reference (e.g. a kind-loaded
 # "flint-lean-operator:e2e").
+#
+# This is an ALIAS of dilipdalton/flint-lite-operator, published from the
+# identical manifest digest — same crate, same build, one image, two
+# names. Nothing flint-lite runs from it: the chart execs
+# /usr/local/bin/flint-lean-operator (and -gateway), never the image's
+# own flint-lite-operator ENTRYPOINT. The alias exists so that
+# installing flint-lean never asks you to pull something called "lite".
 image:
   repository: dilipdalton
-  name: flint-lite-operator   # the lean operator ships in this image
+  name: flint-lean-operator
   tag: ""
   ref: ""
   pullPolicy: IfNotPresent

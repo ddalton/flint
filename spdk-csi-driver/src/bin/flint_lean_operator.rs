@@ -1,8 +1,11 @@
 //! `flint-lean-operator` — the FlintLeanWorkspace controller.
 //!
-//! Ships in the flint-lite-operator image (same crate, same build; the
-//! chart picks the binary — the flint-hub-gateway precedent) but runs
-//! a SEPARATE controller: no FlintShare coupling, no hub lifecycle, no
+//! Ships in the operator image (same crate, same build; the chart picks
+//! the binary — the flint-hub-gateway precedent), published under two
+//! names from one manifest digest: flint-lite-operator and the alias
+//! flint-lean-operator, which is what the lean chart names so a lean
+//! install never pulls something called "lite". Runs a SEPARATE
+//! controller: no FlintShare coupling, no hub lifecycle, no
 //! per-workspace Deployments/PVCs at all. Duties per reconcile: claim
 //! stamping with both adopt arms, bucket posture (operator principal),
 //! the stale-MPU sweep, status. The mutating webhook (native-sidecar

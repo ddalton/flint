@@ -86,6 +86,11 @@ tag_exists() {  # <name> <tag> -> 0 if published on Docker Hub
         "https://hub.docker.com/v2/repositories/$hub_ns/$1/tags/$2" 2>/dev/null
 }
 
+tag_digest() {  # <name> <tag> -> the manifest-list digest, or empty
+    curl -fsS "https://hub.docker.com/v2/repositories/$hub_ns/$1/tags/$2" 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("digest") or "")' 2>/dev/null
+}
+
 # --- check ------------------------------------------------------------------
 echo "chart $chart_version (appVersion $app_version) references:"
 missing_table=""
@@ -235,6 +240,34 @@ EOF
                 exit 1
             fi
         done
+        # ...and the image the chart names must BE that image. The
+        # recipe check above proves flint-lite-operator carries the lean
+        # binaries; it says nothing about the lean-named alias, which is
+        # a separate Docker Hub repo. Publish the alias with a build
+        # instead of `imagetools create` (or forget to re-alias after a
+        # rebuild) and the two names drift: the recipe check passes
+        # against the lite image while the chart pulls stale bits from
+        # the lean one. Digest equality is the only thing that closes
+        # it, and it is one API call.
+        if [ "$lean_op_img" != flint-lite-operator ]; then
+            alias_d=$(tag_digest "$lean_op_img" "$lean_app")
+            src_d=$(tag_digest flint-lite-operator "$lean_app")
+            if [ -z "$alias_d" ] || [ -z "$src_d" ]; then
+                echo "REFUSING to push flint-lean $lean_version: cannot read the" \
+                     "manifest digest of $hub_ns/$lean_op_img:$lean_app or of" \
+                     "$hub_ns/flint-lite-operator:$lean_app." >&2
+                exit 1
+            fi
+            if [ "$alias_d" != "$src_d" ]; then
+                echo "REFUSING to push flint-lean $lean_version:" \
+                     "$hub_ns/$lean_op_img:$lean_app ($alias_d) is NOT the same" \
+                     "image as $hub_ns/flint-lite-operator:$lean_app ($src_d)." \
+                     "The lean image is an alias, not a rebuild — republish it with" \
+                     "scripts/publish-images.sh, which uses 'buildx imagetools create'." >&2
+                exit 1
+            fi
+            echo "  ✓ $hub_ns/$lean_op_img:$lean_app is $hub_ns/flint-lite-operator:$lean_app ($src_d)"
+        fi
         # Same question for the sidecar, plus the two things a lean
         # sidecar base MUST have: a shell (the injected startupProbe
         # execs `test -f` inside it) and ca-certificates (the S3 client

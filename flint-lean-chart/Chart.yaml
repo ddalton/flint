@@ -9,7 +9,7 @@ description: >-
 type: application
 
 # Chart version, independent of the flint release train.
-version: 0.2.0
+version: 0.3.0
 
 # The flint release whose images this chart runs. The operator and the
 # sidecar ship from the same build and speak the same bucket format —
