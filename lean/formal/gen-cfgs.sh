@@ -12,7 +12,7 @@ SyncScanFirst SyncScope ScopedInstBase GatedCitation AtomicCitation \
 GCKeepsCurrent CiteDropsInflightHitl BackstopEnabled MineIsNotForeign \
 MaxTouches \
 SentinelEnabled FoldPending AckFromInstall RefuseOnFence FastPathGuards \
-AckHonest LaneCancelsStaged GatedRepair"
+AckHonest LaneCancelsStaged GatedRepair StampBoundarySource"
 
 emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   local name=$1 invs=$2; shift 2
@@ -43,6 +43,10 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   # under GatedCitation, and no pre-existing cfg pairs that with
   # SentinelEnabled — which was the finding.
   local c_AckHonest=FALSE c_LaneCancelsStaged=FALSE c_GatedRepair=FALSE
+  # The provenance stamp is TRUE everywhere: it is not an arm, it is the
+  # shipped behaviour after the drill found the bucket and the ack naming
+  # two different clocks for one boundary.
+  local c_StampBoundarySource=TRUE
   local kv
   for kv in "$@"; do eval "c_${kv%%=*}=${kv#*=}"; done
   {
@@ -351,3 +355,67 @@ emit LeanSentinelGatedStaleStage "Inv_AckImpliesCited" \
 # already integrated into its own tree.
 emit LeanSentinelGatedNoRepair "Inv_AckBoundaryCoherent" \
   $SENTGATED GatedRepair=FALSE
+
+# ---- the ack's PROVENANCE: one boundary, one clock -------------------------
+# `Inv_AckBoundaryCoherent` asks whether the acked boundary is a coherent
+# POINT.  It never asked which CLOCK installed it — and that is a separate
+# question with a separate reader: the agent reads the ack, the fleet reads
+# the manifest's stamp, and an operator asking "did my agent's publish land,
+# or was that the floor?" has only the bucket to ask.
+#
+# Shipped code computed the two independently. The bucket drill found it
+# twice in one session: the barrier installed through an UNSTAMPED CAS (so
+# every cadence and hybrid workspace reported an unknown clock, including
+# through the gateway's /status), and then the fix produced a DISAGREEMENT —
+# a drain that rewrote its own ack to `drain` over a manifest still stamped
+# `sentinel`. It existed in both modes; fixing the cadence path left the
+# gated one, and only leg B11a caught that. One invariant would have caught
+# both at once, which is the argument for this pair of runs.
+emit LeanSentinelClockHolds \
+  "TypeOK,Inv_AckImpliesCited,Inv_AckBoundaryCoherent,Inv_BoundaryNamesItsClock" \
+  $SENTWORLD
+# The mutation is the shipped shape, not a strawman: the install goes
+# through an unstamped CAS, so a sentinel honor lands a boundary the bucket
+# reports as the default clock while the ack tells the agent otherwise.
+emit LeanSentinelClockUnstamped "Inv_BoundaryNamesItsClock" \
+  $SENTWORLD StampBoundarySource=FALSE
+# The same claim over the CITATION lane, which is a different installer and
+# is where the second half of the shipped defect actually lived.
+emit LeanSentinelGatedClockUnstamped "Inv_BoundaryNamesItsClock" \
+  $SENTGATED StampBoundarySource=FALSE
+
+# ---- the PAIR the plan predicted and the matrix never ran -----------------
+# §10.3: "two products that share an action are not covered by running them
+# separately", and it named SyncScope x GatedCitation as the obvious next
+# one — a scoped sync and a citation lane both advance `instBase`, by
+# different rules. No cfg had ever set both TRUE. This is that run.
+#
+# The shared object is `instBase`: D4 advances it per-path (only where the
+# sync applied or verified in scope) while the citation lane advances it
+# for everything it installs. If the citation's advance is not scope-aware,
+# an out-of-scope foreign entry reads as already-integrated at the next
+# merge and is lost from the inbox flow forever — which is exactly what
+# Inv_NoForeignLost exists to catch, and it had never been evaluated in a
+# world where a citation could do the advancing.
+# WORLD NOTE, and it is the trap §10.3 named, walked into from the third
+# side: the first budget for this pair used MaxHitl=1 as its foreign source
+# and AllowStall=FALSE. The holds run went green over 70,701 states, the
+# deferral probe FIRED, and the D4 mutation still generated a byte-identical
+# state count — `ScopedInstBase` was unreachable, so the pair run was green
+# over a world its bug cannot live in. The foreign source has to be the one
+# SCOPEWORLD uses: a second sidecar installing while ours is stalled.
+SCOPEGATED="SyncEnabled=TRUE SyncScope=TRUE GatedCitation=TRUE MaxSyncs=1 \
+AllowStall=TRUE MaxHitl=0 MaxGen=2 MaxSeq=6 MaxBarriers=2 \
+MaxCrashes=0 MaxRestarts=0"
+emit LeanScopedGatedHolds \
+  "TypeOK,Inv_HITLDurable,Inv_NoResurrection,Inv_CitedVersionLives,\
+Inv_NoUncitedGC,Inv_BoundaryAtomic,Inv_SyncNeverDestroysDirty,Inv_NoForeignLost" \
+  $SCOPEGATED
+# Anti-vacuity for the pair, and it is the whole reason the run exists: if
+# the scoped-deferral action is unreachable in this world then the pair is
+# not being exercised and the holds run above is green over nothing.
+emit LeanProbeScopedGated "ProbeScopedDeferral" $SCOPEGATED
+# The D4 mutation, re-run inside the gated world: whole-instBase advance
+# must still be caught when a citation lane is also advancing it.
+emit LeanScopedGatedWholeBase "Inv_NoForeignLost" \
+  $SCOPEGATED ScopedInstBase=FALSE

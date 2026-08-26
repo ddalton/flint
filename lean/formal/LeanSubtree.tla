@@ -190,20 +190,35 @@ CONSTANTS
                        \* and delete/modify then resolves conservatively
                        \* AGAINST the agent's own delete.  FALSE = the
                        \* shipped rule THIS MODEL REFUTED.
-  BackstopEnabled      \* TRUE = the noncurrent-retention lifecycle rule
+  BackstopEnabled,     \* TRUE = the noncurrent-retention lifecycle rule
                        \* fires.  It is a BACKSTOP, never the reaper, and
                        \* enabling it is a mutation: on `files/` it cannot
                        \* tell cited from uncited, so it runs a clock
                        \* against live cited data (D8's inversion, and
                        \* §2.4.3's abandoned-mid-stage endgame).
+  StampBoundarySource  \* TRUE = every install stamps the manifest with
+                       \* the SAME clock its ack will name.  FALSE = the
+                       \* mutation, and it is what shipped: the barrier
+                       \* installed through an UNSTAMPED CAS, so every
+                       \* boundary read as the default clock no matter
+                       \* what drove it — and a drain that renamed its own
+                       \* ack left the bucket and the agent naming two
+                       \* different clocks for one boundary.  The ack is a
+                       \* LOCAL file; the manifest is what the fleet
+                       \* reads, so the bucket held the wrong one.
 
 Sidecars == {"A", "B"}
+Sources == {"none", "cadence", "sentinel"}
 
 VARIABLES
   \* ---- bucket -----------------------------------------------------------
   cellEpoch,   \* subtree lease cell: current epoch (0 = never claimed)
   cellHolder,  \* "A" | "B" | "none"
   manSeq,      \* manifest document seq (the CAS token)
+  manSrc,      \* the boundary-source stamp on the INSTALLED manifest —
+               \* the fleet-visible answer to "which clock installed
+               \* this?".  Real bucket state (object metadata), not a
+               \* ghost: an operator reads it without the agent's ack.
   manifest,    \* [Paths -> Nat]: cited generation per path (0 = uncited)
   objects,     \* [Paths -> Nat]: current object generation (0 = absent)
   inbox,       \* SUBSET (Paths \X Nat): pending HITL entries
@@ -233,7 +248,7 @@ VARIABLES
 
 gatedVars == <<stage, stageBase, withheldDel>>
 
-vars == <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox, window,
+vars == <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, window,
           sc, versions, stage, stageBase, withheldDel, hitlAcked,
           conflicts, gh>>
 
@@ -363,6 +378,11 @@ vars == <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox, window,
                             everything this workspace had integrated
      fencedOkAck BOOLEAN    an ok ack was written by an incarnation the
                             cell had already deposed
+     srcMismatch BOOLEAN    an ok ack named one clock while the manifest
+                            it acked carried another.  The ack is a LOCAL
+                            file and the manifest is what the FLEET reads,
+                            so this is the bucket disagreeing with the
+                            agent about the same boundary
      foreignLost BOOLEAN    a sync advanced the merge base for a path it
                             neither applied nor surfaced a conflict for —
                             i.e. it claimed to have integrated a generation
@@ -385,6 +405,27 @@ NoPend      == [p \in Paths |-> 0]
 \* are monotone, so the subset test implies it (ledger entry).
 AckMatches(s) == sc[s].pendN \subseteq sc[s].ackN
 
+(* WHICH CLOCK a boundary belongs to.  One function, read by BOTH sides:
+   the installer stamps it on the manifest and the ack names it to the
+   agent.  That is the whole point — the shipped code computed the two
+   independently, so a drain could rewrite its ack to `drain` while the
+   manifest it installed still said `sentinel`, and the BUCKET (which is
+   what an operator reads, and the ack is not) held the wrong one.       *)
+\* Read the SAME test the install reads. `honored` is set BY the install,
+\* so at stamp time it is still FALSE — asking it there would stamp every
+\* sentinel honor "cadence" and the invariant would fire on correct code
+\* (the first pilot did exactly that). A live pending record is what makes
+\* a boundary a sentinel honor, and it outlives the ack: `AckOk` requires
+\* it, and `RetirePending` runs only afterwards.
+BoundaryClock(s) == IF SentinelEnabled /\ PendLive(s) THEN "sentinel" ELSE "cadence"
+
+(* What the install actually writes.  The mutation is not "stamps the
+   wrong thing" but the subtler shape that shipped: the install goes
+   through an UNSTAMPED CAS, so every boundary reads as the default
+   clock however it was driven.                                          *)
+InstallSource(s) == IF StampBoundarySource THEN BoundaryClock(s) ELSE "cadence"
+
+
 Deposed(s)  == cellEpoch > sc[s].epoch
 Running(s)  == sc[s].st = "running"
 Dirty(s)    == {p \in Paths : sc[s].local[p] # sc[s].baseline[p]}
@@ -406,6 +447,7 @@ Destroys(s, p, cur) ==
 
 Init ==
   /\ cellEpoch = 0 /\ cellHolder = "none" /\ manSeq = 1
+  /\ manSrc = "none"
   /\ manifest = [p \in Paths |-> 1]
   /\ objects  = [p \in Paths |-> 1]
   /\ inbox = {} /\ window = 0
@@ -416,6 +458,7 @@ Init ==
   /\ withheldDel = [s \in Sidecars |-> {}]
   /\ sc = [s \in Sidecars |->
        [st |-> "unstarted", pc |-> "idle", epoch |-> 0, expSeq |-> 0,
+        installed |-> FALSE,
         local |-> [p \in Paths |-> 0], baseline |-> [p \in Paths |-> 0],
         instBase |-> [p \in Paths |-> 0],
         instSnap |-> [p \in Paths |-> 0], instSeq |-> 0,
@@ -443,6 +486,7 @@ Init ==
            coalesced |-> 0, fastPaths |-> 0, ackAfterRestart |-> 0,
            fastHonor |-> FALSE, ackEarly |-> FALSE,
            ackIncoherent |-> FALSE, fencedOkAck |-> FALSE,
+           srcMismatch |-> FALSE,
            partialAcks |-> 0, declaredDrops |-> 0]
 
 ------------------------------------------------------------------------------
@@ -457,7 +501,7 @@ StartA ==
        !["A"].baseline = [p \in Paths |-> manifest[p]],
        !["A"].instBase = [p \in Paths |-> manifest[p]],
        !["A"].known = CitedGens]
-  /\ UNCHANGED <<manSeq, manifest, objects, inbox, window,
+  /\ UNCHANGED <<manSeq, manSrc, manifest, objects, inbox, window,
                  hitlAcked, conflicts, gh>>
 
 CrashPod(s) ==
@@ -473,7 +517,7 @@ CrashPod(s) ==
        ![s].honored = FALSE, ![s].pendReRun = FALSE,
        ![s].owed = {}, ![s].ackN = {}]
   /\ gh' = [gh EXCEPT !.crashes = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
 
 (* Container restart in the SAME pod: the emptyDir survives, so local,
@@ -505,7 +549,7 @@ Restart(s) ==
             ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
        /\ gh' = [gh EXCEPT !.restarts = @ + 1,
             !.resurrected = @ \/ (RematerializeOnRestart /\ res)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
 
 (* A node freeze / partition: the process persists but takes no steps.
@@ -515,13 +559,13 @@ StallA ==
   /\ AllowStall /\ sc["A"].st = "running" /\ ~gh.stallUsed
   /\ sc' = [sc EXCEPT !["A"].st = "stalled"]
   /\ gh' = [gh EXCEPT !.stallUsed = TRUE]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
 
 ThawA ==
   /\ sc["A"].st = "stalled"
   /\ sc' = [sc EXCEPT !["A"].st = "running"]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts, gh>>
 
 (* A deposed incarnation's next successful cell read (heartbeat renew)
@@ -546,7 +590,7 @@ RenewDiscover(s) ==
             ![s].pendDirty = IF settle THEN {} ELSE @,
             ![s].honored = FALSE, ![s].pendReRun = FALSE]
        /\ gh' = [gh EXCEPT !.refusedAcks = @ + (IF settle THEN 1 ELSE 0)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
 
 (* Takeover: B observes the quiet cell (abstracting the 6-poll protocol)
@@ -558,6 +602,9 @@ ClaimB ==
   /\ (Rotation => manSeq < MaxSeq)
   /\ cellHolder' = "B" /\ cellEpoch' = cellEpoch + 1
   /\ manSeq' = IF Rotation THEN manSeq + 1 ELSE manSeq
+  \* A rotation is a fence, not a boundary: it publishes nothing, so it
+  \* clears the stamp rather than inheriting the deposed holder's.
+  /\ manSrc' = IF Rotation THEN "none" ELSE manSrc
   /\ sc' = [sc EXCEPT !["B"].st = "claiming",
                       !["B"].epoch = cellEpoch + 1]
   /\ gh' = [gh EXCEPT !.takeovers = @ + 1]
@@ -570,7 +617,7 @@ CheckoutB ==
        !["B"].baseline = [p \in Paths |-> manifest[p]],
        !["B"].instBase = [p \in Paths |-> manifest[p]],
        !["B"].known = CitedGens]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts, gh>>
 
 ------------------------------------------------------------------------------
@@ -581,13 +628,13 @@ AgentWrite(s, p) ==
   /\ sc' = [sc EXCEPT ![s].local[p] = gh.nextGen,
                       ![s].known = @ \cup {gh.nextGen}]
   /\ gh' = [gh EXCEPT !.nextGen = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
 
 AgentDelete(s, p) ==
   /\ Running(s) /\ sc[s].local[p] # 0
   /\ sc' = [sc EXCEPT ![s].local[p] = 0]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts, gh>>
 
 ------------------------------------------------------------------------------
@@ -604,9 +651,12 @@ HitlWrite(p) ==
        /\ objects' = [objects EXCEPT ![p] = g]
        /\ IF InboxEnabled
           THEN /\ inbox' = inbox \cup {<<p, g>>}
-               /\ UNCHANGED <<manifest, manSeq>>
+               /\ UNCHANGED <<manifest, manSeq, manSrc>>
           ELSE /\ manifest' = [manifest EXCEPT ![p] = g]
                /\ manSeq' = manSeq + 1
+               \* The refuted direct-bump path: a party that holds no
+               \* lease installed this, so it carries no sidecar clock.
+               /\ manSrc' = "none"
                /\ UNCHANGED inbox
        /\ hitlAcked' = hitlAcked \cup {<<p, g>>}
        /\ gh' = [gh EXCEPT !.nextGen = @ + 1, !.hitl = @ + 1]
@@ -617,7 +667,7 @@ HitlWrite(p) ==
 HitlRefused ==
   /\ WindowCheck /\ window # 0 /\ gh.refusals < 1
   /\ gh' = [gh EXCEPT !.refusals = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, sc, hitlAcked, conflicts>>
 
 ------------------------------------------------------------------------------
@@ -659,7 +709,7 @@ Consume(s) ==
        /\ conflicts' = conflicts \cup
             (IF ConflictSurfacing THEN conflicted ELSE {})
        /\ inbox' = {}
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, window,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, window,
                  hitlAcked, gh>>
 
 (* Steps 2+3: scan-diff against the persisted baseline and CAS the
@@ -679,7 +729,7 @@ Scan(s) ==
        ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
   /\ window' = sc[s].epoch
   /\ gh' = [gh EXCEPT !.barriers = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  hitlAcked, conflicts>>
 
 (* Step 4: guarded per-key upload.  If-Match = the persisted baseline
@@ -694,7 +744,7 @@ UploadFenced(s) ==
   /\ EpochCheck /\ Deposed(s)
   /\ sc[s].scanU \ (sc[s].upDone \cup sc[s].parked) # {}
   /\ sc' = [sc EXCEPT ![s].st = "dead"]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts, gh>>
 
 Upload(s, p) ==
@@ -711,7 +761,7 @@ Upload(s, p) ==
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.deposedPuts =
                      @ + (IF Deposed(s) THEN 1 ELSE 0)]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, inbox,
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox,
                         window, hitlAcked, conflicts>>
        ELSE IF cur \in sc[s].known
        THEN \* 412, but the current ETag is one I minted or consumed:
@@ -719,14 +769,14 @@ Upload(s, p) ==
             \* integrated).  AdoptOwn convergence.
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.adoptOwn = @ + 1]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects,
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
                         inbox, window, hitlAcked, conflicts>>
        ELSE IF ConflictSurfacing
        THEN \* foreign ETag: park the path, surface the conflict, never
             \* overwrite an ETag this sidecar did not itself publish.
          /\ sc' = [sc EXCEPT ![s].parked = @ \cup {p}]
          /\ conflicts' = conflicts \cup {<<p, cur>>}
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects,
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
                         inbox, window, hitlAcked, gh>>
        ELSE \* MUTATION: the inherited LOCAL-WINS arbitration — re-read
             \* the ETag and overwrite blind.  known does NOT grow.
@@ -735,7 +785,7 @@ Upload(s, p) ==
          /\ gh' = [gh EXCEPT
               !.amputated = @ \/ Destroys(s, p, cur),
               !.deposedPuts = @ + (IF Deposed(s) THEN 1 ELSE 0)]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, inbox,
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox,
                         window, hitlAcked, conflicts>>
 
 (* Steps 5+6 in the chosen order.  The GC delete (etag-guarded HEAD:
@@ -759,14 +809,14 @@ GCDelete(s, p) ==
           \/ DeletesAfterCAS /\ manifest[p] # 0
        THEN \* already absent, still referenced, or unrecognized ETag
          /\ sc' = [sc EXCEPT ![s].gcDone = @ \cup {p}]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects,
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
                         inbox, window, hitlAcked, conflicts, gh>>
        ELSE
          /\ objects' = [objects EXCEPT ![p] = 0]
          /\ sc' = [sc EXCEPT ![s].gcDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.gc = @ + 1,
               !.amputated = @ \/ Destroys(s, p, cur)]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, inbox,
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox,
                         window, hitlAcked, conflicts>>
 
 GCDeleteFenced(s) ==
@@ -775,7 +825,7 @@ GCDeleteFenced(s) ==
      \/ (~DeletesAfterCAS /\ sc[s].pc = "scanned" /\ UploadsDone(s))
   /\ sc[s].scanD \ sc[s].gcDone # {}
   /\ sc' = [sc EXCEPT ![s].st = "dead"]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts, gh>>
 
 PreDeletesDone(s) ==
@@ -783,7 +833,7 @@ PreDeletesDone(s) ==
   /\ sc[s].pc = "scanned" /\ UploadsDone(s)
   /\ sc[s].scanD \subseteq sc[s].gcDone
   /\ sc' = [sc EXCEPT ![s].pc = "delDone"]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts, gh>>
 
 (* Step 5: the manifest CAS.  Parked paths withhold their entry.  A
@@ -803,7 +853,7 @@ CASFenced(s) ==
   /\ EpochCheck /\ Deposed(s)
   /\ sc' = [sc EXCEPT ![s].st = "dead"]
   /\ gh' = [gh EXCEPT !.stragglerCas = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
 
 CASMiss(s) ==
@@ -827,7 +877,7 @@ CASMiss(s) ==
             ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
        /\ window' = 0
        /\ UNCHANGED <<conflicts, gh>>
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  hitlAcked>>
 
 CASInstall(s) ==
@@ -904,6 +954,7 @@ CASInstall(s) ==
      IN
        /\ manifest' = inst
        /\ manSeq' = manSeq + 1
+       /\ manSrc' = InstallSource(s)
        /\ inbox' = inbox2
        /\ window' = 0
        /\ sc' = [sc EXCEPT ![s].pc = "cased",
@@ -927,6 +978,7 @@ Finish(s) ==
        \* A barrier that BEGAN after the consume has now completed: this
        \* is the only thing that entitles an ok ack (D2's uniform rule).
        ![s].honored = IF SentinelEnabled /\ PendLive(s) THEN TRUE ELSE @,
+       ![s].installed = TRUE,
        ![s].baseline = [p \in Paths |->
          IF p \in sc[s].scanU \cap sc[s].upDone THEN sc[s].scanGen[p]
          ELSE IF p \in sc[s].scanD /\ sc[s].instSnap[p] = 0 THEN 0
@@ -937,7 +989,7 @@ Finish(s) ==
        ![s].scanGen = [p \in Paths |-> 0],
        ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
   /\ gh' = [gh EXCEPT !.done = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
 
 
@@ -1026,7 +1078,7 @@ Sync(s) ==
             !.syncDestroyed = @ \/ destroys,
             !.scopedDeferrals = @ + (IF SyncScope THEN Cardinality(deferred) ELSE 0),
             !.foreignLost = @ \/ lost]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked>>
 
 ------------------------------------------------------------------------------
@@ -1088,7 +1140,7 @@ StagePut(s, p) ==
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.staged = @ + 1,
                      !.deposedPuts = @ + (IF Deposed(s) THEN 1 ELSE 0)]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, inbox,
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox,
                         window, withheldDel, hitlAcked, conflicts>>
        ELSE IF cur \in sc[s].known /\ cur = want
        THEN \* our own crashed/torn earlier PUT of THESE bytes: adopt the
@@ -1105,7 +1157,7 @@ StagePut(s, p) ==
          /\ stageBase' = [stageBase EXCEPT ![s] = [@ EXCEPT ![p] = cur]]
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.adoptOwn = @ + 1]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects,
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
                         versions, inbox, window, withheldDel, hitlAcked,
                         conflicts>>
        ELSE IF cur \in sc[s].known
@@ -1119,12 +1171,12 @@ StagePut(s, p) ==
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.adoptOwn = @ + 1,
                      !.deposedPuts = @ + (IF Deposed(s) THEN 1 ELSE 0)]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, inbox,
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox,
                         window, withheldDel, hitlAcked, conflicts>>
        ELSE \* foreign ETag: park and surface; never overwrite.
          /\ sc' = [sc EXCEPT ![s].parked = @ \cup {p}]
          /\ conflicts' = conflicts \cup {<<p, cur>>}
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects,
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
                         versions, inbox, window, stage, stageBase,
                         withheldDel, hitlAcked, gh>>
 
@@ -1134,7 +1186,7 @@ StagePutFenced(s) ==
   /\ EpochCheck /\ Deposed(s)
   /\ sc[s].scanU \ (sc[s].upDone \cup sc[s].parked) # {}
   /\ sc' = [sc EXCEPT ![s].st = "dead"]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, versions,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions,
                  inbox, window, stage, stageBase, withheldDel, hitlAcked,
                  conflicts, gh>>
 
@@ -1161,7 +1213,7 @@ LaneDone(s) ==
        [p \in Paths |-> IF LaneCancelsStaged /\ p \in sc[s].scanD THEN 0 ELSE @[p]]]
   /\ sc' = [sc EXCEPT ![s].pc = "laneDone"]
   /\ gh' = [gh EXCEPT !.withheld = @ + Cardinality(sc[s].scanD \ withheldDel[s])]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, versions,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions,
                  inbox, window, hitlAcked, conflicts>>
 
 (* No coherent point is due: the tick ends with the bytes DURABLE and the
@@ -1177,7 +1229,7 @@ LaneOnly(s) ==
        ![s].scanU = {}, ![s].scanD = {},
        ![s].scanGen = [p \in Paths |-> 0],
        ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, versions,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions,
                  inbox, stage, stageBase, withheldDel, hitlAcked, conflicts,
                  gh>>
 
@@ -1188,7 +1240,7 @@ CiteFenced(s) ==
   /\ Valid(s) \ sc[s].citeDone # {}
   /\ sc' = [sc EXCEPT ![s].st = "dead"]
   /\ gh' = [gh EXCEPT !.stragglerCas = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, versions,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions,
                  inbox, window, stage, stageBase, withheldDel, hitlAcked,
                  conflicts>>
 
@@ -1238,6 +1290,7 @@ CitePassStep(s) ==
           IN
             /\ manifest' = inst
             /\ manSeq' = manSeq + 1
+            /\ manSrc' = InstallSource(s)
             /\ sc' = [sc EXCEPT ![s].citeDone = @ \cup sub,
                                 ![s].expSeq = manSeq + 1,
                                 ![s].instSnap = inst,
@@ -1312,6 +1365,7 @@ CiteFinish(s) ==
        /\ conflicts' = conflicts \cup {<<p, sc[s].baseline[p]>> : p \in dropped}
        /\ sc' = [sc EXCEPT ![s].pc = "idle",
             ![s].honored = IF SentinelEnabled /\ PendLive(s) THEN TRUE ELSE @,
+            ![s].installed = TRUE,
             \* Which paths this boundary does NOT carry.  Kept apart
             \* from `conflicts` on purpose: a conflict record is the
             \* ack's `report.parked` in the FUSED path, which is why
@@ -1337,7 +1391,7 @@ CiteFinish(s) ==
             !.declaredDrops = @ + (IF SentinelEnabled /\ PendLive(s)
                                    THEN Cardinality(dropped \cap sc[s].pendDirty)
                                    ELSE 0)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, inbox, hitlAcked>>
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, inbox, hitlAcked>>
 
 (* The noncurrent-retention BACKSTOP.  It is not the reaper and it must
    never be creditable for the reaper's work: on `files/` it cannot tell
@@ -1353,7 +1407,7 @@ BackstopExpire(p) ==
        /\ g # objects[p]          \* noncurrent only, exactly as S3
        /\ versions' = [versions EXCEPT ![p] = @ \ {g}]
   /\ gh' = [gh EXCEPT !.reaped = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, sc, stage, stageBase, withheldDel, hitlAcked,
                  conflicts>>
 
@@ -1399,7 +1453,7 @@ Touch(s) ==
   /\ gh.touches < MaxTouches
   /\ sc' = [sc EXCEPT ![s].sentTok = gh.touches + 1]
   /\ gh' = [gh EXCEPT !.touches = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
 
 (* The consume: rename the sentinel out of the agent's reach and FOLD it
@@ -1427,7 +1481,7 @@ TakeSentinel(s) ==
             ![s].honored = FALSE,
             ![s].owed = @ \cup {t}]
        /\ gh' = [gh EXCEPT !.coalesced = @ + (IF fold THEN 1 ELSE 0)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
 
 (* Skip-on-no-diff (`barrier.rs`): nothing local to publish, no citation
@@ -1460,10 +1514,12 @@ FastPath(s) ==
   /\ FastPathClean(s)
   /\ sc' = [sc EXCEPT ![s].pc = "idle",
        ![s].honored = IF PendLive(s) THEN TRUE ELSE @,
+       \* No boundary was installed, so this honor stamps nothing.
+       ![s].installed = FALSE,
        ![s].lastDirty = IF SyncEnabled THEN {} ELSE @]
   /\ gh' = [gh EXCEPT !.barriers = @ + 1, !.fastPaths = @ + 1,
                       !.fastHonor = @ \/ PendLive(s)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
 
 (* THE PROMISE, evaluated at the instant the ack is written and stamped
@@ -1559,15 +1615,24 @@ AckOk(s) ==
   \* carry it, and `ok` would assert the opposite.
   /\ (AckHonest => sc[s].pendDirty \cap sc[s].citeDropped = {})
   /\ sc' = [sc EXCEPT ![s].ackN = @ \cup sc[s].pendN, ![s].honored = FALSE,
-       ![s].citeDropped = {}]
+       ![s].installed = FALSE, ![s].citeDropped = {}]
   /\ gh' = [gh EXCEPT
        !.acks = @ + 1,
        !.honors = @ + (IF sc[s].honored THEN 1 ELSE 0),
        !.ackAfterRestart = @ + (IF sc[s].pendReRun THEN 1 ELSE 0),
        !.ackEarly = @ \/ BoundaryBroken(s),
        !.ackIncoherent = @ \/ BoundaryIncoherent(s),
-       !.fencedOkAck = @ \/ Deposed(s)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+       !.fencedOkAck = @ \/ Deposed(s),
+       \* Only an ack that claims its OWN install can disagree with the
+       \* stamp; an ack that installed nothing names no clock.
+       \* Scoped to an honor that actually INSTALLED. A no-diff honor
+       \* installs no boundary, so its ack names the VERB that ran while
+       \* the stamp still names whoever last installed — two different
+       \* questions, and only a real install owes them the same answer.
+       \* (The first pilot conflated them and fired on correct code.)
+       !.srcMismatch = @ \/ (sc[s].honored /\ sc[s].installed
+                             /\ manSrc # BoundaryClock(s))]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
 
 (* The honest answer when the boundary does not carry the declared
@@ -1586,9 +1651,9 @@ AckPartial(s) ==
   /\ ~(RefuseOnFence /\ Deposed(s))
   /\ sc[s].pendDirty \cap sc[s].citeDropped # {}
   /\ sc' = [sc EXCEPT ![s].ackN = @ \cup sc[s].pendN, ![s].honored = FALSE,
-       ![s].citeDropped = {}]
+       ![s].installed = FALSE, ![s].citeDropped = {}]
   /\ gh' = [gh EXCEPT !.acks = @ + 1, !.partialAcks = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
 
 (* Retire AFTER the ack rename.  Splitting these two is not ceremony:
@@ -1601,7 +1666,7 @@ RetirePending(s) ==
   /\ sc' = [sc EXCEPT ![s].pendN = {}, ![s].pendCov = NoPend,
        ![s].pendMint = 0, ![s].pendDirty = {},
        ![s].honored = FALSE, ![s].pendReRun = FALSE]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts, gh>>
 
 (* D2's refused ack: deposal must never strand a waiting agent.  Write
@@ -1616,7 +1681,7 @@ AckRefused(s) ==
        ![s].honored = FALSE, ![s].pendReRun = FALSE,
        ![s].st = "dead"]
   /\ gh' = [gh EXCEPT !.refusedAcks = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
 
 SentinelNext ==
@@ -1666,7 +1731,7 @@ Spec == Init /\ [][Next]_vars
 
 TypeOK ==
   /\ cellEpoch \in 0..3 /\ cellHolder \in Sidecars \cup {"none"}
-  /\ manSeq \in 1..MaxSeq+1
+  /\ manSeq \in 1..MaxSeq+1 /\ manSrc \in Sources
   /\ manifest \in [Paths -> Gens] /\ objects \in [Paths -> Gens]
   /\ inbox \subseteq (Paths \X Gens) /\ window \in 0..3
   /\ hitlAcked \subseteq (Paths \X Gens) /\ conflicts \subseteq (Paths \X Gens)
@@ -1761,6 +1826,17 @@ Inv_AckBoundaryCoherent == ~gh.ackIncoherent
 \* with the pending file.
 Inv_NoNonceOrphan ==
   \A s \in Sidecars : sc[s].owed \subseteq (sc[s].pendN \cup sc[s].ackN)
+
+\* One boundary, ONE clock.  The agent reads the ack; the fleet reads the
+\* manifest's stamp; an operator asking "did my agent's publish land, or
+\* was that the floor?" is a different process from the agent, often in a
+\* different cluster, and it has only the bucket to ask.  Shipped code
+\* computed the two independently and they disagreed — with the bucket
+\* holding the wrong one, which is the worse half.
+\* Scoped to acks that claim their own install: a no-diff honor installs
+\* nothing, and its ack is answering "your point is already true" rather
+\* than naming a new boundary.
+Inv_BoundaryNamesItsClock == ~gh.srcMismatch
 
 \* A deposed incarnation never tells an agent its boundary landed.  The
 \* plan calls this `Inv_RefusedNeverInstalled`; it is stated here as the

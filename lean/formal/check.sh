@@ -186,5 +186,19 @@ mutation_run $M LeanSentinelGatedNoRepair.cfg "the citation lane WITHOUT the rep
 mutation_run $M LeanSentinelGatedStaleStage.cfg "the stage and the withheld-delete set both reach the citation and merge order decides: the boundary an ok ack names cites a file the agent deleted before declaring (found in a fix two hours old)" \
   "Invariant Inv_AckImpliesCited is violated"
 
+# ---- the ack's PROVENANCE: one boundary, one clock ------------------------
+strict_run $M LeanSentinelClockHolds.cfg "the ack and the manifest name the SAME clock -- the agent reads the ack, the fleet reads the stamp"
+mutation_run $M LeanSentinelClockUnstamped.cfg "the barrier installs through an UNSTAMPED CAS: the bucket reports the default clock while the ack tells the agent otherwise (found by the bucket drill, twice in one session)" \
+  "Invariant Inv_BoundaryNamesItsClock is violated"
+mutation_run $M LeanSentinelGatedClockUnstamped.cfg "the same, over the CITATION lane -- the installer where the second half of the shipped defect actually lived (leg B11a caught it after the cadence half was fixed)" \
+  "Invariant Inv_BoundaryNamesItsClock is violated"
+
+# ---- the PAIR the plan predicted and the matrix never ran -----------------
+strict_run $M LeanScopedGatedHolds.cfg "SyncScope x GatedCitation: two products that both advance instBase, run together for the first time (the pair 10.3 named)"
+mutation_run $M LeanProbeScopedGated.cfg "probe: the scoped deferral is REACHABLE in the gated world -- without it the pair run is green over nothing" \
+  "Invariant ProbeScopedDeferral is violated"
+mutation_run $M LeanScopedGatedWholeBase.cfg "whole-instBase advance, with a citation lane also advancing it: the out-of-scope foreign entry is still lost forever" \
+  "Invariant Inv_NoForeignLost is violated"
+
 echo
-echo "lean formal gate: $PASS/55 runs green"
+echo "lean formal gate: $PASS/61 runs green"

@@ -589,7 +589,7 @@ What replaces it is **storage, not requests**: uncited versions (at most one gen
 and 4, the verified-review tranche (§10.1e), the Phase-4/5/6 tranche
 (§10.1f) and **the B1–B25 bucket drill (§10.1g)**. Lean battery
 **101/101** (was 19/19); lean operator suite **37/37** (was 12/12);
-formal gate **55/55** (was 24/24); **kind boundary drill 14/14**
+formal gate **61/61** (was 24/24); **kind boundary drill 14/14**
 (`lean/e2e/run-boundary.sh`); **bucket drill 27/27**
 (`lean/e2e/run-verbs.sh` against a real MinIO). `flint-store` and the
 hub crate both compile against the shared-schema changes —
@@ -1313,6 +1313,46 @@ priority order and the reasoning are in §10.3.
 - **Product 2 — DONE (§10.1c).** It found a live defect on its first
   strict run — the gated citation's reaper deleting an acked HITL write —
   and retired D7's base-version guard as unreachable. ~19k states, ~2 s.
+- **The ack's PROVENANCE — DONE, and it closes the gap the bucket drill
+  walked into twice.** `Inv_AckBoundaryCoherent` asks whether the acked
+  boundary is a coherent POINT; nothing asked *which clock installed
+  it*, and that is a separate question with a separate reader. The agent
+  reads the ack — a LOCAL file — while an operator asking "did my
+  agent's publish land, or was that the floor?" is a different process,
+  often in a different cluster, with only the bucket to ask. Shipped
+  code computed the two independently: the barrier installed through an
+  UNSTAMPED CAS, and then the fix produced a disagreement (a drain
+  rewriting its own ack to `drain` over a manifest still stamped
+  `sentinel`) that existed in BOTH modes — fixing the cadence path left
+  the gated one, and only drill leg B11a caught that. `manSrc` is now
+  real state, stamped by every installing action; `Inv_BoundaryNamesItsClock`
+  is checked over `LeanSentinelClockHolds`, and two mutations
+  (`LeanSentinelClockUnstamped`, `LeanSentinelGatedClockUnstamped`) are
+  REQUIRED to find it — one per installer, because one installer was
+  fixed while the other stayed broken.
+  - **Two false positives before it was stated correctly, and both were
+    the model teaching the design.** (i) `honored` is set BY the install,
+    so reading it at stamp time labels every sentinel honor `cadence`;
+    the install's own test — a live pending record — is what both sides
+    must read. (ii) A **no-diff fast-path honor installs no boundary at
+    all**, so its ack names the VERB that ran while the stamp still names
+    whoever last installed. Those are different questions and only a real
+    install owes them the same answer, so the invariant is scoped to acks
+    that claim their own install. The shipped code agrees: a no-diff
+    honor rewrites no manifest.
+- **`SyncScope` × `GatedCitation` — DONE, and it found nothing.** The
+  pair §10.3 named as "the obvious next one" had never been run: no cfg
+  set both TRUE. It now holds green over 896,481 distinct states, with
+  the deferral probe firing and the D4 whole-`instBase` mutation firing.
+  A green pair run is a real result and is reported as one.
+  - **The budget cost a lap, in exactly the way this section warned.**
+    The first `SCOPEGATED` used `MaxHitl=1` as its foreign source with
+    `AllowStall=FALSE`. The holds run went green over 70,701 states and
+    the deferral probe FIRED — and the mutation still produced a
+    byte-identical state count, because `ScopedInstBase` was unreachable.
+    A probe firing does not license the world; **the mutation is the
+    thing that proves the bug can live there**, and the foreign source
+    has to be the stalled-sidecar path SCOPEWORLD uses.
 - **Product 3 — defer, unchanged.** Its real content is a required-reachable probe
   (a deposed writer's PUT lands and becomes `current[p]`), the fence
   that would make it an invariant is P5 at the proxy, which is not

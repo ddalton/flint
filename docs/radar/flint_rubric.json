@@ -1,0 +1,254 @@
+[
+ {
+  "dimension": "Consistency",
+  "axes": [
+   {
+    "name": "Strong cross-client primitives",
+    "definition": "Whether byte-range locks, O_EXCL create, atomic rename, and shared sqlite/git actually work between clients/pods, not just inside one."
+   },
+   {
+    "name": "Read freshness across clients",
+    "definition": "How stale another client's view of your write can be \u2014 from enforced close-to-open down to snapshot-until-explicit-sync."
+   },
+   {
+    "name": "CAS / conditional-write fidelity",
+    "definition": "What If-Match / If-None-Match actually bind: which writer populations, detection vs refusal, cooperative vs enforced."
+   },
+   {
+    "name": "Acked-write crash durability",
+    "definition": "Which failure domain an acked write/fsync survives before the write-back tier lands it in S3."
+   },
+   {
+    "name": "Multi-writer arbitration",
+    "definition": "Who arbitrates concurrent writers to the same tree and what a second writer experiences \u2014 serialized, refused, or merely detected."
+   },
+   {
+    "name": "Foreign-write conflict surfacing",
+    "definition": "The fate of an out-of-band/foreign write against a live tree: silently lost, undetected, or preserved-and-surfaced."
+   }
+  ],
+  "flint_scores": {
+   "NFS": [
+    5,
+    5,
+    3,
+    3.5,
+    5,
+    1.5
+   ],
+   "FUSE": [
+    1.5,
+    2.5,
+    3,
+    1.5,
+    1.5,
+    2
+   ],
+   "Lean": [
+    1,
+    1.5,
+    4,
+    1.5,
+    2.5,
+    4
+   ]
+  }
+ },
+ {
+  "dimension": "Performance",
+  "axes": [
+   {
+    "name": "Streaming read",
+    "definition": "Large sequential read throughput on warm/resident data, as the workload experiences it."
+   },
+   {
+    "name": "Streaming write",
+    "definition": "Large sequential write throughput on the application's write path (background publish excluded unless it blocks the app)."
+   },
+   {
+    "name": "Small-file / metadata-heavy",
+    "definition": "Throughput of create/stat/delete storms and many-small-file trees (npm install, untar, large clones)."
+   },
+   {
+    "name": "Hot-loop local I/O",
+    "definition": "Latency-sensitive synchronous loops \u2014 sqlite transactions, git operations, build dirs, agent scratch \u2014 where per-op latency, not bandwidth, paces the tool."
+   },
+   {
+    "name": "Cold start / first access",
+    "definition": "Time from a new pod starting against a live, warm share to a usable workspace; after-idle and hibernated wake are priced under Day-2 Idle & wake."
+   },
+   {
+    "name": "Scale-out ceiling",
+    "definition": "How aggregate throughput grows as client/pod count grows, and what shared component caps it."
+   },
+   {
+    "name": "Workload envelope",
+    "definition": "Which workloads an approach can admit at all - maximum working set, maximum unpublished dirty set, admissible shapes (shared-RWX, multi-pod sqlite/git). The other axes assume the workload fits."
+   }
+  ],
+  "flint_scores": {
+   "sys": [
+    3.5,
+    3,
+    1.5,
+    2,
+    4,
+    1.5,
+    5
+   ],
+   "krb5p": [
+    2,
+    1.5,
+    1,
+    1.5,
+    3.5,
+    1,
+    5
+   ],
+   "FUSE": [
+    4,
+    4,
+    3.5,
+    4,
+    3.5,
+    4.5,
+    2.5
+   ],
+   "Lean": [
+    5,
+    5,
+    5,
+    5,
+    3,
+    4,
+    2
+   ]
+  }
+ },
+ {
+  "dimension": "Security",
+  "axes": [
+   {
+    "name": "Client authentication strength",
+    "definition": "How strongly a writer must prove who it is before the store or server accepts its operations."
+   },
+   {
+    "name": "Wire protection",
+    "definition": "Confidentiality and integrity of data and control traffic in transit."
+   },
+   {
+    "name": "Unauthenticated DoS resistance",
+    "definition": "How little a merely-reachable, credential-less peer can do to exhaust memory, state, or availability."
+   },
+   {
+    "name": "Tenancy isolation",
+    "definition": "Strength and enforceability of the boundary that keeps one tenant/project from reading or writing another's data."
+   },
+   {
+    "name": "Pod-compromise blast radius",
+    "definition": "How little an attacker who owns an agent pod gains (credentials, privileges, forgeable identity) and how fast that gain can be revoked - higher = smaller, faster-contained blast."
+   },
+   {
+    "name": "Misconfiguration resistance",
+    "definition": "Whether the security posture fails closed and survives operator error - secure defaults, unforgeable second layers, refusal over silent degradation."
+   }
+  ],
+  "flint_scores": {
+   "sys": [
+    0.5,
+    0.5,
+    2.5,
+    0.5,
+    1,
+    1.5
+   ],
+   "krb5p": [
+    4,
+    4.5,
+    2.5,
+    2,
+    3.5,
+    2
+   ],
+   "FUSE": [
+    3.5,
+    4.5,
+    4.5,
+    3.5,
+    1.5,
+    3.5
+   ],
+   "Lean": [
+    3,
+    4,
+    4,
+    4,
+    4.5,
+    4
+   ]
+  }
+ },
+ {
+  "dimension": "Day-2 operations",
+  "axes": [
+   {
+    "name": "Failure shape",
+    "definition": "How component failures present to running workloads: blast radius, hang vs error vs bounded loss, and the recovery ceremony they demand."
+   },
+   {
+    "name": "Upgrades & restart recovery",
+    "definition": "Cost and risk of rolling new versions and recovering from process/container restarts under live workloads."
+   },
+   {
+    "name": "Fleet-scale standing footprint",
+    "definition": "Standing objects, control-plane load, and recurring coordination cost when the share count reaches thousands."
+   },
+   {
+    "name": "Fleet observability",
+    "definition": "Ability to answer 'is it healthy, is it clean, what is the RPO' per share from an operable fleet-wide surface."
+   },
+   {
+    "name": "Consumer footprint",
+    "definition": "What must be installed, privileged, or configured on client nodes and pods for the data path to keep working day to day."
+   },
+   {
+    "name": "Idle lifecycle & wake",
+    "definition": "Cost of a parked share and the safety and latency of winding down and waking back up."
+   }
+  ],
+  "flint_scores": {
+   "sys": [
+    2,
+    2.5,
+    1.5,
+    3.5,
+    4,
+    2.5
+   ],
+   "krb5p": [
+    2,
+    2,
+    1,
+    3,
+    1,
+    2.5
+   ],
+   "FUSE": [
+    3,
+    2,
+    3,
+    1.5,
+    1.5,
+    3
+   ],
+   "Lean": [
+    3.5,
+    3.5,
+    3.5,
+    3,
+    3.5,
+    3.5
+   ]
+  }
+ }
+]
