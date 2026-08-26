@@ -62,6 +62,16 @@ pub struct BarrierReport {
     pub absences_confirmed: usize,
 }
 
+/// Upload waves per chunk. The chunk is `fanout * this`, so a wave
+/// still saturates fan-out and the sync point between chunks is rare.
+const UPLOAD_CHUNK_WAVES: usize = 16;
+
+/// How stale the lease may get inside a barrier before it is renewed.
+/// Deliberately BELOW the run loop's `renew_every` (min(floor, 30) s) so
+/// a long barrier keeps the same heartbeat cadence the loop would have,
+/// and comfortably below the 6-poll (~60 s) takeover window.
+const RENEW_WITHIN_SECS: u64 = 20;
+
 impl Sidecar {
     fn lease_epoch(&self) -> LeanResult<u64> {
         self.lease
@@ -347,6 +357,35 @@ impl Sidecar {
         confirmed
     }
 
+    /// Renew the lease if it has gone stale MID-BARRIER.
+    ///
+    /// Costs nothing on a short barrier: the renewal is skipped unless
+    /// it was already due, so the request count is unchanged — this
+    /// moves WHEN the heartbeat can happen, not how often. A fence
+    /// propagates as `Fenced`, which aborts the barrier: that is the
+    /// mechanism by which a deposed straggler stops mid-flight instead
+    /// of running its upload set to completion.
+    pub(crate) async fn renew_if_due(&mut self) -> LeanResult<()> {
+        let Some(lease) = self.lease.clone() else { return Ok(()) };
+        let state = match self.store.epoch_read(&self.cfg.epoch_key()).await {
+            Ok(Some(s)) => s,
+            // A read failure is not a fence: the barrier keeps going and
+            // the ordinary renewal arm will try again.
+            _ => return Ok(()),
+        };
+        let now = super::now_unix();
+        let fresh = state
+            .last_renew_unix
+            .map(|t| now.saturating_sub(t) < RENEW_WITHIN_SECS)
+            .unwrap_or(false);
+        if fresh || state.epoch != lease.epoch {
+            // Not due, or already deposed — the epoch check the barrier
+            // already does owns the second case.
+            return Ok(());
+        }
+        super::lease::renew(self).await
+    }
+
     /// Steps 2–7. `barrier` = one full publish cycle (the cadence arm).
     pub async fn run_barrier(&mut self) -> LeanResult<BarrierReport> {
         self.barrier_inner(false, "manual").await
@@ -485,22 +524,63 @@ impl Sidecar {
         let mut new_baseline_entries: BTreeMap<String, BaselineEntry> = BTreeMap::new();
         let outcomes: Vec<(String, LeanResult<UploadOutcome>)> = {
             use futures::stream::{self, StreamExt};
-            let this: &Sidecar = &*self;
-            stream::iter(classified.uploads.iter().map(|path| {
-                let scanned_entry = &scanned[path];
-                let base = baseline.entries.get(path);
-                let flush_uuid = &flush_uuid;
-                let prior_uuids = &prior_uuids;
-                async move {
-                    let r = this
-                        .upload_one(path, scanned_entry, base, epoch, flush_uuid, prior_uuids)
+            // CHUNKED, and the reason is the lease rather than memory.
+            //
+            // The run loop is one `select!`, so while this call runs the
+            // renewal arm CANNOT fire — branches are mutually exclusive.
+            // An unchunked upload phase therefore starves the heartbeat
+            // for its whole duration, which does two bad things: a
+            // deposed straggler cannot learn it was deposed (the CAS
+            // that would tell it never runs), and a HEALTHY sidecar can
+            // outrun the 60 s takeover window and have a standby take
+            // the lease off a live writer. The 0b numbers put a 1M-file
+            // checkout at 7 m 05 s, so this is reachable, not exotic.
+            //
+            // Between chunks nothing borrows `self`, so the renewal can
+            // run on its ordinary ≤30 s cadence — it costs NO extra
+            // requests, because that renewal was already due. The chunk
+            // is a multiple of fan-out so a wave still saturates it.
+            //
+            // Residual, stated rather than hidden: starvation is now
+            // bounded by ONE CHUNK's duration instead of the whole
+            // barrier. A chunk of very large files can still exceed the
+            // window; closing that needs the renewal on its own task,
+            // which needs the lease behind a shared cell.
+            let mut outcomes: Vec<(String, LeanResult<UploadOutcome>)> = Vec::new();
+            let fanout = self.cfg.fanout.max(1);
+            let chunk = fanout.saturating_mul(UPLOAD_CHUNK_WAVES).max(1);
+            let all: Vec<&String> = classified.uploads.iter().collect();
+            for group in all.chunks(chunk) {
+                {
+                    let this: &Sidecar = &*self;
+                    let mut part: Vec<(String, LeanResult<UploadOutcome>)> =
+                        stream::iter(group.iter().map(|path| {
+                            let path = *path;
+                            let scanned_entry = &scanned[path];
+                            let base = baseline.entries.get(path);
+                            let flush_uuid = &flush_uuid;
+                            let prior_uuids = &prior_uuids;
+                            async move {
+                                let r = this
+                                    .upload_one(
+                                        path, scanned_entry, base, epoch, flush_uuid,
+                                        prior_uuids,
+                                    )
+                                    .await;
+                                (path.clone(), r)
+                            }
+                        }))
+                        .buffer_unordered(fanout)
+                        .collect()
                         .await;
-                    (path.clone(), r)
+                    outcomes.append(&mut part);
                 }
-            }))
-            .buffer_unordered(self.cfg.fanout.max(1))
-            .collect()
-            .await
+                // Now that the borrow is released: keep the lease alive.
+                // A fence here aborts the barrier, which is the point —
+                // it is how a straggler stops mid-flight.
+                self.renew_if_due().await?;
+            }
+            outcomes
         };
         let mut outcomes = outcomes;
         outcomes.sort_by(|a, b| a.0.cmp(&b.0));

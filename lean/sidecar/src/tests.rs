@@ -4673,3 +4673,53 @@ async fn a_gated_drain_names_the_same_clock_in_the_ack_and_in_the_bucket() {
         "the gated drain's ack says drain and the bucket says something else"
     );
 }
+
+/// A LONG BARRIER MUST NOT STARVE THE LEASE.
+///
+/// The run loop is one `tokio::select!`, and its branches are mutually
+/// exclusive: while the floor arm's `floor_tick().await` runs — and that
+/// call contains the entire upload loop — the renewal arm cannot fire.
+/// Two things follow, and the second is worse than the first:
+///
+///   - a deposed straggler cannot learn it was deposed, because the
+///     renewal CAS that would tell it is starved by the very barrier it
+///     is executing (chaos C3's 7,591 post-deposal PUTs, drill B12);
+///   - a HEALTHY sidecar can depose ITSELF. Takeover is QUIET_POLLS(6) x
+///     10 s = 60 s, so any barrier that outruns that window stops
+///     renewing and a standby legitimately takes the lease from a live
+///     writer. The 0b measurements put a 1M-file checkout at 7 m 05 s.
+///
+/// B17 missed this: it storms sentinels under an HOUR-LONG floor, so its
+/// barriers are short and renewals flow (22 renewals, 26 s max gap). The
+/// starvation shape is a long barrier, which no leg had.
+#[tokio::test]
+async fn a_long_barrier_does_not_starve_the_lease_renewal() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+
+    // Enough files that the upload phase spans more than one chunk.
+    for i in 0..600 {
+        write(dir.path(), &format!("f{i:04}.txt"), &format!("body-{i}"));
+    }
+
+    // The lease is overdue: the cell has not been touched for longer
+    // than the renewal cadence. Anti-vacuity — if it were fresh, a
+    // renewal would be correct to skip and the leg would prove nothing.
+    let key = sc.cfg.epoch_key();
+    store.backdate_epoch(&key, 120);
+    let before = store.epoch_read(&key).await.unwrap().unwrap().last_renew_unix;
+
+    sc.run_barrier().await.unwrap();
+
+    let after = store.epoch_read(&key).await.unwrap().unwrap().last_renew_unix;
+    assert!(
+        after > before,
+        "the barrier ran to completion without renewing an overdue lease \
+         (last_renew {before:?} -> {after:?}); a barrier longer than the \
+         60 s takeover window would hand the lease to a standby while this \
+         writer was perfectly alive"
+    );
+}

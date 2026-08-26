@@ -90,11 +90,39 @@ pub fn inject_sidecar(
     });
 
     // Mount it into every app container.
+    //
+    // REFUSE rather than push blindly if a container already mounts the
+    // workspace path. Pushing produced an API-server rejection —
+    // "volumeMounts[2].mountPath: Invalid value: \"/workspace\": must be
+    // unique" — that names neither flint nor the knob that fixes it, and
+    // a pod author who happens to use /workspace has no way to read that
+    // error and act on it.
+    //
+    // The alternative — silently skipping the push — is worse and is
+    // deliberately not taken: the container's OWN volume would then
+    // shadow the workspace, and the agent would run ungated against the
+    // wrong directory while every marker and probe still looked healthy.
+    // That is the silent-winner class this codebase refuses everywhere
+    // else, and §2.5's admission rule is explicit that an opted-in pod
+    // either gets its sidecar or does not schedule.
     let mount = VolumeMount {
         name: VOLUME_NAME.into(),
         mount_path: s.mount_path.clone(),
         ..Default::default()
     };
+    for c in spec.containers.iter() {
+        if let Some(existing) = c.volume_mounts.as_ref() {
+            if let Some(m) = existing.iter().find(|m| m.mount_path == s.mount_path) {
+                return Err(format!(
+                    "container {:?} already mounts {:?} (volume {:?}); the lean workspace \
+                     needs that path. Move one of them: set spec.mountPath on \
+                     FlintLeanWorkspace {:?} to a path the pod does not use, or drop the \
+                     pod's own mount",
+                    c.name, s.mount_path, m.name, ws.metadata.name.as_deref().unwrap_or("?")
+                ));
+            }
+        }
+    }
     for c in spec.containers.iter_mut() {
         c.volume_mounts.get_or_insert_with(Vec::new).push(mount.clone());
     }
@@ -482,6 +510,60 @@ mod tests {
             ns.value_from.as_ref().unwrap().field_ref.as_ref().unwrap().field_path,
             "metadata.namespace"
         );
+    }
+
+    #[test]
+    /// A pod that already mounts the workspace path is REFUSED with a
+    /// message naming the knob, not pushed into an API-server rejection
+    /// that mentions neither flint nor `spec.mountPath`.
+    ///
+    /// Refusing is the point. Skipping the push would let the pod's own
+    /// volume shadow the workspace and run the agent ungated against the
+    /// wrong directory, with every marker and probe still looking
+    /// healthy — a silent winner, which §2.5 forbids at admission.
+    #[test]
+    fn a_pod_that_already_mounts_the_workspace_path_is_refused_by_name() {
+        let d = InjectDefaults { image: "i".into() };
+        let mut p = pod();
+        p.spec.as_mut().unwrap().containers[0].volume_mounts = Some(vec![VolumeMount {
+            name: "my-scratch".into(),
+            mount_path: "/workspace".into(),
+            ..Default::default()
+        }]);
+        let err = inject_sidecar(&p, &ws(), &d)
+            .expect_err("a colliding mount must be refused, not silently shadowed");
+        assert!(err.contains("/workspace"), "must name the path: {err}");
+        assert!(err.contains("spec.mountPath"), "must name the knob that fixes it: {err}");
+        assert!(err.contains("my-scratch"), "must name the offending volume: {err}");
+    }
+
+    /// …and the refusal tracks the CONFIGURED path, not a hardcoded
+    /// "/workspace": a workspace moved to /flint collides on /flint and
+    /// is fine on /workspace. That is the fix the message recommends, so
+    /// it has to actually work.
+    #[test]
+    fn the_collision_check_follows_spec_mount_path() {
+        let d = InjectDefaults { image: "i".into() };
+        let mut w = ws();
+        w.spec.mount_path = "/flint".into();
+
+        let mut keeps_own = pod();
+        keeps_own.spec.as_mut().unwrap().containers[0].volume_mounts = Some(vec![VolumeMount {
+            name: "my-scratch".into(),
+            mount_path: "/workspace".into(),
+            ..Default::default()
+        }]);
+        inject_sidecar(&keeps_own, &w, &d)
+            .expect("/workspace is free real estate once the workspace moved to /flint");
+
+        let mut collides = pod();
+        collides.spec.as_mut().unwrap().containers[0].volume_mounts = Some(vec![VolumeMount {
+            name: "mine".into(),
+            mount_path: "/flint".into(),
+            ..Default::default()
+        }]);
+        let err = inject_sidecar(&collides, &w, &d).expect_err("collision on the moved path");
+        assert!(err.contains("/flint"), "{err}");
     }
 
     #[test]
