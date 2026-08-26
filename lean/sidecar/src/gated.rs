@@ -46,7 +46,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use flint_store::{GenerationStamps, StoreError};
+use flint_store::{GenerationStamps, ListedVersion, StoreError};
 
 use super::manifest::{self, LeanEntry};
 use super::state::{BaselineEntry, ConflictRecord};
@@ -145,6 +145,24 @@ pub struct CitationReport {
     /// Lifecycle is only the backstop (D8), and on `files/` it cannot
     /// tell cited from uncited at all.
     pub versions_reclaimed: usize,
+    pub no_change: bool,
+}
+
+/// What one `recover-staged` pass found and installed (D9).
+#[derive(Debug, Default)]
+pub struct RecoverReport {
+    /// Paths re-cited onto their surviving current version.
+    pub recited: Vec<String>,
+    /// Paths whose CITED version no longer exists — the D8
+    /// abandoned-mid-stage endgame, where the noncurrent backstop
+    /// reaped live cited data. A subset of `recited` when a newer
+    /// version survives to roll forward onto.
+    pub dangling: Vec<String>,
+    /// Dangling with NOTHING left to cite: the backstop reaped the
+    /// cited version and no newer generation exists. Named loudly
+    /// because no verb can fix it — the bytes are gone.
+    pub unrecoverable: Vec<String>,
+    pub seq: Option<u64>,
     pub no_change: bool,
 }
 
@@ -278,6 +296,11 @@ impl Sidecar {
         baseline.prev_scan = scanned.keys().cloned().collect();
         self.state.save_baseline(&baseline)?;
         self.save_stage(&stage)?;
+        // Durability moved even though visibility did not — the whole
+        // point of the split, and the number `rpo_secs` must track.
+        if !report.staged.is_empty() {
+            self.note_durable()?;
+        }
         Ok(report)
     }
 
@@ -487,6 +510,7 @@ impl Sidecar {
         };
         report.seq = Some(installed.seq);
         report.cited = upserts.len();
+        self.note_boundary(source.as_str(), installed.seq)?;
 
         // GC of keys the NEW manifest no longer references — deletes
         // LAST, HEAD-guarded on the recognized ETag, unchanged.
@@ -598,17 +622,236 @@ impl Sidecar {
     }
 
     /// The gated floor tick: lane, then a citation if one is due.
-    pub async fn gated_tick(&mut self, sentinel_pending: bool) -> LeanResult<CitationReport> {
-        self.upload_lane().await?;
-        match self.citation_due(sentinel_pending)? {
-            Some(source) => self.citation_pass(source).await,
-            None => Ok(CitationReport { no_change: true, ..Default::default() }),
+    ///
+    /// Both halves are reported because the floor arm has to describe
+    /// them separately — a tick that staged 40 files and cited nothing
+    /// is the mode working, and a tick that staged nothing and cited
+    /// nothing is idle. Collapsing them into one "no change" would make
+    /// gated mode indistinguishable from a wedged one in the log.
+    pub async fn gated_tick(
+        &mut self,
+        sentinel_pending: bool,
+    ) -> LeanResult<(LaneReport, CitationReport)> {
+        let lane = self.upload_lane().await?;
+        let cite = match self.citation_due(sentinel_pending)? {
+            Some(source) => self.citation_pass(source).await?,
+            None => CitationReport { no_change: true, ..Default::default() },
+        };
+        Ok((lane, cite))
+    }
+
+    /// The startup gate for gated mode (D8, D11): probe the version
+    /// surface BEFORE a single byte is staged, and refuse rather than
+    /// degrade. Inert in `cadence`/`hybrid`, which need no version
+    /// surface at all — a gate that took every default workspace down
+    /// with it would be worse than the hazard.
+    pub async fn gated_startup_check(&mut self) -> LeanResult<()> {
+        if !self.is_gated() {
+            return Ok(());
         }
+        self.versioning_conformance().await
+    }
+
+    /// `flint-sync recover-staged` (D9): re-cite durable-but-uncited
+    /// work as ONE flagged boundary — a manifest CAS with no data
+    /// movement, because the versions already exist.
+    ///
+    /// The routine path into this verb is a pure-spot pod replacement:
+    /// the emptyDir that held `pending.json` is gone, so the pending
+    /// record can name nothing and **the bucket is the only source of
+    /// truth**. Two shapes are recovered, and they overlap:
+    ///
+    /// - *uncited work* — the key's current version is not the one the
+    ///   manifest cites (or the key is not cited at all: a brand-new
+    ///   file staged and never installed);
+    /// - *a dangling citation* — the cited version no longer exists,
+    ///   because gated staging made it NONCURRENT and the retention
+    ///   backstop ran its clock against live cited data (D8's
+    ///   inversion). Checkout refuses on this rather than serving a
+    ///   hole, so recovery is what makes the workspace usable again.
+    ///
+    /// Recovery rolls **forward**, onto the newer bytes, and says so:
+    /// every re-citation writes a conflict record. It is deliberately
+    /// NOT a three-way merge — a replacement pod has no merge base, and
+    /// merging against an empty one would classify the entire existing
+    /// manifest as foreign and queue the whole tree into the HITL
+    /// inbox.
+    pub async fn recover_staged(&mut self) -> LeanResult<RecoverReport> {
+        let epoch = self
+            .lease
+            .as_ref()
+            .map(|l| l.epoch)
+            .ok_or_else(|| LeanError::State("recover-staged without a held lease".into()))?;
+        let mut report = RecoverReport::default();
+        let files_prefix = format!("{}/files/", self.cfg.prefix);
+
+        let listed = self.store.list_versions(&files_prefix).await?;
+        let mut current: BTreeMap<String, ListedVersion> = BTreeMap::new();
+        let mut known: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for v in listed {
+            known.entry(v.key.clone()).or_default().insert(v.version_id.clone());
+            if v.is_current {
+                current.insert(v.key.clone(), v);
+            }
+        }
+
+        let loaded = manifest::load(self.store.as_ref(), &self.cfg).await?;
+        let cited_now = loaded.as_ref().map(|l| l.manifest.clone()).unwrap_or_default();
+
+        let mut paths: BTreeSet<String> = cited_now.entries.keys().cloned().collect();
+        for key in current.keys() {
+            if let Some(p) = key.strip_prefix(&files_prefix) {
+                // D0.2 again: a legacy `files/.flint/` citation must not
+                // be recovered INTO the control namespace.
+                if !p.is_empty() && !scan::is_control_path(p) {
+                    paths.insert(p.to_string());
+                }
+            }
+        }
+
+        let mut upserts: BTreeMap<String, LeanEntry> = BTreeMap::new();
+        for path in paths {
+            let key = self.cfg.file_key(&path);
+            let cited = cited_now.entries.get(&path).cloned();
+            let live = current.get(&key).filter(|v| !v.is_delete_marker).cloned();
+
+            // A citation dangles only if it names a version BY ID that
+            // the bucket no longer holds. A legacy entry citing no
+            // version resolves by etag and cannot dangle this way.
+            let dangles = match &cited {
+                Some(e) => match &e.version_id {
+                    Some(v) => !known.get(&key).map(|s| s.contains(v)).unwrap_or(false),
+                    None => false,
+                },
+                None => false,
+            };
+            if dangles {
+                report.dangling.push(path.clone());
+            }
+            let Some(live) = live else {
+                if dangles {
+                    report.unrecoverable.push(path.clone());
+                }
+                continue;
+            };
+            let already = match &cited {
+                None => false,
+                Some(e) => match &e.version_id {
+                    Some(v) => v == &live.version_id,
+                    None => e.etag == live.etag,
+                },
+            };
+            if already {
+                continue;
+            }
+
+            // One HEAD per re-cited path to recover the stamps the
+            // manifest entry needs. A HEAD is not data movement.
+            let meta = self.store.head_version(&key, &live.version_id).await?;
+            let stamps = GenerationStamps::from_meta(&meta.meta);
+            let posix = stamps.as_ref().and_then(|s| s.posix);
+            upserts.insert(
+                path.clone(),
+                LeanEntry {
+                    key: key.clone(),
+                    etag: meta.etag.clone(),
+                    crc64_b64: meta.crc64_b64.clone(),
+                    size: meta.size,
+                    mode: posix
+                        .map(|p| p.mode)
+                        .or_else(|| cited.as_ref().map(|e| e.mode))
+                        .unwrap_or(0o100_644),
+                    mtime_unix: posix
+                        .map(|p| p.mtime_unix)
+                        .or_else(|| meta.last_modified_unix.map(|u| u as i64))
+                        .unwrap_or(0),
+                    generation: stamps
+                        .as_ref()
+                        .map(|s| s.generation)
+                        .or_else(|| cited.as_ref().map(|e| e.generation + 1))
+                        .unwrap_or(1),
+                    epoch: stamps.as_ref().map(|s| s.epoch).unwrap_or(epoch),
+                    version_id: Some(live.version_id.clone()),
+                },
+            );
+            self.state.append_conflict(&ConflictRecord {
+                path: path.clone(),
+                foreign_etag: cited.as_ref().map(|e| e.etag.clone()).unwrap_or_default(),
+                preserved_key: None,
+                kind: if dangles {
+                    "recovered-staged (dangling citation rolled forward)".into()
+                } else {
+                    "recovered-staged".to_string()
+                },
+                at_unix: now_unix(),
+            })?;
+            report.recited.push(path.clone());
+        }
+
+        if upserts.is_empty() {
+            report.no_change = true;
+            report.seq = loaded.map(|l| l.manifest.seq);
+            return Ok(report);
+        }
+
+        // The upserts are ABSOLUTE — derived from bucket versions, not
+        // from a diff — so a lost CAS re-applies them onto whatever is
+        // current without recomputing anything.
+        let flush_uuid = uuid::Uuid::new_v4().to_string();
+        let mut fresh = loaded;
+        for attempt in 0..4u32 {
+            let (mut m, expected) = match &fresh {
+                Some(l) => (l.manifest.clone(), Some(l.etag.clone())),
+                None => (manifest::LeanManifest::default(), None),
+            };
+            for (p, e) in &upserts {
+                m.entries.insert(p.clone(), e.clone());
+            }
+            m.seq += 1;
+            m.pinned_reads = self.is_gated();
+            match manifest::cas_write_stamped(
+                self.store.as_ref(),
+                &self.cfg,
+                &m,
+                expected.as_deref(),
+                epoch,
+                &flush_uuid,
+                Some(CitationSource::Recovered.as_str()),
+            )
+            .await
+            {
+                Ok(_) => {
+                    report.seq = Some(m.seq);
+                    self.note_boundary(CitationSource::Recovered.as_str(), m.seq)?;
+                    return Ok(report);
+                }
+                Err(LeanError::Store(StoreError::PreconditionFailed(_)))
+                | Err(LeanError::Store(StoreError::Conflict(_))) if attempt < 3 => {
+                    self.verify_not_deposed_pub().await?;
+                    fresh = manifest::load(self.store.as_ref(), &self.cfg).await?;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(LeanError::State(
+            "recover-staged lost 4 CAS races — a live writer is still publishing".into(),
+        ))
     }
 
     /// Is this workspace gated?
     pub fn is_gated(&self) -> bool {
         self.cfg.boundary_mode == BoundaryMode::Gated
+    }
+
+    /// Remove every version of the probe key. Errors are ignored on
+    /// purpose: this is hygiene, and the probe's verdict must come from
+    /// the probe, not from a cleanup DELETE.
+    async fn sweep_probe(&self, key: &str) {
+        if let Ok(vs) = self.store.list_versions(key).await {
+            for v in vs.iter().filter(|v| v.key == key) {
+                let _ = self.store.delete_version(key, &v.version_id).await;
+            }
+        }
     }
 
     /// The versioning conformance probe (D8). A project-scoped proxy
@@ -631,17 +874,25 @@ impl Sidecar {
         let refuse =
             |m: &str| LeanError::State(format!("versioning conformance probe FAILED: {m}"));
 
+        // The probe's OWN crash window, closed. It writes If-None-Match
+        // and cleans up at the end; a crash — or one failed cleanup
+        // DELETE — leaves the object behind, and every later probe then
+        // 412s on its first write. On a gated workspace that would be a
+        // permanent startup wedge produced by a transient error, so a
+        // leftover is swept, not refused.
         let b1 = bytes::Bytes::from_static(b"probe-1");
-        let m1 = self
+        let mut first = self
             .store
-            .put_whole(&key, b1, &flint_store::PutCondition::IfNoneMatchAny, &stamps, flint_store::crc64_nvme(b"probe-1"))
-            .await
-            .or_else(|e| match e {
-                // A leftover probe from a previous run: overwrite it.
-                StoreError::PreconditionFailed(_) => Err(e),
-                other => Err(other),
-            })
-            .or(Err(refuse("cannot write the probe object")))?;
+            .put_whole(&key, b1.clone(), &flint_store::PutCondition::IfNoneMatchAny, &stamps, flint_store::crc64_nvme(b"probe-1"))
+            .await;
+        if matches!(first, Err(StoreError::PreconditionFailed(_))) {
+            self.sweep_probe(&key).await;
+            first = self
+                .store
+                .put_whole(&key, b1, &flint_store::PutCondition::IfNoneMatchAny, &stamps, flint_store::crc64_nvme(b"probe-1"))
+                .await;
+        }
+        let m1 = first.or(Err(refuse("cannot write the probe object")))?;
         let v1 = m1
             .version_id
             .clone()
@@ -694,6 +945,9 @@ impl Sidecar {
             return Err(refuse("version-scoped DELETE did not remove the version"));
         }
         let _ = self.store.delete_version(&key, &v2).await;
+        // Belt and braces: leave the key with no versions at all, so a
+        // partially-failed cleanup cannot wedge the NEXT probe either.
+        self.sweep_probe(&key).await;
         Ok(())
     }
 }

@@ -537,6 +537,9 @@ impl Sidecar {
         let posture = self
             .load_posture()?
             .unwrap_or(super::control::SentinelPosture { enabled: false, reason: None });
+        // Both surfaces or neither: an agent reading only the
+        // operational file must not conclude a zombie is healthy.
+        self.write_gauges(true, None)?;
         self.write_capabilities(&posture, true)
     }
 
@@ -598,6 +601,9 @@ impl Sidecar {
     }
 
     async fn honor_publish(&mut self, pending: &PendingSentinel, forced: bool) -> LeanResult<Ack> {
+        if self.is_gated() {
+            return self.honor_publish_gated(pending, forced).await;
+        }
         let report = self.run_barrier().await?;
         let units = self.charge_budget(report.published_bytes)?;
         let _ = units;
@@ -617,6 +623,48 @@ impl Sidecar {
                 parked: report.parked.len(),
                 consumed: report.consumed,
                 no_change: report.no_change,
+                ..Default::default()
+            },
+        })
+    }
+
+    /// The gated honor (D1 x D6): a publish sentinel is a CITATION
+    /// SOURCE, not a fused barrier. The lane runs first so the boundary
+    /// includes everything written up to the touch, then ONE CAS
+    /// installs the whole pending set.
+    ///
+    /// An empty stage still acks `ok`: the lane just ran and staged
+    /// nothing, so every local byte is already cited and the boundary
+    /// the ack claims is already true. That is the same soundness
+    /// argument the cadence path's skip-on-no-diff fast path rests on.
+    async fn honor_publish_gated(
+        &mut self,
+        pending: &PendingSentinel,
+        forced: bool,
+    ) -> LeanResult<Ack> {
+        let lane = self.upload_lane().await?;
+        let cite = self.citation_pass(super::gated::CitationSource::Sentinel).await?;
+        // Metered on what the LANE moved: the citation itself is one
+        // CAS regardless of how many paths it names, so charging by
+        // cited-path count would price the mode's whole advantage as a
+        // cost (D3.1).
+        self.charge_budget(lane.staged_bytes)?;
+        let baseline = self.state.load_baseline()?;
+        Ok(Ack {
+            status: "ok".into(),
+            nonces: pending.nonces.clone(),
+            sentinel_mtime_unix_ns: pending.consumed_mtime_unix_ns,
+            seq: cite.seq,
+            manifest_etag: baseline.manifest_etag.clone(),
+            boundary: if forced { "sentinel-deferred".into() } else { "sentinel".into() },
+            completed_unix: now_unix(),
+            observed_epoch: None,
+            report: AckReport {
+                uploaded: lane.staged.len(),
+                deleted: cite.deleted.len(),
+                parked: lane.parked.len(),
+                consumed: lane.consumed,
+                no_change: lane.staged.is_empty() && cite.no_change,
                 ..Default::default()
             },
         })
@@ -691,6 +739,21 @@ pub struct FloorOutcome {
     pub uploaded: usize,
     pub deleted: usize,
     pub consumed: usize,
+    /// Gated only: what the upload lane made durable on this tick.
+    pub staged: usize,
+    /// Gated only: what a citation, if one fired, made visible.
+    pub cited: usize,
+    /// Gated only: which coherent point fired (`None` = none did, which
+    /// is the mode working, not a fault).
+    pub citation_source: Option<String>,
+    /// Why visibility is withheld right now, straight off the gauges —
+    /// so the per-tick stderr line is greppable and structured, which
+    /// until Phase 6 is the ONLY signal surface an operator has.
+    pub withheld_reason: Option<String>,
+    /// Gated only: a foreign 412 parked at least one path on this tick.
+    pub parked: usize,
+    /// Carried out of the barrier only to feed the news ticker.
+    observed_etag: Option<String>,
 }
 
 impl Sidecar {
@@ -798,14 +861,48 @@ impl Sidecar {
         // barrier the floor owed; running a second one would be pure
         // churn.
         if !published {
-            match self.run_barrier().await {
-                Ok(r) => {
+            // D6: in `gated` the floor tick is the UPLOAD lane, and a
+            // citation only at a coherent point. `cadence` and `hybrid`
+            // keep the fused barrier byte-for-byte.
+            let ran = if self.is_gated() {
+                self.gated_tick(false).await.map(|(lane, cite)| {
+                    out.seq = cite.seq;
+                    out.uploaded = lane.staged.len();
+                    out.deleted = cite.deleted.len();
+                    out.consumed = lane.consumed;
+                    out.staged = lane.staged.len();
+                    out.cited = cite.cited;
+                    out.citation_source = cite.source.clone();
+                    out.parked = lane.parked.len();
+                    out.no_change = lane.staged.is_empty() && cite.no_change;
+                    // The ticker moves at CITATION points in gated mode.
+                    // The lane issues no manifest request of its own
+                    // (D5's rule), so between citations there is nothing
+                    // it could learn about a sibling's publish without
+                    // paying a HEAD per floor tick.
+                    cite.seq
+                })
+            } else {
+                self.run_barrier().await.map(|r| {
                     out.seq = r.seq;
                     out.no_change = r.no_change;
                     out.uploaded = r.uploaded.len();
                     out.deleted = r.deleted.len();
                     out.consumed = r.consumed;
-                    self.ticker_from(r.observed_seq, r.observed_etag.clone())?;
+                    out.observed_etag = r.observed_etag.clone();
+                    r.observed_seq
+                })
+            };
+            match ran {
+                Ok(observed) => {
+                    let etag = out.observed_etag.take();
+                    self.ticker_from(observed, etag)?;
+                    // A foreign 412 outranks "waiting for a boundary":
+                    // those paths are not ours to publish at all, and
+                    // saying "quiesce-pending" would send an operator
+                    // looking for a clock instead of a conflict record.
+                    let forced = (out.parked > 0).then_some(super::gauges::Withheld::Parked412);
+                    out.withheld_reason = self.write_gauges(false, forced)?.withheld_reason;
                     return Ok(out);
                 }
                 Err(e @ LeanError::Fenced(_)) => {
@@ -816,6 +913,7 @@ impl Sidecar {
             }
         }
         self.ticker_from(out.seq, None)?;
+        out.withheld_reason = self.write_gauges(false, None)?.withheld_reason;
         Ok(out)
     }
 
@@ -847,8 +945,22 @@ impl Sidecar {
             }
         }
         if !acks.iter().any(|a| a.seq.is_some()) {
-            let r = self.run_barrier().await?;
-            self.ticker_from(r.observed_seq, r.observed_etag.clone())?;
+            // D10: the drain cites EVERYTHING, in every mode. Under
+            // gated that is the lane plus one CAS naming versions that
+            // already exist — no data movement, which is exactly what
+            // makes the drain sizable against a spot reclaim's grace.
+            // Running the fused barrier here instead would re-upload
+            // every staged byte at the one moment there is no time for
+            // it, and would leave the last boundary of the workspace's
+            // life unstamped and unpinned.
+            if self.is_gated() {
+                self.upload_lane().await?;
+                let cite = self.citation_pass(super::gated::CitationSource::Drain).await?;
+                self.ticker_from(cite.seq, None)?;
+            } else {
+                let r = self.run_barrier().await?;
+                self.ticker_from(r.observed_seq, r.observed_etag.clone())?;
+            }
         }
         Ok(acks)
     }

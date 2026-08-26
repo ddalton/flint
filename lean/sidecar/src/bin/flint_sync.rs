@@ -7,6 +7,13 @@
 //!   checkout   materialize the workspace (restart-matrix aware), exit
 //!   barrier    one publish barrier, exit
 //!   sync       the HITL sync verb (scan-first), exit
+//!   recover-staged  re-cite durable-but-uncited work as one flagged
+//!              boundary (gated recovery after pod replacement), exit
+//!   status     render gauges + pending + lease state as JSON, exit.
+//!              Takes NO lease and NO state-dir lock: it exists to
+//!              diagnose a workspace whose sidecar is dead or deposed,
+//!              and claiming would depose the very sidecar under
+//!              diagnosis.
 //!   run        claim → checkout → barrier loop (floorSecs) → drain on
 //!              SIGTERM → clean lease release
 //!
@@ -97,6 +104,21 @@ async fn main() {
         std::process::exit(2);
     }
 
+    // Dispatched before the state directory is opened: a live sidecar
+    // holds the occupancy flock, and `status` must work WHILE it does.
+    if cmd == "status" {
+        match flint_lean::status_report(&cfg) {
+            Ok(r) => {
+                println!("{}", serde_json::to_string_pretty(&r).unwrap());
+                return;
+            }
+            Err(e) => {
+                eprintln!("flint-sync: status: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let state = match SidecarState::open(cfg.state_dir()) {
         Ok(s) => s,
         Err(e) => {
@@ -110,9 +132,13 @@ async fn main() {
         "checkout" => claim_then(&mut sc, Step::Checkout).await,
         "barrier" => claim_then(&mut sc, Step::Barrier).await,
         "sync" => claim_then(&mut sc, Step::Sync).await,
+        "recover-staged" => claim_then(&mut sc, Step::RecoverStaged).await,
         "run" => run_loop(&mut sc).await,
         other => {
-            eprintln!("flint-sync: unknown subcommand {other:?} (checkout|barrier|sync|run)");
+            eprintln!(
+                "flint-sync: unknown subcommand {other:?} \
+                 (checkout|barrier|sync|status|recover-staged|run)"
+            );
             std::process::exit(2);
         }
     };
@@ -127,6 +153,7 @@ enum Step {
     Checkout,
     Barrier,
     Sync,
+    RecoverStaged,
 }
 
 async fn claim(sc: &mut Sidecar) -> Result<(), LeanError> {
@@ -170,6 +197,31 @@ async fn claim_then(sc: &mut Sidecar, step: Step) -> Result<(), LeanError> {
                 let r = sc.sync().await?;
                 println!("{}", serde_json::to_string_pretty(&r).unwrap());
             }
+            Step::RecoverStaged => {
+                let r = sc.recover_staged().await?;
+                eprintln!(
+                    "flint-sync: recover-staged seq={:?} recited={} dangling={} unrecoverable={}",
+                    r.seq,
+                    r.recited.len(),
+                    r.dangling.len(),
+                    r.unrecoverable.len()
+                );
+                for p in &r.recited {
+                    eprintln!("flint-sync:   recited {p}");
+                }
+                // Named loudly: no verb can fix these — the retention
+                // backstop reaped the cited version and no newer
+                // generation survives.
+                for p in &r.unrecoverable {
+                    eprintln!("flint-sync:   UNRECOVERABLE {p}");
+                }
+                if !r.unrecoverable.is_empty() {
+                    return Err(LeanError::State(format!(
+                        "{} path(s) have no surviving version to cite",
+                        r.unrecoverable.len()
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -186,6 +238,12 @@ async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
     // reaching checkout's body, so pinning the write there would
     // upgrade a fleet whose live workspaces never get the marker:
     // sentinels dead on exactly the pods the upgrade targeted.
+    // D8: gated mode is REFUSED over a backend that cannot express the
+    // version surface — before a single byte is staged. Degrading into
+    // etag semantics on a key whose current version is uncited is
+    // precisely the torn view the mode exists to prevent, so this is a
+    // startup failure, not a warning.
+    sc.gated_startup_check().await?;
     let posture = sc.sentinel_preflight()?;
     sc.write_capabilities(&posture, false)?;
     if !posture.enabled {
@@ -249,8 +307,19 @@ async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
             _ = floor_iv.tick() => {
                 match sc.floor_tick().await {
                     Ok(o) if !o.no_change || !o.acks.is_empty() => eprintln!(
-                        "flint-sync: barrier seq={:?} up={} del={} consumed={} acks={}",
-                        o.seq, o.uploaded, o.deleted, o.consumed, o.acks.len()
+                        "flint-sync: {} seq={:?} up={} del={} consumed={} acks={}{}",
+                        if sc.is_gated() { "lane" } else { "barrier" },
+                        o.seq, o.uploaded, o.deleted, o.consumed, o.acks.len(),
+                        // A gated tick that staged and did not cite is
+                        // the mode working; say so rather than leaving
+                        // it indistinguishable from a wedged loop.
+                        // Structured and greppable: until Phase 6 this
+                        // line is the only signal surface there is.
+                        match (&o.citation_source, &o.withheld_reason) {
+                            (Some(src), _) => format!(" cited={} source={src}", o.cited),
+                            (None, Some(why)) => format!(" cited=0 withheld_reason={why}"),
+                            (None, None) => String::new(),
+                        }
                     ),
                     Ok(_) => {}
                     Err(e @ LeanError::Fenced(_)) => return Err(e),

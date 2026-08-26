@@ -1054,9 +1054,15 @@ async fn capabilities_written_on_live_tree_restart() {
     write(dir.path(), "f.txt", "v1");
     a.run_barrier().await.unwrap();
 
-    // Anti-vacuity: this IS the live-tree row (the marker is present, so
-    // checkout returns early), and no capability marker exists yet — the
-    // pre-D11 state an in-place image upgrade lands in.
+    // The pre-D11 state, constructed as what it actually is: a live
+    // tree checked out by an OLD binary that never wrote a marker, onto
+    // which the new image is dropped in place. (Checkout writes the
+    // marker itself now — that is D11's other half — so simply calling
+    // it cannot produce this state any more.)
+    std::fs::remove_file(dir.path().join(super::CONTROL_DIR).join(control::CAPABILITIES))
+        .unwrap();
+    // Anti-vacuity: this IS the live-tree row — the marker is present,
+    // so checkout returns early without reaching its body.
     assert!(a.state.marker_present());
     assert!(!control_exists(dir.path(), control::CAPABILITIES));
     let r = a.checkout().await.unwrap();
@@ -2301,4 +2307,599 @@ async fn versioning_conformance_probe_passes_on_a_versioned_store() {
     let mut a = sidecar(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.versioning_conformance().await.expect("a versioned store must pass the probe");
+}
+
+// ---------------------------------------------------------------------
+// Phase 3 remainder — the run-loop wiring, the conformance wedge, and
+// `recover-staged` (D9). Up to here `gated.rs` was reachable only from
+// tests: `boundaryMode: gated` was a knob that parsed, validated, and
+// then ran the fused cadence barrier like every other mode.
+// ---------------------------------------------------------------------
+
+/// D6 — the mode's whole content, at the arm that actually runs in
+/// production. A gated floor tick must make bytes DURABLE and leave
+/// them INVISIBLE; the shipped loop ran `run_barrier`, which cites.
+#[tokio::test]
+async fn gated_floor_tick_stages_without_citing() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+
+    write(dir.path(), "model.json", "MID-LOGICAL-CHANGE");
+    let out = a.floor_tick().await.unwrap();
+
+    // Durability: RPO for bytes stays at the floor.
+    let key = a.cfg.file_key("model.json");
+    let (_, current) = store.get_whole(&key, None).await.unwrap();
+    assert_eq!(&current[..], b"MID-LOGICAL-CHANGE", "the gated floor tick published nothing");
+    assert!(
+        a.load_stage().unwrap().entries.contains_key("model.json"),
+        "the floor tick did not run the upload lane"
+    );
+    // Visibility: withheld until a coherent point.
+    let cited = manifest::load(store.as_ref(), &a.cfg)
+        .await
+        .unwrap()
+        .map(|l| l.manifest.entries.contains_key("model.json"))
+        .unwrap_or(false);
+    assert!(!cited, "the gated floor tick advanced the manifest — visibility is not gated");
+    assert_eq!(out.seq, None, "a staging-only tick reported a citation seq");
+}
+
+/// Anti-vacuity for the leg above: the SAME floor tick, with the lag
+/// cap due, must cite — otherwise "did not cite" would be proving that
+/// gated mode does nothing at all.
+#[tokio::test]
+async fn gated_floor_tick_cites_at_the_lag_cap() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+    a.cfg.visibility_lag_bound_secs = Some(0); // the cap is always due
+
+    write(dir.path(), "model.json", "COHERENT");
+    let out = a.floor_tick().await.unwrap();
+
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("model.json"), "the lag cap did not force a citation");
+    assert!(m.pinned_reads, "a gated citation did not stamp pinned_reads");
+    assert_eq!(m.boundary_source.as_deref(), Some("forced-lag-cap"));
+    assert_eq!(out.seq, Some(m.seq));
+    assert!(
+        a.load_stage().unwrap().entries.is_empty(),
+        "the citation left the staged set uncleared"
+    );
+}
+
+/// D1 × D6 — a publish sentinel in gated mode is a CITATION SOURCE, not
+/// a fused barrier. The ack must name the installed boundary, and the
+/// manifest must carry the sentinel stamp.
+#[tokio::test]
+async fn gated_publish_sentinel_cites_the_whole_stage() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+
+    // Two halves of one logical change, staged across SEPARATE lane
+    // passes — the citation must install both in one boundary.
+    write(dir.path(), "model.json", "A1");
+    a.upload_lane().await.unwrap();
+    write(dir.path(), "model.json.index", "B1");
+    a.upload_lane().await.unwrap();
+    assert_eq!(a.load_stage().unwrap().entries.len(), 2);
+
+    touch_sentinel(dir.path(), super::control::PUBLISH, r#"{"nonce":"n-1"}"#);
+    let acks = a.sentinel_tick().await.unwrap();
+    assert_eq!(acks.len(), 1, "the sentinel was not honored");
+    assert_eq!(acks[0].status, "ok");
+    assert_eq!(acks[0].boundary, "sentinel");
+
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("model.json") && m.entries.contains_key("model.json.index"));
+    assert_eq!(m.boundary_source.as_deref(), Some("sentinel"));
+    assert!(m.pinned_reads);
+    assert_eq!(acks[0].seq, Some(m.seq), "the ack did not name the boundary it installed");
+}
+
+/// D10 rule 1 × D6 — the preStop drain cites everything staged, as one
+/// flagged boundary, WITHOUT moving data: the versions already exist.
+/// The shipped drain ran the fused barrier, so the final boundary of a
+/// gated workspace's life carried neither the `drain` stamp nor
+/// `pinned_reads`, and left the pending record naming versions that had
+/// already been cited by another route.
+#[tokio::test]
+async fn gated_drain_cites_the_staged_versions_in_place() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+
+    write(dir.path(), "a.txt", "A1");
+    write(dir.path(), "b.txt", "B1");
+    a.upload_lane().await.unwrap();
+    let stage = a.load_stage().unwrap();
+    let staged_a = stage.entries["a.txt"].version_id.clone().unwrap();
+    let staged_b = stage.entries["b.txt"].version_id.clone().unwrap();
+
+    a.drain().await.unwrap();
+
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.boundary_source.as_deref(), Some("drain"));
+    assert!(m.pinned_reads, "the last boundary of a gated workspace was not pinned");
+    assert_eq!(
+        m.entries["a.txt"].version_id.as_deref(),
+        Some(staged_a.as_str()),
+        "the drain cited a version the lane had not staged — it moved data"
+    );
+    assert_eq!(m.entries["b.txt"].version_id.as_deref(), Some(staged_b.as_str()));
+    assert!(
+        a.load_stage().unwrap().entries.is_empty(),
+        "the drain left staged work in the pending record"
+    );
+}
+
+/// The conformance probe's own crash window. The probe writes its
+/// object `If-None-Match: *` and deletes both versions at the end; a
+/// crash (or one failed cleanup DELETE) in between leaves the object
+/// behind, and every subsequent probe then 412s on its FIRST write and
+/// refuses. On a gated workspace that is a permanent startup wedge from
+/// a transient error — the probe must clean up after itself.
+#[tokio::test]
+async fn versioning_conformance_survives_a_leftover_probe_object() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+
+    // Exactly what a crashed probe leaves behind.
+    let key = format!("{}/{}/probe/versioning", a.cfg.prefix, super::LEAN_DIR);
+    let stamps = GenerationStamps {
+        generation: 0,
+        epoch: 0,
+        flush_uuid: "leftover".into(),
+        boundary_source: None,
+        posix: None,
+    };
+    store
+        .put_whole(
+            &key,
+            Bytes::from_static(b"crashed-probe"),
+            &PutCondition::IfNoneMatchAny,
+            &stamps,
+            crc64_nvme(b"crashed-probe"),
+        )
+        .await
+        .unwrap();
+
+    a.versioning_conformance()
+        .await
+        .expect("a leftover probe object wedged the conformance probe");
+    // And it left nothing behind for the next run either.
+    assert!(store.get_whole(&key, None).await.is_err(), "the probe did not clean up");
+}
+
+// A backend that answers every version-scoped call but strips
+// `x-amz-version-id` from PUT responses: the project-scoped proxy the
+// plan says must be REFUSED rather than silently degraded into etag
+// semantics on a key whose current version is uncited (leg B24's
+// control arm).
+struct VersionStripping(Arc<MemoryStore>);
+
+#[async_trait::async_trait]
+impl ObjectStore for VersionStripping {
+    async fn put_whole(
+        &self,
+        key: &str,
+        body: Bytes,
+        cond: &PutCondition,
+        stamps: &GenerationStamps,
+        crc: u64,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        let mut m = self.0.put_whole(key, body, cond, stamps, crc).await?;
+        m.version_id = None;
+        Ok(m)
+    }
+    async fn compose_generation(
+        &self,
+        spec: &flint_store::ComposeSpec<'_>,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.compose_generation(spec).await
+    }
+    async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.head(key).await
+    }
+    async fn get_whole(
+        &self,
+        key: &str,
+        if_match: Option<&str>,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.0.get_whole(key, if_match).await
+    }
+    async fn get_range(
+        &self,
+        key: &str,
+        off: u64,
+        len: u64,
+        if_match: &str,
+    ) -> flint_store::StoreResult<Bytes> {
+        self.0.get_range(key, off, len, if_match).await
+    }
+    fn min_part_size(&self) -> u64 {
+        self.0.min_part_size()
+    }
+    fn max_parts(&self) -> usize {
+        self.0.max_parts()
+    }
+    async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
+        self.0.list(prefix).await
+    }
+    async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
+        self.0.delete(key).await
+    }
+    async fn head_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.head_version(key, v).await
+    }
+    async fn get_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.0.get_version(key, v).await
+    }
+    async fn delete_version(&self, key: &str, v: &str) -> flint_store::StoreResult<()> {
+        self.0.delete_version(key, v).await
+    }
+    async fn list_versions(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::ListedVersion>> {
+        self.0.list_versions(prefix).await
+    }
+    async fn list_uploads(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::PendingUpload>> {
+        self.0.list_uploads(prefix).await
+    }
+    async fn abort_upload(&self, key: &str, id: &str) -> flint_store::StoreResult<()> {
+        self.0.abort_upload(key, id).await
+    }
+    async fn bootstrap(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<flint_store::BootstrapReport> {
+        self.0.bootstrap(prefix).await
+    }
+    async fn epoch_read(
+        &self,
+        key: &str,
+    ) -> flint_store::StoreResult<Option<flint_store::EpochState>> {
+        self.0.epoch_read(key).await
+    }
+    async fn epoch_acquire(
+        &self,
+        key: &str,
+        holder: &str,
+        observed: Option<&flint_store::EpochState>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.0.epoch_acquire(key, holder, observed).await
+    }
+    async fn epoch_renew(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.0.epoch_renew(key, lease).await
+    }
+    async fn epoch_release(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+    ) -> flint_store::StoreResult<()> {
+        self.0.epoch_release(key, lease).await
+    }
+}
+
+/// D8/D11 — the startup gate. Gated mode over a version-stripping proxy
+/// must REFUSE at startup, before a single byte is staged; and the same
+/// gate must be inert in `hybrid`, which needs no version surface at
+/// all. Without the second half the gate would take every default
+/// workspace down with it.
+#[tokio::test]
+async fn gated_startup_refuses_a_version_stripping_backend() {
+    let inner = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_for(dir.path());
+    let state = SidecarState::open(cfg.state_dir()).unwrap();
+    let mut a = Sidecar {
+        store: Arc::new(VersionStripping(inner.clone())) as Arc<dyn ObjectStore>,
+        cfg,
+        state,
+        lease: None,
+    };
+    assert!(claim_until_held(&mut a, 3).await);
+
+    // hybrid (the default) does not care.
+    a.gated_startup_check().await.expect("the startup gate fired outside gated mode");
+
+    gated(&mut a);
+    let err = a.gated_startup_check().await.unwrap_err().to_string();
+    assert!(
+        err.contains("versioning conformance"),
+        "gated mode started over a stripping proxy: {err}"
+    );
+}
+
+/// D9 — `recover-staged` after the routine pure-spot event: the pod is
+/// replaced, the emptyDir (and with it the pending record) is gone, and
+/// the last lane pass's work is durable-but-uncited. Recovery re-cites
+/// the surviving current versions as ONE flagged boundary — a manifest
+/// CAS, no data movement — and rolls FORWARD onto the newer work.
+#[tokio::test]
+async fn recover_staged_recites_uncited_work_forward() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+
+    // One cited boundary, then uncited work on top of it: an edit to a
+    // cited path AND a brand-new path the manifest has never seen.
+    write(dir.path(), "cited.txt", "V1");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+    let cited_seq = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
+
+    write(dir.path(), "cited.txt", "V2-UNCITED");
+    backdate_baseline(&a, "cited.txt");
+    write(dir.path(), "brand-new.txt", "NEW-UNCITED");
+    a.upload_lane().await.unwrap();
+    drop(a); // the pod goes away; the emptyDir with it
+
+    // A replacement pod: fresh emptyDir, no pending record at all.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    b.cfg.boundary_mode = super::BoundaryMode::Gated;
+    b.cfg.visibility_lag_bound_secs = Some(3600);
+    assert!(claim_until_held(&mut b, 12).await);
+
+    // Anti-vacuity: before recovery the newer work is genuinely invisible.
+    let before = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert!(!before.entries.contains_key("brand-new.txt"));
+
+    let r = b.recover_staged().await.unwrap();
+    assert_eq!(r.recited.len(), 2, "recovery re-cited {:?}", r.recited);
+
+    let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.boundary_source.as_deref(), Some("recovered"));
+    assert!(m.seq > cited_seq);
+    assert!(m.entries.contains_key("brand-new.txt"));
+
+    // Rolls FORWARD: a checkout of the recovered boundary yields the
+    // newer bytes, not the last cited ones.
+    let dir_c = tempfile::tempdir().unwrap();
+    let mut c = sidecar(&store, dir_c.path()).await;
+    c.checkout().await.unwrap();
+    assert_eq!(read(dir_c.path(), "cited.txt").as_deref(), Some("V2-UNCITED"));
+    assert_eq!(read(dir_c.path(), "brand-new.txt").as_deref(), Some("NEW-UNCITED"));
+    // The recovery is surfaced, never silent.
+    assert!(
+        b.state.load_conflicts().unwrap().iter().any(|c| c.kind == "recovered-staged"),
+        "recovery re-cited foreign-generation bytes without a conflict record"
+    );
+}
+
+/// D8's abandoned-mid-stage endgame, closed. The backstop reaped the
+/// CITED version, checkout refuses (proved in the leg above) — and
+/// `recover-staged` is what makes the workspace usable again, by
+/// re-citing the surviving current version.
+#[tokio::test]
+async fn recover_staged_repairs_a_dangling_citation() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+    write(dir.path(), "abandoned.txt", "CITED WORK");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+    write(dir.path(), "abandoned.txt", "UNCITED WORK");
+    backdate_baseline(&a, "abandoned.txt");
+    a.upload_lane().await.unwrap();
+    let key = a.cfg.file_key("abandoned.txt");
+    assert!(!store.expire_noncurrent(0).is_empty(), "the endgame fixture never armed");
+
+    // The dangling state, confirmed before the repair.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    assert!(b.checkout().await.is_err());
+
+    let dir_r = tempfile::tempdir().unwrap();
+    let mut r = sidecar(&store, dir_r.path()).await;
+    r.cfg.boundary_mode = super::BoundaryMode::Gated;
+    r.cfg.visibility_lag_bound_secs = Some(3600);
+    assert!(claim_until_held(&mut r, 12).await);
+    let rep = r.recover_staged().await.unwrap();
+    assert_eq!(rep.dangling.len(), 1, "the dangling citation was not recognized");
+
+    // Now a fresh checkout completes, on the surviving newer bytes.
+    let dir_c = tempfile::tempdir().unwrap();
+    let mut c = sidecar(&store, dir_c.path()).await;
+    c.checkout().await.expect("checkout still refuses after recover-staged");
+    assert_eq!(read(dir_c.path(), "abandoned.txt").as_deref(), Some("UNCITED WORK"));
+    let _ = key;
+}
+
+/// Recovery must not invent work: over a workspace whose every cited
+/// version IS the current version, `recover-staged` re-cites nothing
+/// and does not advance the manifest. (Without this the leg above
+/// passes for a recovery that blindly re-cites the whole tree.)
+#[tokio::test]
+async fn recover_staged_is_a_no_op_when_nothing_is_uncited() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+    write(dir.path(), "quiet.txt", "V1");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+    let seq = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
+
+    let r = a.recover_staged().await.unwrap();
+    assert!(r.recited.is_empty() && r.dangling.is_empty());
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.seq, seq, "a no-op recovery still advanced the manifest");
+}
+
+// ---------------------------------------------------------------------
+// Phase 3 observability minimum (§2.6, review ledger OF-6): "why is the
+// manifest not advancing" must be answerable from inside the pod,
+// before Phase 6's metrics stack exists and without spelunking the
+// emptyDir.
+// ---------------------------------------------------------------------
+
+/// The gated withheld state, gauged. A tick that made bytes durable and
+/// cited nothing is the mode WORKING — but it is indistinguishable from
+/// a wedged loop unless something says why.
+#[tokio::test]
+async fn gauges_name_the_reason_visibility_is_withheld() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+
+    write(dir.path(), "big.bin", "STAGED BUT UNCITED");
+    a.floor_tick().await.unwrap();
+
+    let g = a.load_gauges().unwrap();
+    assert_eq!(g.state, "live");
+    assert_eq!(g.boundary_mode, "gated");
+    assert_eq!(g.staged_uncited_count, 1);
+    assert_eq!(g.staged_uncited_bytes, "STAGED BUT UNCITED".len() as u64);
+    assert_eq!(
+        g.withheld_reason.as_deref(),
+        Some("quiesce-pending"),
+        "a withheld tick did not name its reason"
+    );
+    assert!(g.last_boundary.is_none(), "nothing was cited, yet a boundary is claimed");
+    // The gauge that watches D8's inversion: a cited version went
+    // noncurrent the moment the lane staged over it, and the retention
+    // backstop's clock is now running against live cited data.
+    assert!(g.cited_noncurrent_age_max_secs < 5);
+    assert_eq!(g.sentinel_budget_remaining, a.cfg.sentinel_hourly_budget);
+}
+
+/// The forced-citation counter and the boundary stamp — OF-5's "a
+/// forced possibly-torn citation must be visible downstream", on the
+/// local side. A fleet that forces every citation is a fleet whose
+/// coherence contract is void, and the count is how anyone notices.
+#[tokio::test]
+async fn gauges_count_forced_citations_and_name_the_last_boundary() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+    a.cfg.visibility_lag_bound_secs = Some(0);
+
+    for g in 1..4 {
+        write(dir.path(), "churn.txt", &format!("g{g}"));
+        backdate_baseline(&a, "churn.txt");
+        a.floor_tick().await.unwrap();
+    }
+
+    let g = a.load_gauges().unwrap();
+    assert_eq!(g.forced_citation_count, 3, "forced citations were not counted");
+    let lb = g.last_boundary.expect("a citation installed, but no boundary recorded");
+    assert_eq!(lb.source, "forced-lag-cap");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(lb.seq, m.seq);
+    // Nothing is staged any more, so nothing is withheld.
+    assert_eq!(g.staged_uncited_count, 0);
+    assert_eq!(g.withheld_reason, None);
+}
+
+/// A deposed sidecar's gauges must say `fenced`, exactly as
+/// `capabilities.json` does. An agent that reads only the gauges (the
+/// operational file) must not conclude a zombie is healthy — the two
+/// surfaces cannot be allowed to disagree about liveness.
+#[tokio::test]
+async fn a_fenced_sidecar_gauges_itself_fenced() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "work.txt", "v1");
+    a.floor_tick().await.unwrap();
+    assert_eq!(a.load_gauges().unwrap().state, "live");
+
+    // A successor takes over.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    assert!(claim_until_held(&mut b, 12).await);
+
+    write(dir_a.path(), "work.txt", "v2");
+    backdate_baseline(&a, "work.txt");
+    let err = a.floor_tick().await.unwrap_err();
+    assert!(matches!(err, LeanError::Fenced(_)), "the straggler was not fenced: {err}");
+
+    assert_eq!(a.read_capabilities().unwrap().state, "fenced");
+    assert_eq!(
+        a.load_gauges().unwrap().state,
+        "fenced",
+        "capabilities say fenced but the gauges still say live"
+    );
+}
+
+/// `flint-sync status` is the exec surface for a workspace whose
+/// sidecar is DEAD or deposed — so it must render with no lease held
+/// and no claim attempted. A status verb that claims the lease would
+/// depose the very sidecar being diagnosed.
+#[tokio::test]
+async fn status_renders_without_claiming_the_lease() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    // The mode is env-stamped at pod creation, before anything runs.
+    gated(&mut a);
+    a.checkout().await.unwrap();
+    write(dir.path(), "held.txt", "x");
+    a.floor_tick().await.unwrap();
+
+    // A second process over the SAME tree cannot even open the state
+    // dir (the occupancy flock), so status reads the files directly.
+    let s = super::status_report(&cfg_for(dir.path())).unwrap();
+    assert_eq!(s.gauges.unwrap().staged_uncited_count, 1);
+    assert_eq!(s.capabilities.unwrap().boundary_mode, "gated");
+    assert_eq!(s.pending_stage_entries, 1);
+    assert!(s.incarnation_epoch.is_some());
+    // Rendering it must not have touched the lease.
+    assert_eq!(
+        store.epoch_read(&a.cfg.epoch_key()).await.unwrap().unwrap().epoch,
+        a.lease.as_ref().unwrap().epoch,
+        "status rotated the epoch it was supposed to observe"
+    );
 }

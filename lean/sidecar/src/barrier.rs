@@ -474,6 +474,10 @@ impl Sidecar {
             }
         };
         report.seq = Some(installed.seq);
+        // A fused install IS a coherent point, and cadence/hybrid have
+        // exactly one source. The gauges must not report "no boundary
+        // ever" on a workspace that publishes every minute.
+        self.note_boundary(super::gated::CitationSource::Cadence.as_str(), installed.seq)?;
         report.manifest_etag = Some(installed_etag.clone());
         report.observed_seq = Some(installed.seq);
         report.observed_etag = Some(installed_etag.clone());

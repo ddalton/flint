@@ -43,6 +43,8 @@ pub mod checkout;
 pub mod control;
 pub mod gated;
 pub mod gateway;
+pub mod gauges;
+pub use gauges::{status_report, Gauges, StatusReport};
 pub mod inbox;
 pub mod lease;
 pub mod manifest;

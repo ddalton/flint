@@ -238,6 +238,15 @@ impl Sidecar {
         baseline.inst_base = m.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect();
         baseline.prev_scan = present;
         self.state.save_baseline(&baseline)?;
+        // D11: the capability marker and the gauges exist BEFORE the
+        // agent-start gate opens, so the first thing the agent does can
+        // be to read them. `run` writes capabilities around checkout
+        // too; doing it here as well covers the standalone `checkout`
+        // subcommand, which otherwise leaves an agent with no marker to
+        // read and therefore no way to know the verbs exist.
+        let posture = self.sentinel_preflight()?;
+        self.write_capabilities(&posture, false)?;
+        self.write_gauges(false, None)?;
         // The marker is written LAST: the agent-start gate.
         self.state.write_marker()?;
         Ok(report)
