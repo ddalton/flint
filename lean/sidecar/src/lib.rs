@@ -283,6 +283,11 @@ pub struct Sidecar {
     pub state: state::SidecarState,
     /// The held lease, once claimed. Barriers refuse to run without it.
     pub lease: Option<flint_store::EpochLease>,
+    /// Standing conditions already written to `conflicts.jsonl` by THIS
+    /// process, so a condition that persists across every poll tick is
+    /// recorded once rather than per tick. Deliberately in-memory: a
+    /// restart is a new incarnation and should re-record what it finds.
+    pub(crate) noted_not_regular: std::collections::BTreeSet<String>,
 }
 
 fn now_unix() -> u64 {

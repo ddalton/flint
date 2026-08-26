@@ -290,9 +290,36 @@ fn mtime_ns(m: &std::fs::Metadata) -> u128 {
         .unwrap_or(0)
 }
 
-fn read_bounded(path: &Path) -> std::io::Result<(Vec<u8>, bool)> {
+/// Read the sentinel body, bounded, and WITHOUT ever blocking on the
+/// open.
+///
+/// The type check in `consume_sentinel` is an `lstat`, and this is a
+/// second path resolution — so on its own the check is a TOCTOU: swap a
+/// FIFO in between and a plain `File::open` blocks forever waiting for a
+/// writer, wedging the poll arm and, behind it, every boundary this
+/// sidecar owes (review: U23).
+///
+/// `O_NONBLOCK` closes it at the syscall rather than by winning a race:
+/// opening a writer-less FIFO returns immediately instead of blocking,
+/// and `O_NOFOLLOW` refuses a symlink swapped in for the same purpose.
+/// Both are no-ops on the regular file this is supposed to be reading.
+pub(crate) fn read_bounded(path: &Path) -> std::io::Result<(Vec<u8>, bool)> {
     use std::io::Read;
-    let f = std::fs::File::open(path)?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::File::options()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)?;
+    // A FIFO that a writer DOES hold open reads EAGAIN rather than
+    // blocking; treat it as an empty body, which the torn-body rule
+    // already handles as a bare touch.
+    let meta = f.metadata()?;
+    if !meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sentinel is not a regular file",
+        ));
+    }
     let mut buf = Vec::new();
     let mut take = f.take(MAX_BODY + 1);
     take.read_to_end(&mut buf)?;
@@ -439,13 +466,22 @@ impl Sidecar {
         // a directory, socket or symlink at the sentinel path is not a
         // touch this sidecar will act on.
         if !meta.is_file() {
-            self.state.append_conflict(&ConflictRecord {
-                path: format!("{}/{}", super::CONTROL_DIR, verb.sentinel_name()),
-                foreign_etag: String::new(),
-                preserved_key: None,
-                kind: "sentinel-not-regular-file".into(),
-                at_unix: now_unix(),
-            })?;
+            // ONCE per process, not once per poll tick. A FIFO or dir
+            // parked at the sentinel path is a standing condition, and
+            // appending a record every 10 s grows a file that
+            // `load_conflicts` parses WHOLE — twice per sync honor, and
+            // again per status read and per scrape (review: U23). The
+            // condition is worth recording; the repetition is not.
+            let slot = format!("{}/{}", super::CONTROL_DIR, verb.sentinel_name());
+            if self.noted_not_regular.insert(slot.clone()) {
+                self.state.append_conflict(&ConflictRecord {
+                    path: slot,
+                    foreign_etag: String::new(),
+                    preserved_key: None,
+                    kind: "sentinel-not-regular-file".into(),
+                    at_unix: now_unix(),
+                })?;
+            }
             return Ok(false);
         }
         let ns = mtime_ns(&meta);
@@ -456,6 +492,7 @@ impl Sidecar {
         // The consume act: rename the sentinel out of the agent's reach.
         // Staging first, pending second — a crash between is recovered
         // at startup from the staging file, so a touch is never lost.
+        self.noted_not_regular.remove(&format!("{}/{}", super::CONTROL_DIR, verb.sentinel_name()));
         let staging = self.staging_path(verb);
         std::fs::rename(&path, &staging)?;
         self.fold_into_pending(verb, ns, &body, oversize)?;
@@ -575,10 +612,31 @@ impl Sidecar {
     /// Does a standing ack already answer this pending record? Used by
     /// the restart rule: matching ⇒ retire only (the ack names a real
     /// install); not matching ⇒ run a full barrier and ack from THAT.
-    fn ack_matches(&self, verb: Verb, pending: &PendingSentinel) -> bool {
+    pub(crate) fn ack_matches(&self, verb: Verb, pending: &PendingSentinel) -> bool {
         let Some(ack) = self.read_ack(verb) else { return false };
+        // Compare values the SIDECAR minted (review: U22). The ack is an
+        // ordinary file in `.flint/`, writable by every process sharing
+        // the mount, and `sentinel_mtime_unix_ns` is the agent's own
+        // file mtime — which is not monotone even without an adversary:
+        // `touch -t`, a clock step, a restored file and a tar extract
+        // all move it backwards. Deciding "has this boundary already
+        // run?" from it lets a STALE ack retire a FRESH request, and
+        // the request is then retired having never run.
+        //
+        // `consumed_at` and `completed_unix` are both minted here, in
+        // that order, so their ordering answers the question the mtime
+        // was being asked.
+        if ack.completed_unix < pending.consumed_at {
+            return false;
+        }
         if ack.sentinel_mtime_unix_ns < pending.consumed_mtime_unix_ns {
             return false;
+        }
+        // A bare touch carries no nonce, so `all()` over an empty set is
+        // vacuously TRUE and the timestamps become the entire test.
+        // Require the ack to name this exact touch instead.
+        if pending.nonces.is_empty() {
+            return ack.sentinel_mtime_unix_ns == pending.consumed_mtime_unix_ns;
         }
         pending.nonces.iter().all(|n| ack.nonces.contains(n))
     }

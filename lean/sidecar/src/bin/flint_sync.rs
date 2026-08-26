@@ -185,7 +185,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let mut sc = Sidecar { store, cfg, state, lease: None };
+    let mut sc = Sidecar { store, cfg, state, lease: None, noted_not_regular: Default::default() };
 
     let result = match cmd.as_str() {
         "checkout" => claim_then(&mut sc, Step::Checkout).await,

@@ -84,6 +84,10 @@ impl LeanManifest {
 pub struct LoadedManifest {
     pub manifest: LeanManifest,
     pub etag: String,
+    /// The object's own Last-Modified. The GET already carries it; a
+    /// caller that wants the coherence stamp must not pay a second
+    /// request for what this one threw away (review: U31).
+    pub last_modified_unix: Option<u64>,
 }
 
 pub async fn load(
@@ -94,7 +98,11 @@ pub async fn load(
         Ok((meta, bytes)) => {
             let manifest = LeanManifest::parse(&bytes)
                 .map_err(|e| super::LeanError::State(format!("manifest parse: {e}")))?;
-            Ok(Some(LoadedManifest { manifest, etag: meta.etag }))
+            Ok(Some(LoadedManifest {
+                manifest,
+                etag: meta.etag,
+                last_modified_unix: meta.last_modified_unix,
+            }))
         }
         Err(StoreError::NotFound(_)) => Ok(None),
         Err(e) => Err(e.into()),

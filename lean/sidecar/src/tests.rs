@@ -25,7 +25,13 @@ fn cfg_for(root: &std::path::Path) -> LeanConfig {
 async fn sidecar(store: &Arc<MemoryStore>, root: &std::path::Path) -> Sidecar {
     let cfg = cfg_for(root);
     let state = SidecarState::open(cfg.state_dir()).unwrap();
-    Sidecar { store: store.clone() as Arc<dyn ObjectStore>, cfg, state, lease: None }
+    Sidecar {
+        store: store.clone() as Arc<dyn ObjectStore>,
+        cfg,
+        state,
+        lease: None,
+        noted_not_regular: Default::default(),
+    }
 }
 
 /// Claim, looping claim_step (a fresh or released cell claims on the
@@ -2016,6 +2022,174 @@ async fn a_healthy_replacement_waiting_out_quiet_polls_is_not_marked_fenced() {
     assert!(claim_until_held(&mut b, 10).await, "the refusal path blocked a legitimate takeover");
 }
 
+/// U22 — a STALE ack must not retire a FRESH request.
+///
+/// The restart rule ("crash after ack before retire ⇒ retire on
+/// restart") decided whether a boundary had already run by comparing
+/// the agent's own sentinel file mtime. That value is not monotone even
+/// without an adversary — `touch -t`, a clock step, a restored file, a
+/// tar extract all move it backwards — and for a BARE touch the nonce
+/// test is vacuously true over an empty set, so the mtime was the whole
+/// test. A boundary then gets retired having never run.
+#[tokio::test]
+async fn a_stale_ack_never_retires_a_fresh_bare_touch() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+
+    // Boundary 1: a bare touch, honored, acked.
+    write(dir.path(), "w.txt", "one");
+    touch_sentinel(dir.path(), control::PUBLISH, "");
+    let acks = a.sentinel_tick().await.unwrap();
+    assert_eq!(acks.len(), 1, "the first bare touch was not honored");
+    let first = a.read_ack(Verb::Publish).expect("no ack from the first honor");
+    assert_eq!(first.status, "ok");
+
+    // Boundary 2: the agent asks again, and the sentinel's mtime lands
+    // at or BEFORE the first one's — the non-monotone case.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    write(dir.path(), "w.txt", "two");
+    touch_sentinel(dir.path(), control::PUBLISH, "");
+    let path = dir.path().join(super::CONTROL_DIR).join(control::PUBLISH);
+    let backdated = std::time::SystemTime::UNIX_EPOCH
+        + std::time::Duration::from_nanos((first.sentinel_mtime_unix_ns as u64).saturating_sub(5));
+    let f = std::fs::File::options().write(true).open(&path).unwrap();
+    f.set_times(std::fs::FileTimes::new().set_modified(backdated)).unwrap();
+    drop(f);
+
+    assert!(a.consume_sentinel(Verb::Publish).unwrap(), "the second touch was not consumed");
+    let pending = a.load_pending(Verb::Publish).unwrap().expect("no pending record");
+    assert!(pending.nonces.is_empty(), "the fixture needs a BARE touch");
+    assert!(
+        pending.consumed_mtime_unix_ns <= first.sentinel_mtime_unix_ns,
+        "the mtime did not go backwards — the fixture never armed"
+    );
+
+    // THE ASSERTION. The standing ack answers an older request; it must
+    // not be read as answering this one.
+    assert!(
+        !a.ack_matches(Verb::Publish, &pending),
+        "a stale ack retired a fresh boundary — it will never run"
+    );
+
+    // And the boundary does then actually run, with a new ack. (Forced:
+    // the first honor just set the min-interval, which is not what this
+    // leg is about.)
+    let ack = a
+        .honor_pending(Verb::Publish, true)
+        .await
+        .unwrap()
+        .expect("the second boundary never ran");
+    assert_eq!(ack.status, "ok");
+    let second = a.read_ack(Verb::Publish).expect("no ack from the second honor");
+    assert!(second.completed_unix > first.completed_unix, "the ack was not re-minted");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let e = &m.entries["w.txt"];
+    let (_, body) = store.get_whole(&e.key, Some(&e.etag)).await.unwrap();
+    assert_eq!(&body[..], b"two", "the second boundary was retired without publishing");
+}
+
+/// U23 — the FIFO wedge, at the syscall.
+///
+/// `consume_sentinel` lstats the path, checks `is_file()`, then opens it
+/// BY PATH — a second resolution. Swap a FIFO in between and the open
+/// blocks forever waiting for a writer, taking the poll arm and every
+/// boundary behind it. The type check cannot close this by itself; the
+/// open has to not block.
+///
+/// The timeout is the assertion. Without `O_NONBLOCK` this test does not
+/// fail — it HANGS, which is exactly the production symptom.
+#[tokio::test]
+async fn a_fifo_at_the_sentinel_path_never_wedges_the_poll_arm() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+
+    // A writer-less FIFO exactly where the agent's touch would go.
+    let ctl = dir.path().join(super::CONTROL_DIR);
+    std::fs::create_dir_all(&ctl).unwrap();
+    let path = ctl.join(control::PUBLISH);
+    let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0, "mkfifo failed");
+    assert!(
+        !std::fs::metadata(&path).unwrap().is_file(),
+        "the fixture never armed — that is not a FIFO"
+    );
+
+    // NOTE: do not "prove" the wedge here by racing a plain File::open
+    // against a timeout. The open never returns, and tokio waits for
+    // blocking tasks at teardown — so the probe hangs the test it was
+    // meant to make honest. The anti-vacuity that matters is above (it
+    // really is a FIFO); that the old open blocked is proven by
+    // reverting read_bounded, where this leg HANGS rather than fails.
+
+    // THE TOCTOU ITSELF. The lstat above catches a FIFO that is already
+    // in place; the window the finding names is a FIFO swapped in AFTER
+    // the check, and the only thing that closes it is the open not
+    // blocking. Call the reader directly, which is where the fix lives.
+    //
+    // Under a blocking open this call NEVER RETURNS: the leg does not
+    // fail, the test binary hangs. That is the production symptom, and
+    // it is why the fix is O_NONBLOCK rather than a tighter check.
+    let r = super::sentinel::read_bounded(&path);
+    assert!(r.is_err(), "a writer-less FIFO read as a body instead of erroring");
+
+    // A symlink swapped in for the same purpose is refused too.
+    let target = ctl.join("elsewhere");
+    std::fs::write(&target, "not the agent's").unwrap();
+    let link = ctl.join("publish.link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    assert!(
+        super::sentinel::read_bounded(&link).is_err(),
+        "a symlink at the sentinel path was followed"
+    );
+
+    // And the tick returns promptly with the FIFO in place.
+    let ticked = tokio::time::timeout(std::time::Duration::from_secs(5), a.sentinel_tick()).await;
+    let acks = ticked.expect("THE POLL ARM WEDGED on a FIFO at the sentinel path").unwrap();
+    assert!(acks.is_empty(), "a FIFO was honored as a boundary");
+
+    // And it is recorded rather than silently skipped...
+    let conflicts = a.state.load_conflicts().unwrap();
+    assert!(
+        conflicts.iter().any(|c| c.kind == "sentinel-not-regular-file"),
+        "the non-regular sentinel left no conflict record"
+    );
+
+    // ...ONCE, not once per tick. A parked FIFO is a standing condition
+    // and the poll arm sees it every 10 s; `load_conflicts` parses the
+    // whole file twice per sync honor, so a per-tick record turns a
+    // wedge into a growing O(n) parse for as long as it stands.
+    for _ in 0..5 {
+        a.sentinel_tick().await.unwrap();
+    }
+    let after = a.state.load_conflicts().unwrap();
+    assert_eq!(
+        after.iter().filter(|c| c.kind == "sentinel-not-regular-file").count(),
+        1,
+        "the standing condition was re-recorded on every poll tick"
+    );
+
+    // A recurrence after the condition clears IS recorded again.
+    std::fs::remove_file(&path).unwrap();
+    touch_sentinel(dir.path(), control::PUBLISH, "");
+    a.sentinel_tick().await.unwrap();
+    let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0, "second mkfifo failed");
+    a.sentinel_tick().await.unwrap();
+    assert_eq!(
+        a.state.load_conflicts().unwrap().iter()
+            .filter(|c| c.kind == "sentinel-not-regular-file")
+            .count(),
+        2,
+        "a RECURRENCE of the condition went unrecorded — the latch never clears"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Phase 3 — gated advance (D6, D7, D8, D13) + the flint-store version
 // surface.
@@ -2930,6 +3104,7 @@ async fn gated_startup_refuses_a_version_stripping_backend() {
         cfg,
         state,
         lease: None,
+        noted_not_regular: Default::default(),
     };
     assert!(claim_until_held(&mut a, 3).await);
 

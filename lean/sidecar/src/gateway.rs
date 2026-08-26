@@ -535,8 +535,18 @@ async fn handle_status_authed(
     let Some(cfg) = core.cfg(&ws) else {
         return err_reply(StatusCode::NOT_FOUND, "unknown-workspace", ws);
     };
-    let seq = match manifest::load(core.store.as_ref(), &cfg).await {
-        Ok(m) => m.map(|l| l.manifest.seq),
+    // ONE manifest read for all four manifest-derived fields. The stamp
+    // and the source both ride the document this GET already parses;
+    // fetching them with a second request (a HEAD, under a comment
+    // claiming "the manifest HEAD this handler already did") made
+    // /status cost 4 requests to answer what 3 already had — U31.
+    let (seq, stamp_unix, boundary_source) = match manifest::load(core.store.as_ref(), &cfg).await {
+        Ok(Some(l)) => (
+            Some(l.manifest.seq),
+            l.last_modified_unix,
+            l.manifest.boundary_source.clone(),
+        ),
+        Ok(None) => (None, None, None),
         Err(e) => return err_reply(StatusCode::BAD_GATEWAY, "store", e.to_string()),
     };
     let ib = match inbox::load(core.store.as_ref(), &cfg).await {
@@ -546,16 +556,6 @@ async fn handle_status_authed(
     let cell = match core.store.epoch_read(&cfg.epoch_key()).await {
         Ok(c) => c,
         Err(e) => return err_reply(StatusCode::BAD_GATEWAY, "store", e.to_string()),
-    };
-    // The manifest HEAD this handler already did carries the coherence
-    // stamp — §2.6's "gateway /status gains last_cited_seq,
-    // manifest_stamp_unix, boundary_source" costs no extra request.
-    let (stamp_unix, boundary_source) = match core.store.head(&cfg.manifest_key()).await {
-        Ok(m) => (
-            m.last_modified_unix,
-            flint_store::GenerationStamps::from_meta(&m.meta).and_then(|g| g.boundary_source),
-        ),
-        Err(_) => (None, None),
     };
     #[derive(Serialize)]
     struct Status {
