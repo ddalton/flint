@@ -132,6 +132,13 @@ pub struct LaneReport {
     /// plus crash remnants.
     pub superseded_reclaimed: usize,
     pub withheld_deletes: usize,
+    /// Paths this lane pass saw absent for the FIRST time — withheld to
+    /// the next scan by the rename-vs-walk guard, and so NOT part of
+    /// the boundary a citation from this pass would install.
+    pub first_absence: Vec<String>,
+    /// First-absence paths a DECLARED lane pass confirmed gone by
+    /// direct lstat and staged as ordinary withheld deletes.
+    pub absences_confirmed: usize,
 }
 
 #[derive(Debug, Default)]
@@ -188,6 +195,19 @@ impl Sidecar {
 
     /// The upload lane: durability, every floor tick, no citation.
     pub async fn upload_lane(&mut self) -> LeanResult<LaneReport> {
+        self.lane_inner(false).await
+    }
+
+    /// The lane pass behind a DECLARED boundary — a publish sentinel
+    /// (D1 × D6) or the preStop drain (D10). The citation that follows
+    /// is going to be acked, so a delete the agent made before the
+    /// touch may not sit out the boundary waiting for a second walk:
+    /// `confirm_absences` takes that observation by lstat instead.
+    pub async fn declared_lane(&mut self) -> LeanResult<LaneReport> {
+        self.lane_inner(true).await
+    }
+
+    async fn lane_inner(&mut self, declared: bool) -> LeanResult<LaneReport> {
         let epoch = self
             .lease
             .as_ref()
@@ -207,7 +227,11 @@ impl Sidecar {
 
         let mut baseline = self.state.load_baseline()?;
         let scanned = scan::scan(&self.cfg.root)?;
-        let classified = scan::classify(&scanned, &baseline);
+        let mut classified = scan::classify(&scanned, &baseline);
+        if declared {
+            report.absences_confirmed = self.confirm_absences(&mut classified);
+        }
+        report.first_absence = classified.first_absence.iter().cloned().collect();
         let mut stage = self.load_stage()?;
 
         // Stage-diff base is baseline ∪ PENDING. Diffing against the

@@ -604,7 +604,11 @@ impl Sidecar {
         if self.is_gated() {
             return self.honor_publish_gated(pending, forced).await;
         }
-        let report = self.run_barrier().await?;
+        // The DECLARED form (D1): a delete the agent made before the
+        // touch is part of the coherent point it declared, so this
+        // barrier confirms first-absence paths instead of acking a
+        // boundary that withholds them to the next floor tick.
+        let report = self.declared_barrier().await?;
         let units = self.charge_budget(report.published_bytes)?;
         let _ = units;
         let baseline = self.state.load_baseline()?;
@@ -642,7 +646,7 @@ impl Sidecar {
         pending: &PendingSentinel,
         forced: bool,
     ) -> LeanResult<Ack> {
-        let lane = self.upload_lane().await?;
+        let lane = self.declared_lane().await?;
         let cite = self.citation_pass(super::gated::CitationSource::Sentinel).await?;
         // Metered on what the LANE moved: the citation itself is one
         // CAS regardless of how many paths it names, so charging by
@@ -954,11 +958,11 @@ impl Sidecar {
             // it, and would leave the last boundary of the workspace's
             // life unstamped and unpinned.
             if self.is_gated() {
-                self.upload_lane().await?;
+                self.declared_lane().await?;
                 let cite = self.citation_pass(super::gated::CitationSource::Drain).await?;
                 self.ticker_from(cite.seq, None)?;
             } else {
-                let r = self.run_barrier().await?;
+                let r = self.declared_barrier().await?;
                 self.ticker_from(r.observed_seq, r.observed_etag.clone())?;
             }
         }

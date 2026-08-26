@@ -42,6 +42,14 @@ pub struct BarrierReport {
     /// news ticker (D5) — free, off requests the barrier already made.
     pub observed_seq: Option<u64>,
     pub observed_etag: Option<String>,
+    /// Paths this barrier saw absent for the FIRST time: their deletes
+    /// are withheld to the next scan (the rename-vs-walk guard). On a
+    /// declared boundary a non-empty set means the confirmation lstat
+    /// found them back on disk — the race the guard exists for.
+    pub first_absence: Vec<String>,
+    /// First-absence paths a DECLARED boundary confirmed gone by direct
+    /// lstat and published as ordinary deletes (`confirm_absences`).
+    pub absences_confirmed: usize,
 }
 
 impl Sidecar {
@@ -233,8 +241,56 @@ impl Sidecar {
         Ok(dst)
     }
 
-    /// Steps 2–7. `barrier` = one full publish cycle.
+    /// Take the SECOND absence observation now, by direct `lstat`.
+    ///
+    /// `scan::classify` withholds a path's delete until absence has
+    /// survived two consecutive scans — the rename-vs-walk race guard
+    /// (`lib.rs:37`). The hazard that rule names is the WALK missing a
+    /// file renamed under it, not deletion itself. On the cadence path
+    /// the second walk arrives at the next floor tick and nobody has
+    /// been promised otherwise. On a DECLARED boundary it cannot wait:
+    /// the ack would claim a coherent point (D1 — "everything
+    /// ordered-before T") while the manifest still cites a file the
+    /// agent removed before it touched the sentinel, and it would say
+    /// so with `report.deleted: 0` and `status: "ok"`.
+    ///
+    /// A direct `lstat` is exactly what the rename-vs-walk guard asks
+    /// for and is immune to the walk race by construction, so the
+    /// second observation costs one syscall per transiently-absent
+    /// path — never a second full pass. The cadence path is unchanged
+    /// and still waits for the second walk.
+    pub(crate) fn confirm_absences(&self, classified: &mut scan::Classified) -> usize {
+        if classified.first_absence.is_empty() {
+            return 0;
+        }
+        let mut confirmed = 0;
+        for path in std::mem::take(&mut classified.first_absence) {
+            if std::fs::symlink_metadata(self.cfg.root.join(&path)).is_err() {
+                classified.deletes.insert(path);
+                confirmed += 1;
+            } else {
+                // Back on disk: the rename-vs-walk race, caught exactly
+                // as the rule intends. Still only a first absence.
+                classified.first_absence.insert(path);
+            }
+        }
+        confirmed
+    }
+
+    /// Steps 2–7. `barrier` = one full publish cycle (the cadence arm).
     pub async fn run_barrier(&mut self) -> LeanResult<BarrierReport> {
+        self.barrier_inner(false).await
+    }
+
+    /// A barrier whose result somebody is going to ACK: a sentinel
+    /// honor (D1) or the preStop drain (D10). Identical to
+    /// `run_barrier` except that it confirms first-absence paths rather
+    /// than acking a boundary that withholds them.
+    pub async fn declared_barrier(&mut self) -> LeanResult<BarrierReport> {
+        self.barrier_inner(true).await
+    }
+
+    async fn barrier_inner(&mut self, declared: bool) -> LeanResult<BarrierReport> {
         let epoch = self.lease_epoch()?;
         let mut report = BarrierReport::default();
 
@@ -253,7 +309,11 @@ impl Sidecar {
         // Step 2: scan-diff against the persisted baseline.
         let mut baseline = self.state.load_baseline()?;
         let scanned = scan::scan(&self.cfg.root)?;
-        let classified = scan::classify(&scanned, &baseline);
+        let mut classified = scan::classify(&scanned, &baseline);
+        if declared {
+            report.absences_confirmed = self.confirm_absences(&mut classified);
+        }
+        report.first_absence = classified.first_absence.iter().cloned().collect();
 
         // Skip-on-no-diff: nothing local, nothing consumed, no pending
         // citation repair, and the bucket manifest where we left it.

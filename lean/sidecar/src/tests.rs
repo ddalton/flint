@@ -3042,3 +3042,167 @@ async fn the_reaper_never_takes_an_out_of_band_writers_current_version() {
         .expect("the reaper deleted an out-of-band writer's CURRENT version");
     assert_eq!(&still[..], b"OUT OF BAND");
 }
+
+/// D1 — the ack's own contract, on the one classification the barrier
+/// deliberately withholds.
+///
+/// "A sentinel with mtime T means everything ordered-before T is a
+/// coherent point; publish it", and the ack means that boundary is
+/// installed. A delete the agent made BEFORE the touch is part of that
+/// coherent point: the file's absence is visible on disk at consume
+/// time, which is exactly the state D1's at-least guarantee names.
+#[tokio::test]
+async fn a_sentinel_boundary_carries_a_delete_made_before_the_touch() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    a.checkout().await.unwrap();
+
+    write(dir.path(), "keep.txt", "k");
+    write(dir.path(), "gone.txt", "v1");
+    a.run_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("gone.txt"), "fixture: never published");
+
+    // The agent's logical step: remove the file, then declare.
+    std::fs::remove_file(dir.path().join("gone.txt")).unwrap();
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-del"}"#);
+
+    let acks = a.sentinel_tick().await.unwrap();
+    assert_eq!(acks.len(), 1, "the sentinel was not honored");
+    assert_eq!(acks[0].status, "ok");
+
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(
+        !m.entries.contains_key("gone.txt"),
+        "the ack said ok at seq {:?} while the manifest still cites a file the agent \
+         deleted before the touch (report.deleted = {})",
+        acks[0].seq,
+        acks[0].report.deleted
+    );
+}
+
+/// The A/B that isolates the rule: the CADENCE barrier still withholds
+/// the delete (the rename-vs-walk guard is not weakened for it), and the
+/// DECLARED barrier confirms the absence and publishes it.
+#[tokio::test]
+async fn only_a_declared_barrier_confirms_a_first_absence() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "gone.txt", "v1");
+    a.run_barrier().await.unwrap();
+
+    std::fs::remove_file(dir.path().join("gone.txt")).unwrap();
+
+    // Cadence: first absence, withheld, nothing deleted.
+    let r = a.run_barrier().await.unwrap();
+    assert_eq!(r.first_absence, vec!["gone.txt".to_string()]);
+    assert_eq!(r.absences_confirmed, 0);
+    assert!(r.deleted.is_empty(), "the cadence barrier published a first absence");
+
+    // Put the path back into the withheld state the declared barrier
+    // has to act on (the cadence pass above advanced prev_scan, so a
+    // second cadence pass would delete it on its own — which is the
+    // vacuity this fixture has to avoid).
+    let mut b = a.state.load_baseline().unwrap();
+    b.prev_scan.insert("gone.txt".into());
+    a.state.save_baseline(&b).unwrap();
+
+    let r = a.declared_barrier().await.unwrap();
+    assert_eq!(r.absences_confirmed, 1, "the declared barrier did not confirm the absence");
+    assert!(r.first_absence.is_empty());
+    assert_eq!(r.deleted, vec!["gone.txt".to_string()]);
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("gone.txt"));
+}
+
+/// The guard the two-scan rule is FOR, preserved: a path the walk
+/// missed but that is on disk at confirmation time is not deleted. The
+/// confirmation is an lstat precisely because it cannot be fooled by
+/// the walk race the rule names.
+#[tokio::test]
+async fn the_confirmation_never_deletes_a_path_the_walk_merely_missed() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let a = sidecar(&store, dir.path()).await;
+    write(dir.path(), "renamed.txt", "here all along");
+
+    // What a walk that lost the rename race produces: the path is
+    // classified first-absent while the file is on disk.
+    let mut classified = super::scan::Classified::default();
+    classified.first_absence.insert("renamed.txt".into());
+    classified.first_absence.insert("truly-gone.txt".into());
+
+    let confirmed = a.confirm_absences(&mut classified);
+    assert_eq!(confirmed, 1);
+    assert_eq!(
+        classified.deletes.iter().cloned().collect::<Vec<_>>(),
+        vec!["truly-gone.txt".to_string()]
+    );
+    assert!(
+        classified.first_absence.contains("renamed.txt"),
+        "the confirmation promoted a path that is on disk — the walk race would publish \
+         a delete of a live file"
+    );
+}
+
+/// D1 × D6 — the same contract under gated mode: the citation a publish
+/// sentinel triggers carries the delete, not just the uploads.
+#[tokio::test]
+async fn a_gated_sentinel_boundary_carries_a_delete_made_before_the_touch() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    gated(&mut a);
+    assert!(claim_until_held(&mut a, 3).await);
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    a.checkout().await.unwrap();
+
+    write(dir.path(), "gone.txt", "v1");
+    a.gated_tick(true).await.unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("gone.txt"), "fixture: never cited");
+
+    std::fs::remove_file(dir.path().join("gone.txt")).unwrap();
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-del"}"#);
+    let acks = a.sentinel_tick().await.unwrap();
+    assert_eq!(acks.len(), 1);
+    assert_eq!(acks[0].status, "ok");
+
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(
+        !m.entries.contains_key("gone.txt"),
+        "the gated citation acked a boundary that still cites a file the agent deleted \
+         before the touch"
+    );
+}
+
+/// D10 — the drain is a declared boundary too, and it is the last one
+/// this workspace will ever have: a delete left withheld here is
+/// re-materialized by the successor's checkout.
+#[tokio::test]
+async fn the_drain_carries_a_delete_made_before_it() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "gone.txt", "v1");
+    a.run_barrier().await.unwrap();
+
+    std::fs::remove_file(dir.path().join("gone.txt")).unwrap();
+    a.drain().await.unwrap();
+
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(
+        !m.entries.contains_key("gone.txt"),
+        "the drain left the delete withheld — the successor's checkout resurrects it"
+    );
+}
