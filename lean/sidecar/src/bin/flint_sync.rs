@@ -299,7 +299,9 @@ async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
         tokio::select! {
             _ = renew_iv.tick() => {
                 // Liveness signaling, independent of publish cadence.
-                if let Err(e) = lease::renew(sc).await {
+                // The tick settles owed acks on a fence itself — see
+                // Sidecar::heartbeat_tick for why that cannot live here.
+                if let Err(e) = sc.heartbeat_tick().await {
                     if matches!(e, LeanError::Fenced(_)) { return Err(e); }
                     eprintln!("flint-sync: renew failed (retrying): {e}");
                 }

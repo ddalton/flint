@@ -815,6 +815,28 @@ impl Sidecar {
         Ok(acks)
     }
 
+    /// The D12 heartbeat renewal arm, as a tick of its own.
+    ///
+    /// It is a method rather than three lines in the run loop because
+    /// of what it owes on a fence. This arm renews on its own
+    /// non-resettable interval — `min(floor, 30) s`, decoupled from
+    /// publish cadence, which is the whole reason D12 added it — so on
+    /// deposal it is usually the FIRST arm to find out, ahead of the
+    /// floor tick and ahead of any poll that has nothing to honor.
+    /// Returning from here without settling would strand every owed
+    /// ack and leave `capabilities.json` advertising live verbs on a
+    /// zombie: the hole D2's refused acks exist to close, re-opened at
+    /// the arm D12 added to close a different one.
+    pub async fn heartbeat_tick(&mut self) -> LeanResult<()> {
+        if let Err(e) = super::lease::renew(self).await {
+            if matches!(e, LeanError::Fenced(_)) {
+                self.settle_fence().await?;
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// One floor tick: renew (D12), then either honor a standing
     /// pending sentinel that the budget or min-interval held back — the
     /// boundary is honored by a REAL barrier, its ack stamped

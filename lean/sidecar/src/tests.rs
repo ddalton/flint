@@ -3206,3 +3206,54 @@ async fn the_drain_carries_a_delete_made_before_it() {
         "the drain left the delete withheld — the successor's checkout resurrects it"
     );
 }
+
+/// D12 × D2 — the heartbeat renewal arm owes the refused ack too.
+///
+/// The heartbeat runs on its own interval precisely so liveness
+/// signalling does not wait for publish cadence, which makes it the arm
+/// that usually discovers deposal FIRST — ahead of the floor tick, and
+/// ahead of a poll arm that has nothing due to honor. If it exits
+/// without settling, the pending sentinel is stranded and the marker
+/// still advertises live verbs on a zombie: the hole D2's refused acks
+/// exist to close, at the arm D12 added.
+#[tokio::test]
+async fn the_heartbeat_arm_settles_owed_acks_when_it_finds_the_fence() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    a.checkout().await.unwrap();
+
+    // Both verbs owed: settle_fence answers every one, not just the
+    // verb some other arm happened to be honoring.
+    touch_sentinel(dir_a.path(), control::PUBLISH, r#"{"nonce":"pub-stranded"}"#);
+    touch_sentinel(dir_a.path(), control::SYNC, r#"{"nonce":"sync-stranded"}"#);
+    a.poll_sentinels().unwrap();
+    assert!(a.load_pending(Verb::Publish).unwrap().is_some());
+    assert!(a.load_pending(Verb::Sync).unwrap().is_some());
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    assert!(claim_until_held(&mut b, 12).await);
+    let their_epoch = b.lease.as_ref().unwrap().epoch;
+    assert!(their_epoch > a.lease.as_ref().unwrap().epoch, "no takeover happened");
+
+    // The arm the run loop drives, not the poll arm.
+    let err = a.heartbeat_tick().await.unwrap_err();
+    assert!(matches!(err, LeanError::Fenced(_)));
+
+    for (verb, nonce) in [(Verb::Publish, "pub-stranded"), (Verb::Sync, "sync-stranded")] {
+        let ack = a
+            .read_ack(verb)
+            .unwrap_or_else(|| panic!("{verb:?} was stranded: the heartbeat exited unsettled"));
+        assert_eq!(ack.status, "refused-fenced");
+        assert!(ack.nonces.contains(&nonce.to_string()));
+        assert_eq!(ack.observed_epoch, Some(their_epoch));
+        assert!(a.load_pending(verb).unwrap().is_none());
+    }
+    let caps = a.read_capabilities().unwrap();
+    assert_eq!(caps.state, "fenced", "the marker still advertises a zombie as live");
+    assert!(caps.verbs.is_empty());
+}
