@@ -18,6 +18,16 @@ use super::scan;
 use super::state::{BaselineEntry, ConflictRecord, IntentJournal};
 use super::{now_unix, LeanError, LeanResult, Sidecar};
 
+/// The last gateway request this workspace acted on, per verb. A
+/// watermark rather than a consumed queue — see `note_verb_requests`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct VerbWatermark {
+    #[serde(default)]
+    pub boundary_unix: u64,
+    #[serde(default)]
+    pub sync_unix: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct BarrierReport {
     pub seq: Option<u64>,
@@ -95,6 +105,13 @@ impl Sidecar {
     /// cell at the window-open CAS).
     pub async fn consume_inbox(&mut self) -> LeanResult<Vec<InboxEntry>> {
         let loaded = inbox::load(self.store.as_ref(), &self.cfg).await?;
+        // §2.5's layered doors ride the inbox GET this function already
+        // pays for: promptness is one tick, and the added request count
+        // is ZERO. A failure here must never fail the consume — the
+        // request is idempotent state and the next tick re-reads it.
+        if let Err(e) = self.note_verb_requests(&loaded.doc) {
+            eprintln!("flint-sync: verb request not consumed (retrying next tick): {e}");
+        }
         let mut consumed = vec![];
         let mut baseline = self.state.load_baseline()?;
         for entry in &loaded.doc.entries {
@@ -218,6 +235,59 @@ impl Sidecar {
         }
         self.state.save_baseline(&baseline)?;
         Ok(consumed)
+    }
+
+    /// Act on the inbox document's two request fields (§2.5, D14).
+    ///
+    /// The asymmetry is deliberate and is about blast radius, not
+    /// principle: a boundary request is PERFORMED (it publishes what is
+    /// already on disk and mutates nothing local), a sync request is
+    /// CARRIED into the ticker as advisory news and the agent decides.
+    ///
+    /// Both are watermarked by `requested_unix` rather than consumed by
+    /// a clearing CAS. The field is idempotent state, so a repeat is a
+    /// no-op and a lost clear cannot double-publish; and not writing
+    /// means the doors cost no request at all, which is what §2.5
+    /// promises.
+    fn note_verb_requests(&mut self, doc: &inbox::InboxDoc) -> LeanResult<()> {
+        let mut mark = self.load_verb_watermark()?;
+        if let Some(r) = &doc.sync_request {
+            if r.requested_unix > mark.sync_unix {
+                self.carry_sync_request(r.requested_unix, &r.requestor)?;
+                mark.sync_unix = r.requested_unix;
+            }
+        }
+        if let Some(r) = &doc.boundary_request {
+            if r.requested_unix > mark.boundary_unix {
+                self.request_boundary(
+                    &format!("gw:{}:{}", r.requested_unix, r.requestor),
+                    Some(format!("boundary requested by {}", r.requestor)),
+                )?;
+                mark.boundary_unix = r.requested_unix;
+            }
+        }
+        self.save_verb_watermark(&mark)
+    }
+
+    fn verb_watermark_path(&self) -> std::path::PathBuf {
+        self.cfg.state_dir().join("verb-requests.json")
+    }
+
+    pub(crate) fn load_verb_watermark(&self) -> LeanResult<VerbWatermark> {
+        let p = self.verb_watermark_path();
+        if !p.exists() {
+            return Ok(VerbWatermark::default());
+        }
+        Ok(std::fs::read(&p)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default())
+    }
+
+    fn save_verb_watermark(&self, m: &VerbWatermark) -> LeanResult<()> {
+        let bytes = serde_json::to_vec_pretty(m)
+            .map_err(|e| LeanError::State(format!("verb watermark: {e}")))?;
+        super::control::write_atomic(&self.verb_watermark_path(), &bytes)
     }
 
     async fn preserve_conflict_copy(&self, path: &str, etag: &str) -> LeanResult<String> {

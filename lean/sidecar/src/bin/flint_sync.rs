@@ -9,6 +9,10 @@
 //!   sync       the HITL sync verb (scan-first), exit
 //!   recover-staged  re-cite durable-but-uncited work as one flagged
 //!              boundary (gated recovery after pod replacement), exit
+//!   ctl <boundary|sync|status>
+//!              talk to the UDS door of the sidecar running in THIS
+//!              pod (§2.5). A client, not a second sidecar: it takes
+//!              no lease and no state lock. Requires FLINT_SYNC_UDS_DOOR.
 //!   status     render gauges + pending + lease state as JSON, exit.
 //!              Takes NO lease and NO state-dir lock: it exists to
 //!              diagnose a workspace whose sidecar is dead or deposed,
@@ -29,6 +33,15 @@
 //!   FLINT_SYNC_SENTINEL_MIN_INTERVAL_SECS  (default 5)
 //!   FLINT_SYNC_SENTINEL_HOURLY_BUDGET      work units/hour (default 60)
 //!   FLINT_SYNC_SENTINEL_POLL_SECS          (default 1; env-only)
+//!   FLINT_SYNC_QUIESCE_BOUND_SECS          gated: quiescence window (30)
+//!   FLINT_SYNC_VISIBILITY_LAG_BOUND_SECS   gated: REQUIRED, no default
+//!   FLINT_SYNC_STAGED_BACKLOG_CAP_OBJECTS  gated: forced-citation cap (5000)
+//!   FLINT_SYNC_STAGED_BACKLOG_CAP_BYTES    gated: forced-citation cap (2 GiB)
+//!   FLINT_SYNC_NONCURRENT_RETENTION_DAYS   gated: the backstop's age (30)
+//!   FLINT_SYNC_UDS_DOOR                    "true" arms .flint-sync/ctl.sock
+//!   FLINT_SYNC_METRICS                     "true" arms /metrics (D15)
+//!   FLINT_SYNC_METRICS_PORT                default 9847
+//!   FLINT_SYNC_WORKSPACE/_NAMESPACE        the only two metric labels
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,12 +51,20 @@ use flint_lean::state::SidecarState;
 use flint_lean::{BoundaryMode, LeanConfig, LeanError, Sidecar, SentinelMode};
 use flint_store::s3::S3Store;
 use flint_store::ObjectStore;
+use warp::Filter;
 
 fn env_req(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| {
         eprintln!("flint-sync: {name} is required");
         std::process::exit(2);
     })
+}
+
+fn flint_lean_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
@@ -92,6 +113,16 @@ async fn main() {
     cfg.sentinel_hourly_budget = env_u64("FLINT_SYNC_SENTINEL_HOURLY_BUDGET", 60);
     cfg.sentinel_poll_secs = env_u64("FLINT_SYNC_SENTINEL_POLL_SECS", 1).max(1);
     cfg.quiesce_bound_secs = env_u64("FLINT_SYNC_QUIESCE_BOUND_SECS", 30);
+    // The backlog caps and the retention days were config fields the
+    // binary never read — knobs that exist and do NOTHING, the class
+    // this codebase keeps paying for. The caps bound the preStop drain
+    // by construction (D10 sizes the pod's grace against exactly these
+    // numbers), and the retention is what the citation GC's noncurrent
+    // gauge is measured against.
+    cfg.staged_backlog_cap_objects = env_u64("FLINT_SYNC_STAGED_BACKLOG_CAP_OBJECTS", 5_000);
+    cfg.staged_backlog_cap_bytes =
+        env_u64("FLINT_SYNC_STAGED_BACKLOG_CAP_BYTES", 2 * 1024 * 1024 * 1024);
+    cfg.noncurrent_retention_days = env_u64("FLINT_SYNC_NONCURRENT_RETENTION_DAYS", 30);
     cfg.visibility_lag_bound_secs =
         std::env::var("FLINT_SYNC_VISIBILITY_LAG_BOUND_SECS").ok().and_then(|v| v.parse().ok());
     // Gated is refused without a lag bound: unbounded staleness must be
@@ -102,6 +133,34 @@ async fn main() {
              (unbounded citation staleness is refused)"
         );
         std::process::exit(2);
+    }
+
+    // Also dispatched before the state directory is opened, and for a
+    // stronger reason: `ctl` is a CLIENT of the running sidecar. Taking
+    // the occupancy lock — or the lease — would fight the very process
+    // it is asking to do something.
+    if cmd == "ctl" {
+        let verb = std::env::args().nth(2).unwrap_or_else(|| "status".into());
+        let (method, path) = match verb.as_str() {
+            "boundary" => ("POST", "/v1/boundary"),
+            "sync" => ("POST", "/v1/sync"),
+            "status" => ("GET", "/v1/status"),
+            other => {
+                eprintln!("flint-sync ctl: unknown verb {other:?} (boundary|sync|status)");
+                std::process::exit(2);
+            }
+        };
+        let sock = flint_lean::uds::socket_path(&cfg.state_dir());
+        match ctl_call(&sock, method, path).await {
+            Ok(body) => {
+                println!("{body}");
+                return;
+            }
+            Err(e) => {
+                eprintln!("flint-sync ctl: {} ({e})", sock.display());
+                std::process::exit(1);
+            }
+        }
     }
 
     // Dispatched before the state directory is opened: a live sidecar
@@ -137,7 +196,7 @@ async fn main() {
         other => {
             eprintln!(
                 "flint-sync: unknown subcommand {other:?} \
-                 (checkout|barrier|sync|status|recover-staged|run)"
+                 (checkout|barrier|sync|status|ctl|recover-staged|run)"
             );
             std::process::exit(2);
         }
@@ -147,6 +206,29 @@ async fn main() {
         // A fence is a clean shutdown order, not a crash loop.
         std::process::exit(if matches!(e, LeanError::Fenced(_)) { 0 } else { 1 });
     }
+}
+
+/// One request over the control socket. Deliberately hand-rolled: the
+/// door is a bounded, pod-internal, one-request-per-connection surface,
+/// and a client that pulls in an HTTP stack to say twelve bytes would
+/// be the tail wagging the dog.
+async fn ctl_call(
+    sock: &std::path::Path,
+    method: &str,
+    path: &str,
+) -> std::io::Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::net::UnixStream::connect(sock).await?;
+    s.write_all(format!("{method} {path} HTTP/1.1\r\nhost: flint\r\n\r\n").as_bytes())
+        .await?;
+    s.flush().await?;
+    let mut buf = Vec::new();
+    s.read_to_end(&mut buf).await?;
+    let text = String::from_utf8_lossy(&buf).to_string();
+    Ok(match text.split_once("\r\n\r\n") {
+        Some((_, body)) => body.to_string(),
+        None => text,
+    })
 }
 
 enum Step {
@@ -268,6 +350,83 @@ async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
         }
     }
 
+    // D15's exposition, opt-in and DEGRADING. The agent container is
+    // the likely occupant of any well-known port, so a collision must
+    // leave the workspace fully operable — gauges.json, the heartbeat
+    // echo and `flint-sync status` remain the authority for every
+    // operational decision, and /metrics is additive.
+    {
+        let enabled = std::env::var("FLINT_SYNC_METRICS").ok().as_deref() == Some("true");
+        let port: u16 = std::env::var("FLINT_SYNC_METRICS_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(9847);
+        let mut posture =
+            flint_lean::metrics::MetricsPosture { enabled, port, bound: false, error: None };
+        if enabled {
+            let labels = flint_lean::metrics::Labels {
+                workspace: std::env::var("FLINT_SYNC_WORKSPACE").unwrap_or_else(|_| "unknown".into()),
+                namespace: std::env::var("FLINT_SYNC_NAMESPACE").unwrap_or_else(|_| "unknown".into()),
+            };
+            let state_dir = sc.cfg.state_dir();
+            let route = warp::get().and(warp::path("metrics")).map(move || {
+                // Read the file the tick already wrote. No store, no
+                // stage, no clock: a scrape costs zero bucket requests.
+                let g: flint_lean::Gauges =
+                    std::fs::read(state_dir.join("gauges.json"))
+                        .ok()
+                        .and_then(|b| serde_json::from_slice(&b).ok())
+                        .unwrap_or_default();
+                warp::reply::with_header(
+                    flint_lean::metrics::render(&g, &labels),
+                    "content-type",
+                    "text/plain; version=0.0.4",
+                )
+            });
+            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+            match warp::serve(route).try_bind_ephemeral(addr) {
+                Ok((bound, fut)) => {
+                    eprintln!("flint-sync: /metrics on {bound}");
+                    posture.bound = true;
+                    tokio::spawn(fut);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "flint-sync: /metrics NOT exposed on {addr} ({e}) — the workspace is \
+                         unaffected; gauges.json and the heartbeat echo remain authoritative"
+                    );
+                    posture.error = Some(e.to_string());
+                }
+            }
+        }
+        if let Err(e) = sc.save_metrics_posture(&posture) {
+            eprintln!("flint-sync: could not record the metrics posture: {e}");
+        }
+    }
+
+    // §2.5's UDS door, opt-in. Bind failure DEGRADES: a workspace
+    // whose control socket cannot be created is fully operable through
+    // the file protocol, and killing the sidecar over a missing
+    // convenience would be a worse outcome than not having it.
+    let mut ctl_rx = if std::env::var("FLINT_SYNC_UDS_DOOR").ok().as_deref() == Some("true") {
+        let path = flint_lean::uds::socket_path(&sc.cfg.state_dir());
+        match flint_lean::uds::bind(&path) {
+            Ok(listener) => {
+                let (tx, rx) = tokio::sync::mpsc::channel(16);
+                tokio::spawn(flint_lean::uds::serve(listener, tx));
+                eprintln!("flint-sync: control socket at {}", path.display());
+                Some(rx)
+            }
+            Err(e) => {
+                eprintln!("flint-sync: control socket NOT available ({e}) — the file protocol \
+                           is unaffected");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("SIGTERM handler");
 
@@ -339,6 +498,51 @@ async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
                     },
                     Err(e @ LeanError::Fenced(_)) => return Err(e),
                     Err(e) => eprintln!("flint-sync: sentinel honor failed (retrying): {e}"),
+                }
+            }
+            // The socket's requests are served by the ONE task that
+            // holds the lease and the state directory. That is what
+            // makes the door sugar rather than a second writer.
+            Some(req) = async { match ctl_rx.as_mut() { Some(rx) => rx.recv().await, None => None } } => {
+                match req {
+                    flint_lean::uds::CtlRequest::Boundary { note, reply } => {
+                        let out = async {
+                            sc.request_boundary(&format!("uds:{}", flint_lean_now()), note)?;
+                            sc.sentinel_tick().await
+                        }
+                        .await;
+                        let v = match out {
+                            Ok(acks) => serde_json::json!({
+                                "status": "ok",
+                                "acks": acks.iter().map(|a| serde_json::json!({
+                                    "status": a.status, "boundary": a.boundary,
+                                    "seq": a.seq, "nonces": a.nonces,
+                                })).collect::<Vec<_>>(),
+                            }),
+                            Err(e) => serde_json::json!({
+                                "status": "error", "message": e.to_string(),
+                            }),
+                        };
+                        let _ = reply.send(v);
+                    }
+                    flint_lean::uds::CtlRequest::Sync { reply } => {
+                        let v = match sc.sync().await {
+                            Ok(r) => serde_json::to_value(&r).unwrap_or_default(),
+                            Err(e) => serde_json::json!({
+                                "status": "error", "message": e.to_string(),
+                            }),
+                        };
+                        let _ = reply.send(v);
+                    }
+                    flint_lean::uds::CtlRequest::Status { reply } => {
+                        let v = match flint_lean::status_report(&sc.cfg) {
+                            Ok(r) => serde_json::to_value(&r).unwrap_or_default(),
+                            Err(e) => serde_json::json!({
+                                "status": "error", "message": e.to_string(),
+                            }),
+                        };
+                        let _ = reply.send(v);
+                    }
                 }
             }
             _ = term.recv() => {

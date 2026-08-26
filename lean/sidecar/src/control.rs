@@ -233,7 +233,7 @@ impl Sidecar {
             reason: posture.reason.clone(),
             sentinel_min_interval_secs: self.cfg.sentinel_min_interval_secs,
             sentinel_hourly_budget: self.cfg.sentinel_hourly_budget,
-            sidecar_version: env!("CARGO_PKG_VERSION").to_string(),
+            sidecar_version: super::SIDECAR_VERSION.to_string(),
             boot: BootStamp { holder_id, boot_unix: now_unix() },
         };
         write_json(&self.control_path(CAPABILITIES), &caps)

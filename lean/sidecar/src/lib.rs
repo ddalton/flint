@@ -48,11 +48,13 @@ pub use gauges::{status_report, Gauges, StatusReport};
 pub mod inbox;
 pub mod lease;
 pub mod manifest;
+pub mod metrics;
 pub mod scan;
 pub(crate) mod safefs;
 pub mod sentinel;
 pub mod state;
 pub mod sync;
+pub mod uds;
 
 #[cfg(test)]
 mod tests;
@@ -79,6 +81,13 @@ pub const CONTROL_DIR: &str = ".flint";
 
 /// Protocol version advertised in `.flint/capabilities.json`.
 pub const SENTINEL_PROTOCOL: u32 = 1;
+
+/// This binary's version, echoed to the agent (`capabilities.json`) and
+/// to the operator (the lease-heartbeat echo, §2.6). Both mixed-version
+/// holes — agent↔sidecar and operator↔sidecar — are detected by
+/// comparing what is RUNNING against what was asked for, and neither
+/// comparison exists without a version on the running side.
+pub const SIDECAR_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Default whole-object publish ceiling; larger files go through the
 /// multipart compose path (`tier/flush.rs` uses the same 64 MiB split).

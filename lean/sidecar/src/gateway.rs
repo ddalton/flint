@@ -254,6 +254,23 @@ pub fn routes(
         .and(warp::body::json::<InboxDropReq>())
         .then(handle_inbox_drop);
 
+    // §2.5's gateway door. Two verbs, deliberately asymmetric: a
+    // boundary is PERFORMED by the sidecar, a sync is CARRIED to the
+    // agent as advisory news (D14).
+    let boundary_req = warp::post()
+        .and(authed.clone())
+        .and(with_core.clone())
+        .and(warp::path!("lean" / "v1" / String / "boundary"))
+        .and(warp::header::optional::<String>("x-flint-author"))
+        .then(handle_boundary_request);
+
+    let sync_req = warp::post()
+        .and(authed.clone())
+        .and(with_core.clone())
+        .and(warp::path!("lean" / "v1" / String / "sync-request"))
+        .and(warp::header::optional::<String>("x-flint-author"))
+        .then(handle_sync_request);
+
     let manifest_cas = warp::post()
         .and(authed.clone())
         .and(with_core.clone())
@@ -272,6 +289,8 @@ pub fn routes(
         .or(window_open).unify()
         .or(window_clear).unify()
         .or(inbox_drop).unify()
+        .or(boundary_req).unify()
+        .or(sync_req).unify()
         .or(manifest_cas).unify()
         .or(healthz).unify()
         .recover(recover_auth)
@@ -474,6 +493,16 @@ async fn handle_status_authed(
         Ok(c) => c,
         Err(e) => return err_reply(StatusCode::BAD_GATEWAY, "store", e.to_string()),
     };
+    // The manifest HEAD this handler already did carries the coherence
+    // stamp — §2.6's "gateway /status gains last_cited_seq,
+    // manifest_stamp_unix, boundary_source" costs no extra request.
+    let (stamp_unix, boundary_source) = match core.store.head(&cfg.manifest_key()).await {
+        Ok(m) => (
+            m.last_modified_unix,
+            flint_store::GenerationStamps::from_meta(&m.meta).and_then(|g| g.boundary_source),
+        ),
+        Err(_) => (None, None),
+    };
     #[derive(Serialize)]
     struct Status {
         seq: Option<u64>,
@@ -483,6 +512,18 @@ async fn handle_status_authed(
         holder_id: Option<String>,
         holder_released: Option<bool>,
         now_unix: u64,
+        /// The last CITED manifest seq — under gated mode this is the
+        /// coherent view, not the newest bytes in the bucket.
+        last_cited_seq: Option<u64>,
+        manifest_stamp_unix: Option<u64>,
+        /// Which coherent point installed it: `sentinel`, `quiescence`,
+        /// `forced-lag-cap`, `drain`, `recovered`… A reader that cares
+        /// whether the view it is about to take was DECLARED coherent or
+        /// forced by a cap can tell, from the bucket.
+        boundary_source: Option<String>,
+        /// Whether a boundary/sync request is standing (§2.5).
+        boundary_request: Option<super::inbox::VerbRequest>,
+        sync_request: Option<super::inbox::VerbRequest>,
     }
     ok_json(&Status {
         seq,
@@ -492,7 +533,90 @@ async fn handle_status_authed(
         holder_id: cell.as_ref().map(|c| c.holder_id.clone()),
         holder_released: cell.as_ref().map(|c| c.released),
         now_unix: now_unix(),
+        last_cited_seq: seq,
+        manifest_stamp_unix: stamp_unix,
+        boundary_source,
+        boundary_request: ib.doc.boundary_request.clone(),
+        sync_request: ib.doc.sync_request.clone(),
     })
+}
+
+/// `POST /lean/v1/{ws}/boundary` — ask the workspace to publish.
+///
+/// The gateway does not publish anything itself and holds no epoch: it
+/// sets a field, and the sidecar performs the barrier under its own
+/// lease, min-interval and budget. That is what keeps a leaked bearer
+/// from turning into an unbounded publish loop, and what keeps this
+/// endpoint honest about what it can promise — the response says the
+/// request was RECORDED, never that a boundary happened.
+async fn handle_boundary_request(
+    _auth: (),
+    core: Arc<GatewayCore>,
+    ws: String,
+    author: Option<String>,
+) -> warp::reply::Response {
+    handle_verb_request(core, ws, author, super::inbox::RequestedVerb::Boundary).await
+}
+
+/// `POST /lean/v1/{ws}/sync-request` — ask the workspace to pull.
+///
+/// CARRIED, never performed (D14): the sidecar copies it into
+/// `.flint/remote.seq` and stops. `sync` deletes local files for
+/// remotely-deleted paths, so performing it on a remote's say-so would
+/// upgrade a leaked bearer from "publish, plus hand over these N named
+/// objects" to "rewrite and delete across a running agent's tree, at my
+/// timing, under a scope I choose".
+async fn handle_sync_request(
+    _auth: (),
+    core: Arc<GatewayCore>,
+    ws: String,
+    author: Option<String>,
+) -> warp::reply::Response {
+    handle_verb_request(core, ws, author, super::inbox::RequestedVerb::Sync).await
+}
+
+async fn handle_verb_request(
+    core: Arc<GatewayCore>,
+    ws: String,
+    author: Option<String>,
+    verb: super::inbox::RequestedVerb,
+) -> warp::reply::Response {
+    let Some(cfg) = core.cfg(&ws) else {
+        return err_reply(StatusCode::NOT_FOUND, "unknown-workspace", ws);
+    };
+    let requestor = author.unwrap_or_else(|| "gateway".into());
+    match super::inbox::gateway_request(core.store.as_ref(), &cfg, verb, &requestor).await {
+        Ok(req) => {
+            #[derive(Serialize)]
+            struct Accepted {
+                /// "recorded", never "done": the sidecar decides when.
+                status: &'static str,
+                verb: &'static str,
+                requested_unix: u64,
+                requestor: String,
+                note: &'static str,
+            }
+            ok_json(&Accepted {
+                status: "recorded",
+                verb: match verb {
+                    super::inbox::RequestedVerb::Boundary => "boundary",
+                    super::inbox::RequestedVerb::Sync => "sync",
+                },
+                requested_unix: req.requested_unix,
+                requestor: req.requestor,
+                note: match verb {
+                    super::inbox::RequestedVerb::Boundary =>
+                        "the sidecar honors this as a publish sentinel at its next tick, \
+                         subject to the same min-interval and hourly budget; the ack lands \
+                         in .flint/publish.ack",
+                    super::inbox::RequestedVerb::Sync =>
+                        "CARRIED, not executed: the sidecar moves .flint/remote.seq and the \
+                         agent decides whether to sync",
+                },
+            })
+        }
+        Err(e) => err_reply(StatusCode::BAD_GATEWAY, "store", e.to_string()),
+    }
 }
 
 async fn handle_window_open(

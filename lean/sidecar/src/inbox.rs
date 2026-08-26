@@ -36,10 +36,39 @@ pub struct Window {
     pub deadline_unix: u64,
 }
 
+/// A verb asked for through the gateway door (§2.5, D14). Idempotent
+/// STATE, not a queue: repeated sets before the sidecar acts collapse
+/// to the newest, which is why neither field needs a rate limit, an
+/// exactly-once protocol, or a clearing CAS of its own.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerbRequest {
+    pub requested_unix: u64,
+    pub requestor: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InboxDoc {
     pub entries: Vec<InboxEntry>,
     pub window: Option<Window>,
+    /// "Please publish" from outside the pod (§2.5). Deliberately a
+    /// FIELD and not a fake no-object `InboxEntry`: `consume_inbox`
+    /// HEADs `file_key(path)` for every entry, so an entry naming no
+    /// object lands in the NotFound arm as a spurious
+    /// `consume-object-missing` conflict — and special-casing the
+    /// single most safety-critical function in the crate to avoid that
+    /// is worse than either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary_request: Option<VerbRequest>,
+    /// "Please pull" from outside the pod — CARRIED, never performed
+    /// (D14). A boundary publishes what is already on disk and touches
+    /// no local file; `sync` re-derives the tree against the current
+    /// remote manifest and DELETES local files for remotely-deleted
+    /// paths. Performing that on a remote's say-so would upgrade what a
+    /// leaked gateway bearer can do from "publish, plus hand over these
+    /// N named objects" to "rewrite and delete across a running agent's
+    /// tree, at my timing, under a scope I choose".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_request: Option<VerbRequest>,
 }
 
 pub struct LoadedInbox {
@@ -121,6 +150,51 @@ pub async fn gateway_append(
         }
     }
     Err(LeanError::State("inbox append lost 5 CAS races".into()))
+}
+
+/// Which verb a gateway request is asking for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestedVerb {
+    Boundary,
+    Sync,
+}
+
+/// The GATEWAY side of §2.5: set one of the two request fields under
+/// the same CAS discipline every other inbox write uses.
+///
+/// Deliberately NOT window-gated. `admits_hitl` exists because a HITL
+/// object write races the barrier that is about to publish the tree; a
+/// verb request touches no object and no path — refusing it during a
+/// window would make "please publish" fail precisely while a publish is
+/// in flight, which is the least useful moment to say no.
+pub async fn gateway_request(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    verb: RequestedVerb,
+    requestor: &str,
+) -> LeanResult<VerbRequest> {
+    let req = VerbRequest {
+        requested_unix: now_unix(),
+        requestor: requestor.chars().take(128).collect(),
+    };
+    for _ in 0..5 {
+        let loaded = load(store, cfg).await?;
+        let mut doc = loaded.doc;
+        // Newest wins: the field is state, so a burst collapses instead
+        // of queueing. This is what makes a rate limit unnecessary on
+        // the transport (the HONOR is still min-interval'd and budgeted
+        // like any other sentinel).
+        match verb {
+            RequestedVerb::Boundary => doc.boundary_request = Some(req.clone()),
+            RequestedVerb::Sync => doc.sync_request = Some(req.clone()),
+        }
+        match cas_write(store, cfg, &doc, loaded.etag.as_deref(), 0).await {
+            Ok(_) => return Ok(req),
+            Err(LeanError::Store(StoreError::PreconditionFailed(_))) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(LeanError::State("inbox verb request lost 5 CAS races".into()))
 }
 
 /// The SIDECAR side: open the barrier window (the intent). Succeeds

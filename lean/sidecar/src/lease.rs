@@ -111,15 +111,52 @@ pub async fn claim_step(sc: &mut Sidecar) -> LeanResult<ClaimOutcome> {
     }
 }
 
+/// What this sidecar is OBSERVED to be doing, for the heartbeat cell
+/// (boundary-verbs plan §2.6). Computed from local files only — the
+/// same store-free discipline as `write_gauges`, and for the same
+/// reason: this rides the renewal, so it must not add a request to the
+/// one tick every idle workspace in the fleet pays (leg B8's oracle
+/// counts them).
+fn observed_echo(sc: &Sidecar) -> Option<String> {
+    let g = sc.load_gauges().ok()?;
+    // The count comes from the stage itself rather than the gauges
+    // snapshot: it is the exposure number an operator pages on, and
+    // gauges lag by up to a floor.
+    let staged = sc.load_stage().map(|s| s.entries.len() as u64).unwrap_or(0);
+    let (seq, unix) = g.last_boundary.as_ref().map(|b| (b.seq, b.unix)).unwrap_or((0, 0));
+    // The pre-flight verdict lives in the marker the AGENT reads; the
+    // operator has no other way to see it, so it rides the echo.
+    let caps: Option<super::control::Capabilities> =
+        std::fs::read(sc.cfg.control_dir().join(super::control::CAPABILITIES))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok());
+    serde_json::to_string(&flint_store::LeaseEcho {
+        sidecar_version: super::SIDECAR_VERSION.to_string(),
+        protocol: super::SENTINEL_PROTOCOL,
+        active_boundary_mode: sc.cfg.boundary_mode.as_str().to_string(),
+        last_cited_seq: seq,
+        last_cited_unix: unix,
+        staged_uncited_count: staged,
+        sentinel_verbs_active: caps.map(|c| !c.verbs.is_empty()).unwrap_or(false),
+        metrics_bound: sc.load_metrics_posture().filter(|m| m.enabled).map(|m| m.bound),
+    })
+    .ok()
+}
+
 /// Renew the held lease; a 412 means deposed — the caller must stop
 /// publishing (self-fence).
+///
+/// The renewal also carries the observed-state echo (§2.6): the
+/// operator's only evidence of what the sidecar binary is ACTUALLY
+/// running, on a request that was already being paid for.
 pub async fn renew(sc: &mut Sidecar) -> LeanResult<()> {
     let key = sc.cfg.epoch_key();
     let lease = sc
         .lease
         .clone()
         .ok_or_else(|| LeanError::State("renew without a lease".into()))?;
-    match sc.store.epoch_renew(&key, &lease).await {
+    let echo = observed_echo(sc);
+    match sc.store.epoch_renew(&key, &lease, echo.as_deref()).await {
         Ok(l) => {
             sc.lease = Some(l);
             Ok(())

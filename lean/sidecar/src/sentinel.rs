@@ -534,6 +534,24 @@ impl Sidecar {
         Ok(())
     }
 
+    /// A boundary asked for through a door that is NOT the file
+    /// protocol — the gateway's inbox field (§2.5) or the UDS socket.
+    ///
+    /// It folds into the same pending record a `.flint/publish` touch
+    /// would, which is the whole design of the layered doors: the extra
+    /// doors are sugar over one consume path, so min-interval,
+    /// coalescing, the work-metered budget, the covered-nonce ack and
+    /// the crash rules apply to them without a second implementation
+    /// that could disagree with the first.
+    pub fn request_boundary(&mut self, nonce: &str, note: Option<String>) -> LeanResult<()> {
+        let body = serde_json::json!({ "nonce": nonce, "note": note });
+        let ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        self.fold_into_pending(Verb::Publish, ns, body.to_string().as_bytes(), false)
+    }
+
     fn ack_path(&self, verb: Verb) -> PathBuf {
         self.control_path(verb.ack_name())
     }

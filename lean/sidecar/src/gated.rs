@@ -207,6 +207,30 @@ pub struct RecoverReport {
     pub no_change: bool,
 }
 
+/// D9's durable orphan summary — the bucket-side answer to "is there
+/// work here that no manifest cites?", readable by the operator, a
+/// sibling cluster, or a human, long after the pod that staged it.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct OrphanDoc {
+    pub written_unix: u64,
+    /// The epoch that staged them — a summary from a deposed holder is
+    /// still true about the bytes, and saying whose it was lets a
+    /// reader tell a live backlog from a dead one.
+    pub epoch: u64,
+    pub boundary_mode: String,
+    pub candidates: Vec<OrphanCandidate>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OrphanCandidate {
+    pub path: String,
+    pub version_id: Option<String>,
+    pub size: u64,
+    pub generation: u64,
+    pub epoch: u64,
+    pub staged_unix: u64,
+}
+
 impl Sidecar {
     fn stage_path(&self) -> std::path::PathBuf {
         self.cfg.state_dir().join(PENDING)
@@ -225,6 +249,89 @@ impl Sidecar {
         let bytes =
             serde_json::to_vec_pretty(s).map_err(|e| LeanError::State(format!("pending: {e}")))?;
         super::control::write_atomic(&self.stage_path(), &bytes)
+    }
+
+    /// The key D9's durable orphan summary lives at.
+    pub fn orphans_key(&self) -> String {
+        format!("{}/{}/orphans.json", self.cfg.prefix, super::LEAN_DIR)
+    }
+
+    /// Surface the staged-but-uncited set into the BUCKET (D9).
+    ///
+    /// `pending.json` lives on the emptyDir, which is exactly the thing
+    /// a pure-spot replacement destroys — so on the routine failure of
+    /// this fleet the pending record can name nothing, and the operator
+    /// (a different process, often a different cluster) has no way to
+    /// know that durable work is sitting uncited. This is that summary,
+    /// and it is written where it survives cluster loss.
+    ///
+    /// Written only when the candidate set CHANGES: a re-PUT per tick
+    /// would be a request the design does not need, and an empty doc
+    /// rewritten forever would be worse than none. The clearing write
+    /// matters as much as the surfacing one — a stale summary claiming
+    /// candidates pages an operator about work that was cited minutes
+    /// ago.
+    pub async fn surface_orphans(&self, stage: &PendingStage) -> LeanResult<bool> {
+        let epoch = self.lease.as_ref().map(|l| l.epoch).unwrap_or(0);
+        let candidates: Vec<OrphanCandidate> = stage
+            .entries
+            .iter()
+            .map(|(path, e)| OrphanCandidate {
+                path: path.clone(),
+                version_id: e.version_id.clone(),
+                size: e.size,
+                generation: e.generation,
+                epoch: e.epoch,
+                staged_unix: e.staged_unix,
+            })
+            .collect();
+        let fingerprint = {
+            let mut h = flint_store::Crc64Nvme::new();
+            for c in &candidates {
+                h.update(c.path.as_bytes());
+                h.update(c.version_id.as_deref().unwrap_or("").as_bytes());
+            }
+            format!("{:016x}", h.finalize())
+        };
+        let marker = self.cfg.state_dir().join("orphans-fingerprint");
+        if std::fs::read_to_string(&marker).ok().as_deref() == Some(fingerprint.as_str()) {
+            return Ok(false);
+        }
+        let doc = OrphanDoc {
+            written_unix: super::now_unix(),
+            epoch,
+            boundary_mode: self.cfg.boundary_mode.as_str().to_string(),
+            candidates,
+        };
+        let bytes = bytes::Bytes::from(
+            serde_json::to_vec_pretty(&doc).map_err(|e| LeanError::State(format!("orphans: {e}")))?,
+        );
+        let crc = flint_store::crc64_nvme(&bytes);
+        let stamps = GenerationStamps {
+            generation: 0,
+            epoch,
+            flush_uuid: "orphan-summary".into(),
+            boundary_source: None,
+            posix: None,
+        };
+        // Unconditional: this is a summary, not a protocol cell. A
+        // successor's summary must overwrite a dead holder's, and a
+        // 412-parked orphan doc would strand the very information the
+        // successor needs.
+        let key = self.orphans_key();
+        let cond = match self.store.head(&key).await {
+            Ok(m) => flint_store::PutCondition::IfMatch(m.etag),
+            Err(_) => flint_store::PutCondition::IfNoneMatchAny,
+        };
+        match self.store.put_whole(&key, bytes, &cond, &stamps, crc).await {
+            Ok(_) => {}
+            // Losing the race is fine: whoever won wrote a summary at
+            // least as new as ours, and the next change re-runs this.
+            Err(StoreError::PreconditionFailed(_)) => return Ok(false),
+            Err(e) => return Err(e.into()),
+        }
+        let _ = super::control::write_atomic(&marker, fingerprint.as_bytes());
+        Ok(true)
     }
 
     /// The upload lane: durability, every floor tick, no citation.
@@ -401,6 +508,12 @@ impl Sidecar {
         baseline.prev_scan = scanned.keys().cloned().collect();
         self.state.save_baseline(&baseline)?;
         self.save_stage(&stage)?;
+        // D9: the same set, surfaced where a pure-spot replacement
+        // cannot destroy it. Best-effort by construction — a failed
+        // summary must never fail the lane that made the bytes durable.
+        if let Err(e) = self.surface_orphans(&stage).await {
+            eprintln!("flint-sync: orphan summary not written (retrying next tick): {e}");
+        }
         // Durability moved even though visibility did not — the whole
         // point of the split, and the number `rpo_secs` must track.
         if !report.staged.is_empty() {
@@ -927,6 +1040,12 @@ impl Sidecar {
         stage.last_citation_unix = now_unix();
         stage.stable_since_unix = 0;
         self.save_stage(&stage)?;
+        // The CLEARING write matters as much as the surfacing one: a
+        // stale summary claiming candidates pages an operator about
+        // work that was cited minutes ago (D9).
+        if let Err(e) = self.surface_orphans(&stage).await {
+            eprintln!("flint-sync: orphan summary not cleared (retrying next tick): {e}");
+        }
 
         let queue: Vec<inbox::InboxEntry> = foreign
             .into_iter()
@@ -1163,112 +1282,25 @@ impl Sidecar {
         self.cfg.boundary_mode == BoundaryMode::Gated
     }
 
-    /// Remove every version of the probe key. Errors are ignored on
-    /// purpose: this is hygiene, and the probe's verdict must come from
-    /// the probe, not from a cleanup DELETE.
-    async fn sweep_probe(&self, key: &str) {
-        if let Ok(vs) = self.store.list_versions(key).await {
-            for v in vs.iter().filter(|v| v.key == key) {
-                let _ = self.store.delete_version(key, &v.version_id).await;
-            }
-        }
-    }
-
-    /// The versioning conformance probe (D8). A project-scoped proxy
-    /// that strips `x-amz-version-id` degrades gated mode SILENTLY —
-    /// pending entries would carry `None`, and citation would fall back
-    /// to etag semantics on a key whose current version is uncited,
-    /// which is precisely the torn view the mode exists to prevent. So
-    /// the probe REFUSES rather than degrading, and is re-run at
-    /// startup and on the operator cadence: proxies upgrade, and a
-    /// bucket's posture changes under you.
+    /// The versioning conformance probe (D8) — the SHARED
+    /// implementation in `flint_store::probe`, because the operator
+    /// runs the same probe on its reconcile cadence and the two
+    /// verdicts must never disagree. A workspace the operator calls
+    /// conformant and the sidecar refuses to start is worse than
+    /// either answer alone.
+    ///
+    /// A project-scoped proxy that strips `x-amz-version-id` degrades
+    /// gated mode SILENTLY — pending entries would carry `None`, and
+    /// citation would fall back to etag semantics on a key whose
+    /// current version is uncited, which is precisely the torn view the
+    /// mode exists to prevent. So the probe REFUSES rather than
+    /// degrading, and is re-run at startup and on the operator cadence:
+    /// proxies upgrade, and a bucket's posture changes under you.
     pub async fn versioning_conformance(&self) -> LeanResult<()> {
         let key = format!("{}/{}/probe/versioning", self.cfg.prefix, super::LEAN_DIR);
-        let stamps = GenerationStamps {
-            generation: 0,
-            epoch: 0,
-            flush_uuid: "version-probe".into(),
-            boundary_source: None,
-            posix: None,
-        };
-        let refuse =
-            |m: &str| LeanError::State(format!("versioning conformance probe FAILED: {m}"));
-
-        // The probe's OWN crash window, closed. It writes If-None-Match
-        // and cleans up at the end; a crash — or one failed cleanup
-        // DELETE — leaves the object behind, and every later probe then
-        // 412s on its first write. On a gated workspace that would be a
-        // permanent startup wedge produced by a transient error, so a
-        // leftover is swept, not refused.
-        let b1 = bytes::Bytes::from_static(b"probe-1");
-        let mut first = self
-            .store
-            .put_whole(&key, b1.clone(), &flint_store::PutCondition::IfNoneMatchAny, &stamps, flint_store::crc64_nvme(b"probe-1"))
-            .await;
-        if matches!(first, Err(StoreError::PreconditionFailed(_))) {
-            self.sweep_probe(&key).await;
-            first = self
-                .store
-                .put_whole(&key, b1, &flint_store::PutCondition::IfNoneMatchAny, &stamps, flint_store::crc64_nvme(b"probe-1"))
-                .await;
-        }
-        let m1 = first.or(Err(refuse("cannot write the probe object")))?;
-        let v1 = m1
-            .version_id
-            .clone()
-            .ok_or_else(|| refuse("PUT returned no x-amz-version-id (versioning off, or a proxy strips the header)"))?;
-
-        let b2 = bytes::Bytes::from_static(b"probe-2");
-        let m2 = self
-            .store
-            .put_whole(
-                &key,
-                b2,
-                &flint_store::PutCondition::IfMatch(m1.etag.clone()),
-                &stamps,
-                flint_store::crc64_nvme(b"probe-2"),
-            )
+        flint_store::probe::probe_version_surface(self.store.as_ref(), &key)
             .await
-            .or(Err(refuse("cannot supersede the probe object")))?;
-        let v2 = m2.version_id.clone().ok_or_else(|| refuse("no version id on the second PUT"))?;
-        if v1 == v2 {
-            return Err(refuse("the backend reused one version id for two PUTs"));
-        }
-
-        // The first version must still be fetchable BY ID — this is the
-        // read `pinned_reads` citations depend on.
-        let (_, body) = self
-            .store
-            .get_version(&key, &v1)
-            .await
-            .or(Err(refuse("version-scoped GET is unavailable")))?;
-        if body.as_ref() != b"probe-1" {
-            return Err(refuse("version-scoped GET returned the wrong generation"));
-        }
-        self.store
-            .head_version(&key, &v1)
-            .await
-            .or(Err(refuse("version-scoped HEAD is unavailable")))?;
-        let listed = self
-            .store
-            .list_versions(&key)
-            .await
-            .or(Err(refuse("ListObjectVersions is not permitted")))?;
-        if listed.iter().filter(|v| v.key == key && !v.is_delete_marker).count() < 2 {
-            return Err(refuse("ListObjectVersions did not report both generations"));
-        }
-        self.store
-            .delete_version(&key, &v1)
-            .await
-            .or(Err(refuse("version-scoped DELETE is unavailable")))?;
-        if self.store.head_version(&key, &v1).await.is_ok() {
-            return Err(refuse("version-scoped DELETE did not remove the version"));
-        }
-        let _ = self.store.delete_version(&key, &v2).await;
-        // Belt and braces: leave the key with no versions at all, so a
-        // partially-failed cleanup cannot wedge the NEXT probe either.
-        self.sweep_probe(&key).await;
-        Ok(())
+            .map_err(|m| LeanError::State(format!("versioning conformance probe FAILED: {m}")))
     }
 }
 

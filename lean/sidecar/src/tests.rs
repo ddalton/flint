@@ -2602,8 +2602,9 @@ impl ObjectStore for VersionStripping {
         &self,
         key: &str,
         lease: &flint_store::EpochLease,
+        echo: Option<&str>,
     ) -> flint_store::StoreResult<flint_store::EpochLease> {
-        self.0.epoch_renew(key, lease).await
+        self.0.epoch_renew(key, lease, echo).await
     }
     async fn epoch_release(
         &self,
@@ -3910,4 +3911,444 @@ async fn a_delete_cancels_the_version_the_lane_had_already_staged() {
             "the cancelled staging left an uncited version behind ({path})"
         );
     }
+}
+
+// ── Phase 4: the operator-facing surfaces (§2.6) ─────────────────────
+
+/// D12's heartbeat is the ONE request a live sidecar always pays, so it
+/// is where the observed-state echo rides (§2.6). Without it the
+/// operator can only report what the spec ASKED for: the env read is a
+/// fixed list, so `FLINT_SYNC_BOUNDARY_MODE=gated` reaching a
+/// pre-boundary binary is ignored in silence and the workspace runs
+/// fused cadence behind a green condition — the mixed-version hole D11
+/// closes on the agent side and nothing closed on the operator's.
+///
+/// The count is the part that has to be live rather than derived: the
+/// number of durable-but-invisible objects is gated mode's whole
+/// exposure, and it exists nowhere the operator can reach.
+#[tokio::test]
+async fn a_heartbeat_echoes_the_running_mode_into_the_lease_cell() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "seed.txt", "S1");
+    let cited = a.run_barrier().await.unwrap().seq.unwrap();
+    gated(&mut a);
+
+    // Durable, uncited work standing right now.
+    write(dir.path(), "ckpt.bin", "C1");
+    a.upload_lane().await.unwrap();
+    let staged = a.load_stage().unwrap().entries.len() as u64;
+    assert_eq!(staged, 1, "the fixture staged nothing — the echo's count would be 0 == 0");
+
+    a.heartbeat_tick().await.unwrap();
+
+    let cell = store.epoch_read(&a.cfg.epoch_key()).await.unwrap().unwrap();
+    let echo: flint_store::LeaseEcho = serde_json::from_str(
+        cell.echo.as_deref().expect("the heartbeat carried no observed-state echo"),
+    )
+    .expect("the echo is not a LeaseEcho");
+    assert_eq!(echo.active_boundary_mode, "gated", "the echo reports the spec, not the run");
+    assert_eq!(echo.staged_uncited_count, staged, "the gated exposure is not echoed");
+    assert_eq!(echo.last_cited_seq, cited, "the echo names no citation");
+    assert_eq!(echo.protocol, super::SENTINEL_PROTOCOL);
+    assert!(!echo.sidecar_version.is_empty(), "no version ⇒ no mixed-fleet tell");
+}
+
+/// D8's refusal arm, as a unit test rather than only as drill leg
+/// B24(a): a project-scoped proxy that answers every PUT successfully
+/// but strips `x-amz-version-id`. Everything keeps working until a
+/// citation needs to NAME a version — at which point pending entries
+/// carry `None` and citation falls back to etag semantics on a key
+/// whose current version is uncited, which is the torn view gated mode
+/// exists to prevent. The probe must refuse, never degrade.
+#[tokio::test]
+async fn a_version_stripping_proxy_refuses_gated_startup() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    gated(&mut a);
+
+    // Control: the same probe against a conformant store passes, so a
+    // later failure tracks the proxy and not the fixture.
+    a.gated_startup_check().await.expect("a conformant store must pass the probe");
+
+    store.strip_version_ids(true);
+    let err = a.gated_startup_check().await.expect_err("a stripping proxy was accepted");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("x-amz-version-id"),
+        "the refusal must name the header a proxy operator can fix: {msg}"
+    );
+}
+
+/// D9's durable surfacing. `pending.json` lives on the emptyDir — the
+/// one thing a pure-spot replacement is guaranteed to destroy — so on
+/// this fleet's ROUTINE failure the record that names uncited work dies
+/// with the pod that staged it. The summary has to live in the bucket.
+///
+/// The clearing write is half the contract: a summary still claiming
+/// candidates after a citation pages an operator about work that is
+/// already visible, and an alert that cries wolf is worse than no
+/// alert.
+#[tokio::test]
+async fn uncited_work_is_surfaced_durably_and_cleared_by_its_citation() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "seed.txt", "S1");
+    a.run_barrier().await.unwrap();
+    gated(&mut a);
+
+    let key = a.orphans_key();
+    write(dir.path(), "ckpt.bin", "C1");
+    a.upload_lane().await.unwrap();
+    assert_eq!(a.load_stage().unwrap().entries.len(), 1, "the fixture staged nothing");
+
+    let (_, body) = store.get_whole(&key, None).await.expect("no durable orphan summary");
+    let doc: super::gated::OrphanDoc = serde_json::from_slice(&body).unwrap();
+    assert_eq!(doc.candidates.len(), 1);
+    assert_eq!(doc.candidates[0].path, "ckpt.bin");
+    assert!(
+        doc.candidates[0].version_id.is_some(),
+        "a candidate with no version id cannot be recovered by name"
+    );
+
+    // The pod dies here in the routine case; the summary must not.
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+    let (_, body) = store.get_whole(&key, None).await.unwrap();
+    let doc: super::gated::OrphanDoc = serde_json::from_slice(&body).unwrap();
+    assert!(
+        doc.candidates.is_empty(),
+        "the summary still names work the citation made visible: {:?}",
+        doc.candidates
+    );
+}
+
+/// The summary is written on CHANGE, not on every tick: a re-PUT per
+/// lane tick is a request the design does not need, and leg B8's
+/// zero-added-cost oracle counts every one of them.
+#[tokio::test]
+async fn an_unchanged_orphan_set_costs_no_request() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+    write(dir.path(), "ckpt.bin", "C1");
+    a.upload_lane().await.unwrap();
+    let first = store.head(&a.orphans_key()).await.unwrap().etag;
+
+    // A tick with nothing new to say. Counted in VERSIONS, not etags:
+    // the doc's timestamp is second-granular, so two writes inside one
+    // second produce identical bytes and an etag oracle would pass with
+    // the guard removed — the same "the oracle cannot see the failure"
+    // shape the prefix-overlap leg was caught by.
+    a.upload_lane().await.unwrap();
+    let versions = store
+        .list_versions(&a.orphans_key())
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|v| v.key == a.orphans_key())
+        .count();
+    assert_eq!(versions, 1, "an unchanged candidate set re-wrote the summary");
+    assert_eq!(store.head(&a.orphans_key()).await.unwrap().etag, first);
+}
+
+// ── Phase 5: the layered doors (§2.5, D14) ───────────────────────────
+
+/// The doors are SUGAR over one consume path, and this is the test that
+/// says so: a UDS boundary (`request_boundary`, which is exactly what
+/// the socket handler calls) and a file-protocol touch inside the same
+/// min-interval coalesce into ONE barrier whose single ack covers both
+/// nonces. Two implementations would produce two barriers, or two acks,
+/// or an ack that named only one of them.
+#[tokio::test]
+async fn a_uds_boundary_and_a_file_sentinel_coalesce_into_one_ack() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    // Two honors in one test: the min-interval would defer the second,
+    // and the claim under test is about the consume path, not cadence.
+    a.cfg.sentinel_min_interval_secs = 0;
+    write(dir.path(), "work.txt", "W1");
+
+    // BOTH orders, because they are not symmetric and only one of them
+    // discriminates. Settle-before-consume means the FILE path always
+    // folds into a standing record, so a socket handler that minted its
+    // own record would still look right if the socket went first — the
+    // file touch would coalesce into it. File-first is the order that
+    // catches it: a second implementation overwrites the standing
+    // record and the ack silently loses the file's nonce.
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"file:1"}"#);
+    a.poll_sentinels().unwrap();
+    a.request_boundary("uds:1", Some("from the socket".into())).unwrap();
+
+    let acks = a.sentinel_tick().await.unwrap();
+    assert_eq!(acks.len(), 1, "the two doors produced {} barriers", acks.len());
+    let ack = &acks[0];
+    assert_eq!(ack.status, "ok");
+    for n in ["uds:1", "file:1"] {
+        assert!(
+            ack.nonces.iter().any(|x| x == n),
+            "the ack does not cover {n}: {:?}",
+            ack.nonces
+        );
+    }
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("work.txt"), "the coalesced boundary published nothing");
+
+    // And the other order, for coverage of the coalescing rule itself.
+    write(dir.path(), "work2.txt", "W2");
+    a.request_boundary("uds:2", None).unwrap();
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"file:2"}"#);
+    a.poll_sentinels().unwrap();
+    let acks = a.sentinel_tick().await.unwrap();
+    assert_eq!(acks.len(), 1);
+    for n in ["uds:2", "file:2"] {
+        assert!(acks[0].nonces.iter().any(|x| x == n), "socket-first lost {n}");
+    }
+}
+
+/// The gateway's boundary request is a FIELD on the inbox document, not
+/// a fake no-object entry: `consume_inbox` HEADs `file_key(path)` for
+/// every entry, so an entry naming no object lands in the NotFound arm
+/// as a spurious `consume-object-missing` conflict.
+///
+/// It is also consumed on the inbox GET the barrier already pays for —
+/// the anti-vacuity check here is that no conflict record was minted
+/// and the pending sentinel really exists afterwards.
+#[tokio::test]
+async fn a_gateway_boundary_request_becomes_a_pending_sentinel_with_no_conflict() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+
+    inbox::gateway_request(
+        store.as_ref(),
+        &a.cfg,
+        inbox::RequestedVerb::Boundary,
+        "ci@example",
+    )
+    .await
+    .unwrap();
+
+    write(dir.path(), "work.txt", "W1");
+    a.consume_inbox().await.unwrap();
+
+    let pending = a.load_pending(super::sentinel::Verb::Publish).unwrap();
+    let pending = pending.expect("the gateway request minted no pending sentinel");
+    assert!(
+        pending.nonces.iter().any(|n| n.contains("ci@example")),
+        "the requestor is not in the covered nonces: {:?}",
+        pending.nonces
+    );
+    assert_eq!(
+        std::fs::read_to_string(a.cfg.state_dir().join("conflicts.jsonl")).unwrap_or_default(),
+        "",
+        "the boundary request minted a conflict record"
+    );
+
+    // Idempotent state, not a queue: a second consume of the SAME
+    // request must not mint a second boundary.
+    let before = pending.nonces.len();
+    a.consume_inbox().await.unwrap();
+    assert_eq!(
+        a.load_pending(super::sentinel::Verb::Publish).unwrap().unwrap().nonces.len(),
+        before,
+        "the same gateway request was consumed twice"
+    );
+}
+
+/// D14, with the failing control the plan asks for: a gateway sync
+/// request moves the ticker and mutates NOTHING. `sync` deletes local
+/// files for remotely-deleted paths, so performing it on a remote's
+/// say-so would upgrade a leaked bearer from "publish, plus hand over
+/// these N named objects" to "rewrite and delete across a running
+/// agent's tree, at my timing, under a scope I choose".
+#[tokio::test]
+async fn a_gateway_sync_request_is_carried_and_never_executed() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "keep.txt", "LOCAL");
+    a.run_barrier().await.unwrap();
+
+    // A foreign party deletes the file remotely — the exact change a
+    // performed sync would apply to the local tree.
+    let mut m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    m.manifest.entries.remove("keep.txt");
+    m.manifest.seq += 1;
+    manifest::cas_write(store.as_ref(), &a.cfg, &m.manifest, Some(&m.etag), 9, "foreign")
+        .await
+        .unwrap();
+
+    let tree_before = read(dir.path(), "keep.txt");
+    inbox::gateway_request(store.as_ref(), &a.cfg, inbox::RequestedVerb::Sync, "ci@example")
+        .await
+        .unwrap();
+    a.consume_inbox().await.unwrap();
+
+    assert_eq!(
+        read(dir.path(), "keep.txt"),
+        tree_before,
+        "the sidecar EXECUTED a sync on a remote's say-so and rewrote the agent's tree"
+    );
+    assert!(tree_before.is_some(), "the fixture had nothing to lose");
+    let t: control::RemoteSeq = serde_json::from_slice(
+        &std::fs::read(dir.path().join(".flint/remote.seq")).unwrap(),
+    )
+    .unwrap();
+    assert!(t.sync_requested_unix.is_some(), "the request was not carried to the agent");
+    assert_eq!(t.sync_requested_by.as_deref(), Some("ci@example"));
+    // And no publish sentinel was minted: a sync request is not a
+    // boundary request wearing a different name.
+    assert!(a.load_pending(super::sentinel::Verb::Publish).unwrap().is_none());
+}
+
+// ── Phase 6: /metrics (D15) ──────────────────────────────────────────
+
+/// The parity gate: every field in `gauges.json` reaches exactly one
+/// metric, and every metric reports a field. Two computations of the
+/// same number drift, and the drift is invisible until somebody makes a
+/// decision on the wrong one — so there is one struct, one renderer,
+/// and this test says so field by field.
+#[test]
+fn every_gauges_field_reaches_exactly_one_metric() {
+    let g = super::Gauges {
+        state: "live".into(),
+        boundary_mode: "gated".into(),
+        rpo_secs: 11,
+        visibility_lag_secs: 22,
+        staged_uncited_count: 3,
+        staged_uncited_bytes: 4096,
+        cited_noncurrent_age_max_secs: 33,
+        withheld_reason: Some("awaiting-boundary".into()),
+        sentinel_budget_remaining: 44,
+        forced_citation_count: 5,
+        last_boundary: Some(super::gauges::LastBoundary {
+            source: "quiescence".into(),
+            seq: 66,
+            unix: 1_756_000_000,
+        }),
+        updated_unix: 1_756_000_100,
+        last_durable_unix: 1_756_000_050,
+    };
+    let json = serde_json::to_value(&g).unwrap();
+    let fields: Vec<String> = json.as_object().unwrap().keys().cloned().collect();
+    assert!(fields.len() >= 13, "the fixture did not populate the struct: {fields:?}");
+
+    for f in &fields {
+        assert!(
+            super::metrics::COVERED_FIELDS.contains(&f.as_str()),
+            "gauges field {f:?} reaches no metric — an operator reading /metrics cannot see \
+             what an operator reading gauges.json can"
+        );
+    }
+    for f in super::metrics::COVERED_FIELDS {
+        assert!(
+            fields.iter().any(|x| x == f),
+            "metric table names {f:?}, which is not a gauges field any more"
+        );
+    }
+
+    // …and the VALUES agree at the same tick, not just the names.
+    let text = super::metrics::render(
+        &g,
+        &super::metrics::Labels { workspace: "proj1".into(), namespace: "agents".into() },
+    );
+    for (name, want) in [
+        ("flint_lean_rpo_seconds", 11u64),
+        ("flint_lean_visibility_lag_seconds", 22),
+        ("flint_lean_staged_uncited_objects", 3),
+        ("flint_lean_staged_uncited_bytes", 4096),
+        ("flint_lean_cited_noncurrent_age_max_seconds", 33),
+        ("flint_lean_sentinel_budget_remaining", 44),
+        ("flint_lean_forced_citations_total", 5),
+        ("flint_lean_last_boundary_seq", 66),
+        ("flint_lean_boundary_mode", 2),      // gated
+        ("flint_lean_withheld_reason", 2),    // awaiting-boundary
+        ("flint_lean_last_boundary_source", 2), // quiescence
+        ("flint_lean_fenced", 0),
+    ] {
+        let line = text
+            .lines()
+            .find(|l| l.starts_with(name) && !l.starts_with('#'))
+            .unwrap_or_else(|| panic!("no series for {name}"));
+        let got: u64 = line.rsplit(' ').next().unwrap().parse().unwrap();
+        assert_eq!(got, want, "{name} disagrees with the gauges it renders");
+    }
+}
+
+/// The label-key set is exactly `{workspace, namespace}`. The failing
+/// control this test exists to be: a per-path metric multiplies series
+/// by the workspace's inventory — 250,000 files is the shipped cap —
+/// across a 3,000-workspace fleet.
+#[test]
+fn the_label_key_set_is_exactly_workspace_and_namespace() {
+    let g = super::Gauges { state: "live".into(), boundary_mode: "hybrid".into(), ..Default::default() };
+    let text = super::metrics::render(
+        &g,
+        &super::metrics::Labels { workspace: "proj1".into(), namespace: "agents".into() },
+    );
+    let mut series = 0;
+    for line in text.lines().filter(|l| !l.starts_with('#')) {
+        let labels = line
+            .split_once('{')
+            .and_then(|(_, r)| r.split_once('}'))
+            .map(|(l, _)| l)
+            .unwrap_or_else(|| panic!("unlabelled series: {line}"));
+        let keys: Vec<&str> =
+            labels.split(',').map(|kv| kv.split_once('=').unwrap().0).collect();
+        assert_eq!(
+            keys,
+            vec!["workspace", "namespace"],
+            "series carries label keys beyond the fixed set: {line}"
+        );
+        series += 1;
+    }
+    assert!(series >= 13, "the renderer emitted almost nothing: {series}");
+}
+
+/// A scrape costs zero bucket requests, and the type system is what
+/// says so: `render` takes a `Gauges` and nothing else — no store, no
+/// async, no stage. This test is the readable form of that argument,
+/// and it fails the moment someone gives the renderer a way to reach
+/// the bucket.
+#[tokio::test]
+async fn a_scrape_costs_no_bucket_request() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "work.txt", "W1");
+    a.run_barrier().await.unwrap();
+    let g = a.write_gauges(false, None).unwrap();
+
+    let before = store.list("").await.unwrap().len();
+    for _ in 0..25 {
+        let text = super::metrics::render(
+            &g,
+            &super::metrics::Labels { workspace: "w".into(), namespace: "n".into() },
+        );
+        assert!(text.contains("flint_lean_rpo_seconds"));
+    }
+    assert_eq!(
+        store.list("").await.unwrap().len(),
+        before,
+        "25 scrapes changed the bucket"
+    );
 }
