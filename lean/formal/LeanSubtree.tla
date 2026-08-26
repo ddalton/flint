@@ -59,9 +59,23 @@ CONSTANTS
   RematerializeOnRestart, \* TRUE = mutation: re-checkout over a live tree
   \* ---- tranche 2: the sync verb x barrier product ----------------------
   SyncEnabled,         \* FALSE in every tranche-1 cfg (spaces preserved)
-  SyncScanFirst        \* FALSE: sync judges dirt from the LAST BARRIER's
+  SyncScanFirst,       \* FALSE: sync judges dirt from the LAST BARRIER's
                        \* snapshot instead of its own scan (the refuted
                        \* design; the review's steady-state destruction)
+  \* ---- tranche 3 product 4: the SCOPED sync verb (boundary-verbs D4) ----
+  SyncScope,           \* TRUE: the sentinel's scoped form — remote changes
+                       \* apply only to in-scope paths.  FALSE in every
+                       \* tranche-1/2 cfg, so those state spaces are
+                       \* preserved by construction.
+  ScopedInstBase       \* TRUE  = D4: a scoped sync advances the MERGE BASE
+                       \* only for paths it applied or verified in scope.
+                       \* FALSE = the mutation: it advances the whole
+                       \* instBase to bucket-current, so every out-of-scope
+                       \* foreign entry reads as already-integrated at the
+                       \* next merge and is lost from the inbox flow
+                       \* FOREVER.  `instBase` is the object the model has
+                       \* refuted naive designs on twice; D4 rewrites its
+                       \* per-path semantics, which is why it is modelled.
 
 Sidecars == {"A", "B"}
 
@@ -131,7 +145,18 @@ vars == <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox, window,
      barriers, done, gc, refusals, cited, takeovers, crashes, restarts : Nat
      adoptOwn : Nat      the own-crashed-PUT 412 adoption fired
      stallUsed BOOLEAN
-     nextGen, hitl : Nat *)
+     nextGen, hitl : Nat
+     scopedDeferrals : Nat  paths a SCOPED sync saw changed remotely and
+                            deliberately left for the inbox flow (the
+                            action-written non-vacuity ghost: the probe
+                            names the ACTION, never the situation)
+     foreignLost BOOLEAN    a sync advanced the merge base for a path it
+                            neither applied nor surfaced a conflict for —
+                            i.e. it claimed to have integrated a generation
+                            it never saw.  That is exactly the silent,
+                            permanent loss D4 exists to prevent: the next
+                            merge computes `changed = FALSE` for it and it
+                            is never queued again. *)
 
 ------------------------------------------------------------------------------
 (* Helpers *)
@@ -177,7 +202,8 @@ Init ==
            cited |-> 0, takeovers |-> 0, crashes |-> 0, restarts |-> 0,
            adoptOwn |-> 0, stallUsed |-> FALSE, nextGen |-> 2, hitl |-> 0,
            syncs |-> 0, syncApplied |-> 0, syncConflicts |-> 0,
-           syncDestroyed |-> FALSE]
+           syncDestroyed |-> FALSE,
+           scopedDeferrals |-> 0, foreignLost |-> FALSE]
 
 ------------------------------------------------------------------------------
 (* Lifecycle *)
@@ -623,7 +649,15 @@ Sync(s) ==
   /\ SyncEnabled
   /\ Running(s) /\ sc[s].pc = "idle"
   /\ gh.syncs < MaxSyncs
-  /\ LET
+  \* The agent's scope (D4).  A whole-tree sync is the shipped verb and
+  \* is modelled as scope = Paths; the sentinel's scoped form lets TLC
+  \* choose any proper non-empty subset, which is stronger than fixing
+  \* one — the loss this product exists to catch depends on WHICH path
+  \* is left out.
+  /\ \E scope \in (IF SyncScope
+                   THEN {sub \in SUBSET Paths : sub # {} /\ sub # Paths}
+                   ELSE {Paths}) :
+     LET
        \* Ground truth, independent of the arm under test.
        trueDirty == {p \in Paths : sc[s].local[p] # sc[s].baseline[p]}
        \* What THIS arm believes is dirty.
@@ -633,8 +667,33 @@ Sync(s) ==
        remote(p) == IF \E pr \in inbox : pr[1] = p /\ objects[p] = pr[2]
                     THEN objects[p] ELSE manifest[p]
        changed == {p \in Paths : remote(p) # sc[s].instBase[p]}
-       applicable == changed \ dirt
-       conflicted == changed \cap dirt
+       \* Out-of-scope remote changes are NOT integrated and NOT
+       \* advanced: they stay foreign and reach this workspace through
+       \* the normal merge -> inbox -> consume path at the next barrier.
+       deferred == changed \ scope
+       applicable == (changed \ dirt) \cap scope
+       conflicted == (changed \cap dirt) \cap scope
+       \* Which paths this sync is ENTITLED to advance the merge base
+       \* for: the ones it applied, plus the ones it verified unchanged.
+       \* A conflicted path is deliberately NOT advanced — its local
+       \* bytes won, and the remote generation is still owed to us.
+       advanced == applicable \cup (Paths \ changed)
+       newInstBase ==
+         IF SyncScope /\ ScopedInstBase
+         THEN [p \in Paths |->
+                IF p \in advanced THEN manifest[p] ELSE sc[s].instBase[p]]
+         ELSE [p \in Paths |-> manifest[p]]
+       \* THE LOSS STAMP.  The merge base moved for a path this sync
+       \* neither applied nor surfaced a conflict for, and whose bytes
+       \* we do not hold: we have just claimed to have integrated a
+       \* generation we never saw.  `foreign(p)` is FALSE at every
+       \* subsequent merge, so it is never queued again — silent and
+       \* permanent.
+       lost == \E p \in Paths :
+                 /\ p \notin applicable
+                 /\ p \notin conflicted
+                 /\ newInstBase[p] # sc[s].instBase[p]
+                 /\ sc[s].baseline[p] # remote(p)
        \* A DESTROYING apply: the path was TRULY dirty, sync moved its
        \* local content anyway (a remote fetch or a remote-delete), and
        \* no conflict was surfaced for it.  Under SyncScanFirst this is
@@ -649,14 +708,16 @@ Sync(s) ==
               IF p \in applicable THEN remote(p) ELSE @[p]],
             ![s].baseline = [p \in Paths |->
               IF p \in applicable THEN remote(p) ELSE @[p]],
-            ![s].instBase = [p \in Paths |-> manifest[p]],
+            ![s].instBase = newInstBase,
             ![s].known = @ \cup {remote(p) : p \in applicable},
             ![s].lastDirty = {}]
        /\ conflicts' = conflicts \cup {<<p, remote(p)>> : p \in conflicted}
        /\ gh' = [gh EXCEPT !.syncs = @ + 1,
             !.syncApplied = @ + Cardinality(applicable),
             !.syncConflicts = @ + Cardinality(conflicted),
-            !.syncDestroyed = @ \/ destroys]
+            !.syncDestroyed = @ \/ destroys,
+            !.scopedDeferrals = @ + (IF SyncScope THEN Cardinality(deferred) ELSE 0),
+            !.foreignLost = @ \/ lost]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
                  window, hitlAcked>>
 
@@ -710,6 +771,13 @@ Inv_NoResurrection == ~gh.resurrected
 \* surfacing it (tranche 2).
 Inv_SyncNeverDestroysDirty == ~gh.syncDestroyed
 
+\* D4 (boundary-verbs plan §2.2).  A sync never advances the MERGE BASE
+\* for a path it did not integrate and did not surface.  Violating this
+\* is not a stale read — it is permanent: `foreign(p)` at every later
+\* merge compares theirs against the base we just falsified, computes
+\* "unchanged", and the entry is never queued into the inbox again.
+Inv_NoForeignLost == ~gh.foreignLost
+
 ------------------------------------------------------------------------------
 (* Non-vacuity probes — each names an ACTION via a ghost that only that
    action writes, and TLC is REQUIRED to violate it (the A2 probe rule:
@@ -726,5 +794,8 @@ ProbeAdoptOwn         == gh.adoptOwn = 0
 ProbeRestart          == gh.restarts = 0
 ProbeSyncApplied      == gh.syncApplied = 0
 ProbeSyncConflict     == gh.syncConflicts = 0
+\* Action-written (Sync's own ghost): a SCOPED sync actually deferred a
+\* remote change, rather than the scoped arm never having fired.
+ProbeScopedDeferral   == gh.scopedDeferrals = 0
 
 ==============================================================================

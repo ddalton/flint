@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 KEYS="MaxGen MaxSeq MaxHitl MaxBarriers MaxCrashes MaxRestarts MaxSyncs \
 AllowStall InboxEnabled MergeCapable ConflictSurfacing WindowCheck Rotation \
 EpochCheck GuardedGC DeletesAfterCAS RematerializeOnRestart SyncEnabled \
-SyncScanFirst"
+SyncScanFirst SyncScope ScopedInstBase"
 
 emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   local name=$1 invs=$2; shift 2
@@ -18,6 +18,9 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   local c_WindowCheck=TRUE c_Rotation=TRUE c_EpochCheck=TRUE
   local c_GuardedGC=TRUE c_DeletesAfterCAS=TRUE c_RematerializeOnRestart=FALSE
   local c_SyncEnabled=FALSE c_SyncScanFirst=TRUE
+  # tranche 3 product 4: FALSE in every pre-existing cfg, so tranche-1/2
+  # state spaces are preserved by construction (scope collapses to Paths).
+  local c_SyncScope=FALSE c_ScopedInstBase=TRUE
   local kv
   for kv in "$@"; do eval "c_${kv%%=*}=${kv#*=}"; done
   {
@@ -108,3 +111,31 @@ emit LeanProbeSyncApplied "ProbeSyncApplied" \
 emit LeanProbeSyncConflict "ProbeSyncConflict" \
   SyncEnabled=TRUE MaxSyncs=1 MaxHitl=1 MaxGen=3 MaxBarriers=1 \
   MaxCrashes=0 MaxRestarts=0
+
+# ---- tranche 3, product 4: scoped sync x the merge base (D4) ---------------
+# `instBase` is the object the model has refuted naive designs on twice.
+# D4 rewrites its PER-PATH semantics, so it is modelled before the rule is
+# trusted — the FlintTierSession precedent.
+#
+# WORLD NOTE (found by running it, and it cost a wrong first cfg).  The D4
+# loss needs an out-of-scope change that lives in the MANIFEST, not in the
+# inbox: an inbox-overlaid change survives a wholesale instBase advance
+# untouched, because the entry itself is still queued.  In this design the
+# only legitimate foreign manifest installer is a takeover SUCCESSOR, so
+# these runs need AllowStall + a second barrier — with MaxBarriers=1 and no
+# stall arm the hazard is UNREACHABLE and the mutation runs green against a
+# state space that never contained the bug.  The same mistake made the first
+# Rust test for this rule vacuous.
+# Budget: MaxGen=2 + MaxHitl=0 (the takeover cfgs' depth-buying trick).
+# Verified as a pilot BEFORE it was locked in: at this budget the holds run
+# completes in ~9 s AND both the mutation and the probe still fire, so the
+# strict run is not checking a smaller world than the bug lives in. At
+# MaxGen=3/MaxHitl=1 the holds run passed 30M states without terminating.
+SCOPEWORLD="SyncEnabled=TRUE SyncScope=TRUE AllowStall=TRUE MaxSyncs=1 \
+MaxHitl=0 MaxGen=2 MaxBarriers=2 MaxCrashes=0 MaxRestarts=0"
+emit LeanScopedSyncHolds "$ALLINV,Inv_SyncNeverDestroysDirty,Inv_NoForeignLost" \
+  $SCOPEWORLD
+emit LeanScopedSyncWholeBase "Inv_NoForeignLost" \
+  $SCOPEWORLD ScopedInstBase=FALSE
+emit LeanProbeScopedDeferral "ProbeScopedDeferral" \
+  $SCOPEWORLD

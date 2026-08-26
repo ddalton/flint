@@ -119,5 +119,12 @@ mutation_run $M LeanProbeSyncApplied.cfg  "probe: sync actually applies a remote
 mutation_run $M LeanProbeSyncConflict.cfg "probe: sync actually surfaces a dirty-path conflict" \
   "Invariant ProbeSyncConflict is violated"
 
+# ---- tranche 3, product 4: the SCOPED sync verb x the merge base (D4) ------
+strict_run $M LeanScopedSyncHolds.cfg "scoped sync: the merge base advances ONLY for paths applied or verified in scope"
+mutation_run $M LeanScopedSyncWholeBase.cfg "a scoped sync advancing the WHOLE merge base loses every out-of-scope foreign entry from the inbox flow, permanently" \
+  "Invariant Inv_NoForeignLost is violated"
+mutation_run $M LeanProbeScopedDeferral.cfg "probe: a scoped sync actually defers an out-of-scope remote change" \
+  "Invariant ProbeScopedDeferral is violated"
+
 echo
-echo "lean formal gate: $PASS/24 runs green"
+echo "lean formal gate: $PASS/27 runs green"

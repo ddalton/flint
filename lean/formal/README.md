@@ -13,7 +13,7 @@ a library. Nothing here is wired into `scripts/check-tla.sh`.
 ## Running
 
 ```
-./check.sh          # the 24-run gate (~minutes)
+./check.sh          # the 27-run gate (~75 s)
 ./gen-cfgs.sh       # regenerate the cfg matrix
 ```
 
@@ -108,6 +108,46 @@ agent's un-scanned latest work with no conflict record.
 Two probes keep the strict run honest: `ProbeSyncApplied` (sync really
 does apply a remote change) and `ProbeSyncConflict` (it really does
 surface a dirty-path conflict) — both must be violated.
+
+## Tranche 3, product 4 (2026-08-25): the SCOPED sync verb × the merge base
+
+The boundary-verbs plan's D4 rewrites the per-path semantics of
+`instBase` — the object this model has refuted naive designs on twice —
+so it is modelled before the rule is trusted. `SyncScope` is FALSE in
+every tranche-1/2 cfg (scope collapses to `Paths`), so those state
+spaces are preserved by construction.
+
+`ScopedInstBase` is the arm. TRUE = D4: a scoped sync advances the merge
+base only for paths it applied or verified in scope. FALSE = the
+mutation: it advances the whole base to bucket-current, so every
+out-of-scope foreign entry reads as already-integrated at the next
+merge, `foreign(p)` is FALSE forever after, and the entry is never
+queued into the inbox again. `Inv_NoForeignLost` is the stamp; the loss
+is *silent and permanent*, which is why it is a safety invariant rather
+than a staleness note.
+
+**The world note, and it cost a wrong cfg before it was written down.**
+The D4 loss needs an out-of-scope change that lives in the MANIFEST, not
+in the inbox: an inbox-overlaid change survives a wholesale `instBase`
+advance untouched, because the entry itself is still queued. In this
+design the only legitimate foreign manifest installer is a takeover
+successor — so these runs need `AllowStall` and a second barrier. With
+`MaxBarriers=1` and no stall arm the hazard is UNREACHABLE and the
+mutation runs green against a state space that never contained the bug.
+The first hand-written Rust test for this rule was vacuous for exactly
+the same reason: it used a HITL inbox entry as the out-of-scope change
+and passed with the hazard reintroduced.
+
+**Budget, verified as a pilot before being locked in** (the plan's
+affordability obligation): `MaxGen=2` + `MaxHitl=0`, the takeover cfgs'
+depth-buying trick. At that budget the strict run completes in ~9 s AND
+both the mutation and the probe still fire — the strict run is not
+checking a smaller world than the bug lives in. At `MaxGen=3`/`MaxHitl=1`
+the strict run passed 30M states without terminating.
+
+`ProbeScopedDeferral` is action-written (Sync's own ghost counts the
+paths it deliberately deferred), per the house rule that a probe names
+the ACTION and never the situation.
 
 ## Deliberate abstractions (tranche 1 — residuals, not coverage)
 
