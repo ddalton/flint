@@ -263,6 +263,25 @@ spec:
                 format: uint64
                 minimum: 0.0
                 type: integer
+              udsDoor:
+                default: false
+                description: |-
+                  The UDS control door (§2.5, Phase 5): a Unix socket at
+                  `<mountPath>/.flint-sync/ctl.sock` serving `POST /v1/boundary`,
+                  `POST /v1/sync` and `GET /v1/status`.
+
+                  Pure sugar over the file protocol — a socket request lands in
+                  the same pending record a `.flint/publish` touch would, so it
+                  obeys the same min-interval, budget and ack rules — with one
+                  thing the files cannot give: a SYNCHRONOUS answer, instead of
+                  polling `.flint/publish.ack`. Pod-internal only; there is no TCP
+                  listener and no auth, because the trust boundary is the pod,
+                  exactly as it already is for the sentinel files.
+
+                  Off by default: the file protocol is the only guaranteed
+                  interface, and a bind failure degrades to a log line rather than
+                  failing the workspace.
+                type: boolean
               visibilityLagBoundSecs:
                 description: |-
                   Gated only, and REQUIRED there: the hard cap on citation

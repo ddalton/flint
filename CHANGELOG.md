@@ -10,6 +10,107 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [1.38.0] - 2026-08-26
+
+**A lean-scoped release.** Only the `flint-lean` chart and the two images
+it pulls are published; the CSI driver chart, the lite charts and the
+SPDK target image are untouched and stay at 1.37.0. The CSI chart has
+zero files changed since v1.37.0, and republishing every image at a new
+tag to ship a lean chart would be cost without meaning.
+
+### Added
+
+- **Boundary verbs.** An agent declares a coherent point by writing
+  `.flint/publish` (or `.flint/sync`) into the workspace it already has,
+  and reads the answer from `.flint/publish.ack`: `ok` means the named
+  boundary is installed in the bucket, `partial` means it installed
+  without something the agent declared, `refused-fenced` means this
+  sidecar lost the lease and is saying so rather than leaving the agent
+  waiting. No port, no client, no credential — the workspace is the
+  interface. A workspace that ignores them pays nothing: measured at 20
+  bucket requests per 22 s idle with the verbs off and 20 with them on.
+- **`.flint/remote.seq`** — a local news ticker fed by the barrier's own
+  HEAD, so N agents learn of foreign publishes at zero added bucket
+  cost, with a heartbeat field that separates "no news" from "sidecar
+  dead".
+- **Gated boundary mode** — durability split from visibility. The upload
+  lane makes every changed file durable as a new object version
+  immediately; ONE compare-and-swap then decides when readers may see
+  the whole set. A reader sees the entire change or none of it. Gated is
+  REFUSED without a visibility lag bound, so unbounded staleness is
+  impossible by construction.
+- **`flint-sync recover-staged`** and a durable `orphans.json`, so
+  uncited work is recoverable from bucket truth alone after a pod
+  replacement takes the emptyDir with it.
+- **The lean operator, CRD and mutating webhook** — one
+  FlintLeanWorkspace per subtree; the webhook injects the sidecar as a
+  native sidecar so the workspace is materialized before the agent's
+  first line, and an opted-in pod whose workspace is missing or refused
+  does not schedule.
+- **Opt-in `/metrics`**, rendered from the same struct as
+  `gauges.json`, with the label set fixed at `{workspace, namespace}`.
+- **A production image recipe for `flint-sync`**
+  (`docker/Dockerfile.sync.prebuilt`) and the lean binaries added to the
+  operator image — see Fixed.
+
+### Fixed
+
+- **The chart could not install.** `flint-lean-chart` execs
+  `/usr/local/bin/flint-lean-operator` from the `flint-lite-operator`
+  image, and that binary was not in it — an install was a
+  CrashLoopBackOff on "no such file or directory". The sidecar image the
+  webhook injects had no production recipe anywhere. Both fixed, and
+  `scripts/release.sh` now gates the lean chart the way it gates the
+  others: `grep -c flint-lean scripts/release.sh` was 0.
+- **The sidecar could not reach a TLS S3 endpoint.** `flint-store` builds
+  the AWS SDK with `rustls`, which resolves to `rustls-native-certs` —
+  the system trust store — so a certless base image fails every HTTPS
+  endpoint. Every drill missed it because MinIO is plain HTTP. The image
+  carries `ca-certificates`, and a shell, which the injected startupProbe
+  needs.
+- **A long barrier starved the lease renewal.** The run loop is one
+  `select!`, so while the floor arm ran — and that call contains the
+  whole upload loop — the renewal arm could not fire. A deposed straggler
+  therefore could not learn it was deposed, and worse, a HEALTHY sidecar
+  could outrun the 60 s takeover window and have a standby take the lease
+  off a live writer. The upload phase is chunked and renews between
+  chunks if due: no added requests on a short barrier.
+- **The gateway ignored `pinned_reads`** and returned 409 for every
+  staged-but-uncited file — the human read path went dark exactly when
+  gated mode was doing its job. It now resolves the cited `version_id`
+  the way `checkout` does.
+- **No boundary recorded which clock installed it** outside gated mode,
+  and once stamped, the drain's ack and its manifest named two different
+  clocks. Both fixed; the ack and the bucket now agree.
+- **`flint-sync status` could never report a pending sentinel** — it
+  spelled the record's filename a second time and got it wrong.
+- **A resumed checkout could adopt a stale generation**, stamping the
+  baseline with the cited etag over older content, leaving a divergence
+  nothing would reconcile. Present files are now verified by size and
+  CRC before adoption.
+- **The webhook's mount injection collided silently.** A pod declaring
+  its own mount at the workspace path failed admission with the API
+  server's "must be unique", naming neither flint nor the knob. It now
+  refuses with the path, the offending volume and `spec.mountPath`.
+
+### Verification
+
+Lean battery 102, lean formal gate 61 runs, boundary drill 14 legs on
+kind, bucket drill 27 legs against a real MinIO in one pass, and the
+published chart installed on a three-node AWS cluster publishing to real
+S3 over TLS. Verbatim logs are committed under `lean/e2e/results/`.
+
+### Known limitations
+
+- The S3 proxy is the plan of record and is not built; until it lands,
+  `credentialsSecretRef` gives the sidecar a scoped credential (the agent
+  container holds none in either posture).
+- No enforced data-plane fencing: a deposed sidecar's writes land as
+  uncited versions that destroy nothing and no coherent reader resolves,
+  but a raw-key reader can still see them.
+- One writer per workspace subtree; full checkout only; the v1 file-count
+  cap is ~250k and falls out of manifest size, not byte count.
+
 ## [1.37.0] - 2026-08-24
 
 **The conformance release.** The NFS server was written from scratch and
@@ -2492,6 +2593,7 @@ neither tag represents a supported upgrade source.
 No security advisories at this release.
 
 [Unreleased]: https://github.com/ddalton/flint/compare/v1.35.1...HEAD
+[1.38.0]: https://github.com/ddalton/flint/compare/v1.37.0...v1.38.0
 [1.37.0]: https://github.com/ddalton/flint/compare/v1.36.0...v1.37.0
 [1.36.0]: https://github.com/ddalton/flint/compare/v1.35.1...v1.36.0
 [1.35.1]: https://github.com/ddalton/flint/compare/v1.35.0...v1.35.1

@@ -255,7 +255,7 @@ EOF
         fi
         # The checked-in CRD is install-time bootstrap for the operator's
         # compiled-in copy — same rule as flintshares.yaml above.
-        lean_gen=$(cd "$repo_root/spdk-csi-driver" && cargo run --quiet --bin leancrdgen 2>/dev/null || true)
+        lean_gen=$(cd "$repo_root/spdk-csi-driver" && cargo run --quiet --bin crdgen -- lean 2>/dev/null || true)
         if [ -n "$lean_gen" ] && [ -f "$lean_dir/crds/flintleanworkspaces.yaml" ]; then
             if ! printf '%s\n' "$lean_gen" | diff -q - "$lean_dir/crds/flintleanworkspaces.yaml" >/dev/null; then
                 echo "REFUSING to push flint-lean $lean_version:" \
