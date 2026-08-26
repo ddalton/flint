@@ -6,7 +6,7 @@
 # DELIBERATELY SEPARATE from scripts/check-tla.sh (flint's 196-run gate):
 # lean is a separate system.  Same harness discipline, its own runs.
 #
-# Thirty-six runs, ALL required:
+# Forty-nine runs, ALL required:
 #   - strict runs must complete with every listed invariant green;
 #   - mutation runs must FIND their designated counterexample — a model
 #     that cannot rediscover its bug classes proves nothing;
@@ -145,5 +145,30 @@ mutation_run $M LeanProbeForcedCite.cfg "probe: a citation actually fires mid-ch
 mutation_run $M LeanProbeRawUncited.cfg "probe (REQUIRED-REACHABLE): a raw reader sees uncited bytes — §3 residual 11 proven present, not assumed away" \
   "Invariant ProbeRawReaderSeesUncited is violated"
 
+# ---- tranche 3, product 1: the boundary VERB x barrier x inbox ------------
+strict_run $M LeanSentinelHolds.cfg "boundary verb: consume/honor/ack/retire against the barrier, the inbox and a restart"
+strict_run $M LeanSentinelRestart.cfg "boundary verb across a RESTART: the pending file outlives it, the in-memory honored flag does not"
+strict_run $M LeanSentinelDeposal.cfg "boundary verb across a FENCE: the deposal arm the draft's cfgs never had"
+mutation_run $M LeanSentinelOrphan.cfg "a consume that CLOBBERS the standing pending record instead of folding into it orphans the first agent's nonce forever" \
+  "Invariant Inv_NoNonceOrphan is violated"
+mutation_run $M LeanSentinelAckEarly.cfg "acking from persisted state: pending-and-no-matching-ack is the SAME observable state for crash-before-CAS as for crash-after-step-7, so it asserts publication of writes that never uploaded (the crash matrix the review retracted)" \
+  "Invariant Inv_AckImpliesCited is violated"
+mutation_run $M LeanSentinelFencedAck.cfg "success-ack-after-fence: a deposed incarnation telling a waiting agent its boundary landed" \
+  "Invariant Inv_NoFencedOkAck is violated"
+mutation_run $M LeanSentinelFastPathUnguarded.cfg "the skip-on-no-diff fast path WITHOUT its citation-repair and manifest-unchanged guards acks a boundary the manifest does not carry -- section 10.1's deliberate deviation from section 2.1, machine-checked instead of argued" \
+  "Invariant Inv_AckBoundaryCoherent is violated"
+mutation_run $M LeanSentinelStaleMergeBase.cfg "a restart between the manifest CAS and step 7 leaves our OWN install looking foreign at the next merge, and delete/modify then drops the agent's delete from the boundary it is about to be acked for (found in shipped code)" \
+  "Invariant Inv_AckImpliesCited is violated"
+mutation_run $M LeanProbeSentinelHonored.cfg "probe: an ack was written off a REAL barrier install" \
+  "Invariant ProbeSentinelHonored is violated"
+mutation_run $M LeanProbeRefusedAck.cfg "probe: the refusal fires -- deposal answers a waiting agent" \
+  "Invariant ProbeRefusedAck is violated"
+mutation_run $M LeanProbeAckAfterCrash.cfg "probe: an ack was written for a pending record that SURVIVED a restart" \
+  "Invariant ProbeAckAfterCrash is violated"
+mutation_run $M LeanProbeCoalescedAck.cfg "probe: two touches actually coalesced into one pending record (without this the orphan mutation checks a world with only one live nonce)" \
+  "Invariant ProbeCoalescedAck is violated"
+mutation_run $M LeanProbeFastPathHonor.cfg "probe: a pending sentinel was honored by the skip-on-no-diff pass rather than a full barrier" \
+  "Invariant ProbeFastPathHonor is violated"
+
 echo
-echo "lean formal gate: $PASS/36 runs green"
+echo "lean formal gate: $PASS/49 runs green"

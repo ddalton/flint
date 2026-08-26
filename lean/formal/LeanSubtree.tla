@@ -109,6 +109,58 @@ CONSTANTS
                        \* lane consumes nothing) and the lane opens no
                        \* window, so the inbox is the only witness — and
                        \* the window CAS has already loaded it.
+  \* ---- tranche 3 product 1: the boundary VERB x barrier x inbox --------
+  \* (boundary-verbs D1/D2/D3/D12.)  The sentinel is a FILE in the tree,
+  \* not a bucket object: the agent touches `.flint/publish`, the sidecar
+  \* renames it into its own state dir (the consume), honors it with a
+  \* real barrier, writes `.flint/publish.ack`, and retires the pending
+  \* record.  What this product searches is the interleaving of those
+  \* four steps with the barrier, the inbox, restarts and DEPOSAL.
+  SentinelEnabled,     \* FALSE in every pre-existing cfg: every sentinel
+                       \* action is disabled and the new sc fields stay
+                       \* frozen at their (empty) Init values, so earlier
+                       \* state spaces are preserved by construction.
+  MaxTouches,          \* agent touch budget (a touch id doubles as the
+                       \* nonce AND as the sentinel's mtime clock).
+  FoldPending,         \* TRUE = D2.1: a consume never overwrites the
+                       \* standing pending record, it FOLDS into it, so
+                       \* every coalesced nonce is still named by the ack
+                       \* that eventually lands.  FALSE = the mutation:
+                       \* the rename clobbers the old record and orphans
+                       \* its nonces forever.
+  AckFromInstall,      \* TRUE = the uniform crash rule: an ok ack is only
+                       \* ever written from a barrier that ran STRICTLY
+                       \* AFTER the consume.  FALSE = the mutation the
+                       \* review retracted from the draft's crash matrix:
+                       \* ack from persisted state, which is the same
+                       \* observable state for crash-before-CAS as for
+                       \* crash-after-step-7 and asserts publication of
+                       \* writes that never uploaded.
+  RefuseOnFence,       \* TRUE = D2: a deposed incarnation answers every
+                       \* owed sentinel with `refused-fenced` and never
+                       \* with ok — on the honor path AND on the D12
+                       \* heartbeat arm, which is decoupled from publish
+                       \* cadence and so usually discovers deposal first.
+                       \* FALSE = the mutation: success-ack-after-fence.
+  FastPathGuards,      \* TRUE = the shipped skip-on-no-diff fast path
+                       \* with all of its guards: nothing local, no
+                       \* citation repair owed, and the remote manifest
+                       \* where we left it.  FALSE = the mutation that
+                       \* drops the last two.  This arm is modelled
+                       \* because §10.1 records a DELIBERATE deviation
+                       \* from §2.1 here — the shipped honor path lets a
+                       \* no-diff sentinel take the fast path, on the
+                       \* strength of a prose argument.  This is that
+                       \* argument, machine-checked.
+  MineIsNotForeign,    \* TRUE = an entry that matches OUR OWN BASELINE is
+                       \* not a foreign change, whatever the merge base
+                       \* says.  The merge base is rewritten at step 7,
+                       \* so a barrier that crashed between its manifest
+                       \* CAS and that rewrite leaves the workspace's own
+                       \* installed entry looking like somebody else's —
+                       \* and delete/modify then resolves conservatively
+                       \* AGAINST the agent's own delete.  FALSE = the
+                       \* shipped rule THIS MODEL REFUTED.
   BackstopEnabled      \* TRUE = the noncurrent-retention lifecycle rule
                        \* fires.  It is a BACKSTOP, never the reaper, and
                        \* enabling it is a mutation: on `files/` it cannot
@@ -202,6 +254,51 @@ vars == <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox, window,
                               already non-empty).  Only under gated; FALSE
                               otherwise, so earlier state spaces are
                               preserved by construction.
+     sentTok  Nat             the standing (unconsumed) sentinel file:
+                              0 = none, else the touch id.  A second
+                              touch OVERWRITES it — the agent's own
+                              doing, and not an orphan: the protocol
+                              owes an ack for CONSUMED nonces.
+     pendN    SUBSET Nonces   the pending record's covered nonce set.
+                              Non-empty IS the record's existence
+                              (`PendLive`), and its maximum IS the
+                              record's covered mtime, because every
+                              touch in this model carries a nonce.
+     pendDirty SUBSET Paths   the paths that were LOCALLY DIRTY at the
+                              consume — the agent's own un-published
+                              work, which is what the boundary owes it.
+                              A path that was clean at consume time
+                              carries no promise: its content came from
+                              the remote, and the remote is entitled to
+                              move it (an inbox adoption does exactly
+                              that, and TLC produced one as a
+                              counterexample before this field existed).
+     pendMint Nat             the generation MINT WATERMARK at consume:
+                              every generation >= this was created
+                              after the declaration.  D1's guarantee is
+                              at-LEAST ("the published state may include
+                              later bytes for a racing file, never
+                              earlier ones"), so the promise cannot be
+                              stated as snapshot equality — see
+                              `BoundaryBroken`.
+     pendCov  [Paths -> Nat]  the tree AT CONSUME TIME — D1's at-least
+                              guarantee is stated at exactly that
+                              instant ("every write visible on disk at
+                              consume time is in the published set"),
+                              so this is what the ack promises.
+     honored  BOOLEAN         a barrier COMPLETED strictly after the
+                              latest consume.  Lost on restart (it is
+                              in-memory barrier state), which is what
+                              makes the uniform crash rule reachable.
+     pendReRun BOOLEAN        this pending record survived a restart —
+                              the ghost `ProbeAckAfterCrash` names.
+     owed     SUBSET Nonces   every nonce this incarnation has CONSUMED.
+                              Never shrinks while the pod lives; dies
+                              with the pod, because a pod replacement
+                              takes the agent and the tree with it.
+     ackN     SUBSET Nonces   `.flint/<verb>.ack`'s covered nonce set.
+                              Status is deliberately absent: the shipped
+                              `ack_matches` does not read it.
      lastDirty SUBSET Paths   the dirt set frozen at the LAST barrier's
                               scan.  Tracked only under SyncEnabled (it
                               stays {} otherwise, so every tranche-1
@@ -224,6 +321,19 @@ vars == <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox, window,
                             survived a lane pass: the durability/visibility
                             split actually ACCUMULATED, rather than every
                             citation happening to follow its own lane
+     touches, acks, honors, refusedAcks, coalesced, fastPaths,
+     ackAfterRestart : Nat
+     fastHonor  BOOLEAN     a pending sentinel was honored by a
+                            SKIP-ON-NO-DIFF pass rather than a full
+                            barrier — without this the FastPathGuards
+                            runs could hold vacuously
+     ackEarly   BOOLEAN     an ok ack was written while the agent's own
+                            declared work was neither cited, superseded
+                            by later bytes, nor surfaced
+     ackIncoherent BOOLEAN  an ok ack named a manifest that did not cite
+                            everything this workspace had integrated
+     fencedOkAck BOOLEAN    an ok ack was written by an incarnation the
+                            cell had already deposed
      foreignLost BOOLEAN    a sync advanced the merge base for a path it
                             neither applied nor surfaced a conflict for —
                             i.e. it claimed to have integrated a generation
@@ -236,6 +346,15 @@ vars == <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox, window,
 (* Helpers *)
 
 Gens == 0..MaxGen
+
+Nonces      == 1..MaxTouches
+PendLive(s) == sc[s].pendN # {}
+NoPend      == [p \in Paths |-> 0]
+\* `ack_matches`: every pending nonce named by the standing ack.  The
+\* implementation ALSO requires the ack's covered mtime not to be older
+\* than the pending's; here every touch carries a nonce and touch ids
+\* are monotone, so the subset test implies it (ledger entry).
+AckMatches(s) == sc[s].pendN \subseteq sc[s].ackN
 
 Deposed(s)  == cellEpoch > sc[s].epoch
 Running(s)  == sc[s].st = "running"
@@ -274,7 +393,10 @@ Init ==
         known |-> {}, scanU |-> {}, scanD |-> {},
         scanGen |-> [p \in Paths |-> 0], upDone |-> {}, parked |-> {},
         gcDone |-> {}, lastDirty |-> {}, stageCarried |-> FALSE,
-        citeDone |-> {}]]
+        citeDone |-> {},
+        sentTok |-> 0, pendN |-> {}, pendCov |-> [p \in Paths |-> 0],
+        pendMint |-> 0, pendDirty |-> {},
+        honored |-> FALSE, pendReRun |-> FALSE, owed |-> {}, ackN |-> {}]]
   /\ hitlAcked = {} /\ conflicts = {}
   /\ gh = [amputated |-> FALSE, resurrected |-> FALSE,
            stragglerInstalls |-> 0, stragglerCas |-> 0, deposedPuts |-> 0,
@@ -286,7 +408,11 @@ Init ==
            scopedDeferrals |-> 0, foreignLost |-> FALSE,
            staged |-> 0, cites |-> 0, reaped |-> 0, withheld |-> 0,
            forcedCites |-> 0, citeSpan |-> 0,
-           carriedCite |-> FALSE]
+           carriedCite |-> FALSE,
+           touches |-> 0, acks |-> 0, honors |-> 0, refusedAcks |-> 0,
+           coalesced |-> 0, fastPaths |-> 0, ackAfterRestart |-> 0,
+           fastHonor |-> FALSE, ackEarly |-> FALSE,
+           ackIncoherent |-> FALSE, fencedOkAck |-> FALSE]
 
 ------------------------------------------------------------------------------
 (* Lifecycle *)
@@ -306,7 +432,15 @@ StartA ==
 CrashPod(s) ==
   /\ sc[s].st \in {"running", "stalled"}
   /\ gh.crashes < MaxCrashes
-  /\ sc' = [sc EXCEPT ![s].st = "dead"]
+  \* Pod REPLACEMENT: the emptyDir goes, and with it the pending record,
+  \* the workspace tree, `.flint/` and the agent that was waiting on it.
+  \* Nothing is owed to a process that no longer exists — which is
+  \* exactly why `Inv_NoNonceOrphan` is per-incarnation.
+  /\ sc' = [sc EXCEPT ![s].st = "dead",
+       ![s].sentTok = 0, ![s].pendN = {}, ![s].pendCov = NoPend,
+       ![s].pendMint = 0, ![s].pendDirty = {},
+       ![s].honored = FALSE, ![s].pendReRun = FALSE,
+       ![s].owed = {}, ![s].ackN = {}]
   /\ gh' = [gh EXCEPT !.crashes = @ + 1]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
@@ -327,6 +461,12 @@ Restart(s) ==
            ELSE sc[s].local
      IN
        /\ sc' = [sc EXCEPT ![s].pc = "idle",
+            \* `honored` is in-memory barrier state and dies here; the
+            \* pending record is a FILE in the surviving emptyDir.  That
+            \* asymmetry is the uniform crash rule's whole subject.
+            ![s].honored = FALSE,
+            ![s].pendReRun = IF SentinelEnabled /\ PendLive(s)
+                             THEN TRUE ELSE @,
             ![s].local = newLocal,
             ![s].known = IF RematerializeOnRestart THEN @ \cup CitedGens ELSE @,
             ![s].scanU = {}, ![s].scanD = {},
@@ -357,9 +497,26 @@ ThawA ==
    discovers the higher epoch and self-fences.                          *)
 RenewDiscover(s) ==
   /\ Running(s) /\ Deposed(s)
-  /\ sc' = [sc EXCEPT ![s].st = "dead"]
+  \* D12 x D2.  The heartbeat renewal runs on its own interval,
+  \* decoupled from publish cadence, so on deposal it is usually the
+  \* FIRST arm to find out — ahead of the floor tick and ahead of a poll
+  \* arm with nothing due.  It therefore owes the refused acks: exiting
+  \* unsettled here strands the waiting agent with a marker still
+  \* advertising live verbs, which is the hole D2 exists to close.
+  \* (Shipped code returned from this arm without settling; the model
+  \* was being written when the code was read, and the leg for it is
+  \* `the_heartbeat_arm_settles_owed_acks_when_it_finds_the_fence`.)
+  /\ LET settle == SentinelEnabled /\ RefuseOnFence /\ PendLive(s) IN
+       /\ sc' = [sc EXCEPT ![s].st = "dead",
+            ![s].ackN = IF settle THEN @ \cup sc[s].pendN ELSE @,
+            ![s].pendN = IF settle THEN {} ELSE @,
+            ![s].pendCov = IF settle THEN NoPend ELSE @,
+            ![s].pendMint = IF settle THEN 0 ELSE @,
+            ![s].pendDirty = IF settle THEN {} ELSE @,
+            ![s].honored = FALSE, ![s].pendReRun = FALSE]
+       /\ gh' = [gh EXCEPT !.refusedAcks = @ + (IF settle THEN 1 ELSE 0)]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
-                 window, hitlAcked, conflicts, gh>>
+                 window, hitlAcked, conflicts>>
 
 (* Takeover: B observes the quiet cell (abstracting the 6-poll protocol)
    and claims.  Rotation: the successor CAS-rewrites the manifest
@@ -652,7 +809,26 @@ CASInstall(s) ==
        \* integrated (consume advanced baseline past the citation),
        \* guarded on the object still holding that generation — the
        \* implementation's citation-repair with its HEAD guard.
-       foreign(p) == MergeCapable /\ manifest[p] # sc[s].instBase[p]
+       \* An entry this incarnation RECOGNIZES is not a foreign change,
+       \* whatever the merge base says.  Step 7 rewrites the merge base
+       \* AND the baseline, so a restart between the manifest CAS and
+       \* step 7 leaves both behind — and our own freshly installed
+       \* entry then reads as somebody else's change at the next merge.
+       \* delete/modify resolves conservatively, so the agent's delete
+       \* is dropped from the boundary it is about to be acked for, and
+       \* the path is queued into the inbox as a phantom conflict
+       \* nobody else ever touched.  TLC found this in shipped code.
+       \*
+       \* `known` stands for two witnesses the implementation already
+       \* has and neither of which step 7 can lose: the entry's `epoch`
+       \* is the publishing writer's LEASE EPOCH, which is ours across
+       \* a container restart (a HITL write carries 0, a successor a
+       \* higher one); and the entry's etag can equal what our own
+       \* baseline holds for the path.  Two routes, and the model
+       \* produced one counterexample for each.
+       foreign(p) == /\ MergeCapable
+                     /\ manifest[p] # sc[s].instBase[p]
+                     /\ (MineIsNotForeign => manifest[p] \notin sc[s].known)
        repair(p) ==
          /\ p \notin (sc[s].scanU \cup sc[s].scanD \cup sc[s].parked)
          /\ sc[s].baseline[p] # sc[s].instBase[p]
@@ -709,6 +885,9 @@ Finish(s) ==
   /\ Running(s) /\ sc[s].pc = "cased"
   /\ DeletesAfterCAS => sc[s].scanD \subseteq sc[s].gcDone
   /\ sc' = [sc EXCEPT ![s].pc = "idle",
+       \* A barrier that BEGAN after the consume has now completed: this
+       \* is the only thing that entitles an ok ack (D2's uniform rule).
+       ![s].honored = IF SentinelEnabled /\ PendLive(s) THEN TRUE ELSE @,
        ![s].baseline = [p \in Paths |->
          IF p \in sc[s].scanU \cap sc[s].upDone THEN sc[s].scanGen[p]
          ELSE IF p \in sc[s].scanD /\ sc[s].instSnap[p] = 0 THEN 0
@@ -1038,6 +1217,7 @@ CiteFinish(s) ==
        \* A dropped staged generation is never silently forgotten.
        /\ conflicts' = conflicts \cup {<<p, sc[s].baseline[p]>> : p \in dropped}
        /\ sc' = [sc EXCEPT ![s].pc = "idle",
+            ![s].honored = IF SentinelEnabled /\ PendLive(s) THEN TRUE ELSE @,
             ![s].citeDone = {}, ![s].stageCarried = FALSE,
             ![s].instBase = man2,
             ![s].baseline = [p \in Paths |->
@@ -1081,6 +1261,233 @@ GatedNext ==
   \/ \E p \in Paths : BackstopExpire(p)
 
 ------------------------------------------------------------------------------
+(* TRANCHE 3, PRODUCT 1: the boundary VERB x the barrier x the inbox.      *)
+(*                                                                         *)
+(* The agent declares a coherent point by touching `.flint/publish`; the   *)
+(* sidecar consumes it (rename into its own state dir), honors it with a   *)
+(* real barrier, writes `.flint/publish.ack`, and retires the pending      *)
+(* record.  Four steps, each of which a crash, a restart or a deposal can  *)
+(* land between, and all of them racing the inbox and the manifest CAS.    *)
+(*                                                                         *)
+(* Modelled abstractions, named rather than assumed:                       *)
+(*   - The two verbs collapse to ONE.  `sync` differs in what its honor    *)
+(*     does (tranche 2/product 4 model that) and not in the consume /      *)
+(*     honor / ack / retire protocol, which is what this product searches. *)
+(*   - A touch id doubles as the nonce and as the sentinel's mtime clock:  *)
+(*     ids are monotone, so "the ack's covered mtime is not older than the *)
+(*     pending's" is implied by the nonce subset test in `AckMatches`.     *)
+(*   - The bare touch (a sentinel with no nonce) is not modelled; every    *)
+(*     touch carries one, which is what lets `pendN # {}` stand in for     *)
+(*     "the pending file exists".  The torn-body rule is a battery leg.    *)
+(*   - The min-interval and the hourly work budget are OUT of the safety   *)
+(*     gate (the house rule for rate limiting): a deferred honor is        *)
+(*     modelled as a later honor, which is strictly more permissive.       *)
+(*   - The refusal (write the refused ack, retire, flip the marker, exit)  *)
+(*     is one step, as is the ack rename.  The crash point that matters —  *)
+(*     between the ack and the retire — is modelled, because it is the one *)
+(*     the retracted crash matrix got wrong.                               *)
+
+(* The agent's declaration.  A second touch overwrites an unconsumed
+   sentinel: one file, one body.  That is the agent's own doing and not
+   an orphan — the protocol owes an ack for nonces it CONSUMED.         *)
+Touch(s) ==
+  /\ SentinelEnabled /\ Running(s)
+  /\ gh.touches < MaxTouches
+  /\ sc' = [sc EXCEPT ![s].sentTok = gh.touches + 1]
+  /\ gh' = [gh EXCEPT !.touches = @ + 1]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+                 window, hitlAcked, conflicts>>
+
+(* The consume: rename the sentinel out of the agent's reach and FOLD it
+   into the standing pending record (D2.1).  Folding rather than
+   overwriting is the whole rule — a rename onto a live pending record
+   clobbers its nonces, and the agents behind them wait forever.
+
+   `honored` is cleared unconditionally: D1's guarantee is that the
+   barrier which acknowledges a sentinel BEGINS ITS SCAN strictly after
+   consuming it, so a barrier that completed before this consume
+   entitles nothing.                                                    *)
+TakeSentinel(s) ==
+  /\ SentinelEnabled /\ Running(s)
+  /\ sc[s].sentTok # 0
+  /\ sc[s].pc = "idle"
+  /\ LET t == sc[s].sentTok
+         fold == FoldPending /\ PendLive(s)
+     IN
+       /\ sc' = [sc EXCEPT
+            ![s].sentTok = 0,
+            ![s].pendN = IF fold THEN @ \cup {t} ELSE {t},
+            ![s].pendCov = sc[s].local,
+            ![s].pendMint = gh.nextGen,
+            ![s].pendDirty = Dirty(s),
+            ![s].honored = FALSE,
+            ![s].owed = @ \cup {t}]
+       /\ gh' = [gh EXCEPT !.coalesced = @ + (IF fold THEN 1 ELSE 0)]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+                 window, hitlAcked, conflicts>>
+
+(* Skip-on-no-diff (`barrier.rs`): nothing local to publish, no citation
+   repair owed, and the remote manifest document where we left it — so
+   every local byte is already cited and the barrier returns without a
+   window, without a CAS, and without touching the manifest.
+   §2.1 prescribes that a pending sentinel DEFEAT this fast path;
+   §10.1 records why the shipped code deliberately does not (§7 prices a
+   no-diff honor at one HEAD, and defeating it would cost a manifest CAS
+   at up to 720/hour/workspace — the exact amplification the budget
+   exists to prevent).  That deviation rests on an argument in a
+   document.  `FastPathGuards` is that argument, machine-checked: with
+   the guards on the strict runs must hold, and with the last two
+   dropped the ack must be caught claiming a boundary that is not
+   installed.                                                           *)
+FastPathClean(s) ==
+  /\ USet(s) = {} /\ DSet(s) = {}
+  /\ (~FastPathGuards \/ \A p \in Paths : sc[s].baseline[p] = sc[s].instBase[p])
+  /\ (~FastPathGuards \/ manSeq = sc[s].expSeq)
+
+FastPath(s) ==
+  /\ SentinelEnabled /\ ~GatedCitation
+  /\ Running(s) /\ sc[s].pc = "consumed"
+  \* A no-diff pass IS a barrier tick and charges the barrier budget.
+  \* Not bookkeeping: without it Consume -> FastPath -> Consume is a
+  \* free cycle that consumes nothing, and the state graph's DIAMETER
+  \* grows without bound (the pilot ran to depth 148 and 17M states
+  \* before this line existed).
+  /\ gh.barriers < MaxBarriers
+  /\ FastPathClean(s)
+  /\ sc' = [sc EXCEPT ![s].pc = "idle",
+       ![s].honored = IF PendLive(s) THEN TRUE ELSE @,
+       ![s].lastDirty = IF SyncEnabled THEN {} ELSE @]
+  /\ gh' = [gh EXCEPT !.barriers = @ + 1, !.fastPaths = @ + 1,
+                      !.fastHonor = @ \/ PendLive(s)]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+                 window, hitlAcked, conflicts>>
+
+(* THE PROMISE, evaluated at the instant the ack is written and stamped
+   into a ghost (the house's action-written rule).  D1: "everything
+   ordered-before T is a coherent point; publish it", with the at-least
+   guarantee stated at CONSUME time — so every path whose consume-time
+   content is still the tree's content must be cited by the manifest the
+   ack names.  Two exemptions, both of them the protocol working:
+
+     - the AGENT itself moved the path after the consume, so its
+       declared bytes are superseded rather than owed.  A DELETE is
+       the case that needs this clause on its own: it supersedes
+       without minting anything, so the watermark below cannot see it,
+       and TLC's third counterexample was exactly an agent deleting
+       its own declared file after declaring it.
+     - the citation names a generation MINTED AFTER the declaration.
+       D1's guarantee is at-LEAST: "the published state may include
+       later bytes for a racing file, never earlier ones".  Stating the
+       promise as snapshot equality is WRONG, and TLC said so on the
+       first strict run of this product — its counterexample was an
+       agent that deleted a path, declared, re-created it, let the
+       barrier publish the re-creation, then deleted it again, so the
+       consume-time snapshot matched the tree again at ack time while
+       the manifest legitimately cited later bytes.  The mint watermark
+       is what distinguishes "later" from "stale", and it is why
+       `pendMint` exists.
+     - the path carries a surfaced conflict record — it was answered
+       loudly, which is `report.parked` in the ack the implementation
+       writes.  "Never a silent winner" is the standing rule; a silent
+       LOSER is what this invariant is looking for.
+
+   The two exemptions overlap and neither subsumes the other, which is
+   why both are here and each has a counterexample behind it: an agent
+   can move a path away and back (write, delete, write) so that the
+   tree matches the declaration again at ack time while the manifest
+   legitimately cites later bytes — the watermark is what covers that —
+   and it can supersede by deleting, which mints nothing at all — the
+   tree comparison is what covers that.  What neither covers is an
+   agent restoring byte-identical content, which this model cannot
+   express (mints are unique) and a real filesystem can: ledger entry,
+   and harmless, because the boundary then names bytes equal to the
+   declared ones.
+
+   Note what the conflict clause does NOT excuse: a citation of a
+   generation minted BEFORE the declaration and different from the
+   declared one is stale whichever direction it points — an unpublished
+   write (manifest older than the agent's bytes) and an unpublished
+   DELETE (the agent declared the path gone, the manifest still cites
+   its old generation) are the same defect and the same test.          *)
+BoundaryBroken(s) ==
+  \E p \in sc[s].pendDirty :
+    /\ manifest[p] # sc[s].pendCov[p]
+    /\ manifest[p] < sc[s].pendMint
+    /\ sc[s].local[p] = sc[s].pendCov[p]
+    /\ ~\E pr \in conflicts : pr[1] = p
+
+(* The OTHER half of what an ok ack asserts, and it is not the same
+   claim.  `BoundaryBroken` asks whether the agent's own declared work
+   survived; this asks whether the point the ack names is a coherent
+   one AT ALL: every generation this workspace has integrated — its
+   persisted baseline, which includes the inbox writes it adopted and
+   the foreign entries it merged — is cited by the manifest the ack
+   points at.  When it is not, a reader resolving that manifest gets
+   bytes this workspace has already superseded, and a re-checkout would
+   MATERIALIZE them over the newer ones.
+
+   This is what `repairs_pending` defends in the shipped fast path, and
+   why the two halves need separate invariants: TLC's second
+   counterexample was an inbox adoption whose citation repair was still
+   owed — no work of the agent's was at risk, and the boundary was
+   still not the point the ack claimed.  Parked paths are exempt:
+   their conflict record is the ack's `report.parked`.               *)
+BoundaryIncoherent(s) ==
+  \E p \in Paths :
+    /\ sc[s].baseline[p] # manifest[p]
+    /\ ~\E pr \in conflicts : pr[1] = p
+
+AckOk(s) ==
+  /\ SentinelEnabled /\ Running(s) /\ sc[s].pc = "idle"
+  /\ PendLive(s) /\ ~AckMatches(s)
+  /\ ~(RefuseOnFence /\ Deposed(s))
+  /\ (AckFromInstall => sc[s].honored)
+  /\ sc' = [sc EXCEPT ![s].ackN = @ \cup sc[s].pendN, ![s].honored = FALSE]
+  /\ gh' = [gh EXCEPT
+       !.acks = @ + 1,
+       !.honors = @ + (IF sc[s].honored THEN 1 ELSE 0),
+       !.ackAfterRestart = @ + (IF sc[s].pendReRun THEN 1 ELSE 0),
+       !.ackEarly = @ \/ BoundaryBroken(s),
+       !.ackIncoherent = @ \/ BoundaryIncoherent(s),
+       !.fencedOkAck = @ \/ Deposed(s)]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+                 window, hitlAcked, conflicts>>
+
+(* Retire AFTER the ack rename.  Splitting these two is not ceremony:
+   the crash between them is the one the draft's crash matrix answered
+   wrongly, and it is the only reachable way to observe a pending record
+   that a standing ack already answers.                                 *)
+RetirePending(s) ==
+  /\ SentinelEnabled /\ Running(s) /\ sc[s].pc = "idle"
+  /\ PendLive(s) /\ AckMatches(s)
+  /\ sc' = [sc EXCEPT ![s].pendN = {}, ![s].pendCov = NoPend,
+       ![s].pendMint = 0, ![s].pendDirty = {},
+       ![s].honored = FALSE, ![s].pendReRun = FALSE]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+                 window, hitlAcked, conflicts, gh>>
+
+(* D2's refused ack: deposal must never strand a waiting agent.  Write
+   the refusal naming every covered nonce, retire, flip the marker, and
+   exit fenced — one step here.                                         *)
+AckRefused(s) ==
+  /\ SentinelEnabled /\ Running(s)
+  /\ PendLive(s) /\ RefuseOnFence /\ Deposed(s)
+  /\ sc' = [sc EXCEPT ![s].ackN = @ \cup sc[s].pendN,
+       ![s].pendN = {}, ![s].pendCov = NoPend, ![s].pendMint = 0,
+       ![s].pendDirty = {},
+       ![s].honored = FALSE, ![s].pendReRun = FALSE,
+       ![s].st = "dead"]
+  /\ gh' = [gh EXCEPT !.refusedAcks = @ + 1]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+                 window, hitlAcked, conflicts>>
+
+SentinelNext ==
+  \E s \in Sidecars :
+    Touch(s) \/ TakeSentinel(s) \/ FastPath(s) \/ AckOk(s)
+    \/ RetirePending(s) \/ AckRefused(s)
+
+------------------------------------------------------------------------------
+------------------------------------------------------------------------------
 (* Under gated, ANY action that moves an object mints a version: the
    bucket is versioned, so a PUT destroys nothing and a delete leaves
    every prior version fetchable (S3 writes a delete marker).  Composing
@@ -1108,6 +1515,7 @@ BaseNext ==
        Consume(s) \/ Scan(s) \/ UploadFenced(s) \/ GCDeleteFenced(s)
        \/ PreDeletesDone(s) \/ CASFenced(s) \/ CASMiss(s) \/ CASInstall(s)
        \/ Finish(s) \/ Sync(s)
+  \/ SentinelNext
 
 Next ==
   \/ (BaseNext /\ VersionsFollow /\ UNCHANGED gatedVars)
@@ -1191,6 +1599,37 @@ Inv_BoundaryAtomic ==
   \A s \in Sidecars :
     sc[s].citeDone = {} \/ sc[s].citeDone = Valid(s)
 
+\* ---- tranche 3, product 1: the boundary verb (D1/D2/D12) ----------------
+
+\* THE invariant of this product.  An ok ack asserts that the coherent
+\* point the agent declared is INSTALLED — not durable, not queued:
+\* cited by the manifest, at the seq the ack names.  Stamped at the ack
+\* rather than checked over states, because the promise is about the
+\* instant the agent is told "done" and nothing later can un-tell it.
+Inv_AckImpliesCited == ~gh.ackEarly
+
+\* The second half, and the one the plan's draft called
+\* `Inv_AckNotEarly`: the boundary an ok ack names is a coherent point,
+\* citing every generation this workspace has integrated.  A citation
+\* repair still owed at ack time means a reader — or this workspace's
+\* own next checkout — resolves to bytes already superseded here.
+Inv_AckBoundaryCoherent == ~gh.ackIncoherent
+
+\* Every CONSUMED nonce is still named by something: the pending record
+\* that will answer it, or the ack that already did (ok or refused).
+\* Consuming is the commitment point — the rename takes the sentinel out
+\* of the agent's reach, so nothing else can ever answer it.  Per
+\* incarnation, because a pod replacement takes the agent and the tree
+\* with the pending file.
+Inv_NoNonceOrphan ==
+  \A s \in Sidecars : sc[s].owed \subseteq (sc[s].pendN \cup sc[s].ackN)
+
+\* A deposed incarnation never tells an agent its boundary landed.  The
+\* plan calls this `Inv_RefusedNeverInstalled`; it is stated here as the
+\* ack side, which is the side the agent reads and the only side a
+\* fenced incarnation still controls.
+Inv_NoFencedOkAck == ~gh.fencedOkAck
+
 ------------------------------------------------------------------------------
 (* Non-vacuity probes — each names an ACTION via a ghost that only that
    action writes, and TLC is REQUIRED to violate it (the A2 probe rule:
@@ -1230,6 +1669,26 @@ ProbeForcedCite        == gh.forcedCites = 0
 \* quietly closes it must fail this probe and force the residual to be
 \* rewritten.  It names a state rather than an action on purpose: the
 \* exposure IS a state, and there is no action that "does" it.
+\* ---- tranche 3, product 1 ------------------------------------------------
+\* An ack was actually written off a REAL barrier install (not merely
+\* written): without this the strict runs could hold with the honor path
+\* never having fired.
+ProbeSentinelHonored == gh.honors = 0
+\* The refusal fired: deposal answered a waiting agent.
+ProbeRefusedAck      == gh.refusedAcks = 0
+\* An ack was written for a pending record that SURVIVED A RESTART —
+\* the uniform crash rule's own path, exercised.
+ProbeAckAfterCrash   == gh.ackAfterRestart = 0
+\* Two touches actually coalesced into one pending record.  Product 2's
+\* lesson, applied: the orphan mutation checks a state space that never
+\* contained two live nonces unless this fires.
+ProbeCoalescedAck    == gh.coalesced = 0
+\* A pending sentinel was honored by the SKIP-ON-NO-DIFF pass rather
+\* than a full barrier.  This is what makes the FastPathGuards runs
+\* non-vacuous: without it, "the fast path is sound" could hold because
+\* the fast path never ran.
+ProbeFastPathHonor   == ~gh.fastHonor
+
 ProbeRawReaderSeesUncited ==
   \A p \in Paths : objects[p] = manifest[p] \/ manifest[p] = 0
 

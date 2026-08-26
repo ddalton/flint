@@ -9,7 +9,9 @@ KEYS="MaxGen MaxSeq MaxHitl MaxBarriers MaxCrashes MaxRestarts MaxSyncs \
 AllowStall InboxEnabled MergeCapable ConflictSurfacing WindowCheck Rotation \
 EpochCheck GuardedGC DeletesAfterCAS RematerializeOnRestart SyncEnabled \
 SyncScanFirst SyncScope ScopedInstBase GatedCitation AtomicCitation \
-GCKeepsCurrent CiteDropsInflightHitl BackstopEnabled"
+GCKeepsCurrent CiteDropsInflightHitl BackstopEnabled MineIsNotForeign \
+MaxTouches \
+SentinelEnabled FoldPending AckFromInstall RefuseOnFence FastPathGuards"
 
 emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   local name=$1 invs=$2; shift 2
@@ -28,6 +30,14 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   local c_GatedCitation=FALSE c_AtomicCitation=TRUE c_GCKeepsCurrent=TRUE
   local c_CiteDropsInflightHitl=TRUE
   local c_BackstopEnabled=FALSE
+  # The fix TLC forced: our own baseline is never a foreign change.
+  local c_MineIsNotForeign=TRUE
+  # tranche 3 product 1: SentinelEnabled FALSE in every pre-existing cfg,
+  # so every sentinel action is disabled, the fast path is unreachable and
+  # the new sc fields stay at their empty Init values — those state spaces
+  # are preserved by construction.
+  local c_MaxTouches=0 c_SentinelEnabled=FALSE c_FoldPending=TRUE
+  local c_AckFromInstall=TRUE c_RefuseOnFence=TRUE c_FastPathGuards=TRUE
   local kv
   for kv in "$@"; do eval "c_${kv%%=*}=${kv#*=}"; done
   {
@@ -190,3 +200,82 @@ emit LeanProbeCitationInstalled "ProbeCitationInstalled" $GATEDWORLD
 emit LeanProbeWithheldDelete "ProbeWithheldDelete" $GATEDWORLD
 emit LeanProbeForcedCite "ProbeForcedCite" $GATEDWORLD
 emit LeanProbeRawUncited "ProbeRawReaderSeesUncited" $GATEDWORLD
+
+# ---- tranche 3, product 1: the boundary VERB x barrier x inbox -------------
+# The ack/fence/crash matrix is where the plan retracted its own per-crash
+# prescriptions, so `settle_pending_at_startup` is currently justified by
+# one ordering out of many — and `Inv_NoNonceOrphan` under coalesce +
+# restart + deposal is an interleaving property that unit tests SAMPLE
+# rather than search.
+#
+# WORLD NOTE: MaxTouches=2 is load-bearing in the same way MaxHitl=1 is for
+# product 2. The orphan hazard needs a SECOND consume landing on a live
+# pending record; with one touch the fold rule has nothing to fold and the
+# mutation checks a state space its bug cannot live in. ProbeCoalescedAck
+# is what proves the second touch is actually reached.
+#
+# Budget, PILOTED before it was locked in (section 4's obligation).
+# MaxGen=3 with MaxRestarts=1 passed 4M states at depth 20 without
+# terminating; the two worlds are therefore split, and each mutation
+# runs in the smaller world its counterexample actually needs:
+#   SENTWORLD    MaxGen=3 MaxRestarts=0   -- 28 s, the wide generation world
+#   SENTRESTART  MaxGen=2 MaxRestarts=1   -- 13 s, the crash-matrix world
+# A pod REPLACEMENT takes the agent and the tree with the pending file,
+# so it forgives every owed nonce by construction and buys no coverage
+# here; the restart is the interesting one, because the pending file
+# survives it and `honored` does not.
+SENTWORLD="SentinelEnabled=TRUE MaxTouches=2 MaxGen=3 MaxSeq=6 MaxHitl=1 \
+MaxBarriers=2 MaxCrashes=0 MaxRestarts=0"
+SENTRESTART="SentinelEnabled=TRUE MaxTouches=2 MaxGen=2 MaxSeq=6 MaxHitl=1 \
+MaxBarriers=2 MaxCrashes=0 MaxRestarts=1"
+# The stall/takeover world buys its depth the way the tranche-1 takeover
+# cfgs do — MaxGen=2, MaxHitl=0, one touch. At MaxGen=3 the deposal run
+# passed 1.3 GB of TLC scratch without terminating: two live sidecars,
+# each with its own sentinel/pending/ack, is a different scale from one.
+SENTSTALL="SentinelEnabled=TRUE MaxTouches=1 MaxGen=2 MaxSeq=6 MaxHitl=0 \
+MaxBarriers=2 MaxCrashes=0 MaxRestarts=0 AllowStall=TRUE"
+SENTINV="TypeOK,Inv_HITLDurable,Inv_NoDangling,Inv_NoResurrection,\
+Inv_AckImpliesCited,Inv_AckBoundaryCoherent,Inv_NoNonceOrphan,\
+Inv_NoFencedOkAck"
+emit LeanSentinelHolds "$SENTINV" $SENTWORLD
+# The crash-matrix world: the pending file outlives the restart, the
+# in-memory `honored` flag does not, and the merge base can be behind an
+# install this workspace made.
+emit LeanSentinelRestart "$SENTINV" $SENTRESTART
+# The deposal arm the draft's cfgs never had: `Inv_AckImpliesCited` was
+# never checked ACROSS A FENCE, which is the one place an ack can name a
+# boundary a successor has already moved past.
+emit LeanSentinelDeposal "$SENTINV,Inv_NoStragglerInstall" $SENTSTALL
+# The consume that CLOBBERS the standing pending record instead of folding
+# into it: the first agent's nonce is never named by any ack, and it waits
+# forever on a boundary that did happen.
+emit LeanSentinelOrphan "Inv_NoNonceOrphan" $SENTWORLD FoldPending=FALSE
+# The shortcut the crash-matrix review retracted: ack from persisted state.
+# Pending-and-no-matching-ack is the SAME observable state for
+# crash-before-CAS as for crash-after-step-7, so acking from it asserts
+# publication of writes that never uploaded.
+emit LeanSentinelAckEarly "Inv_AckImpliesCited" $SENTWORLD AckFromInstall=FALSE
+# Success-ack-after-fence: a deposed incarnation telling a waiting agent
+# its boundary landed.
+emit LeanSentinelFencedAck "Inv_NoFencedOkAck" $SENTSTALL RefuseOnFence=FALSE
+# §10.1's DELIBERATE deviation, machine-checked. §2.1 says a pending
+# sentinel must defeat the skip-on-no-diff fast path; the shipped code
+# lets it through, on the argument that the fast path only fires when
+# every local byte is already cited. Drop the two guards that carry that
+# argument — no citation repair owed, and the remote manifest where we
+# left it — and the ack must be caught claiming an uninstalled boundary.
+emit LeanSentinelFastPathUnguarded "Inv_AckBoundaryCoherent" \
+  $SENTWORLD FastPathGuards=FALSE
+emit LeanProbeSentinelHonored "ProbeSentinelHonored" $SENTWORLD
+emit LeanProbeRefusedAck "ProbeRefusedAck" $SENTSTALL
+emit LeanProbeAckAfterCrash "ProbeAckAfterCrash" $SENTRESTART
+emit LeanProbeCoalescedAck "ProbeCoalescedAck" $SENTWORLD
+emit LeanProbeFastPathHonor "ProbeFastPathHonor" $SENTWORLD
+# The merge base is rewritten at step 7, so a restart between the
+# manifest CAS and that rewrite leaves the workspace's OWN installed
+# entry looking foreign at the next merge — and delete/modify resolves
+# conservatively against the agent's own delete, dropping it from the
+# boundary it is about to be acked for. TLC found this in shipped code
+# on the third strict run of this product.
+emit LeanSentinelStaleMergeBase "Inv_AckImpliesCited" \
+  $SENTRESTART MineIsNotForeign=FALSE

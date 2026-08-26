@@ -13,13 +13,13 @@ a library. Nothing here is wired into `scripts/check-tla.sh`.
 ## Running
 
 ```
-./check.sh          # the 27-run gate (~75 s)
+./check.sh          # the 49-run gate (~4 min)
 ./gen-cfgs.sh       # regenerate the cfg matrix
 ```
 
-Twenty-four runs, ALL required: 5 strict (must hold), 11 mutations (must find
+Forty-nine runs, ALL required: 9 strict (must hold), 21 mutations (must find
 their designated counterexample — a model that cannot rediscover its bug
-classes proves nothing), 8 probes (must be violated — each names an
+classes proves nothing), 19 probes (must be violated — each names an
 ACTION via a ghost only that action writes; probe the action, never the
 situation). `LeanSubtreeDeep.cfg` is the rich-budget breadth run — an
 opt-in overnight job, not in the gate.
@@ -238,6 +238,106 @@ code holds the HITL window across both).
   stateless by design, so the window cell IS the coordination — a
   per-replica model adds states, not behaviors, at this abstraction.
 
+## Tranche 3, product 1 — the boundary VERB × the barrier × the inbox
+
+Thirteen runs (36 → **49**), behind `SentinelEnabled`, FALSE in every
+pre-existing cfg: every sentinel action is disabled, the skip-on-no-diff
+fast path is unreachable, and the seven new `sc[s]` fields stay at their
+empty Init values, so those state spaces are preserved by construction.
+
+**It found two defects in shipped code, both on strict runs, before a
+single mutation was applied** — and it rejected two of my own invariant
+formulations first, which is the more useful lesson.
+
+**The promise took three tries to state, and each wrong try was a real
+behaviour.** An ok ack asserts that the coherent point the agent
+declared is INSTALLED. Stating that as *snapshot equality* is wrong,
+because D1's guarantee is at-LEAST — "the published state may include
+later bytes for a racing file, never earlier ones". TLC's answers, in
+order: (1) an agent that deleted a path, declared, re-created it, let
+the barrier publish the re-creation and deleted it again, so the
+consume-time snapshot matched the tree again at ack time while the
+manifest legitimately cited later bytes — hence `pendMint`, a
+generation watermark; (2) an inbox adoption of a HITL write that landed
+before checkout, where the agent had no work on the path at all — hence
+`pendDirty`, so the promise covers only what was locally dirty at the
+consume; (3) an agent deleting its own declared file after declaring,
+which supersedes while minting nothing — hence the tree-comparison
+clause the watermark cannot replace. All three exemptions are in
+`BoundaryBroken` with the counterexample that forced them.
+
+**Two invariants, not one.** Counterexample (2) also showed that "the
+agent's own work survived" and "the point the ack names is coherent at
+all" are different claims: a citation repair still owed at ack time
+risks no work of the agent's and still means a reader — or this
+workspace's own next checkout — resolves to bytes already superseded
+here. `Inv_AckImpliesCited` and `Inv_AckBoundaryCoherent` each have
+their own mutation, and neither fires the other's.
+
+**Defect one: a restart between the manifest CAS and step 7 ate the
+agent's delete.** The merge base and the baseline are both rewritten at
+step 7 — after the CAS, after the GC deletes. A container restart in
+that window leaves the bucket holding a document this workspace wrote
+and the persisted merge base one generation behind it, so at the next
+merge our own entries read as somebody else's change; delete/modify
+resolves conservatively by design, so the agent's delete is dropped
+from the boundary it is about to be acked for and the path is queued
+into the inbox as a conflict nobody else ever touched. TLC produced it
+by two different routes — an adopted inbox write and our own upload —
+which is what killed the first fix (an entry-`epoch` test, fooled by an
+in-place foreign edit that leaves the epoch field alone; the battery's
+`local_delete_loses_to_foreign_modify` said so within seconds). The fix
+that holds is document identity: `IntentJournal::installed_etag`,
+written immediately after the CAS. Pinned as `MineIsNotForeign`.
+
+**Defect two was found by reading for the model, not by running it**:
+the D12 heartbeat renewal arm returned on `Fenced` without settling
+owed acks. Both honor arms settle; the heartbeat — decoupled from
+publish cadence, and therefore usually the FIRST arm to discover
+deposal — did not. `RenewDiscover` models the fixed rule.
+
+**§10.1's deliberate deviation is now machine-checked rather than
+argued.** §2.1 prescribes that a pending sentinel defeat the
+skip-on-no-diff fast path; the shipped code lets it through, because
+defeating it would cost a manifest CAS at up to 720/hour/workspace. The
+argument was that the fast path only fires when every local byte is
+already cited. `FastPathGuards=FALSE` drops the two guards that carry
+it — no citation repair owed, and the remote manifest where we left it
+— and `Inv_AckBoundaryCoherent` must fall. `ProbeFastPathHonor` is what
+keeps the strict side from holding because the fast path never ran.
+
+**A budget note that cost a pilot.** The fast path must charge the
+barrier budget. Without it `Consume → FastPath → Consume` is a free
+cycle that consumes nothing, and the state graph's DIAMETER grows
+without bound — the pilot ran to depth 148 and 17M states before that
+line existed. And `MaxGen=3` with `MaxRestarts=1` does not fit: the two
+worlds are split — `MaxGen=3/MaxRestarts=0` for breadth,
+`MaxGen=2/MaxRestarts=1` for the crash matrix, and `MaxGen=2/MaxHitl=0`
+with one touch for the stall/takeover world (at `MaxGen=3` the deposal
+run passed 1.3 GB of TLC scratch without terminating: two live sidecars,
+each with its own sentinel, pending record and ack, is a different scale
+from one) — and every mutation runs in the smaller world its
+counterexample needs.
+`MaxTouches=2` is load-bearing exactly as `MaxHitl=1` was for product 2:
+the orphan hazard needs a second consume landing on a live pending
+record, and `ProbeCoalescedAck` is what proves that is reached.
+
+**The harness earned its keep on this tranche.** One mutation's world
+lost the arm its counterexample needs — a cfg override that silently did
+not apply, leaving `MaxRestarts=0` on the run whose whole subject is a
+crash between the CAS and step 7. It completed a full 1.3M-state search
+and reported no error, which reads exactly like a pass. `mutation_run`
+treats rc=0 as a FAILURE for precisely this reason: a mutation that
+cannot rediscover its bug proves nothing, and the only way to tell that
+from a fix is to demand the counterexample by name.
+
+Not modelled, named rather than omitted: the two-consecutive-scans
+delete rule (still unrepresentable here — the battery isolates it with
+five mutations after it produced its own shipped defect this session),
+the bare touch, the min-interval and hourly budget (rate limiting stays
+out of the safety gate), and an agent restoring byte-identical content,
+which unique mints cannot express.
+
 ## Tranche 3 candidates (in review-priority order)
 
 1. Layout/multi-subtree (P2/P3): root-owner designation, foreign
@@ -246,9 +346,6 @@ code holds the HITL window across both).
    it OUT of the safety gate; the WF ping-pong trap lives here).
 3. Refine ClaimB into the poll protocol with a torn heartbeat task
    (the self-recognition + rotation composition).
-4. **Product 1 — boundary × barrier × inbox with the deposal arm.**
-   Still owed. `Inv_NoNonceOrphan` under coalesce + crash + restart is
-   an interleaving property unit tests sample rather than search, and
-   `settle_pending_at_startup` is justified today by one ordering out of
-   many. Product 2's return (a live defect on the first strict run)
-   is the argument for doing it.
+4. ~~Product 1 — boundary × barrier × inbox with the deposal arm.~~
+   **DONE** (above). Two shipped defects, and three rejected invariant
+   formulations before the promise was stated correctly.
