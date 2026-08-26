@@ -75,7 +75,7 @@
 <section class="page">
   <header class="ph">
     <h1>Flint-lean — plain files, one bucket</h1>
-    <span class="kicker">1 / 3 · architecture</span>
+    <span class="kicker">1 / 4 · architecture</span>
   </header>
   <p class="dek">The third front end over the flint bucket format, split out of the flint-fuse architecture doc: if the workspace fits on disk, no interception is needed at all. Materialize plain files at pod start, publish changed files at cadence with an unprivileged sidecar, and put write authority in a stateless gateway. Most of FUSE's value at a fraction of its risk surface — same bucket format, same engine.</p>
   <figure>
@@ -202,7 +202,7 @@
 <section class="page">
   <header class="ph">
     <h1>One dialect — the S3 surface, three placements</h1>
-    <span class="kicker">2 / 3 · protocol</span>
+    <span class="kicker">2 / 4 · protocol</span>
   </header>
   <p class="dek">The decision of record: every REST surface in the system speaks the S3 dialect — the hub's file API converges onto it, the gateway serves it, and direct-mode non-mount access (lean and FUSE alike) is plain S3 against the bucket. One library, three placements; the consistency contracts say which view a client is reading.</p>
   <figure>
@@ -288,7 +288,7 @@
 <section class="page">
   <header class="ph">
     <h1>Boundary verbs — the agent says when</h1>
-    <span class="kicker">3 / 3 · architecture · shipped 2026-08-26</span>
+    <span class="kicker">3 / 4 · architecture · shipped 2026-08-26</span>
   </header>
   <p class="dek">Pages 1–2 describe publishing <b>at cadence</b>: an mtime/size scan on a timer. That is still the default, and it is still the whole story for a workspace nobody is watching. What it could not express is a coherent point — &ldquo;these files, together, now&rdquo; — so an agent finishing a unit of work had no way to say so and no way to learn when its bytes were durable. The boundary verbs are that sentence, written as files in the workspace the agent already has. Nothing new is mounted, no port is opened, and a workspace that ignores them pays nothing: measured at <b>20 bucket requests per 22&nbsp;s idle with the verbs off and 20 with them on</b>.</p>
   <figure>
@@ -366,6 +366,96 @@
     <text class="tx" x="56" y="694">  this front end exists to avoid — so it is a chosen ceiling, not an unfinished task.</text>
   </svg>
   <figcaption><b>The verbs are files because the workspace is the interface.</b> An agent that can write a file can declare a boundary — no client library, no credential, no network path, and the same mechanism serves a shell script and a language runtime. The ack is the other half: <code>ok</code> means the boundary is installed in the bucket, <code>partial</code> means it installed without something the agent declared, and <code>refused-fenced</code> means this sidecar lost the lease and is saying so rather than leaving the agent waiting — which it used to do, forever. <b>Gated mode answers a different question from cadence:</b> cadence asks how stale a reader may be, gated asks whether a reader may see half a logical change, and answers no by making durability and visibility separate events. The cost is stated, not hidden — uncited versions exist in the bucket, a raw-key reader can see them, and the retention backstop must outlast the crash window or it will reap a version the manifest still cites. <b>Evidence, not assertion:</b> 27 bucket legs against a real MinIO, 14 operator legs on kind, a 61-run TLC gate, and the published chart installed on a three-node AWS cluster publishing to real S3 over TLS — logs committed under <code>lean/e2e/results/</code>.</figcaption>
+</section>
+
+<!-- ============================================================ PAGE 4 -->
+<section class="page">
+  <header class="ph">
+    <h1>Does it fit? — the workflow lean is for</h1>
+    <span class="kicker">4 / 4 · use case</span>
+  </header>
+  <p class="dek">Lean is not a general filesystem and does not try to be. It is for <b>one agent, one workspace, one writer, a workspace that fits on disk</b> — the harness shape: clone-ish tree of code and artifacts, an agent that reads and writes it locally at full speed, and a durable point somebody else can read when the work is done. Everything below is the boundary of that claim, in measured numbers, so the answer to &ldquo;will this work for us&rdquo; is arithmetic rather than opinion.</p>
+  <figure>
+  <svg viewBox="0 0 1600 700" role="img" aria-label="A decision column asking whether the workspace fits on disk, whether one writer is enough and whether snapshot freshness is acceptable, next to a timeline of the agent workflow from pod start through checkout, local work, a declared boundary and a sibling's sync, and a table of measured costs.">
+    <defs>
+      <marker id="p4-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
+    </defs>
+
+    <rect x="40" y="70" width="470" height="320" rx="10" class="bx-slate"/>
+    <text class="th" x="56" y="96">three questions, in order</text>
+
+    <rect x="60" y="116" width="430" height="76" rx="8" class="bx"/>
+    <text class="tl" x="76" y="140">1 · does the workspace fit the disk?</text>
+    <text class="tx" x="76" y="160">the whole tree is materialized — no stubs, no eviction.</text>
+    <text class="tx" x="76" y="176">No ⇒ FUSE (its own doc). This is the hard gate.</text>
+
+    <rect x="60" y="204" width="430" height="76" rx="8" class="bx"/>
+    <text class="tl" x="76" y="228">2 · is one writer per subtree enough?</text>
+    <text class="tx" x="76" y="248">a lease admits exactly one sidecar; a second is refused,</text>
+    <text class="tx" x="76" y="264">not merged. No ⇒ the hub, for live shared POSIX.</text>
+
+    <rect x="60" y="292" width="430" height="80" rx="8" class="bx"/>
+    <text class="tl" x="76" y="316">3 · is snapshot freshness acceptable?</text>
+    <text class="tx" x="76" y="336">readers see the last published boundary, not your last</text>
+    <text class="tx" x="76" y="352">write. No ⇒ the hub. Yes ⇒ lean, and read on.</text>
+
+    <rect x="540" y="70" width="1020" height="320" rx="10" class="bx-hub"/>
+    <text class="th" x="556" y="96">the loop — one agent, start to durable</text>
+
+    <rect x="560" y="118" width="220" height="90" rx="8" class="bx"/>
+    <text class="tl ctr" x="670" y="142">pod starts</text>
+    <text class="tx ctr" x="670" y="162">webhook injects the sidecar;</text>
+    <text class="tx ctr" x="670" y="178">checkout runs BEFORE the</text>
+    <text class="tx ctr" x="670" y="194">agent's first line</text>
+
+    <rect x="800" y="118" width="220" height="90" rx="8" class="bx"/>
+    <text class="tl ctr" x="910" y="142">agent works</text>
+    <text class="tx ctr" x="910" y="162">plain local files, full POSIX,</text>
+    <text class="tx ctr" x="910" y="178">zero interception — this is</text>
+    <text class="tx ctr" x="910" y="194">the part that is just fast</text>
+
+    <rect x="1040" y="118" width="220" height="90" rx="8" class="bx"/>
+    <text class="tl ctr" x="1150" y="142">agent declares</text>
+    <text class="mns ctr" x="1150" y="164">echo &gt; .flint/publish</text>
+    <text class="tx ctr" x="1150" y="184">one file write — the whole</text>
+    <text class="tx ctr" x="1150" y="200">API surface</text>
+
+    <rect x="1280" y="118" width="260" height="90" rx="8" class="bx"/>
+    <text class="tl ctr" x="1410" y="142">sidecar answers</text>
+    <text class="mns ctr" x="1410" y="164">.flint/publish.ack</text>
+    <text class="tx ctr" x="1410" y="184">ok ⇒ the bytes are in S3 and</text>
+    <text class="tx ctr" x="1410" y="200">a sibling can read them</text>
+
+    <line class="ln ln-blue" x1="780" y1="163" x2="800" y2="163" marker-end="url(#p4-ab)"/>
+    <line class="ln ln-blue" x1="1020" y1="163" x2="1040" y2="163" marker-end="url(#p4-ab)"/>
+    <line class="ln ln-blue" x1="1260" y1="163" x2="1280" y2="163" marker-end="url(#p4-ab)"/>
+
+    <rect x="560" y="228" width="980" height="144" rx="8" class="bx"/>
+    <text class="tl" x="578" y="252">what it costs — MEASURED, loopback floors (0b); a latency-bound proxy moves these</text>
+    <text class="mns" x="578" y="278">bytes</text>
+    <text class="tx" x="700" y="278">checkout 3.3 s/GiB · publish 8.0 s/GiB</text>
+    <text class="mns" x="578" y="300">100k files</text>
+    <text class="tx" x="700" y="300">checkout 49.5 s · first publish 65 s (was 117 s before bounded fan-out) · idle tick 1.85 s</text>
+    <text class="mns" x="578" y="322">1M files</text>
+    <text class="tx" x="700" y="322">checkout 7 m 05 s · manifest 264 MiB at ~277 B/entry, exactly linear — the manifest is the wall</text>
+    <text class="mns" x="578" y="344">v1 cap</text>
+    <text class="tx" x="700" y="344">~250k files, and it falls out of the manifest size, not the byte count</text>
+    <text class="tx" x="578" y="364">idle costs ~5 bucket requests per tick, and the verbs add ZERO when unused — measured 20 vs 20 over 22 s</text>
+
+    <rect x="40" y="414" width="1520" height="120" rx="10" class="band"/>
+    <text class="th" x="56" y="440">worked example — a coding-agent fleet</text>
+    <text class="tx" x="56" y="464">A 2 GiB repo, 40k files, 30 agent pods, each on its own prefix. Checkout ≈ 7 s of bytes plus ~20 s of file count, so a pod is working inside half a minute.</text>
+    <text class="tx" x="56" y="482">Each agent publishes when it finishes a task rather than on a timer, so a reviewer reads whole units of work, never a half-written tree. Idle pods cost about</text>
+    <text class="tx" x="56" y="500">five requests a tick each. Nothing is shared live: if two agents must edit one tree simultaneously, that is the hub's job, not this one — and the lease will</text>
+    <text class="tx" x="56" y="518">tell you so by refusing the second writer rather than merging them badly.</text>
+
+    <rect x="40" y="558" width="1520" height="110" rx="10" class="bx-ochre"/>
+    <text class="th" x="56" y="584">when to walk away from lean</text>
+    <text class="tx" x="56" y="608">· The tree does not fit the pod's disk, or is TiB-scale, or you need lazy access to a small slice of a huge dataset — FUSE.</text>
+    <text class="tx" x="56" y="626">· Two writers must see each other's bytes live, or you need byte-range locks, O_EXCL or shared sqlite/git ACROSS pods — the hub.</text>
+    <text class="tx" x="56" y="644">· A reader cannot tolerate seeing the last boundary instead of the last write — the hub. Gated mode narrows WHAT a reader sees, never HOW STALE it is.</text>
+  </svg>
+  <figcaption><b>The fit question is one question, and it is about the disk.</b> Everything else follows: because the whole tree is local, the app gets real POSIX at local speed and the FUSE risk class disappears; because it is local, it must fit; and because publishing is a boundary rather than a write-through, a reader sees coherent points instead of a live tree. <b>The file count binds before the byte count.</b> At ~277 B per manifest entry the document is exactly linear, so a million small files costs a 264 MiB manifest while a million bytes costs nothing — which is why the v1 cap is expressed in files (~250k) and why the levers that mattered were fan-out and skipping the manifest parse on an idle tick, not raw throughput. <b>The verbs change the shape of the workflow, not its cost.</b> Cadence alone forces a choice between publishing too often (wasted work) and too rarely (a reviewer reads a half-finished tree); a declared boundary removes the choice, and costs nothing when unused. <b>Say no early.</b> The three questions above are ordered so the cheapest disqualifier comes first, and a workload that fails any of them is better served by another front end over the same bucket format — all three are mutually convertible, so choosing lean today does not strand the data if the answer changes.</figcaption>
 </section>
 </body>
 </html>
