@@ -75,7 +75,7 @@
 <section class="page">
   <header class="ph">
     <h1>Flint-lean — plain files, one bucket</h1>
-    <span class="kicker">1 / 4 · architecture</span>
+    <span class="kicker">1 / 5 · architecture</span>
   </header>
   <p class="dek">The third front end over the flint bucket format, split out of the flint-fuse architecture doc: if the workspace fits on disk, no interception is needed at all. Materialize plain files at pod start, publish changed files at cadence with an unprivileged sidecar, and put write authority in a stateless gateway. Most of FUSE's value at a fraction of its risk surface — same bucket format, same engine.</p>
   <figure>
@@ -202,7 +202,7 @@
 <section class="page">
   <header class="ph">
     <h1>One dialect — the S3 surface, three placements</h1>
-    <span class="kicker">2 / 4 · protocol</span>
+    <span class="kicker">2 / 5 · protocol</span>
   </header>
   <p class="dek">The decision of record: every REST surface in the system speaks the S3 dialect — the hub's file API converges onto it, the gateway serves it, and direct-mode non-mount access (lean and FUSE alike) is plain S3 against the bucket. One library, three placements; the consistency contracts say which view a client is reading.</p>
   <figure>
@@ -288,7 +288,7 @@
 <section class="page">
   <header class="ph">
     <h1>Boundary verbs — the agent says when</h1>
-    <span class="kicker">3 / 4 · architecture · shipped 2026-08-26</span>
+    <span class="kicker">3 / 5 · architecture · shipped 2026-08-26</span>
   </header>
   <p class="dek">Pages 1–2 describe publishing <b>at cadence</b>: an mtime/size scan on a timer. That is still the default, and it is still the whole story for a workspace nobody is watching. What it could not express is a coherent point — &ldquo;these files, together, now&rdquo; — so an agent finishing a unit of work had no way to say so and no way to learn when its bytes were durable. The boundary verbs are that sentence, written as files in the workspace the agent already has. Nothing new is mounted, no port is opened, and a workspace that ignores them pays nothing: measured at <b>20 bucket requests per 22&nbsp;s idle with the verbs off and 20 with them on</b>.</p>
   <figure>
@@ -372,7 +372,7 @@
 <section class="page">
   <header class="ph">
     <h1>Does it fit? — the workflow lean is for</h1>
-    <span class="kicker">4 / 4 · use case</span>
+    <span class="kicker">4 / 5 · use case · sizing</span>
   </header>
   <p class="dek">Lean is not a general filesystem and does not try to be. It is for <b>one agent, one workspace, one writer, a workspace that fits on disk</b> — the harness shape: clone-ish tree of code and artifacts, an agent that reads and writes it locally at full speed, and a durable point somebody else can read when the work is done. Everything below is the boundary of that claim, in measured numbers, so the answer to &ldquo;will this work for us&rdquo; is arithmetic rather than opinion.</p>
   <figure>
@@ -456,6 +456,74 @@
     <text class="tx" x="56" y="644">· A reader cannot tolerate seeing the last boundary instead of the last write — the hub. Gated mode narrows WHAT a reader sees, never HOW STALE it is.</text>
   </svg>
   <figcaption><b>The fit question is one question, and it is about the disk.</b> Everything else follows: because the whole tree is local, the app gets real POSIX at local speed and the FUSE risk class disappears; because it is local, it must fit; and because publishing is a boundary rather than a write-through, a reader sees coherent points instead of a live tree. <b>The file count binds before the byte count.</b> At ~277 B per manifest entry the document is exactly linear, so a million small files costs a 264 MiB manifest while a million bytes costs nothing — which is why the v1 cap is expressed in files (~250k) and why the levers that mattered were fan-out and skipping the manifest parse on an idle tick, not raw throughput. <b>The verbs change the shape of the workflow, not its cost.</b> Cadence alone forces a choice between publishing too often (wasted work) and too rarely (a reviewer reads a half-finished tree); a declared boundary removes the choice, and costs nothing when unused. <b>Say no early.</b> The three questions above are ordered so the cheapest disqualifier comes first, and a workload that fails any of them is better served by another front end over the same bucket format — all three are mutually convertible, so choosing lean today does not strand the data if the answer changes.</figcaption>
+</section>
+
+<!-- ============================================================ PAGE 5 -->
+<section class="page">
+  <header class="ph">
+    <h1>Git on a lean workspace — two jobs, two paths</h1>
+    <span class="kicker">5 / 5 · use case · collaboration</span>
+  </header>
+  <p class="dek">The obvious question once several agents share a repo: how do they integrate? The answer is that they do not integrate through flint-lean at all. <b>Use plain git against a real git host, and let flint-lean keep the workspace durable.</b> Two mechanisms, two network paths, two different jobs — and they never touch, which is exactly why nothing special is needed to make them coexist. Full guide: <code>docs/flint-lean-git-workflow.md</code>.</p>
+  <figure>
+  <svg viewBox="0 0 1600 660" role="img" aria-label="An agent pod whose workspace is a local emptyDir; git pushes and pulls over HTTPS to a git host for collaboration, while the flint-lean sidecar snapshots the whole tree to S3 for durability; a table divides what each mechanism owns and is blind to.">
+    <defs>
+      <marker id="p5-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
+      <marker id="p5-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b45309"/></marker>
+    </defs>
+
+    <rect x="40" y="70" width="520" height="230" rx="10" class="bx-hub"/>
+    <text class="th" x="56" y="96">agent pod</text>
+    <rect x="62" y="118" width="476" height="76" rx="8" class="bx"/>
+    <text class="mns ctr" x="300" y="144">/workspace</text>
+    <text class="tx ctr" x="300" y="166">local emptyDir · real POSIX · zero interception</text>
+    <text class="tx ctr" x="300" y="182">so plain git just works — index locks, hard links, local clones</text>
+    <text class="tx" x="76" y="222">The app container holds ONE storage-facing secret: the git</text>
+    <text class="tx" x="76" y="240">credential. The S3 side belongs to the sidecar, never the app.</text>
+    <text class="tx" x="76" y="268">(flint-lite&rsquo;s LINK→NOTSUPP limit is an NFS-over-S3 constraint —</text>
+    <text class="tx" x="76" y="286">it does not apply here, because a lean checkout is local disk.)</text>
+
+    <rect x="640" y="70" width="440" height="100" rx="10" class="bx-blue"/>
+    <text class="th" x="656" y="96">COLLABORATION — git host</text>
+    <text class="tx" x="656" y="120">push / pull / clone over ordinary HTTPS</text>
+    <text class="tx" x="656" y="140">merging, review, history, conflict resolution</text>
+    <text class="tx" x="656" y="160">several agents meet HERE, not in the bucket</text>
+
+    <rect x="640" y="200" width="440" height="100" rx="10" class="bx-ochre"/>
+    <text class="th" x="656" y="226">DURABILITY — flint-lean → S3</text>
+    <text class="tx" x="656" y="250">the WHOLE tree: code, .git, uncommitted edits,</text>
+    <text class="tx" x="656" y="270">untracked files, build caches, sqlite</text>
+    <text class="tx" x="656" y="290">one writer per subtree, epoch-fenced</text>
+
+    <line class="ln ln-blue" x1="560" y1="120" x2="640" y2="120" marker-end="url(#p5-ab)"/>
+    <line class="ln ln-ochre" x1="560" y1="250" x2="640" y2="250" marker-end="url(#p5-ao)"/>
+
+    <rect x="1120" y="70" width="440" height="230" rx="10" class="bx-slate"/>
+    <text class="th" x="1136" y="96">they cover each other&rsquo;s gaps EXACTLY</text>
+    <text class="tx" x="1136" y="124">git is blind to: uncommitted edits, unpushed</text>
+    <text class="tx" x="1136" y="142">commits, everything outside the repo</text>
+    <text class="tx" x="1136" y="166">— which is flint-lean&rsquo;s whole job.</text>
+    <text class="tx" x="1136" y="196">flint-lean is blind to: combining two agents&rsquo;</text>
+    <text class="tx" x="1136" y="214">work (single-writer, no merge)</text>
+    <text class="tx" x="1136" y="238">— which is git&rsquo;s whole job.</text>
+    <text class="tx" x="1136" y="272">Neither is a substitute for the other, and</text>
+    <text class="tx" x="1136" y="290">neither needs to know the other exists.</text>
+
+    <rect x="40" y="330" width="1520" height="128" rx="10" class="band"/>
+    <text class="th" x="56" y="356">two tiers of durability — reason about a hard pod kill</text>
+    <text class="tx" x="56" y="382">· PUSHED COMMITS are safe unconditionally. They live on the git host; the pod is irrelevant to them.</text>
+    <text class="tx" x="56" y="402">· EVERYTHING ELSE is safe to the last barrier — uncommitted edits, unpushed commits, untracked files, build state.</text>
+    <text class="tx" x="56" y="422">  A hard kill loses at most floorSecs of it (default 60 s). That is the RPO contract, and it is the reason to publish at breakpoints.</text>
+    <text class="tx" x="56" y="442">· A GRACEFUL stop loses nothing: preStop runs a final barrier. A container restart over a live tree resumes from its baseline — no re-checkout.</text>
+
+    <rect x="40" y="488" width="1520" height="140" rx="10" class="bx-ochre"/>
+    <text class="th" x="56" y="514">why NOT a git-over-S3 remote</text>
+    <text class="tx" x="56" y="540">· A lean pod reaches the bucket on the sidecar&rsquo;s scoped credential, not the open bucket such a helper expects; its writes would be</text>
+    <text class="tx" x="56" y="558">  unscoped and would carry no epoch stamp — invisible to the arbitration everything else on these pages depends on.</text>
+    <text class="tx" x="56" y="580">· flint-lean IS a checkout/publish-to-S3 engine. A second S3 sync on top is redundant, and gives you two coherence models that disagree.</text>
+    <text class="tx" x="56" y="602">· flint-lean is ONE WRITER per subtree. N agents merging into one tree is precisely what a git remote is for — so let it be.</text>
+  </svg>
+  <figcaption><b>The division is clean because the blind spots are complementary, not overlapping.</b> Git owns what has been committed and pushed — history, review, merge, and the actual integration of several agents&rsquo; work. flint-lean owns everything git cannot see: the uncommitted edit, the unpushed commit, the untracked scratch file, the build cache, the sqlite database sitting next to the repo. Each agent gets its own lean workspace on its own prefix, and the agents meet at the git host. <b>The practical rule is a two-tier one.</b> Commit and push at natural breakpoints, because that is the only tier with no RPO at all; rely on flint-lean to carry the in-flight remainder across pod churn, bounded by <code>floorSecs</code> — or declare a boundary explicitly with <code>.flint/publish</code> when a unit of work finishes, which is page 3&rsquo;s subject and turns &ldquo;at most 60 s of loss&rdquo; into &ldquo;none, and I know it landed.&rdquo; <b>Nothing here is special-cased.</b> There is no git integration in flint-lean, no hook, no filter, no lock coordination — the working tree is ordinary local disk, which is the entire reason this composes.</figcaption>
 </section>
 </body>
 </html>
