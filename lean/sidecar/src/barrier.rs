@@ -349,7 +349,16 @@ impl Sidecar {
 
     /// Steps 2–7. `barrier` = one full publish cycle (the cadence arm).
     pub async fn run_barrier(&mut self) -> LeanResult<BarrierReport> {
-        self.barrier_inner(false).await
+        self.barrier_inner(false, "manual").await
+    }
+
+    /// The floor tick's barrier. Stamped `cadence` so the bucket can
+    /// answer "which clock installed this boundary?" without the ack —
+    /// the ack is a LOCAL file, and the fleet-visible question is asked
+    /// by operators and by the gateway's `/status`, neither of which
+    /// can see it.
+    pub async fn cadence_barrier(&mut self) -> LeanResult<BarrierReport> {
+        self.barrier_inner(false, "cadence").await
     }
 
     /// A barrier whose result somebody is going to ACK: a sentinel
@@ -357,10 +366,17 @@ impl Sidecar {
     /// `run_barrier` except that it confirms first-absence paths rather
     /// than acking a boundary that withholds them.
     pub async fn declared_barrier(&mut self) -> LeanResult<BarrierReport> {
-        self.barrier_inner(true).await
+        self.barrier_inner(true, "sentinel").await
     }
 
-    async fn barrier_inner(&mut self, declared: bool) -> LeanResult<BarrierReport> {
+    /// `declared_barrier` under an explicit provenance stamp — the
+    /// drain and the budget-deferred honor are the same barrier
+    /// reporting a different clock.
+    pub async fn declared_barrier_as(&mut self, source: &str) -> LeanResult<BarrierReport> {
+        self.barrier_inner(true, source).await
+    }
+
+    async fn barrier_inner(&mut self, declared: bool, source: &str) -> LeanResult<BarrierReport> {
         let epoch = self.lease_epoch()?;
         let mut report = BarrierReport::default();
 
@@ -600,13 +616,14 @@ impl Sidecar {
                 };
             let (merged, foreign) =
                 manifest::merge(base, &theirs, &upserts, &classified.deletes, &parked);
-            match manifest::cas_write(
+            match manifest::cas_write_stamped(
                 self.store.as_ref(),
                 &self.cfg,
                 &merged,
                 expected.as_deref(),
                 epoch,
                 &flush_uuid,
+                Some(source),
             )
             .await
             {

@@ -74,7 +74,7 @@ impl Verb {
             Verb::Sync => "sync",
         }
     }
-    fn sentinel_name(&self) -> &'static str {
+    pub fn sentinel_name(&self) -> &'static str {
         match self {
             Verb::Publish => control::PUBLISH,
             Verb::Sync => control::SYNC,
@@ -86,7 +86,12 @@ impl Verb {
             Verb::Sync => control::SYNC_ACK,
         }
     }
-    fn pending_name(&self) -> &'static str {
+    /// The standing pending record. `pub` because `flint-sync status`
+    /// reports on it and MUST NOT spell it a second time: it did, it
+    /// spelled it wrong ("pending-publish.json"), and the field that
+    /// answers "is my agent blocked on an ack?" therefore answered no
+    /// forever.
+    pub fn pending_name(&self) -> &'static str {
         match self {
             Verb::Publish => "publish.pending.json",
             Verb::Sync => "sync.pending.json",
@@ -615,6 +620,19 @@ impl Sidecar {
     /// boundary; the ack is stamped `sentinel-deferred`. `Ok(None)`
     /// means nothing was owed (or it is not due yet).
     pub async fn honor_pending(&mut self, verb: Verb, forced: bool) -> LeanResult<Option<Ack>> {
+        self.honor_pending_as(verb, forced, None).await
+    }
+
+    /// `honor_pending` under an explicit provenance stamp. The drain
+    /// needs it: it rewrites the ack to `drain`, and a manifest still
+    /// stamped `sentinel-deferred` would have the bucket and the ack
+    /// naming two different clocks for one boundary.
+    pub async fn honor_pending_as(
+        &mut self,
+        verb: Verb,
+        forced: bool,
+        source: Option<&str>,
+    ) -> LeanResult<Option<Ack>> {
         let Some(pending) = self.load_pending(verb)? else { return Ok(None) };
         if !forced {
             match self.sentinel_due()? {
@@ -641,7 +659,7 @@ impl Sidecar {
         }
 
         let ack = match verb {
-            Verb::Publish => self.honor_publish(&pending, forced).await,
+            Verb::Publish => self.honor_publish(&pending, forced, source).await,
             Verb::Sync => self.honor_sync(&pending, forced).await,
         };
         match ack {
@@ -666,15 +684,26 @@ impl Sidecar {
         self.store.epoch_read(&self.cfg.epoch_key()).await.ok().flatten().map(|s| s.epoch)
     }
 
-    async fn honor_publish(&mut self, pending: &PendingSentinel, forced: bool) -> LeanResult<Ack> {
+    async fn honor_publish(
+        &mut self,
+        pending: &PendingSentinel,
+        forced: bool,
+        source: Option<&str>,
+    ) -> LeanResult<Ack> {
         if self.is_gated() {
-            return self.honor_publish_gated(pending, forced).await;
+            return self.honor_publish_gated(pending, forced, source).await;
         }
         // The DECLARED form (D1): a delete the agent made before the
         // touch is part of the coherent point it declared, so this
         // barrier confirms first-absence paths instead of acking a
         // boundary that withholds them to the next floor tick.
-        let report = self.declared_barrier().await?;
+        // The ack and the manifest must agree on which clock published:
+        // a budget-deferred boundary reads `sentinel-deferred` in both.
+        let report = self
+            .declared_barrier_as(
+                source.unwrap_or(if forced { "sentinel-deferred" } else { "sentinel" }),
+            )
+            .await?;
         let units = self.charge_budget(report.published_bytes)?;
         let _ = units;
         let baseline = self.state.load_baseline()?;
@@ -711,9 +740,18 @@ impl Sidecar {
         &mut self,
         pending: &PendingSentinel,
         forced: bool,
+        source: Option<&str>,
     ) -> LeanResult<Ack> {
+        // The drain honors a standing sentinel too, and rewrites the ack
+        // to `drain`. The manifest has to agree: one boundary must never
+        // name two clocks, least of all with the BUCKET — the surface an
+        // operator trusts — holding the wrong one.
+        let cite_source = match source {
+            Some("drain") => super::gated::CitationSource::Drain,
+            _ => super::gated::CitationSource::Sentinel,
+        };
         let mut lane = self.declared_lane().await?;
-        let mut cite = self.citation_pass(super::gated::CitationSource::Sentinel).await?;
+        let mut cite = self.citation_pass(cite_source).await?;
         // D1, at the one place gated can break it. A citation drops a
         // staged path when a HITL write landed between the lane's
         // consume and the citation's window — so the manifest this ack
@@ -725,7 +763,7 @@ impl Sidecar {
         // citation carries the declared point.
         if !cite.dropped_inflight.is_empty() {
             let lane2 = self.declared_lane().await?;
-            let mut cite2 = self.citation_pass(super::gated::CitationSource::Sentinel).await?;
+            let mut cite2 = self.citation_pass(cite_source).await?;
             if cite2.seq.is_none() {
                 // Nothing left to cite: the boundary the first pass
                 // installed is still the one being acked.
@@ -981,7 +1019,7 @@ impl Sidecar {
                     cite.seq
                 })
             } else {
-                self.run_barrier().await.map(|r| {
+                self.cadence_barrier().await.map(|r| {
                     out.seq = r.seq;
                     out.no_change = r.no_change;
                     out.uploaded = r.uploaded.len();
@@ -1032,7 +1070,7 @@ impl Sidecar {
         for verb in [Verb::Sync, Verb::Publish] {
             let is_publish = matches!(verb, Verb::Publish);
             if self.load_pending(verb)?.is_some() {
-                match self.honor_pending(verb, true).await {
+                match self.honor_pending_as(verb, true, Some("drain")).await {
                     Ok(Some(mut a)) => {
                         a.boundary = "drain".into();
                         // Re-write with the drain stamp so the agent can
@@ -1066,7 +1104,7 @@ impl Sidecar {
                 let cite = self.citation_pass(super::gated::CitationSource::Drain).await?;
                 self.ticker_from(cite.seq, None)?;
             } else {
-                let r = self.declared_barrier().await?;
+                let r = self.declared_barrier_as("drain").await?;
                 self.ticker_from(r.observed_seq, r.observed_etag.clone())?;
             }
         }

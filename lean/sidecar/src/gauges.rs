@@ -259,11 +259,13 @@ pub fn status_report(cfg: &super::LeanConfig) -> LeanResult<StatusReport> {
     let baseline: super::state::Baseline = read_json(&sd.join("baseline.json")).unwrap_or_default();
     let inc: Option<super::state::Incarnation> = read_json(&sd.join("incarnation.json"));
     let mut pending_sentinels = vec![];
-    for (name, file) in
-        [("publish", super::control::PUBLISH), ("sync", super::control::SYNC)]
-    {
-        if sd.join(format!("pending-{file}.json")).exists() {
-            pending_sentinels.push(name.to_string());
+    // Named by the SAME function that writes them. The previous form
+    // built the name a second time and got it wrong, so this field —
+    // the "is my agent blocked on an ack?" answer — was permanently
+    // empty on a workspace that had a sentinel standing.
+    for verb in [super::sentinel::Verb::Publish, super::sentinel::Verb::Sync] {
+        if sd.join(verb.pending_name()).exists() {
+            pending_sentinels.push(verb.sentinel_name().to_string());
         }
     }
     let conflicts = std::fs::read_to_string(sd.join("conflicts.jsonl"))

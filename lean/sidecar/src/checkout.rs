@@ -35,6 +35,24 @@ pub struct CheckoutReport {
     pub refused: usize,
 }
 
+/// CRC-64/NVME of a local file, in the same base64 form the manifest
+/// carries. Streamed: a resumed checkout may be verifying a 20 GiB
+/// workspace and must not hold it in memory.
+fn local_crc64_b64(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut h = flint_store::Crc64Nvme::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Some(flint_store::crc64_to_b64(h.finalize()))
+}
+
 impl Sidecar {
     /// Materialize the workspace from the manifest. Idempotent across
     /// crashes (resume skips present paths); refuses over budget
@@ -112,21 +130,54 @@ impl Sidecar {
                     };
                     let _ = &target;
                     if local.exists() {
-                        // Resume: local-wins on present paths.
+                        // Resume: a present path is one THIS checkout
+                        // already fetched, so re-downloading it would
+                        // pay bucket GETs for bytes that are on disk.
+                        //
+                        // But only if it is the same bytes. A checkout
+                        // that died halfway leaves generation N on
+                        // disk, and the manifest can MOVE before the
+                        // replacement pod resumes (a HITL write, a
+                        // sibling's barrier — routine on this fleet).
+                        // Adopting then would stamp the baseline with
+                        // the NEW entry's etag over the OLD content:
+                        // the scan reads the file as clean and never
+                        // uploads it, a sync reads baseline == manifest
+                        // and never re-fetches it, and the workspace
+                        // holds bytes nothing will ever reconcile. The
+                        // divergence is silent and permanent.
+                        //
+                        // The check is local-only: size from the stat
+                        // we already took, then crc of the local file.
+                        // No bucket request either way — which is why
+                        // it can be unconditional rather than a knob.
                         let st = std::fs::metadata(&local)?;
-                        return Ok(Fetched {
-                            path: path.clone(),
-                            be: Some(BaselineEntry {
-                                etag: entry.etag.clone(),
-                                generation: entry.generation,
-                                size: st.len(),
-                                mtime_unix: mtime_of(&st),
-                                version_id: None,
-                            }),
-                            skipped: true,
-                            bytes: 0,
-                            refused: None,
-                        });
+                        let same = st.len() == entry.size
+                            && match &entry.crc64_b64 {
+                                Some(want) => local_crc64_b64(&local)
+                                    .map(|got| &got == want)
+                                    .unwrap_or(false),
+                                // A legacy entry attests nothing beyond
+                                // its size; adopting on size alone is
+                                // the same residual the scan carries.
+                                None => true,
+                            };
+                        if same {
+                            return Ok(Fetched {
+                                path: path.clone(),
+                                be: Some(BaselineEntry {
+                                    etag: entry.etag.clone(),
+                                    generation: entry.generation,
+                                    size: st.len(),
+                                    mtime_unix: mtime_of(&st),
+                                    version_id: entry.version_id.clone(),
+                                }),
+                                skipped: true,
+                                bytes: 0,
+                                refused: None,
+                            });
+                        }
+                        // Fall through and re-materialize.
                     }
                     // D13, the reader rule. Under a GATED citation the
                     // manifest is stamped `pinned_reads` and every
@@ -177,7 +228,10 @@ impl Sidecar {
                                 // mid-logical-change bytes. Refuse
                                 // loudly; the bytes are not lost.
                                 return Err(LeanError::State(format!(
-                                    "manifest cites {} at an etag the object no longer                                      carries, and the entry names no version to resolve                                      instead — refusing to adopt uncited bytes into a                                      pinned checkout. Run `flint-sync recover-staged` to                                      re-cite forward",
+                                    "manifest cites {} at an etag the object no longer carries, and \
+                                     the entry names no version to resolve instead — refusing \
+                                     to adopt uncited bytes into a pinned checkout. Run \
+                                     `flint-sync recover-staged` to re-cite forward",
                                     entry.key
                                 )));
                             }

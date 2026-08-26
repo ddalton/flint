@@ -1,0 +1,290 @@
+# The BOUNDARY-VERBS drill rig (run-verbs.sh, legs B1-B25).
+#
+# Same posture as chaos.yaml and for the same reason: operator-free, so
+# every barrier boundary is under the script's control. A webhook-
+# injected `run` loop publishes on its own clock, and half these legs
+# are about WHICH clock published — the sentinel's, the floor's, the lag
+# cap's or the quiescence timer's.
+#
+# The store half (namespace, MinIO, bucket) comes from minio.yaml, and
+# the script enables bucket VERSIONING before any gated leg: gated mode
+# refuses a bucket that cannot carry the version surface, so a rig
+# without it would test the refusal path by accident.
+#
+# Pods: verbs-a runs anything that needs no second identity; verbs-b is
+# the successor/probe pod (a FRESH emptyDir, so it takes the takeover
+# path instead of self-recognizing the lease); verbs-s/verbs-s2 are the
+# SIGSTOP straggler pair.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: strip-proxy-conf
+  namespace: flint-system
+data:
+  default.conf: |
+    # A project-scoped proxy that STRIPS x-amz-version-id — D8's
+    # silent-degradation hazard, as a real network element rather than
+    # a test injection. Everything else passes through, which is the
+    # point: the workspace looks healthy until a citation needs to NAME
+    # a version.
+    server {
+      listen 9000;
+      client_max_body_size 0;
+      location / {
+        proxy_pass http://minio.flint-system.svc:9000;
+        # SigV4 signs the Host header, so it must survive verbatim.
+        proxy_set_header Host $http_host;
+        proxy_hide_header x-amz-version-id;
+        proxy_hide_header X-Amz-Version-Id;
+        proxy_buffering off;
+        proxy_request_buffering off;
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: strip-proxy
+  namespace: flint-system
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: strip-proxy } }
+  template:
+    metadata: { labels: { app: strip-proxy } }
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports: [{ containerPort: 9000 }]
+          volumeMounts:
+            - { name: conf, mountPath: /etc/nginx/conf.d }
+      volumes:
+        - name: conf
+          configMap: { name: strip-proxy-conf }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: strip-proxy
+  namespace: flint-system
+spec:
+  selector: { app: strip-proxy }
+  ports: [{ port: 9000, targetPort: 9000 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lean-gateway
+  namespace: flint-system
+spec:
+  selector: { app: lean-gateway }
+  ports: [{ port: 8091, targetPort: 8091 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lean-gateway
+  namespace: flint-system
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: lean-gateway } }
+  template:
+    metadata: { labels: { app: lean-gateway } }
+    spec:
+      containers:
+        - name: gateway
+          image: flint-lean-gateway:e2e
+          imagePullPolicy: Never
+          env:
+            - { name: FLINT_LEAN_GW_BUCKET, value: agentws }
+            - { name: FLINT_LEAN_GW_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
+            - { name: FLINT_LEAN_GW_TOKEN, value: verbs-drill-token-0123456789 }
+            - name: FLINT_LEAN_GW_WORKSPACES
+              value: "b05=tenants/b05,b06=tenants/b06,b07=tenants/b07,b09=tenants/b09,b12=tenants/b12,b19=tenants/b19"
+            - { name: AWS_ACCESS_KEY_ID, value: drill }
+            - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
+            - { name: AWS_REGION, value: us-east-1 }
+            - { name: RUST_LOG, value: info }
+          ports: [{ containerPort: 8091 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8091 }
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: mc, namespace: flint-system }
+spec:
+  restartPolicy: Never
+  containers:
+    - name: mc
+      image: minio/mc
+      command: ["/bin/sh", "-c", "sleep 100000"]
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: curl, namespace: flint-system }
+spec:
+  restartPolicy: Never
+  containers:
+    - name: curl
+      image: curlimages/curl:latest
+      command: ["/bin/sh", "-c", "sleep 100000"]
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: verbs-a, namespace: default }
+spec:
+  restartPolicy: Always
+  containers:
+    # B7's probe: shares the workspace and has NO credentials, no S3
+    # client and no reason to reach the network. That is the claim
+    # `.flint/remote.seq` makes — news an agent can read without
+    # touching the bucket — and a probe holding creds could not prove it.
+    - name: probe
+      image: busybox:stable
+      command: ["/bin/sh", "-c", "sleep infinity"]
+      volumeMounts: [{ name: work, mountPath: /work }]
+    - name: sync
+      image: flint-sync:e2e
+      imagePullPolicy: Never
+      command: ["/bin/sh", "-c", "rm -f /work/DIE; exec sleep infinity"]
+      livenessProbe:
+        exec: { command: ["/bin/sh", "-c", "test ! -f /work/DIE"] }
+        initialDelaySeconds: 2
+        periodSeconds: 2
+        failureThreshold: 1
+      env:
+        - { name: FLINT_SYNC_BUCKET, value: agentws }
+        - { name: FLINT_SYNC_PREFIX, value: "tenants/verbs" }
+        - { name: FLINT_SYNC_ROOT, value: /work }
+        - { name: FLINT_SYNC_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
+        # The falsifiability fixture: with an hour-long floor, ONLY the
+        # mechanism under test can advance the manifest.
+        - { name: FLINT_SYNC_FLOOR_SECS, value: "3600" }
+        - { name: FLINT_SYNC_FANOUT, value: "1" }
+        - { name: AWS_ACCESS_KEY_ID, value: drill }
+        - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
+        - { name: AWS_REGION, value: us-east-1 }
+      volumeMounts: [{ name: work, mountPath: /work }]
+  volumes: [{ name: work, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: verbs-b, namespace: default }
+spec:
+  restartPolicy: Always
+  containers:
+    - name: sync
+      image: flint-sync:e2e
+      imagePullPolicy: Never
+      command: ["/bin/sh", "-c", "rm -f /work/DIE; exec sleep infinity"]
+      livenessProbe:
+        exec: { command: ["/bin/sh", "-c", "test ! -f /work/DIE"] }
+        initialDelaySeconds: 2
+        periodSeconds: 2
+        failureThreshold: 1
+      env:
+        - { name: FLINT_SYNC_BUCKET, value: agentws }
+        - { name: FLINT_SYNC_PREFIX, value: "tenants/verbs" }
+        - { name: FLINT_SYNC_ROOT, value: /work }
+        - { name: FLINT_SYNC_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
+        - { name: FLINT_SYNC_FLOOR_SECS, value: "3600" }
+        - { name: FLINT_SYNC_FANOUT, value: "1" }
+        - { name: AWS_ACCESS_KEY_ID, value: drill }
+        - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
+        - { name: AWS_REGION, value: us-east-1 }
+      volumeMounts: [{ name: work, mountPath: /work }]
+  volumes: [{ name: work, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: verbs-s, namespace: default }
+spec:
+  restartPolicy: Always
+  containers:
+    - name: sync
+      image: flint-sync:e2e
+      imagePullPolicy: Never
+      command: ["/bin/sh", "-c", "rm -f /work/DIE; exec sleep infinity"]
+      env:
+        - { name: FLINT_SYNC_BUCKET, value: agentws }
+        - { name: FLINT_SYNC_PREFIX, value: "tenants/verbs" }
+        - { name: FLINT_SYNC_ROOT, value: /work }
+        - { name: FLINT_SYNC_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
+        - { name: FLINT_SYNC_FLOOR_SECS, value: "3600" }
+        - { name: FLINT_SYNC_FANOUT, value: "1" }
+        - { name: AWS_ACCESS_KEY_ID, value: drill }
+        - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
+        - { name: AWS_REGION, value: us-east-1 }
+      volumeMounts: [{ name: work, mountPath: /work }]
+  volumes: [{ name: work, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: verbs-s2, namespace: default }
+spec:
+  restartPolicy: Always
+  containers:
+    - name: sync
+      image: flint-sync:e2e
+      imagePullPolicy: Never
+      command: ["/bin/sh", "-c", "rm -f /work/DIE; exec sleep infinity"]
+      env:
+        - { name: FLINT_SYNC_BUCKET, value: agentws }
+        - { name: FLINT_SYNC_PREFIX, value: "tenants/verbs" }
+        - { name: FLINT_SYNC_ROOT, value: /work }
+        - { name: FLINT_SYNC_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
+        - { name: FLINT_SYNC_FLOOR_SECS, value: "3600" }
+        - { name: FLINT_SYNC_FANOUT, value: "1" }
+        - { name: AWS_ACCESS_KEY_ID, value: drill }
+        - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
+        - { name: AWS_REGION, value: us-east-1 }
+      volumeMounts: [{ name: work, mountPath: /work }]
+  volumes: [{ name: work, emptyDir: {} }]
+---
+# B14's mixed fleet, and it is a REAL old binary rather than a
+# simulation: built from `69b35978` — the commit before the boundary
+# verbs existed — so it has no sentinel support, no capability marker,
+# and no `.flint/` reservation in its scan. That last one is the hazard
+# the leg demonstrates, and it cannot be faked by a knob.
+#
+# Two containers over ONE emptyDir: `sync` is the old binary, `new` is
+# the shipping one. The downgrade-over-a-live-tree arm needs both to see
+# the same workspace, which is exactly what a rollback looks like.
+apiVersion: v1
+kind: Pod
+metadata: { name: verbs-old, namespace: default }
+spec:
+  restartPolicy: Always
+  containers:
+    - name: sync
+      image: flint-sync:predo
+      imagePullPolicy: Never
+      command: ["/bin/sh", "-c", "exec sleep infinity"]
+      env:
+        - { name: FLINT_SYNC_BUCKET, value: agentws }
+        - { name: FLINT_SYNC_PREFIX, value: "tenants/b14" }
+        - { name: FLINT_SYNC_ROOT, value: /work }
+        - { name: FLINT_SYNC_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
+        - { name: FLINT_SYNC_FLOOR_SECS, value: "3600" }
+        - { name: FLINT_SYNC_FANOUT, value: "1" }
+        - { name: AWS_ACCESS_KEY_ID, value: drill }
+        - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
+        - { name: AWS_REGION, value: us-east-1 }
+      volumeMounts: [{ name: work, mountPath: /work }]
+    - name: new
+      image: flint-sync:e2e
+      imagePullPolicy: Never
+      command: ["/bin/sh", "-c", "exec sleep infinity"]
+      env:
+        - { name: FLINT_SYNC_BUCKET, value: agentws }
+        - { name: FLINT_SYNC_PREFIX, value: "tenants/b14" }
+        - { name: FLINT_SYNC_ROOT, value: /work }
+        - { name: FLINT_SYNC_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
+        - { name: FLINT_SYNC_FLOOR_SECS, value: "3600" }
+        - { name: FLINT_SYNC_FANOUT, value: "1" }
+        - { name: AWS_ACCESS_KEY_ID, value: drill }
+        - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
+        - { name: AWS_REGION, value: us-east-1 }
+      volumeMounts: [{ name: work, mountPath: /work }]
+  volumes: [{ name: work, emptyDir: {} }]

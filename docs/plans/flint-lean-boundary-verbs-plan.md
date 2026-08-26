@@ -389,18 +389,18 @@ House rules inherited wholesale (`docs/plans/flint-lean-chaos-drill.md:33-61`, `
 |---|---|---|
 | B1 | Sentinel publishes when cadence cannot: 1 h floor, dirty files, touch `.flint/publish` → manifest advances, ack covers nonce | Control phase first: assert the manifest does NOT advance for 3 min without the sentinel — proves the floor fixture actually removed cadence from the leg |
 | B2 | Crash between consume and ack converges via the uniform re-run rule: SIGSTOP mid-honor (two-HEAD mid-flight check), SIGKILL, restart → full barrier re-runs, ack carries the re-run's seq | Assert `publish.pending.json` exists AND `publish.ack` absent (or stale-nonced) *before* the kill; assert post-restart ack seq == the re-run barrier's installed seq, not the pre-crash baseline seq (review: crash-takeover) |
-| B3 | Rate limit + coalescing: 100 touches in 10 s ⇒ ≤ `ceil(10/5)+1` barriers; final ack's `nonces[]` covers EVERY touched nonce (review: security-dos) | Assert touch timestamps actually beat `sentinelMinIntervalSecs`; assert a mid-storm nonce (not the last) appears in the covered set |
+| B3 | Rate limit + coalescing: 100 touches in 10 s ⇒ ≤ `ceil(10/5)+1` barriers, and the final ack coalesces more than one nonce. **CORRECTED while writing the leg:** this row originally also demanded one ack naming all 100 touches, and the two cannot both hold — the nonce set is per-HONOR by construction (a retired pending record starts the next window empty), so a mid-storm nonce appears in the ack of ITS OWN honor and that ack is then overwritten. What an agent may rely on is the AT-LEAST guarantee, whose covering signal is `sentinel_mtime_unix_ns`, not `nonces[]` | Assert touch timestamps actually beat `sentinelMinIntervalSecs`; assert the final ack carries >1 nonce (a per-touch barrier satisfies a barrier cap on a slow storm but coalesces nothing); assert a file written MID-storm is cited at the final boundary |
 | B4 | Stale-ack discrimination: pre-seed an old ack, fresh touch → **fresh ack arrives** with echoed nonce and covering mtime; agent-side check distinguishes both | Assert the stale ack exists with an older nonce BEFORE the touch AND the fresh ack lands (review: model-drill — discrimination with nothing new to find is vacuous) |
 | B5 | Scoped sync: foreign changes under `inputs/` and `outputs/`, scope=`inputs/` ⇒ only `inputs/` applied now; `outputs/` integrates via the NEXT barrier's inbox flow (the D4 rule) | Assert the `outputs/` foreign change existed pre-sync AND was absent at sync-ack time AND present after the next barrier — all three |
 | B6 | Conflict transport: dirty local file vs foreign change ⇒ `sync.ack.conflicts[]` non-empty, local bytes untouched | Assert local dirt observed (scan-visible mtime/size delta) before the sentinel |
-| B7 | remote.seq is local-only news: foreign install advances manifest; a probe container — no creds, no network — polls only `.flint/remote.seq` until `observed_seq` moves; `updated_unix` heartbeats meanwhile | Assert `observed_seq` had NOT moved before the foreign install; assert the probe container's only access is the file; assert `updated_unix` advanced across an idle tick (review: ops-fleet) |
+| B7 | remote.seq is local-only news: a foreign write advances the manifest; a probe container — no creds, no S3 client — polls only `.flint/remote.seq` until `observed_seq` moves; `updated_unix` heartbeats meanwhile. **The foreign writer has to be the GATEWAY, and that is a product fact rather than a rig convenience:** the lease admits exactly one sidecar, so while this workspace's sidecar runs, the only party that can put new bytes in the bucket is one that holds no lease and edits no manifest — the HITL path. The first draft used a second sidecar and HUNG in `claim` forever, which is also why every one-shot in the harness now carries a timeout | Assert `observed_seq` had NOT moved across an idle window before the write; assert the probe container carries ZERO `AWS_*` variables (read it out of the container, not off the manifest); assert `updated_unix` advanced across an idle tick (review: ops-fleet) |
 | B8 | Zero-added-cost when unused: marker present, agent silent for N floors | Oracle counts requests per idle tick **as a delta vs a recorded control whose 4-request shape (renew CAS, epoch read, inbox GET, manifest HEAD) is written into the leg** (review: ops-fleet); assert no `files/.flint/*` key ever appears; assert no ack files appear |
 | B9 | Gated invisibility of mid-logical-change (§8 Q2 form): write A then B, boundary only after B; a second pod checkouts between A's upload and the boundary — **the probe checkout must COMPLETE and materialize exactly the pre-boundary cited set** (file count + etags vs a recorded manifest snapshot), resolving cited `version_id`s under `pinned_reads` | Assert A's uncited version EXISTS and is `current` at the real key while manifest seq is unchanged — durability observed, visibility withheld; **and assert a raw GET without versionId returns A's NEW bytes** (residual 11 is real, and this proves invisibility comes from version resolution, not from absence). A wedged/errored probe FAILS the leg |
 | B10 | Lag cap forces citation: gated, no sentinel, writer keeps the tree non-quiescent ⇒ citation by `visibilityLagBoundSecs`; source `forced-lag-cap` readable **from the bucket manifest meta alone** (review: ops-fleet) | Assert the writer actually wrote during every quiesce window (post-hoc mtime audit) — else quiescence fired and the leg proved nothing about the cap |
 | B11 | preStop cites everything: (a) gated SIGTERM ⇒ final manifest cites all uncited versions, superseded versions reclaimed, owed ack settled; (b) SIGKILL mid-drain + pod replacement ⇒ recovery at last boundary, orphans surfaced in durable `orphans.json` (review: crash-takeover); (c) SIGTERM-ignoring agent ⇒ citation still lands within derived grace or loss equals the documented bound (review: gc-durability) | Assert `staged_uncited_count > 0` (gauges + staging LIST) immediately before SIGTERM — a drain leg with nothing to drain is vacuous; (b) asserts the pending record genuinely died with the emptyDir |
 | B12 | Straggler non-destructiveness (§8 Q2 restates containment): SIGSTOP sidecar, force takeover, thaw ⇒ the straggler's in-place PUTs land as **uncited versions** on real `files/` keys, every **cited version id is still fetchable byte-identical**, a `pinned_reads` checkout is unaffected, and version GC reclaims them; **inbox doc snapshot before freeze vs after thaw: no entry disappeared, no stale-epoch window appeared** (review: crash-takeover); successor surfaces the candidates | Assert the thawed straggler's PUT count > 0 via oracle (the C3 pattern — 7,591 was measured, not assumed) AND that `current` genuinely moved on ≥1 key (else non-destructiveness is proven by the attack's absence) AND re-GET every cited version id and compare crc64 |
 | B13 | Legacy `.flint/` upgrade safety: pre-seed a cited `files/.flint/legacy.txt`, upgrade sidecar, two barriers ⇒ citation survives, warning record present | Assert the legacy citation existed in manifest AND bucket pre-upgrade |
-| B14 | Mixed-fleet detection, both directions: (a) old sidecar image (pinned pre-D0 tag, named in the leg — review: model-drill), marker genuinely absent ⇒ agent library refuses sentinels; recorded NOTE: the destructive control (touching anyway publishes `files/.flint/publish`, isolated prefix); (b) downgrade-over-live-tree: stale marker present, old image ⇒ agent's boot-stamp check flags it suspect (review: crash-takeover) | (a) assert marker absent + image version verified; (b) assert the stale marker's boot stamp is unchanged across the observed restart |
+| B14 | Mixed-fleet detection, both directions, against a **REAL pre-D0 binary** built from `69b35978` — the commit before the boundary verbs existed, so it has no sentinel support, no capability marker, and no `.flint/` reservation in its scan. That last one cannot be simulated by a knob: `SENTINELS=off` on a CURRENT binary still reserves the namespace. (a) old image over a workspace with an agent sentinel ⇒ no marker written, the file NOT consumed, and the destructive control fires — it publishes `files/.flint/publish` as ordinary data, on an isolated prefix; (b) downgrade-over-live-tree ⇒ the marker SURVIVES the rollback with an unchanged boot stamp, still advertising verbs over a binary that has none | (a) assert the marker is absent AND that the old image genuinely leaked ≥1 `files/.flint/` key — an image that does not leak is not pre-D0 and the leg proves nothing — AND that the shipping binary on the same fixture leaks zero while still publishing ordinary data (an empty comparison is not a comparison); (b) assert the stale marker's boot stamp is byte-identical across the observed restart |
 | B15 | Citation atomicity, no roll-forward machinery (§8 Q2 replaces the copy-phase leg): with ≥3 paths staged as uncited versions, SIGKILL the sidecar across the citation CAS in a loop, then **pod replacement**; every probe checkout observes either the whole pre-boundary set or the whole post-boundary set — never a mixture — and the successor converges with no intent document to read | Assert ≥3 uncited versions existed at real keys before each kill AND the pending record died with the emptyDir; assert runs landed on BOTH sides of the CAS (a leg whose kills all land pre-CAS proves nothing about atomicity); probe checkout must complete (B9 rule) |
 | B16 | Hybrid default-floor regression (review: model-drill): dirty tree, NO sentinel, default floor ⇒ manifest advances within floor+slack — the rewritten select/interval loop did not starve cadence | Assert no sentinel file ever existed during the leg (else it tested the wrong arm) |
 | B17 | Renewal under storm (review: crash-takeover, security-dos): floor 3600, standby claimant pod, continuous sentinel storm ⇒ NO takeover across N minutes; heartbeat renewals observed at ≤30 s cadence | Assert the standby really observed the lease cell (its quiet-poll log advances) — a dead standby proves nothing |
@@ -409,9 +409,9 @@ House rules inherited wholesale (`docs/plans/flint-lean-chaos-drill.md:33-61`, `
 | B20 | Quiescence fires (review: gc-durability): gated, ONE write then silence ⇒ citation at ~`quiesceBoundSecs` with `boundary:"quiescence"` | FAIL if the source reads `forced-lag-cap` — the exact dead-code shape the finding named |
 | B21 | Version reclamation (§8 Q2 form): steady-state churn ⇒ after each citation `ListObjectVersions` shows **one live version per key** plus only the current pending set — superseded versions gone by flint's exact GC, not by waiting for lifecycle | Assert the key carried > N versions mid-leg before asserting it drains; assert the retention rule could NOT have done it (elapsed ≪ `noncurrentRetentionDays`), else the leg credits GC for the backstop's work |
 | B22 | Pre-existing `.flint/` data (review: ops-fleet): workspace with app-owned `.flint/publish` file, new sidecar ⇒ sentinels disabled (`SentinelVerbsActive=False`), the file NOT consumed, NOT published, still present and byte-identical | Assert the file existed pre-upgrade with recorded bytes; assert `capabilities.json` reports `verbs: []` with the pre-flight reason |
-| B23 | Abandoned-mid-stage endgame (D8, §8 Q2): with retention shortened to minutes on the rig, stage uncited versions then abandon the workspace (no lease) past retention ⇒ the backstop reaps the **cited noncurrent** version, checkout REFUSES with the dangling-citation error (not a silent hole), and `recover-staged` re-cites the surviving current version as `boundary:"recovered"` | Assert the checkout genuinely failed on the dangling citation BEFORE recovery (an endgame leg that never dangles proves nothing); assert recovery moved zero data bytes (request oracle: one CAS, no PUT/COPY) |
-| B25 | Hot-loops no-regression (D3.1): two storms on the same rig at the same touch rate — (a) a >`whole_put_max` file rewritten each iteration ⇒ budget exhausts in ~2 honors, subsequent acks read `sentinel-deferred`, and total published bytes over the window ≤ cadence-only baseline + `budget × whole_put_max`; (b) a 4 KiB file rewritten each iteration ⇒ NOT throttled below the drafted 60 honors/hour | Record the cadence-only baseline bytes in a control run FIRST (a storm compared against nothing proves nothing); assert (a) and (b) ran at the same sentinel touch rate — the leg's whole claim is that the meter discriminates by work, not by calls — and assert ≥1 `sentinel-deferred` ack in (a) and ZERO in (b) |
-| B24 | Conformance refusals, both arms (§8 Q2, failing-control house style): (a) a proxy configured to strip `x-amz-version-id` ⇒ `BoundaryModeAccepted=False`, gated REFUSED — never a silent fall back to etag semantics; (b) a bucket carrying a 1-day `NoncurrentVersionExpiration` rule covering `<prefix>/files/` ⇒ refused with the offending rule Id named | (a) assert the same CR reconciles green once the header is passed through (the refusal tracks the proxy, not a typo); (b) assert the rule genuinely covers the prefix — a control object written under it visibly ages out — before crediting the refusal |
+| B23 | Abandoned-mid-stage endgame (D8, §8 Q2): stage uncited versions then abandon the workspace (no lease) ⇒ the backstop reaps the **cited noncurrent** version, checkout REFUSES with the dangling-citation error (not a silent hole), and `recover-staged` re-cites the surviving current version as `boundary:"recovered"`. **The rig cannot shorten retention to minutes** — S3/MinIO express `NoncurrentVersionExpiration` in DAYS — so the reaper is simulated by the one action the backstop actually takes: a version-scoped delete of the cited noncurrent version. Everything downstream of it is the product's own | Assert the cited version is genuinely NONCURRENT before the delete (else nothing was ever exposed to the backstop); assert the checkout failed on the dangling citation BEFORE recovery (an endgame leg that never dangles proves nothing); assert recovery moved zero data bytes (request oracle: no PUT under `files/`) |
+| B25 | Hot-loops no-regression (D3.1): two storms at the same touch rate under the SAME budget — (a) a >`whole_put_max` file rewritten each iteration ⇒ `ceil(65/64) = 2` units per honor, so a budget of 4 exhausts after two honors and the rest read `sentinel-deferred`; (b) a 4 KiB file rewritten each iteration ⇒ 1 unit per honor, so four honors fit inside the same budget and NOTHING is deferred. Same knob, same rate, opposite outcome — which is the whole claim. **The floor must be short:** a deferred boundary is honored by the next FLOOR tick and its ack is stamped there, so the drill's hour-long floor would strand exactly the ack the leg reads | Assert ≥1 `sentinel-deferred` ack in (a) and ZERO in (b), at the same touch rate and the same budget — the leg's claim is that the meter discriminates by WORK, not by calls |
+| B24 | Conformance refusals (§8 Q2, failing-control house style): a proxy configured to strip `x-amz-version-id` ⇒ gated REFUSED at startup — never a silent fall back to etag semantics. **The gate binds in the RUN loop, not on a one-shot verb, and that is correct rather than incidental:** the run loop is the only path that STAGES, so "refuse before a single byte is staged" has to bind where the staging is. Arm (b) — a customer `NoncurrentVersionExpiration` rule over the prefix — is the OPERATOR's check and lives at B30/B31 | The ACCEPTED control runs FIRST, same workspace and same knobs straight at MinIO (a refusal suite whose accepted case never passes proves only that the sidecar says no to everything); assert a CADENCE workspace comes up green through the SAME proxy, so the gate is shown to bind on gated mode rather than on the network; assert the refusal names `x-amz-version-id`, because a refusal that cannot say what it violated is one nobody can act on |
 
 | B26 | Gated with no `visibilityLagBoundSecs` ⇒ `BoundaryModeAccepted=False`, reason `LagBoundRequired` | The ACCEPTED control runs FIRST (a coherent gated CR must reach True) — a refusal suite whose accepted case never passes proves only that the operator says no to everything |
 | B27 | `noncurrentRetentionDays` below D8's K=2 window ⇒ refused, message naming the window in seconds | Assert the message contains the computed window, not just the reason: a refusal that cannot say what it violated is a refusal nobody can act on |
@@ -427,7 +427,7 @@ House rules inherited wholesale (`docs/plans/flint-lean-chaos-drill.md:33-61`, `
 | B37 | `/metrics` serves ≥13 series and the label-key set is EXACTLY `{workspace, namespace}` | Parse the label keys off every series and fail on any third key — the per-path metric is the failure this rule exists for |
 | B38 | Bind collision: the agent container holds the metrics port first ⇒ the sidecar starts anyway, `MetricsExposed=False`/`PortUnavailable`, and the workspace keeps publishing | Assert a real publish reaches the bucket AFTER the collision — a degradation leg that never checks the degraded path still works proves nothing |
 
-Total: 38 legs (25 bucket-drill + 13 kind, `lean/e2e/run-boundary.sh`); register with an "of N" count to bump, rig reset re-runnable, per the shipped harness.
+Total: **40 legs** — 26 in the bucket drill (`lean/e2e/run-verbs.sh` + `verbs.yaml`: B1–B25, with B11 split into the three sub-legs B11a/b/c the row already asked for) and 14 in the kind drill (`lean/e2e/run-boundary.sh`, B26–B38). Both rigs reset themselves and are re-runnable; `ONLY=B9 ./run-verbs.sh` runs one leg.
 
 ---
 
@@ -586,12 +586,23 @@ What replaces it is **storage, not requests**: uncited versions (at most one gen
 ## 10. Implementation status (2026-08-25)
 
 **Landed: Phases 0–6 in full**, plus formal tranche 3 products 1, 2
-and 4, plus the verified-review tranche (§10.1e) and the Phase-4/5/6
-tranche (§10.1f). Lean battery **94/94** (was 19/19); lean operator
-suite **35/35** (was 12/12); formal gate **55/55** (was 24/24);
-`flint-store` and the hub crate both compile against the shared-schema
-changes — `--all-targets` included, which HEAD did not — and the
-`s3`-feature binaries build.
+and 4, the verified-review tranche (§10.1e), the Phase-4/5/6 tranche
+(§10.1f) and **the B1–B25 bucket drill (§10.1g)**. Lean battery
+**101/101** (was 19/19); lean operator suite **37/37** (was 12/12);
+formal gate **55/55** (was 24/24); **kind boundary drill 14/14**
+(`lean/e2e/run-boundary.sh`); **bucket drill 27/27**
+(`lean/e2e/run-verbs.sh` against a real MinIO). `flint-store` and the
+hub crate both compile against the shared-schema changes —
+`--all-targets` included, which HEAD did not — and the `s3`-feature
+binaries build.
+
+Both drills reset their own rigs and are re-runnable; `ONLY=B9
+./run-verbs.sh` runs a single leg. The bucket drill needs one image the
+repo does not build by default: `flint-sync:predo`, B14's genuinely
+pre-D0 binary, cross-built from `69b35978` — the commit before the
+boundary verbs existed. Without it B14 fails loudly rather than
+skipping, because a mixed-fleet leg with no old binary in it is not a
+mixed-fleet leg.
 
 | Phase | State | Notes |
 |---|---|---|
@@ -1136,6 +1147,134 @@ Two deviations from §2.6 worth naming rather than burying:
    reached INSIDE the pod (D0.4's pre-flight against the agent's own
    tree; the exposition bind) that no other surface can carry, and both
    ride a request that was already being paid for.
+
+### 10.1g The B1–B25 bucket drill — five defects, and one the drill's own guard caught
+
+`lean/e2e/run-verbs.sh` against a real MinIO on kind, with the oracle
+reading the bucket directly (`mc`) rather than through the sidecar's own
+code — one bug must not be allowed to hide another. **27 legs**
+(B1–B25, with B11 split into the three sub-legs its row asks for), and
+the battery grew 94 → **101** carrying the regressions.
+
+Two falsifiability fixtures, one per half of the drill. Cadence legs run
+`floor_secs=3600`, so only the mechanism under test can advance the
+manifest. **Gated legs run the opposite fixture**: a SHORT floor so the
+upload lane ticks, and hour-long `visibilityLagBound`/`quiesceBound` so
+no timer may cite. Both halves have the same property — any boundary
+that appears is attributable.
+
+What the drill found that the battery and the formal gate could not:
+
+- **`flint-sync status` could never report a pending sentinel.** It
+  built the pending record's filename a second time and spelled it
+  `pending-publish.json` against the written `publish.pending.json`, so
+  the field that answers "is my agent blocked on an ack?" was
+  permanently empty on exactly the workspace that had one standing. Both
+  names now come from `Verb::pending_name()`. Found because a leg looked
+  for the file by the name the status verb used.
+- **A resumed checkout adopted a stale generation.** Checkout skips
+  files already present — right for a checkout that died halfway — and
+  then stamped the baseline with the CITED etag over the OLD content. If
+  the manifest moved while the pod was down (a HITL write, a sibling's
+  barrier: routine on a pure-spot fleet), the workspace held generation
+  N under a baseline claiming N+1. The scan then reads it as clean and
+  never uploads it; a sync reads baseline == manifest and never re-fetches
+  it. Silent and permanent. Present files are now verified against the
+  citation by size and CRC before adoption — local reads only, no bucket
+  request, so it is unconditional rather than a knob.
+- **The gateway ignored `pinned_reads` — the one reader in the system
+  that did.** `GET /files/{path}` resolved the citation by ETag and did
+  an If-Match GET. Under gated mode the upload lane makes the cited
+  version NONCURRENT, so the current object's etag no longer matches and
+  the precondition fails: the gateway returned **409 for every
+  staged-but-uncited file**, for the whole withholding window. The human
+  read path went dark exactly when gating was doing its job — and gated
+  mode withholds visibility of NEW bytes, never the cited ones. It now
+  resolves `version_id` the way `checkout` does. The unit test found it;
+  B9 then reproduced it in the cluster independently, against a real
+  MinIO.
+  - Its second arm: under `pinned_reads` with no resolvable version (the
+    mixed-manifest cell), the gateway answered "the object moved past
+    the tracked version; **retry**" — advice that can never come true,
+    since the cited etag is gone. It now says which it is and names
+    `recover-staged`.
+- **No boundary said which clock installed it, outside gated mode.**
+  `boundary_source` was stamped only by the gated citation path;
+  `run_barrier` used the unstamped `cas_write`. The field is not
+  gated-only — the gateway's `GET /status` reports it for EVERY
+  workspace — so it read as unknown on every cadence and hybrid
+  workspace in a fleet. The ack answers the question for the agent, but
+  the ack is a LOCAL file, and the operator asking "did my agent's
+  publish land, or was that the floor?" is a different process, often in
+  a different cluster. Now stamped `cadence` / `sentinel` /
+  `sentinel-deferred` / `drain` at each call site.
+- **…and fixing that immediately produced a disagreement, which a leg
+  caught.** The drain rewrites its ack to `drain`; its pending-sentinel
+  arm went through the forced path and left the MANIFEST stamped
+  `sentinel-deferred`. One boundary, two clocks — with the bucket, the
+  surface an operator trusts, holding the wrong one. `honor_pending_as`
+  now carries the drain's provenance, and both the battery and B11a
+  assert the ack and the bucket agree.
+
+What the drill CONFIRMED rather than found, which is worth as much:
+
+- **D0's hazard is real, and B14 shows it firing.** The leg runs a
+  genuinely pre-D0 binary — built from `69b35978`, the commit before the
+  boundary verbs existed, so it has no sentinel support, no capability
+  marker, and no reserved namespace in its scan. Given a workspace with
+  an agent's `.flint/publish` in it, that binary **published
+  `files/.flint/publish` into the bucket as ordinary workspace data**,
+  and the shipping binary on the identical fixture published zero keys
+  under `files/.flint/` while still publishing the ordinary file. The
+  destructive control is not a thought experiment; it is one `mc ls`.
+  Downgrade-over-a-live-tree also behaves as D11 describes: the marker
+  SURVIVES the rollback, still advertising `publish`/`sync`/`remote-seq`
+  over a binary that has none, with its boot stamp unchanged — which is
+  exactly why the stamp, not the marker's presence, is the agent's tell.
+- **Straggler containment, with the attack actually landing.** B12's
+  first run FAILED on its own anti-vacuity guard: frozen at an arbitrary
+  point, the straggler thaws into `verify_not_deposed`, fences
+  cooperatively and writes NOTHING — the product working, and
+  containment untested. The freeze has to land INSIDE the upload loop.
+  Once it did, the thawed straggler moved `current` on a key the
+  successor's boundary cites, and every cited version stayed fetchable
+  byte-identical, with a `pinned_reads` checkout still materializing the
+  cited bytes.
+- **Sentinels really are free when unused.** B8 measured **20 requests
+  in 22 s with `SENTINELS=off` and 20 with them on** — a delta of zero
+  over four idle ticks, counted from `mc admin trace` against a recorded
+  control rather than a magic number.
+
+Harness bugs worth recording, because two produced product-shaped
+symptoms, one produced none at all, and one was self-inflicted:
+
+- **A failing leg skipped its own cleanup**, and the `run` loop it left
+  behind deposed the NEXT leg's sidecar — which then read a
+  `refused-fenced` ack it had never asked for. `leg()` now resets all
+  four pods before the body. A harness bug wearing a product bug's
+  clothes is the most expensive kind.
+- **B8's request counter was silently empty.** The `minio/mc` image
+  ships `mc` and little else — no `grep`, no `awk`, no `sed` — so the
+  in-pod count returned the empty string and every budget assertion
+  would have passed on nothing. The leg's own anti-vacuity guard ("the
+  control window counted ZERO requests — a dead oracle passes every
+  budget") is what caught it; counting moved to the host. Measured
+  result: **20 requests in 22 s with sentinels off, 20 with them on** —
+  delta zero.
+- **Fixtures that rewrite a file to the same length in the same second
+  are invisible to the scan by design** (§3 residual 1), so a leg built
+  on one tests the residual rather than the leg. Every fixture now
+  varies length.
+- **A one-shot verb blocks in `claim` forever while another sidecar
+  holds the lease.** B7's first draft hung the drill instead of failing
+  it; every one-shot now carries a timeout, and exit 124 reads as
+  "blocked".
+
+- **Do not edit the drill script while it is running.** bash reads a
+  script incrementally, so a mid-run edit shifts the offsets underneath
+  it: one run re-executed part of a leg (starting a second sidecar over
+  the same workspace) and then died on `ence_fires: command not found`.
+  Every failure it reported in between was an artifact. Edit, then run.
 
 ### 10.2 Formal model — tranche 3, product 4 (done)
 

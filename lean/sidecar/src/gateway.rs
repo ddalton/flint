@@ -412,12 +412,52 @@ async fn handle_files_get(
 
     // The manifest citation is the coherent view; an uncited inbox
     // entry (a HITL write no barrier has re-cited yet) is the fallback.
-    let cited = match manifest::load(core.store.as_ref(), &cfg).await {
-        Ok(m) => m.and_then(|l| l.manifest.entries.get(&path).map(|e| e.etag.clone())),
+    //
+    // Under `pinned_reads` the citation names a VERSION, and that is
+    // what a coherent read resolves — the same rule `checkout` follows,
+    // and for the same reason. Reading by etag alone breaks exactly
+    // when gating is doing its job: the upload lane makes the cited
+    // version noncurrent, so an If-Match GET against the current object
+    // fails its precondition and the human read path goes dark for the
+    // whole withholding window. Gated mode withholds VISIBILITY of new
+    // bytes; it never withholds the cited ones.
+    let (cited, pinned) = match manifest::load(core.store.as_ref(), &cfg).await {
+        Ok(Some(l)) => (
+            l.manifest.entries.get(&path).map(|e| (e.etag.clone(), e.version_id.clone())),
+            l.manifest.pinned_reads,
+        ),
+        Ok(None) => (None, false),
         Err(e) => return err_reply(StatusCode::BAD_GATEWAY, "store", e.to_string()),
     };
-    let tracked = if cited.is_some() {
-        cited
+    let pinned_version = match (pinned, cited.as_ref()) {
+        (true, Some((_, Some(vid)))) => Some(vid.clone()),
+        _ => None,
+    };
+    if let Some(vid) = pinned_version {
+        return match core.store.get_version(&key, &vid).await {
+            Ok((meta, body)) => {
+                let mut res = warp::reply::Response::new(body.into());
+                res.headers_mut()
+                    .insert("etag", warp::http::HeaderValue::from_str(&meta.etag).unwrap());
+                res
+            }
+            // The dangling-citation endgame (D8): the backstop reaped a
+            // cited noncurrent version. Say so — never fall back to the
+            // current object, which is precisely the uncited,
+            // possibly-mid-logical-change bytes gating withholds.
+            Err(StoreError::NotFound(_)) => err_reply(
+                StatusCode::GONE,
+                "dangling-citation",
+                format!(
+                    "the manifest cites {path} version {vid} but that version is gone; \
+                     run `flint-sync recover-staged` to re-cite forward"
+                ),
+            ),
+            Err(e) => err_reply(StatusCode::BAD_GATEWAY, "store", e.to_string()),
+        };
+    }
+    let tracked = if let Some((etag, _)) = cited {
+        Some(etag)
     } else {
         match inbox::load(core.store.as_ref(), &cfg).await {
             Ok(l) => l.doc.entries.iter().rev().find(|e| e.path == path).map(|e| e.etag.clone()),
@@ -434,6 +474,20 @@ async fn handle_files_get(
                 .insert("etag", warp::http::HeaderValue::from_str(&meta.etag).unwrap());
             res
         }
+        // Under `pinned_reads` this is the mixed-manifest cell: an entry
+        // the citation could not make version-addressable, whose object
+        // has since moved. Retrying cannot fix it — the cited etag will
+        // never come back — and adopting the current version is exactly
+        // the uncited, possibly mid-logical-change bytes gating
+        // withholds. Say which it is, so a UI does not retry forever.
+        Err(StoreError::PreconditionFailed(_)) if pinned => err_reply(
+            StatusCode::GONE,
+            "uncited-bytes",
+            format!(
+                "the manifest cites {path} at an etag the object no longer carries and names \
+                 no version to resolve instead; run `flint-sync recover-staged` to re-cite forward"
+            ),
+        ),
         Err(StoreError::PreconditionFailed(_)) => err_reply(
             StatusCode::CONFLICT,
             "moved",

@@ -4352,3 +4352,324 @@ async fn a_scrape_costs_no_bucket_request() {
         "25 scrapes changed the bucket"
     );
 }
+
+/// `flint-sync status` exists to answer "why is my agent blocked?", and
+/// `pending_sentinels` is the field that answers it. It built the
+/// pending record's filename a SECOND time, and got it wrong
+/// ("pending-publish.json" against the written "publish.pending.json"),
+/// so the answer was permanently "nothing pending" on a workspace with
+/// a sentinel standing. Found by writing a drill leg that looked for
+/// the file by the name the status verb used.
+#[tokio::test]
+async fn status_reports_a_standing_pending_sentinel() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+
+    let before = super::status_report(&a.cfg).unwrap();
+    assert!(before.pending_sentinels.is_empty(), "the fixture started with one pending");
+
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"s-1"}"#);
+    a.poll_sentinels().unwrap();
+    assert!(
+        a.load_pending(super::sentinel::Verb::Publish).unwrap().is_some(),
+        "the fixture consumed nothing — the status field would be empty either way"
+    );
+
+    let r = super::status_report(&a.cfg).unwrap();
+    assert_eq!(
+        r.pending_sentinels,
+        vec!["publish".to_string()],
+        "status cannot see the pending record it exists to report"
+    );
+}
+
+/// Checkout's resume rule — "local-wins on present paths" — is right
+/// for the case it was written for: a checkout that crashed halfway
+/// finds files IT wrote, and re-fetching them would cost bucket GETs
+/// for bytes already on disk.
+///
+/// It is wrong when the manifest MOVED while the pod was down. The
+/// resumed checkout then adopts the old generation's bytes and stamps
+/// the baseline with the NEW entry's etag, so the workspace holds stale
+/// content that every later mechanism believes is published: the scan
+/// sees it as clean and never uploads it, and a sync sees
+/// baseline == manifest and never re-fetches it. Nothing is loud; the
+/// file is simply wrong from then on.
+///
+/// Reachable on a pure-spot fleet with a gateway: crash mid-checkout,
+/// a HITL write lands, the replacement pod resumes.
+#[tokio::test]
+async fn a_resumed_checkout_never_adopts_a_stale_generation() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let dir2 = tempfile::tempdir().unwrap();
+
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "big.bin", "GENERATION-ONE");
+    a.run_barrier().await.unwrap();
+
+    // The replacement pod got as far as materializing generation 1
+    // before its checkout died: files on disk, no completion marker.
+    write(dir2.path(), "big.bin", "GENERATION-ONE");
+
+    // …and while it was down, generation 2 landed.
+    write(dir.path(), "big.bin", "GENERATION-TWO-IS-LONGER");
+    a.run_barrier().await.unwrap();
+    let cited = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    assert_eq!(
+        cited.manifest.entries["big.bin"].size,
+        "GENERATION-TWO-IS-LONGER".len() as u64,
+        "the fixture never advanced the manifest"
+    );
+    lease::release(&mut a).await.unwrap();
+    drop(a);
+
+    let mut b = sidecar(&store, dir2.path()).await;
+    assert!(claim_until_held(&mut b, 8).await);
+    assert!(
+        !b.state.marker_present(),
+        "the fixture left a completion marker — this is the RESUME row"
+    );
+    b.checkout().await.unwrap();
+
+    let local = read(dir2.path(), "big.bin").unwrap();
+    assert_eq!(
+        local, "GENERATION-TWO-IS-LONGER",
+        "the resumed checkout adopted the STALE generation: the workspace holds {local:?} while \
+         the manifest cites the newer bytes, and the baseline claims they are the same — so the \
+         scan will never upload it and a sync will never re-fetch it"
+    );
+}
+
+/// The gateway is a READER of the coherent view, so it owes the same
+/// promise `checkout` does: under `pinned_reads` the manifest entry
+/// names a `version_id`, and that is what a coherent read resolves.
+///
+/// Reading by ETag alone breaks precisely when gating is doing its job.
+/// The upload lane makes the cited version NONCURRENT, so the current
+/// object's etag no longer matches the citation, and an If-Match GET
+/// fails its precondition — the gateway turned a perfectly readable
+/// cited version into a 409 for every staged-but-uncited file. The
+/// human read path went dark for the whole withholding window, which is
+/// the window gated mode exists to make invisible *and still readable*.
+#[tokio::test]
+async fn the_gateway_resolves_the_cited_version_while_newer_bytes_are_staged() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    gated(&mut sc);
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+
+    write(dir.path(), "docs/spec.md", "CITED");
+    sc.gated_tick(true).await.unwrap();
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.pinned_reads, "the fixture did not produce a pinned boundary");
+    let cited_seq = m.seq;
+    assert!(
+        m.entries.get("docs/spec.md").and_then(|e| e.version_id.as_ref()).is_some(),
+        "the citation names no version — the leg cannot test version resolution"
+    );
+
+    let routes = super::gateway::routes(gw_core(&store));
+    let res = gw_req().method("GET").path("/lean/v1/proj1/files/docs/spec.md").reply(&routes).await;
+    assert_eq!(res.status(), 200, "the cited version is not readable at all");
+    assert_eq!(&res.body()[..], b"CITED");
+
+    // Stage newer bytes WITHOUT citing them: the current version moves,
+    // the manifest does not. This is the ordinary gated steady state,
+    // not an exotic one.
+    write(dir.path(), "docs/spec.md", "STAGED-NEWER");
+    sc.upload_lane().await.unwrap();
+    let m2 = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m2.seq, cited_seq, "the fixture cited the new bytes — nothing is withheld");
+    let (_, cur) = store.get_whole(&sc.cfg.file_key("docs/spec.md"), None).await.unwrap();
+    assert_eq!(&cur[..], b"STAGED-NEWER", "the lane did not stage over the real key");
+
+    // The coherent read must still serve the CITED bytes.
+    let res = gw_req().method("GET").path("/lean/v1/proj1/files/docs/spec.md").reply(&routes).await;
+    assert_eq!(
+        res.status(),
+        200,
+        "the gateway refused a readable cited version while newer bytes were staged"
+    );
+    assert_eq!(
+        &res.body()[..],
+        b"CITED",
+        "the gateway served uncited, possibly mid-logical-change bytes"
+    );
+}
+
+/// Which clock published a boundary is a FLEET question, not a local
+/// one: the agent gets its answer in the ack, but an operator holding
+/// only the bucket — and the gateway's `/status`, which reports this
+/// field for every workspace — gets whatever the manifest was stamped
+/// with. Gated citations stamped it from the start; the ordinary floor
+/// and the sentinel honor left it null, so the field read as "unknown"
+/// on every workspace not running gated mode.
+#[tokio::test]
+async fn every_boundary_says_which_clock_installed_it() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+
+    // The ordinary floor tick.
+    write(dir.path(), "a.txt", "one");
+    sc.floor_tick().await.unwrap();
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("a.txt"), "the fixture published nothing");
+    assert_eq!(
+        m.boundary_source.as_deref(),
+        Some("cadence"),
+        "a cadence boundary does not say it was cadence"
+    );
+
+    // A sentinel honor.
+    // Driven the way the run loop drives it. `settle_pending_at_startup`
+    // is the CRASH path and stamps `sentinel-deferred` — correctly, and
+    // that is a different clock than the one under test here.
+    write(dir.path(), "b.txt", "two");
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n1"}"#);
+    sc.sentinel_tick().await.unwrap();
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("b.txt"), "the sentinel published nothing");
+    assert_eq!(
+        m.boundary_source.as_deref(),
+        Some("sentinel"),
+        "a sentinel boundary does not say it was a sentinel"
+    );
+
+    // The preStop drain.
+    write(dir.path(), "c.txt", "three");
+    sc.drain().await.unwrap();
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("c.txt"), "the drain published nothing");
+    assert_eq!(
+        m.boundary_source.as_deref(),
+        Some("drain"),
+        "a drain boundary does not say it was a drain"
+    );
+}
+
+/// The mixed-manifest cell, through the gateway: a pinned boundary
+/// carrying an entry the citation could not make version-addressable,
+/// whose object has since moved. "Retry" is advice that can never come
+/// true — the cited etag is gone — and serving the current version
+/// would hand a coherent reader the uncited bytes gating withholds.
+#[tokio::test]
+async fn the_gateway_never_tells_a_reader_to_retry_a_citation_that_cannot_come_back() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    gated(&mut sc);
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "spec.md", "CITED");
+    sc.gated_tick(true).await.unwrap();
+
+    // Strip the version id off the citation, keeping the boundary
+    // pinned: this is the cell, not a mode change.
+    let loaded = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    let mut m = loaded.manifest.clone();
+    m.entries.get_mut("spec.md").unwrap().version_id = None;
+    assert!(m.pinned_reads, "the fixture stopped being a pinned boundary");
+    manifest::cas_write(store.as_ref(), &sc.cfg, &m, Some(&loaded.etag), 1, "test-strip")
+        .await
+        .unwrap();
+
+    // …and the object moves past the cited etag.
+    write(dir.path(), "spec.md", "MOVED-PAST-THE-CITATION");
+    sc.upload_lane().await.unwrap();
+
+    let routes = super::gateway::routes(gw_core(&store));
+    let res = gw_req().method("GET").path("/lean/v1/proj1/files/spec.md").reply(&routes).await;
+    assert_ne!(res.status(), 200, "the gateway served uncited bytes to a pinned reader");
+    let body = String::from_utf8_lossy(&res.body()[..]).to_string();
+    assert!(
+        !body.contains("retry"),
+        "the gateway told a reader to retry a citation that can never come back: {body}"
+    );
+    assert!(
+        body.contains("recover-staged"),
+        "the refusal does not name the way out: {body}"
+    );
+}
+
+/// The ack and the manifest must never name two different clocks for
+/// one boundary. The drain's pending-sentinel arm rewrites the ack to
+/// `drain`; if the manifest it installed still said `sentinel-deferred`,
+/// the agent's local answer and the fleet's bucket answer would disagree
+/// about the same event — and the bucket is the one an operator trusts.
+#[tokio::test]
+async fn a_drained_sentinel_names_the_same_clock_in_the_ack_and_in_the_bucket() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+
+    write(dir.path(), "late.txt", "written before the drain");
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"owed"}"#);
+    sc.poll_sentinels().unwrap();
+    // Anti-vacuity: the drain must find a PENDING record, not a raw
+    // sentinel file — the raw file is the next incarnation's problem and
+    // would send this leg down the cite-everything arm instead.
+    assert!(
+        sc.load_pending(Verb::Publish).unwrap().is_some(),
+        "no pending record — the drain would not take the owed-ack arm"
+    );
+
+    let acks = sc.drain().await.unwrap();
+    let ack = acks.iter().find(|a| a.nonces.iter().any(|n| n == "owed")).expect("owed ack unsettled");
+    assert_eq!(ack.boundary, "drain");
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("late.txt"), "the drain published nothing");
+    assert_eq!(
+        m.boundary_source.as_deref(),
+        Some("drain"),
+        "the ack says drain and the bucket says something else"
+    );
+}
+
+/// The same rule on the GATED path, which is a separate honor with its
+/// own citation source — and where the first fix missed it. B11a caught
+/// this one in the cluster before the battery did.
+#[tokio::test]
+async fn a_gated_drain_names_the_same_clock_in_the_ack_and_in_the_bucket() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    gated(&mut sc);
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+
+    write(dir.path(), "staged.txt", "staged before the drain");
+    sc.upload_lane().await.unwrap();
+    // Anti-vacuity: uncited work must be standing, or the drain has
+    // nothing to cite and the leg is about an event that never happened.
+    assert!(
+        !sc.load_stage().unwrap().entries.is_empty(),
+        "nothing staged uncited — the gated drain would have nothing to do"
+    );
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"owed"}"#);
+    sc.poll_sentinels().unwrap();
+    assert!(sc.load_pending(Verb::Publish).unwrap().is_some());
+
+    let acks = sc.drain().await.unwrap();
+    let ack = acks.iter().find(|a| a.nonces.iter().any(|n| n == "owed")).expect("owed ack unsettled");
+    assert_eq!(ack.boundary, "drain");
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("staged.txt"), "the gated drain cited nothing");
+    assert_eq!(
+        m.boundary_source.as_deref(),
+        Some("drain"),
+        "the gated drain's ack says drain and the bucket says something else"
+    );
+}
