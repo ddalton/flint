@@ -17,11 +17,14 @@ a library. Nothing here is wired into `scripts/check-tla.sh`.
 ./gen-cfgs.sh       # regenerate the cfg matrix
 ```
 
-Forty-nine runs, ALL required: 9 strict (must hold), 21 mutations (must find
-their designated counterexample — a model that cannot rediscover its bug
-classes proves nothing), 19 probes (must be violated — each names an
+Fifty-five runs, ALL required: 11 strict (must hold), 22 mutations (must
+find their designated counterexample — a model that cannot rediscover its
+bug classes proves nothing), 22 probes (must be violated — each names an
 ACTION via a ghost only that action writes; probe the action, never the
-situation). `LeanSubtreeDeep.cfg` is the rich-budget breadth run — an
+situation). The three numbers are `grep -c "^strict_run "`,
+`grep "^mutation_run " | grep -vc Probe` and `grep "^mutation_run " |
+grep -c Probe` in `check.sh` — they had drifted from the script before,
+so they are stated as a recipe rather than a claim. `LeanSubtreeDeep.cfg` is the rich-budget breadth run — an
 opt-in overnight job, not in the gate.
 
 ## The module: LeanSubtree.tla
@@ -338,6 +341,57 @@ the bare touch, the min-interval and hourly budget (rate limiting stays
 out of the safety gate), and an agent restoring byte-identical content,
 which unique mints cannot express.
 
+## Product 1 × product 2: the sentinel over the citation lane (6 runs)
+
+Both products were already green, each in a world where the other was
+switched OFF — so the citation-lane honor, the one path where a boundary
+can be *installed* and still not carry what its ack claims, had never
+been evaluated at all. `CiteFinish` sets `honored` under
+`SentinelEnabled`; the module could always express it, the cfg matrix
+never asked.
+
+What the pairing cost and what it bought, in order:
+
+- It refuted a fix that was two hours old. `LaneCancelsStaged` — a
+  withheld delete cancels the version the stage still holds, and vice
+  versa — went in because delete-then-recreate amputated a live file;
+  the model showed that resolving the overlap the other way cites a file
+  the agent DELETED. Neither set carries the ordering, so `merge` cannot
+  arbitrate it in either direction; the lane can, and does.
+- It found C2's gap as a model artifact (`GatedRepair`): the citation
+  lane had no citation-repair, so an ok ack named a manifest that did
+  not cite a HITL write the workspace had already integrated.
+- Three of the four defects it reported first were **in the model**, and
+  saying so is the point of writing them down: `dels` guarded the UNCITE
+  with the GC's own guard (the code uncites in the CAS and lets the GC
+  refuse the object separately); `Consume` could interleave between the
+  citation and the ack, which a single-threaded honor cannot; and the
+  adopt-own arm staged any recognized generation, where `upload_one`
+  adopts only when the object holds the bytes it is uploading and
+  otherwise supersedes them knowingly.
+- `BoundaryBroken`'s conflict exemption had to be NARROWED: a conflict
+  record is the ack's `report.parked` in the fused path, which is why it
+  excuses a path there — a correspondence the gated honor cannot
+  maintain, because the drop happens inside the citation and the honor
+  writes one ack for the lot. Written as a plain conjunct it excuses
+  exactly the case it exists to catch; it is a disjunct with the
+  exemption for a reason.
+- And `ProbeDeclaredDrop` found a hole in the runs that came BEFORE it.
+  The in-flight drop needs four mints (a second staged path — without
+  one no citation fires at all — the dropped path's generation, the HITL
+  generation, and the declaration's watermark), and no gated world had
+  the budget. So **`CiteDropsInflightHitl`, product 2's rule, has never
+  had a positive reachability probe**: its mutation fires through an
+  unrelated shape, and the state the rule actually guards was
+  unreachable in its own world. One probe, in an already-green gate.
+
+Not modelled here, named rather than omitted: what the drop-inflight
+rule guards in shipped code — a HITL write landing between the lane's
+consume and the citation's window — is not expressible, because the
+gated lane reuses `Scan`, which OPENS the window, while the shipped lane
+deliberately opens none. Making the gated lane window-free is the
+fidelity fix and it is not free.
+
 ## Tranche 3 candidates (in review-priority order)
 
 1. Layout/multi-subtree (P2/P3): root-owner designation, foreign
@@ -349,3 +403,8 @@ which unique mints cannot express.
 4. ~~Product 1 — boundary × barrier × inbox with the deposal arm.~~
    **DONE** (above). Two shipped defects, and three rejected invariant
    formulations before the promise was stated correctly.
+5. **Pair the other products that share an action.** "Every arm is
+   modelled" is not "every pair of arms that meet in one action is
+   modelled" — product 1 × product 2 proved the difference. `SyncScope`
+   with `GatedCitation` is the obvious next one: a scoped sync and a
+   citation lane both advance `inst_base`, by different rules.

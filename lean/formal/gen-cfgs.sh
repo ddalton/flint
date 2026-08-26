@@ -11,7 +11,8 @@ EpochCheck GuardedGC DeletesAfterCAS RematerializeOnRestart SyncEnabled \
 SyncScanFirst SyncScope ScopedInstBase GatedCitation AtomicCitation \
 GCKeepsCurrent CiteDropsInflightHitl BackstopEnabled MineIsNotForeign \
 MaxTouches \
-SentinelEnabled FoldPending AckFromInstall RefuseOnFence FastPathGuards"
+SentinelEnabled FoldPending AckFromInstall RefuseOnFence FastPathGuards \
+AckHonest LaneCancelsStaged GatedRepair"
 
 emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   local name=$1 invs=$2; shift 2
@@ -38,6 +39,10 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   # are preserved by construction.
   local c_MaxTouches=0 c_SentinelEnabled=FALSE c_FoldPending=TRUE
   local c_AckFromInstall=TRUE c_RefuseOnFence=TRUE c_FastPathGuards=TRUE
+  # C6: FALSE in every pre-existing cfg. The drop it governs exists only
+  # under GatedCitation, and no pre-existing cfg pairs that with
+  # SentinelEnabled — which was the finding.
+  local c_AckHonest=FALSE c_LaneCancelsStaged=FALSE c_GatedRepair=FALSE
   local kv
   for kv in "$@"; do eval "c_${kv%%=*}=${kv#*=}"; done
   {
@@ -195,6 +200,18 @@ emit LeanGatedSplitCitation "Inv_BoundaryAtomic" $GATEDWORLD AtomicCitation=FALS
 # locally dirty, and consume/sync refuse dirty paths) and the REACHABLE
 # arm — an inbox entry still in flight, on a lane that opens no window —
 # had no guard at all. That is the whole return on this tranche.
+# LaneCancelsStaged stays FALSE here, and that is load-bearing rather than
+# inherited: this mutation's counterexample runs through a path the agent
+# DELETED while the stage still held a version for it, which is exactly the
+# shape C3's lane cancellation closes. With the cancellation on, every
+# remaining route to citing over an acked HITL write in this world is
+# already conflict-surfaced (the park arm records one), so the mutation
+# goes green and proves nothing. What the drop-inflight rule actually
+# guards in shipped code — a HITL write landing between the lane's consume
+# and the citation's window — this model cannot express: its gated lane
+# reuses `Scan`, which OPENS the window, while the shipped lane
+# deliberately opens none. Named here rather than papered over; making the
+# gated lane window-free is the fidelity fix, and it is not free.
 emit LeanGatedInflightHitl "Inv_HITLDurable" $GATEDWORLD CiteDropsInflightHitl=FALSE
 emit LeanProbeCitationInstalled "ProbeCitationInstalled" $GATEDWORLD
 emit LeanProbeWithheldDelete "ProbeWithheldDelete" $GATEDWORLD
@@ -279,3 +296,58 @@ emit LeanProbeFastPathHonor "ProbeFastPathHonor" $SENTWORLD
 # on the third strict run of this product.
 emit LeanSentinelStaleMergeBase "Inv_AckImpliesCited" \
   $SENTRESTART MineIsNotForeign=FALSE
+
+# ---- C6: the sentinel over the CITATION lane ------------------------------
+# The gap the verified review named: no cfg paired SentinelEnabled with
+# GatedCitation, so `Inv_AckImpliesCited` was never evaluated over a
+# citation-lane honor even though `CiteFinish` sets `honored` under
+# SentinelEnabled — the module could express it, the matrix never asked.
+#
+# WORLD NOTE: one touch, MaxGen=4, and the generation budget is load-bearing
+# in the way MaxHitl=1 is for product 2 — PILOTED, not guessed, because the
+# probe said so. The in-flight drop needs FOUR things minted: a second
+# staged path (without one the citation never fires — a citation installs
+# `Valid(s)`, and the dropped path is by definition not in it), the dropped
+# path's own generation, the HITL generation that lands on it, and the
+# declaration's mint watermark. At MaxGen=3 (two mints) `ProbeDeclaredDrop`
+# holds — no drop is reachable AT ALL — and both mutations in this world go
+# green against a state space their bug cannot live in. A second NONCE buys
+# nothing here (that is product 1's business, and it doubles the space).
+#
+# The same probe says something about the runs that came BEFORE it:
+# `CiteDropsInflightHitl`, product 2's rule, has never had a positive
+# reachability probe. Its mutation fires through a different shape (a path
+# the agent deleted while the stage still held a version for it), and the
+# state the rule actually guards is unreachable in GATEDWORLD for exactly
+# the reason above. That is a coverage hole in a gate that was already
+# green, found by adding one anti-vacuity probe.
+# Costs ~20 s of the gate at this budget (1.5M distinct states); measured.
+SENTGATED="SentinelEnabled=TRUE MaxTouches=1 GatedCitation=TRUE \
+MaxGen=4 MaxSeq=6 MaxHitl=1 MaxBarriers=2 MaxCrashes=0 MaxRestarts=0 \
+AckHonest=TRUE LaneCancelsStaged=TRUE GatedRepair=TRUE"
+emit LeanSentinelGatedHolds \
+  "TypeOK,Inv_HITLDurable,Inv_NoResurrection,Inv_CitedVersionLives,\
+Inv_NoUncitedGC,Inv_BoundaryAtomic,Inv_AckImpliesCited,\
+Inv_AckBoundaryCoherent,Inv_NoNonceOrphan,Inv_NoFencedOkAck" $SENTGATED
+# What shipped: `status: "ok"` whatever the citation dropped, with no
+# field in the ack schema that could express the exception. The agent
+# that declared a point containing p is told the point landed while the
+# manifest at the acked seq still cites p's previous generation.
+emit LeanSentinelGatedOkOverDrop "Inv_AckImpliesCited" \
+  $SENTGATED AckHonest=FALSE
+# Anti-vacuity, both halves: the drop is REACHED inside a declared
+# boundary, and the honest answer actually fires.
+emit LeanProbeDeclaredDrop "ProbeDeclaredDrop" $SENTGATED
+emit LeanProbePartialAck "ProbePartialAck" $SENTGATED
+# The defect TLC found in this world, in a fix two hours old: the stage
+# and the withheld-delete set both reach the citation, and `merge` has no
+# ordering between them. Cancel neither and the boundary an ok ack names
+# cites a file the agent deleted before declaring.
+emit LeanSentinelGatedStaleStage "Inv_AckImpliesCited" \
+  $SENTGATED LaneCancelsStaged=FALSE
+# C2, as a model artifact rather than a battery-only fix: the repair the
+# fused barrier has and the citation lane did not. Without it an ok ack
+# names a manifest that does not cite a HITL write this workspace has
+# already integrated into its own tree.
+emit LeanSentinelGatedNoRepair "Inv_AckBoundaryCoherent" \
+  $SENTGATED GatedRepair=FALSE

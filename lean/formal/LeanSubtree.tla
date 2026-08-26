@@ -152,6 +152,35 @@ CONSTANTS
                        \* no-diff sentinel take the fast path, on the
                        \* strength of a prose argument.  This is that
                        \* argument, machine-checked.
+  GatedRepair,         \* TRUE = the citation lane carries the same
+                       \* citation-repair the fused barrier has: re-cite
+                       \* an object this sidecar INTEGRATED (a consumed
+                       \* HITL write) whose citation is still behind it.
+                       \* FALSE = what shipped, where the repair lived
+                       \* only in the fused barrier — which gated mode
+                       \* structurally never runs — so an acked HITL
+                       \* write stayed cited at its predecessor forever
+                       \* (§2.4.2's exemption and D13's "within one
+                       \* floor", both prose-only until C2).
+  LaneCancelsStaged,   \* TRUE = a withheld delete cancels the version the
+                       \* stage still holds for that path (and vice
+                       \* versa, in the lane).  FALSE = the shipped lane
+                       \* before C3's second half: the stage and the
+                       \* tombstone set both reach the citation and
+                       \* merge order decides, which cites a file the
+                       \* agent deleted.  FALSE in every pre-existing
+                       \* cfg — including `LeanGatedInflightHitl`, whose
+                       \* counterexample runs through exactly the shape
+                       \* this arm closes (see the ledger note there).
+  AckHonest,           \* TRUE = a gated citation that DROPPED a path the
+                       \* agent declared is answered with a partial ack
+                       \* naming it, never with `ok`.  FALSE = the
+                       \* mutation, which is what shipped: `status: "ok"`
+                       \* unconditionally, with no field in the ack
+                       \* schema that could express the exception.
+                       \* FALSE in every pre-existing cfg; the drop only
+                       \* exists under GatedCitation, so the spaces of
+                       \* the sentinel-only runs are preserved either way.
   MineIsNotForeign,    \* TRUE = an entry that matches OUR OWN BASELINE is
                        \* not a foreign change, whatever the merge base
                        \* says.  The merge base is rewritten at step 7,
@@ -396,7 +425,8 @@ Init ==
         citeDone |-> {},
         sentTok |-> 0, pendN |-> {}, pendCov |-> [p \in Paths |-> 0],
         pendMint |-> 0, pendDirty |-> {},
-        honored |-> FALSE, pendReRun |-> FALSE, owed |-> {}, ackN |-> {}]]
+        honored |-> FALSE, pendReRun |-> FALSE, owed |-> {}, ackN |-> {},
+        citeDropped |-> {}]]
   /\ hitlAcked = {} /\ conflicts = {}
   /\ gh = [amputated |-> FALSE, resurrected |-> FALSE,
            stragglerInstalls |-> 0, stragglerCas |-> 0, deposedPuts |-> 0,
@@ -412,7 +442,8 @@ Init ==
            touches |-> 0, acks |-> 0, honors |-> 0, refusedAcks |-> 0,
            coalesced |-> 0, fastPaths |-> 0, ackAfterRestart |-> 0,
            fastHonor |-> FALSE, ackEarly |-> FALSE,
-           ackIncoherent |-> FALSE, fencedOkAck |-> FALSE]
+           ackIncoherent |-> FALSE, fencedOkAck |-> FALSE,
+           partialAcks |-> 0, declaredDrops |-> 0]
 
 ------------------------------------------------------------------------------
 (* Lifecycle *)
@@ -600,6 +631,14 @@ HitlRefused ==
    unconsumed inbox.                                                     *)
 Consume(s) ==
   /\ Running(s) /\ sc[s].pc = "idle"
+  \* An honored boundary owes its ack BEFORE anything else runs: the
+  \* ack write is the last step of the honoring pass, in the same
+  \* single-threaded arm, so the loop cannot start another pass in
+  \* between.  Without this the model interleaves a consume there and
+  \* reports an incoherence the implementation cannot reach — the ack
+  \* would be judged against a baseline that moved after the boundary
+  \* it names.
+  /\ ~(SentinelEnabled /\ sc[s].honored)
   /\ gh.barriers < MaxBarriers
   /\ LET
        live == {pr \in inbox : objects[pr[1]] = pr[2]}
@@ -1051,9 +1090,17 @@ StagePut(s, p) ==
                      !.deposedPuts = @ + (IF Deposed(s) THEN 1 ELSE 0)]
          /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, inbox,
                         window, withheldDel, hitlAcked, conflicts>>
-       ELSE IF cur \in sc[s].known
-       THEN \* our own crashed/torn earlier PUT, or content already
-            \* integrated: adopt the current version as the staged one.
+       ELSE IF cur \in sc[s].known /\ cur = want
+       THEN \* our own crashed/torn earlier PUT of THESE bytes: adopt the
+            \* current version as the staged one.  The equality matters
+            \* and the model was coarser than the code without it —
+            \* `upload_one`'s 412 arm adopts only when the object's CRC
+            \* is the CRC of the body it is uploading, and otherwise
+            \* SUPERSEDES it knowingly (the arm below).  Adopting any
+            \* recognized generation stages bytes the agent has already
+            \* replaced, which reads as a boundary that lost the
+            \* agent's declared write — a counterexample the
+            \* implementation cannot produce.
          /\ stage' = [stage EXCEPT ![s] = [@ EXCEPT ![p] = cur]]
          /\ stageBase' = [stageBase EXCEPT ![s] = [@ EXCEPT ![p] = cur]]
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
@@ -1061,6 +1108,19 @@ StagePut(s, p) ==
          /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects,
                         versions, inbox, window, withheldDel, hitlAcked,
                         conflicts>>
+       ELSE IF cur \in sc[s].known
+       THEN \* our own earlier PUT, OLDER content: supersede it knowingly
+            \* (If-Match on what we recognize), which is what the shipped
+            \* arm does rather than citing the stale generation.
+         /\ objects' = [objects EXCEPT ![p] = want]
+         /\ versions' = [versions EXCEPT ![p] = @ \cup {want}]
+         /\ stage' = [stage EXCEPT ![s] = [@ EXCEPT ![p] = want]]
+         /\ stageBase' = [stageBase EXCEPT ![s] = [@ EXCEPT ![p] = cur]]
+         /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
+         /\ gh' = [gh EXCEPT !.adoptOwn = @ + 1,
+                     !.deposedPuts = @ + (IF Deposed(s) THEN 1 ELSE 0)]
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, inbox,
+                        window, withheldDel, hitlAcked, conflicts>>
        ELSE \* foreign ETag: park and surface; never overwrite.
          /\ sc' = [sc EXCEPT ![s].parked = @ \cup {p}]
          /\ conflicts' = conflicts \cup {<<p, cur>>}
@@ -1079,16 +1139,30 @@ StagePutFenced(s) ==
                  conflicts, gh>>
 
 (* The lane ends.  Deletes are WITHHELD — a rename r->s must not become
-   reader-visible as r-gone/s-absent at a point nobody declared.        *)
+   reader-visible as r-gone/s-absent at a point nobody declared.
+
+   ...and a withheld delete CANCELS any version this stage was still
+   holding for that path.  The stage and the tombstone set carry no
+   ordering between them, so a citation handed both installs one by
+   accident of merge order: the shipped merge applied deletes last
+   (right for create-then-delete, which amputates a re-created file),
+   and making upserts win instead cites a file the agent deleted.  Only
+   the lane knows which it saw last, so the lane is where they cancel.
+   TLC found this the first time the sentinel and the citation lane ran
+   in one world — against a fix two hours old.                          *)
 LaneDone(s) ==
   /\ GatedCitation
   /\ Running(s) /\ sc[s].pc = "scanned"
   /\ sc[s].scanU \subseteq (sc[s].upDone \cup sc[s].parked)
   /\ withheldDel' = [withheldDel EXCEPT ![s] = @ \cup sc[s].scanD]
+  /\ stage' = [stage EXCEPT ![s] =
+       [p \in Paths |-> IF LaneCancelsStaged /\ p \in sc[s].scanD THEN 0 ELSE @[p]]]
+  /\ stageBase' = [stageBase EXCEPT ![s] =
+       [p \in Paths |-> IF LaneCancelsStaged /\ p \in sc[s].scanD THEN 0 ELSE @[p]]]
   /\ sc' = [sc EXCEPT ![s].pc = "laneDone"]
   /\ gh' = [gh EXCEPT !.withheld = @ + Cardinality(sc[s].scanD \ withheldDel[s])]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, versions,
-                 inbox, window, stage, stageBase, hitlAcked, conflicts>>
+                 inbox, window, hitlAcked, conflicts>>
 
 (* No coherent point is due: the tick ends with the bytes DURABLE and the
    manifest un-advanced, and the pending set survives to the next lane.
@@ -1133,8 +1207,20 @@ CitePassStep(s) ==
   /\ \E sub \in SUBSET (Valid(s) \ sc[s].citeDone) :
        /\ sub # {}
        /\ AtomicCitation => sub = Valid(s) \ sc[s].citeDone
-       /\ LET inst == [p \in Paths |->
-                IF p \in sub THEN stage[s][p] ELSE manifest[p]]
+       /\ LET \* §2.4.2's ungated repair, in the lane that never had it.
+              \* Same shape and same guard as the fused barrier's arm
+              \* (`repair(p)`, in Finish): the object must still hold
+              \* the generation this workspace integrated, or the
+              \* citation would name bytes it never saw.
+              repairG(p) ==
+                /\ GatedRepair
+                /\ p \notin sub
+                /\ sc[s].baseline[p] # sc[s].instBase[p]
+                /\ objects[p] = sc[s].baseline[p]
+              inst == [p \in Paths |->
+                IF p \in sub THEN stage[s][p]
+                ELSE IF repairG(p) THEN sc[s].baseline[p]
+                ELSE manifest[p]]
               \* This citation names a generation OTHER than the acked
               \* user bytes the key currently holds, and says nothing
               \* about it.  Not "the agent integrated the user's bytes
@@ -1180,11 +1266,19 @@ CiteFinish(s) ==
   /\ GatedCitation
   /\ Running(s) /\ sc[s].pc = "laneDone"
   /\ sc[s].citeDone # {} /\ sc[s].citeDone = Valid(s)
-  /\ LET dels == {p \in withheldDel[s] :
-                    /\ manifest[p] # 0
-                    /\ p \notin sc[s].citeDone
-                    /\ (~GuardedGC \/ objects[p] \in sc[s].known)}
-         man2 == [p \in Paths |-> IF p \in dels THEN 0 ELSE manifest[p]]
+  \* Two different questions, and the shipped code answers them in two
+  \* different places: may this boundary UNCITE the path (the manifest
+  \* CAS — yes, the agent deleted it), and may it DELETE THE OBJECT (the
+  \* GC, which HEADs first and refuses an etag it does not recognize).
+  \* Guarding the uncite with the GC's guard, as this model did, means a
+  \* foreign write to a path the agent deleted keeps the path CITED —
+  \* and an ok ack for a boundary that declared it gone.  TLC reported
+  \* that as a defect; the defect was in the model.
+  /\ LET uncite == {p \in withheldDel[s] :
+                      /\ manifest[p] # 0
+                      /\ p \notin sc[s].citeDone}
+         dels == {p \in uncite : ~GuardedGC \/ objects[p] \in sc[s].known}
+         man2 == [p \in Paths |-> IF p \in uncite THEN 0 ELSE manifest[p]]
          obj2 == [p \in Paths |-> IF p \in dels THEN 0 ELSE objects[p]]
          \* The reaper runs over the paths this citation INSTALLED and
          \* keeps what the INSTALLED DOCUMENT cites — never the writer's
@@ -1212,17 +1306,24 @@ CiteFinish(s) ==
        /\ versions' = ver2
        /\ stage' = [stage EXCEPT ![s] = [p \in Paths |-> 0]]
        /\ stageBase' = [stageBase EXCEPT ![s] = [p \in Paths |-> 0]]
-       /\ withheldDel' = [withheldDel EXCEPT ![s] = @ \ dels]
+       /\ withheldDel' = [withheldDel EXCEPT ![s] = @ \ uncite]
        /\ window' = 0
        \* A dropped staged generation is never silently forgotten.
        /\ conflicts' = conflicts \cup {<<p, sc[s].baseline[p]>> : p \in dropped}
        /\ sc' = [sc EXCEPT ![s].pc = "idle",
             ![s].honored = IF SentinelEnabled /\ PendLive(s) THEN TRUE ELSE @,
+            \* Which paths this boundary does NOT carry.  Kept apart
+            \* from `conflicts` on purpose: a conflict record is the
+            \* ack's `report.parked` in the FUSED path, which is why
+            \* BoundaryBroken exempts it — a correspondence the gated
+            \* honor cannot maintain, because the drop happens inside
+            \* the citation and the honor writes one ack for the lot.
+            ![s].citeDropped = dropped,
             ![s].citeDone = {}, ![s].stageCarried = FALSE,
             ![s].instBase = man2,
             ![s].baseline = [p \in Paths |->
               IF p \in sc[s].citeDone THEN stage[s][p]
-              ELSE IF p \in dels THEN 0
+              ELSE IF p \in uncite THEN 0
               ELSE @[p]],
             ![s].known = @ \cup {stage[s][p] : p \in sc[s].citeDone},
             ![s].scanU = {}, ![s].scanD = {},
@@ -1232,7 +1333,10 @@ CiteFinish(s) ==
             !.gc = @ + Cardinality(dels),
             !.reaped = @ + Cardinality(UNION {versions[p] \ ver2[p] : p \in Paths}),
             !.cited = IF \E pr \in hitlAcked : man2[pr[1]] = pr[2]
-                      THEN 1 ELSE @]
+                      THEN 1 ELSE @,
+            !.declaredDrops = @ + (IF SentinelEnabled /\ PendLive(s)
+                                   THEN Cardinality(dropped \cap sc[s].pendDirty)
+                                   ELSE 0)]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, inbox, hitlAcked>>
 
 (* The noncurrent-retention BACKSTOP.  It is not the reaper and it must
@@ -1414,7 +1518,15 @@ BoundaryBroken(s) ==
     /\ manifest[p] # sc[s].pendCov[p]
     /\ manifest[p] < sc[s].pendMint
     /\ sc[s].local[p] = sc[s].pendCov[p]
-    /\ ~\E pr \in conflicts : pr[1] = p
+    \* The conflict exemption reads the ack's `report.parked`.  A path
+    \* the CITATION dropped is in no such field — the gated honor
+    \* writes one ack for the whole boundary — so its record excuses
+    \* nothing here.  That is the exemption holding the finding's own
+    \* combined world vacuously green until it was narrowed.  Note the
+    \* shape: the drop DEFEATS the exemption, it does not exclude the
+    \* path from the search.  Writing it as a plain conjunct excuses
+    \* exactly the case the clause exists to catch.
+    /\ (p \in sc[s].citeDropped \/ ~\E pr \in conflicts : pr[1] = p)
 
 (* The OTHER half of what an ok ack asserts, and it is not the same
    claim.  `BoundaryBroken` asks whether the agent's own declared work
@@ -1442,7 +1554,12 @@ AckOk(s) ==
   /\ PendLive(s) /\ ~AckMatches(s)
   /\ ~(RefuseOnFence /\ Deposed(s))
   /\ (AckFromInstall => sc[s].honored)
-  /\ sc' = [sc EXCEPT ![s].ackN = @ \cup sc[s].pendN, ![s].honored = FALSE]
+  \* D1, at the one place a gated boundary can break it: a citation
+  \* that dropped a declared path installed a point that does not
+  \* carry it, and `ok` would assert the opposite.
+  /\ (AckHonest => sc[s].pendDirty \cap sc[s].citeDropped = {})
+  /\ sc' = [sc EXCEPT ![s].ackN = @ \cup sc[s].pendN, ![s].honored = FALSE,
+       ![s].citeDropped = {}]
   /\ gh' = [gh EXCEPT
        !.acks = @ + 1,
        !.honors = @ + (IF sc[s].honored THEN 1 ELSE 0),
@@ -1450,6 +1567,27 @@ AckOk(s) ==
        !.ackEarly = @ \/ BoundaryBroken(s),
        !.ackIncoherent = @ \/ BoundaryIncoherent(s),
        !.fencedOkAck = @ \/ Deposed(s)]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+                 window, hitlAcked, conflicts>>
+
+(* The honest answer when the boundary does not carry the declared
+   point: the agent is still ANSWERED — a partial ack names the nonces
+   and the dropped paths — but nothing claims the point landed.  An
+   agent that treats it as failure and re-touches is behaving
+   correctly, and the next boundary carries the path the ordinary way
+   (the racing write is queued in the inbox; the lane consumes it, the
+   local file is still dirty, and the conflict rule publishes it).
+
+   `Inv_NoNonceOrphan` is what makes this an ANSWER rather than a
+   silence, and it is checked over this action like any other.        *)
+AckPartial(s) ==
+  /\ SentinelEnabled /\ AckHonest /\ Running(s) /\ sc[s].pc = "idle"
+  /\ PendLive(s) /\ ~AckMatches(s)
+  /\ ~(RefuseOnFence /\ Deposed(s))
+  /\ sc[s].pendDirty \cap sc[s].citeDropped # {}
+  /\ sc' = [sc EXCEPT ![s].ackN = @ \cup sc[s].pendN, ![s].honored = FALSE,
+       ![s].citeDropped = {}]
+  /\ gh' = [gh EXCEPT !.acks = @ + 1, !.partialAcks = @ + 1]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
 
@@ -1484,7 +1622,7 @@ AckRefused(s) ==
 SentinelNext ==
   \E s \in Sidecars :
     Touch(s) \/ TakeSentinel(s) \/ FastPath(s) \/ AckOk(s)
-    \/ RetirePending(s) \/ AckRefused(s)
+    \/ AckPartial(s) \/ RetirePending(s) \/ AckRefused(s)
 
 ------------------------------------------------------------------------------
 ------------------------------------------------------------------------------
@@ -1688,6 +1826,16 @@ ProbeCoalescedAck    == gh.coalesced = 0
 \* non-vacuous: without it, "the fast path is sound" could hold because
 \* the fast path never ran.
 ProbeFastPathHonor   == ~gh.fastHonor
+
+\* ---- tranche 3, product 1 x 2: the sentinel over the CITATION lane ------
+\* A gated citation actually DROPPED a path the agent had declared.  The
+\* honesty rule is vacuous without it: "an ok ack never claims a dropped
+\* path" holds trivially in a world where nothing is ever dropped.
+ProbeDeclaredDrop == gh.declaredDrops = 0
+\* ...and the partial ack — the honest answer — actually fired, so the
+\* agent is ANSWERED rather than left waiting on a boundary that will
+\* never be claimed.
+ProbePartialAck   == gh.partialAcks = 0
 
 ProbeRawReaderSeesUncited ==
   \A p \in Paths : objects[p] = manifest[p] \/ manifest[p] = 0

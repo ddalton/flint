@@ -6,7 +6,7 @@
 # DELIBERATELY SEPARATE from scripts/check-tla.sh (flint's 196-run gate):
 # lean is a separate system.  Same harness discipline, its own runs.
 #
-# Forty-nine runs, ALL required:
+# Fifty-five runs, ALL required:
 #   - strict runs must complete with every listed invariant green;
 #   - mutation runs must FIND their designated counterexample — a model
 #     that cannot rediscover its bug classes proves nothing;
@@ -170,5 +170,21 @@ mutation_run $M LeanProbeCoalescedAck.cfg "probe: two touches actually coalesced
 mutation_run $M LeanProbeFastPathHonor.cfg "probe: a pending sentinel was honored by the skip-on-no-diff pass rather than a full barrier" \
   "Invariant ProbeFastPathHonor is violated"
 
+# ---- C6: the sentinel over the CITATION lane ------------------------------
+# The matrix gap the verified review named: the two products never ran in
+# one world, so an ack written off a citation-lane honor was never checked
+# at all.
+strict_run $M LeanSentinelGatedHolds.cfg "the boundary verb over the GATED citation lane: an ok ack never claims a path the citation dropped"
+mutation_run $M LeanSentinelGatedOkOverDrop.cfg "the shipped gated honor: status ok whatever the citation dropped, with no ack field that could express the exception (found in shipped code)" \
+  "Invariant Inv_AckImpliesCited is violated"
+mutation_run $M LeanProbeDeclaredDrop.cfg "probe: a gated citation actually dropped a path the agent had DECLARED (without it the honesty rule holds vacuously)" \
+  "Invariant ProbeDeclaredDrop is violated"
+mutation_run $M LeanProbePartialAck.cfg "probe: the partial ack fires -- the agent is answered rather than left waiting" \
+  "Invariant ProbePartialAck is violated"
+mutation_run $M LeanSentinelGatedNoRepair.cfg "the citation lane WITHOUT the repair the fused barrier has: an ok ack names a manifest that does not cite a HITL write this workspace already integrated into its own tree (found in shipped code -- C2)" \
+  "Invariant Inv_AckBoundaryCoherent is violated"
+mutation_run $M LeanSentinelGatedStaleStage.cfg "the stage and the withheld-delete set both reach the citation and merge order decides: the boundary an ok ack names cites a file the agent deleted before declaring (found in a fix two hours old)" \
+  "Invariant Inv_AckImpliesCited is violated"
+
 echo
-echo "lean formal gate: $PASS/49 runs green"
+echo "lean formal gate: $PASS/55 runs green"
