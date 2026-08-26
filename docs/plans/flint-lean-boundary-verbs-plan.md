@@ -266,6 +266,10 @@ New `FlintLeanWorkspaceSpec` fields (today's fields: `crd.rs:35-95`; flow to the
 
 `sentinelPollSecs` stays env-only (`FLINT_SYNC_SENTINEL_POLL_SECS`, default 1) — not a fleet contract.
 
+**Added by the Phase-4/5/6 tranche (§10.1f), stated here so the table is the contract:** `udsDoor` (bool, default false — §2.5's socket is opt-in and the table gave no way to opt in); the gated **drain-vs-spot-reclaim ceiling**, which is the check the grace derivation actually binds on (the webhook only ever RAISES a pod's grace, so "derived exceeds configured" could never fire from the webhook path; what binds on a pure-spot fleet is the ~2-minute reclaim, and a gated workspace whose backlog caps cannot drain inside it is refused with the knob named); a `StagedWorkRecovered` condition carrying D9's DR signature, whose liveness test is the STORE's clock rather than the released flag (the failure that strands work is a pod that DIED, and a dead holder leaves its cell unreleased); and a `MetricsExposed` condition for D15's bind collision. `LeaseEcho` carries two fields beyond the six above — `sentinel_verbs_active` and `metrics_bound` — because both report a verdict reached INSIDE the pod that no other surface can carry.
+
+**Reconcile cadence, split (§10.1f):** the posture half (claim, sweep, conformance probe, lifecycle read, provisioning) runs every 1800 s **and on every spec-generation change**; the observation half — one epoch read for the echo — runs every 120 s. A `LAG` printer column refreshed on the posture cadence is not a lag column, and re-asking the bucket's lifecycle rules every two minutes would multiply fleet operator traffic to re-answer a question that moves on the timescale of an admin edit.
+
 **Propagation semantics — stated, because they bite (review: ops-fleet):** sidecar config is env stamped at pod creation by the mutating webhook (`inject.rs:108-131`); there is no re-read path. Changing any of these on a CR affects **new pods only**; the gated→cadence "escape hatch" therefore requires pod recreation — which destroys the emptyDir pending record and converts the whole uncited window into D9 orphans. That is why `recover-staged` is a v1 deliverable (D9) and why the CRD doc-comment for `boundaryMode` states the recreation requirement verbatim.
 
 **Status (new, additive):** `FlintLeanWorkspaceStatus` (today `crd.rs:114-128`, no conditions array) gains `conditions[]`: `BoundaryModeAccepted` (spec validation: gated-without-lag-bound, failed retention cross-validation, failed versioning/version-id conformance probe, a shorter noncurrent rule covering the prefix, insufficient grace ⇒ False with the probe/rule named), `VersionRetentionProvisioned` (operator-side D8 posture — message names the installed noncurrent retention and the conformance verdicts), `SentinelVerbsActive` (D0.4), and **`BoundaryModeActive`** (review: ops-fleet): the sidecar echoes `{sidecar_version, protocol, active_boundary_mode, last_cited_seq, last_cited_unix, staged_uncited_count}` into the lease-heartbeat cell it already writes (D12 renews it every ≤30 s — the echo is free); operator reconcile compares spec vs observed and sets `BoundaryModeActive=False` on mismatch. This closes the operator↔sidecar mixed-version hole the way D11 closes agent↔sidecar: an old sidecar binary ignoring `FLINT_SYNC_BOUNDARY_MODE=gated` (env read is a fixed list, `flint_sync.rs:56-60`) no longer runs fused cadence behind a green condition. It also gives the operator live per-workspace visibility lag as a condition/printer column with no metrics stack.
@@ -363,15 +367,15 @@ Interval-based loop rewrite, consume/honor/ack/retire with settle-before-consume
 *Gate:* tranche-3 products 2 + 3 green BEFORE merge, **including the P2 affordability pilot (§4)**; **proxy conformance probe extended**: (i) conditional-header preservation, (ii) stale-epoch refusal readiness, (iii) versioning=Enabled **and `x-amz-version-id` returned on PUT** (§8 Q2 — a stripping proxy must refuse, never degrade), (iv) GET/HEAD/DELETE by versionId and `ListObjectVersions` permitted (review: gc-durability) — a failing probe blocks gated mode for that fleet (`BoundaryModeAccepted=False`, message names the probe; re-probed at startup + operator cadence). Battery additions per invariant, including `hitl_put_admitted_between_citations` (review: crash-takeover/security-dos), `clear_intent_keys_preserves_pending`, and **`pinned_reads_never_adopts_current`** (red against the shipped S3-wins arm, `checkout.rs:102-121` — the D13 rule the design is incoherent without) plus `legacy_entry_without_version_id_uses_etag_path`. Drill legs B9–B12, B15, B19, B20, B21.
 *Acceptance:* B9 mid-logical-change invisibility observed with a *completed* probe checkout; B10 forced citation ≤ `visibilityLagBoundSecs`+one floor with the source readable from the bucket; B11 lossless preStop incl. SIGKILL and SIGTERM-ignoring variants; B12 straggler containment with the inbox-cell oracle; B15 citation atomicity under mid-CAS kill; B20 quiescence actually fires; B21 version count returns to one per key.
 
-**Phase 4 — CRD/chart/operator (§2.6) + recovery tool.**
+**Phase 4 — CRD/chart/operator (§2.6) + recovery tool.** *(landed — §10.1f; kind legs B26–B33 green.)*
 Knobs, validation (gated⇒lag-bound; retention cross-validation; versioning conformance; **no shorter noncurrent rule covering the prefix**; grace sufficiency), conditions (incl. `BoundaryModeActive` from the heartbeat echo, uncited-without-lease event), noncurrent-retention provisioning/sweep with read-merge-append (D8), webhook grace derivation (D10), `flint-sync recover-staged` (D9 — v1, now a re-cite CAS with no data movement).
 *Gate:* kind e2e extended: a CR with `boundaryMode: gated` and no lag bound is Refused at reconcile (failing control, house style); retention cross-validation refused; a bucket carrying a 1-day noncurrent rule over the prefix is Refused with the rule Id named; spec/observed mode mismatch flips `BoundaryModeActive` (old-sidecar-image control leg); chart install green with new values; recover-staged re-cites a named uncited-version set as a flagged boundary on a rig with manufactured orphans.
 *Acceptance:* `VersionRetentionProvisioned` True on a MinIO rig with versioning ON (the 30-day noncurrent + ExpiredObjectDeleteMarker rules verified in the live config, user rules intact), sweep-mode fallback exercised with version-scoped deletes, B23's dangling-citation endgame recovered by `recover-staged`, and B24's two refusals observed.
 
-**Phase 5 — layered doors (§2.5), opt-in.** UDS socket; gateway boundary verb via the dedicated inbox-doc field.
+**Phase 5 — layered doors (§2.5), opt-in.** *(landed — §10.1f; kind legs B34–B36 green.)* UDS socket; gateway boundary verb via the dedicated inbox-doc field.
 *Gate:* gateway verb drill legs — (a) boundary request lands as a consumed sentinel via the `boundary_request` field (no conflict records minted; window-409 path exercised; min-interval + budget honored); (b) **sync request is carried, not executed** (D14): setting `sync_request` moves `sync_requested_unix` in the ticker while the workspace tree is **byte-identical before and after** (failing control, house style — a tree hash taken at both points, and the leg FAILS if the sidecar mutated anything), then the agent's own `.flint/sync` produces the normal scoped ack and conflict records; UDS and file sentinel proven to share one consume path (a UDS boundary and a file sentinel in the same interval coalesce into one barrier, one covered-nonce ack).
 
-**Phase 6 — observability plumbing (D15, §8 Q5 DECIDED).** `/metrics` on `flint-sync` via the crate's existing `warp`, rendered from the same struct as `gauges.json`, opt-in per workspace, bound on the pod network; webhook-stamped scrape annotations; chart-flagged NetworkPolicy + PodMonitor.
+**Phase 6 — observability plumbing (D15, §8 Q5 DECIDED).** *(landed — §10.1f; kind legs B37–B38 green.)* `/metrics` on `flint-sync` via the crate's existing `warp`, rendered from the same struct as `gauges.json`, opt-in per workspace, bound on the pod network; webhook-stamped scrape annotations; chart-flagged NetworkPolicy + PodMonitor.
 *Gate:* parity test (every `gauges.json` field ⇒ exactly one metric, equal at the same tick); label-key set is exactly `{workspace, namespace}` (failing control: a per-path metric must fail the test); **scrape-costs-nothing leg** — request-count oracle across N scrapes on an idle workspace shows the recorded 4-request idle shape unchanged; **bind-collision leg** — the agent container holds the port first, sidecar starts, workspace stays fully operational with the condition set (failing control: a sidecar that exits is a red leg); NetworkPolicy leg on kind (a pod outside the monitoring namespace is refused).
 *Acceptance:* a 3-workspace kind rig scraped end-to-end, series count == workspaces × the fixed metric set, and the heartbeat-echo condition still authoritative with the scrape target deliberately down.
 
@@ -409,7 +413,21 @@ House rules inherited wholesale (`docs/plans/flint-lean-chaos-drill.md:33-61`, `
 | B25 | Hot-loops no-regression (D3.1): two storms on the same rig at the same touch rate — (a) a >`whole_put_max` file rewritten each iteration ⇒ budget exhausts in ~2 honors, subsequent acks read `sentinel-deferred`, and total published bytes over the window ≤ cadence-only baseline + `budget × whole_put_max`; (b) a 4 KiB file rewritten each iteration ⇒ NOT throttled below the drafted 60 honors/hour | Record the cadence-only baseline bytes in a control run FIRST (a storm compared against nothing proves nothing); assert (a) and (b) ran at the same sentinel touch rate — the leg's whole claim is that the meter discriminates by work, not by calls — and assert ≥1 `sentinel-deferred` ack in (a) and ZERO in (b) |
 | B24 | Conformance refusals, both arms (§8 Q2, failing-control house style): (a) a proxy configured to strip `x-amz-version-id` ⇒ `BoundaryModeAccepted=False`, gated REFUSED — never a silent fall back to etag semantics; (b) a bucket carrying a 1-day `NoncurrentVersionExpiration` rule covering `<prefix>/files/` ⇒ refused with the offending rule Id named | (a) assert the same CR reconciles green once the header is passed through (the refusal tracks the proxy, not a typo); (b) assert the rule genuinely covers the prefix — a control object written under it visibly ages out — before crediting the refusal |
 
-Total: 25 legs; register with an "of 25" count to bump, rig reset re-runnable, per the shipped harness.
+| B26 | Gated with no `visibilityLagBoundSecs` ⇒ `BoundaryModeAccepted=False`, reason `LagBoundRequired` | The ACCEPTED control runs FIRST (a coherent gated CR must reach True) — a refusal suite whose accepted case never passes proves only that the operator says no to everything |
+| B27 | `noncurrentRetentionDays` below D8's K=2 window ⇒ refused, message naming the window in seconds | Assert the message contains the computed window, not just the reason: a refusal that cannot say what it violated is a refusal nobody can act on |
+| B28 | Backlog caps the ~2-minute spot reclaim cannot drain ⇒ refused, message naming `stagedBacklogCapBytes` | Assert the DEFAULT caps are accepted in the same run — the check must bind on the knob, not on gated mode |
+| B29 | The 30-day noncurrent backstop is really installed: `VersionRetentionProvisioned=True` AND a rule covering `<prefix>/files/` exists in the LIVE bucket config | Read the rule back with `mc ilm rule ls`, not from the condition — the condition is the claim under test |
+| B30 | A customer's 1-day noncurrent rule over the prefix ⇒ `ShorterNoncurrentRule`, gated refused (D8's destroyer is a rule flint never wrote) | Plant the rule with `mc` (never through flint), and assert the workspace was ACCEPTED before planting it |
+| B31 | Removing that rule restores acceptance | The refusal must track the RULE, not a typo in the fixture — both directions or neither |
+| B32 | The lease-heartbeat echo reaches `status`: `citedSeq`/`stagedUncited`/`observedBoundaryMode` populated from a running sidecar | Assert the field is non-empty, not merely present: an unset printer column renders as `<none>` and reads like a value |
+| B33 | Spec vs RUNNING binary: patch `boundaryMode` on the CR without recreating the pod ⇒ `BoundaryModeActive=False`, `ModeMismatch` (§2.6's propagation semantics, exercised rather than asserted) | Assert `True` was observed BEFORE the patch — otherwise the leg proves only that the condition can be False |
+| B34 | Gateway boundary request: the inbox document's `boundary_request` field ⇒ a publish ack naming the requestor, no conflict records | Assert `.flint/publish.ack` is ABSENT before the request |
+| B35 | Gateway sync request is CARRIED, never executed (D14): the ticker moves and the workspace tree is byte-identical | A tree hash taken before and after — the leg FAILS if the sidecar mutated anything |
+| B36 | The UDS door answers synchronously and shares ONE consume path: `flint-sync ctl boundary` returns an ok ack whose nonce set names the socket request | Assert the socket exists AND that the ack carries a `uds:` nonce — an ack that named nothing would prove only that something published |
+| B37 | `/metrics` serves ≥13 series and the label-key set is EXACTLY `{workspace, namespace}` | Parse the label keys off every series and fail on any third key — the per-path metric is the failure this rule exists for |
+| B38 | Bind collision: the agent container holds the metrics port first ⇒ the sidecar starts anyway, `MetricsExposed=False`/`PortUnavailable`, and the workspace keeps publishing | Assert a real publish reaches the bucket AFTER the collision — a degradation leg that never checks the degraded path still works proves nothing |
+
+Total: 38 legs (25 bucket-drill + 13 kind, `lean/e2e/run-boundary.sh`); register with an "of N" count to bump, rig reset re-runnable, per the shipped harness.
 
 ---
 
@@ -567,11 +585,13 @@ What replaces it is **storage, not requests**: uncited versions (at most one gen
 
 ## 10. Implementation status (2026-08-25)
 
-**Landed: Phases 0, 1, 2 and 3, plus formal tranche 3 products 1, 2
-and 4, plus the verified-review tranche (§10.1e).** Lean battery
-**84/84** (was 19/19); formal gate **55/55** (was 24/24); `flint-store`
-and the hub crate both compile against the shared-schema changes, and
-the `s3`-feature binaries build.
+**Landed: Phases 0–6 in full**, plus formal tranche 3 products 1, 2
+and 4, plus the verified-review tranche (§10.1e) and the Phase-4/5/6
+tranche (§10.1f). Lean battery **94/94** (was 19/19); lean operator
+suite **35/35** (was 12/12); formal gate **55/55** (was 24/24);
+`flint-store` and the hub crate both compile against the shared-schema
+changes — `--all-targets` included, which HEAD did not — and the
+`s3`-feature binaries build.
 
 | Phase | State | Notes |
 |---|---|---|
@@ -584,10 +604,10 @@ the `s3`-feature binaries build.
 | 3 — recovery (D9) | **done** | `flint-sync recover-staged`: bucket-truth re-citation of durable-but-uncited work as one `recovered` boundary — uncited current versions, brand-new never-cited paths, and D8's dangling citations rolled forward; conflict records throughout; unrecoverable paths named loudly and exit non-zero |
 | 3 — observability minimum (§2.6, OF-6) | **done** | `.flint-sync/gauges.json` (rpo/visibility-lag/staged-uncited/cited-noncurrent-age/withheld-reason/budget/forced-count/last-boundary, `fenced` in lockstep with `capabilities.json`), the structured per-tick `withheld_reason=` stderr line, and `flint-sync status` — which takes no lease and no state-dir lock, so it diagnoses a workspace *while* its sidecar holds them |
 | 1/2/3 — the verified-review tranche (§10.1e) | **done** | six adversarially-verified findings fixed, each observed red: the drain's sync-ack guard (C1), the ungated repair pass gated mode never had (C2), tombstone/stage cancellation in **both** directions (C3), containment for every path a write touches (C4), the pinned-manifest legacy cell — backfill before pinning, refuse rather than adopt (C5), and the ack that claimed a boundary the citation dropped (C6) |
-| 3 — remainder | **open** | the operator-facing heartbeat echo (deferred to Phase 4 — see below), preStop drain sizing (webhook-derived; Phase 4) |
-| 4 — CRD/chart/operator | **not started** | |
-| 5 — layered doors | **partial** | D14's `carry_sync_request` ticker path exists; the UDS socket and the gateway `boundary_request`/`sync_request` inbox fields do not |
-| 6 — `/metrics` (D15) | **not started** | |
+| 3 — remainder | **done** | the heartbeat echo is `flint_store::LeaseEcho`, carried on the lease-renewal CAS the sidecar already pays for every ≤30 s; the preStop drain is sized by `boundary::derived_grace_secs` and stamped on the pod by the webhook |
+| 4 — CRD/chart/operator | **done** | every §2.6 knob on the CRD with its trade in the doc-comment; `boundary.rs` spec validation (mode/sentinel parse, gated⇒lag-bound, D8's K=2 retention cross-validation, and the drain-vs-spot-reclaim ceiling); the bucket-side pass (shared conformance probe, live lifecycle read, read-merge-append provisioning of the noncurrent backstop); four conditions plus `MetricsExposed`; observed status fields + printer columns from the echo; D9's DR-signature event; the CRD bootstrap copy regenerated |
+| 5 — layered doors | **done** | the inbox document's `boundary_request`/`sync_request` fields with the gateway's CAS setter and two bearer-authed endpoints; the sidecar consumes both on the inbox GET it already pays for (zero added requests) and watermarks them by `requested_unix` rather than a clearing CAS; `uds.rs` serves `.flint-sync/ctl.sock` and `flint-sync ctl` is its in-pod client; every door folds into the SAME pending record a `.flint/publish` touch would |
+| 6 — `/metrics` (D15) | **done** | `metrics.rs` renders the exposition from the same `Gauges` struct `gauges.json` is written from — one struct, one renderer, and a parity test field by field; the label-key set is fixed at `{workspace, namespace}` and string gauges are numeric enums rather than labels; the listener is opt-in, degrades on a bind collision to an echoed condition, and costs zero bucket requests by construction; chart-flagged PodMonitor + NetworkPolicy |
 
 ### 10.1 Verification posture — read this before trusting the table
 
@@ -1008,6 +1028,114 @@ stage now keeps its own two-observations memory; and a consume that
 adopts a HITL write records no `version_id`, so a gated repair had to
 HEAD for one or the entry would be unreadable by exactly the pinned
 readers it exists for.
+
+### 10.1f The Phase 4/5/6 tranche — the operator, the doors, the metrics
+
+Ten more battery legs (84 → **94**), 23 more operator legs (12 → **35**),
+and **eighteen mutations** applied to the shipped code, each observed
+red and reverted. What it found, beyond the plan's own list:
+
+- **D9's `orphans.json` was never written.** §10's table called D9 done
+  because `recover-staged` shipped, and the verb works — but the DURABLE
+  SUMMARY it recovers from did not exist, in any mode. The whole point
+  of surfacing is that `pending.json` lives on the emptyDir, which is
+  precisely what a pure-spot replacement destroys: on this fleet's
+  ROUTINE failure the record naming uncited work died with the pod that
+  staged it, and the operator (a different process, often a different
+  cluster) had nothing to read. Now written on change and CLEARED by the
+  citation that makes the work visible — a summary still claiming
+  candidates after a citation pages someone about work that is already
+  fine, and an alert that cries wolf is worse than no alert.
+- **Two config fields the binary never read.** `stagedBacklogCapObjects/
+  Bytes` and `noncurrentRetentionDays` were `LeanConfig` fields with no
+  `env_u64` line behind them — the "knobs that exist and do NOTHING"
+  class, and the caps are exactly what D10 sizes the pod's grace
+  against. The webhook↔binary contract is now a TEST: it scans
+  `bin/flint_sync.rs` at compile time (`include_str!`) and fails if the
+  webhook stamps a variable the sidecar never reads, or the sidecar
+  reads one the webhook never stamps, with a declared exception list
+  that has to say why for each.
+- **"No live lease" cannot mean "no cell".** The DR-signature condition
+  first read `released == true`, so it could only fire after a CLEAN
+  shutdown — the one case that never strands anything, because the drain
+  cites everything before releasing. The failure that actually strands
+  work is a pod that DIED, and a dead holder leaves its cell behind
+  unreleased. Liveness is now judged against the STORE's clock (A8's
+  rule), on the sidecar's own takeover threshold, doubled.
+- **The refusal has to be ordered before the provisioning.** Installing
+  our 30-day noncurrent rule beside a customer's 1-day rule would make
+  `VersionRetentionProvisioned` read True while the destroyer is still
+  armed: S3 applies the shortest matching rule, not ours. The bucket
+  pass reads the live rules first and returns without writing.
+- **An unreadable lifecycle posture is not an empty one.** The
+  `lifecycle_rules` trait method defaults to a REFUSAL rather than
+  `Ok(vec![])`, because gated mode is accepted on the strength of a
+  positive answer that nothing shorter is reaping noncurrent versions —
+  and D8's hazard is a rule flint never wrote.
+- **One probe, two callers.** The versioning conformance probe moved
+  into `flint_store::probe`: the sidecar refuses gated startup on it and
+  the operator flips `BoundaryModeAccepted` on it, and a workspace the
+  operator calls conformant while the sidecar refuses to start is worse
+  than either verdict alone. The two use DISTINCT probe keys — sharing
+  one would let two conformant probes fail each other's If-None-Match
+  write, a conformance failure manufactured by conformance checking.
+- **The grace derivation binds against the reclaim ceiling, not the
+  pod's own grace.** The webhook only ever raises grace, so a
+  "derived > configured" refusal could never fire from the webhook path.
+  The number that *does* bind on this fleet is the ~2-minute spot
+  reclaim: a gated workspace whose backlog caps cannot drain inside it
+  is refused, and the message names the knob to lower. The default caps
+  are asserted to fit — if anyone raises those defaults, the test says
+  so.
+- **Three tests that could not fail, caught by the mutation pass.** An
+  orphan-summary oracle compared ETags, and the doc's timestamp is
+  second-granular, so two writes inside one second are byte-identical —
+  it now counts VERSIONS. A condition-timestamp test compared two
+  `now_rfc3339()` values from the same second — it now stamps an
+  explicit one. And the door-coalescing test ran the socket request
+  first, which is the order settle-before-consume makes safe for a
+  *wrong* implementation too; file-first is the order that discriminates,
+  and the test now runs both and says why.
+- **The structural-CRD guard needed a probe of its own.** kube's
+  `KubeSchema` derive already flattens the `anyOf: [T, null]` that plain
+  schemars emits, so no field shape in this CRD trips the junctor
+  scanner today — which makes a green test meaningless unless the
+  scanner is shown to work. It now checks a synthetic junctor first.
+
+**The kind drill (`lean/e2e/run-boundary.sh`, 14 legs, B26–B38) found
+the worst defect of the tranche, and it was in the cadence split this
+tranche introduced.** §2.6 promises `CITED-SEQ`/`LAG`/`STAGED` as
+printer columns — live per-workspace visibility with no metrics stack —
+and the shipped reconcile requeued at 1800 s, so a "lag" column was up
+to half an hour stale. The fix splits the pass in two: the POSTURE half
+(claim, MPU sweep, conformance probe, lifecycle read, provisioning, ~12
+requests) stays on 1800 s and also runs whenever the spec generation
+changes; the OBSERVATION half is ONE epoch read — the echo — every
+120 s, plus an orphans GET only when the lease is dead. At 3,000
+workspaces that is ~25 GET/s, a third of the sidecars' own idle read
+rate (§7).
+
+The defect: the fast pass recomputed the pure spec verdict and wrote
+`BoundaryModeAccepted=True` from it. A bucket-side refusal — a
+customer's 1-day noncurrent rule, a version-stripping proxy — was
+therefore CLEARED about two minutes after the posture pass raised it,
+leaving the operator looking at green while the destroyer stayed armed.
+The rule now: a spec-level REFUSAL is authoritative on every pass (an
+incoherent knob must not wait out a cadence), and acceptance is not
+symmetric — a pass that consulted no bucket says nothing and the
+standing condition stands. The comment describing that rule was already
+in the file, above an empty `if` block that never implemented it.
+
+Two deviations from §2.6 worth naming rather than burying:
+
+1. **`udsDoor` is a new CRD knob** the §2.6 table does not list. Phase 5
+   is opt-in and the plan gives no way to opt in; an env-only switch
+   would have been a fleet feature no CR could turn on.
+2. **`LeaseEcho` carries two fields beyond §2.6's six** —
+   `sentinel_verbs_active` and `metrics_bound`. Both report a verdict
+   reached INSIDE the pod (D0.4's pre-flight against the agent's own
+   tree; the exposition bind) that no other surface can carry, and both
+   ride a request that was already being paid for.
 
 ### 10.2 Formal model — tranche 3, product 4 (done)
 
