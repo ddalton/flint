@@ -6,7 +6,7 @@
 # DELIBERATELY SEPARATE from scripts/check-tla.sh (flint's 196-run gate):
 # lean is a separate system.  Same harness discipline, its own runs.
 #
-# Twenty-four runs, ALL required:
+# Thirty-six runs, ALL required:
 #   - strict runs must complete with every listed invariant green;
 #   - mutation runs must FIND their designated counterexample — a model
 #     that cannot rediscover its bug classes proves nothing;
@@ -126,5 +126,24 @@ mutation_run $M LeanScopedSyncWholeBase.cfg "a scoped sync advancing the WHOLE m
 mutation_run $M LeanProbeScopedDeferral.cfg "probe: a scoped sync actually defers an out-of-scope remote change" \
   "Invariant ProbeScopedDeferral is violated"
 
+# ---- tranche 3, product 2: gated citation x version GC x the backstop -----
+strict_run $M LeanGatedHolds.cfg "gated advance: cited versions live, the reaper never takes live bytes, boundaries are all-or-nothing"
+mutation_run $M LeanGatedReapsCurrent.cfg "the shipped reaper rule (keep only the cited version) DELETES a HITL write that landed between the lane and the citation — it was current, acked, and about to be read" \
+  "Invariant Inv_NoUncitedGC is violated"
+mutation_run $M LeanGatedBackstop.cfg "the noncurrent-retention BACKSTOP reaps a cited version — gated staging makes the cited generation noncurrent, so lifecycle runs a clock against live cited data (D8's inversion; the abandoned-mid-stage endgame)" \
+  "Invariant Inv_CitedVersionLives is violated"
+mutation_run $M LeanGatedSplitCitation.cfg "a citation split across two CASes lets a reader see half a logical change" \
+  "Invariant Inv_BoundaryAtomic is violated"
+mutation_run $M LeanGatedInflightHitl.cfg "citing over an inbox entry still in flight names bytes that PREDATE the user's write" \
+  "Invariant Inv_HITLDurable is violated"
+mutation_run $M LeanProbeCitationInstalled.cfg "probe: ONE CAS installs >= 2 paths from a pending set that survived a lane pass" \
+  "Invariant ProbeCitationInstalled is violated"
+mutation_run $M LeanProbeWithheldDelete.cfg "probe: a delete is actually withheld from the manifest until a citation" \
+  "Invariant ProbeWithheldDelete is violated"
+mutation_run $M LeanProbeForcedCite.cfg "probe: a citation actually fires mid-change (the lag/backlog caps' shape)" \
+  "Invariant ProbeForcedCite is violated"
+mutation_run $M LeanProbeRawUncited.cfg "probe (REQUIRED-REACHABLE): a raw reader sees uncited bytes — §3 residual 11 proven present, not assumed away" \
+  "Invariant ProbeRawReaderSeesUncited is violated"
+
 echo
-echo "lean formal gate: $PASS/27 runs green"
+echo "lean formal gate: $PASS/36 runs green"

@@ -67,7 +67,7 @@ CONSTANTS
                        \* apply only to in-scope paths.  FALSE in every
                        \* tranche-1/2 cfg, so those state spaces are
                        \* preserved by construction.
-  ScopedInstBase       \* TRUE  = D4: a scoped sync advances the MERGE BASE
+  ScopedInstBase,      \* TRUE  = D4: a scoped sync advances the MERGE BASE
                        \* only for paths it applied or verified in scope.
                        \* FALSE = the mutation: it advances the whole
                        \* instBase to bucket-current, so every out-of-scope
@@ -76,6 +76,45 @@ CONSTANTS
                        \* FOREVER.  `instBase` is the object the model has
                        \* refuted naive designs on twice; D4 rewrites its
                        \* per-path semantics, which is why it is modelled.
+  \* ---- tranche 3 product 2: gated citation x version GC x backstop -----
+  \* (boundary-verbs D6/D7/D8/D13.)  Generations are unique mints, so a
+  \* generation IS a version id and `manifest[p]` already cites one; the
+  \* substrate this product adds is `versions[p]` — the generations that
+  \* still EXIST as stored versions, which on a versioned bucket is a
+  \* different question from what the object currently reads as.
+  \*
+  \* That distinction is the whole tranche.  `Inv_NoDangling` asks
+  \* "does the object exist" and was the right question until D7: gated
+  \* staging makes the CITED version noncurrent, so an object can exist,
+  \* read as newer uncited bytes, and have nothing behind its citation.
+  GatedCitation,       \* FALSE in every pre-existing cfg: the gated
+                       \* actions are disabled and `versions`/`stage`/
+                       \* `withheldDel` stay frozen at Init, so every
+                       \* earlier state space is preserved by construction.
+  AtomicCitation,      \* TRUE = D6: ONE CAS installs the entire pending
+                       \* set.  FALSE = the mutation: the install is split
+                       \* across two CASes, so a reader can see half a
+                       \* logical change.
+  GCKeepsCurrent,      \* TRUE = the reaper never reclaims the CURRENT
+                       \* version.  FALSE = the shipped rule THIS MODEL
+                       \* REFUTED: "delete every version of a touched key
+                       \* except the one the installed manifest cites"
+                       \* deletes a foreign write that landed between the
+                       \* lane and the citation — and it was current,
+                       \* acked, and about to be read.
+  CiteDropsInflightHitl, \* TRUE = a staged path with a LIVE INBOX ENTRY is
+                       \* dropped from the boundary rather than cited
+                       \* over.  The base-version check cannot see that
+                       \* write (it reads the baseline, and the citation
+                       \* lane consumes nothing) and the lane opens no
+                       \* window, so the inbox is the only witness — and
+                       \* the window CAS has already loaded it.
+  BackstopEnabled      \* TRUE = the noncurrent-retention lifecycle rule
+                       \* fires.  It is a BACKSTOP, never the reaper, and
+                       \* enabling it is a mutation: on `files/` it cannot
+                       \* tell cited from uncited, so it runs a clock
+                       \* against live cited data (D8's inversion, and
+                       \* §2.4.3's abandoned-mid-stage endgame).
 
 Sidecars == {"A", "B"}
 
@@ -90,13 +129,32 @@ VARIABLES
   window,      \* 0 = closed; else the opener's epoch
   \* ---- sidecars ---------------------------------------------------------
   sc,          \* [Sidecars -> record], fields below
+  \* ---- the versioned substrate (tranche 3 product 2) --------------------
+  versions,    \* [Paths -> SUBSET Nat]: every generation still STORED for
+               \* the path.  `objects[p]` is which one it currently reads
+               \* as; a PUT over a versioned bucket destroys nothing, so
+               \* the two diverge exactly while work is staged-uncited.
+  stage,       \* [Sidecars -> [Paths -> Nat]]: the gated pending set —
+               \* staged-but-uncited generation per path (0 = none).
+  stageBase,   \* [Sidecars -> [Paths -> Nat]]: the generation the BASELINE
+               \* cited when we staged.  D7's re-validation guard: if the
+               \* baseline has moved by citation time, a HITL consume or a
+               \* sync landed after we staged, and installing our staged
+               \* generation would let work that PREDATES the foreign
+               \* bytes win against them.
+  withheldDel, \* [Sidecars -> SUBSET Paths]: deletes withheld from the
+               \* manifest until a citation, so a rename never becomes
+               \* reader-visible as gone/absent at an undeclared point.
   \* ---- environment / ghosts --------------------------------------------
   hitlAcked,   \* SUBSET (Paths \X Nat): writes acked to the user
   conflicts,   \* SUBSET (Paths \X Nat): surfaced conflict records
   gh           \* ghost/counter record, fields below
 
+gatedVars == <<stage, stageBase, withheldDel>>
+
 vars == <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox, window,
-          sc, hitlAcked, conflicts, gh>>
+          sc, versions, stage, stageBase, withheldDel, hitlAcked,
+          conflicts, gh>>
 
 (* sc[s] fields:
      st       "unstarted" | "claiming" | "running" | "stalled" | "dead"
@@ -133,6 +191,17 @@ vars == <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox, window,
      upDone   SUBSET Paths    uploaded (or adopted-own) this barrier
      parked   SUBSET Paths    412-parked this barrier
      gcDone   SUBSET Paths    delete-set entries processed this barrier
+     citeDone SUBSET Paths    which staged paths THIS citation has already
+                              installed.  Non-empty and not the whole
+                              valid pending set = a reader can see half a
+                              logical change; the single-CAS design never
+                              produces that state, which is exactly why
+                              the split-install mutation stays.
+     stageCarried BOOLEAN     this incarnation's pending set survived a
+                              lane pass (set at Scan when the stage is
+                              already non-empty).  Only under gated; FALSE
+                              otherwise, so earlier state spaces are
+                              preserved by construction.
      lastDirty SUBSET Paths   the dirt set frozen at the LAST barrier's
                               scan.  Tracked only under SyncEnabled (it
                               stays {} otherwise, so every tranche-1
@@ -150,6 +219,11 @@ vars == <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox, window,
                             deliberately left for the inbox flow (the
                             action-written non-vacuity ghost: the probe
                             names the ACTION, never the situation)
+     staged, cites, reaped, withheld, forcedCites, citeSpan : Nat
+     carriedCite BOOLEAN    a citation installed a pending set that had
+                            survived a lane pass: the durability/visibility
+                            split actually ACCUMULATED, rather than every
+                            citation happening to follow its own lane
      foreignLost BOOLEAN    a sync advanced the merge base for a path it
                             neither applied nor surfaced a conflict for —
                             i.e. it claimed to have integrated a generation
@@ -187,6 +261,11 @@ Init ==
   /\ manifest = [p \in Paths |-> 1]
   /\ objects  = [p \in Paths |-> 1]
   /\ inbox = {} /\ window = 0
+  \* Every path starts published at gen 1, so gen 1 is its only version.
+  /\ versions = [p \in Paths |-> {1}]
+  /\ stage = [s \in Sidecars |-> [p \in Paths |-> 0]]
+  /\ stageBase = [s \in Sidecars |-> [p \in Paths |-> 0]]
+  /\ withheldDel = [s \in Sidecars |-> {}]
   /\ sc = [s \in Sidecars |->
        [st |-> "unstarted", pc |-> "idle", epoch |-> 0, expSeq |-> 0,
         local |-> [p \in Paths |-> 0], baseline |-> [p \in Paths |-> 0],
@@ -194,7 +273,8 @@ Init ==
         instSnap |-> [p \in Paths |-> 0], instSeq |-> 0,
         known |-> {}, scanU |-> {}, scanD |-> {},
         scanGen |-> [p \in Paths |-> 0], upDone |-> {}, parked |-> {},
-        gcDone |-> {}, lastDirty |-> {}]]
+        gcDone |-> {}, lastDirty |-> {}, stageCarried |-> FALSE,
+        citeDone |-> {}]]
   /\ hitlAcked = {} /\ conflicts = {}
   /\ gh = [amputated |-> FALSE, resurrected |-> FALSE,
            stragglerInstalls |-> 0, stragglerCas |-> 0, deposedPuts |-> 0,
@@ -203,7 +283,10 @@ Init ==
            adoptOwn |-> 0, stallUsed |-> FALSE, nextGen |-> 2, hitl |-> 0,
            syncs |-> 0, syncApplied |-> 0, syncConflicts |-> 0,
            syncDestroyed |-> FALSE,
-           scopedDeferrals |-> 0, foreignLost |-> FALSE]
+           scopedDeferrals |-> 0, foreignLost |-> FALSE,
+           staged |-> 0, cites |-> 0, reaped |-> 0, withheld |-> 0,
+           forcedCites |-> 0, citeSpan |-> 0,
+           carriedCite |-> FALSE]
 
 ------------------------------------------------------------------------------
 (* Lifecycle *)
@@ -393,6 +476,10 @@ Scan(s) ==
        ![s].scanU = USet(s), ![s].scanD = DSet(s),
        ![s].lastDirty = IF SyncEnabled THEN USet(s) \cup DSet(s) ELSE {},
        ![s].scanGen = [p \in Paths |-> sc[s].local[p]],
+       \* The pending set survived a lane pass: the durability/visibility
+       \* split actually ACCUMULATED across ticks, which is the claim
+       \* ProbeCitationInstalled has to make non-vacuous.
+       ![s].stageCarried = \E q \in Paths : stage[s][q] # 0,
        ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
   /\ window' = sc[s].epoch
   /\ gh' = [gh EXCEPT !.barriers = @ + 1]
@@ -406,6 +493,7 @@ Scan(s) ==
    mutation.  EpochCheck rejects a deposed writer per-request — the
    sidecar takes the rejection as deposal and fences.                   *)
 UploadFenced(s) ==
+  /\ ~GatedCitation
   /\ Running(s) /\ sc[s].pc = "scanned"
   /\ EpochCheck /\ Deposed(s)
   /\ sc[s].scanU \ (sc[s].upDone \cup sc[s].parked) # {}
@@ -414,6 +502,7 @@ UploadFenced(s) ==
                  window, hitlAcked, conflicts, gh>>
 
 Upload(s, p) ==
+  /\ ~GatedCitation          \* gated replaces this with StagePut
   /\ Running(s) /\ sc[s].pc = "scanned"
   /\ p \in sc[s].scanU \ (sc[s].upDone \cup sc[s].parked)
   /\ ~(EpochCheck /\ Deposed(s))
@@ -546,6 +635,7 @@ CASMiss(s) ==
                  hitlAcked>>
 
 CASInstall(s) ==
+  /\ ~GatedCitation          \* gated replaces this with CitePassStep
   /\ Running(s) /\ CASReady(s)
   /\ ~(EpochCheck /\ Deposed(s))
   /\ manSeq = sc[s].expSeq
@@ -722,7 +812,290 @@ Sync(s) ==
                  window, hitlAcked>>
 
 ------------------------------------------------------------------------------
-Next ==
+(* TRANCHE 3, PRODUCT 2: gated manifest advance — durability split from     *)
+(* visibility (boundary-verbs D6/D7/D8/D13).                                *)
+(*                                                                          *)
+(* Two lanes instead of one fused barrier:                                  *)
+(*   - the UPLOAD LANE puts in place, minting a new VERSION and citing       *)
+(*     nothing.  The cited generation survives as a noncurrent version —     *)
+(*     that is the premise the whole design rests on, and it is what makes   *)
+(*     `objects[p]` (what the key reads as) a different question from        *)
+(*     `versions[p]` (what is still fetchable).                              *)
+(*   - the CITATION LANE installs the entire pending set in ONE CAS, then    *)
+(*     applies the withheld deletes and runs the EXACT version reaper.       *)
+(*                                                                          *)
+(* The lane opens no HITL window; window open/clear belong to the citation.  *)
+(* Modelled abstractions, named rather than assumed: the citation and its    *)
+(* reaper are one step (the real code holds the HITL window across both, so  *)
+(* no foreign write can interleave), and the four citation SOURCES collapse  *)
+(* to nondeterminism — a citation is enabled whenever the stage is           *)
+(* non-empty, which is strictly more permissive than any of them.            *)
+
+Staged(s) == {p \in Paths : stage[s][p] # 0}
+
+\* D7's re-validation: a staged entry is still installable only if the
+\* baseline it staged against has not moved under it.
+(* Which staged entries this citation may install.
+   D7 ALSO specifies a base-version re-validation — drop a staged entry
+   whose BASELINE moved under it.  That guard is deliberately NOT modelled
+   as an arm, because the model showed it is UNREACHABLE given the lane's
+   own discipline: the lane never advances the baseline, so a staged path
+   is by construction locally-dirty, and every route that could move a
+   baseline (consume, sync) refuses dirty paths and surfaces a conflict
+   instead.  It stays in the implementation as defence in depth; what the
+   model says is that it is not what protects anything today, and the
+   hazard it was written for arrives by a route it cannot see. *)
+Valid(s) ==
+  IF CiteDropsInflightHitl
+  THEN {p \in Staged(s) : ~\E pr \in inbox : pr[1] = p}
+  ELSE Staged(s)
+
+(* The upload lane.  Same guard chain as Upload — If-Match on the
+   recognized baseline, AdoptOwn on a known ETag, park on a foreign one —
+   but the PUT lands as a new VERSION and no manifest CAS runs.          *)
+StagePut(s, p) ==
+  /\ GatedCitation
+  /\ Running(s) /\ sc[s].pc = "scanned"
+  /\ p \in sc[s].scanU \ (sc[s].upDone \cup sc[s].parked)
+  /\ ~(EpochCheck /\ Deposed(s))
+  /\ LET cur == objects[p]
+         want == sc[s].scanGen[p]
+     IN
+       IF cur = sc[s].baseline[p]
+       THEN
+         /\ objects' = [objects EXCEPT ![p] = want]
+         /\ versions' = [versions EXCEPT ![p] = @ \cup {want}]
+         /\ stage' = [stage EXCEPT ![s] = [@ EXCEPT ![p] = want]]
+         /\ stageBase' = [stageBase EXCEPT ![s] = [@ EXCEPT ![p] = cur]]
+         /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
+         /\ gh' = [gh EXCEPT !.staged = @ + 1,
+                     !.deposedPuts = @ + (IF Deposed(s) THEN 1 ELSE 0)]
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, inbox,
+                        window, withheldDel, hitlAcked, conflicts>>
+       ELSE IF cur \in sc[s].known
+       THEN \* our own crashed/torn earlier PUT, or content already
+            \* integrated: adopt the current version as the staged one.
+         /\ stage' = [stage EXCEPT ![s] = [@ EXCEPT ![p] = cur]]
+         /\ stageBase' = [stageBase EXCEPT ![s] = [@ EXCEPT ![p] = cur]]
+         /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
+         /\ gh' = [gh EXCEPT !.adoptOwn = @ + 1]
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects,
+                        versions, inbox, window, withheldDel, hitlAcked,
+                        conflicts>>
+       ELSE \* foreign ETag: park and surface; never overwrite.
+         /\ sc' = [sc EXCEPT ![s].parked = @ \cup {p}]
+         /\ conflicts' = conflicts \cup {<<p, cur>>}
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects,
+                        versions, inbox, window, stage, stageBase,
+                        withheldDel, hitlAcked, gh>>
+
+StagePutFenced(s) ==
+  /\ GatedCitation
+  /\ Running(s) /\ sc[s].pc = "scanned"
+  /\ EpochCheck /\ Deposed(s)
+  /\ sc[s].scanU \ (sc[s].upDone \cup sc[s].parked) # {}
+  /\ sc' = [sc EXCEPT ![s].st = "dead"]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, versions,
+                 inbox, window, stage, stageBase, withheldDel, hitlAcked,
+                 conflicts, gh>>
+
+(* The lane ends.  Deletes are WITHHELD — a rename r->s must not become
+   reader-visible as r-gone/s-absent at a point nobody declared.        *)
+LaneDone(s) ==
+  /\ GatedCitation
+  /\ Running(s) /\ sc[s].pc = "scanned"
+  /\ sc[s].scanU \subseteq (sc[s].upDone \cup sc[s].parked)
+  /\ withheldDel' = [withheldDel EXCEPT ![s] = @ \cup sc[s].scanD]
+  /\ sc' = [sc EXCEPT ![s].pc = "laneDone"]
+  /\ gh' = [gh EXCEPT !.withheld = @ + Cardinality(sc[s].scanD \ withheldDel[s])]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, versions,
+                 inbox, window, stage, stageBase, hitlAcked, conflicts>>
+
+(* No coherent point is due: the tick ends with the bytes DURABLE and the
+   manifest un-advanced, and the pending set survives to the next lane.
+   This is the mode working, and it is the state every invariant in this
+   product has to hold in.                                              *)
+LaneOnly(s) ==
+  /\ GatedCitation
+  /\ Running(s) /\ sc[s].pc = "laneDone"
+  /\ sc[s].citeDone = {}
+  /\ window' = 0
+  /\ sc' = [sc EXCEPT ![s].pc = "idle",
+       ![s].scanU = {}, ![s].scanD = {},
+       ![s].scanGen = [p \in Paths |-> 0],
+       ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, versions,
+                 inbox, stage, stageBase, withheldDel, hitlAcked, conflicts,
+                 gh>>
+
+CiteFenced(s) ==
+  /\ GatedCitation
+  /\ Running(s) /\ sc[s].pc = "laneDone"
+  /\ EpochCheck /\ Deposed(s)
+  /\ Valid(s) \ sc[s].citeDone # {}
+  /\ sc' = [sc EXCEPT ![s].st = "dead"]
+  /\ gh' = [gh EXCEPT !.stragglerCas = @ + 1]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, versions,
+                 inbox, window, stage, stageBase, withheldDel, hitlAcked,
+                 conflicts>>
+
+(* THE citation.  Under AtomicCitation it installs the whole valid
+   pending set in one CAS — the versions already exist, so there is no
+   copy phase and no half-boundary.  Under the mutation TLC may install
+   any non-empty subset, which is what a two-CAS design looks like from
+   a reader's side.                                                     *)
+CitePassStep(s) ==
+  /\ GatedCitation
+  /\ Running(s) /\ sc[s].pc = "laneDone"
+  /\ ~(EpochCheck /\ Deposed(s))
+  /\ manSeq = sc[s].expSeq
+  /\ manSeq < MaxSeq
+  /\ Valid(s) \ sc[s].citeDone # {}
+  /\ \E sub \in SUBSET (Valid(s) \ sc[s].citeDone) :
+       /\ sub # {}
+       /\ AtomicCitation => sub = Valid(s) \ sc[s].citeDone
+       /\ LET inst == [p \in Paths |->
+                IF p \in sub THEN stage[s][p] ELSE manifest[p]]
+              \* This citation names a generation OTHER than the acked
+              \* user bytes the key currently holds, and says nothing
+              \* about it.  Not "the agent integrated the user's bytes
+              \* and then edited" — `known` exempts that case throughout
+              \* this model — but work that PREDATES the user's write
+              \* winning against it.  Two arms reach it, and each has its
+              \* own guard: the write was consumed after we staged (D7's
+              \* base re-validation), or it is still in flight in the
+              \* inbox (the window the lane deliberately does not open).
+              staleWin == \E p \in sub :
+                /\ <<p, objects[p]>> \in hitlAcked
+                /\ objects[p] # stage[s][p]
+                /\ <<p, objects[p]>> \notin conflicts
+              forced == \E p \in sub : sc[s].local[p] # stage[s][p]
+          IN
+            /\ manifest' = inst
+            /\ manSeq' = manSeq + 1
+            /\ sc' = [sc EXCEPT ![s].citeDone = @ \cup sub,
+                                ![s].expSeq = manSeq + 1,
+                                ![s].instSnap = inst,
+                                ![s].instSeq = manSeq + 1]
+            /\ gh' = [gh EXCEPT
+                 !.cites = @ + 1,
+                 !.amputated = @ \/ staleWin,
+                 !.forcedCites = @ + (IF forced THEN 1 ELSE 0),
+                 !.citeSpan = IF Cardinality(sub) > @ THEN Cardinality(sub) ELSE @,
+                 !.carriedCite = @ \/ (sc[s].stageCarried /\ Cardinality(sub) > 1),
+                 !.stragglerCas = @ + (IF Deposed(s) THEN 1 ELSE 0),
+                 !.stragglerInstalls = @ + (IF Deposed(s) THEN 1 ELSE 0)]
+  /\ UNCHANGED <<cellEpoch, cellHolder, objects, versions, inbox, window,
+                 stage, stageBase, withheldDel, hitlAcked, conflicts>>
+
+(* The citation completes: withheld deletes land WITH it, the EXACT
+   version reaper runs, the baseline advances, the window clears.
+
+   The reaper is flint's own and it is the ONLY reaper that can tell
+   cited from uncited.  Lifecycle cannot do this job on `files/`: gated
+   staging makes the cited version noncurrent the moment a newer
+   generation is staged, so a NoncurrentVersionExpiration rule runs a
+   clock against live cited data and never reaches the newest uncited
+   bytes, which are current.  That inversion is BackstopExpire.         *)
+CiteFinish(s) ==
+  /\ GatedCitation
+  /\ Running(s) /\ sc[s].pc = "laneDone"
+  /\ sc[s].citeDone # {} /\ sc[s].citeDone = Valid(s)
+  /\ LET dels == {p \in withheldDel[s] :
+                    /\ manifest[p] # 0
+                    /\ p \notin sc[s].citeDone
+                    /\ (~GuardedGC \/ objects[p] \in sc[s].known)}
+         man2 == [p \in Paths |-> IF p \in dels THEN 0 ELSE manifest[p]]
+         obj2 == [p \in Paths |-> IF p \in dels THEN 0 ELSE objects[p]]
+         \* The reaper runs over the paths this citation INSTALLED and
+         \* keeps what the INSTALLED DOCUMENT cites — never the writer's
+         \* own idea of what it cited.
+         scope == sc[s].citeDone
+         \* ...plus the CURRENT version, unconditionally.  If current is
+         \* not what we just cited then a foreign write landed between
+         \* the lane and this citation: live bytes somebody is about to
+         \* read, not a generation this workspace superseded.  THE MODEL
+         \* FOUND THIS — the rule without this clause deleted an acked
+         \* HITL write in shipped code.
+         current(p) == IF GCKeepsCurrent /\ obj2[p] # 0 THEN {obj2[p]} ELSE {}
+         ver2 == [p \in Paths |->
+                    IF p \in scope /\ man2[p] # 0
+                    \* FAIL CLOSED: if the installed manifest names no
+                    \* version for this path we do not know what is
+                    \* cited, and "delete everything unrecognized" would
+                    \* reap live data.  Reclaim nothing.
+                    THEN (versions[p] \cap {man2[p]}) \cup current(p)
+                    ELSE versions[p]]
+         dropped == Staged(s) \ Valid(s)
+     IN
+       /\ manifest' = man2
+       /\ objects' = obj2
+       /\ versions' = ver2
+       /\ stage' = [stage EXCEPT ![s] = [p \in Paths |-> 0]]
+       /\ stageBase' = [stageBase EXCEPT ![s] = [p \in Paths |-> 0]]
+       /\ withheldDel' = [withheldDel EXCEPT ![s] = @ \ dels]
+       /\ window' = 0
+       \* A dropped staged generation is never silently forgotten.
+       /\ conflicts' = conflicts \cup {<<p, sc[s].baseline[p]>> : p \in dropped}
+       /\ sc' = [sc EXCEPT ![s].pc = "idle",
+            ![s].citeDone = {}, ![s].stageCarried = FALSE,
+            ![s].instBase = man2,
+            ![s].baseline = [p \in Paths |->
+              IF p \in sc[s].citeDone THEN stage[s][p]
+              ELSE IF p \in dels THEN 0
+              ELSE @[p]],
+            ![s].known = @ \cup {stage[s][p] : p \in sc[s].citeDone},
+            ![s].scanU = {}, ![s].scanD = {},
+            ![s].scanGen = [p \in Paths |-> 0],
+            ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
+       /\ gh' = [gh EXCEPT !.done = @ + 1,
+            !.gc = @ + Cardinality(dels),
+            !.reaped = @ + Cardinality(UNION {versions[p] \ ver2[p] : p \in Paths}),
+            !.cited = IF \E pr \in hitlAcked : man2[pr[1]] = pr[2]
+                      THEN 1 ELSE @]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, inbox, hitlAcked>>
+
+(* The noncurrent-retention BACKSTOP.  It is not the reaper and it must
+   never be creditable for the reaper's work: on `files/` it cannot tell
+   cited from uncited, so when a workspace is abandoned mid-stage it
+   reaps the CITED (now noncurrent) version while the uncited current
+   one survives.  The manifest then dangles — checkout refuses rather
+   than serving a hole, and `recover-staged` re-cites the survivor
+   FORWARD.  Enabling this action is a mutation, and the counterexample
+   it must find IS the abandoned-mid-stage endgame.                     *)
+BackstopExpire(p) ==
+  /\ GatedCitation /\ BackstopEnabled
+  /\ \E g \in versions[p] :
+       /\ g # objects[p]          \* noncurrent only, exactly as S3
+       /\ versions' = [versions EXCEPT ![p] = @ \ {g}]
+  /\ gh' = [gh EXCEPT !.reaped = @ + 1]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manifest, objects, inbox,
+                 window, sc, stage, stageBase, withheldDel, hitlAcked,
+                 conflicts>>
+
+GatedNext ==
+  \/ \E s \in Sidecars, p \in Paths : StagePut(s, p)
+  \/ \E s \in Sidecars :
+       StagePutFenced(s) \/ LaneDone(s) \/ LaneOnly(s) \/ CiteFenced(s)
+       \/ CitePassStep(s) \/ CiteFinish(s)
+  \/ \E p \in Paths : BackstopExpire(p)
+
+------------------------------------------------------------------------------
+(* Under gated, ANY action that moves an object mints a version: the
+   bucket is versioned, so a PUT destroys nothing and a delete leaves
+   every prior version fetchable (S3 writes a delete marker).  Composing
+   this once at the Next level rather than threading it through twenty
+   actions is also what keeps every pre-gated state space intact — with
+   GatedCitation = FALSE, `versions` is frozen at Init and adds no
+   distinct states at all.                                             *)
+VersionsFollow ==
+  IF GatedCitation
+  THEN versions' = [p \in Paths |->
+         IF objects'[p] = 0 THEN versions[p]
+         ELSE versions[p] \cup {objects'[p]}]
+  ELSE versions' = versions
+
+BaseNext ==
   \/ StartA
   \/ \E s \in Sidecars : CrashPod(s) \/ Restart(s) \/ RenewDiscover(s)
   \/ StallA \/ ThawA \/ ClaimB \/ CheckoutB
@@ -736,6 +1109,10 @@ Next ==
        \/ PreDeletesDone(s) \/ CASFenced(s) \/ CASMiss(s) \/ CASInstall(s)
        \/ Finish(s) \/ Sync(s)
 
+Next ==
+  \/ (BaseNext /\ VersionsFollow /\ UNCHANGED gatedVars)
+  \/ GatedNext
+
 Spec == Init /\ [][Next]_vars
 
 ------------------------------------------------------------------------------
@@ -747,6 +1124,9 @@ TypeOK ==
   /\ manifest \in [Paths -> Gens] /\ objects \in [Paths -> Gens]
   /\ inbox \subseteq (Paths \X Gens) /\ window \in 0..3
   /\ hitlAcked \subseteq (Paths \X Gens) /\ conflicts \subseteq (Paths \X Gens)
+  /\ versions \in [Paths -> SUBSET Gens]
+  /\ stage \in [Sidecars -> [Paths -> Gens]]
+  /\ stageBase \in [Sidecars -> [Paths -> Gens]]
 
 \* An acked HITL write is never silently lost: its bytes are never
 \* destroyed by a writer that did not legitimately learn them, and no
@@ -778,6 +1158,39 @@ Inv_SyncNeverDestroysDirty == ~gh.syncDestroyed
 \* "unchanged", and the entry is never queued into the inbox again.
 Inv_NoForeignLost == ~gh.foreignLost
 
+\* ---- tranche 3, product 2: version lifetime (D7/D8) ---------------------
+
+\* THE invariant of this product.  Every cited generation is still
+\* STORED — which on a versioned bucket is a strictly stronger claim
+\* than Inv_NoDangling's "the object exists".  Gated staging makes the
+\* cited version NONCURRENT, so an object can exist, read as newer
+\* uncited bytes, and have nothing at all behind its citation.
+\*
+\* Not hypothetical: the shipped implementation violated this for one
+\* session, because the store reported its ObjectMeta before the version
+\* id was minted, every citation named the empty version, and the exact
+\* reaper — matching nothing — deleted every live version of every cited
+\* key.  The unit tests caught it only because assertions happened to sit
+\* in the right places.
+Inv_CitedVersionLives ==
+  \A p \in Paths : manifest[p] # 0 => manifest[p] \in versions[p]
+
+\* The reaper never removes the version a path currently READS as.  That
+\* generation is either the citation it just installed or live
+\* staged-uncited work; either way it is not garbage.
+Inv_NoUncitedGC ==
+  \A p \in Paths : objects[p] # 0 => objects[p] \in versions[p]
+
+\* A boundary is all-or-nothing.  No reachable state may show a citation
+\* that has installed SOME of its pending set and not the rest — that is
+\* a reader seeing half a logical change, which is the one thing gated
+\* mode exists to prevent.  The single-CAS design makes it true by
+\* construction; the split-install mutation is what keeps that from
+\* being an untested claim.
+Inv_BoundaryAtomic ==
+  \A s \in Sidecars :
+    sc[s].citeDone = {} \/ sc[s].citeDone = Valid(s)
+
 ------------------------------------------------------------------------------
 (* Non-vacuity probes — each names an ACTION via a ghost that only that
    action writes, and TLC is REQUIRED to violate it (the A2 probe rule:
@@ -797,5 +1210,27 @@ ProbeSyncConflict     == gh.syncConflicts = 0
 \* Action-written (Sync's own ghost): a SCOPED sync actually deferred a
 \* remote change, rather than the scoped arm never having fired.
 ProbeScopedDeferral   == gh.scopedDeferrals = 0
+
+\* ---- tranche 3, product 2 ------------------------------------------------
+\* One CAS installed >= 2 paths from a pending set that had SURVIVED a
+\* lane pass.  Both halves matter: without the size the split is
+\* untested, and without the carry every citation might simply be
+\* following its own lane, which is hybrid wearing gated's name.
+ProbeCitationInstalled == ~gh.carriedCite
+\* A delete was actually withheld from the manifest until a citation.
+ProbeWithheldDelete    == gh.withheld = 0
+\* A citation actually fired mid-change (a staged path had already been
+\* edited again locally) — the lag/backlog caps' shape, and the reason
+\* the source is stamped bucket-visibly.
+ProbeForcedCite        == gh.forcedCites = 0
+\* REQUIRED-REACHABLE, deliberately.  §3 residual 11: a reader that does
+\* not resolve through the manifest sees mid-logical-change bytes where
+\* it previously saw the last boundary.  This probe proves the exposure
+\* is PRESENT rather than assumed away — and a future design that
+\* quietly closes it must fail this probe and force the residual to be
+\* rewritten.  It names a state rather than an action on purpose: the
+\* exposure IS a state, and there is no action that "does" it.
+ProbeRawReaderSeesUncited ==
+  \A p \in Paths : objects[p] = manifest[p] \/ manifest[p] = 0
 
 ==============================================================================

@@ -149,6 +149,74 @@ the strict run passed 30M states without terminating.
 paths it deliberately deferred), per the house rule that a probe names
 the ACTION and never the situation.
 
+## Tranche 3, product 2 — gated citation × version GC × the backstop
+
+Nine runs (27 → **36**), behind `GatedCitation`, which is FALSE in every
+pre-existing cfg: the gated actions are disabled and `versions`, `stage`,
+`stageBase` and `withheldDel` are frozen at their Init values, so those
+state spaces are preserved by construction. `VersionsFollow` composes the
+version-minting rule once at the `Next` level rather than threading it
+through twenty actions — under gated, *any* action that moves an object
+mints a version, which is what a versioned bucket does.
+
+**The substrate is the point.** Generations are unique mints, so a
+generation already IS a version id and `manifest[p]` already cites one.
+What the product adds is `versions[p]` — what is still STORED, which on
+a versioned bucket is a different question from what the key reads as.
+`Inv_NoDangling` ("the object exists") was the right question until D7;
+gated staging makes the CITED version noncurrent, so an object can
+exist, read as newer uncited bytes, and have nothing behind its
+citation. `Inv_CitedVersionLives` is the corrected question.
+
+**It found a live defect on its first strict run, in shipped code.**
+The reaper's rule was *"delete every version of a touched key except the
+one the installed manifest cites"*. The upload lane opens no HITL window
+— deliberately, since a lane that fenced HITL out every floor tick would
+refuse admission essentially forever between citations — so a UI write
+can land on an already-staged path. The citation's base-version check
+cannot see it (that check reads the BASELINE, and the citation lane
+consumes nothing), so the citation cited our staged version, and the
+reaper then deleted the user's version. **It was current, it was acked,
+and the inbox entry 412s on its next consume and is dropped as
+superseded.** Two rules close it, both now in the code and both modelled:
+the reaper never reclaims the CURRENT version, and a staged path with a
+live inbox entry is dropped from the boundary rather than cited over
+(the window CAS has already loaded the inbox — zero added requests).
+
+**And it retired a guard that protects nothing.** D7 also specifies a
+base-version re-validation: drop a staged entry whose baseline moved
+under it. The model showed that arm is UNREACHABLE given the lane's own
+discipline — the lane never advances the baseline, so a staged path is
+by construction locally-dirty, and every route that could move a
+baseline (consume, sync) refuses dirty paths and surfaces a conflict
+instead. It stays in the implementation as defence in depth; what the
+model says is that it is not what protects anything today, and that the
+hazard it was written for arrives by a route it could not see. That is
+the second-order return on modelling after the fact: not only "here is a
+bug" but "here is a guard you believed in for the wrong reason".
+
+**Defence in depth, pinned as such.** `LeanGatedReapsCurrent` turns off
+BOTH the keep-current rule and the inbox guard, because with the inbox
+guard in place removing keep-current changes nothing — the reaper's
+scope never reaches the path. The Rust battery hit exactly the same wall
+and needed a second leg (an out-of-band writer, §3 residual 11's
+population) to isolate the rule. A one-arm cfg here would have been a
+green mutation dressed as a passing test.
+
+**Budget:** `MaxGen=3`, `MaxHitl=1`, `MaxBarriers=2`, no crashes or
+restarts — ~19k distinct states, ~2 s for the strict run. `MaxHitl=1` is
+load-bearing rather than breadth: the whole product turns on a foreign
+write arriving between the lane and the citation, and at `MaxHitl=0`
+that interleaving does not exist and every mutation checks a state space
+its bug cannot live in.
+
+**Not modelled, named rather than omitted silently:**
+`Inv_ManifestKeysUnderFiles` (this module has no control namespace; D0.2
+is carried by the Rust battery's scan/classify/checkout legs), and the
+citation's own crash matrix (product 1's territory — the citation and
+its reaper are ONE step here, which is faithful only because the real
+code holds the HITL window across both).
+
 ## Deliberate abstractions (tranche 1 — residuals, not coverage)
 
 - The scan is ATOMIC: the rename-vs-walk race and the
@@ -178,3 +246,9 @@ the ACTION and never the situation.
    it OUT of the safety gate; the WF ping-pong trap lives here).
 3. Refine ClaimB into the poll protocol with a torn heartbeat task
    (the self-recognition + rotation composition).
+4. **Product 1 — boundary × barrier × inbox with the deposal arm.**
+   Still owed. `Inv_NoNonceOrphan` under coalesce + crash + restart is
+   an interleaving property unit tests sample rather than search, and
+   `settle_pending_at_startup` is justified today by one ordering out of
+   many. Product 2's return (a live defect on the first strict run)
+   is the argument for doing it.
