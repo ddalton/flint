@@ -67,7 +67,7 @@ This is the keystone: with D0 in place, sentinel files can exist without ever en
 
 ```json
 {
-  "status": "ok",                      // "ok" | "refused-fenced"  (review: crash-takeover)
+  "status": "ok",                      // "ok" | "partial" | "refused-fenced"  (review: crash-takeover; C6)
   "nonces": ["…", "…"],                // EVERY coalesced nonce covered (bounded 32, oldest dropped)
   "sentinel_mtime_unix_ns": 1756…,     // latest covered touch — bare-touch agents match on this
   "seq": 4132,                         // manifest seq installed by the honoring barrier
@@ -75,9 +75,12 @@ This is the keystone: with D0 in place, sentinel files can exist without ever en
   "boundary": "sentinel",              // "sentinel" | "sentinel-deferred" (budget, D3)
   "completed_unix": 1756…,
   "observed_epoch": null,              // set on refused-fenced: the epoch that fenced us
-  "report": { "uploaded": 12, "deleted": 1, "parked": 0, "consumed": 2, "no_change": false }
+  "report": { "uploaded": 12, "deleted": 1, "parked": 0, "consumed": 2, "no_change": false,
+              "dropped": [] }   // non-empty ⇒ status "partial" (C6)
 }
 ```
+
+   **`partial` (C6, 2026-08-25).** A gated honor's citation can install a boundary that does **not** carry a path the agent declared: a HITL write landing between the lane's consume and the citation's window drops that path (§2.4.2). The shipped honor acked `"ok"` regardless, with `parked` taken from the lane only and no field anywhere that could name the dropped path — the D1 corollary above, falsified in code, and worst on the preStop drain where it is the last boundary of the workspace's life. Shipped rule: the honor re-runs **once** (the racing write is queued in the inbox by then, the lane consumes it the ordinary way, and the second citation carries the declared point); if a path is still dropped, the ack is `"partial"` and `report.dropped` names it. This is §2.2's "the conflict report rides the ack in FULL — never a silent winner" generalized from `sync` to `publish`, and an agent that treats `partial` as failure and re-touches is behaving correctly. The stale-base drop is deliberately **not** partial: it fires only when the foreign bytes *are* the local bytes, so the point does carry the agent's content.
 
    The ack carries the **full covered-nonce set** (review: security-dos): under coalescing, an agent whose nonce rode behind a later touch would otherwise never see its nonce and re-touch in a loop, feeding the storm the rate limit exists to prevent.
 4. **Retire** = delete `.flint-sync/publish.pending.json` *after* the ack rename.
@@ -128,6 +131,7 @@ Cost: at floor=60 this changes the renewal PUT cadence from 60 s to 30 s — pri
 
 **Scope validation + write containment (review: security-dos).** Scope is agent-controlled JSON driving writes by the credential-holding sidecar, and the write path it invokes — `write_file_atomic` (`barrier.rs:702-724`, also used by consume and checkout) — does `create_dir_all(parent)` + `fs::write` with no `O_NOFOLLOW` and no root-containment check, while the scanner skips symlinks (`scan.rs:40-43`) so a planted symlink is invisible to the sidecar. An unprivileged app that plants `inputs -> /root/.aws`, lands a HITL object at `inputs/<path>`, and drops a scoped sync turns the sidecar into an on-demand arbitrary-file-write primitive outside the workspace. Rules (Phase 2 gate; the hardening also covers the pre-existing checkout/consume exposure):
 - `write_file_atomic` becomes containment-safe: openat-style parent walk (or canonicalize-and-verify-prefix) refusing any target that escapes the workspace root or traverses a symlink component.
+- **The rule is "every path the write touches", not "the target" (C4, 2026-08-25).** The shipped walk validated the rename target and then wrote through a temp sibling nobody had looked at: `write_file_atomic` computes `<name>.flint-sync-tmp` *after* containment ran and called `fs::write` on it, which follows symlinks. Worse, this tranche added two writers with no containment at all — `control::write_atomic` (`.flint/capabilities.json`, `.flint/remote.seq`, `.flint/<verb>.ack`, `pending.json`) and `state::write_atomic` (`baseline.json`, `intent.json`, `incarnation.json`) — both writing into directories the app must be able to write, and `.flint/remote.seq` is rewritten **on every tick**, so no remote cooperation is needed at all: plant `.flint/remote.seq.tmp` as a symlink and the sidecar's own heartbeat performs the write, inside the credential-holding container. All three writers now go through one helper (`safefs.rs`): unlink the temp name first (which removes a symlink, never its target), create it `O_CREAT|O_EXCL` (which POSIX requires to fail on a symlink whatever it points at, so a plant re-established in the gap is a refusal rather than a redirect), and refuse outright when the parent directory is itself a symlink — `create_dir_all` would walk straight through one.
 - Scope entries are normalized and matched on **path-component boundaries** (`"in"` never matches `internal/`); entries whose parents are symlinks are refused with a conflict record; scope list bounded (≤64 entries, each ≤1 KiB).
 
 **Ack payload:** the existing `SyncReport {applied, deleted, conflicts, seq}` (`sync.rs:22-28`, already `Serialize`) extended with `status`, `nonces`, `sentinel_mtime_unix_ns`, `scope`, and `out_of_scope_foreign: <count>` (changes seen but deferred to the inbox flow). **The conflict report rides the ack in full** — "never a silent winner" must survive the file transport: every dirty-vs-remote skip appears as a `ConflictRecord` in `sync.ack`'s `conflicts[]`, in addition to `conflicts.jsonl` as today.
@@ -172,6 +176,7 @@ The copy design rested on one premise: `upload_one` PUTs to `files/<path>` guard
 What the switch **deletes** — machinery, not lines, and it is the bulk of the win: the `eager/` namespace; the per-citation `CopyObject` and its `UploadPartCopy` path for >5 GiB files; the citation-intent document and successor roll-forward; the stage-NotFound arm; the lifecycle-refresh re-PUT; superseded-stage deletes; `stage_key` in the pending record; and the transient copy-phase reader window. **A citation becomes one manifest CAS naming versions that already exist** — O(1) requests per boundary instead of O(dirty files), atomic by construction rather than by a recovery protocol.
 
 - **Entry schema.** `LeanEntry` (`manifest.rs:25-36`) gains `version_id: Option<String>`. `None` = a legacy/unversioned entry ⇒ today's `get_whole(key, If-Match etag)` path verbatim; mixed manifests are normal during rollout and after any bucket-versioning change, so both forms are permanent reader cases. The etag stays and is still verified: **the version id addresses, the etag attests.**
+  **Except under `pinned_reads` (C5, 2026-08-25) — where this rule and D13 collide, and D13 wins.** A gated citation clones the predecessor manifest and stamps `pinned_reads` over it, so every path a pre-D7 writer cited stays `version_id: None` *inside a pinned manifest* — and checkout sent that cell to the etag arm, whose 412 handler adopts the current version. On the rollout path (enable gated on an existing workspace) the first lane staging of each legacy path therefore made a concurrent checkout adopt uncited mid-change bytes through the exact arm the mode exists to close, and it did not self-correct: the adopter's baseline records the adopted etag, so the path scans clean and reads unchanged forever after. Two rules close it. (a) **The citation backfills before it pins:** any entry it is about to carry with no version id is resolved against the bucket's own version history — one `ListObjectVersions` over `files/`, matching the *cited etag*, which answers even where the current version has already moved past the citation (a HEAD cannot). Paths it cannot resolve are remembered, so one unresolvable entry does not buy a listing at every subsequent citation. (b) **A pinned reader refuses rather than adopts:** for an entry the backfill could not answer for, checkout fails loudly naming `recover-staged`, because the current version is precisely what D13 excludes.
 - **Store surface — the cost the question understated.** `ObjectMeta` gains `version_id`: S3 already returns `x-amz-version-id` on PUT and `put_whole` **discards it today** (`s3.rs:178-187`), so citation needs no extra request. `ObjectStore` gains version-scoped `get_whole`/`head`/`delete` plus `list_versions`. Blast radius is small and *inside flint-store*: `ObjectMeta` is constructed at 9 sites, all in that crate, and the trait has exactly two implementors (`s3.rs:154`, `memory.rs:236`) — none in the hub. The real line item is that **the memory double must model version chains** (`memory.rs`, ~815 lines): the lean battery runs on `MemoryStore` with no AWS by deliberate crate design (`lean/sidecar/Cargo.toml:1-12`), so an unversioned double would leave the shipped design untested by every test that matters. Budget the double, not the sidecar.
 - **Upload lane (gated), in place:** PUT to `files/<path>` with the guard chain unchanged (If-Match on the recognized baseline etag, AdoptOwn, park on foreign — the 412 policy inherited). The response's `version_id` lands in `pending[path]` alongside `base_version_id`, the version the baseline cited at staging time. No manifest CAS; the lane still opens **no HITL window** (§2.4.1's reasoning holds a fortiori — there is no upload→CAS span to fence, and a staged PUT now destroys nothing HITL wrote); stage-diff base stays baseline ∪ pending, so quiet staged files are not re-PUT.
 - **Citation lane:** one CAS installing every pending entry with its recorded `version_id`. No copy phase ⇒ no half-boundary, no intent document, no roll-forward, and no interval in which a version-resolving reader can see boundary-new bytes under old citations. `Inv_BoundaryAtomic` holds by construction; the invariant and its split-CAS mutation stay in the model as the regression fence.
@@ -179,9 +184,9 @@ What the switch **deletes** — machinery, not lines, and it is the bulk of the 
 - **The reader rule (DECIDED — D13, new — and the switch is incoherent without it).** A gated citation stamps the manifest `pinned_reads: true` (alongside `flint-boundary-source`). Under `pinned_reads`, flint's readers resolve **exclusively** by the cited `version_id` and never S3-wins-adopt the current version; HITL writes reach them through the ungated repair pass, i.e. within one floor (the HITL exemption below is unchanged). Without `pinned_reads` — cadence, hybrid, legacy manifests — `checkout.rs:102-121` keeps today's 412/S3-wins arm **verbatim**, so the shipped `hitl_upload_survives_two_barriers_without_sync` invariant is untouched in the default mode. Why it is load-bearing: the moment the gated lane stages a path, the cited etag stops matching current, so *every* gated checkout would 412 and S3-wins-adopt uncited mid-change bytes on *every* dirty path — the versioned design would leak its own staging into readers through exactly the arm the copy design existed to avoid.
 - **Raw-key visibility — the trade, inverted from the question's framing (new).** Copy-staging kept uncited bytes out of `files/` entirely. Versioned staging makes them the **current version of the real key**: any reader that does not resolve through the manifest — an import tool, `aws s3 cp`, a foreign system pointed at the prefix, a human — now sees mid-logical-change bytes where it previously saw the last boundary. Flint's own readers all qualify as manifest-resolving under D13, so the guarantee holds where it is promised, but the promise is now **scoped to manifest-resolving readers** and says so in the CRD doc-comment and §3 residual 11. The torn-reader window closes structurally; a narrower, permanent raw-key exposure replaces it. It is modeled as a *required-reachable probe*, not as an invariant (§4) — the house rule against proving a guarantee by the attack's absence applies equally to proving a documented exposure by never generating it.
 - **Straggler containment changes shape (review: crash-takeover).** Under copy-staging a deposed straggler's PUTs could not touch `files/` at all. Under versioned staging they land on real keys again — chaos C3's measured **7,591** post-deposal data PUTs would arrive as 7,591 uncited versions — but they **destroy nothing**: every cited version survives, a `pinned_reads` checkout never sees them, and cleanup is version GC. The honest claim moves from *"a straggler cannot touch cited keys"* to *"a straggler cannot destroy cited data; it can move the current-version pointer, which only raw-key readers follow."* Stronger for durability than the copy design, weaker for raw-key visibility. The shared-inbox TOCTOU (epoch-cell re-reads, cell-compared window ops, B12's oracle) is unchanged, and P5-at-the-proxy remains the fence.
-- **Withheld deletes and GC.** Delete classifications are still withheld from the manifest until a citation pass, and GC still runs only after the CAS that uncites (`barrier.rs:412-441`, deletes-LAST model-pinned). Two simplifications: a delete marker can never destroy a cited version, and GC becomes **version-scoped** (D8).
+- **Withheld deletes and GC.** Delete classifications are still withheld from the manifest until a citation pass, and GC still runs only after the CAS that uncites (`barrier.rs:412-441`, deletes-LAST model-pinned). **A tombstone is cancelled by the file's return (C3, 2026-08-25):** the gated stage persists its withheld deletes across ticks while `stage.entries` accumulates, so delete-then-recreate inside one citation interval — checkpoint rotation, write-temp-swap — put the same path in *both* sets, and `manifest::merge` applies upserts first and deletes second. The installed boundary then omitted a file that exists on disk and was staged that pass (covered by an ok ack on a declared boundary), and a sibling sync, seeing it gone from the manifest, deleted its copy: byte destruction from a routine agent shape. The lane now removes a path from `withheld_deletes` when it stages it, and `merge` skips a delete for any path in `mine_upserts` — the fused path was immune only because it recomputes both sets from one scan, so the contract now lives where the removal happens. Two simplifications: a delete marker can never destroy a cited version, and GC becomes **version-scoped** (D8).
 - **The pending record** stays its own file `.flint-sync/pending.json` with the `clear_intent_keys` preservation test (`state.rs:180-212`) — minus `stage_key`, plus `version_id`/`base_version_id`. Write ordering is unchanged and now cheaper to reason about: PUT first, pending record second; a crash between them leaves an uncited version (version GC's side), never a pending entry naming a version that does not exist.
-- **HITL exemption (unchanged, DECIDED):** inbox consume and the citation-repair pass are *not* gated — a HITL write is already a coherent, whole-object act by a foreign author. Repairs ride the next citation pass **or**, if none is due within one floor, trigger a repair-only citation (no local upserts). **Repair-only passes still withhold pending tombstones** (review: model-drill): installing withheld deletes without their paired staged creates would make a rename r→s reader-visible as r-gone/s-absent at an undeclared point. Pinned in product 4.
+- **HITL exemption (unchanged, DECIDED):** inbox consume and the citation-repair pass are *not* gated — a HITL write is already a coherent, whole-object act by a foreign author. Repairs ride the next citation pass **or**, if none is due within one floor, trigger a repair-only citation (no local upserts). **This was prose, not code, until C2 (2026-08-25).** The repair machinery lived only in the fused barrier, which gated mode structurally never runs — its floor tick is the lane, its sentinel honor is lane+citation, its drain likewise — so a consumed HITL write was adopted into the tree, went clean-vs-baseline, was never staged, and the manifest went on citing the pre-HITL version *forever*: invisible to every pinned reader, DR checkout and sibling sync, with no conflict record and no gauge, and D13's "within one floor" promise unimplemented. Shipped: `repair_candidates` (baseline ≠ `inst_base`, not staged, not tombstoned) is computed by the citation lane too; a repair rides any citation, and `CitationSource::Repair` fires a repair-only one once `floor_secs` has passed with nothing else due. The pass HEADs each candidate — which is also what supplies the **version id** a consume never records, and without which a repaired entry would be unreadable by the very readers it exists for — and cites nothing whose current object has moved off what this workspace integrated. **Repair-only passes still withhold pending tombstones** (review: model-drill): installing withheld deletes without their paired staged creates would make a rename r→s reader-visible as r-gone/s-absent at an undeclared point. Pinned in product 4.
 
 **The two safety properties, restated for versions (review: crash-takeover, gc-durability):**
 1. **`Inv_ManifestKeysUnderFiles` gets easier and stays enforced.** With no `eager/` namespace there is no cite-in-place shortcut left to tempt anyone, but `manifest::cas_write` keeps refusing entries whose key lies outside `files/` — free insurance, mutation retained. The hazard it guarded has *moved*, not vanished: it is now "a lifecycle rule reaps a cited **version**", and D8 carries it.
@@ -563,9 +568,10 @@ What replaces it is **storage, not requests**: uncited versions (at most one gen
 ## 10. Implementation status (2026-08-25)
 
 **Landed: Phases 0, 1, 2 and 3, plus formal tranche 3 products 1, 2
-and 4.** Lean battery **75/75** (was 19/19); formal gate **49/49** (was
-24/24); `flint-store` and the hub crate both compile against the
-shared-schema changes, and the `s3`-feature binaries build.
+and 4, plus the verified-review tranche (§10.1e).** Lean battery
+**84/84** (was 19/19); formal gate **55/55** (was 24/24); `flint-store`
+and the hub crate both compile against the shared-schema changes, and
+the `s3`-feature binaries build.
 
 | Phase | State | Notes |
 |---|---|---|
@@ -577,6 +583,7 @@ shared-schema changes, and the `s3`-feature binaries build.
 | 3 — run-loop wiring (D6, D8, D10) | **done** | the floor arm runs the LANE in gated and cites only at a coherent point; a publish sentinel is a citation source, not a fused barrier; the preStop drain cites everything staged in place (`drain` stamp, `pinned_reads`, no data movement); the versioning conformance probe is a startup **refusal**, and it now sweeps its own leftovers instead of wedging on them |
 | 3 — recovery (D9) | **done** | `flint-sync recover-staged`: bucket-truth re-citation of durable-but-uncited work as one `recovered` boundary — uncited current versions, brand-new never-cited paths, and D8's dangling citations rolled forward; conflict records throughout; unrecoverable paths named loudly and exit non-zero |
 | 3 — observability minimum (§2.6, OF-6) | **done** | `.flint-sync/gauges.json` (rpo/visibility-lag/staged-uncited/cited-noncurrent-age/withheld-reason/budget/forced-count/last-boundary, `fenced` in lockstep with `capabilities.json`), the structured per-tick `withheld_reason=` stderr line, and `flint-sync status` — which takes no lease and no state-dir lock, so it diagnoses a workspace *while* its sidecar holds them |
+| 1/2/3 — the verified-review tranche (§10.1e) | **done** | six adversarially-verified findings fixed, each observed red: the drain's sync-ack guard (C1), the ungated repair pass gated mode never had (C2), tombstone/stage cancellation in **both** directions (C3), containment for every path a write touches (C4), the pinned-manifest legacy cell — backfill before pinning, refuse rather than adopt (C5), and the ack that claimed a boundary the citation dropped (C6) |
 | 3 — remainder | **open** | the operator-facing heartbeat echo (deferred to Phase 4 — see below), preStop drain sizing (webhook-derived; Phase 4) |
 | 4 — CRD/chart/operator | **not started** | |
 | 5 — layered doors | **partial** | D14's `carry_sync_request` ticker path exists; the UDS socket and the gateway `boundary_request`/`sync_request` inbox fields do not |
@@ -913,6 +920,95 @@ Not modelled, named rather than omitted: the two-consecutive-scans rule
 five battery mutations instead), the bare touch, and the min-interval
 and hourly budget, which stay out of the safety gate per the house rule.
 
+### 10.1e The verified-review tranche — six confirmed findings, and a seventh the model found
+
+An `ultracode` review of this plan (2026-08-25, `wf_4bf110db-4fe`) produced
+56 distinct findings; eight were routed to adversarial verifiers whose
+default stance was that the finding is wrong. **Six survived** (two were
+refuted and are recorded as such in the review, not re-opened here). All
+six were re-verified against the code by hand before any change, and
+every fix below was **observed red** — by fixture where the state is
+constructible, by mutation where it is not — and each mutation reverted.
+
+| # | What it was | Where it lives now |
+|---|---|---|
+| **C1** | The preStop drain asked "did any settled ack carry a seq?" before running its cite-everything pass. A **sync** ack always carries one — the manifest it synced *against* — while publishing nothing, so a pending `.flint/sync` at SIGTERM cancelled the drain's own boundary. On this pure-spot fleet that is the routine path, and it forfeits every byte since the last boundary (in gated, leaves durable work uncited). The floor arm's own comment names this exact trap; the drain repeated it. | the guard is now "no ok **publish** ack" (`sentinel.rs`) |
+| **C2** | §2.4.2's HITL exemption and D13's "within one floor" were **prose only**: the repair pass lived in the fused barrier, which gated mode never runs. A consumed HITL write was adopted into the tree, went clean-vs-baseline, and the manifest cited its predecessor forever — invisible to every pinned reader, DR checkout and sibling sync, with no conflict record and no gauge. | `repair_candidates` + `CitationSource::Repair` in the citation lane (§2.4.2) |
+| **C3** | A withheld tombstone outliving its file amputated a re-created path at the citation (checkpoint rotation, write-temp-swap), and a sibling sync then deleted its copy. **The first fix inverted the bug rather than fixing it** — see below. | symmetric cancellation in the lane; `merge` resolves nothing (§2.4.2) |
+| **C4** | §2.2's containment rule was implemented exactly as written — on the **target** — and the write then went through an unvalidated temp sibling. This tranche made it worse by adding two writers with no containment at all, one of which (`.flint/remote.seq`) fires every tick, so the sidecar's own heartbeat is the trigger and no remote cooperation is needed. An arbitrary-file-write primitive with the bucket credentials, in a sidecar with no `securityContext`. | one helper (`safefs.rs`), used by all three writers (§2.2) |
+| **C5** | D7's entry schema and D13 collide on `(pinned_reads, version_id: None)`, and checkout took the S3-wins arm there — so enabling gated on an existing workspace adopted uncited mid-change bytes through the exact arm the mode exists to close, and it did not self-correct. | citation backfills version ids before it pins; a pinned reader refuses rather than adopts (§2.4.2) |
+| **C6** | A gated honor's citation can drop a declared path (a HITL write landing between the lane's consume and the citation's window); the ack said `"ok"` regardless, with no field that could express the exception. D1's corollary, falsified in code, worst on the drain. | one bounded re-run, then `status: "partial"` + `report.dropped` (§2.1) |
+
+**C3 is the one to read twice.** The first fix made upserts win over a
+standing tombstone — correct for delete-then-recreate, and *wrong* for
+create-then-delete, where it cites a file the agent deleted. The shipped
+merge had the opposite bug. Neither set carries the ordering, so
+`manifest::merge` cannot resolve the overlap in either direction: only
+the lane knows which it observed last. The lane now cancels each against
+the other (and reclaims the uncited version), and `merge` states the
+disjointness as the caller's contract instead of pretending to arbitrate
+it. **TLC found the inversion two hours after it was written**, on the
+first run that put the sentinel and the citation lane in one world.
+
+**And the mutation that went green when the fix landed.** With the
+cancellation on, `LeanGatedInflightHitl` — product 2's drop-inflight
+mutation — stopped finding its counterexample, because that
+counterexample ran through a path the agent had DELETED while the stage
+still held a version for it: the exact shape C3 closes. Every remaining
+route to citing over an acked HITL write in that world is already
+conflict-surfaced by the park arm. A green mutation proves nothing, so
+the cancellation is an arm (`LaneCancelsStaged`, FALSE in every
+pre-existing cfg including that one) and it has its own mutation
+(`LeanSentinelGatedStaleStage`). What that leaves named rather than
+buried: what the drop-inflight rule actually guards in shipped code — a
+HITL write landing between the lane's consume and the citation's window
+— **this model cannot express**, because its gated lane reuses `Scan`,
+which opens the window, while the shipped lane deliberately opens none.
+Making the gated lane window-free is the fidelity fix and it is not
+free; until then that rule is pinned against the pre-cancellation lane
+and by the battery, not by a faithful interleaving.
+
+**And the coverage hole the anti-vacuity probe found in the runs that
+came before it.** `ProbeDeclaredDrop` says the citation must actually
+drop a **declared** path, or C6's rule holds trivially. It did not fire —
+and the reason turned out to reach further back: the in-flight drop needs
+four things minted (a second staged path, without which no citation fires
+at all, since a citation installs `Valid(s)` and the dropped path is by
+definition not in it; the dropped path's own generation; the HITL
+generation that lands on it; and the declaration's mint watermark), and
+no gated world had the budget for four. Which means **`CiteDropsInflightHitl`
+— product 2's rule, the one §10.1c was written about — has never had a
+positive reachability probe**: its mutation fires through a different
+shape entirely, and the state the rule actually guards was unreachable in
+its own world. A green gate, and one probe found the hole.
+
+That world is the second half of C6, and it was a real matrix gap: no cfg
+paired `SentinelEnabled` with `GatedCitation`, so `Inv_AckImpliesCited`
+had never been evaluated over a citation-lane honor even though
+`CiteFinish` sets `honored` — the module could express it, the matrix
+never asked. Six runs added (49 → **55**): `LeanSentinelGatedHolds`
+(strict), `LeanSentinelGatedOkOverDrop` (the shipped ack, must violate
+`Inv_AckImpliesCited`), `LeanSentinelGatedNoRepair` (C2's gap, must
+violate `Inv_AckBoundaryCoherent`), `LeanSentinelGatedStaleStage` (C3's
+inversion), and two anti-vacuity probes —
+`ProbeDeclaredDrop` (a citation really did drop a **declared** path;
+without it the honesty rule holds trivially) and `ProbePartialAck` (the
+honest answer really fires, so the agent is answered rather than left
+waiting). `BoundaryBroken`'s conflict exemption had to be narrowed to
+make any of it non-vacuous: a conflict record is the ack's
+`report.parked` in the fused path, which is why it excuses a path there —
+a correspondence the gated honor cannot maintain, because the drop
+happens inside the citation and the honor writes one ack for the lot.
+
+Two more gaps this closed on the way, both of which the review did not
+name and the model did: a staged-but-never-cited path is invisible to
+`scan::classify` (it has no baseline entry), so the stage carried a
+scratch file's version into a boundary after the agent deleted it — the
+stage now keeps its own two-observations memory; and a consume that
+adopts a HITL write records no `version_id`, so a gated repair had to
+HEAD for one or the entry would be unreadable by exactly the pinned
+readers it exists for.
+
 ### 10.2 Formal model — tranche 3, product 4 (done)
 
 `SyncScope`/`ScopedInstBase` join `LeanSubtree.tla` behind constants that
@@ -954,3 +1050,21 @@ priority order and the reasoning are in §10.3.
   (a deposed writer's PUT lands and becomes `current[p]`), the fence
   that would make it an invariant is P5 at the proxy, which is not
   built, and drill leg B12 covers the shape better than a model would.
+- **Product 1 × product 2 — DONE (§10.1e), and it was not optional.**
+  Each product had been checked in a world where the other was switched
+  off, so the citation-lane honor — the one path where a boundary can
+  be *installed* and still not carry what the ack claims — had never
+  been evaluated at all. It found a defect on its first strict run, in
+  a fix two hours old. **The lesson generalizes past this plan: two
+  products that share an action are not covered by running them
+  separately, and "every arm is modelled" is not the same claim as
+  "every pair of arms that meet in one action is modelled."** Worth a
+  pass over the other tranche pairs on the same question — `SyncScope`
+  with `GatedCitation` is the obvious next one (a scoped sync and a
+  citation lane both advance `inst_base`, by different rules).
+- **Still not modelled, named rather than omitted.** The C4 write
+  containment is filesystem behaviour a TLA model cannot express (it is
+  battery-tested, three writers, each proven red on its own victim);
+  C5's backfill is checked by construction and by battery, not by the
+  model — a version index is a data-structure claim, not an
+  interleaving one.
