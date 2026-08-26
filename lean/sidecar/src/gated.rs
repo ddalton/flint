@@ -465,7 +465,41 @@ impl Sidecar {
 
         // Window open/clear belong to THIS lane only.
         let deadline = now_unix() + self.cfg.window_slack_secs;
-        inbox::open_window(self.store.as_ref(), &self.cfg, epoch, deadline).await?;
+        let opened =
+            inbox::open_window(self.store.as_ref(), &self.cfg, epoch, deadline).await?;
+
+        // A HITL write that landed AFTER the lane staged this path.
+        //
+        // The base-version check above cannot see it: it reads the
+        // BASELINE, and the citation lane consumes nothing, so the
+        // baseline has not moved. And the upload lane opens no window —
+        // deliberately, because a lane that fenced HITL out every floor
+        // tick would refuse admission essentially forever between
+        // citations. So the gap is real and it is the mode's own doing.
+        //
+        // The inbox is what can see it, and the window CAS just loaded
+        // it: zero added requests. Drop the path rather than cite bytes
+        // that PREDATE the user's write over it. The entry stays queued,
+        // so the next lane consumes it the ordinary way.
+        //
+        // (Found by the formal model — tranche 3 product 2. Before the
+        // companion rule below, the reaper then DELETED the user's
+        // version, because it was not the one the manifest cited.)
+        let inflight: BTreeSet<String> =
+            opened.doc.entries.iter().map(|e| e.path.clone()).collect();
+        for path in &inflight {
+            if upserts.remove(path).is_some() {
+                stage.entries.remove(path);
+                report.dropped_stale_base.push(path.clone());
+                self.state.append_conflict(&ConflictRecord {
+                    path: path.clone(),
+                    foreign_etag: String::new(),
+                    preserved_key: None,
+                    kind: "citation-hitl-inflight".into(),
+                    at_unix: now_unix(),
+                })?;
+            }
+        }
 
         let deletes = stage.withheld_deletes.clone();
         let parked: BTreeSet<String> = BTreeSet::new();
@@ -569,6 +603,16 @@ impl Sidecar {
                         continue;
                     }
                     if v.version_id == keep {
+                        continue;
+                    }
+                    // NEVER the current version. If current is not what
+                    // we just cited, a foreign write landed between the
+                    // lane and this citation — those are live bytes
+                    // somebody is about to read, not a superseded
+                    // generation. The reaper's job is reclaiming what
+                    // this workspace itself superseded; anything else
+                    // is destruction with extra steps.
+                    if v.is_current {
                         continue;
                     }
                     let _ = self.store.delete_version(&key, &v.version_id).await;

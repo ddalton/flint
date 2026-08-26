@@ -2903,3 +2903,142 @@ async fn status_renders_without_claiming_the_lease() {
         "status rotated the epoch it was supposed to observe"
     );
 }
+
+/// **Found by the formal model (tranche 3 product 2), in shipped code.**
+///
+/// The gated upload lane opens no HITL window — deliberately, because a
+/// lane that fenced HITL out every floor tick would refuse admission
+/// essentially forever between citations. So a UI write can land on a
+/// path the lane has already staged. The citation lane's base-version
+/// re-validation cannot see it: that check reads the BASELINE, and the
+/// citation lane consumes nothing, so the baseline has not moved.
+///
+/// The citation then cites our staged version — and the exact version
+/// reaper, whose rule was "delete every version of a touched key except
+/// the one the installed manifest cites", deleted the user's version.
+/// It was CURRENT. The inbox entry then 412s on its next consume and is
+/// dropped as superseded: an acked write, gone silently.
+///
+/// Two rules close it, and both are asserted here: the reaper never
+/// reclaims the CURRENT version, and a staged path with a live inbox
+/// entry is dropped from the citation rather than cited over.
+#[tokio::test]
+async fn citation_never_reaps_a_hitl_write_that_landed_mid_stage() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+
+    write(dir.path(), "shared.txt", "AGENT V1");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+
+    // The lane stages the agent's next generation...
+    write(dir.path(), "shared.txt", "AGENT V2");
+    backdate_baseline(&a, "shared.txt");
+    a.upload_lane().await.unwrap();
+    let staged = a.load_stage().unwrap().entries["shared.txt"].version_id.clone().unwrap();
+
+    // ...and THEN a UI write lands on the same path. The lane opens no
+    // window, so this is admitted, and it is acked to the user.
+    hitl_write(&store, &a.cfg, "shared.txt", "USER EDIT", "ui@example").await.unwrap();
+    let key = a.cfg.file_key("shared.txt");
+    let (hitl_meta, _) = store.get_whole(&key, None).await.unwrap();
+    let hitl_version = hitl_meta.version_id.clone().unwrap();
+    assert_ne!(hitl_version, staged, "the fixture never armed: no foreign version landed");
+
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+
+    // The user's bytes are still THERE. This is the half that was
+    // destroyed: the reaper deleted the current version.
+    let (_, still) = store
+        .get_version(&key, &hitl_version)
+        .await
+        .expect("the citation reaped the user's CURRENT version");
+    assert_eq!(&still[..], b"USER EDIT");
+    // ...and still current, so a plain read serves them.
+    let (_, current) = store.get_whole(&key, None).await.unwrap();
+    assert_eq!(&current[..], b"USER EDIT");
+
+    // And the citation did not cite OUR older generation over them: an
+    // in-flight inbox entry drops the path from the boundary.
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_ne!(
+        m.entries["shared.txt"].version_id.as_deref(),
+        Some(staged.as_str()),
+        "the citation cited bytes that PREDATE the user's write, over it"
+    );
+    assert!(
+        a.state.load_conflicts().unwrap().iter().any(|c| c.kind.contains("hitl-inflight")),
+        "the dropped path was not surfaced"
+    );
+    // The entry is still queued, so the next lane integrates it normally.
+    let ib = inbox::load(store.as_ref(), &a.cfg).await.unwrap();
+    assert!(ib.doc.entries.iter().any(|e| e.path == "shared.txt"));
+}
+
+/// The companion to the leg above, and the reason the keep-current rule
+/// is not redundant with the in-flight inbox check.
+///
+/// The inbox only sees writers who go through the gateway. §3 residual
+/// 11 says out loud that others exist — an import tool, `aws s3 cp`, a
+/// human with credentials — and under gated they write to a key whose
+/// current version is uncited. The citation cannot know about them
+/// (that is the residual, not a bug), but the reaper must still not
+/// DELETE them: the difference between "your write is not cited yet"
+/// and "your write is gone" is the whole of it.
+///
+/// Both the formal model and the Rust battery needed two arms to see
+/// this: with the inbox guard in place, removing the keep-current rule
+/// changes nothing on the HITL path. This is the arm that isolates it.
+#[tokio::test]
+async fn the_reaper_never_takes_an_out_of_band_writers_current_version() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+
+    write(dir.path(), "shared.txt", "AGENT V1");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+    write(dir.path(), "shared.txt", "AGENT V2");
+    backdate_baseline(&a, "shared.txt");
+    a.upload_lane().await.unwrap();
+
+    // An out-of-band write: no inbox entry, no gateway, no window check.
+    let key = a.cfg.file_key("shared.txt");
+    let (cur, _) = store.get_whole(&key, None).await.unwrap();
+    let stamps = GenerationStamps {
+        generation: 0,
+        epoch: 0,
+        flush_uuid: "out-of-band".into(),
+        boundary_source: None,
+        posix: None,
+    };
+    let foreign = store
+        .put_whole(
+            &key,
+            Bytes::from_static(b"OUT OF BAND"),
+            &PutCondition::IfMatch(cur.etag.clone()),
+            &stamps,
+            crc64_nvme(b"OUT OF BAND"),
+        )
+        .await
+        .unwrap();
+    let foreign_version = foreign.version_id.clone().unwrap();
+    assert!(inbox::load(store.as_ref(), &a.cfg).await.unwrap().doc.entries.is_empty());
+
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+
+    // Not cited — that is the documented residual, and it is fine.
+    // Not DELETED — that is the rule.
+    let (_, still) = store
+        .get_version(&key, &foreign_version)
+        .await
+        .expect("the reaper deleted an out-of-band writer's CURRENT version");
+    assert_eq!(&still[..], b"OUT OF BAND");
+}
