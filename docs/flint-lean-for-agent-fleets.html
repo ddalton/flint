@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>flint-lean on a Kubernetes cluster</title>
+<style>
+  @page { size: A4 portrait; margin: 16mm 15mm 14mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body {
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: #0f172a; font-size: 10.5px; line-height: 1.55;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  h1 { font-size: 25px; font-weight: 600; letter-spacing: -0.015em; margin: 0 0 6px; }
+  h2 { font-size: 15px; font-weight: 600; margin: 22px 0 8px; padding-bottom: 5px;
+       border-bottom: 1.5px solid #0f172a; break-after: avoid; page-break-after: avoid; }
+  h3 { font-size: 12px; font-weight: 600; margin: 15px 0 6px; color: #1a5f9e;
+       break-after: avoid; page-break-after: avoid; }
+  p { margin: 0 0 8px; }
+  .kicker { font-size: 10px; font-weight: 600; letter-spacing: .14em;
+            text-transform: uppercase; color: #1a5f9e; margin: 0 0 8px; }
+  .dek { font-size: 12.5px; color: #475569; margin: 0 0 12px; line-height: 1.5; }
+  .dek b { color: #0f172a; font-weight: 600; }
+  .masthead { border-bottom: 2.5px solid #0f172a; padding-bottom: 12px; margin-bottom: 14px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 4px 20px; font-size: 9.5px; color: #64748b;
+          font-family: Menlo, "SF Mono", monospace; margin-top: 10px; }
+  .meta b { color: #475569; font-weight: 600; }
+
+  code, pre, .console, td.m { font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; }
+  code { font-family: Menlo, "SF Mono", Consolas, monospace; font-size: 9.5px;
+         background: #f1f5f9; padding: .5px 3px; border-radius: 2px; }
+  pre { font-family: Menlo, "SF Mono", Consolas, monospace; font-size: 8.8px; line-height: 1.5;
+        background: #f8fafc; border: 1px solid #e2e8f0; border-left: 2.5px solid #1a5f9e;
+        border-radius: 2px; padding: 8px 10px; margin: 0 0 9px; white-space: pre-wrap;
+        word-break: break-word; break-inside: avoid; page-break-inside: avoid; }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .cm { color: #94a3b8; font-style: italic; }
+  .kw { color: #1a5f9e; }
+  .hl { color: #a03a18; font-weight: 600; }
+
+  .note { border: 1px solid #a03a18; background: #fdf4f0; border-radius: 2px;
+          padding: 8px 10px; margin: 0 0 10px; break-inside: avoid; page-break-inside: avoid; }
+  .note.info { border-color: #1a5f9e; background: #eff6fb; }
+  .note.good { border-color: #1c7a53; background: #eef7f2; }
+  .note .lb { font-size: 8.5px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+              color: #a03a18; display: block; margin-bottom: 4px; }
+  .note.info .lb { color: #1a5f9e; }
+  .note.good .lb { color: #1c7a53; }
+  .note p { margin: 0 0 5px; font-size: 10px; }
+  .note p:last-child { margin-bottom: 0; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 9.5px; margin: 0 0 10px;
+          break-inside: avoid; page-break-inside: avoid; }
+  th, td { text-align: left; padding: 4.5px 8px 4.5px 0; border-bottom: 1px solid #e2e8f0;
+           vertical-align: top; }
+  th { font-size: 8.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+       color: #64748b; border-bottom: 1.5px solid #94a3b8; }
+  td.m { font-family: Menlo, "SF Mono", monospace; font-size: 9px; }
+  .yes { color: #1c7a53; font-weight: 600; }
+  .no  { color: #a03a18; font-weight: 600; }
+
+  figure { margin: 0 0 12px; break-inside: avoid; page-break-inside: avoid; }
+  figure svg { width: 100%; height: auto; display: block; }
+  figcaption { font-size: 9px; line-height: 1.5; color: #475569; margin-top: 6px;
+               border-top: 1px solid #e2e8f0; padding-top: 5px; }
+  figcaption b { color: #0f172a; font-weight: 600; }
+
+  svg text { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; fill: #0f172a; }
+  .th2 { font-size: 12px; font-weight: 600; }
+  .tl  { font-size: 11px; }
+  .ts  { font-size: 9.5px; fill: #64748b; }
+  .tsb { font-size: 9.5px; font-weight: 600; fill: #475569; }
+  .mn  { font-family: Menlo, "SF Mono", monospace; font-size: 9.5px; }
+  .mns { font-family: Menlo, "SF Mono", monospace; font-size: 8.5px; }
+  .ctr { text-anchor: middle; }
+  .end { text-anchor: end; }
+  .bx        { fill: #fff; stroke: #cbd5e1; stroke-width: 1.2; }
+  .bx-blue   { fill: #e9f2fa; stroke: #1a5f9e; stroke-width: 1.5; }
+  .bx-violet { fill: #f0eafb; stroke: #6d4aa8; stroke-width: 1.5; }
+  .bx-ochre  { fill: #fbf2de; stroke: #a06b12; stroke-width: 1.5; }
+  .bx-red    { fill: #fdf0ec; stroke: #a03a18; stroke-width: 1.5; }
+  .bx-green  { fill: #eaf5ef; stroke: #1c7a53; stroke-width: 1.5; }
+  .grp       { fill: none; stroke: #94a3b8; stroke-width: 1.2; stroke-dasharray: 5 4; }
+  .ln        { stroke: #475569; stroke-width: 1.4; fill: none; }
+  .ln-blue   { stroke: #1a5f9e; stroke-width: 2.2; fill: none; }
+  .ln-violet { stroke: #6d4aa8; stroke-width: 2.2; fill: none; }
+  .ln-red    { stroke: #a03a18; stroke-width: 2; fill: none; stroke-dasharray: 5 4; }
+  .ln-green  { stroke: #1c7a53; stroke-width: 2; fill: none; }
+  .c-blue { fill: #1a5f9e; } .c-violet { fill: #6d4aa8; } .c-red { fill: #a03a18; }
+  .c-green { fill: #1c7a53; } .c-ochre { fill: #8f5e0f; }
+  .avoid { break-inside: avoid; page-break-inside: avoid; }
+  .newpage { break-before: page; page-break-before: always; }
+  footer { margin-top: 16px; padding-top: 6px; border-top: 1.5px solid #0f172a;
+           font-size: 8.5px; color: #64748b; font-family: Menlo, monospace; }
+</style>
+</head>
+<body>
+<h1>flint-lean on a Kubernetes cluster</h1>
+<p>Give every agent pod its own workspace: <strong>plain local files</strong> checked out of your S3 bucket at pod start, published back on a cadence — or when the agent says so. No FUSE, no NFS, no privileged pods, no mount to wedge.</p>
+<pre><code>        agent pod
+        ├─ your container ──▶ /workspace   plain files, real POSIX, local speed
+        │                        ▲   │
+        │            checkout ───┘   └─── publish (cadence, or on demand)
+        │                                     │
+        └─ flint-sync sidecar ────────────────┴──▶ S3
+              injected by a webhook · unprivileged · no /dev/fuse</code></pre>
+<p>The trade, stated up front: the workspace is a <strong>local copy</strong>. It must fit the pod&#x27;s disk, one writer owns it at a time, and other readers see the last published boundary rather than your last write. If that is not your shape, see <a href="#when-not-to-use-lean">when not to use lean</a>.</p>
+<p>Everything below was run end to end on 2026-08-26 against the published <code>0.2.0</code> chart. Commands are copy-pasteable, not illustrative.</p>
+<hr>
+<h2>Before you start</h2>
+<table><tr><th></th><th></th></tr><tr><td>An S3 bucket</td><td>must already exist. <strong>Versioning on</strong> if you want gated mode — it is refused without it. Nothing here creates or deletes buckets.</td></tr><tr><td>Kubernetes</td><td><strong>1.29+</strong> — the sidecar is injected as a *native sidecar* (<code>initContainer</code> with <code>restartPolicy: Always</code>), which is 1.29 or newer.</td></tr><tr><td>Tools</td><td><code>kubectl</code>, <code>helm</code> 3.8+ (OCI support)</td></tr><tr><td>Credentials</td><td>see <a href="#credentials">credentials</a> — the agent container never holds one</td></tr></table>
+<p>Nothing is installed on your nodes. The sidecar is an ordinary unprivileged container.</p>
+<hr>
+<h2>1. Install the operator</h2>
+<pre><code>kubectl create namespace flint-system
+
+helm install flint-lean \
+  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.2.0 \
+  -n flint-system</code></pre>
+<p>That installs three things: the <code>FlintLeanWorkspace</code> CRD, the operator, and a mutating webhook. The webhook provisions <strong>its own TLS certificate and <code>MutatingWebhookConfiguration</code> at startup</strong> — there is no cert-manager dependency and nothing to pre-create.</p>
+<p>Check it came up:</p>
+<pre><code>kubectl -n flint-system get pods
+# flint-lean-59d5b4f886-s5hp8   1/1   Running
+
+kubectl -n flint-system logs deploy/flint-lean | tail -3
+# webhook cert generated and stored in flint-lean-webhook-cert
+# mutating webhook flint-lean-inject applied
+# flint-lean-operator: watching FlintLeanWorkspace</code></pre>
+<blockquote><strong>If <code>helm install</code> fails with <code>permission denied</code> on <code>~/Library/Caches/helm</code></strong>, something ran <code>helm</code> as root with your <code>HOME</code> and took ownership of your cache. Either <code>sudo chown -R &quot;$USER&quot; ~/Library/Caches/helm</code>, or run with a private cache: <code>HELM_CACHE_HOME=/tmp/helmcache helm install …</code></blockquote>
+<hr>
+<h2>Credentials</h2>
+<p>The operator does bucket-admin work (posture probes, a stale-upload sweep) under its own identity. Each workspace&#x27;s sidecar uses the credential its CR names. <strong>The agent container is given neither</strong> — the webhook stamps the secret onto the sidecar container only, and process namespaces are not shared, so a compromised agent cannot read it.</p>
+<pre><code>kubectl -n flint-system create secret generic s3 \
+  --from-literal=AWS_ACCESS_KEY_ID=... \
+  --from-literal=AWS_SECRET_ACCESS_KEY=... \
+  --from-literal=AWS_REGION=us-west-1
+
+# and the same secret in the namespace your agents run in
+kubectl -n agents create secret generic s3 --from-literal=... </code></pre>
+<p>Point the operator at it by reinstalling (or <code>helm upgrade</code>) with <code>--set operatorCredentialsSecret=s3</code>, or leave it empty to use the pod&#x27;s ambient chain (IRSA and friends).</p>
+<p>The keys must be named <code>AWS_*</code> <strong>verbatim</strong> — they are passed to the sidecar as environment.</p>
+<blockquote><strong>Plan of record:</strong> a project-scoped S3 proxy holds the real credentials and no pod stores one at all. Until that lands, <code>credentialsSecretRef</code> is the interim posture.</blockquote>
+<hr>
+<h2>2. Create a workspace</h2>
+<p>One CR per project subtree.</p>
+<pre><code>apiVersion: flint.io/v1alpha1
+kind: FlintLeanWorkspace
+metadata:
+  name: proj1
+  namespace: agents
+spec:
+  projectId: team-a/proj1        # durable claim identity
+  bucket: my-bucket
+  keyPrefix: tenants/proj1       # the subtree this workspace owns
+  credentialsSecretRef: s3
+  floorSecs: 60                  # publish cadence — and the RPO</code></pre>
+<pre><code>kubectl apply -f workspace.yaml
+kubectl -n agents get flintleanworkspace proj1 -o yaml | grep -A6 conditions</code></pre>
+<p>You want <code>BoundaryModeAccepted: True</code>. <code>BoundaryModeActive: Unknown</code> with reason <code>NoLiveSidecar</code> is normal for a workspace at rest — nothing holds the lease until a pod starts.</p>
+<hr>
+<h2>3. Opt a pod in</h2>
+<p>One label. That is the whole integration.</p>
+<pre><code>apiVersion: v1
+kind: Pod
+metadata:
+  name: agent-1
+  namespace: agents
+  labels:
+    flint.io/lean-workspace: proj1     # ← the webhook keys on this
+spec:
+  containers:
+    - name: agent
+      image: your-agent:latest
+      workingDir: /workspace</code></pre>
+<p>The webhook injects the sidecar, adds the workspace volume, and mounts it into <strong>every</strong> container in the pod. The sidecar runs the checkout *before* your container starts — the injected <code>startupProbe</code> gates it — so your first line of code sees a complete tree.</p>
+<pre><code>kubectl -n agents get pod agent-1
+# agent-1   2/2   Running        ← 2/2 = your container + the sidecar</code></pre>
+<p>If the workspace is missing or refused, the pod is <strong>rejected at admission</strong> rather than started against an empty directory.</p>
+<blockquote><strong>Do not declare your own volumeMount at <code>/workspace</code></strong> — the injection would collide and admission fails. If your image needs that path, move flint&#x27;s with <code>spec.mountPath: /flint</code> on the CR.</blockquote>
+<hr>
+<h2>4. Publish on demand (optional, recommended)</h2>
+<p>Cadence alone forces a bad choice: publish often and waste work, or publish rarely and let a reader see a half-finished tree. Instead, let the agent declare a coherent point when it finishes a unit of work:</p>
+<pre><code># in the agent container
+printf &#x27;{&quot;nonce&quot;:&quot;task-42&quot;}&#x27; &gt; /workspace/.flint/publish
+
+# wait for the answer
+until [ -f /workspace/.flint/publish.ack ]; do sleep 1; done
+cat /workspace/.flint/publish.ack
+# {
+#   &quot;status&quot;: &quot;ok&quot;,
+#   &quot;nonces&quot;: [ &quot;task-42&quot; ],
+#   &quot;seq&quot;: 1,
+#   &quot;manifest_etag&quot;: &quot;\&quot;caa5498c...\&quot;&quot;,
+#   &quot;boundary&quot;: &quot;sentinel&quot;,
+#   &quot;completed_unix&quot;: 1787772547,
+#   &quot;report&quot;: { &quot;uploaded&quot;: 0, &quot;deleted&quot;: 0, &quot;parked&quot;: 0, ... }
+# }</code></pre>
+<p><code>uploaded: 0</code> here just means nothing had changed since the last boundary — the point the agent declared is already true, which is still an honest <code>ok</code>.</p>
+<p><code>status: &quot;ok&quot;</code> means <strong>the named boundary is in the bucket</strong> — not queued, not scheduled. <code>refused-fenced</code> means this sidecar lost the lease and is telling you rather than leaving you waiting.</p>
+<p>Costs nothing when unused: measured at 20 bucket requests per 22 s idle with the verbs off, and 20 with them on.</p>
+<hr>
+<h2>5. Verify</h2>
+<pre><code>aws s3 ls s3://my-bucket/tenants/proj1/ --recursive
+# tenants/proj1/.flint/lean/claim
+# tenants/proj1/.flint/lean/epoch
+# tenants/proj1/.flint/lean/manifest
+# tenants/proj1/files/...          ← your tree lives here</code></pre>
+<p>The <code>files/</code> prefix is the workspace. <code>.flint/lean/</code> is control state. To see which clock installed the current boundary:</p>
+<pre><code>aws s3api head-object --bucket my-bucket \
+  --key tenants/proj1/.flint/lean/manifest \
+  --query &#x27;Metadata.&quot;flint-boundary-source&quot;&#x27;
+# &quot;cadence&quot; | &quot;sentinel&quot; | &quot;quiescence&quot; | &quot;drain&quot; | ...</code></pre>
+<hr>
+<h2>What it costs</h2>
+<p>Measured floors (loopback; a latency-bound proxy moves these):</p>
+<table><tr><th></th><th></th></tr><tr><td>bytes</td><td>checkout <strong>3.3 s/GiB</strong> · publish <strong>8.0 s/GiB</strong></td></tr><tr><td>100k files</td><td>checkout <strong>49.5 s</strong> · first publish <strong>65 s</strong> · idle tick <strong>1.85 s</strong></td></tr><tr><td>1M files</td><td>checkout <strong>7 m 05 s</strong>; manifest <strong>264 MiB</strong> at ~277 B/entry</td></tr><tr><td>idle</td><td>~5 bucket requests per tick, per workspace</td></tr></table>
+<p><strong>The file count binds before the byte count</strong> — the manifest is exactly linear in entries, which is why the v1 cap is ~250k files.</p>
+<hr>
+<h2>When not to use lean</h2>
+<table><tr><th>you need</th><th>use</th></tr><tr><td>a tree too large for the pod&#x27;s disk, or lazy access to a slice of a huge dataset</td><td>FUSE (<code>docs/flint-fuse-architecture.html</code>)</td></tr><tr><td>two pods writing one tree and seeing each other live; byte-range locks; shared sqlite/git across pods</td><td>the hub (flint-lite)</td></tr><tr><td>readers that cannot tolerate seeing the last boundary instead of the last write</td><td>the hub</td></tr></table>
+<p>All three front ends share one bucket format and are mutually convertible, so choosing lean now does not strand the data.</p>
+<p>For agents collaborating on code, do <strong>not</strong> reach for a git-over-S3 remote: use plain <code>git</code> against a real git host and let flint-lean keep the workspace durable. See <code>docs/flint-lean-git-workflow.md</code>.</p>
+<hr>
+<h2>Tearing down</h2>
+<pre><code>kubectl -n agents delete pod agent-1
+kubectl -n agents delete flintleanworkspace proj1   # leaves bucket data intact
+helm uninstall flint-lean -n flint-system</code></pre>
+<p>Deleting the CR does not delete your data. The bucket subtree is the durable artifact; a new workspace pointed at the same <code>keyPrefix</code> picks it up.</p>
+</body>
+</html>
