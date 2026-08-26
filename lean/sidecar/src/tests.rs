@@ -2949,7 +2949,7 @@ async fn citation_never_reaps_a_hitl_write_that_landed_mid_stage() {
     let hitl_version = hitl_meta.version_id.clone().unwrap();
     assert_ne!(hitl_version, staged, "the fixture never armed: no foreign version landed");
 
-    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+    let cite = a.citation_pass(CitationSource::Sentinel).await.unwrap();
 
     // The user's bytes are still THERE. This is the half that was
     // destroyed: the reaper deleted the current version.
@@ -2974,6 +2974,10 @@ async fn citation_never_reaps_a_hitl_write_that_landed_mid_stage() {
         a.state.load_conflicts().unwrap().iter().any(|c| c.kind.contains("hitl-inflight")),
         "the dropped path was not surfaced"
     );
+    // …and it is reported as the kind that makes an ack for a DECLARED
+    // boundary a lie (C6), not as the content-equal stale-base drop.
+    assert_eq!(cite.dropped_inflight, vec!["shared.txt".to_string()]);
+    assert!(cite.dropped_stale_base.is_empty());
     // The entry is still queued, so the next lane integrates it normally.
     let ib = inbox::load(store.as_ref(), &a.cfg).await.unwrap();
     assert!(ib.doc.entries.iter().any(|e| e.path == "shared.txt"));
@@ -3357,4 +3361,553 @@ async fn a_gated_citation_never_reads_its_own_boundary_as_foreign() {
         !m.entries.contains_key("f.txt"),
         "the citation read its own boundary as foreign and withheld the agent's delete"
     );
+}
+
+// ---------------------------------------------------------------------
+// The C1-C6 tranche: six findings that survived adversarial
+// verification. Each test below is the RED form of one of them.
+// ---------------------------------------------------------------------
+
+/// C1 — D10 rule 1. The drain's "did a boundary already run?" guard
+/// asks whether any settled ack carries a seq. A SYNC ack always
+/// carries one (the manifest it synced against) while publishing
+/// nothing, so a pending `.flint/sync` at SIGTERM satisfies the guard
+/// and the drain returns without its cite-everything pass. On the
+/// routine spot-reclaim path that forfeits every byte written since the
+/// last boundary — the exact trap the floor arm's own comment names and
+/// guards against.
+#[tokio::test]
+async fn a_pending_sync_at_sigterm_never_cancels_the_drains_own_boundary() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "seed.txt", "S1");
+    a.run_barrier().await.unwrap();
+
+    // The agent asks for news, then keeps working. SIGTERM lands with
+    // the sync still owed and the new bytes unpublished.
+    write(dir.path(), "work.txt", "W1");
+    touch_sentinel(dir.path(), control::SYNC, r#"{"nonce":"s-1"}"#);
+    a.poll_sentinels().unwrap();
+    assert!(a.load_pending(Verb::Sync).unwrap().is_some());
+
+    let acks = a.drain().await.unwrap();
+    assert_eq!(acks.len(), 1, "the drain did not settle the owed sync ack");
+
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(
+        m.entries.contains_key("work.txt"),
+        "the drain skipped its cite-everything pass because a SYNC ack carried a seq — \
+         every byte since the last boundary died with the emptyDir"
+    );
+}
+
+/// C1, gated. Same guard, worse blast radius: the staged versions are
+/// durable in the bucket but uncited, so they are invisible to every
+/// import, DR checkout and successor — recoverable only by hand.
+#[tokio::test]
+async fn a_gated_drain_cites_its_stage_even_when_a_sync_was_owed() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "seed.txt", "S1");
+    a.run_barrier().await.unwrap();
+    gated(&mut a);
+
+    write(dir.path(), "ckpt.bin", "C1");
+    a.upload_lane().await.unwrap();
+    assert_eq!(a.load_stage().unwrap().entries.len(), 1);
+
+    touch_sentinel(dir.path(), control::SYNC, r#"{"nonce":"s-2"}"#);
+    a.poll_sentinels().unwrap();
+    a.drain().await.unwrap();
+
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(
+        m.entries.contains_key("ckpt.bin"),
+        "the gated drain left durable work uncited because a sync ack carried a seq"
+    );
+    assert!(
+        a.load_stage().unwrap().entries.is_empty(),
+        "the drain left staged work in the pending record"
+    );
+}
+
+/// C3 — the withheld tombstone that outlives its file. `withheld_deletes`
+/// is insert-only until a citation clears it wholesale, so a
+/// delete-then-recreate inside one citation interval puts the same path
+/// in BOTH the upsert set and the delete set. `manifest::merge` applies
+/// upserts first and deletes second with no upsert check, so the
+/// installed boundary omits a file that exists on disk, was staged this
+/// pass, and — on a declared boundary — is covered by an ok ack. A
+/// sibling sync then DELETES its copy: real byte destruction from a
+/// checkpoint-rotation shape.
+#[tokio::test]
+async fn a_recreated_file_survives_its_own_withheld_tombstone() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "ckpt.bin", "v1");
+    a.run_barrier().await.unwrap();
+    gated(&mut a);
+
+    // Rotation: the old checkpoint goes, two lane ticks confirm the
+    // absence, then the new one lands under the same name.
+    std::fs::remove_file(dir.path().join("ckpt.bin")).unwrap();
+    a.upload_lane().await.unwrap();
+    a.upload_lane().await.unwrap();
+    assert!(
+        a.load_stage().unwrap().withheld_deletes.contains("ckpt.bin"),
+        "the fixture never armed the tombstone"
+    );
+    // A longer body: same-size, same-second rewrite of a path whose
+    // baseline entry survives the withheld delete would scan clean.
+    write(dir.path(), "ckpt.bin", "v2-the-replacement");
+    a.upload_lane().await.unwrap();
+    assert!(
+        a.load_stage().unwrap().entries.contains_key("ckpt.bin"),
+        "the fixture never staged the replacement"
+    );
+
+    a.citation_pass(CitationSource::ForcedLagCap).await.unwrap();
+
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(
+        m.entries.contains_key("ckpt.bin"),
+        "the stale tombstone amputated a file that exists on disk and was staged this pass"
+    );
+    let cited = m.entries["ckpt.bin"].version_id.clone().unwrap();
+    let (_, body) = store.get_version(&a.cfg.file_key("ckpt.bin"), &cited).await.unwrap();
+    assert_eq!(
+        &body[..],
+        b"v2-the-replacement",
+        "the boundary cited the pre-rotation checkpoint"
+    );
+}
+
+/// C4 — §2.2's containment rule covers the TARGET; the write goes
+/// through a temp sibling nobody validates. `contained_path` refuses a
+/// symlinked component, then `write_file_atomic` computes
+/// `<name>.flint-sync-tmp` and `fs::write`s it — `File::create`
+/// semantics, which follow symlinks. The scanner skips symlinks, so the
+/// plant is invisible. The two helpers this tranche ADDED are worse:
+/// `control::write_atomic` and `state::write_atomic` have no
+/// containment at all and write into directories the app must be able
+/// to write, and `.flint/remote.seq` is rewritten on every tick — so
+/// the sidecar's own heartbeat performs the write, with no remote
+/// cooperation at all.
+///
+/// The sidecar holds the bucket credentials and runs with no
+/// `securityContext`: this is a cross-container write primitive, not a
+/// workspace-local nuisance.
+#[tokio::test]
+async fn a_planted_temp_sibling_is_never_written_through() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "seed.txt", "S1");
+    a.run_barrier().await.unwrap();
+
+    // Three victims, one per unvalidated writer.
+    let victims = ["consume-victim", "ticker-victim", "state-victim"];
+    for v in victims {
+        std::fs::write(outside.path().join(v), "ORIGINAL").unwrap();
+    }
+    // 1. the consume/checkout/sync writer's temp sibling
+    std::fs::create_dir_all(dir.path().join("inputs")).unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("consume-victim"),
+        dir.path().join("inputs/config.json.flint-sync-tmp"),
+    )
+    .unwrap();
+    // 2. the control-namespace writer's — rewritten every tick, in the
+    //    directory the agent drops its sentinels into
+    std::fs::create_dir_all(dir.path().join(super::CONTROL_DIR)).unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("ticker-victim"),
+        dir.path().join(super::CONTROL_DIR).join("remote.seq.tmp"),
+    )
+    .unwrap();
+    // 3. the state-dir writer's
+    std::os::unix::fs::symlink(
+        outside.path().join("state-victim"),
+        a.cfg.state_dir().join("baseline.tmp"),
+    )
+    .unwrap();
+
+    // A gateway write lands, and the ordinary barrier does the rest:
+    // consume writes the file, the ticker refreshes, the baseline saves.
+    hitl_write(&store, &a.cfg, "inputs/config.json", "REMOTE-BYTES", "ui").await.unwrap();
+    a.run_barrier().await.unwrap();
+    // …and one sentinel honor, which is what drives the ticker and the
+    // ack through the control-namespace writer.
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-tmp"}"#);
+    let acks = a.sentinel_tick().await.unwrap();
+    assert_eq!(acks.len(), 1, "the fixture never exercised the control writer");
+
+    for v in victims {
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join(v)).unwrap(),
+            "ORIGINAL",
+            "the sidecar wrote through a planted temp sibling ({v}) — an arbitrary-file-write \
+             primitive outside the workspace, with the bucket credentials"
+        );
+    }
+    // …and the workspace itself still works.
+    assert_eq!(read(dir.path(), "inputs/config.json").as_deref(), Some("REMOTE-BYTES"));
+    assert!(control_exists(dir.path(), "remote.seq"));
+}
+
+/// C2 — D13's load-bearing premise. §2.4.2 exempts the inbox consume
+/// and the citation-repair pass from gating, and D13 leans on it: HITL
+/// writes reach pinned readers "through the ungated repair pass, i.e.
+/// within one floor". The repair machinery lives ONLY in the fused
+/// barrier, which gated mode structurally never runs — its floor tick
+/// is the lane, its sentinel honor is lane+citation, its drain likewise.
+/// So the consume adopts the acked HITL bytes into the tree, the path
+/// is then clean-vs-baseline and never staged, and the manifest goes on
+/// citing the PRE-HITL version forever: invisible to every pinned
+/// reader, every DR checkout, every sibling sync, with no conflict
+/// record and no gauge. On a pure-spot fleet the successor materializes
+/// a tree without a write the gateway acked.
+#[tokio::test]
+async fn a_consumed_hitl_write_is_re_cited_in_gated_mode() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "shared.txt", "AGENT-V1");
+    a.run_barrier().await.unwrap();
+    gated(&mut a);
+
+    // The gateway acks a UI edit to a path the agent is not touching.
+    hitl_write(&store, &a.cfg, "shared.txt", "UI-EDIT", "ui").await.unwrap();
+    a.upload_lane().await.unwrap();
+    assert_eq!(
+        read(dir.path(), "shared.txt").as_deref(),
+        Some("UI-EDIT"),
+        "the fixture never got as far as the consume"
+    );
+    assert!(
+        a.load_stage().unwrap().entries.is_empty(),
+        "the fixture staged the path, so it never exercises the repair gap"
+    );
+
+    // One floor passes with the agent quiet.
+    let mut stage = a.load_stage().unwrap();
+    stage.last_citation_unix -= 3600;
+    a.save_stage(&stage).unwrap();
+
+    let due = a.citation_due(false).unwrap();
+    assert!(due.is_some(), "no citation is ever due for a consumed HITL write");
+    a.citation_pass(due.unwrap()).await.unwrap();
+
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let e = m.entries.get("shared.txt").expect("the boundary dropped the path entirely");
+    let key = a.cfg.file_key("shared.txt");
+    let (_, body) = match &e.version_id {
+        Some(v) => store.get_version(&key, v).await.unwrap(),
+        None => store.get_whole(&key, Some(&e.etag)).await.unwrap(),
+    };
+    assert_eq!(
+        &body[..],
+        b"UI-EDIT",
+        "the manifest still cites the pre-HITL version — under pinned_reads the acked write \
+         is invisible to every checkout, sibling sync and DR re-materialization"
+    );
+}
+
+/// C5 — the cell where two rules of §2.4.2 collide. D7's entry schema
+/// says `version_id: None` ⇒ "today's If-Match GET path verbatim", and
+/// calls mixed manifests a PERMANENT reader case. D13 says that under
+/// `pinned_reads` readers resolve exclusively by version and never
+/// S3-wins-adopt. A gated citation clones the predecessor manifest and
+/// stamps `pinned_reads = true` over it, so every path a pre-D7 binary
+/// cited keeps `version_id: None` INSIDE a pinned manifest — and
+/// checkout's match sends `(true, None)` to the etag arm, whose 412
+/// handler adopts the current version. So on the rollout path — enable
+/// gated on an existing workspace — the first lane staging of each
+/// legacy path makes a concurrent checkout adopt uncited,
+/// mid-logical-change bytes through the exact arm the mode exists to
+/// close. It does not self-correct: the adopter's baseline records the
+/// adopted etag, so the path scans clean and reads unchanged forever.
+#[tokio::test]
+async fn a_pinned_manifest_never_adopts_current_for_a_legacy_entry() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "legacy.txt", "L1");
+    write(dir_a.path(), "other.txt", "O1");
+    a.run_barrier().await.unwrap();
+
+    // What a pre-D7 binary left behind: cited by etag, no version id.
+    let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    let mut m = loaded.manifest.clone();
+    m.entries.get_mut("legacy.txt").unwrap().version_id = None;
+    manifest::cas_write(store.as_ref(), &a.cfg, &m, Some(&loaded.etag), 1, "legacy-writer")
+        .await
+        .unwrap();
+
+    // Gated is switched on. A boundary of its own stamps pinned_reads
+    // over the inherited entries.
+    gated(&mut a);
+    write(dir_a.path(), "other.txt", "O2");
+    backdate_baseline(&a, "other.txt");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::ForcedLagCap).await.unwrap();
+
+    // The agent now touches the legacy path. The lane moves its CURRENT
+    // version; the citation has not run.
+    write(dir_a.path(), "legacy.txt", "L2-MID-CHANGE");
+    backdate_baseline(&a, "legacy.txt");
+    a.upload_lane().await.unwrap();
+
+    // Anti-vacuity: the uncited version is current at the real key…
+    let key = a.cfg.file_key("legacy.txt");
+    let (_, raw) = store.get_whole(&key, None).await.unwrap();
+    assert_eq!(&raw[..], b"L2-MID-CHANGE", "nothing was actually staged");
+    let now = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(now.pinned_reads, "the fixture never got a pinned manifest");
+
+    // …and a successor checks out in that window.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    b.checkout().await.unwrap();
+    assert_eq!(
+        read(dir_b.path(), "legacy.txt").as_deref(),
+        Some("L1"),
+        "a pinned checkout S3-wins-adopted uncited mid-change bytes for a legacy entry"
+    );
+    assert_eq!(read(dir_b.path(), "other.txt").as_deref(), Some("O2"));
+}
+
+/// C5, the residue. The backfill answers from the version history, so
+/// what is left is the entry it CANNOT answer for: a legacy citation
+/// whose etag matches no surviving version. Under `pinned_reads` the
+/// current version is exactly what D13 excludes — uncited, possibly
+/// mid-change bytes — so the reader must refuse, not adopt. The bytes
+/// are not lost; `recover-staged` re-cites forward.
+#[tokio::test]
+async fn an_unresolvable_legacy_citation_refuses_rather_than_adopts() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "legacy.txt", "L1");
+    write(dir_a.path(), "other.txt", "O1");
+    a.run_barrier().await.unwrap();
+
+    let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    let mut m = loaded.manifest.clone();
+    let v1 = m.entries["legacy.txt"].version_id.clone().unwrap();
+    m.entries.get_mut("legacy.txt").unwrap().version_id = None;
+    manifest::cas_write(store.as_ref(), &a.cfg, &m, Some(&loaded.etag), 1, "legacy-writer")
+        .await
+        .unwrap();
+
+    // A mixed-writer bucket: something moves the object on WITHOUT an
+    // inbox entry (announce it and the repair pass would answer for it
+    // instead), and the cited generation is then reaped — so the
+    // citation names bytes no surviving version carries.
+    let key = a.cfg.file_key("legacy.txt");
+    let body = Bytes::from_static(b"FOREIGN-CURRENT");
+    let crc = crc64_nvme(&body);
+    store
+        .put_whole(
+            &key,
+            body,
+            &PutCondition::IfMatch(m.entries["legacy.txt"].etag.clone()),
+            &GenerationStamps {
+                generation: 0,
+                epoch: 0,
+                flush_uuid: "foreign".into(),
+                boundary_source: None,
+                posix: None,
+            },
+            crc,
+        )
+        .await
+        .unwrap();
+    store.delete_version(&key, &v1).await.unwrap();
+
+    gated(&mut a);
+    write(dir_a.path(), "other.txt", "O2");
+    backdate_baseline(&a, "other.txt");
+    a.upload_lane().await.unwrap();
+    let cite = a.citation_pass(CitationSource::ForcedLagCap).await.unwrap();
+    assert!(
+        !cite.backfilled.contains(&"legacy.txt".to_string()),
+        "the fixture left the entry resolvable, so it never reaches the reader rule"
+    );
+    let installed = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(installed.pinned_reads);
+    assert!(
+        installed.entries["legacy.txt"].version_id.is_none(),
+        "the fixture never produced an unresolvable legacy entry"
+    );
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    let err = b.checkout().await;
+    assert!(
+        err.is_err(),
+        "a pinned checkout adopted the current version for an unresolvable legacy citation"
+    );
+    assert_eq!(
+        read(dir_b.path(), "legacy.txt"),
+        None,
+        "the uncited foreign bytes were materialized anyway"
+    );
+}
+
+/// C6 — the ack that claims a boundary the citation dropped. A gated
+/// publish honor runs the citation lane, and the citation drops a
+/// staged path when a HITL write lands between the lane's consume and
+/// its window. The shipped honor acked `status: "ok"` regardless, with
+/// `parked` taken from the LANE only and no field anywhere that could
+/// name the dropped path: the agent that declared a point containing p
+/// is told "ok, uploaded 1" while the manifest at the acked seq still
+/// cites p's previous generation. That is §2.1's D1 corollary
+/// falsified, and the drain makes it worst — the last boundary of the
+/// workspace's life, with the pending record dying with the emptyDir.
+///
+/// The rule is tested where it lives, because the drop's own window —
+/// between two awaits inside the honor — is not schedulable from a
+/// fixture. The stale-base drop is deliberately NOT a lie: it fires
+/// only when the foreign bytes are the local bytes.
+#[tokio::test]
+async fn a_gated_ack_never_claims_a_path_the_citation_dropped() {
+    let pending = super::sentinel::PendingSentinel {
+        verb: "publish".into(),
+        consumed_mtime_unix_ns: 7,
+        consumed_at: 0,
+        nonces: vec!["n-1".into()],
+        note: None,
+        scope: None,
+        torn: false,
+    };
+    let lane = super::gated::LaneReport {
+        staged: vec!["p".into(), "q".into()],
+        staged_bytes: 2,
+        ..Default::default()
+    };
+
+    // The boundary carried everything declared.
+    let clean = super::gated::CitationReport { seq: Some(9), cited: 2, ..Default::default() };
+    let ok = super::sentinel::gated_ack(&pending, false, &lane, &clean, Some("e".into()));
+    assert_eq!(ok.status, "ok");
+    assert!(ok.report.dropped.is_empty());
+
+    // A HITL write landed mid-lane and p was dropped from the boundary.
+    let dropped = super::gated::CitationReport {
+        seq: Some(9),
+        cited: 1,
+        dropped_inflight: vec!["p".into()],
+        ..Default::default()
+    };
+    let partial = super::sentinel::gated_ack(&pending, false, &lane, &dropped, Some("e".into()));
+    assert_ne!(
+        partial.status, "ok",
+        "the ack claimed a coherent point that omits a path the agent declared"
+    );
+    assert_eq!(partial.report.dropped, vec!["p".to_string()]);
+    assert_eq!(partial.nonces, vec!["n-1".to_string()], "the agent must still be answered");
+
+    // The stale-base drop is content-equal by construction: the point
+    // does carry the agent's bytes, so it stays ok.
+    let equal = super::gated::CitationReport {
+        seq: Some(9),
+        cited: 1,
+        dropped_stale_base: vec!["p".into()],
+        ..Default::default()
+    };
+    let still_ok = super::sentinel::gated_ack(&pending, false, &lane, &equal, Some("e".into()));
+    assert_eq!(still_ok.status, "ok");
+}
+
+/// The other half of C3, and the one TLC found — in a fix that was two
+/// hours old. `stage.entries` and `withheld_deletes` carry no ordering,
+/// so an overlap between them is ambiguous: delete-then-recreate needs
+/// the upsert to win, create-then-delete needs the delete to win, and
+/// `manifest::merge` sees only two sets. The shipped merge applied
+/// deletes last (right here, wrong for the recreate); the first C3 fix
+/// made upserts win (right there, wrong here — a boundary citing a file
+/// the agent had deleted, acked ok on a declared boundary). The
+/// ordering is only known where it is observed, so the lane cancels
+/// each against the other and merge resolves nothing.
+///
+/// Two shapes, because they reach the stage by different routes: a path
+/// the manifest already cites (classify sees the delete) and one staged
+/// but never cited (classify cannot see it AT ALL — it has no baseline
+/// entry — so the stage carries its own absence memory).
+#[tokio::test]
+async fn a_delete_cancels_the_version_the_lane_had_already_staged() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "ckpt.bin", "V1");
+    a.run_barrier().await.unwrap();
+    gated(&mut a);
+
+    // Shape A: a CITED path, re-staged, then removed.
+    write(dir.path(), "ckpt.bin", "V2-the-next-one");
+    backdate_baseline(&a, "ckpt.bin");
+    // Shape B: a scratch file staged but never cited.
+    write(dir.path(), "scratch.tmp", "TEMP");
+    a.upload_lane().await.unwrap();
+    let stage = a.load_stage().unwrap();
+    let staged_a = stage.entries["ckpt.bin"].version_id.clone().unwrap();
+    let staged_b = stage.entries["scratch.tmp"].version_id.clone().unwrap();
+
+    std::fs::remove_file(dir.path().join("ckpt.bin")).unwrap();
+    std::fs::remove_file(dir.path().join("scratch.tmp")).unwrap();
+    a.upload_lane().await.unwrap();
+    a.upload_lane().await.unwrap();
+
+    let stage = a.load_stage().unwrap();
+    assert!(
+        stage.withheld_deletes.contains("ckpt.bin"),
+        "the fixture never confirmed the cited path's absence"
+    );
+    assert!(
+        !stage.entries.contains_key("ckpt.bin"),
+        "the lane kept a staged version for a path it has since seen deleted"
+    );
+    assert!(
+        !stage.entries.contains_key("scratch.tmp"),
+        "a staged-but-never-cited path survived its own deletion — classify cannot see it"
+    );
+
+    a.citation_pass(CitationSource::ForcedLagCap).await.unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(
+        !m.entries.contains_key("ckpt.bin"),
+        "the boundary cited a file the agent had deleted before it"
+    );
+    assert!(
+        !m.entries.contains_key("scratch.tmp"),
+        "the boundary cited a scratch file that never existed at any coherent point"
+    );
+    // The uncited versions are reclaimed rather than left as litter.
+    for (path, v) in [("ckpt.bin", staged_a), ("scratch.tmp", staged_b)] {
+        assert!(
+            store.get_version(&a.cfg.file_key(path), &v).await.is_err(),
+            "the cancelled staging left an uncited version behind ({path})"
+        );
+    }
 }

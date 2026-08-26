@@ -49,6 +49,7 @@ pub mod inbox;
 pub mod lease;
 pub mod manifest;
 pub mod scan;
+pub(crate) mod safefs;
 pub mod sentinel;
 pub mod state;
 pub mod sync;

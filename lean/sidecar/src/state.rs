@@ -129,10 +129,10 @@ const INTENT: &str = "intent.json";
 const CONFLICTS: &str = "conflicts.jsonl";
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> LeanResult<()> {
+    // The state dir lives in the same app-writable emptyDir.
+    super::safefs::check_parent(path)?;
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    super::safefs::write_via_tmp(path, &tmp, bytes, None)
 }
 
 impl SidecarState {

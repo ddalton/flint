@@ -140,7 +140,12 @@ pub struct PendingSentinel {
 /// The ack document (`.flint/<verb>.ack`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ack {
-    /// "ok" | "refused-fenced".
+    /// "ok" | "partial" | "refused-fenced".
+    ///
+    /// `partial` is the gated citation's honest answer (D1): the
+    /// boundary installed, but a path the agent declared is not in it —
+    /// `report.dropped` names them. An agent that treats it as failure
+    /// and re-touches is behaving correctly.
     pub status: String,
     pub nonces: Vec<String>,
     pub sentinel_mtime_unix_ns: u128,
@@ -176,6 +181,49 @@ pub struct AckReport {
     /// Foreign changes seen but deferred to the inbox flow (D4).
     #[serde(default)]
     pub out_of_scope_foreign: usize,
+    /// Declared paths the boundary does NOT carry (gated citations
+    /// only). Non-empty ⇒ `status: "partial"`: the §2.2 rule — the
+    /// conflict report rides the ack in full, never a silent loser —
+    /// generalized from `sync` to the publish verb.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped: Vec<String>,
+}
+
+/// The ack a gated publish honor writes.
+///
+/// Extracted so the one rule that makes it truthful is testable on its
+/// own: a citation can install a boundary that does NOT carry a path
+/// the agent declared, and the shipped honor said `status: "ok"` with
+/// no field anywhere that could express the exception — the plan's own
+/// "silent loser", at the verb whose whole contract is D1's at-least
+/// guarantee.
+pub(crate) fn gated_ack(
+    pending: &PendingSentinel,
+    forced: bool,
+    lane: &super::gated::LaneReport,
+    cite: &super::gated::CitationReport,
+    manifest_etag: Option<String>,
+) -> Ack {
+    let dropped = cite.dropped_inflight.clone();
+    Ack {
+        status: if dropped.is_empty() { "ok".into() } else { "partial".into() },
+        nonces: pending.nonces.clone(),
+        sentinel_mtime_unix_ns: pending.consumed_mtime_unix_ns,
+        seq: cite.seq,
+        manifest_etag,
+        boundary: if forced { "sentinel-deferred".into() } else { "sentinel".into() },
+        completed_unix: now_unix(),
+        observed_epoch: None,
+        report: AckReport {
+            uploaded: lane.staged.len(),
+            deleted: cite.deleted.len(),
+            parked: lane.parked.len(),
+            consumed: lane.consumed,
+            no_change: lane.staged.is_empty() && cite.no_change && dropped.is_empty(),
+            dropped,
+            ..Default::default()
+        },
+    }
 }
 
 /// The work meter (D3.1 — the hot-loops no-regression rule).
@@ -646,32 +694,38 @@ impl Sidecar {
         pending: &PendingSentinel,
         forced: bool,
     ) -> LeanResult<Ack> {
-        let lane = self.declared_lane().await?;
-        let cite = self.citation_pass(super::gated::CitationSource::Sentinel).await?;
+        let mut lane = self.declared_lane().await?;
+        let mut cite = self.citation_pass(super::gated::CitationSource::Sentinel).await?;
+        // D1, at the one place gated can break it. A citation drops a
+        // staged path when a HITL write landed between the lane's
+        // consume and the citation's window — so the manifest this ack
+        // would name still cites the PREVIOUS generation of a path the
+        // agent declared. Re-run once: the racing entry is queued in
+        // the inbox now, the lane consumes it the ordinary way (the
+        // local file is still dirty, so the conflict rule publishes the
+        // agent's bytes and preserves the user's), and the second
+        // citation carries the declared point.
+        if !cite.dropped_inflight.is_empty() {
+            let lane2 = self.declared_lane().await?;
+            let mut cite2 = self.citation_pass(super::gated::CitationSource::Sentinel).await?;
+            if cite2.seq.is_none() {
+                // Nothing left to cite: the boundary the first pass
+                // installed is still the one being acked.
+                cite2.seq = cite.seq;
+            }
+            lane.staged.extend(lane2.staged);
+            lane.parked.extend(lane2.parked);
+            lane.staged_bytes += lane2.staged_bytes;
+            lane.consumed += lane2.consumed;
+            cite = cite2;
+        }
         // Metered on what the LANE moved: the citation itself is one
         // CAS regardless of how many paths it names, so charging by
         // cited-path count would price the mode's whole advantage as a
         // cost (D3.1).
         self.charge_budget(lane.staged_bytes)?;
         let baseline = self.state.load_baseline()?;
-        Ok(Ack {
-            status: "ok".into(),
-            nonces: pending.nonces.clone(),
-            sentinel_mtime_unix_ns: pending.consumed_mtime_unix_ns,
-            seq: cite.seq,
-            manifest_etag: baseline.manifest_etag.clone(),
-            boundary: if forced { "sentinel-deferred".into() } else { "sentinel".into() },
-            completed_unix: now_unix(),
-            observed_epoch: None,
-            report: AckReport {
-                uploaded: lane.staged.len(),
-                deleted: cite.deleted.len(),
-                parked: lane.parked.len(),
-                consumed: lane.consumed,
-                no_change: lane.staged.is_empty() && cite.no_change,
-                ..Default::default()
-            },
-        })
+        Ok(gated_ack(pending, forced, &lane, &cite, baseline.manifest_etag.clone()))
     }
 
     async fn honor_sync(&mut self, pending: &PendingSentinel, forced: bool) -> LeanResult<Ack> {
@@ -949,7 +1003,16 @@ impl Sidecar {
     /// the agent both survive, must not strand a waiting agent.
     pub async fn drain(&mut self) -> LeanResult<Vec<Ack>> {
         let mut acks = vec![];
+        // Only an ok PUBLISH ack means a boundary already ran. A sync
+        // ack carries a seq too — the manifest it synced AGAINST — while
+        // publishing nothing, so asking "did any ack carry a seq?" lets
+        // a pending `.flint/sync` at SIGTERM cancel the drain's own
+        // cite-everything pass and forfeit every byte since the last
+        // boundary. The floor arm's `sync_ack_is_not_a_floor` comment
+        // names this exact trap; the drain repeated it.
+        let mut published = false;
         for verb in [Verb::Sync, Verb::Publish] {
+            let is_publish = matches!(verb, Verb::Publish);
             if self.load_pending(verb)?.is_some() {
                 match self.honor_pending(verb, true).await {
                     Ok(Some(mut a)) => {
@@ -959,6 +1022,7 @@ impl Sidecar {
                         let bytes = serde_json::to_vec_pretty(&a)
                             .map_err(|e| LeanError::State(format!("ack: {e}")))?;
                         write_atomic(&self.ack_path(verb), &bytes)?;
+                        published |= is_publish && a.status == "ok";
                         acks.push(a);
                     }
                     Ok(None) => {}
@@ -970,7 +1034,7 @@ impl Sidecar {
                 }
             }
         }
-        if !acks.iter().any(|a| a.seq.is_some()) {
+        if !published {
             // D10: the drain cites EVERYTHING, in every mode. Under
             // gated that is the lane plus one CAS naming versions that
             // already exist — no data movement, which is exactly what

@@ -998,6 +998,7 @@ pub(super) fn write_file_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) ->
         let p = path.display().to_string();
         move |e| super::LeanError::State(format!("{op} {p}: {e}"))
     }
+    super::safefs::check_parent(path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(ctx("mkdir for", path))?;
     }
@@ -1007,14 +1008,7 @@ pub(super) fn write_file_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) ->
         "{}.flint-sync-tmp",
         path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
     ));
-    std::fs::write(&tmp, bytes).map_err(ctx("write tmp for", path))?;
-    #[cfg(unix)]
-    if let Some(mode) = mode {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode & 0o7777));
-    }
-    #[cfg(not(unix))]
-    let _ = mode;
-    std::fs::rename(&tmp, path).map_err(ctx("rename into", path))?;
-    Ok(())
+    // The temp sibling is computed AFTER containment ran, so the walk
+    // never saw it: it needs its own refusal, not a plain write.
+    super::safefs::write_via_tmp(path, &tmp, bytes, mode)
 }

@@ -119,6 +119,10 @@ pub struct SentinelPosture {
 }
 
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> LeanResult<()> {
+    // `.flint/` is app-writable by construction — the agent drops its
+    // sentinels there — so both the parent and the temp name are
+    // attacker-reachable, and `remote.seq` is rewritten every tick.
+    super::safefs::check_parent(path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -126,9 +130,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> LeanResult<()> {
         "{}.tmp",
         path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
     ));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    super::safefs::write_via_tmp(path, &tmp, bytes, None)
 }
 
 fn write_json<T: Serialize>(path: &Path, v: &T) -> LeanResult<()> {

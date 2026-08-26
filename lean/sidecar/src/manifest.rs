@@ -158,6 +158,15 @@ pub async fn cas_write_stamped(
 /// The three-way merge (the model's `inst`). Starts from THEIRS so
 /// foreign entries survive by construction; applies my upserts; applies
 /// my deletes only where theirs is unchanged since my merge base.
+///
+/// **`mine_upserts` and `mine_deletes` must be DISJOINT**, and that is
+/// the caller's job, not this function's: which one wins depends on
+/// which the tree saw LAST, and neither set carries that. The fused
+/// barrier gets it free (both are computed from one scan); the gated
+/// lane, whose stage and tombstones persist across ticks, cancels each
+/// against the other as it observes them. Resolving an overlap here —
+/// in either direction — cites a deleted file half the time and
+/// amputates a live one the other half. TLC found both halves.
 /// Returns the merged document plus the foreign entries a consume must
 /// integrate next (present in theirs, changed vs base, not mine).
 pub fn merge(
@@ -190,6 +199,7 @@ pub fn merge(
         if parked.contains(p) {
             continue;
         }
+
         let theirs_unchanged = match (theirs.entries.get(p), base.get(p)) {
             (Some(e), Some(b)) => &e.etag == b,
             (None, None) => true,

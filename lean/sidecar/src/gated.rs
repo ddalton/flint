@@ -93,6 +93,21 @@ pub struct PendingStage {
     /// dead code and every citation would ride the lag cap).
     pub last_scan_fingerprint: Option<String>,
     pub stable_since_unix: u64,
+    /// Legacy-cited paths (no `version_id`) whose cited etag matched no
+    /// surviving version, so the backfill below could not make them
+    /// addressable. Remembered so one unresolvable entry does not buy a
+    /// whole version listing at every subsequent citation.
+    #[serde(default)]
+    pub legacy_unresolved: BTreeSet<String>,
+    /// Staged paths the last lane pass did not see on disk. A staged
+    /// path that was never CITED has no baseline entry, so
+    /// `scan::classify` cannot call it a delete — it cannot see it at
+    /// all — and the stage would carry its version into a boundary for
+    /// a file the agent removed. This is that path's own
+    /// two-observations memory, the rename-vs-walk guard applied where
+    /// classify cannot reach.
+    #[serde(default)]
+    pub staged_absent_once: BTreeSet<String>,
 }
 
 /// Which coherent point fired.
@@ -105,6 +120,12 @@ pub enum CitationSource {
     Cadence,
     Drain,
     Recovered,
+    /// A repair-only pass: nothing of the agent's is staged, but the
+    /// manifest cites an older object than the one this sidecar has
+    /// already INTEGRATED (a consumed HITL write, checkout's S3-wins
+    /// arm). §2.4.2 exempts these from gating, and D13's promise to
+    /// pinned readers — "within one floor" — is this source.
+    Repair,
 }
 
 impl CitationSource {
@@ -117,6 +138,7 @@ impl CitationSource {
             CitationSource::Cadence => "cadence",
             CitationSource::Drain => "drain",
             CitationSource::Recovered => "recovered",
+            CitationSource::Repair => "repair",
         }
     }
 }
@@ -147,6 +169,18 @@ pub struct CitationReport {
     pub source: Option<String>,
     pub cited: usize,
     pub dropped_stale_base: Vec<String>,
+    /// Paths dropped because a HITL write landed between the lane's
+    /// consume and this citation's window. Unlike the stale-base drop,
+    /// the agent's latest bytes are NOT in the installed boundary — so
+    /// an ack for a declared point that names one of these is a lie
+    /// (D1's at-least guarantee).
+    pub dropped_inflight: Vec<String>,
+    /// Paths re-cited onto bytes this sidecar had already integrated —
+    /// no data moved (§2.4.2's ungated repair).
+    pub repaired: Vec<String>,
+    /// Inherited entries this boundary made version-addressable before
+    /// stamping `pinned_reads` over them.
+    pub backfilled: Vec<String>,
     pub deleted: Vec<String>,
     /// Versions reaped by flint's EXACT per-citation GC — the reaper.
     /// Lifecycle is only the backstop (D8), and on `files/` it cannot
@@ -290,11 +324,57 @@ impl Sidecar {
                             report.superseded_reclaimed += 1;
                         }
                     }
+                    // The path is back. A tombstone standing from an
+                    // earlier tick would otherwise ride into the same
+                    // citation as this upsert, and merge applies
+                    // deletes last: delete-then-recreate inside one
+                    // citation interval would install a boundary that
+                    // omits a file present on disk and staged this
+                    // pass.
+                    stage.withheld_deletes.remove(path);
                     stage.entries.insert(path.clone(), entry);
                 }
                 None => report.parked.push(path.clone()),
             }
         }
+
+        // A staged version is cancelled by the file's departure, the
+        // mirror of the tombstone cancellation above. The lane has now
+        // seen the path GONE, later than it saw it present; a citation
+        // carrying both the stage entry and the tombstone would install
+        // one of them by accident of merge order, and merge has no way
+        // to know which came last. Reclaiming the version costs
+        // nothing — it was never cited.
+        let mut absent_now: BTreeSet<String> = BTreeSet::new();
+        let staged_paths: Vec<String> = stage.entries.keys().cloned().collect();
+        let mut cancel: Vec<String> = vec![];
+        for path in staged_paths {
+            if scanned.contains_key(&path) {
+                continue;
+            }
+            if classified.deletes.contains(&path) {
+                cancel.push(path);
+            } else if stage.staged_absent_once.contains(&path)
+                || (declared
+                    && std::fs::symlink_metadata(self.cfg.root.join(&path)).is_err())
+            {
+                // Never cited, so classify cannot see it: two lane
+                // observations, or one direct lstat on a DECLARED
+                // boundary, stand in for the two-scan rule.
+                cancel.push(path);
+            } else {
+                absent_now.insert(path);
+            }
+        }
+        for path in cancel {
+            if let Some(stale) = stage.entries.remove(&path) {
+                if let Some(vid) = stale.version_id {
+                    let _ = self.store.delete_version(&stale.key, &vid).await;
+                    report.superseded_reclaimed += 1;
+                }
+            }
+        }
+        stage.staged_absent_once = absent_now;
 
         // Deletes are WITHHELD until a citation pass (unchanged rule).
         for p in &classified.deletes {
@@ -369,18 +449,68 @@ impl Sidecar {
         }
     }
 
+    /// Paths whose INTEGRATED object (the baseline) differs from the
+    /// manifest's citation: a consumed HITL write, or checkout's
+    /// S3-wins adoption. The fused barrier has carried this repair
+    /// since the amputation leg; gated mode never runs the fused
+    /// barrier, so without the same pass here an acked HITL write is
+    /// adopted into the tree, scans clean forever after, and stays
+    /// cited at its PREVIOUS version — invisible to exactly the
+    /// pinned readers D13 governs.
+    pub fn repair_candidates(&self) -> LeanResult<Vec<String>> {
+        let baseline = self.state.load_baseline()?;
+        let stage = self.load_stage()?;
+        Ok(baseline
+            .entries
+            .iter()
+            .filter(|(p, be)| {
+                be.size != u64::MAX // consume-dirty sentinel: publishes via the lane
+                    && !stage.entries.contains_key(*p)
+                    && !stage.withheld_deletes.contains(*p)
+                    && baseline.inst_base.get(*p) != Some(&be.etag)
+            })
+            .map(|(p, _)| p.clone())
+            .collect())
+    }
+
+    /// `(key, etag)` -> version id, over this subtree's whole version
+    /// history. One listing answers for every legacy entry at once,
+    /// including paths whose CURRENT version has already moved past
+    /// the citation — which a HEAD, by construction, cannot.
+    async fn version_index(&self) -> LeanResult<BTreeMap<(String, String), String>> {
+        let files_prefix = format!("{}/files/", self.cfg.prefix);
+        let mut ix: BTreeMap<(String, String), String> = BTreeMap::new();
+        // A backend that cannot list versions leaves every legacy entry
+        // unresolved, which the reader rule then refuses rather than
+        // adopts. Gated already refuses such a backend at startup.
+        for v in self.store.list_versions(&files_prefix).await.unwrap_or_default() {
+            if v.is_delete_marker {
+                continue;
+            }
+            ix.entry((v.key, v.etag)).or_insert(v.version_id);
+        }
+        Ok(ix)
+    }
+
     /// Which coherent point, if any, is due right now.
     pub fn citation_due(&self, sentinel_pending: bool) -> LeanResult<Option<CitationSource>> {
         let stage = self.load_stage()?;
+        let now = now_unix();
         if stage.entries.is_empty() && stage.withheld_deletes.is_empty() {
-            // Nothing to cite. A repair-only pass is still driven by the
-            // ordinary barrier path.
+            // Nothing of the agent's is staged — but a repair still
+            // owes the readers a boundary. Not a forced cap: nothing is
+            // late, and stamping these "forced" would misread the
+            // operator's own tell.
+            if !self.repair_candidates()?.is_empty()
+                && now.saturating_sub(stage.last_citation_unix) >= self.cfg.floor_secs
+            {
+                return Ok(Some(CitationSource::Repair));
+            }
             return Ok(None);
         }
         if sentinel_pending {
             return Ok(Some(CitationSource::Sentinel));
         }
-        let now = now_unix();
         // The lag cap forces one even mid-change: unbounded citation
         // staleness is impossible by construction, which is why `gated`
         // is REFUSED without a bound rather than defaulted.
@@ -422,7 +552,8 @@ impl Sidecar {
 
         let mut stage = self.load_stage()?;
         let mut baseline = self.state.load_baseline()?;
-        if stage.entries.is_empty() && stage.withheld_deletes.is_empty() {
+        let repairs = self.repair_candidates()?;
+        if stage.entries.is_empty() && stage.withheld_deletes.is_empty() && repairs.is_empty() {
             report.no_change = true;
             return Ok(report);
         }
@@ -488,6 +619,49 @@ impl Sidecar {
             stage.entries.remove(p);
         }
 
+        // The ungated repair (§2.4.2). No bytes move: the object IS
+        // what this sidecar already integrated, and the citation is
+        // catching up to it. The HEAD is also what supplies the VERSION
+        // id — a consume records none, and under `pinned_reads` a
+        // citation without one is unreadable by the very readers this
+        // pass exists for.
+        for path in &repairs {
+            if upserts.contains_key(path) {
+                continue;
+            }
+            let Some(be) = baseline.entries.get(path).cloned() else { continue };
+            let key = self.cfg.file_key(path);
+            let meta = match self.store.head(&key).await {
+                Ok(m) if m.etag == be.etag => m,
+                // Moved again or gone: citing a version this workspace
+                // has not integrated would be the lie the repair exists
+                // to prevent. The next consume reconciles it.
+                _ => continue,
+            };
+            let stamps = GenerationStamps::from_meta(&meta.meta);
+            let scan_entry = scanned.get(path);
+            upserts.insert(
+                path.clone(),
+                LeanEntry {
+                    key,
+                    etag: meta.etag.clone(),
+                    crc64_b64: meta.crc64_b64.clone(),
+                    size: meta.size,
+                    mode: stamps
+                        .as_ref()
+                        .and_then(|s| s.posix)
+                        .map(|p| p.mode)
+                        .or(scan_entry.map(|s| s.mode))
+                        .unwrap_or(0o644),
+                    mtime_unix: scan_entry.map(|s| s.mtime_unix).unwrap_or(be.mtime_unix),
+                    generation: stamps.map(|s| s.generation).unwrap_or(be.generation),
+                    epoch,
+                    version_id: meta.version_id.clone(),
+                },
+            );
+            report.repaired.push(path.clone());
+        }
+
         // Window open/clear belong to THIS lane only.
         let deadline = now_unix() + self.cfg.window_slack_secs;
         let opened =
@@ -515,7 +689,13 @@ impl Sidecar {
         for path in &inflight {
             if upserts.remove(path).is_some() {
                 stage.entries.remove(path);
-                report.dropped_stale_base.push(path.clone());
+                // Kept separate from the stale-base drop on purpose:
+                // this one, and only this one, removes the agent's
+                // LATEST bytes from a boundary it may be acked for.
+                // The stale-base drop fires only when the foreign bytes
+                // ARE the local bytes, so the point still carries the
+                // agent's content.
+                report.dropped_inflight.push(path.clone());
                 self.state.append_conflict(&ConflictRecord {
                     path: path.clone(),
                     foreign_etag: String::new(),
@@ -532,6 +712,9 @@ impl Sidecar {
         let mut intent = self.state.load_intent()?;
         let prev_installed = intent.installed_etag.clone();
         let mut attempt = 0;
+        let mut version_index: Option<BTreeMap<(String, String), String>> = None;
+        let mut backfilled: Vec<String> = vec![];
+        let mut unresolved: BTreeSet<String> = BTreeSet::new();
         let (installed, installed_etag, foreign) = loop {
             attempt += 1;
             if attempt > 4 {
@@ -566,6 +749,40 @@ impl Sidecar {
             // D13: this citation's readers resolve by version, never by
             // S3-wins adoption of the current version.
             merged.pinned_reads = true;
+            // The mixed-manifest cell, where D7's entry schema and D13
+            // collide. Stamping `pinned_reads` over an entry a pre-D7
+            // writer cited leaves it addressable only by etag — and the
+            // moment the lane stages that path, its current version is
+            // uncited mid-change bytes that checkout's fallback arm
+            // would adopt. Resolve the CITED etag in the bucket's own
+            // version history before installing: one listing, and it
+            // answers even where the current version has already moved.
+            let legacy: Vec<String> = merged
+                .entries
+                .iter()
+                .filter(|(p, e)| {
+                    e.version_id.is_none() && !stage.legacy_unresolved.contains(*p)
+                })
+                .map(|(p, _)| p.clone())
+                .collect();
+            if !legacy.is_empty() {
+                if version_index.is_none() {
+                    version_index = Some(self.version_index().await?);
+                }
+                let ix = version_index.as_ref().expect("just built");
+                for path in legacy {
+                    let Some(e) = merged.entries.get_mut(&path) else { continue };
+                    match ix.get(&(e.key.clone(), e.etag.clone())) {
+                        Some(vid) => {
+                            e.version_id = Some(vid.clone());
+                            backfilled.push(path);
+                        }
+                        None => {
+                            unresolved.insert(path);
+                        }
+                    }
+                }
+            }
             match manifest::cas_write_stamped(
                 self.store.as_ref(),
                 &self.cfg,
@@ -592,6 +809,10 @@ impl Sidecar {
         };
         report.seq = Some(installed.seq);
         report.cited = upserts.len();
+        backfilled.sort();
+        backfilled.dedup();
+        report.backfilled = backfilled;
+        stage.legacy_unresolved.extend(unresolved);
         self.note_boundary(source.as_str(), installed.seq)?;
 
         // GC of keys the NEW manifest no longer references — deletes
@@ -671,6 +892,13 @@ impl Sidecar {
 
         // Baseline rewrite.
         for (path, e) in &installed.entries {
+            // A repaired path keeps its integrated stat; only the
+            // version id it is now cited by is new.
+            if report.repaired.contains(path) {
+                if let Some(be) = baseline.entries.get_mut(path) {
+                    be.version_id = e.version_id.clone();
+                }
+            }
             if let Some(pe) = stage.entries.get(path) {
                 baseline.entries.insert(
                     path.clone(),

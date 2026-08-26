@@ -164,6 +164,23 @@ impl Sidecar {
                         },
                         _ => match store.get_whole(&entry.key, Some(&entry.etag)).await {
                             Ok(ok) => ok,
+                            Err(StoreError::PreconditionFailed(_)) if pinned => {
+                                // The mixed-manifest cell: a pinned
+                                // boundary carrying an entry the
+                                // citation could not make
+                                // version-addressable (its cited etag
+                                // matched no surviving version). D13
+                                // says readers under `pinned_reads`
+                                // never S3-wins-adopt, and here the
+                                // current version is precisely what the
+                                // rule excludes — uncited, possibly
+                                // mid-logical-change bytes. Refuse
+                                // loudly; the bytes are not lost.
+                                return Err(LeanError::State(format!(
+                                    "manifest cites {} at an etag the object no longer                                      carries, and the entry names no version to resolve                                      instead — refusing to adopt uncited bytes into a                                      pinned checkout. Run `flint-sync recover-staged` to                                      re-cite forward",
+                                    entry.key
+                                )));
+                            }
                             Err(StoreError::PreconditionFailed(_)) => {
                                 // S3-wins: the object moved past the
                                 // manifest (a HITL write not yet
