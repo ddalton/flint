@@ -197,6 +197,7 @@ Consequences, all mandatory:
 - **`noncurrentRetentionDays` defaults to 30**, operator-provisioned on `<prefix>/files/` with `ExpiredObjectDeleteMarker`, under `bootstrap_lifecycle`'s read-merge-append discipline (`s3.rs:763-840`) — `PutBucketLifecycleConfiguration` is full-replace and must never clobber the MPU-abort rule or user rules. Because exact reclamation already runs at every citation, a long standing retention costs ~nothing in steady state: it holds crash-window remnants only.
 - **A shorter covering rule is a refusal, not a warning.** A9 *recommends* `NoncurrentVersionExpiration` fleet-wide (`s3.rs:418-433`), so a customer sitting at noncurrent-days=1 would arm the destroyer without touching flint at all. The operator reads the live lifecycle config; any rule whose scope covers `<prefix>/files/` with a shorter noncurrent expiration ⇒ `BoundaryModeAccepted=False`, gated refused, the offending rule Id named in the message. Re-checked on the operator cadence, never assumed stable. Leg B24.
 - **The cross-validation survives verbatim in its new subject:** `noncurrentRetentionDays×86400 > K×(visibilityLagBoundSecs + floor_secs)`, K=2 — the longest a cited version can *legitimately* sit noncurrent is one staging window.
+- **Correction forced by the formal model (tranche 3 product 2, §10.1c):** the base-version re-validation below is **unreachable** as written — the lane never advances the baseline, so a staged path is by construction locally-dirty, and consume and sync both refuse dirty paths and surface a conflict instead. It stays as defence in depth. The reachable form of the same hazard is a **HITL write landing between the lane and the citation**, which the baseline cannot see and the windowless lane does not fence; the citation drops any staged path named by a live inbox entry (free — the window CAS already loaded it), and the version reaper **never reclaims the CURRENT version**. Without the second rule the citation *deleted* the user's write.
 - **Versioning conformance is a probe, not an assumption:** versioning=Enabled, `x-amz-version-id` returned on PUT, GET/HEAD/DELETE by versionId, `ListObjectVersions` permitted. A project-scoped proxy that strips the version header degrades this design **silently** — pending entries would carry `None`, and citation would fall back to etag semantics on a key whose current version is uncited, which is precisely the torn view — so the probe refuses gated mode outright rather than degrading into it. Leg B24's control arm.
 - **Sweep fallback** (proxies that cannot express lifecycle rules) keeps its shape: the operator's 1800 s pass issues version-scoped deletes for uncited versions older than the retention, driven off `orphans.json` with a `ListObjectVersions` fallback.
 
@@ -558,9 +559,10 @@ What replaces it is **storage, not requests**: uncited versions (at most one gen
 
 ## 10. Implementation status (2026-08-25)
 
-**Landed: Phases 0, 1, 2 and 3.** Lean battery 65/65 (was 19/19); formal
-gate **27/27** (was 24/24); `flint-store` and the hub crate both compile
-against the shared-schema changes, and the `s3`-feature binaries build.
+**Landed: Phases 0, 1, 2 and 3, plus formal tranche 3 products 2 and 4.**
+Lean battery 67/67 (was 19/19); formal gate **36/36** (was 24/24);
+`flint-store` and the hub crate both compile against the shared-schema
+changes, and the `s3`-feature binaries build.
 
 | Phase | State | Notes |
 |---|---|---|
@@ -694,6 +696,78 @@ Four defects, none of them the wiring itself:
   "why is the manifest not advancing", answerable by `cat` inside the
   pod — is shipped.
 
+### 10.1c Product 2 found a live defect — the gated citation deleted an acked user write
+
+Modelling after the fact paid for itself on the **first strict run** of
+tranche 3 product 2, before a single mutation was applied.
+
+**The defect.** The upload lane opens no HITL window — deliberately
+(§2.4, D6): a lane that fenced HITL out at every floor tick would refuse
+admission essentially forever between citations, and it protects nothing,
+because a lane PUT creates a new version and destroys nothing. So a UI
+write can land on a path the lane has **already staged**. The citation
+lane's base-version re-validation cannot see it: that check reads the
+BASELINE, and the citation lane consumes nothing, so the baseline has not
+moved. The citation therefore cited our staged version — and the exact
+version reaper, whose rule was *"delete every version of a touched key
+except the one the installed manifest cites"*, **deleted the user's
+version. It was current.** The inbox entry then 412s on its next consume
+and is dropped as superseded: an acked write, gone silently. Exactly the
+amputation class the whole lean design was rebuilt to make impossible,
+re-introduced by the one lane that opens no window.
+
+**Two rules close it**, both shipped and both modelled:
+
+1. **The reaper never reclaims the CURRENT version.** If current is not
+   what we just cited, a foreign write landed between the lane and the
+   citation — live bytes somebody is about to read, not a generation this
+   workspace superseded. Reclaiming what we superseded ourselves is the
+   reaper's whole job; anything else is destruction with extra steps.
+2. **A staged path with a live inbox entry is dropped from the boundary**
+   rather than cited over. The window CAS has already loaded the inbox, so
+   this costs zero added requests. The entry stays queued and the next
+   lane consumes it the ordinary way.
+
+**And it retired a guard we believed in for the wrong reason.** D7's
+base-version re-validation is **unreachable** given the lane's own
+discipline: the lane never advances the baseline, so a staged path is by
+construction locally-dirty, and every route that could move a baseline
+(consume, sync) refuses dirty paths and surfaces a conflict instead. It
+stays in the code as defence in depth, but it is not what protects
+anything today, and the hazard it was written for arrives by a route it
+could not see. §2.4.2 should say so.
+
+**Defence in depth had to be pinned as such, twice.** With the inbox
+guard in place, removing the keep-current rule changes nothing — the
+reaper's scope never reaches the path. The TLC mutation needed both arms
+off, and the Rust battery needed a second leg (an out-of-band writer —
+§3 residual 11's population, which the inbox by definition cannot see) to
+isolate the rule at all. A one-arm cfg would have been a green mutation
+dressed as a passing test.
+
+**Nine runs added (27 → 36)**, behind `GatedCitation`, FALSE in every
+pre-existing cfg. Invariants: `Inv_CitedVersionLives` (the corrected form
+of `Inv_NoDangling` — "the object exists" stopped being the right
+question the moment gated staging made the cited version noncurrent),
+`Inv_NoUncitedGC`, `Inv_BoundaryAtomic`. Mutations, all firing: the
+shipped reaper rule, the retention backstop reaping a cited version
+(D8's inversion — this run *is* the abandoned-mid-stage endgame),
+a split two-CAS install, and citing over an in-flight inbox entry.
+Probes, all violated: one CAS installing ≥2 paths from a pending set that
+survived a lane pass, a withheld delete, a mid-change citation, and
+`ProbeRawReaderSeesUncited` — §3 residual 11 proven **present** rather
+than assumed away, so a future design that quietly closes it must fail
+the probe and force the residual to be rewritten. `MaxHitl=1` is
+load-bearing rather than breadth: the whole product turns on a foreign
+write arriving between the lane and the citation.
+
+Not modelled, named rather than omitted: `Inv_ManifestKeysUnderFiles`
+(no control namespace in this module; D0.2 is carried by the battery's
+scan/classify/checkout legs) and the citation's own crash matrix, which
+is **product 1's** territory — here the citation and its reaper are one
+step, faithful only because the real code holds the HITL window across
+both. Product 2's return is the argument for finally doing product 1.
+
 ### 10.2 Formal model — tranche 3, product 4 (done)
 
 `SyncScope`/`ScopedInstBase` join `LeanSubtree.tla` behind constants that
@@ -718,9 +792,9 @@ without terminating; at `MaxGen=2`/`MaxHitl=0` it completes in ~9 s
 **and both the mutation and the probe still fire**, so the strict run is
 not checking a smaller world than the bug lives in. Whole gate: ~75 s.
 
-Products 1 (boundary × barrier × inbox, with the deposal arm), 2 (gated
-citation × version GC × the noncurrent backstop) and 3 (straggler)
-remain unmodelled. Priority order and the reasoning are in §10.3.
+Product 2 is now done as well (§10.1c). Products 1 (boundary × barrier ×
+inbox, with the deposal arm) and 3 (straggler) remain unmodelled;
+priority order and the reasoning are in §10.3.
 
 ### 10.3 What to model next, and what not to
 
@@ -729,12 +803,9 @@ remain unmodelled. Priority order and the reasoning are in §10.3.
   under coalesce + crash + restart is an interleaving property that unit
   tests sample rather than search. `settle_pending_at_startup` is
   currently justified by one ordering out of many.
-- **Product 2 — do it, with the pilot first.** `Inv_CitedVersionLives`
-  is not hypothetical: it was violated in shipped code this session
-  (§10.1 defect 1), and the tests caught it only because assertions
-  happened to be written in the right places. It needs the
-  `versions[p]`/`current[p]` substrate and `MaxVersionsPerPath`, and the
-  product-4 experience says budget the pilot generously.
+- **Product 2 — DONE (§10.1c).** It found a live defect on its first
+  strict run — the gated citation's reaper deleting an acked HITL write —
+  and retired D7's base-version guard as unreachable. ~19k states, ~2 s.
 - **Product 3 — defer.** Its real content is a required-reachable probe
   (a deposed writer's PUT lands and becomes `current[p]`), the fence
   that would make it an invariant is P5 at the proxy, which is not
