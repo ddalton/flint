@@ -496,6 +496,7 @@ pub async fn write_at_barrier(
         generation: m.seq,
         epoch,
         flush_uuid: uuid::Uuid::new_v4().to_string(),
+        boundary_source: None,
         posix: None,
     };
     let key = manifest_key(key_prefix);

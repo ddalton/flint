@@ -348,6 +348,7 @@ async fn handle_files_put(
         generation: prev_gen + 1,
         epoch: 0, // a gateway write carries no lease epoch — it is the second writer
         flush_uuid: format!("gateway-{}", uuid::Uuid::new_v4()),
+        boundary_source: None,
         posix: None,
     };
     let meta = match core.store.put_whole(&key, body, &cond, &stamps, crc).await {

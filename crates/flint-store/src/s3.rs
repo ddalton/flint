@@ -183,6 +183,12 @@ impl ObjectStore for S3Store {
             meta: Self::stamps_meta(stamps),
             last_modified_unix: None,
             storage_class: None, // this tier publishes STANDARD
+            // S3 returns `x-amz-version-id` on every PUT to a versioned
+            // bucket; this used to be discarded, which is why gated
+            // citation costs no extra request once it is kept. `None`
+            // means unversioned — or a proxy stripping the header, which
+            // the conformance probe REFUSES rather than degrading into.
+            version_id: resp.version_id().map(|v| v.to_string()),
         })
     }
 
@@ -248,6 +254,7 @@ impl ObjectStore for S3Store {
             meta: resp.metadata().cloned().unwrap_or_default(),
             last_modified_unix: dt_unix(resp.last_modified()),
             storage_class: resp.storage_class().map(|c| c.as_str().to_string()),
+            version_id: resp.version_id().map(|v| v.to_string()),
         })
     }
 
@@ -273,6 +280,7 @@ impl ObjectStore for S3Store {
             meta: resp.metadata().cloned().unwrap_or_default(),
             last_modified_unix: dt_unix(resp.last_modified()),
             storage_class: resp.storage_class().map(|c| c.as_str().to_string()),
+            version_id: resp.version_id().map(|v| v.to_string()),
         };
         let bytes = resp
             .body
@@ -343,6 +351,118 @@ impl ObjectStore for S3Store {
             .await
             .map_err(|e| map_err("delete", e))?;
         Ok(())
+    }
+
+    async fn head_version(&self, key: &str, version_id: &str) -> StoreResult<ObjectMeta> {
+        let resp = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .version_id(version_id)
+            .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled)
+            .send()
+            .await
+            .map_err(|e| map_err("head_version", e))?;
+        Ok(ObjectMeta {
+            etag: resp.e_tag().unwrap_or_default().to_string(),
+            size: resp.content_length().unwrap_or(0).max(0) as u64,
+            crc64_b64: resp.checksum_crc64_nvme().map(|s| s.to_string()),
+            meta: resp.metadata().cloned().unwrap_or_default(),
+            last_modified_unix: dt_unix(resp.last_modified()),
+            storage_class: resp.storage_class().map(|c| c.as_str().to_string()),
+            version_id: resp.version_id().map(|v| v.to_string()),
+        })
+    }
+
+    async fn get_version(&self, key: &str, version_id: &str) -> StoreResult<(ObjectMeta, Bytes)> {
+        let resp = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .version_id(version_id)
+            .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled)
+            .send()
+            .await
+            .map_err(|e| map_err("get_version", e))?;
+        let meta = ObjectMeta {
+            etag: resp.e_tag().unwrap_or_default().to_string(),
+            size: resp.content_length().unwrap_or(0).max(0) as u64,
+            crc64_b64: resp.checksum_crc64_nvme().map(|s| s.to_string()),
+            meta: resp.metadata().cloned().unwrap_or_default(),
+            last_modified_unix: dt_unix(resp.last_modified()),
+            storage_class: resp.storage_class().map(|c| c.as_str().to_string()),
+            version_id: resp.version_id().map(|v| v.to_string()),
+        };
+        let bytes = resp
+            .body
+            .collect()
+            .await
+            .map_err(|e| StoreError::Other(format!("get_version body: {}", e)))?
+            .into_bytes();
+        Ok((meta, bytes))
+    }
+
+    async fn delete_version(&self, key: &str, version_id: &str) -> StoreResult<()> {
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .version_id(version_id)
+            .send()
+            .await
+            .map_err(|e| map_err("delete_version", e))?;
+        Ok(())
+    }
+
+    async fn list_versions(&self, prefix: &str) -> StoreResult<Vec<ListedVersion>> {
+        let mut out = Vec::new();
+        let mut key_marker: Option<String> = None;
+        let mut vid_marker: Option<String> = None;
+        loop {
+            let mut req =
+                self.client.list_object_versions().bucket(&self.bucket).prefix(prefix);
+            if let Some(k) = &key_marker {
+                req = req.key_marker(k);
+            }
+            if let Some(v) = &vid_marker {
+                req = req.version_id_marker(v);
+            }
+            let resp = req.send().await.map_err(|e| map_err("list_versions", e))?;
+            for v in resp.versions() {
+                out.push(ListedVersion {
+                    key: v.key().unwrap_or_default().to_string(),
+                    version_id: v.version_id().unwrap_or_default().to_string(),
+                    etag: v.e_tag().unwrap_or_default().to_string(),
+                    size: v.size().unwrap_or(0).max(0) as u64,
+                    is_current: v.is_latest().unwrap_or(false),
+                    is_delete_marker: false,
+                    last_modified_unix: dt_unix(v.last_modified()),
+                });
+            }
+            for d in resp.delete_markers() {
+                out.push(ListedVersion {
+                    key: d.key().unwrap_or_default().to_string(),
+                    version_id: d.version_id().unwrap_or_default().to_string(),
+                    etag: String::new(),
+                    size: 0,
+                    is_current: d.is_latest().unwrap_or(false),
+                    is_delete_marker: true,
+                    last_modified_unix: dt_unix(d.last_modified()),
+                });
+            }
+            if resp.is_truncated().unwrap_or(false) {
+                key_marker = resp.next_key_marker().map(|s| s.to_string());
+                vid_marker = resp.next_version_id_marker().map(|s| s.to_string());
+                if key_marker.is_none() && vid_marker.is_none() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     async fn list_uploads(&self, prefix: &str) -> StoreResult<Vec<PendingUpload>> {
@@ -708,6 +828,7 @@ impl S3Store {
             meta: Self::stamps_meta(&spec.stamps),
             last_modified_unix: None,
             storage_class: None, // this tier publishes STANDARD
+            version_id: resp.version_id().map(|v| v.to_string()),
         })
     }
 

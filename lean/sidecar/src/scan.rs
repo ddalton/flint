@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use super::{state::Baseline, LeanResult, STATE_DIR};
+use super::{state::Baseline, LeanResult, CONTROL_DIR, STATE_DIR};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanEntry {
@@ -34,8 +34,15 @@ fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, ScanEntry>) -> LeanR
         let entry = entry?;
         let path = entry.path();
         let name = entry.file_name();
-        if dir == root && name.to_string_lossy() == STATE_DIR {
-            continue;
+        if dir == root {
+            let n = name.to_string_lossy();
+            // The state dir and the control namespace (boundary-verbs
+            // plan D0). Without the second exclusion `.flint/publish`
+            // is live ammunition: an ordinary regular file, scanned and
+            // PUBLISHED to `<prefix>/files/.flint/publish`.
+            if n == STATE_DIR || n == CONTROL_DIR {
+                continue;
+            }
         }
         let meta = std::fs::symlink_metadata(&path)?;
         if meta.file_type().is_symlink() {
@@ -80,6 +87,16 @@ pub struct Classified {
     pub first_absence: BTreeSet<String>,
 }
 
+/// Legacy citations under the reserved control namespace (boundary-verbs
+/// plan D0.2). A workspace that legally published `files/.flint/...`
+/// under a pre-D0 sidecar has those paths in its baseline; the new scan
+/// skips them, so two consecutive scans would classify them absent and
+/// publish their DELETION. An upgrade must never delete data: they are
+/// carried forward frozen — never re-uploaded, never deleted by us.
+pub fn is_control_path(path: &str) -> bool {
+    path == CONTROL_DIR || path.strip_prefix(CONTROL_DIR).map(|r| r.starts_with('/')).unwrap_or(false)
+}
+
 pub fn classify(scan: &BTreeMap<String, ScanEntry>, baseline: &Baseline) -> Classified {
     let mut c = Classified::default();
     for (path, s) in scan {
@@ -96,6 +113,11 @@ pub fn classify(scan: &BTreeMap<String, ScanEntry>, baseline: &Baseline) -> Clas
     }
     for path in baseline.entries.keys() {
         if scan.contains_key(path) {
+            continue;
+        }
+        if is_control_path(path) {
+            // Frozen legacy citation (D0.2): absent from every scan by
+            // construction now, and NEVER delete-eligible.
             continue;
         }
         if baseline.prev_scan.contains(path) {

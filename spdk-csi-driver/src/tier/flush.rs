@@ -1170,6 +1170,7 @@ impl FlushOrchestrator {
             generation: to_gen,
             epoch: current_epoch,
             flush_uuid: flush_uuid.clone(),
+            boundary_source: None,
             // A12: mode/uid/gid/mtime ride on the object — a bucket
             // reader (and the DR import) can restore metadata without
             // the manifest.
@@ -2687,6 +2688,7 @@ mod tests {
             generation: 2,
             epoch: 2,
             flush_uuid: "succ-uuid".into(),
+            boundary_source: None,
             posix: None,
         };
         r.mem
@@ -2745,6 +2747,7 @@ mod tests {
             generation: 9,
             epoch: 99,
             flush_uuid: "forged-uuid".into(),
+            boundary_source: None,
             posix: None,
         };
         r.mem

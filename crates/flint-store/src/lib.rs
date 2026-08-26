@@ -132,6 +132,16 @@ pub struct GenerationStamps {
     pub generation: u64,
     pub epoch: u64,
     pub flush_uuid: String,
+    /// The coherence provenance of a lean manifest citation
+    /// (boundary-verbs plan §2.4.1): `sentinel`, `quiescence`,
+    /// `forced-lag-cap`, `forced-backlog-cap`, `cadence`, `drain`,
+    /// `recovered`. Stamped on the OBJECT so a downstream consumer —
+    /// checkout, a sibling cluster's sync, HITL — can tell a
+    /// declared-coherent citation from a forced possibly-torn one from
+    /// the bucket alone, for the price of a HEAD rather than a GET of a
+    /// manifest that can run to hundreds of MiB. `None` on every
+    /// non-manifest object.
+    pub boundary_source: Option<String>,
     /// A12: POSIX metadata riding on the object, so a bucket reader —
     /// and the DR import — can restore mode/ownership/mtime without
     /// the manifest. OPTIONAL both ways: absence never makes an object
@@ -189,6 +199,7 @@ impl GenerationStamps {
     pub const META_GEN: &'static str = "flint-gen";
     pub const META_EPOCH: &'static str = "flint-epoch";
     pub const META_FLUSH_UUID: &'static str = "flint-flush-uuid";
+    pub const META_BOUNDARY_SOURCE: &'static str = "flint-boundary-source";
 
     pub fn to_meta(&self) -> Vec<(String, String)> {
         let mut v = vec![
@@ -196,6 +207,9 @@ impl GenerationStamps {
             (Self::META_EPOCH.into(), self.epoch.to_string()),
             (Self::META_FLUSH_UUID.into(), self.flush_uuid.clone()),
         ];
+        if let Some(b) = &self.boundary_source {
+            v.push((Self::META_BOUNDARY_SOURCE.into(), b.clone()));
+        }
         if let Some(p) = self.posix {
             v.extend(p.to_meta());
         }
@@ -210,9 +224,25 @@ impl GenerationStamps {
             generation: meta.get(Self::META_GEN)?.parse().ok()?,
             epoch: meta.get(Self::META_EPOCH)?.parse().ok()?,
             flush_uuid: meta.get(Self::META_FLUSH_UUID)?.clone(),
+            boundary_source: meta.get(Self::META_BOUNDARY_SOURCE).cloned(),
             posix: PosixStamps::from_meta(meta),
         })
     }
+}
+
+/// One version of one key (boundary-verbs plan D8's reclamation and DR
+/// surfacing).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedVersion {
+    pub key: String,
+    pub version_id: String,
+    pub etag: String,
+    pub size: u64,
+    pub is_current: bool,
+    /// A delete marker carries no bytes; it makes the key read absent
+    /// while every prior version stays fetchable by id.
+    pub is_delete_marker: bool,
+    pub last_modified_unix: Option<u64>,
 }
 
 /// What HEAD/GET/publish return about an object.
@@ -232,6 +262,18 @@ pub struct ObjectMeta {
     /// retrieval on every CLEAN byte copied, silently inverting the
     /// tier's saving — the flusher refuses BaseCopy from it.
     pub storage_class: Option<String>,
+    /// The object VERSION this metadata describes, on a versioned
+    /// bucket (boundary-verbs plan D7). S3 already returns
+    /// `x-amz-version-id` on PUT and this crate used to discard it;
+    /// gated citation needs it and therefore costs no extra request.
+    ///
+    /// `None` means the backend returned no version id — an
+    /// unversioned bucket, or a proxy that STRIPS the header. The
+    /// second case is why gated mode probes for it and REFUSES rather
+    /// than degrading: falling back to etag semantics on a key whose
+    /// current version is uncited is precisely the torn view the mode
+    /// exists to prevent.
+    pub version_id: Option<String>,
 }
 
 impl ObjectMeta {
@@ -414,6 +456,50 @@ pub trait ObjectStore: Send + Sync {
 
     async fn delete(&self, key: &str) -> StoreResult<()>;
 
+    // ── version-scoped operations (boundary-verbs plan D7/D8) ────────
+    //
+    // On a versioned bucket an in-place PUT destroys nothing: the cited
+    // generation survives as a version, the manifest cites
+    // (key, version_id, etag), and readers resolve the cited version
+    // exactly. The version id ADDRESSES; the etag ATTESTS.
+    //
+    // Backends that cannot express these answer `Other` and the caller
+    // refuses gated mode — never degrades into it.
+
+    /// HEAD one specific version.
+    async fn head_version(&self, key: &str, version_id: &str) -> StoreResult<ObjectMeta> {
+        let _ = (key, version_id);
+        Err(StoreError::Other("this backend has no version-scoped HEAD".into()))
+    }
+
+    /// GET one specific version. This is the read `pinned_reads`
+    /// citations resolve through (D13): under a gated citation flint's
+    /// readers resolve EXCLUSIVELY by the cited version and never
+    /// S3-wins-adopt the current one — without which every gated
+    /// checkout would 412 on its own staged bytes and adopt them.
+    async fn get_version(&self, key: &str, version_id: &str) -> StoreResult<(ObjectMeta, Bytes)> {
+        let _ = (key, version_id);
+        Err(StoreError::Other("this backend has no version-scoped GET".into()))
+    }
+
+    /// DELETE one specific version — the exact reclamation flint's own
+    /// per-citation GC uses. Free, and the ONLY reaper that can tell
+    /// cited from uncited; lifecycle cannot, which is why the noncurrent
+    /// rule is a long backstop rather than the mechanism (D8).
+    async fn delete_version(&self, key: &str, version_id: &str) -> StoreResult<()> {
+        let _ = (key, version_id);
+        Err(StoreError::Other("this backend has no version-scoped DELETE".into()))
+    }
+
+    /// Every version under a prefix, current and noncurrent, oldest
+    /// first per key. The claim-time/DR fallback when `orphans.json` is
+    /// missing or stale — the expensive path, which is why the durable
+    /// summary is written eagerly.
+    async fn list_versions(&self, prefix: &str) -> StoreResult<Vec<ListedVersion>> {
+        let _ = prefix;
+        Err(StoreError::Other("this backend cannot list object versions".into()))
+    }
+
     /// A9 hygiene: every in-progress assembly under the prefix.
     async fn list_uploads(&self, prefix: &str) -> StoreResult<Vec<PendingUpload>>;
 
@@ -517,6 +603,7 @@ mod tests {
             generation: 2,
             epoch: 1,
             flush_uuid: "u-2".into(),
+            boundary_source: None,
             posix: Some(p),
         };
         let m: HashMap<String, String> = s.to_meta().into_iter().collect();

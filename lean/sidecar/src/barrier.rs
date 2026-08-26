@@ -30,6 +30,18 @@ pub struct BarrierReport {
     /// published, nothing advanced; the next scan re-queues them.
     pub deferred: Vec<String>,
     pub no_change: bool,
+    /// Bytes this barrier actually published — the input to the
+    /// sentinel work meter (boundary-verbs plan D3.1). Metering work
+    /// rather than calls is what keeps a sentinel storm from
+    /// un-coalescing a hot large file's republish: a counted budget
+    /// charges a 2 GiB checkpoint the same one unit as a 4 KiB file.
+    pub published_bytes: u64,
+    /// The manifest ETag this barrier installed (the ack's CAS token).
+    pub manifest_etag: Option<String>,
+    /// What the manifest HEAD/install told us the bucket is at, for the
+    /// news ticker (D5) — free, off requests the barrier already made.
+    pub observed_seq: Option<u64>,
+    pub observed_etag: Option<String>,
 }
 
 impl Sidecar {
@@ -38,6 +50,15 @@ impl Sidecar {
             .as_ref()
             .map(|l| l.epoch)
             .ok_or_else(|| LeanError::State("barrier without a held lease".into()))
+    }
+
+    /// The in-loop honor paths' fence check (boundary-verbs plan D2):
+    /// `Sidecar::sync` carries no lease/epoch check of its own, so a
+    /// straggler consuming a sync sentinel between deposal and its next
+    /// cooperative fence would apply the successor's manifest onto its
+    /// zombie tree and ack SUCCESS.
+    pub async fn verify_not_deposed_pub(&self) -> LeanResult<()> {
+        self.verify_not_deposed().await
     }
 
     /// Verify the cell still names us at OUR epoch; anything else is a
@@ -70,6 +91,25 @@ impl Sidecar {
         let mut baseline = self.state.load_baseline()?;
         for entry in &loaded.doc.entries {
             let key = self.cfg.file_key(&entry.path);
+            // Containment BEFORE anything else: a path we could never
+            // safely materialize must be surfaced and dropped, not
+            // routed through the locally-dirty branch — which would
+            // "preserve" it with a GET+PUT and leave a baseline entry
+            // for a path the scanner can never see (the planted-symlink
+            // shape: `inputs -> /root/.aws` reads as locally-present,
+            // therefore dirty, therefore a conflict-preserve of someone
+            // else's file).
+            if let Err(e) = check_contained(&self.cfg.root, &entry.path) {
+                self.state.append_conflict(&ConflictRecord {
+                    path: entry.path.clone(),
+                    foreign_etag: entry.etag.clone(),
+                    preserved_key: None,
+                    kind: format!("consume-refused-containment: {e}"),
+                    at_unix: now_unix(),
+                })?;
+                consumed.push(entry.clone());
+                continue;
+            }
             // Already integrated (a crashed earlier consume): idempotent.
             if baseline.entries.get(&entry.path).map(|b| b.etag == entry.etag).unwrap_or(false) {
                 consumed.push(entry.clone());
@@ -124,6 +164,7 @@ impl Sidecar {
                         // version publishes.
                         size: u64::MAX,
                         mtime_unix: 0,
+                        version_id: None,
                     },
                 );
             } else {
@@ -136,7 +177,21 @@ impl Sidecar {
                         other => other,
                     })?;
                 let mode = PosixStamps::from_meta(&meta.meta).map(|p| p.mode);
-                write_file_atomic(&local_path, &body, mode)?;
+                if let Err(e) = write_file_atomic_in(&self.cfg.root, &entry.path, &body, mode) {
+                    // A refused containment (planted symlink, reserved
+                    // namespace) is a SURFACED skip, never a wedge: one
+                    // hostile path must not stop the workspace
+                    // publishing. The foreign bytes stay in the bucket.
+                    self.state.append_conflict(&ConflictRecord {
+                        path: entry.path.clone(),
+                        foreign_etag: entry.etag.clone(),
+                        preserved_key: None,
+                        kind: format!("consume-refused-containment: {e}"),
+                        at_unix: now_unix(),
+                    })?;
+                    consumed.push(entry.clone());
+                    continue;
+                }
                 let st = std::fs::metadata(&local_path)?;
                 let stamps = GenerationStamps::from_meta(&meta.meta);
                 baseline.entries.insert(
@@ -146,6 +201,7 @@ impl Sidecar {
                         generation: stamps.map(|s| s.generation).unwrap_or(0),
                         size: st.len(),
                         mtime_unix: mtime_of(&st),
+                        version_id: None,
                     },
                 );
                 baseline.prev_scan.insert(entry.path.clone());
@@ -168,6 +224,7 @@ impl Sidecar {
             generation: 0,
             epoch: self.lease.as_ref().map(|l| l.epoch).unwrap_or(0),
             flush_uuid: "conflict-preserve".into(),
+            boundary_source: None,
             posix: PosixStamps::from_meta(&meta.meta),
         };
         self.store
@@ -216,7 +273,15 @@ impl Sidecar {
             // document ETag against the persisted one answers the same
             // question for the price of one HEAD.
             let unchanged = match self.store.head(&self.cfg.manifest_key()).await {
-                Ok(meta) => baseline.manifest_etag.as_deref() == Some(meta.etag.as_str()),
+                Ok(meta) => {
+                    // The HEAD's `flint-gen` stamp IS the remote seq
+                    // (`cas_write` stamps generation = m.seq), so the
+                    // news ticker rides this request for free — D5's
+                    // "zero added bucket requests" is literal.
+                    report.observed_seq = GenerationStamps::from_meta(&meta.meta).map(|s| s.generation);
+                    report.observed_etag = Some(meta.etag.clone());
+                    baseline.manifest_etag.as_deref() == Some(meta.etag.as_str())
+                }
                 Err(StoreError::NotFound(_)) => baseline.manifest_etag.is_none(),
                 Err(e) => return Err(e.into()),
             };
@@ -293,6 +358,7 @@ impl Sidecar {
             let path = &path;
             match outcome? {
                 UploadOutcome::Published { entry, baseline_entry } => {
+                    report.published_bytes += entry.size;
                     upserts.insert(path.clone(), entry);
                     new_baseline_entries.insert(path.clone(), baseline_entry);
                     report.uploaded.push(path.clone());
@@ -355,6 +421,7 @@ impl Sidecar {
                             mtime_unix: scan_entry.map(|s| s.mtime_unix).unwrap_or(0),
                             generation: stamps.map(|s| s.generation).unwrap_or(be.generation),
                             epoch,
+                            version_id: meta.version_id.clone(),
                         },
                     );
                 }
@@ -407,6 +474,9 @@ impl Sidecar {
             }
         };
         report.seq = Some(installed.seq);
+        report.manifest_etag = Some(installed_etag.clone());
+        report.observed_seq = Some(installed.seq);
+        report.observed_etag = Some(installed_etag.clone());
         report.foreign_queued = foreign_entries.len();
 
         // Step 6: deletes LAST — GC of keys the NEW manifest no longer
@@ -533,7 +603,10 @@ impl Sidecar {
         };
         match self.store.compose_generation(&spec).await {
             Ok(meta) => {
-                Ok(UploadOutcome::published(path, key.to_string(), meta.etag, crc, scanned, generation, epoch))
+                Ok(UploadOutcome::published(
+                    path, key.to_string(), meta.etag, crc, scanned, generation, epoch,
+                    meta.version_id,
+                ))
             }
             Err(StoreError::ChecksumMismatch(_)) | Err(StoreError::NoSuchUpload(_)) => {
                 // Drift mid-compose, or the operator sweep aborted us:
@@ -553,11 +626,34 @@ impl Sidecar {
                     let g = head_stamps.map(|s| s.generation).unwrap_or(generation);
                     return Ok(UploadOutcome::published(
                         path, key.to_string(), head.etag, crc, scanned, g, epoch,
+                        head.version_id,
                     ));
                 }
                 Ok(UploadOutcome::Parked { foreign_etag: head.etag })
             }
             Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The gated staging lane's entry point into the shipped guard
+    /// chain — same 412 policy, same AdoptOwn recognizer, same park;
+    /// only the caller's use of the response differs. `None` = parked
+    /// on a foreign etag.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn upload_one_pub(
+        &self,
+        path: &str,
+        scanned: &scan::ScanEntry,
+        base: Option<&BaselineEntry>,
+        epoch: u64,
+        flush_uuid: &str,
+        prior_uuids: &[String],
+    ) -> LeanResult<Option<(LeanEntry, BaselineEntry)>> {
+        match self.upload_one(path, scanned, base, epoch, flush_uuid, prior_uuids).await? {
+            UploadOutcome::Published { entry, baseline_entry } => {
+                Ok(Some((entry, baseline_entry)))
+            }
+            UploadOutcome::Parked { .. } | UploadOutcome::Deferred => Ok(None),
         }
     }
 
@@ -578,6 +674,7 @@ impl Sidecar {
             generation,
             epoch,
             flush_uuid: flush_uuid.to_string(),
+            boundary_source: None,
             posix,
         };
         let condition = match base {
@@ -601,7 +698,9 @@ impl Sidecar {
             .put_whole(&key, Bytes::from(body.clone()), &condition, &stamps, crc)
             .await
         {
-            Ok(meta) => Ok(UploadOutcome::published(path, key, meta.etag, crc, scanned, generation, epoch)),
+            Ok(meta) => Ok(UploadOutcome::published(
+                path, key, meta.etag, crc, scanned, generation, epoch, meta.version_id,
+            )),
             Err(StoreError::PreconditionFailed(_)) => {
                 // The 412 policy: my own crashed/torn PUT ⇒ adopt;
                 // foreign ⇒ park. NEVER the inherited LOCAL-WINS
@@ -618,7 +717,9 @@ impl Sidecar {
                 if head.crc64_b64.as_deref() == Some(crc64_to_b64(crc).as_str()) {
                     // Bytes already there (torn response): cite it.
                     let g = head_stamps.map(|s| s.generation).unwrap_or(generation);
-                    return Ok(UploadOutcome::published(path, key, head.etag, crc, scanned, g, epoch));
+                    return Ok(UploadOutcome::published(
+                        path, key, head.etag, crc, scanned, g, epoch, head.version_id,
+                    ));
                 }
                 // Our earlier PUT, older content: supersede it knowingly.
                 let meta = self
@@ -631,7 +732,9 @@ impl Sidecar {
                         crc,
                     )
                     .await?;
-                Ok(UploadOutcome::published(path, key, meta.etag, crc, scanned, generation, epoch))
+                Ok(UploadOutcome::published(
+                    path, key, meta.etag, crc, scanned, generation, epoch, meta.version_id,
+                ))
             }
             Err(e) => Err(e.into()),
         }
@@ -648,6 +751,7 @@ enum UploadOutcome {
 }
 
 impl UploadOutcome {
+    #[allow(clippy::too_many_arguments)]
     fn published(
         path: &str,
         key: String,
@@ -656,6 +760,7 @@ impl UploadOutcome {
         scanned: &scan::ScanEntry,
         generation: u64,
         epoch: u64,
+        version_id: Option<String>,
     ) -> UploadOutcome {
         let _ = path;
         UploadOutcome::Published {
@@ -668,10 +773,12 @@ impl UploadOutcome {
                 mtime_unix: scanned.mtime_unix,
                 generation,
                 epoch,
+                version_id: version_id.clone(),
             },
             baseline_entry: BaselineEntry {
                 etag,
                 generation,
+                version_id,
                 // The PRE-read stat: if the agent wrote during our read,
                 // the next scan sees the drift and re-queues (the
                 // re-stat/re-queue valve).
@@ -697,6 +804,103 @@ pub(super) fn mtime_of(m: &std::fs::Metadata) -> i64 {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Containment-safe workspace write (boundary-verbs plan §2.2 security
+/// gate). `rel` is a workspace-relative path; the target may not escape
+/// the root, traverse a symlink component, or land in the reserved
+/// control namespace.
+///
+/// The hazard this closes is pre-existing and reachable from three
+/// callers (checkout, inbox consume, sync): `write_file_atomic` did
+/// `create_dir_all(parent)` + write with no `O_NOFOLLOW` and no
+/// root-containment check, while the scanner SKIPS symlinks — so a
+/// planted symlink is invisible to the sidecar. An unprivileged app
+/// that plants `inputs -> /root/.aws`, lands an object at
+/// `inputs/<path>` and drops a scoped sync turns the credential-holding
+/// sidecar into an on-demand arbitrary-file-write primitive outside the
+/// workspace.
+pub(super) fn write_file_atomic_in(
+    root: &Path,
+    rel: &str,
+    bytes: &[u8],
+    mode: Option<u32>,
+) -> LeanResult<()> {
+    let target = contained_path(root, rel)?;
+    write_file_atomic(&target, bytes, mode)
+}
+
+/// Validate `rel` under `root` WITHOUT creating anything — for callers
+/// that must decide whether a path is writable before doing any work
+/// (inbox consume refuses a refused path outright rather than routing it
+/// through conflict-preserve, which would cost a GET+PUT and leave the
+/// path in the baseline).
+pub(super) fn check_contained(root: &Path, rel: &str) -> LeanResult<()> {
+    resolve_contained(root, rel, false).map(|_| ())
+}
+
+/// Resolve `rel` under `root`, refusing escapes, creating missing parent
+/// directories. Walks the parent chain component by component: a
+/// component that EXISTS as a symlink is a refusal (never followed).
+pub(super) fn contained_path(root: &Path, rel: &str) -> LeanResult<std::path::PathBuf> {
+    resolve_contained(root, rel, true)
+}
+
+fn resolve_contained(
+    root: &Path,
+    rel: &str,
+    create_dirs: bool,
+) -> LeanResult<std::path::PathBuf> {
+    use std::path::Component;
+    let refuse = |why: &str| {
+        Err(LeanError::State(format!(
+            "refusing write to {rel:?}: {why} (containment)"
+        )))
+    };
+    if rel.is_empty() {
+        return refuse("empty path");
+    }
+    if super::scan::is_control_path(rel) {
+        // The reserved namespace is the sidecar's own; a citation or
+        // inbox entry naming it is surfaced, never materialized (D0.3).
+        return refuse("reserved control namespace");
+    }
+    let relp = Path::new(rel);
+    let mut cur = root.to_path_buf();
+    let mut comps: Vec<&std::ffi::OsStr> = vec![];
+    for c in relp.components() {
+        match c {
+            Component::Normal(n) => comps.push(n),
+            Component::CurDir => {}
+            Component::ParentDir => return refuse("`..` component"),
+            Component::RootDir | Component::Prefix(_) => return refuse("absolute path"),
+        }
+    }
+    if comps.is_empty() {
+        return refuse("no path components");
+    }
+    let last = comps.len() - 1;
+    for (i, c) in comps.iter().enumerate() {
+        cur.push(c);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return refuse("path traverses a symlink");
+            }
+            Ok(m) if i < last && !m.is_dir() => {
+                return refuse("parent component is not a directory");
+            }
+            Ok(_) => {}
+            Err(_) if i < last => {
+                if create_dirs {
+                    std::fs::create_dir(&cur).map_err(|e| {
+                        LeanError::State(format!("mkdir {}: {e}", cur.display()))
+                    })?;
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(cur)
 }
 
 pub(super) fn write_file_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> LeanResult<()> {

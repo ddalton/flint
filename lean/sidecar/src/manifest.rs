@@ -33,6 +33,16 @@ pub struct LeanEntry {
     pub generation: u64,
     /// The publishing writer's lease epoch (0 = a gateway/HITL write).
     pub epoch: u64,
+    /// The object VERSION this citation names (boundary-verbs plan D7).
+    ///
+    /// `None` = a legacy or unversioned entry ⇒ readers take today's
+    /// `get_whole(key, If-Match etag)` path verbatim. Mixed manifests
+    /// are NORMAL during rollout and after any bucket-versioning
+    /// change, so both forms are permanent reader cases, not a
+    /// migration state. **The version id ADDRESSES; the etag ATTESTS** —
+    /// the etag stays and is still verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -40,6 +50,25 @@ pub struct LeanManifest {
     pub seq: u64,
     /// path -> entry. Paths are workspace-relative, '/'-separated.
     pub entries: BTreeMap<String, LeanEntry>,
+    /// Set by a GATED citation (D13). Under `pinned_reads` flint's
+    /// readers resolve EXCLUSIVELY by the cited `version_id` and never
+    /// S3-wins-adopt the current version.
+    ///
+    /// The rule is load-bearing, not a refinement: the moment the gated
+    /// lane stages a path, the cited etag stops matching current, so
+    /// without it EVERY gated checkout would 412 on every dirty path
+    /// and adopt uncited mid-logical-change bytes — the versioned
+    /// design would leak its own staging into readers through exactly
+    /// the arm the whole mode exists to avoid.
+    ///
+    /// Unset for cadence, hybrid and legacy manifests, which therefore
+    /// keep the shipped 412/S3-wins arm byte-for-byte.
+    #[serde(default)]
+    pub pinned_reads: bool,
+    /// Which citation source installed this manifest (§2.4.1). Also
+    /// stamped on the object's metadata so it is readable by HEAD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary_source: Option<String>,
 }
 
 impl LeanManifest {
@@ -83,6 +112,31 @@ pub async fn cas_write(
     epoch: u64,
     flush_uuid: &str,
 ) -> LeanResult<ObjectMeta> {
+    cas_write_stamped(store, cfg, m, expected, epoch, flush_uuid, None).await
+}
+
+/// `cas_write` with an explicit boundary-source stamp on the manifest
+/// OBJECT (§2.4.1): downstream consumers distinguish a declared-coherent
+/// citation from a forced possibly-torn one from the bucket alone, for
+/// the price of a HEAD rather than a GET of a manifest that can run to
+/// hundreds of MiB.
+pub async fn cas_write_stamped(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    m: &LeanManifest,
+    expected: Option<&str>,
+    epoch: u64,
+    flush_uuid: &str,
+    boundary_source: Option<&str>,
+) -> LeanResult<ObjectMeta> {
+    // The manifest's own document must agree with its object stamp:
+    // a reader that GETs and a reader that HEADs must never disagree
+    // about how coherent the citation claims to be.
+    let mut m = m.clone();
+    if boundary_source.is_some() {
+        m.boundary_source = boundary_source.map(|s| s.to_string());
+    }
+    let m = &m;
     let bytes = m.to_bytes();
     let crc = crc64_nvme(&bytes);
     let cond = match expected {
@@ -93,6 +147,7 @@ pub async fn cas_write(
         generation: m.seq,
         epoch,
         flush_uuid: flush_uuid.to_string(),
+        boundary_source: boundary_source.map(|s| s.to_string()),
         posix: None,
     };
     Ok(store
@@ -114,6 +169,11 @@ pub fn merge(
 ) -> (LeanManifest, Vec<(String, LeanEntry)>) {
     let mut merged = theirs.clone();
     merged.seq = theirs.seq + 1;
+    // Set explicitly by the installing pass; never inherited from
+    // whoever wrote last (a cadence barrier must not inherit a gated
+    // predecessor's `pinned_reads`, and vice versa).
+    merged.pinned_reads = false;
+    merged.boundary_source = None;
 
     let mut foreign: Vec<(String, LeanEntry)> = vec![];
     for (p, e) in &theirs.entries {

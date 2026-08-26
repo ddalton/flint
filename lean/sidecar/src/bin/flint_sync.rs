@@ -17,13 +17,18 @@
 //!   FLINT_SYNC_ENDPOINT  S3 endpoint override (MinIO/proxy rigs)
 //!   FLINT_SYNC_FLOOR_SECS         publish cadence floor (default 60)
 //!   FLINT_SYNC_MAX_BYTES/_FILES   checkout budgets (0 = unlimited)
+//!   FLINT_SYNC_BOUNDARY_MODE      cadence|hybrid|gated (default hybrid)
+//!   FLINT_SYNC_SENTINELS          auto|off|force (default auto)
+//!   FLINT_SYNC_SENTINEL_MIN_INTERVAL_SECS  (default 5)
+//!   FLINT_SYNC_SENTINEL_HOURLY_BUDGET      work units/hour (default 60)
+//!   FLINT_SYNC_SENTINEL_POLL_SECS          (default 1; env-only)
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use flint_lean::lease::{self, ClaimOutcome};
 use flint_lean::state::SidecarState;
-use flint_lean::{LeanConfig, LeanError, Sidecar};
+use flint_lean::{BoundaryMode, LeanConfig, LeanError, Sidecar, SentinelMode};
 use flint_store::s3::S3Store;
 use flint_store::ObjectStore;
 
@@ -58,6 +63,39 @@ async fn main() {
     cfg.max_bytes = env_u64("FLINT_SYNC_MAX_BYTES", 0);
     cfg.max_files = env_u64("FLINT_SYNC_MAX_FILES", 0);
     cfg.fanout = env_u64("FLINT_SYNC_FANOUT", 16).max(1) as usize;
+    if let Ok(m) = std::env::var("FLINT_SYNC_BOUNDARY_MODE") {
+        match BoundaryMode::parse(&m) {
+            Some(bm) => cfg.boundary_mode = bm,
+            None => {
+                eprintln!("flint-sync: FLINT_SYNC_BOUNDARY_MODE={m:?} is not cadence|hybrid|gated");
+                std::process::exit(2);
+            }
+        }
+    }
+    if let Ok(m) = std::env::var("FLINT_SYNC_SENTINELS") {
+        match SentinelMode::parse(&m) {
+            Some(sm) => cfg.sentinel_mode = sm,
+            None => {
+                eprintln!("flint-sync: FLINT_SYNC_SENTINELS={m:?} is not auto|off|force");
+                std::process::exit(2);
+            }
+        }
+    }
+    cfg.sentinel_min_interval_secs = env_u64("FLINT_SYNC_SENTINEL_MIN_INTERVAL_SECS", 5);
+    cfg.sentinel_hourly_budget = env_u64("FLINT_SYNC_SENTINEL_HOURLY_BUDGET", 60);
+    cfg.sentinel_poll_secs = env_u64("FLINT_SYNC_SENTINEL_POLL_SECS", 1).max(1);
+    cfg.quiesce_bound_secs = env_u64("FLINT_SYNC_QUIESCE_BOUND_SECS", 30);
+    cfg.visibility_lag_bound_secs =
+        std::env::var("FLINT_SYNC_VISIBILITY_LAG_BOUND_SECS").ok().and_then(|v| v.parse().ok());
+    // Gated is refused without a lag bound: unbounded staleness must be
+    // impossible by construction, not by convention (§2.4.1).
+    if cfg.boundary_mode == BoundaryMode::Gated && cfg.visibility_lag_bound_secs.is_none() {
+        eprintln!(
+            "flint-sync: boundaryMode=gated requires FLINT_SYNC_VISIBILITY_LAG_BOUND_SECS \
+             (unbounded citation staleness is refused)"
+        );
+        std::process::exit(2);
+    }
 
     let state = match SidecarState::open(cfg.state_dir()) {
         Ok(s) => s,
@@ -142,31 +180,116 @@ async fn claim_then(sc: &mut Sidecar, step: Step) -> Result<(), LeanError> {
 
 async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
     claim(sc).await?;
+    // D11: the capability marker is written at EVERY run startup —
+    // after claim, before the first poll — not inside checkout. The
+    // live-tree restart row returns at `marker_present()` without
+    // reaching checkout's body, so pinning the write there would
+    // upgrade a fleet whose live workspaces never get the marker:
+    // sentinels dead on exactly the pods the upgrade targeted.
+    let posture = sc.sentinel_preflight()?;
+    sc.write_capabilities(&posture, false)?;
+    if !posture.enabled {
+        eprintln!(
+            "flint-sync: sentinel verbs DISABLED ({}) — the poll arm will not arm",
+            posture.reason.as_deref().unwrap_or("unknown")
+        );
+    }
     sc.checkout().await?;
+    sc.write_capabilities(&posture, false)?;
     eprintln!("flint-sync: checkout complete — agent may start");
+
+    // The uniform crash rule (D2): a surviving pending sentinel is
+    // honored, acked and retired BEFORE the poll arm may consume a
+    // fresh one.
+    if posture.enabled {
+        if let Err(e) = sc.settle_pending_at_startup().await {
+            if matches!(e, LeanError::Fenced(_)) {
+                return Err(e);
+            }
+            eprintln!("flint-sync: startup settle failed (retrying at the floor): {e}");
+        }
+    }
 
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("SIGTERM handler");
+
+    // D3/D12: three INDEPENDENT, non-resettable interval timers.
+    //
+    // The shipped loop recreated `sleep(floor)` inside `select!` on
+    // every iteration and renewed the lease only from that arm — so a
+    // third arm completing every second would win every iteration,
+    // perpetually reset the floor sleep, and the lease would NEVER
+    // renew: the sidecar would depose itself into the straggler class
+    // by construction. Independent intervals make no arm's readiness
+    // able to starve another.
     let floor = Duration::from_secs(sc.cfg.floor_secs.max(1));
+    // Decoupled from publish cadence entirely: at the default floor the
+    // shipped renew cadence EQUALS the takeover threshold (6 quiet
+    // polls × 10 s), which is already racy.
+    let renew_every = Duration::from_secs(sc.cfg.floor_secs.min(30).max(1));
+    let poll_every = Duration::from_secs(sc.cfg.sentinel_poll_secs.max(1));
+
+    let mut floor_iv = tokio::time::interval(floor);
+    let mut renew_iv = tokio::time::interval(renew_every);
+    let mut poll_iv = tokio::time::interval(poll_every);
+    for iv in [&mut floor_iv, &mut renew_iv, &mut poll_iv] {
+        iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        iv.reset(); // consume the immediate first tick
+    }
+
     loop {
         tokio::select! {
-            _ = tokio::time::sleep(floor) => {
-                lease::renew(sc).await?;
-                match sc.run_barrier().await {
-                    Ok(r) if !r.no_change => eprintln!(
-                        "flint-sync: barrier seq={:?} up={} del={} parked={} consumed={}",
-                        r.seq, r.uploaded.len(), r.deleted.len(), r.parked.len(), r.consumed
+            _ = renew_iv.tick() => {
+                // Liveness signaling, independent of publish cadence.
+                if let Err(e) = lease::renew(sc).await {
+                    if matches!(e, LeanError::Fenced(_)) { return Err(e); }
+                    eprintln!("flint-sync: renew failed (retrying): {e}");
+                }
+            }
+            _ = floor_iv.tick() => {
+                match sc.floor_tick().await {
+                    Ok(o) if !o.no_change || !o.acks.is_empty() => eprintln!(
+                        "flint-sync: barrier seq={:?} up={} del={} consumed={} acks={}",
+                        o.seq, o.uploaded, o.deleted, o.consumed, o.acks.len()
                     ),
                     Ok(_) => {}
                     Err(e @ LeanError::Fenced(_)) => return Err(e),
                     Err(e) => eprintln!("flint-sync: barrier failed (retrying next floor): {e}"),
                 }
             }
+            _ = poll_iv.tick() => {
+                if !posture.enabled { continue; }
+                match sc.sentinel_tick().await {
+                    Ok(acks) => for a in acks {
+                        eprintln!(
+                            "flint-sync: sentinel ack status={} boundary={} seq={:?} nonces={}",
+                            a.status, a.boundary, a.seq, a.nonces.len()
+                        );
+                    },
+                    Err(e @ LeanError::Fenced(_)) => return Err(e),
+                    Err(e) => eprintln!("flint-sync: sentinel honor failed (retrying): {e}"),
+                }
+            }
             _ = term.recv() => {
                 eprintln!("flint-sync: SIGTERM — final drain barrier");
-                let out = sc.run_barrier().await;
+                // D10 rule 2: bounded retry. The shipped arm made ONE
+                // attempt and released the lease even on failure, so a
+                // transient store error silently forfeited everything
+                // since the last boundary.
+                let mut last = Ok(vec![]);
+                for attempt in 0..3u32 {
+                    last = sc.drain().await;
+                    match &last {
+                        Ok(_) => break,
+                        Err(LeanError::Fenced(_)) => break,
+                        Err(e) => {
+                            eprintln!("flint-sync: drain attempt {} failed: {e}", attempt + 1);
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
+                    }
+                }
                 let _ = lease::release(sc).await;
-                out?;
+                last?;
                 return Ok(());
             }
         }

@@ -80,6 +80,7 @@ async fn hitl_write(
         generation: 0,
         epoch: 0,
         flush_uuid: format!("gateway-{author}"),
+        boundary_source: None,
         posix: None,
     };
     let meta = store.put_whole(&key, body, &cond, &stamps, crc).await?;
@@ -307,6 +308,7 @@ async fn adopt_own_412_converges_without_conflict() {
         generation: 1,
         epoch: 1,
         flush_uuid: crashed_uuid,
+        boundary_source: None,
         posix: None,
     };
     store
@@ -342,6 +344,7 @@ async fn foreign_412_parks_never_overwrites() {
         generation: 9,
         epoch: 0,
         flush_uuid: "someone-else".into(),
+        boundary_source: None,
         posix: None,
     };
     let foreign =
@@ -391,6 +394,7 @@ async fn gc_refuses_unrecognized_etag() {
         generation: 0,
         epoch: 0,
         flush_uuid: "gateway-late".into(),
+        boundary_source: None,
         posix: None,
     };
     let cur = store.head(&sc.cfg.file_key("doc.txt")).await.unwrap();
@@ -436,6 +440,7 @@ async fn local_delete_loses_to_foreign_modify() {
         generation: 2,
         epoch: 0,
         flush_uuid: "other-writer".into(),
+        boundary_source: None,
         posix: None,
     };
     let cur = store.head(&sc.cfg.file_key("shared.txt")).await.unwrap();
@@ -820,4 +825,1480 @@ async fn sync_scan_first_dirty_wins_clean_applies() {
     assert_eq!(read(dir_a.path(), "mine.txt").unwrap(), "agent latest v2");
     assert!(r.conflicts.contains(&"mine.txt".to_string()));
     assert!(r.deleted.is_empty());
+}
+
+// ---------------------------------------------------------------------
+// Boundary verbs (docs/plans/flint-lean-boundary-verbs-plan.md).
+//
+// Phase 0 — `.flint/` namespace reservation + capability marker + the
+// pre-existing-data pre-flight (D0, D11).
+// ---------------------------------------------------------------------
+
+use super::control;
+use super::sentinel::{Due, Verb};
+
+fn touch_sentinel(root: &std::path::Path, name: &str, body: &str) {
+    let dir = root.join(super::CONTROL_DIR);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(name), body).unwrap();
+}
+
+fn control_exists(root: &std::path::Path, name: &str) -> bool {
+    root.join(super::CONTROL_DIR).join(name).exists()
+}
+
+/// D0.1 — the keystone. The RED form named in §5: before the scan
+/// exclusion, `.flint/publish` is an ordinary regular file, so it gets
+/// scanned and PUBLISHED to `<prefix>/files/.flint/publish` — the
+/// sentinel is live ammunition on an old sidecar. This asserts the
+/// hazard is gone: no `.flint/` key ever appears in the manifest or the
+/// bucket, and the scan never yields the path.
+#[tokio::test]
+async fn flint_dir_never_scanned() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+
+    write(dir.path(), "real.txt", "data");
+    touch_sentinel(dir.path(), control::PUBLISH, "");
+    touch_sentinel(dir.path(), control::REMOTE_SEQ, "{}");
+
+    let scanned = super::scan::scan(dir.path()).unwrap();
+    assert!(scanned.contains_key("real.txt"));
+    assert!(
+        !scanned.keys().any(|k| k.starts_with(".flint")),
+        "the scan yielded a control path: {:?}",
+        scanned.keys().collect::<Vec<_>>()
+    );
+
+    a.run_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("real.txt"));
+    assert!(
+        !m.entries.keys().any(|k| k.starts_with(".flint")),
+        "a control path was CITED: {:?}",
+        m.entries.keys().collect::<Vec<_>>()
+    );
+    assert!(store.head(&a.cfg.file_key(".flint/publish")).await.is_err());
+}
+
+/// D0.2 — an upgrade must never delete data. A workspace that legally
+/// published `files/.flint/legacy.txt` under a pre-D0 sidecar has it in
+/// the baseline; the new scan skips it, so the two-consecutive-scans
+/// rule would otherwise classify it absent twice and publish its
+/// DELETION. It is carried forward frozen.
+#[tokio::test]
+async fn legacy_flint_citation_survives_upgrade() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "keep.txt", "v1");
+    a.run_barrier().await.unwrap();
+
+    // Manufacture the pre-D0 state: a cited `.flint/` path in both the
+    // manifest and our baseline, as an old sidecar would have left it.
+    let key = a.cfg.file_key(".flint/legacy.txt");
+    let body = Bytes::from_static(b"legacy payload");
+    let crc = crc64_nvme(&body);
+    let stamps = GenerationStamps {
+        generation: 1,
+        epoch: 0,
+        flush_uuid: "legacy".into(),
+        boundary_source: None,
+        posix: None,
+    };
+    let meta = store
+        .put_whole(&key, body, &PutCondition::IfNoneMatchAny, &stamps, crc)
+        .await
+        .unwrap();
+    let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    let mut m = loaded.manifest.clone();
+    m.seq += 1;
+    m.entries.insert(
+        ".flint/legacy.txt".into(),
+        manifest::LeanEntry {
+            key: key.clone(),
+            etag: meta.etag.clone(),
+            crc64_b64: meta.crc64_b64.clone(),
+            size: meta.size,
+            mode: 0o644,
+            mtime_unix: 0,
+            generation: 1,
+            epoch: 0,
+            version_id: meta.version_id.clone(),
+        },
+    );
+    let installed =
+        manifest::cas_write(store.as_ref(), &a.cfg, &m, Some(&loaded.etag), 0, "legacy")
+            .await
+            .unwrap();
+    let mut b = a.state.load_baseline().unwrap();
+    b.entries.insert(
+        ".flint/legacy.txt".into(),
+        super::state::BaselineEntry {
+            etag: meta.etag.clone(),
+            generation: 1,
+            size: meta.size,
+            mtime_unix: 0,
+            version_id: None,
+        },
+    );
+    b.inst_base.insert(".flint/legacy.txt".into(), meta.etag.clone());
+    b.prev_scan.insert(".flint/legacy.txt".into());
+    b.seq = m.seq;
+    b.manifest_etag = Some(installed.etag.clone());
+    a.state.save_baseline(&b).unwrap();
+
+    // Anti-vacuity: the citation and the object genuinely exist first.
+    assert!(store.head(&key).await.is_ok());
+
+    // Two barriers — exactly what the two-scan delete rule needs.
+    a.run_barrier().await.unwrap();
+    a.run_barrier().await.unwrap();
+
+    let after = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(
+        after.entries.contains_key(".flint/legacy.txt"),
+        "an upgrade DELETED a legacy citation"
+    );
+    assert!(store.head(&key).await.is_ok(), "an upgrade GC'd the legacy object");
+}
+
+/// D0.3 — a legacy `files/.flint/...` citation is never materialized
+/// into the local control dir (it would collide with the control
+/// files); it stays cited, with a conflict record naming it.
+#[tokio::test]
+async fn checkout_never_materializes_control_citation() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "real.txt", "v1");
+    a.run_barrier().await.unwrap();
+
+    let key = a.cfg.file_key(".flint/legacy.txt");
+    let body = Bytes::from_static(b"legacy");
+    let crc = crc64_nvme(&body);
+    let meta = store
+        .put_whole(
+            &key,
+            body,
+            &PutCondition::IfNoneMatchAny,
+            &GenerationStamps {
+                generation: 1,
+                epoch: 0,
+                flush_uuid: "legacy".into(),
+                boundary_source: None,
+                posix: None,
+            },
+            crc,
+        )
+        .await
+        .unwrap();
+    let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    let mut m = loaded.manifest.clone();
+    m.seq += 1;
+    m.entries.insert(
+        ".flint/legacy.txt".into(),
+        manifest::LeanEntry {
+            key,
+            etag: meta.etag.clone(),
+            crc64_b64: meta.crc64_b64.clone(),
+            size: meta.size,
+            mode: 0o644,
+            mtime_unix: 0,
+            generation: 1,
+            epoch: 0,
+            version_id: meta.version_id.clone(),
+        },
+    );
+    manifest::cas_write(store.as_ref(), &a.cfg, &m, Some(&loaded.etag), 0, "legacy")
+        .await
+        .unwrap();
+
+    // A FRESH pod checks the same subtree out.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    let r = b.checkout().await.unwrap();
+    assert_eq!(read(dir_b.path(), "real.txt").unwrap(), "v1");
+    assert!(
+        !dir_b.path().join(".flint/legacy.txt").exists(),
+        "checkout materialized into the reserved control namespace"
+    );
+    assert_eq!(r.refused, 1);
+    assert!(b
+        .state
+        .load_conflicts()
+        .unwrap()
+        .iter()
+        .any(|c| c.path == ".flint/legacy.txt" && c.kind.starts_with("checkout-refused")));
+}
+
+/// D11 — the marker must be written on the LIVE-TREE restart row, not
+/// only inside a fresh checkout. `checkout()` returns at
+/// `marker_present()` without reaching its body, so a sidecar upgrade
+/// over live workspaces would otherwise leave sentinels dead on exactly
+/// the pods the upgrade targeted.
+#[tokio::test]
+async fn capabilities_written_on_live_tree_restart() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1");
+    a.run_barrier().await.unwrap();
+
+    // Anti-vacuity: this IS the live-tree row (the marker is present, so
+    // checkout returns early), and no capability marker exists yet — the
+    // pre-D11 state an in-place image upgrade lands in.
+    assert!(a.state.marker_present());
+    assert!(!control_exists(dir.path(), control::CAPABILITIES));
+    let r = a.checkout().await.unwrap();
+    assert!(r.resumed_live_tree);
+    assert!(!control_exists(dir.path(), control::CAPABILITIES));
+
+    // The startup write is what closes it.
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    let caps = a.read_capabilities().unwrap();
+    assert_eq!(caps.protocol, super::SENTINEL_PROTOCOL);
+    assert_eq!(caps.state, "live");
+    assert!(caps.verbs.iter().any(|v| v == "publish"));
+    assert!(caps.verbs.iter().any(|v| v == "sync"));
+    assert_eq!(caps.boundary_mode, "hybrid");
+}
+
+/// D0.4 — reserving `.flint/` is a BREAKING change for a workspace
+/// already using it as data: a file literally named `.flint/publish`
+/// would be CONSUMED (renamed away) by the poll — a data grab from a
+/// non-participating workspace. The pre-flight disables the verbs
+/// instead, fleet-visibly, and the file is left byte-identical.
+#[tokio::test]
+async fn preexisting_flint_disables_sentinels() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    // The app owned `.flint/publish` BEFORE any protocol-aware sidecar
+    // ran here — recorded bytes, per the drill's anti-vacuity rule.
+    touch_sentinel(dir.path(), control::PUBLISH, "app-owned payload");
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+
+    let posture = a.sentinel_preflight().unwrap();
+    assert!(!posture.enabled);
+    assert_eq!(posture.reason.as_deref(), Some("preexisting-flint-paths"));
+    a.write_capabilities(&posture, false).unwrap();
+    let caps = a.read_capabilities().unwrap();
+    assert!(caps.verbs.is_empty());
+    assert_eq!(caps.reason.as_deref(), Some("preexisting-flint-paths"));
+
+    // The poll arm never arms: the file is NOT consumed, NOT published,
+    // still present and byte-identical.
+    a.checkout().await.unwrap();
+    let acks = a.sentinel_tick().await.unwrap();
+    assert!(acks.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".flint/publish")).unwrap(),
+        "app-owned payload"
+    );
+    assert!(a.load_pending(Verb::Publish).unwrap().is_none());
+
+    // And the verdict is STICKY: a second startup, now that the marker
+    // exists, must not silently re-enable what it disabled.
+    let again = a.sentinel_preflight().unwrap();
+    assert!(!again.enabled);
+}
+
+// ---------------------------------------------------------------------
+// Phase 1 — publish sentinel, ack, coalescing, the work meter, the
+// refused-fenced path (D1, D2, D3, D3.1, D12).
+// ---------------------------------------------------------------------
+
+/// Zero the min-interval clock so a test can honor back-to-back without
+/// sleeping. (The interval itself is exercised by
+/// `min_interval_coalesces_into_one_barrier`.)
+fn clear_min_interval(sc: &Sidecar) {
+    let mut b = sc.load_budget().unwrap();
+    b.last_honor_unix = 0;
+    let bytes = serde_json::to_vec(&b).unwrap();
+    std::fs::write(sc.cfg.state_dir().join("sentinel-budget.json"), bytes).unwrap();
+}
+
+/// D1/D2 — the verb end to end: a sentinel publishes when cadence has
+/// not, and the ack names the seq the honoring barrier installed.
+#[tokio::test]
+async fn publish_sentinel_honored_and_acked() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    a.checkout().await.unwrap();
+    a.run_barrier().await.unwrap();
+    let before = manifest::load(store.as_ref(), &a.cfg).await.unwrap().map(|l| l.manifest.seq);
+
+    // The agent's logical change, then its declared coherent point.
+    write(dir.path(), "model.json", "{}");
+    write(dir.path(), "model.json.index", "idx");
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-1","note":"step 1"}"#);
+
+    let acks = a.sentinel_tick().await.unwrap();
+    assert_eq!(acks.len(), 1, "the sentinel was not honored");
+    let ack = &acks[0];
+    assert_eq!(ack.status, "ok");
+    assert_eq!(ack.boundary, "sentinel");
+    assert_eq!(ack.nonces, vec!["n-1".to_string()]);
+    assert!(ack.sentinel_mtime_unix_ns > 0);
+
+    // Both files of the logical change are cited by the SAME boundary.
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("model.json"));
+    assert!(m.entries.contains_key("model.json.index"));
+    assert_eq!(ack.seq, Some(m.seq));
+    assert_ne!(before, Some(m.seq), "the manifest did not advance");
+
+    // Consume/retire discipline: the sentinel is gone from the agent's
+    // view, the pending record is retired, the ack is on disk.
+    assert!(!control_exists(dir.path(), control::PUBLISH));
+    assert!(a.load_pending(Verb::Publish).unwrap().is_none());
+    assert!(control_exists(dir.path(), control::PUBLISH_ACK));
+    assert_eq!(a.read_ack(Verb::Publish).unwrap().nonces, vec!["n-1".to_string()]);
+}
+
+/// D2 — the ack carries EVERY coalesced nonce. Under coalescing an
+/// agent whose nonce rode behind a later touch would otherwise never
+/// see it and would re-touch in a loop, feeding the storm the rate
+/// limit exists to prevent.
+///
+/// Anti-vacuity: a MID-storm nonce (not the last) must appear.
+#[tokio::test]
+async fn sentinel_ack_echoes_covered_nonces() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    a.checkout().await.unwrap();
+
+    write(dir.path(), "f.txt", "v1");
+    for i in 0..5 {
+        touch_sentinel(dir.path(), control::PUBLISH, &format!(r#"{{"nonce":"n-{i}"}}"#));
+        // Consume only — honoring is held off by the min-interval below.
+        a.poll_sentinels().unwrap();
+    }
+    let pending = a.load_pending(Verb::Publish).unwrap().unwrap();
+    assert_eq!(pending.nonces.len(), 5, "touches did not coalesce into one record");
+
+    clear_min_interval(&a);
+    let ack = a.honor_pending(Verb::Publish, false).await.unwrap().unwrap();
+    for i in 0..5 {
+        assert!(
+            ack.nonces.contains(&format!("n-{i}")),
+            "nonce n-{i} was orphaned by coalescing: {:?}",
+            ack.nonces
+        );
+    }
+    // The mid-storm nonce specifically (the guard the drill leg names).
+    assert!(ack.nonces.contains(&"n-2".to_string()));
+}
+
+/// D3 — the min-interval is a COALESCING window, not a drop: touches
+/// inside it produce ONE barrier, and the ack covers every one of them.
+#[tokio::test]
+async fn min_interval_coalesces_into_one_barrier() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    a.cfg.sentinel_min_interval_secs = 3600; // the 1-hour-floor trick, applied to the interval
+    assert!(claim_until_held(&mut a, 3).await);
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    a.checkout().await.unwrap();
+
+    write(dir.path(), "f.txt", "v1");
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"first"}"#);
+    let acks = a.sentinel_tick().await.unwrap();
+    assert_eq!(acks.len(), 1, "the first honor must be prompt");
+    let seq_after_first = acks[0].seq.unwrap();
+
+    // Inside the interval now: further touches consume but do NOT honor.
+    write(dir.path(), "g.txt", "v1");
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"second"}"#);
+    let acks = a.sentinel_tick().await.unwrap();
+    assert!(acks.is_empty(), "the min-interval did not hold the second honor");
+    assert_eq!(a.sentinel_due().unwrap(), Due::MinInterval);
+    // Anti-vacuity: the touch WAS consumed — it is waiting, not lost.
+    assert_eq!(
+        a.load_pending(Verb::Publish).unwrap().unwrap().nonces,
+        vec!["second".to_string()]
+    );
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.seq, seq_after_first, "a held honor still advanced the manifest");
+
+    // The floor tick picks it up: the boundary is honored by a REAL
+    // barrier (contents are never thinned — D1's corollary).
+    let out = a.floor_tick().await.unwrap();
+    assert_eq!(out.acks.len(), 1);
+    assert_eq!(out.acks[0].nonces, vec!["second".to_string()]);
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("g.txt"));
+}
+
+/// D3.1 — THE HOT-LOOPS NO-REGRESSION RULE. The budget meters work, not
+/// calls. Red against a per-call counter: at the same touch rate, a
+/// storm publishing an over-`whole_put_max` file must exhaust the
+/// budget in ~2 honors while a small-file storm must not be throttled
+/// at all.
+#[tokio::test]
+async fn budget_meters_bytes_not_calls() {
+    // Arm (a): the large-file storm.
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    a.cfg.whole_put_max = 1024; // a small ceiling keeps the test fast
+    a.cfg.sentinel_hourly_budget = 8; // ⇒ 2 honors of a 4 KiB file
+    a.cfg.sentinel_min_interval_secs = 0;
+    assert!(claim_until_held(&mut a, 3).await);
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    a.checkout().await.unwrap();
+
+    let mut honors_large = 0;
+    let mut deferred_acks = 0;
+    for i in 0..6 {
+        write(dir.path(), "big.bin", &"x".repeat(4096 + i));
+        backdate_baseline(&a, "big.bin");
+        touch_sentinel(dir.path(), control::PUBLISH, &format!(r#"{{"nonce":"L{i}"}}"#));
+        let acks = a.sentinel_tick().await.unwrap();
+        honors_large += acks.len();
+        if acks.is_empty() && a.load_pending(Verb::Publish).unwrap().is_some() {
+            // The budget held it: the floor tick honors it, deferred.
+            let out = a.floor_tick().await.unwrap();
+            deferred_acks += out
+                .acks
+                .iter()
+                .filter(|x| x.boundary == "sentinel-deferred")
+                .count();
+        }
+    }
+    assert!(
+        honors_large <= 3,
+        "a 4 KiB-over-ceiling storm was NOT throttled: {honors_large} prompt honors"
+    );
+    assert!(deferred_acks >= 1, "no ack was stamped sentinel-deferred");
+    assert_eq!(a.sentinel_due().unwrap(), Due::BudgetDeferred);
+
+    // Arm (b): the SAME touch rate on a small file must NOT throttle.
+    let store2 = Arc::new(MemoryStore::new());
+    let dir2 = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store2, dir2.path()).await;
+    b.cfg.whole_put_max = 1024;
+    b.cfg.sentinel_hourly_budget = 8;
+    b.cfg.sentinel_min_interval_secs = 0;
+    assert!(claim_until_held(&mut b, 3).await);
+    let posture = b.sentinel_preflight().unwrap();
+    b.write_capabilities(&posture, false).unwrap();
+    b.checkout().await.unwrap();
+
+    let mut honors_small = 0;
+    for i in 0..6 {
+        write(dir2.path(), "small.txt", &format!("v{i}"));
+        backdate_baseline(&b, "small.txt");
+        touch_sentinel(dir2.path(), control::PUBLISH, &format!(r#"{{"nonce":"S{i}"}}"#));
+        honors_small += b.sentinel_tick().await.unwrap().len();
+    }
+    assert_eq!(
+        honors_small, 6,
+        "the small-file storm was throttled — the meter is counting CALLS, not work"
+    );
+    assert!(b
+        .read_ack(Verb::Publish)
+        .map(|a| a.boundary == "sentinel")
+        .unwrap_or(false));
+    // The claim the whole rule rests on: same touch rate, different verdict.
+    assert!(honors_small > honors_large);
+}
+
+/// D3.1's third consequence — a no-diff sentinel storm stays free: the
+/// budget exists to bound WORK, and a no-diff honor does none. Its only
+/// bound is the min-interval.
+#[tokio::test]
+async fn no_diff_sentinel_honor_costs_no_budget() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    a.cfg.sentinel_hourly_budget = 2;
+    a.cfg.sentinel_min_interval_secs = 0;
+    assert!(claim_until_held(&mut a, 3).await);
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    a.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1");
+    a.run_barrier().await.unwrap();
+
+    for i in 0..10 {
+        touch_sentinel(dir.path(), control::PUBLISH, &format!(r#"{{"nonce":"q{i}"}}"#));
+        let acks = a.sentinel_tick().await.unwrap();
+        assert_eq!(acks.len(), 1, "a no-diff honor was throttled at touch {i}");
+        assert!(acks[0].report.no_change, "the tree was not actually quiet");
+    }
+    assert_eq!(a.load_budget().unwrap().spent(super::now_unix()), 0);
+}
+
+/// D2's uniform crash rule. Pending-present-and-no-matching-ack is the
+/// SAME observable state for crash-before-CAS and crash-after-step-7,
+/// so acking from persisted state would assert publication of writes
+/// that never uploaded. The rule: ALWAYS re-run a full barrier, and ack
+/// with THAT barrier's install.
+#[tokio::test]
+async fn crash_between_consume_and_ack_reruns_barrier() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    a.checkout().await.unwrap();
+    a.run_barrier().await.unwrap();
+    let seq_before = a.state.load_baseline().unwrap().seq;
+
+    // The crash shape: the sentinel was consumed, the barrier never ran.
+    write(dir.path(), "late.txt", "written before the boundary");
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"crashed"}"#);
+    a.poll_sentinels().unwrap();
+    // Anti-vacuity: pending present, ack absent — the exact crash state.
+    assert!(a.load_pending(Verb::Publish).unwrap().is_some());
+    assert!(a.read_ack(Verb::Publish).is_none());
+
+    // Restart.
+    a.settle_pending_at_startup().await.unwrap();
+
+    let ack = a.read_ack(Verb::Publish).unwrap();
+    assert_eq!(ack.status, "ok");
+    assert!(ack.nonces.contains(&"crashed".to_string()));
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    // The ack names the RE-RUN barrier's install, never the pre-crash
+    // baseline seq — and the file that had never uploaded is cited.
+    assert_eq!(ack.seq, Some(m.seq));
+    assert!(m.seq > seq_before);
+    assert!(m.entries.contains_key("late.txt"));
+    assert!(a.load_pending(Verb::Publish).unwrap().is_none());
+}
+
+/// D2 settle-before-consume: a surviving pending must be honored, acked
+/// and retired FIRST. A fresh consume that clobbered it would orphan its
+/// nonces forever.
+#[tokio::test]
+async fn restart_settles_pending_before_new_consume() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    a.cfg.sentinel_min_interval_secs = 0;
+    assert!(claim_until_held(&mut a, 3).await);
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    a.checkout().await.unwrap();
+
+    write(dir.path(), "a.txt", "v1");
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"old"}"#);
+    a.poll_sentinels().unwrap();
+    // A NEW touch arrives while the old pending still stands.
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"new"}"#);
+    a.poll_sentinels().unwrap();
+
+    // The old nonce was not clobbered — it coalesced.
+    let pending = a.load_pending(Verb::Publish).unwrap().unwrap();
+    assert!(pending.nonces.contains(&"old".to_string()));
+    assert!(pending.nonces.contains(&"new".to_string()));
+
+    let ack = a.honor_pending(Verb::Publish, false).await.unwrap().unwrap();
+    assert!(ack.nonces.contains(&"old".to_string()));
+    assert!(ack.nonces.contains(&"new".to_string()));
+}
+
+/// D2's torn-body rule: an unparsable or oversize body is honored as a
+/// bare-touch boundary with a warning conflict record — never a wedge,
+/// never a silent drop.
+#[tokio::test]
+async fn torn_pending_body_honored_as_bare_touch() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    a.checkout().await.unwrap();
+
+    write(dir.path(), "f.txt", "v1");
+    // A plain open+write racing the consume rename leaves exactly this.
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"half-writ"#);
+    let acks = a.sentinel_tick().await.unwrap();
+    assert_eq!(acks.len(), 1, "a torn body wedged the verb");
+    assert_eq!(acks[0].status, "ok");
+    assert!(acks[0].nonces.is_empty());
+    assert!(acks[0].sentinel_mtime_unix_ns > 0, "the bare-touch mtime must still be covered");
+    assert!(a
+        .state
+        .load_conflicts()
+        .unwrap()
+        .iter()
+        .any(|c| c.kind == "sentinel-torn-body"));
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("f.txt"));
+}
+
+/// A FIFO at the sentinel path would block the body read forever. Type
+/// check first: skipped with a warning record, never consumed.
+#[tokio::test]
+#[cfg(unix)]
+async fn fifo_sentinel_skipped() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    a.checkout().await.unwrap();
+
+    let ctl = dir.path().join(super::CONTROL_DIR);
+    std::fs::create_dir_all(&ctl).unwrap();
+    let fifo = ctl.join(control::PUBLISH);
+    let cpath = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    // SAFETY: a path we own, in a temp dir.
+    let rc = unsafe { libc::mkfifo(cpath.as_ptr(), 0o644) };
+    assert_eq!(rc, 0, "could not create the FIFO fixture");
+    // Anti-vacuity: it really is a FIFO, and it really is at the
+    // sentinel path.
+    assert!(!std::fs::symlink_metadata(&fifo).unwrap().is_file());
+
+    let acks = a.sentinel_tick().await.unwrap();
+    assert!(acks.is_empty());
+    assert!(a.load_pending(Verb::Publish).unwrap().is_none());
+    assert!(fifo.exists(), "the FIFO was consumed");
+    assert!(a
+        .state
+        .load_conflicts()
+        .unwrap()
+        .iter()
+        .any(|c| c.kind == "sentinel-not-regular-file"));
+}
+
+/// D2's largest protocol hole in the draft: deposal stranded sentinels
+/// forever. A fenced honor writes `refused-fenced` naming the observed
+/// epoch, flips the marker to fenced with no verbs, and retires the
+/// pending — the agent is answered, and stops touching a zombie.
+#[tokio::test]
+async fn fenced_honor_writes_refused_ack() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "f.txt", "v1");
+    a.run_barrier().await.unwrap();
+
+    // A pending sentinel stands...
+    write(dir_a.path(), "g.txt", "v1");
+    touch_sentinel(dir_a.path(), control::PUBLISH, r#"{"nonce":"stranded"}"#);
+    a.poll_sentinels().unwrap();
+    assert!(a.load_pending(Verb::Publish).unwrap().is_some());
+
+    // ...and a successor deposes us. Anti-vacuity: the takeover is real.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    assert!(claim_until_held(&mut b, 12).await);
+    let our_epoch = a.lease.as_ref().unwrap().epoch;
+    let their_epoch = b.lease.as_ref().unwrap().epoch;
+    assert!(their_epoch > our_epoch, "no takeover happened");
+
+    let err = a.sentinel_tick().await.unwrap_err();
+    assert!(matches!(err, LeanError::Fenced(_)));
+
+    let ack = a.read_ack(Verb::Publish).unwrap();
+    assert_eq!(ack.status, "refused-fenced");
+    assert!(ack.nonces.contains(&"stranded".to_string()));
+    assert_eq!(ack.observed_epoch, Some(their_epoch));
+    assert!(ack.seq.is_none());
+    assert!(a.load_pending(Verb::Publish).unwrap().is_none());
+
+    // The marker stops the agent from touching a zombie.
+    let caps = a.read_capabilities().unwrap();
+    assert_eq!(caps.state, "fenced");
+    assert!(caps.verbs.is_empty());
+}
+
+/// D2 — the in-loop SYNC honor must never apply the successor's
+/// manifest onto a zombie tree. `Sidecar::sync` has no lease/epoch
+/// check of its own, so before this tranche a straggler consuming a
+/// sync sentinel between deposal and its next cooperative fence would
+/// have done exactly that, and acked SUCCESS.
+///
+/// **Correction to D2's framing, recorded because the mutation matrix
+/// found it:** removing `verify_not_deposed` from the sync honor does
+/// NOT turn this test red — `honor_pending` renews the lease first
+/// (D12) and the renew 412s on deposal, so the renew is the
+/// load-bearing fence and the explicit check is the narrower guard for
+/// the window between renew and apply. Both are kept; the test asserts
+/// the property (tree unmutated, ack refused), and
+/// `deposed_sidecar_fails_the_explicit_epoch_check` covers the guard
+/// itself so it is not untested code.
+#[tokio::test]
+async fn fenced_sync_honor_refused_and_tree_unmutated() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "shared.txt", "zombie view");
+    a.run_barrier().await.unwrap();
+
+    // The successor takes over and publishes something the zombie's
+    // sync WOULD apply if it ran.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    assert!(claim_until_held(&mut b, 12).await);
+    b.checkout().await.unwrap();
+    write(dir_b.path(), "shared.txt", "successor view");
+    backdate_baseline(&b, "shared.txt");
+    b.run_barrier().await.unwrap();
+
+    let before = std::fs::read_to_string(dir_a.path().join("shared.txt")).unwrap();
+    touch_sentinel(dir_a.path(), control::SYNC, r#"{"nonce":"zombie-sync"}"#);
+    let err = a.sentinel_tick().await.unwrap_err();
+    assert!(matches!(err, LeanError::Fenced(_)));
+
+    let ack = a.read_ack(Verb::Sync).unwrap();
+    assert_eq!(ack.status, "refused-fenced");
+    assert_eq!(
+        std::fs::read_to_string(dir_a.path().join("shared.txt")).unwrap(),
+        before,
+        "a fenced sync honor MUTATED the zombie's tree"
+    );
+    assert_ne!(before, "successor view", "the fixture never diverged");
+}
+
+/// The explicit guard of the previous test, isolated: on a deposed
+/// sidecar the epoch check itself fences, independently of the renew.
+#[tokio::test]
+async fn deposed_sidecar_fails_the_explicit_epoch_check() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    // Anti-vacuity: it passes while we hold the lease.
+    a.verify_not_deposed_pub().await.unwrap();
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    assert!(claim_until_held(&mut b, 12).await);
+    assert!(b.lease.as_ref().unwrap().epoch > a.lease.as_ref().unwrap().epoch);
+
+    assert!(matches!(
+        a.verify_not_deposed_pub().await.unwrap_err(),
+        LeanError::Fenced(_)
+    ));
+}
+
+// ---------------------------------------------------------------------
+// Phase 2 — sync sentinel + scope (D4) + remote.seq (D5) + write
+// containment (§2.2 security gate).
+// ---------------------------------------------------------------------
+
+/// D4 — THE correctness rule, not an optimization. A scoped sync must
+/// advance `inst_base` only for what it applied in scope. `inst_base`
+/// is the three-way MERGE BASE: if a scoped sync advanced it wholesale
+/// to bucket-current, `manifest::merge` would compute
+/// `changed = base != theirs` as FALSE for every out-of-scope foreign
+/// entry, never queue it, and the change would be silently lost from
+/// the inbox flow forever.
+///
+/// The foreign change here is a MANIFEST install by another writer, not
+/// a HITL inbox entry — a first draft of this test used an inbox entry
+/// and passed even with the hazard reintroduced, because
+/// `consume_inbox` integrates queued entries regardless of `inst_base`.
+/// The loss only runs through the merge.
+///
+/// Anti-vacuity (the drill leg's three-part guard): the out-of-scope
+/// change existed pre-sync, was absent at ack time, and is present
+/// after the barriers that integrate it.
+#[tokio::test]
+async fn scoped_sync_preserves_out_of_scope_foreign_flow() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "inputs/data.txt", "v1");
+    write(dir_a.path(), "outputs/result.txt", "v1");
+    a.run_barrier().await.unwrap();
+
+    // A sibling writer installs new generations of BOTH paths directly
+    // into the manifest.
+    let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    let mut theirs = loaded.manifest.clone();
+    theirs.seq += 1;
+    for (path, content) in
+        [("inputs/data.txt", "foreign inputs v2"), ("outputs/result.txt", "foreign outputs v2")]
+    {
+        let key = a.cfg.file_key(path);
+        let body = Bytes::from(content.to_string());
+        let crc = crc64_nvme(&body);
+        let cur = store.head(&key).await.unwrap();
+        let meta = store
+            .put_whole(
+                &key,
+                body,
+                &PutCondition::IfMatch(cur.etag),
+                &GenerationStamps {
+                    generation: 2,
+                    epoch: 0,
+                    flush_uuid: "sibling".into(),
+                    boundary_source: None,
+                    posix: None,
+                },
+                crc,
+            )
+            .await
+            .unwrap();
+        let e = theirs.entries.get_mut(path).unwrap();
+        e.etag = meta.etag.clone();
+        e.crc64_b64 = meta.crc64_b64.clone();
+        e.size = meta.size;
+        e.generation = 2;
+    }
+    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.etag), 0, "sibling")
+        .await
+        .unwrap();
+    let foreign_out_etag = theirs.entries["outputs/result.txt"].etag.clone();
+
+    // (1) the out-of-scope change genuinely existed pre-sync.
+    assert_ne!(
+        foreign_out_etag,
+        a.state.load_baseline().unwrap().inst_base["outputs/result.txt"]
+    );
+
+    let r = a.sync_scoped(Some(vec!["inputs/".into()])).await.unwrap();
+
+    // In scope: applied now.
+    assert_eq!(read(dir_a.path(), "inputs/data.txt").unwrap(), "foreign inputs v2");
+    assert!(r.applied.contains(&"inputs/data.txt".to_string()));
+    // (2) out of scope: absent at ack time, and COUNTED as deferred.
+    assert_eq!(read(dir_a.path(), "outputs/result.txt").unwrap(), "v1");
+    assert!(r.out_of_scope_foreign >= 1);
+    // The merge base was NOT advanced for it — this is the whole rule.
+    assert_ne!(
+        a.state.load_baseline().unwrap().inst_base["outputs/result.txt"],
+        foreign_out_etag,
+        "a scoped sync advanced the MERGE BASE for an out-of-scope path"
+    );
+    // A scoped sync leaves seq/manifest_etag alone.
+    assert_eq!(r.seq, a.state.load_baseline().unwrap().seq);
+
+    // (3) present after the normal merge → inbox → consume flow: the
+    // first barrier's merge queues it, the second consumes it.
+    a.run_barrier().await.unwrap();
+    a.run_barrier().await.unwrap();
+    assert_eq!(
+        read(dir_a.path(), "outputs/result.txt").unwrap(),
+        "foreign outputs v2",
+        "the out-of-scope foreign change was LOST from the inbox flow"
+    );
+}
+
+/// §2.2 — scope matches on COMPONENT boundaries. `"in"` must never
+/// match `internal/`.
+#[test]
+fn scope_matches_on_component_boundary() {
+    let s = super::sync::Scope::new(&["in".to_string(), "inputs/".to_string()]);
+    assert!(s.covers("in"));
+    assert!(s.covers("in/x.txt"));
+    assert!(s.covers("inputs/a.txt"));
+    assert!(!s.covers("internal/secret.txt"));
+    assert!(!s.covers("inputsX/a.txt"));
+    // `..` and absolute entries are dropped, not honored.
+    let s = super::sync::Scope::new(&["../etc".to_string()]);
+    assert!(s.is_empty());
+}
+
+/// §2.2 — the write path becomes containment-safe. The shipped
+/// `write_file_atomic` did `create_dir_all(parent)` + write with no
+/// `O_NOFOLLOW` and no root check, while the scanner SKIPS symlinks — so
+/// an unprivileged app that plants `inputs -> /root/.aws`, lands an
+/// object at `inputs/<path>` and drops a scoped sync turns the
+/// credential-holding sidecar into an arbitrary-file-write primitive
+/// outside the workspace.
+#[tokio::test]
+#[cfg(unix)]
+async fn write_file_atomic_refuses_symlink_escape() {
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.txt");
+    std::fs::write(&secret, "ORIGINAL CREDENTIALS").unwrap();
+
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+
+    // The planted symlink. Anti-vacuity: it really escapes the root,
+    // and the scanner really cannot see it.
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("inputs")).unwrap();
+    assert!(dir.path().join("inputs/secret.txt").exists());
+    let scanned = super::scan::scan(dir.path()).unwrap();
+    assert!(!scanned.keys().any(|k| k.starts_with("inputs")));
+
+    // Every workspace write path refuses it.
+    assert!(super::barrier::contained_path(dir.path(), "inputs/secret.txt").is_err());
+    assert!(super::barrier::contained_path(dir.path(), "../escape.txt").is_err());
+    assert!(super::barrier::contained_path(dir.path(), "/etc/passwd").is_err());
+    assert!(super::barrier::contained_path(dir.path(), ".flint/publish").is_err());
+    // A legitimate nested path still works.
+    assert!(super::barrier::contained_path(dir.path(), "ok/nested/f.txt").is_ok());
+
+    // And the end-to-end shape: a foreign object at the planted path is
+    // surfaced as a conflict, never written through the symlink.
+    hitl_write(&store, &a.cfg, "inputs/secret.txt", "ATTACKER PAYLOAD", "attacker")
+        .await
+        .unwrap();
+    a.run_barrier().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&secret).unwrap(),
+        "ORIGINAL CREDENTIALS",
+        "the sidecar wrote THROUGH a planted symlink, outside the workspace"
+    );
+    assert!(a
+        .state
+        .load_conflicts()
+        .unwrap()
+        .iter()
+        .any(|c| c.kind.starts_with("consume-refused-containment")));
+}
+
+/// §2.2's phantom-conflict rule. `sync` saves the baseline only at the
+/// end, so a crash mid-apply followed by a re-honor makes already-
+/// applied paths scan dirty against the stale baseline: the ack would
+/// report a conflict for a path whose local bytes ARE the remote bytes,
+/// and the path would then re-publish as a spurious generation bump.
+#[tokio::test]
+async fn sync_rehonor_no_phantom_conflicts() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "shared.txt", "v1");
+    a.run_barrier().await.unwrap();
+
+    // A foreign change lands and IS applied...
+    hitl_write(&store, &a.cfg, "shared.txt", "foreign v2", "ci").await.unwrap();
+    let r = a.sync().await.unwrap();
+    assert!(r.applied.contains(&"shared.txt".to_string()));
+
+    // ...but the crash shape: `sync` saves the baseline only at the end,
+    // so a crash mid-apply leaves the WHOLE entry stale — etag included.
+    // The path now scans DIRTY against that stale baseline while its
+    // bytes are byte-identical to the remote's.
+    let mut b = a.state.load_baseline().unwrap();
+    let stale = b.entries.get_mut("shared.txt").unwrap();
+    stale.etag = "\"stale-pre-sync-etag\"".into();
+    stale.mtime_unix -= 10;
+    stale.size = 1;
+    a.state.save_baseline(&b).unwrap();
+    let scanned = super::scan::scan(dir.path()).unwrap();
+    let c = super::scan::classify(&scanned, &a.state.load_baseline().unwrap());
+    assert!(c.uploads.contains("shared.txt"), "the fixture is not actually dirty");
+
+    let r = a.sync().await.unwrap();
+    assert!(
+        !r.conflicts.contains(&"shared.txt".to_string()),
+        "a phantom conflict was reported for byte-identical content"
+    );
+    assert!(r.applied.contains(&"shared.txt".to_string()));
+}
+
+/// D5 — the news ticker is fed from information the barrier already
+/// has: ZERO added bucket requests. `updated_unix` heartbeats on every
+/// tick (so an agent can tell "no news" from "sidecar dead");
+/// `observed_seq` moves only when it moves.
+#[tokio::test]
+async fn remote_seq_ticks_without_added_requests() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "f.txt", "v1");
+    a.floor_tick().await.unwrap();
+
+    let t0 = a.load_remote_seq();
+    assert!(t0.updated_unix > 0);
+    assert_eq!(t0.observed_seq, t0.integrated_seq, "no news, yet the ticker claims some");
+
+    // A foreign install advances the bucket.
+    let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    let mut theirs = loaded.manifest.clone();
+    theirs.seq += 1;
+    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.etag), 0, "foreign")
+        .await
+        .unwrap();
+
+    // Anti-vacuity: the ticker had NOT moved before the foreign install.
+    assert_eq!(t0.observed_seq, loaded.manifest.seq);
+
+    a.floor_tick().await.unwrap();
+    let t1 = a.load_remote_seq();
+    assert!(
+        t1.observed_seq >= theirs.seq,
+        "the ticker missed a foreign install: {} vs {}",
+        t1.observed_seq,
+        theirs.seq
+    );
+    assert!(t1.updated_unix >= t0.updated_unix);
+}
+
+/// D14 — a gateway sync request is CARRIED, never executed. The
+/// asymmetry with a boundary request is blast radius: a boundary
+/// publishes what is already on disk and touches no local file, whereas
+/// `sync` re-derives the tree against the current remote manifest and
+/// DELETES local files for remotely-deleted paths.
+///
+/// Failing control, house style: the tree hash is taken before and
+/// after, and the test FAILS if the sidecar mutated anything.
+#[tokio::test]
+async fn sync_request_is_carried_never_executed() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "keep.txt", "agent bytes");
+    a.run_barrier().await.unwrap();
+
+    // Remote truth diverges in a way a sync WOULD apply (a deletion —
+    // the destructive half of the verb).
+    let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    let mut theirs = loaded.manifest.clone();
+    theirs.seq += 1;
+    theirs.entries.remove("keep.txt");
+    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.etag), 0, "remote-delete")
+        .await
+        .unwrap();
+
+    let tree_before = std::fs::read_to_string(dir.path().join("keep.txt")).unwrap();
+    a.carry_sync_request(super::now_unix(), "ci@example").unwrap();
+    // Several ticks: the sidecar must move the ticker and NOTHING else.
+    for _ in 0..3 {
+        let _ = a.sentinel_tick().await.unwrap();
+    }
+    let t = a.load_remote_seq();
+    assert_eq!(t.sync_requested_by.as_deref(), Some("ci@example"));
+    assert!(t.sync_requested_unix.is_some());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("keep.txt")).unwrap(),
+        tree_before,
+        "the sidecar acted on a remote's sync request"
+    );
+
+    // The agent's OWN touch is what performs it — and then the request
+    // is stale and self-clears.
+    touch_sentinel(dir.path(), control::SYNC, r#"{"nonce":"mine"}"#);
+    let acks = a.sentinel_tick().await.unwrap();
+    assert_eq!(acks.len(), 1);
+    assert!(!dir.path().join("keep.txt").exists(), "the agent's own sync did not run");
+}
+
+// ---------------------------------------------------------------------
+// Phase 3 — gated advance (D6, D7, D8, D13) + the flint-store version
+// surface.
+// ---------------------------------------------------------------------
+
+use super::gated::CitationSource;
+
+fn gated(sc: &mut Sidecar) {
+    sc.cfg.boundary_mode = super::BoundaryMode::Gated;
+    sc.cfg.visibility_lag_bound_secs = Some(3600); // the 1-hour-floor trick
+    sc.cfg.quiesce_bound_secs = 3600;
+}
+
+/// D7 — the premise the whole switch rests on: on a versioned bucket an
+/// in-place PUT DESTROYS NOTHING. The cited generation survives as a
+/// version and stays byte-fetchable by id.
+#[tokio::test]
+async fn staging_put_never_destroys_the_cited_version() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "model.json", "BOUNDARY 1");
+    a.run_barrier().await.unwrap();
+
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let cited = m.entries["model.json"].clone();
+    let cited_vid = cited.version_id.clone().expect("a versioned store cites a version");
+
+    // Now stage a new generation in place.
+    gated(&mut a);
+    write(dir.path(), "model.json", "MID-LOGICAL-CHANGE");
+    backdate_baseline(&a, "model.json");
+    let lane = a.upload_lane().await.unwrap();
+    assert_eq!(lane.staged, vec!["model.json".to_string()]);
+
+    // Anti-vacuity: the staging PUT really moved `current`.
+    let key = a.cfg.file_key("model.json");
+    let (_, current) = store.get_whole(&key, None).await.unwrap();
+    assert_eq!(&current[..], b"MID-LOGICAL-CHANGE");
+    // Visibility withheld: the manifest has NOT advanced.
+    let m2 = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m2.seq, m.seq, "the upload lane advanced the manifest");
+    // Durability without destruction: the CITED version is intact.
+    let (_, still) = store.get_version(&key, &cited_vid).await.unwrap();
+    assert_eq!(&still[..], b"BOUNDARY 1", "an in-place staging PUT destroyed cited data");
+}
+
+/// D13 — the rule the design is INCOHERENT without. Red against the
+/// shipped S3-wins arm: with staged (uncited) bytes current, a gated
+/// checkout must materialize the cited version, never adopt the
+/// mid-logical-change current one.
+///
+/// This is leg B9's core: the probe checkout must COMPLETE and
+/// materialize exactly the pre-boundary cited set.
+#[tokio::test]
+async fn pinned_reads_never_adopts_current() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+
+    // Boundary 1: both files of a logical change, cited together.
+    write(dir_a.path(), "model.json", "A1");
+    write(dir_a.path(), "model.json.index", "B1");
+    a.upload_lane().await.unwrap();
+    let cite = a.citation_pass(CitationSource::Sentinel).await.unwrap();
+    assert_eq!(cite.cited, 2);
+    let cited = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(cited.pinned_reads, "a gated citation did not stamp pinned_reads");
+    assert_eq!(cited.boundary_source.as_deref(), Some("sentinel"));
+
+    // Now write A2 and stage it — the mid-logical-change state: A is
+    // new, B is not yet written.
+    write(dir_a.path(), "model.json", "A2-MID-CHANGE");
+    backdate_baseline(&a, "model.json");
+    a.upload_lane().await.unwrap();
+
+    // Anti-vacuity, both halves of the drill leg's guard:
+    // (1) the uncited version EXISTS and is CURRENT at the real key...
+    let key = a.cfg.file_key("model.json");
+    let (_, raw) = store.get_whole(&key, None).await.unwrap();
+    assert_eq!(&raw[..], b"A2-MID-CHANGE", "nothing was actually staged");
+    // (2) ...while the manifest seq is unchanged.
+    let now = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(now.seq, cited.seq);
+
+    // A second pod checks out between the staging and the boundary.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    let r = b.checkout().await.unwrap();
+    // The probe checkout must COMPLETE (a wedged probe fails the leg).
+    assert_eq!(r.materialized, 2);
+    assert_eq!(
+        read(dir_b.path(), "model.json").unwrap(),
+        "A1",
+        "a gated checkout S3-WINS-ADOPTED its own staged bytes"
+    );
+    assert_eq!(read(dir_b.path(), "model.json.index").unwrap(), "B1");
+}
+
+/// §3 residual 11, as a REQUIRED-REACHABLE probe rather than an
+/// assumption. The raw-key exposure is real and permanent: a reader
+/// that does not resolve through the manifest sees mid-logical-change
+/// bytes. Proving invisibility without proving this would be proving a
+/// guarantee by the attack's absence — the house rule forbids it.
+#[tokio::test]
+async fn raw_key_reader_sees_uncited_bytes() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+    write(dir.path(), "f.txt", "CITED");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+
+    write(dir.path(), "f.txt", "UNCITED");
+    backdate_baseline(&a, "f.txt");
+    a.upload_lane().await.unwrap();
+
+    // The documented exposure, demonstrated: `aws s3 cp` equivalent.
+    let (_, raw) = store.get_whole(&a.cfg.file_key("f.txt"), None).await.unwrap();
+    assert_eq!(&raw[..], b"UNCITED");
+    // And the guarantee that IS promised still holds for a
+    // manifest-resolving reader.
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let vid = m.entries["f.txt"].version_id.clone().unwrap();
+    let (_, cited) = store.get_version(&a.cfg.file_key("f.txt"), &vid).await.unwrap();
+    assert_eq!(&cited[..], b"CITED");
+}
+
+/// §2.4.1's stage-diff base. Diffing against the baseline ALONE — which
+/// gated mode leaves un-advanced until citation — would re-PUT every
+/// staged-but-quiet file on every tick: 50 quiet files × 60 ticks =
+/// 3,000 PUTs/hour vs today's 50, which would falsify the plan's own
+/// economics. The base is baseline ∪ PENDING.
+#[tokio::test]
+async fn quiet_staged_file_is_not_restaged() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+
+    write(dir.path(), "quiet.txt", "v1");
+    let first = a.upload_lane().await.unwrap();
+    assert_eq!(first.staged, vec!["quiet.txt".to_string()], "nothing staged on the first tick");
+
+    for tick in 0..5 {
+        let r = a.upload_lane().await.unwrap();
+        assert!(
+            r.staged.is_empty(),
+            "tick {tick} re-staged a quiet file: the stage-diff base is the baseline alone"
+        );
+    }
+    // One version, not six.
+    assert_eq!(store.version_count(&a.cfg.file_key("quiet.txt")), 1);
+}
+
+/// §2.4.1 — the citation lane owns the window; the upload lane opens
+/// NONE. A lane with no CAS that opened a 180 s-deadline window every
+/// 60 s would refuse HITL admission essentially forever between
+/// citations, and it would protect nothing.
+#[tokio::test]
+async fn hitl_admitted_between_citations() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+    write(dir.path(), "seed.txt", "v1");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+
+    for i in 0..3 {
+        write(dir.path(), &format!("churn{i}.txt"), "x");
+        let lane = a.upload_lane().await.unwrap();
+        // Anti-vacuity: the lane really ran and really staged.
+        assert!(!lane.staged.is_empty(), "no lane tick happened at {i}");
+        // No citation is due (1-hour caps), so this is squarely
+        // between citations.
+        assert!(a.citation_due(false).unwrap().is_none());
+        hitl_write(&store, &a.cfg, &format!("hitl{i}.txt"), "user bytes", "dilip")
+            .await
+            .unwrap_or_else(|e| panic!("HITL refused between citations at tick {i}: {e}"));
+    }
+}
+
+/// §2.4.1 — quiescence must actually FIRE. The draft's definition ("no
+/// scan diff vs baseline") could never fire once anything was pending,
+/// since pending paths stay classified-changed until citation:
+/// quiescence would have been dead code and every citation would ride
+/// the lag cap. The definition is scan-to-scan STABILITY.
+///
+/// The leg FAILS if the source reads `forced-lag-cap` — the exact dead
+/// -code shape the finding named.
+#[tokio::test]
+async fn quiescence_fires_and_is_not_the_lag_cap() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+    a.cfg.quiesce_bound_secs = 0; // fire as soon as stability is observed
+    a.cfg.visibility_lag_bound_secs = Some(3600); // the cap CANNOT be the cause
+
+    write(dir.path(), "one.txt", "written once, then silence");
+    a.upload_lane().await.unwrap();
+    // The first tick establishes the fingerprint; the second observes
+    // it unchanged — that is the stability the rule is about.
+    assert!(a.citation_due(false).unwrap().is_none(), "quiescence fired before any stability");
+    a.upload_lane().await.unwrap();
+
+    let source = a.citation_due(false).unwrap();
+    assert_eq!(
+        source,
+        Some(CitationSource::Quiescence),
+        "quiescence did not fire — got {source:?} (dead-code shape if forced-lag-cap)"
+    );
+    let r = a.citation_pass(source.unwrap()).await.unwrap();
+    assert_eq!(r.source.as_deref(), Some("quiescence"));
+    // And the source is readable FROM THE BUCKET alone, by HEAD.
+    let head = store.head(&a.cfg.manifest_key()).await.unwrap();
+    let stamps = GenerationStamps::from_meta(&head.meta).unwrap();
+    assert_eq!(stamps.boundary_source.as_deref(), Some("quiescence"));
+}
+
+/// §2.4.1 — the lag cap forces a citation even mid-change, and stamps
+/// its provenance so a downstream consumer can tell a declared-coherent
+/// boundary from a forced possibly-torn one.
+///
+/// Anti-vacuity: the writer must actually be writing during every
+/// quiesce window — otherwise quiescence fired and the leg proved
+/// nothing about the cap.
+#[tokio::test]
+async fn lag_cap_forces_citation_and_stamps_the_source() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+    a.cfg.visibility_lag_bound_secs = Some(0); // the cap is due immediately
+    a.cfg.quiesce_bound_secs = 3600; // quiescence CANNOT be the cause
+
+    let mut wrote = 0;
+    for i in 0..3 {
+        write(dir.path(), &format!("hot{i}.txt"), &format!("v{i}"));
+        wrote += 1;
+        a.upload_lane().await.unwrap();
+    }
+    assert_eq!(wrote, 3, "the writer was not writing");
+    let source = a.citation_due(false).unwrap();
+    assert_eq!(source, Some(CitationSource::ForcedLagCap));
+    let r = a.citation_pass(source.unwrap()).await.unwrap();
+    assert_eq!(r.source.as_deref(), Some("forced-lag-cap"));
+    let head = store.head(&a.cfg.manifest_key()).await.unwrap();
+    assert_eq!(
+        GenerationStamps::from_meta(&head.meta).unwrap().boundary_source.as_deref(),
+        Some("forced-lag-cap"),
+        "the forced source is not readable from the bucket manifest meta alone"
+    );
+}
+
+/// D8 — EXACT version reclamation is flint's job; lifecycle is only the
+/// backstop. Steady-state churn ⇒ after each citation the key holds ONE
+/// live version.
+///
+/// Anti-vacuity (the drill leg's guard): the key must carry more than
+/// one version mid-leg before asserting it drains, and the retention
+/// backstop must NOT be creditable for the work.
+#[tokio::test]
+async fn version_reclamation_returns_to_one_per_key() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+    let key = a.cfg.file_key("churn.txt");
+
+    write(dir.path(), "churn.txt", "g1");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+    assert_eq!(store.version_count(&key), 1);
+
+    // Churn across SEPARATE citations so the cited version of each
+    // becomes noncurrent under the next.
+    for g in 2..6 {
+        write(dir.path(), "churn.txt", &format!("g{g}"));
+        backdate_baseline(&a, "churn.txt");
+        a.upload_lane().await.unwrap();
+        // Mid-leg the key genuinely carries more than one version.
+        assert!(
+            store.version_count(&key) >= 2,
+            "generation {g} did not create a second version"
+        );
+        a.citation_pass(CitationSource::Sentinel).await.unwrap();
+        assert_eq!(
+            store.version_count(&key),
+            1,
+            "exact per-citation GC did not drain generation {g}"
+        );
+    }
+    // The backstop could not have done it: nothing is old enough.
+    assert!(store.expire_noncurrent(86_400).is_empty());
+}
+
+/// D8's abandoned-mid-stage endgame — stated in the plan because it is
+/// WORSE than the copy design's. Gated staging makes the CITED version
+/// noncurrent, so the noncurrent backstop runs a clock against live
+/// cited data. When it reaps one, the manifest dangles and checkout
+/// must REFUSE loudly rather than serve a hole.
+///
+/// Anti-vacuity: the checkout must genuinely fail on the dangling
+/// citation before any recovery claim is made.
+#[tokio::test]
+async fn dangling_citation_refuses_rather_than_serving_a_hole() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+    write(dir.path(), "abandoned.txt", "CITED WORK");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+
+    // Stage newer work and then abandon the workspace: the cited
+    // version is now NONCURRENT under the uncited current one.
+    write(dir.path(), "abandoned.txt", "UNCITED WORK");
+    backdate_baseline(&a, "abandoned.txt");
+    a.upload_lane().await.unwrap();
+    let key = a.cfg.file_key("abandoned.txt");
+    assert_eq!(store.version_count(&key), 2);
+
+    // The backstop fires past retention (shortened to seconds on the
+    // rig) and reaps the CITED noncurrent version — the inversion.
+    let reaped = store.expire_noncurrent(0);
+    assert!(
+        reaped.iter().any(|(k, _)| k == &key),
+        "the backstop reaped nothing — the endgame fixture never armed"
+    );
+
+    // A fresh pod's checkout now dangles, and must refuse.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    let err = b.checkout().await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("recover-staged") && msg.contains("version"),
+        "checkout did not refuse loudly on a dangling citation: {msg}"
+    );
+    assert!(
+        !dir_b.path().join("abandoned.txt").exists(),
+        "checkout served a partial tree past a dangling citation"
+    );
+    // The bytes are NOT lost: the surviving current version is the
+    // newer work, which `recover-staged` re-cites FORWARD.
+    let (_, survivor) = store.get_whole(&key, None).await.unwrap();
+    assert_eq!(&survivor[..], b"UNCITED WORK");
+}
+
+/// D8's conformance probe: a backend that cannot express the version
+/// surface must be REFUSED, never silently degraded into etag
+/// semantics on a key whose current version is uncited — which is
+/// precisely the torn view gated mode exists to prevent.
+#[tokio::test]
+async fn versioning_conformance_probe_passes_on_a_versioned_store() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.versioning_conformance().await.expect("a versioned store must pass the probe");
 }

@@ -40,11 +40,14 @@
 
 pub mod barrier;
 pub mod checkout;
+pub mod control;
+pub mod gated;
 pub mod gateway;
 pub mod inbox;
 pub mod lease;
 pub mod manifest;
 pub mod scan;
+pub mod sentinel;
 pub mod state;
 pub mod sync;
 
@@ -63,6 +66,16 @@ pub const LEAN_DIR: &str = ".flint/lean";
 /// The sidecar's durable bookkeeping directory inside the workspace
 /// (emptyDir-scoped: survives container restarts, dies with the pod).
 pub const STATE_DIR: &str = ".flint-sync";
+
+/// The workspace-local control namespace (boundary-verbs plan D0): the
+/// agent's side of the file protocol. Reserved exactly as the gateway
+/// reserves `.flint/` on the HTTP side (`gateway::path_ok`) — the scan
+/// skips it, `classify` never makes it delete-eligible, and checkout
+/// never materializes a `files/.flint/...` citation into it.
+pub const CONTROL_DIR: &str = ".flint";
+
+/// Protocol version advertised in `.flint/capabilities.json`.
+pub const SENTINEL_PROTOCOL: u32 = 1;
 
 /// Default whole-object publish ceiling; larger files go through the
 /// multipart compose path (`tier/flush.rs` uses the same 64 MiB split).
@@ -87,6 +100,70 @@ pub enum LeanError {
 
 pub type LeanResult<T> = Result<T, LeanError>;
 
+/// Citation policy (boundary-verbs plan D6). `hybrid` is the default:
+/// the fused barrier runs at every floor tick AND at every consumed
+/// publish sentinel, whichever comes first — citation never waits, so
+/// published-view freshness is never later than cadence-only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BoundaryMode {
+    /// Exactly pre-boundary behavior (the escape hatch).
+    Cadence,
+    /// Cadence ∪ sentinels. No trade; the default.
+    Hybrid,
+    /// Durability and visibility split: uploads land as uncited object
+    /// versions every floor tick, citation happens at coherent points
+    /// only. Opt-in per workspace; requires the versioning conformance
+    /// probe and a `visibility_lag_bound_secs`.
+    Gated,
+}
+
+impl BoundaryMode {
+    pub fn parse(s: &str) -> Option<BoundaryMode> {
+        match s {
+            "cadence" => Some(BoundaryMode::Cadence),
+            "hybrid" => Some(BoundaryMode::Hybrid),
+            "gated" => Some(BoundaryMode::Gated),
+            _ => None,
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BoundaryMode::Cadence => "cadence",
+            BoundaryMode::Hybrid => "hybrid",
+            BoundaryMode::Gated => "gated",
+        }
+    }
+}
+
+/// Sentinel posture knob (D0.4). `auto` = verbs on unless the
+/// pre-existing-`.flint/` pre-flight trips; `force` accepts consumption
+/// of pre-existing sentinel-named files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SentinelMode {
+    Auto,
+    Off,
+    Force,
+}
+
+impl SentinelMode {
+    pub fn parse(s: &str) -> Option<SentinelMode> {
+        match s {
+            "auto" => Some(SentinelMode::Auto),
+            "off" => Some(SentinelMode::Off),
+            "force" => Some(SentinelMode::Force),
+            _ => None,
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SentinelMode::Auto => "auto",
+            SentinelMode::Off => "off",
+            SentinelMode::Force => "force",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct LeanConfig {
     /// Bucket key prefix for this subtree (project- or subtree-scoped;
@@ -108,6 +185,35 @@ pub struct LeanConfig {
     /// rig measured the sequential loops at 561-854 PUTs/s and
     /// 1,000-2,000 GETs/s; fan-out multiplies directly against those.
     pub fanout: usize,
+
+    // --- boundary verbs (plan docs/plans/flint-lean-boundary-verbs-plan.md) ---
+    /// Citation policy. Default `hybrid` ≡ today's behavior when the
+    /// agent never touches a sentinel.
+    pub boundary_mode: BoundaryMode,
+    /// Sentinel posture (D0.4 pre-flight override).
+    pub sentinel_mode: SentinelMode,
+    /// A consumed sentinel arriving sooner than this after the previous
+    /// sentinel-honoring barrier waits; touches inside the interval
+    /// coalesce into the pending record.
+    pub sentinel_min_interval_secs: u64,
+    /// Work-metered hourly cap (D3.1): a honor charges
+    /// `max(1, ceil(published_bytes / whole_put_max))` units, or 0 for
+    /// a no-diff honor. Exhaustion defers honors to the floor tick —
+    /// the workspace degrades to exactly cadence behavior.
+    pub sentinel_hourly_budget: u64,
+    /// Sentinel poll cadence (env-only, not a fleet contract).
+    pub sentinel_poll_secs: u64,
+    /// Gated: hard cap on citation staleness. Required iff gated.
+    pub visibility_lag_bound_secs: Option<u64>,
+    /// Gated: scan-to-scan stability window that counts as quiescence.
+    pub quiesce_bound_secs: u64,
+    /// Gated: forced-citation sources bounding the preStop drain.
+    pub staged_backlog_cap_objects: u64,
+    pub staged_backlog_cap_bytes: u64,
+    /// Gated: the noncurrent-version retention the operator provisions
+    /// on `<prefix>/files/` — the crash-window backstop BEHIND flint's
+    /// exact per-citation version GC (D8).
+    pub noncurrent_retention_days: u64,
 }
 
 impl LeanConfig {
@@ -121,6 +227,16 @@ impl LeanConfig {
             max_files: 0,
             window_slack_secs: 180,
             fanout: 16,
+            boundary_mode: BoundaryMode::Hybrid,
+            sentinel_mode: SentinelMode::Auto,
+            sentinel_min_interval_secs: 5,
+            sentinel_hourly_budget: 60,
+            sentinel_poll_secs: 1,
+            visibility_lag_bound_secs: None,
+            quiesce_bound_secs: 30,
+            staged_backlog_cap_objects: 5000,
+            staged_backlog_cap_bytes: 2 * 1024 * 1024 * 1024,
+            noncurrent_retention_days: 30,
         }
     }
 
@@ -141,6 +257,10 @@ impl LeanConfig {
     }
     pub fn state_dir(&self) -> PathBuf {
         self.root.join(STATE_DIR)
+    }
+    /// The workspace-local control namespace (D0).
+    pub fn control_dir(&self) -> PathBuf {
+        self.root.join(CONTROL_DIR)
     }
 }
 

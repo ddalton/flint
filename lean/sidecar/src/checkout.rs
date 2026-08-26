@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 
 use flint_store::StoreError;
 
-use super::barrier::{mtime_of, write_file_atomic};
+use super::barrier::{contained_path, mtime_of, write_file_atomic};
 use super::manifest;
 use super::state::BaselineEntry;
 use super::{LeanError, LeanResult, Sidecar};
@@ -29,6 +29,10 @@ pub struct CheckoutReport {
     pub bytes: u64,
     /// Restart-matrix row taken.
     pub resumed_live_tree: bool,
+    /// Citations left in place rather than materialized (D0.3 legacy
+    /// `.flint/` paths, containment refusals). Never a silent drop:
+    /// each has a conflict record.
+    pub refused: usize,
 }
 
 impl Sidecar {
@@ -72,42 +76,105 @@ impl Sidecar {
         // 3.3 s/GiB; fan-out multiplies directly against both).
         struct Fetched {
             path: String,
-            be: BaselineEntry,
+            be: Option<BaselineEntry>,
             skipped: bool,
             bytes: u64,
+            /// A citation this checkout refused to materialize (D0.3 /
+            /// containment): left cited, surfaced as a conflict.
+            refused: Option<String>,
         }
         let mut present: BTreeSet<String> = BTreeSet::new();
         let results: Vec<LeanResult<Fetched>> = {
             use futures::stream::{self, StreamExt};
             let this: &super::Sidecar = &*self;
+            let pinned = m.pinned_reads;
             stream::iter(m.entries.iter().map(|(path, entry)| {
                 let store = this.store.clone();
+                let root = this.cfg.root.clone();
                 let local = this.cfg.root.join(path);
                 async move {
+                    // D0.3: a legacy `files/.flint/...` citation is
+                    // never materialized (it would collide with the
+                    // control files); it stays cited and a conflict
+                    // record names it. Same arm refuses a citation
+                    // whose path escapes the workspace.
+                    let target = match contained_path(&root, path) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            return Ok(Fetched {
+                                path: path.clone(),
+                                be: None,
+                                skipped: true,
+                                bytes: 0,
+                                refused: Some(e.to_string()),
+                            })
+                        }
+                    };
+                    let _ = &target;
                     if local.exists() {
                         // Resume: local-wins on present paths.
                         let st = std::fs::metadata(&local)?;
                         return Ok(Fetched {
                             path: path.clone(),
-                            be: BaselineEntry {
+                            be: Some(BaselineEntry {
                                 etag: entry.etag.clone(),
                                 generation: entry.generation,
                                 size: st.len(),
                                 mtime_unix: mtime_of(&st),
-                            },
+                                version_id: None,
+                            }),
                             skipped: true,
                             bytes: 0,
+                            refused: None,
                         });
                     }
-                    let (meta, body) =
-                        match store.get_whole(&entry.key, Some(&entry.etag)).await {
+                    // D13, the reader rule. Under a GATED citation the
+                    // manifest is stamped `pinned_reads` and every
+                    // entry names the version it cites: readers resolve
+                    // that version EXCLUSIVELY and never S3-wins-adopt
+                    // the current one.
+                    //
+                    // This is load-bearing, not a refinement. The
+                    // moment the gated lane stages a path, the cited
+                    // etag stops matching current — so without it EVERY
+                    // gated checkout would 412 on EVERY dirty path and
+                    // adopt uncited mid-logical-change bytes through
+                    // exactly the arm the mode exists to avoid. HITL
+                    // writes still reach readers, through the ungated
+                    // repair pass, within one floor.
+                    let (meta, body) = match (pinned, entry.version_id.as_deref()) {
+                        (true, Some(vid)) => match store.get_version(&entry.key, vid).await {
+                            Ok(ok) => ok,
+                            Err(StoreError::NotFound(_)) => {
+                                // The dangling-citation endgame (D8):
+                                // the backstop reaped a cited noncurrent
+                                // version. REFUSE loudly — the bytes are
+                                // not lost, `recover-staged` re-cites the
+                                // surviving current version forward — and
+                                // never serve a hole.
+                                return Err(LeanError::State(format!(
+                                    "manifest cites {} version {} but that version is gone — \
+                                     the noncurrent backstop reaped a cited version. Run \
+                                     `flint-sync recover-staged` to re-cite forward; refusing \
+                                     a silent hole",
+                                    entry.key, vid
+                                )));
+                            }
+                            Err(e) => return Err(e.into()),
+                        },
+                        _ => match store.get_whole(&entry.key, Some(&entry.etag)).await {
                             Ok(ok) => ok,
                             Err(StoreError::PreconditionFailed(_)) => {
                                 // S3-wins: the object moved past the
                                 // manifest (a HITL write not yet
                                 // re-cited). Adopt the CURRENT version
                                 // — its inbox entry reconciles the
-                                // manifest at the next barrier.
+                                // manifest at the next barrier. Reached
+                                // only for cadence/hybrid/legacy
+                                // manifests, so the shipped
+                                // `hitl_upload_survives_two_barriers`
+                                // behaviour is untouched in the default
+                                // mode.
                                 store.get_whole(&entry.key, None).await?
                             }
                             Err(StoreError::NotFound(_)) => {
@@ -118,19 +185,22 @@ impl Sidecar {
                                 )));
                             }
                             Err(e) => return Err(e.into()),
-                        };
-                    write_file_atomic(&local, &body, Some(entry.mode))?;
+                        },
+                    };
+                    write_file_atomic(&target, &body, Some(entry.mode))?;
                     let st = std::fs::metadata(&local)?;
                     Ok(Fetched {
                         path: path.clone(),
-                        be: BaselineEntry {
+                        be: Some(BaselineEntry {
                             etag: meta.etag.clone(),
                             generation: entry.generation,
                             size: st.len(),
                             mtime_unix: mtime_of(&st),
-                        },
+                            version_id: None,
+                        }),
                         skipped: false,
                         bytes: body.len() as u64,
+                        refused: None,
                     })
                 }
             }))
@@ -140,6 +210,17 @@ impl Sidecar {
         };
         for r in results {
             let f = r?;
+            if let Some(why) = f.refused {
+                self.state.append_conflict(&super::state::ConflictRecord {
+                    path: f.path.clone(),
+                    foreign_etag: String::new(),
+                    preserved_key: None,
+                    kind: format!("checkout-refused: {why}"),
+                    at_unix: super::now_unix(),
+                })?;
+                report.refused += 1;
+                continue;
+            }
             if f.skipped {
                 report.skipped_present += 1;
             } else {
@@ -147,7 +228,9 @@ impl Sidecar {
                 report.bytes += f.bytes;
             }
             present.insert(f.path.clone());
-            baseline.entries.insert(f.path, f.be);
+            if let Some(be) = f.be {
+                baseline.entries.insert(f.path, be);
+            }
         }
 
         baseline.seq = m.seq;

@@ -37,6 +37,16 @@ struct StoredObject {
     crc64: u64,
     meta: HashMap<String, String>,
     last_modified_unix: u64,
+    /// The version's identity (boundary-verbs plan D7). Minted from a
+    /// per-store COUNTER, never a uuid or a clock: a reproducible
+    /// battery is the whole reason this double exists, and a
+    /// nondeterministic id would make every version-citing assertion
+    /// order-dependent in a way that only shows up under load.
+    version_id: String,
+    /// A delete marker. Under versioning a DELETE never destroys data:
+    /// it makes the key read as absent while every prior version stays
+    /// fetchable by id.
+    deleted: bool,
 }
 
 impl StoredObject {
@@ -50,6 +60,7 @@ impl StoredObject {
             // The fake models STANDARD only; the IA guard's unit tests
             // exercise copy_allowed=false at the planner level.
             storage_class: None,
+            version_id: Some(self.version_id.clone()),
         }
     }
 }
@@ -60,10 +71,89 @@ struct Mpu {
     initiated_unix: u64,
 }
 
+/// A key's version chain: oldest first, LAST is current. Nothing in
+/// this double ever overwrites in place — that is the entire point of
+/// modelling versions, since an in-place overwrite is the destructive
+/// design versioned staging exists to avoid (§2.4.2).
+#[derive(Default, Clone)]
+struct VersionChain {
+    versions: Vec<StoredObject>,
+}
+
+impl VersionChain {
+    /// The current version, or None if the key reads as absent (empty
+    /// chain, or a delete marker on top).
+    fn current(&self) -> Option<&StoredObject> {
+        match self.versions.last() {
+            Some(o) if !o.deleted => Some(o),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct Inner {
-    objects: BTreeMap<String, StoredObject>,
+    chains: BTreeMap<String, VersionChain>,
     uploads: HashMap<String, Mpu>,
+    /// Deterministic version-id source (see `StoredObject::version_id`).
+    version_seq: u64,
+}
+
+impl Inner {
+    fn next_version_id(&mut self) -> String {
+        self.version_seq += 1;
+        format!("v{:012}", self.version_seq)
+    }
+
+    /// The current version of `key`, or None if absent.
+    fn current(&self, key: &str) -> Option<&StoredObject> {
+        self.chains.get(key).and_then(|c| c.current())
+    }
+
+    /// Append a version and make it current.
+    fn push(&mut self, key: &str, mut obj: StoredObject) -> String {
+        let vid = self.next_version_id();
+        obj.version_id = vid.clone();
+        self.chains.entry(key.to_string()).or_default().versions.push(obj);
+        vid
+    }
+
+    /// A keyed DELETE: a delete marker, never destruction.
+    fn push_delete_marker(&mut self, key: &str) {
+        if self.chains.get(key).map(|c| c.current().is_none()).unwrap_or(true) {
+            return; // already absent: S3 still adds a marker; we keep the chain quiet
+        }
+        let vid = self.next_version_id();
+        self.chains.entry(key.to_string()).or_default().versions.push(StoredObject {
+            bytes: Bytes::new(),
+            etag: String::new(),
+            crc64: 0,
+            meta: HashMap::new(),
+            last_modified_unix: now_unix(),
+            version_id: vid,
+            deleted: true,
+        });
+    }
+
+    fn version(&self, key: &str, version_id: &str) -> Option<&StoredObject> {
+        self.chains
+            .get(key)?
+            .versions
+            .iter()
+            .find(|o| o.version_id == version_id && !o.deleted)
+    }
+
+    /// Version-scoped DELETE: removes exactly that version. Removing
+    /// the current version promotes the one beneath it, exactly as S3
+    /// does.
+    fn remove_version(&mut self, key: &str, version_id: &str) {
+        if let Some(chain) = self.chains.get_mut(key) {
+            chain.versions.retain(|o| o.version_id != version_id);
+            if chain.versions.is_empty() {
+                self.chains.remove(key);
+            }
+        }
+    }
 }
 
 const INJECT_NONE: u8 = 0;
@@ -144,10 +234,62 @@ impl MemoryStore {
             meta: meta.into_iter().collect(),
             last_modified_unix: now_unix(),
             bytes,
+            version_id: String::new(),
+            deleted: false,
         };
-        let m = obj.to_meta();
-        self.inner.lock().unwrap().objects.insert(key.to_string(), obj);
+        let mut inner = self.inner.lock().unwrap();
+        let vid = inner.push(key, obj);
+        let mut m = inner.current(key).map(|o| o.to_meta()).expect("just pushed");
+        m.version_id = Some(vid);
         m
+    }
+
+    /// Test surface: the NONCURRENT-VERSION LIFECYCLE BACKSTOP (D8),
+    /// modelled as an explicit method because it is a timer in reality
+    /// and an untestable one if left implicit.
+    ///
+    /// The hazard it exists to demonstrate is INVERTED from the
+    /// eager-prefix design's: gated staging makes the **cited** version
+    /// noncurrent the moment a newer generation is staged, so a
+    /// `NoncurrentVersionExpiration` rule on `files/` runs a clock
+    /// against live cited data — and never against the newest uncited
+    /// bytes, which are current and which no lifecycle rule can reach.
+    /// Reaping a cited noncurrent version dangles the manifest; that is
+    /// `Inv_CitedVersionLives`'s required-firing mutation and leg B23's
+    /// abandoned-mid-stage endgame.
+    ///
+    /// Returns the (key, version_id) pairs reaped.
+    pub fn expire_noncurrent(&self, older_than_secs: u64) -> Vec<(String, String)> {
+        let now = now_unix();
+        let mut inner = self.inner.lock().unwrap();
+        let mut reaped = vec![];
+        let keys: Vec<String> = inner.chains.keys().cloned().collect();
+        for k in keys {
+            let Some(chain) = inner.chains.get_mut(&k) else { continue };
+            let last = chain.versions.len().saturating_sub(1);
+            let doomed: Vec<String> = chain
+                .versions
+                .iter()
+                .enumerate()
+                .filter(|(i, o)| {
+                    *i != last && now.saturating_sub(o.last_modified_unix) >= older_than_secs
+                })
+                .map(|(_, o)| o.version_id.clone())
+                .collect();
+            for vid in doomed {
+                chain.versions.retain(|o| o.version_id != vid);
+                reaped.push((k.clone(), vid));
+            }
+        }
+        reaped
+    }
+
+    /// Test surface: how many versions a key currently holds (leg B21's
+    /// oracle — steady state must return to ONE live version per key,
+    /// reclaimed by flint's exact per-citation GC, NOT by waiting for
+    /// the backstop).
+    pub fn version_count(&self, key: &str) -> usize {
+        self.inner.lock().unwrap().chains.get(key).map(|c| c.versions.len()).unwrap_or(0)
     }
 
     /// Test surface: a DEPOSED writer's late CompleteMultipartUpload.
@@ -172,9 +314,13 @@ impl MemoryStore {
             meta: HashMap::new(),
             last_modified_unix: now_unix(),
             bytes,
+                   version_id: String::new(),
+            deleted: false,
         };
-        let m = obj.to_meta();
-        inner.objects.insert(mpu.key, obj);
+        let mkey = mpu.key.clone();
+        let vid = inner.push(&mkey, obj);
+        let mut m = inner.current(&mkey).expect("just pushed").to_meta();
+        m.version_id = Some(vid);
         Ok(m)
     }
 
@@ -250,16 +396,23 @@ impl ObjectStore for MemoryStore {
             )));
         }
         let mut inner = self.inner.lock().unwrap();
-        Self::check_condition(inner.objects.get(key), condition)?;
+        Self::check_condition(inner.current(key), condition)?;
         let obj = StoredObject {
             etag: put_etag(&body),
             crc64,
             meta: stamps.to_meta().into_iter().collect(),
             last_modified_unix: now_unix(),
             bytes: body,
+            version_id: String::new(),
+            deleted: false,
         };
-        let m = obj.to_meta();
-        inner.objects.insert(key.to_string(), obj);
+        // The version id is minted by `push`; reporting a meta built
+        // BEFORE it would hand the caller `Some("")` — and a manifest
+        // that cites version "" makes the citation GC match nothing and
+        // reap every real version of the key.
+        let vid = inner.push(key, obj);
+        let mut m = inner.current(key).expect("just pushed").to_meta();
+        m.version_id = Some(vid);
         Ok(m)
     }
 
@@ -290,8 +443,7 @@ impl ObjectStore for MemoryStore {
         self.inner
             .lock()
             .unwrap()
-            .objects
-            .get(key)
+            .current(key)
             .map(|o| o.to_meta())
             .ok_or_else(|| StoreError::NotFound(key.into()))
     }
@@ -303,8 +455,7 @@ impl ObjectStore for MemoryStore {
     ) -> StoreResult<(ObjectMeta, Bytes)> {
         let inner = self.inner.lock().unwrap();
         let o = inner
-            .objects
-            .get(key)
+            .current(key)
             .ok_or_else(|| StoreError::NotFound(key.into()))?;
         if let Some(want) = if_match {
             if o.etag != want {
@@ -338,8 +489,7 @@ impl ObjectStore for MemoryStore {
         }
         let inner = self.inner.lock().unwrap();
         let o = inner
-            .objects
-            .get(key)
+            .current(key)
             .ok_or_else(|| StoreError::NotFound(key.into()))?;
         if o.etag != if_match {
             return Err(StoreError::PreconditionFailed(format!(
@@ -357,21 +507,72 @@ impl ObjectStore for MemoryStore {
             .inner
             .lock()
             .unwrap()
-            .objects
+            .chains
             .range(prefix.to_string()..)
             .take_while(|(k, _)| k.starts_with(prefix))
-            .map(|(k, o)| ListedObject {
-                key: k.clone(),
-                size: o.bytes.len() as u64,
-                etag: o.etag.clone(),
-                last_modified_unix: Some(o.last_modified_unix),
+            // Current versions only, delete markers skipped — a LIST
+            // must never report a key a GET would 404 on.
+            .filter_map(|(k, c)| {
+                c.current().map(|o| ListedObject {
+                    key: k.clone(),
+                    size: o.bytes.len() as u64,
+                    etag: o.etag.clone(),
+                    last_modified_unix: Some(o.last_modified_unix),
+                })
             })
             .collect())
     }
 
     async fn delete(&self, key: &str) -> StoreResult<()> {
-        self.inner.lock().unwrap().objects.remove(key);
+        self.inner.lock().unwrap().push_delete_marker(key);
         Ok(())
+    }
+
+    async fn head_version(&self, key: &str, version_id: &str) -> StoreResult<ObjectMeta> {
+        self.inner
+            .lock()
+            .unwrap()
+            .version(key, version_id)
+            .map(|o| o.to_meta())
+            .ok_or_else(|| StoreError::NotFound(format!("{key}?versionId={version_id}")))
+    }
+
+    async fn get_version(&self, key: &str, version_id: &str) -> StoreResult<(ObjectMeta, Bytes)> {
+        let inner = self.inner.lock().unwrap();
+        let o = inner
+            .version(key, version_id)
+            .ok_or_else(|| StoreError::NotFound(format!("{key}?versionId={version_id}")))?;
+        Ok((o.to_meta(), o.bytes.clone()))
+    }
+
+    async fn delete_version(&self, key: &str, version_id: &str) -> StoreResult<()> {
+        // Idempotent, exactly as S3: deleting an absent version is Ok —
+        // the GC pass and the operator sweep race each other by design.
+        self.inner.lock().unwrap().remove_version(key, version_id);
+        Ok(())
+    }
+
+    async fn list_versions(&self, prefix: &str) -> StoreResult<Vec<ListedVersion>> {
+        let inner = self.inner.lock().unwrap();
+        let mut out = vec![];
+        for (k, chain) in inner.chains.range(prefix.to_string()..) {
+            if !k.starts_with(prefix) {
+                break;
+            }
+            let last = chain.versions.len().saturating_sub(1);
+            for (i, o) in chain.versions.iter().enumerate() {
+                out.push(ListedVersion {
+                    key: k.clone(),
+                    version_id: o.version_id.clone(),
+                    etag: o.etag.clone(),
+                    size: o.bytes.len() as u64,
+                    is_current: i == last,
+                    is_delete_marker: o.deleted,
+                    last_modified_unix: Some(o.last_modified_unix),
+                });
+            }
+        }
+        Ok(out)
     }
 
     async fn list_uploads(&self, prefix: &str) -> StoreResult<Vec<PendingUpload>> {
@@ -405,7 +606,7 @@ impl ObjectStore for MemoryStore {
 
     async fn epoch_read(&self, key: &str) -> StoreResult<Option<EpochState>> {
         let inner = self.inner.lock().unwrap();
-        let Some(o) = inner.objects.get(key) else {
+        let Some(o) = inner.current(key) else {
             return Ok(None);
         };
         let body: EpochBody = serde_json::from_slice(&o.bytes)
@@ -439,16 +640,18 @@ impl ObjectStore for MemoryStore {
             Some(s) => PutCondition::IfMatch(s.token.clone()),
         };
         let mut inner = self.inner.lock().unwrap();
-        Self::check_condition(inner.objects.get(key), &condition)?;
+        Self::check_condition(inner.current(key), &condition)?;
         let obj = StoredObject {
             etag: put_etag(&body),
             crc64: crc64_nvme(&body),
             meta: HashMap::new(),
             last_modified_unix: now_unix(),
             bytes: body,
+                   version_id: String::new(),
+            deleted: false,
         };
         let token = obj.etag.clone();
-        inner.objects.insert(key.to_string(), obj);
+        inner.push(&key, obj);
         Ok(EpochLease { holder_id: holder_id.into(), epoch, token })
     }
 
@@ -463,7 +666,7 @@ impl ObjectStore for MemoryStore {
         );
         let mut inner = self.inner.lock().unwrap();
         Self::check_condition(
-            inner.objects.get(key),
+            inner.current(key),
             &PutCondition::IfMatch(lease.token.clone()),
         )?;
         // Same holder/epoch, fresh Last-Modified; the etag must CHANGE
@@ -477,9 +680,11 @@ impl ObjectStore for MemoryStore {
             meta: HashMap::new(),
             last_modified_unix: now_unix(),
             bytes: body,
+                   version_id: String::new(),
+            deleted: false,
         };
         let token = obj.etag.clone();
-        inner.objects.insert(key.to_string(), obj);
+        inner.push(&key, obj);
         Ok(EpochLease { holder_id: lease.holder_id.clone(), epoch: lease.epoch, token })
     }
 
@@ -495,7 +700,7 @@ impl ObjectStore for MemoryStore {
         );
         let mut inner = self.inner.lock().unwrap();
         Self::check_condition(
-            inner.objects.get(key),
+            inner.current(key),
             &PutCondition::IfMatch(lease.token.clone()),
         )?;
         let obj = StoredObject {
@@ -504,8 +709,10 @@ impl ObjectStore for MemoryStore {
             meta: HashMap::new(),
             last_modified_unix: now_unix(),
             bytes: body,
+                   version_id: String::new(),
+            deleted: false,
         };
-        inner.objects.insert(key.to_string(), obj);
+        inner.push(&key, obj);
         Ok(())
     }
 
@@ -564,7 +771,7 @@ impl MemoryStore {
                     })?;
                     let inner = self.inner.lock().unwrap();
                     let base_key = spec.base_key.unwrap_or(spec.key);
-                    let base = inner.objects.get(base_key).ok_or_else(|| {
+                    let base = inner.current(base_key).ok_or_else(|| {
                         StoreError::PreconditionFailed("copy-source: no base object".into())
                     })?;
                     if base.etag != want {
@@ -641,7 +848,7 @@ impl MemoryStore {
             // Fenced by a takeover sweep or lifecycle abort.
             return Err(StoreError::NoSuchUpload(upload_id.into()));
         }
-        Self::check_condition(inner.objects.get(spec.key), &spec.condition)?;
+        Self::check_condition(inner.current(spec.key), &spec.condition)?;
         let parts = spec.parts.len();
         let bytes = Bytes::from(assembled);
         let obj = StoredObject {
@@ -650,9 +857,12 @@ impl MemoryStore {
             meta: spec.stamps.to_meta().into_iter().collect(),
             last_modified_unix: now_unix(),
             bytes,
+                   version_id: String::new(),
+            deleted: false,
         };
-        let m = obj.to_meta();
-        inner.objects.insert(spec.key.to_string(), obj);
+        let vid = inner.push(spec.key, obj);
+        let mut m = inner.current(spec.key).expect("just pushed").to_meta();
+        m.version_id = Some(vid);
         Ok(m)
     }
 }

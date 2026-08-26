@@ -71,6 +71,7 @@ pub async fn ensure_claim(
         generation: 1,
         epoch: 0,
         flush_uuid: "lean-operator-claim".into(),
+        boundary_source: None,
         posix: None,
     };
     match store

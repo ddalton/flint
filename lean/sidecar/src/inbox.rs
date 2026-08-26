@@ -78,6 +78,7 @@ pub async fn cas_write(
         generation: 0,
         epoch,
         flush_uuid: "inbox".into(),
+        boundary_source: None,
         posix: None,
     };
     let meta = store.put_whole(&cfg.inbox_key(), bytes.into(), &cond, &stamps, crc).await?;

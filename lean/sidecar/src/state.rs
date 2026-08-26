@@ -23,6 +23,13 @@ pub struct BaselineEntry {
     pub generation: u64,
     pub size: u64,
     pub mtime_unix: i64,
+    /// The version the manifest cites for this path, when the bucket is
+    /// versioned (boundary-verbs plan D7). Carried so a gated citation
+    /// can re-validate its staging base: if this moved between staging
+    /// and citation, a HITL consume or sync landed in between and
+    /// installing the staged version would UNCITE the foreign bytes.
+    #[serde(default)]
+    pub version_id: Option<String>,
 }
 
 /// The persisted baseline snapshot: what this sidecar believes the
