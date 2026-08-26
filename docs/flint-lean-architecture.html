@@ -75,7 +75,7 @@
 <section class="page">
   <header class="ph">
     <h1>Flint-lean — plain files, one bucket</h1>
-    <span class="kicker">1 / 2 · architecture</span>
+    <span class="kicker">1 / 3 · architecture</span>
   </header>
   <p class="dek">The third front end over the flint bucket format, split out of the flint-fuse architecture doc: if the workspace fits on disk, no interception is needed at all. Materialize plain files at pod start, publish changed files at cadence with an unprivileged sidecar, and put write authority in a stateless gateway. Most of FUSE's value at a fraction of its risk surface — same bucket format, same engine.</p>
   <figure>
@@ -135,7 +135,7 @@
     <text class="thv" x="656" y="206">grade 1 — write proxy</text>
     <text class="tx" x="656" y="224">bytes transit the gateway; strongest enforcement;</text>
     <text class="tx" x="656" y="240">pays back a slice of the hub's NIC ceiling</text>
-    <text class="thv" x="656" y="264">grade 2 — presigned arbiter (recommended)</text>
+    <text class="thv" x="656" y="264">grade 2 — presigned arbiter (DESIGNED, not built)</text>
     <text class="tx" x="656" y="282">the sidecar asks to publish generation N of subtree X;</text>
     <text class="tx" x="656" y="298">the gateway validates lease + layout + claim identity,</text>
     <text class="tx" x="656" y="314">then mints short-lived presigned PUTs pinned to</text>
@@ -145,13 +145,13 @@
     <text class="tx" x="656" y="390">metering; revocation in seconds — kill the token</text>
 
     <rect x="640" y="430" width="400" height="110" rx="10" class="band"/>
-    <text class="tsb" x="656" y="456">pods hold ZERO bucket write credentials</text>
+    <text class="tsb" x="656" y="456">then pods hold ZERO bucket write credentials</text>
     <text class="tx" x="656" y="476">checkout/hydrate: a read-only prefix role (harmless</text>
     <text class="tx" x="656" y="492">blast radius), or presigned GETs from the same door</text>
     <text class="tx" x="656" y="514">the FUSE variant's two-principal split and sidecar-only-</text>
     <text class="tx" x="656" y="530">IRSA machinery is unnecessary in this variant</text>
 
-    <text class="tx" x="640" y="566">gateway down ⇒ publishes pause and the RPO grows while pods keep</text>
+    <text class="tx" x="640" y="566">gateway down ⇒ only HITL writes fail — publishes, checkout and sync CONTINUE (chaos C8)</text>
     <text class="tx" x="640" y="582">serving local files — far softer than hub-down; reads never depended on it</text>
 
     <!-- bucket -->
@@ -195,14 +195,14 @@
     <text class="tx" x="1060" y="774">emptyDir budget; TiB-scale or lazy</text>
     <text class="tx" x="1060" y="790">volumes are FUSE's territory (its own doc)</text>
   </svg>
-  <figcaption><b>This is a third front end, not a FUSE configuration</b> — the app touches plain files on a real local filesystem, and the sidecar is an ordinary unprivileged program running the same engine verbs: <code>import</code> at start (bytes instead of stubs), the flush barrier's whole-file lane at cadence (driven by an mtime/size scan against the manifest instead of capture interception), the same epoch, claim, and manifest machinery. For the agent-workspace shape — code, configs, artifacts, GiB-scale — it is most of FUSE's value with none of FUSE's hard parts: the entire privileged/mount-propagation/ENOTCONN/mount-broker risk section of the FUSE architecture stops applying, and the kernel floor drops to nothing. <b>The gateway restores the security posture the review said direct mode gives up.</b> With grade 2, "the bucket trusts one principal" is true again — pods hold no write credentials, the cooperative CAS regime becomes enforced arbitration (a non-holder is refused a URL, not merely detected after the fact), revocation returns to seconds, and per-share metering exists again. Its failure mode is publish-pause with growing RPO while pods keep serving — the softest failure shape any component on these pages has. <b>One dialect everywhere:</b> this also argues for converging the hub's file API onto the S3 REST surface (the libflint plan's §8 sidecar adapter, built once, placed three ways — hub listener, localhost sidecar, gateway), so the live view and the published view speak the same protocol and the same tools work against both. <b>Recommendation:</b> lean is the direct-mode entry point; FUSE is the escalation for volumes too large or too lazy to materialize; the hub is unchanged. Same bucket, three front ends, one engine. Implementation plan: docs/plans/flint-lean-plan.md.</figcaption>
+  <figcaption><b>This is a third front end, not a FUSE configuration</b> — the app touches plain files on a real local filesystem, and the sidecar is an ordinary unprivileged program running the same engine verbs: <code>import</code> at start (bytes instead of stubs), the flush barrier's whole-file lane at cadence (driven by an mtime/size scan against the manifest instead of capture interception), the same epoch, claim, and manifest machinery. For the agent-workspace shape — code, configs, artifacts, GiB-scale — it is most of FUSE's value with none of FUSE's hard parts: the entire privileged/mount-propagation/ENOTCONN/mount-broker risk section of the FUSE architecture stops applying, and the kernel floor drops to nothing. <b>Two corrections from the drills.</b> This page originally read &ldquo;gateway down ⇒ publishes pause&rdquo;; chaos leg C8 measured the opposite — barriers continue, because the shipped sidecar writes its manifest, window and epoch cells straight to the store. All four stated outage effects belong to the <b>proxy</b>; the gateway costs only the fourth. And <b>grade 2 is a design, not a build</b> — nothing in the tree mints a presigned URL today, and the shipped path gives the sidecar a scoped credential of its own (the agent container still holds none). <b>The gateway restores the security posture the review said direct mode gives up.</b> With grade 2, "the bucket trusts one principal" is true again — pods hold no write credentials, the cooperative CAS regime becomes enforced arbitration (a non-holder is refused a URL, not merely detected after the fact), revocation returns to seconds, and per-share metering exists again. Its failure mode is publish-pause with growing RPO while pods keep serving — the softest failure shape any component on these pages has. <b>One dialect everywhere:</b> this also argues for converging the hub's file API onto the S3 REST surface (the libflint plan's §8 sidecar adapter, built once, placed three ways — hub listener, localhost sidecar, gateway), so the live view and the published view speak the same protocol and the same tools work against both. <b>Recommendation:</b> lean is the direct-mode entry point; FUSE is the escalation for volumes too large or too lazy to materialize; the hub is unchanged. Same bucket, three front ends, one engine. Implementation plan: docs/plans/flint-lean-plan.md.</figcaption>
 </section>
 
 <!-- ============================================================ PAGE 2 -->
 <section class="page">
   <header class="ph">
     <h1>One dialect — the S3 surface, three placements</h1>
-    <span class="kicker">2 / 2 · protocol</span>
+    <span class="kicker">2 / 3 · protocol</span>
   </header>
   <p class="dek">The decision of record: every REST surface in the system speaks the S3 dialect — the hub's file API converges onto it, the gateway serves it, and direct-mode non-mount access (lean and FUSE alike) is plain S3 against the bucket. One library, three placements; the consistency contracts say which view a client is reading.</p>
   <figure>
@@ -282,6 +282,90 @@
     <text class="tx" x="56" y="672">the same rclone / boto3 / aws-cli invocation works against either endpoint; only the URL and the consistency contract change.</text>
   </svg>
   <figcaption><b>Why S3 and not a nicer bespoke API:</b> the ecosystem is the feature — every language has a mature S3 client, presigned flows are understood by every CI system and browser uploader, and the tools people already point at buckets (rclone, boto3, cyberduck, Velero) work against a live flint share the day the dialect ships. The file API was already shaped on S3 semantics — whole-file GET/PUT with ETag and If-Match (the v1.30 conditional-writes work maps one-to-one onto S3's own conditional headers) — so this is a dialect change, not an architecture change. <b>The one thing the hub's live view offers that no real S3 can:</b> assembly under a temp name completed by an atomic RENAME under a deny-both OPEN — an atomic, exclusive multipart-complete, the differentiator the libflint plan already claims for the localhost gateway, inherited here. <b>Migration is dual-serve:</b> the hub answers both <code>/files</code> and the S3 dialect for one release; the front door moves; <code>/files</code> deprecates. Bearer auth stays alongside SigV4 so existing gateway tokens keep working, and revocation keeps its seconds-scale semantics. The activity classification is the one place the dialect must be flint-aware from day one — the idle ladder's lesson stands: a conditional GET answering 304 pins a share exactly as hard as a 200, so what counts as "activity" is declared per verb, not inferred.</figcaption>
+</section>
+
+<!-- ============================================================ PAGE 3 -->
+<section class="page">
+  <header class="ph">
+    <h1>Boundary verbs — the agent says when</h1>
+    <span class="kicker">3 / 3 · architecture · shipped 2026-08-26</span>
+  </header>
+  <p class="dek">Pages 1–2 describe publishing <b>at cadence</b>: an mtime/size scan on a timer. That is still the default, and it is still the whole story for a workspace nobody is watching. What it could not express is a coherent point — &ldquo;these files, together, now&rdquo; — so an agent finishing a unit of work had no way to say so and no way to learn when its bytes were durable. The boundary verbs are that sentence, written as files in the workspace the agent already has. Nothing new is mounted, no port is opened, and a workspace that ignores them pays nothing: measured at <b>20 bucket requests per 22&nbsp;s idle with the verbs off and 20 with them on</b>.</p>
+  <figure>
+  <svg viewBox="0 0 1600 760" role="img" aria-label="The agent writes a sentinel file into .flint/ and the sidecar answers with an ack file; in gated mode the upload lane makes bytes durable continuously while a single manifest CAS decides when readers see them; the operator injects the sidecar and reports observed state.">
+    <defs>
+      <marker id="p3-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
+      <marker id="p3-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b45309"/></marker>
+    </defs>
+
+    <rect x="40" y="70" width="700" height="330" rx="10" class="bx-hub"/>
+    <text class="th" x="56" y="96">the workspace — the whole interface</text>
+
+    <rect x="62" y="118" width="300" height="120" rx="8" class="bx"/>
+    <text class="tl ctr" x="212" y="144">agent writes</text>
+    <text class="mns ctr" x="212" y="168">.flint/publish</text>
+    <text class="mns ctr" x="212" y="186">.flint/sync</text>
+    <text class="tx ctr" x="212" y="210">a nonce in a file — no port,</text>
+    <text class="tx ctr" x="212" y="226">no client, no credentials</text>
+
+    <rect x="418" y="118" width="300" height="120" rx="8" class="bx"/>
+    <text class="tl ctr" x="568" y="144">sidecar answers</text>
+    <text class="mns ctr" x="568" y="168">.flint/publish.ack</text>
+    <text class="tx ctr" x="568" y="192">status ok | partial |</text>
+    <text class="mns ctr" x="568" y="208">refused-fenced</text>
+    <text class="tx ctr" x="568" y="228">an ok ack means the bytes are in S3</text>
+
+    <line class="ln ln-blue" x1="362" y1="178" x2="418" y2="178" marker-end="url(#p3-ab)"/>
+
+    <rect x="62" y="258" width="656" height="118" rx="8" class="bx"/>
+    <text class="tl" x="80" y="284">news without a request</text>
+    <text class="mns" x="80" y="308">.flint/remote.seq</text>
+    <text class="tx" x="80" y="330">observed_seq &gt; integrated_seq means &ldquo;somebody else published; consider a sync&rdquo;.</text>
+    <text class="tx" x="80" y="348">Fed by the barrier&rsquo;s own HEAD, so N agents cost ZERO extra bucket requests, and a</text>
+    <text class="tx" x="80" y="366">heartbeat field separates &ldquo;no news&rdquo; from &ldquo;sidecar dead&rdquo;.</text>
+
+    <rect x="770" y="70" width="790" height="330" rx="10" class="bx-ochre"/>
+    <text class="th" x="786" y="96">gated mode — durability split from visibility</text>
+
+    <rect x="792" y="118" width="360" height="150" rx="8" class="bx"/>
+    <text class="tl ctr" x="972" y="144">the upload lane</text>
+    <text class="tx ctr" x="972" y="168">runs continuously; every changed file</text>
+    <text class="tx ctr" x="972" y="184">becomes a NEW OBJECT VERSION</text>
+    <text class="tx ctr" x="972" y="208">durable immediately —</text>
+    <text class="tx ctr" x="972" y="224">and invisible to readers</text>
+    <text class="tx ctr" x="972" y="248">a crash here loses nothing</text>
+
+    <rect x="1180" y="118" width="360" height="150" rx="8" class="bx"/>
+    <text class="tl ctr" x="1360" y="144">the citation — ONE CAS</text>
+    <text class="tx ctr" x="1360" y="168">installs the whole pending set at once,</text>
+    <text class="tx ctr" x="1360" y="184">naming version ids</text>
+    <text class="tx ctr" x="1360" y="208">a reader sees the whole change</text>
+    <text class="tx ctr" x="1360" y="224">or none of it — never a mixture</text>
+    <text class="tx ctr" x="1360" y="248">no copy phase, so no half-boundary</text>
+
+    <line class="ln ln-ochre" x1="1152" y1="193" x2="1180" y2="193" marker-end="url(#p3-ao)"/>
+
+    <rect x="792" y="288" width="748" height="88" rx="8" class="bx"/>
+    <text class="tl" x="810" y="314">when a citation fires</text>
+    <text class="tx" x="810" y="336">the agent asks (a sentinel) · the tree goes quiet · a lag cap expires · a backlog cap trips · preStop drains</text>
+    <text class="tx" x="810" y="354">gated is REFUSED without a lag bound, so unbounded staleness is impossible by construction, not by convention</text>
+
+    <rect x="40" y="424" width="1520" height="120" rx="10" class="bx-violet"/>
+    <text class="th" x="56" y="450">the operator — one CRD, one webhook, no new data path</text>
+    <text class="tx" x="56" y="474">A FlintLeanWorkspace names the bucket, the prefix and the knobs; the mutating webhook injects the sidecar as a NATIVE sidecar</text>
+    <text class="tx" x="56" y="492">(initContainer, restartPolicy Always) so the workspace is materialized before the agent&rsquo;s first line runs, and an opted-in pod</text>
+    <text class="tx" x="56" y="510">whose workspace is missing or refused does not schedule at all. The webhook serves in-process and provisions its own TLS.</text>
+    <text class="tx" x="56" y="528">Observed state rides the lease heartbeat that was already happening: cited seq, staged-uncited count, the mode actually running.</text>
+
+    <rect x="40" y="568" width="1520" height="150" rx="10" class="band"/>
+    <text class="th" x="56" y="594">what is NOT here, and deliberately</text>
+    <text class="tx" x="56" y="618">· No new component in the data path. The verbs are files; the doors (a pod-local UNIX socket, a gateway endpoint) are opt-in sugar over the same consume path.</text>
+    <text class="tx" x="56" y="638">· No fsync interception. A boundary is declared, never inferred — that is the whole reason this is not FUSE.</text>
+    <text class="tx" x="56" y="658">· No enforced data-plane fencing. A deposed sidecar is refused at the control plane and its writes land as UNCITED versions: they destroy nothing and no</text>
+    <text class="tx" x="56" y="676">  coherent reader resolves them, but a raw-key reader can still see them. Closing that needs per-request epoch validation at a proxy, which is a component</text>
+    <text class="tx" x="56" y="694">  this front end exists to avoid — so it is a chosen ceiling, not an unfinished task.</text>
+  </svg>
+  <figcaption><b>The verbs are files because the workspace is the interface.</b> An agent that can write a file can declare a boundary — no client library, no credential, no network path, and the same mechanism serves a shell script and a language runtime. The ack is the other half: <code>ok</code> means the boundary is installed in the bucket, <code>partial</code> means it installed without something the agent declared, and <code>refused-fenced</code> means this sidecar lost the lease and is saying so rather than leaving the agent waiting — which it used to do, forever. <b>Gated mode answers a different question from cadence:</b> cadence asks how stale a reader may be, gated asks whether a reader may see half a logical change, and answers no by making durability and visibility separate events. The cost is stated, not hidden — uncited versions exist in the bucket, a raw-key reader can see them, and the retention backstop must outlast the crash window or it will reap a version the manifest still cites. <b>Evidence, not assertion:</b> 27 bucket legs against a real MinIO, 14 operator legs on kind, a 61-run TLC gate, and the published chart installed on a three-node AWS cluster publishing to real S3 over TLS — logs committed under <code>lean/e2e/results/</code>.</figcaption>
 </section>
 </body>
 </html>
