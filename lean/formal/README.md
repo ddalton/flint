@@ -17,13 +17,13 @@ a library. Nothing here is wired into `scripts/check-tla.sh`.
 ./gen-cfgs.sh       # regenerate the cfg matrix
 ```
 
-Fifty-five runs, ALL required: 11 strict (must hold), 22 mutations (must
+Sixty-three runs, ALL required: 14 strict (must hold), 25 mutations (must
 find their designated counterexample — a model that cannot rediscover its
-bug classes proves nothing), 22 probes (must be violated — each names an
+bug classes proves nothing), 24 probes (must be violated — each names an
 ACTION via a ghost only that action writes; probe the action, never the
 situation). The three numbers are `grep -c "^strict_run "`,
 `grep "^mutation_run " | grep -vc Probe` and `grep "^mutation_run " |
-grep -c Probe` in `check.sh` — they had drifted from the script before,
+grep -c Probe` in `check.sh` — they had drifted from the script twice,
 so they are stated as a recipe rather than a claim. `LeanSubtreeDeep.cfg` is the rich-budget breadth run — an
 opt-in overnight job, not in the gate.
 
@@ -154,7 +154,7 @@ the ACTION and never the situation.
 
 ## Tranche 3, product 2 — gated citation × version GC × the backstop
 
-Nine runs (27 → **36**), behind `GatedCitation`, which is FALSE in every
+Nine runs (27 → **36**, at the time), behind `GatedCitation`, which is FALSE in every
 pre-existing cfg: the gated actions are disabled and `versions`, `stage`,
 `stageBase` and `withheldDel` are frozen at their Init values, so those
 state spaces are preserved by construction. `VersionsFollow` composes the
@@ -243,7 +243,7 @@ code holds the HITL window across both).
 
 ## Tranche 3, product 1 — the boundary VERB × the barrier × the inbox
 
-Thirteen runs (36 → **49**), behind `SentinelEnabled`, FALSE in every
+Thirteen runs (36 → **49**, at the time), behind `SentinelEnabled`, FALSE in every
 pre-existing cfg: every sentinel action is disabled, the skip-on-no-diff
 fast path is unreachable, and the seven new `sc[s]` fields stay at their
 empty Init values, so those state spaces are preserved by construction.

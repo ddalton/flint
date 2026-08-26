@@ -352,6 +352,16 @@ async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
         );
     }
     sc.checkout().await?;
+    // RE-RUN the preflight rather than republishing the pre-checkout
+    // snapshot (review: U25). Two of the preflight's inputs are written
+    // BY checkout — `baseline.inst_base` wholesale, and the posture file
+    // itself, from checkout's own fresher verdict — so passing the
+    // `posture` computed above clobbered a newer answer with an older
+    // one, and D0.4's fleet-visible verdict could advertise verbs as
+    // live on the pod-replacement path. The preflight is sticky
+    // (disabled stays disabled unless mode is `force`), so re-running it
+    // can only narrow, never spuriously re-enable.
+    let posture = sc.sentinel_preflight()?;
     sc.write_capabilities(&posture, false)?;
     eprintln!("flint-sync: checkout complete — agent may start");
 

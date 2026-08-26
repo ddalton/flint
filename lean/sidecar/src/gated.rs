@@ -199,6 +199,9 @@ pub struct CitationReport {
 /// What one `recover-staged` pass found and installed (D9).
 #[derive(Debug, Default)]
 pub struct RecoverReport {
+    /// Whether D9's durable summary drove this pass (the cheap path) or
+    /// it fell back to the prefix-wide version LIST.
+    pub from_summary: bool,
     /// Paths re-cited onto their surviving current version.
     pub recited: Vec<String>,
     /// Paths whose CITED version no longer exists — the D8
@@ -1191,7 +1194,43 @@ impl Sidecar {
         let mut report = RecoverReport::default();
         let files_prefix = format!("{}/files/", self.cfg.prefix);
 
-        let listed = self.store.list_versions(&files_prefix).await?;
+        // D9's durable summary is the MECHANISM; the prefix-wide version
+        // LIST is the fallback (review: U1). `flint-store`'s own trait
+        // doc has said so since the version surface landed — "the
+        // claim-time/DR fallback when `orphans.json` is missing or
+        // stale — the expensive path, which is why the durable summary
+        // is written eagerly" — but nothing in the sidecar read the
+        // summary, so recovery always took the expensive path and the
+        // eager write bought nothing here.
+        //
+        // The summary narrows WHICH keys we list, never what we
+        // conclude about them: every candidate is still resolved
+        // against the bucket below. A stale or partial summary
+        // therefore costs coverage, not correctness — so a missing one,
+        // or one written under a different boundary mode, falls back to
+        // the full sweep rather than trusting a narrower answer.
+        let summary = match self.store.get_whole(&self.orphans_key(), None).await {
+            Ok((_, bytes)) => serde_json::from_slice::<OrphanDoc>(&bytes).ok(),
+            Err(_) => None,
+        };
+        let narrowed: Option<BTreeSet<String>> = summary.as_ref().and_then(|d| {
+            if d.boundary_mode != self.cfg.boundary_mode.as_str() || d.candidates.is_empty() {
+                return None;
+            }
+            Some(d.candidates.iter().map(|c| self.cfg.file_key(&c.path)).collect())
+        });
+        report.from_summary = narrowed.is_some();
+
+        let listed: Vec<ListedVersion> = match &narrowed {
+            Some(keys) => {
+                let mut out = vec![];
+                for key in keys {
+                    out.extend(self.store.list_versions(key).await.unwrap_or_default());
+                }
+                out
+            }
+            None => self.store.list_versions(&files_prefix).await?,
+        };
         let mut current: BTreeMap<String, ListedVersion> = BTreeMap::new();
         let mut known: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for v in listed {

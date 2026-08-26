@@ -2190,6 +2190,45 @@ async fn a_fifo_at_the_sentinel_path_never_wedges_the_poll_arm() {
     );
 }
 
+/// U38 — an `ok` ack must name a seq. A gated no-diff honor installed
+/// nothing and returned `seq: null` under `status: "ok"`, which breaks
+/// the ack schema and §1.2's authoritative-durability recipe: read the
+/// ack's seq, then confirm that seq in the bucket. Nothing was
+/// published, but the agent's boundary IS satisfied — by the boundary
+/// already standing. The ack names that one.
+#[tokio::test]
+async fn a_gated_no_diff_honor_still_names_the_boundary_it_is_satisfied_by() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+
+    write(dir.path(), "w.txt", "ONE");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+    let installed = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
+
+    // A second boundary with NOTHING changed since the first.
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-nodiff"}"#);
+    assert!(a.consume_sentinel(Verb::Publish).unwrap());
+    let ack = a
+        .honor_pending(Verb::Publish, true)
+        .await
+        .unwrap()
+        .expect("the no-diff honor produced no ack at all");
+
+    assert_eq!(ack.status, "ok");
+    assert_eq!(ack.report.uploaded, 0, "the fixture published something — not a no-diff honor");
+    let seq = ack.seq.expect("an ok ack with seq: null — §1.2's recipe has nothing to confirm");
+    assert_eq!(seq, installed, "the ack named a boundary that is not the standing one");
+
+    // The recipe actually works: that seq is in the bucket.
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.seq, seq, "the ack's seq is not the manifest's");
+}
+
 // ---------------------------------------------------------------------
 // Phase 3 — gated advance (D6, D7, D8, D13) + the flint-store version
 // surface.
@@ -3124,6 +3163,69 @@ async fn gated_startup_refuses_a_version_stripping_backend() {
 /// the last lane pass's work is durable-but-uncited. Recovery re-cites
 /// the surviving current versions as ONE flagged boundary — a manifest
 /// CAS, no data movement — and rolls FORWARD onto the newer work.
+/// U1 — D9's durable summary is the MECHANISM, not decoration.
+///
+/// `flint-store`'s trait doc has always said the prefix-wide
+/// `ListObjectVersions` is "the claim-time/DR fallback when
+/// `orphans.json` is missing or stale — the expensive path, which is
+/// why the durable summary is written eagerly". Nothing in the sidecar
+/// read the summary, so recovery always took the expensive path and the
+/// eager write bought the sidecar nothing.
+#[tokio::test]
+async fn recover_staged_uses_the_durable_summary_and_falls_back_without_it() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+
+    write(dir.path(), "cited.txt", "V1");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+
+    write(dir.path(), "cited.txt", "V2-UNCITED");
+    backdate_baseline(&a, "cited.txt");
+    write(dir.path(), "brand-new.txt", "NEW-UNCITED");
+    a.upload_lane().await.unwrap();
+    // Anti-vacuity: the lane really did publish a summary to recover FROM.
+    let okey = a.orphans_key();
+    store.head(&okey).await.expect("the upload lane wrote no orphan summary");
+    drop(a);
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    b.cfg.boundary_mode = super::BoundaryMode::Gated;
+    b.cfg.visibility_lag_bound_secs = Some(3600);
+    assert!(claim_until_held(&mut b, 12).await);
+
+    let r = b.recover_staged().await.unwrap();
+    assert!(r.from_summary, "recovery took the expensive path with a good summary on hand");
+    assert_eq!(r.recited.len(), 2, "the cheap path recovered less: {:?}", r.recited);
+    let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("brand-new.txt"), "the cheap path missed the new path");
+
+    // THE FALLBACK. Same work, no summary: recovery must still find
+    // everything, by the expensive route. A summary is an optimisation,
+    // never the source of truth.
+    let dir_c = tempfile::tempdir().unwrap();
+    let mut c = sidecar(&store, dir_c.path()).await;
+    c.cfg.boundary_mode = super::BoundaryMode::Gated;
+    c.cfg.visibility_lag_bound_secs = Some(3600);
+    assert!(claim_until_held(&mut c, 12).await);
+    c.checkout().await.unwrap();
+    write(dir_c.path(), "later.txt", "UNCITED-AGAIN");
+    c.upload_lane().await.unwrap();
+    store.delete(&okey).await.unwrap(); // the summary is gone
+    let r2 = c.recover_staged().await.unwrap();
+    assert!(!r2.from_summary, "reported the cheap path with no summary present");
+    assert!(
+        r2.recited.iter().any(|p| p == "later.txt"),
+        "the fallback missed uncited work: {:?}",
+        r2.recited
+    );
+}
+
 #[tokio::test]
 async fn recover_staged_recites_uncited_work_forward() {
     let store = Arc::new(MemoryStore::new());

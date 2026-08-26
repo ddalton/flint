@@ -505,6 +505,7 @@ StartA ==
                  hitlAcked, conflicts, gh>>
 
 CrashPod(s) ==
+  /\ ~GatedCitation          \* gated replaces this with CrashPodGated
   /\ sc[s].st \in {"running", "stalled"}
   /\ gh.crashes < MaxCrashes
   \* Pod REPLACEMENT: the emptyDir goes, and with it the pending record,
@@ -519,6 +520,38 @@ CrashPod(s) ==
   /\ gh' = [gh EXCEPT !.crashes = @ + 1]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
+
+(* Pod REPLACEMENT under gated staging.  §4's substrate rule: `pending`
+   lives in the emptyDir, so it DIES with the pod — "pod recreation
+   destroys the emptyDir pending record and converts the whole uncited
+   window into D9 orphans" (§2.6).  The ungated CrashPod cannot express
+   that: stage/stageBase/withheldDel are framed at the Next composition
+   (`UNCHANGED gatedVars` over BaseNext), so a crashed incarnation's
+   entire staged set survived it — the exact opposite of the design, and
+   the reason no gated cfg could safely raise MaxCrashes (review: U13).
+
+   `citeDone` must go WITH it, and that is the half a frame fix alone
+   misses.  Clearing only gatedVars leaves a dead sidecar's frozen
+   citeDone quantified by Inv_BoundaryAtomic against a Valid(s) that
+   keeps moving as the inbox changes — a false positive that surfaces
+   EARLIER (depth 9) than the one it was meant to remove (depth 16), on
+   a STRICT run.  Both, or neither.                                     *)
+CrashPodGated(s) ==
+  /\ GatedCitation
+  /\ sc[s].st \in {"running", "stalled"}
+  /\ gh.crashes < MaxCrashes
+  /\ sc' = [sc EXCEPT ![s].st = "dead",
+       ![s].sentTok = 0, ![s].pendN = {}, ![s].pendCov = NoPend,
+       ![s].pendMint = 0, ![s].pendDirty = {},
+       ![s].honored = FALSE, ![s].pendReRun = FALSE,
+       ![s].owed = {}, ![s].ackN = {},
+       ![s].citeDone = {}]
+  /\ stage' = [stage EXCEPT ![s] = [p \in Paths |-> 0]]
+  /\ stageBase' = [stageBase EXCEPT ![s] = [p \in Paths |-> 0]]
+  /\ withheldDel' = [withheldDel EXCEPT ![s] = {}]
+  /\ gh' = [gh EXCEPT !.crashes = @ + 1]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+                 window, hitlAcked, conflicts, versions>>
 
 (* Container restart in the SAME pod: the emptyDir survives, so local,
    baseline, known, expSeq and the incarnation epoch persist; only the
@@ -1415,7 +1448,7 @@ GatedNext ==
   \/ \E s \in Sidecars, p \in Paths : StagePut(s, p)
   \/ \E s \in Sidecars :
        StagePutFenced(s) \/ LaneDone(s) \/ LaneOnly(s) \/ CiteFenced(s)
-       \/ CitePassStep(s) \/ CiteFinish(s)
+       \/ CitePassStep(s) \/ CiteFinish(s) \/ CrashPodGated(s)
   \/ \E p \in Paths : BackstopExpire(p)
 
 ------------------------------------------------------------------------------
@@ -1869,6 +1902,12 @@ ProbeScopedDeferral   == gh.scopedDeferrals = 0
 \* lane pass.  Both halves matter: without the size the split is
 \* untested, and without the carry every citation might simply be
 \* following its own lane, which is hybrid wearing gated's name.
+\* A pod replacement actually happened IN THE GATED WORLD. Without this
+\* the crash-matrix run is green over a state space that never crashed
+\* — the vacuity that let MaxCrashes=0 stand in all 19 gated cfgs
+\* while §10.1c deferred the citation's crash matrix to product 1,
+\* whose own cfgs never crash either (review: U12).
+ProbeGatedCrashReachable == gh.crashes = 0
 ProbeCitationInstalled == ~gh.carriedCite
 \* A delete was actually withheld from the manifest until a citation.
 ProbeWithheldDelete    == gh.withheld = 0

@@ -128,6 +128,9 @@ mutation_run $M LeanProbeScopedDeferral.cfg "probe: a scoped sync actually defer
 
 # ---- tranche 3, product 2: gated citation x version GC x the backstop -----
 strict_run $M LeanGatedHolds.cfg "gated advance: cited versions live, the reaper never takes live bytes, boundaries are all-or-nothing"
+strict_run $M LeanGatedCrash.cfg "gated advance UNDER POD REPLACEMENT: the citation's own crash matrix, which belonged to no product until now"
+mutation_run $M LeanProbeGatedCrash.cfg "probe: a pod replacement is REACHABLE in the gated world -- without it the crash run is green over nothing" \
+  "Invariant ProbeGatedCrashReachable is violated"
 mutation_run $M LeanGatedReapsCurrent.cfg "the shipped reaper rule (keep only the cited version) DELETES a HITL write that landed between the lane and the citation — it was current, acked, and about to be read" \
   "Invariant Inv_NoUncitedGC is violated"
 mutation_run $M LeanGatedBackstop.cfg "the noncurrent-retention BACKSTOP reaps a cited version — gated staging makes the cited generation noncurrent, so lifecycle runs a clock against live cited data (D8's inversion; the abandoned-mid-stage endgame)" \
@@ -201,4 +204,4 @@ mutation_run $M LeanScopedGatedWholeBase.cfg "whole-instBase advance, with a cit
   "Invariant Inv_NoForeignLost is violated"
 
 echo
-echo "lean formal gate: $PASS/61 runs green"
+echo "lean formal gate: $PASS/63 runs green"

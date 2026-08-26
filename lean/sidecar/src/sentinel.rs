@@ -491,7 +491,16 @@ impl Sidecar {
         };
         // The consume act: rename the sentinel out of the agent's reach.
         // Staging first, pending second — a crash between is recovered
-        // at startup from the staging file, so a touch is never lost.
+        // at startup from the staging file, so a touch is never lost
+        // ACROSS A RESTART.
+        //
+        // Scope worth naming (review: U37): recovery runs ONLY at
+        // startup (`settle_pending_at_startup`, called once before the
+        // run loop). A *transient* fold failure mid-run therefore leaves
+        // a consumed touch stranded in the staging file until the
+        // process restarts, and the next consume's rename clobbers it,
+        // orphaning its nonce. Recovering in the poll arm as well would
+        // close it; nothing does today.
         self.noted_not_regular.remove(&format!("{}/{}", super::CONTROL_DIR, verb.sentinel_name()));
         let staging = self.staging_path(verb);
         std::fs::rename(&path, &staging)?;
@@ -880,6 +889,22 @@ impl Sidecar {
         // cost (D3.1).
         self.charge_budget(lane.staged_bytes)?;
         let baseline = self.state.load_baseline()?;
+        // An `ok` ack MUST name a seq (review: U38). A citation that
+        // installed nothing — the no-diff honor, and the re-run after a
+        // crash that had already installed — returns `seq: None`, and
+        // the ack then said `status: "ok"` with `seq: null`, which
+        // breaks the ack schema and §1.2's authoritative-durability
+        // recipe ("read the ack's seq, then confirm that seq in the
+        // bucket"). Nothing was published, but the agent's boundary IS
+        // satisfied — by the boundary already installed. Name that one.
+        //
+        // The earlier `dropped_inflight` fallback above closes a THIRD
+        // path and does nothing for these two: it sits inside a block
+        // guarded on dropped_inflight being non-empty, which is exactly
+        // what a no-diff citation does not have.
+        if cite.seq.is_none() {
+            cite.seq = Some(baseline.seq);
+        }
         Ok(gated_ack(pending, forced, &lane, &cite, baseline.manifest_etag.clone()))
     }
 

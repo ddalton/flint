@@ -198,6 +198,16 @@ emit LeanGatedBackstop "Inv_CitedVersionLives" $GATEDWORLD BackstopEnabled=TRUE
 emit LeanGatedReapsCurrent "Inv_NoUncitedGC" $GATEDWORLD \
   GCKeepsCurrent=FALSE CiteDropsInflightHitl=FALSE
 emit LeanGatedSplitCitation "Inv_BoundaryAtomic" $GATEDWORLD AtomicCitation=FALSE
+# THE CITATION'S CRASH MATRIX. Every gated cfg ran MaxCrashes=0 and
+# §10.1c deferred this to product 1 — whose cfgs are MaxCrashes=0 too, so
+# it belonged to no product at all (review: U12). It could not simply be
+# switched on: `stage` was framed at the Next composition, so a crashed
+# incarnation's staged set SURVIVED pod replacement — the opposite of
+# §4's substrate rule — and a frozen `citeDone` was then quantified by
+# Inv_BoundaryAtomic against a Valid(s) that kept moving. CrashPodGated
+# clears both; these two runs are what that bought.
+emit LeanGatedCrash "$GATEDINV" $GATEDWORLD MaxCrashes=1
+emit LeanProbeGatedCrash "ProbeGatedCrashReachable" $GATEDWORLD MaxCrashes=1
 # A citation naming bytes that PREDATE a user's write. D7 wrote a
 # base-version guard for this; the model showed that guard unreachable
 # (the lane never advances the baseline, so a staged path is always
@@ -220,7 +230,17 @@ emit LeanGatedInflightHitl "Inv_HITLDurable" $GATEDWORLD CiteDropsInflightHitl=F
 emit LeanProbeCitationInstalled "ProbeCitationInstalled" $GATEDWORLD
 emit LeanProbeWithheldDelete "ProbeWithheldDelete" $GATEDWORLD
 emit LeanProbeForcedCite "ProbeForcedCite" $GATEDWORLD
-emit LeanProbeRawUncited "ProbeRawReaderSeesUncited" $GATEDWORLD
+# MaxHitl=0 is the whole point of this cfg, not an inherited default.
+# With HITL on, `HitlWrite` is enabled in the INITIAL state and sets
+# objects[p] # manifest[p] in one step — so TLC's counterexample is an
+# ordinary HITL write, reachable before any StagePut and equally
+# reachable in cadence and hybrid. The probe then proves nothing about
+# §3 residual 11 (the gated lane's uncited CURRENT version), and the
+# regression fence §4 assigns it does not work: a design that abolished
+# uncited staging entirely would still fail it (review: U14). With HITL
+# off, the only way to separate objects from manifest is the staging
+# lane, which is the exposure being pinned.
+emit LeanProbeRawUncited "ProbeRawReaderSeesUncited" $GATEDWORLD MaxHitl=0
 
 # ---- tranche 3, product 1: the boundary VERB x barrier x inbox -------------
 # The ack/fence/crash matrix is where the plan retracted its own per-crash
