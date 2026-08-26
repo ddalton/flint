@@ -1,0 +1,93 @@
+# Getting a LOCAL image onto a real cluster without a registry.
+#
+# The rolesanywhere role has no ECR (ecr:DescribeRepositories is denied),
+# and pushing proprietary binaries to Docker Hub or a public ephemeral
+# registry is not this drill's call to make. So the image is sideloaded
+# straight into each node's containerd.
+#
+# Two objects: `imgsrv` holds the image tar once and serves it over HTTP
+# in-cluster (one upload from the Mac, not one per node), and the
+# `sideload` DaemonSet pulls it on every node and imports it via nsenter
+# into the host's containerd. Nodes CAN pull public images (they pulled
+# Cilium at provision), so busybox itself comes from Docker Hub normally
+# — there is no bootstrap circularity.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lean-drill
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: imgsrv
+  namespace: lean-drill
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: imgsrv } }
+  template:
+    metadata: { labels: { app: imgsrv } }
+    spec:
+      containers:
+        - name: httpd
+          image: busybox:stable
+          # -f foreground, -h docroot. The tar is kubectl cp'd in after
+          # the pod is Ready.
+          command: ["/bin/sh", "-c", "mkdir -p /srv && httpd -f -p 8080 -h /srv"]
+          ports: [{ containerPort: 8080 }]
+          volumeMounts: [{ name: srv, mountPath: /srv }]
+      volumes:
+        - name: srv
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: imgsrv
+  namespace: lean-drill
+spec:
+  selector: { app: imgsrv }
+  ports: [{ port: 8080, targetPort: 8080 }]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: sideload
+  namespace: lean-drill
+spec:
+  selector: { matchLabels: { app: sideload } }
+  template:
+    metadata: { labels: { app: sideload } }
+    spec:
+      # hostPID + privileged is what lets nsenter reach the host's
+      # containerd namespace. This DaemonSet is drill scaffolding and is
+      # deleted with the namespace.
+      hostPID: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: importer
+          image: busybox:stable
+          securityContext:
+            privileged: true
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              # /host-tmp is the NODE's /tmp, so the path nsenter sees is
+              # the same path ctr will read.
+              wget -q -O /host-tmp/lean-drill.tar http://imgsrv.lean-drill.svc:8080/lean-drill.tar
+              CTR=""
+              for c in /usr/bin/ctr /usr/local/bin/ctr /bin/ctr; do
+                nsenter -t 1 -m -u -i -n -p -- test -x $c 2>/dev/null && CTR=$c && break
+              done
+              [ -n "$CTR" ] || { echo "SIDELOAD-FAIL: no ctr on this node"; sleep infinity; }
+              nsenter -t 1 -m -u -i -n -p -- $CTR -n k8s.io images import /tmp/lean-drill.tar
+              nsenter -t 1 -m -u -i -n -p -- $CTR -n k8s.io images ls -q | grep -c flint-lean-drill > /dev/null \
+                || { echo "SIDELOAD-FAIL: image absent after import"; sleep infinity; }
+              echo SIDELOAD-OK
+              sleep infinity
+          volumeMounts:
+            - { name: host-tmp, mountPath: /host-tmp }
+      volumes:
+        - name: host-tmp
+          hostPath: { path: /tmp, type: Directory }

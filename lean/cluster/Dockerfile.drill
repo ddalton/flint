@@ -1,0 +1,13 @@
+# The cluster-drill image: BOTH lean binaries in one x86_64 image.
+#
+# x86_64, not aarch64 — the trove fleet is i4i (Intel). The kind rig's
+# images are aarch64 (Apple Silicon) and will not run here; building the
+# wrong arch is a whole provision wasted, so the drill script asserts the
+# arch before it sideloads.
+#
+# busybox rather than scratch, for the same reason as the kind image: the
+# sidecar's startupProbe execs `test -f <marker>` INSIDE this container.
+FROM busybox:stable
+COPY flint-sync /usr/local/bin/flint-sync
+COPY flint-lean-gateway /usr/local/bin/flint-lean-gateway
+ENTRYPOINT ["/bin/sh"]

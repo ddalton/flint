@@ -1,0 +1,86 @@
+# The store, pinned to its OWN node.
+#
+# MinIO stands in for the deployment proxy here. It is deliberately given
+# a dedicated, tainted node: a 1000-pod burst co-scheduled with its own
+# store would measure the two contending, and a saturated store shows up
+# as sidecar startupProbe failures that read exactly like a product bug.
+# Isolating it does not make the throughput number quotable — it is not,
+# and the drill record says so — it makes the CLUSTER-side result
+# attributable, which is the whole point of this leg.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: lean-drill
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: minio } }
+  template:
+    metadata: { labels: { app: minio } }
+    spec:
+      nodeSelector: { "lean-drill/store": "yes" }
+      tolerations:
+        - key: "lean-drill/store"
+          operator: "Equal"
+          value: "yes"
+          effect: "NoSchedule"
+      containers:
+        - name: minio
+          image: minio/minio
+          args: ["server", "/data", "--address", ":9000"]
+          env:
+            - { name: MINIO_ROOT_USER, value: drill }
+            - { name: MINIO_ROOT_PASSWORD, value: drillsecret }
+          ports: [{ containerPort: 9000 }]
+          volumeMounts: [{ name: data, mountPath: /data }]
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: lean-drill
+spec:
+  selector: { app: minio }
+  ports: [{ port: 9000, targetPort: 9000 }]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: make-bucket
+  namespace: lean-drill
+spec:
+  backoffLimit: 20
+  template:
+    spec:
+      restartPolicy: OnFailure
+      tolerations:
+        - key: "lean-drill/store"
+          operator: "Equal"
+          value: "yes"
+          effect: "NoSchedule"
+      containers:
+        - name: mc
+          image: minio/mc
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until mc alias set m http://minio.lean-drill.svc:9000 drill drillsecret; do sleep 2; done
+              mc mb --ignore-existing m/agentws
+---
+# The bucket oracle, kept OFF the store node so a saturated store cannot
+# also stall the instrument reading it.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mc
+  namespace: lean-drill
+spec:
+  restartPolicy: Never
+  containers:
+    - name: mc
+      image: minio/mc
+      command: ["/bin/sh", "-c", "sleep 100000"]

@@ -1,0 +1,89 @@
+# LEG B — the burst wave (plan §5 Phase 0c / Phase 6).
+#
+# ONE Indexed Job rather than N generated Pod manifests, and the reason
+# is the measurement: `kubectl apply` of 1000 separate pod documents
+# takes minutes of client-side round trips, which spreads the "burst"
+# over a window long enough that nothing is actually concurrent. The Job
+# controller creates them server-side as fast as it can ramp, which is
+# the burst the leg claims to test.
+#
+# Indexed mode also gives each pod a DISTINCT workspace for free:
+# JOB_COMPLETION_INDEX is injected by the controller, so pod N drives
+# subtree burst/wsN. 1000 pods against 1000 subtrees is the realistic
+# fleet shape (1000 agents, 1000 projects) and keeps lease contention
+# out of a leg that is not about lease contention.
+#
+# When the agent container exits, the native sidecar is SIGTERMed and
+# runs its final drain barrier — so this Job also exercises 1000
+# simultaneous drains, which is the graceful half of node loss.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: burst
+  namespace: lean-drill
+spec:
+  completions: 1000
+  parallelism: 1000
+  completionMode: Indexed
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      # Keep the fleet off the store's node.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: "lean-drill/store"
+                    operator: NotIn
+                    values: ["yes"]
+      initContainers:
+        - name: flint-sync
+          image: flint-lean-drill:cluster
+          imagePullPolicy: Never
+          # restartPolicy Always on an initContainer = a NATIVE sidecar:
+          # it starts before the agent, keeps running alongside it, and
+          # is SIGTERMed when the agent exits.
+          restartPolicy: Always
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              export FLINT_SYNC_PREFIX="burst/ws${JOB_COMPLETION_INDEX}"
+              exec /usr/local/bin/flint-sync run
+          env:
+            - { name: FLINT_SYNC_BUCKET, value: agentws }
+            - { name: FLINT_SYNC_ROOT, value: /work }
+            - { name: FLINT_SYNC_ENDPOINT, value: "http://minio.lean-drill.svc:9000" }
+            - { name: FLINT_SYNC_FLOOR_SECS, value: "10" }
+            - { name: FLINT_SYNC_FANOUT, value: "4" }
+            - { name: AWS_ACCESS_KEY_ID, value: drill }
+            - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
+            - { name: AWS_REGION, value: us-east-1 }
+          # The checkout gate. failureThreshold is deliberately generous:
+          # under a real burst the store is the queue, and a probe budget
+          # tuned for a quiet cluster would report congestion as failure.
+          startupProbe:
+            exec: { command: ["/bin/sh", "-c", "test -f /work/.flint-sync/checkout-complete"] }
+            periodSeconds: 3
+            failureThreshold: 200
+          volumeMounts: [{ name: work, mountPath: /work }]
+      containers:
+        - name: agent
+          image: flint-lean-drill:cluster
+          imagePullPolicy: Never
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              # The gate, asserted by the AGENT ITSELF: if the marker is
+              # not there the pod FAILS, so the leg cannot pass vacuously
+              # on a sidecar that never checked out.
+              test -f /work/.flint-sync/checkout-complete || { echo "GATE BROKEN"; exit 1; }
+              echo "agent-${JOB_COMPLETION_INDEX}" > /work/agent.txt
+              # Longer than the floor, so a PERIODIC barrier publishes it
+              # rather than only the drain barrier on exit.
+              sleep 30
+          volumeMounts: [{ name: work, mountPath: /work }]
+      volumes:
+        - name: work
+          emptyDir: {}
