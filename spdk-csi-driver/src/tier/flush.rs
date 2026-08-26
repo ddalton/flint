@@ -2473,7 +2473,7 @@ mod tests {
         r.mem.raw_put(
             "t/torn.bin",
             Bytes::from_static(b"torn publish contents"),
-            GenerationStamps { generation: 1, epoch: 0, flush_uuid: uuid.into(), posix: None }.to_meta(),
+            GenerationStamps { generation: 1, epoch: 0, flush_uuid: uuid.into(), boundary_source: None, posix: None }.to_meta(),
         );
 
         assert_eq!(r.orch.reconcile_intents().await, 1);

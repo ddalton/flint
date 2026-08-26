@@ -512,7 +512,7 @@ pub fn spawn_heartbeat(
                     return;
                 }
             }
-            match store.epoch_renew(&cfg.key, &lease).await {
+            match store.epoch_renew(&cfg.key, &lease, None).await {
                 Ok(next) => {
                     lease = next;
                     consecutive_failures = 0;
@@ -648,7 +648,7 @@ mod tests {
             .unwrap();
         assert_eq!(l2.epoch, 2, "resume supersedes the dead incarnation");
         // The dead incarnation's lease is fenced.
-        let err = store.epoch_renew(&c.key, &l1).await.unwrap_err();
+        let err = store.epoch_renew(&c.key, &l1, None).await.unwrap_err();
         assert!(matches!(err, StoreError::PreconditionFailed(_)));
     }
 
@@ -679,7 +679,7 @@ mod tests {
         assert_eq!(lb.epoch, 2, "numbering continues from the released epoch");
 
         // And the predecessor is fenced, released or not.
-        let err = store.epoch_renew(&cb.key, &la).await.unwrap_err();
+        let err = store.epoch_renew(&cb.key, &la, None).await.unwrap_err();
         assert!(matches!(err, StoreError::PreconditionFailed(_)));
     }
 
@@ -714,7 +714,7 @@ mod tests {
             let mut lease = la;
             for _ in 0..15 {
                 tokio::time::sleep(Duration::from_millis(20)).await;
-                lease = store_a.epoch_renew(&key, &lease).await.unwrap();
+                lease = store_a.epoch_renew(&key, &lease, None).await.unwrap();
             }
         });
 

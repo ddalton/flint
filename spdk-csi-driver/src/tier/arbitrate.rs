@@ -87,7 +87,7 @@ mod tests {
     use bytes::Bytes;
 
     fn stamps(generation: u64, uuid: &str) -> GenerationStamps {
-        GenerationStamps { generation, epoch: 1, flush_uuid: uuid.into(), posix: None }
+        GenerationStamps { generation, epoch: 1, flush_uuid: uuid.into(), boundary_source: None, posix: None }
     }
 
     async fn seed_base(store: &MemoryStore, key: &str) -> ObjectMeta {

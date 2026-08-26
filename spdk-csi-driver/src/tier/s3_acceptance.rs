@@ -47,7 +47,7 @@ mod tests {
         let key = format!("{}file.bin", prefix);
         let gen1_body = Bytes::from(vec![0xA5u8; 12 * 1024 * 1024]);
         let gen1_crc = crc64_nvme(&gen1_body);
-        let stamps1 = GenerationStamps { generation: 1, epoch: 1, flush_uuid: "uuid-g1".into(), posix: None };
+        let stamps1 = GenerationStamps { generation: 1, epoch: 1, flush_uuid: "uuid-g1".into(), boundary_source: None, posix: None };
         let gen1 = store
             .put_whole(&key, gen1_body.clone(), &PutCondition::IfNoneMatchAny, &stamps1, gen1_crc)
             .await
@@ -102,7 +102,7 @@ mod tests {
         gen2_content[..(6 * MB) as usize].fill(0x5A); // first 6 MiB dirty
         std::fs::write(&local, &gen2_content).unwrap();
         let gen2_crc = crc64_nvme(&gen2_content);
-        let stamps2 = GenerationStamps { generation: 2, epoch: 1, flush_uuid: "uuid-g2".into(), posix: None };
+        let stamps2 = GenerationStamps { generation: 2, epoch: 1, flush_uuid: "uuid-g2".into(), boundary_source: None, posix: None };
         let spec = ComposeSpec {
             key: &key,
             local_path: &local,
@@ -158,7 +158,7 @@ mod tests {
         let err = store.compose_generation(&ComposeSpec {
             condition: PutCondition::IfMatch(gen2.etag.clone()),
             base_etag: Some(gen2.etag.clone()),
-            stamps: GenerationStamps { generation: 3, epoch: 1, flush_uuid: "uuid-g3".into(), posix: None },
+            stamps: GenerationStamps { generation: 3, epoch: 1, flush_uuid: "uuid-g3".into(), boundary_source: None, posix: None },
             ..spec.clone()
         }).await.unwrap_err();
         assert!(matches!(err, StoreError::PreconditionFailed(_)),
@@ -190,16 +190,16 @@ mod tests {
         let err = store.epoch_acquire(&ekey, "hub-b", None).await.unwrap_err();
         assert!(matches!(err, StoreError::PreconditionFailed(_)),
             "blind second claim must 412, got {:?}", err);
-        let l1b = store.epoch_renew(&ekey, &l1).await.unwrap();
+        let l1b = store.epoch_renew(&ekey, &l1, None).await.unwrap();
         assert_ne!(l1b.token, l1.token, "renew must rotate the CAS token");
-        let err = store.epoch_renew(&ekey, &l1).await.unwrap_err();
+        let err = store.epoch_renew(&ekey, &l1, None).await.unwrap_err();
         assert!(matches!(err, StoreError::PreconditionFailed(_)), "stale renew must 412");
         let observed = store.epoch_read(&ekey).await.unwrap().unwrap();
         assert_eq!(observed.holder_id, "hub-a");
         assert!(observed.last_renew_unix.is_some(), "S3's clock must stamp the lease");
         let l2 = store.epoch_acquire(&ekey, "hub-b", Some(&observed)).await.unwrap();
         assert_eq!(l2.epoch, 2);
-        let err = store.epoch_renew(&ekey, &l1b).await.unwrap_err();
+        let err = store.epoch_renew(&ekey, &l1b, None).await.unwrap_err();
         assert!(matches!(err, StoreError::PreconditionFailed(_)), "deposed renew must 412");
         store.epoch_release(&ekey, &l2).await.unwrap();
         assert!(store.epoch_read(&ekey).await.unwrap().is_none());
