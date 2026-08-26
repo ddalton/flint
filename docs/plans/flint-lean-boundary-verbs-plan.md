@@ -558,17 +558,20 @@ What replaces it is **storage, not requests**: uncited versions (at most one gen
 
 ## 10. Implementation status (2026-08-25)
 
-**Landed: Phases 0, 1, 2, and Phase 3's core.** Lean battery 52/52 (was
-19/19); formal gate **27/27** (was 24/24); `flint-store` and the hub
-crate both compile against the shared-schema changes.
+**Landed: Phases 0, 1, 2 and 3.** Lean battery 65/65 (was 19/19); formal
+gate **27/27** (was 24/24); `flint-store` and the hub crate both compile
+against the shared-schema changes, and the `s3`-feature binaries build.
 
 | Phase | State | Notes |
 |---|---|---|
 | 0 — namespace + marker + pre-flight (D0, D11) | **done** | `scan` skips `.flint/`, `classify` exempts it from delete eligibility, checkout refuses to materialize a control citation, sticky pre-flight verdict in `.flint-sync/sentinels.json`, `capabilities.json` written at every `run` startup |
 | 1 — publish sentinel (D1–D3, D3.1, D12) | **done** | `sentinel.rs`: consume/honor/ack/retire, staging-file crash recovery, coalescing, covered-nonce acks, torn-body + type checks, refused-fenced acks, work-metered budget; run loop rewritten on three independent non-resettable intervals with a decoupled 30 s renewal |
 | 2 — sync sentinel + scope (D4) + ticker (D5) + containment | **done** | `sync_scoped` with the merge-base rule, component-boundary scope matching, `contained_path`/`check_contained`, phantom-conflict rule, `.flint/remote.seq` fed off the barrier's existing HEAD |
-| 3 — gated advance (D6–D10, D13) | **core done** | `flint-store` version surface (`version_id` on `ObjectMeta`, version-scoped HEAD/GET/DELETE, `list_versions`, S3 + `MemoryStore` version chains + an `expire_noncurrent` backstop hook); `gated.rs` upload lane + single-CAS citation lane, four citation sources, base-version re-validation, exact version GC, `pinned_reads` reader rule in checkout and sync, boundary-source stamped on the manifest object, conformance probe |
-| 3 — remainder | **open** | gauges.json / `withheld_reason` line / `flint-sync status`, heartbeat echo, `recover-staged`, gated wiring into the run loop's floor arm, preStop drain sizing |
+| 3 — gated advance (D6–D10, D13) | **done** | `flint-store` version surface (`version_id` on `ObjectMeta`, version-scoped HEAD/GET/DELETE, `list_versions`, S3 + `MemoryStore` version chains + an `expire_noncurrent` backstop hook); `gated.rs` upload lane + single-CAS citation lane, four citation sources, base-version re-validation, exact version GC, `pinned_reads` reader rule in checkout and sync, boundary-source stamped on the manifest object, conformance probe |
+| 3 — run-loop wiring (D6, D8, D10) | **done** | the floor arm runs the LANE in gated and cites only at a coherent point; a publish sentinel is a citation source, not a fused barrier; the preStop drain cites everything staged in place (`drain` stamp, `pinned_reads`, no data movement); the versioning conformance probe is a startup **refusal**, and it now sweeps its own leftovers instead of wedging on them |
+| 3 — recovery (D9) | **done** | `flint-sync recover-staged`: bucket-truth re-citation of durable-but-uncited work as one `recovered` boundary — uncited current versions, brand-new never-cited paths, and D8's dangling citations rolled forward; conflict records throughout; unrecoverable paths named loudly and exit non-zero |
+| 3 — observability minimum (§2.6, OF-6) | **done** | `.flint-sync/gauges.json` (rpo/visibility-lag/staged-uncited/cited-noncurrent-age/withheld-reason/budget/forced-count/last-boundary, `fenced` in lockstep with `capabilities.json`), the structured per-tick `withheld_reason=` stderr line, and `flint-sync status` — which takes no lease and no state-dir lock, so it diagnoses a workspace *while* its sidecar holds them |
+| 3 — remainder | **open** | the operator-facing heartbeat echo (deferred to Phase 4 — see below), preStop drain sizing (webhook-derived; Phase 4) |
 | 4 — CRD/chart/operator | **not started** | |
 | 5 — layered doors | **partial** | D14's `carry_sync_request` ticker path exists; the UDS socket and the gateway `boundary_request`/`sync_request` inbox fields do not |
 | 6 — `/metrics` (D15) | **not started** | |
@@ -622,6 +625,74 @@ buried.**
   every path, and the remote manifest has not moved — i.e. every local
   byte is already cited, so the boundary the ack claims is already true.
   §2.1 should be corrected to match §7.
+
+### 10.1b The Phase-3 completion tranche — what it found
+
+Thirteen more legs (52 → **65**) and **sixteen more mutations**, each
+applied to the shipped code, observed red, and reverted. Up to this
+point `gated.rs` was reachable only from tests: `boundaryMode: gated`
+parsed, validated, refused itself without a lag bound — and then ran the
+fused cadence barrier like every other mode. It was the "knobs that
+exist and do NOTHING" class, one wiring commit from being shipped that
+way.
+
+Four defects, none of them the wiring itself:
+
+1. **The versioning conformance probe could wedge gated mode
+   permanently.** It writes its object `If-None-Match: *` and cleans up
+   at the end; a crash — or one failed cleanup DELETE, which the code
+   discarded with `let _` — leaves the object behind, and every
+   subsequent probe then 412s on its *first* write and refuses. A
+   transient error would have taken a gated workspace down until a human
+   deleted an object by hand. The probe now sweeps its own leftovers,
+   and sweeps again at the end so a partial cleanup cannot wedge the
+   next run either.
+2. **The preStop drain moved data in gated mode.** Running the fused
+   barrier at SIGTERM re-uploads bytes the lane already staged, at the
+   one moment there is no time for it — and D10's grace sizing is
+   explicitly premised on "installing pending citations is one CAS". It
+   also left the final boundary of the workspace's life carrying neither
+   the `drain` stamp nor `pinned_reads`. Isolated by mutation: with the
+   stamp assertions removed, the version-identity assertion *still*
+   fired, so the re-upload was real and not a bookkeeping difference.
+3. **`checkout` never wrote the capability marker**, though D11 says it
+   must, before the completion marker, so it exists the instant the
+   agent may start. `run` wrote it either side of checkout, so the gap
+   was invisible there and total for the standalone `checkout`
+   subcommand. Correcting it broke an existing test's *fixture* — which
+   had reached "no marker yet" by relying on the bug — so the fixture
+   now constructs that state as what it actually is: a live tree checked
+   out by an old binary, with a new image dropped in place.
+4. **`CitationSource::Recovered` was defined and never constructed**,
+   because `recover-staged` did not exist. It does now, and the source
+   is what stamps its boundary.
+
+**Two design calls made here, stated rather than buried.**
+
+- **The news ticker moves at citation points in gated mode.** D5's rule
+  is that the ticker never issues a request of its own — it rides the
+  barrier's existing manifest HEAD. The upload lane has no such HEAD, so
+  keeping ticker freshness at floor cadence under gated would cost one
+  added HEAD per tick per workspace (60/hour), which is the same order
+  as the entire sentinel budget. Inbound news therefore refreshes at
+  coherent points, which is consistent with what the mode means; the
+  cost is that an agent learns of a sibling's publish up to
+  `visibilityLagBoundSecs` later than it would in hybrid.
+- **`withheld_reason` names `version-probe-failed`, not the plan's
+  `copy-probe-failed`.** §8 Q2 withdrew the CopyObject staging engine
+  entirely, so the draft's value named machinery that no longer exists.
+- **The operator-facing heartbeat echo is deferred to Phase 4**, on
+  purpose. The plan's argument for it is that it is *free* — it rides
+  the lease-heartbeat cell the sidecar already renews. But
+  `EpochState`/`EpochLease` carry no free-form payload, so it is free
+  only after a shared `flint-store` schema change that also touches the
+  hub's arbitration path — and the only consumer is the operator's
+  `BoundaryModeActive` condition, which does not exist yet. A separate
+  heartbeat object would cost ~120 PUTs/hour/workspace, which is not
+  free and is precisely the "instrument reports on itself" tax. It
+  lands with the operator, or not at all. The *local* half of OF-6 —
+  "why is the manifest not advancing", answerable by `cat` inside the
+  pod — is shipped.
 
 ### 10.2 Formal model — tranche 3, product 4 (done)
 
