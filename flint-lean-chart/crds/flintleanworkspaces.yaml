@@ -26,6 +26,18 @@ spec:
     - jsonPath: .spec.keyPrefix
       name: PREFIX
       type: string
+    - jsonPath: .status.observedBoundaryMode
+      name: MODE
+      type: string
+    - jsonPath: .status.citedSeq
+      name: CITED-SEQ
+      type: integer
+    - jsonPath: .status.visibilityLagSecs
+      name: LAG
+      type: integer
+    - jsonPath: .status.stagedUncited
+      name: STAGED
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: AGE
       type: date
@@ -36,6 +48,41 @@ spec:
         properties:
           spec:
             properties:
+              boundaryMode:
+                default: hybrid
+                description: |-
+                  Citation policy (D6): `cadence` | `hybrid` | `gated`.
+
+                  - `cadence` — exactly pre-boundary behavior; the escape hatch.
+                  - `hybrid` (DEFAULT) — cadence ∪ boundary sentinels, whichever
+                    comes first. No trade: a workspace whose agent never touches
+                    `.flint/publish` behaves identically to `cadence`.
+                  - `gated` — OPT-IN. Durability and visibility split: uploads
+                    land every floor tick as uncited object versions, and the
+                    manifest advances only at coherent points. Buys coherent
+                    views for manifest-resolving readers. COSTS, all of which
+                    apply the moment you set it: (1) automatic-recovery RPO is
+                    the last BOUNDARY, not the last floor — on a pure-spot fleet
+                    pod replacement is routine, and uncited work then needs
+                    `flint-sync recover-staged`, an operator action; (2) uncited
+                    generations are the CURRENT version of real `files/` keys, so
+                    any reader that does not resolve through the manifest — an
+                    import tool, `aws s3 cp`, a foreign system, a human — sees
+                    mid-logical-change bytes; (3) uncited = invisible to every
+                    import, DR checkout, GitOps re-apply and cross-cluster move;
+                    (4) the bucket must pass the versioning conformance probe
+                    (versioning=Enabled, `x-amz-version-id` on PUT, version-scoped
+                    GET/HEAD/DELETE, `ListObjectVersions`) — a proxy that strips
+                    the version header gets gated REFUSED, never degraded into;
+                    (5) `visibilityLagBoundSecs` is REQUIRED.
+
+                  CHANGING THIS ON A LIVE WORKSPACE REQUIRES POD RECREATION: the
+                  sidecar's config is env stamped at pod creation by the webhook
+                  and there is no re-read path. Recreation destroys the emptyDir
+                  pending record, which turns the whole uncited window into
+                  recovery candidates — the gated→cadence escape hatch is
+                  therefore an operator procedure, not an edit.
+                type: string
               bucket:
                 description: |-
                   Bucket and subtree prefix (the proxy's tenancy boundary —
@@ -101,10 +148,54 @@ spec:
                 format: uint64
                 minimum: 0.0
                 type: integer
+              metrics:
+                default:
+                  enabled: false
+                  port: 9847
+                description: |-
+                  Opt-in Prometheus exposition on the pod network (D15). Off by
+                  default: a workspace with metrics disabled is fully operable —
+                  `gauges.json`, the heartbeat echo and `flint-sync status` are
+                  the authority for every operational decision, and `/metrics` is
+                  additive. A bind collision degrades to a condition, never a
+                  crash.
+                properties:
+                  enabled:
+                    default: false
+                    type: boolean
+                  port:
+                    default: 9847
+                    description: |-
+                      Deliberately not 8080/9090/9100: the agent container is the
+                      likely occupant of the usual ports, and losing the bind is a
+                      degraded condition rather than a failure — but a default that
+                      collides on most pods would make the degraded path the normal
+                      one.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                type: object
               mountPath:
                 default: /workspace
                 description: Where the workspace mounts in every container.
                 type: string
+              noncurrentRetentionDays:
+                default: 30
+                description: |-
+                  Gated only: the noncurrent-version retention the operator
+                  provisions on `<prefix>/files/` — the crash-window backstop
+                  BEHIND flint's exact per-citation version GC, not the reaper.
+
+                  Read the inversion before lowering it: gated staging makes the
+                  CITED version noncurrent the moment a newer generation stages,
+                  so a `NoncurrentVersionExpiration` rule over `files/` runs a
+                  clock against live cited data and never against the newest
+                  uncited bytes. A shorter fleet rule covering this prefix
+                  REFUSES gated mode with the offending rule Id named. Cross-
+                  validated against `2 × (visibilityLagBoundSecs + floorSecs)`.
+                format: uint64
+                minimum: 0.0
+                type: integer
               projectId:
                 description: |-
                   The durable, user-declared project identity the claim cell
@@ -112,11 +203,77 @@ spec:
                   CR UID. Equal identity on a standing claim ⇒ adopt (DR, GitOps,
                   cross-cluster moves); different ⇒ the CR is Refused.
                 type: string
+              quiesceBoundSecs:
+                default: 30
+                description: |-
+                  Gated only: the scan-to-scan stability window that counts as
+                  quiescence — the cheapest coherent point there is, and the one
+                  that fires for an agent that never learns the verbs.
+                format: uint64
+                minimum: 0.0
+                type: integer
+              sentinelHourlyBudget:
+                default: 60
+                description: |-
+                  Work-metered hourly cap (D3.1) — UNITS, not calls. A honor
+                  charges `max(1, ceil(published_bytes / 64 MiB))`, and 0 for a
+                  no-diff honor, so sentinel-driven bytes are bounded at
+                  budget × 64 MiB/hour however hot the agent's loop is. Exhausted
+                  ⇒ honors defer to the floor tick and the ack is stamped
+                  `sentinel-deferred`: the workspace degrades to exactly cadence
+                  behavior, never to a refusal.
+                format: uint64
+                minimum: 0.0
+                type: integer
+              sentinelMinIntervalSecs:
+                default: 5
+                description: |-
+                  Latency guard: sentinels arriving inside the interval coalesce
+                  into one barrier whose ack covers every nonce. Inert on a
+                  workspace whose agent never touches a sentinel.
+                format: uint64
+                minimum: 0.0
+                type: integer
+              sentinels:
+                default: auto
+                description: |-
+                  Sentinel posture (D0.4): `auto` | `off` | `force`. `auto` runs
+                  the verbs unless the pre-flight finds pre-existing `.flint/`
+                  data in the workspace (an app that already owns that name);
+                  `force` accepts consuming such files.
+                type: string
               sizeLimitGib:
                 default: 20
                 description: emptyDir sizeLimit for the workspace volume, GiB. 0 = no limit.
                 format: uint64
                 minimum: 0.0
+                type: integer
+              stagedBacklogCapBytes:
+                default: 2147483648
+                format: uint64
+                minimum: 0.0
+                type: integer
+              stagedBacklogCapObjects:
+                default: 5000
+                description: |-
+                  Gated only: forced-citation sources that bound the preStop
+                  drain by construction. If backlog-cap becomes the DOMINANT
+                  citation source, the cap is pacing the workspace instead of
+                  bounding it — lower the lag bound or teach the agent the verbs.
+                format: uint64
+                minimum: 0.0
+                type: integer
+              visibilityLagBoundSecs:
+                description: |-
+                  Gated only, and REQUIRED there: the hard cap on citation
+                  staleness. Unbounded staleness is refused by construction
+                  rather than by convention — a gated CR without this is
+                  `BoundaryModeAccepted=False`. A citation forced by this cap is
+                  stamped `forced-lag-cap` in the ack AND on the manifest object,
+                  so "was that view coherent?" is answerable from the bucket.
+                format: uint64
+                minimum: 0.0
+                nullable: true
                 type: integer
             required:
             - bucket
@@ -126,6 +283,49 @@ spec:
           status:
             nullable: true
             properties:
+              citedSeq:
+                description: The last manifest seq the sidecar cited.
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
+              conditions:
+                description: |-
+                  `BoundaryModeAccepted`, `VersionRetentionProvisioned`,
+                  `SentinelVerbsActive`, `BoundaryModeActive` (§2.6).
+                items:
+                  description: |-
+                    A metav1.Condition mirror (same field names, same semantics) — the
+                    lite operator's `ShareCondition`, kept separate on purpose: the two
+                    controllers share no types by design (`mod.rs`).
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        RFC3339. Bumped only when `status` actually changes, so it means
+                        what it says.
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      type: string
+                    status:
+                      description: '`"True"` | `"False"` | `"Unknown"`.'
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - reason
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
               lastVerifiedUnix:
                 description: |-
                   Unix time of the last successful operator pass (claim verified,
@@ -137,16 +337,41 @@ spec:
               message:
                 nullable: true
                 type: string
+              observedBoundaryMode:
+                description: The mode the sidecar is actually running.
+                nullable: true
+                type: string
+              observedSidecarVersion:
+                description: The sidecar binary's version — the mixed-fleet tell.
+                nullable: true
+                type: string
               phase:
                 description: Pending | Claimed | Adopted | Refused | Error
                 nullable: true
                 type: string
+              stagedUncited:
+                description: |-
+                  Durable-but-invisible objects standing right now. This is the
+                  number that would need `recover-staged` if the pod were
+                  replaced this second.
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
               standingProjectId:
                 description: |-
                   The claim cell's standing identity when Refused (the operator
                   never adopts a foreign claim on the fly).
                 nullable: true
                 type: string
+              visibilityLagSecs:
+                description: |-
+                  Seconds since that citation — gated mode's coherence lag, as a
+                  printer column, with no metrics stack in the picture.
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
             type: object
         required:
         - spec

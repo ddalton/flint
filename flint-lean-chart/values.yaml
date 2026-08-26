@@ -84,6 +84,26 @@ gateway:
     requests: { cpu: 50m, memory: 64Mi }
     limits: { memory: 512Mi }
 
+# D15's Prometheus plumbing. The exposition itself is a per-workspace
+# CR knob (`spec.metrics.enabled`) — these flags only ship the cluster
+# objects that scrape it, and both are off by default: a PodMonitor on a
+# cluster without the Prometheus Operator CRDs fails the whole install,
+# and a NetworkPolicy in the wrong namespace does nothing while looking
+# like protection.
+metrics:
+  # Must match the CRs' spec.metrics.port for the NetworkPolicy to
+  # match; the PodMonitor selects by port NAME and does not care.
+  port: 9847
+  podMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+  # Namespaces to render the metrics NetworkPolicy into — the ones your
+  # agent pods run in, NOT this release's namespace. Empty ⇒ no policy
+  # is created and the port is reachable from anywhere the CNI allows.
+  networkPolicyNamespaces: []
+  monitoringNamespace: monitoring
+
 nodeSelector: {}
 tolerations: []
 affinity: {}

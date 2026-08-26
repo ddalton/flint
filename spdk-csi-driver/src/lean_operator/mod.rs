@@ -21,6 +21,12 @@
 //!   declared inventory × the 0b-measured rates, never a fleet
 //!   constant. The admission HTTP/TLS wrapper is follow-up plumbing;
 //!   everything it will do is here and unit-tested.
+//! - `boundary`: the operator's half of the boundary-verbs contract —
+//!   spec validation (gated needs a lag bound; retention must outlive
+//!   one staging window; the derived drain must fit a spot reclaim),
+//!   the bucket-side conformance probe and lifecycle posture, and the
+//!   `BoundaryModeActive` comparison between what the CR asked for and
+//!   what the RUNNING sidecar echoes into its lease cell.
 //! - `reconcile`: claim stamping with BOTH adopt arms (equal declared
 //!   identity ⇒ adopt — DR/GitOps recreate is a designed lifecycle;
 //!   different ⇒ a refusing status, never on-the-fly adoption), the
@@ -28,6 +34,7 @@
 //!   the operator-side MPU sweep (bucket-wide `list_uploads` is
 //!   DENIED to a project-scoped sidecar by design — plan §2.4).
 
+pub mod boundary;
 pub mod crd;
 pub mod inject;
 pub mod reconcile;

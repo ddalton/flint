@@ -1,0 +1,65 @@
+{{- if .Values.metrics.podMonitor.enabled }}
+# D15's scrape target. Selects the INJECTED sidecar by the label the
+# webhook requires on every opted-in pod, so a workspace joins
+# monitoring by being a workspace — there is nothing per-workspace to
+# install.
+#
+# Requires the Prometheus Operator CRDs; the flag is off by default
+# because a PodMonitor on a cluster without them fails the whole
+# install.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "flint-lean.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flint-lean.labels" . | nindent 4 }}
+    {{- with .Values.metrics.podMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    any: true
+  selector:
+    matchExpressions:
+      - key: flint.io/lean-workspace
+        operator: Exists
+  podMetricsEndpoints:
+    # By NAME, not by number: the port is a per-workspace CR knob, and
+    # a hard-coded number would scrape whichever workspaces happened to
+    # keep the default.
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.metrics.podMonitor.interval }}
+{{- end }}
+{{- range $ns := .Values.metrics.networkPolicyNamespaces }}
+---
+# Exposition is on the POD network with no auth: the trust boundary is
+# the pod, and this policy is what keeps it that way at the network
+# layer. Ingress to the metrics port is allowed ONLY from the
+# monitoring namespace.
+#
+# One policy per workspace namespace, because NetworkPolicy is
+# namespaced and the chart installs into flint-system. A workspace in a
+# namespace absent from this list is unreachable by the scraper (fail
+# closed) rather than open to the cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "flint-lean.name" $ }}-metrics
+  namespace: {{ $ns }}
+  labels: {{- include "flint-lean.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: flint.io/lean-workspace
+        operator: Exists
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $.Values.metrics.monitoringNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ $.Values.metrics.port }}
+{{- end }}

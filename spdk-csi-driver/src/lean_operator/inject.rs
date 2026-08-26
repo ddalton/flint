@@ -17,10 +17,12 @@
 //! to a pod is here and unit-tested.
 
 use k8s_openapi::api::core::v1::{
-    Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, ExecAction, Pod, Probe,
-    SecretEnvSource, Volume, VolumeMount,
+    Container, ContainerPort, EmptyDirVolumeSource, EnvFromSource, EnvVar, EnvVarSource,
+    ExecAction, ObjectFieldSelector, Pod, Probe, SecretEnvSource, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+
+use kube::ResourceExt;
 
 use super::crd::FlintLeanWorkspace;
 
@@ -113,7 +115,49 @@ pub fn inject_sidecar(
         ev("FLINT_SYNC_MAX_BYTES", &s.max_bytes.to_string()),
         ev("FLINT_SYNC_MAX_FILES", &s.max_files.to_string()),
         ev("FLINT_SYNC_FANOUT", &s.fanout.to_string()),
+        // Boundary verbs (§2.6). Every one of these is stamped
+        // unconditionally, defaults included: the sidecar reads a FIXED
+        // env list, so a knob that is only stamped when it differs from
+        // the default is a knob whose absence and whose default look
+        // identical to the binary AND to anyone debugging the pod.
+        ev("FLINT_SYNC_BOUNDARY_MODE", &s.boundary_mode),
+        ev("FLINT_SYNC_SENTINELS", &s.sentinels),
+        ev(
+            "FLINT_SYNC_SENTINEL_MIN_INTERVAL_SECS",
+            &s.sentinel_min_interval_secs.to_string(),
+        ),
+        ev("FLINT_SYNC_SENTINEL_HOURLY_BUDGET", &s.sentinel_hourly_budget.to_string()),
+        ev("FLINT_SYNC_QUIESCE_BOUND_SECS", &s.quiesce_bound_secs.to_string()),
+        ev(
+            "FLINT_SYNC_STAGED_BACKLOG_CAP_OBJECTS",
+            &s.staged_backlog_cap_objects.to_string(),
+        ),
+        ev("FLINT_SYNC_STAGED_BACKLOG_CAP_BYTES", &s.staged_backlog_cap_bytes.to_string()),
+        ev("FLINT_SYNC_NONCURRENT_RETENTION_DAYS", &s.noncurrent_retention_days.to_string()),
+        ev("FLINT_SYNC_UDS_DOOR", if s.uds_door { "true" } else { "false" }),
+        ev("FLINT_SYNC_METRICS", if s.metrics.enabled { "true" } else { "false" }),
+        ev("FLINT_SYNC_METRICS_PORT", &s.metrics.port.to_string()),
+        // The only two labels any series carries (D15). The namespace
+        // comes from the downward API rather than the CR, because the
+        // CR does not know where the POD landed.
+        ev("FLINT_SYNC_WORKSPACE", &ws.name_any()),
     ];
+    env.push(EnvVar {
+        name: "FLINT_SYNC_NAMESPACE".into(),
+        value_from: Some(EnvVarSource {
+            field_ref: Some(ObjectFieldSelector {
+                field_path: "metadata.namespace".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    // The one knob with no default: gated REFUSES to start without it,
+    // and stamping an invented value would defeat that refusal.
+    if let Some(lag) = s.visibility_lag_bound_secs {
+        env.push(ev("FLINT_SYNC_VISIBILITY_LAG_BOUND_SECS", &lag.to_string()));
+    }
     if let Some(endpoint) = &s.endpoint {
         env.push(ev("FLINT_SYNC_ENDPOINT", endpoint));
     }
@@ -141,9 +185,42 @@ pub fn inject_sidecar(
             failure_threshold: Some(failure_threshold),
             ..Default::default()
         }),
+        ports: if s.metrics.enabled {
+            Some(vec![ContainerPort {
+                name: Some("metrics".into()),
+                container_port: i32::try_from(s.metrics.port).unwrap_or(9847),
+                protocol: Some("TCP".into()),
+                ..Default::default()
+            }])
+        } else {
+            None
+        },
         ..Default::default()
     };
     spec.init_containers.get_or_insert_with(Vec::new).push(sidecar);
+
+    // Scrape annotations, stamped only when exposition is on: an
+    // annotation that advertises a port nothing listens on is a
+    // permanently-down target in somebody's alerting.
+    if s.metrics.enabled {
+        let ann = pod.metadata.annotations.get_or_insert_with(Default::default);
+        ann.insert("prometheus.io/scrape".into(), "true".into());
+        ann.insert("prometheus.io/port".into(), s.metrics.port.to_string());
+        ann.insert("prometheus.io/path".into(), "/metrics".into());
+    }
+
+    // D10 rule 3: the drain has to FIT. Today's injected sidecar sets no
+    // terminationGracePeriodSeconds at all, so every workspace drains
+    // inside the 30 s default nobody chose — and native-sidecar ordering
+    // spends the agent's share of that budget first. Derived from the
+    // workspace's own knobs, and only ever UPWARD: a pod template that
+    // asks for more grace than we derive knows something we do not.
+    let derived = i64::try_from(super::boundary::derived_grace_secs(s))
+        .map_err(|_| "derived grace overflows")?;
+    let current = spec.termination_grace_period_seconds.unwrap_or(30);
+    if derived > current {
+        spec.termination_grace_period_seconds = Some(derived);
+    }
     Ok(pod)
 }
 
@@ -227,6 +304,184 @@ mod tests {
         assert!(env.iter().any(|e| e.name == "FLINT_SYNC_PREFIX"
             && e.value.as_deref() == Some("tenants/proj1")));
         assert!(sc.env_from.is_some());
+    }
+
+    fn sidecar_of(pod: &Pod) -> &Container {
+        &pod.spec.as_ref().unwrap().init_containers.as_ref().unwrap()[0]
+    }
+
+    fn env_of(pod: &Pod) -> std::collections::BTreeMap<String, String> {
+        sidecar_of(pod)
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| (e.name.clone(), e.value.clone().unwrap_or_default()))
+            .collect()
+    }
+
+    /// The sidecar's own source, read at COMPILE time. The contract
+    /// between these two crates is a list of env names in two files,
+    /// and every previous version of that contract drifted: a knob the
+    /// CRD offers and the binary never reads is the "knobs that exist
+    /// and do NOTHING" class, and a knob the binary reads and the
+    /// webhook never stamps is the same bug facing the other way.
+    const SIDECAR_MAIN: &str = include_str!("../../../lean/sidecar/src/bin/flint_sync.rs");
+
+    #[test]
+    fn every_knob_the_sidecar_reads_is_stamped_by_the_webhook() {
+        // Names the binary actually parses (not the doc-comment block).
+        let mut read: std::collections::BTreeSet<String> = Default::default();
+        for line in SIDECAR_MAIN.lines() {
+            let code = line.trim_start();
+            if code.starts_with("//") {
+                continue;
+            }
+            for (i, _) in code.match_indices("\"FLINT_SYNC_") {
+                let rest = &code[i + 1..];
+                if let Some(end) = rest.find('"') {
+                    read.insert(rest[..end].to_string());
+                }
+            }
+        }
+        assert!(read.len() > 10, "the source scan found almost nothing: {read:?}");
+
+        let out = inject_sidecar(&pod(), &ws(), &InjectDefaults { image: "i".into() }).unwrap();
+        let stamped = env_of(&out);
+        // Declared exceptions, each with a reason. Anything else that
+        // shows up here is drift, and the test says which side.
+        let exceptions: &[(&str, &str)] = &[
+            ("FLINT_SYNC_ENDPOINT", "stamped only when the CR overrides it"),
+            ("FLINT_SYNC_SENTINEL_POLL_SECS", "env-only by design — not a fleet contract"),
+            (
+                "FLINT_SYNC_VISIBILITY_LAG_BOUND_SECS",
+                "no default: gated refuses without it, and stamping an invented value \
+                 would defeat that refusal",
+            ),
+        ];
+        for name in &read {
+            if exceptions.iter().any(|(n, _)| n == name) {
+                continue;
+            }
+            assert!(
+                stamped.contains_key(name),
+                "the sidecar reads {name} and the webhook never stamps it — the workspace \
+                 silently runs the binary default instead of the CR"
+            );
+        }
+        for name in stamped.keys() {
+            assert!(
+                read.contains(name.as_str()),
+                "the webhook stamps {name} and the sidecar never reads it — a knob that \
+                 exists and does NOTHING"
+            );
+        }
+    }
+
+    /// The gated lag bound has no default anywhere, so stamping it when
+    /// the CR does not set it would hand the sidecar a number nobody
+    /// chose and defeat its startup refusal.
+    #[test]
+    fn the_lag_bound_is_stamped_only_when_the_cr_sets_it() {
+        let out = inject_sidecar(&pod(), &ws(), &InjectDefaults { image: "i".into() }).unwrap();
+        assert!(!env_of(&out).contains_key("FLINT_SYNC_VISIBILITY_LAG_BOUND_SECS"));
+
+        let mut gated = ws();
+        gated.spec.boundary_mode = "gated".into();
+        gated.spec.visibility_lag_bound_secs = Some(300);
+        let out = inject_sidecar(&pod(), &gated, &InjectDefaults { image: "i".into() }).unwrap();
+        let env = env_of(&out);
+        assert_eq!(env["FLINT_SYNC_VISIBILITY_LAG_BOUND_SECS"], "300");
+        assert_eq!(env["FLINT_SYNC_BOUNDARY_MODE"], "gated");
+    }
+
+    /// D10 rule 3. The failing control is the FIRST assertion: today the
+    /// injected sidecar sets no grace at all, so every workspace drains
+    /// inside the 30 s default nobody chose.
+    #[test]
+    fn the_drain_gets_a_derived_grace_and_a_bigger_one_is_never_lowered() {
+        let out = inject_sidecar(&pod(), &ws(), &InjectDefaults { image: "i".into() }).unwrap();
+        let grace = out.spec.as_ref().unwrap().termination_grace_period_seconds;
+        assert!(grace.is_some_and(|g| g >= 30), "no derived grace: {grace:?}");
+
+        // The derivation must TRACK the knobs it claims to be derived
+        // from — a "derived" number that ignores them is a fleet
+        // constant wearing a derivation's clothes, which is the hazard
+        // the startupProbe budget was written against.
+        let mut gated = ws();
+        gated.spec.boundary_mode = "gated".into();
+        gated.spec.visibility_lag_bound_secs = Some(300);
+        let out = inject_sidecar(&pod(), &gated, &InjectDefaults { image: "i".into() }).unwrap();
+        let small = out.spec.as_ref().unwrap().termination_grace_period_seconds.unwrap();
+
+        let mut bigger = gated.clone();
+        bigger.spec.staged_backlog_cap_bytes *= 2;
+        let out = inject_sidecar(&pod(), &bigger, &InjectDefaults { image: "i".into() }).unwrap();
+        let large = out.spec.as_ref().unwrap().termination_grace_period_seconds.unwrap();
+        assert!(large > small, "doubling the backlog cap did not move the grace: {small} → {large}");
+
+        // …and the cadence estimate tracks the floor, which is the only
+        // bound that mode has: nothing stages, so the drain repeats at
+        // most one floor's barrier.
+        let mut slow = ws();
+        slow.spec.floor_secs = 600;
+        let out = inject_sidecar(&pod(), &slow, &InjectDefaults { image: "i".into() }).unwrap();
+        assert!(
+            out.spec.unwrap().termination_grace_period_seconds.unwrap() > grace.unwrap(),
+            "a 10-minute floor drains no slower than a 1-minute one?"
+        );
+
+        // A pod that asks for more knows something we do not.
+        let mut big = pod();
+        big.spec.as_mut().unwrap().termination_grace_period_seconds = Some(3600);
+        let out = inject_sidecar(&big, &gated, &InjectDefaults { image: "i".into() }).unwrap();
+        assert_eq!(
+            out.spec.unwrap().termination_grace_period_seconds,
+            Some(3600),
+            "the webhook LOWERED a grace period the pod author chose"
+        );
+    }
+
+    /// D15 is opt-in, and "opt-in" has to mean the pod is untouched:
+    /// an annotation advertising a port nothing listens on is a
+    /// permanently-down target in somebody's alerting.
+    #[test]
+    fn metrics_plumbing_appears_only_when_metrics_are_enabled() {
+        let out = inject_sidecar(&pod(), &ws(), &InjectDefaults { image: "i".into() }).unwrap();
+        assert!(out.metadata.annotations.is_none() || out.metadata.annotations.unwrap().is_empty());
+        let sc = &out.spec.as_ref().unwrap().init_containers.as_ref().unwrap()[0];
+        assert!(sc.ports.is_none(), "a port was declared with exposition off");
+        let out2 = inject_sidecar(&pod(), &ws(), &InjectDefaults { image: "i".into() }).unwrap();
+        assert_eq!(env_of(&out2)["FLINT_SYNC_METRICS"], "false");
+
+        let mut on = ws();
+        on.spec.metrics.enabled = true;
+        on.spec.metrics.port = 9911;
+        let out = inject_sidecar(&pod(), &on, &InjectDefaults { image: "i".into() }).unwrap();
+        let ann = out.metadata.annotations.clone().unwrap();
+        assert_eq!(ann["prometheus.io/scrape"], "true");
+        assert_eq!(ann["prometheus.io/port"], "9911");
+        assert_eq!(ann["prometheus.io/path"], "/metrics");
+        let sc = &out.spec.as_ref().unwrap().init_containers.as_ref().unwrap()[0];
+        assert_eq!(sc.ports.as_ref().unwrap()[0].container_port, 9911);
+        let env = env_of(&out);
+        assert_eq!(env["FLINT_SYNC_METRICS"], "true");
+        assert_eq!(env["FLINT_SYNC_METRICS_PORT"], "9911");
+        // The two metric labels: the workspace from the CR, the
+        // namespace from the downward API — the CR does not know where
+        // the pod landed.
+        assert_eq!(env["FLINT_SYNC_WORKSPACE"], "proj1");
+        let ns = sc
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|e| e.name == "FLINT_SYNC_NAMESPACE")
+            .expect("no namespace label source");
+        assert_eq!(
+            ns.value_from.as_ref().unwrap().field_ref.as_ref().unwrap().field_path,
+            "metadata.namespace"
+        );
     }
 
     #[test]
