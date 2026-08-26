@@ -196,4 +196,77 @@ EOF
         helm push "$op_pkg" "oci://registry-1.docker.io/$hub_ns"
         echo "chart flint-lite-operator $op_version released."
     fi
+
+    # The flint-lean chart. It was NOT gated here until 2026-08-26, and
+    # the omission cost exactly what this script exists to prevent: the
+    # chart execs /usr/local/bin/flint-lean-operator out of the
+    # flint-lite-operator image, and that binary was not in it — an
+    # install was a CrashLoopBackOff on "no such file or directory".
+    # The 1.2.0 unpublished-image bug, one layer deeper: the image
+    # existed and the binary inside it did not.
+    #
+    # Two images must exist: the operator image the chart names, and the
+    # SIDECAR image, which is the one a workspace pod actually runs —
+    # the webhook injects it, so an unpublished sidecar is a fleet of
+    # pods that never start, with the operator itself perfectly healthy.
+    lean_dir="$repo_root/flint-lean-chart"
+    if [ -d "$lean_dir" ]; then
+        lean_version=$(python3 -c "import yaml; print(yaml.safe_load(open('$lean_dir/Chart.yaml'))['version'])")
+        lean_app=$(python3 -c "import yaml; print(yaml.safe_load(open('$lean_dir/Chart.yaml'))['appVersion'])")
+        lean_op_img=$(python3 -c "import yaml; print(yaml.safe_load(open('$lean_dir/values.yaml'))['image']['name'])")
+        lean_sc_img=$(python3 -c "import yaml; print(yaml.safe_load(open('$lean_dir/values.yaml'))['sidecarImage']['name'])")
+        for img in "$lean_op_img" "$lean_sc_img"; do
+            if ! tag_exists "$img" "$lean_app"; then
+                echo "REFUSING to push flint-lean $lean_version:" \
+                     "$hub_ns/$img:$lean_app is not on Docker Hub." >&2
+                exit 1
+            fi
+        done
+        # The binaries the chart EXECS must be in the image it pulls.
+        # tag_exists proves the image was published; it cannot prove the
+        # image carries flint-lean-operator, so check the recipe that
+        # builds it. Cheap, and it is the exact miss above.
+        op_recipe="$repo_root/spdk-csi-driver/docker/Dockerfile.operator.prebuilt"
+        for bin in flint-lean-operator flint-lean-gateway; do
+            if ! grep -q "/usr/local/bin/$bin" "$op_recipe"; then
+                echo "REFUSING to push flint-lean $lean_version: the chart execs" \
+                     "/usr/local/bin/$bin but $(basename "$op_recipe") does not" \
+                     "install it — the image would start and the binary would not exist." >&2
+                exit 1
+            fi
+        done
+        # Same question for the sidecar, plus the two things a lean
+        # sidecar base MUST have: a shell (the injected startupProbe
+        # execs `test -f` inside it) and ca-certificates (the S3 client
+        # resolves rustls to rustls-native-certs — the SYSTEM trust
+        # store — so a certless base fails every HTTPS endpoint, which
+        # no kind rig can catch because MinIO is plain HTTP).
+        sync_recipe="$repo_root/spdk-csi-driver/docker/Dockerfile.sync.prebuilt"
+        if [ ! -f "$sync_recipe" ]; then
+            echo "REFUSING to push flint-lean $lean_version: no build recipe for the" \
+                 "sidecar image ($sync_recipe)." >&2
+            exit 1
+        fi
+        if ! grep -q 'ca-certificates' "$sync_recipe"; then
+            echo "REFUSING to push flint-lean $lean_version: $(basename "$sync_recipe")" \
+                 "installs no ca-certificates; the sidecar reads the SYSTEM trust store" \
+                 "and would fail every HTTPS S3 endpoint." >&2
+            exit 1
+        fi
+        # The checked-in CRD is install-time bootstrap for the operator's
+        # compiled-in copy — same rule as flintshares.yaml above.
+        lean_gen=$(cd "$repo_root/spdk-csi-driver" && cargo run --quiet --bin leancrdgen 2>/dev/null || true)
+        if [ -n "$lean_gen" ] && [ -f "$lean_dir/crds/flintleanworkspaces.yaml" ]; then
+            if ! printf '%s\n' "$lean_gen" | diff -q - "$lean_dir/crds/flintleanworkspaces.yaml" >/dev/null; then
+                echo "REFUSING to push flint-lean $lean_version:" \
+                     "crds/flintleanworkspaces.yaml is stale." >&2
+                exit 1
+            fi
+        fi
+        helm package "$lean_dir" --destination "$pkg_dir" >/dev/null
+        lean_pkg="$pkg_dir/flint-lean-$lean_version.tgz"
+        echo "── pushing $(basename "$lean_pkg") to oci://registry-1.docker.io/$hub_ns"
+        helm push "$lean_pkg" "oci://registry-1.docker.io/$hub_ns"
+        echo "chart flint-lean $lean_version released."
+    fi
 fi

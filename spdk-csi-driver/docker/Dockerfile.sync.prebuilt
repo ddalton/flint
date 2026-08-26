@@ -1,0 +1,50 @@
+# syntax=docker/dockerfile:1
+# flint-sync — the flint-lean workspace sidecar, runtime-only image for a
+# HOST-CROSS-COMPILED binary, same recipe shape as
+# Dockerfile.operator.prebuilt.
+#
+#   for T in x86_64 aarch64; do
+#     (cd ../lean/sidecar && cargo zigbuild --release --features s3 \
+#       --target $T-unknown-linux-musl --bin flint-sync); done
+#   # stage: docker/prebuilt/{amd64,arm64}/flint-sync
+#   for A in amd64 arm64; do
+#     docker build --platform linux/$A -f docker/Dockerfile.sync.prebuilt \
+#       --build-arg BIN_DIR=docker/prebuilt \
+#       -t dilipdalton/flint-sync:<tag>-$A . && \
+#     docker push dilipdalton/flint-sync:<tag>-$A; done
+#   docker manifest create dilipdalton/flint-sync:<tag> \
+#     --amend ...-amd64 --amend ...-arm64 && docker manifest push ...
+#
+# This image is INJECTED into every workspace pod by the lean webhook
+# (flint-lean-chart/values.yaml `sidecarImage`), so it is sized and
+# hardened as a guest in somebody else's pod, not as a service.
+#
+# TWO REQUIREMENTS, both load-bearing, and a scratch/distroless-static
+# base fails BOTH:
+#
+#  1. A SHELL. The injected startupProbe execs `test -f <marker>` INSIDE
+#     this container to gate the agent's start (values.yaml:23). Without
+#     a shell the probe never passes and the workspace never comes up —
+#     silently, because the container is otherwise healthy.
+#
+#  2. CA CERTIFICATES. flint-store builds the AWS SDK with its `rustls`
+#     feature, which resolves to `rustls-native-certs` — the SYSTEM trust
+#     store, not compiled-in roots. Without a CA bundle every HTTPS S3
+#     endpoint fails at handshake. Every kind drill missed this because
+#     MinIO is plain HTTP; it appears on the first real bucket.
+#
+# alpine gives both in ~8 MiB, and the binary is musl-static so the base
+# is only providing the shell, the certs and a filesystem.
+FROM alpine:3.20
+
+ARG BIN_DIR=docker/prebuilt
+ARG TARGETARCH
+
+RUN apk add --no-cache ca-certificates && update-ca-certificates
+
+COPY ${BIN_DIR}/${TARGETARCH}/flint-sync /usr/local/bin/flint-sync
+
+# No USER: the sidecar shares the agent's workspace volume and must be
+# able to read and write files the agent owns. The chart sets the
+# security context, because only the chart knows the agent's uid.
+ENTRYPOINT ["/usr/local/bin/flint-sync"]
