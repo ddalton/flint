@@ -265,6 +265,7 @@ impl Sidecar {
             flush_uuid: flush_uuid.clone(),
             keys: to_stage.iter().map(|p| self.cfg.file_key(p)).collect(),
             recent_uuids: prior_uuids.clone(),
+            installed_etag: intent.installed_etag.clone(),
         };
         self.state.save_intent(&intent)?;
 
@@ -528,6 +529,8 @@ impl Sidecar {
         let deletes = stage.withheld_deletes.clone();
         let parked: BTreeSet<String> = BTreeSet::new();
         let flush_uuid = uuid::Uuid::new_v4().to_string();
+        let mut intent = self.state.load_intent()?;
+        let prev_installed = intent.installed_etag.clone();
         let mut attempt = 0;
         let (installed, installed_etag, foreign) = loop {
             attempt += 1;
@@ -541,8 +544,25 @@ impl Sidecar {
                 Some(l) => (l.manifest.clone(), Some(l.etag.clone())),
                 None => (Default::default(), None),
             };
+            // Same rule as the fused barrier: if the bucket is still at
+            // the document we installed, that document IS the merge
+            // base (`IntentJournal::installed_etag`). A citation pass
+            // that crashed between its CAS and the baseline rewrite
+            // would otherwise read its own boundary as foreign.
+            let own_base;
+            let base: &BTreeMap<String, String> =
+                if prev_installed.is_some() && prev_installed == expected {
+                    own_base = theirs
+                        .entries
+                        .iter()
+                        .map(|(p, e)| (p.clone(), e.etag.clone()))
+                        .collect();
+                    &own_base
+                } else {
+                    &baseline.inst_base
+                };
             let (mut merged, foreign) =
-                manifest::merge(&baseline.inst_base, &theirs, &upserts, &deletes, &parked);
+                manifest::merge(base, &theirs, &upserts, &deletes, &parked);
             // D13: this citation's readers resolve by version, never by
             // S3-wins adoption of the current version.
             merged.pinned_reads = true;
@@ -557,7 +577,11 @@ impl Sidecar {
             )
             .await
             {
-                Ok(meta) => break (merged, meta.etag, foreign),
+                Ok(meta) => {
+                    intent.installed_etag = Some(meta.etag.clone());
+                    self.state.save_intent(&intent)?;
+                    break (merged, meta.etag, foreign);
+                }
                 Err(LeanError::Store(StoreError::PreconditionFailed(_)))
                 | Err(LeanError::Store(StoreError::Conflict(_))) => {
                     self.verify_not_deposed_pub().await?;

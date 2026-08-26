@@ -75,6 +75,22 @@ pub struct IntentJournal {
     pub flush_uuid: String,
     pub keys: Vec<String>,
     pub recent_uuids: Vec<String>,
+    /// The ETag of the manifest document THIS workspace last installed,
+    /// written immediately after the CAS.
+    ///
+    /// The merge base (`Baseline::inst_base`) and the baseline are both
+    /// rewritten at step 7, after the CAS and after the GC deletes. A
+    /// container restart in that window leaves the bucket holding a
+    /// document we wrote and our persisted merge base one generation
+    /// behind it — so at the next merge our own entries read as foreign
+    /// changes, delete/modify resolves conservatively against the
+    /// agent's own delete, and the path is queued into the inbox as a
+    /// conflict nobody else ever touched. Recording the installed ETag
+    /// costs one small local write and restores exactly what step 7 was
+    /// going to say: if the bucket is still at this document, the merge
+    /// base IS this document.
+    #[serde(default)]
+    pub installed_etag: Option<String>,
 }
 
 /// One surfaced conflict: both versions stay recoverable (local bytes in

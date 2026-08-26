@@ -372,10 +372,14 @@ impl Sidecar {
             }
             v
         };
+        // Carried forward, not dropped: it stays true until we install
+        // again, and the merge below is what reads it.
+        let prev_installed = intent.installed_etag.clone();
         intent = IntentJournal {
             flush_uuid: flush_uuid.clone(),
             keys: classified.uploads.iter().map(|p| self.cfg.file_key(p)).collect(),
             recent_uuids: prior_uuids.clone(),
+            installed_etag: prev_installed.clone(),
         };
         self.state.save_intent(&intent)?;
         let deadline = now_unix() + self.cfg.window_slack_secs;
@@ -506,8 +510,26 @@ impl Sidecar {
                 Some(l) => (l.manifest.clone(), Some(l.etag.clone())),
                 None => (Default::default(), None),
             };
+            // If the bucket is still at the document THIS workspace
+            // installed, that document IS the merge base — whatever the
+            // persisted one says. Step 7 rewrites the merge base after
+            // the CAS, so a restart in between leaves it behind a
+            // document we wrote, and every entry in it would read as
+            // somebody else's change. See `IntentJournal::installed_etag`.
+            let own_base;
+            let base: &BTreeMap<String, String> =
+                if prev_installed.is_some() && prev_installed == expected {
+                    own_base = theirs
+                        .entries
+                        .iter()
+                        .map(|(p, e)| (p.clone(), e.etag.clone()))
+                        .collect();
+                    &own_base
+                } else {
+                    &baseline.inst_base
+                };
             let (merged, foreign) =
-                manifest::merge(&baseline.inst_base, &theirs, &upserts, &classified.deletes, &parked);
+                manifest::merge(base, &theirs, &upserts, &classified.deletes, &parked);
             match manifest::cas_write(
                 self.store.as_ref(),
                 &self.cfg,
@@ -519,6 +541,10 @@ impl Sidecar {
             .await
             {
                 Ok(meta) => {
+                    // Before the deletes and before step 7: this is the
+                    // only record that survives a crash in that window.
+                    intent.installed_etag = Some(meta.etag.clone());
+                    self.state.save_intent(&intent)?;
                     foreign_entries = foreign;
                     break (merged, meta.etag);
                 }

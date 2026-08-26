@@ -3257,3 +3257,104 @@ async fn the_heartbeat_arm_settles_owed_acks_when_it_finds_the_fence() {
     assert_eq!(caps.state, "fenced", "the marker still advertises a zombie as live");
     assert!(caps.verbs.is_empty());
 }
+
+/// The merge base is rewritten at step 7 — after the manifest CAS and
+/// after the GC deletes. A container restart in that window leaves the
+/// bucket holding a document THIS workspace wrote and the persisted
+/// merge base one generation behind it, so our own entries read as
+/// foreign changes at the next merge. delete/modify then resolves
+/// conservatively against the agent's own delete: the delete is dropped
+/// from a boundary about to be acked, and the path is queued into the
+/// inbox as a conflict nobody else ever touched.
+///
+/// Found by the formal model (tranche 3, product 1) on a strict run.
+#[tokio::test]
+async fn a_crash_between_the_cas_and_step_7_never_makes_our_own_entry_foreign() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1");
+    a.run_barrier().await.unwrap();
+
+    // A second publish of the same path...
+    write(dir.path(), "f.txt", "v2 is longer");
+    backdate_baseline(&a, "f.txt");
+    let stale = a.state.load_baseline().unwrap();
+    a.run_barrier().await.unwrap();
+    let installed = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+
+    // ...whose step 7 never ran. The manifest carries the install; the
+    // persisted baseline and merge base are as they were before it.
+    // The intent journal is NOT rolled back: it is written before the
+    // deletes, which is exactly the point.
+    a.state.save_baseline(&stale).unwrap();
+    assert_ne!(
+        stale.inst_base.get("f.txt"),
+        Some(&installed.manifest.entries["f.txt"].etag),
+        "fixture: the merge base is not actually behind the install"
+    );
+
+    // The agent removes the file and declares.
+    std::fs::remove_file(dir.path().join("f.txt")).unwrap();
+    let r = a.declared_barrier().await.unwrap();
+
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(
+        !m.entries.contains_key("f.txt"),
+        "our own install read as a foreign change and swallowed the agent's delete \
+         (deleted={:?}, foreign_queued={})",
+        r.deleted,
+        r.foreign_queued
+    );
+    let ib = inbox::load(store.as_ref(), &a.cfg).await.unwrap();
+    assert!(
+        !ib.doc.entries.iter().any(|e| e.path == "f.txt"),
+        "a phantom foreign entry was queued for a path only this workspace ever wrote"
+    );
+}
+
+/// The same window in the gated citation lane: its CAS installs, its
+/// baseline rewrite is a separate step, and a crash between them must
+/// not turn the boundary it just installed into a foreign change.
+#[tokio::test]
+async fn a_gated_citation_never_reads_its_own_boundary_as_foreign() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    gated(&mut a);
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1");
+    a.gated_tick(true).await.unwrap();
+
+    write(dir.path(), "f.txt", "v2 is longer");
+    backdate_baseline(&a, "f.txt");
+    let stale = a.state.load_baseline().unwrap();
+    a.gated_tick(true).await.unwrap();
+    let installed = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    assert_eq!(
+        installed.manifest.entries["f.txt"].size,
+        "v2 is longer".len() as u64,
+        "fixture: the second citation never landed"
+    );
+
+    // The citation installed; its baseline rewrite did not.
+    a.state.save_baseline(&stale).unwrap();
+    assert_ne!(
+        stale.inst_base.get("f.txt"),
+        Some(&installed.manifest.entries["f.txt"].etag),
+        "fixture: the merge base is not actually behind the citation"
+    );
+
+    std::fs::remove_file(dir.path().join("f.txt")).unwrap();
+    a.declared_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(
+        !m.entries.contains_key("f.txt"),
+        "the citation read its own boundary as foreign and withheld the agent's delete"
+    );
+}
