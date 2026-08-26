@@ -1,0 +1,156 @@
+# The Phase 4/5/6 fixtures (boundary-verbs plan §5). Each workspace
+# exists to be REFUSED for one named reason, plus one that must be
+# accepted — a refusal suite with no accepted control proves only that
+# the operator says no to everything.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lean-proxy-creds
+  namespace: default
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: drill
+  AWS_SECRET_ACCESS_KEY: drillsecret
+  AWS_REGION: us-east-1
+---
+# (1) gated with NO lag bound ⇒ BoundaryModeAccepted=False.
+apiVersion: flint.io/v1alpha1
+kind: FlintLeanWorkspace
+metadata: { name: nolag, namespace: default }
+spec:
+  projectId: team-a/nolag
+  bucket: agentws
+  keyPrefix: tenants/nolag
+  endpoint: http://minio.flint-system.svc:9000
+  credentialsSecretRef: lean-proxy-creds
+  floorSecs: 5
+  boundaryMode: gated
+---
+# (2) gated, lag bound set, retention shorter than one staging window.
+apiVersion: flint.io/v1alpha1
+kind: FlintLeanWorkspace
+metadata: { name: shortret, namespace: default }
+spec:
+  projectId: team-a/shortret
+  bucket: agentws
+  keyPrefix: tenants/shortret
+  endpoint: http://minio.flint-system.svc:9000
+  credentialsSecretRef: lean-proxy-creds
+  floorSecs: 5
+  boundaryMode: gated
+  visibilityLagBoundSecs: 3600
+  noncurrentRetentionDays: 0
+---
+# (3) gated, backlog caps nothing can drain inside a spot reclaim.
+apiVersion: flint.io/v1alpha1
+kind: FlintLeanWorkspace
+metadata: { name: bigbacklog, namespace: default }
+spec:
+  projectId: team-a/bigbacklog
+  bucket: agentws
+  keyPrefix: tenants/bigbacklog
+  endpoint: http://minio.flint-system.svc:9000
+  credentialsSecretRef: lean-proxy-creds
+  floorSecs: 5
+  boundaryMode: gated
+  visibilityLagBoundSecs: 300
+  stagedBacklogCapBytes: 21474836480
+---
+# (4) THE ACCEPTED CONTROL: a coherent gated workspace with an agent.
+apiVersion: flint.io/v1alpha1
+kind: FlintLeanWorkspace
+metadata: { name: good, namespace: default }
+spec:
+  projectId: team-a/good
+  bucket: agentws
+  keyPrefix: tenants/good
+  endpoint: http://minio.flint-system.svc:9000
+  credentialsSecretRef: lean-proxy-creds
+  floorSecs: 5
+  expectedBytes: 1048576
+  expectedFiles: 100
+  boundaryMode: gated
+  visibilityLagBoundSecs: 60
+  quiesceBoundSecs: 5
+  udsDoor: true
+  metrics:
+    enabled: true
+    port: 9847
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agent-good
+  namespace: default
+  labels: { flint.io/lean-workspace: good }
+spec:
+  restartPolicy: Never
+  containers:
+    - name: agent
+      image: busybox:stable
+      command: ["/bin/sh","-c"]
+      args:
+        - |
+          test -f /workspace/.flint-sync/checkout-complete || { echo "GATE BROKEN"; exit 1; }
+          echo v1 > /workspace/ckpt.bin
+          sleep 3600
+---
+# (4b) A gated workspace with NO pod, used for the lifecycle legs: they
+# recreate the CR to force a posture pass, and recreating `good` would
+# take its agent (and every later leg) with it.
+apiVersion: flint.io/v1alpha1
+kind: FlintLeanWorkspace
+metadata: { name: lifecycle, namespace: default }
+spec:
+  projectId: team-a/lifecycle
+  bucket: agentws
+  keyPrefix: tenants/lifecycle
+  endpoint: http://minio.flint-system.svc:9000
+  credentialsSecretRef: lean-proxy-creds
+  floorSecs: 5
+  boundaryMode: gated
+  visibilityLagBoundSecs: 60
+---
+# (5) The METRICS BIND COLLISION: the agent takes the port first. The
+# workspace must stay fully operable and say so in a condition.
+apiVersion: flint.io/v1alpha1
+kind: FlintLeanWorkspace
+metadata: { name: portclash, namespace: default }
+spec:
+  projectId: team-a/portclash
+  bucket: agentws
+  keyPrefix: tenants/portclash
+  endpoint: http://minio.flint-system.svc:9000
+  credentialsSecretRef: lean-proxy-creds
+  floorSecs: 5
+  expectedBytes: 1048576
+  expectedFiles: 100
+  metrics:
+    enabled: true
+    port: 9847
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agent-portclash
+  namespace: default
+  labels: { flint.io/lean-workspace: portclash }
+spec:
+  restartPolicy: Never
+  # The agent grabs the metrics port BEFORE the sidecar can bind it.
+  # hostNetwork is not needed: both containers share the pod's netns,
+  # which is exactly the collision D15 has to survive.
+  initContainers:
+    - name: portgrab
+      image: busybox:stable
+      restartPolicy: Always
+      command: ["/bin/sh","-c","nc -l -p 9847 -s 0.0.0.0 >/dev/null 2>&1 || sleep 3600"]
+  containers:
+    - name: agent
+      image: busybox:stable
+      command: ["/bin/sh","-c"]
+      args:
+        - |
+          test -f /workspace/.flint-sync/checkout-complete || { echo "GATE BROKEN"; exit 1; }
+          echo alive > /workspace/still-works.txt
+          sleep 3600
