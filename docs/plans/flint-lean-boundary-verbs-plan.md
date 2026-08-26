@@ -57,6 +57,8 @@ This is the keystone: with D0 in place, sentinel files can exist without ever en
 
 **Semantics (DECIDED — D1):** a sentinel with mtime T means *"everything ordered-before T is a coherent point; publish it."* The guarantee is **at-least**: the barrier that acknowledges the sentinel begins its scan strictly after consuming it, so every write visible on disk at consume time is in the published set. Writes racing the upload read are covered by the shipped pre-read-stat re-queue valve (`barrier.rs:672-680`) — the published state may include *later* bytes for a racing file, never earlier ones. The mtime-granularity residual of the scan (`scan.rs:73-75`) applies to the boundary guarantee too (§3). **Corollary (review: security-dos):** a sentinel-honoring barrier may never skip a dirty file for cost reasons — a cooldown that excluded a file's latest bytes would falsify the ack. Cost is bounded by *deferring the barrier* (D3), never by thinning its contents.
 
+**Correction (2026-08-25, §10.1d — found while modelling this section).** The at-least guarantee above is stated at *consume* time, and one classification did not honour it: `scan::classify` withholds a path's delete until absence has survived two consecutive scans (the rename-vs-walk race guard), so a delete the agent made **before** the touch was not in the boundary the ack claimed — `status: "ok"`, `report.deleted: 0`, and the manifest still citing the removed file. Shipped rule: a **declared** boundary — a sentinel honor in either mode, and the preStop drain (D10) — takes the second absence observation immediately, by direct `lstat` per first-absence path. That is what the rename-vs-walk guard actually asks for and is immune to the walk race by construction; the cadence path is unchanged and still waits for the second walk. Cost: one syscall per transiently-absent path, on the boundary that asked for it. Also corrected here: §2.1's "a pending sentinel defeats the skip-on-no-diff fast path" is **not** implemented and should not be — it contradicts §7 and D3.1 (§10.1) — and the soundness of letting it through is now a machine-checked run rather than a paragraph (`LeanSentinelFastPathUnguarded`, §10.1d).
+
 **Consumption discipline (DECIDED — D2, revised) — the inbox pattern, mirrored.** `consume_inbox` is exactly-once via integrate → persist → drop-in-CAS, idempotent between (`barrier.rs:67-157`, `inbox.rs:165-186`). The sentinel copies it with rename in place of CAS:
 
 1. **Consume** = `rename(".flint/publish", ".flint-sync/publish.pending.json")` (same filesystem — both under the workspace emptyDir — so rename is atomic), wrapping the body with `{consumed_mtime_unix_ns, consumed_at, nonces: […]}`. A bare touch gets an empty nonce list entry. **Type check first (review: security-dos):** the poll `lstat`s the sentinel and consumes only `S_ISREG` — a FIFO, directory, symlink, or socket at the sentinel path is skipped with a warning conflict record (a FIFO would block the body read forever; the read is also bounded at 64 KiB). **Settle-before-consume (review: crash-takeover):** the poll arm never consumes while a pending file exists — a surviving pending must be honored, acked, and retired first, otherwise the rename would clobber the old pending record and orphan its nonces forever. Coalescing happens *inside* the pending record: while a pending sentinel waits for the min-interval, subsequent touches are consumed by appending their nonces to the standing pending record (rename onto a temp, merge, rewrite pending), never by overwriting it.
@@ -217,7 +219,8 @@ The SIGTERM arm's final drain barrier runs **fused and cite-everything in every 
 1. **The drain settles every owed ack before lease release:** a pending sentinel at SIGTERM is answered by the drain itself (`status: "ok"` after the fused install — the container-restart case where emptyDir and agent survive must not strand a waiting agent), or `status: "refused-fenced"` if the drain hits Fenced (the shipped path propagates Fenced with no ack and exits 0 — that branch now writes the refusal first).
 2. **Bounded retry:** the shipped arm makes one attempt and releases the lease even on failure (`bin/flint_sync.rs:165-171` — `let _ = lease::release`). The drain retries the final barrier within the remaining grace budget before releasing; a transient store error no longer silently forfeits everything since the last boundary.
 3. **Sized against grace:** §8 Q2 removes the per-*object* copy term the draft had to size against — installing pending citations is one CAS — leaving the parent plan's bytes×rate arithmetic (`flint-lean-plan.md:194-204`) over files dirtied since the last lane tick, a strictly smaller drain than the copy design's. The hazard it was sized against remains: the injected sidecar sets no `terminationGracePeriodSeconds` at all today, so it inherits the 30 s default; under a SIGTERM-ignoring agent, native-sidecar ordering burns the agent budget first. Rules: the webhook derives a grace bump from the configured caps × measured upload rate + slack (the startupProbe-derivation precedent, `inject.rs:40-54`); the CRD **refuses** gated mode when derived need exceeds configured grace (condition, same pattern as gated-requires-lag-bound); the **backlog-cap citation source (§2.4.1.iv) bounds the drain to a sized backlog by construction**; and the parent plan's early-drain hook runs a citation pass at deletionTimestamp observation so the final fused barrier handles only the last delta. On pure-spot fleets the ~2-minute reclaim cap is the routine ceiling — the arithmetic is run against it, and the gated CRD doc-comment states the spot-reclaim RPO consequence verbatim.
-4. The cluster drill's A1 lossless-drain leg is the acceptance oracle; under gated mode the leg's precondition is *observed staged-uncited work*, and B11 gains a SIGKILL-mid-drain variant (recovery lands at the last boundary; orphans surfaced per D9) and a SIGTERM-ignoring-agent variant (the parent plan mandates that control for drain legs).
+4. **The drain is a DECLARED boundary (§10.1d, 2026-08-25):** it confirms first-absence paths by `lstat` rather than leaving them to a second walk that will never happen — this is the last boundary of the workspace's life, and a delete left withheld here is re-materialized by the successor's checkout. Both lanes.
+5. The cluster drill's A1 lossless-drain leg is the acceptance oracle; under gated mode the leg's precondition is *observed staged-uncited work*, and B11 gains a SIGKILL-mid-drain variant (recovery lands at the last boundary; orphans surfaced per D9) and a SIGTERM-ignoring-agent variant (the parent plan mandates that control for drain legs).
 
 ### 2.5 Layered doors and the capability marker
 
@@ -559,15 +562,16 @@ What replaces it is **storage, not requests**: uncited versions (at most one gen
 
 ## 10. Implementation status (2026-08-25)
 
-**Landed: Phases 0, 1, 2 and 3, plus formal tranche 3 products 2 and 4.**
-Lean battery 67/67 (was 19/19); formal gate **36/36** (was 24/24);
-`flint-store` and the hub crate both compile against the shared-schema
-changes, and the `s3`-feature binaries build.
+**Landed: Phases 0, 1, 2 and 3, plus formal tranche 3 products 1, 2
+and 4.** Lean battery **75/75** (was 19/19); formal gate **49/49** (was
+24/24); `flint-store` and the hub crate both compile against the
+shared-schema changes, and the `s3`-feature binaries build.
 
 | Phase | State | Notes |
 |---|---|---|
 | 0 — namespace + marker + pre-flight (D0, D11) | **done** | `scan` skips `.flint/`, `classify` exempts it from delete eligibility, checkout refuses to materialize a control citation, sticky pre-flight verdict in `.flint-sync/sentinels.json`, `capabilities.json` written at every `run` startup |
 | 1 — publish sentinel (D1–D3, D3.1, D12) | **done** | `sentinel.rs`: consume/honor/ack/retire, staging-file crash recovery, coalescing, covered-nonce acks, torn-body + type checks, refused-fenced acks, work-metered budget; run loop rewritten on three independent non-resettable intervals with a decoupled 30 s renewal |
+| 1 — the ack's own contract (D1, §10.1d) | **done** | a DECLARED boundary — sentinel honor or preStop drain, both lanes — confirms first-absence paths by direct `lstat` instead of acking a point that withholds the agent's delete; the D12 heartbeat arm is `heartbeat_tick` and settles every owed ack on a fence; a restart between the manifest CAS and step 7 no longer makes this workspace's own install read as a foreign change (`IntentJournal::installed_etag`) |
 | 2 — sync sentinel + scope (D4) + ticker (D5) + containment | **done** | `sync_scoped` with the merge-base rule, component-boundary scope matching, `contained_path`/`check_contained`, phantom-conflict rule, `.flint/remote.seq` fed off the barrier's existing HEAD |
 | 3 — gated advance (D6–D10, D13) | **done** | `flint-store` version surface (`version_id` on `ObjectMeta`, version-scoped HEAD/GET/DELETE, `list_versions`, S3 + `MemoryStore` version chains + an `expire_noncurrent` backstop hook); `gated.rs` upload lane + single-CAS citation lane, four citation sources, base-version re-validation, exact version GC, `pinned_reads` reader rule in checkout and sync, boundary-source stamped on the manifest object, conformance probe |
 | 3 — run-loop wiring (D6, D8, D10) | **done** | the floor arm runs the LANE in gated and cites only at a coherent point; a publish sentinel is a citation source, not a fused barrier; the preStop drain cites everything staged in place (`drain` stamp, `pinned_reads`, no data movement); the versioning conformance probe is a startup **refusal**, and it now sweeps its own leftovers instead of wedging on them |
@@ -768,6 +772,147 @@ is **product 1's** territory — here the citation and its reaper are one
 step, faithful only because the real code holds the HITL window across
 both. Product 2's return is the argument for finally doing product 1.
 
+### 10.1d Product 1, and the three defects between §10.1c and it
+
+§10.3 said of product 1 — the boundary verb against the barrier, the
+inbox and deposal — "do it", on the argument that product 2 had paid
+for itself on its first strict run. It did so again, and **two of the
+three defects this tranche found were found by READING the code in
+order to model it faithfully**, before TLC ran at all. That is worth
+naming as a result in its own right: the modelling discipline pays
+before the model does.
+
+**1. A sentinel ack claimed a boundary that withheld the agent's
+delete.** `scan::classify` withholds a path's delete until absence has
+survived two consecutive scans — the rename-vs-walk race guard. On the
+cadence path the second walk arrives at the next floor tick and nobody
+has been promised otherwise. On a sentinel honor the ack lands first:
+`status: "ok"`, `report.deleted: 0`, `seq` naming a real install — and
+the manifest still citing a file the agent removed *before* it touched
+the sentinel, which is precisely the state D1's at-least guarantee
+names. Same gap in gated mode (the lane withholds it from the stage, so
+the citation cannot carry it) and in the preStop drain, where it is
+worse: that is the last boundary of the workspace's life, so the
+successor's checkout re-materializes the deleted file.
+
+The fix takes the second observation NOW, by direct `lstat`, rather
+than promoting first-absence paths on the strength of the declaration
+alone. An `lstat` is what the rename-vs-walk guard actually asks for and
+is immune to the walk race by construction, so a declared boundary costs
+one syscall per transiently-absent path — not a second full pass, and
+not a weakened rule on the cadence path, which still waits for the
+second walk. **§2.1 should record the declared-boundary rule**, and D10
+should say the drain is a declared boundary.
+
+**2. The D12 heartbeat renewal arm exited on a fence without settling.**
+D2's refused ack closes what the review called the largest protocol
+hole. Both honor arms settle correctly. D12 then added a third arm — a
+heartbeat renewal on its own non-resettable interval, decoupled from
+publish cadence — and its run-loop arm returned on `Fenced` without
+settling anything. Because it is decoupled, it is usually the arm that
+finds out FIRST: ahead of the floor tick at 60 s, and ahead of a poll
+arm with nothing due to honor. The hole was re-opened at the arm added
+to close a different one, on the path most likely to be taken. It is now
+`Sidecar::heartbeat_tick`, so the rule lives with the other two rather
+than in the binary loop where it can be forgotten again.
+
+**3. THE MODEL'S: a restart between the manifest CAS and step 7 ate the
+agent's delete.** The merge base (`baseline.inst_base`) and the baseline
+are both rewritten at step 7 — after the CAS, after the GC deletes. A
+container restart in that window leaves the bucket holding a document
+this workspace wrote and the persisted merge base one generation behind
+it. At the next merge every entry of our own install reads as somebody
+else's change, and delete/modify resolves conservatively **by design**,
+so the agent's delete is dropped from the boundary it is about to be
+acked for and the path is queued into the inbox as a foreign conflict on
+a path nobody else has ever written.
+
+TLC produced it by two routes — an adopted inbox write whose citation
+repair had just landed, and our own upload — and that is what killed the
+first fix. An entry-`epoch` test covers the second route and is fooled
+by an in-place foreign edit that leaves the epoch field alone; the
+battery's `local_delete_loses_to_foreign_modify` said so within seconds,
+and it was right. The witness that holds is the manifest DOCUMENT's
+identity: `IntentJournal::installed_etag`, written immediately after the
+CAS — before the deletes, before step 7 — and carried forward until the
+next install. If the document we are merging against is still the one we
+installed, that document IS the merge base, whatever the persisted one
+says. It restores exactly what step 7 was going to write, costs one
+small local write per barrier and no bucket request, and an ETag names
+one document version, so it cannot be fooled. Both lanes.
+
+**The invariant was wrong three times before the code was wrong once,
+and that is the tranche's most transferable lesson.** An ok ack asserts
+that the coherent point the agent declared is INSTALLED — but D1's
+guarantee is at-*least*: "the published state may include later bytes
+for a racing file, never earlier ones". Stated as snapshot equality it
+flags legitimate behaviour, and TLC said so three times running, each
+time with a real trace: an agent that deleted, declared, re-created and
+deleted again (so the consume-time snapshot matched the tree again while
+the manifest legitimately cited later bytes) — which forced a generation
+WATERMARK; an inbox adoption of a HITL write that predated checkout, on
+a path the agent had never touched — which forced the promise to cover
+only what was **locally dirty at the consume**; and an agent deleting
+its own declared file, which supersedes while minting nothing — which
+forced the tree comparison the watermark cannot replace. Writing the
+invariant as "the manifest equals what I declared" is the same error
+class as the abstraction failures the corpus has now paid for four
+times: it states the mechanism instead of the promise.
+
+That second counterexample also split the invariant in two. "The
+agent's own work survived" and "the point the ack names is coherent at
+all" are different claims: a citation repair still owed at ack time
+risks none of the agent's work and still means a reader — or this
+workspace's own next checkout — resolves to bytes already superseded
+here. `Inv_AckImpliesCited` and `Inv_AckBoundaryCoherent` each carry
+their own mutation, and neither fires the other's.
+
+**§10.1's deviation is now machine-checked instead of argued.** §2.1
+prescribes that a pending sentinel defeat the skip-on-no-diff fast path;
+the shipped code lets it through, because defeating it would cost a
+manifest CAS at up to 720/hour/workspace — §7's own number. The
+justification was a paragraph. It is now a run:
+`LeanSentinelFastPathUnguarded` drops the two guards that carry the
+argument (no citation repair owed, and the remote manifest where we left
+it) and `Inv_AckBoundaryCoherent` must fall; `ProbeFastPathHonor` keeps
+the strict side from holding because the fast path never fired. §2.1
+should be corrected to match §7 and to point at these runs.
+
+**Thirteen runs added (36 → 49)** behind `SentinelEnabled`, FALSE in
+every pre-existing cfg. Invariants: `Inv_AckImpliesCited`,
+`Inv_AckBoundaryCoherent`, `Inv_NoNonceOrphan` (per incarnation — a pod
+replacement takes the agent and the tree with the pending file, so it
+forgives every owed nonce by construction), `Inv_NoFencedOkAck`.
+Mutations, all firing: consume-over-pending, ack-from-persisted-state,
+success-ack-after-fence, the unguarded fast path, and the stale merge
+base. Probes, all violated: an ack off a real install, the refusal, an
+ack for a pending record that survived a restart, two touches coalescing
+into one record, and a fast-path honor.
+
+Two budget notes, both paid for by a pilot. The fast path must charge
+the barrier budget: without it `Consume → FastPath → Consume` is a free
+cycle that consumes nothing and the state graph's DIAMETER grows without
+bound — depth 148 and 17M states before that line existed. And
+`MaxGen=3` with `MaxRestarts=1` does not fit, so the worlds are split
+(`MaxGen=3/MaxRestarts=0` for breadth, `MaxGen=2/MaxRestarts=1` for the
+crash matrix) and every mutation runs in the smaller world its
+counterexample needs. `MaxTouches=2` is load-bearing exactly as
+`MaxHitl=1` was for product 2.
+
+One process note worth keeping, because it looked exactly like a pass:
+a mutation cfg's world override silently failed to apply, leaving
+`MaxRestarts=0` on the run whose entire subject is a crash between the
+CAS and step 7. It completed a full 1.3M-state search and reported no
+error. `check.sh`'s `mutation_run` treats rc=0 as a FAILURE for this
+reason — a mutation that cannot rediscover its bug proves nothing, and
+demanding the counterexample **by name** is the only thing that
+distinguishes a fixed bug from an unreachable one.
+
+Not modelled, named rather than omitted: the two-consecutive-scans rule
+(still unrepresentable in this module — defect 1 above is isolated by
+five battery mutations instead), the bare touch, and the min-interval
+and hourly budget, which stay out of the safety gate per the house rule.
+
 ### 10.2 Formal model — tranche 3, product 4 (done)
 
 `SyncScope`/`ScopedInstBase` join `LeanSubtree.tla` behind constants that
@@ -798,15 +943,14 @@ priority order and the reasoning are in §10.3.
 
 ### 10.3 What to model next, and what not to
 
-- **Product 1 — do it.** The ack/fence/crash matrix is where the plan
-  retracted its own per-crash prescriptions, and `Inv_NoNonceOrphan`
-  under coalesce + crash + restart is an interleaving property that unit
-  tests sample rather than search. `settle_pending_at_startup` is
-  currently justified by one ordering out of many.
+- **Product 1 — DONE (§10.1d).** Two shipped defects found by reading
+  for it, one found by running it, and three rejected invariant
+  formulations before the ack's promise was stated correctly. Thirteen
+  runs, ~1 min of the gate.
 - **Product 2 — DONE (§10.1c).** It found a live defect on its first
   strict run — the gated citation's reaper deleting an acked HITL write —
   and retired D7's base-version guard as unreachable. ~19k states, ~2 s.
-- **Product 3 — defer.** Its real content is a required-reachable probe
+- **Product 3 — defer, unchanged.** Its real content is a required-reachable probe
   (a deposed writer's PUT lands and becomes `current[p]`), the fence
   that would make it an invariant is P5 at the proxy, which is not
   built, and drill leg B12 covers the shape better than a model would.
