@@ -35,6 +35,7 @@
 //! SDK.
 
 pub mod memory;
+pub mod probe;
 #[cfg(feature = "s3")]
 pub mod s3;
 
@@ -397,6 +398,14 @@ pub struct EpochState {
     /// The store's own clock for the last renewal (S3 Last-Modified) —
     /// A8: takeover is judged against the STORE's clock, not ours.
     pub last_renew_unix: Option<u64>,
+    /// An opaque observed-state echo the holder wrote with its last
+    /// heartbeat, if any ([`LeaseEcho`]). Read-only to everyone but the
+    /// holder: it is the ONE fleet-visible surface that reports what a
+    /// sidecar is actually *doing* rather than what its spec asked for,
+    /// and it costs nothing — the heartbeat CAS was already happening.
+    /// `None` = the holder wrote none (an older binary, a clean
+    /// release, or a backend that cannot carry it).
+    pub echo: Option<String>,
     /// The holder shut down cleanly and will never publish under this
     /// epoch again — a successor supersedes immediately instead of
     /// waiting out the lease. Written by [`ObjectStore::epoch_release`].
@@ -409,6 +418,45 @@ pub struct EpochLease {
     pub holder_id: String,
     pub epoch: u64,
     pub token: String,
+}
+
+/// What a live lean sidecar echoes into its lease-heartbeat cell
+/// (boundary-verbs plan §2.6). The schema lives here, beside the cell
+/// that carries it, because the WRITER (the sidecar) and the READER
+/// (the operator) are in different crates and a duplicated mirror
+/// struct on either side would drift silently — which is the failure
+/// this field exists to detect, not to reproduce.
+///
+/// It answers one question no spec field can: is the binary in that pod
+/// actually running the mode the CR asked for? An old sidecar reads a
+/// FIXED env list, so `FLINT_SYNC_BOUNDARY_MODE=gated` reaching a
+/// pre-boundary binary is silently ignored and the workspace runs fused
+/// cadence behind a green condition.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct LeaseEcho {
+    /// The sidecar binary's own version — the mixed-fleet tell.
+    pub sidecar_version: String,
+    /// `.flint/capabilities.json`'s protocol number.
+    pub protocol: u32,
+    /// The mode the sidecar is RUNNING, not the mode it was asked for.
+    pub active_boundary_mode: String,
+    /// The last citation this sidecar installed.
+    pub last_cited_seq: u64,
+    pub last_cited_unix: u64,
+    /// Durable-but-invisible work standing right now — the gated
+    /// exposure, per workspace, with no metrics stack in the picture.
+    pub staged_uncited_count: u64,
+    /// Whether the boundary verbs are live in this workspace. The
+    /// pre-flight that turns them off (an app already owns `.flint/`)
+    /// runs INSIDE the pod against the agent's own tree, so this is the
+    /// only surface on which an operator can see the answer.
+    #[serde(default)]
+    pub sentinel_verbs_active: bool,
+    /// `None` = exposition not enabled. `Some(false)` = enabled and the
+    /// port was TAKEN — the workspace is fully operable and nothing is
+    /// scraping it, which is a degradation only this field can report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_bound: Option<bool>,
 }
 
 // ── the trait ────────────────────────────────────────────────────────
@@ -500,6 +548,33 @@ pub trait ObjectStore: Send + Sync {
         Err(StoreError::Other("this backend cannot list object versions".into()))
     }
 
+    /// Every lifecycle rule on the bucket, reduced to [`LifecycleView`].
+    ///
+    /// Defaulted to a refusal rather than to an empty list: "no rules"
+    /// and "I cannot see the rules" must never be the same answer here.
+    /// An empty list is a POSITIVE claim that nothing is reaping
+    /// noncurrent versions, and gated mode is accepted on the strength
+    /// of it (D8).
+    async fn lifecycle_rules(&self) -> StoreResult<Vec<LifecycleView>> {
+        Err(StoreError::Other("this backend cannot read lifecycle rules".into()))
+    }
+
+    /// Provision the noncurrent-version retention backstop on `prefix`
+    /// with read-merge-append, and report what is installed.
+    ///
+    /// `PutBucketLifecycleConfiguration` is FULL-REPLACE: an
+    /// implementation that writes its rule alone silently deletes the
+    /// MPU-abort rule and every rule the customer owns. Read, merge,
+    /// append — the discipline `bootstrap_lifecycle` already follows.
+    async fn ensure_noncurrent_retention(
+        &self,
+        prefix: &str,
+        days: u64,
+    ) -> StoreResult<RetentionOutcome> {
+        let _ = (prefix, days);
+        Err(StoreError::Other("this backend cannot write lifecycle rules".into()))
+    }
+
     /// A9 hygiene: every in-progress assembly under the prefix.
     async fn list_uploads(&self, prefix: &str) -> StoreResult<Vec<PendingUpload>>;
 
@@ -530,7 +605,19 @@ pub trait ObjectStore: Send + Sync {
     ) -> StoreResult<EpochLease>;
 
     /// Heartbeat CAS. `PreconditionFailed` means deposed: self-fence.
-    async fn epoch_renew(&self, key: &str, lease: &EpochLease) -> StoreResult<EpochLease>;
+    ///
+    /// `echo` rides the same write (see [`EpochState::echo`]) — the
+    /// observed-state surface is deliberately a passenger on a request
+    /// the holder already pays for every ≤30 s. A caller with nothing
+    /// to report passes `None`, which CLEARS any previous echo rather
+    /// than preserving it: a stale echo read as live is exactly the
+    /// mixed-version hole the field exists to close.
+    async fn epoch_renew(
+        &self,
+        key: &str,
+        lease: &EpochLease,
+        echo: Option<&str>,
+    ) -> StoreResult<EpochLease>;
 
     /// Mark the cell released: a clean handoff. The epoch NUMBER must
     /// survive (deleting the cell would restart numbering at 1 and
@@ -542,6 +629,39 @@ pub trait ObjectStore: Send + Sync {
     /// Backend part granularity for the A11 part-size grid.
     fn min_part_size(&self) -> u64;
     fn max_parts(&self) -> usize;
+}
+
+/// One lifecycle rule, reduced to what VERSION RETENTION cares about
+/// (lean boundary-verbs plan D8).
+///
+/// Gated staging makes the CITED version noncurrent the moment a newer
+/// generation stages, so a `NoncurrentVersionExpiration` rule covering
+/// `<prefix>/files/` runs a clock against live cited data — and never
+/// against the newest uncited bytes, which are current and which no
+/// lifecycle rule can reach. That inversion is why the rules have to be
+/// READABLE and not merely writable: a customer sitting at
+/// noncurrent-days=1 arms the destroyer without touching flint at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleView {
+    pub id: String,
+    pub enabled: bool,
+    /// The rule's prefix filter; `""` = the whole bucket.
+    pub prefix: String,
+    /// `NoncurrentVersionExpiration.NoncurrentDays`, when the rule has
+    /// one. `None` = this rule expires no noncurrent versions.
+    pub noncurrent_days: Option<u64>,
+    /// Whether the rule also expires orphaned delete markers.
+    pub expired_delete_marker: bool,
+}
+
+/// What [`ObjectStore::ensure_noncurrent_retention`] found or did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionOutcome {
+    pub rule_id: String,
+    pub noncurrent_days: u64,
+    /// False ⇒ a conforming rule was already installed and nothing was
+    /// written (the read-merge-append path never runs blind).
+    pub created: bool,
 }
 
 /// What bootstrap found/did (A9). `errors` non-empty ⇒ the tier must
@@ -584,7 +704,7 @@ mod tests {
 
     #[test]
     fn stamps_roundtrip_and_reject_partial() {
-        let s = GenerationStamps { generation: 7, epoch: 3, flush_uuid: "u-1".into(), posix: None };
+        let s = GenerationStamps { generation: 7, epoch: 3, flush_uuid: "u-1".into(), boundary_source: None, posix: None };
         let m: HashMap<String, String> = s.to_meta().into_iter().collect();
         assert_eq!(GenerationStamps::from_meta(&m), Some(s));
         let mut partial = m.clone();

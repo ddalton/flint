@@ -19,6 +19,7 @@ use aws_sdk_s3::types::{
     AbortIncompleteMultipartUpload, BucketLifecycleConfiguration, BucketVersioningStatus,
     ChecksumAlgorithm, ChecksumType, CompletedMultipartUpload, CompletedPart,
     ExpirationStatus, LifecycleRule, LifecycleRuleFilter,
+    NoncurrentVersionExpiration,
 };
 use tracing::{info, warn};
 
@@ -141,6 +142,11 @@ struct EpochBody {
     /// by older hubs readable — they simply read as not-released.
     #[serde(default)]
     released: bool,
+    /// The holder's observed-state echo (`LeaseEcho`), opaque here —
+    /// the operator parses it, the store just carries it. `default`
+    /// keeps cells written by older binaries readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    echo: Option<String>,
 }
 
 fn now_unix() -> u64 {
@@ -634,6 +640,128 @@ impl ObjectStore for S3Store {
         Ok(report)
     }
 
+    async fn lifecycle_rules(&self) -> StoreResult<Vec<LifecycleView>> {
+        let cfg = match self
+            .client
+            .get_bucket_lifecycle_configuration()
+            .bucket(&self.bucket)
+            .send()
+            .await
+        {
+            Ok(cfg) => cfg,
+            // A bucket with no lifecycle config answers 404
+            // NoSuchLifecycleConfiguration. That is a real, positive
+            // answer: nothing is reaping noncurrent versions. Every
+            // OTHER error stays an error — "I cannot see the rules"
+            // must never read as "there are none", because gated mode
+            // is accepted on the strength of that answer.
+            Err(e) => match map_err("get_lifecycle", e) {
+                StoreError::NotFound(_) => return Ok(vec![]),
+                other => return Err(other),
+            },
+        };
+        Ok(cfg
+            .rules()
+            .iter()
+            .map(|r| LifecycleView {
+                id: r.id().unwrap_or_default().to_string(),
+                enabled: r.status() == &ExpirationStatus::Enabled,
+                // Both filter shapes carry a prefix; the legacy
+                // top-level `prefix` is still what many real buckets
+                // use, and reading only `filter` would report a
+                // fleet-wide destroyer as scoped to nothing.
+                prefix: r
+                    .filter()
+                    .and_then(|f| f.prefix())
+                    .map(|p| p.to_string())
+                    .or_else(|| {
+                        // Deprecated in the SDK, alive in real buckets:
+                        // a fleet-wide rule written years ago carries
+                        // the top-level prefix, and reading only
+                        // `filter` would report the destroyer as
+                        // scoped to nothing.
+                        #[allow(deprecated)]
+                        r.prefix().map(|p| p.to_string())
+                    })
+                    .unwrap_or_default(),
+                noncurrent_days: r
+                    .noncurrent_version_expiration()
+                    .and_then(|n| n.noncurrent_days())
+                    .map(|d| d as u64),
+                expired_delete_marker: r
+                    .expiration()
+                    .and_then(|e| e.expired_object_delete_marker())
+                    .unwrap_or(false),
+            })
+            .collect())
+    }
+
+    async fn ensure_noncurrent_retention(
+        &self,
+        prefix: &str,
+        days: u64,
+    ) -> StoreResult<RetentionOutcome> {
+        let rule_id =
+            format!("flint-lean-noncurrent-{}", prefix.trim_end_matches('/').replace('/', "-"));
+        let existing = self
+            .client
+            .get_bucket_lifecycle_configuration()
+            .bucket(&self.bucket)
+            .send()
+            .await;
+        let mut rules: Vec<LifecycleRule> = match existing {
+            Ok(cfg) => cfg.rules().to_vec(),
+            Err(e) => match map_err("get_lifecycle", e) {
+                StoreError::NotFound(_) => Vec::new(),
+                // Refuse rather than write blind: PutBucketLifecycle-
+                // Configuration is FULL-REPLACE, so appending to a list
+                // we could not read would delete the MPU-abort rule and
+                // every rule the customer owns.
+                other => return Err(other),
+            },
+        };
+        let want_days = i32::try_from(days)
+            .map_err(|_| StoreError::Other(format!("retention {days} days does not fit")))?;
+        if rules.iter().any(|r| {
+            r.id() == Some(rule_id.as_str())
+                && r.status() == &ExpirationStatus::Enabled
+                && r.noncurrent_version_expiration().and_then(|n| n.noncurrent_days())
+                    == Some(want_days)
+        }) {
+            return Ok(RetentionOutcome { rule_id, noncurrent_days: days, created: false });
+        }
+        rules.retain(|r| r.id() != Some(rule_id.as_str()));
+        rules.push(
+            LifecycleRule::builder()
+                .id(&rule_id)
+                .status(ExpirationStatus::Enabled)
+                .filter(LifecycleRuleFilter::builder().prefix(prefix).build())
+                .noncurrent_version_expiration(
+                    NoncurrentVersionExpiration::builder().noncurrent_days(want_days).build(),
+                )
+                .expiration(
+                    aws_sdk_s3::types::LifecycleExpiration::builder()
+                        .expired_object_delete_marker(true)
+                        .build(),
+                )
+                .build()
+                .map_err(|e| StoreError::Other(format!("retention rule: {e}")))?,
+        );
+        self.client
+            .put_bucket_lifecycle_configuration()
+            .bucket(&self.bucket)
+            .lifecycle_configuration(
+                BucketLifecycleConfiguration::builder()
+                    .set_rules(Some(rules))
+                    .build()
+                    .map_err(|e| StoreError::Other(format!("lifecycle configuration: {e}")))?,
+            )
+            .send()
+            .await
+            .map_err(|e| map_err("put_lifecycle", e))?;
+        Ok(RetentionOutcome { rule_id, noncurrent_days: days, created: true })
+    }
+
     async fn epoch_read(&self, key: &str) -> StoreResult<Option<EpochState>> {
         match self.get_whole(key, None).await {
             Ok((meta, bytes)) => {
@@ -645,6 +773,7 @@ impl ObjectStore for S3Store {
                     token: meta.etag,
                     last_renew_unix: meta.last_modified_unix,
                     released: body.released,
+                    echo: body.echo,
                 }))
             }
             Err(StoreError::NotFound(_)) => Ok(None),
@@ -667,16 +796,23 @@ impl ObjectStore for S3Store {
                 None => PutCondition::IfNoneMatchAny,
                 Some(s) => PutCondition::IfMatch(s.token.clone()),
             },
+            None,
         )
         .await
     }
 
-    async fn epoch_renew(&self, key: &str, lease: &EpochLease) -> StoreResult<EpochLease> {
+    async fn epoch_renew(
+        &self,
+        key: &str,
+        lease: &EpochLease,
+        echo: Option<&str>,
+    ) -> StoreResult<EpochLease> {
         self.epoch_put(
             key,
             &lease.holder_id,
             lease.epoch,
             PutCondition::IfMatch(lease.token.clone()),
+            echo,
         )
         .await
     }
@@ -702,6 +838,9 @@ impl ObjectStore for S3Store {
             lease.epoch,
             PutCondition::IfMatch(lease.token.clone()),
             true,
+            // A released cell reports no live sidecar: clearing the
+            // echo is the point, not an omission.
+            None,
         )
         .await
         .map(|_| ())
@@ -838,8 +977,9 @@ impl S3Store {
         holder_id: &str,
         epoch: u64,
         condition: PutCondition,
+        echo: Option<&str>,
     ) -> StoreResult<EpochLease> {
-        self.epoch_put_marked(key, holder_id, epoch, condition, false).await
+        self.epoch_put_marked(key, holder_id, epoch, condition, false, echo).await
     }
 
     async fn epoch_put_marked(
@@ -849,6 +989,7 @@ impl S3Store {
         epoch: u64,
         condition: PutCondition,
         released: bool,
+        echo: Option<&str>,
     ) -> StoreResult<EpochLease> {
         let body = Bytes::from(
             serde_json::to_vec(&EpochBody {
@@ -857,6 +998,7 @@ impl S3Store {
                 renewed_unix: now_unix(),
                 salt: uuid::Uuid::new_v4().to_string(),
                 released,
+                echo: echo.map(|e| e.to_string()),
             })
             .unwrap(),
         );

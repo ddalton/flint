@@ -97,6 +97,10 @@ struct Inner {
     uploads: HashMap<String, Mpu>,
     /// Deterministic version-id source (see `StoredObject::version_id`).
     version_seq: u64,
+    /// The bucket's lifecycle rules. Modelled because D8's hazard is a
+    /// rule the CUSTOMER already owns — the battery has to be able to
+    /// plant one (`plant_lifecycle_rule`) and watch gated mode refuse.
+    lifecycle: Vec<LifecycleView>,
 }
 
 impl Inner {
@@ -171,6 +175,15 @@ pub struct MemoryStore {
     /// Step-11 drill injections: counted get_range failures / stall.
     fail_get_range_count: AtomicU64,
     stall_next_get_range_ms: AtomicU64,
+    /// Model a project-scoped proxy that STRIPS `x-amz-version-id`:
+    /// every write still succeeds and reports no version. This is D8's
+    /// silent-degradation hazard, and the only way to test that the
+    /// conformance probe refuses instead of degrading.
+    strip_version_ids: AtomicBool,
+    /// Model a bucket whose lifecycle rules are readable but not
+    /// writable (a scoped operator principal): the backstop cannot be
+    /// provisioned, which is a DEGRADATION, not a torn view.
+    fail_lifecycle_writes: AtomicBool,
     pub min_part: u64,
     pub max_parts: usize,
 }
@@ -182,6 +195,24 @@ impl Default for MemoryStore {
 }
 
 impl MemoryStore {
+    /// Age an object's last-modified stamp. Liveness here is judged
+    /// against the STORE's clock (A8), so a test about a dead holder
+    /// has to be able to move that clock rather than sleep.
+    pub fn backdate_epoch(&self, key: &str, secs: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(chain) = inner.chains.get_mut(key) {
+            for v in chain.versions.iter_mut() {
+                v.last_modified_unix = v.last_modified_unix.saturating_sub(secs);
+            }
+        }
+    }
+
+    /// Plant a lifecycle rule the way a customer's own fleet policy
+    /// would. D8's destroyer is a rule flint never wrote.
+    pub fn plant_lifecycle_rule(&self, rule: LifecycleView) {
+        self.inner.lock().unwrap().lifecycle.push(rule);
+    }
+
     pub fn new() -> Self {
         MemoryStore {
             inner: Mutex::new(Inner::default()),
@@ -190,11 +221,24 @@ impl MemoryStore {
             leave_orphan: AtomicBool::new(false),
             fail_get_range_count: AtomicU64::new(0),
             stall_next_get_range_ms: AtomicU64::new(0),
+            strip_version_ids: AtomicBool::new(false),
+            fail_lifecycle_writes: AtomicBool::new(false),
             // Tiny granularity by default so tests compose small
             // files; S3's real limits live in the S3 backend.
             min_part: 1,
             max_parts: 10_000,
         }
+    }
+
+    /// Every write from here on reports no version id — a proxy that
+    /// strips the header (D8's refusal arm).
+    pub fn strip_version_ids(&self, on: bool) {
+        self.strip_version_ids.store(on, Ordering::SeqCst);
+    }
+
+    /// Lifecycle writes fail from here on; reads keep working.
+    pub fn fail_lifecycle_writes(&self, on: bool) {
+        self.fail_lifecycle_writes.store(on, Ordering::SeqCst);
     }
 
     /// Next compose: Complete LANDS but the response is lost.
@@ -376,6 +420,9 @@ struct EpochBody {
     /// Clean-shutdown mark — see `ObjectStore::epoch_release`.
     #[serde(default)]
     released: bool,
+    /// The holder's observed-state echo (`LeaseEcho`), opaque here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    echo: Option<String>,
 }
 
 #[async_trait]
@@ -413,6 +460,12 @@ impl ObjectStore for MemoryStore {
         let vid = inner.push(key, obj);
         let mut m = inner.current(key).expect("just pushed").to_meta();
         m.version_id = Some(vid);
+        if self.strip_version_ids.load(Ordering::SeqCst) {
+            // The version still EXISTS — the proxy only hid its name.
+            // That asymmetry is the hazard: everything keeps working
+            // until a citation needs to name a version.
+            m.version_id = None;
+        }
         Ok(m)
     }
 
@@ -604,6 +657,44 @@ impl ObjectStore for MemoryStore {
         })
     }
 
+    async fn lifecycle_rules(&self) -> StoreResult<Vec<LifecycleView>> {
+        Ok(self.inner.lock().unwrap().lifecycle.clone())
+    }
+
+    async fn ensure_noncurrent_retention(
+        &self,
+        prefix: &str,
+        days: u64,
+    ) -> StoreResult<RetentionOutcome> {
+        if self.fail_lifecycle_writes.load(Ordering::SeqCst) {
+            return Err(StoreError::Other("lifecycle writes are denied".into()));
+        }
+        let rule_id = format!("flint-lean-noncurrent-{}", prefix.trim_end_matches('/').replace('/', "-"));
+        let mut inner = self.inner.lock().unwrap();
+        // Read-merge-append, exactly as S3 must: an existing conforming
+        // rule is left alone and NOTHING is rewritten.
+        if let Some(r) = inner
+            .lifecycle
+            .iter()
+            .find(|r| r.enabled && r.prefix == prefix && r.noncurrent_days == Some(days))
+        {
+            return Ok(RetentionOutcome {
+                rule_id: r.id.clone(),
+                noncurrent_days: days,
+                created: false,
+            });
+        }
+        inner.lifecycle.retain(|r| r.id != rule_id);
+        inner.lifecycle.push(LifecycleView {
+            id: rule_id.clone(),
+            enabled: true,
+            prefix: prefix.to_string(),
+            noncurrent_days: Some(days),
+            expired_delete_marker: true,
+        });
+        Ok(RetentionOutcome { rule_id, noncurrent_days: days, created: true })
+    }
+
     async fn epoch_read(&self, key: &str) -> StoreResult<Option<EpochState>> {
         let inner = self.inner.lock().unwrap();
         let Some(o) = inner.current(key) else {
@@ -617,6 +708,7 @@ impl ObjectStore for MemoryStore {
             token: o.etag.clone(),
             last_renew_unix: Some(o.last_modified_unix),
             released: body.released,
+            echo: body.echo,
         }))
     }
 
@@ -632,6 +724,7 @@ impl ObjectStore for MemoryStore {
                 holder_id: holder_id.into(),
                 epoch,
                 released: false,
+                echo: None,
             })
             .unwrap(),
         );
@@ -655,12 +748,18 @@ impl ObjectStore for MemoryStore {
         Ok(EpochLease { holder_id: holder_id.into(), epoch, token })
     }
 
-    async fn epoch_renew(&self, key: &str, lease: &EpochLease) -> StoreResult<EpochLease> {
+    async fn epoch_renew(
+        &self,
+        key: &str,
+        lease: &EpochLease,
+        echo: Option<&str>,
+    ) -> StoreResult<EpochLease> {
         let body = Bytes::from(
             serde_json::to_vec(&EpochBody {
                 holder_id: lease.holder_id.clone(),
                 epoch: lease.epoch,
                 released: false,
+                echo: echo.map(|e| e.to_string()),
             })
             .unwrap(),
         );
@@ -695,6 +794,9 @@ impl ObjectStore for MemoryStore {
                 holder_id: lease.holder_id.clone(),
                 epoch: lease.epoch,
                 released: true,
+                // A released cell reports no live sidecar: clearing the
+                // echo is the point, not an omission.
+                echo: None,
             })
             .unwrap(),
         );
@@ -884,7 +986,7 @@ mod tests {
     use super::*;
 
     fn stamps(generation: u64) -> GenerationStamps {
-        GenerationStamps { generation, epoch: 1, flush_uuid: format!("u-{}", generation), posix: None }
+        GenerationStamps { generation, epoch: 1, flush_uuid: format!("u-{}", generation), boundary_source: None, posix: None }
     }
 
     #[tokio::test]
@@ -944,9 +1046,9 @@ mod tests {
 
         // Renew with the live token; the token rotates so the OLD one
         // is dead afterwards (a stale holder's heartbeat must fail).
-        let l1b = s.epoch_renew(K, &l1).await.unwrap();
+        let l1b = s.epoch_renew(K, &l1, None).await.unwrap();
         assert_ne!(l1b.token, l1.token, "renew must rotate the CAS token");
-        let err = s.epoch_renew(K, &l1).await.unwrap_err();
+        let err = s.epoch_renew(K, &l1, None).await.unwrap_err();
         assert!(matches!(err, StoreError::PreconditionFailed(_)), "stale token must be dead");
 
         // Takeover: supersede the OBSERVED state (step 7 judges the
@@ -956,7 +1058,7 @@ mod tests {
         assert_eq!(observed.holder_id, "hub-a");
         let l2 = s.epoch_acquire(K, "hub-b", Some(&observed)).await.unwrap();
         assert_eq!(l2.epoch, 2);
-        let err = s.epoch_renew(K, &l1b).await.unwrap_err();
+        let err = s.epoch_renew(K, &l1b, None).await.unwrap_err();
         assert!(matches!(err, StoreError::PreconditionFailed(_)), "deposed renew must fail");
         let err = s.epoch_release(K, &l1b).await.unwrap_err();
         assert!(matches!(err, StoreError::PreconditionFailed(_)), "deposed release must fail");
