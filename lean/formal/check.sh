@@ -131,6 +131,8 @@ strict_run $M LeanGatedHolds.cfg "gated advance: cited versions live, the reaper
 strict_run $M LeanGatedCrash.cfg "gated advance UNDER POD REPLACEMENT: the citation's own crash matrix, which belonged to no product until now"
 mutation_run $M LeanProbeGatedCrash.cfg "probe: a pod replacement is REACHABLE in the gated world -- without it the crash run is green over nothing" \
   "Invariant ProbeGatedCrashReachable is violated"
+mutation_run $M LeanProbeGatedRestart.cfg "probe (U41): a RESTART is reachable in the gated world — Inv_NoResurrection was listed as checked there while MaxRestarts=0 disabled its only writer" \
+  "Invariant ProbeGatedRestartReachable is violated"
 mutation_run $M LeanGatedReapsCurrent.cfg "the shipped reaper rule (keep only the cited version) DELETES a HITL write that landed between the lane and the citation — it was current, acked, and about to be read" \
   "Invariant Inv_NoUncitedGC is violated"
 mutation_run $M LeanGatedBackstop.cfg "the noncurrent-retention BACKSTOP reaps a cited version — gated staging makes the cited generation noncurrent, so lifecycle runs a clock against live cited data (D8's inversion; the abandoned-mid-stage endgame)" \
@@ -143,6 +145,8 @@ mutation_run $M LeanProbeCitationInstalled.cfg "probe: ONE CAS installs >= 2 pat
   "Invariant ProbeCitationInstalled is violated"
 mutation_run $M LeanProbeWithheldDelete.cfg "probe: a delete is actually withheld from the manifest until a citation" \
   "Invariant ProbeWithheldDelete is violated"
+mutation_run $M LeanProbeGatedGC.cfg "probe (U15): the withheld delete actually LANDS at a citation — ProbeWithheldDelete counts the WITHHOLDING, so the gated run could hold over dels={} forever" \
+  "Invariant ProbeGatedGC is violated"
 mutation_run $M LeanProbeForcedCite.cfg "probe: a citation actually fires mid-change (the lag/backlog caps' shape)" \
   "Invariant ProbeForcedCite is violated"
 mutation_run $M LeanProbeRawUncited.cfg "probe (REQUIRED-REACHABLE): a raw reader sees uncited bytes — §3 residual 11 proven present, not assumed away" \
@@ -204,4 +208,4 @@ mutation_run $M LeanScopedGatedWholeBase.cfg "whole-instBase advance, with a cit
   "Invariant Inv_NoForeignLost is violated"
 
 echo
-echo "lean formal gate: $PASS/63 runs green"
+echo "lean formal gate: $PASS/65 runs green"

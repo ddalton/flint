@@ -6,7 +6,7 @@
 # pod joins it with the label `flint.io/lean-workspace: <name>`.
 #
 # Design of record: docs/plans/flint-lean-plan.md
-# Formal model:     lean/formal/  (63-run TLC gate)
+# Formal model:     lean/formal/  (65-run TLC gate)
 # Measurements:     docs/plans/flint-lean-0b-measurements.md
 
 # The operator image. Composed as {repository}/{name}:{tag|appVersion};

@@ -352,7 +352,7 @@ vars == <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, windo
      amputated  BOOLEAN  an acked HITL write silently lost (either stamp site)
      resurrected BOOLEAN an unpublished delete undone by re-materialize
      stragglerInstalls, stragglerCas, deposedPuts : Nat
-     barriers, done, gc, refusals, cited, takeovers, crashes, restarts : Nat
+     barriers, done, gc, gcCited, refusals, cited, takeovers, crashes, restarts : Nat
      adoptOwn : Nat      the own-crashed-PUT 412 adoption fired
      stallUsed BOOLEAN
      nextGen, hitl : Nat
@@ -360,6 +360,15 @@ vars == <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, windo
                             deliberately left for the inbox flow (the
                             action-written non-vacuity ghost: the probe
                             names the ACTION, never the situation)
+     deferredPaths : SUBSET Paths  which ones, still outstanding
+     deferredLater : Nat    U16: a deferred out-of-scope path that a LATER
+                            consume actually integrated.  `scopedDeferrals`
+                            proves the deferral happened; D4's whole
+                            loss-avoidance argument is that the entry
+                            ARRIVES, and `Inv_NoForeignLost` is a stamp
+                            written inside `Sync`, not an eventual-
+                            integration property.  Without this the
+                            deferral could be a synonym for the loss.
      staged, cites, reaped, withheld, forcedCites, citeSpan : Nat
      carriedCite BOOLEAN    a citation installed a pending set that had
                             survived a lane pass: the durability/visibility
@@ -473,12 +482,13 @@ Init ==
   /\ hitlAcked = {} /\ conflicts = {}
   /\ gh = [amputated |-> FALSE, resurrected |-> FALSE,
            stragglerInstalls |-> 0, stragglerCas |-> 0, deposedPuts |-> 0,
-           barriers |-> 0, done |-> 0, gc |-> 0, refusals |-> 0,
+           barriers |-> 0, done |-> 0, gc |-> 0, gcCited |-> 0, refusals |-> 0,
            cited |-> 0, takeovers |-> 0, crashes |-> 0, restarts |-> 0,
            adoptOwn |-> 0, stallUsed |-> FALSE, nextGen |-> 2, hitl |-> 0,
            syncs |-> 0, syncApplied |-> 0, syncConflicts |-> 0,
            syncDestroyed |-> FALSE,
            scopedDeferrals |-> 0, foreignLost |-> FALSE,
+           deferredPaths |-> {}, deferredLater |-> 0,
            staged |-> 0, cites |-> 0, reaped |-> 0, withheld |-> 0,
            forcedCites |-> 0, citeSpan |-> 0,
            carriedCite |-> FALSE,
@@ -742,8 +752,14 @@ Consume(s) ==
        /\ conflicts' = conflicts \cup
             (IF ConflictSurfacing THEN conflicted ELSE {})
        /\ inbox' = {}
+       \* U16: the arrival half of D4. A path this workspace deferred
+       \* out of scope is integrated HERE, one consume later — which is
+       \* the only reason deferring it was not simply losing it.
+       /\ gh' = [gh EXCEPT
+            !.deferredLater = @ + Cardinality(advPaths \cap gh.deferredPaths),
+            !.deferredPaths = @ \ advPaths]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, window,
-                 hitlAcked, gh>>
+                 hitlAcked>>
 
 (* Steps 2+3: scan-diff against the persisted baseline and CAS the
    window open (the intent).  A stale window (a lower epoch's) may be
@@ -1110,6 +1126,7 @@ Sync(s) ==
             !.syncConflicts = @ + Cardinality(conflicted),
             !.syncDestroyed = @ \/ destroys,
             !.scopedDeferrals = @ + (IF SyncScope THEN Cardinality(deferred) ELSE 0),
+            !.deferredPaths = @ \cup (IF SyncScope THEN deferred ELSE {}),
             !.foreignLost = @ \/ lost]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked>>
@@ -1418,6 +1435,7 @@ CiteFinish(s) ==
             ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
        /\ gh' = [gh EXCEPT !.done = @ + 1,
             !.gc = @ + Cardinality(dels),
+            !.gcCited = @ + Cardinality(dels),
             !.reaped = @ + Cardinality(UNION {versions[p] \ ver2[p] : p \in Paths}),
             !.cited = IF \E pr \in hitlAcked : man2[pr[1]] = pr[2]
                       THEN 1 ELSE @,
@@ -1896,6 +1914,23 @@ ProbeSyncConflict     == gh.syncConflicts = 0
 \* Action-written (Sync's own ghost): a SCOPED sync actually deferred a
 \* remote change, rather than the scoped arm never having fired.
 ProbeScopedDeferral   == gh.scopedDeferrals = 0
+\* U16, MEASURED AND OPEN (2026-08-26). This probe does NOT fire, and
+\* that is the finding rather than a missing cfg. `gh.deferredPaths`
+\* becomes non-empty (the deferral happens), but
+\* `deferredPaths # {} /\ inbox # {}` is UNREACHABLE across the full
+\* state space at MaxBarriers = 3 (6.2M states) and again at 4 (13.5M
+\* states) — so the deferred path is never queued into the inbox while
+\* the deferral stands, and no consume can integrate it.
+\*
+\* D4's loss-avoidance argument is precisely that the deferred entry
+\* ARRIVES through merge -> inbox -> consume. `Inv_NoForeignLost` and
+\* `ProbeScopedDeferral` are both stamps written INSIDE `Sync`: they
+\* prove the deferral, never the arrival. So the model currently cannot
+\* distinguish "deferred" from "lost", which is exactly what the review
+\* alleged. NOT wired into check.sh: a must-fail run that does not fail
+\* would turn the gate red over an unbuilt artifact rather than a
+\* regression. The instrumentation stays because it is what a fix needs.
+ProbeOutOfScopeLater  == gh.deferredLater = 0
 
 \* ---- tranche 3, product 2 ------------------------------------------------
 \* One CAS installed >= 2 paths from a pending set that had SURVIVED a
@@ -1908,9 +1943,31 @@ ProbeScopedDeferral   == gh.scopedDeferrals = 0
 \* while §10.1c deferred the citation's crash matrix to product 1,
 \* whose own cfgs never crash either (review: U12).
 ProbeGatedCrashReachable == gh.crashes = 0
+\* U41: `Inv_NoResurrection` was listed as checked by LeanGatedHolds
+\* while that cfg ran MaxRestarts = 0, and `Restart` is the ONLY writer
+\* of the state the invariant tests — so the line read as coverage and
+\* was unfalsifiable by construction. It matters here more than
+\* anywhere: gated mode WIDENS the resurrection window, because a
+\* delete stays cited until a citation, which is exactly the
+\* local[p]=0 /\ manifest[p]#0 /\ baseline[p]#0 shape `res` tests.
+\* Restarts are now ON in the gated world (127k states, 2 s), and this
+\* is the probe that keeps the fix honest — without it, enabling the
+\* knob and never reaching a restart would look identical.
+ProbeGatedRestartReachable == gh.restarts = 0
 ProbeCitationInstalled == ~gh.carriedCite
 \* A delete was actually withheld from the manifest until a citation.
 ProbeWithheldDelete    == gh.withheld = 0
+\* U15: `ProbeWithheldDelete` counts `gh.withheld`, bumped in `LaneDone`
+\* when a delete is WITHHELD — never in `CiteFinish` when it is APPLIED.
+\* So `LeanGatedHolds` can hold with `dels = {}` at every citation, and
+\* the delete-application half of the gated design — manifest entry
+\* removed, object deleted, version reaped — is never shown reachable.
+\* That is the one step where `Inv_CitedVersionLives` and
+\* `Inv_NoUncitedGC` are most at risk, so its reachability is not
+\* something to assume. `gcCited` is bumped ONLY by `CiteFinish`, so
+\* unlike a `ProbeGC` re-run this cannot be satisfied by the cadence
+\* GC path.
+ProbeGatedGC           == gh.gcCited = 0
 \* A citation actually fired mid-change (a staged path had already been
 \* edited again locally) — the lag/backlog caps' shape, and the reason
 \* the source is stamped bucket-visibly.
@@ -1952,6 +2009,31 @@ ProbeDeclaredDrop == gh.declaredDrops = 0
 \* never be claimed.
 ProbePartialAck   == gh.partialAcks = 0
 
+\* U20, OPEN (assessed 2026-08-26). This is a STATE PREDICATE over
+\* `objects` vs `manifest`, not an action-written ghost — it breaks
+\* this model's own house rule ("the probe names the ACTION, never the
+\* situation") because there IS no reader action to name.
+\*
+\* §4 requires two that were never built: `PinnedReader` (with its own
+\* invariant — never materializes post-boundary bytes under
+\* pre-boundary citations) and `RawReader`, plus product 2's
+\* `ProbeDanglingCitation`. The only reader in the module is the
+\* checkout embedded in the barrier, which copies `manifest[p]` into
+\* `local` without consulting `versions` or `objects` at all. So the
+\* model cannot express the hazard D13 exists to prevent — a gated
+\* checkout 412ing and S3-wins-adopting `current[p]` — nor the
+\* endgame: after `BackstopExpire` reaps a cited version
+\* `Inv_CitedVersionLives` fires, but nothing shows a checkout REFUSING
+\* rather than serving a hole.
+\*
+\* Both are currently carried by the Rust battery
+\* (`pinned_reads_never_adopts_current`, and as of 2026-08-26
+\* `sync_under_pinned_reads_resolves_the_cited_version_not_the_current_one`)
+\* and by drill legs B23/B24. That is real evidence, but it is not the
+\* model, and §10.1c's "not modelled" list does not name the readers.
+\* Building them is a tranche — a reader action over the `versions`
+\* substrate plus an invariant — not a probe, and it is deliberately
+\* NOT faked here with a predicate that would read as coverage.
 ProbeRawReaderSeesUncited ==
   \A p \in Paths : objects[p] = manifest[p] \/ manifest[p] = 0
 

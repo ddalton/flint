@@ -159,12 +159,34 @@ emit LeanProbeSyncConflict "ProbeSyncConflict" \
 # MaxGen=3/MaxHitl=1 the holds run passed 30M states without terminating.
 SCOPEWORLD="SyncEnabled=TRUE SyncScope=TRUE AllowStall=TRUE MaxSyncs=1 \
 MaxHitl=0 MaxGen=2 MaxBarriers=2 MaxCrashes=0 MaxRestarts=0"
-emit LeanScopedSyncHolds "$ALLINV,Inv_SyncNeverDestroysDirty,Inv_NoForeignLost" \
+# U41: $ALLINV carries Inv_HITLDurable and Inv_NoResurrection, and this
+# world runs MaxHitl=0 / MaxRestarts=0 — `HitlWrite` and `Restart` are both
+# disabled, so both lines were unfalsifiable by construction and inflated
+# the product's apparent coverage. Dropped rather than enabled: turning on
+# HITL and restarts here would change what the SCOPE product tests, and
+# both invariants are checked where they can actually fire (LeanSubtree,
+# LeanGatedHolds, LeanSentinelRestart).
+emit LeanScopedSyncHolds "TypeOK,Inv_NoDangling,Inv_NoStragglerInstall,Inv_NoDeposedPut,Inv_SyncNeverDestroysDirty,Inv_NoForeignLost" \
   $SCOPEWORLD
 emit LeanScopedSyncWholeBase "Inv_NoForeignLost" \
   $SCOPEWORLD ScopedInstBase=FALSE
 emit LeanProbeScopedDeferral "ProbeScopedDeferral" \
   $SCOPEWORLD
+# U16: `ProbeScopedDeferral` fires on the DEFERRAL, a stamp written inside
+# `Sync`. D4 is only acceptable because the deferred entry ARRIVES through
+# the merge -> inbox -> consume flow, and `Inv_NoForeignLost` is likewise a
+# stamp inside `Sync` rather than an eventual-integration property. This is
+# the arrival half: a path a scoped sync deferred is integrated by a LATER
+# consume. Without it, "deferred" and "lost" are the same trace, which is
+# exactly what drill leg B5's own anti-vacuity guard asserts and the model
+# did not. MaxBarriers is raised by one over SCOPEWORLD: the flow needs a
+# barrier to QUEUE the foreign entry and a later one to consume it, which
+# is the two-barrier shape the Rust fixture also had to use.
+# NOT in check.sh: this probe does not fire, and that is U16's finding
+# (see LeanSubtree.tla). Emitted so the next attempt starts from a cfg
+# rather than from scratch.
+emit LeanProbeOutOfScopeLater "ProbeOutOfScopeLater" \
+  $SCOPEWORLD MaxBarriers=3
 
 # ---- tranche 3, product 2: gated citation x version GC x the backstop ------
 # The substrate this product adds is `versions[p]` — what is still STORED,
@@ -181,10 +203,16 @@ emit LeanProbeScopedDeferral "ProbeScopedDeferral" \
 # consumed before the citation; with MaxHitl=0 that interleaving does not
 # exist and the mutation checks a state space its bug cannot live in — the
 # same trap product 4 fell into from the other side.
+# U41: MaxRestarts was 0 while GATEDINV listed `Inv_NoResurrection`, whose
+# only writer is `Restart` — the line read as coverage and could not fire.
+# Gated is the mode where it matters most (a delete stays cited until a
+# citation, which IS the shape `res` tests), and the run costs 2 s.
 GATEDWORLD="GatedCitation=TRUE MaxGen=3 MaxSeq=6 MaxHitl=1 MaxBarriers=2 \
-MaxCrashes=0 MaxRestarts=0"
+MaxCrashes=0 MaxRestarts=1"
 GATEDINV="TypeOK,Inv_HITLDurable,Inv_NoResurrection,Inv_CitedVersionLives,Inv_NoUncitedGC,Inv_BoundaryAtomic"
 emit LeanGatedHolds "$GATEDINV" $GATEDWORLD
+# ...and the probe that stops the knob from being cosmetic.
+emit LeanProbeGatedRestart "ProbeGatedRestartReachable" $GATEDWORLD
 emit LeanGatedBackstop "Inv_CitedVersionLives" $GATEDWORLD BackstopEnabled=TRUE
 # THE ONE THIS TRANCHE PAID FOR. The shipped reaper's rule was "delete
 # every version of a touched key except the one the installed manifest
@@ -229,6 +257,15 @@ emit LeanProbeGatedCrash "ProbeGatedCrashReachable" $GATEDWORLD MaxCrashes=1
 emit LeanGatedInflightHitl "Inv_HITLDurable" $GATEDWORLD CiteDropsInflightHitl=FALSE
 emit LeanProbeCitationInstalled "ProbeCitationInstalled" $GATEDWORLD
 emit LeanProbeWithheldDelete "ProbeWithheldDelete" $GATEDWORLD
+# U15: §4 asked for a `ProbeGC` re-run with GatedCitation=TRUE and it was
+# never built. A plain ProbeGC re-run would not have answered it either:
+# `gh.gc` is bumped by the CADENCE `GCDelete` as well, so the probe would
+# fire on a path the gated design does not use. `gcCited` is written only
+# by `CiteFinish`, so this proves a withheld delete actually LANDS at a
+# citation — the step where Inv_CitedVersionLives and Inv_NoUncitedGC are
+# most exposed, and which LeanGatedHolds could otherwise hold over with
+# `dels = {}` at every boundary.
+emit LeanProbeGatedGC "ProbeGatedGC" $GATEDWORLD
 emit LeanProbeForcedCite "ProbeForcedCite" $GATEDWORLD
 # MaxHitl=0 is the whole point of this cfg, not an inherited default.
 # With HITL on, `HitlWrite` is enabled in the INITIAL state and sets
