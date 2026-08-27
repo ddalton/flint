@@ -3184,13 +3184,36 @@ async fn recover_staged_uses_the_durable_summary_and_falls_back_without_it() {
     a.upload_lane().await.unwrap();
     a.citation_pass(CitationSource::Sentinel).await.unwrap();
 
+    // A path that is CITED and then never touched again. It is NOT in
+    // the orphan summary — the summary names staged candidates — so a
+    // narrowing that lists only the summary's keys leaves it with no
+    // surviving version and recovery calls it UNRECOVERABLE. Drill leg
+    // B11b caught exactly that; the first version of this test did not,
+    // because every cited path was also a staged one.
+    write(dir.path(), "quiet.txt", "CITED-AND-THEN-QUIET");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+
     write(dir.path(), "cited.txt", "V2-UNCITED");
     backdate_baseline(&a, "cited.txt");
     write(dir.path(), "brand-new.txt", "NEW-UNCITED");
     a.upload_lane().await.unwrap();
-    // Anti-vacuity: the lane really did publish a summary to recover FROM.
+    // Anti-vacuity: the lane really did publish a summary to recover
+    // FROM, and that summary really does NOT name the quiet path.
     let okey = a.orphans_key();
-    store.head(&okey).await.expect("the upload lane wrote no orphan summary");
+    let (_, obytes) = store.get_whole(&okey, None).await.expect("no orphan summary");
+    let odoc: serde_json::Value = serde_json::from_slice(&obytes).unwrap();
+    let named: Vec<String> = odoc["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["path"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!named.is_empty(), "the summary names nothing");
+    assert!(
+        !named.contains(&"quiet.txt".to_string()),
+        "the summary names the quiet path — the narrowing gap cannot be reproduced"
+    );
     drop(a);
 
     let dir_b = tempfile::tempdir().unwrap();
@@ -3204,6 +3227,21 @@ async fn recover_staged_uses_the_durable_summary_and_falls_back_without_it() {
     assert_eq!(r.recited.len(), 2, "the cheap path recovered less: {:?}", r.recited);
     let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
     assert!(m.entries.contains_key("brand-new.txt"), "the cheap path missed the new path");
+    // THE REGRESSION B11b FOUND: the quiet cited path must survive the
+    // narrowing. Recovery must not report it unrecoverable, and it must
+    // still be cited afterwards.
+    assert!(
+        r.unrecoverable.is_empty(),
+        "recovery called a cited path unrecoverable: {:?}",
+        r.unrecoverable
+    );
+    assert!(
+        m.entries.contains_key("quiet.txt"),
+        "the narrowed recovery dropped a cited-but-not-staged path"
+    );
+    let q = &m.entries["quiet.txt"];
+    let (_, qb) = store.get_version(&q.key, q.version_id.as_ref().unwrap()).await.unwrap();
+    assert_eq!(&qb[..], b"CITED-AND-THEN-QUIET");
 
     // THE FALLBACK. Same work, no summary: recovery must still find
     // everything, by the expensive route. A summary is an optimisation,

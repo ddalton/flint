@@ -1213,11 +1213,27 @@ impl Sidecar {
             Ok((_, bytes)) => serde_json::from_slice::<OrphanDoc>(&bytes).ok(),
             Err(_) => None,
         };
+        // The manifest is read BEFORE the narrowing, because the
+        // narrowed key set is the union of the summary's candidates and
+        // everything the manifest already CITES.
+        //
+        // Getting that wrong is a data-loss-shaped bug, and leg B11b
+        // caught it: `orphans.json` names only the STAGED candidates, so
+        // narrowing to those alone left every cited-but-not-staged path
+        // with no listed version at all — and recovery classifies a path
+        // with no surviving version as UNRECOVERABLE. A workspace with
+        // one quiet cited file would have been told its data was gone.
+        let loaded = manifest::load(self.store.as_ref(), &self.cfg).await?;
+        let cited_now = loaded.as_ref().map(|l| l.manifest.clone()).unwrap_or_default();
+
         let narrowed: Option<BTreeSet<String>> = summary.as_ref().and_then(|d| {
             if d.boundary_mode != self.cfg.boundary_mode.as_str() || d.candidates.is_empty() {
                 return None;
             }
-            Some(d.candidates.iter().map(|c| self.cfg.file_key(&c.path)).collect())
+            let mut keys: BTreeSet<String> =
+                d.candidates.iter().map(|c| self.cfg.file_key(&c.path)).collect();
+            keys.extend(cited_now.entries.keys().map(|p| self.cfg.file_key(p)));
+            Some(keys)
         });
         report.from_summary = narrowed.is_some();
 
@@ -1239,9 +1255,6 @@ impl Sidecar {
                 current.insert(v.key.clone(), v);
             }
         }
-
-        let loaded = manifest::load(self.store.as_ref(), &self.cfg).await?;
-        let cited_now = loaded.as_ref().map(|l| l.manifest.clone()).unwrap_or_default();
 
         let mut paths: BTreeSet<String> = cited_now.entries.keys().cloned().collect();
         for key in current.keys() {

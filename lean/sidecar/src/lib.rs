@@ -287,7 +287,7 @@ pub struct Sidecar {
     /// process, so a condition that persists across every poll tick is
     /// recorded once rather than per tick. Deliberately in-memory: a
     /// restart is a new incarnation and should re-record what it finds.
-    pub(crate) noted_not_regular: std::collections::BTreeSet<String>,
+    pub noted_not_regular: std::collections::BTreeSet<String>,
 }
 
 fn now_unix() -> u64 {

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# The BOUNDARY-VERBS bucket drill (plan §6, legs B1-B25) — against a
-# real MinIO, through the real S3 backend, with the oracle reading the
-# bucket directly.
+# The BOUNDARY-VERBS bucket drill (plan §6, legs B1-B25 + B12b) —
+# against a real MinIO, through the real S3 backend, with the oracle
+# reading the bucket directly.
 #
-# The unit battery (94 legs) and the formal gate (55 runs) prove the
+# The unit battery (110 tests) and the formal gate (63 runs) prove the
 # protocol. This drill proves the things neither can see: real crash
 # timing, a real proxy that strips a header, real request counts, real
 # object versions, and the two-consecutive-scans rule against a real
@@ -17,6 +17,20 @@
 # EVERY leg carries an anti-vacuity guard: a leg that cannot observe its
 # own precondition FAILS rather than passing quietly. The lite drill's
 # lesson was that 24 of 41 proposed legs would have PASSED IF BROKEN.
+#
+# A GUARD IS ONLY AS GOOD AS THE FIELD IT READS. Writing B12b turned up
+# two guards in this file that could not fail:
+#   - `mc ls --versions --json` emits NO `isLatest` field (its keys are
+#     etag, key, lastModified, size, status, storageClass, type, url,
+#     versionId, versionOrdinal). `vers()` read `.isLatest // false`, so
+#     `latest` was false for every row and B23's "the cited version is
+#     now noncurrent" check asserted a constant. `versionOrdinal` is the
+#     real signal — highest is current.
+#   - `jq -e` sets its exit status from the LAST output, so a bare
+#     `select` over a stream exits 4 ("no output") whenever the final
+#     row does not match, even when an earlier one did.
+# Same family as B8's "minio/mc has no grep": the tool did not have the
+# thing the oracle assumed. Prefer probes you have watched go red.
 #
 # Prereqs: kind cluster `flint-lean-verbs` with flint-sync:e2e and
 # flint-lean-gateway:e2e loaded; minio.yaml + verbs.yaml applied; bucket
@@ -169,10 +183,35 @@ putobj()   { printf '%s' "$2" | $K -n flint-system exec -i mc -- mc pipe "m/$BUC
 allkeys()  { mcx mc ls --recursive --json "m/$BUCKET/$1/" | jq -r --arg p "$1/" 'select(.key)|$p + .key'; }
 manif()    { objcat "$1/.flint/lean/manifest"; }
 mseq()     { local m; m=$(manif "$1"); [ -z "$m" ] && { echo 0; return; }; printf '%s' "$m" | jq -r '.seq // 0'; }
-# Every version of one key, oldest first: {versionId, isLatest, size}.
-vers()     { mcx mc ls --versions --json "m/$BUCKET/$1" | jq -c 'select(.versionId)|{v:.versionId,latest:(.isLatest//false),size:.size}'; }
+# Every version of one key: {v, latest, size}.
+#
+# `mc ls --versions --json` EMITS NO `isLatest` FIELD. Its keys are
+# etag, key, lastModified, size, status, storageClass, type, url,
+# versionId, versionOrdinal — so the old `(.isLatest // false)` was
+# false for EVERY row, and any oracle reading it was reading a
+# constant. B23's "the cited version is now noncurrent" guard was
+# asserting `latest == "false"` against that constant and therefore
+# passed whatever the bucket said. Same family as B8's `minio/mc` has
+# no grep: the tool does not have the field the oracle assumed.
+#
+# `versionOrdinal` is the real signal — highest is current.
+vers()     { mcx mc ls --versions --json "m/$BUCKET/$1" \
+               | jq -s -c 'map(select(.versionId))
+                           | (map(.versionOrdinal // 0) | max) as $top
+                           | .[] | {v:.versionId,
+                                    latest:((.versionOrdinal // 0) == $top),
+                                    size:.size}'; }
 vcount()   { vers "$1" | grep -c . ; }
 vcat()     { mcx mc cat --version-id "$2" "m/$BUCKET/$1"; }
+# Is version $2 of key $1 still present? (mc has no grep/awk/sed, so the
+# filtering is done HERE, on the host — the B8 lesson.)
+# NB `jq -e` sets its status from the LAST output, so a bare `select`
+# over a stream exits 4 ("no output") whenever the last row does not
+# match — even when an earlier one did. Slurp and use `any`.
+vhas()     { vers "$1" | jq -s -e --arg v "$2" 'any(.[]; .v==$v)' > /dev/null 2>&1; }
+# Is version $2 of key $1 present AND NOT current? That is the old
+# reaper rule's kill zone: neither `keep` nor `is_current`.
+vnoncurrent() { vers "$1" | jq -s -e --arg v "$2" 'any(.[]; .v==$v and .latest==false)' > /dev/null 2>&1; }
 # The manifest's boundary provenance, from the OBJECT's metadata — an
 # operator has to be able to read it from the bucket alone.
 bsource()  { objstat "$1/.flint/lean/manifest" | jq -r '.metadata["X-Amz-Meta-Flint-Boundary-Source"] // .metadata["x-amz-meta-flint-boundary-source"] // empty'; }
@@ -1661,7 +1700,7 @@ b23_dangling_citation_refuses_then_recovers() {
   for i in $(seq 1 40); do vc=$(vcount "$P/files/d.txt"); [ "$vc" -ge 2 ] && break; sleep 1; done
   [ "$vc" -ge 2 ] || { bad "the lane never staged over d.txt"; return 1; }
   local latest_is_cited
-  latest_is_cited=$(vers "$P/files/d.txt" | jq -r "select(.v==\"$vcited\")|.latest")
+  latest_is_cited=$(vers "$P/files/d.txt" | jq -s -r --arg v "$vcited" 'any(.[]; .v==$v and .latest)')
   [ "$latest_is_cited" = "false" ] || { bad "the cited version is still current — nothing is exposed to the backstop"; return 1; }
   ok "cited version ${vcited:0:8}… is now NONCURRENT while $vc versions exist"
 
@@ -1964,7 +2003,7 @@ for i in $(seq -w 1 25); do
 done
 # The legs that need more than one prefix of their own: B11's three
 # drains, B24's three conformance arms, B25's second storm.
-for p in b11a b11a2 b11b b11c b14a b14b b14c b24a b24b b24c b25b; do
+for p in b11a b11a2 b11b b11c b12r b14a b14b b14c b24a b24b b24c b25b; do
   mcx mc rm --recursive --force --versions "m/$BUCKET/tenants/$p/" > /dev/null 2>&1
 done
 $K exec verbs-a -c sync -- /bin/sh -c 'rm -rf /work/b*' > /dev/null 2>&1
@@ -1972,6 +2011,160 @@ $K exec verbs-b -c sync -- /bin/sh -c 'rm -rf /work/b*' > /dev/null 2>&1
 $K exec verbs-s -c sync -- /bin/sh -c 'rm -rf /work/b*' > /dev/null 2>&1
 $K exec verbs-s2 -c sync -- /bin/sh -c 'rm -rf /work/b*' > /dev/null 2>&1
 echo "  rig reset: 25 leg prefixes and their workspaces cleared"
+
+# ── B12b  the straggler frozen in the REAPER, not the upload loop ──────
+#
+# B12 freezes the straggler INSIDE THE UPLOAD LOOP, and that is the arm
+# that really is non-destructive: a lane PUT lands a new version and
+# destroys nothing. The REAPER is the other arm, it runs AFTER the
+# manifest CAS in the same pass, and it used to delete every version of
+# a cited key that was neither `keep` nor `is_current`.
+#
+# That rule destroys committed data. The `is_current` guard protects
+# exactly ONE version, on the reasoning that at most one foreign
+# generation can appear between the lane and the citation. A successor
+# in gated mode does not stop at one — its cadence is stage → cite →
+# stage — so a straggler resuming here finds the successor's CITED
+# version sitting noncurrent-and-not-`keep`, and takes it.
+#
+# So B12 passed on the safe half of the mechanism it exists to test,
+# and the plan asserted "they destroy nothing" in four places on the
+# strength of it.
+b12b_straggler_frozen_in_the_reaper_destroys_nothing() {
+  local P=tenants/b12r RS=/work/b12r RB=/work/b12rs
+  inpod verbs-s "rm -rf $RS" > /dev/null
+  inpod verbs-s2 "rm -rf $RB" > /dev/null
+  sy_bg verbs-s $P $RS "$GATED_TICK" /tmp/b12r.log run
+  await_file verbs-s "$RS/.flint-sync/checkout-complete" 60 \
+    || { bad "the straggler never checked out"; return 1; }
+
+  # A wide cited set: the reaper is one LIST + one DELETE per cited
+  # path, walked in lexicographic order, so 300 paths is a window wide
+  # enough to freeze inside and a0001/a0300 bracket it.
+  mkfiles verbs-s $RS 300 a > /dev/null
+  touchp verbs-s $RS publish '{"nonce":"b12r-seed"}'
+  wait_ack verbs-s $RS publish 'b12r-seed' 180 > /dev/null \
+    || { bad "the seed citation never acked"; return 1; }
+  local s0 v1_first v1_last
+  s0=$(mseq $P)
+  v1_first=$(manif $P | jq -r '.entries["a0001.txt"].version_id // empty')
+  v1_last=$(manif $P  | jq -r '.entries["a0300.txt"].version_id // empty')
+  [ -n "$v1_first" ] && [ -n "$v1_last" ] \
+    || { bad "the seed boundary names no versions — is the bucket versioned?"; return 1; }
+  ok "seeded seq $s0 over 300 cited paths (a0001=${v1_first:0:8}… a0300=${v1_last:0:8}…)"
+
+  # Now supersede every one of them. The lane stages 300 new versions;
+  # the citation CAS then advances the manifest and the REAPER starts
+  # deleting the 300 superseded ones, oldest key first.
+  inpod verbs-s "for i in \$(seq 1 300); do \
+      printf GEN2 > $RS/a\$(printf %04d \$i).txt; done" > /dev/null
+  touchp verbs-s $RS publish '{"nonce":"b12r-gen2"}'
+
+  # THE FREEZE HAS TO LAND INSIDE THE REAPER. Two conditions, and both
+  # are read from the bucket, never from the sidecar's own log:
+  #   (i)  the manifest CAS has landed   ⇒ seq advanced past s0
+  #   (ii) the sweep has NOT finished    ⇒ a0300's superseded version
+  #        is still there
+  # (i) alone would catch the citation before the reaper; (ii) alone
+  # would catch the whole pass before the CAS. Together they are the
+  # reaper, mid-flight. Same two-probe discipline as B12's upload
+  # freeze, one phase later.
+  local i s1=0 froze=no
+  for i in $(seq 1 600); do
+    s1=$(mseq $P)
+    if [ "$s1" -gt "$s0" ] && vhas "$P/files/a0300.txt" "$v1_last"; then
+      stopsync verbs-s; froze=yes; break
+    fi
+    sleep 0.2
+  done
+  [ "$froze" = yes ] || {
+    bad "never caught the reaper mid-flight (seq $s0 -> $s1) — the window closed before the probe, widen the cited set"
+    contsync verbs-s; return 1
+  }
+  # ANTI-VACUITY on the freeze itself: the sweep must have genuinely
+  # STARTED (an early key already reaped) and genuinely NOT FINISHED (a
+  # late key not yet). "Frozen during the pass" is not "frozen in the
+  # reaper", and the difference is the whole leg.
+  vhas "$P/files/a0001.txt" "$v1_first" && {
+    bad "the reaper had not started at freeze time (a0001's superseded version is intact) — this is not the reaper arm"
+    contsync verbs-s; return 1
+  }
+  ok "straggler frozen INSIDE the reaper at seq $s0 -> $s1 (a0001 reaped, a0300 not); waiting out the takeover"
+
+  # The successor takes over and does the ORDINARY gated thing: cite,
+  # then stage past the citation. That second staging is what pushes
+  # its own cited version off `current` and into the old rule's kill
+  # zone — and it is the steady state, not a contrived one.
+  sy_bg verbs-s2 $P $RB "$GATED_TICK" /tmp/b12rs.log run
+  await_file verbs-s2 "$RB/.flint-sync/checkout-complete" "$TAKEOVER_SECS" \
+    || { bad "the successor never took the lease over"; contsync verbs-s; return 1; }
+  inpod verbs-s2 "printf SUCCESSOR-CITED > $RB/a0300.txt" > /dev/null
+  touchp verbs-s2 $RB publish '{"nonce":"b12r-succ"}'
+  wait_ack verbs-s2 $RB publish 'b12r-succ' 180 > /dev/null \
+    || { bad "the successor never published"; contsync verbs-s; return 1; }
+  local s2 vsucc
+  s2=$(mseq $P)
+  [ "$s2" -gt "$s1" ] || { bad "the successor's manifest never advanced ($s1 -> $s2)"; contsync verbs-s; return 1; }
+  vsucc=$(manif $P | jq -r '.entries["a0300.txt"].version_id // empty')
+  [ -n "$vsucc" ] || { bad "the successor's boundary names no version for a0300.txt"; contsync verbs-s; return 1; }
+
+  # ...and now stage past it, so the successor's CITED version becomes
+  # noncurrent.
+  inpod verbs-s2 "printf SUCCESSOR-STAGED > $RB/a0300.txt" > /dev/null
+  local staged=no
+  for i in $(seq 1 90); do
+    [ "$(objcat "$P/files/a0300.txt")" = "SUCCESSOR-STAGED" ] && { staged=yes; break; }
+    sleep 1
+  done
+  [ "$staged" = yes ] || { bad "the successor never staged past its own citation"; contsync verbs-s; return 1; }
+
+  # ANTI-VACUITY on the KILL ZONE. Unless the successor's cited version
+  # is present AND noncurrent AND not the straggler's `keep`, the old
+  # rule would have skipped it anyway and survival proves nothing.
+  vnoncurrent "$P/files/a0300.txt" "$vsucc" || {
+    bad "the successor's cited version is not noncurrent — the old rule's kill zone is empty, this leg proves nothing"
+    contsync verbs-s; return 1
+  }
+  ok "kill zone armed: the successor cited ${vsucc:0:8}… at seq $s2, then staged past it (it is now noncurrent)"
+
+  # THAW. The straggler resumes inside the reaper holding a dead lease.
+  contsync verbs-s
+  sleep 20
+
+  # THE CLAIM. Nothing the straggler could still have reached is gone.
+  vhas "$P/files/a0300.txt" "$vsucc" || {
+    bad "THE STRAGGLER'S REAPER DELETED THE SUCCESSOR'S CITED VERSION (${vsucc:0:8}…) — committed data destroyed"
+    return 1
+  }
+  [ "$(vcat "$P/files/a0300.txt" "$vsucc")" = "SUCCESSOR-CITED" ] \
+    || { bad "the successor's cited version survived but its bytes changed"; return 1; }
+
+  # ANTI-VACUITY on the THAW: the reaper must have had work OUTSTANDING
+  # when it resumed. If a0300's superseded version is gone the sweep ran
+  # to completion and simply chose well; if it is still there the fence
+  # stopped it with work left, which is the shipped behaviour and the
+  # only thing that makes the survival above meaningful.
+  vhas "$P/files/a0300.txt" "$v1_last" || {
+    bad "the reaper ran to completion after deposal — the epoch fence never fired, so nothing stopped it taking more"
+    return 1
+  }
+  ok "the deposed reaper stopped with work outstanding: a0300's superseded version survives, and so does the successor's citation"
+
+  # The successor's own view is intact end to end.
+  local m_now
+  m_now=$(manif $P | jq -r '.entries["a0300.txt"].version_id // empty')
+  [ "$m_now" = "$vsucc" ] || { bad "the manifest no longer cites the successor's version"; return 1; }
+  [ "$(mseq $P)" = "$s2" ] || { bad "the straggler's CAS landed after deposal (seq moved past $s2)"; return 1; }
+  ok "the manifest still cites ${vsucc:0:8}… at seq $s2 — the straggler installed nothing"
+
+  killsync verbs-s
+  killsync verbs-s2
+  await_exit verbs-s flint-sync 20 > /dev/null
+  await_exit verbs-s2 flint-sync 20 > /dev/null
+  return 0
+}
+
+
 
 leg "B1  sentinel publishes when cadence cannot"     b1_sentinel_beats_cadence
 leg "B2  crash between consume and ack re-runs"      b2_crash_between_consume_and_ack
@@ -1992,6 +2185,7 @@ leg "B13 a legacy citation survives the upgrade"     b13_legacy_citation_survive
 leg "B19 HITL admitted between citations"            b19_hitl_admitted_between_citations
 leg "B21 version reclamation returns to one per key" b21_version_reclamation_returns_to_one_per_key
 leg "B12 the straggler is contained, not destructive" b12_straggler_is_contained_not_destructive
+leg "B12b straggler frozen in the REAPER"            b12b_straggler_frozen_in_the_reaper_destroys_nothing
 leg "B14 mixed-fleet detection, both ways"           b14_mixed_fleet_is_detectable_both_ways
 leg "B15 the citation is atomic across kills"        b15_citation_is_atomic_across_kills
 leg "B17 renewal survives a sentinel storm"          b17_renewal_survives_a_sentinel_storm
