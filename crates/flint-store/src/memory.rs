@@ -1033,7 +1033,6 @@ mod tests {
 
     #[tokio::test]
     async fn conditional_puts_and_gets_enforce_the_contract() {
-        self.bump("conditional_puts_and_gets_enforce_the_contract");
         let s = MemoryStore::new();
         let body = Bytes::from_static(b"gen-1");
         let crc = crc64_nvme(&body);
@@ -1078,7 +1077,6 @@ mod tests {
 
     #[tokio::test]
     async fn epoch_cas_lease_lifecycle() {
-        self.bump("epoch_cas_lease_lifecycle");
         let s = MemoryStore::new();
         const K: &str = "vol/.flint-epoch";
 
@@ -1128,7 +1126,6 @@ mod tests {
 
     #[tokio::test]
     async fn compose_mixes_local_and_guarded_base_copy() {
-        self.bump("compose_mixes_local_and_guarded_base_copy");
         let s = MemoryStore::new();
         // Base generation: 8 bytes.
         let base_body = Bytes::from_static(b"AAAABBBB");
