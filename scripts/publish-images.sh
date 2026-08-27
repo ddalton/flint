@@ -19,7 +19,13 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-ver=${1:?usage: publish-images.sh <version> [--dry-run]}
+ver=${1:?usage: publish-images.sh <version> [all|lean] [--dry-run]}
+# Scope, matching stage-prebuilt.sh. A lean-scoped release publishes the
+# operator image (which carries the lean binaries) and the sidecar, then
+# aliases the operator to its lean name — it does not republish the CSI
+# driver or the pNFS image, because nothing in them changed.
+SCOPE=all
+for a in "$@"; do case "$a" in lean) SCOPE=lean ;; esac; done
 dry=${2:-}
 run() { if [ "$dry" = "--dry-run" ]; then echo "  + $*"; else "$@"; fi; }
 
@@ -32,10 +38,26 @@ cd "$crate"
     exit 1; }
 
 # image:dockerfile
+#
+# `flint-sync` joined this list on 2026-08-26. Until then the image the
+# lean webhook INJECTS INTO EVERY WORKSPACE POD was published by hand,
+# following a recipe written in a comment at the top of its own
+# Dockerfile — no staging check, no staleness check, no multi-arch
+# manifest step that anything verified. `release.sh` only asks whether a
+# tag EXISTS on the Hub, which a hand-pushed wrong build satisfies
+# perfectly. An unpublished or stale sidecar is a fleet of pods that
+# never start, with the operator itself perfectly healthy.
 set -- \
     "flint-driver:docker/Dockerfile.csi.prebuilt" \
     "flint-pnfs:docker/Dockerfile.pnfs.prebuilt" \
-    "flint-lite-operator:docker/Dockerfile.operator.prebuilt"
+    "flint-lite-operator:docker/Dockerfile.operator.prebuilt" \
+    "flint-sync:docker/Dockerfile.sync.prebuilt"
+
+if [ "$SCOPE" = lean ]; then
+    set -- \
+        "flint-lite-operator:docker/Dockerfile.operator.prebuilt" \
+        "flint-sync:docker/Dockerfile.sync.prebuilt"
+fi
 
 minor=${ver%.*}      # 1.31.0 -> 1.31
 major=${ver%%.*}     # 1.31.0 -> 1

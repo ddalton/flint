@@ -10,6 +10,99 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [1.39.0] - 2026-08-26
+
+**A lean-scoped correctness release, and it supersedes 1.38.0 for anyone
+running `boundaryMode: gated`.** Scope matches 1.38.0: only the
+`flint-lean` chart (now `0.4.0`) and the two images it pulls are
+published. The CSI driver chart, the lite charts and the SPDK target
+image are untouched and stay at 1.37.0.
+
+### Fixed — two independent paths that destroyed committed data
+
+Both are `gated` only, which is opt-in — but gated exists to protect
+coherent views, so the exposure landed exactly on the workspaces that
+asked for the strongest guarantee. Both shipped in `flint-sync:1.38.0`.
+
+- **The reaper deleted the successor's cited version.** The rule was
+  "delete every version of a touched key that is neither the cited one
+  nor current". Its `is_current` guard protects exactly ONE version, on
+  the assumption that at most one foreign generation appears between the
+  lane and the citation — and a successor in gated mode does not stop at
+  one, because its cadence is stage → cite → stage. A straggler thawing
+  inside the reaper therefore found the successor's CITED version
+  noncurrent-and-not-`keep`, and deleted it. The plan asserted the
+  opposite in four places. Now narrowed to the version this workspace's
+  own record names, fenced every 8 paths, and fail-closed when the
+  installed manifest names no version.
+
+- **The lane deleted versions the boundary cites, and no crash was
+  required.** The upload lane reclaimed superseded versions under ONE
+  guard — "not the version I just wrote" — with no reference to the
+  installed manifest. `citation_pass` clears the pending stage LAST,
+  after the CAS, the reaper, the baseline save and the intent clear, and
+  four ordinary `?` returns sit in that window (the withheld-delete GC's
+  `store.delete`, its HEAD arm, `append_conflict`, and
+  `reclaim_superseded`, which itself awaits `renew_if_due` and
+  `verify_not_deposed`). One transient store error after a successful
+  CAS left a stage naming versions the boundary now cites, and the next
+  lane pass reaped them. There were TWO such sites — the supersede path
+  and the cancel path, the second with no manifest reference at all.
+  Both now RECORD into `pending_reclaims`; only the citation-time reaper
+  deletes, under its four guards.
+
+### Fixed — availability and correctness
+
+- **A restarted claimant stranded its agent.** An incarnation that came
+  up owing an ack it could never honor sat in `claim` without answering,
+  leaving the agent blocked on a sentinel forever. It now writes
+  `refused-fenced` and flips the capability marker before waiting.
+- **A stale ack retired a fresh boundary.** `ack_matches` compared too
+  loosely, so an ack from a previous honor could satisfy a pending
+  record written after it.
+- **A FIFO at a sentinel path wedged the poll arm.** `read_bounded` now
+  opens `O_NONBLOCK | O_NOFOLLOW` and refuses anything that is not a
+  regular file, with a once-per-process notice rather than a log flood.
+- **`recover-staged` ignored the durable orphan summary** and paid for a
+  prefix-wide version listing every time.
+- **`/status` paid for a HEAD it already had** — the manifest's
+  last-modified now rides the single GET.
+
+### Changed
+
+- **`stagedBacklogCapObjects` now counts recorded version reclaims as
+  well as staged paths.** The old predicate counted paths only, so one
+  hot file rewritten every tick was a single stage entry forever and the
+  cap never fired on it — while `drain_need_secs` sized the pod's
+  termination grace from that same cap. Measured: recorded reclaims grow
+  at exactly 1 per hot path per tick, and the cap now beats the
+  visibility-lag bound above roughly 83 continuously-rewritten paths at
+  `floorSecs: 60` / `visibilityLagBoundSecs: 3600`. Below that it is
+  inert. Total `DeleteObjectVersion` count is unchanged — the deletes
+  moved from the lane to the citation rather than doubling.
+
+### Release machinery
+
+- **`flint-sync`, `flint-lean-operator` and `flint-lean-gateway` are now
+  staged and published by the scripts.** Until this release the image
+  every workspace pod RUNS was built by hand from a recipe in a comment
+  at the top of its own Dockerfile — absent from `stage-prebuilt.sh` and
+  from `publish-images.sh`, with only `release.sh`'s after-the-fact "is
+  the tag on the Hub?" check standing between it and a silent wrong-code
+  release. `stage-prebuilt.sh` gained a second staleness clock for the
+  lean crate that includes `crates/flint-store`, because the sidecar
+  links it and a store edit changes the binary with no `lean/sidecar`
+  file touched.
+
+### Verification
+
+`lean/sidecar` battery **117/117** · TLC gate **65/65** (up from 63:
+`ProbeGatedGC` proves a withheld delete actually LANDS at a citation,
+`ProbeGatedRestart` makes `Inv_NoResurrection` falsifiable in the mode
+that widens the resurrection window) · bucket drill **28/28** with the
+roster reconciled · kind boundary drill 14/14 · agent-pod rig 9/9
+against the released chart.
+
 ## [1.38.0] - 2026-08-26
 
 **A lean-scoped release.** Only the `flint-lean` chart and the two images
@@ -2603,6 +2696,7 @@ neither tag represents a supported upgrade source.
 No security advisories at this release.
 
 [Unreleased]: https://github.com/ddalton/flint/compare/v1.35.1...HEAD
+[1.39.0]: https://github.com/ddalton/flint/compare/v1.38.0...v1.39.0
 [1.38.0]: https://github.com/ddalton/flint/compare/v1.37.0...v1.38.0
 [1.37.0]: https://github.com/ddalton/flint/compare/v1.36.0...v1.37.0
 [1.36.0]: https://github.com/ddalton/flint/compare/v1.35.1...v1.36.0

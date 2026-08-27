@@ -24,7 +24,38 @@ here=$(cd "$(dirname "$0")" && pwd)
 crate=$(cd "$here/../spdk-csi-driver" && pwd)
 dest="$crate/docker/prebuilt"
 
-BINS="csi-driver flint-nfs-server flint-pnfs-mds flint-pnfs-ds flint-lite-operator flint-hub-gateway"
+# Binaries from the HUB crate (spdk-csi-driver).
+#
+# `flint-lean-operator` was missing here until 2026-08-26 while
+# Dockerfile.operator.prebuilt COPYs it — so the lean half of the
+# operator image was staged BY HAND, outside every staleness check this
+# script exists to enforce. That is the same shape as the bug the
+# 1.38.0 changelog records ("the chart execs /usr/local/bin/
+# flint-lean-operator and that binary was not in it"), and the same
+# shape as the 1.30.0 near-miss described above.
+BINS="csi-driver flint-nfs-server flint-pnfs-mds flint-pnfs-ds flint-lite-operator flint-hub-gateway flint-lean-operator"
+
+# A LEAN-SCOPED release (the 1.38.0 shape: only the flint-lean chart and
+# the two images it pulls) republishes the operator image and the sidecar
+# image, and nothing else. Demanding csi-driver and the pNFS binaries be
+# fresh for that is a refusal with no safety content — and it is almost
+# certainly why the lean binaries were hand-staged in the first place,
+# which is the hole this script just grew to cover. `lean` stages exactly
+# what those two images COPY, with the SAME staleness rules.
+SCOPE=${1:-all}
+case "$SCOPE" in
+    all)  ;;
+    lean) BINS="flint-lite-operator flint-hub-gateway flint-lean-operator" ;;
+    *)    echo "usage: stage-prebuilt.sh [all|lean]" >&2; exit 2 ;;
+esac
+
+# Binaries from the LEAN crate (lean/sidecar) — a separate crate with a
+# separate target dir, which is why they could not simply join $BINS.
+# `flint-sync` is the image every workspace pod actually RUNS, and it was
+# published entirely by hand: absent from this script AND from
+# publish-images.sh, with only release.sh's after-the-fact "is it on the
+# Hub?" check standing between it and a silent wrong-code release.
+LEAN_BINS="flint-sync flint-lean-gateway"
 
 # Newest thing that can change a binary. Cargo.lock matters as much as
 # src/ — a dependency bump with no source edit still changes the output.
@@ -41,6 +72,29 @@ case "$src_mtime" in
         exit 2 ;;
 esac
 echo "newest source: $(date -r "$src_mtime" '+%Y-%m-%d %H:%M:%S')  ${src_name#$crate/}"
+
+# The lean crate has its OWN newest-source clock, and it must include
+# crates/flint-store: the sidecar links it, so a store edit changes the
+# binary with no lean/sidecar/src file touched at all. That is exactly
+# the Cargo.lock argument above, one crate further out.
+lean_crate=$(cd "$here/../lean/sidecar" && pwd)
+store_crate=$(cd "$here/../crates/flint-store" && pwd)
+# There is no workspace Cargo.lock at the repo root — the lean crate
+# carries its own. Naming a path that does not exist made `find` fail,
+# and under `set -euo pipefail` that killed this script with NO message
+# at all, which is the worst possible failure for a staleness gate.
+newest_lean=$(find "$lean_crate/src" "$lean_crate/Cargo.toml" "$lean_crate/Cargo.lock" \
+                   "$store_crate/src" "$store_crate/Cargo.toml" \
+                   -type f -print0 \
+              | xargs -0 stat -f '%m %N' | sort -rn | head -1)
+lean_mtime=${newest_lean%% *}
+lean_name=${newest_lean#* }
+case "$lean_mtime" in
+    ''|*[!0-9]*)
+        echo "cannot determine the newest LEAN source mtime — refusing to stage blind" >&2
+        exit 2 ;;
+esac
+echo "newest lean source: $(date -r "$lean_mtime" '+%Y-%m-%d %H:%M:%S')  ${lean_name#$here/../}"
 
 stale=0
 for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
@@ -61,6 +115,22 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
         cp "$src" "$dest/$arch/$b"
         echo "  ✓ staged  $arch/$b  ($(date -r "$m" '+%m-%d %H:%M'), $(( $(stat -f '%z' "$src") / 1048576 )) MiB)"
     done
+    for b in $LEAN_BINS; do
+        src="$lean_crate/target/$triple/release/$b"
+        if [ ! -f "$src" ]; then
+            echo "  ✗ MISSING $arch/$b — build it before staging" >&2
+            echo "            (cd lean/sidecar && cargo zigbuild --release --features s3 \\" >&2
+            echo "               --target $triple)" >&2
+            stale=1; continue
+        fi
+        m=$(stat -f '%m' "$src")
+        if [ "$m" -lt "$lean_mtime" ]; then
+            echo "  ✗ STALE   $arch/$b built $(date -r "$m" '+%m-%d %H:%M') — older than the lean source" >&2
+            stale=1; continue
+        fi
+        cp "$src" "$dest/$arch/$b"
+        echo "  ✓ staged  $arch/$b  ($(date -r "$m" '+%m-%d %H:%M'), $(( $(stat -f '%z' "$src") / 1048576 )) MiB)"
+    done
 done
 
 # Content check, which an mtime cannot fake. The operator has the hub
@@ -68,6 +138,11 @@ done
 # it was built for — compare that against the chart's appVersion. This is
 # what actually catches "rebuilt the wrong tree": a fresh timestamp on
 # code from a stale checkout passes every mtime test there is.
+# Still the LITE chart's appVersion under `lean` scope, and deliberately:
+# this checks the hub image the operator binary has pinned at compile
+# time, which does not move in a lean-scoped release. If it disagrees,
+# the binary was built from a different tree — the exact failure an
+# mtime cannot see.
 want_pin=$(awk '/^appVersion:/ {gsub(/"/,"",$2); print $2}' \
            "$here/../flint-lite-chart/Chart.yaml")
 if [ -n "$want_pin" ] && [ "$stale" = "0" ]; then
