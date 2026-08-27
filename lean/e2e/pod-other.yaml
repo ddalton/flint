@@ -1,0 +1,23 @@
+# A second team's agent on the same bucket, a different subtree.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agent-other
+  namespace: agents
+  labels:
+    flint.io/lean-workspace: other
+spec:
+  restartPolicy: Never
+  containers:
+    - name: agent
+      image: busybox:stable
+      command:
+        - /bin/sh
+        - -c
+        - |
+          ls /workspace/src 2>/dev/null | wc -l > /tmp/seen-count
+          find /workspace -name 'f0042.txt' > /tmp/leak 2>/dev/null
+          printf 'team-b work\n' > /workspace/theirs.txt
+          trap 'exit 0' TERM INT
+          sleep 3600 &
+          wait

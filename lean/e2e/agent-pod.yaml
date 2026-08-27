@@ -1,0 +1,63 @@
+# The agent-fleet use case, as a pod author would actually write it.
+#
+# READ THE AGENT PODS AS SPECS, NOT AS SCRIPTS: the whole point of this
+# file is what is ABSENT from them. No bucket. No endpoint. No AWS_*
+# secret. No volume, no volumeMount, no sidecar, no probe. An agent pod
+# names a workspace with one label and is otherwise an ordinary pod;
+# everything else in its running spec was put there by the operator.
+# run-agent.sh asserts that absence against this file directly, so if a
+# future edit smuggles an endpoint into an agent stanza, leg A3 goes red.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agents
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lean-proxy-creds
+  namespace: agents
+type: Opaque
+stringData:
+  # Keys AWS_* VERBATIM — the SIDECAR's chain. Never mounted into an
+  # agent container; leg A4 proves that at runtime, not just in spec.
+  AWS_ACCESS_KEY_ID: drill
+  AWS_SECRET_ACCESS_KEY: drillsecret
+  AWS_REGION: us-east-1
+---
+# ── the project every agent in the fleet checks out ──────────────────
+apiVersion: flint.io/v1alpha1
+kind: FlintLeanWorkspace
+metadata:
+  name: proj
+  namespace: agents
+spec:
+  projectId: team-a/proj
+  bucket: agentfleet
+  keyPrefix: tenants/proj
+  endpoint: http://minio.flint-system.svc:9000
+  credentialsSecretRef: lean-proxy-creds
+  # An HOUR. Nothing in this rig can be published by the cadence timer,
+  # so every publish a leg observes was DECLARED by an agent. Without
+  # this the boundary legs would pass on a tick.
+  floorSecs: 3600
+  expectedBytes: 8388608
+  expectedFiles: 500
+  maxFiles: 5000
+---
+# A second project, same bucket, different subtree — the tenancy leg.
+apiVersion: flint.io/v1alpha1
+kind: FlintLeanWorkspace
+metadata:
+  name: other
+  namespace: agents
+spec:
+  projectId: team-b/other
+  bucket: agentfleet
+  keyPrefix: tenants/other
+  endpoint: http://minio.flint-system.svc:9000
+  credentialsSecretRef: lean-proxy-creds
+  floorSecs: 3600
+  expectedBytes: 1048576
+  expectedFiles: 100

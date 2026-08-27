@@ -1,0 +1,33 @@
+# A cold agent joining an existing project. Note what this spec does
+# NOT contain — leg A3 asserts that absence mechanically.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agent-1
+  namespace: agents
+  labels:
+    flint.io/lean-workspace: proj
+spec:
+  restartPolicy: Never
+  containers:
+    - name: agent
+      image: busybox:stable
+      command:
+        - /bin/sh
+        - -c
+        - |
+          # Everything below runs as the agent's FIRST instruction. If
+          # the start gate is broken these observations are of a partial
+          # tree, and legs A2/A4 read them out of /tmp afterwards.
+          if [ -f /workspace/.flint-sync/checkout-complete ]; then
+            echo GATE-OK > /tmp/gate
+          else
+            echo GATE-BROKEN > /tmp/gate
+          fi
+          ls /workspace/src 2>/dev/null | wc -l > /tmp/seen-count
+          cat /workspace/src/f0042.txt > /tmp/seen-sample 2>/dev/null || echo MISSING > /tmp/seen-sample
+          env | grep -c '^AWS_' > /tmp/aws-count
+          env | grep -c '^FLINT_SYNC_' > /tmp/flint-count
+          trap 'exit 0' TERM INT
+          sleep 3600 &
+          wait

@@ -1,0 +1,40 @@
+# Job-shaped agent: does its work, publishes at a boundary it declares,
+# exits. The pod is gone by the time run-agent.sh checks out the same
+# project from a DIFFERENT pod — that is the fleet claim under test.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: seeder
+  namespace: agents
+  labels:
+    flint.io/lean-workspace: proj
+spec:
+  restartPolicy: Never
+  containers:
+    - name: agent
+      image: busybox:stable
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          test -f /workspace/.flint-sync/checkout-complete || { echo "GATE BROKEN"; exit 1; }
+          mkdir -p /workspace/src
+          i=1
+          while [ $i -le 200 ]; do
+            printf 'unit %04d of the seeded project\n' $i > "$(printf '/workspace/src/f%04d.txt' $i)"
+            i=$((i + 1))
+          done
+          # Declare the boundary and WAIT for the answer, the way an
+          # agent that must not exit before its work is durable does.
+          mkdir -p /workspace/.flint
+          printf '{"nonce":"seed-1"}' > /workspace/.flint/publish.tmp
+          mv /workspace/.flint/publish.tmp /workspace/.flint/publish
+          n=0
+          while [ $n -lt 120 ]; do
+            if grep -c seed-1 /workspace/.flint/publish.ack > /dev/null 2>&1; then
+              echo "SEED PUBLISHED"; cat /workspace/.flint/publish.ack; exit 0
+            fi
+            n=$((n + 1)); sleep 1
+          done
+          echo "SEED NEVER ACKED"; exit 1
