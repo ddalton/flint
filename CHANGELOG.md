@@ -10,6 +10,102 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [1.41.0] - 2026-08-27
+
+**A lean-scoped read-path release: the agent-blocking checkout, measured
+rather than reasoned about.** Scope matches 1.38.0/1.39.0 — only the
+`flint-lean` chart (now `0.5.0`) and the two images it pulls are
+published. The CSI driver chart, the lite charts and the SPDK target
+image are untouched and stay at 1.37.0.
+
+`1.40.0` is reserved for the passthrough front end, in flight when this
+was cut; this release deliberately skips it rather than claim it.
+
+### Changed — the read path
+
+The headline is one default. A fresh checkout of 20,000 small files at a
+25 ms round trip runs **39.6 s → 21.3 s (−46%)** purely from the fan-out
+default moving 16 → 32. That is time the agent spends unable to read its
+first file.
+
+The number that outlives the release is the model behind it. Measured
+wall clock fits `(files / fanout) × RTT + floor`, and setting the two
+terms equal puts the useful ceiling at **`RTT / per-file-floor`,
+independent of file count** — so ~32 for same-region S3 and higher only
+as the round trip grows. `fanout` is no longer a guessed constant; there
+is a rule for when to change it.
+
+- **Fan-out default 16 → 32**, in the CRD (which is the one that counts:
+  the API server applies that default when a workspace omits the field,
+  so the Rust constant alone would have shipped inert).
+- **An in-flight byte bound on the checkout window**, default 512 MiB,
+  tunable with `FLINT_SYNC_FETCH_INFLIGHT_MB`. `fanout` bounded the
+  number of concurrent fetches but never their size, and each whole
+  object is held in RAM before it reaches disk — so peak RSS was
+  `fanout × largest object`, an unbounded product, in a sidecar that
+  ships with no memory limit. Measured on 32 × 32 MiB: **916 → 533 MiB**.
+  It also ran **25% faster**, which was not predicted: holding 916 MiB
+  in flight costs more in memory pressure than the extra width buys.
+- **Slice-by-8 CRC-64/NVME**, same digest, **3.36× faster** (352 → 1184
+  MiB/s). This is the resume row's inner loop — a restarted container
+  re-CRCs every present file before it can serve — so a 1 GiB workspace
+  resume goes **3.20 s → 1.18 s**, and a 20 GiB one 58 s → 17 s.
+- **Compact JSON for the manifest and the baseline.** Same 3,001-file
+  tree: **830 → 601 KiB (−27.6%)**, 283 → 205 B/entry. It moves on every
+  checkout, every barrier merge and CAS, and every gateway read verb.
+  `mc cat`, `jq` and the raw quoted-path greps the rigs use are all
+  unaffected — verified against a live bucket.
+- **`GET /status` answers by HEAD, not GET.** It reports scalars and not
+  one entry, so it had been downloading and parsing a document that runs
+  to tens of MB to return three numbers. Request count is unchanged at
+  three.
+- **Largest-first checkout admission.** Path-order admission appended the
+  biggest object's transfer to the tail of the fan-out window. Worth
+  −4.4% at 25 ms here, and it scales with the largest file rather than
+  the tree.
+- **A read timeout on the S3 client.** The default provider bounds only
+  connect, and stalled-stream protection arms after headers arrive, so
+  nothing bounded the wait for a response that never starts. One pooled
+  connection to a reclaimed peer hung a fan-out slot, and because the
+  window is collected whole, the entire checkout waited and the
+  agent-start marker never landed.
+- **Two allocations off the barrier**: `Bytes::from(body.clone())` was a
+  full memcpy of every published body, and the gated lane rewrote the
+  whole O(files) baseline every tick whether or not the scan set moved —
+  the guard the cadence path has always had.
+
+### Fixed
+
+- **A takeover rotation dropped the manifest's boundary-source stamp.**
+  `rotate_for_takeover` clones the standing manifest and re-CASes it
+  through a path that passes no source, so the DOCUMENT carried e.g.
+  `sentinel` through the clone while the OBJECT STAMP lost it — exactly
+  the GET/HEAD divergence the writer documents as forbidden. Invisible
+  for as long as every reader used GET; it surfaces as a null
+  `boundary_source` the moment one HEADs, which `/status` now does. Both
+  halves land together, and the writer now stamps the document's own
+  source so the two cannot disagree.
+- **The `flint-store` test target had not compiled since `f2080edd`.**
+  Three `self.bump(...)` calls sat in free test functions where there is
+  no `self`, so the whole lib-test target failed to BUILD and every test
+  in that crate was silently unrunnable. Nothing caught it because lean
+  work runs its own crate and never builds this one's tests.
+
+### Upgrade notes
+
+- **`fanout` default changes for workspaces that do not set it.** A
+  `FlintLeanWorkspace` with no `spec.fanout` moves from 16 to 32 on
+  chart upgrade. Set `spec.fanout: 16` to hold the old behaviour. Nothing
+  else in the CR surface changed.
+- **The measurements are from a local rig with injected latency**, not
+  real S3: MinIO behind a latency proxy on one machine. Ratios under
+  controlled round trips are sound; the absolute per-request floor is
+  rig-specific, and on a faster S3 path the useful fan-out ceiling is
+  higher than 32, not lower. A proxy-shaped re-measurement is still the
+  open item it was in 0b.
+- Checkout now reports phase timing (manifest / fetch / commit) on
+  stderr, which is what makes any of the above attributable.
+
 ## [1.39.0] - 2026-08-26
 
 **A lean-scoped correctness release, and it supersedes 1.38.0 for anyone
@@ -2696,6 +2792,7 @@ neither tag represents a supported upgrade source.
 No security advisories at this release.
 
 [Unreleased]: https://github.com/ddalton/flint/compare/v1.35.1...HEAD
+[1.41.0]: https://github.com/ddalton/flint/compare/v1.39.0...v1.41.0
 [1.39.0]: https://github.com/ddalton/flint/compare/v1.38.0...v1.39.0
 [1.38.0]: https://github.com/ddalton/flint/compare/v1.37.0...v1.38.0
 [1.37.0]: https://github.com/ddalton/flint/compare/v1.36.0...v1.37.0
