@@ -41,6 +41,28 @@ impl S3Store {
             .load()
             .await;
         let mut b = aws_sdk_s3::config::Builder::from(&base);
+        // Bound TIME TO FIRST BYTE. The default provider sets only a
+        // connect timeout (~3.1 s), and the SDK's stalled-stream
+        // protection arms AFTER headers arrive — so nothing at all
+        // bounded the wait for a response that never starts. One pooled
+        // connection to a silently-dead peer (spot reclamation is the
+        // routine event on this fleet) then hangs one slot of the
+        // checkout fan-out, and because the fan-out is collected as a
+        // whole, the ENTIRE checkout waits and the agent-start marker
+        // never lands. The startupProbe burns its full derived budget,
+        // restarts the container, and the resume row re-reads the tree.
+        //
+        // `read_timeout` is first-byte-only, so it is safe to set
+        // globally. An `operation_attempt_timeout` would NOT be: it
+        // would guillotine a legitimately long `upload_part`.
+        // Retries are unaffected and safe here — every lean write is
+        // conditional, so a retried publish cannot double-apply.
+        b = b.timeout_config(
+            aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+                .connect_timeout(std::time::Duration::from_secs(3))
+                .read_timeout(std::time::Duration::from_secs(10))
+                .build(),
+        );
         if let Some(ep) = endpoint {
             // Custom endpoints (MinIO/localstack) need path-style —
             // virtual-hosted addressing would resolve the bucket as a

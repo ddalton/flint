@@ -28,6 +28,8 @@
 //!   FLINT_SYNC_ENDPOINT  S3 endpoint override (MinIO/proxy rigs)
 //!   FLINT_SYNC_FLOOR_SECS         publish cadence floor (default 60)
 //!   FLINT_SYNC_MAX_BYTES/_FILES   checkout budgets (0 = unlimited)
+//!   FLINT_SYNC_FANOUT             concurrent fetches/uploads (default 32)
+//!   FLINT_SYNC_FETCH_INFLIGHT_MB  checkout bytes in flight (default 512)
 //!   FLINT_SYNC_BOUNDARY_MODE      cadence|hybrid|gated (default hybrid)
 //!   FLINT_SYNC_SENTINELS          auto|off|force (default auto)
 //!   FLINT_SYNC_SENTINEL_MIN_INTERVAL_SECS  (default 5)
@@ -90,7 +92,9 @@ async fn main() {
     cfg.floor_secs = env_u64("FLINT_SYNC_FLOOR_SECS", 60);
     cfg.max_bytes = env_u64("FLINT_SYNC_MAX_BYTES", 0);
     cfg.max_files = env_u64("FLINT_SYNC_MAX_FILES", 0);
-    cfg.fanout = env_u64("FLINT_SYNC_FANOUT", 16).max(1) as usize;
+    cfg.fanout = env_u64("FLINT_SYNC_FANOUT", 32).max(1) as usize;
+    cfg.fetch_inflight_max_bytes =
+        env_u64("FLINT_SYNC_FETCH_INFLIGHT_MB", 512).max(1) * 1024 * 1024;
     if let Ok(m) = std::env::var("FLINT_SYNC_BOUNDARY_MODE") {
         match BoundaryMode::parse(&m) {
             Some(bm) => cfg.boundary_mode = bm,
@@ -279,6 +283,10 @@ async fn claim_then(sc: &mut Sidecar, step: Step) -> Result<(), LeanError> {
                 eprintln!(
                     "flint-sync: checkout — {} materialized, {} present, live-tree={}",
                     r.materialized, r.skipped_present, r.resumed_live_tree
+                );
+                eprintln!(
+                    "flint-sync: phase manifest={:.3}s fetch={:.3}s commit={:.3}s",
+                    r.manifest_secs, r.fetch_secs, r.commit_secs
                 );
             }
             Step::Barrier => {

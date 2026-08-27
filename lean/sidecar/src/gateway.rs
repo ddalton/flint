@@ -535,20 +535,32 @@ async fn handle_status_authed(
     let Some(cfg) = core.cfg(&ws) else {
         return err_reply(StatusCode::NOT_FOUND, "unknown-workspace", ws);
     };
-    // ONE manifest read for all four manifest-derived fields. The stamp
-    // and the source both ride the document this GET already parses;
-    // fetching them with a second request (a HEAD, under a comment
-    // claiming "the manifest HEAD this handler already did") made
-    // /status cost 4 requests to answer what 3 already had — U31.
-    let (seq, stamp_unix, boundary_source) = match manifest::load(core.store.as_ref(), &cfg).await {
-        Ok(Some(l)) => (
-            Some(l.manifest.seq),
-            l.last_modified_unix,
-            l.manifest.boundary_source.clone(),
-        ),
-        Ok(None) => (None, None, None),
-        Err(e) => return err_reply(StatusCode::BAD_GATEWAY, "store", e.to_string()),
-    };
+    // ONE manifest request for all four manifest-derived fields, and it
+    // is a HEAD: /status reports scalars — seq, the stamp, the source —
+    // and NOT ONE ENTRY, so downloading and parsing a document that runs
+    // to ~66 MiB at the 250k cap bought nothing. Every field it needs
+    // rides the object stamps `cas_write_stamped` already writes
+    // (`generation` IS the seq), and the request COUNT is unchanged at
+    // three — U31 was about a HEAD *in addition to* the GET, not
+    // instead of it.
+    //
+    // This is only sound because the stamp and the document agree by
+    // construction; `cas_write_stamped` stamps the document's own
+    // `boundary_source` precisely so a HEAD reader and a GET reader
+    // cannot disagree.
+    let (seq, stamp_unix, boundary_source) =
+        match core.store.head(&cfg.manifest_key()).await {
+            Ok(meta) => {
+                let stamps = GenerationStamps::from_meta(&meta.meta);
+                (
+                    stamps.as_ref().map(|s| s.generation),
+                    meta.last_modified_unix,
+                    stamps.and_then(|s| s.boundary_source),
+                )
+            }
+            Err(StoreError::NotFound(_)) => (None, None, None),
+            Err(e) => return err_reply(StatusCode::BAD_GATEWAY, "store", e.to_string()),
+        };
     let ib = match inbox::load(core.store.as_ref(), &cfg).await {
         Ok(l) => l,
         Err(e) => return err_reply(StatusCode::BAD_GATEWAY, "store", e.to_string()),

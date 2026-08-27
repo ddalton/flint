@@ -476,10 +476,13 @@ impl Sidecar {
                 // prev_scan still advances (the two-scan rule's clock) —
                 // but the baseline document (hundreds of MB at 1M
                 // entries) is rewritten only when the scan SET moved.
-                let now_present: std::collections::BTreeSet<String> =
-                    scanned.keys().cloned().collect();
-                if now_present != baseline.prev_scan {
-                    baseline.prev_scan = now_present;
+                // Compare without building the set: both sides iterate
+                // sorted, and the allocation this used to make was the
+                // size of the very document it was trying not to write.
+                if scanned.len() != baseline.prev_scan.len()
+                    || !scanned.keys().eq(baseline.prev_scan.iter())
+                {
+                    baseline.prev_scan = scanned.keys().cloned().collect();
                     self.state.save_baseline(&baseline)?;
                 }
                 return Ok(report);
@@ -948,11 +951,16 @@ impl Sidecar {
                 .upload_compose(path, &key, &local_path, size, scanned, condition, stamps, generation, epoch)
                 .await;
         }
-        let body = std::fs::read(&local_path)?;
+        // `Bytes::from(Vec<u8>)` TAKES OWNERSHIP without copying, so the
+        // old `Bytes::from(body.clone())` was a full memcpy of every
+        // published file body — bought solely to leave `body` intact for
+        // the 412 retry below, which is reached almost never. Build the
+        // `Bytes` once; the retry gets a refcount clone.
+        let body = Bytes::from(std::fs::read(&local_path)?);
         let crc = crc64_nvme(&body);
         match self
             .store
-            .put_whole(&key, Bytes::from(body.clone()), &condition, &stamps, crc)
+            .put_whole(&key, body.clone(), &condition, &stamps, crc)
             .await
         {
             Ok(meta) => Ok(UploadOutcome::published(
@@ -981,13 +989,7 @@ impl Sidecar {
                 // Our earlier PUT, older content: supersede it knowingly.
                 let meta = self
                     .store
-                    .put_whole(
-                        &key,
-                        Bytes::from(body),
-                        &PutCondition::IfMatch(head.etag),
-                        &stamps,
-                        crc,
-                    )
+                    .put_whole(&key, body, &PutCondition::IfMatch(head.etag), &stamps, crc)
                     .await?;
                 Ok(UploadOutcome::published(
                     path, key, meta.etag, crc, scanned, generation, epoch, meta.version_id,

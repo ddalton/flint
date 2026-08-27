@@ -71,7 +71,8 @@ pub struct FlintLeanWorkspaceSpec {
     #[serde(default = "default_max_files")]
     pub max_files: u64,
 
-    /// Bounded upload/checkout concurrency (0b lever; default 16).
+    /// Bounded upload/checkout concurrency (measured: useful ceiling is
+    /// RTT / 375us, independent of file count; ~32 for same-region S3).
     #[serde(default = "default_fanout")]
     pub fanout: u64,
 
@@ -250,7 +251,12 @@ fn default_max_files() -> u64 {
     250_000
 }
 fn default_fanout() -> u64 {
-    16
+    // 32, not 16. The blocking checkout on a small-file tree is ~95%
+    // round trips, so this multiplies directly against the wall clock
+    // the agent waits on. Not higher yet: the per-entry local write
+    // chain is blocking `std::fs` driven from ONE runtime task, so past
+    // ~32 the extra width queues on that task instead of the wire.
+    32
 }
 fn default_size_limit_gib() -> u64 {
     20

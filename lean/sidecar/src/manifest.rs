@@ -72,8 +72,14 @@ pub struct LeanManifest {
 }
 
 impl LeanManifest {
+    /// COMPACT, not pretty. This document is O(entries) and it moves on
+    /// every path that matters: the pre-marker checkout GET, every
+    /// barrier merge GET and CAS PUT, and every gateway read verb. The
+    /// indentation was ~22% of those bytes and of the parse that
+    /// follows. `mc cat | jq` — the operator's and every rig's only
+    /// debugging surface for the CAS commit point — is unaffected.
     pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec_pretty(self).expect("manifest serializes")
+        serde_json::to_vec(self).expect("manifest serializes")
     }
     pub fn parse(bytes: &[u8]) -> Result<LeanManifest, String> {
         serde_json::from_slice(bytes).map_err(|e| e.to_string())
@@ -155,7 +161,18 @@ pub async fn cas_write_stamped(
         generation: m.seq,
         epoch,
         flush_uuid: flush_uuid.to_string(),
-        boundary_source: boundary_source.map(|s| s.to_string()),
+        // Stamp what the DOCUMENT carries, not merely what this call
+        // passed. An explicit source has already been written into the
+        // document above, so the two agree there either way; the case
+        // this closes is a `None` caller over a document that already
+        // names its clock — `rotate_for_takeover` clones the standing
+        // manifest and re-CASes it, and the gateway's HITL CAS relays a
+        // document it did not author. Stamping `None` on those left the
+        // object saying nothing while the document said `sentinel`,
+        // which is exactly the GET/HEAD divergence the contract above
+        // forbids. Invisible while every reader GETs; it becomes a
+        // `boundary_source: null` the moment one HEADs.
+        boundary_source: m.boundary_source.clone(),
         posix: None,
     };
     Ok(store

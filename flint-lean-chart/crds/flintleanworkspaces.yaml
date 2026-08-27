@@ -118,8 +118,10 @@ spec:
                 nullable: true
                 type: integer
               fanout:
-                default: 16
-                description: Bounded upload/checkout concurrency (0b lever; default 16).
+                default: 32
+                description: |-
+                  Bounded upload/checkout concurrency (measured: useful ceiling is
+                  RTT / 375us, independent of file count; ~32 for same-region S3).
                 format: uint64
                 minimum: 0.0
                 type: integer

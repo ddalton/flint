@@ -177,9 +177,13 @@ impl SidecarState {
         serde_json::from_slice(&bytes).map_err(|e| LeanError::State(format!("baseline: {e}")))
     }
 
+    /// COMPACT: the baseline is the other O(files) document, rewritten
+    /// on the cadence tick and re-parsed several times per barrier. The
+    /// agent-facing O(1) files (gauges, capabilities, acks) stay pretty
+    /// — those exist to be `cat`-ed.
     pub fn save_baseline(&self, b: &Baseline) -> LeanResult<()> {
-        let bytes = serde_json::to_vec_pretty(b)
-            .map_err(|e| LeanError::State(format!("baseline: {e}")))?;
+        let bytes =
+            serde_json::to_vec(b).map_err(|e| LeanError::State(format!("baseline: {e}")))?;
         write_atomic(&self.dir.join(BASELINE), &bytes)
     }
 

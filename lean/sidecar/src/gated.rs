@@ -552,8 +552,21 @@ impl Sidecar {
             stage.last_citation_unix = now_unix();
         }
 
-        baseline.prev_scan = scanned.keys().cloned().collect();
-        self.state.save_baseline(&baseline)?;
+        // Mirror the cadence path's guard (barrier.rs, the no-change
+        // arm): `prev_scan` advances the two-consecutive-scans clock,
+        // but the baseline DOCUMENT is O(files) and this lane rewrote
+        // the whole thing every tick whether or not the scan set had
+        // moved — ~46 MB of emptyDir writeback per tick at the 250k cap,
+        // for an idle workspace. `prev_scan` is the ONLY field this
+        // function mutates, so the save is guarded on it alone.
+        // Both sides iterate in sorted order, so the sets compare
+        // without building one.
+        if scanned.len() != baseline.prev_scan.len()
+            || !scanned.keys().eq(baseline.prev_scan.iter())
+        {
+            baseline.prev_scan = scanned.keys().cloned().collect();
+            self.state.save_baseline(&baseline)?;
+        }
         self.save_stage(&stage)?;
         // D9: the same set, surfaced where a pure-spot replacement
         // cannot destroy it. Best-effort by construction — a failed

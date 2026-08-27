@@ -5976,3 +5976,65 @@ async fn measure_backlog_cap_footprint() {
         );
     }
 }
+
+
+/// T1.2's second half. `/status` reports the boundary source from the
+/// manifest OBJECT STAMP, so a writer that leaves the stamp behind
+/// makes the workspace report an unknown clock.
+///
+/// `rotate_for_takeover` clones the standing manifest and re-CASes it
+/// through `cas_write` — which passes `boundary_source: None`. The
+/// DOCUMENT carried the source through the clone; the STAMP did not.
+/// That is the GET/HEAD divergence `cas_write_stamped` documents as
+/// forbidden, and it was invisible for exactly as long as every
+/// reader used GET.
+#[tokio::test]
+async fn a_takeover_rotation_carries_the_boundary_stamp_with_the_document() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1");
+    sc.run_barrier().await.unwrap();
+
+    // Install a manifest that names its clock, the way a sentinel
+    // honor or a gated citation does.
+    let loaded = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    manifest::cas_write_stamped(
+        store.as_ref(),
+        &sc.cfg,
+        &loaded.manifest,
+        Some(&loaded.etag),
+        1,
+        "u-cited",
+        Some("sentinel"),
+    )
+    .await
+    .unwrap();
+
+    let head = store.head(&sc.cfg.manifest_key()).await.unwrap();
+    assert_eq!(
+        GenerationStamps::from_meta(&head.meta).unwrap().boundary_source.as_deref(),
+        Some("sentinel"),
+        "precondition: the cited manifest names its clock on the object"
+    );
+
+    // Now the successor rotates the fence.
+    manifest::rotate_for_takeover(store.as_ref(), &sc.cfg, 2).await.unwrap().unwrap();
+
+    let head = store.head(&sc.cfg.manifest_key()).await.unwrap();
+    let stamped = GenerationStamps::from_meta(&head.meta).unwrap();
+    let doc = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert_eq!(
+        stamped.boundary_source.as_deref(),
+        Some("sentinel"),
+        "rotation must not drop the boundary stamp: a HEAD reader would report an \
+         unknown clock for a workspace whose document still says `sentinel`"
+    );
+    assert_eq!(
+        stamped.boundary_source, doc.manifest.boundary_source,
+        "a reader that GETs and a reader that HEADs must never disagree"
+    );
+    assert_eq!(stamped.generation, doc.manifest.seq, "the stamped generation IS the seq");
+}

@@ -54,6 +54,33 @@ use std::collections::HashMap;
 /// Reflected form of the CRC-64/NVME polynomial 0xAD93D23594C935A9.
 const CRC64_NVME_POLY: u64 = 0x9A6C_9329_AC4B_C9B5;
 
+/// Slice-by-8: eight tables, so `update` consumes a u64 word per round
+/// instead of a byte. Table 0 is the classic byte table; table k is
+/// table k-1 advanced one more zero byte. Same polynomial, same digest
+/// — the catalog check value and the split-update property both pin it.
+///
+/// This is the checkout resume path's inner loop: a restarted container
+/// re-CRCs every present file before it can serve, so the byte-at-a-time
+/// form put a full tree re-hash on the agent-blocking path.
+fn crc64_tables8() -> &'static [[u64; 256]; 8] {
+    static TABLES: std::sync::OnceLock<[[u64; 256]; 8]> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| {
+        let mut t = [[0u64; 256]; 8];
+        t[0] = *crc64_table();
+        let mut i = 0usize;
+        while i < 256 {
+            let mut k = 1usize;
+            while k < 8 {
+                let prev = t[k - 1][i];
+                t[k][i] = (prev >> 8) ^ t[0][(prev & 0xFF) as usize];
+                k += 1;
+            }
+            i += 1;
+        }
+        t
+    })
+}
+
 fn crc64_table() -> &'static [u64; 256] {
     static TABLE: std::sync::OnceLock<[u64; 256]> = std::sync::OnceLock::new();
     TABLE.get_or_init(|| {
@@ -88,10 +115,29 @@ impl Crc64Nvme {
         Crc64Nvme(u64::MAX)
     }
     pub fn update(&mut self, data: &[u8]) {
-        let t = crc64_table();
-        for &b in data {
-            self.0 = t[((self.0 ^ b as u64) & 0xFF) as usize] ^ (self.0 >> 8);
+        let t = crc64_tables8();
+        let mut crc = self.0;
+        let mut rest = data;
+        // Eight bytes per round off the aligned body...
+        while let Some((head, tail)) = rest.split_first_chunk::<8>() {
+            let w = u64::from_le_bytes(*head) ^ crc;
+            crc = t[7][(w & 0xFF) as usize]
+                ^ t[6][((w >> 8) & 0xFF) as usize]
+                ^ t[5][((w >> 16) & 0xFF) as usize]
+                ^ t[4][((w >> 24) & 0xFF) as usize]
+                ^ t[3][((w >> 32) & 0xFF) as usize]
+                ^ t[2][((w >> 40) & 0xFF) as usize]
+                ^ t[1][((w >> 48) & 0xFF) as usize]
+                ^ t[0][((w >> 56) & 0xFF) as usize];
+            rest = tail;
         }
+        // ...then the <8-byte tail, byte-at-a-time as before. `update`
+        // is a STREAMING call: the tail runs per chunk, so an arbitrary
+        // split must give the same digest as one pass. The test pins it.
+        for &b in rest {
+            crc = t[0][((crc ^ b as u64) & 0xFF) as usize] ^ (crc >> 8);
+        }
+        self.0 = crc;
     }
     pub fn finalize(self) -> u64 {
         self.0 ^ u64::MAX
@@ -693,6 +739,47 @@ mod tests {
         c.update(b"56789");
         assert_eq!(c.finalize(), 0xAE8B_1486_0A79_9888);
         assert_eq!(crc64_nvme(b""), 0);
+    }
+
+    #[test]
+    fn crc64_slice_by_8_agrees_with_the_byte_at_a_time_form() {
+        // `update` consumes 8-byte words with a byte-at-a-time tail, and
+        // it is a STREAMING call — so the word/tail boundary can land
+        // anywhere a caller happens to split. That makes split ALIGNMENT
+        // load-bearing in a way the 4/5 split above never exercised:
+        // every arbitrary split must give the one-shot digest.
+        fn byte_at_a_time(data: &[u8]) -> u64 {
+            let t = crc64_table();
+            let mut crc = u64::MAX;
+            for &b in data {
+                crc = t[((crc ^ b as u64) & 0xFF) as usize] ^ (crc >> 8);
+            }
+            crc ^ u64::MAX
+        }
+        let data: Vec<u8> =
+            (0..1000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+
+        // Every length across the word boundary, against the reference.
+        for n in 0..40usize {
+            assert_eq!(crc64_nvme(&data[..n]), byte_at_a_time(&data[..n]), "len {n}");
+        }
+        assert_eq!(crc64_nvme(&data), byte_at_a_time(&data));
+
+        // Every single split point of the full buffer.
+        let want = crc64_nvme(&data);
+        for cut in 0..data.len() {
+            let mut c = Crc64Nvme::new();
+            c.update(&data[..cut]);
+            c.update(&data[cut..]);
+            assert_eq!(c.finalize(), want, "split at {cut}");
+        }
+
+        // A three-way split at two unaligned points.
+        let mut c = Crc64Nvme::new();
+        c.update(&data[..13]);
+        c.update(&data[13..457]);
+        c.update(&data[457..]);
+        assert_eq!(c.finalize(), want);
     }
 
     #[test]

@@ -33,6 +33,13 @@ pub struct CheckoutReport {
     /// `.flint/` paths, containment refusals). Never a silent drop:
     /// each has a conflict record.
     pub refused: usize,
+    /// Phase attribution for the agent-blocking path. Without these the
+    /// checkout wall clock cannot be split between the manifest GET,
+    /// the fan-out fetch window, and the local commit — which is the
+    /// one fact any read-path decision here rests on.
+    pub manifest_secs: f64,
+    pub fetch_secs: f64,
+    pub commit_secs: f64,
 }
 
 /// CRC-64/NVME of a local file, in the same base64 form the manifest
@@ -65,7 +72,9 @@ impl Sidecar {
             return Ok(report);
         }
 
+        let t_start = std::time::Instant::now();
         let loaded = manifest::load(self.store.as_ref(), &self.cfg).await?;
+        report.manifest_secs = t_start.elapsed().as_secs_f64();
         let mut baseline = self.state.load_baseline()?;
         let (m, metag) = match loaded {
             Some(l) => (l.manifest, Some(l.etag)),
@@ -102,15 +111,47 @@ impl Sidecar {
             refused: Option<String>,
         }
         let mut present: BTreeSet<String> = BTreeSet::new();
+        let t_fetch = std::time::Instant::now();
+        // LARGEST FIRST. `m.entries` is a BTreeMap, so iterating it
+        // admits in PATH order, which appends the biggest object's
+        // transfer to the tail of the fan-out window: a multi-GiB
+        // checkpoint whose name sorts late is a whole transfer of pure
+        // makespan after every other slot has drained. Longest-
+        // processing-time-first bounds that at (4/3 - 1/3k) x optimal.
+        // `size` is already in the entry, so this costs no request and
+        // one sort; on a size-uniform tree it is exactly a no-op.
+        //
+        // Nothing downstream may depend on admission order:
+        // `buffer_unordered` already yields in COMPLETION order, and the
+        // budget refusals above ran over the whole map before this.
+        let mut admission: Vec<(&String, &super::manifest::LeanEntry)> =
+            m.entries.iter().collect();
+        admission.sort_unstable_by(|a, b| b.1.size.cmp(&a.1.size).then_with(|| a.0.cmp(b.0)));
+        // The in-flight BYTE bound (see `fetch_inflight_max_bytes`).
+        // Permits are 1 MiB units; an entry larger than the whole budget
+        // clamps to the budget rather than deadlocking on a permit count
+        // the semaphore can never grant.
+        const FETCH_UNIT: u64 = 1 << 20;
+        let budget_units =
+            (self.cfg.fetch_inflight_max_bytes / FETCH_UNIT).clamp(1, u32::MAX as u64) as u32;
+        let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(budget_units as usize));
         let results: Vec<LeanResult<Fetched>> = {
             use futures::stream::{self, StreamExt};
             let this: &super::Sidecar = &*self;
             let pinned = m.pinned_reads;
-            stream::iter(m.entries.iter().map(|(path, entry)| {
+            stream::iter(admission.into_iter().map(|(path, entry)| {
                 let store = this.store.clone();
                 let root = this.cfg.root.clone();
                 let local = this.cfg.root.join(path);
+                let gate = gate.clone();
+                let want =
+                    entry.size.div_ceil(FETCH_UNIT).clamp(1, budget_units as u64) as u32;
                 async move {
+                    // Held until this entry's bytes have reached disk.
+                    let _permit = gate
+                        .acquire_many(want)
+                        .await
+                        .map_err(|_| LeanError::State("fetch budget closed".into()))?;
                     // D0.3: a legacy `files/.flint/...` citation is
                     // never materialized (it would collide with the
                     // control files); it stays cited and a conflict
@@ -279,6 +320,8 @@ impl Sidecar {
             .collect()
             .await
         };
+        report.fetch_secs = t_fetch.elapsed().as_secs_f64();
+        let t_commit = std::time::Instant::now();
         for r in results {
             let f = r?;
             if let Some(why) = f.refused {
@@ -320,6 +363,7 @@ impl Sidecar {
         self.write_gauges(false, None)?;
         // The marker is written LAST: the agent-start gate.
         self.state.write_marker()?;
+        report.commit_secs = t_commit.elapsed().as_secs_f64();
         Ok(report)
     }
 }

@@ -197,6 +197,16 @@ pub struct LeanConfig {
     /// rig measured the sequential loops at 561-854 PUTs/s and
     /// 1,000-2,000 GETs/s; fan-out multiplies directly against those.
     pub fanout: usize,
+    /// Ceiling on bytes in flight across the checkout fan-out window.
+    ///
+    /// `fanout` bounds the number of concurrent fetches but NOT their
+    /// size, and `get_whole` holds each whole object in RAM before it
+    /// reaches disk — so peak RSS was `fanout x largest object`, an
+    /// unbounded product of two numbers nobody sets together. A 32-wide
+    /// window over 64 MiB objects is 2 GiB in a sidecar that ships with
+    /// no memory limit at all. Each entry takes permits proportional to
+    /// its size, so small-file trees still run the full width.
+    pub fetch_inflight_max_bytes: u64,
 
     // --- boundary verbs (plan docs/plans/flint-lean-boundary-verbs-plan.md) ---
     /// Citation policy. Default `hybrid` ≡ today's behavior when the
@@ -238,7 +248,8 @@ impl LeanConfig {
             max_bytes: 0,
             max_files: 0,
             window_slack_secs: 180,
-            fanout: 16,
+            fanout: 32,
+            fetch_inflight_max_bytes: 512 * 1024 * 1024,
             boundary_mode: BoundaryMode::Hybrid,
             sentinel_mode: SentinelMode::Auto,
             sentinel_min_interval_secs: 5,
