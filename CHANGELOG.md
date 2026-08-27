@@ -10,6 +10,36 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [1.41.1] - 2026-08-27
+
+**Supersedes 1.41.0, which was tagged but never published.** The
+in-flight byte bound 1.41.0 introduced was not reachable: the sidecar
+read `FLINT_SYNC_FETCH_INFLIGHT_MB`, but the webhook — which builds the
+sidecar's entire environment — never stamped it, and no CR field carried
+it. Every workspace ran the binary default and there was no place a user
+could change it. The changelog called it tunable; it was not.
+
+Install 1.41.1. No `flint-lean` images were ever pushed for 1.41.0.
+
+### Fixed
+
+- **`spec.fetchInflightMb`** (default 512) now exists on
+  `FlintLeanWorkspace` and the webhook stamps it, so the knob the
+  read-path release headlines is actually settable. Declaring it env-only
+  instead was considered and rejected: the webhook owns the sidecar's
+  environment, so "env-only" in the operator path means *unsettable*, and
+  putting it in the guard test's exceptions list would have documented a
+  dead knob rather than a deliberate one.
+
+This is the same class as the fan-out default the release itself fixed —
+a value that exists in the binary and cannot be reached from the CR — and
+it shipped in the very commit that fixed the other half. The repo's own
+guard test, `every_knob_the_sidecar_reads_is_stamped_by_the_webhook`,
+names exactly this and was red at `v1.41.0`; it had not been run after
+the perf commit, because lean work runs the lean crate's battery and
+never the operator's. Green now, with the whole hub suite: 1973 passed,
+0 failed.
+
 ## [1.41.0] - 2026-08-27
 
 **A lean-scoped read-path release: the agent-blocking checkout, measured
@@ -39,7 +69,8 @@ is a rule for when to change it.
   the API server applies that default when a workspace omits the field,
   so the Rust constant alone would have shipped inert).
 - **An in-flight byte bound on the checkout window**, default 512 MiB,
-  tunable with `FLINT_SYNC_FETCH_INFLIGHT_MB`. `fanout` bounded the
+  tunable with `spec.fetchInflightMb` (see 1.41.1 — as shipped in
+  1.41.0 the knob was NOT reachable). `fanout` bounded the
   number of concurrent fetches but never their size, and each whole
   object is held in RAM before it reaches disk — so peak RSS was
   `fanout × largest object`, an unbounded product, in a sidecar that
@@ -2920,6 +2951,7 @@ neither tag represents a supported upgrade source.
 No security advisories at this release.
 
 [Unreleased]: https://github.com/ddalton/flint/compare/v1.35.1...HEAD
+[1.41.1]: https://github.com/ddalton/flint/compare/v1.41.0...v1.41.1
 [1.41.0]: https://github.com/ddalton/flint/compare/v1.39.0...v1.41.0
 # 1.40.0 was cut AFTER 1.41.0 (which reserved the number), so it is
 # compared against v1.41.0 rather than v1.39.0 — that diff is the

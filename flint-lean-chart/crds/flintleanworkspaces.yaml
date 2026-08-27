@@ -125,6 +125,17 @@ spec:
                 format: uint64
                 minimum: 0.0
                 type: integer
+              fetchInflightMb:
+                default: 512
+                description: |-
+                  Ceiling on bytes in flight across the checkout fan-out window, MiB.
+                  `fanout` bounds how MANY objects are fetched at once but not how
+                  big they are, and each is held whole in RAM before it reaches
+                  disk, so peak RSS is the product of the two. Sized against the
+                  sidecar's memory limit, not its CPU.
+                format: uint64
+                minimum: 0.0
+                type: integer
               floorSecs:
                 default: 60
                 description: 'Publish cadence floor, seconds: the durability (RPO) contract.'

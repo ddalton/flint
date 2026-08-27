@@ -76,6 +76,14 @@ pub struct FlintLeanWorkspaceSpec {
     #[serde(default = "default_fanout")]
     pub fanout: u64,
 
+    /// Ceiling on bytes in flight across the checkout fan-out window, MiB.
+    /// `fanout` bounds how MANY objects are fetched at once but not how
+    /// big they are, and each is held whole in RAM before it reaches
+    /// disk, so peak RSS is the product of the two. Sized against the
+    /// sidecar's memory limit, not its CPU.
+    #[serde(default = "default_fetch_inflight_mb")]
+    pub fetch_inflight_mb: u64,
+
     /// emptyDir sizeLimit for the workspace volume, GiB. 0 = no limit.
     #[serde(default = "default_size_limit_gib")]
     pub size_limit_gib: u64,
@@ -257,6 +265,9 @@ fn default_fanout() -> u64 {
     // chain is blocking `std::fs` driven from ONE runtime task, so past
     // ~32 the extra width queues on that task instead of the wire.
     32
+}
+fn default_fetch_inflight_mb() -> u64 {
+    512
 }
 fn default_size_limit_gib() -> u64 {
     20

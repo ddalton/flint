@@ -143,6 +143,7 @@ pub fn inject_sidecar(
         ev("FLINT_SYNC_MAX_BYTES", &s.max_bytes.to_string()),
         ev("FLINT_SYNC_MAX_FILES", &s.max_files.to_string()),
         ev("FLINT_SYNC_FANOUT", &s.fanout.to_string()),
+        ev("FLINT_SYNC_FETCH_INFLIGHT_MB", &s.fetch_inflight_mb.to_string()),
         // Boundary verbs (§2.6). Every one of these is stamped
         // unconditionally, defaults included: the sidecar reads a FIXED
         // env list, so a knob that is only stamped when it differs from
