@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1
+# flint-passthrough-mounter — the FUSE mounter the passthrough webhook
+# injects. NOT `flint-passthrough`: that Docker Hub repo holds the Helm
+# chart as an OCI artifact, and one repo cannot sanely hold both.
+#
+#   docker build --platform linux/arm64 -f docker/Dockerfile.passthrough \
+#     -t dilipdalton/flint-passthrough-mounter:<tag>-arm64 .
+#
+# WHY OUR OWN IMAGE. Mountpoint for S3 publishes no official container
+# image, so the alternative is defaulting a chart to somebody's
+# unpinned personal build — in a PRIVILEGED container. This one carries
+# one mounter, from AWS's own pinned .deb, and nothing else.
+#
+# This image carries a shell ON PURPOSE (the injected startupProbe
+# execs `grep` over /proc/mounts, and the launcher is `sh -c`),
+# unlike the operator image which carries nothing.
+FROM debian:bookworm-slim
+
+ARG TARGETARCH
+# Pinned, not `latest`. A moving mounter version inside a privileged
+# container is a change nobody in this chart's release notes chose.
+ARG MOUNT_S3_VERSION=1.24.0
+
+RUN set -eux; \
+    apt-get update; \
+    # `fuse` explicitly, not merely as mount-s3's dependency: it is
+    # what provides /etc/fuse.conf and the `fusermount` the injected
+    # stale-mount cleanup calls. A dependency that stops being one is
+    # a pod that cannot clear its own corpse.
+    apt-get install -y --no-install-recommends \
+        fuse ca-certificates curl; \
+    case "$TARGETARCH" in \
+        amd64) ma=x86_64 ;; \
+        arm64) ma=arm64 ;; \
+        *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/mount-s3.deb \
+        "https://s3.amazonaws.com/mountpoint-s3-release/${MOUNT_S3_VERSION}/${ma}/mount-s3-${MOUNT_S3_VERSION}-${ma}.deb"; \
+    apt-get install -y --no-install-recommends /tmp/mount-s3.deb; \
+    rm -f /tmp/mount-s3.deb; \
+    rm -rf /var/lib/apt/lists/*; \
+    # allow_other lets the APP container's uid traverse a mount made by
+    # root in the sidecar. Without it the mount exists and everything
+    # in it is EACCES to the workload, which reads as a bucket policy
+    # problem and is not one.
+    echo user_allow_other >> /etc/fuse.conf; \
+    # Fail the BUILD, not a pod at 3am, if the mounter or the tools the
+    # injected launcher calls are missing.
+    mount-s3 --version; \
+    command -v fusermount; \
+    command -v grep
+
+# No ENTRYPOINT: the webhook supplies command+args. An ENTRYPOINT here
+# would only be something to override.
+CMD ["/bin/sh", "-c", "echo 'flint-passthrough-mounter: run me via the flint-passthrough webhook' >&2; exit 1"]

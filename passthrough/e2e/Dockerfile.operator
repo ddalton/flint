@@ -1,0 +1,7 @@
+# e2e image only. USER 65532 because the chart runs the webhook with
+# runAsNonRoot: true — a root-by-default base fails to start with a
+# kubelet message about the IMAGE, which names nothing useful.
+FROM busybox:stable
+COPY flint-passthrough-operator /usr/local/bin/flint-passthrough-operator
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/flint-passthrough-operator"]

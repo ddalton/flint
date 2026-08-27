@@ -1,0 +1,121 @@
+# Two mounts of one prefix (read-write and read-only), a second prefix as
+# A2b's falsifiability fixture, and the pods that opt into them. One
+# label per pod: the webhook injects exactly one mount, by design.
+apiVersion: flint.io/v1alpha1
+kind: FlintPassthroughMount
+metadata:
+  name: datasets
+  namespace: pt-agents
+spec:
+  bucket: ptbucket
+  keyPrefix: datasets/imagenet
+  endpoint: http://minio.flint-system.svc:9000
+  credentialsSecretRef: minio-creds
+  region: us-east-1
+  mountPath: /mnt/s3
+---
+apiVersion: flint.io/v1alpha1
+kind: FlintPassthroughMount
+metadata:
+  name: datasets-ro
+  namespace: pt-agents
+spec:
+  bucket: ptbucket
+  keyPrefix: datasets/imagenet
+  endpoint: http://minio.flint-system.svc:9000
+  credentialsSecretRef: minio-creds
+  region: us-east-1
+  mountPath: /mnt/ro
+  readOnly: true
+---
+# The reader pods run as NON-ROOT on purpose: `allow_other` in the
+# mounter is what lets them traverse a mount made by root, and without
+# it every read is EACCES while the mount itself looks perfectly
+# healthy.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: reader
+  namespace: pt-agents
+  labels: { "flint.io/passthrough-mount": datasets }
+spec:
+  securityContext: { runAsNonRoot: true, runAsUser: 1001 }
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c"]
+      args: ["trap 'exit 0' TERM INT; sleep 86400 & wait"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: reader-ro
+  namespace: pt-agents
+  labels: { "flint.io/passthrough-mount": datasets-ro }
+spec:
+  securityContext: { runAsNonRoot: true, runAsUser: 1001 }
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c"]
+      args: ["trap 'exit 0' TERM INT; sleep 86400 & wait"]
+---
+# No label: the webhook must not touch it at all.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nolabel
+  namespace: pt-agents
+spec:
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c"]
+      args: ["trap 'exit 0' TERM INT; sleep 86400 & wait"]
+---
+# The falsifiability fixture: a SECOND mount of the SAME bucket at a
+# DIFFERENT prefix. If A2's reader were reading anything other than the
+# prefix its CR names — a stale local directory, the bucket root, some
+# other pod's mount — this pod would see the same eleven files. It must
+# see exactly one, with different bytes.
+apiVersion: flint.io/v1alpha1
+kind: FlintPassthroughMount
+metadata:
+  name: elsewhere
+  namespace: pt-agents
+spec:
+  bucket: ptbucket
+  keyPrefix: elsewhere
+  endpoint: http://minio.flint-system.svc:9000
+  credentialsSecretRef: minio-creds
+  region: us-east-1
+  mountPath: /mnt/s3
+  readOnly: true
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: reader-else
+  namespace: pt-agents
+  labels: { "flint.io/passthrough-mount": elsewhere }
+spec:
+  securityContext: { runAsNonRoot: true, runAsUser: 1001 }
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c"]
+      args: ["trap 'exit 0' TERM INT; sleep 86400 & wait"]
+---
+apiVersion: flint.io/v1alpha1
+kind: FlintPassthroughMount
+metadata:
+  name: datasets
+  namespace: pt-restricted
+spec:
+  bucket: ptbucket
+  keyPrefix: datasets/imagenet
+  endpoint: http://minio.flint-system.svc:9000
+  credentialsSecretRef: minio-creds
+  region: us-east-1
+  mountPath: /mnt/s3
+  readOnly: true

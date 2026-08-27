@@ -1,0 +1,29 @@
+apiVersion: v2
+name: flint-passthrough
+description: >-
+  Mount an S3 prefix into a pod with Mountpoint for S3, injected by a
+  mutating webhook. One FlintPassthroughMount per bucket subtree, one
+  label on the pod, and no control plane behind it: no checkout, no
+  manifest, no claim, no publish boundary, no controller. Reads are
+  fast and lazy; writes are whole new objects, with no rename, no
+  append and no in-place modification at any setting. The sidecar is
+  PRIVILEGED — see values.yaml.
+type: application
+
+# Chart version, independent of the flint release train.
+version: 0.1.0
+
+# The flint release whose operator image carries
+# flint-passthrough-operator, and whose tag the mounter image also
+# takes. 1.40.0 was RESERVED for this front end by the 1.41.0 release
+# rather than claimed by it, which is why this number sits below the
+# tag that precedes it in time.
+appVersion: "1.40.0"
+
+keywords:
+  - s3
+  - fuse
+  - mountpoint-s3
+  - passthrough
+  - flint
+home: https://github.com/ddalton/flint

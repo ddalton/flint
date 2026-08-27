@@ -39,13 +39,17 @@ chart_dir="$repo_root/flint-csi-driver-chart"
 
 cmd=${1:-check}
 case "$cmd" in check|images|chart|all) ;; *)
-    echo "usage: $0 [check|images|chart|all] [all|lean] [--force-republish]" >&2; exit 2 ;;
+    echo "usage: $0 [check|images|chart|all] [all|lean|passthrough] [--force-republish]" >&2; exit 2 ;;
 esac
 
 # SCOPE, matching stage-prebuilt.sh and publish-images.sh. A lean-scoped
 # release (the 1.38.0/1.39.0 shape) publishes the flint-lean chart and
 # the two images it pulls; the CSI, lite and lite-operator charts are
-# untouched and must not be republished. Adding the scope to the image
+# untouched and must not be republished. A passthrough-scoped release
+# (the 1.40.0 shape) is the same idea for the third front end: the
+# flint-passthrough chart, the shared operator image, and the mounter.
+#
+# Adding the scope to the image
 # scripts and NOT here is how the 1.39.0 release re-pushed three
 # unrelated charts at their EXISTING versions — see push_chart below for
 # why that is not harmless.
@@ -60,9 +64,10 @@ shift || true
 for a in "$@"; do
     case "$a" in
         lean) scope=lean ;;
+        passthrough) scope=passthrough ;;
         all)  scope=all ;;
         --force-republish) force_republish=1 ;;
-        *) echo "unknown argument '$a' — usage: $0 [check|images|chart|all] [all|lean] [--force-republish]" >&2
+        *) echo "unknown argument '$a' — usage: $0 [check|images|chart|all] [all|lean|passthrough] [--force-republish]" >&2
            exit 2 ;;
     esac
 done
@@ -142,6 +147,20 @@ push_chart() {  # <scopes> <name> <version> <tgz>
     echo "chart $name $version released."
 }
 
+# True when the active scope is in the given list.
+#
+# The chart GATES need this as much as push_chart does, and for a
+# reason that only showed up once a second scope existed: every gate
+# below runs unconditionally and EXITS on failure, so a chart that is
+# out of scope can abort a release it has nothing to do with. Live
+# example — the flint-lean chart's appVersion is 1.41.0 and its images
+# are a pending publish, so a passthrough-scoped `chart` run died on
+# lean's gate and never reached the passthrough chart at all. Scoping
+# the push in 1.39.0 fixed half of this; this is the other half.
+in_scope() {  # <space-separated scopes>
+    case " $1 " in *" $scope "*) return 0 ;; *) return 1 ;; esac
+}
+
 tag_digest() {  # <name> <tag> -> the manifest-list digest, or empty
     curl -fsS "https://hub.docker.com/v2/repositories/$hub_ns/$1/tags/$2" 2>/dev/null \
         | python3 -c 'import json,sys; print(json.load(sys.stdin).get("digest") or "")' 2>/dev/null
@@ -189,6 +208,10 @@ fi
 
 # --- chart: verify everything again, then package + push ---------------------
 if [ "$cmd" = chart ] || [ "$cmd" = all ]; then
+    pkg_dir=$(mktemp -d)
+    trap 'rm -rf "$pkg_dir"' EXIT
+
+    if in_scope "all"; then
     while read -r name tag ctx file; do
         [ -n "$name" ] || continue
         if ! tag_exists "$name" "$tag"; then
@@ -199,15 +222,15 @@ if [ "$cmd" = chart ] || [ "$cmd" = all ]; then
     done <<EOF
 $images_table
 EOF
-    pkg_dir=$(mktemp -d)
-    trap 'rm -rf "$pkg_dir"' EXIT
     helm package "$chart_dir" --destination "$pkg_dir" >/dev/null
     pkg="$pkg_dir/flint-csi-driver-chart-$chart_version.tgz"
     push_chart "all" flint-csi-driver-chart "$chart_version" "$pkg"
+    fi
 
     # The flint-lite chart ships alongside as its OWN OCI artifact
     # (independent version; its appVersion pins the flint-pnfs tag, which
     # the gate above already verified via the pnfs image row).
+    if in_scope "all"; then
     lite_dir="$repo_root/flint-lite-chart"
     lite_version=$(python3 -c "import yaml; print(yaml.safe_load(open('$repo_root/flint-lite-chart/Chart.yaml'))['version'])")
     lite_app=$(python3 -c "import yaml; print(yaml.safe_load(open('$repo_root/flint-lite-chart/Chart.yaml'))['appVersion'])")
@@ -218,6 +241,7 @@ EOF
     helm package "$lite_dir" --destination "$pkg_dir" >/dev/null
     lite_pkg="$pkg_dir/flint-lite-$lite_version.tgz"
     push_chart "all" flint-lite "$lite_version" "$lite_pkg"
+    fi
 
     # The flint-lite OPERATOR chart, likewise its own artifact. Two
     # images must exist for it to be installable: its own (the
@@ -226,7 +250,7 @@ EOF
     # fleet of ImagePullBackOff, which is the 1.2.0 bug this script
     # exists to prevent, one level up.
     op_dir="$repo_root/flint-lite-operator-chart"
-    if [ -d "$op_dir" ]; then
+    if [ -d "$op_dir" ] && in_scope "all"; then
         op_version=$(python3 -c "import yaml; print(yaml.safe_load(open('$op_dir/Chart.yaml'))['version'])")
         op_app=$(python3 -c "import yaml; print(yaml.safe_load(open('$op_dir/Chart.yaml'))['appVersion'])")
         for img in flint-lite-operator flint-pnfs; do
@@ -265,7 +289,7 @@ EOF
     # the webhook injects it, so an unpublished sidecar is a fleet of
     # pods that never start, with the operator itself perfectly healthy.
     lean_dir="$repo_root/flint-lean-chart"
-    if [ -d "$lean_dir" ]; then
+    if [ -d "$lean_dir" ] && in_scope "all lean"; then
         lean_version=$(python3 -c "import yaml; print(yaml.safe_load(open('$lean_dir/Chart.yaml'))['version'])")
         lean_app=$(python3 -c "import yaml; print(yaml.safe_load(open('$lean_dir/Chart.yaml'))['appVersion'])")
         lean_op_img=$(python3 -c "import yaml; print(yaml.safe_load(open('$lean_dir/values.yaml'))['image']['name'])")
@@ -349,5 +373,99 @@ EOF
         helm package "$lean_dir" --destination "$pkg_dir" >/dev/null
         lean_pkg="$pkg_dir/flint-lean-$lean_version.tgz"
         push_chart "all lean" flint-lean "$lean_version" "$lean_pkg"
+    fi
+
+    # The flint-passthrough chart. Two images again, and the same two
+    # QUESTIONS as lean — is the tag published, and does the image
+    # actually carry what the chart runs — but the second image is a
+    # different kind of thing: the mounter carries no flint binary at
+    # all, and it is what a PRIVILEGED sidecar in every opted-in pod
+    # executes. So the recipe checks below are about the mounter being
+    # the thing this repo builds, pinned, rather than someone's image
+    # that happens to answer to the name.
+    pt_dir="$repo_root/flint-passthrough-chart"
+    if [ -d "$pt_dir" ] && in_scope "all passthrough"; then
+        pt_version=$(python3 -c "import yaml; print(yaml.safe_load(open('$pt_dir/Chart.yaml'))['version'])")
+        pt_app=$(python3 -c "import yaml; print(yaml.safe_load(open('$pt_dir/Chart.yaml'))['appVersion'])")
+        pt_op_img=$(python3 -c "import yaml; print(yaml.safe_load(open('$pt_dir/values.yaml'))['image']['name'])")
+        pt_sc_img=$(python3 -c "import yaml; print(yaml.safe_load(open('$pt_dir/values.yaml'))['sidecarImage']['name'])")
+        for img in "$pt_op_img" "$pt_sc_img"; do
+            if ! tag_exists "$img" "$pt_app"; then
+                echo "REFUSING to push flint-passthrough $pt_version:" \
+                     "$hub_ns/$img:$pt_app is not on Docker Hub." >&2
+                exit 1
+            fi
+        done
+        # The binary the chart EXECS must be in the image it pulls —
+        # the flint-lean lesson, and this chart makes exactly the same
+        # bet: it runs a NON-DEFAULT binary out of a shared image, so
+        # the image can be perfectly healthy and the command not exist.
+        op_recipe="$repo_root/spdk-csi-driver/docker/Dockerfile.operator.prebuilt"
+        if ! grep -q '/usr/local/bin/flint-passthrough-operator' "$op_recipe"; then
+            echo "REFUSING to push flint-passthrough $pt_version: the chart execs" \
+                 "/usr/local/bin/flint-passthrough-operator but $(basename "$op_recipe")" \
+                 "does not install it — the image would start and the binary would not exist." >&2
+            exit 1
+        fi
+        # ...and the lean-named alias must BE the lite image, same as
+        # above: this chart pulls the alias too.
+        if [ "$pt_op_img" != flint-lite-operator ]; then
+            pt_alias_d=$(tag_digest "$pt_op_img" "$pt_app")
+            pt_src_d=$(tag_digest flint-lite-operator "$pt_app")
+            if [ -z "$pt_alias_d" ] || [ -z "$pt_src_d" ] || [ "$pt_alias_d" != "$pt_src_d" ]; then
+                echo "REFUSING to push flint-passthrough $pt_version:" \
+                     "$hub_ns/$pt_op_img:$pt_app ('${pt_alias_d:-unreadable}') is not the same" \
+                     "image as $hub_ns/flint-lite-operator:$pt_app ('${pt_src_d:-unreadable}')." \
+                     "Republish with scripts/publish-images.sh, which aliases rather than rebuilds." >&2
+                exit 1
+            fi
+            echo "  ✓ $hub_ns/$pt_op_img:$pt_app is $hub_ns/flint-lite-operator:$pt_app ($pt_src_d)"
+        fi
+        # The MOUNTER image. Three things it must have, each one a pod
+        # that fails in a way that names nothing if it is missing:
+        #   · mount-s3        — there is no other mounter now.
+        #   · a PINNED version — a moving mounter inside a privileged
+        #     container is a change nobody's release notes chose.
+        #   · fusermount + a shell — the injected launcher is `sh -c`,
+        #     and the stale-mount cleanup that keeps a restarted sidecar
+        #     from mounting over its own corpse calls fusermount.
+        pt_recipe="$repo_root/spdk-csi-driver/docker/Dockerfile.passthrough"
+        if [ ! -f "$pt_recipe" ]; then
+            echo "REFUSING to push flint-passthrough $pt_version: no build recipe for the" \
+                 "mounter image ($pt_recipe)." >&2
+            exit 1
+        fi
+        if ! grep -q 'mount-s3' "$pt_recipe"; then
+            echo "REFUSING to push flint-passthrough $pt_version: $(basename "$pt_recipe")" \
+                 "installs no mount-s3 — the sidecar's launcher execs it." >&2
+            exit 1
+        fi
+        if ! grep -qE '^ARG MOUNT_S3_VERSION=[0-9]' "$pt_recipe"; then
+            echo "REFUSING to push flint-passthrough $pt_version: $(basename "$pt_recipe")" \
+                 "does not PIN a mount-s3 version — a moving mounter version inside a" \
+                 "privileged container is not a change this release chose." >&2
+            exit 1
+        fi
+        if ! grep -q 'command -v fusermount' "$pt_recipe"; then
+            echo "REFUSING to push flint-passthrough $pt_version: $(basename "$pt_recipe")" \
+                 "does not verify fusermount is present; the injected stale-mount cleanup" \
+                 "calls it, and without it a restarted sidecar mounts over its own corpse." >&2
+            exit 1
+        fi
+        # The CRD is HAND-WRITTEN here (the spec is plain serde, not a
+        # schemars derive), so there is no crdgen to diff against. The
+        # equivalent gate is a unit test that compares the shipped CRD's
+        # properties against the struct's fields in both directions —
+        # run it, because a drift in either direction is silent: a
+        # pruned field is a knob that does nothing, and an extra CRD
+        # property denies every pod that opts into the mount.
+        ( cd "$repo_root/spdk-csi-driver" \
+          && cargo test --quiet --lib passthrough::spec:: >/dev/null 2>&1 ) || {
+            echo "REFUSING to push flint-passthrough $pt_version: the CRD/spec parity tests" \
+                 "fail. Run: cargo test --lib passthrough::spec::" >&2
+            exit 1; }
+        helm package "$pt_dir" --destination "$pkg_dir" >/dev/null
+        pt_pkg="$pkg_dir/flint-passthrough-$pt_version.tgz"
+        push_chart "all passthrough" flint-passthrough "$pt_version" "$pt_pkg"
     fi
 fi

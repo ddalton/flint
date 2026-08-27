@@ -1,0 +1,163 @@
+# FlintPassthroughMount — the argument list for a FUSE mount.
+#
+# There is no controller behind this CR and no status: nothing about a
+# passthrough mount converges. (Nothing here can repair a mount either:
+# if the mounter crashes, containers already running in the pod are
+# stranded on a dead FUSE connection and the pod must be recreated.) The mutating webhook reads it once, at
+# pod admission, and turns it into a sidecar. That is the whole
+# lifecycle.
+#
+# NOTE ON UPGRADES: Helm applies crds/ on INSTALL ONLY and never on
+# upgrade. If a later chart version adds a field here, apply this file
+# by hand:
+#   kubectl apply -f flint-passthrough-chart/crds/flintpassthroughmounts.yaml
+# The webhook refuses a spec it cannot parse rather than defaulting it,
+# so a stale CRD shows up as a denied pod naming the field — not as a
+# mount with a silently wrong shape.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: flintpassthroughmounts.flint.io
+spec:
+  group: flint.io
+  scope: Namespaced
+  names:
+    kind: FlintPassthroughMount
+    listKind: FlintPassthroughMountList
+    plural: flintpassthroughmounts
+    singular: flintpassthroughmount
+    shortNames: [fpm]
+    categories: [flint]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - { name: Bucket, type: string, jsonPath: .spec.bucket }
+        - { name: Prefix, type: string, jsonPath: .spec.keyPrefix }
+        - { name: Mount, type: string, jsonPath: .spec.mountPath }
+        - { name: RO, type: boolean, jsonPath: .spec.readOnly }
+        - { name: Age, type: date, jsonPath: .metadata.creationTimestamp }
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >-
+            An S3 prefix, mounted into every pod labelled
+            flint.io/passthrough-mount with this CR's name, by
+            Mountpoint for S3. Passthrough only: no cache, no manifest,
+            no publish boundary, and no coordination between pods
+            sharing it. Writes are sequential writes to whole objects —
+            no rename, no append, no in-place modification, at any
+            setting. A pod that needs those wants flint-lean.
+          properties:
+            spec:
+              type: object
+              required: [bucket]
+              properties:
+                bucket:
+                  type: string
+                  description: The bucket to mount.
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{1,253}$'
+                keyPrefix:
+                  type: string
+                  description: >-
+                    Object key prefix to mount as the root. An object
+                    KEY prefix, not a path — no leading slash.
+                  pattern: '^([^/].*)?$'
+                  x-kubernetes-validations:
+                    - rule: "!self.contains('..')"
+                      message: keyPrefix must not contain a .. segment
+                endpoint:
+                  type: string
+                  description: >-
+                    S3 endpoint override (MinIO, Ceph RGW, the lean
+                    proxy). Unset means AWS S3.
+                  pattern: '^https?://.+$'
+                region:
+                  type: string
+                mountPath:
+                  type: string
+                  description: >-
+                    Where the bucket appears inside the pod. Refused if
+                    any container in the pod already mounts it.
+                  default: /mnt/s3
+                  pattern: '^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$'
+                # A TOMBSTONE, not a leftover. Removing the field
+                # outright would have the API server PRUNE it: a CR
+                # asking for s3fs would be stored without the ask and
+                # mounted with a write model it did not choose — no
+                # rename, no append — and the first sign of it would be
+                # a workload failing at 3am. Declared-and-refused turns
+                # that into `kubectl apply` naming the field. The
+                # webhook's deny_unknown_fields is the second gate, for
+                # a CR stored while an older CRD was installed.
+                driver:
+                  type: string
+                  description: >-
+                    REMOVED. The mounter is Mountpoint for S3 and only
+                    that. A pod needing rename, append or in-place
+                    modification wants flint-lean, whose publish
+                    boundary is what makes those safe.
+                  x-kubernetes-validations:
+                    - rule: "false"
+                      message: >-
+                        spec.driver has been removed — the mounter is
+                        Mountpoint for S3 for every mount. Drop the field.
+                        If you set it to s3fs for rename/append/in-place
+                        writes, those are not available at any setting
+                        here: use flint-lean.
+                readOnly:
+                  type: boolean
+                  default: false
+                pathStyle:
+                  type: boolean
+                  description: >-
+                    Path-style addressing. Unset means "true when
+                    endpoint is set" — every self-hosted gateway needs
+                    it and AWS proper does not.
+                credentialsSecretRef:
+                  type: string
+                  description: >-
+                    Secret whose keys are AWS_* VERBATIM
+                    (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+                    optionally AWS_SESSION_TOKEN) — the same shape
+                    flint-lean takes. Unset means the ambient chain
+                    (IRSA, instance profile), which mount-s3 resolves
+                    natively.
+                uid:
+                  type: integer
+                  description: >-
+                    Owner uid reported for every file in the mount.
+                    Defaults to the POD's securityContext.runAsUser,
+                    because a mount owned by root is one an
+                    unprivileged workload can read and cannot write —
+                    EACCES on the first create, which looks like a
+                    bucket policy problem. Set this only to override
+                    that.
+                  format: int64
+                gid:
+                  type: integer
+                  description: >-
+                    Owner gid. Defaults to the pod's
+                    securityContext.runAsGroup, same reasoning as uid.
+                  format: int64
+                mountOptions:
+                  type: array
+                  description: >-
+                    Extra mount-s3 arguments, appended verbatim as ARGV
+                    (never through a shell). A flag and its value are
+                    two entries: ["--metadata-ttl", "60"].
+                  items:
+                    type: string
+                image:
+                  type: string
+                  description: >-
+                    Per-mount mounter image override. The chart's
+                    sidecarImage otherwise.
+              # No `additionalProperties: false` here — a structural
+              # schema forbids it alongside `properties`, and it would
+              # be redundant: the API server PRUNES unknown fields
+              # before storage. The webhook additionally parses with
+              # serde's deny_unknown_fields, which is what catches a CR
+              # written while an older CRD was installed.
+          required: [spec]

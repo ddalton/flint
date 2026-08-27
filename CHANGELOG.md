@@ -106,6 +106,134 @@ is a rule for when to change it.
 - Checkout now reports phase timing (manifest / fetch / commit) on
   stderr, which is what makes any of the above attributable.
 
+## [1.40.0] - 2026-08-27
+
+**The third front end, published: an S3 prefix as a directory in a pod,
+with one mounter and no control plane behind it.** Scope is
+passthrough-only — the new `flint-passthrough` chart (`0.1.0`), the
+shared operator image, and a new mounter image. The CSI driver chart,
+the lite charts, the lean chart and the SPDK target image are untouched.
+
+Cut AFTER `1.41.0`, and numbered below it on purpose: `1.41.0` reserved
+this number for exactly this work rather than claim it. One consequence
+worth stating plainly — the operator image published here is built from
+a tree that already contains `1.41.0`'s lean read-path work, because
+that is what the branch holds. Nothing routes lean traffic through it:
+the `flint-lean` chart pins `1.41.0`, whose images are a separate,
+still-pending publish.
+
+### Added — flint-passthrough
+
+`FlintPassthroughMount` names a bucket subtree; a pod opts in with one
+label; a mutating webhook injects a native sidecar that FUSE-mounts it.
+There is no checkout, no manifest, no claim, no publish boundary and no
+controller — reads and writes go straight to the bucket. Reach for
+`flint-lean` instead when a pod wants a working tree with a boundary.
+
+Two costs, both structural and both enforced rather than documented:
+
+- **The sidecar is PRIVILEGED.** `mountPropagation: Bidirectional` is
+  the only way a mount made in a sidecar reaches the app container, and
+  the API server allows that mode only on a privileged container. In a
+  namespace enforcing PodSecurity `baseline` or `restricted` the mutated
+  pod is REJECTED — proven by a drill leg, not asserted.
+- **A mounter crash is not recoverable in place.** Every container
+  already running holds a private copy of the FUSE filesystem; when the
+  mounter dies that copy goes ENOTCONN and the replacement's fresh mount
+  does not reach it. The sidecar detects the case and reports itself NOT
+  READY so the pod leaves its Service endpoints, and the pod must be
+  recreated. Also proven by a drill leg, including the pod-level
+  `Ready: False`.
+
+### Changed — one mounter, not two
+
+The component was built with a `driver` field selecting s3fs or
+Mountpoint for S3. It ships with **Mountpoint for S3 and nothing else**,
+and the field is gone.
+
+The reason is not line count, though ~200 lines went with it — including
+the launcher fragment that re-exported a Secret's contents into
+s3fs-shaped environment variables, which was the only place a credential
+touched a shell. It is that a second driver was offering a POSIX
+*approximation* — rename as copy+delete, append by rewriting the whole
+object — with no coordination behind it: two pods writing one key is
+last-writer-wins, undetected. That is a worse answer than "use the front
+end that has a publish boundary". So passthrough now does fast lazy
+reads and whole-object sequential writes, and `git`, `pip install` and
+sqlite do not work here at any setting, on purpose.
+
+Removing a field is where this could have gone wrong quietly, and both
+directions are now closed:
+
+- **`spec.driver` is a TOMBSTONE in the CRD, not an absence.** Deleting
+  it outright would have the API server PRUNE it — a CR asking for s3fs
+  stored without the ask, mounted with a write model it did not choose,
+  first noticed by a workload failing at 3am. Declared-and-refused makes
+  it a `kubectl apply` error naming the field.
+- **`spec.mountOptions` containing `-o` is refused at admission.**
+  mount-s3 takes only `--long` flags, so `-o` is an s3fs option that
+  outlived s3fs; unrefused it is a privileged sidecar in
+  CrashLoopBackOff whose reason exists only in a container log. Found by
+  running the rig against a CR written before the removal.
+
+### Fixed — the mount was owned by root, so the workload could not write
+
+mount-s3 reports the MOUNTING user as the owner of everything in the
+mount, and the mounter is root. An unprivileged pod therefore read all
+of its objects and got EACCES on its first create — which reads as a
+bucket policy problem and is not one. `spec.uid`/`spec.gid` were the fix
+and nothing pointed at them.
+
+The pod's own `securityContext.runAsUser`/`runAsGroup` is now the
+default for both, which is the right answer wherever the question comes
+up at all; the CR still wins when it says something, and a pod that
+declares nothing runs as root and needs neither. Found by the rig's
+write-through leg, which failed for this reason and no other.
+
+### Fixed — two release-machinery holes, one of them live
+
+- **`stage-prebuilt.sh` never staged `flint-passthrough-operator`**,
+  which `Dockerfile.operator.prebuilt` COPYs unconditionally. This is
+  not "an operator image without passthrough" — it is no image at all,
+  a release that dies at `docker build` with `COPY failed`. Staged in
+  every scope now, alongside a new `passthrough` scope for the three
+  scripts.
+- **`publish-images.sh` read `--dry-run` from `$2` alone.** Once a scope
+  argument existed, `publish-images.sh <ver> passthrough --dry-run` —
+  the natural way to write it — set the scope variable to
+  `"passthrough"`, left `dry` empty, and PUBLISHED FOR REAL from a
+  command whose author had just asked it not to. Both flags are now
+  scanned over the whole argument list.
+
+`release.sh` gained the passthrough chart gate: both images published at
+the chart's appVersion, the lean-named operator alias proven to be the
+same DIGEST as the lite image, the recipe proven to install
+`/usr/local/bin/flint-passthrough-operator`, and the mounter recipe
+proven to install a PINNED mount-s3 and to verify `fusermount` exists.
+
+### Verification
+
+kind drill **42/42** (`passthrough/e2e/run-passthrough.sh`), against the
+chart and a locally built image, every read leg asserting CONTENT written
+before the pod existed and every refusal carrying an accepted control ·
+lib tests **29/29** for the module.
+
+Two of the drill's reds were real and are fixed above; two more were the
+rig telling the truth about itself — MinIO's `emptyDir` had lost the seed
+after a restart, and leg A1 refused to let any read leg be trusted until
+it was reseeded. One leg was VACUOUS and is not any more: A7 asserted
+that unlink removes an object without first proving the object existed,
+which passes trivially when the write never happened.
+
+New gates that keep the hand-written CRD honest, since this spec is
+plain serde with no schemars derive to diff against:
+`the_crd_and_the_struct_agree_on_every_field` compares the shipped CRD's
+properties against the struct's fields in BOTH directions — a struct
+field the CRD lacks is a knob the API server prunes, and a CRD property
+the struct lacks denies every pod that opts into the mount. It found a
+dead `spec.resources` on its first run: accepted, stored, and never read
+by the injector, which takes the sidecar's resources from the chart.
+
 ## [1.39.0] - 2026-08-26
 
 **A lean-scoped correctness release, and it supersedes 1.38.0 for anyone
@@ -2793,6 +2921,10 @@ No security advisories at this release.
 
 [Unreleased]: https://github.com/ddalton/flint/compare/v1.35.1...HEAD
 [1.41.0]: https://github.com/ddalton/flint/compare/v1.39.0...v1.41.0
+# 1.40.0 was cut AFTER 1.41.0 (which reserved the number), so it is
+# compared against v1.41.0 rather than v1.39.0 — that diff is the
+# passthrough work and nothing else.
+[1.40.0]: https://github.com/ddalton/flint/compare/v1.41.0...v1.40.0
 [1.39.0]: https://github.com/ddalton/flint/compare/v1.38.0...v1.39.0
 [1.38.0]: https://github.com/ddalton/flint/compare/v1.37.0...v1.38.0
 [1.37.0]: https://github.com/ddalton/flint/compare/v1.36.0...v1.37.0

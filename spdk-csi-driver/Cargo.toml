@@ -82,6 +82,13 @@ path = "src/bin/flint_hub_stub.rs"
 name = "flint-lean-operator"
 path = "src/bin/flint_lean_operator.rs"
 
+# flint-passthrough's webhook. Same image, different binary; NO
+# controller — see src/passthrough/mod.rs for why the whole component
+# is a webhook and three files.
+[[bin]]
+name = "flint-passthrough-operator"
+path = "src/bin/flint_passthrough_operator.rs"
+
 # Removed old binaries:
 # - node-agent: now a library module, not standalone binary
 # - spdk-dashboard-backend: replaced by spdk_dashboard_backend_minimal.rs

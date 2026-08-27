@@ -33,7 +33,13 @@ dest="$crate/docker/prebuilt"
 # 1.38.0 changelog records ("the chart execs /usr/local/bin/
 # flint-lean-operator and that binary was not in it"), and the same
 # shape as the 1.30.0 near-miss described above.
-BINS="csi-driver flint-nfs-server flint-pnfs-mds flint-pnfs-ds flint-lite-operator flint-hub-gateway flint-lean-operator"
+# `flint-passthrough-operator` is NOT optional in any scope, and that is
+# a property of the recipe rather than a preference: Dockerfile.operator.
+# prebuilt COPYs it unconditionally, so a scope that omits it does not
+# produce an operator image without passthrough — it produces no image
+# at all, failing the release at `docker build` with "COPY failed". The
+# same is true of flint-lean-gateway below.
+BINS="csi-driver flint-nfs-server flint-pnfs-mds flint-pnfs-ds flint-lite-operator flint-hub-gateway flint-lean-operator flint-passthrough-operator"
 
 # A LEAN-SCOPED release (the 1.38.0 shape: only the flint-lean chart and
 # the two images it pulls) republishes the operator image and the sidecar
@@ -42,11 +48,19 @@ BINS="csi-driver flint-nfs-server flint-pnfs-mds flint-pnfs-ds flint-lite-operat
 # certainly why the lean binaries were hand-staged in the first place,
 # which is the hole this script just grew to cover. `lean` stages exactly
 # what those two images COPY, with the SAME staleness rules.
+#
+# A PASSTHROUGH-scoped release (the 1.40.0 shape) publishes the
+# flint-passthrough chart, the operator image its webhook runs out of,
+# and the mounter image the webhook injects. The mounter image carries
+# no flint binary at all — it is a Debian base with mount-s3 from AWS's
+# .deb — so it stages nothing here; the operator image is the same one
+# lean publishes, which is why this list is lean's plus nothing.
 SCOPE=${1:-all}
 case "$SCOPE" in
     all)  ;;
-    lean) BINS="flint-lite-operator flint-hub-gateway flint-lean-operator" ;;
-    *)    echo "usage: stage-prebuilt.sh [all|lean]" >&2; exit 2 ;;
+    lean|passthrough)
+          BINS="flint-lite-operator flint-hub-gateway flint-lean-operator flint-passthrough-operator" ;;
+    *)    echo "usage: stage-prebuilt.sh [all|lean|passthrough]" >&2; exit 2 ;;
 esac
 
 # Binaries from the LEAN crate (lean/sidecar) — a separate crate with a
@@ -56,6 +70,15 @@ esac
 # publish-images.sh, with only release.sh's after-the-fact "is it on the
 # Hub?" check standing between it and a silent wrong-code release.
 LEAN_BINS="flint-sync flint-lean-gateway"
+
+# ...and `flint-sync` is the one binary here a passthrough release does
+# NOT need: it is the lean sidecar image's whole payload, and a
+# passthrough release publishes no sidecar image — the mounter comes
+# from AWS's .deb. flint-lean-gateway stays, because the OPERATOR image
+# COPYs it and that image is republished.
+if [ "$SCOPE" = passthrough ]; then
+    LEAN_BINS="flint-lean-gateway"
+fi
 
 # Newest thing that can change a binary. Cargo.lock matters as much as
 # src/ — a dependency bump with no source edit still changes the output.

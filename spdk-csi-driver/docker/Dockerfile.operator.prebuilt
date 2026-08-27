@@ -7,7 +7,7 @@
 #   for T in x86_64 aarch64; do
 #     cargo zigbuild --release --target $T-unknown-linux-musl \
 #       --bin flint-lite-operator --bin flint-hub-gateway \
-#       --bin flint-lean-operator
+#       --bin flint-lean-operator --bin flint-passthrough-operator
 #     (cd ../lean/sidecar && cargo zigbuild --release --features s3 \
 #       --target $T-unknown-linux-musl --bin flint-lean-gateway); done
 #   # stage: docker/prebuilt/amd64/{flint-lite-operator,flint-hub-gateway}
@@ -64,6 +64,12 @@ COPY ${BIN_DIR}/${TARGETARCH}/flint-hub-gateway /usr/local/bin/flint-hub-gateway
 # cargo invocations; see the header.
 COPY ${BIN_DIR}/${TARGETARCH}/flint-lean-operator /usr/local/bin/flint-lean-operator
 COPY ${BIN_DIR}/${TARGETARCH}/flint-lean-gateway /usr/local/bin/flint-lean-gateway
+
+# flint-passthrough's webhook, same story: same crate, same build, one
+# fewer image at release. It is a webhook and nothing else — no
+# controller, no store client — so it adds a binary and no runtime
+# requirements to this image.
+COPY ${BIN_DIR}/${TARGETARCH}/flint-passthrough-operator /usr/local/bin/flint-passthrough-operator
 
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/flint-lite-operator"]

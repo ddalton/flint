@@ -1,14 +1,15 @@
-//! The mutating-admission wrapper around `inject` — self-contained
-//! cert plumbing, registration, and the AdmissionReview handler.
+//! The mutating-admission wrapper around `inject`: registration, the
+//! AdmissionReview handler, and the TLS server.
 //!
-//! Cert posture (no cert-manager dependency): the operator generates a
-//! CA + serving cert once and persists them in a Secret; every replica
-//! serves from the same Secret, and the MutatingWebhookConfiguration's
-//! caBundle is (re)applied at startup. `failurePolicy: Fail` +
-//! `objectSelector: flint.io/lean-workspace Exists` — an opted-in pod
-//! either gets its sidecar or does not schedule; it NEVER starts
-//! ungated (the review's clobbered-scaffold finding). Un-labeled pods
-//! are never touched.
+//! `failurePolicy: Fail` + `objectSelector: flint.io/passthrough-mount
+//! Exists`. An opted-in pod either gets its mount or does not schedule.
+//! The alternative — Ignore — starts the pod against an empty
+//! directory, which no probe in the pod can distinguish from a bucket
+//! that happens to have no objects under the prefix. Un-labelled pods
+//! are never looked at.
+//!
+//! Cert material comes from `crate::webhook_certs`, shared with the
+//! lean webhook.
 
 use std::sync::Arc;
 
@@ -19,26 +20,28 @@ use kube::Client;
 use serde_json::{json, Value};
 use tracing::info;
 
-use super::crd::{FlintLeanWorkspace, INJECT_LABEL};
-use super::inject::{inject_sidecar, InjectDefaults};
+use super::inject::{inject_mount, InjectDefaults, INJECT_LABEL};
+use super::spec::MountSpec;
 
-pub const CERT_SECRET: &str = "flint-lean-webhook-cert";
-pub const WEBHOOK_CONFIG: &str = "flint-lean-inject";
+pub const CERT_SECRET: &str = "flint-passthrough-webhook-cert";
+pub const WEBHOOK_CONFIG: &str = "flint-passthrough-inject";
 pub const MUTATE_PATH: &str = "mutate";
+pub const CRD_GROUP: &str = "flint.io";
+pub const CRD_VERSION: &str = "v1alpha1";
+pub const CRD_KIND: &str = "FlintPassthroughMount";
+const CA_CN: &str = "flint-passthrough-webhook-ca";
 
-// ── the AdmissionReview core (pure over an injected lookup) ──────────
+pub use crate::webhook_certs::CertBundle;
 
 /// Handle one AdmissionReview. `lookup` resolves (namespace, name) to
-/// the workspace CR; injected so the core is unit-testable without a
-/// cluster.
-pub async fn mutate_review<F, Fut>(
-    review: Value,
-    defaults: &InjectDefaults,
-    lookup: F,
-) -> Value
+/// the CR as raw JSON; injected so the core is unit-testable without a
+/// cluster, and raw so that a spec the CRD schema would have rejected
+/// is DENIED here with a parse error rather than defaulted into
+/// something plausible.
+pub async fn mutate_review<F, Fut>(review: Value, defaults: &InjectDefaults, lookup: F) -> Value
 where
     F: FnOnce(String, String) -> Fut,
-    Fut: std::future::Future<Output = Result<Option<FlintLeanWorkspace>, String>>,
+    Fut: std::future::Future<Output = Result<Option<Value>, String>>,
 {
     let uid = review
         .pointer("/request/uid")
@@ -53,11 +56,7 @@ where
         })
     };
     let deny = |uid: &str, msg: String| {
-        respond(json!({
-            "uid": uid,
-            "allowed": false,
-            "status": { "message": msg },
-        }))
+        respond(json!({ "uid": uid, "allowed": false, "status": { "message": msg } }))
     };
     let allow_unchanged = respond(json!({ "uid": uid, "allowed": true }));
 
@@ -73,51 +72,44 @@ where
         },
         None => return deny(&uid, "no object in the review".into()),
     };
-    let Some(ws_name) = pod
-        .metadata
-        .labels
-        .as_ref()
-        .and_then(|l| l.get(INJECT_LABEL))
-        .cloned()
+    let Some(cr_name) =
+        pod.metadata.labels.as_ref().and_then(|l| l.get(INJECT_LABEL)).cloned()
     else {
-        // Not opted in (the objectSelector should have filtered this;
-        // belt anyway): never touch it.
         return allow_unchanged;
     };
 
-    let ws = match lookup(namespace.clone(), ws_name.clone()).await {
-        Ok(Some(ws)) => ws,
+    let cr = match lookup(namespace.clone(), cr_name.clone()).await {
+        Ok(Some(cr)) => cr,
         Ok(None) => {
             return deny(
                 &uid,
                 format!(
-                    "pod opts into lean workspace {namespace}/{ws_name}, but no such \
-                     FlintLeanWorkspace exists — refusing to start the pod ungated"
+                    "pod opts into passthrough mount {namespace}/{cr_name}, but no such \
+                     {CRD_KIND} exists — refusing to start the pod with an empty directory \
+                     where the bucket should be"
                 ),
             );
         }
-        Err(e) => return deny(&uid, format!("workspace lookup failed: {e}")),
+        Err(e) => return deny(&uid, format!("{CRD_KIND} lookup failed: {e}")),
     };
-    if ws.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Refused") {
-        return deny(
-            &uid,
-            format!(
-                "lean workspace {namespace}/{ws_name} is Refused (foreign claim on its \
-                 prefix) — resolve the claim before scheduling pods"
-            ),
-        );
-    }
+    let spec: MountSpec = match cr.get("spec").cloned() {
+        Some(s) => match serde_json::from_value(s) {
+            Ok(s) => s,
+            Err(e) => {
+                return deny(&uid, format!("{CRD_KIND} {namespace}/{cr_name} spec is invalid: {e}"))
+            }
+        },
+        None => return deny(&uid, format!("{CRD_KIND} {namespace}/{cr_name} has no spec")),
+    };
 
-    let mutated = match inject_sidecar(&pod, &ws, defaults) {
+    let mutated = match inject_mount(&pod, &cr_name, &spec, defaults) {
         Ok(m) => m,
         Err(e) => return deny(&uid, format!("injection failed: {e}")),
     };
     if mutated == pod {
         return allow_unchanged;
     }
-    let patch = json!([
-        { "op": "replace", "path": "/spec", "value": mutated.spec }
-    ]);
+    let patch = json!([{ "op": "replace", "path": "/spec", "value": mutated.spec }]);
     let patch_b64 =
         base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&patch).unwrap());
     respond(json!({
@@ -128,23 +120,6 @@ where
     }))
 }
 
-// ── cert material ────────────────────────────────────────────────────
-//
-// One implementation, shared with `passthrough::webhook` — see
-// `crate::webhook_certs`. These wrappers keep lean's own call sites and
-// its Secret name unchanged.
-
-pub use crate::webhook_certs::CertBundle;
-
-const CA_CN: &str = "flint-lean-webhook-ca";
-
-/// Generate a CA + serving cert for `<service>.<namespace>.svc`.
-pub fn generate_cert(service: &str, namespace: &str) -> Result<CertBundle, String> {
-    crate::webhook_certs::generate_cert(CA_CN, service, namespace)
-}
-
-/// Read-or-create the cert Secret (two replicas race safely: the loser
-/// of the create adopts the winner's material).
 pub async fn ensure_cert_secret(
     client: &Client,
     namespace: &str,
@@ -158,6 +133,7 @@ pub async fn ensure_webhook_config(
     client: &Client,
     namespace: &str,
     service: &str,
+    port: u16,
     ca_pem: &str,
 ) -> anyhow::Result<()> {
     use k8s_openapi::api::admissionregistration::v1::MutatingWebhookConfiguration;
@@ -168,11 +144,9 @@ pub async fn ensure_webhook_config(
         "kind": "MutatingWebhookConfiguration",
         "metadata": { "name": WEBHOOK_CONFIG },
         "webhooks": [{
-            "name": "inject.lean.flint.io",
+            "name": "inject.passthrough.flint.io",
             "admissionReviewVersions": ["v1"],
             "sideEffects": "None",
-            // An opted-in pod either gets its sidecar or does not
-            // schedule — never starts ungated (plan §2.4).
             "failurePolicy": "Fail",
             "objectSelector": {
                 "matchExpressions": [{ "key": INJECT_LABEL, "operator": "Exists" }]
@@ -185,19 +159,37 @@ pub async fn ensure_webhook_config(
                 "scope": "Namespaced"
             }],
             "clientConfig": {
-                "service": { "name": service, "namespace": namespace, "path": format!("/{MUTATE_PATH}"), "port": 9443 },
+                "service": {
+                    "name": service,
+                    "namespace": namespace,
+                    "path": format!("/{MUTATE_PATH}"),
+                    "port": port,
+                },
                 "caBundle": ca_b64,
             }
         }]
     }))?;
     api.patch(
         WEBHOOK_CONFIG,
-        &PatchParams::apply("flint-lean-operator").force(),
+        &PatchParams::apply("flint-passthrough-operator").force(),
         &Patch::Apply(&cfg),
     )
     .await?;
     info!("mutating webhook {WEBHOOK_CONFIG} applied");
     Ok(())
+}
+
+/// Fetch a `FlintPassthroughMount` as raw JSON.
+pub async fn get_mount(client: &Client, ns: &str, name: &str) -> Result<Option<Value>, String> {
+    use kube::api::{ApiResource, DynamicObject, GroupVersionKind};
+    let gvk = GroupVersionKind::gvk(CRD_GROUP, CRD_VERSION, CRD_KIND);
+    let ar = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &ar);
+    match api.get_opt(name).await {
+        Ok(Some(o)) => serde_json::to_value(o).map(Some).map_err(|e| e.to_string()),
+        Ok(None) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Serve /mutate over TLS. Blocks; run in its own task.
@@ -218,8 +210,7 @@ pub async fn serve(
             let defaults = defaults.clone();
             async move {
                 let resp = mutate_review(review, &defaults, |ns, name| async move {
-                    let api: Api<FlintLeanWorkspace> = Api::namespaced((*client).clone(), &ns);
-                    api.get_opt(&name).await.map_err(|e| e.to_string())
+                    get_mount(&client, &ns, &name).await
                 })
                 .await;
                 warp::reply::json(&resp)
@@ -237,32 +228,14 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lean_operator::crd::FlintLeanWorkspaceSpec;
 
-    fn ws() -> FlintLeanWorkspace {
-        FlintLeanWorkspace::new(
-            "proj1",
-            serde_json::from_value::<FlintLeanWorkspaceSpec>(serde_json::json!({
-                "projectId": "team-a/proj1",
-                "bucket": "agentws",
-                "keyPrefix": "tenants/proj1",
-            }))
-            .unwrap(),
-        )
-    }
-
-    fn review_for(pod: serde_json::Value) -> Value {
+    fn review_for(pod: Value) -> Value {
         json!({
             "apiVersion": "admission.k8s.io/v1",
             "kind": "AdmissionReview",
-            "request": {
-                "uid": "review-1",
-                "namespace": "agents",
-                "object": pod,
-            }
+            "request": { "uid": "review-1", "namespace": "agents", "object": pod },
         })
     }
-
     fn labeled_pod() -> Value {
         json!({
             "apiVersion": "v1", "kind": "Pod",
@@ -270,13 +243,27 @@ mod tests {
             "spec": { "containers": [{ "name": "agent", "image": "agent:1" }] }
         })
     }
-
-    const D: fn() -> InjectDefaults = || InjectDefaults { image: "flint-sync:test".into() };
+    fn cr(spec: Value) -> Value {
+        json!({
+            "apiVersion": "flint.io/v1alpha1", "kind": CRD_KIND,
+            "metadata": { "name": "proj1", "namespace": "agents" },
+            "spec": spec,
+        })
+    }
+    fn good_cr() -> Value {
+        cr(json!({ "bucket": "agentws", "keyPrefix": "tenants/proj1",
+                   "credentialsSecretRef": "proj1-creds" }))
+    }
+    const D: fn() -> InjectDefaults = || InjectDefaults {
+        image: "flint-passthrough:test".into(),
+        resources: None,
+    };
 
     #[tokio::test]
-    async fn labeled_pod_gets_a_jsonpatch_with_the_sidecar() {
+    async fn labeled_pod_gets_a_jsonpatch_with_the_mounter() {
         let resp =
-            mutate_review(review_for(labeled_pod()), &D(), |_, _| async { Ok(Some(ws())) }).await;
+            mutate_review(review_for(labeled_pod()), &D(), |_, _| async { Ok(Some(good_cr())) })
+                .await;
         let r = resp.pointer("/response").unwrap();
         assert_eq!(r["uid"], "review-1");
         assert_eq!(r["allowed"], true);
@@ -287,34 +274,52 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(patch[0]["op"], "replace");
         assert_eq!(patch[0]["path"], "/spec");
         let init = &patch[0]["value"]["initContainers"][0];
-        assert_eq!(init["name"], "flint-sync");
+        assert_eq!(init["name"], super::super::inject::SIDECAR_NAME);
         assert_eq!(init["restartPolicy"], "Always");
+        assert_eq!(init["securityContext"]["privileged"], true);
     }
 
-    /// failurePolicy Fail end-to-end: a pod opting into a MISSING
-    /// workspace is denied — it must never start ungated.
+    /// failurePolicy Fail end-to-end: no CR means no pod. Starting it
+    /// would hand the workload an empty directory that looks exactly
+    /// like an empty bucket.
     #[tokio::test]
-    async fn missing_workspace_denies_the_pod() {
-        let resp =
-            mutate_review(review_for(labeled_pod()), &D(), |_, _| async { Ok(None) }).await;
+    async fn missing_cr_denies_the_pod() {
+        let resp = mutate_review(review_for(labeled_pod()), &D(), |_, _| async { Ok(None) }).await;
         let r = resp.pointer("/response").unwrap();
         assert_eq!(r["allowed"], false);
-        assert!(r["status"]["message"].as_str().unwrap().contains("no such FlintLeanWorkspace"));
+        assert!(r["status"]["message"].as_str().unwrap().contains("no such FlintPassthroughMount"));
+    }
+
+    /// A spec an older CRD schema let through must be denied HERE, with
+    /// the reason, rather than defaulted into a plausible mount.
+    #[tokio::test]
+    async fn an_unparseable_spec_denies_the_pod() {
+        let resp = mutate_review(review_for(labeled_pod()), &D(), |_, _| async {
+            Ok(Some(cr(json!({ "bucket": "b", "readOnly": "yes-please" }))))
+        })
+        .await;
+        let r = resp.pointer("/response").unwrap();
+        assert_eq!(r["allowed"], false);
+        assert!(r["status"]["message"].as_str().unwrap().contains("spec is invalid"));
     }
 
     #[tokio::test]
-    async fn refused_workspace_denies_the_pod() {
-        let mut w = ws();
-        w.status = Some(crate::lean_operator::crd::FlintLeanWorkspaceStatus {
-            phase: Some("Refused".into()),
-            ..Default::default()
-        });
-        let resp =
-            mutate_review(review_for(labeled_pod()), &D(), move |_, _| async move { Ok(Some(w)) })
-                .await;
+    async fn an_unknown_field_denies_rather_than_being_ignored() {
+        let resp = mutate_review(review_for(labeled_pod()), &D(), |_, _| async {
+            Ok(Some(cr(json!({ "bucket": "b", "readonly": true }))))
+        })
+        .await;
+        assert_eq!(resp.pointer("/response/allowed").unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_failure_denies_rather_than_admitting_unmounted() {
+        let resp = mutate_review(review_for(labeled_pod()), &D(), |_, _| async {
+            Err("connection refused".into())
+        })
+        .await;
         assert_eq!(resp.pointer("/response/allowed").unwrap(), false);
     }
 
@@ -326,19 +331,11 @@ mod tests {
             "spec": { "containers": [{ "name": "c" }] }
         });
         let resp = mutate_review(review_for(pod), &D(), |_, _| async {
-            panic!("must not even look up the workspace")
+            panic!("must not even look up the CR")
         })
         .await;
         let r = resp.pointer("/response").unwrap();
         assert_eq!(r["allowed"], true);
         assert!(r.get("patch").is_none());
-    }
-
-    #[test]
-    fn cert_carries_the_service_sans() {
-        let b = generate_cert("flint-lean-operator", "flint-system").unwrap();
-        assert!(b.ca_pem.contains("BEGIN CERTIFICATE"));
-        assert!(b.cert_pem.contains("BEGIN CERTIFICATE"));
-        assert!(b.key_pem.contains("PRIVATE KEY"));
     }
 }

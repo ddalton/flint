@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flint-passthrough.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flint-passthrough.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "flint-passthrough.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "flint-passthrough.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "flint-passthrough.serviceAccountName" . }}
+      containers:
+        - name: webhook
+          image: {{ include "flint-passthrough.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The image's own ENTRYPOINT is the lite operator; this chart
+          # runs a different binary out of the same image.
+          command: ["/usr/local/bin/flint-passthrough-operator"]
+          env:
+            - { name: FLINT_PT_WEBHOOK_SERVICE, value: {{ include "flint-passthrough.name" . | quote }} }
+            - { name: FLINT_PT_WEBHOOK_NAMESPACE, value: {{ .Release.Namespace | quote }} }
+            - { name: FLINT_PT_WEBHOOK_LISTEN, value: "0.0.0.0:{{ .Values.webhook.port }}" }
+            - { name: FLINT_PT_WEBHOOK_PORT, value: {{ .Values.webhook.port | quote }} }
+            - { name: FLINT_PT_SIDECAR_IMAGE, value: {{ include "flint-passthrough.sidecarImage" . | quote }} }
+            - { name: FLINT_PT_SIDECAR_RESOURCES, value: {{ .Values.sidecarResources | toJson | quote }} }
+            - { name: RUST_LOG, value: "info" }
+          ports:
+            - { name: webhook, containerPort: {{ .Values.webhook.port }} }
+          readinessProbe:
+            httpGet: { path: /healthz, port: webhook, scheme: HTTPS }
+            periodSeconds: 5
+          # The webhook injects privileged sidecars; it does not need to
+          # be one. Nothing here writes to disk or opens a socket
+          # inbound except the TLS listener.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities: { drop: ["ALL"] }
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+{{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+{{- end }}
+{{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+{{- end }}
+{{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "flint-passthrough.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flint-passthrough.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "flint-passthrough.selectorLabels" . | nindent 4 }}
+  ports:
+    - { name: webhook, port: {{ .Values.webhook.port }}, targetPort: webhook }

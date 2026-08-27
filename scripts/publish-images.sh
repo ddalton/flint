@@ -19,14 +19,31 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-ver=${1:?usage: publish-images.sh <version> [all|lean] [--dry-run]}
+ver=${1:?usage: publish-images.sh <version> [all|lean|passthrough] [--dry-run]}
 # Scope, matching stage-prebuilt.sh. A lean-scoped release publishes the
 # operator image (which carries the lean binaries) and the sidecar, then
 # aliases the operator to its lean name — it does not republish the CSI
 # driver or the pNFS image, because nothing in them changed.
+#
+# A passthrough-scoped release publishes the same operator image (the
+# webhook is another binary in it) and the MOUNTER image, which carries
+# no flint code at all. It still needs the lean-named alias, because the
+# passthrough chart pulls flint-lean-operator like the lean chart does.
 SCOPE=all
-for a in "$@"; do case "$a" in lean) SCOPE=lean ;; esac; done
-dry=${2:-}
+dry=
+# BOTH flags are scanned over the WHOLE argument list, and --dry-run
+# used to be read from $2 alone. That made `publish-images.sh 1.40.0
+# passthrough --dry-run` — the natural way to write it once a scope
+# exists — set dry="passthrough" and PUBLISH FOR REAL, from a command
+# whose author had just asked it not to.
+for a in "$@"; do
+    case "$a" in
+        lean)        SCOPE=lean ;;
+        passthrough) SCOPE=passthrough ;;
+        all)         SCOPE=all ;;
+        --dry-run)   dry=--dry-run ;;
+    esac
+done
 run() { if [ "$dry" = "--dry-run" ]; then echo "  + $*"; else "$@"; fi; }
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -51,12 +68,24 @@ set -- \
     "flint-driver:docker/Dockerfile.csi.prebuilt" \
     "flint-pnfs:docker/Dockerfile.pnfs.prebuilt" \
     "flint-lite-operator:docker/Dockerfile.operator.prebuilt" \
-    "flint-sync:docker/Dockerfile.sync.prebuilt"
+    "flint-sync:docker/Dockerfile.sync.prebuilt" \
+    "flint-passthrough-mounter:docker/Dockerfile.passthrough"
 
 if [ "$SCOPE" = lean ]; then
     set -- \
         "flint-lite-operator:docker/Dockerfile.operator.prebuilt" \
         "flint-sync:docker/Dockerfile.sync.prebuilt"
+fi
+
+# The mounter image is the odd one here: no staged binary, no BIN_DIR,
+# nothing of ours inside it. It is in this script anyway because the
+# thing that matters about it is the same thing that matters about every
+# other image — that the tag the chart names was built by the release
+# and not by hand. It is the image a workload's PRIVILEGED sidecar runs.
+if [ "$SCOPE" = passthrough ]; then
+    set -- \
+        "flint-lite-operator:docker/Dockerfile.operator.prebuilt" \
+        "flint-passthrough-mounter:docker/Dockerfile.passthrough"
 fi
 
 minor=${ver%.*}      # 1.31.0 -> 1.31
@@ -68,10 +97,17 @@ for spec in "$@"; do
     repo="dilipdalton/$name"
     echo "=== $repo ==="
 
+    # Only the prebuilt recipes take BIN_DIR. Passing it to one that
+    # does not (the mounter image) is a warning docker prints and a
+    # human scrolls past — and this log is where a release is read.
+    bin_arg=""
+    grep -q '^ARG BIN_DIR' "$dockerfile" && bin_arg="--build-arg BIN_DIR=docker/prebuilt"
+
     for arch in amd64 arm64; do
         echo "--- build $arch ---"
+        # shellcheck disable=SC2086  # bin_arg is one flag or empty
         run docker build --platform "linux/$arch" \
-            -f "$dockerfile" --build-arg BIN_DIR=docker/prebuilt \
+            -f "$dockerfile" $bin_arg \
             -t "$repo:$ver-$arch" .
         run docker push "$repo:$ver-$arch"
     done
@@ -118,5 +154,5 @@ for spec in "$@"; do
 done
 
 echo
-echo "published $ver (+ $minor, $major, latest) for all three images"
+echo "published $ver (+ $minor, $major, latest) for scope=$SCOPE"
 echo "aliased   flint-lite-operator -> flint-lean-operator at the same digest"

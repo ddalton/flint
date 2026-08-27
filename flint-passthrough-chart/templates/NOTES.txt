@@ -1,0 +1,71 @@
+flint-passthrough is installed in namespace {{ .Release.Namespace }}.
+
+The mutating webhook is REGISTERED BY THE OPERATOR at startup (it
+carries the caBundle for the cert it generates). Give it a few seconds,
+then confirm:
+
+  kubectl get mutatingwebhookconfiguration flint-passthrough-inject
+
+Declare a mount:
+
+  apiVersion: flint.io/v1alpha1
+  kind: FlintPassthroughMount
+  metadata: { name: datasets }
+  spec:
+    bucket: my-bucket
+    keyPrefix: datasets/imagenet
+    endpoint: http://minio.flint-system.svc:9000   # unset ⇒ AWS S3
+    credentialsSecretRef: datasets-creds           # keys AWS_* verbatim
+    mountPath: /mnt/s3
+    readOnly: true
+
+Then opt a pod in with one label:
+
+  metadata:
+    labels:
+      flint.io/passthrough-mount: datasets
+
+THE MOUNT IS OWNED BY THE USER YOUR POD RUNS AS. mount-s3 reports the
+mounting user (root) as the owner of everything; a pod with
+`securityContext.runAsUser` therefore gets `--uid` from that, so the
+workload can write to its own mount instead of hitting EACCES on the
+first create. Override with spec.uid / spec.gid if you need something
+else.
+
+THE SIDECAR IS PRIVILEGED. `mountPropagation: Bidirectional` is the
+only way a mount made in a sidecar reaches the app container, and
+Kubernetes allows that mode only on a privileged container. In a
+namespace enforcing PodSecurity `baseline` or `restricted` the mutated
+pod is REJECTED. Label the namespace deliberately if that is what you
+want:
+
+  kubectl label ns <ns> pod-security.kubernetes.io/enforce=privileged
+
+If the mount is missing, misconfigured, or its CR does not exist, the
+pod is REFUSED at admission rather than started against an empty
+directory — which is what an unmounted emptyDir looks like from inside
+the workload, and is indistinguishable from an empty bucket.
+
+A MOUNTER CRASH IS NOT RECOVERABLE IN PLACE. Containers already running
+in the pod hold a private copy of the FUSE filesystem; if the mounter
+dies they read ENOTCONN and the replacement's mount never reaches them.
+The sidecar notices and reports NOT READY — so the pod drops out of its
+Service and `kubectl describe pod` says why — but the pod has to be
+recreated. Run these under a Deployment or Job, not as bare pods.
+
+WHAT THIS IS NOT. There is no checkout, no manifest, no claim and no
+publish boundary: reads and writes go straight to the bucket with
+Mountpoint for S3's semantics, which are
+
+  · fast sequential reads, lazily, over a bucket of any size;
+  · writes that are whole new objects written sequentially — NO
+    rename, NO append, NO in-place modification, at any setting;
+  · no coordination between writers. Two pods writing one key is
+    last-writer-wins, undetected.
+
+So `pip install`, `git` and sqlite do not work here, and there is no
+setting that makes them: the mounter is Mountpoint for S3 and only
+that. A POSIX-emulating client would give those workloads a working
+tree with nothing behind it. If that is what you need, install
+flint-lean — its publish boundary is the part that makes concurrent
+writers safe.
