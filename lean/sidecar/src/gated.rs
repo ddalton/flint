@@ -108,6 +108,29 @@ pub struct PendingStage {
     /// classify cannot reach.
     #[serde(default)]
     pub staged_absent_once: BTreeSet<String>,
+    /// Versions this workspace superseded or cancelled between
+    /// citations, per path — RECORDED by the lane, DELETED only by the
+    /// guarded citation-time reaper.
+    ///
+    /// The lane used to delete these itself, with one guard ("not the
+    /// version I just wrote") and no reference to the installed
+    /// manifest. `citation_pass` clears the stage LAST — after the CAS,
+    /// the reaper, the baseline save and the intent clear — and four
+    /// ordinary `?` returns sit in that window, so one transient store
+    /// error leaves a stage naming versions the boundary now CITES. The
+    /// next lane pass then deleted the cited version. One guarded
+    /// delete site was the fix; this ledger is what keeps the
+    /// intermediate versions NAMEABLE while it is the only one.
+    ///
+    /// Without it, `base_version_id` is pinned to the cited generation
+    /// (it comes from the baseline, which gated mode advances only at
+    /// citation), so a path re-staged N times between citations leaves
+    /// versions 2..N named by nothing at all — falling through to
+    /// `noncurrentRetentionDays`, which D8 is explicit is a crash-window
+    /// backstop and not a GC policy, because it runs its clock against
+    /// live cited data.
+    #[serde(default)]
+    pub pending_reclaims: BTreeMap<String, Vec<String>>,
 }
 
 /// Which coherent point fired.
@@ -159,7 +182,9 @@ pub struct LaneReport {
     /// Superseded uncited versions reclaimed by the lane itself (free,
     /// version-scoped): uncited work holds at most one version per path
     /// plus crash remnants.
-    pub superseded_reclaimed: usize,
+    /// Versions the lane RECORDED for the reaper to reclaim at the
+    /// next citation. The lane deletes nothing.
+    pub superseded_recorded: usize,
     pub withheld_deletes: usize,
     /// Paths this lane pass saw absent for the FIRST time — withheld to
     /// the next scan by the rename-vs-walk guard, and so NOT part of
@@ -434,11 +459,19 @@ impl Sidecar {
                     // The lane reclaims the version it just superseded:
                     // free, version-scoped, and it keeps uncited work at
                     // one version per path plus crash remnants.
+                    // RECORD, never delete. The lane cannot prove a
+                    // version is uncited: it does not read the installed
+                    // manifest, and its own stage may have outlived a
+                    // citation. The reaper can, and does, under four
+                    // guards.
                     if let Some(vid) = superseded {
                         if Some(&vid) != entry.version_id.as_ref() {
-                            let _ =
-                                self.store.delete_version(&entry.key, &vid).await;
-                            report.superseded_reclaimed += 1;
+                            stage
+                                .pending_reclaims
+                                .entry(path.clone())
+                                .or_default()
+                                .push(vid);
+                            report.superseded_recorded += 1;
                         }
                     }
                     // The path is back. A tombstone standing from an
@@ -485,9 +518,13 @@ impl Sidecar {
         }
         for path in cancel {
             if let Some(stale) = stage.entries.remove(&path) {
+                // Same rule as the supersede site above: a cancelled
+                // path's staged version can be the CITED one if this
+                // stage outlived a citation, and this site had no
+                // manifest reference at all.
                 if let Some(vid) = stale.version_id {
-                    let _ = self.store.delete_version(&stale.key, &vid).await;
-                    report.superseded_reclaimed += 1;
+                    stage.pending_reclaims.entry(path.clone()).or_default().push(vid);
+                    report.superseded_recorded += 1;
                 }
             }
         }
@@ -644,7 +681,16 @@ impl Sidecar {
         }
         // The backlog cap bounds the preStop drain BY CONSTRUCTION.
         let bytes: u64 = stage.entries.values().map(|e| e.size).sum();
-        if stage.entries.len() as u64 >= self.cfg.staged_backlog_cap_objects
+        // Recorded reclaims are counted as OBJECTS, because they are
+        // exactly the drain work this cap exists to bound: the citation
+        // the drain runs issues one `delete_version` per recorded id.
+        // Counting only staged PATHS would let one hot file rewritten
+        // every tick accumulate a version per tick forever — one stage
+        // entry, one size, and a cap that never fires — while
+        // `drain_need_secs` sized the grace from that same cap.
+        let recorded: u64 =
+            stage.pending_reclaims.values().map(|v| v.len() as u64).sum();
+        if stage.entries.len() as u64 + recorded >= self.cfg.staged_backlog_cap_objects
             || bytes >= self.cfg.staged_backlog_cap_bytes
         {
             return Ok(Some(CitationSource::ForcedBacklogCap));
@@ -753,6 +799,69 @@ impl Sidecar {
             }
             let _ = self.store.delete_version(&key, &superseded).await;
             report.versions_reclaimed += 1;
+        }
+
+        // Then everything the LANE recorded and did not delete. Same
+        // four guards; the only difference is where the candidate came
+        // from. `base_version_id` names exactly one version — the one
+        // superseded relative to the CITED generation — so without this
+        // pass every intermediate generation between two citations
+        // would be named by nothing and left to the retention backstop.
+        let recorded: Vec<(String, Vec<String>)> =
+            stage.pending_reclaims.iter().map(|(p, v)| (p.clone(), v.clone())).collect();
+        for (i, (path, vids)) in recorded.iter().enumerate() {
+            if i % RECLAIM_FENCE_EVERY == 0 {
+                self.renew_if_due().await?;
+                self.verify_not_deposed_pub().await?;
+            }
+            // Two distinct "no keep" cases, and they are NOT the same:
+            //
+            // - the installed manifest does not cite this path AT ALL
+            //   (a withheld delete installed, a path that never made a
+            //   boundary) — there is no cited version to protect, so
+            //   the recorded ids are reclaimable;
+            // - it cites the path but names no version — an unversioned
+            //   backend, a stripping proxy, a foreign-wins merge. We do
+            //   not know what is cited, so FAIL CLOSED, exactly as the
+            //   pass above does.
+            let keep = match installed.entries.get(path) {
+                None => None,
+                Some(e) => match e.version_id.clone().filter(|v| !v.is_empty()) {
+                    Some(v) => Some(v),
+                    None => continue,
+                },
+            };
+            let key = self.cfg.file_key(path);
+            let Ok(versions) = self.store.list_versions(&key).await else { continue };
+            for vid in vids {
+                if vid.is_empty() || Some(vid) == keep.as_ref() {
+                    continue;
+                }
+                let Some(v) = versions
+                    .iter()
+                    .find(|v| v.key == key && !v.is_delete_marker && &v.version_id == vid)
+                else {
+                    continue;
+                };
+                // The `is_current` guard is CONDITIONAL here, and the
+                // asymmetry is deliberate. Where the boundary cites this
+                // path, a recorded id that is current again means a
+                // foreign writer restored it and those are live bytes —
+                // skip, exactly as the pass above does. Where the
+                // boundary does not cite the path AT ALL — a withheld
+                // delete that installed, a scratch file that never made
+                // a boundary — current is the ORDINARY state of the last
+                // version this workspace staged before the file went
+                // away, and skipping it would leave precisely the litter
+                // this pass exists to collect. We delete by exact
+                // version id, so a foreign write is still safe: it would
+                // be a different id, and this one would not be current.
+                if keep.is_some() && v.is_current {
+                    continue;
+                }
+                let _ = self.store.delete_version(&key, vid).await;
+                report.versions_reclaimed += 1;
+            }
         }
         Ok(())
     }
@@ -1107,6 +1216,7 @@ impl Sidecar {
 
         stage.entries.clear();
         stage.withheld_deletes.clear();
+        stage.pending_reclaims.clear();
         stage.last_citation_unix = now_unix();
         stage.stable_since_unix = 0;
         self.save_stage(&stage)?;

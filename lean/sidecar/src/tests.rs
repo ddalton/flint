@@ -5337,3 +5337,642 @@ async fn a_long_barrier_does_not_starve_the_lease_renewal() {
          writer was perfectly alive"
     );
 }
+
+/// AUDIT of the B11b class — a fixture whose cases all coincide, so an
+/// asymmetry no case exercises rides through green.
+///
+/// `PendingStage` carries NO seq and no manifest stamp, `load_stage`
+/// deserializes whatever is on disk, and `gated_startup_check` runs
+/// only the versioning conformance probe. Meanwhile `citation_pass`
+/// clears the stage LAST — after the manifest CAS, after the reaper,
+/// after the baseline save and the intent clear. So a process that dies
+/// anywhere in that window leaves a stage naming versions the installed
+/// manifest now CITES, and the very next lane pass reads exactly that
+/// field to decide what to reclaim:
+///
+///     let superseded = stage.entries.get(path).and_then(|p| p.version_id...)
+///     ...
+///     if Some(&vid) != entry.version_id.as_ref() { delete_version(key, vid) }
+///
+/// Every existing lane fixture stages and cites in one uninterrupted
+/// pass, so `superseded` is always an UNCITED version and the two sets
+/// coincide. This is the case where they do not.
+///
+/// AND IT NEEDS NO CRASH. Between the CAS and the clear sit four
+/// ordinary `?` returns — the withheld-delete GC's `store.delete`, its
+/// HEAD arm, `append_conflict`, and `reclaim_superseded`, which itself
+/// awaits `renew_if_due` and `verify_not_deposed_pub`. One transient
+/// store error on any of them returns Err from `citation_pass` with the
+/// boundary already installed and the stage still standing. This test
+/// EMULATES that state (it restores the pre-clear stage) rather than
+/// injecting the fault; the reachability is in the four call sites.
+///
+/// Contrast `reclaim_superseded`, which fails CLOSED: it will not
+/// reclaim unless the installed manifest names a version for the path,
+/// it skips `superseded == keep`, and it never touches `is_current`.
+/// The lane's reclaim has exactly one guard — "not the version I just
+/// wrote" — and no reference to the installed manifest at all. This is
+/// U2's rule applied at one of the two sites that delete versions.
+#[tokio::test]
+async fn a_stage_that_outlived_its_citation_must_not_reap_the_cited_version() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    gated(&mut a);
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+
+    write(dir.path(), "f.txt", "v1");
+    a.upload_lane().await.unwrap();
+    // The stage exactly as it stands the instant before a citation
+    // would clear it.
+    let pre_clear = a.load_stage().unwrap();
+    let staged_vid = pre_clear.entries["f.txt"].version_id.clone().unwrap();
+
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+    let installed = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let cited_vid = installed.entries["f.txt"].version_id.clone().unwrap();
+    assert_eq!(
+        cited_vid, staged_vid,
+        "precondition: the citation named the version the lane staged"
+    );
+
+    // THE CRASH: the process dies between the manifest CAS and
+    // `save_stage`. The emptyDir survives — this is a restart, not a
+    // pod replacement — so the pre-citation stage is what the next
+    // incarnation loads.
+    a.save_stage(&pre_clear).unwrap();
+
+    // The agent goes on working. Nothing exotic: one more write.
+    // A DIFFERENT LENGTH, deliberately: `v1` -> `v2` is size-identical
+    // and lands in the same mtime second, so the scan cannot see it and
+    // the lane stages nothing. The first draft of this leg did exactly
+    // that and passed green having never reached the branch under test.
+    write(dir.path(), "f.txt", "v2 — the agent keeps working");
+    let lane = a.upload_lane().await.unwrap();
+
+    // ANTI-VACUITY: the leg is worthless unless the second lane pass
+    // actually re-staged this path AND actually reached the reclaim
+    // branch that reads `superseded`.
+    assert!(
+        lane.staged.contains(&"f.txt".to_string()),
+        "the second lane pass never re-staged f.txt (staged={:?} parked={:?}) — \
+         this leg never reached the reclaim branch",
+        lane.staged, lane.parked
+    );
+    assert_eq!(
+        lane.superseded_recorded, 1,
+        "the lane did not reach the branch under test at all — it neither recorded \
+         nor reclaimed, so this leg proves nothing"
+    );
+
+    // No citation has run since, so the boundary still names v1.
+    let still = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(
+        still.entries["f.txt"].version_id.as_ref(),
+        Some(&cited_vid),
+        "precondition: no citation ran, so the installed boundary still cites v1"
+    );
+    store
+        .get_version(&a.cfg.file_key("f.txt"), &cited_vid)
+        .await
+        .expect("the lane reaped the version the INSTALLED MANIFEST CITES");
+}
+
+/// The companion to the leg above, and the one that actually holds the
+/// FIX in place. That leg proves the lane no longer deletes; this one
+/// proves the reaper's drain will not delete either, in the one case
+/// where a recorded id is still the cited one.
+///
+/// It is reachable through the merge, not through a crash: a citation
+/// whose merge resolves foreign-wins on a path — or which DROPS the
+/// path because a HITL write is in flight over it — installs a boundary
+/// that still cites the OLD version, which is precisely the version the
+/// lane recorded as superseded. `reclaim_superseded` is driven straight
+/// here, the way the `base_version_id` guard's own test does, so the
+/// arm under test is the only thing in the frame.
+///
+/// Without the `Some(vid) == keep` skip this passes nothing: removing
+/// that guard was mutation-tested and left the whole battery green
+/// until this leg existed.
+#[tokio::test]
+async fn the_drain_never_reclaims_a_recorded_version_the_boundary_still_cites() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    gated(&mut a);
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+
+    write(dir.path(), "m.txt", "generation one");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+    let installed = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let cited = installed.entries["m.txt"].version_id.clone().unwrap();
+
+    // Stage a NEWER generation without citing it. This is the ordinary
+    // gated state and it is what makes the cited version NONCURRENT —
+    // D8's inversion, stated in the code's own comments. It also puts
+    // the cited version outside the `is_current` guard's reach, so the
+    // `keep` guard is the ONLY thing left protecting it. The first
+    // draft of this leg skipped this step, left the cited version
+    // current, and survived the mutation that deletes the guard.
+    write(dir.path(), "m.txt", "generation two, longer than the first");
+    a.upload_lane().await.unwrap();
+
+    // The lane recorded this very version as superseded — and then the
+    // merge resolved onto it, so the installed boundary still cites it.
+    let mut stage = a.load_stage().unwrap();
+    stage.pending_reclaims.insert("m.txt".to_string(), vec![cited.clone()]);
+
+    // ANTI-VACUITY, stated as the two facts that matter: the version is
+    // reachable (it is in the listing) and it is NOT protected by the
+    // is_current guard. Without both, removing `keep` changes nothing
+    // and this leg is decorative.
+    let versions = store.list_versions(&a.cfg.file_key("m.txt")).await.unwrap();
+    let v = versions
+        .iter()
+        .find(|v| v.version_id == cited)
+        .expect("the cited version is not in the listing — the pass would skip it anyway");
+    assert!(
+        !v.is_current,
+        "the cited version is still CURRENT, so `is_current` protects it and this leg \
+         cannot isolate the `keep` guard"
+    );
+    assert!(
+        installed.entries.contains_key("m.txt"),
+        "the boundary does not cite this path, so `keep` is None and the guard is moot"
+    );
+
+    let upserts = std::collections::BTreeMap::new();
+    let mut report = Default::default();
+    a.reclaim_superseded(&upserts, &installed, &stage, &mut report).await.unwrap();
+
+    assert_eq!(
+        report.versions_reclaimed, 0,
+        "the drain reclaimed a version the installed boundary CITES"
+    );
+    store
+        .get_version(&a.cfg.file_key("m.txt"), &cited)
+        .await
+        .expect("the drain deleted the version the installed manifest CITES");
+}
+
+/// COVERAGE AUDIT: `sync`'s dirty-conflict arm — the branch that stops
+/// a sync overwriting work the agent has not published — was never
+/// executed by any battery fixture. `sync_scan_first_dirty_wins_clean_
+/// applies` exercises the CLEAN half and `sync_rehonor_no_phantom_
+/// conflicts` exercises the identical-content half, which returns at
+/// the `identical` early-continue above it. Nothing reached the arm
+/// that writes `sync-dirty` and skips the write.
+///
+/// The formal model covers the RULE (`LeanSyncStaleDirt` refutes
+/// judging dirt from the last barrier's snapshot). This covers the Rust
+/// that implements it, which is a different artifact.
+///
+/// Two paths, deliberately: a clean one that MUST be applied alongside
+/// the dirty one that must not. Without the clean control, a sync that
+/// silently did nothing at all would satisfy every assertion here.
+#[tokio::test]
+async fn sync_refuses_to_clobber_a_locally_dirty_path_and_says_so() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "dirty.txt", "published v1");
+    write(dir.path(), "clean.txt", "published v1");
+    a.run_barrier().await.unwrap();
+
+    // A sibling installs new generations of BOTH paths.
+    let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    let mut theirs = loaded.manifest.clone();
+    theirs.seq += 1;
+    for (path, content) in
+        [("dirty.txt", "foreign bytes for dirty"), ("clean.txt", "foreign bytes for clean")]
+    {
+        let key = a.cfg.file_key(path);
+        let body = Bytes::from(content.to_string());
+        let crc = crc64_nvme(&body);
+        let cur = store.head(&key).await.unwrap();
+        let meta = store
+            .put_whole(
+                &key,
+                body,
+                &PutCondition::IfMatch(cur.etag),
+                &GenerationStamps {
+                    generation: 2,
+                    epoch: 0,
+                    flush_uuid: "sibling".into(),
+                    boundary_source: None,
+                    posix: None,
+                },
+                crc,
+            )
+            .await
+            .unwrap();
+        let e = theirs.entries.get_mut(path).unwrap();
+        e.etag = meta.etag.clone();
+        e.crc64_b64 = meta.crc64_b64.clone();
+        e.size = meta.size;
+        e.generation = 2;
+    }
+    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.etag), 0, "sibling")
+        .await
+        .unwrap();
+
+    // The agent edits one of them locally and does NOT publish. A
+    // different length, so the scan can actually see it.
+    write(dir.path(), "dirty.txt", "the agent's own unpublished work, longer");
+
+    let r = a.sync().await.unwrap();
+
+    // ANTI-VACUITY (1): the clean path really was applied, so a sync
+    // that did nothing cannot pass this leg.
+    assert_eq!(
+        read(dir.path(), "clean.txt").unwrap(),
+        "foreign bytes for clean",
+        "the control path was not applied — this sync did nothing at all"
+    );
+    assert!(r.applied.contains(&"clean.txt".to_string()));
+
+    // ANTI-VACUITY (2): the two versions genuinely differ, or
+    // "preserved" is trivially true.
+    assert_ne!(
+        read(dir.path(), "dirty.txt").unwrap(),
+        "foreign bytes for dirty",
+        "local and remote bytes are identical — nothing was in conflict"
+    );
+
+    // The rule: the agent's unpublished bytes stand.
+    assert_eq!(
+        read(dir.path(), "dirty.txt").unwrap(),
+        "the agent's own unpublished work, longer",
+        "sync CLOBBERED work the agent had not published"
+    );
+    assert!(
+        r.conflicts.contains(&"dirty.txt".to_string()),
+        "the conflict was not surfaced in the report: {:?}",
+        r.conflicts
+    );
+    let conflicts = a.state.load_conflicts().unwrap();
+    assert!(
+        conflicts.iter().any(|c| c.kind == "sync-dirty" && c.path == "dirty.txt"),
+        "no sync-dirty record was written: {conflicts:?}"
+    );
+}
+
+/// COVERAGE AUDIT: `manifest::merge`'s "our delete does not apply"
+/// arms. All eleven delete-merges in the battery took `(Some, Some)`
+/// with EQUAL etags and removed the entry; the `(None, None)` arm, the
+/// `_ => false` arm, and the `parked` skip were never executed at all.
+///
+/// The arm that matters is `(Some, None)` — present in theirs, absent
+/// from our merge base, i.e. a FOREIGN ADD at a path we are deleting.
+/// Flipping `_ => false` to `true` deletes somebody else's new file and
+/// the whole battery stays green. `merge` is a pure function over plain
+/// maps, so every arm is pinned here directly rather than reached
+/// through a barrier that can only produce the easy one.
+#[tokio::test]
+async fn merge_applies_a_local_delete_only_where_theirs_is_unchanged() {
+    fn entry(etag: &str) -> manifest::LeanEntry {
+        manifest::LeanEntry {
+            key: "tenant/proj1/files/p.txt".into(),
+            etag: etag.into(),
+            crc64_b64: None,
+            size: 3,
+            mode: 0o644,
+            mtime_unix: 0,
+            generation: 1,
+            epoch: 0,
+            version_id: None,
+        }
+    }
+    // (name, theirs entry, base etag, parked, must_survive_our_delete)
+    let cases: Vec<(&str, Option<&str>, Option<&str>, bool, bool)> = vec![
+        ("theirs unchanged since our base", Some("e1"), Some("e1"), false, false),
+        ("FOREIGN MODIFY under our delete", Some("e2"), Some("e1"), false, true),
+        ("FOREIGN ADD under our delete", Some("e2"), None, false, true),
+        ("absent from both", None, None, false, false),
+        ("already deleted by someone else", None, Some("e1"), false, false),
+        ("parked: never resolved this pass", Some("e1"), Some("e1"), true, true),
+    ];
+    for (name, theirs_etag, base_etag, is_parked, must_survive) in cases {
+        let mut theirs = manifest::LeanManifest::default();
+        if let Some(e) = theirs_etag {
+            theirs.entries.insert("p.txt".to_string(), entry(e));
+        }
+        let mut base = std::collections::BTreeMap::new();
+        if let Some(b) = base_etag {
+            base.insert("p.txt".to_string(), b.to_string());
+        }
+        let mut deletes = std::collections::BTreeSet::new();
+        deletes.insert("p.txt".to_string());
+        let mut parked = std::collections::BTreeSet::new();
+        if is_parked {
+            parked.insert("p.txt".to_string());
+        }
+
+        // ANTI-VACUITY: the case is only the case if the inputs say so.
+        assert_eq!(theirs.entries.contains_key("p.txt"), theirs_etag.is_some(), "{name}");
+        assert_eq!(base.contains_key("p.txt"), base_etag.is_some(), "{name}");
+
+        let (merged, _foreign) =
+            manifest::merge(&base, &theirs, &Default::default(), &deletes, &parked);
+
+        assert_eq!(
+            merged.entries.contains_key("p.txt"),
+            must_survive,
+            "{name}: our local delete {} the entry",
+            if must_survive { "destroyed" } else { "failed to remove" }
+        );
+        // Where it survives because THEIRS moved, it must survive as
+        // THEIRS — not as some merged-in ghost of our own.
+        if must_survive {
+            if let Some(e) = theirs_etag {
+                assert_eq!(merged.entries["p.txt"].etag, e, "{name}: wrong bytes survived");
+            }
+        }
+    }
+}
+
+/// COVERAGE AUDIT: `checkout`'s resume-adoption guard. `local_
+/// crc64_b64` is never called by any battery fixture — the entire
+/// content check is dead in the battery — because a second checkout
+/// short-circuits at `marker_present()` and never reaches the body.
+///
+/// The hazard is the one the code's own comment states: a checkout that
+/// died halfway leaves generation N on disk while the manifest MOVES
+/// (a HITL write, a sibling's barrier — routine on this fleet).
+/// Adopting on size alone stamps the baseline with the NEW entry's etag
+/// over the OLD content; the scan then reads the file as clean and
+/// never uploads it, sync reads baseline == manifest and never
+/// re-fetches it, and the workspace holds bytes nothing will ever
+/// reconcile. Silent and permanent, in the code's words.
+///
+/// Both halves are asserted: a genuinely identical file must be ADOPTED
+/// (or the leg is just "checkout re-fetches everything"), and a
+/// same-length-different-bytes file must be RE-FETCHED.
+#[tokio::test]
+async fn a_resumed_checkout_adopts_identical_bytes_and_refetches_same_size_impostors() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "same.txt", "these bytes never move");
+    write(dir.path(), "impostor.txt", "AAAA");
+    a.run_barrier().await.unwrap();
+
+    // A sibling replaces impostor.txt with the SAME NUMBER OF BYTES.
+    let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    let mut theirs = loaded.manifest.clone();
+    theirs.seq += 1;
+    let key = a.cfg.file_key("impostor.txt");
+    let body = Bytes::from_static(b"BBBB");
+    let meta = store
+        .put_whole(
+            &key,
+            body,
+            &PutCondition::IfMatch(store.head(&key).await.unwrap().etag),
+            &GenerationStamps {
+                generation: 2,
+                epoch: 0,
+                flush_uuid: "sibling".into(),
+                boundary_source: None,
+                posix: None,
+            },
+            crc64_nvme(&Bytes::from_static(b"BBBB")),
+        )
+        .await
+        .unwrap();
+    let e = theirs.entries.get_mut("impostor.txt").unwrap();
+    e.etag = meta.etag.clone();
+    e.crc64_b64 = meta.crc64_b64.clone();
+    e.size = meta.size;
+    e.generation = 2;
+    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.etag), 0, "sibling")
+        .await
+        .unwrap();
+
+    // ANTI-VACUITY: size alone cannot tell these apart. If the manifest
+    // entry and the on-disk file differed in length, the cheap check
+    // would catch it and the crc would never be consulted.
+    assert_eq!(
+        theirs.entries["impostor.txt"].size,
+        std::fs::metadata(dir.path().join("impostor.txt")).unwrap().len(),
+        "the impostor differs in SIZE — this leg would pass without any crc at all"
+    );
+    assert_eq!(read(dir.path(), "impostor.txt").unwrap(), "AAAA");
+
+    // A checkout that died halfway: the files are on disk, the marker
+    // was never written. Without this the resume row returns at
+    // `marker_present()` and the adoption code is unreachable — which
+    // is exactly why no fixture had ever run it.
+    std::fs::remove_file(dir.path().join(".flint-sync/checkout-complete")).unwrap();
+    let r = a.checkout().await.unwrap();
+
+    assert!(
+        r.skipped_present >= 1,
+        "nothing was adopted — the leg degenerates into 'checkout re-fetches everything'"
+    );
+    assert_eq!(
+        read(dir.path(), "same.txt").unwrap(),
+        "these bytes never move",
+        "an identical file was not left alone"
+    );
+    assert_eq!(
+        read(dir.path(), "impostor.txt").unwrap(),
+        "BBBB",
+        "checkout ADOPTED a same-size file whose bytes are not the cited bytes — \
+         the baseline now attests content the workspace does not hold"
+    );
+}
+
+/// COVERAGE AUDIT: `sync` under `pinned_reads` — D13's promise that a
+/// reader resolves the CITED version and never the current one. The
+/// whole `pinned_version` branch was never executed: every sync fixture
+/// ran against a cadence manifest, where `pinned_reads` is false and
+/// the `else { None }` arm is taken.
+///
+/// The state that makes it matter is the ordinary gated one: a
+/// citation names V2 while the lane has already staged an uncited V3
+/// over it, so the CURRENT version of a real `files/` key is not the
+/// cited one. A sync that ignored `pinned_reads` would take the
+/// `get_whole(key, If-Match etag_of_V2)` path, 412 against V3, hit the
+/// `continue` and leave the workspace on V1 — no error, no conflict
+/// record, and a path that never converges.
+#[tokio::test]
+async fn sync_under_pinned_reads_resolves_the_cited_version_not_the_current_one() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    gated(&mut a);
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "d.txt", "cited generation one");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+
+    let key = a.cfg.file_key("d.txt");
+    let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    assert!(loaded.manifest.pinned_reads, "the gated citation did not pin reads");
+
+    // A sibling cites generation two...
+    let v2_body = Bytes::from_static(b"cited generation TWO");
+    let v2 = store
+        .put_whole(
+            &key,
+            v2_body.clone(),
+            &PutCondition::IfMatch(store.head(&key).await.unwrap().etag),
+            &GenerationStamps {
+                generation: 2,
+                epoch: 0,
+                flush_uuid: "sibling".into(),
+                boundary_source: None,
+                posix: None,
+            },
+            crc64_nvme(&v2_body),
+        )
+        .await
+        .unwrap();
+    let mut theirs = loaded.manifest.clone();
+    theirs.seq += 1;
+    theirs.pinned_reads = true;
+    {
+        let e = theirs.entries.get_mut("d.txt").unwrap();
+        e.etag = v2.etag.clone();
+        e.crc64_b64 = v2.crc64_b64.clone();
+        e.size = v2.size;
+        e.generation = 2;
+        e.version_id = v2.version_id.clone();
+    }
+    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.etag), 0, "sibling")
+        .await
+        .unwrap();
+
+    // ...and then stages an UNCITED generation three over it. This is
+    // not exotic: it is what the gated lane does every floor tick.
+    let v3_body = Bytes::from_static(b"uncited generation three, staged");
+    let v3 = store
+        .put_whole(
+            &key,
+            v3_body.clone(),
+            &PutCondition::IfMatch(v2.etag.clone()),
+            &GenerationStamps {
+                generation: 3,
+                epoch: 0,
+                flush_uuid: "sibling".into(),
+                boundary_source: None,
+                posix: None,
+            },
+            crc64_nvme(&v3_body),
+        )
+        .await
+        .unwrap();
+
+    // ANTI-VACUITY: the cited version must NOT be the current one, or
+    // "resolved the cited version" is indistinguishable from "read the
+    // key".
+    let versions = store.list_versions(&key).await.unwrap();
+    let cited_vid = theirs.entries["d.txt"].version_id.clone().unwrap();
+    assert!(
+        versions.iter().any(|v| v.version_id == v3.version_id.clone().unwrap() && v.is_current),
+        "the uncited generation is not current — the two reads would agree"
+    );
+    assert_ne!(cited_vid, v3.version_id.clone().unwrap());
+
+    let r = a.sync().await.unwrap();
+
+    assert!(
+        r.applied.contains(&"d.txt".to_string()),
+        "sync applied nothing — it took the 412 path and left the workspace behind: {r:?}"
+    );
+    assert_eq!(
+        read(dir.path(), "d.txt").unwrap(),
+        "cited generation TWO",
+        "sync did not land the CITED bytes"
+    );
+    assert_ne!(
+        read(dir.path(), "d.txt").unwrap(),
+        "uncited generation three, staged",
+        "sync served the CURRENT version over the cited one — D13's promise inverted"
+    );
+}
+
+/// MEASUREMENT, not an assertion: what counting recorded reclaims
+/// toward `stagedBacklogCapObjects` costs a fleet.
+///
+/// The change makes a hot path force citations it previously never
+/// triggered, because the old predicate counted staged PATHS and a file
+/// rewritten every tick is one path forever. What that costs depends on
+/// a rate nobody should guess at — how fast `pending_reclaims` actually
+/// grows per lane tick — so it is measured here rather than derived,
+/// along with the per-tick and per-citation request counts that price
+/// it. Run with `--nocapture` to read the table.
+#[tokio::test]
+async fn measure_backlog_cap_footprint() {
+    for hot in [1usize, 10, 100] {
+        let store = Arc::new(MemoryStore::new());
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = sidecar(&store, dir.path()).await;
+        gated(&mut a);
+        // The lag cap and quiescence must be unreachable, or they, not
+        // the backlog cap, decide when a citation fires and the
+        // measurement is of the wrong thing.
+        a.cfg.visibility_lag_bound_secs = Some(86_400);
+        a.cfg.quiesce_bound_secs = 86_400;
+        assert!(claim_until_held(&mut a, 3).await);
+        a.checkout().await.unwrap();
+
+        const TICKS: usize = 12;
+        let mut lane_ops = 0u64;
+        let mut lane_shape = Default::default();
+        let mut recorded_at = vec![];
+        for t in 0..TICKS {
+            for h in 0..hot {
+                // Length varies per tick: a same-size rewrite inside one
+                // mtime second is invisible to the scan, which would
+                // measure a workload that never happened.
+                write(dir.path(), &format!("hot{h:03}.txt"), &"x".repeat(8 + t * 3 + h));
+            }
+            store.reset_op_counts();
+            a.upload_lane().await.unwrap();
+            lane_ops += store.total_ops();
+            if t == TICKS - 1 {
+                lane_shape = store.op_counts();
+            }
+            let st = a.load_stage().unwrap();
+            let rec: usize = st.pending_reclaims.values().map(|v| v.len()).sum();
+            recorded_at.push((st.entries.len(), rec));
+        }
+
+        store.reset_op_counts();
+        a.citation_pass(CitationSource::Sentinel).await.unwrap();
+        let cite_ops = store.total_ops();
+        let cite_shape = store.op_counts();
+
+        let (entries, rec_last) = *recorded_at.last().unwrap();
+        // Growth per tick, MEASURED across the run rather than assumed
+        // to be one-per-path.
+        let rate = rec_last as f64 / (TICKS - 1) as f64;
+        let cap = 5000f64; // the shipped default
+        let old_ticks = if (entries as f64) >= cap { 1.0 } else { f64::INFINITY };
+        let new_ticks = if rate > 0.0 { (cap - entries as f64) / rate } else { f64::INFINITY };
+
+        eprintln!(
+            "\nhot paths = {hot}\n  \
+             stage entries after {TICKS} ticks : {entries}\n  \
+             recorded reclaims                : {rec_last}  (measured {rate:.2}/tick)\n  \
+             lane ops/tick                    : {:.1}  {:?}\n  \
+             citation ops                     : {cite_ops}  {:?}\n  \
+             ticks to forced citation, OLD    : {}\n  \
+             ticks to forced citation, NEW    : {:.0}",
+            lane_ops as f64 / TICKS as f64,
+            lane_shape,
+            cite_shape,
+            if old_ticks.is_finite() { "1".to_string() } else { "never".to_string() },
+            new_ticks,
+        );
+    }
+}

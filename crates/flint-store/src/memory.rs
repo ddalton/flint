@@ -184,6 +184,10 @@ pub struct MemoryStore {
     /// writable (a scoped operator principal): the backstop cannot be
     /// provisioned, which is a DEGRADATION, not a torn view.
     fail_lifecycle_writes: AtomicBool,
+    /// Per-operation call counts. Cost measurement is otherwise
+    /// guesswork: the request SHAPE of a tick is the thing the plan
+    /// prices, and it is not derivable from the code by reading.
+    ops: Mutex<std::collections::BTreeMap<&'static str, u64>>,
     pub min_part: u64,
     pub max_parts: usize,
 }
@@ -215,6 +219,7 @@ impl MemoryStore {
 
     pub fn new() -> Self {
         MemoryStore {
+            ops: Mutex::new(Default::default()),
             inner: Mutex::new(Inner::default()),
             upload_seq: AtomicU64::new(1),
             inject: AtomicU8::new(INJECT_NONE),
@@ -425,6 +430,22 @@ struct EpochBody {
     echo: Option<String>,
 }
 
+impl MemoryStore {
+    fn bump(&self, op: &'static str) {
+        *self.ops.lock().unwrap().entry(op).or_insert(0) += 1;
+    }
+    /// Call counts since construction or the last reset.
+    pub fn op_counts(&self) -> std::collections::BTreeMap<&'static str, u64> {
+        self.ops.lock().unwrap().clone()
+    }
+    pub fn reset_op_counts(&self) {
+        self.ops.lock().unwrap().clear();
+    }
+    pub fn total_ops(&self) -> u64 {
+        self.ops.lock().unwrap().values().sum()
+    }
+}
+
 #[async_trait]
 impl ObjectStore for MemoryStore {
     async fn put_whole(
@@ -435,6 +456,7 @@ impl ObjectStore for MemoryStore {
         stamps: &GenerationStamps,
         crc64: u64,
     ) -> StoreResult<ObjectMeta> {
+        self.bump("put_whole");
         let actual = crc64_nvme(&body);
         if actual != crc64 {
             return Err(StoreError::ChecksumMismatch(format!(
@@ -470,6 +492,7 @@ impl ObjectStore for MemoryStore {
     }
 
     async fn compose_generation(&self, spec: &ComposeSpec<'_>) -> StoreResult<ObjectMeta> {
+        self.bump("compose_generation");
         if spec.parts.is_empty() {
             return Err(StoreError::Other("compose: no parts".into()));
         }
@@ -493,6 +516,7 @@ impl ObjectStore for MemoryStore {
     }
 
     async fn head(&self, key: &str) -> StoreResult<ObjectMeta> {
+        self.bump("head");
         self.inner
             .lock()
             .unwrap()
@@ -506,6 +530,7 @@ impl ObjectStore for MemoryStore {
         key: &str,
         if_match: Option<&str>,
     ) -> StoreResult<(ObjectMeta, Bytes)> {
+        self.bump("get_whole");
         let inner = self.inner.lock().unwrap();
         let o = inner
             .current(key)
@@ -528,6 +553,7 @@ impl ObjectStore for MemoryStore {
         len: u64,
         if_match: &str,
     ) -> StoreResult<Bytes> {
+        self.bump("get_range");
         // Counted injections for the step-11 drills.
         if self
             .fail_get_range_count
@@ -556,6 +582,7 @@ impl ObjectStore for MemoryStore {
     }
 
     async fn list(&self, prefix: &str) -> StoreResult<Vec<ListedObject>> {
+        self.bump("list");
         Ok(self
             .inner
             .lock()
@@ -577,11 +604,13 @@ impl ObjectStore for MemoryStore {
     }
 
     async fn delete(&self, key: &str) -> StoreResult<()> {
+        self.bump("delete");
         self.inner.lock().unwrap().push_delete_marker(key);
         Ok(())
     }
 
     async fn head_version(&self, key: &str, version_id: &str) -> StoreResult<ObjectMeta> {
+        self.bump("head_version");
         self.inner
             .lock()
             .unwrap()
@@ -591,6 +620,7 @@ impl ObjectStore for MemoryStore {
     }
 
     async fn get_version(&self, key: &str, version_id: &str) -> StoreResult<(ObjectMeta, Bytes)> {
+        self.bump("get_version");
         let inner = self.inner.lock().unwrap();
         let o = inner
             .version(key, version_id)
@@ -599,6 +629,7 @@ impl ObjectStore for MemoryStore {
     }
 
     async fn delete_version(&self, key: &str, version_id: &str) -> StoreResult<()> {
+        self.bump("delete_version");
         // Idempotent, exactly as S3: deleting an absent version is Ok —
         // the GC pass and the operator sweep race each other by design.
         self.inner.lock().unwrap().remove_version(key, version_id);
@@ -606,6 +637,7 @@ impl ObjectStore for MemoryStore {
     }
 
     async fn list_versions(&self, prefix: &str) -> StoreResult<Vec<ListedVersion>> {
+        self.bump("list_versions");
         let inner = self.inner.lock().unwrap();
         let mut out = vec![];
         for (k, chain) in inner.chains.range(prefix.to_string()..) {
@@ -629,6 +661,7 @@ impl ObjectStore for MemoryStore {
     }
 
     async fn list_uploads(&self, prefix: &str) -> StoreResult<Vec<PendingUpload>> {
+        self.bump("list_uploads");
         let inner = self.inner.lock().unwrap();
         let mut v: Vec<PendingUpload> = inner
             .uploads
@@ -645,12 +678,14 @@ impl ObjectStore for MemoryStore {
     }
 
     async fn abort_upload(&self, _key: &str, upload_id: &str) -> StoreResult<()> {
+        self.bump("abort_upload");
         // Absent is Ok: abort races the lifecycle rule by design.
         self.inner.lock().unwrap().uploads.remove(upload_id);
         Ok(())
     }
 
     async fn bootstrap(&self, _prefix: &str) -> StoreResult<BootstrapReport> {
+        self.bump("bootstrap");
         Ok(BootstrapReport {
             notes: vec!["memory store: no bucket posture to verify".into()],
             ..Default::default()
@@ -658,6 +693,7 @@ impl ObjectStore for MemoryStore {
     }
 
     async fn lifecycle_rules(&self) -> StoreResult<Vec<LifecycleView>> {
+        self.bump("lifecycle_rules");
         Ok(self.inner.lock().unwrap().lifecycle.clone())
     }
 
@@ -666,6 +702,7 @@ impl ObjectStore for MemoryStore {
         prefix: &str,
         days: u64,
     ) -> StoreResult<RetentionOutcome> {
+        self.bump("ensure_noncurrent_retention");
         if self.fail_lifecycle_writes.load(Ordering::SeqCst) {
             return Err(StoreError::Other("lifecycle writes are denied".into()));
         }
@@ -696,6 +733,7 @@ impl ObjectStore for MemoryStore {
     }
 
     async fn epoch_read(&self, key: &str) -> StoreResult<Option<EpochState>> {
+        self.bump("epoch_read");
         let inner = self.inner.lock().unwrap();
         let Some(o) = inner.current(key) else {
             return Ok(None);
@@ -718,6 +756,7 @@ impl ObjectStore for MemoryStore {
         holder_id: &str,
         supersede: Option<&EpochState>,
     ) -> StoreResult<EpochLease> {
+        self.bump("epoch_acquire");
         let epoch = supersede.map_or(1, |s| s.epoch + 1);
         let body = Bytes::from(
             serde_json::to_vec(&EpochBody {
@@ -754,6 +793,7 @@ impl ObjectStore for MemoryStore {
         lease: &EpochLease,
         echo: Option<&str>,
     ) -> StoreResult<EpochLease> {
+        self.bump("epoch_renew");
         let body = Bytes::from(
             serde_json::to_vec(&EpochBody {
                 holder_id: lease.holder_id.clone(),
@@ -788,6 +828,7 @@ impl ObjectStore for MemoryStore {
     }
 
     async fn epoch_release(&self, key: &str, lease: &EpochLease) -> StoreResult<()> {
+        self.bump("epoch_release");
         // Mark, never delete — deleting restarts epoch numbering at 1.
         let body = Bytes::from(
             serde_json::to_vec(&EpochBody {
@@ -833,6 +874,7 @@ impl MemoryStore {
         spec: &ComposeSpec<'_>,
         upload_id: &str,
     ) -> StoreResult<ObjectMeta> {
+        self.bump("compose_inner");
         // Parts must be contiguous from 0 and respect granularity —
         // catching a flusher part-grid bug here beats catching it on
         // real S3.
@@ -991,6 +1033,7 @@ mod tests {
 
     #[tokio::test]
     async fn conditional_puts_and_gets_enforce_the_contract() {
+        self.bump("conditional_puts_and_gets_enforce_the_contract");
         let s = MemoryStore::new();
         let body = Bytes::from_static(b"gen-1");
         let crc = crc64_nvme(&body);
@@ -1035,6 +1078,7 @@ mod tests {
 
     #[tokio::test]
     async fn epoch_cas_lease_lifecycle() {
+        self.bump("epoch_cas_lease_lifecycle");
         let s = MemoryStore::new();
         const K: &str = "vol/.flint-epoch";
 
@@ -1084,6 +1128,7 @@ mod tests {
 
     #[tokio::test]
     async fn compose_mixes_local_and_guarded_base_copy() {
+        self.bump("compose_mixes_local_and_guarded_base_copy");
         let s = MemoryStore::new();
         // Base generation: 8 bytes.
         let base_body = Bytes::from_static(b"AAAABBBB");
