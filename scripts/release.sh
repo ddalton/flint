@@ -39,8 +39,33 @@ chart_dir="$repo_root/flint-csi-driver-chart"
 
 cmd=${1:-check}
 case "$cmd" in check|images|chart|all) ;; *)
-    echo "usage: $0 [check|images|chart|all]" >&2; exit 2 ;;
+    echo "usage: $0 [check|images|chart|all] [all|lean] [--force-republish]" >&2; exit 2 ;;
 esac
+
+# SCOPE, matching stage-prebuilt.sh and publish-images.sh. A lean-scoped
+# release (the 1.38.0/1.39.0 shape) publishes the flint-lean chart and
+# the two images it pulls; the CSI, lite and lite-operator charts are
+# untouched and must not be republished. Adding the scope to the image
+# scripts and NOT here is how the 1.39.0 release re-pushed three
+# unrelated charts at their EXISTING versions — see push_chart below for
+# why that is not harmless.
+scope=all
+force_republish=0
+# Shift the command off first, then validate what remains STRICTLY. An
+# unrecognized word must not be silently ignored: `chart len` would
+# otherwise run in `all` scope and republish three charts the caller was
+# explicitly trying to leave alone — the exact outcome this flag exists
+# to prevent, reached by a typo.
+shift || true
+for a in "$@"; do
+    case "$a" in
+        lean) scope=lean ;;
+        all)  scope=all ;;
+        --force-republish) force_republish=1 ;;
+        *) echo "unknown argument '$a' — usage: $0 [check|images|chart|all] [all|lean] [--force-republish]" >&2
+           exit 2 ;;
+    esac
+done
 
 # --- read the chart ---------------------------------------------------------
 # images_table lines:  <name> <tag> <context-dir> <dockerfile-rel-to-context>
@@ -84,6 +109,37 @@ PYEOF
 tag_exists() {  # <name> <tag> -> 0 if published on Docker Hub
     curl -fsS -o /dev/null \
         "https://hub.docker.com/v2/repositories/$hub_ns/$1/tags/$2" 2>/dev/null
+}
+
+# Push one chart, or say precisely why not.
+#
+# TWO refusals, and the second is the one that bit 1.39.0:
+#
+#  - OUT OF SCOPE. A lean release has no business touching the CSI or
+#    lite charts.
+#  - ALREADY PUBLISHED at this version. `helm package` is not
+#    byte-deterministic, so re-pushing an unchanged chart at a version
+#    that already exists MUTATES that version's digest on the registry.
+#    Nothing breaks for `helm install --version`, but a released
+#    artifact silently becoming different bytes is the kind of thing a
+#    supply chain is supposed to make impossible, and it happens by
+#    accident because `chart` pushed all four charts unconditionally.
+#    Bump the version, or pass --force-republish and mean it.
+push_chart() {  # <scopes> <name> <version> <tgz>
+    local scopes=$1 name=$2 version=$3 pkg=$4
+    case " $scopes " in
+        *" $scope "*) ;;
+        *) echo "  · skipping chart $name $version (scope=$scope)"; return 0 ;;
+    esac
+    if [ "$force_republish" = 0 ] && tag_exists "$name" "$version"; then
+        echo "  · skipping chart $name $version — ALREADY on Docker Hub." \
+             "Re-pushing would change its digest for identical content;" \
+             "bump the version, or pass --force-republish."
+        return 0
+    fi
+    echo "── pushing $(basename "$pkg") to oci://registry-1.docker.io/$hub_ns"
+    helm push "$pkg" "oci://registry-1.docker.io/$hub_ns"
+    echo "chart $name $version released."
 }
 
 tag_digest() {  # <name> <tag> -> the manifest-list digest, or empty
@@ -147,9 +203,7 @@ EOF
     trap 'rm -rf "$pkg_dir"' EXIT
     helm package "$chart_dir" --destination "$pkg_dir" >/dev/null
     pkg="$pkg_dir/flint-csi-driver-chart-$chart_version.tgz"
-    echo "── pushing $(basename "$pkg") to oci://registry-1.docker.io/$hub_ns"
-    helm push "$pkg" "oci://registry-1.docker.io/$hub_ns"
-    echo "chart $chart_version released."
+    push_chart "all" flint-csi-driver-chart "$chart_version" "$pkg"
 
     # The flint-lite chart ships alongside as its OWN OCI artifact
     # (independent version; its appVersion pins the flint-pnfs tag, which
@@ -163,9 +217,7 @@ EOF
     fi
     helm package "$lite_dir" --destination "$pkg_dir" >/dev/null
     lite_pkg="$pkg_dir/flint-lite-$lite_version.tgz"
-    echo "── pushing $(basename "$lite_pkg") to oci://registry-1.docker.io/$hub_ns"
-    helm push "$lite_pkg" "oci://registry-1.docker.io/$hub_ns"
-    echo "chart flint-lite $lite_version released."
+    push_chart "all" flint-lite "$lite_version" "$lite_pkg"
 
     # The flint-lite OPERATOR chart, likewise its own artifact. Two
     # images must exist for it to be installable: its own (the
@@ -197,9 +249,7 @@ EOF
         fi
         helm package "$op_dir" --destination "$pkg_dir" >/dev/null
         op_pkg="$pkg_dir/flint-lite-operator-$op_version.tgz"
-        echo "── pushing $(basename "$op_pkg") to oci://registry-1.docker.io/$hub_ns"
-        helm push "$op_pkg" "oci://registry-1.docker.io/$hub_ns"
-        echo "chart flint-lite-operator $op_version released."
+        push_chart "all" flint-lite-operator "$op_version" "$op_pkg"
     fi
 
     # The flint-lean chart. It was NOT gated here until 2026-08-26, and
@@ -298,8 +348,6 @@ EOF
         fi
         helm package "$lean_dir" --destination "$pkg_dir" >/dev/null
         lean_pkg="$pkg_dir/flint-lean-$lean_version.tgz"
-        echo "── pushing $(basename "$lean_pkg") to oci://registry-1.docker.io/$hub_ns"
-        helm push "$lean_pkg" "oci://registry-1.docker.io/$hub_ns"
-        echo "chart flint-lean $lean_version released."
+        push_chart "all lean" flint-lean "$lean_version" "$lean_pkg"
     fi
 fi
