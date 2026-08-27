@@ -84,6 +84,21 @@ FAILED=0
 SKIPPED=0
 NOTES=()
 
+# U32: the drill's own accounting. Until now the roster existed only as
+# a column of `leg` calls, so deleting one produced "27 passed, 0
+# failed" — green, and one claim lighter. Two legs (B14, B25) were
+# additionally assigned to NO phase gate in the plan, which meant the
+# only empirical check of the work-metered budget and the only
+# mixed-fleet leg could both be skipped while every phase read green.
+#
+# This is the register §6 asks for, as an assertion rather than a
+# comment: every id here must run, and every leg that runs must be
+# here. Adding a leg without adding its id fails the drill, which is
+# the forcing function that keeps the plan's matrix honest.
+EXPECTED_LEGS="B1 B2 B3 B4 B5 B6 B7 B8 B9 B10 B11a B11b B11c B12 B12b B13 B14 \
+B15 B16 B17 B18 B19 B20 B21 B22 B23 B24 B25"
+RAN_LEGS=""
+
 note() { NOTES+=("$1"); echo "  note: $1"; }
 ok()   { echo "  ok: $1"; }
 bad()  { echo "  BAD: $1"; }
@@ -109,6 +124,7 @@ reset_pods() {
 
 leg() {
   local name=$1; shift
+  RAN_LEGS="$RAN_LEGS ${name%% *}"
   if [ -n "$ONLY" ] && [ "${name%% *}" != "$ONLY" ]; then return 0; fi
   echo
   echo "── $name"
@@ -447,15 +463,28 @@ b3_storm_coalesces_and_covers() {
   a=$(wait_ack verbs-a $R publish 'b3-100' 60) || { bad "the final touch was never covered: $a"; return 1; }
 
   # Coalescing: at most ceil(span/5)+1 barriers may have run, and the
-  # final ack must carry MORE THAN ONE nonce — a per-touch barrier
-  # would satisfy the cap on a slow storm but never coalesce.
-  local cap=$(( (span + 4) / 5 + 1 ))
+  # touch:barrier ratio must be nothing like 1:1.
+  local cap=$(( (span + 4) / 5 + 1 )) touches=100
   local seq n
   seq=$(mseq $P)
   n=$(ajq "$a" '.nonces|length')
   [ "$seq" -le "$cap" ] || { bad "$seq barriers for a ${span}s storm, cap is $cap — coalescing did not hold"; return 1; }
-  [ "$n" -gt 1 ] || { bad "the final ack carries $n nonce — nothing coalesced into it"; return 1; }
-  ok "$seq barrier(s) <= cap $cap; the final ack coalesced $n touches"
+  # Coalescing asserted on the RELIABLE signal: 100 touches must not
+  # produce anything like 100 barriers. The previous form asserted
+  # `nonces > 1`, which this leg's own note (below) says an agent
+  # cannot rely on — the nonce list is best-effort, because a mid-storm
+  # nonce appears in the ack of ITS OWN honor and that ack is then
+  # overwritten. It duly went red on a slower run (12 s instead of 10 s,
+  # under cluster contention) with the product behaving correctly: 100
+  # touches, 1 nonce in the final ack, and the barrier count still
+  # inside the cap. An assertion the documented contract does not
+  # support is a flake by construction.
+  [ "$((seq * 10))" -le "$touches" ] || {
+    bad "$touches touches produced $seq barriers — that is not coalescing, whatever the cap allows"
+    return 1; }
+  ok "$seq barrier(s) for $touches touches, <= cap $cap — coalescing on the barrier count"
+  [ "$n" -gt 1 ] && ok "the final ack also carried $n coalesced nonces" \
+    || note "the final ack carried $n nonce; best-effort by design (see below), not asserted"
 
   # Coverage is the AT-LEAST guarantee, not the nonce list. The nonce
   # set is per-honor by construction (a retired pending record starts
@@ -684,9 +713,11 @@ b8_unused_verbs_cost_nothing() {
   local P=tenants/b08 R=/work/b08
   inpod verbs-a "mkdir -p $R" > /dev/null
 
-  # <window secs> <extra env> -> requests touching this prefix
+  # <window secs> <extra env> <tag> -> requests touching this prefix.
+  # The tag keeps each run's raw trace, because the SHAPE assertion
+  # below reads the control run's after the second call has run.
   count_window() {
-    local secs=$1 envs=$2
+    local secs=$1 envs=$2 tag=$3
     mcx mc rm --recursive --force --versions "m/$BUCKET/$P/" > /dev/null 2>&1
     inpod verbs-a "rm -rf $R && mkdir -p $R" > /dev/null
     sy_bg verbs-a $P $R "FLINT_SYNC_FLOOR_SECS=5 $envs" /tmp/b08.log run
@@ -694,23 +725,93 @@ b8_unused_verbs_cost_nothing() {
     # Trace only AFTER startup, so claim/checkout/marker writes are not
     # counted as steady-state cost.
     $K -n flint-system exec mc -- sh -c \
-      "timeout $secs mc admin trace --json m > /tmp/b08.json 2>/dev/null; true" > /dev/null 2>&1
+      "timeout $secs mc admin trace --json m > /tmp/b08-$tag.json 2>/dev/null; true" > /dev/null 2>&1
     killsync verbs-a
     await_exit verbs-a flint-sync 15 > /dev/null
     # Counted HERE, not in the mc pod: that image ships `mc` and little
     # else — no grep, no awk, no sed — so an in-pod count returns the
     # empty string and every budget assertion passes on nothing. The
     # leg's own anti-vacuity guard is what caught it.
-    $K -n flint-system exec mc -- cat /tmp/b08.json 2>/dev/null \
+    $K -n flint-system exec mc -- cat /tmp/b08-$tag.json 2>/dev/null \
       | grep -c "\"path\":\"/$BUCKET/$P" || true
+  }
+
+  # Requests of one (api, cell) kind in a saved trace. Counted OUT of
+  # the pod for the same reason the totals are: minio/mc ships no grep.
+  kind_count() { # <tag> <api> <cell>
+    $K -n flint-system exec mc -- cat /tmp/b08-$1.json 2>/dev/null \
+      | grep -c "\"api\":\"s3.$2\".*\"path\":\"/$BUCKET/$P/.flint/lean/$3\"" || true
   }
 
   local win=22 ticks=4
   local off_n auto_n
-  off_n=$(count_window $win "FLINT_SYNC_SENTINELS=off")
-  auto_n=$(count_window $win "")
+  off_n=$(count_window $win "FLINT_SYNC_SENTINELS=off" off)
+  auto_n=$(count_window $win "" auto)
   [ "$off_n" -gt 0 ] || { bad "the control window counted ZERO requests — a dead oracle passes every budget"; return 1; }
   ok "control (sentinels off): $off_n requests in ${win}s ≈ $((off_n / ticks))/tick"
+
+  # U7: this leg computed a per-tick figure, printed it, and asserted
+  # NOTHING about it. A delta-only oracle passes a sidecar that
+  # regressed from 4 requests per tick to 40, so long as sentinels
+  # added none of them — and §7 says the draft's own "1 HEAD" figure
+  # was ~19x under, so the absolute number is exactly the thing that
+  # has been wrong before.
+  #
+  # The plan states the idle tick EXACTLY (§7, and B8's own acceptance
+  # row): 4 requests at floor <= 30 s — the renew CAS and the deposal
+  # read, both on .flint/lean/epoch with the renew PUT-priced, plus the
+  # inbox GET and the manifest HEAD. That shape is asserted here, which
+  # is what "a recorded control whose request shape is written into the
+  # leg" was asking for.
+  local per_tick=$(( off_n / ticks ))
+  [ "$per_tick" -ge 4 ] && [ "$per_tick" -le 6 ] || {
+    bad "the idle tick costs $per_tick requests, outside the measured 5 (window $win s, $ticks ticks, $off_n total)"
+    return 1; }
+  ok "idle tick costs $per_tick requests"
+
+  local n_renew n_epoch n_inbox n_manifest
+  n_renew=$(kind_count off PutObject epoch)
+  n_epoch=$(kind_count off GetObject epoch)
+  n_inbox=$(kind_count off GetObject inbox)
+  n_manifest=$(kind_count off HeadObject manifest)
+  # Every category must appear, or "4 requests" could be four of the
+  # wrong thing — four manifest GETs on a 264 MiB manifest is the same
+  # count and a different product.
+  local missing=""
+  [ "$n_renew" -gt 0 ]    || missing="$missing renew-PUT"
+  [ "$n_epoch" -gt 0 ]    || missing="$missing epoch-GET"
+  [ "$n_inbox" -gt 0 ]    || missing="$missing inbox-GET"
+  [ "$n_manifest" -gt 0 ] || missing="$missing manifest-HEAD"
+  [ -z "$missing" ] || {
+    bad "the idle tick's shape is not the documented one — missing:$missing (renew=$n_renew epoch=$n_epoch inbox=$n_inbox manifest=$n_manifest)"
+    return 1; }
+  # And the manifest is read by HEAD, never by GET: the 0b lever that
+  # took the 1M-file idle tick from 27.5 s to 1.85 s was exactly this,
+  # and a regression to GET is invisible in a request COUNT.
+  local n_mget
+  n_mget=$(kind_count off GetObject manifest)
+  [ "$n_mget" -eq 0 ] || {
+    bad "$n_mget idle-tick manifest GETs — the HEAD+etag lever regressed; at 1M files this is 264 MiB per tick"
+    return 1; }
+  ok "shape: renew PUT=$n_renew, epoch GET=$n_epoch, inbox GET=$n_inbox, manifest HEAD=$n_manifest, manifest GET=0"
+
+  # The renew arm fires TWICE at this floor, and that is correct.
+  # §7's "4 requests" is the tick's SHAPE (renew + epoch read + inbox
+  # GET + manifest HEAD); the renew COUNT is floor-dependent, because
+  # D12's heartbeat interval is min(floor,30) and the floor arm renews
+  # on its own independent non-resettable timer with no debounce in
+  # `lease::renew`. At floor=60 that is 3 renews/minute, which §7's
+  # delta line prices at +100 PUT/s fleet-wide. At THIS leg's floor=5
+  # the two arms coincide, so it is 2 per tick and the tick costs 5.
+  # Asserting a bare total would therefore encode a floor-specific
+  # number as if it were the contract; asserting the multiplier catches
+  # the regression that actually matters — the second renew silently
+  # disappearing, which would be a takeover-safety loss (§2.1a), not a
+  # saving.
+  [ "$n_renew" -ge $(( n_epoch * 2 )) ] || {
+    bad "renew PUT=$n_renew against epoch GET=$n_epoch — the heartbeat arm's independent renew is gone; D12 bought takeover safety with exactly that PUT"
+    return 1; }
+  ok "the renew arm fires twice per tick ($n_renew PUTs vs $n_epoch epoch reads) — D12's heartbeat plus the floor arm, priced in §7"
 
   local delta=$(( auto_n - off_n ))
   [ "$delta" -lt 0 ] && delta=$(( -delta ))
@@ -1394,6 +1495,47 @@ b12_straggler_is_contained_not_destructive() {
   [ "$(vcat "$P/files/y.txt" "$vy")" = "ORIGINAL-Y" ] || { bad "the cited version of y.txt was destroyed"; return 1; }
   [ -z "$vz" ] || [ "$(vcat "$P/files/z.txt" "$vz")" = "SUCCESSOR-Z" ] || { bad "the successor's own citation was destroyed"; return 1; }
   ok "every cited version id is still fetchable byte-identical after the straggler's writes"
+
+  # U7: three clauses this leg's own header CLAIMS and never asserted.
+  # B12 was proven structurally blind to the defect it was named for
+  # (it froze the straggler in the upload loop, where the reaper never
+  # runs — see B12b), so its remaining claims get checked rather than
+  # credited.
+  #
+  # (1) "those writes land as UNCITED versions". Survival of the cited
+  # version is NOT that claim: a straggler whose CAS landed would leave
+  # the old version alive AND cite its own, and every assertion above
+  # would still pass.
+  local vx_cited_now seq_now
+  vx_cited_now=$(manif $P | jq -r '.entries["x.txt"].version_id')
+  [ "$vx_cited_now" = "$vx" ] || {
+    bad "the boundary now cites ${vx_cited_now:0:8}… for x.txt, not the successor's ${vx:0:8}… — the straggler's write became CITED"
+    return 1; }
+  ok "the straggler's bytes are UNCITED: x.txt is still cited at ${vx:0:8}…"
+
+  # (2) it installed NOTHING. The seq must be exactly where the
+  # successor left it — not merely greater than the seed.
+  seq_now=$(mseq $P)
+  [ "$seq_now" = "$s1" ] || {
+    bad "the manifest moved $s1 -> $seq_now with only the straggler writing — a deposed CAS landed"
+    return 1; }
+  ok "the manifest is untouched at seq $seq_now — the straggler installed nothing"
+
+  # (3) CONTAINED, not merely ineffective. §8 Q2's word is containment,
+  # and a straggler that writes forever while believing it holds the
+  # lease is a different product from one that knows it was deposed.
+  # The agent-facing marker is the only place that difference is
+  # visible, and nothing in this leg had ever looked at it.
+  local cs
+  cs=$(caps verbs-s "$RS")
+  [ -n "$cs" ] || { bad "the straggler has no capabilities.json to inspect"; return 1; }
+  [ "$(printf '%s' "$cs" | jq -r '.state')" = "fenced" ] || {
+    bad "the straggler still advertises state=$(printf '%s' "$cs" | jq -r '.state') — it does not know it was deposed"
+    return 1; }
+  [ "$(printf '%s' "$cs" | jq -r '.verbs|length')" = "0" ] || {
+    bad "a fenced straggler still advertises verbs $(printf '%s' "$cs" | jq -c '.verbs') — an agent would keep touching sentinels on a zombie"
+    return 1; }
+  ok "the straggler fenced itself: state=fenced, verbs=[]"
 
   # A pinned reader is unaffected — this is what the citation BUYS.
   #
@@ -2194,6 +2336,31 @@ leg "B22 pre-existing .flint/ disables the verbs"    b22_preexisting_flint_disab
 leg "B23 dangling citation refuses, then recovers"   b23_dangling_citation_refuses_then_recovers
 leg "B24 a stripping proxy refuses gated"            b24_stripping_proxy_refuses_gated
 leg "B25 hot loops meter by work, not by calls"      b25_hot_loops_meter_by_work_not_by_calls
+
+# The reconciliation. Skipped under -only, which runs one leg on
+# purpose; a full run that does not match its roster is a failure, not
+# a note.
+if [ -z "$ONLY" ]; then
+  acct_missing=""
+  for want in $EXPECTED_LEGS; do
+    case " $RAN_LEGS " in *" $want "*) ;; *) acct_missing="$acct_missing $want";; esac
+  done
+  acct_extra=""
+  for got in $RAN_LEGS; do
+    case " $EXPECTED_LEGS " in *" $got "*) ;; *) acct_extra="$acct_extra $got";; esac
+  done
+  if [ -n "$acct_missing" ]; then
+    echo "  BAD: the roster declares legs that never ran:$acct_missing"
+    FAILED=$((FAILED + 1))
+  fi
+  if [ -n "$acct_extra" ]; then
+    echo "  BAD: legs ran that the roster does not declare:$acct_extra" \
+         "— add them to EXPECTED_LEGS and to the plan's §6 matrix"
+    FAILED=$((FAILED + 1))
+  fi
+  [ -n "$acct_missing$acct_extra" ] || \
+    echo "  accounting: $(printf '%s' "$RAN_LEGS" | wc -w | tr -d ' ') legs ran, roster reconciles"
+fi
 
 echo
 echo "─────────────────────────────────────────────"
