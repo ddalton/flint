@@ -330,6 +330,52 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_length_reply_body_seals_and_unseals() {
+        // The RPC NULL reply over RPCSEC_GSS: no results at all.
+        //
+        // Before 2026-08-27 the GSS path never dispatched NULL — it fed
+        // every call to the COMPOUND decoder, so this body shape was
+        // unreachable and untested. It is also the shape most likely to
+        // break the crypto: AES-CTS needs at least a block, and a naive
+        // wrap of zero bytes has none. RFC 4121 saves it (16-byte header
+        // plus confounder mean the plaintext is never actually empty) —
+        // but that is a property worth pinning rather than assuming.
+        for service in [GssService::None, GssService::Integrity, GssService::Privacy] {
+            let v = server(service);
+            let sealed = seal_reply_body(&v, &[])
+                .unwrap_or_else(|e| panic!("{service:?}: sealing an empty body: {}", e.reason()));
+
+            match service {
+                // svc_none is a pass-through: nothing added, nothing to strip.
+                GssService::None => assert!(sealed.is_empty(), "svc_none added framing"),
+                // The others must produce a NON-empty wrapper around the
+                // empty payload — a zero-length result here would mean
+                // the reply carried no integrity/privacy at all.
+                _ => assert!(
+                    !sealed.is_empty(),
+                    "{service:?}: empty body produced empty framing — no protection applied"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_reply_is_not_confused_with_an_unprotected_one() {
+        // Anti-vacuity for the test above: prove the krb5i/krb5p framing
+        // of an empty body actually differs from the svc_none one, so
+        // "not empty" is not being satisfied by incidental bytes.
+        let none = seal_reply_body(&server(GssService::None), &[]).unwrap();
+        let integ = seal_reply_body(&server(GssService::Integrity), &[]).unwrap();
+        let priv_ = seal_reply_body(&server(GssService::Privacy), &[]).unwrap();
+        assert_ne!(none, integ);
+        assert_ne!(none, priv_);
+        assert_ne!(integ, priv_);
+        // And each carries more than the sequence number it wraps.
+        assert!(integ.len() > 8, "integrity framing too small to hold a MIC");
+        assert!(priv_.len() > 8, "privacy framing too small to hold a wrap token");
+    }
+
+    #[test]
     fn every_service_round_trips_a_call_body() {
         for service in [GssService::None, GssService::Integrity, GssService::Privacy] {
             let v = server(service);

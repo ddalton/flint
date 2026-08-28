@@ -4,7 +4,7 @@
 //! Listens on TCP port, receives RPC COMPOUND calls, dispatches to NFSv4.2 handlers,
 //! and sends replies.
 
-use super::rpc::{CallMessage, ReplyBuilder, AuthFlavor};
+use super::rpc::{CallMessage, ReplyBuilder, AuthFlavor, AuthStat};
 use super::rpcsec_gss::{RpcSecGssManager, RpcGssCred, procedure as gss_proc};
 use super::v4::{CompoundDispatcher, CompoundRequest};
 use super::v4::filehandle::FileHandleManager;
@@ -158,6 +158,27 @@ impl NfsServer {
             state_mgr.clone(),
             lock_mgr.clone(),
         ));
+
+        // Validate the security floor BEFORE the listener exists.
+        //
+        // A typo in a security knob must not resolve to "no floor": an
+        // operator who set FLINT_NFS_MIN_SEC=krb5pp asked for
+        // enforcement, and starting anyway would serve every sec=sys
+        // client while they believed otherwise. Refuse to come up.
+        let sec_policy = crate::nfs::sec_policy::SecPolicy::validate_env()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        if sec_policy.floor() == crate::nfs::sec_policy::SecLevel::None {
+            info!(
+                "🔓 NFS minimum security flavor: none — every flavor accepted \
+                 (set {} to raise it)",
+                crate::nfs::sec_policy::SecPolicy::ENV
+            );
+        } else {
+            info!(
+                "🔒 NFS minimum security flavor: {} — weaker calls get AUTH_TOOWEAK",
+                sec_policy.floor().name()
+            );
+        }
 
         // Initialize RPCSEC_GSS manager
         let keytab_path = std::env::var("KRB5_KTNAME").ok();
@@ -759,6 +780,31 @@ async fn dispatch_nfsv4(
         return handle_rpcsec_gss_call(call, args, gss_manager, dispatcher, back_channel).await;
     }
 
+    // Enforce the export's minimum security flavor.
+    //
+    // Everything that reaches here is AUTH_NONE or AUTH_SYS — the GSS
+    // branch above returned already. Advertising krb5p through SECINFO
+    // and then serving whatever the client actually presented meant the
+    // choice of protection belonged to the client, which is no
+    // enforcement at all (`nfs::sec_policy`).
+    //
+    // NULL is exempt: it carries no arguments and returns no data, and
+    // it is how clients and monitoring probe liveness before they have
+    // any credential to offer. Refusing it would break the probe without
+    // protecting anything.
+    let arrived = crate::nfs::sec_policy::SecLevel::of_call(call.cred.flavor, None);
+    if let crate::nfs::sec_policy::Admission::TooWeak { arrived, floor } = crate::nfs::sec_policy::active()
+        .admit(arrived, call.procedure == procedure::NULL)
+    {
+        warn!(
+            "🔒 Refusing sec={} call: this export requires at least sec={} ({})",
+            arrived.name(),
+            floor.name(),
+            crate::nfs::sec_policy::SecPolicy::ENV
+        );
+        return ReplyBuilder::auth_error(call.xid, AuthStat::TooWeak);
+    }
+
     // Handle procedure
     match call.procedure {
         procedure::NULL => {
@@ -873,27 +919,44 @@ async fn handle_compound(
     // to: the verifier and the sealed body both bind the requesting
     // call's sequence number, so a replay served from the cache needs
     // fresh ones rather than a recording of the first reply's.
+    frame_reply(call.xid, gss, compound_data)
+}
+
+/// Frame an accepted RPC reply, adding the RPCSEC_GSS verifier and
+/// sealing the body per the negotiated service when the call was
+/// authenticated.
+///
+/// Shared by COMPOUND and NULL deliberately. NULL used to be routed into
+/// the COMPOUND decoder on the GSS path, which answered a legal
+/// `sess.c.null()` with GARBAGE_ARGS (found by pynfs `--security=krb5`,
+/// 2026-08-27); giving the two paths one framing function is what stops
+/// the fix from drifting back apart.
+fn frame_reply(
+    xid: u32,
+    gss: Option<&crate::nfs::gss_framing::ValidatedCall>,
+    results: Bytes,
+) -> Bytes {
     let (verf, body) = match gss {
-        None => (crate::nfs::rpc::Auth::null(), compound_data),
+        None => (crate::nfs::rpc::Auth::null(), results),
         Some(v) => {
             let verf = match crate::nfs::gss_framing::reply_verifier(v) {
                 Ok(a) => a,
                 Err(e) => {
                     warn!("❌ GSS reply verifier failed: {}", e.reason());
-                    return ReplyBuilder::auth_error(call.xid, e.auth_stat());
+                    return ReplyBuilder::auth_error(xid, e.auth_stat());
                 }
             };
-            match crate::nfs::gss_framing::seal_reply_body(v, &compound_data) {
+            match crate::nfs::gss_framing::seal_reply_body(v, &results) {
                 Ok(b) => (verf, b),
                 Err(e) => {
                     warn!("❌ GSS reply sealing failed: {}", e.reason());
-                    return ReplyBuilder::auth_error(call.xid, e.auth_stat());
+                    return ReplyBuilder::auth_error(xid, e.auth_stat());
                 }
             }
         }
     };
 
-    let mut reply = ReplyBuilder::success_with_verf(call.xid, &verf);
+    let mut reply = ReplyBuilder::success_with_verf(xid, &verf);
     // Per RFC 5531 procedure results are appended directly, no length prefix.
     reply.encoder().append_bytes(&body);
     reply.finish()
@@ -947,6 +1010,30 @@ async fn handle_rpcsec_gss_call(
                 }
             };
 
+            // 1b. The negotiated service against the export's floor.
+            //     A context established for svc_none is a real Kerberos
+            //     identity and still not privacy; an export that asks
+            //     for krb5p must refuse it here, not merely decline to
+            //     advertise it.
+            {
+                let arrived = crate::nfs::sec_policy::SecLevel::of_call(
+                    AuthFlavor::RpcsecGss,
+                    Some(validated.service),
+                );
+                if let crate::nfs::sec_policy::Admission::TooWeak { arrived, floor } =
+                    crate::nfs::sec_policy::active()
+                        .admit(arrived, call.procedure == procedure::NULL)
+                {
+                    warn!(
+                        "🔒 Refusing sec={} call: this export requires at least sec={} ({})",
+                        arrived.name(),
+                        floor.name(),
+                        crate::nfs::sec_policy::SecPolicy::ENV
+                    );
+                    return ReplyBuilder::auth_error(call.xid, AuthStat::TooWeak);
+                }
+            }
+
             // 2. The call verifier: a MIC over the header up to and
             //    including the credential (RFC 2203 §5.3.1). Previously
             //    decoded and discarded, so any verifier was accepted.
@@ -971,8 +1058,28 @@ async fn handle_rpcsec_gss_call(
                 }
             };
 
-            info!("✅ GSS authentication successful, processing COMPOUND");
-            handle_compound(call, args, dispatcher, back_channel, Some(&validated)).await
+            // 4. Dispatch on the RPC procedure — which this branch never
+            //    did. Every authenticated call went to the COMPOUND
+            //    decoder, so an RPC NULL over RPCSEC_GSS (a legal call,
+            //    and how clients probe a context) met an empty body and
+            //    came back GARBAGE_ARGS. The non-GSS path above has
+            //    always dispatched correctly; only the GSS path did not,
+            //    which is why sec=sys testing could never see it.
+            match call.procedure {
+                procedure::NULL => {
+                    info!(">>> NULL procedure (over RPCSEC_GSS)");
+                    // No results, but still a GSS-verified reply.
+                    frame_reply(call.xid, Some(&validated), Bytes::new())
+                }
+                procedure::COMPOUND => {
+                    info!("✅ GSS authentication successful, processing COMPOUND");
+                    handle_compound(call, args, dispatcher, back_channel, Some(&validated)).await
+                }
+                other => {
+                    warn!("Invalid NFSv4 procedure over RPCSEC_GSS: {}", other);
+                    ReplyBuilder::proc_unavail(call.xid)
+                }
+            }
         }
 
         gss_proc::DESTROY => {

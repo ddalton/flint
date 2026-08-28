@@ -2081,9 +2081,6 @@ fn encode_lock_denied(
 /// has nothing else still works — but no client that can do better will
 /// choose it.
 fn encode_secinfo_flavors(encoder: &mut XdrEncoder) {
-    // Kerberos V5 OID (1.2.840.113554.1.2.2)
-    const KRB5_OID: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
-
     // GSS is advertised ONLY when a keytab actually loaded.
     //
     // This used to advertise RPCSEC_GSS unconditionally, which invited
@@ -2092,26 +2089,65 @@ fn encode_secinfo_flavors(encoder: &mut XdrEncoder) {
     // that was the shipped default. Advertising what you cannot honour is
     // the same defect as claiming protection you do not apply, pointed
     // the other way.
-    let gss = crate::nfs::rpcsec_gss::gss_is_available();
+    encode_secinfo_flavors_with(
+        encoder,
+        crate::nfs::rpcsec_gss::gss_is_available(),
+        crate::nfs::sec_policy::active(),
+    )
+}
+
+/// The body of [`encode_secinfo_flavors`], with its two inputs passed in
+/// rather than read from process-wide state, so the filtering can be
+/// tested across every floor without a test mutating the environment.
+fn encode_secinfo_flavors_with(
+    encoder: &mut XdrEncoder,
+    gss: bool,
+    policy: crate::nfs::sec_policy::SecPolicy,
+) {
+    use crate::nfs::sec_policy::SecLevel;
+
+    // Kerberos V5 OID (1.2.840.113554.1.2.2)
+    const KRB5_OID: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
 
     // rpc_gss_svc_none / _integrity / _privacy — all three implemented now
     // (RFC 2203 §5.3.2, framing in `nfs::gss_framing`). Advertising only
     // svc_none, as this did, means a client that wants krb5p is never
     // offered it. Strongest first, since a client picks from the top.
-    let services: &[u32] = &[3, 2, 1];
+    const GSS_RUNGS: [(SecLevel, u32); 3] = [
+        (SecLevel::Krb5p, 3),
+        (SecLevel::Krb5i, 2),
+        (SecLevel::Krb5, 1),
+    ];
 
-    let count = 2 + if gss { services.len() as u32 } else { 0 };
-    encoder.encode_u32(count);
-    encoder.encode_u32(1); // AUTH_SYS   — first: carries a uid to check
-    if gss {
-        for &svc in services {
-            encoder.encode_u32(6); // RPCSEC_GSS
-            encoder.encode_opaque(&KRB5_OID);
-            encoder.encode_u32(0); // QOP
-            encoder.encode_u32(svc);
-        }
+    // Nothing below the export's floor is offered. The server refuses
+    // such a call with AUTH_TOOWEAK anyway (`nfs::sec_policy`), and
+    // listing a flavor it will refuse is the same defect as the
+    // keytab-less GSS advertisement above.
+    let sys = policy.advertises(SecLevel::Sys);
+    let none = policy.advertises(SecLevel::None);
+    let rungs: Vec<(SecLevel, u32)> = if gss {
+        GSS_RUNGS
+            .iter()
+            .copied()
+            .filter(|(level, _)| policy.advertises(*level))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    encoder.encode_u32(sys as u32 + none as u32 + rungs.len() as u32);
+    if sys {
+        encoder.encode_u32(1); // AUTH_SYS — first: carries a uid to check
     }
-    encoder.encode_u32(0); // AUTH_NONE — LAST, see the note above
+    for (_, svc) in &rungs {
+        encoder.encode_u32(6); // RPCSEC_GSS
+        encoder.encode_opaque(&KRB5_OID);
+        encoder.encode_u32(0); // QOP
+        encoder.encode_u32(*svc);
+    }
+    if none {
+        encoder.encode_u32(0); // AUTH_NONE — LAST, see the note above
+    }
 }
 
 impl CompoundResponse {
@@ -3485,6 +3521,109 @@ mod tests {
         );
 
         set_gss_available_for_test(false);
+    }
+
+    /// Decode a SECINFO flavor list back into the levels it offers.
+    #[cfg(test)]
+    fn advertised_levels(bytes: Bytes) -> Vec<crate::nfs::sec_policy::SecLevel> {
+        use crate::nfs::sec_policy::SecLevel;
+        let mut d = XdrDecoder::new(bytes);
+        let count = d.decode_u32().unwrap();
+        let mut out = Vec::new();
+        for _ in 0..count {
+            match d.decode_u32().unwrap() {
+                0 => out.push(SecLevel::None),
+                1 => out.push(SecLevel::Sys),
+                6 => {
+                    d.decode_opaque().unwrap();
+                    assert_eq!(d.decode_u32().unwrap(), 0, "QOP");
+                    out.push(match d.decode_u32().unwrap() {
+                        1 => SecLevel::Krb5,
+                        2 => SecLevel::Krb5i,
+                        3 => SecLevel::Krb5p,
+                        other => panic!("unknown GSS service {other}"),
+                    });
+                }
+                other => panic!("unknown flavor {other}"),
+            }
+        }
+        assert_eq!(d.remaining(), 0, "no trailing bytes");
+        out
+    }
+
+    #[test]
+    fn secinfo_offers_exactly_what_the_floor_will_accept() {
+        // The invariant, not the two code paths, is the real thing:
+        // whatever SECINFO lists, the accept path must serve, and
+        // whatever it omits, the accept path must refuse. A server that
+        // advertises sec=sys under a krb5p floor sends every client
+        // down a mount that will only ever come back AUTH_TOOWEAK.
+        use crate::nfs::sec_policy::{SecLevel, SecPolicy};
+
+        for &floor in &SecLevel::ALL {
+            let policy = SecPolicy::new(floor);
+            let mut encoder = XdrEncoder::new();
+            encode_secinfo_flavors_with(&mut encoder, true, policy);
+            let offered = advertised_levels(encoder.finish());
+
+            for &level in &SecLevel::ALL {
+                assert_eq!(
+                    offered.contains(&level),
+                    policy.permits(level),
+                    "floor {}: advertising {} but permits() says {}",
+                    floor.name(),
+                    level.name(),
+                    policy.permits(level)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_krb5p_floor_advertises_only_krb5p() {
+        use crate::nfs::sec_policy::{SecLevel, SecPolicy};
+        let mut encoder = XdrEncoder::new();
+        encode_secinfo_flavors_with(&mut encoder, true, SecPolicy::new(SecLevel::Krb5p));
+        assert_eq!(advertised_levels(encoder.finish()), vec![SecLevel::Krb5p]);
+    }
+
+    #[test]
+    fn a_kerberos_floor_without_a_keytab_advertises_nothing_at_all() {
+        // An export configured to require Kerberos on a server that
+        // loaded no keys can serve no one. The empty list is the honest
+        // answer — the alternative is offering sec=sys as a fallback,
+        // which would quietly serve the traffic the floor exists to
+        // stop. `NfsServer::new` logs this configuration loudly.
+        use crate::nfs::sec_policy::{SecLevel, SecPolicy};
+        for floor in [SecLevel::Krb5, SecLevel::Krb5i, SecLevel::Krb5p] {
+            let mut encoder = XdrEncoder::new();
+            encode_secinfo_flavors_with(&mut encoder, false, SecPolicy::new(floor));
+            assert!(
+                advertised_levels(encoder.finish()).is_empty(),
+                "floor {} with no keytab offered something",
+                floor.name()
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_floor_leaves_the_advertisement_exactly_as_it_shipped() {
+        // Guards the non-breaking claim: an export that never set the
+        // knob must advertise the same five entries, in the same order,
+        // as before the floor existed.
+        use crate::nfs::sec_policy::{SecLevel, SecPolicy};
+        let mut encoder = XdrEncoder::new();
+        encode_secinfo_flavors_with(&mut encoder, true, SecPolicy::default());
+        assert_eq!(
+            advertised_levels(encoder.finish()),
+            vec![
+                SecLevel::Sys,
+                SecLevel::Krb5p,
+                SecLevel::Krb5i,
+                SecLevel::Krb5,
+                SecLevel::None
+            ]
+        );
     }
 
     #[test]
