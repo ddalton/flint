@@ -130,14 +130,14 @@ CMP_RE = re.compile(r"\{\{(cmp|cmpL|lean|lake|score):([^/}]+)/([^}]+)\}\}")
 def resolve_refs(text, data, lk):
     """Substitute score cross-references with the LIVE numbers.
 
-    Page 5 compares lakeFS cells against Lean cells in prose. Those
+    The lakeFS page compares lakeFS cells against Lean cells in prose. Those
     numbers were hand-copied, and by 2026-08-27 three of them were
     quoting pre-rescore Lean values — a page silently disagreeing with
     the chart printed above it. Writing {{cmp:Consistency/Ack survives}}
     instead makes the comparison derived, so it cannot drift again, and
     an axis that gets renamed fails the build instead of going quiet.
 
-    That guard covered page 5 only, so pages 1-4 kept hand-copied
+    That guard covered the lakeFS page only, so the flint pages kept hand-copied
     numbers and drifted exactly the same way: the Consistency note said
     both direct modes sat at the 1.5 durability floor after Lean was
     rescored to 2.5, and the Security note said FUSE won tenancy when
@@ -216,10 +216,22 @@ def card(ch, data, lk):
   </div>
 </div>'''
 
-def rat_section(ch):
+def rat_section(ch, lo, hi, head):
+    """One rationale column: axes [lo, hi) of `ch`.
+
+    A chart's rationales used to be ONE column, two charts to a page. All
+    four columns overflowed the fixed 8.5in page and the surplus was
+    silently clipped -- 11 cells, the last axis of every chart, including
+    the 935-character Conflicts cell that renders 7 characters. Nothing
+    warned: the .page block has a fixed height and no overflow rule, so
+    the text simply stopped. A chart now gets a whole page and splits its
+    axes across two columns of the SAME width as before, which fixes it
+    on the page-count axis instead of the type-size axis: font, leading
+    and gaps are untouched.
+    """
     shorts = ch["series"]
     blocks = []
-    for i, ax in enumerate(ch["axes"]):
+    for i, ax in list(enumerate(ch["axes"]))[lo:hi]:
         rows = "".join(
             f'<p class="rr"><span class="sw" style="background:{SERIES_STYLE[s][1]}"></span>'
             f'<b>{s} {fmt(ch["scores"][s][i])}</b> — {ch["rationales"][s][i]}</p>'
@@ -227,8 +239,10 @@ def rat_section(ch):
         defn = ax.get("definition", "")
         blocks.append(f'<div class="axb"><p class="axt"><b>{ax["name"]}</b>'
                       f'{" — " + defn if defn else ""}</p>{rows}</div>')
-    return (f'<div class="ratcol"><h2 class="rath">{ch["title"]}</h2>'
-            + "".join(blocks) + "</div>")
+    # The continuation column keeps the rule but not the words, so the
+    # two halves stay optically level.
+    h = ch["title"] if head else "&nbsp;"
+    return f'<div class="ratcol"><h2 class="rath">{h}</h2>' + "".join(blocks) + "</div>"
 
 S_GOOD, S_WARN, S_SER, S_CRIT = "#0ca30c", "#fab219", "#ec835a", "#d03b3b"
 
@@ -468,12 +482,22 @@ def main():
     cards = "".join(card(ch, data, lk) for ch in data["charts"])
     ch = data["charts"]
     rat_pages = ""
-    for pair, last in ((ch[0:2], False), (ch[2:4], True)):
-        cols = "".join(rat_section(c) for c in pair)
-        names = " · ".join(c["title"] for c in pair)
-        rat_pages += (f'<div class="page"><h1>Why these numbers — {names}</h1>'
+    for c in ch:
+        n_ax = len(c["axes"])
+        half = (n_ax + 1) // 2
+        cols = rat_section(c, 0, half, True) + rat_section(c, half, n_ax, False)
+        rat_pages += (f'<div class="page"><h1>Why these numbers — {c["title"]}</h1>'
                       f'<div class="ratrow">{cols}</div></div>')
     lakefs_pg = p5_page(data, lk) if lk else ""
+    # Derived, not counted by hand: the rationale section grew from two
+    # pages to one per chart, and a navigation sentence that names page
+    # numbers is the same hand-copied cross-reference resolve_refs exists
+    # to kill.
+    p_rat_first = 2
+    p_rat_last = 1 + len(data["charts"])
+    p_avail = p_rat_last + 1
+    rat_ref = (f"Pages {p_rat_first}&ndash;{p_rat_last}"
+               if p_rat_last > p_rat_first else f"Page {p_rat_first}")
     html = f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Flint front ends — radar comparison</title>
@@ -557,7 +581,7 @@ def main():
   <h1>Flint front ends — consistency, performance, security, Day-2 operations</h1>
   <p class="deck">Three ways to put one S3 bucket behind agent workloads, compared on four dimensions —
   six factors each (Performance carries a seventh, the workload envelope), scored 0 (weakest) – 5 (strongest) from the architecture docs, adversarially verified
-  per approach. Pages 2–3 give the reason behind every number; page 4 maps availability, the multicluster-to-one-bucket contract, and where other industry implementations would shift the numbers. NFS-over-S3 is charted in both flavors
+  per approach. {rat_ref} give the reason behind every number; page {p_avail} maps availability, the multicluster-to-one-bucket contract, and where other industry implementations would shift the numbers. NFS-over-S3 is charted in both flavors
   (sec=sys dashed).</p>
   {INTRO}
   <div class="grid">{cards}</div>
