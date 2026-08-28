@@ -34,6 +34,19 @@ import sys
 # it is the failure that most resembles success.
 MIN_TESTCASES = 200
 
+# ...but a SKIP is not evidence that anything was tested. The recorded
+# floor was 171 PASS / 0 FAIL / 91 SKIP; a newer pynfs clone gives
+# 175/23/68, and under the old rules that PASSED — 175 clears the 171
+# floor, 266 clears MIN_TESTCASES, and the 23 codes that moved SKIP->FAIL
+# were never looked at, because FAIL was counted, printed, and never
+# gated on. Both holes are closed below: failures have a ceiling, and the
+# anti-collapse count is over EXECUTED cases only.
+#
+# `min_executed` defaults to `min_pass` when the baseline does not record
+# it, which is exactly right for a 171/0/91 baseline and needs no
+# re-baselining to take effect.
+DEFAULT_MAX_FAIL = 0
+
 
 def classify(tc):
     if "skipped" in tc:
@@ -76,6 +89,8 @@ def main():
           f"PASS={counts['PASS']} FAIL={counts['FAIL']} "
           f"SKIP={counts['SKIP']} ERROR={counts['ERROR']}")
 
+    executed = counts["PASS"] + counts["FAIL"] + counts["ERROR"]
+
     if total < MIN_TESTCASES:
         print(f"\nFAIL: only {total} testcases ran (expected >= {MIN_TESTCASES}).")
         print("      The suite did not really execute. Check that the server booted,")
@@ -83,10 +98,12 @@ def main():
         return 1
 
     floor = None
+    baseline_doc = {}
     if os.path.exists(baseline_path):
         try:
             with open(baseline_path) as fh:
-                floor = json.load(fh).get("min_pass")
+                baseline_doc = json.load(fh)
+            floor = baseline_doc.get("min_pass")
         except (json.JSONDecodeError, OSError) as e:
             print(f"FAIL: baseline at {baseline_path} is unreadable ({e}).")
             return 1
@@ -105,7 +122,32 @@ def main():
         print("      a deliberate change — do not lower it without saying why.")
         return 1
 
-    print(f"\nPYNFS 4.1 GATE PASSED ({counts['PASS']} passes >= floor {floor})")
+    # A SKIP tests nothing, so it cannot be evidence the run happened.
+    # Without this, swapping in a clone that skips more and fails more
+    # passes the gate on the strength of the skips.
+    min_executed = baseline_doc.get("min_executed", floor)
+    if executed < min_executed:
+        print(f"\nFAIL: only {executed} testcases actually EXECUTED "
+              f"(PASS+FAIL+ERROR), below the floor of {min_executed}.")
+        print("      SKIPs are not evidence of a run. A clone whose codes moved")
+        print("      SKIP->FAIL, or a rig that cannot reach a feature, lands here.")
+        return 1
+
+    # Failures are gated, not merely printed. This is the one that was
+    # computed and thrown away.
+    max_fail = baseline_doc.get("max_fail", DEFAULT_MAX_FAIL)
+    bad = counts["FAIL"] + counts["ERROR"]
+    if bad > max_fail:
+        print(f"\nFAIL: {counts['FAIL']} failures + {counts['ERROR']} errors "
+              f"= {bad}, above the recorded ceiling of {max_fail}.")
+        print("      A conformance gate that counts only passes cannot see a")
+        print("      regression that turns a SKIP into a FAIL. If these are")
+        print("      known and accepted, record them:")
+        print(f'        {{"min_pass": {floor}, "max_fail": {bad}}}')
+        return 1
+
+    print(f"\nPYNFS 4.1 GATE PASSED ({counts['PASS']} passes >= floor {floor}, "
+          f"{executed} executed >= {min_executed}, {bad} failures <= {max_fail})")
     if counts["PASS"] > floor:
         print(f"NOTE: {counts['PASS'] - floor} more passes than the floor — "
               f"raise it to {counts['PASS']} to lock the gain in.")

@@ -325,6 +325,18 @@ test-authz-drill: ## Leg A1: cross-uid authorization gate (seconds) — runs aga
 	# assertion it also fails is this drill being wrong about POSIX, not
 	# the server being wrong. Measured 2026-08-24: knfsd 9/9, flint 2/9.
 	limactl copy tests/lima/pnfs/access-authz-drill.sh $(LIMA_VM):/tmp/access-authz-drill.sh
+	# §0 rule 4: assert the mounts BEFORE trusting either arm. Both paths
+	# are pre-existing mounts this target does not create, and an
+	# unmounted /mnt/pjd (the ordinary state after a VM reboot — and two
+	# sessions share this VM) leaves both arms exercising local ext4 and
+	# reporting 9/9 green, having never spoken to flint or to knfsd.
+	# A drill that measures whoever last mounted the VM is worse than no
+	# drill, because it reports.
+	@limactl shell $(LIMA_VM) -- sudo bash -lc 'for m in /mnt/knfsd/pjd /mnt/pjd/tmp/pjd; do \
+	     t=$$(findmnt -n -o FSTYPE -T "$$m" 2>/dev/null || true); \
+	     case "$$t" in nfs4|nfs) ;; \
+	       *) echo "VOID: $$m is fstype '\''$$t'\'', not nfs4 — nothing was mounted, so this drill would have measured local disk"; exit 1;; \
+	     esac; done'
 	@limactl shell $(LIMA_VM) -- sudo bash -lc 'chmod +x /tmp/access-authz-drill.sh; \
 	   /tmp/access-authz-drill.sh /mnt/knfsd/pjd knfsd' \
 	  || { echo "VOID: the knfsd CONTROL arm failed — the drill is wrong about POSIX, fix it there"; exit 1; }
@@ -357,10 +369,16 @@ test-nfs-frag: ## Force fragmented WRITE (T1) — large file via dd over NFS
 
 .PHONY: test-nfs-all
 test-nfs-all: nfs-server-bg ## Run mount + protocol + frag tests, then stop server
-	-$(MAKE) test-nfs-mount
-	-$(MAKE) test-nfs-protocol
-	-$(MAKE) test-nfs-frag
-	$(MAKE) nfs-server-stop
+	# The `-` prefixes this used to carry made the target INCAPABLE of
+	# failing: make ignored all three results and the recipe's status
+	# became nfs-server-stop's. The intent was "stop the server even if a
+	# test fails", which is right; this keeps that and still reports.
+	@rc=0; \
+	$(MAKE) test-nfs-mount    || rc=1; \
+	$(MAKE) test-nfs-protocol || rc=1; \
+	$(MAKE) test-nfs-frag     || rc=1; \
+	$(MAKE) nfs-server-stop; \
+	exit $$rc
 
 # ───────────────────────────── pNFS tests ────────────────────────────────────
 #

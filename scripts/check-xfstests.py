@@ -116,14 +116,25 @@ def main():
     try:
         baseline = json.load(open(baseline_path))
     except OSError:
-        print(f"\nNo baseline at {baseline_path}; recording only, not gating.")
+        # NOT a pass. `tests/lima/xfstests-baseline.json` has never
+        # existed (`git log -- 'tests/lima/xfstests*'` is empty), so this
+        # arm was the only one that ever ran: a ~40-minute suite that
+        # could not fail, printing a candidate baseline and returning 0.
+        # Every anti-vacuity guard above it had never seen real input.
+        #
+        # The candidate is still printed — that is genuinely useful, and
+        # it is how you record the first baseline — but recording it is
+        # now a deliberate act rather than the default outcome.
+        print(f"\nFAIL: no baseline at {baseline_path}, so nothing was gated.")
+        print("      Record one from a run you have actually inspected:")
         print(json.dumps({"max_regressions": len(regressions),
                           "max_coverage_loss": len(coverage_loss),
                           "max_unguarded": len(unguarded),
                           "known_regressions": regressions,
                           "known_coverage_loss": coverage_loss,
                           "known_unguarded": unguarded}, indent=2))
-        return 0
+        print(f"      ...into {baseline_path}, then re-run.")
+        return 1
 
     rc = 0
     max_reg = baseline.get("max_regressions")
