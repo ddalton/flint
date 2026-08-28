@@ -174,6 +174,8 @@ pub struct MemoryStore {
     leave_orphan: AtomicBool,
     /// Step-11 drill injections: counted get_range failures / stall.
     fail_get_range_count: AtomicU64,
+    /// Counted HEAD failures — the sweep's transient-throttle drill.
+    fail_head_count: AtomicU64,
     stall_next_get_range_ms: AtomicU64,
     /// Model a project-scoped proxy that STRIPS `x-amz-version-id`:
     /// every write still succeeds and reports no version. This is D8's
@@ -225,6 +227,7 @@ impl MemoryStore {
             inject: AtomicU8::new(INJECT_NONE),
             leave_orphan: AtomicBool::new(false),
             fail_get_range_count: AtomicU64::new(0),
+            fail_head_count: AtomicU64::new(0),
             stall_next_get_range_ms: AtomicU64::new(0),
             strip_version_ids: AtomicBool::new(false),
             fail_lifecycle_writes: AtomicBool::new(false),
@@ -266,6 +269,16 @@ impl MemoryStore {
     /// exceed the chunk-retry budget to force the truncate-back path.
     pub fn inject_get_range_failures(&self, n: u64) {
         self.fail_get_range_count.store(n, Ordering::SeqCst);
+    }
+
+    /// The next `n` HEAD calls fail with a transport error.
+    ///
+    /// The condition this models is not exotic: the foreign-key sweep
+    /// issues one HEAD per unknown object, which on a large bucket is
+    /// exactly the shape that earns a 503 SlowDown. The SDK's default
+    /// retry absorbs a blip; a sustained throttle outlives it.
+    pub fn inject_head_failures(&self, n: u64) {
+        self.fail_head_count.store(n, Ordering::SeqCst);
     }
 
     /// Step-11 drills: the NEXT get_range stalls `ms` before serving —
@@ -517,6 +530,13 @@ impl ObjectStore for MemoryStore {
 
     async fn head(&self, key: &str) -> StoreResult<ObjectMeta> {
         self.bump("head");
+        if self
+            .fail_head_count
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| c.checked_sub(1))
+            .is_ok()
+        {
+            return Err(StoreError::Other("injected head failure".into()));
+        }
         self.inner
             .lock()
             .unwrap()

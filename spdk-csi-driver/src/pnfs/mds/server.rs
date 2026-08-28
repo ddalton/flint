@@ -1162,6 +1162,36 @@ impl MetadataServer {
                     rep.skipped_tombstoned,
                     rep.failed
                 );
+                // The gap this closes: the `refused` arm 20 lines above
+                // fences publishing because serving a tree the manifest
+                // could not describe, and then publishing it back,
+                // destroys the bucket's namespace. A manifest lane that
+                // READ the manifest fine and then could not place what
+                // it described reaches the same end state — a short
+                // tree, served as authoritative, published over the
+                // real one, after which rpo::evaluate reports clean —
+                // through a door that had no guard on it.
+                //
+                // Only the retryable count gates. A per-key defect (an
+                // unsafe path in the manifest) is a permanent property
+                // of the document: fencing on it would wedge the volume
+                // forever with no operator action that could lift it.
+                if rep.failed_retryable > 0 {
+                    let why = format!(
+                        "import incomplete: {} entry/entries failed on a retryable condition \
+                         (out of space/inodes, or a backend error)",
+                        rep.failed_retryable
+                    );
+                    error!(
+                        "🪣 tier import INCOMPLETE: {}. This volume's namespace is NOT fully \
+                         restored and the hub must NOT publish over the bucket. Check `df -i` \
+                         as well as `df` — a zero-length stub costs an inode with the bytes \
+                         still free — grow the volume if either is full, then restart.",
+                        why
+                    );
+                    self.status.set_import_refused(why.clone());
+                    orch.fence_publishing(&why);
+                }
             }
         }
 

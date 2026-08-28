@@ -61,6 +61,25 @@ pub struct ImportConfig<'a> {
     pub sweep_note_path: Option<&'a Path>,
 }
 
+/// Why a placement failed, and the whole reason the reports carry two
+/// counters instead of one.
+///
+/// A per-key defect fails identically on every retry, so discarding the
+/// work is correct. A RETRYABLE failure is a property of the
+/// environment at that instant — a full volume, an exhausted inode
+/// table, a throttled bucket, a backend that blinked — and it is not
+/// confined to the key that hit it: every key after it failed for the
+/// same reason. Treating those as per-key is what turns a transient
+/// condition into a permanent one, because the durable "work is owed"
+/// note is cleared and nothing ever looks at the bucket again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailKind {
+    /// The key/entry itself is unusable. Retrying changes nothing.
+    PerKey,
+    /// The environment refused. A later pass may well succeed.
+    Retryable,
+}
+
 #[derive(Debug, Default, PartialEq, Eq, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportReport {
@@ -79,11 +98,24 @@ pub struct ImportReport {
     pub swept_temps: usize,
     pub swept_rows: usize,
     pub failed: usize,
+    /// Of `failed`, those that failed on a retryable condition rather
+    /// than a per-key defect. See [`FailKind`]. Nonzero means the tree
+    /// this report describes is INCOMPLETE THROUGH NO FAULT OF THE
+    /// DATA, and must not be believed.
+    pub failed_retryable: usize,
 }
 
 impl ImportReport {
     pub fn did_anything(&self) -> bool {
         *self != ImportReport::default()
+    }
+    /// Count a failure and its kind together, so no call site can
+    /// record one without the other.
+    pub fn fail(&mut self, kind: FailKind) {
+        self.failed += 1;
+        if kind == FailKind::Retryable {
+            self.failed_retryable += 1;
+        }
     }
 }
 
@@ -224,7 +256,7 @@ pub async fn import_refresh(
         Err(e) => {
             // Cannot see the tombstones ⇒ cannot honor A7: bail.
             warn!("tier import: cannot list tombstones ({}) — import refused", e);
-            rep.failed += 1;
+            rep.fail(FailKind::Retryable);
             return rep;
         }
     };
@@ -232,7 +264,7 @@ pub async fn import_refresh(
         Ok(rows) => rows.into_iter().map(|r| r.key).collect(),
         Err(e) => {
             warn!("tier import: cannot list generations ({}) — import refused", e);
-            rep.failed += 1;
+            rep.fail(FailKind::Retryable);
             return rep;
         }
     };
@@ -254,7 +286,7 @@ pub async fn import_refresh(
                 for e in &m.entries {
                     let Some(rel) = safe_rel_path(&e.path) else {
                         warn!("tier import: manifest path {:?} refused", e.path);
-                        rep.failed += 1;
+                        rep.fail(FailKind::PerKey);
                         continue;
                     };
                     let local = cfg.export_root.join(&rel);
@@ -271,7 +303,7 @@ pub async fn import_refresh(
                                 }
                                 Err(err) => {
                                     warn!("tier import: mkdir {}: {}", local.display(), err);
-                                    rep.failed += 1;
+                                    rep.fail(FailKind::Retryable);
                                 }
                             }
                         }
@@ -295,7 +327,7 @@ pub async fn import_refresh(
                                 }
                                 Err(err) => {
                                     warn!("tier import: symlink {}: {}", local.display(), err);
-                                    rep.failed += 1;
+                                    rep.fail(FailKind::Retryable);
                                 }
                             }
                         }
@@ -308,7 +340,7 @@ pub async fn import_refresh(
                                 (e.etag.clone(), e.generation, e.size)
                             else {
                                 warn!("tier import: manifest file {} lacks etag/gen/size", e.path);
-                                rep.failed += 1;
+                                rep.fail(FailKind::PerKey);
                                 continue;
                             };
                             if !admissible(&mut rep, &tombstoned, &known_keys, &local, &key) {
@@ -328,9 +360,12 @@ pub async fn import_refresh(
                                     mtime_unix: e.mtime_unix,
                                 },
                             );
-                            let Some((st, erow, grow)) = staged else {
-                                rep.failed += 1;
-                                continue;
+                            let (st, erow, grow) = match staged {
+                                Ok(v) => v,
+                                Err(kind) => {
+                                    rep.fail(kind);
+                                    continue;
+                                }
                             };
                             pending.staged.push(st);
                             pending.rows.push((erow, grow));
@@ -371,8 +406,23 @@ pub async fn import_refresh(
             );
         }
     }
-    if let Some(p) = cfg.intent_path {
-        let _ = std::fs::remove_file(p);
+    // Same rule as the sweep note, one lane earlier. Clearing the
+    // intent note on a retryably-incomplete walk is strictly worse than
+    // clearing the sweep note: the sweep can re-adopt a missing FILE as
+    // a foreign key, but directories, symlinks and mode/uid/gid live
+    // only in the manifest, so nothing else in the system can restore
+    // them. Keeping the note re-runs this lane on the next start, which
+    // is the one path that can.
+    if rep.failed_retryable == 0 {
+        if let Some(p) = cfg.intent_path {
+            let _ = std::fs::remove_file(p);
+        }
+    } else {
+        warn!(
+            "tier import: {} entry/entries failed on a retryable condition — the intent note \
+             is KEPT so the next start re-runs the manifest lane",
+            rep.failed_retryable
+        );
     }
     if rep.did_anything() {
         info!(
@@ -435,12 +485,20 @@ struct Staged {
 /// Phase 1: create the temp, stamp it with the final metadata, and
 /// build the two durable rows. Nothing is written to the database and
 /// no name exists yet, so abandoning a staged stub costs one unlink.
-fn stage_stub(local: &Path, stub: Stub) -> Option<(Staged, TierEvictedRow, TierGenerationRow)> {
-    let parent = local.parent()?;
+fn stage_stub(
+    local: &Path,
+    stub: Stub,
+) -> Result<(Staged, TierEvictedRow, TierGenerationRow), FailKind> {
+    // A path with no parent is a defect in the key; the create below
+    // failing is the volume talking. Only the first is per-key.
+    let parent = local.parent().ok_or(FailKind::PerKey)?;
     let tmp = parent.join(format!("{}{}", IMPORT_TMP_PREFIX, uuid::Uuid::new_v4()));
     if let Err(e) = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+        // ENOSPC here is the inode table as often as it is the bytes:
+        // a stub is zero-length, so a volume with gigabytes free still
+        // refuses once `df -i` reads 100%.
         warn!("tier import: temp create {}: {}", tmp.display(), e);
-        return None;
+        return Err(FailKind::Retryable);
     }
     apply_posix(&tmp, stub.mode, stub.uid, stub.gid, Some(stub.mtime_unix));
     #[cfg(unix)]
@@ -452,7 +510,7 @@ fn stage_stub(local: &Path, stub: Stub) -> Option<(Staged, TierEvictedRow, TierG
     let identity: Option<(u64, u64)> = None;
     let Some((dev, ino)) = identity else {
         let _ = std::fs::remove_file(&tmp);
-        return None;
+        return Err(FailKind::Retryable);
     };
     let now = now_unix();
     let erow = TierEvictedRow {
@@ -483,7 +541,7 @@ fn stage_stub(local: &Path, stub: Stub) -> Option<(Staged, TierEvictedRow, TierG
         copy_allowed: false,
         updated_unix: now,
     };
-    Some((
+    Ok((
         Staged { tmp, local: local.to_path_buf(), dev, ino, stub },
         erow,
         grow,
@@ -552,7 +610,7 @@ async fn place_stub(
         Err(e) => {
             warn!("tier import: place {}: {}", local.display(), e);
             rollback.run().await;
-            rep.failed += 1;
+            rep.fail(FailKind::Retryable);
             return;
         }
     }
@@ -689,9 +747,23 @@ pub struct SweepReport {
     pub skipped_known: usize,
     pub skipped_local_exists: usize,
     pub failed: usize,
+    /// Of `failed`, those that failed on a retryable condition. See
+    /// [`FailKind`]. Nonzero keeps the note and holds `completed` low.
+    pub failed_retryable: usize,
     /// The sweep ran to the end of the listing and the note was
-    /// cleared. False = it was interrupted and is still owed.
+    /// cleared. False = it was interrupted or refused, and is still
+    /// owed.
     pub completed: bool,
+}
+
+impl SweepReport {
+    /// See [`ImportReport::fail`].
+    pub fn fail(&mut self, kind: FailKind) {
+        self.failed += 1;
+        if kind == FailKind::Retryable {
+            self.failed_retryable += 1;
+        }
+    }
 }
 
 /// Objects under the prefix that no flint hub published — foreign
@@ -759,7 +831,7 @@ pub async fn sweep_foreign(
                  the note is kept so the next start retries",
                 e
             );
-            rep.failed += 1;
+            rep.fail(FailKind::Retryable);
             return rep;
         }
     };
@@ -771,7 +843,7 @@ pub async fn sweep_foreign(
         Ok(rows) => rows.into_iter().map(|r| r.key).collect(),
         Err(e) => {
             warn!("tier sweep: cannot list generations ({}) — sweep refused", e);
-            rep.failed += 1;
+            rep.fail(FailKind::Retryable);
             return rep;
         }
     };
@@ -779,7 +851,7 @@ pub async fn sweep_foreign(
         Ok(t) => t.into_iter().map(|t| t.key).collect(),
         Err(e) => {
             warn!("tier sweep: cannot list tombstones ({}) — sweep refused (A7)", e);
-            rep.failed += 1;
+            rep.fail(FailKind::Retryable);
             return rep;
         }
     };
@@ -810,7 +882,7 @@ pub async fn sweep_foreign(
 
         let Some(rel) = o.key.strip_prefix(key_prefix.as_str()).and_then(safe_rel_path) else {
             warn!("tier sweep: bucket key {:?} refused (unsafe path)", o.key);
-            rep.failed += 1;
+            rep.fail(FailKind::PerKey);
             continue;
         };
         let local = export_root.join(&rel);
@@ -827,7 +899,7 @@ pub async fn sweep_foreign(
             Ok(h) => h,
             Err(e) => {
                 warn!("tier sweep: HEAD {}: {}", o.key, e);
-                rep.failed += 1;
+                rep.fail(FailKind::Retryable);
                 continue;
             }
         };
@@ -838,7 +910,7 @@ pub async fn sweep_foreign(
         if let Some(parent) = local.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 warn!("tier sweep: mkdir -p {}: {}", parent.display(), e);
-                rep.failed += 1;
+                rep.fail(FailKind::Retryable);
                 continue;
             }
         }
@@ -860,9 +932,12 @@ pub async fn sweep_foreign(
                 ),
             },
         );
-        let Some((st, erow, grow)) = staged else {
-            rep.failed += 1;
-            continue;
+        let (st, erow, grow) = match staged {
+            Ok(v) => v,
+            Err(kind) => {
+                rep.fail(kind);
+                continue;
+            }
         };
         pending.staged.push(st);
         pending.rows.push((erow, grow));
@@ -875,12 +950,32 @@ pub async fn sweep_foreign(
     }
     flush_sweep(&backend, &mut pending, &mut rep).await;
 
-    // The note is cleared only when the whole listing was walked. A
-    // sweep that failed objects still completed its pass — those keys
-    // are individually broken, and re-running would fail them again;
-    // what must survive is an INTERRUPTION, which never reaches here.
-    clear_note(note_path.as_deref());
-    rep.completed = true;
+    // The note is cleared only when the whole listing was walked AND
+    // nothing failed retryably.
+    //
+    // The original rule here cleared it unconditionally, reasoning that
+    // "a sweep that failed objects still completed its pass — those
+    // keys are individually broken, and re-running would fail them
+    // again". That is true of an unsafe key and false of everything
+    // else that reaches this line: a HEAD that was throttled, a mkdir
+    // that hit ENOSPC, a stub the inode table refused. Those are
+    // tree-wide and transient — every key after the volume filled
+    // failed for the same reason — and clearing the note made the
+    // condition permanent. The next start finds non-fresh state (so no
+    // import) and no note (so no sweep), and the objects stay in the
+    // bucket, invisible, even after the operator grows the volume.
+    if rep.failed_retryable == 0 {
+        clear_note(note_path.as_deref());
+        rep.completed = true;
+    } else {
+        warn!(
+            "tier sweep: {} object(s) failed on a retryable condition (out of space/inodes, \
+             a throttled bucket, a backend error) — the export does NOT describe the bucket. \
+             The sweep note is KEPT so the next start retries; check `df -i` as well as `df`, \
+             grow the volume if either is full, then restart.",
+            rep.failed_retryable
+        );
+    }
     info!(
         "tier sweep: {} scanned, {} stub(s) created, {} tombstoned, {} known, \
          {} local-wins, {} failed",
@@ -905,6 +1000,7 @@ async fn flush_sweep(
     rep.stubs_created += one.stubs_created;
     rep.skipped_local_exists += one.skipped_local_exists;
     rep.failed += one.failed;
+    rep.failed_retryable += one.failed_retryable;
 }
 
 fn clear_note(p: Option<&Path>) {
@@ -1887,6 +1983,195 @@ mod tests {
         assert!(rep.completed);
         assert!(!note.exists(), "a completed sweep clears its note");
         let _ = std::fs::remove_file(&intent);
+    }
+
+    /// The note must survive a TREE-WIDE transient refusal, and the
+    /// namespace must come back when the condition lifts.
+    ///
+    /// The old rule cleared the note on any pass that walked the whole
+    /// listing, reasoning that failures are per-key defects which would
+    /// fail again anyway. A throttled bucket is the counterexample:
+    /// every key after the throttle starts fails for one reason, and
+    /// clearing the note made that transient condition PERMANENT — the
+    /// next start finds non-fresh state (no import lane) and no note
+    /// (no sweep lane), so those objects are never looked at again.
+    ///
+    /// The second half is the anti-vacuity control and the operator's
+    /// actual recovery: same rig, same objects, condition lifted. If
+    /// the note were being kept for some reason other than the refusal,
+    /// this arm would keep it too and the test would fail.
+    #[tokio::test]
+    async fn the_sweep_note_survives_a_retryable_refusal_and_the_namespace_returns() {
+        let r = rig();
+        for i in 0..4 {
+            r.mem.raw_put(&format!("t/obj{i}.bin"), Bytes::from_static(b"x"), vec![]);
+        }
+        let note = r.root.join("..").join("flint-sweep-note-retryable");
+        std::fs::write(&note, b"sweep\n").unwrap();
+
+        // Sustained throttle: every HEAD this pass issues is refused.
+        // Exactly four, so the budget is spent by the end of the pass —
+        // the recovery arm below then runs against a bucket that has
+        // genuinely stopped throttling, not a flag someone flipped.
+        r.mem.inject_head_failures(4);
+        let rep = sweep_foreign(
+            r.backend.clone(),
+            r.mem.clone() as Arc<dyn ObjectStore>,
+            r.root.clone(),
+            "t/".to_string(),
+            Some(note.clone()),
+        )
+        .await;
+
+        assert_eq!(rep.scanned, 4, "the sweep must have LOOKED at every key: {:?}", rep);
+        assert_eq!(rep.stubs_created, 0, "nothing can have landed: {:?}", rep);
+        assert_eq!(rep.failed_retryable, 4, "all four are environmental: {:?}", rep);
+        assert!(!rep.completed, "a refused pass is not a completed one");
+        assert!(
+            note.exists(),
+            "THE BUG: clearing the note here is what made a throttle permanent"
+        );
+        for i in 0..4 {
+            assert!(
+                !r.root.join(format!("obj{i}.bin")).exists(),
+                "the tree really is short — otherwise nothing was lost to begin with"
+            );
+        }
+
+        // The condition lifts (the operator grew the volume, or the
+        // bucket stopped throttling) and the next pass recovers.
+        let rep2 = sweep_foreign(
+            r.backend.clone(),
+            r.mem.clone() as Arc<dyn ObjectStore>,
+            r.root.clone(),
+            "t/".to_string(),
+            Some(note.clone()),
+        )
+        .await;
+        assert_eq!(rep2.stubs_created, 4, "the namespace must return: {:?}", rep2);
+        assert_eq!(rep2.failed_retryable, 0, "{:?}", rep2);
+        assert!(rep2.completed);
+        assert!(!note.exists(), "and NOW the note clears");
+    }
+
+    /// The discriminating counterpart: the gate must not degrade into
+    /// "always keep the note". A key the sweep can never place — an
+    /// unsafe path — is a permanent property of the bucket, so holding
+    /// the note for it would wedge every future start into re-running a
+    /// sweep that cannot progress.
+    #[tokio::test]
+    async fn a_per_key_defect_still_clears_the_sweep_note() {
+        let r = rig();
+        r.mem.raw_put("t/../escape.bin", Bytes::from_static(b"nope"), vec![]);
+        r.mem.raw_put("t/fine.bin", Bytes::from_static(b"yes"), vec![]);
+        let note = r.root.join("..").join("flint-sweep-note-perkey");
+        std::fs::write(&note, b"sweep\n").unwrap();
+
+        let rep = sweep_foreign(
+            r.backend.clone(),
+            r.mem.clone() as Arc<dyn ObjectStore>,
+            r.root.clone(),
+            "t/".to_string(),
+            Some(note.clone()),
+        )
+        .await;
+
+        assert_eq!(rep.failed, 1, "the unsafe key must have been refused: {:?}", rep);
+        assert_eq!(
+            rep.failed_retryable, 0,
+            "and refused as PER-KEY — if this is retryable the gate never releases: {:?}",
+            rep
+        );
+        assert_eq!(rep.stubs_created, 1, "the good key still lands: {:?}", rep);
+        assert!(rep.completed);
+        assert!(!note.exists(), "a pass whose only failures are per-key is done");
+    }
+
+    /// F2a — the same rule one lane earlier, where the stakes are
+    /// higher: the sweep can re-adopt a missing FILE as a foreign key,
+    /// but directories, symlinks and mode/uid/gid live only in the
+    /// manifest. If the intent note clears on a retryably-short walk,
+    /// nothing in the system can ever restore them.
+    #[tokio::test]
+    async fn a_retryably_incomplete_manifest_lane_keeps_its_intent_note() {
+        let r = rig();
+        let intent = r.root.join("..").join("flint-import-intent-retryable");
+        let note = r.root.join("..").join("flint-sweep-note-manifest");
+        let _ = std::fs::remove_file(&intent);
+        let _ = std::fs::remove_file(&note);
+
+        // Refuse the environment: a read-only export root fails every
+        // mkdir with EACCES. Root ignores the mode bits, so probe for
+        // the capability rather than assuming it.
+        use std::os::unix::fs::PermissionsExt;
+        let ro = || std::fs::Permissions::from_mode(0o555);
+        let rw = || std::fs::Permissions::from_mode(0o755);
+        let sub = r.root.join("probe");
+        std::fs::set_permissions(&r.root, ro()).unwrap();
+        let writable_anyway = std::fs::create_dir(&sub).is_ok();
+        if writable_anyway {
+            let _ = std::fs::remove_dir(&sub);
+            std::fs::set_permissions(&r.root, rw()).unwrap();
+            eprintln!("skipped: running as root, a read-only directory refuses nothing");
+            return;
+        }
+
+        let m = manifest::Manifest::parse(
+            br#"{"version":1,"seq":1,"epoch":1,"written_unix":0,"beyond_rpo":0,
+                 "skipped_special":0,"entries":[
+                 {"path":"d","type":"dir","mode":16877,"uid":0,"gid":0,"mtime_unix":0}]}"#,
+        )
+        .expect("fixture manifest must parse");
+        let rep = import_refresh(
+            &r.backend,
+            Some(&m),
+            ImportConfig {
+                export_root: &r.root,
+                key_prefix: "t/",
+                intent_path: Some(&intent),
+                sweep_note_path: Some(&note),
+            },
+        )
+        .await;
+        std::fs::set_permissions(&r.root, rw()).unwrap();
+
+        assert_eq!(rep.dirs_restored, 0, "the mkdir must really have failed: {:?}", rep);
+        assert_eq!(rep.failed_retryable, 1, "and failed ENVIRONMENTALLY: {:?}", rep);
+        assert!(
+            intent.exists(),
+            "THE BUG: clearing the intent note here loses the directory forever — \
+             no sweep can restore a dir, because a dir is not an object"
+        );
+
+        // Control: the same lane, the same manifest, a writable root.
+        // The note must clear — otherwise the assertion above is
+        // measuring something other than the refusal.
+        //
+        // `rig()` holds `capture::test_exclusive()`, so the first rig
+        // MUST be released before the second is built — two live rigs
+        // in one test is a self-deadlock, not a failure.
+        drop(r);
+        let r2 = rig();
+        let intent2 = r2.root.join("..").join("flint-import-intent-control");
+        let note2 = r2.root.join("..").join("flint-sweep-note-control");
+        let _ = std::fs::remove_file(&intent2);
+        let rep2 = import_refresh(
+            &r2.backend,
+            Some(&m),
+            ImportConfig {
+                export_root: &r2.root,
+                key_prefix: "t/",
+                intent_path: Some(&intent2),
+                sweep_note_path: Some(&note2),
+            },
+        )
+        .await;
+        assert_eq!(rep2.dirs_restored, 1, "{:?}", rep2);
+        assert_eq!(rep2.failed_retryable, 0, "{:?}", rep2);
+        assert!(!intent2.exists(), "a clean lane clears its intent note");
+        let _ = std::fs::remove_file(&intent);
+        let _ = std::fs::remove_file(&note);
+        let _ = std::fs::remove_file(&note2);
     }
 
     /// A bucket that HAS a manifest we cannot read is not the same as a
