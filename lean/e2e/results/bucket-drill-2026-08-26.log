@@ -1,0 +1,167 @@
+  rig reset: 25 leg prefixes and their workspaces cleared
+
+── B1  sentinel publishes when cadence cannot
+  ok: 5 dirty files, floor=3600
+  ok: control: 25 s with no sentinel, manifest still at seq 0
+  ok: sentinel published: seq 0 -> 1, 5 files cited, ack covers b1-n1
+  PASS
+
+── B2  crash between consume and ack re-runs
+  ok: seeded baseline at seq 1
+  ok: killed mid-honor: pending record present, ack absent, uploads incomplete
+  ok: re-run acked seq 2 (baseline was 1) and the full set is cited
+  PASS
+
+── B3  storm coalesces, ack covers every touch
+  ok: 100 touches in 10s (min-interval 5 s), mid-storm file written at touch 50
+  ok: 2 barrier(s) <= cap 3; the final ack coalesced 5 touches
+  ok: the mid-storm write is cited at seq 2 — the at-least guarantee held across the storm
+  PASS
+
+── B4  stale-ack discrimination
+  ok: stale ack planted with nonce b4-OLD
+  ok: fresh ack replaced it: nonce b4-NEW, covering mtime 1787758343153670000
+  PASS
+
+── B5  scoped sync defers, never loses
+  ok: foreign install: inputs/a.txt=A2-remote and outputs/b.txt=B2-remote are in the bucket
+  ok: scoped: inputs/ applied (A2-remote), outputs/ untouched (B1), ack defers 1 change(s)
+  ok: the deferred change integrated at the next barrier (outputs/b.txt=B2-remote)
+  PASS
+
+── B6  conflict transport rides the ack
+  ok: local dirt (LOCAL-DIRTY) against a foreign remote (REMOTE)
+  ok: ack carries 1 conflict record(s); the agent's bytes are untouched
+  PASS
+
+── B7  remote.seq is local-only news
+  ok: probe (no creds, no S3 client) reads the ticker: observed_seq=1
+  ok: idle heartbeat: updated_unix 1787758367 -> 1787758377, observed_seq still 1
+  ok: foreign write seen by the probe alone: observed_seq 1 -> 2
+  PASS
+
+── B8  unused verbs cost nothing
+  ok: control (sentinels off): 20 requests in 22s ≈ 5/tick
+  ok: sentinels on: 20 requests — delta 0 over 4 ticks
+  ok: no files/.flint/ objects, no acks: the verbs are inert when unused
+  PASS
+
+── B9  gated withholds a mid-logical-change
+  ok: seeded a pinned boundary at seq 1 citing 2 files (a.txt=CITED-A0)
+  ok: staged: a.txt has 2 versions, the current one is A1-NEW-MID-CHANGE, manifest still seq 1
+  ok: gateway read resolves the citation: CITED-A0, not the staged bytes
+  ok: probe checkout completed and materialized exactly the 2 cited files, a.txt=CITED-A0
+  PASS
+
+── B10 the lag cap forces a citation
+  ok: citation source is forced-lag-cap, read from the manifest object's metadata alone
+  ok: the tree was non-quiescent across the cap (churn.txt at 17 bytes, writer alive=yes)
+  PASS
+
+── B16 the default floor still publishes
+  ok: cadence advanced seq 0 -> 1 citing 3 files, source=cadence, no sentinel ever existed
+  PASS
+
+── B20 quiescence fires
+  ok: quiescence cited q.txt 25s after the last write (window 15 s), source=quiescence
+  PASS
+
+── B11a SIGTERM drains and cites
+  ok: 12 paths staged uncited at seq 1 (no timer may cite: both bounds are an hour)
+  ok: SIGTERM drained: seq 1 -> 2, 13 files cited, bucket reads source=drain
+  ok: a consumed-but-unhonored sentinel stands at seq 1 (held by a 600 s min-interval, floor an hour away)
+  ok: owed ack settled: seq 1 -> 2, ack and bucket BOTH read drain, declared bytes published
+  PASS
+
+── B11b SIGKILL surfaces orphans durably
+  ok: 8 staged, orphans.json in the bucket names 8 candidates
+  ok: recovery from the bucket alone: seq 1 -> 3, source=recovered, 9 files cited
+  PASS
+
+── B11c the drain bounds a SIGTERM-ignoring agent
+  ok: drain finished in 1s (ceiling 120 s), cited 12 of the 11 pre-SIGTERM files
+  ok: the writer ran on to 17 files; the 5 written past the drain are the documented bound
+  PASS
+
+── B13 a legacy citation survives the upgrade
+  ok: pre-upgrade state: files/.flint/legacy.txt in the bucket AND cited by the baseline
+  ok: the upgrade disabled the verbs and said why: reason=preexisting-flint-paths
+  ok: after two barriers the legacy object survives byte-identical
+  PASS
+
+── B19 HITL admitted between citations
+  ok: 6 HITL PUTs admitted across 6 inter-citation intervals; the lane had staged work in 6 of them
+  ok: the HITL bytes are durable while the citation is still withheld
+  PASS
+
+── B21 version reclamation returns to one per key
+  ok: mid-leg peak: churn.txt carried 2 versions
+  ok: reclaimed to 1 live version in 35s — 30-day retention could not have done it
+  PASS
+
+── B12 the straggler is contained, not destructive
+  ok: seeded seq 1; cited versions x=201d14f3… y=609d2492…
+  ok: straggler frozen INSIDE the upload loop (a0002 landed, a0300 has not); waiting out the quiet-poll takeover
+  ok: successor deposed it and published seq 1 -> 3 (z.txt cited)
+  ok: the thawed straggler landed writes: x.txt 1 -> 2 versions, current is now STRAGGLER-WRITES-THIS
+  ok: every cited version id is still fetchable byte-identical after the straggler's writes
+  ok: a pinned_reads checkout still materializes ORIGINAL-X
+  ok: inbox intact (0 -> 0 entries), no live stale-epoch window
+  PASS
+
+── B14 mixed-fleet detection, both ways
+  ok: old image: no capability marker, sentinel file untouched
+  ok: destructive control: the old binary published 1 key(s) under files/.flint/ — the hazard D0 exists to close
+  ok: shipping image on the same fixture: 0 keys under files/.flint/, ordinary data published
+  ok: marked by the shipping binary: state=live, boot stamp recorded
+  ok: downgrade over a live tree: the marker survives with an UNCHANGED boot stamp — the agent's rollback tell
+  ok: the stale marker still advertises verbs from sidecar 0.1.0, over a binary that has none — this is why the stamp is the tell
+  PASS
+
+── B15 the citation is atomic across kills
+  ok: 6 kill rounds: 2 landed pre-CAS, 4 post-CAS, 0 mixed boundaries
+  ok: the probe checkout materialized one coherent round (ROUND-06) with no intent document in the bucket
+  PASS
+
+── B17 renewal survives a sentinel storm
+  ok: no takeover across ~90 s of storm: epoch stayed 1, standby observed 15 quiet polls
+  ok: 23 renewals, widest gap 25s (30 s cadence, 60 s takeover window) while the storm ran
+  PASS
+
+── B18 deposed mid-pending refuses
+  ok: pending record standing at deposal, no ack, tree hash recorded
+  ok: successor holds epoch 2 and published
+  ok: owed ack settled refused-fenced (epoch 2); capabilities: state=fenced, verbs=[]
+  ok: a later sync sentinel on the zombie is refused; tree hash unchanged
+  PASS
+
+── B22 pre-existing .flint/ disables the verbs
+  ok: pre-existing app-owned .flint/publish planted (58 bytes), tree never marked
+  ok: capabilities.json: verbs=[] reason=preexisting-flint-paths
+  ok: the app's file is untouched, unacked and unpublished after a full floor
+  PASS
+
+── B23 dangling citation refuses, then recovers
+  ok: cited version 5707d6e9… is now NONCURRENT while 2 versions exist
+  ok: the backstop reaped the CITED noncurrent version; the manifest still cites it
+  ok: checkout refused on the dangling citation and named the recovery verb
+  ok: recovery re-cited forward with ZERO data PUTs under files/
+  ok: a fresh checkout completes on the surviving bytes (d.txt=STAGED-NEWER-BYTES)
+  PASS
+
+── B24 a stripping proxy refuses gated
+  ok: control: gated came up green through MinIO directly
+  ok: gated REFUSED through the stripping proxy: flint-sync: state: versioning conformance probe FAILED: PUT returned no x-amz-version-id (versioning off, or a
+  ok: cadence mode is unaffected by the same proxy — the gate binds on gated, not on the network
+  note: B24 arm (b) — a customer NoncurrentVersionExpiration rule over the prefix — is the OPERATOR's check, covered green as B30/B31 in run-boundary.sh
+  PASS
+
+── B25 hot loops meter by work, not by calls
+  ok: (a) big-file loop: 2 honored, 2 deferred — the meter engaged
+  ok: (b) 4 KiB loop at the same touch rate: 4 honored, 0 deferred
+  ok: the meter discriminates by WORK: 65 MiB throttles at 2, 4 KiB at 0
+  PASS
+
+─────────────────────────────────────────────
+boundary-verbs bucket drill: 27 passed, 0 failed, 0 skipped
+  note: B24 arm (b) — a customer NoncurrentVersionExpiration rule over the prefix — is the OPERATOR's check, covered green as B30/B31 in run-boundary.sh

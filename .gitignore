@@ -21,6 +21,13 @@ spdk-csi-driver/src/csi.v1.rs
 
 # Logs
 *.log
+# ...except drill evidence. lean/e2e/results/ exists so that a number
+# quoted in a plan or a score is re-readable without re-running
+# anything -- and the commit that added it (fd5b94c7, "the drill
+# evidence made durable") committed only the README describing the
+# logs, because this *.log rule silently swallowed the logs
+# themselves. They lived on one laptop for a month.
+!lean/e2e/results/*.log
 
 # Temporary files
 *.tmp

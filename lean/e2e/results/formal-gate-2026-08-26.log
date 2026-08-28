@@ -1,0 +1,124 @@
+== strict: core breadth (crash+restart+HITL, all arms on) [LeanSubtree.cfg]
+   ok
+== strict: stall/takeover world: rotation + per-request epoch hold [LeanSubtreeTakeover.cfg]
+   ok
+== strict: window OFF: inbox + guards still carry safety (the window is availability/defense-in-depth at whole-PUT atomicity) [LeanNoWindowHolds.cfg]
+   ok
+== strict: rotation OFF, epoch-check ON: per-request validation alone fences the straggler (redundancy A/B) [LeanEpochOnlyHolds.cfg]
+   ok
+== must-fail: HITL amputation: direct bump + whole-rewrite 412/re-seed/overwrite [LeanAmputation.cfg]
+   found: Invariant Inv_HITLDurable is violated
+== must-fail: merge WITHOUT the inbox: preservation is one barrier deep (delete-after-absorption) — the inbox is load-bearing [LeanDirectMergeInsufficient.cfg]
+   found: Invariant Inv_HITLDurable is violated
+== must-fail: the inherited LOCAL-WINS 412 arbitration destroys a user upload [LeanLocalWins.cfg]
+   found: Invariant Inv_HITLDurable is violated
+== must-fail: unguarded GC delete destroys a HITL re-create [LeanGCUnguarded.cfg]
+   found: Invariant Inv_HITLDurable is violated
+== must-fail: v1 order (upload->delete->CAS) dangles the standing manifest [LeanDanglingOrder.cfg]
+   found: Invariant Inv_NoDangling is violated
+== must-fail: no takeover rotation: the deposed straggler's manifest CAS lands [LeanNoRotate.cfg]
+   found: Invariant Inv_NoStragglerInstall is violated
+== must-fail: rotation alone: the deposed straggler's data PUT lands [LeanNoEpochCheck.cfg]
+   found: Invariant Inv_NoDeposedPut is violated
+== must-fail: re-checkout over a live tree resurrects an unpublished delete [LeanRematerialize.cfg]
+   found: Invariant Inv_NoResurrection is violated
+== must-fail: probe: a full 7-step barrier completes [LeanProbeBarrier.cfg]
+   found: Invariant ProbeBarrierDone is violated
+== must-fail: probe: an acked HITL write becomes manifest-cited [LeanProbeHITLCited.cfg]
+   found: Invariant ProbeHITLCited is violated
+== must-fail: probe: the takeover fires [LeanProbeTakeover.cfg]
+   found: Invariant ProbeTakeover is violated
+== must-fail: probe: a deposed CAS attempt is exercised (and fenced) [LeanProbeStragglerAttempt.cfg]
+   found: Invariant ProbeStragglerAttempt is violated
+== must-fail: probe: the 412-park/conflict-surface arm fires [LeanProbePark.cfg]
+   found: Invariant ProbePark is violated
+== must-fail: probe: the GC delete fires [LeanProbeGC.cfg]
+   found: Invariant ProbeGC is violated
+== must-fail: probe: a HITL write is refused while the window is open [LeanProbeRefusal.cfg]
+   found: Invariant ProbeRefusal is violated
+== must-fail: probe: the own-crashed-PUT 412 adoption fires after restart [LeanProbeAdoptOwn.cfg]
+   found: Invariant ProbeAdoptOwn is violated
+== strict: sync verb: scan-first + locally-dirty-wins holds against the barrier/HITL product [LeanSyncHolds.cfg]
+   ok
+== must-fail: sync judging dirt from the LAST BARRIER's snapshot destroys un-scanned live work [LeanSyncStaleDirt.cfg]
+   found: Invariant Inv_SyncNeverDestroysDirty is violated
+== must-fail: probe: sync actually applies a remote change [LeanProbeSyncApplied.cfg]
+   found: Invariant ProbeSyncApplied is violated
+== must-fail: probe: sync actually surfaces a dirty-path conflict [LeanProbeSyncConflict.cfg]
+   found: Invariant ProbeSyncConflict is violated
+== strict: scoped sync: the merge base advances ONLY for paths applied or verified in scope [LeanScopedSyncHolds.cfg]
+   ok
+== must-fail: a scoped sync advancing the WHOLE merge base loses every out-of-scope foreign entry from the inbox flow, permanently [LeanScopedSyncWholeBase.cfg]
+   found: Invariant Inv_NoForeignLost is violated
+== must-fail: probe: a scoped sync actually defers an out-of-scope remote change [LeanProbeScopedDeferral.cfg]
+   found: Invariant ProbeScopedDeferral is violated
+== strict: gated advance: cited versions live, the reaper never takes live bytes, boundaries are all-or-nothing [LeanGatedHolds.cfg]
+   ok
+== must-fail: the shipped reaper rule (keep only the cited version) DELETES a HITL write that landed between the lane and the citation — it was current, acked, and about to be read [LeanGatedReapsCurrent.cfg]
+   found: Invariant Inv_NoUncitedGC is violated
+== must-fail: the noncurrent-retention BACKSTOP reaps a cited version — gated staging makes the cited generation noncurrent, so lifecycle runs a clock against live cited data (D8's inversion; the abandoned-mid-stage endgame) [LeanGatedBackstop.cfg]
+   found: Invariant Inv_CitedVersionLives is violated
+== must-fail: a citation split across two CASes lets a reader see half a logical change [LeanGatedSplitCitation.cfg]
+   found: Invariant Inv_BoundaryAtomic is violated
+== must-fail: citing over an inbox entry still in flight names bytes that PREDATE the user's write [LeanGatedInflightHitl.cfg]
+   found: Invariant Inv_HITLDurable is violated
+== must-fail: probe: ONE CAS installs >= 2 paths from a pending set that survived a lane pass [LeanProbeCitationInstalled.cfg]
+   found: Invariant ProbeCitationInstalled is violated
+== must-fail: probe: a delete is actually withheld from the manifest until a citation [LeanProbeWithheldDelete.cfg]
+   found: Invariant ProbeWithheldDelete is violated
+== must-fail: probe: a citation actually fires mid-change (the lag/backlog caps' shape) [LeanProbeForcedCite.cfg]
+   found: Invariant ProbeForcedCite is violated
+== must-fail: probe (REQUIRED-REACHABLE): a raw reader sees uncited bytes — §3 residual 11 proven present, not assumed away [LeanProbeRawUncited.cfg]
+   found: Invariant ProbeRawReaderSeesUncited is violated
+== strict: boundary verb: consume/honor/ack/retire against the barrier, the inbox and a restart [LeanSentinelHolds.cfg]
+   ok
+== strict: boundary verb across a RESTART: the pending file outlives it, the in-memory honored flag does not [LeanSentinelRestart.cfg]
+   ok
+== strict: boundary verb across a FENCE: the deposal arm the draft's cfgs never had [LeanSentinelDeposal.cfg]
+   ok
+== must-fail: a consume that CLOBBERS the standing pending record instead of folding into it orphans the first agent's nonce forever [LeanSentinelOrphan.cfg]
+   found: Invariant Inv_NoNonceOrphan is violated
+== must-fail: acking from persisted state: pending-and-no-matching-ack is the SAME observable state for crash-before-CAS as for crash-after-step-7, so it asserts publication of writes that never uploaded (the crash matrix the review retracted) [LeanSentinelAckEarly.cfg]
+   found: Invariant Inv_AckImpliesCited is violated
+== must-fail: success-ack-after-fence: a deposed incarnation telling a waiting agent its boundary landed [LeanSentinelFencedAck.cfg]
+   found: Invariant Inv_NoFencedOkAck is violated
+== must-fail: the skip-on-no-diff fast path WITHOUT its citation-repair and manifest-unchanged guards acks a boundary the manifest does not carry -- section 10.1's deliberate deviation from section 2.1, machine-checked instead of argued [LeanSentinelFastPathUnguarded.cfg]
+   found: Invariant Inv_AckBoundaryCoherent is violated
+== must-fail: a restart between the manifest CAS and step 7 leaves our OWN install looking foreign at the next merge, and delete/modify then drops the agent's delete from the boundary it is about to be acked for (found in shipped code) [LeanSentinelStaleMergeBase.cfg]
+   found: Invariant Inv_AckImpliesCited is violated
+== must-fail: probe: an ack was written off a REAL barrier install [LeanProbeSentinelHonored.cfg]
+   found: Invariant ProbeSentinelHonored is violated
+== must-fail: probe: the refusal fires -- deposal answers a waiting agent [LeanProbeRefusedAck.cfg]
+   found: Invariant ProbeRefusedAck is violated
+== must-fail: probe: an ack was written for a pending record that SURVIVED a restart [LeanProbeAckAfterCrash.cfg]
+   found: Invariant ProbeAckAfterCrash is violated
+== must-fail: probe: two touches actually coalesced into one pending record (without this the orphan mutation checks a world with only one live nonce) [LeanProbeCoalescedAck.cfg]
+   found: Invariant ProbeCoalescedAck is violated
+== must-fail: probe: a pending sentinel was honored by the skip-on-no-diff pass rather than a full barrier [LeanProbeFastPathHonor.cfg]
+   found: Invariant ProbeFastPathHonor is violated
+== strict: the boundary verb over the GATED citation lane: an ok ack never claims a path the citation dropped [LeanSentinelGatedHolds.cfg]
+   ok
+== must-fail: the shipped gated honor: status ok whatever the citation dropped, with no ack field that could express the exception (found in shipped code) [LeanSentinelGatedOkOverDrop.cfg]
+   found: Invariant Inv_AckImpliesCited is violated
+== must-fail: probe: a gated citation actually dropped a path the agent had DECLARED (without it the honesty rule holds vacuously) [LeanProbeDeclaredDrop.cfg]
+   found: Invariant ProbeDeclaredDrop is violated
+== must-fail: probe: the partial ack fires -- the agent is answered rather than left waiting [LeanProbePartialAck.cfg]
+   found: Invariant ProbePartialAck is violated
+== must-fail: the citation lane WITHOUT the repair the fused barrier has: an ok ack names a manifest that does not cite a HITL write this workspace already integrated into its own tree (found in shipped code -- C2) [LeanSentinelGatedNoRepair.cfg]
+   found: Invariant Inv_AckBoundaryCoherent is violated
+== must-fail: the stage and the withheld-delete set both reach the citation and merge order decides: the boundary an ok ack names cites a file the agent deleted before declaring (found in a fix two hours old) [LeanSentinelGatedStaleStage.cfg]
+   found: Invariant Inv_AckImpliesCited is violated
+== strict: the ack and the manifest name the SAME clock -- the agent reads the ack, the fleet reads the stamp [LeanSentinelClockHolds.cfg]
+   ok
+== must-fail: the barrier installs through an UNSTAMPED CAS: the bucket reports the default clock while the ack tells the agent otherwise (found by the bucket drill, twice in one session) [LeanSentinelClockUnstamped.cfg]
+   found: Invariant Inv_BoundaryNamesItsClock is violated
+== must-fail: the same, over the CITATION lane -- the installer where the second half of the shipped defect actually lived (leg B11a caught it after the cadence half was fixed) [LeanSentinelGatedClockUnstamped.cfg]
+   found: Invariant Inv_BoundaryNamesItsClock is violated
+== strict: SyncScope x GatedCitation: two products that both advance instBase, run together for the first time (the pair 10.3 named) [LeanScopedGatedHolds.cfg]
+   ok
+== must-fail: probe: the scoped deferral is REACHABLE in the gated world -- without it the pair run is green over nothing [LeanProbeScopedGated.cfg]
+   found: Invariant ProbeScopedDeferral is violated
+== must-fail: whole-instBase advance, with a citation lane also advancing it: the out-of-scope foreign entry is still lost forever [LeanScopedGatedWholeBase.cfg]
+   found: Invariant Inv_NoForeignLost is violated
+
+lean formal gate: 61/61 runs green
