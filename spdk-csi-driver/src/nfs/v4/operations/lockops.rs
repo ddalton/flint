@@ -1283,7 +1283,38 @@ impl LockOperationHandler {
             };
         }
 
+        // The identity LOCKU acts on came entirely from the stateid the
+        // CALLER presented: `resolve_owner` hands back the `(client_id,
+        // owner)` the stateid names, and that pair went straight into
+        // `trim_owner_range`. `ctx` was consulted only for the current
+        // filehandle. So presenting another client's lock stateid
+        // released THAT client's lock — the exact mutual-exclusion
+        // invariant 7abc0a5, B1 and B2 exist to defend, with no wire
+        // signal to the victim. LOCK already refuses this (its
+        // `Some((cid, owner)) if cid == client_id` arm); LOCKU is now
+        // held to the same rule.
+        let session_client = match ctx
+            .session_id
+            .and_then(|sid| self.state_mgr.sessions.get_session(&sid).map(|s| s.client_id))
+        {
+            Some(id) => id,
+            None => {
+                warn!("LOCKU: no session in context, returning NFS4ERR_BAD_SESSION");
+                return LockURes {
+                    status: Nfs4Status::BadSession,
+                    stateid: None,
+                };
+            }
+        };
+
         let (client_id, owner) = match self.lock_mgr.resolve_owner(&op.stateid) {
+            Some((cid, _)) if cid != session_client => {
+                warn!("LOCKU: lock stateid belongs to another client");
+                return LockURes {
+                    status: Nfs4Status::BadStateId,
+                    stateid: None,
+                };
+            }
             Some(o) => o,
             None => {
                 warn!("LOCKU: stateid resolves to no lock owner");
@@ -2170,6 +2201,79 @@ mod tests {
         assert!(mgr2
             .check_conflicts(b"/data/file", &LockRange { offset: 8192, length: 100 }, LockType::Write, None)
             .is_none());
+    }
+
+    /// LOCKU took the identity it acted on from the stateid the CALLER
+    /// presented — `resolve_owner` returns the `(client_id, owner)` the
+    /// stateid names, and that pair went straight into
+    /// `trim_owner_range`. `ctx` was read only for the current
+    /// filehandle. So one client could release another's lock, which is
+    /// the mutual-exclusion invariant 7abc0a5, B1 and B2 exist to
+    /// defend, with no wire signal to the victim.
+    ///
+    /// Arms: the foreign LOCKU is refused, the lock SURVIVES it (a
+    /// refusal that still trimmed the range would be the same bug), and
+    /// the owner can still release — the last one is the control that
+    /// stops this passing against a LOCKU that refuses everyone.
+    #[test]
+    fn locku_refuses_a_lock_stateid_belonging_to_another_client() {
+        let temp = TempDir::new().unwrap();
+        let fh_mgr = Arc::new(FileHandleManager::new(temp.path().to_path_buf()));
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let handler = LockOperationHandler::new(state_mgr, Arc::new(LockManager::new()));
+
+        let mut owner_ctx = CompoundContext::new(0);
+        owner_ctx.session_id = Some(create_test_session(&handler, 11));
+        owner_ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+        let fh_bytes = owner_ctx.current_fh.as_ref().unwrap().data.clone();
+
+        let granted = handler.handle_lock(LockOp {
+            locktype: LockType::Write,
+            reclaim: false,
+            offset: 0,
+            length: 4096,
+            stateid: create_test_stateid(&handler, 11),
+            owner: b"victim".to_vec(),
+            new_lock_owner: true,
+            open_seqid: Some(0),
+        }, &owner_ctx);
+        assert_eq!(granted.status, Nfs4Status::Ok);
+        let canonical = granted.stateid.unwrap();
+
+        let mut attacker_ctx = CompoundContext::new(0);
+        attacker_ctx.session_id = Some(create_test_session(&handler, 22));
+        attacker_ctx.current_fh = owner_ctx.current_fh.clone();
+
+        let unlock = |ctx: &CompoundContext| handler.handle_locku(LockUOp {
+            locktype: LockType::Write,
+            seqid: canonical.seqid,
+            stateid: canonical,
+            offset: 0,
+            length: 4096,
+        }, ctx);
+
+        assert_eq!(
+            unlock(&attacker_ctx).status, Nfs4Status::BadStateId,
+            "a foreign client must not be able to release this lock"
+        );
+
+        // The range is still locked. This is the arm that matters: a
+        // refusal that had already trimmed the range would be the
+        // original defect wearing an error code.
+        assert!(
+            handler.lock_mgr.check_conflicts(
+                &fh_bytes,
+                &LockRange { offset: 0, length: 4096 },
+                LockType::Write,
+                None,
+            ).is_some(),
+            "the victim's lock must survive the refused LOCKU"
+        );
+
+        assert_eq!(
+            unlock(&owner_ctx).status, Nfs4Status::Ok,
+            "the owning client must still be able to release"
+        );
     }
 
     /// B6, per-client lock quota: granted range entries are refused with

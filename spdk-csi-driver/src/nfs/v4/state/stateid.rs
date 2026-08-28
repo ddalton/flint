@@ -618,6 +618,26 @@ impl StateIdManager {
     ///
     /// We do NOT accept `seqid - 1` here — that's a READ-only relaxation
     /// (see `validate_for_read`).
+    /// True only when this stateid EXISTS and was established by a
+    /// DIFFERENT client.
+    ///
+    /// A miss deliberately answers false. CLOSE's replay and tombstone
+    /// paths depend on an unknown stateid falling through to them, and
+    /// turning a benign reorder into BAD_STATEID detonates a
+    /// TEST_STATEID recovery round that stalls the whole session — the
+    /// F31 lesson, which is why `close_open` discriminates outcomes at
+    /// all. Ownership is a separate question from existence; this
+    /// answers only ownership.
+    pub fn belongs_to_other_client(&self, stateid: &StateId, client_id: u64) -> bool {
+        if stateid == &ANONYMOUS_STATEID || stateid == &READ_BYPASS_STATEID {
+            return false;
+        }
+        self.states
+            .get(&stateid.other)
+            .map(|e| e.client_id != client_id)
+            .unwrap_or(false)
+    }
+
     pub fn validate(&self, stateid: &StateId) -> Result<(), String> {
         if stateid == &ANONYMOUS_STATEID {
             return Ok(());

@@ -55,11 +55,14 @@
 use super::protocol::Nfs4FileHandle;
 use super::pseudo::{PseudoFilesystem, Export};
 use crate::state_backend::{FhMappingRecord, StateBackend, WriteOp};
-use sha2::{Sha256, Digest};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+type HmacSha256 = Hmac<Sha256>;
 use tracing::{debug, warn, info};
 
 /// Fixed length of a v2 (id-based) filehandle.
@@ -122,6 +125,23 @@ impl std::fmt::Display for HandleError {
 pub struct FileHandleManager {
     /// Server instance ID (changes on restart to invalidate old handles)
     instance_id: u64,
+
+    /// Key for the v1/v3 handle MAC.
+    ///
+    /// The handle tag used to be a bare `Sha256(path, instance_id[, ino])`.
+    /// Every input to that was public: the path is the client's own, and
+    /// `instance_id` is emitted in the clear at bytes [1..9] of every
+    /// handle the server hands out — and on the lite hub it is not even
+    /// secret from the wire, since `stable_nfs_instance_id` derives it by
+    /// hashing the volume id with a fixed string. So anyone who had ever
+    /// held one filehandle could mint a valid-looking handle for ANY path
+    /// string, and `parse_handle` fed that string straight to the
+    /// filesystem. Keyed now, and verified in constant time.
+    ///
+    /// Persisted at `<export>/.flint-nfs/fh.key` (the same secret the v4
+    /// kernel-handle mode already uses), so handles survive a failover
+    /// exactly as far as `instance_id` lets them.
+    fh_secret: [u8; 32],
 
     /// Cache of path -> handle mappings (for fast lookup)
     path_to_handle: Arc<RwLock<HashMap<PathBuf, Nfs4FileHandle>>>,
@@ -276,8 +296,23 @@ impl FileHandleManager {
             None
         };
 
+        // The MAC key. A failure here must never fall back to an
+        // unkeyed tag — that is the bug. A random key is the safe
+        // degradation: handles stop surviving restart (which the
+        // instance-id check already governs), forgery stays closed.
+        let fh_secret = match crate::nfs::v4::fh_kernel::load_or_create_key(&export_path) {
+            Ok(k) => k,
+            Err(e) => {
+                warn!(
+                    "filehandle MAC key unavailable ({e}) — using a per-process key.                      Handles will not survive a restart; forgery stays refused"
+                );
+                rand::random()
+            }
+        };
+
         Self {
             instance_id,
+            fh_secret,
             path_to_handle: Arc::new(RwLock::new(HashMap::new())),
             handle_to_path: Arc::new(RwLock::new(HashMap::new())),
             export_path,
@@ -617,13 +652,7 @@ impl FileHandleManager {
             return Ok(self.v2_handle_for(path));
         }
 
-        let mut hasher = Sha256::new();
-        hasher.update(path_str.as_bytes());
-        hasher.update(&self.instance_id.to_be_bytes()); // Include instance ID in hash
-        if let Some(ino) = ino {
-            hasher.update(&ino.to_be_bytes()); // v3: generation is part of the identity
-        }
-        let hash = hasher.finalize();
+        let hash = self.handle_mac(path_str, ino.map(|i| i.to_be_bytes()));
 
         let mut data = Vec::with_capacity(total_len);
         match ino {
@@ -735,13 +764,19 @@ impl FileHandleManager {
             let mut id_bytes = [0u8; 8];
             id_bytes.copy_from_slice(&handle.data[9..17]);
             let id = u64::from_be_bytes(id_bytes);
-            return self
+            let mapped = self
                 .id_to_path
                 .read()
                 .unwrap()
                 .get(&id)
                 .cloned()
-                .ok_or_else(|| "Stale file handle: unknown v2 file id".to_string());
+                .ok_or_else(|| "Stale file handle: unknown v2 file id".to_string())?;
+            // Same containment gate as the embedded-path handles below.
+            // The v2 table is restored from the state backend, so it is
+            // not a trusted-by-construction source either.
+            let decoded = self.lexical_normalize(&mapped)?;
+            self.ensure_within_export(&decoded)?;
+            return Ok(decoded);
         }
 
         // v1 and v3 share the layout up to the hash; v3 inserts the
@@ -767,20 +802,30 @@ impl FileHandleManager {
         let path_str = std::str::from_utf8(&handle.data[path_off..path_off + path_len])
             .map_err(|_| "Invalid path encoding".to_string())?;
 
-        // Verify hash (v3 folds the pinned inode into the identity)
-        let mut hasher = Sha256::new();
-        hasher.update(path_str.as_bytes());
-        hasher.update(&self.instance_id.to_be_bytes());
-        if is_v3 {
-            hasher.update(&handle.data[41..49]);
-        }
-        let computed_hash = hasher.finalize();
-
-        if computed_hash.as_slice() != &handle.data[9..41] {
+        // Verify the tag (v3 folds the pinned inode into the identity).
+        let ino_be = if is_v3 {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&handle.data[41..49]);
+            Some(b)
+        } else {
+            None
+        };
+        if !self.handle_mac_ok(path_str, ino_be, &handle.data[9..41]) {
             return Err("File handle hash mismatch".to_string());
         }
 
-        Ok(PathBuf::from(path_str))
+        // CONTAINMENT. Until this call the resolve path took the client's
+        // word for the path it decoded: `normalize_path` — whose whole job
+        // is "ensure the path is within the export" — had exactly one
+        // caller, and it was the MINT side. So a handle naming
+        // `/data/state/state.db` or the pod's service-account token
+        // resolved and was served. `open_beneath` states as its module
+        // invariant that every path it receives "is canonicalized and
+        // proven inside the export before arriving"; that is only true
+        // once this runs.
+        let decoded = self.lexical_normalize(Path::new(path_str))?;
+        self.ensure_within_export(&decoded)?;
+        Ok(decoded)
     }
 
     /// A successful filesystem RENAME old→new: re-key the v2 id↔path
@@ -893,6 +938,34 @@ impl FileHandleManager {
         }
     }
 
+    /// The v1/v3 handle tag: HMAC-SHA256 over the same identity the old
+    /// bare hash covered — path, instance, and (v3) the pinned inode.
+    fn handle_mac(&self, path_str: &str, ino_be: Option<[u8; 8]>) -> [u8; 32] {
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&self.fh_secret)
+            .expect("hmac accepts any key length");
+        mac.update(path_str.as_bytes());
+        mac.update(&self.instance_id.to_be_bytes());
+        if let Some(ino) = ino_be {
+            mac.update(&ino);
+        }
+        let mut tag = [0u8; 32];
+        tag.copy_from_slice(&mac.finalize().into_bytes());
+        tag
+    }
+
+    /// Constant-time tag check. `verify_slice` is the whole point: a
+    /// byte-wise `!=` on a MAC leaks the tag one comparison at a time.
+    fn handle_mac_ok(&self, path_str: &str, ino_be: Option<[u8; 8]>, tag: &[u8]) -> bool {
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&self.fh_secret)
+            .expect("hmac accepts any key length");
+        mac.update(path_str.as_bytes());
+        mac.update(&self.instance_id.to_be_bytes());
+        if let Some(ino) = ino_be {
+            mac.update(&ino);
+        }
+        mac.verify_slice(tag).is_ok()
+    }
+
     /// Normalize a path (resolve . and .., ensure within export)
     fn normalize_path(&self, path: &Path) -> Result<PathBuf, String> {
         // Convert to absolute path
@@ -932,6 +1005,29 @@ impl FileHandleManager {
         // already gone (normalize_without_following_symlinks), and any
         // symlinked *directory* on the way in is still resolved, so a real
         // escape is still caught.
+        self.ensure_within_export(&normalized)?;
+
+        Ok(normalized)
+    }
+
+    /// The containment check itself, factored out of `normalize_path`.
+    ///
+    /// The RESOLVE path needs containment on paths that do NOT exist: a
+    /// v3 handle whose file was renamed away is resolved by following
+    /// the alias table, and its embedded path is legitimately gone by
+    /// then (`rename_away_handle_follows_the_file` pins that). So the
+    /// existence requirement in `normalize_without_following_symlinks`
+    /// cannot be part of containment. One implementation, two callers —
+    /// a second copy of this would be the thing that later drifts.
+    fn ensure_within_export(&self, normalized: &Path) -> Result<(), String> {
+        // The server's own metadata directory is not part of the
+        // exported namespace. `fh.key` lives there, and a client that
+        // can read it can forge filehandles again — so this is the
+        // other half of keying the tag, not a cosmetic hide.
+        if crate::nfs::v4::fh_kernel::traverses_meta_dir(normalized) {
+            return Err("Path outside export".to_string());
+        }
+
         let export_canon = self.export_path.canonicalize()
             .unwrap_or_else(|_| self.export_path.clone());
 
@@ -957,7 +1053,33 @@ impl FileHandleManager {
         if !inside {
             return Err("Path outside export".to_string());
         }
+        Ok(())
+    }
 
+    /// Resolve `.` and `..` lexically. No filesystem access, no symlink
+    /// following, no existence requirement.
+    fn lexical_normalize(&self, path: &Path) -> Result<PathBuf, String> {
+        use std::path::Component;
+
+        let abs = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.export_path.join(path)
+        };
+
+        let mut normalized = PathBuf::new();
+        for component in abs.components() {
+            match component {
+                Component::Prefix(_) | Component::RootDir => normalized.push(component),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if !normalized.pop() {
+                        return Err("Path goes above root".to_string());
+                    }
+                }
+                Component::Normal(name) => normalized.push(name),
+            }
+        }
         Ok(normalized)
     }
 
@@ -1036,6 +1158,162 @@ mod tests {
         assert_eq!(test_path.canonicalize().unwrap(), resolved_path.canonicalize().unwrap());
 
         // TempDir cleanup happens automatically
+    }
+
+    /// Build a v1 handle by hand: version, instance, 32-byte tag,
+    /// u16 path length, path. This is the attacker's whole toolkit —
+    /// every field is either public or observable in a handle the
+    /// server already handed out.
+    fn forge_v1(instance_id: u64, tag: &[u8; 32], path: &str) -> Nfs4FileHandle {
+        let mut data = Vec::new();
+        data.push(1u8);
+        data.extend_from_slice(&instance_id.to_be_bytes());
+        data.extend_from_slice(tag);
+        data.extend_from_slice(&(path.len() as u16).to_be_bytes());
+        data.extend_from_slice(path.as_bytes());
+        Nfs4FileHandle { data }
+    }
+
+    /// CONTROL for the two refusal legs below. A hand-forged handle
+    /// carrying a VALID tag for a path inside the export must RESOLVE.
+    ///
+    /// Without this, both refusal tests could pass because `forge_v1`
+    /// builds a malformed handle that would be rejected whatever the
+    /// path said — proving nothing about containment or about the key.
+    #[test]
+    fn a_correctly_signed_handle_for_an_in_export_path_resolves() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let root = temp_dir.path().canonicalize().unwrap();
+        let mgr = FileHandleManager::new(root.clone());
+
+        let inside = root.join("inside.txt");
+        fs::write(&inside, b"x").unwrap();
+        let path_str = inside.to_str().unwrap();
+
+        let tag = mgr.handle_mac(path_str, None);
+        let handle = forge_v1(mgr.instance_id, &tag, path_str);
+
+        let resolved = mgr
+            .filehandle_to_path(&handle)
+            .expect("a validly-signed in-export handle must resolve");
+        assert_eq!(resolved.canonicalize().unwrap(), inside.canonicalize().unwrap());
+    }
+
+    /// The escape. A handle whose tag is VALID — so the MAC cannot be
+    /// what refuses it — naming a path outside the export.
+    ///
+    /// `normalize_path` is the function whose doc comment says "ensure
+    /// the path is within the export". Before this leg it had exactly
+    /// one caller and it was the MINT side, so `parse_handle` returned
+    /// `PathBuf::from(path_str)` for whatever the client sent.
+    #[test]
+    fn a_signed_handle_naming_a_path_outside_the_export_is_refused() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let root = temp_dir.path().canonicalize().unwrap();
+        let mgr = FileHandleManager::new(root.clone());
+
+        // A real file that exists and is emphatically not ours. Sitting
+        // beside the export rather than at /etc/passwd keeps the leg
+        // hermetic and identical on macOS and Linux.
+        let outside_dir = tempfile::TempDir::new().unwrap();
+        let secret = outside_dir.path().canonicalize().unwrap().join("state.db");
+        fs::write(&secret, b"not yours").unwrap();
+        let path_str = secret.to_str().unwrap();
+
+        let tag = mgr.handle_mac(path_str, None);
+        let handle = forge_v1(mgr.instance_id, &tag, path_str);
+
+        let err = mgr
+            .filehandle_to_path(&handle)
+            .expect_err("a handle naming a path outside the export must be refused");
+        assert!(
+            err.contains("outside export"),
+            "refused for the wrong reason: {err}"
+        );
+    }
+
+    /// The key. Reproduces the pre-fix tag exactly — a bare
+    /// `Sha256(path || instance_id)` — for a path INSIDE the export, so
+    /// containment cannot be what refuses it.
+    ///
+    /// Every input to that hash was public: the path is the client's
+    /// own, and `instance_id` rides in the clear at bytes [1..9] of
+    /// every handle the server hands out (and on the lite hub is a
+    /// plain hash of the volume id).
+    #[test]
+    fn a_handle_forged_with_the_old_unkeyed_hash_is_refused() {
+        use sha2::Digest;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let root = temp_dir.path().canonicalize().unwrap();
+        let mgr = FileHandleManager::new(root.clone());
+
+        let inside = root.join("target.txt");
+        fs::write(&inside, b"x").unwrap();
+        let path_str = inside.to_str().unwrap();
+
+        let mut hasher = Sha256::new();
+        hasher.update(path_str.as_bytes());
+        hasher.update(&mgr.instance_id.to_be_bytes());
+        let mut legacy = [0u8; 32];
+        legacy.copy_from_slice(&hasher.finalize());
+
+        // Same path, same instance — the ONLY thing the attacker lacks
+        // is the key.
+        assert_ne!(legacy, mgr.handle_mac(path_str, None), "the tag must be keyed");
+
+        let handle = forge_v1(mgr.instance_id, &legacy, path_str);
+        let err = mgr
+            .filehandle_to_path(&handle)
+            .expect_err("an unkeyed-hash handle must be refused");
+        assert!(err.contains("hash mismatch"), "refused for the wrong reason: {err}");
+    }
+
+    /// Two servers over two different exports do not accept each
+    /// other's handles even at the same instance id — i.e. the key is
+    /// really per-export state and really participates.
+    #[test]
+    fn one_servers_handle_does_not_verify_under_anothers_key() {
+        let a_dir = tempfile::TempDir::new().unwrap();
+        let b_dir = tempfile::TempDir::new().unwrap();
+        let a = FileHandleManager::new_with_instance_id(
+            a_dir.path().to_path_buf(), "volume".to_string(), 42);
+        let b = FileHandleManager::new_with_instance_id(
+            b_dir.path().to_path_buf(), "volume".to_string(), 42);
+        assert_ne!(a.fh_secret, b.fh_secret, "each export mints its own key");
+
+        let f = a_dir.path().join("f.txt");
+        fs::write(&f, b"x").unwrap();
+        let path_str = f.canonicalize().unwrap().to_str().unwrap().to_string();
+
+        assert!(a.handle_mac_ok(&path_str, None, &a.handle_mac(&path_str, None)));
+        assert!(!b.handle_mac_ok(&path_str, None, &a.handle_mac(&path_str, None)));
+    }
+
+    /// `fh.key` authenticates every filehandle, and it lives INSIDE the
+    /// export because it has to travel with the volume. So a client that
+    /// could read it could forge handles again — keying the tag would
+    /// have bought nothing. No handle may name anything under the
+    /// server's private directory, however the handle was obtained.
+    #[test]
+    fn no_handle_can_name_the_servers_key_directory() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let root = temp_dir.path().canonicalize().unwrap();
+        let mgr = FileHandleManager::new(root.clone());
+
+        let key = root.join(crate::nfs::v4::fh_kernel::META_DIR).join("fh.key");
+        assert!(key.exists(), "the key must actually be there, or this leg proves nothing");
+
+        // Correctly signed, so the MAC is not what refuses it.
+        let path_str = key.to_str().unwrap();
+        let handle = forge_v1(mgr.instance_id, &mgr.handle_mac(path_str, None), path_str);
+        assert!(
+            mgr.filehandle_to_path(&handle).is_err(),
+            "a validly-signed handle for the key file must still be refused"
+        );
+
+        // And the ordinary mint path will not name it either.
+        assert!(mgr.path_to_filehandle(&key).is_err());
     }
 
     #[test]

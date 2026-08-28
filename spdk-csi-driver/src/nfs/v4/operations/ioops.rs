@@ -1290,9 +1290,37 @@ impl IoOperationHandler {
     pub fn handle_close(
         &self,
         op: CloseOp,
-        _ctx: &CompoundContext,
+        ctx: &CompoundContext,
     ) -> CloseRes {
         debug!("CLOSE: stateid={:?}", op.stateid);
+
+        // A stateid belongs to the client that established it. This took
+        // none of that into account: the context was discarded outright
+        // (`_ctx`), and `close_open` keys on `stateid.other` alone while
+        // accepting `seqid == 0` as a wildcard, so not even a seqid had
+        // to be guessed. `other` is `[global counter][client_id as u32]`
+        // with no random component (`stateid.rs` `allocate`), so reaching
+        // another client's open state is arithmetic rather than luck —
+        // and destroying it is silent, because the victim learns nothing
+        // until its next use of a stateid the server has already dropped.
+        //
+        // LOCK carried this guard; CLOSE and LOCKU did not.
+        if let Some(client_id) = ctx
+            .session_id
+            .and_then(|sid| self.state_mgr.sessions.get_session(&sid).map(|s| s.client_id))
+        {
+            if self
+                .state_mgr
+                .stateids
+                .belongs_to_other_client(&op.stateid, client_id)
+            {
+                warn!("CLOSE: stateid belongs to another client — refusing");
+                return CloseRes {
+                    status: Nfs4Status::BadStateId,
+                    stateid: None,
+                };
+            }
+        }
 
         // F31: atomic seqid-checked close. The outcome discrimination is
         // load-bearing: OLD_STATEID tells the client "your view is stale,
@@ -2900,6 +2928,75 @@ mod tests {
         let close_res = handler.handle_close(close_op, &ctx);
         assert_eq!(close_res.status, Nfs4Status::Ok);
         assert!(close_res.stateid.is_some());
+    }
+
+    /// CLOSE used to discard its CompoundContext outright (`_ctx`) and
+    /// key `close_open` on `stateid.other` alone, accepting `seqid == 0`
+    /// as a wildcard. `other` is `[global counter][client_id as u32]`
+    /// with no random component, so reaching another client's open state
+    /// was arithmetic, and destroying it was silent.
+    ///
+    /// Three arms, because a bare "the foreign CLOSE is refused" oracle
+    /// would pass against a CLOSE that refused everything:
+    ///   1. the foreign CLOSE is refused,
+    ///   2. the state SURVIVES it, and
+    ///   3. the rightful owner can still close.
+    #[tokio::test]
+    async fn close_refuses_a_stateid_belonging_to_another_client() {
+        let (handler, fh_mgr, _temp) = create_test_handler();
+
+        let mk_session = |cid: u64| {
+            handler.state_mgr.sessions.create_session(
+                cid, 0, 0, 1024 * 1024, 1024 * 1024, 64 * 1024, 8, 8, 0, None, 1,
+            ).session_id
+        };
+
+        let mut owner_ctx = CompoundContext::new(1);
+        owner_ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+        owner_ctx.session_id = Some(mk_session(11));
+
+        let open_res = handler.handle_open(OpenOp {
+            seqid: 0,
+            share_access: OPEN4_SHARE_ACCESS_READ,
+            share_deny: OPEN4_SHARE_DENY_NONE,
+            owner: b"victim".to_vec(),
+            openhow: OpenHow::NoCreate,
+            claim: OpenClaim::Fh,
+        }, &mut owner_ctx).await;
+        assert_eq!(open_res.status, Nfs4Status::Ok);
+        let victim_stateid = open_res.stateid.unwrap();
+
+        // A different client, presenting the victim's stateid — and with
+        // seqid 0, the wildcard that needed no guessing at all.
+        let mut attacker_ctx = CompoundContext::new(1);
+        attacker_ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+        attacker_ctx.session_id = Some(mk_session(22));
+
+        let refused = handler.handle_close(
+            CloseOp { seqid: 0, stateid: StateId { seqid: 0, other: victim_stateid.other } },
+            &attacker_ctx,
+        );
+        assert_eq!(
+            refused.status, Nfs4Status::BadStateId,
+            "a foreign client must not be able to CLOSE this state"
+        );
+
+        // The state is still there — the refusal did not half-destroy it.
+        assert!(
+            handler.state_mgr.stateids.validate(&victim_stateid).is_ok(),
+            "the victim's open state must survive the refused CLOSE"
+        );
+
+        // And the owner is unaffected. Without this arm the leg would
+        // also pass against a CLOSE that refused every caller.
+        let owner_close = handler.handle_close(
+            CloseOp { seqid: 0, stateid: victim_stateid },
+            &owner_ctx,
+        );
+        assert_eq!(
+            owner_close.status, Nfs4Status::Ok,
+            "the owning client must still be able to close"
+        );
     }
 
     #[tokio::test]

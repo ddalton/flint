@@ -65,6 +65,24 @@ pub fn v4_ino(data: &[u8]) -> Option<u64> {
     }
 }
 
+/// The server's private directory inside the export.
+///
+/// It holds `fh.key`, the secret that authenticates filehandles. That
+/// secret lives inside the export on purpose — it has to travel with
+/// the volume or handles die at every failover — which makes hiding it
+/// from the namespace a correctness requirement, not tidiness: a client
+/// that can READ this file can mint a filehandle for any path, which is
+/// the whole thing the key exists to prevent. So the server refuses to
+/// resolve any path through it and omits it from READDIR.
+pub const META_DIR: &str = ".flint-nfs";
+
+/// True when any component of this path is the server's private
+/// directory. Checked on the RESOLVE path, so no filehandle can name
+/// anything beneath it however the handle was obtained.
+pub fn traverses_meta_dir(path: &Path) -> bool {
+    path.components().any(|c| c.as_os_str() == META_DIR)
+}
+
 fn mac_tag(key: &[u8; 32], instance_id: u64, ino: u64, htype: i32, kh: &[u8]) -> [u8; HMAC_LEN] {
     let mut mac = HmacSha256::new_from_slice(key).expect("hmac accepts any key length");
     mac.update(&instance_id.to_be_bytes());
@@ -144,7 +162,7 @@ pub fn decode_v4(
 /// `<export>/.flint-nfs/fh.key`. Travels with the volume: handles stay
 /// valid across pod failover.
 pub fn load_or_create_key(export_root: &Path) -> Result<[u8; 32], String> {
-    let dir = export_root.join(".flint-nfs");
+    let dir = export_root.join(META_DIR);
     let path = dir.join("fh.key");
     match std::fs::read(&path) {
         Ok(bytes) if bytes.len() == 32 => {

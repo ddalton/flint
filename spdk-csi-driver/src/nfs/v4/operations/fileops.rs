@@ -2883,6 +2883,13 @@ impl FileOperationHandler {
             if name_bytes == b"." || name_bytes == b".." {
                 continue;
             }
+            // The server's private directory is not part of the exported
+            // namespace — see fh_kernel::META_DIR. Filtered here rather
+            // than in the handler because the HTTP file API reaches
+            // READDIR through the same COMPOUND.
+            if name_bytes == crate::nfs::v4::fh_kernel::META_DIR.as_bytes() {
+                continue;
+            }
             // Cookie 0 is reserved to mean "start of directory", so an
             // entry can never be handed out with it. This should not
             // occur (telldir after a successful readdir is past the
@@ -2915,7 +2922,13 @@ impl FileOperationHandler {
         let mut all = Vec::new();
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
-            all.push(entry.file_name().to_string_lossy().into_owned());
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // Same exclusion as the Linux enumerator. Filtered at
+            // COLLECTION so the positional cookies below stay dense.
+            if name == crate::nfs::v4::fh_kernel::META_DIR {
+                continue;
+            }
+            all.push(name);
         }
         let start = cookie as usize;
         let mut out = Vec::new();

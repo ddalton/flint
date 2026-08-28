@@ -181,8 +181,12 @@ impl PseudoFilesystem {
         }
         
         // Check for pseudo-root marker
+        // The slice below runs to 20, so 17 was not enough: a PUTFH
+        // carrying a 17-, 18- or 19-byte handle whose first byte is the
+        // marker panicked here, before any credential or state was
+        // consulted. The minted handle is 20 bytes.
         handle.data[0] == PSEUDO_ROOT_MARKER && 
-        handle.data.len() >= 17 &&
+        handle.data.len() >= 20 &&
         &handle.data[9..20] == b"PSEUDO_ROOT"
     }
     
@@ -255,6 +259,35 @@ pub struct PseudoRootAttrs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bounds check said 17; the slice runs to 20. A PUTFH carrying
+    /// a 17-, 18- or 19-byte handle whose first byte is the marker
+    /// panicked here — before any credential, session or state was
+    /// consulted, so the whole reach was "can send bytes to 2049".
+    ///
+    /// The loop covers 0..=24 so the leg also pins the two ends: short
+    /// handles answer false, and a real 20-byte marker handle still
+    /// answers true (asserted separately below, since a bare "no panic"
+    /// oracle would pass against a function that always returned false).
+    #[test]
+    fn a_short_handle_carrying_the_marker_byte_is_not_a_pseudo_root() {
+        let pfs = PseudoFilesystem::new(TEST_INSTANCE);
+        for len in 0usize..=24 {
+            let handle = Nfs4FileHandle {
+                data: std::iter::once(PSEUDO_ROOT_MARKER)
+                    .chain(std::iter::repeat(0u8))
+                    .take(len)
+                    .collect(),
+            };
+            assert!(
+                !pfs.is_pseudo_root(&handle),
+                "a {len}-byte all-zero-tail handle is not the pseudo root"
+            );
+        }
+        // The other direction: the genuine article still resolves, so
+        // the loop above is not passing because the check is dead.
+        assert!(pfs.is_pseudo_root(&pfs.get_pseudo_root_handle()));
+    }
 
     /// Stands in for `stable_nfs_instance_id(volume_id)` — an arbitrary
     /// 64-bit hash, NOT epoch seconds.
