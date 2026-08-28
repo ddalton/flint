@@ -98,8 +98,9 @@ INTRO = """<div class="intro">
     server, it is the only approach with true shared-filesystem semantics. Its two flavors differ only
     in how NFS clients are trusted: <b>sec=sys</b> (today&rsquo;s deployment &mdash; the client self-
     declares its uid; the network is the only boundary) and <b>krb5p</b> (Kerberos &mdash; cryptographic
-    per-user identity plus wire encryption; needs a KDC and a keytab on every client node; the
-    implementation is in-tree but dormant, never wired &mdash; scored as designed).
+    per-user identity plus wire encryption; needs a KDC and a keytab on every client node; implemented,
+    interop-verified against MIT krb5 and mounted as of 2026-08-27 &mdash; still scored as designed,
+    because no krb5p throughput has been measured).
     <i class="arch">Archetype: NFS gateway over object storage (AWS Storage Gateway, Nasuni-class).</i></p>
   </div>
   <div class="ib">
@@ -114,8 +115,8 @@ INTRO = """<div class="intro">
     <h3><span class="sw" style="background:#1baf7a"></span>Lean &nbsp;<span class="ibt">flint-lean</span><span class="badge">built + chaos-drilled &middot; cluster drill open</span></h3>
     <p>No server and no interception: the app works on <b>plain local files</b>. An ordinary, unprivileged
     sidecar (flint-sync) checks the workspace out of S3 at pod start and re-publishes changed files on a
-    cadence through a small <b>gateway</b> that arbitrates who may publish; pods hold no bucket write
-    credentials. All three approaches share one bucket format and are mutually convertible.</p>
+    cadence, writing to the bucket directly; a small <b>gateway</b> carries human-in-the-loop writes and
+    the publish/sync verbs. The agent container holds no bucket credentials. All three approaches share one bucket format and are mutually convertible.</p>
   </div>
 </div>"""
 
@@ -262,12 +263,12 @@ AVAIL_ROWS = [
         (S_SER, "Four wedges — at the proxy", "proxy unreachable: publishes pause AND checkouts/restarts wedge AND sync is unavailable AND HITL writes fail loudly (chaos leg C12). Gateway down alone: barriers continue — the shipped sidecar writes its cells straight to the store (C8); running pods keep serving throughout."),
     ]),
     ("KDC / Kerberos infrastructure down — krb5p flavor only", [
-        (S_SER, "New mounts fail", "new GSS contexts and credential renewals fail; established tickets ride out their lifetime; sec=sys is untouched (as designed — the GSS path is dormant)."),
+        (S_SER, "New mounts fail", "new GSS contexts and credential renewals fail; established tickets ride out their lifetime; sec=sys is untouched — it carries no GSS context at all."),
         (None, "n/a", "no NFS wire."),
         (None, "n/a", "no NFS wire."),
     ]),
     ("Share idle / parked, then accessed", [
-        (S_WARN, "Wake required", "an NFS mount against a scaled-to-zero hub hangs until something writes the wake annotation — the data path cannot; the file API answers 503 fast; wake &asymp; 41 s suspended / 79 s hibernated."),
+        (S_WARN, "Wake required", "an NFS mount against a scaled-to-zero hub hangs until something writes the wake annotation — the data path cannot; the file API answers 503 fast; wake &asymp; 41 s suspended, and 17 s hibernated once the epoch cell was released &mdash; ~80 s when it was not."),
         (S_GOOD, "Nothing to wake", "idle = Hibernated structurally; the price moves to every pod start being a cold start — hydration on touch."),
         (S_GOOD, "Nothing to wake", "idle = S3-only structurally; the price is a full checkout at pod start, budgeted by derived probes."),
     ]),
