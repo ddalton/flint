@@ -57,3 +57,8 @@ spdk-csi-driver/docker/prebuilt/
 # caches it here (override with TLA_TOOLS_JAR). It is a 2 MB upstream
 # release artifact, not source.
 .tla2tools.jar
+
+# Perf-gate measurements are per-run and rig-specific; only the
+# baseline (tests/lima/perf-baseline.json) is committed.
+tests/lima/perf-*.json
+!tests/lima/perf-baseline.json

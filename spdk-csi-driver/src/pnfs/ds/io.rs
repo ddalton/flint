@@ -462,15 +462,30 @@ impl IoOperationHandler {
             // &mut [u8]. The real fix is a per-worker reusable buffer pool,
             // which is genuine engineering on a path nobody has profiled.
             //
-            // Context for whoever does profile it: a DS serves 396 MiB/s
-            // over pNFS where the same node's local block path does 845
+            // Context for whoever does profile it: a DS served 396 MiB/s
+            // over pNFS where the same node's local block path did 845
             // (measured on runaw, 2026-08-01, with a client that provably
-            // had headroom). That 2.13x is the one real, undiagnosed
-            // deficit in the fleet. This memset is a known contributor but
-            // almost certainly not the bulk of it — the extra full copy at
-            // ds/server.rs (encode_opaque into the reply buffer, with no
-            // writev/splice anywhere on the path) is the larger one.
-            // Instrument the DS first; do not guess which to attack.
+            // had headroom) — the fleet's one real unexplained deficit.
+            //
+            // BUT THAT NUMBER IS STALE, AND THIS NOTE USED TO SAY SO
+            // WRONGLY. It named the encode_opaque copy in ds/server.rs as
+            // the larger contributor. `133e6db0` deleted that copy the very
+            // next day (2026-08-02): READ payloads now travel to the socket
+            // as the `Bytes` the I/O layer produced, see `OpBody::Payload`.
+            // The 8-agent review behind that commit also established the
+            // copies ran at <1 of 24 workers busy and predicted ~0%
+            // throughput change — so removing them almost certainly did not
+            // close the 2.13x either.
+            //
+            // The honest status is therefore UNRE-MEASURED at HEAD, not
+            // undiagnosed. And every DS ceiling investigated since landed
+            // somewhere other than the DS's own copies: runbb (Cilium
+            // WireGuard collapsing pod traffic into ONE UDP flow), runbd
+            // (the wire), runbh (the client kernel, ~3000 MiB/s).
+            //
+            // Re-measure on real hardware before attacking anything here.
+            // This memset is what remains of the original suspects, and
+            // the note that named it did not think it was the bulk.
             let mut buffer = vec![0u8; count as usize];
             let bytes_read = file.read_at(&mut buffer, offset)?;
             buffer.truncate(bytes_read);

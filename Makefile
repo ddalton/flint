@@ -353,10 +353,14 @@ test-perf-differential: ## Leg L-perf: throughput + metadata vs a knfsd control,
 	# absolute MiB/s from this VM is not a comparable quantity — the rig
 	# has been measured drifting ~2x within one session.
 	#
-	# It is RED until someone records a baseline from a run they have
-	# inspected on a quiet rig, and that is the correct resting state:
-	# the alternative is the xfstests trap, where a missing baseline
-	# meant a 40-minute suite that could not fail.
+	# The baseline is recorded (tests/lima/perf-baseline.json) from two
+	# independent runs on a quiet rig, 2026-08-28. Its floors are the
+	# LOWER of the two, and its tolerance is 0.15 rather than the 0.25
+	# default because the measured run-to-run ratio spread was ~3%.
+	#
+	# A missing baseline still FAILS this target rather than passing it
+	# -- the xfstests trap, where an absent baseline meant a 40-minute
+	# suite that could not fail, is refused here by construction.
 	bash tests/lima/pnfs/perf-differential.sh
 	python3 scripts/check-perf.py tests/lima/perf-latest.json
 	# The falsifiability arm must FAIL. A gate that cannot see a mount

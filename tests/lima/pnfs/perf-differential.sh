@@ -61,16 +61,72 @@ vm "systemctl stop flint-perf 2>/dev/null||true; systemctl reset-failed flint-pe
     rm -rf $MDS_EXPORT $MDS_STATE; mkdir -p $MDS_EXPORT $MDS_STATE $FLINT_MNT
     chmod 0777 $MDS_EXPORT
     cat > $MDS_CONFIG <<CFG
-listen: 0.0.0.0:$PORT
-export_path: $MDS_EXPORT
-state_dir: $MDS_STATE
-volume_id: perf
+apiVersion: flint.io/v1alpha1
+kind: PnfsConfig
+mode: standalone
+
+mds:
+  bind:
+    address: \"0.0.0.0\"
+    port: $PORT
+
+  layout:
+    type: file
+    stripeSize: 8388608
+    policy: stripe
+
+  dataServers: []
+
+  # sqlite, NOT memory. The hub ships sqlite, and the meta dimension
+  # below is exactly where the state backend costs something — gating
+  # a create/stat rate measured against an in-process map would gate a
+  # path nobody runs.
+  state:
+    backend: sqlite
+    config:
+      path: $MDS_STATE/state.db
+
+exports:
+  - path: $MDS_EXPORT
+    fsid: 1
+    options: [rw, sync, no_subtree_check]
+    access:
+      - network: 0.0.0.0/0
+        permissions: rw
+
+logging:
+  level: warn
+  format: text
+  components:
+    mds: warn
+
+monitoring:
+  prometheus:
+    enabled: false
+    port: 0
+    path: /metrics
+  health:
+    enabled: false
+    port: 0
+    path: /health
+  metrics: []
 CFG
     chmod +x $MDS_BIN
     systemd-run --unit=flint-perf --collect --setenv=RUST_LOG=warn \
       $MDS_BIN --config $MDS_CONFIG >/dev/null 2>&1
     sleep 4
     mount -t nfs -o vers=4.1,port=$PORT,nolock 127.0.0.1:/ $FLINT_MNT" >/dev/null 2>&1
+
+# The config schema is not obvious and a wrong one is SILENT: PnfsConfig
+# does not deny unknown fields, so a config with invented keys parses
+# into an all-defaults standalone server on the wrong port. The mount
+# then fails and gate 1 below voids the run — correct, but it reports
+# "not nfs" rather than "your config was ignored". Say it plainly here.
+if ! vm "systemctl is-active --quiet flint-perf"; then
+  echo "FAIL: the flint MDS unit is not active — it died at startup."
+  vm "systemctl status flint-perf --no-pager -l 2>&1 | tail -20" || true
+  exit 1
+fi
 
 echo "── bringing up arm B (control): knfsd ──"
 vm "umount -f $KNFSD_MNT 2>/dev/null||true
