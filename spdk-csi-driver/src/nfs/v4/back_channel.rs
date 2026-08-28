@@ -167,6 +167,33 @@ impl BackChannelWriter {
         Ok(())
     }
 
+    /// Send one RPC record assembled from an ordered segment list.
+    ///
+    /// Same framing as [`Self::send_record`] — one 4-byte marker over
+    /// the SUM of the segments, then the segments in order, under the
+    /// same lock so a concurrent CB frame cannot interleave into the
+    /// middle of a reply. The point is that a READ payload reaches the
+    /// socket as the `Bytes` the I/O layer produced, never copied into
+    /// a reply buffer first. See `CompoundResponse::encode_segments`.
+    pub async fn send_record_segments(&self, segs: &[Bytes]) -> std::io::Result<()> {
+        let len: usize = segs.iter().map(|s| s.len()).sum();
+        if len > 0x7FFF_FFFF {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "RPC fragment exceeds 2 GiB",
+            ));
+        }
+        let marker: u32 = 0x8000_0000 | (len as u32);
+
+        let mut w = self.inner.lock().await;
+        w.write_all(&marker.to_be_bytes()).await?;
+        for seg in segs {
+            w.write_all(seg).await?;
+        }
+        w.flush().await?;
+        Ok(())
+    }
+
     /// Allocate the next outgoing CB xid for this connection.
     pub fn next_xid(&self) -> u32 {
         self.next_xid.fetch_add(1, Ordering::Relaxed)

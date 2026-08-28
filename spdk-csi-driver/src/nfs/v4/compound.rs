@@ -140,7 +140,16 @@ pub struct CompoundResponse {
     /// `status`/`tag`/`results`. Used for exactly-once SEQUENCE replay
     /// (RFC 8881 §15.1.10.4): the cached reply MUST be byte-for-byte
     /// identical to the original.
-    pub raw_reply: Option<Bytes>,
+    /// A reply already encoded upstream, carried as WIRE SEGMENTS.
+    ///
+    /// Segments rather than one `Bytes` because the dispatcher's
+    /// response-size check encodes the whole reply already, and if that
+    /// encoding flattens, a READ payload is copied there and every
+    /// saving downstream is fictional — which is exactly what happened
+    /// the first time this was optimised. Keeping it segmented from the
+    /// point of first encode is the only shape in which the payload is
+    /// never copied at all.
+    pub raw_reply: Option<Vec<Bytes>>,
     /// When set, after the response is encoded the resulting bytes MUST be
     /// stored on this `(session, slot)` for future replay matching. Set by
     /// the SEQUENCE handler when it accepts a new request; consumed by the
@@ -2159,11 +2168,18 @@ impl CompoundResponse {
     /// response, so we never re-encode it from `results`/`status`/`tag`.
     pub fn encode(self) -> Bytes {
         if let Some(raw) = self.raw_reply {
-            tracing::trace!(
-                "DEBUG CompoundResponse::encode: raw replay reply ({} bytes)",
-                raw.len()
-            );
-            return raw;
+            // Flattening here is correct and deliberate: `encode` is the
+            // contiguous-bytes surface (GSS sealing, the replay cache).
+            // The segmented surface is `encode_segments`.
+            if raw.len() == 1 {
+                return raw.into_iter().next().expect("len checked");
+            }
+            let total: usize = raw.iter().map(|b| b.len()).sum();
+            let mut flat = bytes::BytesMut::with_capacity(total);
+            for b in &raw {
+                flat.extend_from_slice(b);
+            }
+            return flat.freeze();
         }
 
         let mut encoder = XdrEncoder::new();
@@ -2190,6 +2206,76 @@ impl CompoundResponse {
         tracing::trace!("DEBUG CompoundResponse: First 80 bytes: {:02x?}", &bytes[..bytes.len().min(80)]);
         debug!("✅ COMPOUND response encoded: {} results, {} bytes total", result_count, bytes.len());
         bytes
+    }
+
+
+    /// Encode the COMPOUND body as an ordered list of wire segments,
+    /// keeping each READ payload as the `Bytes` the I/O layer produced
+    /// instead of copying it into a growing buffer.
+    ///
+    /// WHY THIS EXISTS. [`Self::encode`] flattens everything into one
+    /// `XdrEncoder`, whose `BytesMut` is born at 8 KiB and doubles. A
+    /// 1 MiB READ reply therefore costs a full `put_slice` of the
+    /// payload PLUS the realloc-copies on the way past 1 MiB, and then
+    /// `frame_reply` copies the whole thing again into the RPC reply
+    /// buffer. The data server hit exactly this and fixed it in
+    /// `133e6db0` (`pnfs/ds/server.rs::assemble_reply`), which measured
+    /// ~11 MiB of memory traffic per 1 MiB served. The shared v4 stack
+    /// never got that fix, so `flint-nfs-server`, `flint-pnfs-mds` in
+    /// standalone mode and the flint-lite hub all still paid it.
+    ///
+    /// MEASURED, 2026-08-28, lima 2 vCPU, server cache warm and client
+    /// O_DIRECT so neither disk nor client cache is in the path: flint
+    /// 1119 MiB/s at ~1920 cpu-ms/GiB against knfsd's 4107 MiB/s at
+    /// ~560 — 3.4x the CPU per byte, with both servers CPU-saturated
+    /// and RPC counts matched (518 vs 516).
+    ///
+    /// The wire bytes are IDENTICAL to `encode`; only the copy count
+    /// changes. `segments_match_the_flattened_encoding` asserts that
+    /// against the real encoder rather than a reimplementation of it.
+    pub fn encode_segments(self) -> Vec<Bytes> {
+        // A replay is served verbatim from the slot cache; there is
+        // nothing to segment and nothing to gain.
+        if let Some(raw) = self.raw_reply {
+            return raw;
+        }
+
+        let mut segs: Vec<Bytes> = Vec::with_capacity(3);
+        let mut cur = XdrEncoder::new();
+        cur.encode_status(self.status);
+        cur.encode_string(&self.tag);
+        cur.encode_u32(self.results.len() as u32);
+
+        for result in self.results.into_iter() {
+            match result {
+                // The ONLY segmented case. Every other result is a
+                // handful of words, where cutting a segment would cost
+                // more than the copy it saves.
+                OperationResult::Read(Nfs4Status::Ok, Some(res)) if !res.data.is_empty() => {
+                    cur.encode_u32(opcode::READ);
+                    cur.encode_status(Nfs4Status::Ok);
+                    cur.encode_bool(res.eof);
+                    // The head of the opaque: its length. The bytes and
+                    // the XDR pad follow as their own segments, which is
+                    // what `encode_opaque` would have written inline.
+                    cur.encode_u32(res.data.len() as u32);
+                    let pad = (4 - res.data.len() % 4) % 4;
+                    segs.push(cur.finish());
+                    cur = XdrEncoder::new();
+                    segs.push(res.data);
+                    if pad > 0 {
+                        cur.append_raw(&[0u8; 3][..pad]);
+                    }
+                }
+                other => Self::encode_result(&mut cur, other),
+            }
+        }
+
+        let tail = cur.finish();
+        if !tail.is_empty() {
+            segs.push(tail);
+        }
+        segs
     }
 
     /// Encode a single operation result
@@ -2793,6 +2879,100 @@ impl CompoundResponse {
                 encoder.encode_status(resstatus);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod segment_tests {
+    use super::*;
+
+    /// Build the same response twice — `CompoundResponse` is not Clone,
+    /// and a test that encoded one object twice would be asserting
+    /// nothing about the second path.
+    fn resp(payload: &[u8], eof: bool) -> CompoundResponse {
+        let mut r = CompoundResponse::new();
+        r.tag = "tag".to_string();
+        r.results.push(OperationResult::PutRootFh(Nfs4Status::Ok));
+        r.results.push(OperationResult::Read(
+            Nfs4Status::Ok,
+            Some(ReadResult { eof, data: Bytes::copy_from_slice(payload) }),
+        ));
+        r.results.push(OperationResult::PutRootFh(Nfs4Status::Ok));
+        r
+    }
+
+    fn joined(segs: Vec<Bytes>) -> Vec<u8> {
+        let mut v = Vec::new();
+        for s in segs {
+            v.extend_from_slice(&s);
+        }
+        v
+    }
+
+    /// THE SAFETY PROPERTY. `encode_segments` changes the copy count,
+    /// never the wire. Asserted against the REAL `encode`, not against a
+    /// reimplementation of it — a hand-written reference would drift
+    /// from the encoder and start agreeing with the wrong bytes.
+    ///
+    /// Payload lengths cover every XDR pad residue, because the pad is
+    /// the one thing the segmented path emits from a different place
+    /// than `encode_opaque` does: it lands in the segment AFTER the
+    /// payload rather than inline behind it.
+    #[test]
+    fn segments_match_the_flattened_encoding() {
+        for len in [0usize, 1, 2, 3, 4, 5, 7, 8, 4096, 4097] {
+            for eof in [false, true] {
+                let payload: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+                let flat = resp(&payload, eof).encode();
+                let segs = resp(&payload, eof).encode_segments();
+                assert_eq!(
+                    joined(segs),
+                    flat.to_vec(),
+                    "len={} eof={} — segmented and flattened wire bytes diverged",
+                    len,
+                    eof
+                );
+            }
+        }
+    }
+
+    /// The payload must travel as its OWN segment, not be copied into a
+    /// buffer. Without this the test above would still pass for an
+    /// implementation that segmented nothing and simply called `encode`.
+    #[test]
+    fn a_read_payload_is_carried_as_its_own_segment() {
+        let payload: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+        let segs = resp(&payload, false).encode_segments();
+        assert!(
+            segs.len() >= 3,
+            "expected head/payload/tail segments, got {}",
+            segs.len()
+        );
+        assert!(
+            segs.iter().any(|s| s.len() == 4096 && s.as_ref() == payload.as_slice()),
+            "the payload is not present as an uncopied standalone segment"
+        );
+    }
+
+    /// A zero-length READ cuts no segment: there are no bytes and no
+    /// pad, so segmenting it would add a wire-invisible empty segment
+    /// and an allocation for nothing.
+    #[test]
+    fn an_empty_read_payload_cuts_no_segment() {
+        let flat = resp(&[], true).encode();
+        let segs = resp(&[], true).encode_segments();
+        assert_eq!(segs.len(), 1, "an empty payload must not be segmented");
+        assert_eq!(joined(segs), flat.to_vec());
+    }
+
+    /// A replay is served verbatim from the slot cache and must not be
+    /// re-encoded by either path.
+    #[test]
+    fn a_raw_replay_reply_passes_through_untouched() {
+        let raw = Bytes::from_static(b"already-encoded-reply");
+        let mut r = CompoundResponse::new();
+        r.raw_reply = Some(vec![raw.clone()]);
+        assert_eq!(r.encode_segments(), vec![raw]);
     }
 }
 

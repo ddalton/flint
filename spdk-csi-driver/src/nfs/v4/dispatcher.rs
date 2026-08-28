@@ -612,7 +612,8 @@ impl CompoundDispatcher {
                     status: Nfs4Status::Ok,
                     tag: request.tag,
                     results: Vec::new(),
-                    raw_reply: context.replay_reply.take(),
+                    // A cached replay is one exact buffer by definition.
+                    raw_reply: context.replay_reply.take().map(|b| vec![b]),
                     cache_slot: None,
                 };
             }
@@ -654,11 +655,32 @@ impl CompoundDispatcher {
                         raw_reply: None,
                         cache_slot,
                     };
-                    let measured = trial.encode();
-                    if measured.len() > max {
+                    // Measured via the SEGMENTED encoder, which produces
+                    // byte-identical output (asserted by
+                    // `segments_match_the_flattened_encoding`) and
+                    // therefore an identical length — but leaves a READ
+                    // payload as the `Bytes` the I/O layer produced
+                    // instead of memcpy-ing it into a buffer that exists
+                    // only to be measured and dropped.
+                    //
+                    // THIS is where every reply is encoded. The bytes
+                    // are carried out as `raw_reply` below, so the RPC
+                    // layer's own encode short-circuits to them — which
+                    // is why segmenting only the RPC layer achieved
+                    // exactly nothing (measured 0.989x, i.e. noise):
+                    // `encode_segments` there saw `raw_reply: Some(..)`
+                    // and handed back the already-flattened buffer.
+                    //
+                    // A profile (2026-08-28, lima, 997 Hz cpu-clock) put
+                    // this call at 2.96% of the whole system while the
+                    // server ran at 40% of it — the largest single
+                    // `memcpy` caller in the process.
+                    let measured = trial.encode_segments();
+                    let measured_len: usize = measured.iter().map(|b| b.len()).sum();
+                    if measured_len > max {
                         warn!(
                             "COMPOUND: encoded reply {} > ca_maxresponsesize {} → REP_TOO_BIG",
-                            measured.len(), max,
+                            measured_len, max,
                         );
                         // Keep the SEQUENCE result first so the client
                         // can still read sr_status (pynfs CSESS26 indexes
@@ -684,7 +706,7 @@ impl CompoundDispatcher {
                             status: Nfs4Status::RepTooBig,
                             tag: request.tag,
                             results: Vec::new(),
-                            raw_reply: Some(stripped_bytes),
+                            raw_reply: Some(vec![stripped_bytes]),
                             cache_slot,
                         };
                     }

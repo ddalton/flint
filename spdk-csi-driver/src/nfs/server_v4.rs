@@ -740,11 +740,12 @@ async fn handle_tcp_connection(
                     rpc_num,
                     bcw_dispatch,
                 ).await;
-                debug!("📨 [NFS_SERVER] Connection #{}: RPC #{} processed in {:?} (reply: {} bytes)",
-                       conn_id, rpc_num, rpc_start.elapsed(), reply.len());
+                debug!("📨 [NFS_SERVER] Connection #{}: RPC #{} processed in {:?} ({} bytes in {} segment(s))",
+                       conn_id, rpc_num, rpc_start.elapsed(),
+                       reply.iter().map(|s: &Bytes| s.len()).sum::<usize>(), reply.len());
                 reply
             },
-            move |reply| async move { bcw_write.send_record(reply).await },
+            move |reply| async move { bcw_write.send_record_segments(&reply).await },
         ).await?;
 
         rpc_count += 1;
@@ -761,7 +762,7 @@ async fn dispatch_nfsv4(
     conn_id: u64,
     rpc_num: u64,
     back_channel: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
-) -> Bytes {
+) -> Vec<Bytes> {
     debug!("🔍 [NFS_SERVER] Connection #{}, RPC #{}: Dispatching RPC: {} total bytes", conn_id, rpc_num, request.len());
     debug!("   First 64 bytes of request: {:02x?}", &request[..std::cmp::min(64, request.len())]);
 
@@ -775,7 +776,7 @@ async fn dispatch_nfsv4(
             warn!("❌ [NFS_SERVER] Connection #{}, RPC #{}: Failed to parse RPC call: {}", conn_id, rpc_num, e);
             warn!("   Request was {} bytes: {:02x?}", request.len(),
                   &request[..std::cmp::min(128, request.len())]);
-            return ReplyBuilder::garbage_args(0).into();
+            return vec![ReplyBuilder::garbage_args(0)];
         }
     };
 
@@ -792,7 +793,7 @@ async fn dispatch_nfsv4(
         warn!("❌ Invalid program number: {} (expected {} for NFS4)", call.program, NFS4_PROGRAM);
         warn!("   This might be a different RPC service trying to connect");
         debug!("   Returning PROG_UNAVAIL to client");
-        return ReplyBuilder::prog_unavail(call.xid);
+        return vec![ReplyBuilder::prog_unavail(call.xid)];
     }
 
     // Check version (4.0, 4.1, or 4.2)
@@ -801,7 +802,7 @@ async fn dispatch_nfsv4(
         warn!("   Client might be trying NFSv3 or other version");
         debug!("   Returning PROC_UNAVAIL to client");
         // NFSv4 doesn't have prog_mismatch, return proc_unavail
-        return ReplyBuilder::proc_unavail(call.xid);
+        return vec![ReplyBuilder::proc_unavail(call.xid)];
     }
     
     debug!("✅ RPC validation passed: program={}, version={}", call.program, call.version);
@@ -839,7 +840,7 @@ async fn dispatch_nfsv4(
             floor.name(),
             crate::nfs::sec_policy::SecPolicy::ENV
         );
-        return ReplyBuilder::auth_error(call.xid, AuthStat::TooWeak);
+        return vec![ReplyBuilder::auth_error(call.xid, AuthStat::TooWeak)];
     }
 
     // Handle procedure
@@ -847,7 +848,7 @@ async fn dispatch_nfsv4(
         procedure::NULL => {
             // NULL procedure - just return success (empty result)
             info!(">>> NULL procedure");
-            ReplyBuilder::success(call.xid).finish()
+            vec![ReplyBuilder::success(call.xid).finish()]
         }
 
         procedure::COMPOUND => {
@@ -858,7 +859,7 @@ async fn dispatch_nfsv4(
 
         _ => {
             warn!("Invalid NFSv4 procedure: {}", call.procedure);
-            ReplyBuilder::proc_unavail(call.xid)
+            vec![ReplyBuilder::proc_unavail(call.xid)]
         }
     }
 }
@@ -870,7 +871,7 @@ async fn handle_compound(
     dispatcher: Arc<CompoundDispatcher>,
     back_channel: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
     gss: Option<&crate::nfs::gss_framing::ValidatedCall>,
-) -> Bytes {
+) -> Vec<Bytes> {
     // The args Bytes contains only the COMPOUND procedure arguments (RPC header already stripped)
 
     tracing::trace!("handle_compound: args.len()={}", args.len());
@@ -890,7 +891,7 @@ async fn handle_compound(
         Ok(req) => req,
         Err(e) => {
             warn!("Failed to decode COMPOUND request: {}", e);
-            return ReplyBuilder::garbage_args(call.xid);
+            return vec![ReplyBuilder::garbage_args(call.xid)];
         }
     };
     compound_req.wire_size = wire_size;
@@ -934,14 +935,25 @@ async fn handle_compound(
     // bytes the client received, so we capture it after encoding finishes.
     let cache_slot = compound_resp.cache_slot;
 
-    // Encode COMPOUND response
-    let compound_data = compound_resp.encode();
+    // Encode the COMPOUND body.
+    //
+    // Segmented unless the slot cache wants it: the cache stores the
+    // EXACT bytes a later replay returns verbatim, so that path keeps
+    // the flat encoding. Everything else — every READ a client actually
+    // streams, which sends cachethis=false — takes the segmented path
+    // and never copies its payload. See
+    // `CompoundResponse::encode_segments`.
+    let compound_segments: Vec<Bytes> = if cache_slot.is_some() {
+        vec![compound_resp.encode()]
+    } else {
+        compound_resp.encode_segments()
+    };
 
     // Cache the encoded reply against the SEQUENCE slot for replay matching.
     // Skipped automatically when the COMPOUND short-circuited a replay
     // (cache_slot is None on that path).
     if let Some((session_id, slot_id)) = cache_slot {
-        dispatcher.cache_slot_reply(&session_id, slot_id, compound_data.clone());
+        dispatcher.cache_slot_reply(&session_id, slot_id, compound_segments[0].clone());
     }
 
     // RPC reply framing.
@@ -956,7 +968,7 @@ async fn handle_compound(
     // to: the verifier and the sealed body both bind the requesting
     // call's sequence number, so a replay served from the cache needs
     // fresh ones rather than a recording of the first reply's.
-    frame_reply(call.xid, gss, compound_data)
+    frame_reply(call.xid, gss, compound_segments)
 }
 
 /// Frame an accepted RPC reply, adding the RPCSEC_GSS verifier and
@@ -971,23 +983,68 @@ async fn handle_compound(
 fn frame_reply(
     xid: u32,
     gss: Option<&crate::nfs::gss_framing::ValidatedCall>,
-    results: Bytes,
-) -> Bytes {
+    results: Vec<Bytes>,
+) -> Vec<Bytes> {
+    // The unauthenticated path — every ordinary READ — emits the RPC
+    // header as its own segment and passes the body segments through
+    // untouched. `append_bytes` below would otherwise copy the whole
+    // payload a SECOND time, after the compound encoder already had.
+    if gss.is_none() {
+        // A body that is ONE segment carried no READ payload — every
+        // metadata reply is a handful of words. Segmenting it buys
+        // nothing (there is no large copy to avoid) and costs an extra
+        // encoder allocation, so take the original flattening path and
+        // stay byte-for-byte and allocation-for-allocation identical to
+        // what shipped before segmentation existed.
+        //
+        // This is not a micro-optimisation on a hunch: the first
+        // measured run after segmentation showed `read` up but `meta`
+        // down 10% with the spread widening from 2.7% to 9.4%, which is
+        // what paying for segmentation on replies that cannot benefit
+        // looks like.
+        if results.len() == 1 {
+            let mut reply =
+                ReplyBuilder::success_with_verf(xid, &crate::nfs::rpc::Auth::null());
+            reply.encoder().append_bytes(&results[0]);
+            return vec![reply.finish()];
+        }
+        let header = ReplyBuilder::success_with_verf(xid, &crate::nfs::rpc::Auth::null()).finish();
+        let mut segs = Vec::with_capacity(results.len() + 1);
+        segs.push(header);
+        segs.extend(results);
+        return segs;
+    }
+
+    // GSS binds a MIC over, or seals, the body as one octet stream, so
+    // from here it has to be contiguous. krb5 is a correctness path,
+    // not the throughput path, and flattening it costs what the old
+    // code cost everyone.
+    let results: Bytes = if results.len() == 1 {
+        results.into_iter().next().expect("len checked")
+    } else {
+        let total: usize = results.iter().map(|s| s.len()).sum();
+        let mut flat = bytes::BytesMut::with_capacity(total);
+        for seg in &results {
+            flat.extend_from_slice(seg);
+        }
+        flat.freeze()
+    };
+
     let (verf, body) = match gss {
-        None => (crate::nfs::rpc::Auth::null(), results),
+        None => unreachable!("handled above"),
         Some(v) => {
             let verf = match crate::nfs::gss_framing::reply_verifier(v) {
                 Ok(a) => a,
                 Err(e) => {
                     warn!("❌ GSS reply verifier failed: {}", e.reason());
-                    return ReplyBuilder::auth_error(xid, e.auth_stat());
+                    return vec![ReplyBuilder::auth_error(xid, e.auth_stat())];
                 }
             };
             match crate::nfs::gss_framing::seal_reply_body(v, &results) {
                 Ok(b) => (verf, b),
                 Err(e) => {
                     warn!("❌ GSS reply sealing failed: {}", e.reason());
-                    return ReplyBuilder::auth_error(xid, e.auth_stat());
+                    return vec![ReplyBuilder::auth_error(xid, e.auth_stat())];
                 }
             }
         }
@@ -996,7 +1053,7 @@ fn frame_reply(
     let mut reply = ReplyBuilder::success_with_verf(xid, &verf);
     // Per RFC 5531 procedure results are appended directly, no length prefix.
     reply.encoder().append_bytes(&body);
-    reply.finish()
+    vec![reply.finish()]
 }
 
 /// Handle RPCSEC_GSS authenticated RPC call
@@ -1006,7 +1063,7 @@ async fn handle_rpcsec_gss_call(
     gss_manager: Arc<RpcSecGssManager>,
     dispatcher: Arc<CompoundDispatcher>,
     back_channel: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
-) -> Bytes {
+) -> Vec<Bytes> {
     // Decode RPCSEC_GSS credentials
     let gss_cred = match RpcGssCred::decode(&call.cred.body) {
         Ok(cred) => {
@@ -1016,7 +1073,7 @@ async fn handle_rpcsec_gss_call(
         }
         Err(e) => {
             warn!("❌ Failed to decode RPCSEC_GSS credentials: {}", e);
-            return ReplyBuilder::garbage_args(call.xid);
+            return vec![ReplyBuilder::garbage_args(call.xid)];
         }
     };
 
@@ -1024,12 +1081,12 @@ async fn handle_rpcsec_gss_call(
     match gss_cred.procedure {
         gss_proc::INIT => {
             info!("🔐 RPCSEC_GSS_INIT");
-            handle_gss_init(call.xid, &gss_cred, args, gss_manager).await
+            vec![handle_gss_init(call.xid, &gss_cred, args, gss_manager).await]
         }
 
         gss_proc::CONTINUE_INIT => {
             info!("🔐 RPCSEC_GSS_CONTINUE_INIT");
-            handle_gss_continue_init(call.xid, &gss_cred, args, gss_manager).await
+            vec![handle_gss_continue_init(call.xid, &gss_cred, args, gss_manager).await]
         }
 
         gss_proc::DATA => {
@@ -1044,7 +1101,7 @@ async fn handle_rpcsec_gss_call(
                     // CREDPROBLEM/CTXPROBLEM tell the client to refresh and
                     // retry. SYSTEM_ERR, which is what this used to send,
                     // tells it to give up.
-                    return ReplyBuilder::auth_error(call.xid, e.auth_stat());
+                    return vec![ReplyBuilder::auth_error(call.xid, e.auth_stat())];
                 }
             };
 
@@ -1068,7 +1125,7 @@ async fn handle_rpcsec_gss_call(
                         floor.name(),
                         crate::nfs::sec_policy::SecPolicy::ENV
                     );
-                    return ReplyBuilder::auth_error(call.xid, AuthStat::TooWeak);
+                    return vec![ReplyBuilder::auth_error(call.xid, AuthStat::TooWeak)];
                 }
             }
 
@@ -1079,7 +1136,7 @@ async fn handle_rpcsec_gss_call(
                 crate::nfs::gss_framing::verify_call_verifier(&validated, &call.verf, &call.cred_span)
             {
                 warn!("❌ GSS call verifier rejected: {}", e.reason());
-                return ReplyBuilder::auth_error(call.xid, e.auth_stat());
+                return vec![ReplyBuilder::auth_error(call.xid, e.auth_stat())];
             }
 
             // 2b. ONLY NOW spend the sequence number. RFC 2203 §5.3.3.1
@@ -1096,7 +1153,7 @@ async fn handle_rpcsec_gss_call(
             //     mount, costing one packet.
             if let Err(e) = gss_manager.accept_sequence(&gss_cred).await {
                 warn!("❌ GSS sequence rejected: {}", e.reason());
-                return ReplyBuilder::auth_error(call.xid, e.auth_stat());
+                return vec![ReplyBuilder::auth_error(call.xid, e.auth_stat())];
             }
 
             // 3. Unseal the body BEFORE the COMPOUND is decoded. For
@@ -1105,11 +1162,11 @@ async fn handle_rpcsec_gss_call(
                 Ok(a) => a,
                 Err(e) if e.is_garbage() => {
                     warn!("❌ GSS body framing malformed: {}", e.reason());
-                    return ReplyBuilder::garbage_args(call.xid);
+                    return vec![ReplyBuilder::garbage_args(call.xid)];
                 }
                 Err(e) => {
                     warn!("❌ GSS body rejected: {}", e.reason());
-                    return ReplyBuilder::auth_error(call.xid, e.auth_stat());
+                    return vec![ReplyBuilder::auth_error(call.xid, e.auth_stat())];
                 }
             };
 
@@ -1124,7 +1181,7 @@ async fn handle_rpcsec_gss_call(
                 procedure::NULL => {
                     info!(">>> NULL procedure (over RPCSEC_GSS)");
                     // No results, but still a GSS-verified reply.
-                    frame_reply(call.xid, Some(&validated), Bytes::new())
+                    frame_reply(call.xid, Some(&validated), vec![])
                 }
                 procedure::COMPOUND => {
                     info!("✅ GSS authentication successful, processing COMPOUND");
@@ -1132,7 +1189,7 @@ async fn handle_rpcsec_gss_call(
                 }
                 other => {
                     warn!("Invalid NFSv4 procedure over RPCSEC_GSS: {}", other);
-                    ReplyBuilder::proc_unavail(call.xid)
+                    vec![ReplyBuilder::proc_unavail(call.xid)]
                 }
             }
         }
@@ -1141,12 +1198,12 @@ async fn handle_rpcsec_gss_call(
             info!("🔐 RPCSEC_GSS_DESTROY");
             gss_manager.handle_destroy(&gss_cred).await;
             // Return success
-            ReplyBuilder::success(call.xid).finish()
+            vec![ReplyBuilder::success(call.xid).finish()]
         }
 
         _ => {
             warn!("❌ Unknown RPCSEC_GSS procedure: {}", gss_cred.procedure);
-            ReplyBuilder::proc_unavail(call.xid)
+            vec![ReplyBuilder::proc_unavail(call.xid)]
         }
     }
 }
