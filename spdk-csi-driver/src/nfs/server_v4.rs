@@ -290,6 +290,11 @@ pub(crate) fn max_connections_from_env() -> u64 {
 /// ordinary NFS client behaviour, whose replay path B3/B5 pinned.
 /// Precedent: knfsd ages out idle client sockets after ~6 minutes
 /// (sunrpc `svc_age_temp_sockets`); this default matches it.
+/// Ceiling on one assembled RPC record. Applies to the SUM of a
+/// record's fragments, not to any single one — see the reassembly in
+/// `handle_tcp_connection`.
+pub(crate) const MAX_RPC_RECORD_BYTES: usize = 4 * 1024 * 1024;
+
 pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 360;
 
 /// Resolve the deadline. Unset → [`DEFAULT_IDLE_TIMEOUT_SECS`]; `0` →
@@ -583,18 +588,33 @@ async fn handle_tcp_connection(
 
         debug!("📊 RPC marker decoded: is_last={}, length={} bytes", is_last, length);
 
-        // Prevent oversized allocations
-        if length > 4 * 1024 * 1024 {
-            warn!("❌ Rejecting oversized RPC message from {}: {} bytes (max 4MB)", peer, length);
+        // RFC 5531 §11 record marking: a record is a SEQUENCE of
+        // fragments, and only the last carries the high bit. `is_last`
+        // was decoded and then used in one `debug!` and nowhere else —
+        // so every fragment was handed to the RPC parser as though it
+        // were a whole record. A legal multi-fragment call would be
+        // decoded as garbage, and its continuation decoded again as a
+        // second call on the same connection.
+        //
+        // Nothing shipped has exercised it: the Linux client sends
+        // single-fragment records, which is the only reason this has
+        // never been seen. A structure-aware fuzzer (G1, still
+        // unwritten) would find it in the first minute.
+        //
+        // The cap moves with it. Bounding the FRAGMENT while accepting
+        // unlimited fragments is not a bound at all, so it applies to
+        // the assembled record.
+        let assembled = buf.len();
+        if assembled + length > MAX_RPC_RECORD_BYTES {
+            warn!(
+                "❌ Rejecting oversized RPC record from {}: {} + {} bytes exceeds {} \
+                 (a record may arrive in fragments; the limit is on the whole)",
+                peer, assembled, length, MAX_RPC_RECORD_BYTES
+            );
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "RPC message too large",
+                "RPC record too large",
             ));
-        }
-
-        if length == 0 {
-            warn!("⚠️  Zero-length RPC message from {}, ignoring", peer);
-            continue;
         }
 
         // Read message.
@@ -606,8 +626,7 @@ async fn handle_tcp_connection(
         // observe uninitialized memory). `resize` is implemented as a single
         // `RawVec::reserve` + memset pair and is essentially free relative to
         // the I/O cost of receiving `length` bytes from the socket.
-        buf.clear();
-        buf.resize(length, 0);
+        buf.resize(assembled + length, 0);
 
         debug!("📥 Reading RPC payload: {} bytes from {}", length, peer);
         // Blocker 7, mid-request: a peer that sent a marker and then
@@ -616,7 +635,12 @@ async fn handle_tcp_connection(
         // peer promised `length` bytes and did not deliver — so it is an
         // error, not a quiet close.
         match idle_timeout {
-            Some(d) => match tokio::time::timeout(d, reader.read_exact(&mut buf[..length])).await {
+            Some(d) => match tokio::time::timeout(
+                d,
+                reader.read_exact(&mut buf[assembled..assembled + length]),
+            )
+            .await
+            {
                 Ok(r) => {
                     r?;
                 }
@@ -634,12 +658,25 @@ async fn handle_tcp_connection(
                 }
             },
             None => {
-                reader.read_exact(&mut buf[..length]).await?;
+                reader.read_exact(&mut buf[assembled..assembled + length]).await?;
             }
         }
-        
-        debug!("✅ Received complete RPC message ({} bytes), first 32 bytes: {:02x?}", 
-               length, &buf[..std::cmp::min(32, length)]);
+
+        if !is_last {
+            debug!(
+                "📎 RPC fragment from {}: {} bytes, record now {} — awaiting continuation",
+                peer, length, buf.len()
+            );
+            continue;
+        }
+
+        if buf.is_empty() {
+            warn!("⚠️  Zero-length RPC record from {}, ignoring", peer);
+            continue;
+        }
+
+        debug!("✅ Received complete RPC record ({} bytes), first 32 bytes: {:02x?}",
+               buf.len(), &buf[..std::cmp::min(32, buf.len())]);
 
         let request = buf.split().freeze();
 
@@ -1474,6 +1511,69 @@ mod idle_timeout_tests {
         // The handler treats idle as an ordinary close, not an error:
         // refusal-by-error would spam the log for every aged-out trunk.
         assert!(handle.await.unwrap().is_ok(), "idle close must be the Ok path");
+    }
+
+    /// An RPC record may arrive as several fragments; only the last
+    /// carries the high bit in its marker.
+    ///
+    /// `is_last` was decoded and then used in a single `debug!`, so every
+    /// fragment was handed to the parser as a whole record: a legal
+    /// two-fragment call was decoded as garbage, and its continuation
+    /// decoded AGAIN as a second call on the same connection. Nothing
+    /// shipped fragments, which is the only reason it was never seen.
+    ///
+    /// The oracle is equality against the single-fragment reply, not
+    /// "a reply came back". A server that mangles the record still
+    /// answers something, and answering something is what the defect
+    /// did.
+    #[tokio::test]
+    async fn a_record_split_across_fragments_is_reassembled_before_dispatch() {
+        // RFC 5531 CALL: xid, msg_type=0, rpcvers=2, prog=100003 (NFS),
+        // vers=4, proc=0 (NULL), then null cred and null verf.
+        let call: Vec<u8> = [0x0Bu32, 0, 2, 100_003, 4, 0, 0, 0, 0, 0]
+            .iter()
+            .flat_map(|w| w.to_be_bytes())
+            .collect();
+        assert_eq!(call.len(), 40);
+
+        async fn reply_to(frames: &[(&[u8], bool)]) -> Vec<u8> {
+            let (mut client, handle, _t) =
+                one_served_connection(Some(Duration::from_secs(5))).await;
+            for (payload, last) in frames {
+                let mut marker = payload.len() as u32;
+                if *last {
+                    marker |= 0x8000_0000;
+                }
+                client.write_all(&marker.to_be_bytes()).await.unwrap();
+                client.write_all(payload).await.unwrap();
+            }
+            client.flush().await.unwrap();
+
+            let mut m = [0u8; 4];
+            tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut m))
+                .await
+                .expect("the server must answer within the window")
+                .expect("reply marker");
+            let len = (u32::from_be_bytes(m) & 0x7FFF_FFFF) as usize;
+            let mut body = vec![0u8; len];
+            client.read_exact(&mut body).await.expect("reply body");
+            drop(client);
+            let _ = handle.await;
+            body
+        }
+
+        // CONTROL first: the same call as ONE fragment. If this is not
+        // a working baseline the comparison below proves nothing.
+        let whole = reply_to(&[(&call[..], true)]).await;
+        assert!(!whole.is_empty(), "the single-fragment control must get a reply");
+
+        // The same 40 bytes, split. Only the second marker sets the bit.
+        let split = reply_to(&[(&call[..20], false), (&call[20..], true)]).await;
+
+        assert_eq!(
+            split, whole,
+            "a fragmented record must produce the SAME reply as the whole one",
+        );
     }
 
     /// The trickle half: a peer that sends a marker promising 100 bytes
