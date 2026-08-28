@@ -532,10 +532,32 @@ pub fn spawn_heartbeat(
                 Err(e) => {
                     consecutive_failures += 1;
                     meter::bump(Counter::EpochRenewFailures);
-                    warn!(
-                        "tier epoch: renew failed ({}/{}): {}",
-                        consecutive_failures, cfg.lease_misses, e
-                    );
+                    // A refusal and a failure are different events with
+                    // the same shape. Both end in a fence -- correctly,
+                    // since a hub that cannot renew cannot prove it is
+                    // still the holder, whatever the reason -- but they
+                    // send an operator to different places, and this
+                    // said "renew failed" for both. A rotated key or an
+                    // expired session token produced a fence, an
+                    // exit(70) and a CrashLoopBackOff whose only log
+                    // line talked about lease windows.
+                    let refused = matches!(e, StoreError::Auth(_));
+                    if refused {
+                        meter::bump(Counter::EpochAuthFailures);
+                        error!(
+                            "tier epoch: renew REFUSED ({}/{}): {} — the store answered \
+                             401/403, so this is a credential, a policy or the node's \
+                             clock, NOT the bucket and NOT contention. Retrying with the \
+                             same key cannot succeed; a rotated Secret is picked up at \
+                             the next container start",
+                            consecutive_failures, cfg.lease_misses, e
+                        );
+                    } else {
+                        warn!(
+                            "tier epoch: renew failed ({}/{}): {}",
+                            consecutive_failures, cfg.lease_misses, e
+                        );
+                    }
                     if consecutive_failures >= cfg.lease_misses {
                         // A successor may now lawfully judge us dead —
                         // we can no longer prove otherwise. Self-fence

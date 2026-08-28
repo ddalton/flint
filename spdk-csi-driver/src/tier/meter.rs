@@ -78,6 +78,7 @@ counters! {
     /// The epoch machinery (step 7, A8).
     epoch_renews,
     epoch_renew_failures,
+    epoch_auth_failures,
     /// Foreign holders judged dead and superseded (NOT self-recognition
     /// resumes — those are routine restarts).
     epoch_takeovers,
@@ -191,6 +192,10 @@ pub enum Counter {
     FlushesCleanMatch,
     EpochRenews,
     EpochRenewFailures,
+    /// The subset of renew failures that were 401/403 — a credential,
+    /// a policy, or the node's clock. Separate because retrying does
+    /// not fix any of them and the operator action is different.
+    EpochAuthFailures,
     EpochTakeovers,
     TakeoverMpuAborts,
     FlushesFenced,
@@ -241,6 +246,7 @@ impl Counter {
             Counter::FlushesCleanMatch => &flushes_clean_match,
             Counter::EpochRenews => &epoch_renews,
             Counter::EpochRenewFailures => &epoch_renew_failures,
+            Counter::EpochAuthFailures => &epoch_auth_failures,
             Counter::EpochTakeovers => &epoch_takeovers,
             Counter::TakeoverMpuAborts => &takeover_mpu_aborts,
             Counter::FlushesFenced => &flushes_fenced,

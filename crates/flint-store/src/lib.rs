@@ -425,6 +425,24 @@ pub enum StoreError {
     /// different full-object checksum than local truth claims.
     #[error("checksum mismatch: {0}")]
     ChecksumMismatch(String),
+    /// 401/403, or an S3 code that means the same thing: the request
+    /// was well-formed and we are not allowed to make it.
+    ///
+    /// Split out of `Other` because the caller's response is different
+    /// in kind. A transient 5xx or a connection reset is "the store is
+    /// having a moment, keep trying"; this is "the credentials are
+    /// wrong, expired, or the policy changed", and no amount of retrying
+    /// fixes it. It reached the epoch heartbeat as an ordinary renew
+    /// failure, so a rotated key produced a fence and an exit whose log
+    /// line talked about lease windows — pointing an operator at the
+    /// bucket, at contention, at anything but the credential that had
+    /// actually expired.
+    ///
+    /// `RequestTimeTooSkewed` belongs here too: S3 answers 403, and the
+    /// cause is the node's clock rather than the key, which is
+    /// diagnosable only if the error says so.
+    #[error("not authorized: {0}")]
+    Auth(String),
     #[error("store: {0}")]
     Other(String),
 }

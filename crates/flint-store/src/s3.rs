@@ -109,18 +109,83 @@ where
         let status = se.raw().status().as_u16();
         let code = se.err().code().unwrap_or("").to_string();
         let msg = format!("{}: {} {}", ctx, status, code);
-        return match (status, code.as_str()) {
-            (412, _) => StoreError::PreconditionFailed(msg),
-            (409, "ConditionalRequestConflict") => StoreError::Conflict(msg),
-            (_, "NoSuchUpload") => StoreError::NoSuchUpload(msg),
-            (404, _) | (_, "NoSuchKey") => StoreError::NotFound(msg),
-            (_, "BadDigest") | (_, "InvalidDigest") | (_, "XAmzContentChecksumMismatch") => {
-                StoreError::ChecksumMismatch(msg)
-            }
-            _ => StoreError::Other(format!("{}: {}", msg, err)),
+        return match classify(status, &code, msg.clone()) {
+            Some(mapped) => mapped,
+            None => StoreError::Other(format!("{}: {}", msg, err)),
         };
     }
     StoreError::Other(format!("{}: {}", ctx, err))
+}
+
+/// The status/code decision table, split out of `map_err` so it can be
+/// tested without constructing an `SdkError`.
+///
+/// `None` means "no specific contract applies" and the caller wraps it
+/// in `Other` with the full SDK debug text attached.
+fn classify(status: u16, code: &str, msg: String) -> Option<StoreError> {
+    Some(match (status, code) {
+        (412, _) => StoreError::PreconditionFailed(msg),
+        (409, "ConditionalRequestConflict") => StoreError::Conflict(msg),
+        (_, "NoSuchUpload") => StoreError::NoSuchUpload(msg),
+        (404, _) | (_, "NoSuchKey") => StoreError::NotFound(msg),
+        // 401/403 and their named codes. These used to fall through to
+        // `Other`, where the epoch heartbeat counted them as ordinary
+        // renew failures — so an expired session token or a rotated key
+        // fenced the hub and exited, logging about lease windows.
+        (401, _)
+        | (403, _)
+        | (_, "ExpiredToken")
+        | (_, "ExpiredTokenException")
+        | (_, "InvalidAccessKeyId")
+        | (_, "SignatureDoesNotMatch")
+        | (_, "AccessDenied")
+        | (_, "RequestTimeTooSkewed")
+        | (_, "InvalidToken") => StoreError::Auth(msg),
+        (_, "BadDigest") | (_, "InvalidDigest") | (_, "XAmzContentChecksumMismatch") => {
+            StoreError::ChecksumMismatch(msg)
+        }
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    /// Every way S3 says "you may not do this" must land on `Auth`, and
+    /// nothing else may.
+    #[test]
+    fn refusals_are_classified_apart_from_failures() {
+        let m = || "ctx: x".to_string();
+        for (status, code) in [
+            (403u16, ""),
+            (401, ""),
+            (403, "AccessDenied"),
+            (400, "ExpiredToken"),
+            (400, "InvalidAccessKeyId"),
+            (403, "SignatureDoesNotMatch"),
+            (403, "RequestTimeTooSkewed"),
+        ] {
+            assert!(
+                matches!(classify(status, code, m()), Some(StoreError::Auth(_))),
+                "({status}, {code:?}) must classify as Auth",
+            );
+        }
+
+        // The contracts that already existed must not have moved — an
+        // arm ordered above them would silently capture them, and 412
+        // in particular routes to arbitration rather than an operator.
+        assert!(matches!(classify(412, "", m()), Some(StoreError::PreconditionFailed(_))));
+        assert!(matches!(classify(404, "", m()), Some(StoreError::NotFound(_))));
+        assert!(matches!(classify(409, "ConditionalRequestConflict", m()), Some(StoreError::Conflict(_))));
+        assert!(matches!(classify(400, "BadDigest", m()), Some(StoreError::ChecksumMismatch(_))));
+
+        // And a genuine transient must NOT be an auth refusal, or the
+        // new message would send every operator hunting a credential
+        // during an outage.
+        assert!(classify(503, "SlowDown", m()).is_none(), "5xx is not a refusal");
+        assert!(classify(500, "InternalError", m()).is_none());
+    }
 }
 
 fn dt_unix(dt: Option<&aws_sdk_s3::primitives::DateTime>) -> Option<u64> {

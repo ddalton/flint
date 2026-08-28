@@ -24,11 +24,16 @@ on:
       # this the drill could be edited into uselessness and CI would not
       # even run — the same class as a gate nobody wired up.
       - 'tests/lima/pnfs/**'
+      # flint-store is a SEPARATE crate, not a workspace member, so
+      # nothing under spdk-csi-driver/ builds its tests. Its own job is
+      # below; this is what makes that job run when it changes.
+      - 'crates/**'
   pull_request:
     paths:
       - 'spdk-csi-driver/**'
       - '.github/workflows/rust-ci.yml'
       - 'tests/lima/pnfs/**'
+      - 'crates/**'
 
 jobs:
   lib-tests:
@@ -67,6 +72,38 @@ jobs:
   # blaming the change under test. A job that goes red for infrastructure
   # reasons trains people to ignore it, which is the failure mode this
   # workflow's own header warns about.
+  # flint-store's own suite, which nothing else runs.
+  #
+  # It is not a workspace member, so `cargo test` in spdk-csi-driver never
+  # compiles it — the crate was uncompilable for a month without anyone
+  # noticing. And its S3 backend is behind a default-off feature, so even
+  # `cargo test` inside the crate skips `src/s3.rs` entirely: a test added
+  # there passes by not being built, which looks exactly like passing.
+  # Hence `--features s3` explicitly rather than a bare invocation.
+  store-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/flint-store
+      - name: cargo test --lib --features s3
+        working-directory: crates/flint-store
+        run: cargo test --lib --features s3
+      - name: the s3 backend must actually have been compiled
+        working-directory: crates/flint-store
+        # Anti-vacuity: if the feature ever stops pulling in the module,
+        # the step above goes green having tested the memory double only.
+        run: |
+          cargo test --lib --features s3 -- --list > /tmp/store-tests.txt
+          n=$(grep -c '^s3::' /tmp/store-tests.txt || true)
+          echo "s3-module tests discovered: $n"
+          test "$n" -ge 1 || {
+            echo "::error::no s3:: tests were compiled — the feature did not take"
+            exit 1
+          }
+
   authz-drill:
     runs-on: ubuntu-latest
     steps:
