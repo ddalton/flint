@@ -123,7 +123,7 @@ def fmt(v):
     return f"{v:g}"
 
 
-CMP_RE = re.compile(r"\{\{(cmp|cmpL|lean|lake):([^/}]+)/([^}]+)\}\}")
+CMP_RE = re.compile(r"\{\{(cmp|cmpL|lean|lake|score):([^/}]+)/([^}]+)\}\}")
 
 
 def resolve_refs(text, data, lk):
@@ -135,9 +135,27 @@ def resolve_refs(text, data, lk):
     the chart printed above it. Writing {{cmp:Consistency/Ack survives}}
     instead makes the comparison derived, so it cannot drift again, and
     an axis that gets renamed fails the build instead of going quiet.
+
+    That guard covered page 5 only, so pages 1-4 kept hand-copied
+    numbers and drifted exactly the same way: the Consistency note said
+    both direct modes sat at the 1.5 durability floor after Lean was
+    rescored to 2.5, and the Security note said FUSE won tenancy when
+    Lean had passed it. Neither could fail a build that never read them.
+    {{score:Chart/Axis/Column}} is the flint-to-flint form — same
+    contract, any column — and the chart notes and the deck foot now go
+    through here too.
     """
     def one(m):
-        kind, chart, axis = m.group(1), m.group(2).strip(), m.group(3).strip()
+        kind, chart, rest = m.group(1), m.group(2).strip(), m.group(3).strip()
+        column = None
+        if kind == "score":
+            axis, _, column = rest.rpartition("/")
+            axis, column = axis.strip(), column.strip()
+            if not axis:
+                raise SystemExit(
+                    f"{{{{score:...}}}} needs Chart/Axis/Column, got {rest!r}")
+        else:
+            axis = rest
         ch = next((c for c in data["charts"] if c["title"] == chart), None)
         if ch is None:
             raise SystemExit(f"cross-reference to unknown chart {chart!r}")
@@ -145,6 +163,14 @@ def resolve_refs(text, data, lk):
                   if axis in (a["short"], a["name"])), None)
         if i is None:
             raise SystemExit(f"cross-reference to unknown axis {chart}/{axis!r}")
+        if kind == "score":
+            if column not in ch["scores"]:
+                raise SystemExit(
+                    f"cross-reference to unknown column {chart}/{column!r}")
+            return fmt(ch["scores"][column][i])
+        if not lk:
+            raise SystemExit(
+                f"{{{{{kind}:...}}}} compares against lakeFS, which is not loaded")
         lean, lake = fmt(ch["scores"]["Lean"][i]), fmt(lk["scores"][chart][i])
         return {"cmp": f"{lake} vs {lean}",
                 "cmpL": f"{lake} vs Lean {lean}",
@@ -152,7 +178,7 @@ def resolve_refs(text, data, lk):
                 "lake": lake}[kind]
     return CMP_RE.sub(one, text)
 
-def card(ch):
+def card(ch, data, lk):
     shorts = ch["series"]
     legend = "".join(
         f'<span class="lg"><span class="sw" style="background:{SERIES_STYLE[s][1]}"></span>'
@@ -184,7 +210,7 @@ def card(ch):
         <thead><tr>{head}</tr></thead>
         <tbody>{rows}</tbody>
       </table>
-      <p class="note">{ch["note"]}</p>
+      <p class="note">{resolve_refs(ch["note"], data, lk)}</p>
     </div>
   </div>
 </div>'''
@@ -436,7 +462,9 @@ def avail_page():
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     data = json.load(open(os.path.join(here, "radar_data.json")))
-    cards = "".join(card(ch) for ch in data["charts"])
+    lk_path = os.path.join(here, "lakefs_data.json")
+    lk = json.load(open(lk_path)) if os.path.exists(lk_path) else {}
+    cards = "".join(card(ch, data, lk) for ch in data["charts"])
     ch = data["charts"]
     rat_pages = ""
     for pair, last in ((ch[0:2], False), (ch[2:4], True)):
@@ -444,8 +472,7 @@ def main():
         names = " · ".join(c["title"] for c in pair)
         rat_pages += (f'<div class="page"><h1>Why these numbers — {names}</h1>'
                       f'<div class="ratrow">{cols}</div></div>')
-    lk_path = os.path.join(here, "lakefs_data.json")
-    lakefs_pg = p5_page(data, json.load(open(lk_path))) if os.path.exists(lk_path) else ""
+    lakefs_pg = p5_page(data, lk) if lk else ""
     html = f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Flint front ends — radar comparison</title>
@@ -533,7 +560,7 @@ def main():
   (sec=sys dashed).</p>
   {INTRO}
   <div class="grid">{cards}</div>
-  <p class="foot">{data["foot"]}</p>
+  <p class="foot">{resolve_refs(data["foot"], data, lk)}</p>
   </div>
   {rat_pages}
   {avail_page()}
