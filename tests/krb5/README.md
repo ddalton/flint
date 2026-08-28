@@ -34,7 +34,7 @@ cross-build with
 | `run-krb5p.sh` | `mount -o sec=krb5p`, readdir, read | 6 ok, 0 bad |
 | `run-krb5i.sh` | `sec=krb5i` end to end, incl. write-then-read-back (MICs the reply, not just the call) | 8 ok, 0 bad |
 | `run-secfloor.sh` | `FLINT_NFS_MIN_SEC` actually refuses | 12 ok, 0 bad |
-| `run-pynfs-gss.sh` | the conformance suite over GSS; takes test names or `all` | see below |
+| `run-pynfs-gss.sh` | the conformance suite over GSS; takes test codes (EID9, CSID1) or `all` | 175/23/68 on every flavor — `results/` |
 
 ## Traps, each of which cost a run
 
@@ -80,6 +80,14 @@ SECINFO. That is per-operation enforcement inside the COMPOUND
 dispatcher, with SEQUENCE still processed first on 4.1. Until it exists,
 krb5i is the strongest usable floor and clients may still choose
 `sec=krb5p` for data.
+
+## Results
+
+`results/` holds one clean serial run per flavor with its own README.
+The headline: **sys, krb5, krb5i and krb5p are identical — same counts
+AND the same 23 failing test names**, so Kerberos costs nothing in
+conformance. Run them SERIALLY; two suites on this VM is enough to make
+the lease-timing tests fail.
 
 ## What pynfs over GSS found on its first run
 

@@ -1,0 +1,1767 @@
+{
+    "errors": 0,
+    "failures": 23,
+    "name": "all",
+    "skipped": 68,
+    "testcase": [
+        {
+            "classname": "st_callback",
+            "code": "CALLBACK1",
+            "name": "testCbNotifyLockExpiredClient",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR6",
+            "name": "testShareReservationDB03",
+            "time": "100.66754412651062"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR5",
+            "name": "testShareReservationDB02",
+            "time": "100.41944909095764"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR4",
+            "name": "testShareReservationDB01",
+            "time": "0.10541176795959473"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR3",
+            "name": "testShareReservation00",
+            "time": "100.77980947494507"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR1",
+            "name": "testLockSleepLockU",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR2",
+            "name": "testLockSleepLock",
+            "time": "101.5263683795929"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR7",
+            "name": "testExpiringManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT5",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_xattr.py\", line 115, in testUpdateOfMissingAttr\n    check(res, NFS4ERR_NOXATTR)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 311, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_ILLEGAL should return NFS4ERR_NOXATTR, instead got NFS4ERR_OP_ILLEGAL\n",
+                "message": "OP_ILLEGAL should return NFS4ERR_NOXATTR, instead got NFS4ERR_OP_ILLEGAL"
+            },
+            "name": "testUpdateOfMissingAttr",
+            "time": "0.20608091354370117"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT7",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_xattr.py\", line 155, in testUpdateExistingAttr\n    check(res)\n    ~~~~~^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 311, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_ILLEGAL should return NFS4_OK, instead got NFS4ERR_OP_ILLEGAL\n",
+                "message": "OP_ILLEGAL should return NFS4_OK, instead got NFS4ERR_OP_ILLEGAL"
+            },
+            "name": "testUpdateExistingAttr",
+            "time": "0.07799434661865234"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT8",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_xattr.py\", line 181, in testRemoveNonExistingAttr\n    check(res, NFS4ERR_NOXATTR)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 311, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_ILLEGAL should return NFS4ERR_NOXATTR, instead got NFS4ERR_OP_ILLEGAL\n",
+                "message": "OP_ILLEGAL should return NFS4ERR_NOXATTR, instead got NFS4ERR_OP_ILLEGAL"
+            },
+            "name": "testRemoveNonExistingAttr",
+            "time": "0.036351919174194336"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT9",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_xattr.py\", line 199, in testRemoveExistingAttr\n    check(res)\n    ~~~~~^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 311, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_ILLEGAL should return NFS4_OK, instead got NFS4ERR_OP_ILLEGAL\n",
+                "message": "OP_ILLEGAL should return NFS4_OK, instead got NFS4ERR_OP_ILLEGAL"
+            },
+            "name": "testRemoveExistingAttr",
+            "time": "0.05536794662475586"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT10",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_xattr.py\", line 219, in testListNoAttrs\n    check(res)\n    ~~~~~^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 311, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_ILLEGAL should return NFS4_OK, instead got NFS4ERR_OP_ILLEGAL\n",
+                "message": "OP_ILLEGAL should return NFS4_OK, instead got NFS4ERR_OP_ILLEGAL"
+            },
+            "name": "testListNoAttrs",
+            "time": "0.05081820487976074"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT11",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_xattr.py\", line 246, in testListAttrs\n    check(res)\n    ~~~~~^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 311, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_ILLEGAL should return NFS4_OK, instead got NFS4ERR_OP_ILLEGAL\n",
+                "message": "OP_ILLEGAL should return NFS4_OK, instead got NFS4ERR_OP_ILLEGAL"
+            },
+            "name": "testListAttrs",
+            "time": "0.015174627304077148"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT1",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_xattr.py\", line 31, in testGetXattrAttribute\n    fail(\"xattr_support is not included in the set of supported attributes\")\n    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 278, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: xattr_support is not included in the set of supported attributes\n",
+                "message": "xattr_support is not included in the set of supported attributes"
+            },
+            "name": "testGetXattrAttribute",
+            "time": "0.028772354125976562"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT2",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_xattr.py\", line 51, in testGetMissingAttr\n    check(res, NFS4ERR_NOXATTR)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 311, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_ILLEGAL should return NFS4ERR_NOXATTR, instead got NFS4ERR_OP_ILLEGAL\n",
+                "message": "OP_ILLEGAL should return NFS4ERR_NOXATTR, instead got NFS4ERR_OP_ILLEGAL"
+            },
+            "name": "testGetMissingAttr",
+            "time": "0.07704567909240723"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT6",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_xattr.py\", line 133, in testExclusiveCreateAttr\n    check(res)\n    ~~~~~^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 311, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_ILLEGAL should return NFS4_OK, instead got NFS4ERR_OP_ILLEGAL\n",
+                "message": "OP_ILLEGAL should return NFS4_OK, instead got NFS4ERR_OP_ILLEGAL"
+            },
+            "name": "testExclusiveCreateAttr",
+            "time": "0.03848576545715332"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT4",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_xattr.py\", line 92, in testCreateNewIfMissingAttr\n    check(res)\n    ~~~~~^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 311, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_ILLEGAL should return NFS4_OK, instead got NFS4ERR_OP_ILLEGAL\n",
+                "message": "OP_ILLEGAL should return NFS4_OK, instead got NFS4ERR_OP_ILLEGAL"
+            },
+            "name": "testCreateNewIfMissingAttr",
+            "time": "0.05532979965209961"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT3",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_xattr.py\", line 69, in testCreateNewAttr\n    check(res)\n    ~~~~~^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 311, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_ILLEGAL should return NFS4_OK, instead got NFS4ERR_OP_ILLEGAL\n",
+                "message": "OP_ILLEGAL should return NFS4_OK, instead got NFS4ERR_OP_ILLEGAL"
+            },
+            "name": "testCreateNewAttr",
+            "time": "0.061026573181152344"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFST1",
+            "name": "testStateid1",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLA1",
+            "name": "testFlexLayoutTestAccess",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLG2",
+            "name": "testFlexLayoutStress",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLS3",
+            "name": "testFlexLayoutStatsStraight",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLS1",
+            "name": "testFlexLayoutStatsSmall",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLS2",
+            "name": "testFlexLayoutStatsReset",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLS4",
+            "name": "testFlexLayoutStatsOverflow",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORSTALEWRITE",
+            "name": "testFlexLayoutReturnStaleWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORSTALEREAD",
+            "name": "testFlexLayoutReturnStaleRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORSERVERFAULTWRITE",
+            "name": "testFlexLayoutReturnServerFaultWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORSERVERFAULTREAD",
+            "name": "testFlexLayoutReturnServerFaultRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORNXIOWRITE",
+            "name": "testFlexLayoutReturnNxioWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORNXIOREAD",
+            "name": "testFlexLayoutReturnNxioRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORNOSPCWRITE",
+            "name": "testFlexLayoutReturnNospcWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORNOSPC",
+            "name": "testFlexLayoutReturnNospcRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORIOWRITE",
+            "name": "testFlexLayoutReturnIoWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORIOREAD",
+            "name": "testFlexLayoutReturnIoRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLOR1",
+            "name": "testFlexLayoutReturnFile",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORFBIGWRITE",
+            "name": "testFlexLayoutReturnFbigWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORFBIG",
+            "name": "testFlexLayoutReturnFbigRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORDELAYWRITE",
+            "name": "testFlexLayoutReturnDelayWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORDELAYREAD",
+            "name": "testFlexLayoutReturnDelayRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORACCESSWRITE",
+            "name": "testFlexLayoutReturnAccessWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORACCESSREAD",
+            "name": "testFlexLayoutReturnAccessRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLOR100",
+            "name": "testFlexLayoutReturn100",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLOOS",
+            "name": "testFlexLayoutOldSeqid",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFGDI1",
+            "name": "testFlexGetDevInfo",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sparse",
+            "code": "ALLOC1",
+            "name": "testAllocateSupported",
+            "time": "0.2322404384613037"
+        },
+        {
+            "classname": "st_sparse",
+            "code": "ALLOC2",
+            "name": "testAllocateStateidZero",
+            "time": "0.07812786102294922"
+        },
+        {
+            "classname": "st_sparse",
+            "code": "ALLOC3",
+            "name": "testAllocateStateidOne",
+            "time": "0.05602860450744629"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID3",
+            "name": "testOpenWriteClose",
+            "time": "0.07852649688720703"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID8",
+            "name": "testOpenSetattr",
+            "time": "0.08130359649658203"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID10",
+            "name": "testOpenSaveFHLookupRestoreFHClose",
+            "time": "0.08923482894897461"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID5",
+            "name": "testOpenLookupClose",
+            "time": "0.09117579460144043"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID7",
+            "name": "testOpenLayoutGet",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID9",
+            "name": "testOpenFreestateidClose",
+            "time": "0.07923030853271484"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID1",
+            "name": "testOpenAndClose",
+            "time": "0.05582737922668457"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID4",
+            "name": "testLockWriteLocku",
+            "time": "0.07364916801452637"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID2",
+            "name": "testLockLockU",
+            "time": "0.058435916900634766"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID6",
+            "name": "testCloseNoStateid",
+            "time": "0.05185270309448242"
+        },
+        {
+            "classname": "st_block",
+            "code": "BLOCK2",
+            "name": "testStateid2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_block",
+            "code": "BLOCK1",
+            "name": "testStateid1",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_block",
+            "code": "BLOCK4",
+            "name": "testSplitCommit",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_block",
+            "code": "BLOCK3",
+            "name": "testEmptyCommit",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT4c",
+            "name": "testRebootWithManyManyManyClientsDoubleReclaim",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT2c",
+            "name": "testRebootWithManyManyManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT4b",
+            "name": "testRebootWithManyManyClientsDoubleReclaim",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT2b",
+            "name": "testRebootWithManyManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT4a",
+            "name": "testRebootWithManyClientsDoubleReclaim",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT2a",
+            "name": "testRebootWithManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT5",
+            "name": "testRebootWithLateReclaim",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT1",
+            "name": "testRebootValid",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT3c",
+            "name": "testDoubleRebootWithManyManyManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT3b",
+            "name": "testDoubleRebootWithManyManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT3a",
+            "name": "testDoubleRebootWithManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1s",
+            "name": "testSocket",
+            "time": "0.09487009048461914"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1a",
+            "name": "testLink",
+            "time": "0.03285717964172363"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1r",
+            "name": "testFile",
+            "time": "0.043436288833618164"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1f",
+            "name": "testFifo",
+            "time": "0.026729583740234375"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1d",
+            "name": "testDir",
+            "time": "0.06891870498657227"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1c",
+            "name": "testChar",
+            "time": "0.03034496307373047"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1b",
+            "name": "testBlock",
+            "time": "0.026997089385986328"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH2",
+            "name": "testBadHandle",
+            "time": "0.02068805694580078"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM6",
+            "name": "testZeroLengthOldname",
+            "time": "0.08568596839904785"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM7",
+            "name": "testZeroLengthNewname",
+            "time": "0.06821370124816895"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1s",
+            "name": "testValidSocket",
+            "time": "0.13415026664733887"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1a",
+            "name": "testValidLink",
+            "time": "0.12107467651367188"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1r",
+            "name": "testValidFile",
+            "time": "0.18618464469909668"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1f",
+            "name": "testValidFifo",
+            "time": "0.24930787086486816"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1d",
+            "name": "testValidDir",
+            "time": "0.3184819221496582"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1c",
+            "name": "testValidChar",
+            "time": "0.26095032691955566"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1b",
+            "name": "testValidBlock",
+            "time": "0.14458346366882324"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM21",
+            "name": "testStaleRename",
+            "time": "0.14060068130493164"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2s",
+            "name": "testSfhSocket",
+            "time": "0.0636911392211914"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2a",
+            "name": "testSfhLink",
+            "time": "0.06710648536682129"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2r",
+            "name": "testSfhFile",
+            "time": "0.14515113830566406"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2f",
+            "name": "testSfhFifo",
+            "time": "0.05494809150695801"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2c",
+            "name": "testSfhChar",
+            "time": "0.04729032516479492"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2b",
+            "name": "testSfhBlock",
+            "time": "0.06510519981384277"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM19",
+            "name": "testSelfRenameFile",
+            "time": "0.07326054573059082"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM18",
+            "name": "testSelfRenameDir",
+            "time": "0.04701399803161621"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM5",
+            "name": "testNonExistent",
+            "time": "0.05353260040283203"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM4",
+            "name": "testNoSfh",
+            "time": "0.02310490608215332"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM20",
+            "name": "testLinkRename",
+            "time": "0.0980219841003418"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM17",
+            "name": "testFileToFullDir",
+            "time": "0.16279196739196777"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM15",
+            "name": "testFileToFile",
+            "time": "0.4424569606781006"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM14",
+            "name": "testFileToDir",
+            "time": "0.13302993774414062"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM10",
+            "name": "testDotsOldname",
+            "time": "0.08814859390258789"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM11",
+            "name": "testDotsNewname",
+            "time": "0.07202553749084473"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM12",
+            "name": "testDirToObj",
+            "time": "0.10281944274902344"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM16",
+            "name": "testDirToFullDir",
+            "time": "0.14082860946655273"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM13",
+            "name": "testDirToDir",
+            "time": "0.23839592933654785"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3s",
+            "name": "testCfhSocket",
+            "time": "0.08097958564758301"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3a",
+            "name": "testCfhLink",
+            "time": "0.08391547203063965"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3r",
+            "name": "testCfhFile",
+            "time": "0.09812545776367188"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3f",
+            "name": "testCfhFifo",
+            "time": "0.04769444465637207"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3c",
+            "name": "testCfhChar",
+            "time": "0.04435300827026367"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3b",
+            "name": "testCfhBlock",
+            "time": "0.0851895809173584"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM8",
+            "name": "testBadutf8Oldname",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM9",
+            "name": "testBadutf8Newname",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP4",
+            "name": "testXdev",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1s",
+            "name": "testSock",
+            "time": "0.03854084014892578"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP3",
+            "name": "testNoFH",
+            "time": "0.042383670806884766"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP2",
+            "name": "testLookuppRoot",
+            "time": "0.139984130859375"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1d",
+            "name": "testLookupp",
+            "time": "0.04228019714355469"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1a",
+            "name": "testLink",
+            "time": "0.0216219425201416"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1r",
+            "name": "testFile",
+            "time": "0.01940155029296875"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1f",
+            "name": "testFifo",
+            "time": "0.03415727615356445"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1c",
+            "name": "testChar",
+            "time": "0.11780929565429688"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1b",
+            "name": "testBlock",
+            "time": "0.06093406677246094"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "LAYOUTRET2",
+            "name": "testLayoutReturnFsid",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "LAYOUTRET1",
+            "name": "testLayoutReturnFile",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "LAYOUTRET3",
+            "name": "testLayoutReturnAll",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "LAYOUTCOMMIT1",
+            "name": "testLayoutCommit",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "GETLAYOUT1",
+            "name": "testGetLayout",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "GETDLIST1",
+            "name": "testGetDevList",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "GETDINFO1",
+            "name": "testGetDevInfo",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "GETLAYOUT100",
+            "name": "testEMCGetLayout",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_verify",
+            "code": "VF1r",
+            "name": "testMandFile",
+            "time": "0.07802081108093262"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG9",
+            "name": "testWriteOpenvsReadDeleg",
+            "time": "0.11427021026611328"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG2",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 82, in testWriteDeleg\n    _testDeleg(t, env, OPEN4_SHARE_ACCESS_READ|OPEN4_SHARE_ACCESS_WRITE,\n    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n       OPEN4_SHARE_ACCESS_WANT_WRITE_DELEG, OPEN4_SHARE_ACCESS_READ)\n       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 46, in _testDeleg\n    fh = _create_file_with_deleg(sess1, env.testname(t), openaccess | want)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 30, in _create_file_with_deleg\n    fh, deleg = __create_file_with_deleg(sess, name, access)\n                ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 26, in __create_file_with_deleg\n    fail(\"Could not get delegation\")\n    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 278, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Could not get delegation\n",
+                "message": "Could not get delegation"
+            },
+            "name": "testWriteDeleg",
+            "time": "0.08819007873535156"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG23",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 267, in testServerSelfConflict3\n    fh, deleg = __create_file_with_deleg(sess1, env.testname(t),\n                ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^\n            OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WANT_READ_DELEG)\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 26, in __create_file_with_deleg\n    fail(\"Could not get delegation\")\n    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 278, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Could not get delegation\n",
+                "message": "Could not get delegation"
+            },
+            "name": "testServerSelfConflict3",
+            "time": "0.04554319381713867"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG1",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 73, in testReadDeleg\n    _testDeleg(t, env, OPEN4_SHARE_ACCESS_READ,\n    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n        OPEN4_SHARE_ACCESS_WANT_READ_DELEG, OPEN4_SHARE_ACCESS_BOTH)\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 46, in _testDeleg\n    fh = _create_file_with_deleg(sess1, env.testname(t), openaccess | want)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 30, in _create_file_with_deleg\n    fh, deleg = __create_file_with_deleg(sess, name, access)\n                ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 26, in __create_file_with_deleg\n    fail(\"Could not get delegation\")\n    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 278, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Could not get delegation\n",
+                "message": "Could not get delegation"
+            },
+            "name": "testReadDeleg",
+            "time": "0.0347597599029541"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG4",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 108, in testNoDeleg\n    fail(\"Got no delegation, expected OPEN_DELEGATE_NONE_EXT\")\n    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 278, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Got no delegation, expected OPEN_DELEGATE_NONE_EXT\n",
+                "message": "Got no delegation, expected OPEN_DELEGATE_NONE_EXT"
+            },
+            "name": "testNoDeleg",
+            "time": "0.027352571487426758"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG8",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 173, in testDelegRevocation\n    fh, deleg = __create_file_with_deleg(sess1, env.testname(t),\n                ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^\n            OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WANT_READ_DELEG)\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 26, in __create_file_with_deleg\n    fail(\"Could not get delegation\")\n    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 278, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Could not get delegation\n",
+                "message": "Could not get delegation"
+            },
+            "name": "testDelegRevocation",
+            "time": "0.046401023864746094"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG26",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 431, in testDelegReadAfterClose\n    fail(\"Failed to get delegation\")\n    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 278, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Failed to get delegation\n",
+                "message": "Failed to get delegation"
+            },
+            "name": "testDelegReadAfterClose",
+            "time": "0.0597536563873291"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG25",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 385, in testCbGetattrWithChange\n    attrs1, attrs2 = _testCbGetattr(t, env, change=1, size=5)\n                     ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 315, in _testCbGetattr\n    fail(\"FATTR4_OPEN_ARGUMENTS not supported\")\n    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 278, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: FATTR4_OPEN_ARGUMENTS not supported\n",
+                "message": "FATTR4_OPEN_ARGUMENTS not supported"
+            },
+            "name": "testCbGetattrWithChange",
+            "time": "0.026960134506225586"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG24",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 366, in testCbGetattrNoChange\n    attrs1, attrs2 = _testCbGetattr(t, env)\n                     ~~~~~~~~~~~~~~^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 315, in _testCbGetattr\n    fail(\"FATTR4_OPEN_ARGUMENTS not supported\")\n    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 278, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: FATTR4_OPEN_ARGUMENTS not supported\n",
+                "message": "FATTR4_OPEN_ARGUMENTS not supported"
+            },
+            "name": "testCbGetattrNoChange",
+            "time": "0.022929906845092773"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG6",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 137, in testCBSecParmsNull\n    recall = _testDeleg(t, env, OPEN4_SHARE_ACCESS_READ,\n        OPEN4_SHARE_ACCESS_WANT_READ_DELEG, OPEN4_SHARE_ACCESS_BOTH,\n        sec = [callback_sec_parms4(AUTH_NONE)])\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 46, in _testDeleg\n    fh = _create_file_with_deleg(sess1, env.testname(t), openaccess | want)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 30, in _create_file_with_deleg\n    fh, deleg = __create_file_with_deleg(sess, name, access)\n                ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 26, in __create_file_with_deleg\n    fail(\"Could not get delegation\")\n    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 278, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Could not get delegation\n",
+                "message": "Could not get delegation"
+            },
+            "name": "testCBSecParmsNull",
+            "time": "0.055211782455444336"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG7",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 156, in testCBSecParmsChange\n    recall = _testDeleg(t, env, OPEN4_SHARE_ACCESS_READ,\n        OPEN4_SHARE_ACCESS_WANT_READ_DELEG, OPEN4_SHARE_ACCESS_BOTH,\n        sec  = [callback_sec_parms4(AUTH_SYS, sys_cred1)],\n        sec2 = [callback_sec_parms4(AUTH_SYS, sys_cred2)])\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 46, in _testDeleg\n    fh = _create_file_with_deleg(sess1, env.testname(t), openaccess | want)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 30, in _create_file_with_deleg\n    fh, deleg = __create_file_with_deleg(sess, name, access)\n                ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 26, in __create_file_with_deleg\n    fail(\"Could not get delegation\")\n    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 278, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Could not get delegation\n",
+                "message": "Could not get delegation"
+            },
+            "name": "testCBSecParmsChange",
+            "time": "0.046710968017578125"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG5",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 124, in testCBSecParms\n    recall = _testDeleg(t, env, OPEN4_SHARE_ACCESS_READ,\n        OPEN4_SHARE_ACCESS_WANT_READ_DELEG, OPEN4_SHARE_ACCESS_BOTH,\n        sec = [callback_sec_parms4(AUTH_SYS, sys_cred)])\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 46, in _testDeleg\n    fh = _create_file_with_deleg(sess1, env.testname(t), openaccess | want)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 30, in _create_file_with_deleg\n    fh, deleg = __create_file_with_deleg(sess, name, access)\n                ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 26, in __create_file_with_deleg\n    fail(\"Could not get delegation\")\n    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 278, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Could not get delegation\n",
+                "message": "Could not get delegation"
+            },
+            "name": "testCBSecParms",
+            "time": "0.03868269920349121"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG3",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 91, in testAnyDeleg\n    _testDeleg(t, env, OPEN4_SHARE_ACCESS_READ,\n    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n        OPEN4_SHARE_ACCESS_WANT_ANY_DELEG, OPEN4_SHARE_ACCESS_BOTH);\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 46, in _testDeleg\n    fh = _create_file_with_deleg(sess1, env.testname(t), openaccess | want)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 30, in _create_file_with_deleg\n    fh, deleg = __create_file_with_deleg(sess, name, access)\n                ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/st_delegation.py\", line 26, in __create_file_with_deleg\n    fail(\"Could not get delegation\")\n    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 278, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Could not get delegation\n",
+                "message": "Could not get delegation"
+            },
+            "name": "testAnyDeleg",
+            "time": "0.05958080291748047"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN1",
+            "name": "testSupported",
+            "time": "0.24578475952148438"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN2",
+            "name": "testServerStateSeqid",
+            "time": "0.07371950149536133"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN30",
+            "name": "testReadWrite",
+            "time": "0.22910261154174805"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN7",
+            "name": "testOPENClaimFH",
+            "time": "0.09669280052185059"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN6",
+            "name": "testEXCLUSIVE4AtNameAttribute",
+            "time": "0.041480302810668945"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN8",
+            "name": "testCloseWithZeroSeqid",
+            "time": "0.03314614295959473"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN31",
+            "name": "testAnonReadWrite",
+            "time": "0.05568099021911621"
+        },
+        {
+            "classname": "st_trunking",
+            "code": "TRUNK2",
+            "name": "testUseTwoSessions",
+            "time": "0.0553288459777832"
+        },
+        {
+            "classname": "st_trunking",
+            "code": "TRUNK1",
+            "name": "testTwoSessions",
+            "time": "0.022570133209228516"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ7",
+            "name": "testTooManyOps",
+            "time": "0.05861616134643555"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ1",
+            "name": "testSupported",
+            "time": "0.02257823944091797"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ12",
+            "name": "testSessionidSequenceidSlotid",
+            "time": "0.01596689224243164"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ6",
+            "name": "testRequestTooBig",
+            "time": "0.019217967987060547"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ10b",
+            "name": "testReplayCache007",
+            "time": "0.04675912857055664"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9f",
+            "name": "testReplayCache006",
+            "time": "0.02519965171813965"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9e",
+            "name": "testReplayCache005",
+            "time": "0.03275012969970703"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9d",
+            "name": "testReplayCache004",
+            "time": "0.04616498947143555"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9c",
+            "name": "testReplayCache003",
+            "time": "0.020962953567504883"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9b",
+            "name": "testReplayCache002",
+            "time": "0.16587090492248535"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9a",
+            "name": "testReplayCache001",
+            "time": "0.049458980560302734"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ11",
+            "name": "testOpNotInSession",
+            "time": "0.015317201614379883"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ2",
+            "name": "testNotFirst",
+            "time": "0.03875613212585449"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ4",
+            "name": "testImplicitBind",
+            "time": "0.09371590614318848"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ8",
+            "name": "testBadSlot",
+            "time": "0.026947021484375"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ5",
+            "name": "testBadSession",
+            "time": "0.014560699462890625"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ13",
+            "name": "testBadSequenceidAtSlot",
+            "time": "0.0413050651550293"
+        },
+        {
+            "classname": "st_secinfo",
+            "code": "SEC2",
+            "name": "testSupported2",
+            "time": "0.1304938793182373"
+        },
+        {
+            "classname": "st_secinfo",
+            "code": "SEC1",
+            "name": "testSupported",
+            "time": "0.07121753692626953"
+        },
+        {
+            "classname": "st_secinfo_no_name",
+            "code": "SECNN4",
+            "name": "testSupported4",
+            "time": "0.020052671432495117"
+        },
+        {
+            "classname": "st_secinfo_no_name",
+            "code": "SECNN3",
+            "name": "testSupported3",
+            "time": "0.027097702026367188"
+        },
+        {
+            "classname": "st_secinfo_no_name",
+            "code": "SECNN2",
+            "name": "testSupported2",
+            "time": "0.020715713500976562"
+        },
+        {
+            "classname": "st_secinfo_no_name",
+            "code": "SECNN1",
+            "name": "testSupported",
+            "time": "0.027185440063476562"
+        },
+        {
+            "classname": "st_reclaim_complete",
+            "code": "RECC1",
+            "name": "testSupported",
+            "time": "0.02604198455810547"
+        },
+        {
+            "classname": "st_reclaim_complete",
+            "code": "RECC2",
+            "name": "testReclaimAfterRECC",
+            "time": "0.06756091117858887"
+        },
+        {
+            "classname": "st_reclaim_complete",
+            "code": "RECC3",
+            "name": "testOpenBeforeRECC",
+            "time": "0.04625749588012695"
+        },
+        {
+            "classname": "st_reclaim_complete",
+            "code": "RECC4",
+            "name": "testDoubleRECC",
+            "time": "0.08530569076538086"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID1",
+            "name": "testSupported",
+            "time": "0.024935245513916016"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID2",
+            "name": "testDestroyCIDWS",
+            "time": "0.043625831604003906"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID8",
+            "name": "testDestroyCIDTwice",
+            "time": "0.04354596138000488"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID5",
+            "name": "testDestroyCIDSessionB",
+            "time": "0.04125165939331055"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID7",
+            "name": "testDestroyCIDNotOnly",
+            "time": "0.013451337814331055"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID6",
+            "name": "testDestroyCIDCSession",
+            "time": "0.022155284881591797"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID3",
+            "name": "testDestroyBadCIDWS",
+            "time": "0.006887197494506836"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID4",
+            "name": "testDestroyBadCIDIS",
+            "time": "0.08449625968933105"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9006",
+            "name": "testDestroyLockConfRace",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS1",
+            "name": "testDestroyBasic",
+            "time": "0.10302257537841797"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9003",
+            "name": "testDestroy3",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9002",
+            "name": "testDestroy2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9001",
+            "name": "testDestroy",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9005",
+            "name": "testDestoryNotSoleOps",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9004",
+            "name": "testDestoryNotFinalOps",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS28",
+            "name": "testTooSmallMaxReq",
+            "time": "0.014402151107788086"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS25",
+            "name": "testTooSmallMaxRS",
+            "time": "0.006139039993286133"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS2b",
+            "name": "testSupported2b",
+            "time": "0.025090456008911133"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS2",
+            "name": "testSupported2",
+            "time": "0.016242265701293945"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS1",
+            "name": "testSupported1",
+            "time": "0.006146430969238281"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS6",
+            "name": "testReplay2",
+            "time": "0.014278173446655273"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS5b",
+            "name": "testReplay1b",
+            "time": "0.010176420211791992"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS5a",
+            "name": "testReplay1a",
+            "time": "0.026181936264038086"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS5",
+            "name": "testReplay1",
+            "time": "0.01789259910583496"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS27",
+            "name": "testRepTooBigToCache",
+            "time": "0.015883207321166992"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS26",
+            "name": "testRepTooBig",
+            "time": "0.024611949920654297"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS19",
+            "name": "testRdmaArray2",
+            "time": "0.010134220123291016"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS18",
+            "name": "testRdmaArray1",
+            "time": "0.01947498321533203"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS17",
+            "name": "testRdmaArray0",
+            "time": "0.016769886016845703"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS10",
+            "name": "testPrincipalCollision2",
+            "time": "0.02483654022216797"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS9",
+            "name": "testPrincipalCollision1",
+            "time": "0.023215770721435547"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS23",
+            "name": "testNotOnlyOp",
+            "time": "0.010113239288330078"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS3",
+            "name": "testNoExchange",
+            "time": "0.003642559051513672"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS22",
+            "name": "testMaxreqs",
+            "time": "0.014656782150268555"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS200",
+            "name": "testManyClients",
+            "time": "0.19667768478393555"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS29",
+            "name": "testDRCMemLeak",
+            "time": "55.09034562110901"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS24",
+            "name": "testCsr_sequence",
+            "time": "0.08028936386108398"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS4",
+            "name": "testContrivedReplay",
+            "time": "0.018578767776489258"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS16a",
+            "name": "testCbSecParmsDec",
+            "time": "0.03434443473815918"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS16",
+            "name": "testCbSecParms",
+            "time": "0.1331484317779541"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS21",
+            "name": "testCallbackVersion",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS20",
+            "name": "testCallbackProgram",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS8",
+            "name": "testBadSeqnum2",
+            "time": "0.028151512145996094"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS7",
+            "name": "testBadSeqnum1",
+            "time": "0.01857137680053711"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS15",
+            "name": "testBadFlag",
+            "time": "0.017012596130371094"
+        },
+        {
+            "classname": "st_copy",
+            "code": "COPY5",
+            "name": "testZeroLengthCopy",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP1",
+            "name": "testZeroOps",
+            "time": "0.01797652244567871"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP5",
+            "name": "testUndefined",
+            "time": "0.037009477615356445"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP4b",
+            "name": "testInvalidMinor2",
+            "time": "0.027628183364868164"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP4a",
+            "name": "testInvalidMinor",
+            "time": "0.00645136833190918"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP2",
+            "name": "testGoodTag",
+            "time": "0.03886890411376953"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP3",
+            "name": "testBadTags",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6",
+            "name": "testUpdateNonexistant",
+            "time": "0.012480735778808594"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6h",
+            "name": "testUpdate111",
+            "time": "0.054696083068847656"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6g",
+            "name": "testUpdate110",
+            "time": "0.0276792049407959"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6f",
+            "name": "testUpdate101",
+            "time": "0.021785259246826172"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6e",
+            "name": "testUpdate100",
+            "time": "0.036676645278930664"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6d",
+            "name": "testUpdate011",
+            "time": "0.017079591751098633"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6c",
+            "name": "testUpdate010",
+            "time": "0.012888908386230469"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6b",
+            "name": "testUpdate001",
+            "time": "0.02990579605102539"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6a",
+            "name": "testUpdate000",
+            "time": "0.055806636810302734"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID1b",
+            "name": "testSupported2",
+            "time": "0.022044658660888672"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID7",
+            "name": "testSupported1a",
+            "time": "0.005991697311401367"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID1",
+            "name": "testSupported",
+            "time": "0.007007122039794922"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID50",
+            "name": "testSSV",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID8",
+            "name": "testNotOnlyOp",
+            "time": "0.008447408676147461"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5h",
+            "name": "testNoUpdate111",
+            "time": "0.026672840118408203"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5g",
+            "name": "testNoUpdate110",
+            "time": "0.06362438201904297"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5fb",
+            "name": "testNoUpdate101b",
+            "time": "0.17026090621948242"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5f",
+            "name": "testNoUpdate101",
+            "time": "0.0858011245727539"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5e",
+            "name": "testNoUpdate100",
+            "time": "0.051054954528808594"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5d",
+            "name": "testNoUpdate011",
+            "time": "0.017996549606323242"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5c",
+            "name": "testNoUpdate010",
+            "time": "0.01674652099609375"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5b",
+            "name": "testNoUpdate001",
+            "time": "0.02167224884033203"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5a",
+            "name": "testNoUpdate000",
+            "time": "0.03507661819458008"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID2",
+            "name": "testNoImplId",
+            "time": "0.012333154678344727"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID3",
+            "name": "testLongArray",
+            "time": "0.008213043212890625"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID9",
+            "name": "testLeasePeriod",
+            "time": "101.47636580467224"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID4",
+            "name": "testBadFlags",
+            "time": "0.022316694259643555"
+        }
+    ],
+    "tests": 266,
+    "time": 571.959722995758,
+    "timestamp": "2026-08-27 20:46:15.062090"
+}
