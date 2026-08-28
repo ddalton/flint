@@ -36,12 +36,28 @@
     "NOT A CLAIM ABOUT FLINT'S SPEED. read 0.459 means flint's read path is",
     "~2.18x slower than the kernel's on this rig. That is a real, controlled",
     "gap and the largest of the three -- but it is a FLOOR TO HOLD, not a",
-    "target that has been accepted as good."
+    "target that has been accepted as good.",
+    "",
+    "CONTROL HEALTH. control_mib_s records what KNFSD measured when this",
+    "baseline was taken (medians of the two runs: read 1585/1488,",
+    "write 715/741, meta 1592/1582). knfsd does not change when flint",
+    "does, so if the control drifts outside +/-30% the RIG moved, and a",
+    "ratio from it is not comparable. That matters because saturation",
+    "compresses the ratio toward 1.0: a contended run reports a BETTER",
+    "ratio and would hide a regression. Observed 2026-08-28 -- a runaway",
+    "logind halved the VM and read 'improved' 0.46 -> 0.93 with no code",
+    "change at all."
   ],
   "tolerance": 0.15,
   "ratios": {
     "meta": 0.665,
     "read": 0.459,
     "write": 0.605
-  }
+  },
+  "control_mib_s": {
+    "read": 1537.0,
+    "write": 728.0,
+    "meta": 1587.0
+  },
+  "control_band": 0.3
 }

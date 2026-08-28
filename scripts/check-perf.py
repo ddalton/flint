@@ -107,6 +107,41 @@ def main():
         print(f"{dim:<10} {mf/scale:>10.1f} {unit:<4} {mk/scale:>10.1f} {unit:<4} "
               f"{ratios[dim]:>8.3f}  {n}")
 
+    # ── RIG-HEALTH GATE: is the control arm where it was? ────────────
+    #
+    # The ratio cancels MILD rig drift. It does not survive SATURATION:
+    # when the box is oversubscribed both arms queue, and the ratio
+    # compresses toward 1.0 — so a loaded rig reports a FLATTERING
+    # number and can hide a real regression behind it.
+    #
+    # Found the hard way, 2026-08-28: a runaway systemd-logind eating one
+    # of the VM's two cores took knfsd's read from ~1500 MiB/s to 591,
+    # and the same build's read ratio "improved" from 0.46 to 0.93. Every
+    # gate check passed. Nothing about the server had changed.
+    #
+    # The control's ABSOLUTE throughput is the tell, because it is the
+    # one number that must not move when only flint changes.
+    if os.path.exists(baseline_path):
+        with open(baseline_path) as fh:
+            _b = json.load(fh)
+        ctl = _b.get("control_mib_s", {})
+        band = _b.get("control_band", 0.5)
+        for dim, want_ctl in sorted(ctl.items()):
+            f = by.get((dim, "knfsd"), [])
+            if not f:
+                continue
+            got = statistics.median(f) / (1.0 if dim == "meta" else 1024 * 1024)
+            lo, hi = want_ctl * (1 - band), want_ctl * (1 + band)
+            if not (lo <= got <= hi):
+                print(f"\nVOID: the {dim} CONTROL arm measured {got:.1f}, outside "
+                      f"{lo:.1f}..{hi:.1f} (baseline {want_ctl:.1f}).")
+                print("      knfsd did not change; the RIG did. A ratio measured on a")
+                print("      rig in a different state is not comparable to the baseline,")
+                print("      and a saturated rig flatters the ratio toward 1.0 — which")
+                print("      would hide a regression rather than report one.")
+                print("      Fix the rig (check for a runaway process) and re-run.")
+                return 1
+
     if not os.path.exists(baseline_path):
         # NOT a pass. The xfstests checker used to return 0 here and the
         # baseline it asked for was never written, so a 40-minute suite
