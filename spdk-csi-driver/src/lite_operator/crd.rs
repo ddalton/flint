@@ -130,6 +130,10 @@ use serde::{Deserialize, Serialize};
     "!has(self.service) || !has(self.service.advertiseAddress) || self.service.advertiseAddress.matches('^[^:]+:[0-9]+$') || (self.service.advertiseAddress.startsWith('[') && self.service.advertiseAddress.matches('^.+]:[0-9]+$'))")
     .message("spec.service.advertiseAddress must be host:port — e.g. hub.example.internal:2049, 10.0.4.7:2049, or [2001:db8::1]:2049 for IPv6"))]
 pub struct FlintShareSpec {
+    /// Server-side permission enforcement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<SecuritySpec>,
+
     /// Bucket this share publishes to. Must already exist, with
     /// VERSIONING ON (delete-marker recovery assumes it) — the hub
     /// never creates buckets and the operator never touches their
@@ -420,6 +424,34 @@ pub struct FileApiSpec {
     /// working — which is what talked us out of adding this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_threshold_bytes: Option<i64>,
+}
+
+/// Server-side authorization.
+#[derive(KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SecuritySpec {
+    /// Enforce the POSIX permission check instead of only logging it.
+    /// Absent = `false`, which is what the hub has always done.
+    ///
+    /// The check itself has always existed and has always run. In the
+    /// default mode it evaluates, logs, and then allows the operation
+    /// anyway — and the kernel cannot backstop it either, because the
+    /// hub runs as uid 0 with `CAP_DAC_OVERRIDE`. So a non-root client
+    /// writing into a root-owned `0755` directory SUCCEEDS, which is the
+    /// opposite of what `docs/flint-lite-for-agent-fleets.md` promised
+    /// for a `sec=sys` mount.
+    ///
+    /// Until this field existed there was no supported way to turn
+    /// enforcement on: both renderers emit a fixed env list, neither
+    /// chart has an `extraEnv`, and the only switch was an environment
+    /// variable reachable solely by smuggling it through the tier
+    /// credentials Secret — which a non-tiered hub does not have.
+    ///
+    /// It defaults OFF because switching it on is a behaviour change for
+    /// every existing install: work that succeeded will start returning
+    /// NFS4ERR_ACCESS. Turn it on deliberately, per share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforce_permissions: Option<bool>,
 }
 
 /// The hub's disk.
@@ -969,6 +1001,15 @@ impl FlintShareSpec {
     pub fn tiered(&self) -> bool {
         self.bucket.as_deref().is_some_and(|b| !b.is_empty())
     }
+
+    /// Whether the hub ENFORCES the permission check rather than only
+    /// logging it. Absent = false, which is the shipped behaviour.
+    pub fn enforce_permissions(&self) -> bool {
+        self.security
+            .as_ref()
+            .and_then(|s| s.enforce_permissions)
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
@@ -1068,6 +1109,7 @@ mod tests {
 
     fn spec_with(settings: TierSettings) -> FlintShareSpec {
         FlintShareSpec {
+            security: None,
             bucket: Some("b".into()),
             key_prefix: Some("p/".into()),
             endpoint: None,

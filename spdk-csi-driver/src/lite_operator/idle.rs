@@ -397,6 +397,7 @@ mod tests {
                 ..Default::default()
             },
             spec: FlintShareSpec {
+                security: None,
                 bucket: Some("b".into()),
                 key_prefix: None,
                 endpoint: None,

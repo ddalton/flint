@@ -385,6 +385,35 @@ spec:
                 - Manual
                 nullable: true
                 type: string
+              security:
+                description: Server-side permission enforcement.
+                nullable: true
+                properties:
+                  enforcePermissions:
+                    description: |-
+                      Enforce the POSIX permission check instead of only logging it.
+                      Absent = `false`, which is what the hub has always done.
+
+                      The check itself has always existed and has always run. In the
+                      default mode it evaluates, logs, and then allows the operation
+                      anyway — and the kernel cannot backstop it either, because the
+                      hub runs as uid 0 with `CAP_DAC_OVERRIDE`. So a non-root client
+                      writing into a root-owned `0755` directory SUCCEEDS, which is the
+                      opposite of what `docs/flint-lite-for-agent-fleets.md` promised
+                      for a `sec=sys` mount.
+
+                      Until this field existed there was no supported way to turn
+                      enforcement on: both renderers emit a fixed env list, neither
+                      chart has an `extraEnv`, and the only switch was an environment
+                      variable reachable solely by smuggling it through the tier
+                      credentials Secret — which a non-tiered hub does not have.
+
+                      It defaults OFF because switching it on is a behaviour change for
+                      every existing install: work that succeeded will start returning
+                      NFS4ERR_ACCESS. Turn it on deliberately, per share.
+                    nullable: true
+                    type: boolean
+                type: object
               service:
                 description: How consumers reach the hub.
                 nullable: true

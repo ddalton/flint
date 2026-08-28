@@ -199,6 +199,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            {{- if .Values.security.enforcePermissions }}
+            # Enforce the permission check rather than only logging it.
+            # Off by default: turning it on is a behaviour change for an
+            # existing install, because work that succeeded starts
+            # returning NFS4ERR_ACCESS. See values.yaml.
+            - name: FLINT_NFS_ENFORCE_PERMISSIONS
+              value: "1"
+            {{- end }}
             {{- if and .Values.tier.enabled .Values.tier.region }}
             - name: AWS_REGION
               value: {{ .Values.tier.region | quote }}

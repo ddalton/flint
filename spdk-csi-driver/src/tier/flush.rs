@@ -971,10 +971,12 @@ impl FlushOrchestrator {
             Ok(Ok(b)) => b,
             Ok(Err(e)) => {
                 warn!("tier manifest: tree walk failed: {} — barrier skipped", e);
+                self.record_barrier_failure();
                 return;
             }
             Err(e) => {
                 warn!("tier manifest: walk task failed: {} — barrier skipped", e);
+                self.record_barrier_failure();
                 return;
             }
         };
@@ -989,6 +991,28 @@ impl FlushOrchestrator {
         .await;
         if let Ok(mut slot) = self.last_barrier.lock() {
             *slot = Some(outcome);
+        }
+    }
+
+    /// A barrier that never reached `write_at_barrier`.
+    ///
+    /// Both early returns above used to leave `last_barrier` untouched,
+    /// which meant `rpo::evaluate` went on reporting the PREVIOUS
+    /// barrier — so `/status` said `manifestCurrent: true` while the DR
+    /// record had silently stopped advancing. `BarrierOutcome::Failed`
+    /// existed for exactly this event and had no writer, and
+    /// `Counter::ManifestFailures` is bumped inside `write_at_barrier`,
+    /// which these paths never reach. The only signal was a `warn!`,
+    /// and §0 rule 4 says log lines drop under load.
+    ///
+    /// This is reachable without any store failure at all: `manifest::walk`
+    /// propagates on the recursive `read_dir`, so a client `rmdir`
+    /// between a parent's listing and its recursion aborts the whole
+    /// tree walk — routine under agent-fleet churn.
+    fn record_barrier_failure(&self) {
+        crate::tier::meter::bump(crate::tier::meter::Counter::ManifestFailures);
+        if let Ok(mut slot) = self.last_barrier.lock() {
+            *slot = Some(crate::tier::manifest::BarrierOutcome::Failed);
         }
     }
 
@@ -1688,6 +1712,51 @@ fn live_inodes(root: &std::path::Path) -> std::io::Result<std::collections::Hash
 
 #[cfg(test)]
 mod tests {
+
+    /// Every early return out of the barrier must record the failure.
+    ///
+    /// Both of them used to just `return`, leaving `last_barrier`
+    /// holding the PREVIOUS outcome — so `rpo::evaluate` went on
+    /// reporting `manifestCurrent: true` while the DR record had
+    /// silently stopped advancing. `BarrierOutcome::Failed` existed for
+    /// this and had no writer at all, and `ManifestFailures` is bumped
+    /// inside `write_at_barrier`, which neither path reaches.
+    ///
+    /// Driving a walk failure end-to-end means racing an `rmdir` against
+    /// a recursive `read_dir`, so this is a call-site lint instead —
+    /// same shape as `every_namespace_mutation_commits_before_it_is_acked`.
+    /// It asserts its own anchors resolved, so it cannot pass by not
+    /// looking.
+    #[test]
+    fn every_skipped_barrier_records_the_failure() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tier/flush.rs"),
+        )
+        .expect("flush.rs must be readable");
+        let prod = match src.rfind("\n#[cfg(test)]") {
+            Some(i) => &src[..i],
+            None => &src[..],
+        };
+
+        let needle = "barrier skipped";
+        let sites: Vec<usize> = prod
+            .match_indices(needle)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            sites.len(), 2,
+            "expected the two barrier-skip returns; the anchors are stale, \
+             so this lint would have passed by not looking"
+        );
+        for at in sites {
+            let after: String = prod[at..].lines().take(4).collect::<Vec<_>>().join("\n");
+            assert!(
+                after.contains("record_barrier_failure"),
+                "a barrier skip that does not call `record_barrier_failure` leaves \
+                 /status reporting the previous manifest as current:\n{after}"
+            );
+        }
+    }
     use super::*;
     use crate::state_backend::memory::MemoryBackend;
     use crate::tier::capture::Mutation;

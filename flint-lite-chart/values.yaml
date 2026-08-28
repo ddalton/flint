@@ -204,6 +204,24 @@ monitoring:
     # it. Hubs are 1:1 with projects, so that was a per-project cost.
     streamThresholdBytes: 8388608
 
+# Server-side authorization.
+security:
+  # Enforce the POSIX permission check instead of only logging it.
+  #
+  # The check has always run. At this default it evaluates the mode,
+  # logs the answer, and allows the operation anyway — and the kernel
+  # cannot backstop it either, because the hub runs as uid 0 with
+  # CAP_DAC_OVERRIDE. So a non-root pod writing into a root-owned 0755
+  # directory SUCCEEDS. What `sec=sys` buys at this default is IDENTITY
+  # (files carry the right owner, `ls -l` tells the truth), not
+  # enforcement, and it is not a boundary between tenants sharing a hub.
+  #
+  # It stays off by default because switching it on is a behaviour
+  # change for every existing install: work that succeeded starts
+  # returning NFS4ERR_ACCESS. Turn it on deliberately, and expect to
+  # find workloads that were relying on the gap.
+  enforcePermissions: false
+
 logLevel: info
 # Requests only, no limits, and matched by the operator's
 # RenderDefaults — a hub with neither runs BestEffort, which at fleet

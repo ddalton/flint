@@ -783,6 +783,16 @@ pub fn deployment(
             ..Default::default()
         },
     ];
+    // Permission enforcement. Rendered only when ON, so the default
+    // render is byte-identical to what it was and the parity fixture
+    // keeps its meaning. Mirrored in the chart.
+    if s.enforce_permissions() {
+        env.push(EnvVar {
+            name: "FLINT_NFS_ENFORCE_PERMISSIONS".to_string(),
+            value: Some("1".to_string()),
+            ..Default::default()
+        });
+    }
     if let Some(region) = s.region.as_deref().filter(|r| !r.is_empty() && s.tiered()) {
         env.push(EnvVar {
             name: "AWS_REGION".to_string(),
@@ -1216,6 +1226,7 @@ mod tests {
 
     fn base_spec() -> FlintShareSpec {
         FlintShareSpec {
+            security: None,
             bucket: None,
             key_prefix: None,
             endpoint: None,

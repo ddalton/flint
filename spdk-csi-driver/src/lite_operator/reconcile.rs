@@ -2861,6 +2861,7 @@ mod tests {
         let mut s = FlintShare::new(
             name,
             FlintShareSpec {
+                security: None,
                 bucket: None,
                 key_prefix: None,
                 endpoint: None,
