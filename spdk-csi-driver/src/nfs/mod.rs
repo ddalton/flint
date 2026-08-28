@@ -29,6 +29,8 @@
 pub mod xdr;          // XDR encoding/decoding (shared with RPC)
 pub mod rpc;          // RPC message handling (shared with NFSv4)
 pub mod kerberos;     // Pure Rust Kerberos acceptor for RPCSEC_GSS
+pub mod krb;          // Kerberos 5 crypto to spec (RFC 3961/3962/8009/4121)
+pub mod gss_framing;  // RPCSEC_GSS message framing (RFC 2203 §5.3)
 pub mod rpcsec_gss;   // RPCSEC_GSS authentication (Kerberos support)
 pub mod pipeline;     // Per-connection RPC pipelining (RFC 8881 §2.10.6)
 pub mod activity;     // Client-activity signal (the idle-lifecycle input)

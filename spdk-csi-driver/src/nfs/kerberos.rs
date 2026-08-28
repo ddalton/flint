@@ -15,10 +15,6 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use tracing::{debug, info};
-use aes::{Aes128, Aes256, cipher::{BlockEncrypt, BlockDecrypt, KeyInit, generic_array::GenericArray}};
-use hmac::{Hmac, Mac};
-use sha1::Sha1;
-use sha2::{Sha256, Sha384};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Kerberos error types
@@ -51,7 +47,7 @@ pub type Result<T> = std::result::Result<T, KerberosError>;
 pub enum EncType {
     AES256CtsHmacSha196 = 18,
     AES128CtsHmacSha196 = 17,
-    AES256CtsHmacSha384196 = 20,
+    AES256CtsHmacSha384192 = 20,
     AES128CtsHmacSha256128 = 19,
 }
 
@@ -61,18 +57,19 @@ impl EncType {
             17 => Some(EncType::AES128CtsHmacSha196),
             18 => Some(EncType::AES256CtsHmacSha196),
             19 => Some(EncType::AES128CtsHmacSha256128),
-            20 => Some(EncType::AES256CtsHmacSha384196),
+            20 => Some(EncType::AES256CtsHmacSha384192),
             _ => None,
         }
     }
     
-    pub fn key_size(&self) -> usize {
-        match self {
-            EncType::AES128CtsHmacSha196 => 16,
-            EncType::AES256CtsHmacSha196 => 32,
-            EncType::AES128CtsHmacSha256128 => 16,
-            EncType::AES256CtsHmacSha384196 => 32,
-        }
+    /// REMOVED. Key sizes now come from [`super::krb::kdf`], which is the
+    /// only thing that derives keys. One `key_size()` could never express
+    /// enctype 20 anyway — RFC 8009 gives it Ke = 32 but Kc = Ki = 24, and
+    /// collapsing those to one number is what made the old `derive_key_aes_sha2`
+    /// hand back 32-octet Kc/Ki that truncation then accepted in silence.
+    /// This enum is now an IDENTIFIER for the wire and the keytab, nothing more.
+    pub fn etype(&self) -> i32 {
+        *self as i32
     }
 }
 
@@ -273,6 +270,46 @@ impl Keytab {
         None
     }
     
+    /// Select the key a specific ticket was encrypted with.
+    ///
+    /// ⚠ A REAL KEYTAB HOLDS ONE KEY PER ENCTYPE FOR THE SAME PRINCIPAL —
+    /// `ktadd` writes them all by default, so four entries for one
+    /// service name is the ORDINARY case, not an edge case. Matching on
+    /// the principal alone and taking the first hit therefore picks an
+    /// arbitrary enctype, and the ticket then fails its integrity check
+    /// with an HMAC mismatch that looks exactly like a wrong password.
+    ///
+    /// The ticket names the enctype it used, so use it. `kvno` is
+    /// honoured when the ticket supplies one and a match exists, but a
+    /// mismatch is not fatal: a keytab mid-rotation legitimately carries
+    /// the older kvno, and the enctype+HMAC still decides correctness.
+    pub fn find_key_for(
+        &self,
+        principal: &str,
+        enctype: EncType,
+        kvno: Option<u32>,
+    ) -> Option<&ServiceKey> {
+        // F24: bind the iterator result with a standalone `let` — never
+        // hold the iterator guard across an if-let scrutinee.
+        let candidates: Vec<&ServiceKey> = self
+            .keys
+            .iter()
+            .filter(|k| {
+                (k.principal == principal
+                    || format!("{}@{}", k.principal, k.realm) == principal)
+                    && k.enctype == enctype
+            })
+            .collect();
+
+        if let Some(v) = kvno {
+            let exact = candidates.iter().find(|k| k.kvno == v).copied();
+            if exact.is_some() {
+                return exact;
+            }
+        }
+        candidates.first().copied()
+    }
+
     /// Get all keys (for debugging)
     pub fn keys(&self) -> &[ServiceKey] {
         &self.keys
@@ -288,6 +325,23 @@ pub struct KerberosContext {
     pub enctype: EncType,
     pub established: bool,
     pub client_realm: String,
+    /// The RFC 4121 §2 base key for PER-MESSAGE tokens: "the acceptor
+    /// subkey, if the acceptor asserted one; otherwise the initiator
+    /// subkey from the AP-REQ authenticator; otherwise the ticket
+    /// session key."
+    ///
+    /// The authenticator's optional subkey was parsed and then thrown
+    /// away, so a client that asked for one would have had every
+    /// per-message token keyed on the session key instead — bytes a
+    /// real peer rejects, with nothing on this side reporting an error.
+    ///
+    /// This is deliberately NOT `session_key`: the AP-REP encrypted
+    /// part is always sealed with the TICKET SESSION KEY (RFC 4120
+    /// §5.5.2), so both have to be carried.
+    pub base_key: Vec<u8>,
+    pub base_key_enctype: EncType,
+    /// True when the initiator supplied a subkey and it was adopted.
+    pub used_initiator_subkey: bool,
 }
 
 /// Kerberos key usage constants (RFC 4120 Section 7.5.1)
@@ -297,595 +351,120 @@ mod key_usage {
     pub const TGS_REP_ENC_PART: i32 = 8;
     pub const AP_REQ_AUTHENTICATOR: i32 = 11;
     pub const AP_REP_ENC_PART: i32 = 12;
+    /// RFC 4120 §7.5.1: "AS-REP Ticket and TGS-REP Ticket ... encrypted
+    /// with the service key". This server decrypted tickets under usage
+    /// 8 (the TGS-REP *encrypted part*) — a wrong key against any real
+    /// KDC, and the constant did not exist to reach for.
+    pub const TICKET: i32 = 2;
     pub const KRB_PRIV_ENC_PART: i32 = 13;
     pub const KRB_CRED_ENC_PART: i32 = 14;
 }
 
-//==============================================================================
-// PHASE 1: AES-CTS MODE (RFC 3962 Section 6)
-//==============================================================================
+/// Clock-skew tolerance for an AP-REQ authenticator, in seconds.
+///
+/// RFC 4120 §5.3 recommends 5 minutes; a site with worse clocks needs to
+/// say so rather than patching the binary.
+fn default_clock_skew() -> i64 {
+    std::env::var("FLINT_NFS_KRB5_CLOCK_SKEW_SECS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(300)
+}
 
-/// AES-CTS (Ciphertext Stealing) encryption per RFC 2040 Section 8
-/// 
-/// Adapted from RC5-CTS to AES-CTS (same algorithm, different cipher)
-/// Output length = Input length (no padding expansion)
-/// 
-/// Algorithm from RFC 2040:
-/// - For exact multiple of block size: CBC encrypt, swap last two blocks
-/// - For partial block: "steal" ciphertext bytes to pad, rearrange output
-fn aes_cts_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
-    if plaintext.len() < 16 {
-        return Err(KerberosError::DecryptionFailed(
-            format!("Plaintext too short for AES-CTS: {} bytes", plaintext.len())
-        ));
-    }
-    
-    if iv.len() != 16 {
-        return Err(KerberosError::DecryptionFailed(
-            format!("IV must be 16 bytes, got {}", iv.len())
-        ));
-    }
-    
-    let block_size = 16;
-    let len = plaintext.len();
-    
-    // Special case: exactly one block - no CTS needed
-    if len == block_size {
-        return aes_cbc_encrypt(key, iv, plaintext);
-    }
-    
-    // Calculate blocks and remainder
-    let num_blocks = len / block_size;
-    let remainder = len % block_size;
-    
-    if remainder == 0 {
-        // Case 1: Length is exact multiple of block size
-        // Per RFC 2040: Encrypt with CBC, swap last two blocks
-        let mut ciphertext = aes_cbc_encrypt(key, iv, plaintext)?;
-        
-        // Swap blocks n-2 and n-1 (last two blocks)
-        let swap_start = (num_blocks - 2) * block_size;
-        for i in 0..block_size {
-            ciphertext.swap(swap_start + i, swap_start + block_size + i);
-        }
-        
-        Ok(ciphertext)
-    } else {
-        // Case 2: Length not multiple of block size (has partial block)
-        // Per RFC 2040 Section 8: Use ciphertext stealing
-        
-        // Step 1: Encrypt all complete blocks with CBC
-        let complete_len = num_blocks * block_size;
-        let cbc_result = aes_cbc_encrypt(key, iv, &plaintext[..complete_len])?;
-        
-        // Step 2: Extract last complete ciphertext block (C[n-1])
-        let c_n_minus_1_start = (num_blocks - 1) * block_size;
-        let c_n_minus_1 = &cbc_result[c_n_minus_1_start..complete_len];
-        
-        // Step 3: Pad partial block with ZEROS (per Schneier's description)
-        let partial_plaintext = &plaintext[complete_len..];
-        let mut padded_partial = [0u8; 16];
-        padded_partial[..remainder].copy_from_slice(partial_plaintext);
-        // Rest is already zeros
-        
-        // Step 4: XOR padded block with C[n-1] and encrypt -> T
-        let mut xor_input = [0u8; 16];
-        for i in 0..16 {
-            xor_input[i] = padded_partial[i] ^ c_n_minus_1[i];
-        }
-        let t = aes_block_encrypt(key, &xor_input)?;
-        
-        // Step 5: Build CTS output per Schneier:
-        // Output: C[0], ..., C[n-2], T (full 16 bytes), C[n-1][0..remainder]
-        let mut result = Vec::with_capacity(len);
-        
-        // Add all blocks up to n-2 (if any)
-        if num_blocks > 1 {
-            result.extend_from_slice(&cbc_result[..(num_blocks - 1) * block_size]);
-        }
-        
-        // Add T (full 16 bytes)
-        result.extend_from_slice(&t);
-        
-        // Add truncated C[n-1] (only 'remainder' bytes)
-        result.extend_from_slice(&c_n_minus_1[..remainder]);
-        
-        assert_eq!(result.len(), len, "CTS output length must equal input length");
-        Ok(result)
+/// APOptions bit 2 (RFC 4120 §5.5.1), in the BIT STRING's 32-bit view.
+const AP_OPTS_MUTUAL_REQUIRED: u32 = 0x2000_0000;
+
+/// RFC 4121 §4.1 mechanism token IDs, which sit between the GSS mech
+/// OID and the Kerberos message.
+const TOK_ID_AP_REQ: &[u8; 2] = &[0x01, 0x00];
+const TOK_ID_AP_REP: &[u8; 2] = &[0x02, 0x00];
+
+/// RFC 4121 §2 base-key selection, split out so it can be tested without
+/// a KDC: "the acceptor subkey, if the acceptor asserted one; otherwise
+/// the initiator subkey ...; otherwise the ticket session key."
+///
+/// This server asserts no acceptor subkey, so the first arm cannot fire
+/// here — but the ordering is written out rather than assumed, because
+/// the arm that WAS missing is the second one.
+fn select_base_key(
+    session_key: &SessionKey,
+    initiator_subkey: Option<&SessionKey>,
+) -> (Vec<u8>, EncType, bool) {
+    match initiator_subkey {
+        Some(sk) => (sk.key.clone(), sk.enctype, true),
+        None => (session_key.key.clone(), session_key.enctype, false),
     }
 }
 
-/// Helper: Standard AES CBC encryption
-fn aes_cbc_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
-    let mut ciphertext = Vec::with_capacity(plaintext.len());
-    let mut prev_block = iv.to_vec();
-    
-    for chunk in plaintext.chunks(16) {
-        let mut block = [0u8; 16];
-        block[..chunk.len()].copy_from_slice(chunk);
-        
-        // XOR with previous ciphertext block (CBC)
-        for i in 0..16 {
-            block[i] ^= prev_block[i];
-        }
-        
-        // Encrypt
-        let encrypted = match key.len() {
-            16 => {
-                let cipher = Aes128::new(GenericArray::from_slice(key));
-                let mut block_array = GenericArray::clone_from_slice(&block);
-                cipher.encrypt_block(&mut block_array);
-                block_array.to_vec()
-            }
-            32 => {
-                let cipher = Aes256::new(GenericArray::from_slice(key));
-                let mut block_array = GenericArray::clone_from_slice(&block);
-                cipher.encrypt_block(&mut block_array);
-                block_array.to_vec()
-            }
-            _ => return Err(KerberosError::DecryptionFailed(
-                format!("Unsupported key length: {}", key.len())
-            )),
-        };
-        
-        ciphertext.extend_from_slice(&encrypted);
-        prev_block = encrypted;
-    }
-    
-    Ok(ciphertext)
+/// Bridge to the RFC-conformant crypto in [`super::krb`].
+///
+/// The primitives further down this file are NOT RFC 3961: they derive
+/// Ke with Kc's constant, zero-pad where n-fold is required, and encrypt
+/// with no confounder and the HMAC inside the ciphertext. Every ticket,
+/// authenticator and AP-REP now goes through `krb::profile`, which is
+/// pinned to published test vectors. Passing the *declared* enctype with
+/// the service key also makes a key/enctype mismatch an error rather
+/// than a silently short key — `kdf::derive_key` length-checks its base.
+fn spec_keys(enctype: EncType, base_key: &[u8], usage: i32)
+    -> Result<(super::krb::profile::Enctype, Vec<u8>, Vec<u8>)>
+{
+    let e = enctype as i32;
+    let map = |m: String| KerberosError::DecryptionFailed(m);
+    let kd = super::krb::kdf::Enctype::from_i32(e).map_err(|x| map(x.to_string()))?;
+    let pr = super::krb::profile::Enctype::from_i32(e).map_err(|x| map(x.to_string()))?;
+    let usage = usage as u32;
+    let ke = super::krb::kdf::derive_key(kd, base_key, usage, super::krb::kdf::KeyUse::Encryption)
+        .map_err(|x| map(x.to_string()))?;
+    let ki = super::krb::kdf::derive_key(kd, base_key, usage, super::krb::kdf::KeyUse::Integrity)
+        .map_err(|x| map(x.to_string()))?;
+    Ok((pr, ke, ki))
 }
 
-/// CTS encryption for last two full blocks (swap them)
-#[allow(dead_code)]
-fn aes_cts_encrypt_last_two_blocks(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>> {
-    assert_eq!(data.len(), 32); // Two full blocks
-    
-    // Encrypt both blocks normally with CBC
-    let encrypted = aes_cbc_encrypt(key, iv, data)?;
-    
-    // Swap the two blocks (CTS technique per RFC 3962)
-    let mut result = Vec::with_capacity(32);
-    result.extend_from_slice(&encrypted[16..32]); // Second block first
-    result.extend_from_slice(&encrypted[0..16]);  // First block second
-    
-    Ok(result)
+/// RFC 3961 §5.3 / RFC 8009 §5 decrypt. Verifies the HMAC in constant
+/// time before returning any plaintext.
+fn spec_decrypt(enctype: EncType, base_key: &[u8], usage: i32, ciphertext: &[u8]) -> Result<Vec<u8>> {
+    let (pr, ke, ki) = spec_keys(enctype, base_key, usage)?;
+    super::krb::profile::decrypt(pr, &ke, &ki, ciphertext)
+        .map_err(|x| KerberosError::DecryptionFailed(x.to_string()))
 }
 
-/// CTS encryption for one full block + partial block
-/// Kerberos uses "last two blocks" CTS variant
-#[allow(dead_code)]
-fn aes_cts_encrypt_partial(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>> {
-    let partial_len = data.len() % 16;
-    let p1 = &data[..16];
-    let p2 = &data[16..];
-    
-    // Encrypt P1 with CBC
-    let mut xor_block = [0u8; 16];
-    for i in 0..16 {
-        xor_block[i] = p1[i] ^ iv[i];
-    }
-    let c1 = aes_block_encrypt(key, &xor_block)?;
-    
-    // Pad P2 with zeros
-    let mut p2_padded = [0u8; 16];
-    p2_padded[..partial_len].copy_from_slice(p2);
-    
-    // Encrypt P2 (padded) with C1 as IV
-    let mut xor_block2 = [0u8; 16];
-    for i in 0..16 {
-        xor_block2[i] = p2_padded[i] ^ c1[i];
-    }
-    let c2 = aes_block_encrypt(key, &xor_block2)?;
-    
-    // CTS output: C2[0..partial_len] || C1
-    let mut result = Vec::with_capacity(data.len());
-    result.extend_from_slice(&c2[..partial_len]);
-    result.extend_from_slice(&c1);
-    
-    Ok(result)
-}
-
-/// Single AES block encryption
-fn aes_block_encrypt(key: &[u8], block: &[u8]) -> Result<Vec<u8>> {
-    let encrypted = match key.len() {
-        16 => {
-            let cipher = Aes128::new(GenericArray::from_slice(key));
-            let mut block_array = GenericArray::clone_from_slice(block);
-            cipher.encrypt_block(&mut block_array);
-            block_array.to_vec()
-        }
-        32 => {
-            let cipher = Aes256::new(GenericArray::from_slice(key));
-            let mut block_array = GenericArray::clone_from_slice(block);
-            cipher.encrypt_block(&mut block_array);
-            block_array.to_vec()
-        }
-        _ => return Err(KerberosError::DecryptionFailed(
-            format!("Unsupported key length: {}", key.len())
-        )),
-    };
-    Ok(encrypted)
-}
-
-/// Single AES block decryption  
-fn aes_block_decrypt(key: &[u8], block: &[u8]) -> Result<Vec<u8>> {
-    let decrypted = match key.len() {
-        16 => {
-            let cipher = Aes128::new(GenericArray::from_slice(key));
-            let mut block_array = GenericArray::clone_from_slice(block);
-            cipher.decrypt_block(&mut block_array);
-            block_array.to_vec()
-        }
-        32 => {
-            let cipher = Aes256::new(GenericArray::from_slice(key));
-            let mut block_array = GenericArray::clone_from_slice(block);
-            cipher.decrypt_block(&mut block_array);
-            block_array.to_vec()
-        }
-        _ => return Err(KerberosError::DecryptionFailed(
-            format!("Unsupported key length: {}", key.len())
-        )),
-    };
-    Ok(decrypted)
-}
-
-/// AES-CTS decryption per RFC 2040 Section 8
-/// 
-/// Reverse of AES-CTS encryption
-/// Input length = Output length (no padding)
-fn aes_cts_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
-    if ciphertext.len() < 16 {
-        return Err(KerberosError::DecryptionFailed(
-            format!("Ciphertext too short for AES-CTS: {} bytes", ciphertext.len())
-        ));
-    }
-    
-    if iv.len() != 16 {
-        return Err(KerberosError::DecryptionFailed(
-            format!("IV must be 16 bytes, got {}", iv.len())
-        ));
-    }
-    
-    let block_size = 16;
-    let len = ciphertext.len();
-    
-    // Special case: exactly one block
-    if len == block_size {
-        return aes_cbc_decrypt(key, iv, ciphertext);
-    }
-    
-    let num_blocks = len / block_size;
-    let remainder = len % block_size;
-    
-    if remainder == 0 {
-        // Case 1: Exact multiple - reverse swap of last two blocks, then CBC decrypt
-        let mut temp = ciphertext.to_vec();
-        let swap_start = (num_blocks - 2) * block_size;
-        
-        // Un-swap the last two blocks
-        for i in 0..block_size {
-            temp.swap(swap_start + i, swap_start + block_size + i);
-        }
-        
-        // Now decrypt with CBC
-        aes_cbc_decrypt(key, iv, &temp)
-    } else {
-        // Case 2: Has partial block - reverse ciphertext stealing
-        // Input format: C[0], ..., C[n-2], C[n]_partial, C[n-1]
-        
-        // Extract positions
-        let cn_partial_start = if num_blocks > 1 { 
-            (num_blocks - 1) * block_size 
-        } else { 
-            0 
-        };
-        let cn_partial_end = cn_partial_start + remainder;
-        
-        // C[n]_partial: ciphertext[cn_partial_start..cn_partial_end]
-        let _c_n_partial = &ciphertext[cn_partial_start..cn_partial_end];
-
-        // C[n-1]: ciphertext[cn_partial_end..end]
-        let _c_n_minus_1 = &ciphertext[cn_partial_end..];
-        
-        // Per Schneier's "Applied Cryptography" pages 195-196 and search results:
-        // Input format: C[0], ..., C[n-2], T (16 bytes), C[n-1]_partial (remainder bytes)
-        
-        // Calculate positions
-        let t_start = if num_blocks > 1 { (num_blocks - 1) * block_size } else { 0 };
-        let t_end = t_start + block_size;
-        
-        // Extract T (full 16 bytes) and C[n-1]_partial
-        let t = &ciphertext[t_start..t_end];
-        let c_n_minus_1_partial = &ciphertext[t_end..];
-        
-        // Per the algorithm, we need to:
-        // 1. First decrypt T to recover the padded partial plaintext
-        // 2. Then use information from T to help decrypt C[n-1]
-        
-        // But wait - we need C[n-1]_full to decrypt T (it's the IV for T)!
-        // And we need T to reconstruct C[n-1]_full. Circular dependency!
-        
-        // The solution: Use bytes from BOTH to reconstruct
-        // Reconstruct full C[n-1]: C[n-1]_partial || bytes_stolen_back_from_T
-        let mut c_n_minus_1_full = [0u8; 16];
-        c_n_minus_1_full[..remainder].copy_from_slice(c_n_minus_1_partial);
-        // During encryption, we padded P[n] with zeros, NOT with C[n-1] bytes!
-        // So T doesn't contain C[n-1] bytes. The bytes at T[remainder..] are
-        // the encryption of the zero-padding.
-        // Actually, we need the ORIGINAL C[n-1] bytes, which we can't get from T...
-        
-        // Let me think: maybe we decrypt in the opposite order?
-        // Decrypt C[n-1]_partial first (but it's incomplete...)
-        // OR: Maybe the last_iv calculation is the key?
-        
-        // Try a different approach: treat T as if it were C[n] and work backwards
-        let last_iv = if num_blocks > 1 {
-            &ciphertext[(num_blocks - 2) * block_size..t_start]
-        } else {
-            iv
-        };
-        
-        // Decrypt T first (T is like C[n])
-        let d_t = aes_block_decrypt(key, t)?;
-        
-        // Now, during encryption, T = E([P[n] zero-padded] XOR C[n-1])
-        // So: D(T) = [P[n] zero-padded] XOR C[n-1]
-        // Therefore: [P[n] zero-padded] = D(T) XOR C[n-1]
-        // But we only have C[n-1]_partial!
-        
-        // The trick: D(T)[remainder..] XOR ??? = zeros (the padding)
-        // So: C[n-1][remainder..] = D(T)[remainder..]
-        c_n_minus_1_full[remainder..].copy_from_slice(&d_t[remainder..]);
-        
-        // Now decrypt C[n-1] with proper IV
-        let d_n_minus_1 = aes_block_decrypt(key, &c_n_minus_1_full)?;
-        let mut p_n_minus_1 = [0u8; 16];
-        for i in 0..16 {
-            p_n_minus_1[i] = d_n_minus_1[i] ^ last_iv[i];
-        }
-        
-        // And recover P[n] from D(T) XOR C[n-1]_full
-        let mut p_n_padded = [0u8; 16];
-        for i in 0..16 {
-            p_n_padded[i] = d_t[i] ^ c_n_minus_1_full[i];
-        }
-        
-        // Step 6: Decrypt earlier blocks with standard CBC (if any)
-        let mut result = if num_blocks > 1 {
-            aes_cbc_decrypt(key, iv, &ciphertext[..(num_blocks - 1) * block_size])?
-        } else {
-            Vec::new()
-        };
-        
-        // Step 7: Append the recovered plaintext blocks
-        // For 28 bytes: result is empty, then we add P[0] (16 bytes) and P[1] (12 bytes)
-        result.extend_from_slice(&p_n_minus_1);
-        result.extend_from_slice(&p_n_padded[..remainder]);
-        
-        debug!("CTS decrypt: len={}, num_blocks={}, remainder={}, result_len={}", 
-               len, num_blocks, remainder, result.len());
-        
-        assert_eq!(result.len(), len, "CTS output length must equal input length");
-        Ok(result)
-    }
-}
-
-/// Helper: Standard AES CBC decryption
-fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
-    let mut plaintext = Vec::with_capacity(ciphertext.len());
-    let mut prev_block = iv.to_vec();
-    
-    for chunk in ciphertext.chunks(16) {
-        let mut block = [0u8; 16];
-        block[..chunk.len()].copy_from_slice(chunk);
-        
-        // Decrypt
-        let decrypted = match key.len() {
-            16 => {
-                let cipher = Aes128::new(GenericArray::from_slice(key));
-                let mut block_array = GenericArray::clone_from_slice(&block);
-                cipher.decrypt_block(&mut block_array);
-                block_array.to_vec()
-            }
-            32 => {
-                let cipher = Aes256::new(GenericArray::from_slice(key));
-                let mut block_array = GenericArray::clone_from_slice(&block);
-                cipher.decrypt_block(&mut block_array);
-                block_array.to_vec()
-            }
-            _ => return Err(KerberosError::DecryptionFailed(
-                format!("Unsupported key length: {}", key.len())
-            )),
-        };
-        
-        // XOR with previous ciphertext block (CBC)
-        let mut plain_block = [0u8; 16];
-        for i in 0..16 {
-            plain_block[i] = decrypted[i] ^ prev_block[i];
-        }
-        
-        plaintext.extend_from_slice(&plain_block[..chunk.len()]);
-        prev_block = block.to_vec();
-    }
-    
-    Ok(plaintext)
-}
-
-/// CTS decryption for partial last block
-/// Reverse of CTS encryption
-#[allow(dead_code)]
-fn aes_cts_decrypt_partial(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>> {
-    let partial_len = data.len() % 16;
-    
-    // Input: C2[0..partial_len] || C1
-    let c2_part = &data[..partial_len];
-    let c1 = &data[partial_len..];
-    
-    // Decrypt C1
-    let d1 = aes_block_decrypt(key, c1)?;
-    
-    // Reconstruct full C2 by appending last bytes of D1
-    let mut c2_full = [0u8; 16];
-    c2_full[..partial_len].copy_from_slice(c2_part);
-    c2_full[partial_len..].copy_from_slice(&d1[partial_len..]);
-    
-    // Decrypt C2
-    let d2 = aes_block_decrypt(key, &c2_full)?;
-    
-    // XOR D1 with IV to get P1
-    let mut p1 = [0u8; 16];
-    for i in 0..16 {
-        p1[i] = d1[i] ^ iv[i];
-    }
-    
-    // XOR D2 with C1 to get P2_padded, then truncate
-    let mut p2_padded = [0u8; 16];
-    for i in 0..16 {
-        p2_padded[i] = d2[i] ^ c1[i];
-    }
-    
-    // Output: P1 || P2_padded[0..partial_len]
-    let mut result = Vec::with_capacity(data.len());
-    result.extend_from_slice(&p1);
-    result.extend_from_slice(&p2_padded[..partial_len]);
-    
-    Ok(result)
+/// RFC 3961 §5.3 / RFC 8009 §5 encrypt. Draws its own random confounder.
+fn spec_encrypt(enctype: EncType, base_key: &[u8], usage: i32, plaintext: &[u8]) -> Result<Vec<u8>> {
+    let (pr, ke, ki) = spec_keys(enctype, base_key, usage)?;
+    super::krb::profile::encrypt(pr, &ke, &ki, plaintext)
+        .map_err(|x| KerberosError::DecryptionFailed(x.to_string()))
 }
 
 //==============================================================================
-// PHASE 2: KERBEROS KEY DERIVATION (RFC 3961/3962)
+// CRYPTO: see `super::krb`
 //==============================================================================
-
-/// Derive encryption or integrity key from base key
-/// RFC 3961 Section 5.1 and RFC 3962 Section 4
-fn derive_key(base_key: &[u8], enctype: EncType, usage: i32, key_type: &str) -> Result<Vec<u8>> {
-    match enctype {
-        EncType::AES128CtsHmacSha196 | EncType::AES256CtsHmacSha196 => {
-            derive_key_aes_sha1(base_key, enctype, usage, key_type)
-        }
-        EncType::AES128CtsHmacSha256128 | EncType::AES256CtsHmacSha384196 => {
-            derive_key_aes_sha2(base_key, enctype, usage, key_type)
-        }
-    }
-}
-
-/// Derive key using AES with HMAC-SHA1 (RFC 3962)
-fn derive_key_aes_sha1(base_key: &[u8], enctype: EncType, usage: i32, key_type: &str) -> Result<Vec<u8>> {
-    // Build usage constant: 4-byte usage in big-endian || 1-byte key_type
-    let mut constant = Vec::new();
-    constant.extend_from_slice(&(usage as u32).to_be_bytes());
-    
-    // Key type: "ke" = 0x99 (encryption), "ki" = 0x55 (integrity)
-    let key_type_byte = match key_type {
-        "ke" => 0x99u8,
-        "ki" => 0x55u8,
-        _ => return Err(KerberosError::DecryptionFailed(
-            format!("Unknown key type: {}", key_type)
-        )),
-    };
-    constant.push(key_type_byte);
-    
-    // Key length in bits
-    let key_len = enctype.key_size();
-    
-    // Use DR (pseudo-random) function
-    let derived = dr_aes_sha1(base_key, &constant, key_len)?;
-    
-    Ok(derived)
-}
-
-/// Derive key using AES with HMAC-SHA2
-fn derive_key_aes_sha2(base_key: &[u8], enctype: EncType, usage: i32, key_type: &str) -> Result<Vec<u8>> {
-    // Build usage constant
-    let mut constant = Vec::new();
-    constant.extend_from_slice(&(usage as u32).to_be_bytes());
-    
-    let key_type_byte = match key_type {
-        "ke" => 0x99u8,
-        "ki" => 0x55u8,
-        _ => return Err(KerberosError::DecryptionFailed(
-            format!("Unknown key type: {}", key_type)
-        )),
-    };
-    constant.push(key_type_byte);
-    
-    let key_len = enctype.key_size();
-    
-    // Use appropriate hash function
-    match enctype {
-        EncType::AES128CtsHmacSha256128 => dr_aes_sha256(base_key, &constant, key_len),
-        EncType::AES256CtsHmacSha384196 => dr_aes_sha384(base_key, &constant, key_len),
-        _ => Err(KerberosError::DecryptionFailed("Invalid enctype for SHA2".to_string())),
-    }
-}
-
-/// DR (Pseudo-Random) function using AES-128/256 and HMAC-SHA1
-/// RFC 3962 Section 4
-fn dr_aes_sha1(key: &[u8], constant: &[u8], output_len: usize) -> Result<Vec<u8>> {
-    let block_size = 16;
-    let k = (output_len + block_size - 1) / block_size; // Number of blocks needed
-    
-    let mut result = Vec::new();
-    let iv = vec![0u8; block_size];
-    
-    // Generate k blocks
-    let mut input = constant.to_vec();
-    // Pad to block size
-    while input.len() < block_size {
-        input.push(0);
-    }
-    
-    for _ in 0..k {
-        let encrypted = aes_cbc_encrypt(key, &iv, &input)?;
-        result.extend_from_slice(&encrypted[encrypted.len() - block_size..]);
-        input = encrypted[encrypted.len() - block_size..].to_vec();
-    }
-    
-    // Truncate to desired length
-    result.truncate(output_len);
-    Ok(result)
-}
-
-/// DR function using HMAC-SHA256
-fn dr_aes_sha256(key: &[u8], constant: &[u8], output_len: usize) -> Result<Vec<u8>> {
-    type HmacSha256 = Hmac<Sha256>;
-    
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key)
-        .map_err(|e| KerberosError::DecryptionFailed(format!("HMAC error: {}", e)))?;
-    mac.update(constant);
-    let result = mac.finalize();
-    
-    Ok(result.into_bytes()[..output_len].to_vec())
-}
-
-/// DR function using HMAC-SHA384
-fn dr_aes_sha384(key: &[u8], constant: &[u8], output_len: usize) -> Result<Vec<u8>> {
-    type HmacSha384 = Hmac<Sha384>;
-    
-    let mut mac = <HmacSha384 as Mac>::new_from_slice(key)
-        .map_err(|e| KerberosError::DecryptionFailed(format!("HMAC error: {}", e)))?;
-    mac.update(constant);
-    let result = mac.finalize();
-    
-    Ok(result.into_bytes()[..output_len].to_vec())
-}
-
-/// Compute HMAC for integrity check
-fn compute_hmac(key: &[u8], data: &[u8], truncate_to: usize, use_sha1: bool) -> Vec<u8> {
-    if use_sha1 {
-        type HmacSha1 = Hmac<Sha1>;
-        let mut mac = <HmacSha1 as Mac>::new_from_slice(key).unwrap();
-        mac.update(data);
-        let result = mac.finalize();
-        result.into_bytes()[..truncate_to].to_vec()
-    } else {
-        type HmacSha256 = Hmac<Sha256>;
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(key).unwrap();
-        mac.update(data);
-        let result = mac.finalize();
-        result.into_bytes()[..truncate_to].to_vec()
-    }
-}
+//
+// The AES-CTS, key-derivation and HMAC primitives that used to live here
+// were removed, not ported. They were not RFC 3961/3962:
+//
+//   * Ke was derived with 0x99, the constant RFC 3961 §5.3 assigns to Kc,
+//     and there was no way to ask for Kc at all;
+//   * DR zero-padded its constant where §5.1 requires n-fold;
+//   * encryption used no confounder and sealed the HMAC INSIDE the
+//     ciphertext instead of appending it;
+//   * the SHA-2 enctypes used a bare HMAC rather than RFC 8009's KDF, and
+//     `compute_hmac`'s `use_sha1: bool` could not express SHA-384 at all,
+//     so enctype 20 silently got SHA-256.
+//
+// Sixteen tests covered them and all sixteen were self-round-trips —
+// encrypt with these functions, decrypt with these functions — which pass
+// whether or not the algorithm matches the specification. That is why
+// four defects survived here for the life of the file. Those tests were
+// deleted rather than ported: porting a round-trip onto correct code
+// rebuilds the same evidence vacuum.
+//
+// Replacements live in `super::krb`, pinned to published test vectors:
+//   krb::nfold   RFC 3961 §5.1 n-fold
+//   krb::kdf     RFC 3961 §5.1 DR/DK, RFC 8009 §3 KDF-HMAC-SHA2
+//   krb::profile RFC 3961 §5.3 / RFC 8009 §5 encrypt, decrypt, checksum
+//   krb::token   RFC 4121 §4.2 per-message Wrap and MIC
+// Reach them through `spec_encrypt` / `spec_decrypt` above.
 
 /// Get current time in seconds since epoch
 fn current_time() -> i64 {
@@ -1057,47 +636,20 @@ impl Ticket {
     fn decrypt(&self, service_key: &ServiceKey) -> Result<EncTicketPart> {
         debug!("   Decrypting ticket with service key (enctype={:?})", service_key.enctype);
         
-        // Derive decryption key
-        let ke = derive_key(&service_key.key, service_key.enctype, 
-                           key_usage::TGS_REP_ENC_PART, "ke")?;
-        
-        // Decrypt with AES-CTS (Kerberos uses zero IV)
-        let iv = vec![0u8; 16];
-        let plaintext = aes_cts_decrypt(&ke, &iv, &self.enc_part.cipher)?;
-        
-        // Verify checksum (HMAC at end of plaintext)
-        let checksum_len = match self.enc_part.enctype {
-            EncType::AES128CtsHmacSha196 | EncType::AES256CtsHmacSha196 => 12,
-            _ => 16,
-        };
-        
-        if plaintext.len() <= checksum_len {
-            return Err(KerberosError::DecryptionFailed(
-                "Decrypted ticket too short for checksum".to_string()
-            ));
-        }
-        
-        let data_len = plaintext.len() - checksum_len;
-        let data = &plaintext[..data_len];
-        let checksum = &plaintext[data_len..];
-        
-        // Compute expected checksum
-        let ki = derive_key(&service_key.key, service_key.enctype,
-                           key_usage::TGS_REP_ENC_PART, "ki")?;
-        let use_sha1 = matches!(self.enc_part.enctype, 
-            EncType::AES128CtsHmacSha196 | EncType::AES256CtsHmacSha196);
-        let expected = compute_hmac(&ki, data, checksum_len, use_sha1);
-        
-        if checksum != expected {
-            return Err(KerberosError::DecryptionFailed(
-                "Ticket checksum verification failed".to_string()
-            ));
-        }
-        
+        // Usage 2 — RFC 4120 §7.5.1. This was TGS_REP_ENC_PART (8), the
+        // usage for the TGS-REP *encrypted part*, which derives a
+        // different key and cannot decrypt any real KDC's ticket.
+        let data = spec_decrypt(
+            self.enc_part.enctype,
+            &service_key.key,
+            key_usage::TICKET,
+            &self.enc_part.cipher,
+        )?;
+
         debug!("   ✅ Ticket checksum verified");
-        
+
         // Parse decrypted content
-        EncTicketPart::parse(data)
+        EncTicketPart::parse(&data)
     }
 }
 
@@ -1218,52 +770,24 @@ struct Authenticator {
 impl Authenticator {
     /// Parse and decrypt authenticator from AP-REQ
     fn parse_and_decrypt(enc_data: &[u8], session_key: &SessionKey) -> Result<Self> {
-        // Derive decryption key
-        let ke = derive_key(&session_key.key, session_key.enctype,
-                           key_usage::AP_REQ_AUTHENTICATOR, "ke")?;
-        
-        // Decrypt
-        let iv = vec![0u8; 16];
-        let plaintext = aes_cts_decrypt(&ke, &iv, enc_data)?;
-        
-        // Verify checksum
-        let checksum_len = match session_key.enctype {
-            EncType::AES128CtsHmacSha196 | EncType::AES256CtsHmacSha196 => 12,
-            _ => 16,
-        };
-        
-        if plaintext.len() <= checksum_len {
-            return Err(KerberosError::InvalidAuthenticator(
-                "Authenticator too short for checksum".to_string()
-            ));
-        }
-        
-        let data_len = plaintext.len() - checksum_len;
-        let data = &plaintext[..data_len];
-        let checksum = &plaintext[data_len..];
-        
-        // Verify checksum
-        let ki = derive_key(&session_key.key, session_key.enctype,
-                           key_usage::AP_REQ_AUTHENTICATOR, "ki")?;
-        let use_sha1 = matches!(session_key.enctype, 
-            EncType::AES128CtsHmacSha196 | EncType::AES256CtsHmacSha196);
-        let expected = compute_hmac(&ki, data, checksum_len, use_sha1);
-        
-        if checksum != expected {
-            return Err(KerberosError::InvalidAuthenticator(
-                "Authenticator checksum verification failed".to_string()
-            ));
-        }
-        
+        // Usage 11 was already right; the crypto under it was not.
+        let data = spec_decrypt(
+            session_key.enctype,
+            &session_key.key,
+            key_usage::AP_REQ_AUTHENTICATOR,
+            enc_data,
+        )
+        .map_err(|e| KerberosError::InvalidAuthenticator(e.to_string()))?;
+
         debug!("   ✅ Authenticator checksum verified");
-        
+
         // Parse authenticator structure
-        Self::parse_from_plaintext(data)
+        Self::parse_from_plaintext(&data)
     }
     
     /// Parse Authenticator structure from plaintext
     fn parse_from_plaintext(data: &[u8]) -> Result<Self> {
-        // Authenticator ::= [APPLICATION 11] SEQUENCE {
+        // Authenticator ::= [APPLICATION 2] SEQUENCE {
         //   authenticator-vno[0] INTEGER (5),
         //   crealm[1] Realm,
         //   cname[2] PrincipalName,
@@ -1275,9 +799,14 @@ impl Authenticator {
         // }
         
         let (tag, _len, header_size) = parse_der_tag_length(data)?;
-        if tag != 0x6B {  // APPLICATION 11
+        // RFC 4120 §5.10 assigns the Authenticator APPLICATION **2**
+        // (0x62). This checked for APPLICATION 11 (0x6b) — which is
+        // AS-REP's tag, and also the key usage number for the AP-REQ
+        // authenticator, which is where the 11 almost certainly came
+        // from. The two are unrelated numbers that happen to collide.
+        if tag != 0x62 {  // APPLICATION 2
             return Err(KerberosError::ParseError(
-                format!("Expected APPLICATION 11 for Authenticator, got 0x{:02x}", tag)
+                format!("Expected APPLICATION 2 for Authenticator, got 0x{:02x}", tag)
             ));
         }
         
@@ -1446,30 +975,16 @@ impl EncAPRepPart {
     /// Encrypt and return as EncryptedData
     fn encrypt(&self, session_key: &SessionKey) -> Result<Vec<u8>> {
         let plaintext = self.encode_asn1();
-        
-        // Compute HMAC checksum
-        let ki = derive_key(&session_key.key, session_key.enctype,
-                           key_usage::AP_REP_ENC_PART, "ki")?;
-        
-        let checksum_len = match session_key.enctype {
-            EncType::AES128CtsHmacSha196 | EncType::AES256CtsHmacSha196 => 12,
-            _ => 16,
-        };
-        
-        let use_sha1 = matches!(session_key.enctype, 
-            EncType::AES128CtsHmacSha196 | EncType::AES256CtsHmacSha196);
-        let checksum = compute_hmac(&ki, &plaintext, checksum_len, use_sha1);
-        
-        // Append checksum
-        let mut data_with_checksum = plaintext;
-        data_with_checksum.extend_from_slice(&checksum);
-        
-        // Encrypt with AES-CTS
-        let ke = derive_key(&session_key.key, session_key.enctype,
-                           key_usage::AP_REP_ENC_PART, "ke")?;
-        let iv = vec![0u8; 16];
-        let ciphertext = aes_cts_encrypt(&ke, &iv, &data_with_checksum)?;
-        
+
+        // RFC 3961 §5.3: a random confounder, and the HMAC APPENDED to
+        // the ciphertext rather than sealed inside it.
+        let ciphertext = spec_encrypt(
+            session_key.enctype,
+            &session_key.key,
+            key_usage::AP_REP_ENC_PART,
+            &plaintext,
+        )?;
+
         // Wrap in EncryptedData structure
         let enc_data = EncryptedData {
             enctype: session_key.enctype,
@@ -1806,10 +1321,26 @@ fn encode_asn1_octet_string(data: &[u8]) -> Vec<u8> {
 
 /// Encode KerberosTime as GeneralizedTime
 #[allow(dead_code)]
-fn encode_kerberos_time(_timestamp: i64) -> Vec<u8> {
-    // For simplicity, encode current time as GeneralizedTime
-    // Format: YYYYMMDDHHMMSSz
-    let time_str = format!("{}Z", chrono::Utc::now().format("%Y%m%d%H%M%S"));
+fn encode_kerberos_time(timestamp: i64) -> Vec<u8> {
+    // ⚠ This IGNORED its argument and encoded `Utc::now()` — "for
+    // simplicity", per the comment it replaced.
+    //
+    // The only caller is the AP-REP's EncAPRepPart, whose ctime and
+    // cusec MUST echo the AP-REQ authenticator's EXACTLY (RFC 4120
+    // §3.2.5). That echo IS mutual authentication: it is the client's
+    // only proof that the server could decrypt the authenticator, and a
+    // client MUST reject a mismatch with KRB_AP_ERR_MUT_FAIL.
+    //
+    // So every AP-REP this server ever sent carried the server's clock
+    // instead of the client's timestamp, and mutual authentication could
+    // never have succeeded — which is precisely how a real `mount -o
+    // sec=krb5p` failed: the client accepted the context handle, then
+    // threw the context away when `gss_init_sec_context` rejected the
+    // AP-REP, and retried until it gave up with "access denied".
+    // Format: YYYYMMDDHHMMSSZ
+    let dt = chrono::DateTime::from_timestamp(timestamp, 0)
+        .unwrap_or_else(chrono::Utc::now);
+    let time_str = format!("{}Z", dt.format("%Y%m%d%H%M%S"));
     
     let mut result = vec![0x18];  // GeneralizedTime tag
     result.push(time_str.len() as u8);
@@ -1900,6 +1431,28 @@ fn extract_tagged_field<'a>(data: &'a [u8], expected_tag: u8) -> Result<(&'a [u8
 }
 
 impl KerberosContext {
+    /// The RFC 4121 per-message token machinery for this context.
+    ///
+    /// Keyed on [`Self::base_key`] — the §2 selection — and fixed to
+    /// `Role::Acceptor` with `acceptor_subkey = false`, because this is a
+    /// server and it asserts no subkey of its own. Both of those feed the
+    /// Flags octet, which is inside every checksum, so getting either
+    /// wrong changes every token on the wire.
+    pub fn per_message_tokens(
+        &self,
+    ) -> Result<super::krb::token::PerMessageTokens<super::krb::token::ContextKey>> {
+        let key = super::krb::token::ContextKey::new(
+            self.base_key_enctype as i32,
+            &self.base_key,
+        )
+        .map_err(|e| KerberosError::DecryptionFailed(e.to_string()))?;
+        Ok(super::krb::token::PerMessageTokens::new(
+            key,
+            super::krb::token::Role::Acceptor,
+            false,
+        ))
+    }
+
     /// Accept a GSS-API Kerberos AP-REQ token with FULL CRYPTOGRAPHY
     /// 
     /// This implements complete Kerberos crypto:
@@ -1909,6 +1462,22 @@ impl KerberosContext {
     /// 4. Decrypt and validate authenticator
     /// 5. Generate cryptographically valid AP-REP
     pub fn accept_token(keytab: &Keytab, token: &[u8]) -> Result<(Self, Vec<u8>)> {
+        Self::accept_token_with_skew(keytab, token, default_clock_skew())
+    }
+
+    /// As [`Self::accept_token`], with an explicit clock-skew tolerance.
+    ///
+    /// Exists because the interop fixtures are recorded, not live: a
+    /// captured AP-REQ is minutes or months old by the time it is
+    /// replayed in a test, and a fixture that expires is a test that
+    /// rots. Production goes through `accept_token`, which reads the
+    /// site policy from `FLINT_NFS_KRB5_CLOCK_SKEW_SECS` (default 300,
+    /// the RFC 4120 §5.3 recommendation).
+    pub fn accept_token_with_skew(
+        keytab: &Keytab,
+        token: &[u8],
+        max_skew_secs: i64,
+    ) -> Result<(Self, Vec<u8>)> {
         info!("🔐 Accepting Kerberos GSS token with FULL CRYPTOGRAPHY: {} bytes", token.len());
         
         // Parse GSS-API wrapper
@@ -1937,19 +1506,48 @@ impl KerberosContext {
             return Err(KerberosError::ParseError("Not a Kerberos GSS token".to_string()));
         }
         
-        // Extract AP-REQ (after OID)
-        let ap_req_start = gss_content_start + krb5_oid.len();
+        // RFC 4121 §4.1: between the mech OID and the Kerberos message
+        // sits a 2-octet TOK_ID — 01 00 for AP-REQ, 02 00 for AP-REP,
+        // 03 00 for KRB-ERROR.
+        //
+        // This was skipped over: the parser jumped straight from the OID
+        // to the message and then rejected the leading 0x01 as a bad
+        // AP-REQ tag. NOTHING CAUGHT IT because no real GSS token was
+        // ever fed to this function — the only fixtures were hand-built
+        // ones that omitted the field, so the parser and its tests agreed
+        // with each other and with no other implementation.
+        let tok_id_start = gss_content_start + krb5_oid.len();
+        if token.len() < tok_id_start + 2 {
+            return Err(KerberosError::ParseError("Token too short for TOK_ID".to_string()));
+        }
+        let tok_id = &token[tok_id_start..tok_id_start + 2];
+        if tok_id != TOK_ID_AP_REQ {
+            return Err(KerberosError::ParseError(format!(
+                "Expected TOK_ID 01 00 (KRB_AP_REQ), found {:02x} {:02x}",
+                tok_id[0], tok_id[1]
+            )));
+        }
+
+        // Extract AP-REQ (after OID and TOK_ID)
+        let ap_req_start = tok_id_start + 2;
         let ap_req_data = &token[ap_req_start..];
         
         debug!("   Parsed GSS wrapper: AP-REQ is {} bytes", ap_req_data.len());
         
         // Parse AP-REQ structure
-        let (ticket, enc_authenticator) = Self::parse_ap_req(ap_req_data)?;
+        let (ticket, enc_authenticator, ap_options) = Self::parse_ap_req(ap_req_data)?;
         
         // Find service key for this ticket
         let service_name = ticket.sname.join("/");
-        let service_key = keytab.find_key(&service_name)
-            .ok_or_else(|| KerberosError::PrincipalNotFound(service_name.clone()))?;
+        // Select by the enctype the TICKET declares, not just the name.
+        let service_key = keytab
+            .find_key_for(&service_name, ticket.enc_part.enctype, ticket.enc_part.kvno)
+            .ok_or_else(|| {
+                KerberosError::PrincipalNotFound(format!(
+                    "{} with enctype {:?}",
+                    service_name, ticket.enc_part.enctype
+                ))
+            })?;
         
         info!("   Found service key: {}@{}", service_key.principal, service_key.realm);
         
@@ -1961,13 +1559,23 @@ impl KerberosContext {
         
         // Decrypt and validate authenticator
         let authenticator = Authenticator::parse_and_decrypt(&enc_authenticator, &session_key)?;
-        authenticator.validate(300)?;  // 5 minute tolerance
+        authenticator.validate(max_skew_secs)?;
         
         info!("   ✅ Authenticator validated: time_skew={}s", 
               current_time() - authenticator.ctime);
         
         // Create context
         let client_name = enc_ticket_part.cname.join("/");
+        // RFC 4121 §2 base-key selection. This server asserts no acceptor
+        // subkey (see `generate_ap_rep_with_crypto`, which passes None), so
+        // the choice is between the initiator's subkey and the ticket
+        // session key — and until now it was always the latter.
+        let (base_key, base_key_enctype, used_initiator_subkey) =
+            select_base_key(&session_key, authenticator.subkey.as_ref());
+        if used_initiator_subkey {
+            info!("   Adopting the initiator's subkey as the per-message base key");
+        }
+
         let context = KerberosContext {
             client_principal: format!("{}@{}", client_name, enc_ticket_part.crealm),
             service_principal: format!("{}@{}", service_name, service_key.realm),
@@ -1975,14 +1583,24 @@ impl KerberosContext {
             enctype: session_key.enctype,
             established: true,
             client_realm: enc_ticket_part.crealm,
+            base_key,
+            base_key_enctype,
+            used_initiator_subkey,
         };
         
-        // Generate encrypted AP-REP
-        let ap_rep = Self::generate_ap_rep_with_crypto(
-            &session_key,
-            authenticator.ctime,
-            authenticator.cusec
-        )?;
+        // RFC 4120 §3.2.4: an AP-REP is the answer to MUTUAL-REQUIRED and
+        // to nothing else. Sending one unasked breaks the initiator, which
+        // is already established and rejects the extra token.
+        let ap_rep = if ap_options & AP_OPTS_MUTUAL_REQUIRED != 0 {
+            Self::generate_ap_rep_with_crypto(
+                &session_key,
+                authenticator.ctime,
+                authenticator.cusec,
+            )?
+        } else {
+            debug!("   No MUTUAL-REQUIRED in ap-options — replying with an empty token");
+            Vec::new()
+        };
         
         info!("✅ FULL CRYPTO: Kerberos context established: client={}", context.client_principal);
         info!("   Session key: {} bytes, enctype={:?}", context.session_key.len(), context.enctype);
@@ -1992,7 +1610,7 @@ impl KerberosContext {
     }
     
     /// Parse AP-REQ and extract ticket + encrypted authenticator
-    fn parse_ap_req(data: &[u8]) -> Result<(Ticket, Vec<u8>)> {
+    fn parse_ap_req(data: &[u8]) -> Result<(Ticket, Vec<u8>, u32)> {
         // AP-REQ ::= [APPLICATION 14] SEQUENCE {
         //   pvno[0] INTEGER (5),
         //   msg-type[1] INTEGER (14),
@@ -2035,8 +1653,18 @@ impl KerberosContext {
         }
         remaining = rest;
         
-        // Skip ap-options[2]
-        let (_, rest) = extract_tagged_field(remaining, 0xA2)?;
+        // ap-options[2] — NOT skippable.
+        //
+        // RFC 4120 §3.2.4: the AP-REP is sent ONLY when MUTUAL-REQUIRED is
+        // set. This discarded the field and replied with an AP-REP every
+        // time, so a client that did not ask for mutual authentication —
+        // which is already complete after sending its AP-REQ — got a token
+        // it had no use for, fed it to GSS anyway, and was told
+        // "Context is already fully established". libtirpc then abandons
+        // the context with no GSS error of its own, which is precisely
+        // how `mount -o sec=krb5p` failed with a bare "access denied".
+        let (opts_data, rest) = extract_tagged_field(remaining, 0xA2)?;
+        let ap_options = parse_asn1_bit_string(opts_data)?;
         remaining = rest;
         
         // Parse ticket[3]
@@ -2050,9 +1678,14 @@ impl KerberosContext {
         let (auth_data, _) = extract_tagged_field(remaining, 0xA4)?;
         let enc_auth = EncryptedData::parse(auth_data)?;
         
-        debug!("   Parsed encrypted authenticator: {} bytes", enc_auth.cipher.len());
+        debug!(
+            "   Parsed encrypted authenticator: {} bytes, ap_options=0x{:08x}{}",
+            enc_auth.cipher.len(),
+            ap_options,
+            if ap_options & AP_OPTS_MUTUAL_REQUIRED != 0 { " (MUTUAL-REQUIRED)" } else { "" }
+        );
         
-        Ok((ticket, enc_auth.cipher))
+        Ok((ticket, enc_auth.cipher, ap_options))
     }
     
     /// Generate properly encrypted AP-REP with real cryptography
@@ -2103,13 +1736,17 @@ impl KerberosContext {
         Self::encode_length(&mut ap_rep, ap_rep_seq.len());
         ap_rep.extend_from_slice(&ap_rep_seq);
         
-        // Wrap in GSS-API
+        // Wrap in GSS-API. The TOK_ID (RFC 4121 §4.1) is NOT optional —
+        // an initiator reading this reply expects 02 00 before the
+        // AP-REP, and the emitter omitted it for the same reason the
+        // parser ignored it on the way in.
         let krb5_oid = [0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
-        let gss_content_len = krb5_oid.len() + ap_rep.len();
-        
+        let gss_content_len = krb5_oid.len() + TOK_ID_AP_REP.len() + ap_rep.len();
+
         let mut token = vec![0x60];  // APPLICATION 0
         Self::encode_length(&mut token, gss_content_len);
         token.extend_from_slice(&krb5_oid);
+        token.extend_from_slice(TOK_ID_AP_REP);
         token.extend_from_slice(&ap_rep);
         
         debug!("   Generated AP-REP: {} bytes (encrypted)", token.len());
@@ -2144,12 +1781,13 @@ impl KerberosContext {
         ap_rep.extend_from_slice(&ap_rep_inner);
         
         // Calculate total length for GSS wrapper
-        let gss_content_len = krb5_oid.len() + ap_rep.len();
-        
+        let gss_content_len = krb5_oid.len() + TOK_ID_AP_REP.len() + ap_rep.len();
+
         // GSS-API wrapper: APPLICATION 0 (0x60)
         token.push(0x60);
         Self::encode_length(&mut token, gss_content_len);
         token.extend_from_slice(&krb5_oid);
+        token.extend_from_slice(TOK_ID_AP_REP);
         token.extend_from_slice(&ap_rep);
         
         debug!("Generated GSS-wrapped AP-REP: {} bytes", token.len());
@@ -2243,7 +1881,7 @@ mod tests {
         assert_eq!(EncType::from_i32(17), Some(EncType::AES128CtsHmacSha196));
         assert_eq!(EncType::from_i32(18), Some(EncType::AES256CtsHmacSha196));
         assert_eq!(EncType::from_i32(19), Some(EncType::AES128CtsHmacSha256128));
-        assert_eq!(EncType::from_i32(20), Some(EncType::AES256CtsHmacSha384196));
+        assert_eq!(EncType::from_i32(20), Some(EncType::AES256CtsHmacSha384192));
         assert_eq!(EncType::from_i32(999), None);
     }
     
@@ -2484,6 +2122,82 @@ mod tests {
     }
     
     #[test]
+    fn a_multi_enctype_keytab_selects_by_the_tickets_enctype() {
+        // THE ORDINARY SHAPE OF A REAL KEYTAB: `ktadd` writes one key per
+        // enctype for the same principal. Matching on the name alone and
+        // taking the first hit picks an arbitrary enctype, and the ticket
+        // then fails its integrity check with an HMAC mismatch that reads
+        // exactly like a wrong password.
+        //
+        // Measured against a live MIT KDC on 2026-08-27: four keys for
+        // nfs/flintsrv.flint.test, `find_key` took the wrong one, and
+        // every real `mount -o sec=krb5p` failed. The interop fixtures
+        // missed it because they gave each enctype its OWN principal, so
+        // every keytab in those tests held exactly one key.
+        let mk = |etype, kvno, byte| ServiceKey {
+            principal: "nfs/srv".to_string(),
+            realm: "EXAMPLE.COM".to_string(),
+            kvno,
+            enctype: etype,
+            key: vec![byte; 32],
+        };
+        let keytab = Keytab {
+            keys: vec![
+                mk(EncType::AES256CtsHmacSha384192, 2, 0xAA),
+                mk(EncType::AES256CtsHmacSha196, 2, 0xBB),
+                mk(EncType::AES128CtsHmacSha256128, 2, 0xCC),
+                mk(EncType::AES128CtsHmacSha196, 2, 0xDD),
+            ],
+        };
+
+        // Every enctype must select ITS OWN key, not the first entry.
+        for (etype, want) in [
+            (EncType::AES256CtsHmacSha384192, 0xAAu8),
+            (EncType::AES256CtsHmacSha196, 0xBB),
+            (EncType::AES128CtsHmacSha256128, 0xCC),
+            (EncType::AES128CtsHmacSha196, 0xDD),
+        ] {
+            let k = keytab
+                .find_key_for("nfs/srv", etype, None)
+                .unwrap_or_else(|| panic!("{etype:?} not found"));
+            assert_eq!(k.enctype, etype);
+            assert_eq!(k.key[0], want, "{etype:?} selected the wrong key");
+        }
+
+        // Realm-qualified name resolves the same way.
+        assert_eq!(
+            keytab
+                .find_key_for("nfs/srv@EXAMPLE.COM", EncType::AES256CtsHmacSha196, None)
+                .unwrap()
+                .key[0],
+            0xBB
+        );
+
+        // An enctype the keytab does not carry is None, not a wrong key —
+        // the failure mode that produced the HMAC mismatch.
+        let one = Keytab { keys: vec![mk(EncType::AES256CtsHmacSha196, 2, 0xBB)] };
+        assert!(one
+            .find_key_for("nfs/srv", EncType::AES128CtsHmacSha196, None)
+            .is_none());
+
+        // kvno picks among same-enctype keys when it matches, and is not
+        // fatal when it does not (a keytab mid-rotation carries the old one).
+        let rot = Keytab {
+            keys: vec![
+                mk(EncType::AES256CtsHmacSha196, 3, 0x11),
+                mk(EncType::AES256CtsHmacSha196, 4, 0x22),
+            ],
+        };
+        assert_eq!(
+            rot.find_key_for("nfs/srv", EncType::AES256CtsHmacSha196, Some(4)).unwrap().key[0],
+            0x22
+        );
+        assert!(rot
+            .find_key_for("nfs/srv", EncType::AES256CtsHmacSha196, Some(99))
+            .is_some());
+    }
+
+    #[test]
     fn test_service_key_find() {
         let key1 = ServiceKey {
             principal: "nfs/server".to_string(),
@@ -2547,174 +2261,6 @@ mod tests {
     //==========================================================================
     // PHASE 8: COMPREHENSIVE CRYPTO TESTS
     //==========================================================================
-    
-    #[test]
-    fn test_aes_cbc_encrypt_decrypt_aes128() {
-        let key = vec![0u8; 16];  // AES-128
-        let iv = vec![0u8; 16];
-        let plaintext = b"Hello, Kerberos!";
-        
-        let ciphertext = aes_cbc_encrypt(&key, &iv, plaintext).unwrap();
-        assert_eq!(ciphertext.len(), 16);  // One block
-        
-        let decrypted = aes_cbc_decrypt(&key, &iv, &ciphertext).unwrap();
-        assert_eq!(&decrypted[..plaintext.len()], plaintext);
-    }
-    
-    #[test]
-    fn test_aes_cbc_encrypt_decrypt_aes256() {
-        let key = vec![0u8; 32];  // AES-256
-        let iv = vec![0u8; 16];
-        let plaintext = b"Testing AES-256!";
-        
-        let ciphertext = aes_cbc_encrypt(&key, &iv, plaintext).unwrap();
-        assert_eq!(ciphertext.len(), 16);
-        
-        let decrypted = aes_cbc_decrypt(&key, &iv, &ciphertext).unwrap();
-        assert_eq!(&decrypted[..plaintext.len()], plaintext);
-    }
-    
-    #[test]
-    fn test_aes_cts_encrypt_decrypt_single_block() {
-        let key = vec![1u8; 16];
-        let iv = vec![0u8; 16];
-        let plaintext = b"Exactly16Bytes!!";
-        
-        let ciphertext = aes_cts_encrypt(&key, &iv, plaintext).unwrap();
-        // True CTS: output length = input length
-        assert_eq!(ciphertext.len(), plaintext.len());
-        
-        let decrypted = aes_cts_decrypt(&key, &iv, &ciphertext).unwrap();
-        assert_eq!(decrypted, plaintext);
-    }
-    
-    #[test]
-    fn test_aes_cts_encrypt_decrypt_two_blocks() {
-        let key = vec![2u8; 16];
-        let iv = vec![0u8; 16];
-        let plaintext = b"This is exactly thirty-two!!";  // 28 bytes
-        
-        let ciphertext = aes_cts_encrypt(&key, &iv, plaintext).unwrap();
-        // True CTS: no expansion
-        assert_eq!(ciphertext.len(), plaintext.len());
-        
-        let decrypted = aes_cts_decrypt(&key, &iv, &ciphertext).unwrap();
-        assert_eq!(decrypted, plaintext);
-    }
-    
-    #[test]
-    fn test_aes_cts_encrypt_decrypt_partial_block() {
-        let key = vec![3u8; 16];
-        let iv = vec![0u8; 16];
-        let plaintext = b"Twenty-three bytes!";  // 19 bytes
-        
-        let ciphertext = aes_cts_encrypt(&key, &iv, plaintext).unwrap();
-        // True CTS: exact size preservation
-        assert_eq!(ciphertext.len(), plaintext.len());
-        
-        let decrypted = aes_cts_decrypt(&key, &iv, &ciphertext).unwrap();
-        assert_eq!(decrypted, plaintext);
-    }
-    
-    #[test]
-    fn test_aes_cts_encrypt_decrypt_large() {
-        let key = vec![4u8; 32];  // AES-256
-        let iv = vec![0u8; 16];
-        let plaintext = b"This is a much longer message that spans multiple blocks for testing!";
-        
-        let ciphertext = aes_cts_encrypt(&key, &iv, plaintext).unwrap();
-        // True CTS: no padding overhead
-        assert_eq!(ciphertext.len(), plaintext.len());
-        
-        let decrypted = aes_cts_decrypt(&key, &iv, &ciphertext).unwrap();
-        assert_eq!(decrypted, plaintext);
-    }
-    
-    #[test]
-    fn test_aes_cts_reject_too_short() {
-        let key = vec![0u8; 16];
-        let iv = vec![0u8; 16];
-        let plaintext = b"Short";  // < 16 bytes
-        
-        let result = aes_cts_encrypt(&key, &iv, plaintext);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("too short"));
-    }
-    
-    #[test]
-    fn test_derive_key_aes128_sha1() {
-        let base_key = vec![5u8; 16];
-        let result = derive_key(&base_key, EncType::AES128CtsHmacSha196, 
-                               key_usage::AP_REQ_AUTHENTICATOR, "ke");
-        
-        assert!(result.is_ok());
-        let derived = result.unwrap();
-        assert_eq!(derived.len(), 16);  // AES-128 key
-        assert_ne!(derived, base_key);   // Should be different from base
-    }
-    
-    #[test]
-    fn test_derive_key_aes256_sha1() {
-        let base_key = vec![6u8; 32];
-        let result = derive_key(&base_key, EncType::AES256CtsHmacSha196,
-                               key_usage::AP_REP_ENC_PART, "ki");
-        
-        assert!(result.is_ok());
-        let derived = result.unwrap();
-        assert_eq!(derived.len(), 32);  // AES-256 key
-    }
-    
-    #[test]
-    fn test_derive_key_different_usages() {
-        let base_key = vec![7u8; 16];
-        
-        let ke1 = derive_key(&base_key, EncType::AES128CtsHmacSha196,
-                            key_usage::AP_REQ_AUTHENTICATOR, "ke").unwrap();
-        let ke2 = derive_key(&base_key, EncType::AES128CtsHmacSha196,
-                            key_usage::AP_REP_ENC_PART, "ke").unwrap();
-        
-        // Different usages should produce different keys
-        assert_ne!(ke1, ke2);
-    }
-    
-    #[test]
-    fn test_derive_key_encryption_vs_integrity() {
-        let base_key = vec![8u8; 16];
-        
-        let ke = derive_key(&base_key, EncType::AES128CtsHmacSha196,
-                           key_usage::AP_REQ_AUTHENTICATOR, "ke").unwrap();
-        let ki = derive_key(&base_key, EncType::AES128CtsHmacSha196,
-                           key_usage::AP_REQ_AUTHENTICATOR, "ki").unwrap();
-        
-        // Encryption and integrity keys should be different
-        assert_ne!(ke, ki);
-    }
-    
-    #[test]
-    fn test_compute_hmac_sha1() {
-        let key = vec![9u8; 16];
-        let data = b"Test data for HMAC";
-        
-        let hmac1 = compute_hmac(&key, data, 12, true);
-        assert_eq!(hmac1.len(), 12);
-        
-        // Same input should produce same output
-        let hmac2 = compute_hmac(&key, data, 12, true);
-        assert_eq!(hmac1, hmac2);
-        
-        // Different data should produce different output
-        let hmac3 = compute_hmac(&key, b"Different data", 12, true);
-        assert_ne!(hmac1, hmac3);
-    }
-    
-    #[test]
-    fn test_compute_hmac_sha256() {
-        let key = vec![10u8; 32];
-        let data = b"Test data for SHA256";
-        
-        let hmac = compute_hmac(&key, data, 16, false);
-        assert_eq!(hmac.len(), 16);
-    }
     
     #[test]
     fn test_parse_asn1_integer() {
@@ -2798,21 +2344,6 @@ mod tests {
     }
     
     #[test]
-    fn test_enc_ap_rep_part_encrypt() {
-        let session_key = SessionKey {
-            enctype: EncType::AES128CtsHmacSha196,
-            key: vec![11u8; 16],
-        };
-        
-        let enc_part = EncAPRepPart::create(current_time(), 0, None);
-        let result = enc_part.encrypt(&session_key);
-        
-        assert!(result.is_ok());
-        let encrypted = result.unwrap();
-        assert!(encrypted.len() > 20);  // Should be substantial
-    }
-    
-    #[test]
     fn test_authenticator_validate_success() {
         let auth = Authenticator {
             crealm: "TEST.REALM".to_string(),
@@ -2844,11 +2375,60 @@ mod tests {
     }
     
     #[test]
-    fn test_enctype_key_sizes() {
-        assert_eq!(EncType::AES128CtsHmacSha196.key_size(), 16);
-        assert_eq!(EncType::AES256CtsHmacSha196.key_size(), 32);
-        assert_eq!(EncType::AES128CtsHmacSha256128.key_size(), 16);
-        assert_eq!(EncType::AES256CtsHmacSha384196.key_size(), 32);
+    fn the_initiator_subkey_becomes_the_per_message_base_key() {
+        // RFC 4121 §2. The subkey was parsed and discarded, so every
+        // per-message token was keyed on the session key even when the
+        // client had asked for a subkey — bytes a real peer rejects,
+        // with nothing on this side reporting an error.
+        let session = SessionKey { enctype: EncType::AES256CtsHmacSha196, key: vec![0xAA; 32] };
+        let subkey = SessionKey { enctype: EncType::AES128CtsHmacSha196, key: vec![0xBB; 16] };
+
+        let (k, e, used) = select_base_key(&session, Some(&subkey));
+        assert_eq!(k, subkey.key, "the subkey must win");
+        assert_eq!(e, EncType::AES128CtsHmacSha196, "and it carries its OWN enctype");
+        assert!(used);
+
+        // Control: with no subkey the session key is still chosen, so the
+        // assertion above is the selection working and not a constant.
+        let (k, e, used) = select_base_key(&session, None);
+        assert_eq!(k, session.key);
+        assert_eq!(e, EncType::AES256CtsHmacSha196);
+        assert!(!used);
+    }
+
+    #[test]
+    fn every_enctype_agrees_with_the_crypto_modules() {
+        // Three enums name these four enctypes: this one (wire/keytab
+        // identity), krb::kdf::Enctype and krb::profile::Enctype (crypto
+        // parameters). They are not merged — merging would move keytab
+        // parsing into the crypto layer — so their agreement is PINNED
+        // here instead. A divergence is otherwise invisible until a real
+        // peer rejects the bytes.
+        use super::super::krb::{kdf, profile};
+        for e in [
+            EncType::AES128CtsHmacSha196,
+            EncType::AES256CtsHmacSha196,
+            EncType::AES128CtsHmacSha256128,
+            EncType::AES256CtsHmacSha384192,
+        ] {
+            let n = e.etype();
+            let k = kdf::Enctype::from_i32(n).expect("kdf knows this enctype");
+            let pr = profile::Enctype::from_i32(n).expect("profile knows this enctype");
+            assert_eq!(k.etype(), n, "kdf round-trips {n}");
+            assert_eq!(pr.as_i32(), n, "profile round-trips {n}");
+            assert_eq!(
+                k.is_rfc8009(),
+                pr.is_rfc8009(),
+                "enctype {n}: the two modules disagree on which RFC governs it"
+            );
+            assert_eq!(
+                k.key_size(),
+                pr.ke_len(),
+                "enctype {n}: base-key size and Ke length must agree"
+            );
+        }
+        // And the naming records the truth: enctype 20 is SHA-384-192.
+        assert_eq!(EncType::AES256CtsHmacSha384192.etype(), 20);
     }
     
     #[test]
@@ -2858,36 +2438,6 @@ mod tests {
         assert!(time > 1577836800);
         // Should be before year 2100
         assert!(time < 4102444800);
-    }
-    
-    #[test]
-    fn test_full_crypto_roundtrip() {
-        // Test a complete encryption/decryption cycle
-        let key = vec![12u8; 16];
-        let iv = vec![0u8; 16];
-        let original = b"This is a test message for full crypto roundtrip!";
-        
-        // Encrypt with AES-CTS
-        let encrypted = aes_cts_encrypt(&key, &iv, original).unwrap();
-        
-        // Decrypt
-        let decrypted = aes_cts_decrypt(&key, &iv, &encrypted).unwrap();
-        
-        assert_eq!(decrypted, original);
-    }
-    
-    #[test]
-    fn test_key_derivation_consistency() {
-        let base_key = vec![13u8; 16];
-        
-        // Derive same key twice
-        let key1 = derive_key(&base_key, EncType::AES128CtsHmacSha196,
-                             key_usage::AP_REQ_AUTHENTICATOR, "ke").unwrap();
-        let key2 = derive_key(&base_key, EncType::AES128CtsHmacSha196,
-                             key_usage::AP_REQ_AUTHENTICATOR, "ke").unwrap();
-        
-        // Should be identical
-        assert_eq!(key1, key2);
     }
     
     #[test]

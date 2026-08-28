@@ -729,12 +729,6 @@ async fn dispatch_nfsv4(
     );
     debug!("   Cred: {:?}, Verf: {:?}", call.cred.flavor, call.verf.flavor);
 
-    // Handle RPCSEC_GSS authentication
-    if call.cred.flavor == AuthFlavor::RpcsecGss {
-        info!("🔐 [NFS_SERVER] Connection #{}, RPC #{}: RPCSEC_GSS authentication detected", conn_id, rpc_num);
-        return handle_rpcsec_gss_call(call, args, gss_manager, dispatcher, back_channel).await;
-    }
-
     // Check program number
     if call.program != NFS4_PROGRAM {
         warn!("❌ Invalid program number: {} (expected {} for NFS4)", call.program, NFS4_PROGRAM);
@@ -754,6 +748,17 @@ async fn dispatch_nfsv4(
     
     debug!("✅ RPC validation passed: program={}, version={}", call.program, call.version);
 
+    // Handle RPCSEC_GSS authentication.
+    //
+    // AFTER the program/version check, deliberately. The GSS branch
+    // mints and looks up context state, and taking it first meant a
+    // call addressed to a program this server does not even serve
+    // still reached that machinery.
+    if call.cred.flavor == AuthFlavor::RpcsecGss {
+        info!("🔐 [NFS_SERVER] Connection #{}, RPC #{}: RPCSEC_GSS authentication detected", conn_id, rpc_num);
+        return handle_rpcsec_gss_call(call, args, gss_manager, dispatcher, back_channel).await;
+    }
+
     // Handle procedure
     match call.procedure {
         procedure::NULL => {
@@ -765,7 +770,7 @@ async fn dispatch_nfsv4(
         procedure::COMPOUND => {
             // COMPOUND procedure - dispatch to NFSv4.2 handler
             debug!(">>> COMPOUND procedure");
-            handle_compound(call, args, dispatcher, back_channel).await
+            handle_compound(call, args, dispatcher, back_channel, None).await
         }
 
         _ => {
@@ -781,6 +786,7 @@ async fn handle_compound(
     args: Bytes,
     dispatcher: Arc<CompoundDispatcher>,
     back_channel: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+    gss: Option<&crate::nfs::gss_framing::ValidatedCall>,
 ) -> Bytes {
     // The args Bytes contains only the COMPOUND procedure arguments (RPC header already stripped)
 
@@ -813,7 +819,19 @@ async fn handle_compound(
 
     // RPC-level principal for the EXCHANGE_ID §18.35.5 state machine.
     // Cheap to compute and an empty Vec for AUTH_NONE.
-    let principal = call.cred.principal();
+    // Prefer the AUTHENTICATED Kerberos principal when the context gave
+    // us one: it is stable across context re-establishment, where the
+    // handle is not, and it is what RFC 8881 §18.35.5 actually means by
+    // "principal".
+    let principal = match gss.and_then(|v| v.client_principal.as_deref()) {
+        Some(name) => {
+            let mut p = Vec::with_capacity(name.len() + 4);
+            p.extend_from_slice(b"gss:");
+            p.extend_from_slice(name.as_bytes());
+            p
+        }
+        None => call.cred.principal(),
+    };
     // AUTH_SYS (uid, gid) — file-creating ops stamp it onto the backing
     // object so ownership round-trips (postgres-class workloads check it).
     let unix_cred = call.cred.unix_uid_gid();
@@ -843,27 +861,42 @@ async fn handle_compound(
         dispatcher.cache_slot_reply(&session_id, slot_id, compound_data.clone());
     }
 
-    // Build RPC SUCCESS reply with compound data
-    // The compound response is the procedure-specific result data
-    let mut encoder = XdrEncoder::new();
+    // RPC reply framing.
+    //
+    // For RPCSEC_GSS the verifier is a MIC over the request's seq_num and
+    // the body is sealed per the negotiated service (RFC 2203 §5.3.3) —
+    // a null verifier over a bare body is what this server used to send
+    // for every GSS call, and a conforming client rejects it.
+    //
+    // NOTE the ordering against the reply cache above: the cache stores
+    // the UNSEALED compound data, and sealing happens per request. It has
+    // to: the verifier and the sealed body both bind the requesting
+    // call's sequence number, so a replay served from the cache needs
+    // fresh ones rather than a recording of the first reply's.
+    let (verf, body) = match gss {
+        None => (crate::nfs::rpc::Auth::null(), compound_data),
+        Some(v) => {
+            let verf = match crate::nfs::gss_framing::reply_verifier(v) {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!("❌ GSS reply verifier failed: {}", e.reason());
+                    return ReplyBuilder::auth_error(call.xid, e.auth_stat());
+                }
+            };
+            match crate::nfs::gss_framing::seal_reply_body(v, &compound_data) {
+                Ok(b) => (verf, b),
+                Err(e) => {
+                    warn!("❌ GSS reply sealing failed: {}", e.reason());
+                    return ReplyBuilder::auth_error(call.xid, e.auth_stat());
+                }
+            }
+        }
+    };
 
-    // RPC Reply header
-    encoder.encode_u32(call.xid);  // XID
-    encoder.encode_u32(1);  // Message type: REPLY
-    encoder.encode_u32(0);  // Reply status: MSG_ACCEPTED
-
-    // Auth (null)
-    encoder.encode_u32(0);  // Auth flavor: AUTH_NONE
-    encoder.encode_u32(0);  // Auth length: 0
-
-    // Accept status: SUCCESS
-    encoder.encode_u32(0);  // AcceptStatus::Success
-
-    // Procedure-specific result (COMPOUND response data appended directly, no length prefix)
-    // Per RFC 5531, procedure results are appended directly to RPC reply
-    encoder.append_bytes(&compound_data);
-
-    encoder.finish()
+    let mut reply = ReplyBuilder::success_with_verf(call.xid, &verf);
+    // Per RFC 5531 procedure results are appended directly, no length prefix.
+    reply.encoder().append_bytes(&body);
+    reply.finish()
 }
 
 /// Handle RPCSEC_GSS authenticated RPC call
@@ -901,16 +934,45 @@ async fn handle_rpcsec_gss_call(
 
         gss_proc::DATA => {
             info!("🔐 RPCSEC_GSS_DATA");
-            // Validate the GSS context
-            if let Err(e) = gss_manager.validate_data(&gss_cred).await {
-                warn!("❌ GSS DATA validation failed: {}", e);
-                // Return SYSTEM_ERR for authentication failure
-                return ReplyBuilder::system_err(call.xid);
+
+            // 1. Context lookup, expiry, replay window, and the base key.
+            let validated = match gss_manager.validate_data(&gss_cred).await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("❌ GSS DATA validation failed: {}", e.reason());
+                    // CREDPROBLEM/CTXPROBLEM tell the client to refresh and
+                    // retry. SYSTEM_ERR, which is what this used to send,
+                    // tells it to give up.
+                    return ReplyBuilder::auth_error(call.xid, e.auth_stat());
+                }
+            };
+
+            // 2. The call verifier: a MIC over the header up to and
+            //    including the credential (RFC 2203 §5.3.1). Previously
+            //    decoded and discarded, so any verifier was accepted.
+            if let Err(e) =
+                crate::nfs::gss_framing::verify_call_verifier(&validated, &call.verf, &call.cred_span)
+            {
+                warn!("❌ GSS call verifier rejected: {}", e.reason());
+                return ReplyBuilder::auth_error(call.xid, e.auth_stat());
             }
 
-            // GSS validated, proceed with normal COMPOUND processing
+            // 3. Unseal the body BEFORE the COMPOUND is decoded. For
+            //    krb5i/krb5p the args are still wrapped at this point.
+            let args = match crate::nfs::gss_framing::unseal_call_body(&validated, args) {
+                Ok(a) => a,
+                Err(e) if e.is_garbage() => {
+                    warn!("❌ GSS body framing malformed: {}", e.reason());
+                    return ReplyBuilder::garbage_args(call.xid);
+                }
+                Err(e) => {
+                    warn!("❌ GSS body rejected: {}", e.reason());
+                    return ReplyBuilder::auth_error(call.xid, e.auth_stat());
+                }
+            };
+
             info!("✅ GSS authentication successful, processing COMPOUND");
-            handle_compound(call, args, dispatcher, back_channel).await
+            handle_compound(call, args, dispatcher, back_channel, Some(&validated)).await
         }
 
         gss_proc::DESTROY => {
@@ -950,29 +1012,35 @@ async fn handle_gss_init(
     // Handle the initialization
     let init_res = gss_manager.handle_init(gss_cred, &init_token).await;
 
-    // Build RPC reply with GSS init result
-    let mut encoder = XdrEncoder::new();
+    // RFC 2203 §5.2.3.1: on GSS_S_COMPLETE the INIT reply verifier is a
+    // MIC over the sequence window. Only on complete — any other major
+    // status takes a NULL verifier, because there is no context to sign
+    // with. This was unconditionally AUTH_NONE.
+    let verf = if init_res.major_status == 0 {
+        match gss_manager.tokens_for(&init_res.handle).await {
+            Some(t) => match crate::nfs::gss_framing::init_reply_verifier(&t, init_res.sequence_window) {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!("❌ GSS INIT verifier failed: {}", e.reason());
+                    return ReplyBuilder::auth_error(xid, e.auth_stat());
+                }
+            },
+            // Placeholder mode: established, but holds no key material.
+            None => crate::nfs::rpc::Auth::null(),
+        }
+    } else {
+        crate::nfs::rpc::Auth::null()
+    };
 
-    // RPC Reply header
-    encoder.encode_u32(xid);  // XID
-    encoder.encode_u32(1);  // Message type: REPLY
-    encoder.encode_u32(0);  // Reply status: MSG_ACCEPTED
-
-    // Auth verifier (null for now)
-    encoder.encode_u32(0);  // Auth flavor: AUTH_NONE
-    encoder.encode_u32(0);  // Auth length: 0
-
-    // Accept status: SUCCESS
-    encoder.encode_u32(0);  // AcceptStatus::Success
-
-    // Encode RPCSEC_GSS init result
     let init_result_data = init_res.encode();
+    let mut reply = ReplyBuilder::success_with_verf(xid, &verf);
+    let encoder = reply.encoder();
     encoder.append_bytes(&init_result_data);
 
     info!("✅ GSS_INIT complete: handle_len={}, major={}, minor={}",
           init_res.handle.len(), init_res.major_status, init_res.minor_status);
 
-    encoder.finish()
+    reply.finish()
 }
 
 /// Handle RPCSEC_GSS_CONTINUE_INIT

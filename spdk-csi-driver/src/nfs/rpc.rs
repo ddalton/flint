@@ -45,6 +45,28 @@ pub enum AcceptStatus {
     SystemErr = 5,
 }
 
+/// RPC authentication status for a MSG_DENIED / AUTH_ERROR reply
+/// (RFC 5531 §9, extended by RFC 2203 §5.3.3.3).
+///
+/// The two RPCSEC_GSS values are the ones that matter: a client that is
+/// told CREDPROBLEM or CTXPROBLEM **refreshes its context and retries**,
+/// where any accepted-status error makes it give up. Collapsing GSS
+/// failures into SYSTEM_ERR — which is what this server did — turns a
+/// recoverable context expiry into a hard mount error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthStat {
+    Ok = 0,
+    BadCred = 1,
+    RejectedCred = 2,
+    BadVerf = 3,
+    RejectedVerf = 4,
+    TooWeak = 5,
+    /// RFC 2203: the credential was bad — client should re-init the context.
+    RpcsecGssCredProblem = 13,
+    /// RFC 2203: the context is gone or expired — client should re-init.
+    RpcsecGssCtxProblem = 14,
+}
+
 /// RPC authentication flavor
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthFlavor {
@@ -147,8 +169,13 @@ impl Auth {
     ///   * AUTH_SYS  → "sys:<machinename>:<uid>" — derived from the
     ///                authsys_parms struct, ignoring the per-call timestamp
     ///                and gid list.
-    ///   * RPCSEC_GSS → "gss:<raw cred body>" — body is the GSS cred which
-    ///                already names the principal.
+    ///   * RPCSEC_GSS → "gss:<context handle>" — the credential also
+    ///                carries a PER-CALL SEQUENCE NUMBER, so using the whole
+    ///                body made every call from one client look like a
+    ///                different principal. Measured against a real Linux
+    ///                client: CREATE_SESSION reported a principal collision
+    ///                between two calls of the same mount. The AUTH_SYS arm
+    ///                above already takes this care with its stamp.
     ///   * unknown   → "raw:<flavor>:<body>"
     pub fn principal(&self) -> Vec<u8> {
         match self.flavor {
@@ -168,9 +195,18 @@ impl Auth {
                 p
             }
             AuthFlavor::RpcsecGss => {
-                let mut p = Vec::with_capacity(self.body.len() + 4);
+                // rpc_gss_cred_t = { version, proc, seq_num, service,
+                //                    handle<> }. Take ONLY the handle:
+                // seq_num changes on every single call.
+                let mut dec = XdrDecoder::new(self.body.clone());
+                let _version = dec.decode_u32().unwrap_or(0);
+                let _proc = dec.decode_u32().unwrap_or(0);
+                let _seq = dec.decode_u32().unwrap_or(0);
+                let _service = dec.decode_u32().unwrap_or(0);
+                let handle = dec.decode_opaque().unwrap_or_default();
+                let mut p = Vec::with_capacity(handle.len() + 4);
                 p.extend_from_slice(b"gss:");
-                p.extend_from_slice(&self.body);
+                p.extend_from_slice(&handle);
                 p
             }
         }
@@ -186,10 +222,24 @@ pub struct CallMessage {
     pub procedure: u32,
     pub cred: Auth,
     pub verf: Auth,
+    /// The RPC header from byte 0 up to and INCLUDING the credential,
+    /// and stopping before the verifier.
+    ///
+    /// RFC 2203 §5.3.1 makes the call verifier a `GSS_GetMIC` over
+    /// exactly this span, so RPCSEC_GSS cannot authenticate a call
+    /// without it. It could not be recovered later — decoding is
+    /// destructive and this struct kept only parsed fields — so every
+    /// GSS call arrived with its verifier unverifiable and the server
+    /// merely debug-printed it.
+    ///
+    /// Zero-copy: `Bytes::slice` over the same allocation.
+    pub cred_span: Bytes,
 }
 
 impl CallMessage {
     pub fn decode(buf: Bytes) -> Result<Self, String> {
+        let original = buf.clone();
+        let total = original.len();
         let mut dec = XdrDecoder::new(buf);
 
         let xid = dec.decode_u32()?;
@@ -209,6 +259,9 @@ impl CallMessage {
         let procedure = dec.decode_u32()?;
 
         let cred = Auth::decode(&mut dec)?;
+        // RFC 2203 §5.3.1: the call verifier MICs everything up to here.
+        // Taken BEFORE the verifier is decoded, on purpose.
+        let cred_span = original.slice(0..total.saturating_sub(dec.remaining()));
         let verf = Auth::decode(&mut dec)?;
 
         Ok(Self {
@@ -218,11 +271,14 @@ impl CallMessage {
             procedure,
             cred,
             verf,
+            cred_span,
         })
     }
 
     /// Decode RPC call and return both the CallMessage and remaining procedure arguments
     pub fn decode_with_args(buf: Bytes) -> Result<(Self, Bytes), String> {
+        let original = buf.clone();
+        let total = original.len();
         let mut dec = XdrDecoder::new(buf);
 
         let xid = dec.decode_u32()?;
@@ -242,6 +298,9 @@ impl CallMessage {
         let procedure = dec.decode_u32()?;
 
         let cred = Auth::decode(&mut dec)?;
+        // RFC 2203 §5.3.1: the call verifier MICs everything up to here.
+        // Taken BEFORE the verifier is decoded, on purpose.
+        let cred_span = original.slice(0..total.saturating_sub(dec.remaining()));
         let verf = Auth::decode(&mut dec)?;
 
         let call_msg = Self {
@@ -251,6 +310,7 @@ impl CallMessage {
             procedure,
             cred,
             verf,
+            cred_span,
         };
 
         // Get remaining bytes (procedure arguments)
@@ -341,6 +401,37 @@ impl ReplyBuilder {
         Self::error(xid, AcceptStatus::SystemErr)
     }
 
+    /// A MSG_DENIED / AUTH_ERROR reply (RFC 5531 §9).
+    ///
+    /// Shape differs from every other reply here: a denied message carries
+    /// NO verifier and NO accept-status, so it cannot be built by
+    /// `error()`.
+    pub fn auth_error(xid: u32, stat: AuthStat) -> Bytes {
+        let mut enc = XdrEncoder::new();
+        enc.encode_u32(xid);
+        enc.encode_u32(MessageType::Reply as u32);
+        enc.encode_u32(ReplyStatus::Denied as u32);
+        enc.encode_u32(1); // reject_stat = AUTH_ERROR (0 would be RPC_MISMATCH)
+        enc.encode_u32(stat as u32);
+        enc.finish()
+    }
+
+    /// A success reply carrying an explicit verifier.
+    ///
+    /// RFC 2203 §5.3.3.2: an RPCSEC_GSS reply's verifier is a `GSS_GetMIC`
+    /// over the request's sequence number, not the null verifier every
+    /// other reply here uses. A client checks it, so emitting AUTH_NONE
+    /// on a GSS call is a protocol error even when the body is right.
+    pub fn success_with_verf(xid: u32, verf: &Auth) -> Self {
+        let mut enc = XdrEncoder::new();
+        enc.encode_u32(xid);
+        enc.encode_u32(MessageType::Reply as u32);
+        enc.encode_u32(ReplyStatus::Accepted as u32);
+        verf.encode(&mut enc);
+        enc.encode_u32(AcceptStatus::Success as u32);
+        Self { enc }
+    }
+
     /// Get the encoder to add result data
     pub fn encoder(&mut self) -> &mut XdrEncoder {
         &mut self.enc
@@ -354,6 +445,59 @@ impl ReplyBuilder {
 
 #[cfg(test)]
 mod tests {
+    /// RFC 2203 §5.3.1: the call verifier is a GSS_GetMIC over the header
+    /// up to and INCLUDING the credential. One octet either way and every
+    /// MIC fails, so the boundary is pinned by construction here rather
+    /// than by round-tripping our own encoder.
+    #[test]
+    fn cred_span_ends_at_the_credential_and_excludes_the_verifier() {
+        use crate::nfs::xdr::XdrEncoder;
+
+        // 6 fixed u32s, then cred (flavor + 5-octet body padded to 8),
+        // then verf, then args.
+        let cred_body: &[u8] = &[0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
+        let verf_body: &[u8] = &[0x11, 0x22, 0x33, 0x44];
+
+        let mut e = XdrEncoder::new();
+        e.encode_u32(0xDEADBEEF); // xid
+        e.encode_u32(0); // CALL
+        e.encode_u32(2); // rpc version
+        e.encode_u32(100003); // program
+        e.encode_u32(4); // version
+        e.encode_u32(1); // procedure
+        e.encode_u32(6); // cred flavor = RPCSEC_GSS
+        e.encode_opaque(cred_body);
+        let expected_end = 6 * 4 + 4 + 4 + 8; // 5 body octets pad to 8
+        e.encode_u32(6); // verf flavor
+        e.encode_opaque(verf_body);
+        e.encode_u32(0x5A5A5A5A); // one word of args
+        let wire = e.finish();
+
+        let (call, args) = CallMessage::decode_with_args(wire.clone()).expect("decode");
+
+        assert_eq!(call.cred_span.len(), expected_end, "span length");
+        assert_eq!(&call.cred_span[..], &wire[..expected_end], "span content");
+        assert_eq!(call.cred.body.as_ref(), cred_body, "credential body");
+        assert_eq!(call.verf.body.as_ref(), verf_body, "verifier body");
+        assert_eq!(args.len(), 4, "one word of args survives");
+
+        // The span must NOT reach the verifier: the verifier's flavor word
+        // is the very next thing on the wire, so its absence is the check.
+        assert!(
+            !call.cred_span.ends_with(verf_body),
+            "span must stop before the verifier"
+        );
+        assert_eq!(
+            &wire[expected_end..expected_end + 4],
+            &6u32.to_be_bytes()[..],
+            "the octet after the span is the verifier flavor"
+        );
+
+        // `decode` must agree with `decode_with_args`.
+        let plain = CallMessage::decode(wire.clone()).expect("decode");
+        assert_eq!(plain.cred_span, call.cred_span);
+    }
+
     use super::*;
 
     #[test]

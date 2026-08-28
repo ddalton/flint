@@ -8,11 +8,13 @@
 //! - RFC 2623: NFS Version 2 and Version 3 Security Issues and NFS Protocol's Use of RPCSEC_GSS and Kerberos V5
 //! - RFC 1964: The Kerberos Version 5 GSS-API Mechanism
 
+use crate::nfs::gss_framing::{GssReject, ValidatedCall};
 use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
 use crate::nfs::kerberos::{Keytab, KerberosContext};
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn, error};
 
@@ -111,6 +113,72 @@ impl RpcGssInitRes {
     }
 }
 
+/// Whether this process can actually do RPCSEC_GSS.
+///
+/// Set once, when the manager is built. SECINFO reads it so the server
+/// never advertises a mechanism it would then refuse — see
+/// `nfs::v4::compound::encode_secinfo_flavors`.
+static GSS_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True when a keytab loaded (or the placeholder is explicitly enabled).
+pub fn gss_is_available() -> bool {
+    GSS_AVAILABLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+pub fn set_gss_available_for_test(v: bool) {
+    GSS_AVAILABLE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Opt-in for the keytab-less placeholder context.
+///
+/// OFF BY DEFAULT. With no keytab the server cannot authenticate
+/// anyone, so it must not establish a context for anyone; this exists
+/// only so a test rig can exercise the GSS code path without a KDC.
+pub const PLACEHOLDER_ENV: &str = "FLINT_NFS_GSS_INSECURE_PLACEHOLDER";
+
+/// Bounds on the GSS context table.
+///
+/// Every context is a standing allocation that only an explicit
+/// RPCSEC_GSS_DESTROY ever removed, and the NFSv4 `StateQuotas` has
+/// never seen this map. These are the two bounds that keep it finite:
+/// a ceiling on live contexts, and an idle TTL swept on admission and
+/// enforced on use.
+#[derive(Debug, Clone, Copy)]
+pub struct GssQuotas {
+    /// Live contexts (`FLINT_NFS_MAX_GSS_CONTEXTS`, default 1024).
+    /// At the cap a new INIT is REFUSED rather than evicting an
+    /// existing context: evicting would let a newcomer knock out a
+    /// live peer, which is the wrong failure under attack.
+    pub max_contexts: usize,
+    /// Idle lifetime (`FLINT_NFS_GSS_CONTEXT_TTL_SECS`, default 3600).
+    /// Measured from last use, not from creation, so an active client
+    /// is never cut off mid-session.
+    pub context_ttl: Duration,
+}
+
+impl GssQuotas {
+    pub fn from_env() -> Self {
+        fn env_or(name: &str, default: u64) -> u64 {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or(default)
+        }
+        Self {
+            max_contexts: env_or("FLINT_NFS_MAX_GSS_CONTEXTS", 1024) as usize,
+            context_ttl: Duration::from_secs(env_or("FLINT_NFS_GSS_CONTEXT_TTL_SECS", 3600)),
+        }
+    }
+}
+
+impl Default for GssQuotas {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
 /// GSS Context for a client session
 #[derive(Debug)]
 pub struct GssContext {
@@ -121,6 +189,10 @@ pub struct GssContext {
     pub last_seq_num: u32,
     pub seq_bitmap: u128,  // Bitmap for tracking seen sequence numbers in window
     pub kerberos_ctx: Option<KerberosContext>,  // Actual Kerberos context
+    /// Last DATA call on this context (creation time until then). The
+    /// table is swept against this, so an abandoned context cannot hold
+    /// a slot forever.
+    pub last_used: Instant,
 }
 
 impl GssContext {
@@ -133,6 +205,7 @@ impl GssContext {
             last_seq_num: 0,
             seq_bitmap: 0,  // Initialize empty bitmap
             kerberos_ctx: None,
+            last_used: Instant::now(),
         }
     }
 
@@ -145,6 +218,7 @@ impl GssContext {
             last_seq_num: 0,
             seq_bitmap: 0,  // Initialize empty bitmap
             kerberos_ctx: Some(krb_ctx),
+            last_used: Instant::now(),
         }
     }
 
@@ -210,6 +284,10 @@ impl GssContext {
 pub struct RpcSecGssManager {
     contexts: Arc<RwLock<HashMap<Vec<u8>, GssContext>>>,
     keytab: Option<Arc<Keytab>>,
+    quotas: GssQuotas,
+    /// Establish contexts with no keytab and no authentication. See
+    /// [`PLACEHOLDER_ENV`] — off unless explicitly asked for.
+    allow_placeholder: bool,
 }
 
 impl RpcSecGssManager {
@@ -239,9 +317,94 @@ impl RpcSecGssManager {
             None
         };
 
+        let allow_placeholder = matches!(
+            std::env::var(PLACEHOLDER_ENV).ok().as_deref(),
+            Some("1") | Some("true") | Some("TRUE")
+        );
+        if keytab.is_none() {
+            if allow_placeholder {
+                error!(
+                    "🚨 {} is set with no keytab: every RPCSEC_GSS_INIT will be ACCEPTED \
+                     WITHOUT AUTHENTICATION. This is a test-rig setting — never run it in \
+                     production.",
+                    PLACEHOLDER_ENV
+                );
+            } else {
+                warn!(
+                    "⚠️  No keytab loaded — RPCSEC_GSS_INIT will be REFUSED. Set KRB5_KTNAME \
+                     for Kerberos, or {}=1 in a test rig.",
+                    PLACEHOLDER_ENV
+                );
+            }
+        }
+
+        Self::with_policy_and_keytab(keytab, GssQuotas::from_env(), allow_placeholder)
+    }
+
+    /// Construct with explicit policy instead of reading the
+    /// environment. Used by tests, which must not race each other over
+    /// process-wide env vars.
+    pub fn with_policy(
+        keytab_path: Option<String>,
+        quotas: GssQuotas,
+        allow_placeholder: bool,
+    ) -> Self {
+        let keytab = keytab_path
+            .and_then(|path| Keytab::load(&path).ok())
+            .map(Arc::new);
+        Self::with_policy_and_keytab(keytab, quotas, allow_placeholder)
+    }
+
+    fn with_policy_and_keytab(
+        keytab: Option<Arc<Keytab>>,
+        quotas: GssQuotas,
+        allow_placeholder: bool,
+    ) -> Self {
+        // SECINFO consults this so the advertisement matches reality.
+        GSS_AVAILABLE.store(
+            keytab.is_some() || allow_placeholder,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
         Self {
             contexts: Arc::new(RwLock::new(HashMap::new())),
             keytab,
+            quotas,
+            allow_placeholder,
+        }
+    }
+
+    /// The per-message token machinery for an established context.
+    ///
+    /// Needed by RPCSEC_GSS_INIT, whose reply verifier is a MIC over the
+    /// sequence window (RFC 2203 §5.2.3.1) and therefore has to be built
+    /// after the context exists but before any DATA call arrives.
+    pub async fn tokens_for(
+        &self,
+        handle: &[u8],
+    ) -> Option<crate::nfs::krb::token::PerMessageTokens<crate::nfs::krb::token::ContextKey>> {
+        let contexts = self.contexts.read().await;
+        contexts
+            .get(handle)
+            .and_then(|c| c.kerberos_ctx.as_ref())
+            .and_then(|k| k.per_message_tokens().ok())
+    }
+
+    /// Number of live contexts. The bound this reports is the one the
+    /// quota enforces; exposed so a test can assert a refusal stored
+    /// nothing rather than trusting the status code alone.
+    pub async fn context_count(&self) -> usize {
+        self.contexts.read().await.len()
+    }
+
+    /// GSS_S_FAILURE, storing nothing.
+    fn init_failure(handle: Vec<u8>) -> RpcGssInitRes {
+        RpcGssInitRes {
+            handle,
+            major_status: 1, // GSS_S_FAILURE
+            minor_status: 0,
+            sequence_window: 0,
+            gss_token: Vec::new(),
         }
     }
 
@@ -250,41 +413,71 @@ impl RpcSecGssManager {
         info!("🔐 RPCSEC_GSS_INIT: service={:?}, token_len={}", cred.service, init_token.len());
         debug!("   Token (first 64 bytes): {:02x?}", &init_token[..std::cmp::min(64, init_token.len())]);
 
-        // Generate a new context handle
         let handle = self.generate_handle();
 
-        // Attempt to establish Kerberos context using PURE RUST implementation
-        let (context, gss_token, major_status, minor_status) = if let Some(ref keytab) = self.keytab {
+        // Attempt to establish Kerberos context using PURE RUST implementation.
+        // NOTHING is stored unless it establishes: a failed exchange used to
+        // leave a context behind, so a peer with no credential at all grew
+        // this map by one entry per RPC.
+        let (context, gss_token) = if let Some(ref keytab) = self.keytab {
             match KerberosContext::accept_token(keytab, init_token) {
                 Ok((krb_ctx, ap_rep)) => {
                     info!("✅ Kerberos context established (Pure Rust): client={}", krb_ctx.client_principal);
-                    let ctx = GssContext::with_kerberos(handle.clone(), cred.service, krb_ctx);
-                    (ctx, ap_rep, 0u32, 0u32)  // GSS_S_COMPLETE
+                    (GssContext::with_kerberos(handle.clone(), cred.service, krb_ctx), ap_rep)
                 }
                 Err(e) => {
                     error!("❌ Kerberos context establishment failed: {}", e);
-                    let ctx = GssContext::new(handle.clone(), cred.service);
-                    (ctx, Vec::new(), 1u32, 0u32)  // GSS_S_FAILURE
+                    return Self::init_failure(handle);
                 }
             }
-        } else {
-            warn!("⚠️  No keytab loaded, using placeholder GSS context");
+        } else if self.allow_placeholder {
+            warn!("⚠️  No keytab loaded — establishing an UNAUTHENTICATED placeholder GSS context");
             let mut ctx = GssContext::new(handle.clone(), cred.service);
-            ctx.established = true;  // Accept in placeholder mode
-            (ctx, Vec::new(), 0u32, 0u32)  // GSS_S_COMPLETE (placeholder)
+            ctx.established = true;
+            (ctx, Vec::new())
+        } else {
+            error!(
+                "❌ RPCSEC_GSS_INIT refused: no keytab loaded, so this caller cannot be \
+                 authenticated. Set KRB5_KTNAME, or {}=1 in a test rig.",
+                PLACEHOLDER_ENV
+            );
+            return Self::init_failure(handle);
         };
 
-        // Store the context
-        let mut contexts = self.contexts.write().await;
-        contexts.insert(handle.clone(), context);
+        // Belt and braces: `with_kerberos` inherits the Kerberos
+        // context's own flag, so an accept_token that returns Ok with an
+        // unestablished context must not reach the table either.
+        if !context.established {
+            error!("❌ RPCSEC_GSS_INIT refused: context did not establish");
+            return Self::init_failure(handle);
+        }
+
+        {
+            let mut contexts = self.contexts.write().await;
+            let ttl = self.quotas.context_ttl;
+            let before = contexts.len();
+            contexts.retain(|_, c| c.last_used.elapsed() < ttl);
+            if before != contexts.len() {
+                debug!("Swept {} idle GSS contexts", before - contexts.len());
+            }
+            if contexts.len() >= self.quotas.max_contexts {
+                error!(
+                    "❌ RPCSEC_GSS_INIT refused: {} live GSS contexts is at the cap \
+                     (FLINT_NFS_MAX_GSS_CONTEXTS); refusing rather than evicting a live peer",
+                    contexts.len()
+                );
+                return Self::init_failure(handle);
+            }
+            contexts.insert(handle.clone(), context);
+        }
 
         debug!("Created GSS context with handle: {:02x?}", handle);
 
         // Return init result
         RpcGssInitRes {
             handle,
-            major_status,
-            minor_status,
+            major_status: 0, // GSS_S_COMPLETE
+            minor_status: 0,
             sequence_window: 128,
             gss_token,
         }
@@ -297,10 +490,13 @@ impl RpcSecGssManager {
 
         let contexts = self.contexts.read().await;
         if let Some(context) = contexts.get(&cred.handle) {
-            // TODO: Continue GSS-API context establishment
+            // The table holds only established contexts (see
+            // `handle_init`), so there is never a partial exchange to
+            // continue. Report what the context actually is rather than
+            // an unconditional GSS_S_COMPLETE.
             RpcGssInitRes {
                 handle: context.handle.clone(),
-                major_status: 0,  // GSS_S_COMPLETE
+                major_status: if context.established { 0 } else { 1 },
                 minor_status: 0,
                 sequence_window: context.sequence_window,
                 gss_token: Vec::new(),
@@ -325,39 +521,72 @@ impl RpcSecGssManager {
         contexts.remove(&cred.handle);
     }
 
-    /// Validate RPCSEC_GSS_DATA message
-    pub async fn validate_data(&self, cred: &RpcGssCred) -> Result<(), String> {
+    /// Validate RPCSEC_GSS_DATA and hand back what the body needs.
+    ///
+    /// This used to answer `Ok(())` for `Integrity` and `Privacy` having
+    /// verified nothing — the caller was told its RPC had been validated
+    /// while the payload travelled unchecked — and then briefly refused
+    /// them outright. Both are now implemented, so it returns the
+    /// per-message machinery instead of a bare unit, because the caller
+    /// cannot unseal the body or sign the reply without it.
+    pub async fn validate_data(&self, cred: &RpcGssCred) -> Result<ValidatedCall, GssReject> {
         let mut contexts = self.contexts.write().await;
+        let ttl = self.quotas.context_ttl;
+        let mut expired = false;
 
-        let context = contexts.get_mut(&cred.handle)
-            .ok_or_else(|| "Invalid GSS context handle".to_string())?;
+        let result = {
+            let context = contexts
+                .get_mut(&cred.handle)
+                .ok_or_else(|| GssReject::CtxProblem("invalid GSS context handle".into()))?;
 
-        if !context.established {
-            return Err("GSS context not established".to_string());
-        }
-
-        // Verify sequence number
-        if !context.verify_sequence(cred.sequence_num) {
-            return Err("Sequence number verification failed (replay attack?)".to_string());
-        }
-
-        // TODO: Verify GSS checksum/signature based on service level
-        match cred.service {
-            GssService::None => {
-                // No integrity/privacy protection, just authentication
-                debug!("GSS DATA: authentication only");
+            if !context.established {
+                Err(GssReject::CtxProblem("GSS context not established".into()))
+            } else if context.last_used.elapsed() >= ttl {
+                // An idle context must not keep working merely because
+                // no INIT has arrived to run the sweep.
+                expired = true;
+                Err(GssReject::CtxProblem("GSS context expired".into()))
+            } else if !context.verify_sequence(cred.sequence_num) {
+                Err(GssReject::CredProblem(
+                    "sequence number verification failed (replay?)".into(),
+                ))
+            } else {
+                // RFC 4121 §2 base key, via the Kerberos context. The
+                // keytab-less placeholder holds none, so it can serve
+                // svc_none and nothing else.
+                let tokens = match &context.kerberos_ctx {
+                    Some(k) => Some(
+                        k.per_message_tokens()
+                            .map_err(|e| GssReject::CtxProblem(e.to_string()))?,
+                    ),
+                    None => None,
+                };
+                if cred.service != GssService::None && tokens.is_none() {
+                    Err(GssReject::CtxProblem(
+                        "context holds no key material (placeholder mode); per-message \
+                         protection is impossible"
+                            .into(),
+                    ))
+                } else {
+                    debug!("GSS DATA: service={:?}", cred.service);
+                    context.last_used = Instant::now();
+                    Ok(ValidatedCall {
+                        service: cred.service,
+                        seq_num: cred.sequence_num,
+                        client_principal: context
+                            .kerberos_ctx
+                            .as_ref()
+                            .map(|k| k.client_principal.clone()),
+                        tokens,
+                    })
+                }
             }
-            GssService::Integrity => {
-                // TODO: Verify GSS_GetMIC checksum
-                debug!("GSS DATA: integrity protection (checksum verification pending)");
-            }
-            GssService::Privacy => {
-                // TODO: Decrypt with GSS_Unwrap
-                debug!("GSS DATA: privacy protection (decryption pending)");
-            }
-        }
+        };
 
-        Ok(())
+        if expired {
+            contexts.remove(&cred.handle);
+        }
+        result
     }
 
     /// Generate a unique context handle
@@ -463,6 +692,152 @@ mod tests {
 
         // Test far outside window (ancient packet)
         assert!(!ctx.verify_sequence(1));
+    }
+
+    // ---- context-table policy -------------------------------------
+    //
+    // These cover four defects that shipped together: a keytab-less
+    // server established a context for anyone; a FAILED exchange still
+    // stored one; the table had no ceiling and no expiry; and DATA
+    // calls asking for integrity or privacy were answered Ok(()) with
+    // nothing verified.
+
+    fn quotas(max: usize, ttl_ms: u64) -> GssQuotas {
+        GssQuotas { max_contexts: max, context_ttl: Duration::from_millis(ttl_ms) }
+    }
+
+    fn cred(service: GssService, procedure: u32, handle: Vec<u8>, seq: u32) -> RpcGssCred {
+        RpcGssCred {
+            version: RPCSEC_GSS_VERSION,
+            procedure,
+            sequence_num: seq,
+            service,
+            handle,
+        }
+    }
+
+    /// The bypass: no keytab meant "accept everybody".
+    #[tokio::test]
+    async fn a_keytab_less_server_refuses_gss_init_and_stores_nothing() {
+        let mgr = RpcSecGssManager::with_policy(None, quotas(1024, 60_000), false);
+        let res = mgr
+            .handle_init(&cred(GssService::None, procedure::INIT, vec![], 1), b"token")
+            .await;
+
+        assert_eq!(res.major_status, 1, "keytab-less INIT must be GSS_S_FAILURE");
+        assert_eq!(mgr.context_count().await, 0, "a refused INIT must store no context");
+    }
+
+    /// Anti-vacuity control for the test above: the refusal is the
+    /// POLICY, not an INIT path that cannot succeed at all. Same
+    /// manager, same call, placeholder enabled — it establishes.
+    #[tokio::test]
+    async fn the_placeholder_context_is_opt_in_and_still_works() {
+        let mgr = RpcSecGssManager::with_policy(None, quotas(1024, 60_000), true);
+        let res = mgr
+            .handle_init(&cred(GssService::None, procedure::INIT, vec![], 1), b"token")
+            .await;
+
+        assert_eq!(res.major_status, 0, "placeholder mode should establish");
+        assert_eq!(mgr.context_count().await, 1);
+    }
+
+    /// INIT now accepts all three services — krb5i and krb5p are
+    /// implemented — so what is left to refuse is a context with no key
+    /// material behind it.
+    #[tokio::test]
+    async fn init_accepts_every_service_now_that_they_are_implemented() {
+        for service in [GssService::None, GssService::Integrity, GssService::Privacy] {
+            let mgr = RpcSecGssManager::with_policy(None, quotas(1024, 60_000), true);
+            let res = mgr
+                .handle_init(&cred(service, procedure::INIT, vec![], 1), b"token")
+                .await;
+            assert_eq!(res.major_status, 0, "{:?} should establish", service);
+            assert_eq!(mgr.context_count().await, 1);
+        }
+    }
+
+    /// The placeholder context holds NO keys, so per-message protection is
+    /// impossible on it — and that must be a CTXPROBLEM (re-init and
+    /// retry), never a silent pass.
+    #[tokio::test]
+    async fn a_keyless_context_refuses_per_message_protection() {
+        let mgr = RpcSecGssManager::with_policy(None, quotas(1024, 60_000), true);
+        let h = mgr
+            .handle_init(&cred(GssService::None, procedure::INIT, vec![], 1), b"t")
+            .await
+            .handle;
+
+        // Control: svc_none needs no key material, so it validates.
+        let v = mgr
+            .validate_data(&cred(GssService::None, procedure::DATA, h.clone(), 1))
+            .await
+            .expect("svc_none needs no keys");
+        assert!(v.tokens.is_none(), "placeholder really has no keys");
+
+        // Distinct sequence numbers: the replay window is live, and reusing
+        // one here would refuse the second call for the WRONG reason.
+        for (i, service) in [GssService::Integrity, GssService::Privacy].iter().enumerate() {
+            let err = mgr
+                .validate_data(&cred(*service, procedure::DATA, h.clone(), 2 + i as u32))
+                .await
+                .expect_err("no key material means no per-message protection");
+            assert_eq!(
+                err.auth_stat(),
+                crate::nfs::rpc::AuthStat::RpcsecGssCtxProblem,
+                "{:?} must tell the client to re-init, not fail the op",
+                service
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_context_table_is_capped() {
+        let mgr = RpcSecGssManager::with_policy(None, quotas(2, 60_000), true);
+        for i in 0..2 {
+            let res = mgr
+                .handle_init(&cred(GssService::None, procedure::INIT, vec![], i), b"t")
+                .await;
+            assert_eq!(res.major_status, 0, "init {i} should be admitted");
+        }
+
+        let over = mgr
+            .handle_init(&cred(GssService::None, procedure::INIT, vec![], 3), b"t")
+            .await;
+        assert_eq!(over.major_status, 1, "the third INIT is over the cap");
+        assert_eq!(mgr.context_count().await, 2, "the cap must not be exceeded");
+    }
+
+    #[tokio::test]
+    async fn an_idle_context_expires_and_frees_its_slot() {
+        let mgr = RpcSecGssManager::with_policy(None, quotas(1, 50), true);
+        let h = mgr
+            .handle_init(&cred(GssService::None, procedure::INIT, vec![], 1), b"t")
+            .await
+            .handle;
+
+        // Control: before the TTL it validates, so the refusal below is
+        // the expiry and not a context that never worked.
+        assert!(mgr
+            .validate_data(&cred(GssService::None, procedure::DATA, h.clone(), 1))
+            .await
+            .is_ok());
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let err = mgr
+            .validate_data(&cred(GssService::None, procedure::DATA, h.clone(), 2))
+            .await
+            .expect_err("an idle context past its TTL must not validate");
+        assert!(err.reason().contains("expired"), "unexpected error: {err}");
+        assert_eq!(mgr.context_count().await, 0, "the expired context is dropped on use");
+
+        // And the slot is genuinely reclaimed: the cap is 1, so this
+        // only succeeds if the sweep removed the old entry.
+        let res = mgr
+            .handle_init(&cred(GssService::None, procedure::INIT, vec![], 4), b"t")
+            .await;
+        assert_eq!(res.major_status, 0, "the swept slot should be reusable");
     }
 
     #[tokio::test]

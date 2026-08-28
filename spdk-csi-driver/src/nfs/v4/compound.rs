@@ -2081,14 +2081,36 @@ fn encode_lock_denied(
 /// has nothing else still works — but no client that can do better will
 /// choose it.
 fn encode_secinfo_flavors(encoder: &mut XdrEncoder) {
-    encoder.encode_u32(3); // 3 flavors, in preference order
-    encoder.encode_u32(1); // AUTH_SYS   — first: carries a uid to check
-    encoder.encode_u32(6); // RPCSEC_GSS
     // Kerberos V5 OID (1.2.840.113554.1.2.2)
-    let krb5_oid = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
-    encoder.encode_opaque(&krb5_oid);
-    encoder.encode_u32(0); // QOP
-    encoder.encode_u32(1); // service = rpc_gss_svc_none
+    const KRB5_OID: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
+
+    // GSS is advertised ONLY when a keytab actually loaded.
+    //
+    // This used to advertise RPCSEC_GSS unconditionally, which invited
+    // every client into a mechanism a keytab-less server then refused —
+    // and nothing outside `deployments/pnfs-*.yaml` sets KRB5_KTNAME, so
+    // that was the shipped default. Advertising what you cannot honour is
+    // the same defect as claiming protection you do not apply, pointed
+    // the other way.
+    let gss = crate::nfs::rpcsec_gss::gss_is_available();
+
+    // rpc_gss_svc_none / _integrity / _privacy — all three implemented now
+    // (RFC 2203 §5.3.2, framing in `nfs::gss_framing`). Advertising only
+    // svc_none, as this did, means a client that wants krb5p is never
+    // offered it. Strongest first, since a client picks from the top.
+    let services: &[u32] = &[3, 2, 1];
+
+    let count = 2 + if gss { services.len() as u32 } else { 0 };
+    encoder.encode_u32(count);
+    encoder.encode_u32(1); // AUTH_SYS   — first: carries a uid to check
+    if gss {
+        for &svc in services {
+            encoder.encode_u32(6); // RPCSEC_GSS
+            encoder.encode_opaque(&KRB5_OID);
+            encoder.encode_u32(0); // QOP
+            encoder.encode_u32(svc);
+        }
+    }
     encoder.encode_u32(0); // AUTH_NONE — LAST, see the note above
 }
 
@@ -3398,47 +3420,71 @@ mod tests {
     }
 
     #[test]
-    fn test_secinfo_encoded_response_carries_three_flavors() {
-        // Both SECINFO and SECINFO_NO_NAME share the same success
-        // body: array<secinfo4>.
-        //
+    fn secinfo_advertises_only_what_the_server_can_honour() {
         // ⚠ THE ORDER IS THE ASSERTION. A client takes the FIRST flavor
         // it supports, so whichever is listed first is what every mount
         // actually uses. This test previously pinned AUTH_NONE first and
         // passed happily while a stock `mount -t nfs -o vers=4.1`
         // negotiated `sec=null` — every operation arriving with no uid,
-        // no gid and no identity of any kind, which no amount of
-        // permission checking can recover from. Measured and confirmed
-        // in /proc/mounts, 2026-08-24.
+        // no gid and no identity of any kind. Measured in /proc/mounts,
+        // 2026-08-24.
         //
-        // AUTH_SYS must come FIRST (matching knfsd, whose default export
-        // is sec=sys). AUTH_NONE stays LAST so a client with nothing
-        // else still works, and no client that can do better picks it.
+        // It also pinned `service = 1` (rpc_gss_svc_none) as the ONLY GSS
+        // entry, which is what a server with no per-message protection
+        // must say. Both krb5i and krb5p are implemented now, so all
+        // three services are offered, strongest first.
+        //
+        // And GSS is offered only when a keytab actually loaded: it used
+        // to be advertised unconditionally, inviting every client into a
+        // mechanism a keytab-less server then refused.
+        use crate::nfs::rpcsec_gss::set_gss_available_for_test;
+
+        // --- with GSS available -------------------------------------
+        set_gss_available_for_test(true);
         let mut encoder = XdrEncoder::new();
         encode_secinfo_flavors(&mut encoder);
         let mut d = XdrDecoder::new(encoder.finish());
-        assert_eq!(d.decode_u32().unwrap(), 3, "3 flavors");
+        assert_eq!(d.decode_u32().unwrap(), 5, "AUTH_SYS + 3 GSS services + AUTH_NONE");
         assert_eq!(
             d.decode_u32().unwrap(),
             1,
             "AUTH_SYS MUST be advertised first — it is the first flavor a client will \
-             take, and it is the only one of the three that carries a uid to check"
+             take, and it is the only non-GSS one that carries a uid to check"
         );
-        assert_eq!(d.decode_u32().unwrap(), 6, "RPCSEC_GSS second");
-        let oid = d.decode_opaque().unwrap();
-        assert_eq!(
-            oid.as_ref(),
-            &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02],
-            "Kerberos V5 OID 1.2.840.113554.1.2.2",
-        );
-        assert_eq!(d.decode_u32().unwrap(), 0, "QOP");
-        assert_eq!(d.decode_u32().unwrap(), 1, "service=rpc_gss_svc_none");
+        // rpc_gss_svc_privacy, _integrity, _none — strongest first.
+        for want in [3u32, 2, 1] {
+            assert_eq!(d.decode_u32().unwrap(), 6, "RPCSEC_GSS");
+            assert_eq!(
+                d.decode_opaque().unwrap().as_ref(),
+                &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02],
+                "Kerberos V5 OID 1.2.840.113554.1.2.2",
+            );
+            assert_eq!(d.decode_u32().unwrap(), 0, "QOP");
+            assert_eq!(d.decode_u32().unwrap(), want, "service");
+        }
         assert_eq!(
             d.decode_u32().unwrap(),
             0,
             "AUTH_NONE must be LAST — advertising it first is how this server spent its \
              whole life negotiating sec=null"
         );
+        assert_eq!(d.remaining(), 0, "no trailing bytes");
+
+        // --- without a keytab ---------------------------------------
+        set_gss_available_for_test(false);
+        let mut encoder = XdrEncoder::new();
+        encode_secinfo_flavors(&mut encoder);
+        let mut d = XdrDecoder::new(encoder.finish());
+        assert_eq!(d.decode_u32().unwrap(), 2, "AUTH_SYS + AUTH_NONE only");
+        assert_eq!(d.decode_u32().unwrap(), 1, "AUTH_SYS still first");
+        assert_eq!(d.decode_u32().unwrap(), 0, "AUTH_NONE still last");
+        assert_eq!(
+            d.remaining(),
+            0,
+            "no GSS entry may be advertised when no keytab loaded"
+        );
+
+        set_gss_available_for_test(false);
     }
 
     #[test]
