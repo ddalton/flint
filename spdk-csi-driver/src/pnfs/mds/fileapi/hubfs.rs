@@ -418,11 +418,29 @@ impl HubFs {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<Listing, FsError> {
-        let cookie = match cursor {
-            Some(c) => c.parse::<u64>().map_err(|_| FsError::StaleCursor)?,
-            None => 0,
+        // The cursor carries the cookieverf as well as the cookie.
+        //
+        // It used to be the cookie alone, sent with `cookieverf: [0; 8]`,
+        // and the server's verifier check was `cookie != 0 && cookieverf
+        // != 0` — so this listing was the client exercising that
+        // opt-out. That made the file API's own pagination vulnerable to
+        // exactly what the verifier defends against: a positional resume
+        // into a directory that moved underneath it, which on this
+        // workload is sub-second and routine, and whose symptom is a
+        // file that existed for the whole listing being silently omitted
+        // from a 200 (`readdir_does_not_skip_entries_when_dir_changes_in_one_second`).
+        let (cookie, verf) = match cursor {
+            Some(c) => {
+                let (a, b) = c.split_once('.').ok_or(FsError::StaleCursor)?;
+                (
+                    a.parse::<u64>().map_err(|_| FsError::StaleCursor)?,
+                    b.parse::<u64>().map_err(|_| FsError::StaleCursor)?,
+                )
+            }
+            None => (0, 0),
         };
-        let (entries, eof, last_cookie) = self.readdir_raw(path, cookie, limit).await?;
+        let (entries, eof, last_cookie, next_verf) =
+            self.readdir_raw(path, cookie, verf, limit).await?;
         let mut out = Vec::with_capacity(entries.len());
         for de in &entries {
             let child_path = format!(
@@ -441,7 +459,11 @@ impl HubFs {
         Ok(Listing {
             path: path.display(),
             entries: out,
-            next_cursor: if eof { None } else { last_cookie.map(|c| c.to_string()) },
+            next_cursor: if eof {
+                None
+            } else {
+                last_cookie.map(|c| format!("{c}.{next_verf}"))
+            },
             truncated: false,
         })
     }
@@ -450,12 +472,13 @@ impl HubFs {
         &self,
         path: &FsPath,
         cookie: u64,
+        cookieverf: u64,
         limit: usize,
-    ) -> Result<(Vec<DirEntry>, bool, Option<u64>), FsError> {
+    ) -> Result<(Vec<DirEntry>, bool, Option<u64>, u64), FsError> {
         let mut ops = path.resolve_ops();
         ops.push(Operation::ReadDir {
             cookie,
-            cookieverf: [0u8; 8],
+            cookieverf: cookieverf.to_be_bytes(),
             dircount: 0,
             // The server bounds a page by encoded size, so this is the
             // knob that turns `limit` into a page. Generous per entry:
@@ -483,7 +506,7 @@ impl HubFs {
         // "." and ".." are protocol furniture, not project files.
         entries.retain(|e| e.name != "." && e.name != "..");
         let last = entries.last().map(|e| e.cookie);
-        Ok((entries, eof, last))
+        Ok((entries, eof, last, rd.cookieverf))
     }
 
     /// Depth-first walk, bounded in both entries and depth.

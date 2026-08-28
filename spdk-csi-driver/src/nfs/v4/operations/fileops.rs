@@ -3110,7 +3110,25 @@ impl FileOperationHandler {
         // Validate cookieverf on subsequent requests (when cookie != 0)
         // Per RFC 5661: "If the server determines that the cookieverf is no longer valid
         // for the directory, the error NFS4ERR_NOT_SAME must be returned."
-        if op.cookie != 0 && op.cookieverf != 0 {
+        //
+        // The condition used to be `op.cookie != 0 && op.cookieverf != 0`,
+        // which made the check CLIENT-OPTIONAL: send a resume cookie with
+        // a zero verifier and the server skipped it. That is the one
+        // guard standing between a positional resume and a directory that
+        // moved underneath it, and this workload changes directories
+        // sub-second — it is why the verifier is nanosecond-granular in
+        // the first place. A conforming client echoes the verifier it was
+        // handed, so requiring it costs a conforming client nothing.
+        //
+        // NFS4ERR_BAD_COOKIE is still never produced, and that is not an
+        // oversight to fix in passing: on Linux the cookie is an opaque
+        // `telldir` offset, so "a cookie this server never issued" is not
+        // a decidable question without issuing signed cookies. Naming it
+        // here so the next reader does not mistake the gap for a
+        // one-liner. Containment does hold meanwhile — `dirp` is opened
+        // from the current filehandle, so a bogus cookie can only produce
+        // nonsense within the directory the client already named.
+        if op.cookie != 0 {
             if op.cookieverf != current_cookieverf {
                 debug!("READDIR: cookieverf mismatch - directory changed (expected {}, got {})",
                        current_cookieverf, op.cookieverf);
@@ -4376,6 +4394,56 @@ mod tests {
     ///
     /// The directory mtime is pinned to a fixed value across the mutation
     /// so the same-second collision is deterministic rather than a race.
+    #[tokio::test]
+    async fn a_resume_cookie_without_its_verifier_is_refused() {
+        use filetime::{set_file_mtime, FileTime};
+
+        let (handler, temp) = create_test_handler();
+        let dir = temp.path();
+        for i in 0..60 {
+            std::fs::write(dir.join(format!("g{i:02}")), b"x").unwrap();
+        }
+        set_file_mtime(dir, FileTime::from_unix_time(1_700_000_000, 0)).unwrap();
+
+        let mut ctx = CompoundContext::new(0);
+        handler.handle_putrootfh(PutRootFhOp, &mut ctx);
+
+        let page = |cookie: u64, cookieverf: u64| ReadDirOp {
+            cookie,
+            cookieverf,
+            dircount: 256,
+            maxcount: 256,
+            attr_request: vec![],
+        };
+
+        let first = handler.handle_readdir(page(0, 0), &ctx).await;
+        assert_eq!(first.status, Nfs4Status::Ok);
+        let resume = first.entries.last().expect("first page must have entries").cookie;
+        assert_ne!(resume, 0, "a resume cookie must be non-zero or this leg tests nothing");
+
+        // THE OPT-OUT. The gate was `cookie != 0 && cookieverf != 0`, so
+        // a client could resume a positional listing with a zero
+        // verifier and skip the only check standing between it and a
+        // directory that moved underneath it.
+        let opted_out = handler.handle_readdir(page(resume, 0), &ctx).await;
+        assert_eq!(
+            opted_out.status,
+            Nfs4Status::NotSame,
+            "a resume with no verifier must be refused, not silently trusted",
+        );
+
+        // CONTROL: the same resume WITH the verifier the server issued
+        // must work. Without this the leg would pass against a server
+        // that refused every resume, which would break pagination
+        // outright.
+        let honest = handler.handle_readdir(page(resume, first.cookieverf), &ctx).await;
+        assert_eq!(
+            honest.status,
+            Nfs4Status::Ok,
+            "a conforming resume must still be served",
+        );
+    }
+
     #[tokio::test]
     async fn readdir_does_not_skip_entries_when_dir_changes_in_one_second() {
         use filetime::{set_file_mtime, FileTime};
