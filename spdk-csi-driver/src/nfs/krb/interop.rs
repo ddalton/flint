@@ -187,3 +187,78 @@ fn an_ap_rep_is_sent_only_when_mutual_auth_is_requested() {
     assert_eq!(with, 4, "both fixture sets must cover all four enctypes");
     assert_eq!(without, 4);
 }
+
+/// NEGATIVE LEG: a real MIT ticket, refused once its own endtime has
+/// passed.
+///
+/// The accept path used to check only the AUTHENTICATOR's clock skew.
+/// The authenticator is minted fresh by whoever holds the session key,
+/// so it is always "now" — which made the ticket's own validity period
+/// unenforced, and an expired ticket good forever. `EncTicketPart` even
+/// carried `#[allow(dead_code)]`, the compiler saying `endtime` was
+/// never read.
+///
+/// The clock is injected rather than slept for: these fixtures were
+/// recorded on 2026-08-27, so an assertion against the real clock would
+/// be false today and true tomorrow. Reading the ticket's endtime out of
+/// the accepted context is not possible (it is not kept), so the pivot is
+/// the fixture's recording date instead: one year on, every one of these
+/// tickets is long expired.
+#[test]
+fn a_real_ticket_is_refused_after_its_endtime() {
+    let kt = keytab();
+    let f = fixtures();
+    // 2027-08-27, a year after the fixtures were captured. MIT's default
+    // ticket life is 10 hours and its maximum renewable life 7 days, so
+    // no ticket here can still be inside its window.
+    const A_YEAR_ON: i64 = 1_819_000_000;
+    let mut checked = 0;
+    for (label, e) in f.as_object().unwrap() {
+        let ap_req = unhex(e["ap_req"].as_str().unwrap());
+        // The SAME tolerance production uses. SKEW is not used here: a
+        // 100-year tolerance would forgive the expiry, which is exactly
+        // how the recorded fixtures keep working in the tests above.
+        let err = KerberosContext::accept_token_at(&kt, &ap_req, 300, A_YEAR_ON)
+            .err()
+            .unwrap_or_else(|| panic!("etype {label}: an expired ticket was ACCEPTED"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ticket expired"),
+            "etype {label}: refused, but not for the ticket: {msg}"
+        );
+        // It must fail on the TICKET, not on the authenticator that
+        // happens to be equally old -- otherwise this leg would pass
+        // against a server that still never looks at endtime.
+        assert!(
+            !msg.contains("Time skew"),
+            "etype {label}: refused for authenticator skew, which proves nothing \
+             about the ticket: {msg}"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 1, "no fixtures exercised");
+}
+
+/// ACCEPTED CONTROL for the leg above.
+///
+/// Same fixtures, same code path, THE SAME CLOCK -- only the tolerance
+/// differs. A refusal leg passes just as well against an accept path
+/// that is simply broken, so the variable has to be reduced to one: at
+/// 300 s these tickets are refused, at a 100-year tolerance the very
+/// same call at the very same instant succeeds. That also pins why the
+/// recorded fixtures above keep working.
+#[test]
+fn the_same_tickets_at_the_same_instant_pass_under_a_wide_tolerance() {
+    let kt = keytab();
+    let f = fixtures();
+    const A_YEAR_ON: i64 = 1_819_000_000;
+    let mut checked = 0;
+    for (label, e) in f.as_object().unwrap() {
+        let ap_req = unhex(e["ap_req"].as_str().unwrap());
+        let (ctx, _) = KerberosContext::accept_token_at(&kt, &ap_req, SKEW, A_YEAR_ON)
+            .unwrap_or_else(|err| panic!("etype {label}: control failed: {err}"));
+        assert!(ctx.established, "etype {label}: control must establish");
+        checked += 1;
+    }
+    assert!(checked >= 1, "no fixtures exercised");
+}

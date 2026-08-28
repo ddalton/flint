@@ -1,0 +1,42 @@
+tee: /srv/flintexport-neg/.flint-nfs/volume-id: Read-only file system (os error 30)
+tee: /srv/flintexport-neg/probe.txt: Read-only file system (os error 30)
+  ok   PRECONDITION: testuser holds a TGT
+--- N1: wrong service key ---
+    flipped the key of 4 entries
+  ok   N1 PRECONDITION: built a same-name wrong-key keytab
+  ok   N1 PRECONDITION: server with the wrong-key keytab is LISTENING
+  ok   N1a: sec=krb5i REFUSED when the service key does not match
+  ok   N1b: and the server SURVIVED it (a crash would also refuse)
+  ok   N1c: ACCEPTED CONTROL — the CURRENT key mounts (so N1a was the key, not the rig)
+  ok   N1d: and it serves data (got: gssneg-probe)
+--- N2: unknown GSS context handle ---
+    DENIED auth_stat=14
+  ok   N2a: an unknown context handle is DENIED at the auth layer
+  ok   N2b: and with a GSS auth_stat that tells the client to re-init
+  ok   N2c: server survived the bogus handle
+  ok   N2d: ACCEPTED CONTROL — the real mount is still serving on the same process
+--- N3: wire replay of a captured GSS RPC ---
+  ok   N3 PRECONDITION: mounted THROUGH the recording proxy
+  ok   N3a: captured a real RPCSEC_GSS DATA record (408 bytes)
+    captured seq=1
+    replay: DENIED auth_stat=13
+  ok   N3b: the replayed record is DENIED
+  ok   N3c: and denied as a GSS credential/context problem
+--- N4: fresh seq_num, stale verifier ---
+  ok   N4 PRECONDITION: read the captured seq_num (1)
+    seq 1001: DENIED auth_stat=13
+  ok   N4a: an unseen seq_num with a stale MIC is refused (replay cannot explain it)
+  ok   N4b: server survived it
+--- N5: does a refused injection move the window? ---
+  ok   N5 PRECONDITION: the mount still serves before the probes
+  ok   N5a: probe A (seq +500000, stale MIC) is refused — it holds no key
+    probe B: DENIED auth_stat=13
+  ok   N5b ANTI-VACUITY: probe B reached the server and was answered
+  ok   N5c: the honest mount still serves after both probes
+  ok   N5d: server survived
+    server refused 1 call(s) as 'outside window'
+    Replay detected: seq_num 1 already seen (last: 4)
+    Replay detected: seq_num 3 is outside window (last: 500001, window: 128)
+  BAD  N5e: probe B was refused for its MIC, NOT for a moved window (1 outside-window refusals) — a keyless peer cannot move the replay window
+
+=== 23 ok, 1 bad ===

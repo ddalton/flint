@@ -29,6 +29,11 @@ pub mod procedure {
     pub const DESTROY: u32 = 3;
 }
 
+/// RFC 2203 §5.3.3.1: sequence numbers live in [0, RPCSEC_GSS_MAXSEQ).
+/// A client that would exceed it must destroy the context and establish
+/// a new one; a server that sees one must refuse rather than wrap.
+pub const RPCSEC_GSS_MAXSEQ: u32 = 0x8000_0000;
+
 /// RPCSEC_GSS service types (rpc_gss_service_t)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -232,19 +237,40 @@ impl GssContext {
     /// 2. If seq_num is within window: Check bitmap for replay
     /// 3. If seq_num is too old (outside window): Reject as replay
     pub fn verify_sequence(&mut self, seq_num: u32) -> bool {
+        // RFC 2203 §5.3.3.1: the sequence space is bounded. A client that
+        // would exceed it must destroy the context and establish a new
+        // one, so a number at or above the ceiling is never legitimate --
+        // and accepting it would let a peer park `last_seq_num` at the top
+        // of the range, after which every honest number is "old".
+        if seq_num >= RPCSEC_GSS_MAXSEQ {
+            warn!(
+                "seq_num {} is at or beyond RPCSEC_GSS_MAXSEQ ({}); refusing",
+                seq_num, RPCSEC_GSS_MAXSEQ
+            );
+            return false;
+        }
+
         // Case 1: New highest sequence number - advance the window
         if seq_num > self.last_seq_num {
             let diff = seq_num - self.last_seq_num;
 
             if diff < self.sequence_window {
-                // Shift bitmap left by diff positions, moving window forward
-                // Set bit for last_seq_num (mark it as seen before advancing)
-                self.seq_bitmap <<= diff;
-                self.seq_bitmap |= 1;  // Mark current position as seen
+                // Shift bitmap left by diff positions, moving window forward.
+                // checked_shl keeps a window wider than the bitmap from
+                // panicking in debug and wrapping in release.
+                self.seq_bitmap = self.seq_bitmap.checked_shl(diff).unwrap_or(0);
             } else {
                 // Gap is larger than window, reset bitmap
                 self.seq_bitmap = 0;
             }
+
+            // Bit 0 is the NEW highest, so it is marked in BOTH arms. It
+            // used to be set only when the window slid: a gap wider than
+            // the window reset the bitmap and left the very number that
+            // caused the reset unmarked, so it could be replayed exactly
+            // once -- including the first call on a fresh context, whose
+            // last_seq_num starts at 0.
+            self.seq_bitmap |= 1;
 
             self.last_seq_num = seq_num;
             debug!("Sequence number accepted (new highest): {}", seq_num);
@@ -513,6 +539,25 @@ impl RpcSecGssManager {
         }
     }
 
+    /// Advance the replay window for a call whose checksum has ALREADY
+    /// been verified (RFC 2203 §5.3.3.1).
+    ///
+    /// Split out of `validate_data` so that an unauthenticated peer cannot
+    /// move the window by sending a well-formed credential with a bad MIC.
+    pub async fn accept_sequence(&self, cred: &RpcGssCred) -> Result<(), GssReject> {
+        let mut contexts = self.contexts.write().await;
+        let context = contexts
+            .get_mut(&cred.handle)
+            .ok_or_else(|| GssReject::CtxProblem("invalid GSS context handle".into()))?;
+        if context.verify_sequence(cred.sequence_num) {
+            Ok(())
+        } else {
+            Err(GssReject::CredProblem(
+                "sequence number verification failed (replay?)".into(),
+            ))
+        }
+    }
+
     /// Handle RPCSEC_GSS_DESTROY - destroy security context
     pub async fn handle_destroy(&self, cred: &RpcGssCred) {
         info!("RPCSEC_GSS_DESTROY: handle={:02x?}", cred.handle);
@@ -522,6 +567,14 @@ impl RpcSecGssManager {
     }
 
     /// Validate RPCSEC_GSS_DATA and hand back what the body needs.
+    ///
+    /// SPENDS NOTHING. The sequence window is advanced by
+    /// [`Self::accept_sequence`], which the dispatcher calls only after the
+    /// call verifier has proved the caller holds the key -- the order RFC
+    /// 2203 §5.3.3.1 gives, and the reverse of what this did. Advancing
+    /// first let anyone holding a captured record park `last_seq_num` at a
+    /// number of their choosing, with a MIC that was never going to verify,
+    /// and every later call from the real client fell outside the window.
     ///
     /// This used to answer `Ok(())` for `Integrity` and `Privacy` having
     /// verified nothing — the caller was told its RPC had been validated
@@ -546,10 +599,6 @@ impl RpcSecGssManager {
                 // no INIT has arrived to run the sweep.
                 expired = true;
                 Err(GssReject::CtxProblem("GSS context expired".into()))
-            } else if !context.verify_sequence(cred.sequence_num) {
-                Err(GssReject::CredProblem(
-                    "sequence number verification failed (replay?)".into(),
-                ))
             } else {
                 // RFC 4121 §2 base key, via the Kerberos context. The
                 // keytab-less placeholder holds none, so it can serve
@@ -757,6 +806,45 @@ mod tests {
         }
     }
 
+    /// RFC 2203 §5.3.3.1 orders the acceptor's work: verify the header
+    /// checksum FIRST, then the sequence number. flint had it the other
+    /// way round, and the consequence was not academic -- the wire drill
+    /// found it. `verify_sequence` MUTATES `last_seq_num`, so a peer with
+    /// a captured record and no key at all could rewrite its seq_num to a
+    /// large value, watch the MIC check reject the call, and leave the
+    /// context's window parked at that number. Every subsequent call from
+    /// the real client then fell outside the window and was refused as a
+    /// replay: an unauthenticated wedge of a live mount.
+    ///
+    /// So `validate_data` must SPEND NOTHING. Advancing the window is
+    /// `accept_sequence`, which the dispatcher calls only once the MIC has
+    /// proved the caller holds the key.
+    #[tokio::test]
+    async fn validate_data_spends_no_sequence_number() {
+        let mgr = RpcSecGssManager::with_policy(None, quotas(1024, 60_000), true);
+        let init = mgr
+            .handle_init(&cred(GssService::None, procedure::INIT, vec![], 1), b"token")
+            .await;
+        let handle = init.handle.clone();
+        let c = |seq| cred(GssService::None, procedure::DATA, handle.clone(), seq);
+
+        // Repeated validation of the SAME seq must not consume it: until
+        // the checksum is verified, nothing about this call is trusted.
+        mgr.validate_data(&c(7)).await.expect("first validate");
+        mgr.validate_data(&c(7)).await.expect("validate must not spend the seq");
+        // A wild seq_num must not move the window either.
+        let _ = mgr.validate_data(&c(9_000)).await;
+        mgr.validate_data(&c(8)).await.expect("the window must not have moved");
+
+        // Spending is explicit, and only then does replay bite.
+        mgr.accept_sequence(&c(7)).await.expect("first spend");
+        assert!(
+            mgr.accept_sequence(&c(7)).await.is_err(),
+            "a spent sequence number must be refused"
+        );
+        mgr.accept_sequence(&c(8)).await.expect("a fresh one still works");
+    }
+
     /// The placeholder context holds NO keys, so per-message protection is
     /// impossible on it — and that must be a CTXPROBLEM (re-init and
     /// retry), never a silent pass.
@@ -855,5 +943,38 @@ mod tests {
 
         // Within new window should work
         assert!(ctx.verify_sequence(490));
+    }
+
+    /// The gap case above proves an OLD number is refused after a reset.
+    /// It never asks about the number that CAUSED the reset.
+    #[test]
+    fn the_jump_that_resets_the_window_cannot_be_replayed() {
+        let mut ctx = GssContext::new(vec![1, 2, 3, 4], GssService::None);
+        assert!(ctx.verify_sequence(100));
+        assert!(ctx.verify_sequence(500), "the jump itself is legitimate");
+        assert!(
+            !ctx.verify_sequence(500),
+            "500 was already spent on the call that reset the window"
+        );
+    }
+
+    /// The same hole on a fresh context: last_seq_num starts at 0 with an
+    /// empty bitmap, so a first call far above the window leaves itself
+    /// unmarked.
+    #[test]
+    fn a_first_call_beyond_the_window_cannot_be_replayed() {
+        let mut ctx = GssContext::new(vec![1, 2, 3, 4], GssService::None);
+        assert!(ctx.verify_sequence(200));
+        assert!(!ctx.verify_sequence(200), "200 was already spent");
+    }
+
+    /// RFC 2203 §5.3.3.1: a seq_num at or above RPCSEC_GSS_MAXSEQ must be
+    /// refused; the client is expected to destroy the context and start a
+    /// new one rather than wrap.
+    #[test]
+    fn a_sequence_number_at_maxseq_is_refused() {
+        let mut ctx = GssContext::new(vec![1, 2, 3, 4], GssService::None);
+        assert!(!ctx.verify_sequence(RPCSEC_GSS_MAXSEQ));
+        assert!(!ctx.verify_sequence(u32::MAX));
     }
 }

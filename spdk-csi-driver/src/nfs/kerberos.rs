@@ -34,6 +34,9 @@ pub enum KerberosError {
     
     #[error("Invalid authenticator: {0}")]
     InvalidAuthenticator(String),
+
+    #[error("Ticket is not valid now: {0}")]
+    TicketNotValid(String),
     
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -655,18 +658,65 @@ impl Ticket {
 
 /// Decrypted ticket content (EncTicketPart from RFC 4120)
 #[derive(Debug)]
-#[allow(dead_code)]
 struct EncTicketPart {
     flags: u32,
     key: SessionKey,
     crealm: String,
     cname: Vec<String>,
+    /// Parsed because the ASN.1 walk has to step over it to reach
+    /// `starttime`/`endtime`; nothing validates against it.
+    #[allow(dead_code)]
     authtime: i64,
     starttime: Option<i64>,
     endtime: i64,
 }
 
+/// RFC 4120 §5.3 TicketFlags: bit 0 is the MOST significant bit of the
+/// BIT STRING, so RFC flag `n` sits at u32 bit `31 - n`. `invalid` is
+/// flag 7.
+const TICKET_FLAG_INVALID: u32 = 1 << (31 - 7);
+
 impl EncTicketPart {
+    /// RFC 4120 §3.2.3: the acceptor checks the ticket is CURRENT, not
+    /// merely decryptable.
+    ///
+    /// Nothing read `starttime` or `endtime` before this; the only clock
+    /// check on the accept path was the authenticator's `ctime` skew, and
+    /// the authenticator is minted fresh by whoever holds the session
+    /// key. So a ticket stayed usable forever after its endtime: revoking
+    /// a principal at the KDC did not stop anyone already holding a
+    /// ticket and its session key. `#[allow(dead_code)]` on this struct
+    /// was the compiler saying so.
+    ///
+    /// `tolerance_seconds` is the same clock-skew allowance the
+    /// authenticator gets, so a recorded fixture replayed under a wide
+    /// tolerance still validates and production still gets 5 minutes.
+    fn validate_validity(&self, now: i64, tolerance_seconds: i64) -> Result<()> {
+        // RFC 4120 §3.2.3: a postdated ticket that has not been validated
+        // carries INVALID and must be refused outright, whatever the clock
+        // says.
+        if self.flags & TICKET_FLAG_INVALID != 0 {
+            return Err(KerberosError::TicketNotValid(
+                "ticket carries the INVALID flag (postdated, not yet validated)".to_string(),
+            ));
+        }
+        if now > self.endtime.saturating_add(tolerance_seconds) {
+            return Err(KerberosError::TicketNotValid(format!(
+                "ticket expired at {} (now {}, tolerance {}s)",
+                self.endtime, now, tolerance_seconds
+            )));
+        }
+        if let Some(start) = self.starttime {
+            if now.saturating_add(tolerance_seconds) < start {
+                return Err(KerberosError::TicketNotValid(format!(
+                    "ticket not valid until {} (now {}, tolerance {}s)",
+                    start, now, tolerance_seconds
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Parse decrypted ticket content
     fn parse(data: &[u8]) -> Result<Self> {
         // EncTicketPart ::= [APPLICATION 3] SEQUENCE {
@@ -881,8 +931,7 @@ impl Authenticator {
     }
     
     /// Validate authenticator timestamp
-    fn validate(&self, tolerance_seconds: i64) -> Result<()> {
-        let now = current_time();
+    fn validate(&self, now: i64, tolerance_seconds: i64) -> Result<()> {
         let time_diff = (now - self.ctime).abs();
         
         if time_diff > tolerance_seconds {
@@ -1478,6 +1527,22 @@ impl KerberosContext {
         token: &[u8],
         max_skew_secs: i64,
     ) -> Result<(Self, Vec<u8>)> {
+        Self::accept_token_at(keytab, token, max_skew_secs, current_time())
+    }
+
+    /// As [`Self::accept_token_with_skew`], with the clock supplied.
+    ///
+    /// Ticket expiry cannot be tested against a live clock without a test
+    /// that rots: a fixture recorded today is valid today and expired
+    /// tomorrow, so the assertion would flip on its own. Injecting `now`
+    /// makes "this real MIT ticket is refused once its endtime has
+    /// passed" a deterministic statement about a committed fixture.
+    pub(crate) fn accept_token_at(
+        keytab: &Keytab,
+        token: &[u8],
+        max_skew_secs: i64,
+        now: i64,
+    ) -> Result<(Self, Vec<u8>)> {
         info!("🔐 Accepting Kerberos GSS token with FULL CRYPTOGRAPHY: {} bytes", token.len());
         
         // Parse GSS-API wrapper
@@ -1553,13 +1618,18 @@ impl KerberosContext {
         
         // Decrypt ticket to get session key
         let enc_ticket_part = ticket.decrypt(service_key)?;
+
+        // BEFORE the authenticator: a ticket outside its validity window
+        // is not a skew problem and must not be reported as one.
+        enc_ticket_part.validate_validity(now, max_skew_secs)?;
+
         let session_key = enc_ticket_part.key;
-        
+
         info!("   ✅ Ticket decrypted, extracted session key: {} bytes", session_key.key.len());
         
         // Decrypt and validate authenticator
         let authenticator = Authenticator::parse_and_decrypt(&enc_authenticator, &session_key)?;
-        authenticator.validate(max_skew_secs)?;
+        authenticator.validate(now, max_skew_secs)?;
         
         info!("   ✅ Authenticator validated: time_skew={}s", 
               current_time() - authenticator.ctime);
@@ -2343,6 +2413,75 @@ mod tests {
         assert_eq!(enc_part.seq_number, Some(0));
     }
     
+    /// A ticket whose validity interval is under test directly -- the
+    /// recorded interop fixtures can only exercise `endtime`, since their
+    /// flags and starttime are whatever MIT chose on the day.
+    fn ticket_at(flags: u32, starttime: Option<i64>, endtime: i64) -> EncTicketPart {
+        EncTicketPart {
+            flags,
+            key: SessionKey { enctype: EncType::AES256CtsHmacSha196, key: vec![0u8; 32] },
+            crealm: "FLINT.TEST".to_string(),
+            cname: vec!["testuser".to_string()],
+            authtime: 1_000,
+            starttime,
+            endtime,
+        }
+    }
+
+    #[test]
+    fn a_ticket_inside_its_window_validates() {
+        assert!(ticket_at(0, Some(1_000), 2_000).validate_validity(1_500, 300).is_ok());
+    }
+
+    #[test]
+    fn an_expired_ticket_is_refused_and_the_tolerance_is_the_only_reprieve() {
+        let t = ticket_at(0, Some(1_000), 2_000);
+        // 100s past endtime, inside a 300s skew allowance: still good.
+        assert!(t.validate_validity(2_100, 300).is_ok());
+        // 400s past: gone.
+        let err = t.validate_validity(2_400, 300).unwrap_err().to_string();
+        assert!(err.contains("ticket expired"), "{err}");
+    }
+
+    #[test]
+    fn a_ticket_presented_before_its_starttime_is_refused() {
+        let t = ticket_at(0, Some(5_000), 9_000);
+        let err = t.validate_validity(4_000, 300).unwrap_err().to_string();
+        assert!(err.contains("not valid until"), "{err}");
+        // and the same allowance applies at this edge
+        assert!(t.validate_validity(4_800, 300).is_ok());
+    }
+
+    #[test]
+    fn a_ticket_with_no_starttime_is_judged_on_endtime_alone() {
+        assert!(ticket_at(0, None, 2_000).validate_validity(1, 300).is_ok());
+    }
+
+    /// RFC 4120 §3.2.3 -- INVALID beats the clock: a postdated ticket that
+    /// was never validated must be refused even mid-window.
+    #[test]
+    fn an_invalid_flagged_ticket_is_refused_even_inside_its_window() {
+        let t = ticket_at(TICKET_FLAG_INVALID, Some(1_000), 2_000);
+        let err = t.validate_validity(1_500, 300).unwrap_err().to_string();
+        assert!(err.contains("INVALID"), "{err}");
+    }
+
+    /// The flag bit is easy to get wrong: RFC 4120 numbers TicketFlags
+    /// from the MOST significant bit, so `invalid` (flag 7) is u32 bit 24.
+    /// Neighbouring flags must not trip the check.
+    #[test]
+    fn the_invalid_flag_is_bit_seven_counted_from_the_msb() {
+        assert_eq!(TICKET_FLAG_INVALID, 0x0100_0000);
+        for neighbour in [1u32 << 23, 1u32 << 25, 1u32 << 31, 1u32 << 22] {
+            assert!(
+                ticket_at(neighbour, Some(1_000), 2_000)
+                    .validate_validity(1_500, 300)
+                    .is_ok(),
+                "flag bit {neighbour:#x} must not read as INVALID"
+            );
+        }
+    }
+
     #[test]
     fn test_authenticator_validate_success() {
         let auth = Authenticator {
@@ -2354,7 +2493,7 @@ mod tests {
             seq_number: None,
         };
         
-        let result = auth.validate(300);
+        let result = auth.validate(current_time(), 300);
         assert!(result.is_ok());
     }
     
@@ -2369,7 +2508,7 @@ mod tests {
             seq_number: None,
         };
         
-        let result = auth.validate(300);  // 5 minute tolerance
+        let result = auth.validate(current_time(), 300);  // 5 minute tolerance
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Time skew"));
     }

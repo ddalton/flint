@@ -998,7 +998,8 @@ async fn handle_rpcsec_gss_call(
         gss_proc::DATA => {
             info!("🔐 RPCSEC_GSS_DATA");
 
-            // 1. Context lookup, expiry, replay window, and the base key.
+            // 1. Context lookup, expiry and the base key. NOT the replay
+            //    window -- see step 2b.
             let validated = match gss_manager.validate_data(&gss_cred).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -1041,6 +1042,23 @@ async fn handle_rpcsec_gss_call(
                 crate::nfs::gss_framing::verify_call_verifier(&validated, &call.verf, &call.cred_span)
             {
                 warn!("❌ GSS call verifier rejected: {}", e.reason());
+                return ReplyBuilder::auth_error(call.xid, e.auth_stat());
+            }
+
+            // 2b. ONLY NOW spend the sequence number. RFC 2203 §5.3.3.1
+            //     puts the header checksum before the sequence check, and
+            //     this used to do the reverse -- inside step 1, where
+            //     `verify_sequence` also ADVANCES the window. The wire
+            //     drill (tests/krb5/run-gssneg.sh, leg N5) showed what
+            //     that bought an attacker: replay a captured record with
+            //     its seq_num rewritten to a large number, hold no key at
+            //     all, and the MIC check duly rejects the call -- after
+            //     the window has already been parked at that number. The
+            //     real client's next calls then fall outside it and are
+            //     refused as replays. An unauthenticated wedge of a live
+            //     mount, costing one packet.
+            if let Err(e) = gss_manager.accept_sequence(&gss_cred).await {
+                warn!("❌ GSS sequence rejected: {}", e.reason());
                 return ReplyBuilder::auth_error(call.xid, e.auth_stat());
             }
 

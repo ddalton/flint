@@ -28,6 +28,10 @@ spdk-csi-driver/src/csi.v1.rs
 # logs, because this *.log rule silently swallowed the logs
 # themselves. They lived on one laptop for a month.
 !lean/e2e/results/*.log
+# Same for the Kerberos rig: run-gssneg.sh's red run is the only durable
+# proof that the sequence-window bug was real, and a fix without its red
+# run is an assertion.
+!tests/krb5/results/*.log
 
 # Temporary files
 *.tmp
