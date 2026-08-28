@@ -51,10 +51,31 @@ RUN apt-get update && apt-get install -y \
     # for as long as the bug existed. tests/k8s/pnfs-drills/truncate-recall.sh
     # reads the CB_COMPOUND status directly and hard-fails without this.
     tcpdump \
+    # setcap, for the file capabilities below.
+    libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
 COPY ${BIN_DIR}/${TARGETARCH}/flint-pnfs-mds /usr/local/bin/flint-pnfs-mds
 COPY ${BIN_DIR}/${TARGETARCH}/flint-pnfs-ds /usr/local/bin/flint-pnfs-ds
+
+# The same file capabilities Dockerfile.pnfs grants, for the same reason,
+# because THIS is the file publish-images.sh actually builds and pushes.
+# b52a423 hardened the securityContext and added the setcap to
+# Dockerfile.pnfs only, so the published flint-pnfs image had neither
+# libcap2-bin nor the capabilities — while values.yaml went on telling
+# operators that flipping to runAsUser 65532 was safe "from the image
+# that ships with this chart". Kubernetes has no ambient capabilities,
+# so following that advice yielded a hub that could not chown, silently,
+# with every operation still answering OK.
+#
+# Both binaries are verified: the previous check looked only at the MDS.
+RUN setcap cap_chown,cap_dac_override,cap_fowner,cap_fsetid=ep \
+      /usr/local/bin/flint-pnfs-mds \
+ && setcap cap_chown,cap_dac_override,cap_fowner,cap_fsetid=ep \
+      /usr/local/bin/flint-pnfs-ds \
+ && getcap /usr/local/bin/flint-pnfs-mds | grep -c cap_chown > /dev/null \
+ && getcap /usr/local/bin/flint-pnfs-ds | grep -c cap_chown > /dev/null \
+ || (echo "setcap did not take — the image cannot run non-root" && exit 1)
 
 # Expose ports for both MDS and DS
 # (only the relevant ports will be used depending on which binary runs)

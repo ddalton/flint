@@ -508,16 +508,20 @@ impl DataServer {
                         response_flags |= exchgid_flags::CONFIRMED_R;
                     }
                     
-                    // Echo back ALL client capability flags
-                    if client_flags & exchgid_flags::SUPP_MOVED_REFER != 0 {
-                        response_flags |= exchgid_flags::SUPP_MOVED_REFER;
-                    }
-                    if client_flags & exchgid_flags::SUPP_MOVED_MIGR != 0 {
-                        response_flags |= exchgid_flags::SUPP_MOVED_MIGR;
-                    }
-                    if client_flags & exchgid_flags::BIND_PRINC_STATEID != 0 {
-                        response_flags |= exchgid_flags::BIND_PRINC_STATEID;
-                    }
+                    // Capability flags are NOT echoed. bc7fed3 fixed this
+                    // on the MDS (B10) and this fork kept the original
+                    // comment, "Echo back ALL client capability flags",
+                    // along with the behaviour: SUPP_MOVED_REFER,
+                    // SUPP_MOVED_MIGR and BIND_PRINC_STATEID were handed
+                    // back to anyone who asked, advertising referral,
+                    // migration and principal-bound stateids that nothing
+                    // here implements — the DS cannot answer
+                    // NFS4ERR_MOVED and discards the stateid outright.
+                    //
+                    // A server that claims a recovery path it does not
+                    // have sends the client down it exactly once, during
+                    // the failure the path was supposed to handle.
+                    let _ = client_flags;
                     
                     encoder.encode_u32(response_flags);
                     

@@ -106,8 +106,12 @@ if dash.get("enabled", False):
 # of bug this script exists to prevent.
 pnfs = values.get("pnfs", {}).get("server", {})
 if pnfs.get("image", {}).get("tag"):
+    # The PREBUILT file, because that is what publish-images.sh builds
+    # and pushes. Naming the other one meant the gate cited a Dockerfile
+    # the publisher never touches — which is how b52a423's setcap could
+    # be present in the gated file and absent from the shipped image.
     print(pnfs["image"]["name"], pnfs["image"]["tag"],
-          "spdk-csi-driver", "docker/Dockerfile.pnfs")
+          "spdk-csi-driver", "docker/Dockerfile.pnfs.prebuilt")
 PYEOF
 )
 

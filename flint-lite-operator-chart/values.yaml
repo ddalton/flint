@@ -97,6 +97,20 @@ networkPolicy:
   # CIDRs here is an outage; listing the local one admits everyone who
   # can reach the NodePort. Restrict cross-cluster reach at the network
   # layer (peering, security groups, a gateway), not here.
+  # Hub HTTP ports to admit. A FlintShare picks its own
+  # `spec.monitoring.port`, and this policy is rendered per NAMESPACE —
+  # it cannot see the shares that will live there, so it cannot derive
+  # the set. It was a hardcoded 8080, which meant a share that moved its
+  # port had its HTTP surface blackholed by the chart's own policy: the
+  # operator's poll fails (HubReachable=False/PollFailed), so the share
+  # never suspends, and the gateway and file API go dark with it.
+  #
+  # List every port in use across `hubNamespaces`. The sibling chart
+  # (flint-lite) renders `.Values.monitoring.port` here because it
+  # installs the one hub it is configuring; this chart does not.
+  hubApiPorts:
+    - 8080
+
   nfsClientCIDRs: []
   nfsClientSelectors: []      # NetworkPolicyPeer objects, verbatim
 

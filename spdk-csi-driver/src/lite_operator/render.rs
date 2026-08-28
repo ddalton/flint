@@ -392,6 +392,11 @@ pub fn mds_yaml(share: &FlintShare, d: &RenderDefaults) -> String {
                 "    hydrateWaitSecs: {}",
                 api.hydrate_wait_secs.unwrap_or(FILE_API_HYDRATE_WAIT_SECS)
             );
+            let _ = writeln!(
+                y,
+                "    streamThresholdBytes: {}",
+                api.stream_threshold_bytes.unwrap_or(FILE_API_STREAM_THRESHOLD_BYTES)
+            );
         }
     }
     y
@@ -405,6 +410,9 @@ const HEALTH_PATH: &str = "/health";
 pub const FILE_API_TOKEN_MOUNT: &str = "/etc/flint/api-token";
 const FILE_API_MAX_BYTES: i64 = 5 * 1024 * 1024 * 1024;
 const FILE_API_HYDRATE_WAIT_SECS: i64 = 30;
+/// Matches `monitoring.fileApi.streamThresholdBytes` in the chart and
+/// `default_file_api_stream_threshold` in the server's own config.
+const FILE_API_STREAM_THRESHOLD_BYTES: i64 = 8 * 1024 * 1024;
 
 /// Quote a scalar the way YAML wants it. Bucket names and prefixes are
 /// user input; an unquoted `endpoint: http://x` is a comment waiting to
@@ -1071,6 +1079,7 @@ mod tests {
             max_upload_bytes: None,
             max_download_bytes: None,
             hydrate_wait_secs: None,
+            stream_threshold_bytes: None,
         }
     }
 

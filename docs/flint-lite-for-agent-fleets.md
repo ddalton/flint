@@ -693,15 +693,34 @@ server takes it at its word — there is no root-squash.
 it the kernel negotiates `sec=null`, which sends **no credential at
 all**. Measured on a real mount, the difference is total:
 
-| | `sec=null` (the default you get) | `sec=sys` |
+| | `sec=null` | `sec=sys` |
 |---|---|---|
 | File created by a uid-1000 pod | owned `0:0` | owned `1000:1000` |
-| A non-root pod writing into a root-owned `0755` dir | **succeeds** | obeys the mode |
+| A non-root pod writing into a root-owned `0755` dir | **succeeds** | **succeeds** (see below) |
 | Effective identity of every client | root | the pod's own uid |
 
 So a mount without `sec=sys` gives every agent root on the share and
-makes ownership meaningless — and nothing anywhere reports this. Check a
-live mount with:
+makes ownership meaningless — and nothing anywhere reports this.
+
+**Two corrections to what this table used to say.** It described
+`sec=null` as "the default you get"; SECINFO now advertises AUTH_SYS
+first, so a stock mount negotiates `sec=sys` on its own. And it promised
+that `sec=sys` makes a non-root pod "obey the mode". **It does not, at
+the shipped default.** Permission checking runs in `Mode::Warn`: the
+server evaluates the mode, logs the answer, and allows the operation
+anyway — and it could not fall back on the kernel's own check either,
+because the hub runs as uid 0 with `CAP_DAC_OVERRIDE`. Enforcement
+exists (`FLINT_NFS_ENFORCE_PERMISSIONS=1`) and is exercised by CI, but
+it is off by default and changing that default is a behaviour break for
+every existing install.
+
+So what `sec=sys` buys you today is **identity, not enforcement**:
+created files carry the right owner, `ls -l` tells the truth, and
+ownership-based tooling works. It is not a security boundary between
+agents. If you need one, give each tenant its own share — which is the
+posture the rest of this guide assumes anyway.
+
+Check a live mount with:
 
 ```console
 $ mount | grep workspace

@@ -184,6 +184,47 @@ mod tests {
         );
     }
 
+    /// The image that is PUBLISHED must carry the same file capabilities
+    /// as the one the release gate names.
+    ///
+    /// b52a423 added the setcap to `Dockerfile.pnfs`. `publish-images.sh`
+    /// builds `Dockerfile.pnfs.prebuilt`. So the hardening was real, was
+    /// gated, and was absent from the artifact users pull — while
+    /// `values.yaml` told operators that flipping to `runAsUser: 65532`
+    /// was safe "from the image that ships with this chart". Kubernetes
+    /// grants no ambient capabilities, so following that advice produced
+    /// a hub that could not chown, silently, every op still answering OK.
+    ///
+    /// The prebuilt file's own header already said "same base, same
+    /// packages, same entrypoint. If you change one, change both." A
+    /// comment is not a guard; this is.
+    #[test]
+    fn both_pnfs_dockerfiles_grant_the_same_file_capabilities() {
+        const CAPS: &str = "cap_chown,cap_dac_override,cap_fowner,cap_fsetid=ep";
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docker");
+        let mut checked = 0usize;
+        for name in ["Dockerfile.pnfs", "Dockerfile.pnfs.prebuilt"] {
+            let path = root.join(name);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("unreadable {}: {e}", path.display()));
+            assert!(
+                text.contains("libcap2-bin"),
+                "{name}: setcap needs libcap2-bin in the base, or the RUN fails at build"
+            );
+            for bin in ["flint-pnfs-mds", "flint-pnfs-ds"] {
+                assert!(
+                    text.contains(&format!("setcap {CAPS} \\\n      /usr/local/bin/{bin}")),
+                    "{name}: no `setcap {CAPS}` for {bin} — a non-root hub built from \
+                     this file cannot chown, and says OK anyway"
+                );
+            }
+            checked += 1;
+        }
+        // Anti-vacuity: if neither file resolved, every assertion above
+        // was skipped and this leg proved nothing.
+        assert_eq!(checked, 2, "both Dockerfiles must have been read");
+    }
+
     /// The probe must not leave its file behind.
     #[test]
     fn the_probe_cleans_up_after_itself() {

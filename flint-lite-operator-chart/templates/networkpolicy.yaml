@@ -104,7 +104,9 @@ spec:
         - {{ toYaml . | nindent 10 | trim }}
         {{- end }}
       ports:
+        {{- range $.Values.networkPolicy.hubApiPorts }}
         - protocol: TCP
-          port: 8080
+          port: {{ . }}
+        {{- end }}
 {{- end }}
 {{- end }}

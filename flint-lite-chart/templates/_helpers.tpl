@@ -113,6 +113,7 @@ monitoring:
     maxUploadBytes: {{ int64 .Values.monitoring.fileApi.maxUploadBytes }}
     maxDownloadBytes: {{ int64 .Values.monitoring.fileApi.maxDownloadBytes }}
     hydrateWaitSecs: {{ .Values.monitoring.fileApi.hydrateWaitSecs }}
+    streamThresholdBytes: {{ int64 .Values.monitoring.fileApi.streamThresholdBytes }}
   {{- end }}
 {{- end }}
 {{- end }}

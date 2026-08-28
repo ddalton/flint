@@ -557,9 +557,35 @@ pub(crate) fn open_for_internal_write(path: &Path) -> std::io::Result<std::fs::F
 /// materialize — C6), set_len(0), fsync. The inode survives, so every
 /// cached fd stays a valid handle whose ops re-check the marker.
 fn truncate_in_place(path: &Path) -> std::io::Result<()> {
+    // POSIX ftruncate moves st_mtime. Eviction is not a modification:
+    // the bytes are in the bucket, the logical size is already served
+    // from the marker, and nobody asked for a write. Left as it was,
+    // every `tar --compare`, rsync, make and git in the fleet reads an
+    // untouched file as modified — the S4 workload class this server is
+    // for — and `manifest::walk` stats the stub and records the
+    // EVICTION timestamp as the file's mtime, which `import::stage_stub`
+    // then replays faithfully onto a DR restore. The damage outlives the
+    // cache.
+    //
+    // Preserved here rather than recovered later from the object's own
+    // `flint-mtime` stamp, because that stamp is only readable when the
+    // bucket is — and the local answer has to be right during an outage.
+    let before = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+
     let f = open_for_internal_write(path)?;
     f.set_len(0)?;
-    f.sync_all()
+    f.sync_all()?;
+
+    if let Some(t) = before {
+        // Best-effort by design: failing to restore the timestamp costs
+        // a spurious "modified", which is what this whole function is
+        // trying to avoid, but it is not a reason to fail an eviction
+        // whose bytes are already safe in the bucket.
+        if let Err(e) = filetime::set_file_mtime(path, filetime::FileTime::from_system_time(t)) {
+            debug!("evict: mtime not restored on {}: {}", path.display(), e);
+        }
+    }
+    Ok(())
 }
 
 // ── startup reconciler (C2: finish or roll back half-evictions) ──────
@@ -872,6 +898,48 @@ pub async fn evict_pass(
 
 #[cfg(test)]
 mod tests {
+
+    /// Eviction must not make an untouched file look modified.
+    ///
+    /// `truncate_in_place` was `open + set_len(0) + sync_all`, and POSIX
+    /// ftruncate moves st_mtime. Everything downstream believed it: the
+    /// S4 workload tools (`tar --compare`, rsync, make, git) read the
+    /// file as changed, and `manifest::walk` wrote the eviction instant
+    /// into the manifest as the file's mtime for `import::stage_stub` to
+    /// replay on a restore.
+    ///
+    /// The oracle is EQUALITY against a timestamp set well in the past —
+    /// not "close to now", which would pass against the bug.
+    #[test]
+    fn eviction_preserves_the_files_modification_time() {
+        // Serialize with the other tier rigs. They force capture on and
+        // leave markers keyed by (dev, ino), and TempDir inodes get
+        // reused inside one process — the documented way a neighbouring
+        // test turns an unrelated READ into a Delay.
+        let _excl = crate::tier::capture::test_exclusive();
+        let dir = tempfile::TempDir::new().unwrap();
+        let f = dir.path().join("weights.bin");
+        std::fs::write(&f, vec![9u8; 4096]).unwrap();
+
+        // A year ago, so nothing about "recent" can make this pass.
+        let then = filetime::FileTime::from_unix_time(1_700_000_000, 123_456_789);
+        filetime::set_file_mtime(&f, then).unwrap();
+        assert_eq!(
+            filetime::FileTime::from_last_modification_time(&std::fs::metadata(&f).unwrap()),
+            then,
+            "precondition: the fixture's mtime must actually be set"
+        );
+
+        truncate_in_place(&f).expect("eviction truncates the stub");
+
+        let md = std::fs::metadata(&f).unwrap();
+        assert_eq!(md.len(), 0, "the stub must actually be truncated");
+        assert_eq!(
+            filetime::FileTime::from_last_modification_time(&md),
+            then,
+            "eviction must leave the modification time alone"
+        );
+    }
     use super::*;
     use crate::state_backend::memory::MemoryBackend;
     use crate::state_backend::TierDirtyEntry;

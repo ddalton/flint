@@ -358,6 +358,18 @@ impl IoOperationHandler {
         offset: u64,
         count: u32,
     ) -> Result<ReadResult> {
+        // DOS-4, data-server edition. `count` arrives off the wire as a
+        // u32 and reached `vec![0u8; count as usize]` unclamped, so a
+        // ~100-byte frame demanded 4 GiB — against an empty file, with no
+        // session, stateid or credential. This fork was strictly worse
+        // than the MDS was BEFORE B8: that one at least took
+        // min(count, file_size - offset).
+        //
+        // aad7a47 clamped the MDS at ioops.rs and never came here. Same
+        // ceiling, deliberately: a short READ is legal (the client
+        // resumes on eof=false) and a reply above it could not be sent.
+        let count = count.min(crate::nfs::v4::operations::session::SERVER_MAX_RESPONSE);
+
         debug!(
             "DS READ: fh={:?}, offset={}, count={}",
             &filehandle[0..4.min(filehandle.len())],
@@ -821,6 +833,40 @@ mod tests {
 
         h.commit(&fh, 0, 0).await.unwrap();
         assert_eq!(h.fd_cache.len(), 1, "COMMIT must hit the cached fd");
+    }
+
+    /// DOS-4 on the data server. `count` came off the wire as a u32 and
+    /// went straight into `vec![0u8; count as usize]`, so a ~100-byte
+    /// frame demanded 4 GiB with no session, stateid or credential —
+    /// worse than the MDS before aad7a47, which at least bounded by the
+    /// file size.
+    ///
+    /// The oracle is the SHORT read: the file is deliberately larger
+    /// than the ceiling, so a server without the clamp returns all of it
+    /// and a server with the clamp returns exactly the ceiling. Reading
+    /// a small file would prove nothing — the length would be the file's
+    /// either way, and only the allocation (which no assertion can see)
+    /// would differ.
+    #[tokio::test]
+    async fn ds_read_count_is_clamped_to_the_response_ceiling() {
+        use crate::nfs::v4::operations::session::SERVER_MAX_RESPONSE;
+        let ceiling = SERVER_MAX_RESPONSE as usize;
+
+        let (h, dir) = handler();
+        let fh = fh_for(&h, "big", &dir);
+        std::fs::write(dir.path().join("big"), vec![7u8; ceiling * 2]).unwrap();
+
+        let r = h.read(&fh, 0, u32::MAX).await.unwrap();
+        assert_eq!(
+            r.data.len(), ceiling,
+            "an unbounded wire count must be clamped to the response ceiling"
+        );
+        assert!(!r.eof, "a clamped read is short, so it is not eof");
+
+        // The control: a request the ceiling does not bind is unchanged,
+        // so the clamp is a ceiling and not a fixed read size.
+        let small = h.read(&fh, 0, 64).await.unwrap();
+        assert_eq!(small.data.len(), 64);
     }
 
     #[tokio::test]

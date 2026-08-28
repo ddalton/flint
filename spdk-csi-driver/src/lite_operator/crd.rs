@@ -408,6 +408,18 @@ pub struct FileApiSpec {
     /// answering 503 with a Retry-After. Absent = 30.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hydrate_wait_secs: Option<i64>,
+
+    /// Downloads at or above this size stream instead of buffering.
+    /// Absent = 8Mi.
+    ///
+    /// Buffering everything bounded hub memory by `maxDownloadBytes`
+    /// instead: a 512 MiB request measured VmHWM 30 MB -> 541 MiB, and
+    /// under a 256Mi limit that GET was OOM-killed, taking the NFS
+    /// export down with it. The chart documented this knob and never
+    /// rendered it, and the CHANGELOG recorded the chart half as
+    /// working — which is what talked us out of adding this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_threshold_bytes: Option<i64>,
 }
 
 /// The hub's disk.

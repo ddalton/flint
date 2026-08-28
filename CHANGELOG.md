@@ -1201,8 +1201,13 @@ cluster-proven, not just unit-proven.
 
 ### Known gaps (unchanged, stated so they are not rediscovered)
 
-- `streamThresholdBytes` is settable in `flint-lite-chart` but has no
-  `FlintShare` field, so operator-managed shares take the 8 MiB default.
+- `streamThresholdBytes` has no `FlintShare` field, so operator-managed
+  shares take the 8 MiB default. (This entry used to say it was
+  "settable in `flint-lite-chart`". It was not: `values.yaml` documented
+  the knob and `_helpers.tpl` never emitted the key, so chart installs
+  took the default too. Believing the chart half worked is what talked
+  us out of adding the CRD field. The chart half is fixed; the
+  `FlintShare` field is still owed.)
 - The write reserve (`admit_bytes` reading a stale gauge with no
   in-flight accounting) is still open.
 

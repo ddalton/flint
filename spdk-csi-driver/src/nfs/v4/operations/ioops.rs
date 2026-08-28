@@ -2842,6 +2842,37 @@ mod tests {
         let f = std::fs::File::create(&big_path).unwrap();
         f.set_len(4 * SERVER_MAX_RESPONSE as u64).unwrap();
         drop(f);
+
+        // KNOWN FLAKE, PRE-EXISTING, NOT YET CLOSED. ~1 full-suite run
+        // in 5 fails here with Delay instead of Ok (measured at
+        // 748bbec8, before the batch that added this comment).
+        //
+        // The eviction registry is process-global and keyed (dev, ino)
+        // with no path corroboration, and TempDir inodes are reused
+        // within a process, so a marker planted for one test's file
+        // aliases onto another's. The rig lock keeps a planter from
+        // running ALONGSIDE this test; the clear below removes any
+        // marker left behind BEFORE it. Neither is sufficient, and the
+        // precondition assert is what proves it: it does not fire on a
+        // failing run, so the marker arrives DURING this test, from a
+        // planter that does not hold `capture::test_exclusive()`.
+        //
+        // The durable fix is one of: corroborate the path in the marker
+        // consult (which would also close the (dev, ino) aliasing
+        // hazard in the product, not just here), or audit every
+        // marker-planting test for the rig lock. Left open deliberately
+        // rather than papered over with a retry, which would hide the
+        // product-side aliasing this shares a cause with.
+        {
+            use std::os::unix::fs::MetadataExt;
+            let md = std::fs::metadata(&big_path).unwrap();
+            crate::tier::evict::forget(md.dev(), md.ino());
+            assert!(
+                crate::tier::evict::logical_size(md.dev(), md.ino()).is_none(),
+                "precondition: this file must carry no eviction marker"
+            );
+        }
+
         ctx.current_fh = Some(fh_mgr.path_to_filehandle(&big_path).unwrap());
 
         let open_res = handler
