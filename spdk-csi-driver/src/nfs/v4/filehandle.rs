@@ -1056,6 +1056,21 @@ impl FileHandleManager {
         Ok(())
     }
 
+    /// Containment for a path that did NOT come out of `resolve_handle`.
+    ///
+    /// `parse_path_lenient` deliberately skips the instance check and
+    /// the tag — a pNFS Data Server has to honour handles minted by the
+    /// Metadata Server, whose instance and key are by definition not its
+    /// own. That makes it the one parser an attacker can satisfy for
+    /// free, so every caller that turns its result into a LOCAL path
+    /// must contain it here. The DS's own rebasing (by basename, into
+    /// its export) is the equivalent step on that side.
+    pub fn contain(&self, path: &Path) -> Result<PathBuf, String> {
+        let normalized = self.lexical_normalize(path)?;
+        self.ensure_within_export(&normalized)?;
+        Ok(normalized)
+    }
+
     /// Resolve `.` and `..` lexically. No filesystem access, no symlink
     /// following, no existence requirement.
     fn lexical_normalize(&self, path: &Path) -> Result<PathBuf, String> {

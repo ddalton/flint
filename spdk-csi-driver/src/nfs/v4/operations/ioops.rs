@@ -1047,12 +1047,51 @@ impl IoOperationHandler {
             }
             OpenClaim::Fh => match self.fh_mgr.resolve_handle(current_fh) {
                 Ok(p) => (parent_fh_data.clone(), Some(p), true, None),
-                Err(_) => (
-                    parent_fh_data.clone(),
-                    FileHandleManager::parse_path_lenient(current_fh).ok(),
-                    false,
-                    None,
-                ),
+                // The cross-instance fallback, and it must be CONTAINED.
+                //
+                // This arm fires exactly when `resolve_handle` REFUSED
+                // the handle — which is now also what it does to a
+                // forged one, or one naming a path outside the export.
+                // `parse_path_lenient` checks neither the tag nor the
+                // instance (a DS has to honour MDS-minted handles), so
+                // without this the OPEN path answered every refusal by
+                // trying again with the parser that cannot refuse: the
+                // path went to `seed_open_fd`, which opens it and
+                // anchors the fd to the stateid for READ and WRITE to
+                // find. A bypass of the containment check, reached by
+                // sending a handle bad enough to fail validation.
+                Err(_) => {
+                    let embedded = match FileHandleManager::parse_path_lenient(current_fh) {
+                        Ok(p) => match self.fh_mgr.contain(&p) {
+                            Ok(contained) => Some(contained),
+                            // Refusing is not the same as having no
+                            // path: dropping it to None here would let
+                            // the OPEN succeed anyway (this arm mints a
+                            // stateid regardless), which is how the
+                            // first version of this fix still let the
+                            // escape through.
+                            Err(e) => {
+                                warn!(
+                                    "OPEN(CLAIM_FH): handle names {:?}, which is not inside \
+                                     the export ({}) — STALE",
+                                    p, e
+                                );
+                                return OpenRes {
+                                    status: Nfs4Status::Stale,
+                                    stateid: None,
+                                    change_info: None,
+                                    result_flags: 0,
+                                    delegation: OpenDelegationType::None,
+                                    attrset: vec![],
+                                };
+                            }
+                        },
+                        // No embedded path at all. Legitimate: v4 kernel
+                        // handles carry only an ino. Unchanged.
+                        Err(_) => None,
+                    };
+                    (parent_fh_data.clone(), embedded, false, None)
+                }
             },
         };
 
@@ -3028,6 +3067,80 @@ mod tests {
             owner_close.status, Nfs4Status::Ok,
             "the owning client must still be able to close"
         );
+    }
+
+    /// The OPEN path answered a REFUSED handle by trying again with the
+    /// parser that cannot refuse.
+    ///
+    /// `resolve_handle` checks the tag, the instance and containment.
+    /// `parse_path_lenient` checks none of them by design — a pNFS Data
+    /// Server has to honour handles the Metadata Server minted, whose
+    /// instance and key are not its own. CLAIM_FH used the second as the
+    /// fallback for the first, so a handle bad enough to be REJECTED got
+    /// its embedded path opened by `seed_open_fd` and anchored to the
+    /// stateid for READ and WRITE to find.
+    ///
+    /// The control is the point: the same forged-tag handle naming a
+    /// path INSIDE the export must still open, because that is the
+    /// cross-instance case the fallback exists for. Only containment may
+    /// refuse here — not the bad tag, or this leg would pass against a
+    /// server that had simply deleted the fallback.
+    #[tokio::test]
+    async fn open_by_handle_cannot_escape_the_export_through_the_lenient_parser() {
+        let (handler, fh_mgr, _temp) = create_test_handler();
+
+        // A v1 handle with a GARBAGE tag, so `resolve_handle` refuses it
+        // and the lenient fallback is what answers — exactly the attack.
+        let forge = |path: &std::path::Path| {
+            let p = path.to_str().unwrap();
+            let mut data = vec![1u8];
+            data.extend_from_slice(&0u64.to_be_bytes());
+            data.extend_from_slice(&[0xABu8; 32]);
+            data.extend_from_slice(&(p.len() as u16).to_be_bytes());
+            data.extend_from_slice(p.as_bytes());
+            crate::nfs::v4::protocol::Nfs4FileHandle { data }
+        };
+        let open_op = || OpenOp {
+            seqid: 0,
+            share_access: OPEN4_SHARE_ACCESS_READ,
+            share_deny: OPEN4_SHARE_DENY_NONE,
+            owner: b"claim-fh".to_vec(),
+            openhow: OpenHow::NoCreate,
+            claim: OpenClaim::Fh,
+        };
+
+        // CONTROL: in-export, same unverifiable tag. Must succeed.
+        let inside = fh_mgr.get_export_path().join("testfile.txt");
+        assert!(inside.exists(), "the rig's fixture file must be there");
+        let mut ok_ctx = CompoundContext::new(1);
+        ok_ctx.current_fh = Some(forge(&inside));
+        let allowed = handler.handle_open(open_op(), &mut ok_ctx).await;
+        assert_eq!(
+            allowed.status, Nfs4Status::Ok,
+            "the cross-instance fallback must still work for an in-export path"
+        );
+
+        // THE ESCAPE: a real file outside the export.
+        let outside_dir = TempDir::new().unwrap();
+        let secret = outside_dir.path().join("state.db");
+        std::fs::write(&secret, b"not yours").unwrap();
+        let mut bad_ctx = CompoundContext::new(1);
+        bad_ctx.current_fh = Some(forge(&secret));
+        let refused = handler.handle_open(open_op(), &mut bad_ctx).await;
+        assert_ne!(
+            refused.status, Nfs4Status::Ok,
+            "OPEN must not resolve a handle naming a path outside the export"
+        );
+
+        // And nothing was anchored: no fd may have been seeded for it,
+        // or a later READ would reach the file through the cache even
+        // though the OPEN said no.
+        if let Some(sid) = refused.stateid {
+            assert!(
+                handler.fd_cache.get(&sid.other).is_none(),
+                "a refused OPEN must leave no anchored fd behind"
+            );
+        }
     }
 
     #[tokio::test]
