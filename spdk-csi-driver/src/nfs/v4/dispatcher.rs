@@ -1033,10 +1033,41 @@ impl CompoundDispatcher {
                     warn!("DESTROY_CLIENTID: unknown clientid {}", clientid);
                     return OperationResult::DestroyClientId(Nfs4Status::StaleClientId);
                 }
+                // §18.50.3 says "any state", not "any session". The gate
+                // checked sessions alone, and `remove_client` reaches only
+                // what ClientManager owns — the record, the owner index,
+                // the lease, the persisted row. So a client with no
+                // session but live opens, locks or delegations was
+                // destroyed and every one of those rows orphaned: a lock
+                // denying its range to everyone, naming a clientid the
+                // server can no longer resolve, whose holder cannot
+                // release it because its stateid went too.
+                //
+                // Counted rather than cascaded on purpose. DESTROY_CLIENTID
+                // is defined to destroy an UNUSED client record; a client
+                // with state is a client whose peer should be doing this
+                // properly, and answering BUSY tells it so. Silently
+                // reaping the state here would make the op a remote
+                // "discard this client's locks" primitive.
                 let active_sessions = self.state_mgr.sessions.get_client_sessions(clientid);
                 if !active_sessions.is_empty() {
                     warn!("DESTROY_CLIENTID: clientid {} has {} active session(s) → CLIENTID_BUSY",
                           clientid, active_sessions.len());
+                    return OperationResult::DestroyClientId(Nfs4Status::ClientIdBusy);
+                }
+                let stateids = self.state_mgr.stateids.count_for_client(clientid);
+                let locks = self.lock_mgr.lock_count_for_client(clientid);
+                let delegations = self
+                    .state_mgr
+                    .delegations
+                    .get_delegations_for_client(clientid)
+                    .len();
+                if stateids > 0 || locks > 0 || delegations > 0 {
+                    warn!(
+                        "DESTROY_CLIENTID: clientid {} still holds {} stateid(s), {} lock(s), \
+                         {} delegation(s) → CLIENTID_BUSY",
+                        clientid, stateids, locks, delegations
+                    );
                     return OperationResult::DestroyClientId(Nfs4Status::ClientIdBusy);
                 }
                 self.state_mgr.clients.remove_client(clientid);
@@ -4319,6 +4350,67 @@ mod tests {
         assert_eq!(
             new.lock_mgr.get_client_locks(v_new).len(), 0,
             "and the strip that follows collects everything granted before it",
+        );
+    }
+
+    /// RFC 8881 §18.50.3 says a client with ANY state is busy, not a
+    /// client with a session.
+    ///
+    /// The gate checked sessions alone, and `remove_client` reaches only
+    /// what `ClientManager` owns — record, owner index, lease, persisted
+    /// row. So a sessionless client holding opens, locks or delegations
+    /// was destroyed and all of it orphaned: rows naming a clientid the
+    /// server can no longer resolve, denying their ranges to everyone,
+    /// unreleasable because the holder's stateids went with the client.
+    ///
+    /// The control at the end is what makes this more than "DESTROY
+    /// always answers busy": a client holding nothing must still be
+    /// destroyable, which is the operation's entire purpose.
+    #[tokio::test]
+    async fn destroy_clientid_refuses_a_client_that_still_holds_state() {
+        use crate::nfs::v4::state::client::ExchangeIdOutcome;
+        use crate::nfs::v4::state::stateid::StateType;
+        let (dispatcher, _temp) = create_test_dispatcher();
+
+        let id_of = |o: ExchangeIdOutcome| match o {
+            ExchangeIdOutcome::NewUnconfirmed { client_id, .. } => client_id,
+            ExchangeIdOutcome::ExistingConfirmed { client_id, .. } => client_id,
+            other => panic!("unexpected EXCHANGE_ID outcome: {other:?}"),
+        };
+
+        let holder = id_of(dispatcher.state_mgr.clients.exchange_id(
+            b"Linux NFSv4.2 holder".to_vec(), 1, 0, b"sys:0".to_vec()));
+        dispatcher.state_mgr.clients.mark_confirmed(holder);
+        // An open stateid and no session at all — the shape the old gate
+        // could not see.
+        let _sid = dispatcher.state_mgr.stateids.allocate(StateType::Open, holder, None);
+        assert!(
+            dispatcher.state_mgr.sessions.get_client_sessions(holder).is_empty(),
+            "precondition: no session, or the session gate would catch it anyway",
+        );
+
+        let res = dispatcher
+            .dispatch_operation(Operation::DestroyClientId(holder), &mut CompoundContext::new(1))
+            .await;
+        assert!(
+            matches!(res, OperationResult::DestroyClientId(Nfs4Status::ClientIdBusy)),
+            "a client still holding an open stateid must answer CLIENTID_BUSY, got {res:?}",
+        );
+        assert!(
+            dispatcher.state_mgr.clients.get_client(holder).is_some(),
+            "the refused DESTROY must not have removed the record",
+        );
+
+        // CONTROL: a client holding nothing is still destroyable.
+        let empty = id_of(dispatcher.state_mgr.clients.exchange_id(
+            b"Linux NFSv4.2 empty".to_vec(), 2, 0, b"sys:0".to_vec()));
+        dispatcher.state_mgr.clients.mark_confirmed(empty);
+        let ok = dispatcher
+            .dispatch_operation(Operation::DestroyClientId(empty), &mut CompoundContext::new(1))
+            .await;
+        assert!(
+            matches!(ok, OperationResult::DestroyClientId(Nfs4Status::Ok)),
+            "a stateless client must still be destroyable, got {ok:?}",
         );
     }
 

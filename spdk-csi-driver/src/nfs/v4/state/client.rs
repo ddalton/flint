@@ -665,35 +665,25 @@ impl ClientManager {
                              cleanup of clientid {} until new client confirms",
                             c.client_id,
                         );
-                        let outcome = self.allocate_client(
-                            owner,
-                            verifier,
-                            flags,
-                            principal,
-                        );
-                        if let ExchangeIdOutcome::NewUnconfirmed { client_id, .. } = &outcome {
-                            if let Some(mut new_c) = self.clients.get_mut(client_id) {
-                                new_c.pending_replaces = Some(c.client_id);
-                                let snap = new_c.clone();
-                                drop(new_c);
-                                self.persist(&snap);
-                            }
-                        }
-                        outcome
+                        self.replace_when_confirmed(
+                            owner, verifier, flags, principal, c.client_id,
+                        )
                     }
                     (true, false) => {
                         // Case 9 alt — verifier matches but a different
-                        // principal is asking. Replace and warn.
+                        // principal is asking.
                         warn!("EXCHANGE_ID: case 9 alt (princ change), replacing client {}", c.client_id);
-                        let _ = self.remove_client_internal(c.client_id);
-                        self.allocate_client(owner, verifier, flags, principal)
+                        self.replace_when_confirmed(
+                            owner, verifier, flags, principal, c.client_id,
+                        )
                     }
                     (false, false) => {
                         // Case 3 — wholly unrelated EXCHANGE_ID happens to
-                        // collide on owner. Replace.
+                        // collide on owner.
                         warn!("EXCHANGE_ID: case 3 (full mismatch), replacing client {}", c.client_id);
-                        let _ = self.remove_client_internal(c.client_id);
-                        self.allocate_client(owner, verifier, flags, principal)
+                        self.replace_when_confirmed(
+                            owner, verifier, flags, principal, c.client_id,
+                        )
                     }
                 }
             }
@@ -790,6 +780,47 @@ impl ClientManager {
 
     /// Internal client removal that doesn't touch logging / leases differently
     /// from the public API. Used during EXCHANGE_ID record replacement.
+    /// Allocate a replacement client and DEFER the incumbent's teardown
+    /// until the replacement confirms via CREATE_SESSION.
+    ///
+    /// Cases 5, 9-alt and 3 all replace an existing client, and only
+    /// case 5 used to do it correctly. The other two called
+    /// `remove_client_internal` directly, and that function reaches only
+    /// what `ClientManager` owns — the client record, the owner index,
+    /// the lease, the persisted row. Sessions, stateids, delegations and
+    /// LOCKS live in other managers, so they were orphaned: rows denying
+    /// a range to everyone, naming a clientid the server can no longer
+    /// resolve, which the holder cannot release either because its lock
+    /// stateid went with the client. The complete teardown already
+    /// exists, in `handle_create_session`'s case-5 arm; routing all
+    /// three through `pending_replaces` is what reaches it.
+    ///
+    /// Deferring is also the more correct semantics, and not just the
+    /// convenient one. An EXCHANGE_ID is not authenticated by anything
+    /// the incumbent did, so a bare one must not destroy a live client's
+    /// state — RFC 8881 §18.35.5 is explicit for case 5, and the reason
+    /// applies identically to a principal change or an owner collision.
+    /// If the replacement never confirms, the incumbent keeps working.
+    fn replace_when_confirmed(
+        &self,
+        owner: Vec<u8>,
+        verifier: u64,
+        flags: u32,
+        principal: Vec<u8>,
+        incumbent: u64,
+    ) -> ExchangeIdOutcome {
+        let outcome = self.allocate_client(owner, verifier, flags, principal);
+        if let ExchangeIdOutcome::NewUnconfirmed { client_id, .. } = &outcome {
+            if let Some(mut new_c) = self.clients.get_mut(client_id) {
+                new_c.pending_replaces = Some(incumbent);
+                let snap = new_c.clone();
+                drop(new_c);
+                self.persist(&snap);
+            }
+        }
+        outcome
+    }
+
     fn remove_client_internal(&self, client_id: u64) -> Option<Client> {
         if let Some((_, client)) = self.clients.remove(&client_id) {
             // ONLY IF IT STILL POINTS AT THIS CLIENT. `co_ownerid` is
@@ -1221,6 +1252,60 @@ mod tests {
     /// Found by TLC, not by review: `FlintClientIdentity.tla` applies its
     /// index guard at EVERY removal site uniformly, so
     /// `FlintClientIdentityIndexBlind.cfg` states the property for all of
+    /// EXCHANGE_ID cases 3 and 9-alt destroyed a live client's record on
+    /// arrival, and reached only what `ClientManager` owns.
+    ///
+    /// Two defects in one line. The teardown was INCOMPLETE — sessions,
+    /// stateids, delegations and locks live in other managers, so they
+    /// were orphaned, and an orphaned lock denies its range to everyone
+    /// while naming a clientid nothing can resolve. And it was
+    /// IMMEDIATE — a bare EXCHANGE_ID is authenticated by nothing the
+    /// incumbent did, so it must not destroy a confirmed client's state
+    /// before the replacement proves itself. Case 5 already knew both
+    /// things; its two siblings did not.
+    ///
+    /// Asserted as the incumbent's survival plus the deferred
+    /// obligation, because those are what the caller acts on:
+    /// `mark_confirmed` returning the old id is what drives the full
+    /// cascade in `handle_create_session`.
+    #[test]
+    fn a_colliding_exchange_id_defers_the_incumbents_teardown_until_it_confirms() {
+        for (label, verifier, princ_b) in [
+            // Case 9 alt: verifier matches, principal differs.
+            ("case 9 alt", 111u64, b"sys:other:0".to_vec()),
+            // Case 3: neither matches.
+            ("case 3", 999u64, b"sys:other:0".to_vec()),
+        ] {
+            let lease_mgr = Arc::new(LeaseManager::new());
+            let mgr = ClientManager::new(
+                lease_mgr, "test-vol", crate::state_backend::memory_backend());
+            let owner = b"Linux NFSv4.2 agent".to_vec();
+            let princ_a = b"sys:agent:0".to_vec();
+
+            let a = new_id(mgr.exchange_id(owner.clone(), 111, 0, princ_a.clone()));
+            mgr.mark_confirmed(a);
+
+            let b = new_id(mgr.exchange_id(owner.clone(), verifier, 0, princ_b.clone()));
+            assert_ne!(a, b, "{label}: the replacement must be a distinct record");
+
+            // THE INCUMBENT SURVIVES. Before this, `remove_client_internal`
+            // had already deleted it by now.
+            assert!(
+                mgr.get_client(a).is_some(),
+                "{label}: an unconfirmed EXCHANGE_ID destroyed a live client",
+            );
+
+            // THE OBLIGATION IS RECORDED, and confirming is what discharges
+            // it. Without this the incumbent would simply leak instead.
+            assert_eq!(
+                mgr.mark_confirmed(b),
+                Some(a),
+                "{label}: confirming the replacement must hand the caller the \
+                 incumbent to cascade through the other managers",
+            );
+        }
+    }
+
     /// them at once and the asymmetry in the code had nowhere to hide.
     #[test]
     fn removing_a_client_must_not_evict_a_live_peer_from_the_owner_index() {
