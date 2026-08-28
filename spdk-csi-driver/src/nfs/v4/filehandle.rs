@@ -152,6 +152,17 @@ pub struct FileHandleManager {
     /// Root export path
     export_path: PathBuf,
 
+    /// `export_path` canonicalized once, at construction.
+    ///
+    /// `ensure_within_export` needs it on every call and used to
+    /// `canonicalize()` it each time — a full realpath walk per LOOKUP,
+    /// per CREATE, and (since containment moved onto the resolve path)
+    /// per uncached filehandle resolve. The export root does not move
+    /// for the life of the process, so the walk is the same answer every
+    /// time; caching it is free and removes a syscall from the metadata
+    /// path, which is the path an agent fleet actually hammers.
+    export_canon: PathBuf,
+
     /// Pseudo-filesystem (RFC 7530 Section 7)
     pseudo_fs: Arc<PseudoFilesystem>,
 
@@ -300,6 +311,10 @@ impl FileHandleManager {
         // unkeyed tag — that is the bug. A random key is the safe
         // degradation: handles stop surviving restart (which the
         // instance-id check already governs), forgery stays closed.
+        let export_canon = export_path
+            .canonicalize()
+            .unwrap_or_else(|_| export_path.clone());
+
         let fh_secret = match crate::nfs::v4::fh_kernel::load_or_create_key(&export_path) {
             Ok(k) => k,
             Err(e) => {
@@ -312,6 +327,7 @@ impl FileHandleManager {
 
         Self {
             instance_id,
+            export_canon,
             fh_secret,
             path_to_handle: Arc::new(RwLock::new(HashMap::new())),
             handle_to_path: Arc::new(RwLock::new(HashMap::new())),
@@ -1028,8 +1044,7 @@ impl FileHandleManager {
             return Err("Path outside export".to_string());
         }
 
-        let export_canon = self.export_path.canonicalize()
-            .unwrap_or_else(|_| self.export_path.clone());
+        let export_canon = &self.export_canon;
 
         let resolved = match (normalized.parent(), normalized.file_name()) {
             (Some(parent), Some(leaf)) => {
@@ -1040,12 +1055,12 @@ impl FileHandleManager {
         };
 
         let inside = match resolved {
-            Some(p) => p.starts_with(&export_canon),
+            Some(p) => p.starts_with(export_canon),
             // Parent unresolvable: fall back to a lexical check against both
             // spellings of the export root, so a symlinked prefix can't make
             // an in-export path look foreign.
             None => {
-                normalized.starts_with(&export_canon)
+                normalized.starts_with(export_canon)
                     || normalized.starts_with(&self.export_path)
             }
         };

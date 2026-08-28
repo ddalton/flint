@@ -346,6 +346,29 @@ test-authz-drill: ## Leg A1: cross-uid authorization gate (seconds) — runs aga
 test-pjdfstest: ## Leg A0: full pjdfstest (8798 assertions) vs flint, differenced against a knfsd control (~7 min)
 	bash tests/lima/pnfs/pjdfstest-differential.sh
 
+.PHONY: test-perf-differential
+test-perf-differential: ## Leg L-perf: throughput + metadata vs a knfsd control, ratio-gated (~5 min)
+	# The repo's only performance gate. It reports RATIOS against knfsd
+	# measured in the same session with the arms interleaved, because
+	# absolute MiB/s from this VM is not a comparable quantity — the rig
+	# has been measured drifting ~2x within one session.
+	#
+	# It is RED until someone records a baseline from a run they have
+	# inspected on a quiet rig, and that is the correct resting state:
+	# the alternative is the xfstests trap, where a missing baseline
+	# meant a 40-minute suite that could not fail.
+	bash tests/lima/pnfs/perf-differential.sh
+	python3 scripts/check-perf.py tests/lima/perf-latest.json
+	# The falsifiability arm must FAIL. A gate that cannot see a mount
+	# deliberately crippled to 4 KiB rsize cannot see a regression
+	# either, and every green run above would mean nothing.
+	@if python3 scripts/check-perf.py tests/lima/perf-latest-crippled.json >/dev/null 2>&1; then \
+	    echo "VOID: the crippled control PASSED — this gate cannot fail, so it is not a gate"; \
+	    exit 1; \
+	else \
+	    echo "falsifiability arm correctly refused"; \
+	fi
+
 .PHONY: test-xfstests
 test-xfstests: ## Leg C10: xfstests generic/ vs flint, differenced against a knfsd control (~40 min)
 	# The suite every in-tree Linux filesystem is gated on. Runs on a
