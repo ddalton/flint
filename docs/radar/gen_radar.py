@@ -3,7 +3,8 @@
 performance / security / day-2 ops) in a 2x2 grid, each plotting all approaches.
 Data (axes, scores, notes) comes from radar_data.json next to this script.
 """
-import json, math, os
+import json
+import re, math, os
 
 # ---------------------------------------------------------------- palette ---
 INK      = "#0b0b0b"
@@ -120,6 +121,36 @@ INTRO = """<div class="intro">
 
 def fmt(v):
     return f"{v:g}"
+
+
+CMP_RE = re.compile(r"\{\{(cmp|cmpL|lean|lake):([^/}]+)/([^}]+)\}\}")
+
+
+def resolve_refs(text, data, lk):
+    """Substitute score cross-references with the LIVE numbers.
+
+    Page 5 compares lakeFS cells against Lean cells in prose. Those
+    numbers were hand-copied, and by 2026-08-27 three of them were
+    quoting pre-rescore Lean values — a page silently disagreeing with
+    the chart printed above it. Writing {{cmp:Consistency/Ack survives}}
+    instead makes the comparison derived, so it cannot drift again, and
+    an axis that gets renamed fails the build instead of going quiet.
+    """
+    def one(m):
+        kind, chart, axis = m.group(1), m.group(2).strip(), m.group(3).strip()
+        ch = next((c for c in data["charts"] if c["title"] == chart), None)
+        if ch is None:
+            raise SystemExit(f"cross-reference to unknown chart {chart!r}")
+        i = next((j for j, a in enumerate(ch["axes"])
+                  if axis in (a["short"], a["name"])), None)
+        if i is None:
+            raise SystemExit(f"cross-reference to unknown axis {chart}/{axis!r}")
+        lean, lake = fmt(ch["scores"]["Lean"][i]), fmt(lk["scores"][chart][i])
+        return {"cmp": f"{lake} vs {lean}",
+                "cmpL": f"{lake} vs Lean {lean}",
+                "lean": lean,
+                "lake": lake}[kind]
+    return CMP_RE.sub(one, text)
 
 def card(ch):
     shorts = ch["series"]
@@ -255,15 +286,16 @@ def p5_card(ch, lscores, lnote):
 </div>"""
 
 def p5_page(data, lk):
-    cards = "".join(p5_card(ch, lk["scores"][ch["title"]], lk["notes"][ch["title"]])
+    cards = "".join(p5_card(ch, lk["scores"][ch["title"]],
+                            resolve_refs(lk["notes"][ch["title"]], data, lk))
                     for ch in data["charts"])
-    heads = "".join(f'<p>{h}</p>' for h in lk["headlines"])
+    heads = "".join(f'<p>{resolve_refs(h, data, lk)}</p>' for h in lk["headlines"])
     return f"""<div class="page">
   <h1>lakeFS — scored from source</h1>
   <p class="deck">{lk["meta"]["sub"]}</p>
   <div class="grid">{cards}</div>
   <div class="beyond" style="margin-top:0.08in">{heads}</div>
-  <p class="foot">{lk["foot"]}</p>
+  <p class="foot">{resolve_refs(lk["foot"], data, lk)}</p>
 </div>"""
 
 def mc_page():
