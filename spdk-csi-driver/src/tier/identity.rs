@@ -23,6 +23,7 @@ use crate::tier::capture;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use tracing::debug;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -69,8 +70,30 @@ pub fn note_rename(
 }
 
 /// REMOVE hook (fileops, post-success, regular files only).
-pub fn note_remove(ident: (u64, u64)) {
+/// `links_remaining` is the inode's link count AFTER this unlink.
+///
+/// It is a parameter, not something this module can derive: by the time
+/// the event is queued the name is already gone, and `(dev, ino)` alone
+/// cannot say whether the inode still answers to another one.
+///
+/// A tombstone deletes the inode's OBJECT and drops its generation row.
+/// That is right when the last name goes and catastrophic when it does
+/// not — the surviving name loses its only published copy, and if the
+/// inode was evicted it becomes a permanent 0-byte file that READs as
+/// EOF under NFS4_OK. `LINK` is refused while the tier is on, but the
+/// refusal does not cover a hard-linked pair adopted by import, or one
+/// that predates the tier being switched on, and neither does it cover
+/// a pair created through any other door onto the same export.
+pub fn note_remove(ident: (u64, u64), links_remaining: u64) {
     if !capture::enabled() {
+        return;
+    }
+    if links_remaining > 0 {
+        debug!(
+            "tier identity: {:?} keeps {} more name(s) — no tombstone, the object is \
+             still referenced",
+            ident, links_remaining
+        );
         return;
     }
     events().lock().unwrap().push(Event::Removed { ident });
@@ -234,7 +257,7 @@ mod tests {
         for _ in 0..50 {
             be.tier_upsert_generation(&gen_row(dev, ino, "t/victim")).await.unwrap();
             capture::note(dev, ino, capture::Mutation::Write { offset: 0, len: 4 });
-            note_remove((dev, ino));
+            note_remove((dev, ino), 0);
             let _ = drain(&be).await;
             if be.tier_list_tombstones().await.unwrap().iter().any(|t| t.key == "t/victim") {
                 break;

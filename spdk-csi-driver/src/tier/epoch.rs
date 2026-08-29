@@ -47,6 +47,34 @@ use tracing::{error, info, warn};
 /// client files under it so none can shadow a control object.
 pub const RESERVED_DIR: &str = ".flint";
 
+/// Is this path component one the tier must never treat as client
+/// data — never keyed, never manifested, never adopted, never restored
+/// into?
+///
+/// Two names qualify, and only the first is the tier's own:
+///
+/// - [`RESERVED_DIR`] (`.flint`) — tier control objects (the epoch,
+///   the DR manifest). A client file here would shadow one.
+/// - [`crate::nfs::v4::fh_kernel::META_DIR`] (`.flint-nfs`) — the NFS
+///   SERVER's private directory inside the same export: `fh.key`, the
+///   filehandle MAC secret, and `state.db`. Not the tier's namespace,
+///   but not client data either.
+///
+/// The second is the one that bites. Publishing it leaks server state
+/// into the bucket; **evicting `fh.key` truncates the MAC secret and
+/// every filehandle in the volume becomes permanently STALE** — a
+/// whole-volume outage no remount clears. The client-facing door
+/// already hides this directory (READDIR filters `META_DIR` in
+/// `fileops`); the tier's own walks were the only ones that did not.
+///
+/// One predicate rather than a comparison repeated at each walk, so a
+/// third reserved name has exactly one place to be added.
+pub fn is_reserved_component<S: AsRef<std::ffi::OsStr>>(name: S) -> bool {
+    let n = name.as_ref();
+    n == std::ffi::OsStr::new(RESERVED_DIR)
+        || n == std::ffi::OsStr::new(crate::nfs::v4::fh_kernel::META_DIR)
+}
+
 /// Where a volume's epoch object lives.
 pub fn epoch_key(key_prefix: &str) -> String {
     format!("{}{}/epoch", key_prefix, RESERVED_DIR)

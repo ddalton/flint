@@ -806,7 +806,7 @@ pub(crate) async fn restore_once_fanout(
         if md.len() != 0 {
             // A failed earlier attempt (or an adopt restart) left
             // bytes; back to the stub first.
-            truncate_stub(path)?;
+            truncate_stub(path, (dev, ino), stub_mtime)?;
         }
     }
 
@@ -850,7 +850,7 @@ pub(crate) async fn restore_once_fanout(
         Err(e) => {
             // ENOSPC / network / verify failure: never leave partial
             // bytes. Stub + flag clear, marker stays, retry later.
-            if let Err(t) = truncate_stub(path) {
+            if let Err(t) = truncate_stub(path, (dev, ino), stub_mtime) {
                 error!(
                     "tier hydrate: {} failed AND could not reset the stub: {} — \
                      reconciler repairs at next startup",
@@ -892,7 +892,8 @@ async fn stream_restore(
     // Internal-write open: a read-only stub (0444 git objects) must
     // still restore — DAC applies to clients, not to the tier's own
     // maintenance I/O.
-    let file = evict::open_for_internal_write(path).map_err(|e| format!("open stub: {}", e))?;
+    let file = evict::open_for_internal_write(path, (dev, ino))
+        .map_err(|e| format!("open stub: {}", e))?;
     let file = Arc::new(file);
     let mut crc = Crc64Nvme::new();
 
@@ -1068,11 +1069,30 @@ async fn adopt_foreign(
     Ok(())
 }
 
-fn truncate_stub(path: &Path) -> Result<(), String> {
-    let f = evict::open_for_internal_write(path)
+/// Reset to a 0-byte stub, PRESERVING `keep_mtime`.
+///
+/// The mtime is the point. Eviction goes to great lengths to leave it
+/// untouched (`evict::truncate_in_place`) because every `tar --compare`,
+/// rsync, make and git in the fleet reads a bumped mtime as "modified",
+/// and `manifest::walk` would then publish that lie. A hydration that
+/// FAILS — ENOSPC, a network drop, a CRC mismatch — used to undo all of
+/// that: it reset the stub and returned, leaving the truncate's fresh
+/// mtime behind. The file was never modified; only the attempt failed.
+fn truncate_stub(
+    path: &Path,
+    expect: (u64, u64),
+    keep_mtime: filetime::FileTime,
+) -> Result<(), String> {
+    let f = evict::open_for_internal_write(path, expect)
         .map_err(|e| format!("open for stub reset: {}", e))?;
     f.set_len(0).map_err(|e| format!("truncate: {}", e))?;
-    f.sync_all().map_err(|e| format!("fsync: {}", e))
+    f.sync_all().map_err(|e| format!("fsync: {}", e))?;
+    // Off the FD, like every other write here: the open was the last
+    // name resolution, and re-resolving would reopen the race.
+    if let Err(e) = filetime::set_file_handle_times(&f, None, Some(keep_mtime)) {
+        warn!("tier hydrate: stub mtime not preserved on {}: {}", path.display(), e);
+    }
+    Ok(())
 }
 
 fn now_unix() -> u64 {
@@ -2015,5 +2035,40 @@ mod tests {
         let rep = warm_fill(&h, Some(&note)).await;
         assert_eq!(rep.candidates, 0);
         assert!(!note.exists(), "no-op fill must remove the note");
+    }
+
+    /// A hydration that FAILS must not modify the file. Eviction goes
+    /// to real trouble to leave mtime untouched, because the fleet's
+    /// workloads (`tar --compare`, rsync, make, git) read a bumped
+    /// mtime as "modified" and `manifest::walk` would then publish that
+    /// lie. The error arm used to reset the stub and return, leaving
+    /// the truncate's fresh mtime behind — so a transient ENOSPC or a
+    /// dropped connection permanently rewrote the file's history.
+    #[test]
+    fn a_failed_hydration_preserves_the_stubs_mtime() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let stub = dir.path().join("evicted.bin");
+        std::fs::write(&stub, b"bytes a partial restore left behind").unwrap();
+
+        let then = filetime::FileTime::from_unix_time(1_700_000_000, 123_456_789);
+        filetime::set_file_mtime(&stub, then).unwrap();
+        let md = std::fs::metadata(&stub).unwrap();
+        assert_eq!(
+            filetime::FileTime::from_last_modification_time(&md),
+            then,
+            "precondition: the fixture's mtime must actually be set"
+        );
+        let expect = (md.dev(), md.ino());
+
+        truncate_stub(&stub, expect, then).expect("the stub must reset");
+
+        let after = std::fs::metadata(&stub).unwrap();
+        assert_eq!(after.len(), 0, "precondition: it really was truncated");
+        assert_eq!(
+            filetime::FileTime::from_last_modification_time(&after),
+            then,
+            "THE BUG: a failed hydration rewrote the file's mtime to now"
+        );
     }
 }

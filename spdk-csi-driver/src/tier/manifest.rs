@@ -244,7 +244,8 @@ fn walk(
         let name = name.to_string_lossy();
         // The reserved control namespace and import temps are the
         // tier's own machinery, never manifested.
-        if name == crate::tier::epoch::RESERVED_DIR || name.starts_with(IMPORT_TMP_PREFIX) {
+        if crate::tier::epoch::is_reserved_component(&*name) || name.starts_with(IMPORT_TMP_PREFIX)
+        {
             continue;
         }
         let Ok(md) = ent.path().symlink_metadata() else { continue };

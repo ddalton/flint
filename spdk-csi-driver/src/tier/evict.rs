@@ -495,7 +495,7 @@ pub async fn evict_file(
     }
 
     // ── destroy local bytes ──────────────────────────────────────────
-    match truncate_in_place(path) {
+    match truncate_in_place(path, (dev, ino)) {
         Ok(()) => {}
         Err(e) => {
             // Marker is durable but bytes remain — exactly the state
@@ -530,33 +530,86 @@ pub async fn evict_file(
 /// one). On EACCES: grant owner-write for the instant of the open and
 /// restore the mode immediately — the open fd keeps its write
 /// permission regardless of the file's mode.
-pub(crate) fn open_for_internal_write(path: &Path) -> std::io::Result<std::fs::File> {
-    match std::fs::OpenOptions::new().write(true).open(path) {
+/// `expect` is the (dev, ino) the caller resolved. It is REQUIRED, not
+/// advisory: this function opens a client-writable path by NAME, and
+/// between the caller's stat and this open the client can unlink the
+/// name and put something else there. Two guards, because one is not
+/// enough:
+///
+/// - **`O_NOFOLLOW`** — the replacement can be a SYMLINK, and a plain
+///   write-open would follow it out of the export. `open_beneath`
+///   exists for exactly this on the client-facing door and names the
+///   targets: `state.db` and the hub's IRSA token. The tier's own
+///   maintenance opener used to be the one door that skipped it.
+/// - **fstat on the returned fd** — `O_NOFOLLOW` refuses a symlink but
+///   says nothing about a plain file that replaced ours. Comparing the
+///   FD's identity (not the path's, which is racy again) against
+///   `expect` is what makes "we truncated the file we meant to" true.
+///
+/// The sibling paths already did this — `hydrate::restore_once_fanout`
+/// re-stats and compares before touching the file, and so does
+/// `reconcile`. Only the live eviction path did not, which is the one
+/// that truncates.
+pub(crate) fn open_for_internal_write(
+    path: &Path,
+    expect: (u64, u64),
+) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true);
+    let f = match crate::nfs::v4::open_beneath::open(&opts, path) {
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             #[cfg(unix)]
             {
+                use std::os::unix::fs::MetadataExt;
                 use std::os::unix::fs::PermissionsExt;
-                let mode = path.symlink_metadata()?.permissions().mode() & 0o7777;
-                std::fs::set_permissions(
-                    path,
-                    std::fs::Permissions::from_mode(mode | 0o200),
-                )?;
-                let r = std::fs::OpenOptions::new().write(true).open(path);
+                // Verify identity BEFORE borrowing the mode. chmod(2)
+                // follows symlinks and there is no portable fchmodat
+                // AT_SYMLINK_NOFOLLOW for them, so the lstat is the
+                // guard: a symlink that replaced our name carries its
+                // OWN (dev, ino), which cannot match `expect`.
+                let md = path.symlink_metadata()?;
+                if (md.dev(), md.ino()) != expect {
+                    return Err(identity_moved(path, expect, (md.dev(), md.ino())));
+                }
+                let mode = md.permissions().mode() & 0o7777;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o200))?;
+                let r = crate::nfs::v4::open_beneath::open(&opts, path);
                 // Restore UNCONDITIONALLY — the mode was only borrowed.
                 let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
-                r
+                r?
             }
             #[cfg(not(unix))]
-            Err(e)
+            return Err(e);
         }
-        r => r,
+        r => r?,
+    };
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let md = f.metadata()?;
+        if (md.dev(), md.ino()) != expect {
+            return Err(identity_moved(path, expect, (md.dev(), md.ino())));
+        }
     }
+    Ok(f)
+}
+
+#[cfg(unix)]
+fn identity_moved(path: &Path, expect: (u64, u64), found: (u64, u64)) -> std::io::Error {
+    std::io::Error::other(format!(
+        "{} no longer names the inode this operation resolved (expected {:?}, found {:?}) \
+         — refusing to write through it",
+        path.display(),
+        expect,
+        found
+    ))
 }
 
 /// In-place: open WITHOUT create (an absent file must never
 /// materialize — C6), set_len(0), fsync. The inode survives, so every
 /// cached fd stays a valid handle whose ops re-check the marker.
-fn truncate_in_place(path: &Path) -> std::io::Result<()> {
+fn truncate_in_place(path: &Path, expect: (u64, u64)) -> std::io::Result<()> {
     // POSIX ftruncate moves st_mtime. Eviction is not a modification:
     // the bytes are in the bucket, the logical size is already served
     // from the marker, and nobody asked for a write. Left as it was,
@@ -570,9 +623,12 @@ fn truncate_in_place(path: &Path) -> std::io::Result<()> {
     // Preserved here rather than recovered later from the object's own
     // `flint-mtime` stamp, because that stamp is only readable when the
     // bucket is — and the local answer has to be right during an outage.
-    let before = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
-
-    let f = open_for_internal_write(path)?;
+    // Everything below acts on the FD, never on the path again. The
+    // open is the last name resolution this function performs, so a
+    // rename or unlink after it cannot redirect the truncate, the stat
+    // or the mtime restore onto another inode.
+    let f = open_for_internal_write(path, expect)?;
+    let before = f.metadata().ok().and_then(|m| m.modified().ok());
     f.set_len(0)?;
     f.sync_all()?;
 
@@ -581,7 +637,11 @@ fn truncate_in_place(path: &Path) -> std::io::Result<()> {
         // a spurious "modified", which is what this whole function is
         // trying to avoid, but it is not a reason to fail an eviction
         // whose bytes are already safe in the bucket.
-        if let Err(e) = filetime::set_file_mtime(path, filetime::FileTime::from_system_time(t)) {
+        if let Err(e) = filetime::set_file_handle_times(
+            &f,
+            None,
+            Some(filetime::FileTime::from_system_time(t)),
+        ) {
             debug!("evict: mtime not restored on {}: {}", path.display(), e);
         }
     }
@@ -669,7 +729,7 @@ pub async fn reconcile(backend: &Arc<dyn StateBackend>) -> ReconcileReport {
                     // Partial restore = garbage; the bucket is the
                     // truth. Back to the stub; hydration re-runs on
                     // demand.
-                    match truncate_in_place(&path) {
+                    match truncate_in_place(&path, (row.dev, row.ino)) {
                         Ok(()) => {
                             let _ = backend.tier_set_hydrating(row.dev, row.ino, None).await;
                             markers().insert((row.dev, row.ino), meta_of(&row));
@@ -710,7 +770,7 @@ pub async fn reconcile(backend: &Arc<dyn StateBackend>) -> ReconcileReport {
                         Ok(crc)
                             if crc64_to_b64(crc) == row.crc64_b64 && len == row.size =>
                         {
-                            match truncate_in_place(&path) {
+                            match truncate_in_place(&path, (row.dev, row.ino)) {
                                 Ok(()) => {
                                     markers().insert((row.dev, row.ino), meta_of(&row));
                     bump_cycle();
@@ -899,6 +959,14 @@ pub async fn evict_pass(
 #[cfg(test)]
 mod tests {
 
+    /// The fixture's own identity — the tests truncate files they just
+    /// created, so the expectation is simply "the file that is there".
+    fn ident_of(p: &Path) -> (u64, u64) {
+        use std::os::unix::fs::MetadataExt;
+        let md = std::fs::metadata(p).unwrap();
+        (md.dev(), md.ino())
+    }
+
     /// Eviction must not make an untouched file look modified.
     ///
     /// `truncate_in_place` was `open + set_len(0) + sync_all`, and POSIX
@@ -930,7 +998,7 @@ mod tests {
             "precondition: the fixture's mtime must actually be set"
         );
 
-        truncate_in_place(&f).expect("eviction truncates the stub");
+        truncate_in_place(&f, ident_of(&f)).expect("eviction truncates the stub");
 
         let md = std::fs::metadata(&f).unwrap();
         assert_eq!(md.len(), 0, "the stub must actually be truncated");
@@ -1432,5 +1500,79 @@ mod tests {
             "the dirty file must be untouched"
         );
         assert!(!is_evicted(cd, ci));
+    }
+
+    /// The maintenance opener resolves a CLIENT-WRITABLE path by name,
+    /// and in `evict_file` that happens long after the caller's stat —
+    /// with three awaits in between, one of them a network HEAD. A
+    /// REMOVE + CREATE at the same name inside that window puts a
+    /// DIFFERENT inode there, and it is not covered by the
+    /// identity-keyed `gate::exclude`, so its writes are ACKed right up
+    /// until the evictor truncates it.
+    ///
+    /// Split from the symlink leg deliberately: as one test the first
+    /// failing assertion masks the second, so the symlink half would
+    /// never be shown red.
+    #[test]
+    fn truncate_refuses_a_substituted_inode() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let victim = dir.path().join("victim.bin");
+        std::fs::write(&victim, b"the bytes eviction meant to truncate").unwrap();
+        let expect = ident_of(&victim);
+
+        // CONTROL: the unmolested file truncates. Without this leg the
+        // refusal below would pass just as well on a function that
+        // refused everything.
+        truncate_in_place(&victim, expect).expect("the real file must still truncate");
+        assert_eq!(std::fs::metadata(&victim).unwrap().len(), 0, "control leg truncated");
+
+        let other = dir.path().join("other.bin");
+        std::fs::write(&other, b"someone else's data").unwrap();
+        std::fs::remove_file(&victim).unwrap();
+        std::fs::hard_link(&other, &victim).unwrap();
+        assert_ne!(ident_of(&victim), expect, "precondition: the name must resolve elsewhere");
+
+        assert!(
+            truncate_in_place(&victim, expect).is_err(),
+            "a path that no longer names the resolved inode must be refused"
+        );
+        assert_eq!(
+            std::fs::read(&other).unwrap(),
+            b"someone else's data",
+            "THE WRONG-INODE TRUNCATE: the bystander file was destroyed"
+        );
+    }
+
+    /// The other half of the same window: the replacement is a SYMLINK.
+    /// A plain write-open follows it and truncates the target.
+    /// `open_beneath` exists for exactly this on the client-facing door
+    /// and names what is reachable — the hub's `state.db`, a sibling of
+    /// the export root, and its IRSA token. The tier's own maintenance
+    /// opener was the one door that skipped it.
+    #[test]
+    fn truncate_refuses_a_planted_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let victim = dir.path().join("victim.bin");
+        std::fs::write(&victim, b"the bytes eviction meant to truncate").unwrap();
+        let expect = ident_of(&victim);
+
+        // CONTROL, as above — this test must be able to succeed.
+        truncate_in_place(&victim, expect).expect("the real file must still truncate");
+        assert_eq!(std::fs::metadata(&victim).unwrap().len(), 0, "control leg truncated");
+
+        std::fs::remove_file(&victim).unwrap();
+        let outside = dir.path().join("state.db");
+        std::fs::write(&outside, b"the server's own state").unwrap();
+        std::os::unix::fs::symlink(&outside, &victim).unwrap();
+
+        assert!(
+            truncate_in_place(&victim, expect).is_err(),
+            "a symlink at the leaf must be refused, not followed"
+        );
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"the server's own state",
+            "THE ESCAPE: set_len(0) through a planted symlink truncated the target"
+        );
     }
 }

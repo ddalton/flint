@@ -1014,6 +1014,25 @@ pub trait StateBackend: Send + Sync {
     /// the bit clear (A4/A5).
     async fn tier_clear_dirty(&self, dev: u64, ino: u64) -> StateBackendResult<()>;
 
+    /// Point an existing dirty row at a different name for the SAME
+    /// inode, preserving its first-dirty time and mark sequence.
+    ///
+    /// `tier_mark_dirty` deliberately only fills a path when one is
+    /// absent ("gain a path if absent"), so it cannot be used to
+    /// correct a stale one. Clear-then-remark could, but it has a crash
+    /// window in which the durable dirty bit does not exist — the exact
+    /// hazard A3 exists to prevent — so this is a single operation.
+    ///
+    /// A no-op when no row exists: the caller is repairing, not
+    /// creating, and resurrecting a row it did not observe would
+    /// re-dirty a file nothing asked to publish.
+    async fn tier_repoint_dirty(
+        &self,
+        dev: u64,
+        ino: u64,
+        path: &str,
+    ) -> StateBackendResult<()>;
+
     /// The A3-safe clear: delete the bit row only if its `mark_seq`
     /// still equals `mark_seq` (what the flusher observed before
     /// publishing). Returns whether a row was deleted; false means a

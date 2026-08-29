@@ -1554,8 +1554,15 @@ fn encode_attributes_from_snapshot(
                 true
             }
             FATTR4_LINK_SUPPORT => {
-                // Supports hard links
-                attr_vals.put_u32(1); // TRUE
+                // Truthful, not constant. LINK is refused with
+                // NFS4ERR_NOTSUPP while the S3 tier is on, and clients
+                // ASK before they try: tar, pax, `rsync -H`, cp -a and
+                // pynfs all read this bit to decide whether to attempt
+                // a link or to fall back to copying. Advertising TRUE
+                // and then refusing turns a supported fallback into a
+                // hard error in the middle of an extract.
+                let supported = !crate::tier::capture::enabled();
+                attr_vals.put_u32(u32::from(supported));
                 true
             }
             FATTR4_SYMLINK_SUPPORT => {
@@ -3700,11 +3707,15 @@ impl FileOperationHandler {
                 // A7: the victim's identity, resolved BEFORE the
                 // unlink (unrecoverable after). Regular files only —
                 // directories and symlinks carry no tier rows.
+                // The link count is read from the SAME pre-unlink
+                // stat as the identity: `note_remove` needs to know
+                // whether this unlink takes the last name, and after
+                // the unlink nothing can tell it.
                 #[cfg(unix)]
                 let tier_ident = (crate::tier::capture::enabled() && metadata.is_file())
                     .then(|| {
                         use std::os::unix::fs::MetadataExt;
-                        (metadata.dev(), metadata.ino())
+                        ((metadata.dev(), metadata.ino()), metadata.nlink())
                     });
                 // ── §2A leg A3 ──────────────────────────────────────
                 // Removing a NAME is permission on the directory that
@@ -3767,7 +3778,7 @@ impl FileOperationHandler {
                         // (durable pre-ack via the dispatcher drain).
                         #[cfg(unix)]
                         if let Some(id) = tier_ident {
-                            crate::tier::identity::note_remove(id);
+                            crate::tier::identity::note_remove(id.0, id.1.saturating_sub(1));
                         }
                         RemoveRes {
                             status: Nfs4Status::Ok,
@@ -5049,5 +5060,48 @@ mod tests {
             }
         }
         assert!(ok, "SPACE_TOTAL must serve the real PVC size, not the 8 EiB constant");
+    }
+
+    /// `LINK` is refused with NFS4ERR_NOTSUPP while the S3 tier is on,
+    /// and clients ASK before they try: tar, pax, `rsync -H` and `cp -a`
+    /// read FATTR4_LINK_SUPPORT to choose between linking and copying.
+    /// This bit used to be a hardcoded TRUE, which turned a supported
+    /// fallback into a hard error in the middle of an extract.
+    ///
+    /// SYMLINK_SUPPORT is requested in the same call as the control
+    /// leg: it must stay TRUE, so a bug that simply zeroed the answer
+    /// buffer could not pass this test. (The tier flag is sticky for
+    /// the process by design — there is deliberately no disable — so
+    /// the "off" direction cannot be asserted here; this control is
+    /// what stands in for it.)
+    #[test]
+    fn link_support_is_false_while_the_tier_refuses_link() {
+        let _excl = crate::tier::capture::test_exclusive();
+        crate::tier::capture::force_enable();
+
+        let snapshot = AttributeSnapshot::pseudo_root(1);
+        let requested = vec![(1u32 << FATTR4_LINK_SUPPORT) | (1u32 << FATTR4_SYMLINK_SUPPORT)];
+        let (vals, supported) =
+            encode_attributes_from_snapshot(&requested, &snapshot, false, None);
+
+        assert_eq!(
+            supported.first().copied().unwrap_or(0) & (1 << FATTR4_LINK_SUPPORT),
+            1 << FATTR4_LINK_SUPPORT,
+            "precondition: the server must actually answer LINK_SUPPORT"
+        );
+        assert_eq!(vals.len(), 8, "precondition: exactly two u32 answers");
+
+        let link = u32::from_be_bytes([vals[0], vals[1], vals[2], vals[3]]);
+        let symlink = u32::from_be_bytes([vals[4], vals[5], vals[6], vals[7]]);
+
+        assert_eq!(
+            symlink, 1,
+            "control: SYMLINK_SUPPORT must still be TRUE — otherwise this test would \
+             pass on an encoder that answered zero to everything"
+        );
+        assert_eq!(
+            link, 0,
+            "THE BUG: the server advertises hard-link support it then refuses with NOTSUPP"
+        );
     }
 }

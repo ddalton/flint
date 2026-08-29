@@ -828,6 +828,28 @@ impl StateBackend for SqliteBackend {
         .await
     }
 
+    async fn tier_repoint_dirty(
+        &self,
+        dev: u64,
+        ino: u64,
+        path: &str,
+    ) -> StateBackendResult<()> {
+        let (d, i) = (u64_to_i64(dev), u64_to_i64(ino));
+        let p = path.to_string();
+        // One UPDATE, so the row is never briefly absent: a crash
+        // between a DELETE and an INSERT would drop the durable dirty
+        // bit and silently lose the write (A3). The WHERE clause makes
+        // it a no-op when there is no row to repair.
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE tier_dirty SET path = ?3 WHERE dev = ?1 AND ino = ?2",
+                params![d, i, p],
+            )
+        })
+        .await
+        .map(|_| ())
+    }
+
     async fn tier_clear_dirty(&self, dev: u64, ino: u64) -> StateBackendResult<()> {
         let (d, i) = (u64_to_i64(dev), u64_to_i64(ino));
         self.with_conn(move |conn| {

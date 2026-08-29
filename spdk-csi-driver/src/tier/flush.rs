@@ -317,12 +317,13 @@ impl FlushOrchestrator {
         // client file at any depth to lose.
         if rel
             .components()
-            .any(|c| c.as_os_str() == crate::tier::epoch::RESERVED_DIR)
+            .any(|c| crate::tier::epoch::is_reserved_component(c.as_os_str()))
         {
             warn!(
-                "tier flush: {} is under the reserved {}/ namespace — not tiered",
+                "tier flush: {} is under a reserved namespace ({}/ or {}/) — not tiered",
                 path.display(),
-                crate::tier::epoch::RESERVED_DIR
+                crate::tier::epoch::RESERVED_DIR,
+                crate::nfs::v4::fh_kernel::META_DIR
             );
             return None;
         }
@@ -1058,10 +1059,18 @@ impl FlushOrchestrator {
         // the durable repair; here it only costs a deferral).
         match stat_identity(&path) {
             Some(id) if id == (dev, ino) => {}
-            _ => {
+            // Names a DIFFERENT inode: a rename landed here. A7 owns
+            // the durable repair and this deferral costs only a tick.
+            Some(_) => {
                 debug!("tier flush: {} no longer names ({},{})", path.display(), dev, ino);
                 return Outcome::PathMismatch;
             }
+            // Names NOTHING. Deferring is what wedges a volume: the row
+            // is dirty forever, so `rpo::clean` never goes true and the
+            // share can never hibernate. An inode can outlive the name
+            // it was dirtied through — the row carries one name, the
+            // inode may have several.
+            None => return self.repoint_or_forget(dev, ino, None, &path).await,
         }
 
         // Base generation: registry first; discovery by HEAD only for
@@ -1117,6 +1126,15 @@ impl FlushOrchestrator {
         .await
         {
             Ok(Ok(s)) => s,
+            // A path that VANISHED is not a generic stat failure. The
+            // dirty row is keyed by identity but carries ONE name, and
+            // an inode can have more than one: remove the name the file
+            // was dirtied through and the row points at nothing while
+            // the file is still there under another. Retrying that
+            // forever pins `rpo::clean` false and blocks hibernate.
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                return self.repoint_or_forget(dev, ino, Some(epoch), &path).await;
+            }
             _ => return self.fail(dev, ino, Some(epoch), format!("stat {}", path.display())),
         };
 
@@ -1476,6 +1494,34 @@ impl FlushOrchestrator {
     /// tick's sweep finishes the job (same posture as a crash here).
     async fn finish_rekey(&self, rekey_from: &Option<String>) {
         let Some(old_key) = rekey_from else { return };
+        // NEVER delete a key another live generation row still cites —
+        // the same rule `consume_tombstones` already applies, which
+        // this path used to bypass by deleting directly.
+        //
+        // Two identities can share one key. It is not a corrupt state:
+        // `manifest::walk` looks a file's key up by (dev, ino), so a
+        // hard-linked pair emits two entries citing ONE key, and the
+        // import materializes a stub per entry. The first write through
+        // either name re-keys, and an unconditional delete here takes
+        // the other stub's only bucket copy with it — leaving a marker
+        // pointing at nothing, which reads as a permanent DELAY loop.
+        //
+        // Leaving the tombstone is the correct fallback, not a leak:
+        // `consume_tombstones` re-evaluates it every barrier and closes
+        // it once nothing cites the key.
+        if let Some(other) = self
+            .generations
+            .iter()
+            .find(|e| &e.key == old_key)
+            .map(|e| (*e.key()).clone())
+        {
+            info!(
+                "tier flush: re-key keeps old object {} — identity {:?} still cites it; \
+                 its tombstone stays for the barrier that finds it unreferenced",
+                old_key, other
+            );
+            return;
+        }
         match self.store.delete(old_key).await {
             Ok(()) => {
                 let _ = self.backend.tier_delete_tombstone(old_key).await;
@@ -1525,6 +1571,90 @@ impl FlushOrchestrator {
         meter::bump(Counter::PublishFailures);
         warn!("tier flush: ({},{}) {}", dev, ino, msg);
         Outcome::Failed(msg)
+    }
+
+    /// The dirty row's recorded name is gone. Find the inode another
+    /// name, or establish that it has none.
+    ///
+    /// Identity is the row's key; the name is only a handle to the
+    /// bytes, so ANY live name will do. The export is walked once —
+    /// this runs on a rare event, not on the hot path — and the
+    /// outcomes are exhaustive:
+    ///
+    /// - **found** → re-point the row and let the next tick publish.
+    ///   Nothing is lost and the RPO claim stays honest.
+    /// - **not found** → the inode has no name under the export, so
+    ///   there is nothing to publish and the row is dropped. Safe
+    ///   against the open-but-unlinked case: NFS silly-renames, so a
+    ///   file a client still holds open is `.nfsXXXX` in the tree and
+    ///   the walk finds it.
+    ///
+    /// The third option — keep failing — is the one this replaces, and
+    /// it is the only one that can wedge a volume.
+    async fn repoint_or_forget(
+        &self,
+        dev: u64,
+        ino: u64,
+        epoch: Option<FileCapture>,
+        gone: &Path,
+    ) -> Outcome {
+        let root = self.cfg.export_root.clone();
+        let found = tokio::task::spawn_blocking(move || find_by_identity(&root, dev, ino))
+            .await
+            .unwrap_or(None);
+
+        match found {
+            Some(live) => {
+                let live_s = live.to_string_lossy().into_owned();
+                if let Err(e) = self.backend.tier_repoint_dirty(dev, ino, &live_s).await {
+                    // Keep the capture: the next tick retries the same
+                    // repair rather than losing the write.
+                    return self.fail(
+                        dev,
+                        ino,
+                        epoch,
+                        format!("re-point {} -> {}: {}", gone.display(), live.display(), e),
+                    );
+                }
+                if let Some(e) = epoch {
+                    capture::merge_back(dev, ino, e);
+                }
+                meter::bump(Counter::PublishFailures);
+                info!(
+                    "tier flush: ({},{}) {} is gone; the inode still answers to {} — row \
+                     re-pointed, publishing next tick",
+                    dev,
+                    ino,
+                    gone.display(),
+                    live.display()
+                );
+                Outcome::RetryNextCycle
+            }
+            None => {
+                // No name anywhere under the export: the file is gone,
+                // not merely renamed. Its generation row and any
+                // tombstone are owned by the A7 identity events; this
+                // only stops the flusher spinning on a dead name.
+                if let Err(e) = self.backend.tier_clear_dirty(dev, ino).await {
+                    return self.fail(
+                        dev,
+                        ino,
+                        epoch,
+                        format!("clear dirty for vanished {}: {}", gone.display(), e),
+                    );
+                }
+                capture::clear_durable(dev, ino);
+                capture::forget(dev, ino);
+                warn!(
+                    "tier flush: ({},{}) {} vanished and the inode has no other name under \
+                     the export — dirty row dropped, nothing to publish",
+                    dev,
+                    ino,
+                    gone.display()
+                );
+                Outcome::NothingToFlush
+            }
+        }
     }
 
     fn fail_keep_intent(&self, dev: u64, ino: u64, msg: String) -> Outcome {
@@ -1708,6 +1838,41 @@ fn live_inodes(root: &std::path::Path) -> std::io::Result<std::collections::Hash
         }
     }
     Ok(out)
+}
+
+/// First path under `root` whose identity is `(dev, ino)`.
+///
+/// Skips the reserved namespaces for the same reason every other tier
+/// walk does — `.flint` is tier control state and `.flint-nfs` is the
+/// server's own — and skips symlinks, which carry no tier rows and
+/// whose targets would take the walk outside the export.
+fn find_by_identity(root: &Path, dev: u64, ino: u64) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for ent in rd.flatten() {
+                if crate::tier::epoch::is_reserved_component(ent.file_name()) {
+                    continue;
+                }
+                let p = ent.path();
+                let Ok(md) = p.symlink_metadata() else { continue };
+                if md.is_dir() {
+                    stack.push(p);
+                } else if md.is_file() && (md.dev(), md.ino()) == (dev, ino) {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, dev, ino);
+        None
+    }
 }
 
 #[cfg(test)]
@@ -2910,7 +3075,7 @@ mod tests {
 
         std::fs::remove_file(&f).unwrap();
         for _ in 0..50 {
-            crate::tier::identity::note_remove(idn);
+            crate::tier::identity::note_remove(idn, 0);
             let _ = crate::tier::durable::drain_pending(&r.backend).await;
             if r.backend
                 .tier_list_tombstones()
@@ -3118,6 +3283,190 @@ mod tests {
             meta.meta.get(GenerationStamps::META_EPOCH).map(String::as_str),
             Some("2"),
             "the resumed publish must carry the RESUMED epoch"
+        );
+    }
+
+    /// A7's REMOVE tombstone is IDENTITY-keyed and nlink-blind: it
+    /// fires on the inode, not on the name that went away. Unlink ONE
+    /// name of a hard-linked pair and the shared bucket object is
+    /// deleted at the next barrier while the file is still very much
+    /// alive at the other name — and the generation row dies with it,
+    /// so nothing republishes it either. If the inode was evicted, the
+    /// surviving name is a stub pointing at nothing: READ answers EOF
+    /// under NFS4_OK.
+    ///
+    /// This is the deliberate counterpart of
+    /// `remove_after_publish_deletes_the_bucket_object` above, which
+    /// stays correct — that is the nlink == 1 case, where deleting the
+    /// object is exactly right. Read together the two tests state the
+    /// contract as "delete the object when the LAST name goes", and
+    /// only its second half holds today.
+    ///
+    /// `LINK` is refused while the tier is on (dispatcher.rs), so the
+    /// pair cannot be built through the NFS door. It arrives the two
+    /// ways the refusal does not cover: a tree adopted by import, or
+    /// one that predates the tier being switched on. Both land here.
+    ///
+    /// RED at 740e45db: the object is deleted.
+    #[tokio::test]
+    async fn remove_of_one_hardlink_must_not_delete_the_shared_object() {
+        use std::os::unix::fs::MetadataExt;
+
+        let r = rig(1024, 256);
+        let first = r.root.join("primary.bin");
+        std::fs::write(&first, b"shared by two names").unwrap();
+        let idn = ident(&first);
+        note_and_land(&r, &first, Mutation::Whole).await;
+        r.orch.tick().await;
+        assert!(
+            r.mem.head("t/primary.bin").await.is_ok(),
+            "precondition: the object must be published before we can claim it was lost"
+        );
+
+        // The second name. Assert the shared inode rather than trusting
+        // hard_link's exit status — on a filesystem that silently
+        // copied, every assertion below would pass for the wrong
+        // reason and the test would be vacuous.
+        let second = r.root.join("secondary.bin");
+        std::fs::hard_link(&first, &second).unwrap();
+        assert_eq!(ident(&second), idn, "the two names must share ONE inode");
+        assert_eq!(std::fs::metadata(&second).unwrap().nlink(), 2, "nlink must be 2");
+
+        // Unlink the FIRST name only, exactly as fileops does on a
+        // successful REMOVE: note_remove is called with the inode
+        // identity, unconditionally, with no nlink check anywhere.
+        std::fs::remove_file(&first).unwrap();
+        assert!(second.exists(), "the file must still exist under its other name");
+        assert_eq!(
+            std::fs::metadata(&second).unwrap().nlink(),
+            1,
+            "one name went away, the inode did not"
+        );
+        for _ in 0..50 {
+            // ONE name remains — exactly what fileops passes from the
+            // pre-unlink stat.
+            crate::tier::identity::note_remove(idn, 1);
+            let _ = crate::tier::durable::drain_pending(&r.backend).await;
+            if r.backend
+                .tier_list_tombstones()
+                .await
+                .unwrap()
+                .iter()
+                .any(|t| t.key == "t/primary.bin")
+            {
+                break;
+            }
+        }
+
+        r.orch.tick().await;
+
+        assert!(
+            r.mem.head("t/primary.bin").await.is_ok(),
+            "THE BUG: the surviving name's only published content was deleted because a \
+             DIFFERENT name for the same inode was unlinked"
+        );
+        assert!(
+            r.backend.tier_list_generations().await.unwrap().iter().any(|g| g.ino == idn.1),
+            "and its generation row was dropped, so nothing will republish it either"
+        );
+        assert_eq!(
+            std::fs::read(&second).unwrap(),
+            b"shared by two names",
+            "the surviving name must still read its bytes"
+        );
+    }
+
+    /// FOLLOW-UP TO THE nlink FIX, not a pre-existing bug: before it,
+    /// REMOVE of any name queued a `Removed` event whose apply called
+    /// `capture::forget` and cleared the row. Now a multi-link inode
+    /// queues nothing — correctly, its object must survive — but the
+    /// dirty row is left pointing at the name that just went away.
+    ///
+    /// `flush` resolves that row BY PATH. If a stale path merely fails,
+    /// `fail()` merges the capture back and the row stays dirty, so the
+    /// volume retries forever and `rpo::clean` can never go true —
+    /// which blocks hibernate. This test asks what actually happens.
+    #[tokio::test]
+    async fn a_dirty_multilink_inode_survives_losing_the_name_it_was_dirtied_through() {
+        let r = rig(1024, 256);
+        let first = r.root.join("dirtied-through-this.bin");
+        std::fs::write(&first, b"content reachable by two names").unwrap();
+        let idn = ident(&first);
+
+        let second = r.root.join("survivor.bin");
+        std::fs::hard_link(&first, &second).unwrap();
+        assert_eq!(ident(&second), idn, "precondition: one inode, two names");
+
+        // Dirty it THROUGH the name that is about to disappear.
+        note_and_land(&r, &first, Mutation::Whole).await;
+        std::fs::remove_file(&first).unwrap();
+        assert!(second.exists(), "precondition: the inode still has a name");
+        crate::tier::identity::note_remove(idn, 1);
+        let _ = crate::tier::durable::drain_pending(&r.backend).await;
+
+        // Tick 1 discovers the name is gone and re-points the row;
+        // tick 2 publishes. Two ticks, not one, is the contract — the
+        // repair deliberately does not re-enter the publish path.
+        r.orch.tick().await;
+        let after_one = r.backend.tier_list_dirty().await.unwrap();
+        assert!(
+            after_one.iter().any(|d| d.path.as_deref() == Some(&*second.to_string_lossy())),
+            "tick 1 must re-point the row at the surviving name: {after_one:?}"
+        );
+
+        r.orch.tick().await;
+
+        assert!(
+            r.mem.head("t/survivor.bin").await.is_ok(),
+            "THE WEDGE: the write was never published — the flusher was resolving a path \
+             that no longer exists and would retry forever, pinning rpo::clean false and \
+             blocking hibernate"
+        );
+        let dirty = r.backend.tier_list_dirty().await.unwrap();
+        assert!(
+            !dirty.iter().any(|d| d.dev == idn.0 && d.ino == idn.1),
+            "and the row must be clean afterwards: {dirty:?}"
+        );
+        assert_eq!(
+            std::fs::read(&second).unwrap(),
+            b"content reachable by two names",
+            "the surviving name still reads its bytes"
+        );
+    }
+
+    /// The other arm of the same repair: when the inode really is gone
+    /// — no name anywhere under the export — there is nothing to
+    /// publish, so the row must be DROPPED rather than retried. This is
+    /// the risky half: dropping a row that should have been kept would
+    /// silently lose a write, so the test above (which must keep it)
+    /// and this one (which must drop it) have to both hold.
+    ///
+    /// Safe against open-but-unlinked files in production because NFS
+    /// silly-renames: a file a client still holds open is `.nfsXXXX` in
+    /// the tree, so the walk finds it and takes the re-point arm.
+    #[tokio::test]
+    async fn a_dirty_row_for_a_truly_vanished_inode_is_dropped_not_retried() {
+        let r = rig(1024, 256);
+        let only = r.root.join("doomed.bin");
+        std::fs::write(&only, b"about to disappear entirely").unwrap();
+        let idn = ident(&only);
+        note_and_land(&r, &only, Mutation::Whole).await;
+
+        // Remove the ONLY name, and do not tell the tier — this is the
+        // state a crash between the unlink and the event drain leaves.
+        std::fs::remove_file(&only).unwrap();
+
+        r.orch.tick().await;
+
+        let dirty = r.backend.tier_list_dirty().await.unwrap();
+        assert!(
+            !dirty.iter().any(|d| d.dev == idn.0 && d.ino == idn.1),
+            "a row whose inode has no name under the export must be dropped, not retried \
+             forever: {dirty:?}"
+        );
+        assert!(
+            matches!(r.mem.head("t/doomed.bin").await, Err(StoreError::NotFound(_))),
+            "and nothing may be published for a file that does not exist"
         );
     }
 }

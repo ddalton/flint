@@ -93,6 +93,18 @@ impl StateBackend for MemoryBackend {
         Ok(self.tier_dirty.iter().map(|e| e.value().clone()).collect())
     }
 
+    async fn tier_repoint_dirty(
+        &self,
+        dev: u64,
+        ino: u64,
+        path: &str,
+    ) -> StateBackendResult<()> {
+        if let Some(mut row) = self.tier_dirty.get_mut(&(dev, ino)) {
+            row.path = Some(path.to_string());
+        }
+        Ok(())
+    }
+
     async fn tier_clear_dirty(&self, dev: u64, ino: u64) -> StateBackendResult<()> {
         self.tier_dirty.remove(&(dev, ino));
         Ok(())

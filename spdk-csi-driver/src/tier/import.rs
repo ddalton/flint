@@ -1043,7 +1043,7 @@ pub async fn adopt_local_tree(
             let Ok(md) = p.symlink_metadata() else { continue };
             if md.is_dir() {
                 // The tier's own control namespace is never client data.
-                if ent.file_name() == crate::tier::epoch::RESERVED_DIR {
+                if crate::tier::epoch::is_reserved_component(ent.file_name()) {
                     continue;
                 }
                 walk(&p, rep, marked);
@@ -1122,7 +1122,7 @@ async fn sweep_crashed_import(
             let p = ent.path();
             let Ok(md) = p.symlink_metadata() else { continue };
             if md.is_dir() {
-                if name != crate::tier::epoch::RESERVED_DIR {
+                if !crate::tier::epoch::is_reserved_component(&name) {
                     sweep_temps(&p, rep);
                 }
             } else if name.starts_with(IMPORT_TMP_PREFIX) && std::fs::remove_file(&p).is_ok() {
@@ -1176,7 +1176,7 @@ fn safe_rel_path(p: &str) -> Option<PathBuf> {
     for c in pb.components() {
         match c {
             Component::Normal(seg) => {
-                if seg == crate::tier::epoch::RESERVED_DIR {
+                if crate::tier::epoch::is_reserved_component(seg) {
                     return None;
                 }
             }
@@ -1190,12 +1190,26 @@ fn apply_posix(path: &Path, mode: u32, uid: u32, gid: u32, mtime: Option<i64>) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o7777));
-        // Best-effort (non-root hubs cannot chown; the manifest still
-        // records the truth).
+        // CHOWN FIRST, THEN CHMOD. chown(2) clears S_ISUID/S_ISGID for
+        // an unprivileged caller — and it does so even for a no-op
+        // chown to the file's existing owner, which is the ordinary
+        // case for a non-root hub restoring its own files. Doing it in
+        // the other order silently strips the setuid and setgid bits
+        // off EVERY restored file, so a DR restore quietly disarms
+        // every `sudo`, `mount`, `ping` and shared-group directory in
+        // the tree. The manifest carried the right mode all along; the
+        // restore threw it away one line later.
+        //
+        // Best-effort (a non-root hub cannot chown to a foreign uid;
+        // the manifest still records the truth), but the failure is
+        // now VISIBLE rather than a discarded return.
         if let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) {
-            unsafe { libc::chown(c.as_ptr(), uid, gid) };
+            if unsafe { libc::chown(c.as_ptr(), uid, gid) } != 0 {
+                let e = std::io::Error::last_os_error();
+                debug!("tier import: chown {} to {}:{} failed: {}", path.display(), uid, gid, e);
+            }
         }
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o7777));
     }
     #[cfg(not(unix))]
     let _ = (mode, uid, gid);
@@ -2354,5 +2368,214 @@ mod tests {
         assert_eq!((mine[0].dev, mine[0].ino), (dev, ino));
         assert!(evict::is_evicted(dev, ino));
         assert!(!note.exists());
+    }
+
+    /// Two manifest entries may cite ONE bucket key. That is not a
+    /// corrupt manifest — it is what `manifest::walk` PRODUCES for a
+    /// hard-linked pair, because it looks the key up by (dev, ino) and
+    /// both names resolve to the same generation row.
+    ///
+    /// `known_keys` is a snapshot taken once before the entry loop
+    /// (import.rs:263) and never refreshed, so `admissible` cannot see
+    /// the row the first entry just wrote: both entries materialize as
+    /// stubs pointing at the same object. The first write through
+    /// EITHER name then re-keys — the stored key is not what the path
+    /// derives — and `finish_rekey` deletes the old object
+    /// UNCONDITIONALLY, without asking whether another live generation
+    /// row still cites it. The other stub is left pointing at nothing.
+    ///
+    /// RED at 740e45db: the shared object is deleted.
+    #[tokio::test]
+    async fn a_rekey_must_not_delete_a_key_another_live_row_still_cites() {
+        let r = rig();
+
+        // Seed the shared object the way a previous epoch would have.
+        let body = Bytes::from_static(b"one object, two names");
+        let stamps = crate::tier::store::GenerationStamps {
+            generation: 1,
+            epoch: 1,
+            flush_uuid: "fixture".into(),
+            boundary_source: None,
+            posix: None,
+        };
+        let meta = r
+            .mem
+            .put_whole(
+                "t/shared.bin",
+                body.clone(),
+                &crate::tier::store::PutCondition::IfNoneMatchAny,
+                &stamps,
+                crate::tier::store::crc64_nvme(&body),
+            )
+            .await
+            .unwrap();
+
+        // Built as a struct, not as a JSON fixture: a real ETag
+        // carries literal double quotes, so hand-formatted JSON here
+        // fails to parse and the test dies on its fixture instead of
+        // on the behaviour it names.
+        let entry = |path: &str| manifest::Entry {
+            path: path.to_string(),
+            kind: manifest::EntryKind::File,
+            mode: 0o100644,
+            uid: 0,
+            gid: 0,
+            mtime_unix: 0,
+            key: Some("t/shared.bin".to_string()),
+            generation: Some(1),
+            etag: Some(meta.etag.clone()),
+            crc64_b64: meta.crc64_b64.clone(),
+            size: Some(body.len() as u64),
+            target: None,
+        };
+        let m = manifest::Manifest {
+            version: manifest::MANIFEST_VERSION,
+            seq: 1,
+            epoch: 1,
+            written_unix: 0,
+            beyond_rpo: 0,
+            skipped_special: 0,
+            entries: vec![entry("a.bin"), entry("b.bin")],
+        };
+
+        let rep = import_refresh(
+            &r.backend,
+            Some(&m),
+            ImportConfig {
+                export_root: &r.root,
+                key_prefix: "t/",
+                intent_path: None,
+                sweep_note_path: None,
+            },
+        )
+        .await;
+
+        // Anti-vacuity: if the second entry had been skipped, there
+        // would be no second citation and nothing below would be
+        // testing the thing it names.
+        assert!(r.root.join("a.bin").exists(), "a.bin must materialize: {rep:?}");
+        assert!(
+            r.root.join("b.bin").exists(),
+            "b.bin must materialize TOO — if `known_keys` had refreshed, this test would \
+             be measuring nothing: {rep:?}"
+        );
+        let (b_dev, b_ino) = ident(&r.root.join("b.bin"));
+        let cited = r
+            .backend
+            .tier_list_generations()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|g| g.dev == b_dev && g.ino == b_ino)
+            .expect("b.bin must carry a generation row")
+            .key;
+        assert_eq!(cited, "t/shared.bin", "b.bin must cite the shared object");
+
+        // Write through a.bin. Its path derives "t/a.bin", which is not
+        // the stored key, so this publish is a re-key.
+        std::fs::write(r.root.join("a.bin"), b"rewritten through the first name").unwrap();
+        evict::forget(ident(&r.root.join("a.bin")).0, ident(&r.root.join("a.bin")).1);
+        note_and_land(&r, &r.root.join("a.bin"), Mutation::Whole).await;
+        r.orch.tick().await;
+        assert!(
+            r.mem.head("t/a.bin").await.is_ok(),
+            "precondition: the re-key must actually have published under the new key"
+        );
+
+        assert!(
+            r.mem.head(&cited).await.is_ok(),
+            "THE BUG: the re-key deleted {cited}, which b.bin's live generation row still \
+             cites — b.bin is now a stub pointing at nothing"
+        );
+    }
+
+    /// The server's own filehandle-MAC secret lives at
+    /// `<export>/.flint-nfs/fh.key` (`nfs::v4::fh_kernel::META_DIR`).
+    /// The tier reserves exactly one name — `.flint`
+    /// (`epoch::RESERVED_DIR`) — and knows nothing about this one, so
+    /// the adopt walk marks fh.key dirty like any client file. From
+    /// there it is uploaded to the bucket, listed in the DR manifest,
+    /// and becomes eviction-eligible; truncating it makes EVERY
+    /// filehandle in the volume permanently STALE.
+    ///
+    /// The client-facing door already hides this directory
+    /// (fileops.rs filters META_DIR out of READDIR). Only the tier's
+    /// own walks do not.
+    ///
+    /// RED at 740e45db: fh.key is marked dirty.
+    #[tokio::test]
+    async fn adopt_must_not_tier_the_servers_own_meta_dir() {
+        let r = rig();
+        let meta_dir = r.root.join(crate::nfs::v4::fh_kernel::META_DIR);
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        std::fs::write(meta_dir.join("fh.key"), b"the filehandle MAC secret").unwrap();
+        std::fs::write(meta_dir.join("state.db"), b"the server's own state").unwrap();
+        // One real client file, so "marked nothing at all" cannot pass
+        // this test by accident.
+        std::fs::write(r.root.join("client.txt"), b"real data").unwrap();
+
+        let rep = adopt_local_tree(&r.backend, &r.root).await;
+
+        let root_str = r.root.to_string_lossy().into_owned();
+        let dirty = r.backend.tier_list_dirty().await.unwrap();
+        let mine: Vec<String> = dirty
+            .iter()
+            .filter_map(|d| d.path.clone())
+            .filter(|p| p.starts_with(&root_str))
+            .collect();
+
+        assert!(
+            mine.iter().any(|p| p.ends_with("client.txt")),
+            "anti-vacuity: the ordinary client file MUST be adopted, or this test would \
+             pass on an adopt that did nothing: {mine:?}"
+        );
+        assert!(
+            !mine.iter().any(|p| p.contains(crate::nfs::v4::fh_kernel::META_DIR)),
+            "THE BUG: the server's own {} is tiered — fh.key reaches the bucket and \
+             becomes eviction-eligible, and truncating it STALEs every filehandle in the \
+             volume: {mine:?}",
+            crate::nfs::v4::fh_kernel::META_DIR
+        );
+        assert_eq!(rep.marked_dirty, 1, "exactly the one client file: {rep:?}");
+    }
+
+    /// `chown(2)` clears S_ISUID/S_ISGID for an unprivileged caller —
+    /// including a no-op chown to the file's existing owner, which is
+    /// what a non-root hub does to every file it restores. Doing the
+    /// chmod first therefore stripped setuid and setgid off the whole
+    /// restored tree, silently disarming every `sudo`, `mount` and
+    /// shared-group directory in it. The manifest carried the right
+    /// mode all along; the restore threw it away one line later.
+    #[tokio::test]
+    async fn dr_restore_must_not_strip_setuid() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let f = dir.path().join("sudo");
+        std::fs::write(&f, b"#!/bin/sh\n").unwrap();
+
+        let (uid, gid) = {
+            let md = std::fs::metadata(&f).unwrap();
+            (md.uid(), md.gid())
+        };
+
+        // ANTI-VACUITY: prove this platform actually strips on chown,
+        // or the assertion below passes for a reason that has nothing
+        // to do with the fix.
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o4755)).unwrap();
+        if let Ok(c) = std::ffi::CString::new(f.as_os_str().as_encoded_bytes()) {
+            unsafe { libc::chown(c.as_ptr(), uid, gid) };
+        }
+        if std::fs::metadata(&f).unwrap().mode() & 0o4000 != 0 {
+            eprintln!("skipped: this platform does not clear setuid on chown");
+            return;
+        }
+
+        apply_posix(&f, 0o104755, uid, gid, Some(1_700_000_000));
+
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().mode() & 0o7777,
+            0o4755,
+            "THE BUG: the restore chmod'd before it chown'd and setuid was cleared"
+        );
     }
 }
