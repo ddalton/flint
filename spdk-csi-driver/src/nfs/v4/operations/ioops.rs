@@ -259,6 +259,74 @@ pub struct IoOperationHandler {
     fd_cache: Arc<FdCache>,
 }
 
+/// Run the READ body inline on the async worker instead of handing it to
+/// the blocking pool. **EXPERIMENT, default off.**
+///
+/// Why it exists: post-`session_limits`, flint uses only 1.14x knfsd's CPU
+/// but runs at 0.819 its throughput, and idles MORE than knfsd while
+/// being slower (76% vs 80% busy). It is latency-bound, not CPU-bound,
+/// and it does 17.0 context switches per READ against knfsd's 7.1. The
+/// `spawn_blocking` round trip -- enqueue, wake a pool thread, run, wake
+/// the worker back -- is the prime suspect for that gap, and a CPU
+/// profile CANNOT see it (it cost 3.5% of CPU, which is why measuring
+/// the wrong axis made me dismiss it once already).
+///
+/// NOT SAFE AS A DEFAULT: a cold read here blocks a runtime worker. This
+/// exists to size the prize on a page-cache-warm workload. If it is
+/// worth having, the shipping form is io_uring or `block_in_place`, not
+/// this.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadMode {
+    /// Hand the read to the blocking pool. Safe everywhere; costs a task
+    /// enqueue and two wakeups per READ.
+    SpawnBlocking,
+    /// Run it on the async worker. Fastest, and NOT SAFE as a default --
+    /// a cold read stalls a runtime worker.
+    Inline,
+    /// Run it on the async worker but tell the runtime first, so siblings
+    /// migrate to another thread. No task handoff, no stalled worker.
+    /// Requires the multi-thread runtime -- every NFS server binary
+    /// (`nfs_mds_main`, `nfs_main`, `nfs_ds_main`) builds one, but
+    /// `#[tokio::test]` does NOT, which is why this is never the default
+    /// under test.
+    BlockInPlace,
+}
+
+/// `BlockInPlace` by default on a multi-thread runtime, which every NFS
+/// server binary builds. Measured, 4 readers, O_DIRECT, warm, splice on,
+/// three arms interleaved in one session with a page-cache guard:
+///
+/// | arm | cpu-ms/GiB | MiB/s | vs knfsd |
+/// |---|---|---|---|
+/// | spawn_blocking | 355 | 4240 | 0.712 |
+/// | **block_in_place** | **310** | **5292** | **0.861** |
+/// | knfsd | 280 | 6006 | 1.000 |
+///
+/// **+24.2% throughput.** The win is latency, not CPU: `spawn_blocking`
+/// costs a task enqueue and two wakeups per READ, and with N synchronous
+/// readers throughput is N x rsize / per-request latency. A CPU profile
+/// cannot see this — the scheduler cost was 3.5% of CPU, which is why
+/// measuring the wrong axis dismissed it once.
+///
+/// NOT flavor-blind: `block_in_place` PANICS on a current-thread
+/// runtime, which is exactly what `#[tokio::test]` builds. The flavor is
+/// checked rather than assumed, so tests keep the pool path.
+/// `FLINT_NFS_INLINE_READ` forces: 0 pool, 1 inline, 2 block-in-place.
+/// Inline measured +8.5% and is NOT safe to default — it stalls a worker
+/// on a cold read with no migration.
+fn read_mode() -> ReadMode {
+    static M: std::sync::OnceLock<ReadMode> = std::sync::OnceLock::new();
+    *M.get_or_init(|| match std::env::var("FLINT_NFS_INLINE_READ").as_deref() {
+        Ok("0") | Ok("false") | Ok("no") => ReadMode::SpawnBlocking,
+        Ok("1") | Ok("true") | Ok("yes") => ReadMode::Inline,
+        Ok("2") | Ok("block_in_place") => ReadMode::BlockInPlace,
+        _ => match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+            Ok(tokio::runtime::RuntimeFlavor::MultiThread) => ReadMode::BlockInPlace,
+            _ => ReadMode::SpawnBlocking,
+        },
+    })
+}
+
 impl IoOperationHandler {
     /// Create a new I/O operation handler
     pub fn new(state_mgr: Arc<StateManager>, fh_mgr: Arc<FileHandleManager>) -> Self {
@@ -1553,7 +1621,7 @@ impl IoOperationHandler {
         // SEQUENCE is op 0, so `cache_slot` is already decided here.
         let may_splice = ctx.can_splice && ctx.cache_slot.is_none();
 
-        let read_result = tokio::task::spawn_blocking(
+        let read_job =
             move || -> std::io::Result<(crate::nfs::segment::Segment, bool)> {
             let file = match cached {
                 Some(f) => f,
@@ -1728,8 +1796,13 @@ impl IoOperationHandler {
             // re-consult needs, and it is why staging goes to a pipe
             // rather than straight to the socket.
             Ok((payload, eof))
-        })
-        .await;
+        };
+        // See `read_mode`. Default is SpawnBlocking.
+        let read_result = match read_mode() {
+            ReadMode::Inline => Ok(read_job()),
+            ReadMode::BlockInPlace => Ok(tokio::task::block_in_place(read_job)),
+            ReadMode::SpawnBlocking => tokio::task::spawn_blocking(read_job).await,
+        };
 
         match read_result {
             Ok(Ok((data, eof))) => {
