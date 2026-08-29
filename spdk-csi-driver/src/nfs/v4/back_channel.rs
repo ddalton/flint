@@ -175,8 +175,11 @@ impl BackChannelWriter {
     /// middle of a reply. The point is that a READ payload reaches the
     /// socket as the `Bytes` the I/O layer produced, never copied into
     /// a reply buffer first. See `CompoundResponse::encode_segments`.
-    pub async fn send_record_segments(&self, segs: &[Bytes]) -> std::io::Result<()> {
-        let len: usize = segs.iter().map(|s| s.len()).sum();
+    pub async fn send_record_segments(
+        &self,
+        segs: &[crate::nfs::segment::Segment],
+    ) -> std::io::Result<()> {
+        let len: usize = crate::nfs::segment::total_len(segs);
         if len > 0x7FFF_FFFF {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -188,7 +191,7 @@ impl BackChannelWriter {
         let mut w = self.inner.lock().await;
         w.write_all(&marker.to_be_bytes()).await?;
         for seg in segs {
-            w.write_all(seg).await?;
+            w.write_all(seg.as_mem()).await?;
         }
         w.flush().await?;
         Ok(())

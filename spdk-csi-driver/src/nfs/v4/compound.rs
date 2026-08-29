@@ -149,7 +149,7 @@ pub struct CompoundResponse {
     /// the first time this was optimised. Keeping it segmented from the
     /// point of first encode is the only shape in which the payload is
     /// never copied at all.
-    pub raw_reply: Option<Vec<Bytes>>,
+    pub raw_reply: Option<Vec<crate::nfs::segment::Segment>>,
     /// When set, after the response is encoded the resulting bytes MUST be
     /// stored on this `(session, slot)` for future replay matching. Set by
     /// the SEQUENCE handler when it accepts a new request; consumed by the
@@ -2172,12 +2172,12 @@ impl CompoundResponse {
             // contiguous-bytes surface (GSS sealing, the replay cache).
             // The segmented surface is `encode_segments`.
             if raw.len() == 1 {
-                return raw.into_iter().next().expect("len checked");
+                return raw.into_iter().next().expect("len checked").into_mem();
             }
-            let total: usize = raw.iter().map(|b| b.len()).sum();
+            let total: usize = crate::nfs::segment::total_len(&raw);
             let mut flat = bytes::BytesMut::with_capacity(total);
             for b in &raw {
-                flat.extend_from_slice(b);
+                flat.extend_from_slice(b.as_mem());
             }
             return flat.freeze();
         }
@@ -2233,14 +2233,14 @@ impl CompoundResponse {
     /// The wire bytes are IDENTICAL to `encode`; only the copy count
     /// changes. `segments_match_the_flattened_encoding` asserts that
     /// against the real encoder rather than a reimplementation of it.
-    pub fn encode_segments(self) -> Vec<Bytes> {
+    pub fn encode_segments(self) -> Vec<crate::nfs::segment::Segment> {
         // A replay is served verbatim from the slot cache; there is
         // nothing to segment and nothing to gain.
         if let Some(raw) = self.raw_reply {
             return raw;
         }
 
-        let mut segs: Vec<Bytes> = Vec::with_capacity(3);
+        let mut segs: Vec<crate::nfs::segment::Segment> = Vec::with_capacity(3);
         let mut cur = XdrEncoder::new();
         cur.encode_status(self.status);
         cur.encode_string(&self.tag);
@@ -2260,9 +2260,9 @@ impl CompoundResponse {
                     // what `encode_opaque` would have written inline.
                     cur.encode_u32(res.data.len() as u32);
                     let pad = (4 - res.data.len() % 4) % 4;
-                    segs.push(cur.finish());
+                    segs.push(cur.finish().into());
                     cur = XdrEncoder::new();
-                    segs.push(res.data);
+                    segs.push(res.data.into());
                     if pad > 0 {
                         cur.append_raw(&[0u8; 3][..pad]);
                     }
@@ -2273,7 +2273,7 @@ impl CompoundResponse {
 
         let tail = cur.finish();
         if !tail.is_empty() {
-            segs.push(tail);
+            segs.push(tail.into());
         }
         segs
     }
@@ -2901,10 +2901,10 @@ mod segment_tests {
         r
     }
 
-    fn joined(segs: Vec<Bytes>) -> Vec<u8> {
+    fn joined(segs: Vec<crate::nfs::segment::Segment>) -> Vec<u8> {
         let mut v = Vec::new();
         for s in segs {
-            v.extend_from_slice(&s);
+            v.extend_from_slice(s.as_mem());
         }
         v
     }
@@ -2949,7 +2949,7 @@ mod segment_tests {
             segs.len()
         );
         assert!(
-            segs.iter().any(|s| s.len() == 4096 && s.as_ref() == payload.as_slice()),
+            segs.iter().any(|s| s.len() == 4096 && s.as_mem().as_ref() == payload.as_slice()),
             "the payload is not present as an uncopied standalone segment"
         );
     }
@@ -2971,8 +2971,8 @@ mod segment_tests {
     fn a_raw_replay_reply_passes_through_untouched() {
         let raw = Bytes::from_static(b"already-encoded-reply");
         let mut r = CompoundResponse::new();
-        r.raw_reply = Some(vec![raw.clone()]);
-        assert_eq!(r.encode_segments(), vec![raw]);
+        r.raw_reply = Some(vec![raw.clone().into()]);
+        assert_eq!(joined(r.encode_segments()), raw.to_vec());
     }
 }
 

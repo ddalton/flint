@@ -613,7 +613,7 @@ impl CompoundDispatcher {
                     tag: request.tag,
                     results: Vec::new(),
                     // A cached replay is one exact buffer by definition.
-                    raw_reply: context.replay_reply.take().map(|b| vec![b]),
+                    raw_reply: context.replay_reply.take().map(|b| vec![b.into()]),
                     cache_slot: None,
                 };
             }
@@ -724,7 +724,7 @@ impl CompoundDispatcher {
                             status: Nfs4Status::RepTooBig,
                             tag: request.tag,
                             results: Vec::new(),
-                            raw_reply: Some(vec![stripped_bytes]),
+                            raw_reply: Some(vec![stripped_bytes.into()]),
                             cache_slot,
                         };
                     }
@@ -4538,8 +4538,8 @@ mod tests {
 
     /// Flatten `raw_reply` and read the COMPOUND header an empty tag makes
     /// trivially positional: status | tag_len(0) | num_results | first opcode.
-    fn header_of(raw: &[Bytes]) -> (u32, u32, u32) {
-        let f: Vec<u8> = raw.iter().flat_map(|b| b.iter().copied()).collect();
+    fn header_of(raw: &[crate::nfs::segment::Segment]) -> (u32, u32, u32) {
+        let f: Vec<u8> = raw.iter().flat_map(|b| b.as_mem().iter().copied()).collect();
         assert!(f.len() >= 16, "reply too short to hold a header: {}", f.len());
         let g = |o: usize| u32::from_be_bytes([f[o], f[o + 1], f[o + 2], f[o + 3]]);
         assert_eq!(g(4), 0, "test builds an empty tag");
