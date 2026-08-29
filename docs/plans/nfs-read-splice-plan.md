@@ -353,3 +353,34 @@ forever (observed: 286s, load 1.00 at 0% CPU). **`umount -l` before
 stopping the server** is the only safe order, and the script now also
 unmounts on EXIT. It surfaced only on the third run, because runs 1-2
 silently left mounts behind.
+
+
+---
+
+## 9. THROUGHPUT — measured 2026-08-28, and it corrects an earlier claim
+
+S3's first runs scored CPU only. Asked for throughput, the rig was
+extended to record wall time per rep. Third independent run, same guards:
+
+| arm | wall for 2 GiB | MiB/s |
+|---|---|---|
+| off (copy) | 656-685 ms | ~3000-3120 |
+| **on (splice)** | **382-431 ms** | **~4750-5360** |
+
+**Median speedup 1.59x — +59% throughput**, spread ~12%. CPU reproduced
+exactly (220 ms on, 590-610 off), so both axes are stable.
+
+### This corrects the framing used earlier in this plan
+
+Sections 6 and 8 argue "the win is CPU, NOT throughput; a MiB/s gate
+would read ~1.0 and be called no-effect". **That is true of S0 and FALSE
+of the server.** S0's standalone bench had one sender thread and a fast
+drain, so the server was never the constraint; extrapolating its
+bottleneck to the real server was the error. With 4 concurrent readers
+on 2 vCPUs the server IS CPU-bound, so freed CPU converts almost
+directly into throughput.
+
+Scoring on cpu-ms/GiB remains the right choice — it is the metric that
+still means something when the bottleneck moves elsewhere, e.g. more
+cores or a slower network. But the claim that a throughput gate would be
+UNINFORMATIVE here was overstated: it would have shown +59%.

@@ -115,15 +115,21 @@ pipe_fds()  { vm "ls -l /proc/\$(systemctl show -p MainPID --value flint-$1)/fd 
 
 run_arm() { # name -> "cpu_ms bytes"
   local n=$1
-  local t0 t1; t0=$(cpu_ticks "$n")
+  local t0 t1 w0 w1; t0=$(cpu_ticks "$n")
+  w0=$(date +%s%N)
   vm "for p in \$(seq 1 $PASSES); do
         for i in \$(seq 1 $READERS); do
           dd if=/mnt/$n/f\$i.bin of=/dev/null bs=1M count=$SIZE_MB iflag=direct status=none &
         done; wait
       done" >/dev/null 2>&1
+  w1=$(date +%s%N)
   t1=$(cpu_ticks "$n")
   local tck; tck=$(vm "getconf CLK_TCK" | tr -d '[:space:]')
-  echo "$(( (t1 - t0) * 1000 / tck )) $(( READERS * SIZE_MB * PASSES * 1048576 ))"
+  # cpu_ms, wall_ms, bytes -- wall is measured from the host, so it
+  # includes limactl round-trip overhead and is a FLOOR on throughput,
+  # not a precise figure. Same overhead on both arms, so the RATIO is
+  # the meaningful part.
+  echo "$(( (t1 - t0) * 1000 / tck )) $(( (w1 - w0) / 1000000 )) $(( READERS * SIZE_MB * PASSES * 1048576 ))"
 }
 
 echo "=== VM HEALTH BEFORE ==="; vm "uptime; vmstat 1 2 | tail -1"
@@ -164,12 +170,12 @@ fi
 echo "  splice confirmed active"
 
 echo "=== REPS (interleaved) ==="
-echo "rep,arm,cpu_ms,bytes" > /tmp/s3.csv
+echo "rep,arm,cpu_ms,wall_ms,bytes" > /tmp/s3.csv
 for r in $(seq 1 "$REPS"); do
   for a in off on; do
-    read -r ms by <<<"$(run_arm $a)"
-    echo "$r,$a,$ms,$by" >> /tmp/s3.csv
-    echo "  rep $r $a: ${ms}ms cpu for $((by/1048576))MiB"
+    read -r ms wms by <<<"$(run_arm $a)"
+    echo "$r,$a,$ms,$wms,$by" >> /tmp/s3.csv
+    echo "  rep $r $a: ${ms}ms cpu, ${wms}ms wall for $((by/1048576))MiB  ($(( by/1048576 * 1000 / (wms>0?wms:1) )) MiB/s)"
   done
 done
 echo "=== VM HEALTH AFTER ==="; vm "vmstat 1 2 | tail -1"
