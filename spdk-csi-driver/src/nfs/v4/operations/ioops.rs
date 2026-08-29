@@ -2639,6 +2639,10 @@ mod tests {
     #[tokio::test]
     async fn read_and_write_answer_delay_on_an_evicted_file() {
         use std::os::unix::fs::MetadataExt;
+        // Plants a marker, which bumps the PROCESS-GLOBAL MARKER_CYCLE.
+        // Any concurrent test with an open read window sees it broken —
+        // no shared file needed. Held for the whole body.
+        let _excl = crate::tier::capture::test_exclusive();
         crate::tier::capture::force_enable();
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
@@ -2913,10 +2917,10 @@ mod tests {
     #[tokio::test]
     async fn read_count_is_clamped_to_the_response_ceiling() {
         use crate::nfs::v4::operations::session::SERVER_MAX_RESPONSE;
-        // The eviction registry is process-global and keyed (dev, ino);
-        // a concurrent tier test's marker can land on this TempDir
-        // file's reused inode and turn the READ into a Delay. Hold the
-        // tier rig lock so no marker-planting test overlaps this one.
+        // Hold the tier rig lock: MARKER_CYCLE is process-global and
+        // every marker INSERT bumps it, so a concurrent planter breaks
+        // this test's read window. See the block below for the measured
+        // mechanism.
         let _excl = crate::tier::capture::test_exclusive();
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
@@ -2927,26 +2931,53 @@ mod tests {
         f.set_len(4 * SERVER_MAX_RESPONSE as u64).unwrap();
         drop(f);
 
-        // KNOWN FLAKE, PRE-EXISTING, NOT YET CLOSED. ~1 full-suite run
-        // in 5 fails here with Delay instead of Ok (measured at
-        // 748bbec8, before the batch that added this comment).
+        // WAS A FLAKE — green alone, red in the full suite. CLOSED by
+        // giving every marker-planting test the rig lock this one
+        // already held; the cause is recorded here because the obvious
+        // reading of it is wrong.
         //
-        // The eviction registry is process-global and keyed (dev, ino)
-        // with no path corroboration, and TempDir inodes are reused
-        // within a process, so a marker planted for one test's file
-        // aliases onto another's. The rig lock keeps a planter from
-        // running ALONGSIDE this test; the clear below removes any
-        // marker left behind BEFORE it. Neither is sufficient, and the
-        // precondition assert is what proves it: it does not fire on a
-        // failing run, so the marker arrives DURING this test, from a
-        // planter that does not hold `capture::test_exclusive()`.
+        // A failure here reports `Delay != Ok`, which comes from the
+        // tier consult and has nothing to do with the response ceiling
+        // the test is named for. The consult that fires is the POST-read
+        // window guard, `read_window_intact`, and it is a conjunction:
         //
-        // The durable fix is one of: corroborate the path in the marker
-        // consult (which would also close the (dev, ino) aliasing
-        // hazard in the product, not just here), or audit every
-        // marker-planting test for the rig lock. Left open deliberately
-        // rather than papered over with a retry, which would hide the
-        // product-side aliasing this shares a cause with.
+        //     !is_evicted(dev, ino) && marker_cycle() == began
+        //
+        // The recorded diagnosis for two months was `(dev, ino)`
+        // ALIASING — a tier test's marker landing on this TempDir file's
+        // reused inode. Instrumenting the failure refuted it:
+        //
+        //     capture_on=true  marker_on_this_file=false  cycle 1->2
+        //
+        // No marker on this file, no aliasing, no shared inode. It is
+        // the SECOND conjunct: MARKER_CYCLE is a single process-global
+        // counter bumped by every marker insert anywhere, so ANY other
+        // test planting ANY marker inside this read window breaks it.
+        // Nothing about the two tests need be related.
+        //
+        // Two process-global statics have to line up for it, which is
+        // why it needed the suite and never reproduced alone:
+        //
+        //   1. `capture::enable()` is STICKY — deliberately no disable
+        //      (a tier that turned off mid-run would strand queued
+        //      marks). One tier test's `force_enable()` therefore leaves
+        //      the consult live for every test that follows it, in a
+        //      process where the tier is otherwise off.
+        //   2. `is_evicted` is gated on `capture::enabled()`;
+        //      `marker_cycle()` is not. So half the guard is tier-gated
+        //      and half is unconditional.
+        //
+        // The product behaviour is deliberate and stays: a global
+        // counter means an unrelated file's eviction costs one spurious
+        // DELAY retry, which `evict.rs` weighs explicitly against
+        // per-identity narrowing (evictions are rare; a warm fill's
+        // clears must not storm). Production evicts rarely; a test
+        // binary evicts constantly. So the fix is test isolation, not a
+        // product change — every cycle-bumping test now takes
+        // `capture::test_exclusive()`, which this test already held.
+        //
+        // The clear below stays: it removes any marker left behind
+        // BEFORE this test, which the lock cannot undo.
         {
             use std::os::unix::fs::MetadataExt;
             let md = std::fs::metadata(&big_path).unwrap();
@@ -2974,10 +3005,27 @@ mod tests {
             .await;
         let stateid = open_res.stateid.unwrap();
 
+        let cycle_at_open = crate::tier::evict::marker_cycle();
         let res = handler
             .handle_read(ReadOp { stateid, offset: 0, count: u32::MAX }, &ctx)
             .await;
-        assert_eq!(res.status, Nfs4Status::Ok);
+        // Self-diagnosing: if the rig lock is ever dropped from a
+        // planter, this names the cause instead of reporting a bare
+        // `Delay != Ok` that points at the response ceiling.
+        assert_eq!(
+            res.status,
+            Nfs4Status::Ok,
+            "tier consult fired: capture={} marker_on_this_file={} marker_cycle moved by {} \
+             during the read window (a non-zero delta means some test planted a marker \
+             without holding capture::test_exclusive())",
+            crate::tier::capture::enabled(),
+            {
+                use std::os::unix::fs::MetadataExt;
+                let md = std::fs::metadata(&big_path).unwrap();
+                crate::tier::evict::logical_size(md.dev(), md.ino()).is_some()
+            },
+            crate::tier::evict::marker_cycle() - cycle_at_open,
+        );
         let data = res.data;
         assert!(
             data.len() <= SERVER_MAX_RESPONSE as usize,

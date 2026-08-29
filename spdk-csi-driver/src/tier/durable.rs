@@ -128,6 +128,10 @@ mod tests {
         // Held for the whole body: the theft window is queue-to-drain,
         // not the drain alone. See `capture::test_exclusive`.
         let _excl = crate::tier::capture::test_exclusive();
+        // A dropped TempDir hands its inodes to the next one, and on
+        // ext4 that reuse is deterministic — so start from no
+        // process-global capture state at all. See reset_for_tests.
+        crate::tier::capture::reset_for_tests();
         capture::force_enable();
         let be: Arc<dyn StateBackend> = Arc::new(MemoryBackend::new());
         let (dev, ino) = (0xD8A1_u64, 0x11_u64);
@@ -152,6 +156,10 @@ mod tests {
         // Held for the whole body: the theft window is queue-to-drain,
         // not the drain alone. See `capture::test_exclusive`.
         let _excl = crate::tier::capture::test_exclusive();
+        // A dropped TempDir hands its inodes to the next one, and on
+        // ext4 that reuse is deterministic — so start from no
+        // process-global capture state at all. See reset_for_tests.
+        crate::tier::capture::reset_for_tests();
         capture::force_enable();
         let be: Arc<dyn StateBackend> = Arc::new(MemoryBackend::new());
         let (dev, ino) = (0xD8A1_u64, 0x22_u64);

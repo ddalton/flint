@@ -306,6 +306,45 @@ pub fn forget(dev: u64, ino: u64) {
     HAS_PENDING.store(!queued().is_empty(), Ordering::Release);
 }
 
+/// Tests only: drop EVERY process-global capture map so a rig starts
+/// from nothing.
+///
+/// The maps are keyed by `(dev, ino)` with no path corroboration, and a
+/// `TempDir` that has been dropped hands its inode numbers straight back
+/// to the next one. On ext4 that reuse is DETERMINISTIC, so a rig
+/// inherits the previous rig's identities exactly, every run.
+///
+/// [`forget`] already names this hazard for the eviction marker. The
+/// half it cannot cover is the DURABLE MEMO, because the suppression is
+/// silent: `queue_mark` returns early for a known-durable identity, so
+/// an adopt reports the file marked (the count is taken at the note
+/// call) while no row ever reaches the backend.
+///
+/// That is a real defect and it cost a Linux-only red suite:
+/// `adopt_must_not_tier_the_servers_own_meta_dir` marks `client.txt`
+/// durable and drops its tree, and the very next test's
+/// `src/nested/main.rs` lands on that exact inode. It reproduced 5/5 in
+/// the full suite, in `tier::import` alone, and single-threaded, while
+/// passing alone and passing on macOS, where APFS allocates differently.
+///
+/// PRODUCTION IS NOT EXPOSED TO THIS: a real unlink goes through the
+/// server, `tier::identity` fires, and [`forget`] clears the memo. Only
+/// a tree that vanishes without the server knowing — a `TempDir` drop —
+/// leaves a stale entry, which is why this is a test-only reset and not
+/// a change to the product's keying.
+///
+/// Safe to call from a rig holding [`test_exclusive`]: that lock spans
+/// queue-to-drain for every rig, so nothing else can own a pending mark
+/// at this moment.
+#[cfg(test)]
+pub fn reset_for_tests() {
+    map().clear();
+    queued().clear();
+    durable().clear();
+    last_note_map().clear();
+    HAS_PENDING.store(false, Ordering::Release);
+}
+
 /// Cheap per-op check for the dispatcher.
 #[inline]
 pub fn has_pending() -> bool {

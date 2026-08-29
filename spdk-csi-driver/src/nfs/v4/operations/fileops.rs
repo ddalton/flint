@@ -5010,6 +5010,10 @@ mod tests {
     #[test]
     fn snapshot_serves_logical_size_for_evicted_files() {
         use std::os::unix::fs::MetadataExt;
+        // Plants a marker, which bumps the PROCESS-GLOBAL MARKER_CYCLE.
+        // Any concurrent test with an open read window sees it broken —
+        // no shared file needed. Held for the whole body.
+        let _excl = crate::tier::capture::test_exclusive();
         crate::tier::capture::force_enable();
         let dir = tempfile::TempDir::new().unwrap();
         let f = dir.path().join("stub.bin");

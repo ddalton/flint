@@ -513,7 +513,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// A pod that already mounts the workspace path is REFUSED with a
     /// message naming the knob, not pushed into an API-server rejection
     /// that mentions neither flint nor `spec.mountPath`.

@@ -2758,6 +2758,10 @@ mod tests {
     async fn seek_serves_the_logical_extent_of_an_evicted_stub() {
         use std::os::unix::fs::MetadataExt;
         const LOGICAL: u64 = 4242;
+        // Plants a marker, which bumps the PROCESS-GLOBAL MARKER_CYCLE.
+        // Any concurrent test with an open read window sees it broken —
+        // no shared file needed. Held for the whole body.
+        let _excl = crate::tier::capture::test_exclusive();
         let (handler, temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
         let path = temp.path().join("evicted.bin");

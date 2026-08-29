@@ -1127,6 +1127,10 @@ mod tests {
 
     fn rig() -> Rig {
         let _excl = capture::test_exclusive();
+        // A dropped TempDir hands its inodes to the next one, and on
+        // ext4 that reuse is deterministic — so start from no
+        // process-global capture state at all. See reset_for_tests.
+        capture::reset_for_tests();
         capture::force_enable();
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().to_path_buf();

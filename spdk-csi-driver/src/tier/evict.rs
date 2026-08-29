@@ -985,6 +985,10 @@ mod tests {
         // reused inside one process — the documented way a neighbouring
         // test turns an unrelated READ into a Delay.
         let _excl = crate::tier::capture::test_exclusive();
+        // A dropped TempDir hands its inodes to the next one, and on
+        // ext4 that reuse is deterministic — so start from no
+        // process-global capture state at all. See reset_for_tests.
+        crate::tier::capture::reset_for_tests();
         let dir = tempfile::TempDir::new().unwrap();
         let f = dir.path().join("weights.bin");
         std::fs::write(&f, vec![9u8; 4096]).unwrap();
@@ -1029,6 +1033,11 @@ mod tests {
     /// direction retries.)
     #[test]
     fn read_window_guard_detects_a_complete_marker_cycle() {
+        // Bumps MARKER_CYCLE, which is PROCESS-GLOBAL. Any test whose
+        // read window is open when this fires sees its window broken —
+        // no shared file and no (dev, ino) collision required. Held for
+        // the whole body so no window can span an insert.
+        let _excl = capture::test_exclusive();
         capture::force_enable();
         let (dev, ino) = (0xF11A7_u64, 0xC1C1E_u64); // synthetic identity
         let began = marker_cycle();
@@ -1067,6 +1076,9 @@ mod tests {
     /// a single success is proof).
     #[test]
     fn read_window_survives_a_forget_alone() {
+        // Up to 200 global cycle bumps in the loop below. See the note
+        // on the sibling test above.
+        let _excl = capture::test_exclusive();
         capture::force_enable();
         let (dev, ino) = (0xF11A8_u64, 0xF09E7_u64); // synthetic identity
         let mut proven = false;
@@ -1099,6 +1111,10 @@ mod tests {
 
     fn rig() -> Rig {
         let _excl = capture::test_exclusive();
+        // A dropped TempDir hands its inodes to the next one, and on
+        // ext4 that reuse is deterministic — so start from no
+        // process-global capture state at all. See reset_for_tests.
+        capture::reset_for_tests();
         capture::force_enable();
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().to_path_buf();
