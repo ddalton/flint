@@ -1333,7 +1333,9 @@ impl DataServer {
         count: u32,
     ) -> Result<Vec<u8>> {
         let result = self.io_handler.read(filehandle, offset, count).await?;
-        Ok(result.data)
+        // This helper is a test/legacy surface; the hot path takes
+        // `ReadResult.data` as `Bytes` straight to `OpBody::Payload`.
+        Ok(result.data.to_vec())
     }
 
     /// Handle WRITE operation (opcode 38)

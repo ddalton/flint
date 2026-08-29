@@ -27,6 +27,7 @@
 use crate::pnfs::Result;
 use crate::nfs::v4::filehandle::FileHandleManager;
 use crate::nfs::v4::protocol::Nfs4FileHandle;
+use bytes::Bytes;
 use dashmap::DashMap;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::FileExt;
@@ -407,7 +408,7 @@ impl IoOperationHandler {
                                 "DS READ: stripe file {:?} absent — hole, replying eof",
                                 file_path
                             );
-                            return Ok(ReadResult { eof: true, data: Vec::new() });
+                            return Ok(ReadResult { eof: true, data: Bytes::new() });
                         }
                         Err(e) => {
                             warn!("Failed to open file {:?}: {}", file_path, e);
@@ -431,7 +432,7 @@ impl IoOperationHandler {
         // path, which is the pre-existing behaviour unchanged.
         let direct = self.cached_direct_fd(filehandle);
 
-        let (buffer, eof) = fast_blocking(count as usize, || -> std::io::Result<(Vec<u8>, bool)> {
+        let (buffer, eof) = fast_blocking(count as usize, || -> std::io::Result<(Bytes, bool)> {
             if let Some(direct) = direct.as_deref() {
                 // A failure here is NOT fatal: fall through to buffered.
                 // O_DIRECT can be refused per-request (misaligned memory
@@ -442,7 +443,11 @@ impl IoOperationHandler {
                     Ok(Some(buffer)) => {
                         let file_size = direct.metadata().map(|m| m.len()).unwrap_or(0);
                         let eof = offset + (buffer.len() as u64) >= file_size;
-                        return Ok((buffer, eof));
+                        // Vec -> Bytes is an ownership move, not a copy.
+                        // The O_DIRECT path keeps its own aligned
+                        // allocation: alignment is a property of the
+                        // buffer the pool does not promise.
+                        return Ok((Bytes::from(buffer), eof));
                     }
                     Ok(None) => {} // below the size threshold — buffered
                     Err(e) => {
@@ -451,16 +456,20 @@ impl IoOperationHandler {
                 }
             }
 
-            // PERF, MEASURED-ADJACENT, NOT YET FIXED. This memsets `count`
-            // bytes (1 MiB at the default rsize) and then immediately
-            // overwrites every one of them with read_at's result — pure
-            // waste on the data server's hottest path.
+            // POOLED — see `crate::nfs::read_pool`. This used to be
+            // `vec![0u8; count]`, which at a 1 MiB rsize is an mmap per
+            // READ and a munmap per reply drop, both taking the
+            // process-wide `mmap_lock` for WRITE.
             //
-            // It is left as-is deliberately. The obvious rewrites do not
-            // help: with_capacity+resize memsets identically, and set_len
-            // over uninitialised capacity is UB because read_at takes
-            // &mut [u8]. The real fix is a per-worker reusable buffer pool,
-            // which is genuine engineering on a path nobody has profiled.
+            // The old note here called a buffer pool "genuine engineering
+            // on a path nobody has profiled" and left the allocation
+            // alone. The path has since been profiled — on the MDS lane,
+            // which had the identical allocation — and the finding was
+            // that the churn is not merely CPU: `rwsem_down_write_slowpath`
+            // and `mt_find` under concurrency are `mmap_lock` and its
+            // maple tree, and they were why that server stopped scaling.
+            // Pooling it there gave +49% at 4 and 8 concurrent readers
+            // (`b1c1e351`). This is the same defect, so it gets the same fix.
             //
             // Context for whoever does profile it: a DS served 396 MiB/s
             // over pNFS where the same node's local block path did 845
@@ -486,9 +495,12 @@ impl IoOperationHandler {
             // Re-measure on real hardware before attacking anything here.
             // This memset is what remains of the original suspects, and
             // the note that named it did not think it was the bulk.
-            let mut buffer = vec![0u8; count as usize];
-            let bytes_read = file.read_at(&mut buffer, offset)?;
-            buffer.truncate(bytes_read);
+            let mut bytes_read = 0usize;
+            let buffer = crate::nfs::read_pool::read_at_pooled(count as usize, |buf| {
+                let n = file.read_at(buf, offset)?;
+                bytes_read = n;
+                Ok(n)
+            })?;
 
             // Check if we reached EOF
             let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -772,7 +784,7 @@ pub struct ReadResult {
     pub eof: bool,
     
     /// Data read
-    pub data: Vec<u8>,
+    pub data: Bytes,
 }
 
 /// WRITE operation result
@@ -842,7 +854,7 @@ mod tests {
         assert_eq!(h.fd_cache.len(), 1);
 
         let r = h.read(&fh, 3, 5).await.unwrap();
-        assert_eq!(&r.data, b"hello");
+        assert_eq!(&r.data[..], b"hello");
         assert!(r.eof);
         assert_eq!(h.fd_cache.len(), 1, "READ must hit the WRITE-cached fd");
 
@@ -917,14 +929,14 @@ mod tests {
         let fh = fh_for(&h, "ro", &dir);
 
         let r = h.read(&fh, 0, 4).await.unwrap();
-        assert_eq!(&r.data, b"data");
+        assert_eq!(&r.data[..], b"data");
         assert_eq!(h.fd_cache.len(), 1);
 
         // WRITE must succeed whether READ cached the fd rw or ro.
         let w = h.write(&fh, 4, bytes::Bytes::from_static(b"more"), WriteStable::FileSync).await.unwrap();
         assert_eq!(w.count, 4);
         let r = h.read(&fh, 0, 8).await.unwrap();
-        assert_eq!(&r.data, b"datamore");
+        assert_eq!(&r.data[..], b"datamore");
     }
 
     #[tokio::test]
@@ -972,8 +984,8 @@ mod tests {
 
         let ra = h.read(&fh_a, 0, 4).await.unwrap();
         let rb = h.read(&fh_b, 0, 4).await.unwrap();
-        assert_eq!(&ra.data, b"AAAA", "dirA content clobbered by dirB write");
-        assert_eq!(&rb.data, b"BBBB");
+        assert_eq!(&ra.data[..], b"AAAA", "dirA content clobbered by dirB write");
+        assert_eq!(&rb.data[..], b"BBBB");
     }
 
     /// The FH path is client-supplied wire bytes: '..' must not
