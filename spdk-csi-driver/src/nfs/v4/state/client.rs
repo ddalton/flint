@@ -61,6 +61,19 @@ pub enum ExchangeIdOutcome {
     /// A new clientid was created (or an existing record replaced). Caller
     /// MUST CREATE_SESSION before any state-using operation.
     NewUnconfirmed { client_id: u64, sequence_id: u32 },
+    /// RFC 8881 §18.35.4 case 3, "Client Collision": a CONFIRMED record
+    /// exists for this owner under a DIFFERENT principal.
+    ///
+    /// Its record pattern is `{ ownerid_arg, *, old_principal_arg, ...,
+    /// confirmed }` — the VERIFIER IS A WILDCARD, so this covers both
+    /// verifier outcomes.
+    ///
+    /// Deliberately decides nothing: the RFC's answer turns on whether the
+    /// incumbent holds state under an unexpired lease, and sessions,
+    /// stateids, locks and delegations live in managers this one cannot
+    /// see. The caller resolves it — NFS4ERR_CLID_INUSE if live, else a
+    /// full cascade then [`ClientManager::allocate_after_collision`].
+    ClientCollision { incumbent: u64 },
     /// Existing confirmed record returned unchanged (renewal of an idempotent
     /// EXCHANGE_ID). Caller may continue using existing sessions.
     ExistingConfirmed { client_id: u64, sequence_id: u32 },
@@ -670,20 +683,32 @@ impl ClientManager {
                         )
                     }
                     (true, false) => {
-                        // Case 9 alt — verifier matches but a different
-                        // principal is asking.
-                        warn!("EXCHANGE_ID: case 9 alt (princ change), replacing client {}", c.client_id);
-                        self.replace_when_confirmed(
-                            owner, verifier, flags, principal, c.client_id,
-                        )
+                        // ALSO RFC 8881 §18.35.4 case 3. Its record
+                        // pattern has the VERIFIER AS A WILDCARD, so any
+                        // confirmed record under a different principal is a
+                        // Client Collision whether or not the verifier
+                        // matches. Cases 6-9 are the UPD_CONFIRMED_REC_A
+                        // "Update" family and do not apply without that flag;
+                        // the local "case 9 alt" label was a misreading.
+                        warn!("EXCHANGE_ID: case 3 (princ change) on client {}", c.client_id);
+                        ExchangeIdOutcome::ClientCollision { incumbent: c.client_id }
                     }
                     (false, false) => {
-                        // Case 3 — wholly unrelated EXCHANGE_ID happens to
-                        // collide on owner.
-                        warn!("EXCHANGE_ID: case 3 (full mismatch), replacing client {}", c.client_id);
-                        self.replace_when_confirmed(
-                            owner, verifier, flags, principal, c.client_id,
-                        )
+                        // RFC 8881 §18.35.4 case 3. Does NOT defer: with no
+                        // state (or an expired lease) "the confirmed record is
+                        // deleted, the old_clientid_ret and its lock state are
+                        // deleted"; with an unexpired lease and live state the
+                        // server "returns NFS4ERR_CLID_INUSE" and changes
+                        // nothing.
+                        //
+                        // This arm used to borrow case 5's DEFERRAL, which left
+                        // the superseded clientid usable (pynfs EID5e) and did
+                        // not buy the safety it was meant to — the colliding
+                        // peer can confirm its own new id one operation later
+                        // and trigger the cascade anyway. CLID_INUSE refuses
+                        // outright, which is strictly stronger.
+                        warn!("EXCHANGE_ID: case 3 (full mismatch) on client {}", c.client_id);
+                        ExchangeIdOutcome::ClientCollision { incumbent: c.client_id }
                     }
                 }
             }
@@ -801,6 +826,20 @@ impl ClientManager {
     /// state — RFC 8881 §18.35.5 is explicit for case 5, and the reason
     /// applies identically to a principal change or an owner collision.
     /// If the replacement never confirms, the incumbent keeps working.
+    /// Case 3's completion half: mint the replacement once the caller has
+    /// torn the collided incumbent down. Separate from `exchange_id`
+    /// because that teardown must cascade through managers this one
+    /// cannot reach.
+    pub fn allocate_after_collision(
+        &self,
+        owner: Vec<u8>,
+        verifier: u64,
+        flags: u32,
+        principal: Vec<u8>,
+    ) -> ExchangeIdOutcome {
+        self.allocate_client(owner, verifier, flags, principal)
+    }
+
     fn replace_when_confirmed(
         &self,
         owner: Vec<u8>,
@@ -1122,16 +1161,22 @@ mod tests {
     }
 
     #[test]
-    fn test_exchange_id_principal_mismatch_replaces() {
-        // Confirmed record + same verifier but different principal →
-        // replace (case 9 alt).
+    fn test_exchange_id_principal_mismatch_reports_a_collision() {
+        // Confirmed record + a DIFFERENT principal is RFC 8881 §18.35.4
+        // case 3 ("Client Collision") whatever the verifier does — its
+        // record pattern has the verifier as a wildcard. The manager
+        // reports it; the caller decides between CLID_INUSE and immediate
+        // replacement, because that turns on state it cannot see.
         let lease_mgr = Arc::new(LeaseManager::new());
         let client_mgr = ClientManager::new(lease_mgr, "test-vol", crate::state_backend::memory_backend());
 
         let id1 = new_id(client_mgr.exchange_id(b"c".to_vec(), 1, 0, b"alice".to_vec()));
         client_mgr.mark_confirmed(id1);
-        let id2 = new_id(client_mgr.exchange_id(b"c".to_vec(), 1, 0, b"bob".to_vec()));
-        assert_ne!(id1, id2);
+        let outcome = client_mgr.exchange_id(b"c".to_vec(), 1, 0, b"bob".to_vec());
+        assert!(
+            matches!(outcome, ExchangeIdOutcome::ClientCollision { incumbent } if incumbent == id1),
+            "a principal mismatch must report a collision naming the incumbent, got {outcome:?}",
+        );
     }
 
     #[test]
@@ -1231,77 +1276,52 @@ mod tests {
         );
     }
 
-    /// MANY CLUSTERS, ONE HUB: removing a client must not evict a LIVE
-    /// peer that shares its `co_ownerid` from the owner index.
+    /// A colliding EXCHANGE_ID must not decide the incumbent's fate HERE.
     ///
-    /// The guard for this went in on `remove_client_internal` — the
-    /// EXCHANGE_ID record-replacement path — and stopped there. The public
-    /// `remove_client` kept an unconditional `owner_to_id.remove(&owner)`,
-    /// and it is reached from three other places: DESTROY_CLIENTID
-    /// (`dispatcher.rs`), the lease sweep (`cleanup_expired_ids`), and the
-    /// case-5 cascade (`handle_create_session`). On any of them a departing
-    /// client deletes whatever the entry currently names — which after a
-    /// case-5 handover is the WINNER.
+    /// RFC 8881 §18.35.4 case 3 ("Client Collision") covers ANY confirmed
+    /// record held under a different principal — its record pattern is
+    /// `{ ownerid_arg, *, old_principal_arg, ..., confirmed }`, verifier a
+    /// WILDCARD — so both shapes below are the same case.
     ///
-    /// The consequence is not a tidy-up failure. The evicted peer is still
-    /// mounted and still serving; its next EXCHANGE_ID finds no record for
-    /// its own owner, takes the `(false, None)` arm, and mints a SECOND
-    /// clientid for an owner that already has one — which is exactly the
-    /// duplicate `Inv_OneConfirmedPerOwner` exists to forbid.
+    /// The answer turns on whether the incumbent holds state under an
+    /// unexpired lease: CLID_INUSE if it does, immediate deletion if not.
+    /// That state lives in other managers, so this one reports the
+    /// collision and mutates NOTHING. The resolution is tested against the
+    /// session handler, which can see it.
     ///
-    /// Found by TLC, not by review: `FlintClientIdentity.tla` applies its
-    /// index guard at EVERY removal site uniformly, so
-    /// `FlintClientIdentityIndexBlind.cfg` states the property for all of
-    /// EXCHANGE_ID cases 3 and 9-alt destroyed a live client's record on
-    /// arrival, and reached only what `ClientManager` owns.
-    ///
-    /// Two defects in one line. The teardown was INCOMPLETE — sessions,
-    /// stateids, delegations and locks live in other managers, so they
-    /// were orphaned, and an orphaned lock denies its range to everyone
-    /// while naming a clientid nothing can resolve. And it was
-    /// IMMEDIATE — a bare EXCHANGE_ID is authenticated by nothing the
-    /// incumbent did, so it must not destroy a confirmed client's state
-    /// before the replacement proves itself. Case 5 already knew both
-    /// things; its two siblings did not.
-    ///
-    /// Asserted as the incumbent's survival plus the deferred
-    /// obligation, because those are what the caller acts on:
-    /// `mark_confirmed` returning the old id is what drives the full
-    /// cascade in `handle_create_session`.
+    /// Replaces a leg that asserted a DEFERRED teardown for both arms.
+    /// Deferral is case 5's rule (client reboot, principal UNCHANGED) and
+    /// was borrowed here by mistake: it left the superseded clientid usable
+    /// — pynfs EID5e caught exactly that — and did not deliver the safety
+    /// it was meant to either, since the colliding peer can confirm its own
+    /// new id one operation later and trigger the cascade anyway.
     #[test]
-    fn a_colliding_exchange_id_defers_the_incumbents_teardown_until_it_confirms() {
-        for (label, verifier, princ_b) in [
-            // Case 9 alt: verifier matches, principal differs.
-            ("case 9 alt", 111u64, b"sys:other:0".to_vec()),
-            // Case 3: neither matches.
-            ("case 3", 999u64, b"sys:other:0".to_vec()),
-        ] {
+    fn a_colliding_exchange_id_reports_the_collision_and_changes_nothing() {
+        for (label, verifier) in [("verifier matches", 111u64), ("verifier differs", 999u64)] {
             let lease_mgr = Arc::new(LeaseManager::new());
             let mgr = ClientManager::new(
                 lease_mgr, "test-vol", crate::state_backend::memory_backend());
             let owner = b"Linux NFSv4.2 agent".to_vec();
-            let princ_a = b"sys:agent:0".to_vec();
 
-            let a = new_id(mgr.exchange_id(owner.clone(), 111, 0, princ_a.clone()));
+            let a = new_id(mgr.exchange_id(owner.clone(), 111, 0, b"sys:agent:0".to_vec()));
             mgr.mark_confirmed(a);
 
-            let b = new_id(mgr.exchange_id(owner.clone(), verifier, 0, princ_b.clone()));
-            assert_ne!(a, b, "{label}: the replacement must be a distinct record");
+            match mgr.exchange_id(owner.clone(), verifier, 0, b"sys:other:0".to_vec()) {
+                ExchangeIdOutcome::ClientCollision { incumbent } => {
+                    assert_eq!(incumbent, a, "{label}: must name the incumbent");
+                }
+                other => panic!("{label}: expected ClientCollision, got {other:?}"),
+            }
 
-            // THE INCUMBENT SURVIVES. Before this, `remove_client_internal`
-            // had already deleted it by now.
+            // MUTATES NOTHING. A bare EXCHANGE_ID is authenticated by
+            // nothing the incumbent did, so this layer must not touch it.
             assert!(
                 mgr.get_client(a).is_some(),
-                "{label}: an unconfirmed EXCHANGE_ID destroyed a live client",
+                "{label}: reporting a collision must not destroy the incumbent",
             );
-
-            // THE OBLIGATION IS RECORDED, and confirming is what discharges
-            // it. Without this the incumbent would simply leak instead.
-            assert_eq!(
-                mgr.mark_confirmed(b),
-                Some(a),
-                "{label}: confirming the replacement must hand the caller the \
-                 incumbent to cascade through the other managers",
+            assert!(
+                mgr.get_client(a).unwrap().confirmed,
+                "{label}: the incumbent must still be confirmed",
             );
         }
     }

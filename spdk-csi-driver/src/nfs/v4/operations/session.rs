@@ -259,6 +259,73 @@ impl SessionOperationHandler {
     }
 
     /// Handle EXCHANGE_ID operation
+
+    /// Tear a superseded client down COMPLETELY.
+    ///
+    /// `ClientManager::remove_client` reaches only what it owns — the
+    /// record, the owner index, the lease, the persisted row. Sessions,
+    /// stateids, delegations and LOCKS live in other managers, so removing
+    /// the record alone orphans all of them: a lock row denying its range
+    /// to everyone, naming a clientid the server can no longer resolve,
+    /// which its holder cannot release either because the lock stateid went
+    /// with the stateids.
+    ///
+    /// Both callers that supersede a client go through here — case 5's
+    /// deferred cleanup and case 3's immediate one — so there is no second
+    /// teardown to drift out of step with this one.
+    fn cascade_destroy_client(&self, old_id: u64) {
+        self.state_mgr.sessions.destroy_client_sessions(old_id);
+        self.state_mgr.stateids.remove_client_stateids(old_id);
+        self.state_mgr.delegations.cleanup_client_delegations(old_id);
+        // LOCKS BEFORE THE CLIENT RECORD. `remove_client` drops the lease,
+        // and the only production caller of `remove_client_locks` iterates
+        // `get_expired_clients()` — which reads the lease map. Anything
+        // still holding a lock after `remove_client` can therefore never be
+        // collected by anything, survives a restart (locks are persisted
+        // and re-seeded at startup), and denies its range to every other
+        // client forever.
+        if let Some(locks) = &self.lock_mgr {
+            locks.remove_client_locks(old_id);
+        } else {
+            warn!(
+                "cleanup of client {} has NO lock manager — any locks it held \
+                 are now unreachable",
+                old_id,
+            );
+        }
+        self.state_mgr.clients.remove_client(old_id);
+    }
+
+    /// Does this client hold state under an UNEXPIRED lease?
+    ///
+    /// RFC 8881 §18.35.4 case 3 turns on exactly this: state with an
+    /// expired lease counts as no state, and the incumbent may be replaced.
+    fn client_has_live_state(&self, id: u64) -> bool {
+        if !self.state_mgr.leases.is_valid(id) {
+            return false; // expired lease — the RFC treats this as no state
+        }
+        if !self.state_mgr.sessions.get_client_sessions(id).is_empty() {
+            return true;
+        }
+        if self.state_mgr.stateids.count_for_client(id) > 0 {
+            return true;
+        }
+        if !self
+            .state_mgr
+            .delegations
+            .get_delegations_for_client(id)
+            .is_empty()
+        {
+            return true;
+        }
+        if let Some(l) = &self.lock_mgr {
+            if l.lock_count_for_client(id) > 0 {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn handle_exchange_id(&self, op: ExchangeIdOp, ctx: &CompoundContext) -> ExchangeIdRes {
         info!("EXCHANGE_ID: owner={:?}, verifier={}", op.client_owner, op.verifier);
 
@@ -319,12 +386,50 @@ impl SessionOperationHandler {
         }
 
         use crate::nfs::v4::state::client::ExchangeIdOutcome;
+        // Kept for case 3's completion half, which re-allocates after the
+        // caller has torn the incumbent down.
+        let owner_again = op.client_owner.clone();
+        let princ_again = ctx.principal.clone();
         let outcome = self.state_mgr.clients.exchange_id(
             op.client_owner,
             op.verifier,
             op.flags,
             ctx.principal.clone(),
         );
+
+        // RFC 8881 §18.35.4 case 3, "Client Collision": a confirmed record
+        // under this owner belongs to a DIFFERENT principal.
+        //
+        //   live state + unexpired lease -> NFS4ERR_CLID_INUSE, touch nothing
+        //   otherwise                    -> delete it NOW, cascade, replace
+        //
+        // The refusal is the security property. Deferring instead (case 5's
+        // rule) left the old clientid usable AND still let the replacing
+        // peer destroy it one operation later by confirming its own new id.
+        let outcome = match outcome {
+            ExchangeIdOutcome::ClientCollision { incumbent } => {
+                if self.client_has_live_state(incumbent) {
+                    warn!(
+                        "EXCHANGE_ID: case 3 — client {} holds live state under an \
+                         unexpired lease; refusing the collision with CLID_INUSE",
+                        incumbent,
+                    );
+                    return exchange_id_err(Nfs4Status::ClIdInUse);
+                }
+                warn!(
+                    "EXCHANGE_ID: case 3 — replacing client {} (no state, or lease expired)",
+                    incumbent,
+                );
+                self.cascade_destroy_client(incumbent);
+                self.state_mgr.clients.allocate_after_collision(
+                    owner_again,
+                    op.verifier,
+                    op.flags,
+                    princ_again,
+                )
+            }
+            other => other,
+        };
 
         let (clientid, sequenceid, is_new) = match outcome {
             ExchangeIdOutcome::NewUnconfirmed { client_id, sequence_id } => {
@@ -334,6 +439,10 @@ impl SessionOperationHandler {
             ExchangeIdOutcome::ExistingConfirmed { client_id, sequence_id } => {
                 info!("EXCHANGE_ID: returning confirmed clientid {}", client_id);
                 (client_id, sequence_id, false)
+            }
+            ExchangeIdOutcome::ClientCollision { .. } => {
+                // Resolved immediately above; cannot reach here.
+                unreachable!("case 3 collision is resolved before this match")
             }
             ExchangeIdOutcome::NoEnt => {
                 warn!("EXCHANGE_ID: UPD_CONFIRMED_REC_A on missing/unconfirmed record");
@@ -552,29 +661,7 @@ impl SessionOperationHandler {
                 "CREATE_SESSION: case-5 deferred cleanup — discarding pre-reboot client {}",
                 old_id,
             );
-            self.state_mgr.sessions.destroy_client_sessions(old_id);
-            self.state_mgr.stateids.remove_client_stateids(old_id);
-            self.state_mgr.delegations.cleanup_client_delegations(old_id);
-            // LOCKS BEFORE THE CLIENT RECORD. `remove_client` drops the
-            // lease, and the only production caller of
-            // `remove_client_locks` iterates `get_expired_clients()` —
-            // which reads the lease map. Anything still holding a lock
-            // after `remove_client` can therefore never be collected by
-            // anything, survives a restart (locks are persisted and
-            // re-seeded at startup), and denies its range to every other
-            // client forever, naming a clientid the server can no longer
-            // resolve. The holder cannot release it either: its lock
-            // stateid went with `remove_client_stateids` above.
-            if let Some(locks) = &self.lock_mgr {
-                locks.remove_client_locks(old_id);
-            } else {
-                warn!(
-                    "CREATE_SESSION: case-5 cleanup of client {} has NO lock manager — \
-                     any locks it held are now unreachable",
-                    old_id,
-                );
-            }
-            self.state_mgr.clients.remove_client(old_id);
+            self.cascade_destroy_client(old_id);
         }
 
         // Per-client session quota. Each session owns a slot table whose
@@ -1852,6 +1939,117 @@ mod tests {
     /// window is not pinned (the client broke its own §2.10.6.1.1
     /// obligation; the ops already ran, so the bounded-memory answer is
     /// an uncached slot whose replay gets RETRY_UNCACHED_REP).
+    /// RFC 8881 §18.35.4 case 3, the half that PROTECTS an incumbent:
+    /// "If old_clientid_ret has an unexpired lease with state, then no
+    /// state of old_clientid_ret is changed or deleted. The server returns
+    /// NFS4ERR_CLID_INUSE."
+    ///
+    /// This is the security property. A bare EXCHANGE_ID is authenticated
+    /// by nothing the incumbent did, so a live client must be refusable
+    /// outright — deferring the replacement instead only delays it by one
+    /// operation, since the caller can confirm its own new clientid.
+    #[test]
+    fn a_collision_with_a_live_incumbent_is_refused_with_clid_inuse() {
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let handler = SessionOperationHandler::new(state_mgr.clone());
+        let owner = b"collide-owner".to_vec();
+
+        let mut ctx1 = CompoundContext::new(1);
+        ctx1.principal = b"principal-one".to_vec();
+        let ex = handler.handle_exchange_id(
+            ExchangeIdOp { client_owner: owner.clone(), verifier: 1, flags: 0,
+                           state_protect: 0, client_impl_id: None },
+            &ctx1,
+        );
+        // Confirm it AND leave it holding a session: live state.
+        let cs = handler.handle_create_session(
+            CreateSessionOp { clientid: ex.clientid, sequence: ex.sequenceid, flags: 0,
+                              fore_chan_attrs: ChannelAttrs::default(),
+                              back_chan_attrs: ChannelAttrs::default(),
+                              cb_program: 0, cb_sec: Vec::new() },
+            &ctx1,
+        );
+        assert_eq!(cs.status, Nfs4Status::Ok, "incumbent must be confirmed and live");
+
+        // A different principal AND a different verifier: case 3.
+        let mut ctx2 = CompoundContext::new(1);
+        ctx2.principal = b"principal-two".to_vec();
+        let collide = handler.handle_exchange_id(
+            ExchangeIdOp { client_owner: owner, verifier: 2, flags: 0,
+                           state_protect: 0, client_impl_id: None },
+            &ctx2,
+        );
+
+        assert_eq!(
+            collide.status, Nfs4Status::ClIdInUse,
+            "a live incumbent must be refused, not replaced"
+        );
+        assert!(
+            state_mgr.clients.get_client(ex.clientid).is_some(),
+            "the incumbent's record must be UNTOUCHED"
+        );
+        assert!(
+            !state_mgr.sessions.get_client_sessions(ex.clientid).is_empty(),
+            "the incumbent's session must survive the refused collision"
+        );
+    }
+
+    /// The other half: "If there is currently no state associated with
+    /// old_clientid_ret ... the confirmed record is deleted, the
+    /// old_clientid_ret and its lock state are deleted, a new shorthand
+    /// client ID is generated".
+    ///
+    /// Deletion is IMMEDIATE. Deferring it left the old clientid usable and
+    /// is what pynfs EID5e caught: CREATE_SESSION on it answered OK where
+    /// NFS4ERR_STALE_CLIENTID was due.
+    #[test]
+    fn a_collision_with_a_stateless_incumbent_replaces_it_immediately() {
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let handler = SessionOperationHandler::new(state_mgr.clone());
+        let owner = b"collide-owner-2".to_vec();
+
+        let mut ctx1 = CompoundContext::new(1);
+        ctx1.principal = b"principal-one".to_vec();
+        let ex = handler.handle_exchange_id(
+            ExchangeIdOp { client_owner: owner.clone(), verifier: 1, flags: 0,
+                           state_protect: 0, client_impl_id: None },
+            &ctx1,
+        );
+        let cs = handler.handle_create_session(
+            CreateSessionOp { clientid: ex.clientid, sequence: ex.sequenceid, flags: 0,
+                              fore_chan_attrs: ChannelAttrs::default(),
+                              back_chan_attrs: ChannelAttrs::default(),
+                              cb_program: 0, cb_sec: Vec::new() },
+            &ctx1,
+        );
+        // Drop the session so the incumbent holds NO state.
+        assert!(
+            state_mgr.sessions.destroy_session(&cs.sessionid).is_ok(),
+            "precondition: the incumbent's session must be destroyable"
+        );
+        assert!(
+            state_mgr.sessions.get_client_sessions(ex.clientid).is_empty(),
+            "precondition: the incumbent must be stateless"
+        );
+
+        let mut ctx2 = CompoundContext::new(1);
+        ctx2.principal = b"principal-two".to_vec();
+        let collide = handler.handle_exchange_id(
+            ExchangeIdOp { client_owner: owner, verifier: 2, flags: 0,
+                           state_protect: 0, client_impl_id: None },
+            &ctx2,
+        );
+
+        assert_eq!(collide.status, Nfs4Status::Ok, "a stateless incumbent may be replaced");
+        assert_ne!(collide.clientid, ex.clientid, "the replacement must be a NEW clientid");
+        // The assertion that matters: deferring would leave this Some, and
+        // the old clientid would keep working — exactly the pynfs failure.
+        assert!(
+            state_mgr.clients.get_client(ex.clientid).is_none(),
+            "the superseded record must be gone IMMEDIATELY, not on confirmation"
+        );
+    }
+
     #[test]
     fn oversize_cached_reply_is_refused_not_pinned() {
         let state_mgr = Arc::new(StateManager::new_in_memory(""));
