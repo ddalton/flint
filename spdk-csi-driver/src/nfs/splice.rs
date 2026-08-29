@@ -40,22 +40,42 @@
 //! and above, proving the rig could actually resolve one copy — without
 //! that arm a favourable ratio would not have been evidence.
 //!
-//! Note the win is CPU, NOT wall throughput: the same run gained only
-//! ~21% MiB/s, and in 2 of 5 reps splice's wall time was WORSE. Anything
-//! gating this change on MiB/s will read ~1.0 and conclude "no effect".
+//! In S0 the win is CPU, NOT wall throughput: that bench gained only
+//! ~21% MiB/s, and in 2 of 5 reps splice's wall time was WORSE.
+//!
+//! **Do not carry that conclusion to the server — the plan's §9 records
+//! doing so as an error.** S0 had one sender thread and a fast drain, so
+//! the server was never the constraint. With 4 concurrent readers on 2
+//! vCPUs flint IS CPU-bound, so freed CPU converts almost directly into
+//! throughput: the in-server differential measured **+59% MiB/s**
+//! (656-685 ms -> 382-431 ms per 2 GiB) alongside the CPU win. Score
+//! cpu-ms/GiB regardless — it is the metric that still means something
+//! once the bottleneck moves to cores or the network.
 
 /// Is splice staging switched on?
 ///
-/// Default OFF. This path changes how reply bytes reach the wire, and
-/// the win it chases is CPU rather than throughput, so it ships dark
-/// until a differential says otherwise — measured as cpu-ms/GiB under
-/// concurrent readers, NOT as MiB/s (see docs/plans/nfs-read-splice-plan).
+/// **Default ON.** Opt out with `FLINT_NFS_SPLICE=0` (also `false` /
+/// `no`); anything else, or nothing, leaves it enabled.
+///
+/// It shipped dark in 1.42.0, and the gate named in
+/// `docs/plans/nfs-read-splice-plan` has since been met: pynfs 4.1
+/// 171/0/91, nfstest_posix 459/2 and nfstest_lock 5296/0 are identical
+/// with the flag ON and OFF, over a pipe-fd execution guard (32 on, 0
+/// off) proving the path actually fired rather than the two arms
+/// agreeing because neither spliced.
+///
+/// Two call sites still refuse it and must keep doing so: GSS
+/// (`server_v4`, the payload has to be wrapped) and a DRC-cached reply
+/// (`ioops`, a pipe has one reader so a cached segment cannot replay).
+///
+/// Off Linux `stage_read` is a stub returning `None`, so this reading
+/// true costs nothing there.
 pub fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("FLINT_NFS_SPLICE").as_deref(),
-            Ok("1") | Ok("true") | Ok("yes")
+            Ok("0") | Ok("false") | Ok("no")
         )
     })
 }

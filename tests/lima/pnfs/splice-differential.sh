@@ -134,7 +134,7 @@ run_arm() { # name -> "cpu_ms bytes"
 
 echo "=== VM HEALTH BEFORE ==="; vm "uptime; vmstat 1 2 | tail -1"
 echo "=== SETUP ==="
-setup_arm off "$PORT_OFF" ""
+setup_arm off "$PORT_OFF" "--setenv=FLINT_NFS_SPLICE=0"
 setup_arm on  "$PORT_ON"  "--setenv=FLINT_NFS_SPLICE=1"
 
 echo "=== WARM (fills the server page cache; the measured reps are warm) ==="

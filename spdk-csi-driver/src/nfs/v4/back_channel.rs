@@ -458,4 +458,166 @@ mod tests {
         }
         assert!(got_err, "expected I/O error after peer close");
     }
+
+    // ---------------------------------------------------------------
+    // WRITER CONTENTION
+    //
+    // `send_record_segments` holds the per-connection mutex across the
+    // marker, every segment, the pre-splice flush, `Staged::drain_to`'s
+    // readiness loop, and the trailing flush. On ONE connection that
+    // makes every reply strictly serial: a cheap GETATTR reply cannot
+    // reach the wire while an expensive READ reply is still pushing
+    // bytes into a full socket.
+    //
+    // Some of that is REQUIRED — RPC frames must not interleave (I1),
+    // and one TCP connection can only carry one frame at a time. What
+    // these two tests pin down is the part that is NOT required: the
+    // serialization is per-WRITER, so it disappears when the client
+    // opens more connections. That is why every flint mount path sets
+    // `nconnect=4` (`pnfs_csi.rs`) and why the docs call `nconnect>=2`
+    // mandatory. A rig that mounts without it measures a configuration
+    // flint does not ship.
+    // ---------------------------------------------------------------
+
+    /// Shrink both directions so back-pressure is a property of the
+    /// test rather than of the machine's autotuning. Without this the
+    /// "big" payload would vanish into a megabyte-sized kernel buffer
+    /// and the test would prove nothing.
+    fn shrink(sock: &TcpStream, bytes: libc::c_int) {
+        use std::os::unix::io::AsRawFd;
+        let fd = sock.as_raw_fd();
+        for opt in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
+            unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    opt,
+                    &bytes as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+            }
+        }
+    }
+
+    /// Like `pair()`, but with tiny socket buffers on both ends.
+    async fn choked_pair() -> (Arc<BackChannelWriter>, tokio::net::tcp::OwnedReadHalf) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = TcpStream::connect(addr);
+        let accept = listener.accept();
+        let (client_res, accept_res) = tokio::join!(connect, accept);
+        let client_stream = client_res.unwrap();
+        let (server_stream, _peer) = accept_res.unwrap();
+        shrink(&client_stream, 4096);
+        shrink(&server_stream, 4096);
+        let (_client_read, client_write) = client_stream.into_split();
+        let (server_read, _server_write) = server_stream.into_split();
+        let writer =
+            BackChannelWriter::new(tokio::io::BufWriter::with_capacity(64, client_write));
+        (writer, server_read)
+    }
+
+    /// Big enough that it cannot fit in a 4 KiB-requested socket buffer
+    /// even after the kernel's doubling and its own overhead.
+    const BIG: usize = 4 * 1024 * 1024;
+    const GRACE: Duration = Duration::from_millis(400);
+
+    #[tokio::test]
+    async fn a_small_reply_is_head_of_line_blocked_by_a_large_one() {
+        let (writer, reader) = choked_pair().await;
+        let big_w = Arc::clone(&writer);
+        let small_w = Arc::clone(&writer);
+
+        // Nobody reads `reader` yet, so the big frame fills the socket
+        // and parks inside the critical section.
+        let mut big = tokio::spawn(async move {
+            big_w.send_record(Bytes::from(vec![b'R'; BIG])).await
+        });
+
+        // ANTI-VACUITY. If the big send COMPLETED, the buffers were not
+        // small enough, nothing is holding the lock, and anything this
+        // test then observed about the small send would be meaningless.
+        assert!(
+            tokio::time::timeout(GRACE, &mut big).await.is_err(),
+            "VACUOUS: the big frame drained into the socket buffer, so no \
+             lock was ever held — shrink() did not take effect"
+        );
+
+        let mut small = tokio::spawn(async move {
+            small_w.send_record(Bytes::from_static(b"tiny")).await
+        });
+
+        // THE FINDING: 8 bytes that would fit in any socket buffer
+        // cannot reach the wire, because the writer mutex is held by a
+        // frame that is itself blocked on writability.
+        assert!(
+            tokio::time::timeout(GRACE, &mut small).await.is_err(),
+            "the small frame completed while the big one still held the \
+             writer lock — the serialization this test documents is gone"
+        );
+
+        // And it is a queue, not a deadlock: draining the peer releases
+        // both, in order. Two frames: (4-byte marker + BIG) and
+        // (4-byte marker + 4-byte "tiny").
+        const WIRE: usize = 4 + BIG + 4 + 4;
+        let drain = tokio::spawn(async move {
+            let mut r = reader;
+            let mut sink = vec![0u8; 64 * 1024];
+            let mut seen = 0usize;
+            while seen < WIRE {
+                match r.read(&mut sink).await {
+                    Ok(0) => break,
+                    Ok(n) => seen += n,
+                    Err(_) => break,
+                }
+            }
+            seen
+        });
+        big.await.unwrap().unwrap();
+        small.await.unwrap().unwrap();
+        let seen = drain.await.unwrap();
+        assert_eq!(
+            seen, WIRE,
+            "both frames must arrive whole once the peer drains"
+        );
+    }
+
+    #[tokio::test]
+    async fn separate_connections_do_not_block_each_other() {
+        // FALSIFIABILITY ARM for the test above. Same choked sockets,
+        // same payloads, same wall-clock budget — the ONLY difference
+        // is that the two frames go through two writers instead of one.
+        // If the small frame were blocked here too, the previous test
+        // would be measuring something global (the runtime, the
+        // loopback) rather than the shared mutex.
+        let (big_writer, _big_reader) = choked_pair().await;
+        let (small_writer, mut small_reader) = choked_pair().await;
+
+        let mut big = tokio::spawn(async move {
+            big_writer.send_record(Bytes::from(vec![b'R'; BIG])).await
+        });
+        assert!(
+            tokio::time::timeout(GRACE, &mut big).await.is_err(),
+            "VACUOUS: the big frame did not block, so this arm is not \
+             comparable to the contended one"
+        );
+
+        // Its own connection, its own writer: straight through.
+        tokio::time::timeout(
+            GRACE,
+            small_writer.send_record(Bytes::from_static(b"tiny")),
+        )
+        .await
+        .expect("a frame on its OWN connection must not wait on another connection's writer")
+        .unwrap();
+
+        let mut marker = [0u8; 4];
+        small_reader.read_exact(&mut marker).await.unwrap();
+        assert_eq!(
+            (u32::from_be_bytes(marker) & 0x7FFF_FFFF) as usize,
+            4,
+            "the unblocked frame must be the small one"
+        );
+        big.abort();
+    }
 }

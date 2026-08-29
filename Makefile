@@ -220,12 +220,18 @@ nfs-server-vm-stop: ## Stop the in-VM flint-nfs-server
 # enough apart to ship as defects. A pynfs number for one front-end is
 # not a pynfs number for the other, and this target is what makes the
 # claim checkable rather than assumed.
-# Splice staging is off unless asked for. `make test-nfs-protocol-mds
-# SPLICE=1` runs the whole conformance suite against the spliced READ
-# path -- which is the gate before FLINT_NFS_SPLICE could ever default
-# on, because S3 only proved correct bytes for sequential O_DIRECT
-# reads, a far narrower claim than protocol conformance.
-SPLICE         ?= 0
+# Splice staging now defaults ON, so the conformance suite exercises the
+# path that actually ships. `make test-nfs-protocol-mds SPLICE=0` runs
+# the copy path instead -- still a supported fallback (GSS and DRC-cached
+# replies always take it), so it must stay green too.
+#
+# That gate is MET: with the flag on, pynfs 4.1 scored 171/0/91 and
+# nfstest posix 459/2 + lock 5296/0 -- identical to the off arm, over an
+# execution guard (server pipe fds 32 on / 0 off) proving the spliced
+# path actually fired rather than the arms agreeing vacuously. S3 alone
+# would not have been enough: it proved correct bytes only for
+# sequential O_DIRECT reads, far narrower than protocol conformance.
+SPLICE         ?= 1
 MDS_VM_BIN     := $(CARGO_DIR)/target/$(LIMA_ARCH)-unknown-linux-musl/release/flint-pnfs-mds
 MDS_VM_EXPORT  := /srv/flint-mds-export
 MDS_VM_STATE   := /srv/flint-mds-state

@@ -102,7 +102,7 @@ run_arm() { # mountpoint -> "busy_ms wall_ms bytes"
 
 echo "=== VM HEALTH BEFORE ==="; vm "uptime; vmstat 1 2 | tail -1"
 echo "=== SETUP ==="
-setup_flint koff "$PORT_OFF" ""
+setup_flint koff "$PORT_OFF" "--setenv=FLINT_NFS_SPLICE=0"
 setup_flint kon  "$PORT_ON"  "--setenv=FLINT_NFS_SPLICE=1"
 setup_knfsd
 for a in koff kon knfsd; do
