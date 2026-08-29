@@ -87,6 +87,7 @@ mod imp {
     /// a pipe on EVERY read — a slow path that looks like a leak.
     static UNDERSIZED: AtomicBool = AtomicBool::new(false);
 
+    #[derive(Debug)]
     struct Pipe {
         r: RawFd,
         w: RawFd,
@@ -127,6 +128,7 @@ mod imp {
     ///
     /// Dropping this without a full [`Staged::drain_to`] RETRACTS it —
     /// nothing reaches the socket. That is the whole point of the type.
+    #[derive(Debug)]
     pub struct Staged {
         pipe: Option<Pipe>,
         len: usize,
@@ -299,6 +301,7 @@ mod imp {
 mod imp {
     /// Non-Linux stub: `splice` is a Linux syscall, so every caller takes
     /// the copy path. Present so call sites need no `cfg` of their own.
+    #[derive(Debug)]
     pub struct Staged(std::convert::Infallible);
 
     impl Staged {
