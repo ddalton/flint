@@ -429,3 +429,46 @@ Splice narrowed the throughput gap; it did not close it.
 
 One configuration: 4 readers, 64 MiB files, cache-warm, 2 vCPU,
 loopback, O_DIRECT. No claim beyond it.
+
+
+---
+
+## 11. S4 CONFORMANCE — splice introduces NO regressions
+
+pynfs 4.1, full suite, `flint-pnfs-mds --standalone` in-VM as root, run
+twice on the same code with only the flag changed:
+
+| run | PASS | FAIL | SKIP | failing test |
+|---|---|---|---|---|
+| `SPLICE=1` | 170 | 1 | 91 | `st_exchange_id.testNoUpdate100` |
+| `SPLICE=0` | 170 | 1 | 91 | `st_exchange_id.testNoUpdate100` |
+
+Identical. **Splice is clean on conformance** — which is what S4 existed
+to establish, and the flag-off control is what makes the claim
+attributable rather than assumed.
+
+### A separate, pre-existing question: 171 -> 170 since the Aug-24 floor
+
+`testNoUpdate100` is EID5e, RFC 8881 case 3: a client with NO state
+(session created then destroyed) re-does EXCHANGE_ID with a different
+principal AND verifier, so the server must replace the record and the
+old clientid must go stale. flint answers NFS4_OK, i.e. the old clientid
+still works. If the server believes the old client still HOLDS state it
+takes a different branch and declines to replace — which points at
+DESTROY_SESSION's cleanup or EXCHANGE_ID's case analysis. No READ is
+involved; nothing splice touches.
+
+Three candidates, one of them self-inflicted:
+
+1. the POSIX fix wave (touched `state_backend/*` and `tier/*`, but for
+   tier operations, not client records — no obvious mechanism);
+2. the splice work — RULED OUT by the control above;
+3. **the pynfs environment, changed today.** Its generated XDR modules
+   were missing (`python3-ply` absent) and had to be regenerated before
+   the suite could import at all. The Aug-24 baseline ran against the
+   OLD generated code, so the delta could live in the harness rather
+   than the server.
+
+Cheapest decisive test: run today's pynfs against `5863468e`, the commit
+before any of today's work. Failing there too means environmental;
+passing means a real regression landed today.
