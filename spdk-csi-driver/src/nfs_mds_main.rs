@@ -30,6 +30,33 @@ struct Args {
 
 /// Async worker count: FLINT_MDS_WORKER_THREADS, else every core on the
 /// node. The old hardcoded 4 capped a 16-core node at 4-core capacity.
+/// Floor for the runtime worker pool. See [`worker_threads`].
+const MIN_WORKER_THREADS: usize = 8;
+
+/// Runtime worker threads.
+///
+/// **Floored at [`MIN_WORKER_THREADS`], not just `available_parallelism()`.**
+/// The READ path runs its blocking body with `block_in_place`, which
+/// occupies a WORKER for the duration rather than a blocking-pool thread,
+/// so sustaining C concurrent reads needs about C workers. Sizing the
+/// pool to the CPU count under-provisions it badly, and
+/// `available_parallelism()` honours the cgroup quota — a 1-CPU pod would
+/// otherwise get ONE worker and serialise every read through it, which is
+/// exactly the shape flint-lite runs in.
+///
+/// Measured on a 2-vCPU VM, 4 readers, O_DIRECT, warm, paired per rep
+/// with the arm order rotating and a page-cache guard:
+///
+/// | workers | cpu-ms/GiB | MiB/s | vs 2 |
+/// |---|---|---|---|
+/// | 2 (was the default here) | 350 | 4686 | 1.000 |
+/// | 4 | 325 | 5278 | 1.126 |
+/// | 8 | 280 | 6169 | **1.318** |
+///
+/// A separate run put 16 workers 1.135x the CPU-count default and took
+/// flint from 0.78 to 0.87 of knfsd. These threads BLOCK rather than
+/// spin, so over-provisioning costs stacks, not CPU. The floor only
+/// raises small hosts; a big one keeps its CPU count.
 fn worker_threads() -> usize {
     std::env::var("FLINT_MDS_WORKER_THREADS")
         .ok()
@@ -39,6 +66,7 @@ fn worker_threads() -> usize {
             std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(4)
+                .max(MIN_WORKER_THREADS)
         })
 }
 
