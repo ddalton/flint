@@ -981,6 +981,29 @@ impl MetadataServer {
                 .map_err(|e| crate::pnfs::Error::Config(format!("tier: store connect: {}", e)))?,
         );
 
+        // Does this store actually ENFORCE conditional writes? Every
+        // publish the tier makes is a compare-and-swap, and a 412 is
+        // how it tells its own torn flush from a foreign overwrite.
+        // A store that accepts the headers and ignores them — some
+        // S3-compatible backends, and any proxy that strips them —
+        // turns all of that into last-writer-wins, silently, with no
+        // error anywhere. lean already refuses to start on a
+        // non-conformant bucket; lite used to start and trust.
+        //
+        // Probe key is per-principal: two probes sharing one key would
+        // fail each other's If-None-Match.
+        {
+            let key = format!("{}{}/probe/conditional-writes", t.key_prefix, crate::tier::epoch::RESERVED_DIR);
+            if let Err(m) =
+                crate::tier::store::probe::probe_conditional_writes(store.as_ref(), &key).await
+            {
+                return Err(crate::pnfs::Error::Config(format!(
+                    "tier: conditional-write conformance probe FAILED: {m}"
+                )));
+            }
+            info!("🪣 tier: conditional-write conformance verified");
+        }
+
         // A9: verify/create the bucket posture; errors refuse startup.
         let report = store
             .bootstrap(&t.key_prefix)
