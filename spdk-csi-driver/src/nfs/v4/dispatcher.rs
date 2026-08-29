@@ -648,10 +648,28 @@ impl CompoundDispatcher {
                 let max = s.fore_chan_maxresponsesize as usize;
                 if max > 0 {
                     let cache_slot = context.cache_slot;
+                    // The oversize path below rebuilds a stripped reply
+                    // from the FIRST result only — the SEQUENCE result,
+                    // kept so the client can still read sr_status. So
+                    // capture just that one and MOVE the rest into the
+                    // trial rather than cloning the whole vector.
+                    //
+                    // `context.session_id` is set in exactly one place
+                    // (the SEQUENCE arm), so reaching here means op 0 was
+                    // a successful SEQUENCE and `first` is its result.
+                    // Matching on the variant rather than taking
+                    // `results[0]` blindly keeps that assumption checked:
+                    // a payload-bearing result must never be duplicated
+                    // here, and a future pipe-backed READ payload could
+                    // not be cloned at all.
+                    let first = match results.first() {
+                        Some(r @ OperationResult::Sequence(..)) => Some(r.clone()),
+                        _ => None,
+                    };
                     let trial = CompoundResponse {
                         status: final_status,
                         tag: request.tag.clone(),
-                        results: results.clone(),
+                        results,
                         raw_reply: None,
                         cache_slot,
                     };
@@ -687,8 +705,8 @@ impl CompoundDispatcher {
                         // by op position). Replace everything after with
                         // a single REP_TOO_BIG sentinel.
                         let mut stripped_results = Vec::new();
-                        if !results.is_empty() {
-                            stripped_results.push(results.into_iter().next().unwrap());
+                        if let Some(f) = first {
+                            stripped_results.push(f);
                         }
                         stripped_results.push(OperationResult::Unsupported {
                             opcode: 0,
@@ -4434,6 +4452,151 @@ mod tests {
             matches!(ok, OperationResult::DestroyClientId(Nfs4Status::Ok)),
             "a stateless client must still be destroyable, got {ok:?}",
         );
+    }
+
+    /// Establish a real session with a caller-chosen `ca_maxresponsesize`.
+    /// 256 is the server's negotiated floor (RFC 5661 §18.36.4 TOOSMALL),
+    /// which is what pynfs's testRepTooBig relies on.
+    async fn session_with_max_response(
+        d: &CompoundDispatcher,
+        max_response: u32,
+    ) -> SessionId {
+        use crate::nfs::v4::compound::ChannelAttrs;
+        let eid = d
+            .dispatch_compound(
+                CompoundRequest {
+                    tag: String::new(),
+                    tag_valid: true,
+                    minor_version: 2,
+                    operations: vec![Operation::ExchangeId {
+                        clientowner: ClientId { verifier: 99, id: b"reptoobig".to_vec() },
+                        flags: 0,
+                        state_protect: 0,
+                        impl_id: vec![],
+                    }],
+                    wire_size: 0,
+                },
+                Vec::new(),
+            )
+            .await;
+        let clientid = match &eid.results[0] {
+            OperationResult::ExchangeId(Nfs4Status::Ok, Some(r)) => r.clientid,
+            other => panic!("EXCHANGE_ID failed: {other:?}"),
+        };
+        let attrs = ChannelAttrs {
+            header_pad_size: 0,
+            max_request_size: 4096,
+            max_response_size: max_response,
+            max_response_size_cached: 4096,
+            max_operations: 64,
+            max_requests: 8,
+            rdma_ird: vec![],
+        };
+        let cs = d
+            .dispatch_compound(
+                CompoundRequest {
+                    tag: String::new(),
+                    tag_valid: true,
+                    minor_version: 2,
+                    operations: vec![Operation::CreateSession {
+                        clientid,
+                        sequence: 1,
+                        flags: 0,
+                        fore_chan_attrs: attrs.clone(),
+                        back_chan_attrs: attrs,
+                        cb_program: 0x40000000,
+                        cb_sec: vec![],
+                    }],
+                    wire_size: 0,
+                },
+                Vec::new(),
+            )
+            .await;
+        match &cs.results[0] {
+            OperationResult::CreateSession(Nfs4Status::Ok, Some(r)) => r.sessionid,
+            other => panic!("CREATE_SESSION failed: {other:?}"),
+        }
+    }
+
+    fn seq_then(sessionid: SessionId, seq: u32, mut ops: Vec<Operation>) -> CompoundRequest {
+        let mut v = vec![Operation::Sequence {
+            sessionid,
+            sequenceid: seq,
+            slotid: 0,
+            highest_slotid: 0,
+            cachethis: false,
+        }];
+        v.append(&mut ops);
+        CompoundRequest {
+            tag: String::new(), // empty tag keeps the header offsets below trivial
+            tag_valid: true,
+            minor_version: 2,
+            operations: v,
+            wire_size: 0,
+        }
+    }
+
+    /// Flatten `raw_reply` and read the COMPOUND header an empty tag makes
+    /// trivially positional: status | tag_len(0) | num_results | first opcode.
+    fn header_of(raw: &[Bytes]) -> (u32, u32, u32) {
+        let f: Vec<u8> = raw.iter().flat_map(|b| b.iter().copied()).collect();
+        assert!(f.len() >= 16, "reply too short to hold a header: {}", f.len());
+        let g = |o: usize| u32::from_be_bytes([f[o], f[o + 1], f[o + 2], f[o + 3]]);
+        assert_eq!(g(4), 0, "test builds an empty tag");
+        (g(0), g(8), g(12)) // (status, num_results, first opcode)
+    }
+
+    /// RFC 8881 §18.46.4: a reply over `ca_maxresponsesize` is replaced by a
+    /// stripped one — but the SEQUENCE result MUST survive as the first
+    /// result, because the client indexes by op position to read sr_status
+    /// (pynfs CSESS26 does exactly that).
+    ///
+    /// This path had NO unit coverage — only pynfs — until the size check
+    /// was changed to stop cloning the whole result vector. It is the guard
+    /// for that change: the SEQUENCE result is now captured explicitly
+    /// rather than surviving as a by-product of the clone.
+    #[tokio::test]
+    async fn an_oversize_reply_is_stripped_but_keeps_the_sequence_result_first() {
+        let (d, _t) = create_test_dispatcher();
+        let sid = session_with_max_response(&d, 256).await;
+
+        // PUTROOTFH + 8 GETFH: each GETFH returns a filehandle, so the
+        // encoded reply comfortably clears the 256-byte cap.
+        let mut ops = vec![Operation::PutRootFh];
+        for _ in 0..8 {
+            ops.push(Operation::GetFh);
+        }
+        let resp = d.dispatch_compound(seq_then(sid, 1, ops), Vec::new()).await;
+
+        assert_eq!(resp.status, Nfs4Status::RepTooBig, "must trip the cap");
+        let raw = resp.raw_reply.expect("an oversize reply is carried as raw bytes");
+        let (status, n_results, first_op) = header_of(&raw);
+        assert_eq!(status, Nfs4Status::RepTooBig as u32);
+        assert_eq!(n_results, 2, "stripped to SEQUENCE + one sentinel");
+        assert_eq!(
+            first_op,
+            opcode::SEQUENCE,
+            "the SEQUENCE result must still be FIRST so the client can read sr_status"
+        );
+    }
+
+    /// Control for the test above: the same shape UNDER the cap must pass
+    /// through untouched. Without this, a bug that stripped every reply —
+    /// or a cap that always tripped — would look like a pass.
+    #[tokio::test]
+    async fn a_reply_within_the_cap_is_not_stripped() {
+        let (d, _t) = create_test_dispatcher();
+        let sid = session_with_max_response(&d, 4096).await;
+
+        let ops = vec![Operation::PutRootFh, Operation::GetFh];
+        let resp = d.dispatch_compound(seq_then(sid, 1, ops), Vec::new()).await;
+
+        assert_eq!(resp.status, Nfs4Status::Ok, "must NOT trip the cap");
+        let raw = resp.raw_reply.expect("session replies are carried as raw bytes");
+        let (status, n_results, first_op) = header_of(&raw);
+        assert_eq!(status, Nfs4Status::Ok as u32);
+        assert_eq!(n_results, 3, "SEQUENCE + PUTROOTFH + GETFH, none dropped");
+        assert_eq!(first_op, opcode::SEQUENCE);
     }
 
     fn create_test_dispatcher() -> (CompoundDispatcher, TempDir) {
