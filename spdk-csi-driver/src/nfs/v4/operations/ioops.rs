@@ -1635,8 +1635,20 @@ impl IoOperationHandler {
             }
 
             // Read data using positioned I/O (no seek needed - concurrent safe!)
-            let mut buffer = vec![0u8; actual_count];
-            let bytes_read = file.read_at(&mut buffer, offset)?;
+            //
+            // POOLED, not `vec![0u8; actual_count]`. At a 1 MiB rsize
+            // that was an mmap per READ, and mmap/munmap take the
+            // process-wide `mmap_lock` for WRITE — so concurrent reads
+            // serialised on it and the server grew DEARER per byte as
+            // concurrency rose (520 -> 600 cpu-ms/GiB from 1 to 8
+            // streams, while knfsd went 280 -> 235). See
+            // `crate::nfs::read_pool`.
+            let mut bytes_read = 0usize;
+            let payload = crate::nfs::read_pool::read_at_pooled(actual_count, |buf| {
+                let n = file.read_at(buf, offset)?;
+                bytes_read = n;
+                Ok(n)
+            })?;
 
             // Re-consult AFTER the read (review finding (b), caught
             // live by the chaos drill's evict/hydrate churn: git once
@@ -1680,10 +1692,9 @@ impl IoOperationHandler {
                 }
             }
 
-            buffer.truncate(bytes_read);
             let eof = offset + bytes_read as u64 >= file_size;
 
-            Ok((Bytes::from(buffer), eof))
+            Ok((payload, eof))
         }).await;
 
         match read_result {
