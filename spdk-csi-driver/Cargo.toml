@@ -94,13 +94,19 @@ path = "src/bin/flint_passthrough_operator.rs"
 # - spdk-dashboard-backend: replaced by spdk_dashboard_backend_minimal.rs
 
 [features]
-# EXPERIMENT (2026-08-29): swap musl's mallocng for mimalloc on the NFS
-# server binaries. The server ships as a STATIC MUSL binary with no
-# custom allocator, and a read-path profile put futex at 66% of syscall
+# DEFAULT ON since 2026-08-29, after measurement. The server ships as a
+# STATIC MUSL binary, and a read-path profile put futex at 66% of syscall
 # time with ~2.4 mmap+munmap per READ in 16-28 KiB chunks -- the shape of
-# musl's allocator, not of the payload (the payload is spliced and never
+# musl's mallocng, not of the payload (which is spliced and never
 # allocated). The allocator is process-global, which is also why adding
-# TCP connections changed nothing. Off by default until measured.
+# TCP connections changed nothing (nc4/nc1 = 0.989).
+#
+# Measured: 350 -> 325 cpu-ms/GiB, 4154 -> 4423 MiB/s, mmap 464 -> 16,
+# munmap 464 -> 0, with splice/sendto counts IDENTICAL across arms.
+#
+# `--no-default-features` restores musl's allocator and is how
+# tests/lima/pnfs/allocator-differential.sh builds its baseline arm.
+default = ["fastalloc"]
 fastalloc = ["dep:mimalloc"]
 
 [dependencies]

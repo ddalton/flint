@@ -9,13 +9,6 @@
 //! Or with environment variables:
 //!   PNFS_MODE=mds flint-pnfs-mds
 
-/// See the `fastalloc` feature in Cargo.toml. musl's mallocng is the
-/// suspect behind this server's per-RPC cost; this makes the swap
-/// measurable without changing the default build.
-#[cfg(feature = "fastalloc")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 use clap::Parser;
 use spdk_csi_driver::pnfs::{PnfsConfig, PnfsMode};
 use std::path::PathBuf;

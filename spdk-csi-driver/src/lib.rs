@@ -5,6 +5,25 @@
 // default limit of 128 on rustc <=1.92 (E0275 at the /api/nodes addition).
 #![recursion_limit = "256"]
 
+/// mimalloc replaces musl's mallocng for every binary in this crate AND
+/// for the test harness. Measured on the NFS read path (4 readers,
+/// O_DIRECT, splice on): 350 -> 325 cpu-ms/GiB and 4154 -> 4423 MiB/s,
+/// with mmap 464 -> 16 and munmap 464 -> 0 while `splice` and `sendto`
+/// counts stayed identical -- the same work, less allocator. The server
+/// ships as a STATIC MUSL binary, where this matters far more than it
+/// would against glibc.
+///
+/// It lives here rather than in each `main` because a `#[global_allocator]`
+/// is process-wide anyway, and 13 binaries copying the same declaration is
+/// 13 chances for one to be forgotten. Nothing depends on this crate as a
+/// library, so this forces the choice on no one else.
+///
+/// `--no-default-features` restores musl's allocator; that is how
+/// `tests/lima/pnfs/allocator-differential.sh` builds its baseline arm.
+#[cfg(feature = "fastalloc")]
+#[global_allocator]
+static GLOBAL_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub mod identity;  // Canonical volume identity: VolumeRef + naming + parsers (identity-unification Phase 0)
 pub mod spdk_native;
 pub mod nvmeof_utils;

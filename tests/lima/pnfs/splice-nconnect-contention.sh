@@ -48,6 +48,7 @@ SIZE_MB=${SIZE_MB:-64}
 PASSES=${PASSES:-8}
 PORT_F=${PORT_F:-20893}   # private: two sessions share this VM
 PORT_C=${PORT_C:-20894}   # same server, SPLICE=0 -- the positive control
+NCONNS=${NCONNS:-"1 2 4 8"}   # the sweep
 CSV=${CSV:-/tmp/nc-contention.csv}
 vm() { limactl shell "$VM" sudo bash -c "$1"; }
 
@@ -199,7 +200,7 @@ mount_at 4; for m in ncf ncc nck; do run_arm "/mnt/$m" >/dev/null; done; umount_
 echo "=== REPS (nc=1 and nc=4 alternate INSIDE each rep) ==="
 echo "rep,nconnect,arm,busy_ms,wall_ms,bytes" > "$CSV"
 for r in $(seq 1 "$REPS"); do
-  for nc in 1 4; do
+  for nc in $NCONNS; do
     mount_at "$nc"
     check_conns "$nc" || { echo "VOID mid-run at rep $r nc=$nc"; exit 1; }
     for m in ncf ncc nck; do
@@ -219,64 +220,38 @@ echo "=== RESULT ==="
 python3 - "$CSV" <<'PY'
 import csv, sys, statistics as st
 rows=list(csv.DictReader(open(sys.argv[1])))
-def sel(nc,arm,f): return [float(r[f]) for r in rows if r['nconnect']==str(nc) and r['arm']==arm]
+ncs=sorted({int(r['nconnect']) for r in rows})
+def sel(nc,arm,f): return [float(r[f]) for r in rows if int(r['nconnect'])==nc and r['arm']==arm]
 def gib(nc,arm):
     b=sel(nc,arm,'bytes'); return b[0]/1073741824 if b else float('nan')
-res={}
-print(f"{'arm':7}{'nconn':>6}{'cpu-ms/GiB':>12}{'MiB/s':>9}")
-for nc in (1,4):
-    for arm in ('flint','flintcopy','knfsd'):
-        w=sel(nc,arm,'wall_ms'); c=sel(nc,arm,'busy_ms')
-        if not w: continue
-        g=gib(nc,arm)
-        cpu=st.median(c)/g; mibs=g*1024/(st.median(w)/1000)
-        res[(nc,arm)]=(cpu,mibs)
-        print(f"{arm:7}{nc:>6}{cpu:12.1f}{mibs:9.0f}")
+print(f"{'nconn':>6}{'flint MiB/s':>13}{'cpu-ms/GiB':>12}{'vs nc=1':>9}{'knfsd MiB/s':>13}{'copy MiB/s':>12}")
+base=None; out={}
+for nc in ncs:
+    g=gib(nc,'flint'); w=st.median(sel(nc,'flint','wall_ms')); c=st.median(sel(nc,'flint','busy_ms'))
+    mibs=g*1024/(w/1000); cpu=c/g
+    if base is None: base=mibs
+    kw=sel(nc,'knfsd','wall_ms'); km=gib(nc,'knfsd')*1024/(st.median(kw)/1000) if kw else float('nan')
+    cw=sel(nc,'flintcopy','wall_ms'); cm=gib(nc,'flintcopy')*1024/(st.median(cw)/1000) if cw else float('nan')
+    out[nc]=(mibs,cpu,km,cm)
+    print(f"{nc:>6}{mibs:13.0f}{cpu:12.1f}{mibs/base:9.3f}{km:13.0f}{cm:12.0f}")
 print()
-fs=res[(4,'flint')][1]/res[(1,'flint')][1]
-ks=res[(4,'knfsd')][1]/res[(1,'knfsd')][1]
-r1=res[(1,'flint')][1]/res[(1,'knfsd')][1]
-r4=res[(4,'flint')][1]/res[(4,'knfsd')][1]
-print(f"flint  nc4/nc1 throughput:  {fs:.3f}   <-- THE RESULT")
-print(f"knfsd  nc4/nc1 throughput:  {ks:.3f}   (uncontrolled: knfsd's connection")
-print( "                                        count is fixed by another mount,")
-print( "                                        so this should read ~1.0 and is a")
-print( "                                        drift check, not a control)")
-print(f"flint/knfsd at flint nc=1:  {r1:.3f}")
-print(f"flint/knfsd at flint nc=4:  {r4:.3f}")
-print(f"cpu-ms/GiB flint nc1->nc4:  {res[(1,'flint')][0]:.1f} -> {res[(4,'flint')][0]:.1f}")
+span=max(out[n][0] for n in ncs)/min(out[n][0] for n in ncs)
+kspan=max(out[n][2] for n in ncs)/min(out[n][2] for n in ncs)
+print(f"flint throughput span across nconnect: {span:.3f}")
+print(f"knfsd span (same config every leg -> this is DRIFT): {kspan:.3f}")
+ctl=out[ncs[-1]][0]/out[ncs[-1]][3]
+print(f"POSITIVE CONTROL splice/copy at nc={ncs[-1]}: {ctl:.3f}")
 print()
-ctl=res[(4,'flint')][1]/res[(4,'flintcopy')][1]
-print(f"POSITIVE CONTROL splice/copy at nc=4: {ctl:.3f}")
 if ctl < 1.10:
-    print("!! VOID-ISH: the rig cannot resolve even the splice-vs-copy")
-    print("   difference, which is known to be large here. Nothing below")
-    print("   about nconnect can be trusted.")
+    print("=> VOID-ISH: the rig cannot resolve even splice-vs-copy, which is")
+    print("   known to be large here. Nothing about nconnect can be trusted.")
+elif span <= kspan or span < 1.05:
+    print("=> NO SCALING. flint does not gain from more connections, and the")
+    print("   spread is no larger than knfsd's drift across identical legs.")
+    print("   The per-connection writer mutex is not what caps throughput.")
 else:
-    print(f"   The rig resolves a {(ctl-1)*100:.0f}% throughput difference, so it would")
-    print( "   have seen a comparable nconnect effect had one existed.")
-print()
-# DRIFT CHECK. knfsd is the same configuration in both legs, so its two
-# numbers differ only by run-to-run drift. If that drift is as large as
-# flint's effect, the effect is not resolvable here.
-if abs(ks-1) > 0.05:
-    print(f"!! knfsd moved {abs(ks-1)*100:.0f}% between legs though its configuration never")
-    print( "   changed. That is drift, and it bounds what can be claimed below.")
-if fs > 1.10 and fs - abs(ks-1) > 1.05:
-    print("=> CONTENTION CONFIRMED. flint gains materially from more")
-    print("   connections while its per-byte work is unchanged, so the")
-    print("   single-connection figure was measuring writer serialization.")
-    print("   Production mounts nconnect=4, so the shipped configuration is")
-    print("   the faster one and splice-vs-knfsd.sh understates it.")
-elif fs < 1.03:
-    print("=> NO CONTENTION EFFECT. More connections did not help, so the")
-    print("   deficit is a per-RPC floor -- syscall, filehandle resolve,")
-    print("   XDR encode -- not the writer mutex. NOTE this is the weaker")
-    print("   direction of evidence: with knfsd's connection count pinned by")
-    print("   another session there is no independent proof the workload")
-    print("   could have resolved the variable. Re-run on an unshared VM.")
-else:
-    print("=> PARTIAL. flint gained, but not beyond what knfsd's drift")
-    print("   allows. Raise REPS or move to an unshared VM before calling it.")
+    print(f"=> SCALES. flint gains {(span-1)*100:.0f}% across the sweep, beyond knfsd's")
+    print( "   drift, so connection count IS a lever and the writer mutex was")
+    print( "   capping throughput at low connection counts.")
 PY
 echo "=== CSV ==="; cat "$CSV"

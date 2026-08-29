@@ -10,9 +10,18 @@
 # splice-nconnect-contention.sh found that adding TCP connections changed
 # nothing (nc4/nc1 = 0.989 against a control that resolved 1.478).
 #
-# Two binaries from ONE source tree, differing in the `fastalloc` feature
-# and nothing else. Both run splice ON, both at nconnect=4 (what
-# production mounts), interleaved per rep.
+# Two binaries from ONE source tree, differing in the allocator and
+# nothing else. Both run splice ON, both at nconnect=4 (what production
+# mounts), interleaved per rep.
+#
+# mimalloc is now the DEFAULT, so the arms build as:
+#   mi   : cargo zigbuild --release --target <triple> --bin flint-pnfs-mds
+#   base : cargo zigbuild --release --target <triple> --bin flint-pnfs-mds \
+#            --no-default-features
+# Note the baseline is the one that needs a flag now. The guard below
+# checks the binaries for mimalloc symbols rather than trusting either
+# command, because getting these the wrong way round would silently
+# compare a binary against itself.
 #
 # SCORED AS cpu-ms/GiB. Absolute figures drift 4-6% between runs; ratios
 # hold within 3%. knfsd is a fixed reference arm -- its connection count
