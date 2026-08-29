@@ -923,7 +923,17 @@ async fn handle_compound(
 
     // Dispatch to COMPOUND handler
     let compound_resp = dispatcher
-        .dispatch_compound_with_cred(compound_req, principal, unix_cred, unix_gids, Some(Arc::clone(&back_channel)))
+        .dispatch_compound_with_cred(
+            compound_req,
+            principal,
+            unix_cred,
+            unix_gids,
+            Some(Arc::clone(&back_channel)),
+            // GSS binds a MIC over / seals the body as one octet stream,
+            // so a payload that never enters userspace cannot be framed
+            // for it. Plain TCP only, and only when switched on.
+            gss.is_none() && crate::nfs::splice::enabled(),
+        )
         .await;
 
     debug!("COMPOUND result: status={:?}, {} results",

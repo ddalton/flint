@@ -44,6 +44,22 @@
 //! ~21% MiB/s, and in 2 of 5 reps splice's wall time was WORSE. Anything
 //! gating this change on MiB/s will read ~1.0 and conclude "no effect".
 
+/// Is splice staging switched on?
+///
+/// Default OFF. This path changes how reply bytes reach the wire, and
+/// the win it chases is CPU rather than throughput, so it ships dark
+/// until a differential says otherwise — measured as cpu-ms/GiB under
+/// concurrent readers, NOT as MiB/s (see docs/plans/nfs-read-splice-plan).
+pub fn enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("FLINT_NFS_SPLICE").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes")
+        )
+    })
+}
+
 /// Largest payload this module will stage. Matches both the default
 /// `/proc/sys/fs/pipe-max-size` (1 MiB, verified on the test VM) and the
 /// server's rsize. A larger READ falls back to the copy path rather than

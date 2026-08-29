@@ -257,8 +257,10 @@ impl CompoundDispatcher {
         unix_cred: Option<(u32, u32)>,
         unix_gids: Vec<u32>,
         back_channel: Option<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
+        may_splice: bool,
     ) -> CompoundResponse {
-        self.dispatch_compound_inner(request, principal, unix_cred, unix_gids, back_channel).await
+        self.dispatch_compound_inner(request, principal, unix_cred, unix_gids, back_channel, may_splice)
+            .await
     }
 
     /// Same as `dispatch_compound` but threads the connection's writer
@@ -272,7 +274,11 @@ impl CompoundDispatcher {
         principal: Vec<u8>,
         back_channel: Option<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
     ) -> CompoundResponse {
-        self.dispatch_compound_inner(request, principal, None, Vec::new(), back_channel).await
+        // `may_splice: false` — see `CompoundContext::can_splice`. Only
+        // the plain-TCP reply path may splice; every other entry, this
+        // one included, is safe by default rather than by a guard.
+        self.dispatch_compound_inner(request, principal, None, Vec::new(), back_channel, false)
+            .await
     }
 
     /// RFC 8881 §8.4.2.4 courtesy-release: drop every expired client's
@@ -343,6 +349,7 @@ impl CompoundDispatcher {
         unix_cred: Option<(u32, u32)>,
         unix_gids: Vec<u32>,
         back_channel: Option<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
+        may_splice: bool,
     ) -> CompoundResponse {
         debug!("COMPOUND: tag={}, operations={}", request.tag, request.operations.len());
 
@@ -497,6 +504,7 @@ impl CompoundDispatcher {
 
         // Create context, seeding with the RPC-level principal.
         let mut context = CompoundContext::with_principal(request.minor_version, principal);
+        context.can_splice = may_splice;
         context.unix_cred = unix_cred;
         context.unix_gids = unix_gids;
         // Stash the connection's back-channel writer so the
@@ -663,7 +671,9 @@ impl CompoundDispatcher {
                     // here, and a future pipe-backed READ payload could
                     // not be cloned at all.
                     let first = match results.first() {
-                        Some(r @ OperationResult::Sequence(..)) => Some(r.clone()),
+                        Some(OperationResult::Sequence(st, sr)) => {
+                            Some(OperationResult::Sequence(*st, sr.clone()))
+                        }
                         _ => None,
                     };
                     let trial = CompoundResponse {
@@ -1661,7 +1671,7 @@ impl CompoundDispatcher {
                             use crate::nfs::v4::compound::ReadResult;
                             return OperationResult::Read(
                                 Nfs4Status::Ok,
-                                Some(ReadResult { eof: true, data: Bytes::new() }),
+                                Some(ReadResult { eof: true, data: Bytes::new().into() }),
                             );
                         }
                         return OperationResult::Read(Nfs4Status::Io, None);
@@ -1693,7 +1703,7 @@ impl CompoundDispatcher {
                                 use crate::nfs::v4::compound::ReadResult;
                                 OperationResult::Read(
                                     Nfs4Status::Ok,
-                                    Some(ReadResult { eof, data: Bytes::from(data) }),
+                                    Some(ReadResult { eof, data: Bytes::from(data).into() }),
                                 )
                             }
                             Err(e) => {
@@ -1719,7 +1729,7 @@ impl CompoundDispatcher {
                     use crate::nfs::v4::compound::ReadResult;
                     OperationResult::Read(res.status, Some(ReadResult {
                         eof: res.eof,
-                        data: res.data,
+                        data: res.data.into(),
                     }))
                 } else {
                     OperationResult::Read(res.status, None)

@@ -580,7 +580,12 @@ pub enum ReadPlusSegment {
 }
 
 /// Operation result
-#[derive(Debug, Clone)]
+///
+/// NOT `Clone`: a READ payload may be a pipe (see [`ReadResult`]), and a
+/// pipe has one reader. Nothing needed to clone a whole result anyway —
+/// the one caller that did, the `ca_maxresponsesize` gate, only ever
+/// wanted the SEQUENCE result and now takes just that.
+#[derive(Debug)]
 pub enum OperationResult {
     // File handle operations
     PutRootFh(Nfs4Status),
@@ -763,10 +768,17 @@ pub struct DirEntry {
     pub attrs: Bytes,
 }
 
-#[derive(Debug, Clone)]
+/// A READ payload.
+///
+/// `data` is a [`Segment`](crate::nfs::segment::Segment), not `Bytes`,
+/// because the payload does not have to be memory the server holds — it
+/// can be a pipe staged straight from the file. That is also why this
+/// type is NOT `Clone`: a pipe has one reader, and duplicating a reply
+/// payload was never something the server needed to do.
+#[derive(Debug)]
 pub struct ReadResult {
     pub eof: bool,
-    pub data: Bytes,
+    pub data: crate::nfs::segment::Segment,
 }
 
 #[derive(Debug, Clone)]
@@ -796,6 +808,20 @@ pub struct CompoundContext {
     /// `(session_id, slot_id)` to associate the encoded reply with for
     /// future replay matching. Populated by SEQUENCE for new requests.
     pub cache_slot: Option<(SessionId, u32)>,
+    /// May this COMPOUND's READ payload be spliced from the file to the
+    /// socket without passing through userspace?
+    ///
+    /// **Defaults to FALSE, and that default is the safety property.**
+    /// Only the plain-TCP RPC path sets it, so every in-process caller —
+    /// the File API (`pnfs::mds::fileapi::hubfs`) most of all, which
+    /// consumes READ results as bytes and never touches a socket — is
+    /// correct by construction rather than by remembering a guard.
+    ///
+    /// Still not sufficient on its own: the slot reply cache must store
+    /// the exact octets a replay returns, so the READ path also requires
+    /// `cache_slot.is_none()`. SEQUENCE is op 0, so that is already
+    /// decided by the time a READ runs.
+    pub can_splice: bool,
     /// RPC-level principal for this COMPOUND. Computed by the RPC layer
     /// from the call's auth credential (`Auth::principal()`). Used by
     /// EXCHANGE_ID's RFC 8881 §18.35.5 client-record state machine to
@@ -862,6 +888,7 @@ impl CompoundContext {
             minor_version,
             session_id: None,
             replay_reply: None,
+            can_splice: false,
             cache_slot: None,
             principal: Vec::new(),
             unix_cred: None,
@@ -2262,7 +2289,7 @@ impl CompoundResponse {
                     let pad = (4 - res.data.len() % 4) % 4;
                     segs.push(cur.finish().into());
                     cur = XdrEncoder::new();
-                    segs.push(res.data.into());
+                    segs.push(res.data);
                     if pad > 0 {
                         cur.append_raw(&[0u8; 3][..pad]);
                     }
@@ -2448,7 +2475,11 @@ impl CompoundResponse {
                 if status == Nfs4Status::Ok {
                     if let Some(res) = result {
                         encoder.encode_bool(res.eof);
-                        encoder.encode_opaque(&res.data);
+                        // The FLAT encode. Reached only when the reply must
+                        // be contiguous — the slot reply cache, or GSS — and
+                        // both of those force `can_splice` off, so the
+                        // payload here is memory by construction.
+                        encoder.encode_opaque(res.data.as_mem());
                     }
                 }
             }
@@ -2895,7 +2926,7 @@ mod segment_tests {
         r.results.push(OperationResult::PutRootFh(Nfs4Status::Ok));
         r.results.push(OperationResult::Read(
             Nfs4Status::Ok,
-            Some(ReadResult { eof, data: Bytes::copy_from_slice(payload) }),
+            Some(ReadResult { eof, data: Bytes::copy_from_slice(payload).into() }),
         ));
         r.results.push(OperationResult::PutRootFh(Nfs4Status::Ok));
         r

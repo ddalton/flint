@@ -583,7 +583,10 @@ impl HubFs {
             .rev()
             .find_map(|r| match r {
                 OperationResult::Read(Nfs4Status::Ok, Some(rr)) => {
-                    Some((rr.data.clone(), rr.eof))
+                    // The File API consumes the payload in-process, so it
+                    // needs real bytes. `can_splice` is false on this path
+                    // (see CompoundContext), so the payload is always memory.
+                    Some((rr.data.as_mem().clone(), rr.eof))
                 }
                 _ => None,
             })
