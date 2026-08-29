@@ -66,6 +66,21 @@ impl Slot {
     }
 }
 
+/// The scalar, `Copy` half of a [`Session`] — everything a request needs
+/// to enforce the limits negotiated at CREATE_SESSION, and nothing that
+/// allocates. Returned by [`SessionManager::session_limits`] so the hot
+/// path stops deep-copying the slot table to read a `u32`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionLimits {
+    pub client_id: u64,
+    pub minorversion: u32,
+    pub fore_chan_maxrequestsize: u32,
+    pub fore_chan_maxresponsesize: u32,
+    pub fore_chan_maxresponsesize_cached: u32,
+    pub fore_chan_maxops: u32,
+    pub fore_chan_maxrequests: u32,
+}
+
 /// NFSv4.1 Session
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -426,6 +441,39 @@ impl SessionManager {
     /// LOCK-FREE: Concurrent reads without blocking other operations
     pub fn get_session(&self, session_id: &SessionId) -> Option<Session> {
         self.sessions.get(session_id).map(|r| r.clone())
+    }
+
+    /// Whether a session exists, without cloning it.
+    ///
+    /// `get_session(..).is_some()` deep-copies the whole session — slot
+    /// table and every cached reply — to answer a yes/no question.
+    pub fn has_session(&self, session_id: &SessionId) -> bool {
+        self.sessions.contains_key(session_id)
+    }
+
+    /// The scalars a request needs from its session, WITHOUT cloning the
+    /// session.
+    ///
+    /// [`Self::get_session`] returns an owned `Session`, and `Session`
+    /// carries `slots: Vec<Slot>` where each `Slot` may hold a
+    /// `cached_response: Option<Vec<u8>>`. Cloning it therefore deep-copies
+    /// the entire reply cache — 64 slots by default on Linux
+    /// (`max_session_slots`) — and the dispatcher was doing that inside
+    /// its PER-OPERATION loop to read three `u32`s. A profile put
+    /// `memcpy` first among userspace symbols and attributed
+    /// `Vec::clone` to `get_session -> Session::clone`.
+    ///
+    /// Copy and scalar-only, so this is a shard read and a register move.
+    pub fn session_limits(&self, session_id: &SessionId) -> Option<SessionLimits> {
+        self.sessions.get(session_id).map(|s| SessionLimits {
+            client_id: s.client_id,
+            minorversion: s.minorversion,
+            fore_chan_maxrequestsize: s.fore_chan_maxrequestsize,
+            fore_chan_maxresponsesize: s.fore_chan_maxresponsesize,
+            fore_chan_maxresponsesize_cached: s.fore_chan_maxresponsesize_cached,
+            fore_chan_maxops: s.fore_chan_maxops,
+            fore_chan_maxrequests: s.fore_chan_maxrequests,
+        })
     }
 
     /// Get a mutable session (for updating slot state)

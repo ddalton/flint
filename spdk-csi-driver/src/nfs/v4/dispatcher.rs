@@ -571,7 +571,7 @@ impl CompoundDispatcher {
             //     accept. `wire_size == 0` means the caller didn't plumb
             //     the length (older test fixtures); skip the check then.
             if let Some(sid) = context.session_id {
-                if let Some(s) = self.state_mgr.sessions.get_session(&sid) {
+                if let Some(s) = self.state_mgr.sessions.session_limits(&sid) {
                     if total_ops as u32 > s.fore_chan_maxops && i + 1 > s.fore_chan_maxops as usize {
                         warn!("COMPOUND: total_ops {} > ca_maxoperations {} → TOO_MANY_OPS",
                               total_ops, s.fore_chan_maxops);
@@ -652,7 +652,7 @@ impl CompoundDispatcher {
         // estimating per-op result sizes up-front would be brittle for
         // a small win.
         if let Some(sid) = context.session_id {
-            if let Some(s) = self.state_mgr.sessions.get_session(&sid) {
+            if let Some(s) = self.state_mgr.sessions.session_limits(&sid) {
                 let max = s.fore_chan_maxresponsesize as usize;
                 if max > 0 {
                     let cache_slot = context.cache_slot;
@@ -1008,7 +1008,7 @@ impl CompoundDispatcher {
                 // RFC 8881 §18.37.3: DESTROY_SESSION must arrive on a
                 // connection bound to the session (pynfs DSESS9001). Only
                 // gate sessions that exist — unknown ids stay BADSESSION.
-                if self.state_mgr.sessions.get_session(&sessionid).is_some()
+                if self.state_mgr.sessions.has_session(&sessionid)
                     && !self.conn_bound_to_session(&sessionid, context)
                 {
                     warn!(
@@ -1029,7 +1029,7 @@ impl CompoundDispatcher {
 
             Operation::BindConnToSession { sessionid, dir, use_conn_in_rdma_mode } => {
                 info!("BIND_CONN_TO_SESSION: sessionid={:?}, dir={}", sessionid, dir);
-                if self.state_mgr.sessions.get_session(&sessionid).is_some() {
+                if self.state_mgr.sessions.has_session(&sessionid) {
                     info!("BIND_CONN_TO_SESSION: Session found, binding connection");
                     self.bind_conn_to_session(sessionid, context);
                     // RFC 5661 §2.10.3.1 conn_dir values:
@@ -1474,7 +1474,7 @@ impl CompoundDispatcher {
                 let is_reclaim_claim = matches!(claim.claim_type, 1 | 3 | 6);
                 let client_id = context
                     .session_id
-                    .and_then(|sid| self.state_mgr.sessions.get_session(&sid))
+                    .and_then(|sid| self.state_mgr.sessions.session_limits(&sid))
                     .map(|s| s.client_id);
                 let in_grace = self.state_mgr.leases.in_grace_period();
                 let already_complete = client_id
@@ -2277,7 +2277,7 @@ impl CompoundDispatcher {
                 //     defense-in-depth.
                 info!("RECLAIM_COMPLETE: one_fs={}", one_fs);
                 let client_id = match context.session_id
-                    .and_then(|sid| self.state_mgr.sessions.get_session(&sid))
+                    .and_then(|sid| self.state_mgr.sessions.session_limits(&sid))
                     .map(|s| s.client_id)
                 {
                     Some(cid) => cid,
@@ -2835,7 +2835,7 @@ impl CompoundDispatcher {
         let (owner_client_id, owner_session_id) = match context.session_id {
             Some(sid) => {
                 let cid = self.state_mgr.sessions
-                    .get_session(&sid)
+                    .session_limits(&sid)
                     .map(|s| s.client_id)
                     .unwrap_or(0);
                 (cid, sid.0)
@@ -3141,7 +3141,7 @@ impl CompoundDispatcher {
         };
         let (client_id, session_id) = match context.session_id {
             Some(sid) => (
-                self.state_mgr.sessions.get_session(&sid).map(|s| s.client_id).unwrap_or(0),
+                self.state_mgr.sessions.session_limits(&sid).map(|s| s.client_id).unwrap_or(0),
                 sid.0,
             ),
             None => return OperationResult::LayoutGet(Nfs4Status::OpNotInSession, None),
@@ -3457,7 +3457,7 @@ impl CompoundDispatcher {
                 Some(sid) => self
                     .state_mgr
                     .sessions
-                    .get_session(&sid)
+                    .session_limits(&sid)
                     .map(|s| s.client_id)
                     .unwrap_or(0),
                 None => 0,
@@ -3637,7 +3637,7 @@ impl CompoundDispatcher {
         // anyway for v4.1 ops.
         let client_id = match context.session_id {
             Some(sid) => self.state_mgr.sessions
-                .get_session(&sid)
+                .session_limits(&sid)
                 .map(|s| s.client_id)
                 .unwrap_or(0),
             None => {
@@ -3905,7 +3905,7 @@ impl CompoundDispatcher {
                     Some(sid) => self
                         .state_mgr
                         .sessions
-                        .get_session(&sid)
+                        .session_limits(&sid)
                         .map(|s| s.client_id)
                         .unwrap_or(0),
                     None => 0,
