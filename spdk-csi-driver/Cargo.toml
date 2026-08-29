@@ -93,7 +93,18 @@ path = "src/bin/flint_passthrough_operator.rs"
 # - node-agent: now a library module, not standalone binary
 # - spdk-dashboard-backend: replaced by spdk_dashboard_backend_minimal.rs
 
+[features]
+# EXPERIMENT (2026-08-29): swap musl's mallocng for mimalloc on the NFS
+# server binaries. The server ships as a STATIC MUSL binary with no
+# custom allocator, and a read-path profile put futex at 66% of syscall
+# time with ~2.4 mmap+munmap per READ in 16-28 KiB chunks -- the shape of
+# musl's allocator, not of the payload (the payload is spliced and never
+# allocated). The allocator is process-global, which is also why adding
+# TCP connections changed nothing. Off by default until measured.
+fastalloc = ["dep:mimalloc"]
+
 [dependencies]
+mimalloc = { version = "0.1", optional = true, default-features = false }
 tokio = { version = "1.0", features = ["full"] }
 kube = { version = "3.0.0", features = ["client", "runtime", "derive"] }
 k8s-openapi = { version = "0.27.0", features = ["latest"] }
