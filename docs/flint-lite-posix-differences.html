@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>flint-lite — differences from POSIX</title>
+<style>
+  @page { size: 11in 8.5in; margin: 0; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 11in; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+         background: #f9f9f7; color: #0b0b0b; }
+  .page { width: 11in; height: 8.5in; padding: 0.26in 0.36in 0.2in;
+          display: flex; flex-direction: column; overflow: hidden;
+          page-break-after: always; background: #f9f9f7; }
+  .page:last-child { page-break-after: auto; }
+  h1 { font-size: 18px; font-weight: 650; letter-spacing: -0.01em; }
+  h2.sec { font-size: 12.5px; font-weight: 650; margin-top: 0.02in; }
+  .deck { font-size: 9.4px; color: #52514e; margin-top: 3px; line-height: 1.45; max-width: 10.3in; }
+  .intro { display: flex; gap: 0.18in; margin-top: 0.13in; }
+  .ib { flex: 1; min-width: 0; }
+  .ib h3 { font-size: 9.5px; font-weight: 650; margin-bottom: 2px; }
+  .ib .ibt { font-weight: 400; color: #898781; font-size: 8px; }
+  .ib p { font-size: 7.9px; color: #52514e; line-height: 1.45; }
+  .badge { font-size: 6.8px; font-weight: 600; color: #898781; border: 1px solid #e1e0d9;
+           border-radius: 6px; padding: 0.5px 4px; margin-left: 5px; vertical-align: 1px;
+           white-space: nowrap; }
+  .card { background: #fcfcfb; border: 1px solid rgba(11,11,11,0.10); border-radius: 9px;
+          padding: 9px 12px 8px; display: flex; flex-direction: column; min-height: 0; }
+  .card h2 { font-size: 12.5px; font-weight: 650; }
+  .card .sub { font-size: 8px; color: #898781; margin-top: 1px; margin-bottom: 4px; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  th { font-weight: 600; color: #898781; text-align: left; padding: 3px 6px;
+       border-bottom: 1px solid #e1e0d9; font-size: 8.2px; }
+  td { padding: 3.2px 6px; text-align: left; vertical-align: top;
+       border-bottom: 1px solid #e1e0d9; font-size: 7.9px; color: #52514e; line-height: 1.4; }
+  tbody tr:last-child td { border-bottom: none; }
+  td.k { font-weight: 650; color: #0b0b0b; font-size: 8.3px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 7.3px;
+         color: #0b0b0b; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+         margin-right: 4px; vertical-align: -0.5px; }
+  .d-loud  { background: #184f95; }
+  .d-quiet { background: #b3541e; }
+  .d-fixed { background: #2f7d4f; }
+  .d-irred { background: #6d6a63; }
+  .legend { font-size: 7.8px; color: #52514e; margin-top: 3px; }
+  .lg { margin-right: 12px; white-space: nowrap; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.14in;
+           margin-top: 0.12in; flex: 1; min-height: 0; }
+  .stack { display: flex; flex-direction: column; gap: 0.12in; margin-top: 0.12in;
+           flex: 1; min-height: 0; }
+  .note { font-size: 8px; color: #52514e; line-height: 1.45; margin-top: 5px; }
+  .keyline { font-size: 8.4px; color: #0b0b0b; line-height: 1.45; margin-top: 5px;
+             border-left: 2px solid #b3541e; padding-left: 7px; }
+  .foot { margin-top: 0.08in; font-size: 7.4px; color: #898781; line-height: 1.45;
+          border-top: 1px solid #e1e0d9; padding-top: 4px; }
+  .pnum { position: absolute; }
+</style></head>
+<body>
+
+<!-- ───────────────────────── PAGE 1 ───────────────────────── -->
+<div class="page">
+  <h1>flint-lite &mdash; differences from POSIX</h1>
+  <p class="deck">flint-lite presents an ordinary POSIX filesystem over NFSv4 and keeps its durable copy in an S3 bucket.
+  Almost everything POSIX promises holds; a short list does not. This page enumerates that list, in the manner of
+  CephFS&rsquo;s &ldquo;Differences from POSIX&rdquo;, and says for each one whether it is refused loudly, lost quietly,
+  already fixed, or irreducible. <b>It is a statement of behaviour, not a measured conformance score</b> &mdash; page 5
+  says exactly what has and has not been measured, and why the distinction matters.</p>
+
+  <div class="intro">
+    <div class="ib" style="flex:1.15">
+      <h3>flint-lite is not a FUSE&#8209;over&#8209;S3 filesystem<span class="badge">read this first</span></h3>
+      <p>A hub pod runs an NFS server over a <b>real ext4 volume</b>; clients mount it with the ordinary kernel NFS
+      client. S3 is a <b>tier underneath</b> &mdash; a flush/evict/hydrate loop &mdash; not the store that answers the
+      syscall. So the familiar object-storage complaints (no partial writes, no <code>mmap</code>, no locking, no
+      atomic rename, a millisecond per <code>stat</code>) are <b>not</b> flint-lite&rsquo;s. Page 2 lists what that buys.</p>
+    </div>
+    <div class="ib">
+      <h3>Three kinds of difference <span class="ibt">&mdash; and none of them is consistency</span></h3>
+      <p><b>Representation</b> &mdash; state S3 cannot encode at all (hard links, sparseness, device nodes).
+      <b>Asynchrony</b> &mdash; the bucket is a correct view of a <i>past</i> moment.
+      <b>Divergence</b> &mdash; two authorities, local and remote, that can disagree.
+      S3 has had strong read-after-write consistency since 2020 and flint publishes with compare-and-swap on top;
+      consistency is the one thing that is <i>not</i> the residual.</p>
+    </div>
+    <div class="ib">
+      <h3>How to read a row</h3>
+      <p><span class="dot d-loud"></span><b>Refused</b> &mdash; the operation fails with an error the application sees.
+      <span class="dot d-quiet"></span><b>Quiet</b> &mdash; it succeeds and something is lost or altered; the caller is not told.
+      <span class="dot d-fixed"></span><b>Fixed</b> &mdash; was a defect, closed 2026-08-28, with a test.
+      <span class="dot d-irred"></span><b>Irreducible</b> &mdash; not a backlog item; no design on this architecture removes it.
+      Quiet is the category that matters: it is the one an operator cannot discover.</p>
+    </div>
+  </div>
+
+  <div class="stack">
+    <div class="card">
+      <h2>The whole list, at a glance</h2>
+      <p class="sub">Every difference on the following pages, and where it becomes visible</p>
+      <table>
+        <colgroup><col style="width:15%"><col style="width:26%"><col style="width:26%"><col style="width:33%"></colgroup>
+        <thead><tr><th>Category</th><th>At the mount</th><th>Through evict &rarr; hydrate</th><th>Through a DR restore from the bucket</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="k">Representation</td>
+            <td>Hard links refused; special files become regular files; two reserved names</td>
+            <td>Holds, except sparseness (a restored file is dense)</td>
+            <td>ctime and atime not carried; mtime at second granularity; sparseness lost; xattrs/ACLs have no front door to lose</td>
+          </tr>
+          <tr>
+            <td class="k">Asynchrony</td>
+            <td><code>fsync</code> means &ldquo;on the volume&rdquo;, not &ldquo;in the bucket&rdquo;</td>
+            <td>&mdash;</td>
+            <td>Restores to the last flush barrier; newer content is beyond the RPO and is counted, not silently dropped</td>
+          </tr>
+          <tr>
+            <td class="k">Divergence</td>
+            <td>&mdash;</td>
+            <td>Foreign bucket writes and a second hub are arbitrated, not merged</td>
+            <td>The manifest lane and the bucket-sweep lane do not have equal fidelity</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="keyline">The single most useful sentence about this design: <b>the local volume converts S3 from a filesystem into a replication target.</b>
+      That removes the entire syscall-shaped problem list. What it cannot remove is that the target cannot express everything the source holds,
+      that replication is asynchronous, and that there are now two authorities instead of one.</p>
+    </div>
+  </div>
+
+  <p class="foot">flint-lite &mdash; NFSv4.1/4.2 server (<code>flint-pnfs-mds --standalone</code>) on an ext4 PVC with an S3 cold tier.
+  Derived from a code read at <code>b871595e</code> plus the tier fixes of 2026-08-28. Page 5 records what is measured and what is not.</p>
+</div>
+
+<!-- ───────────────────────── PAGE 2 ───────────────────────── -->
+<div class="page">
+  <h1>What POSIX holds &mdash; and why that is not obvious</h1>
+  <p class="deck">Most documents of this kind for object-backed storage open with a long list of things that do not work.
+  That list belongs to filesystems where S3 answers the syscall. flint-lite&rsquo;s syscalls are answered by ext4, so the list
+  is short and the guarantees below are ordinary. They are stated explicitly because a reader who has used
+  <code>s3fs</code>, <code>goofys</code> or <code>mount-s3</code> will reasonably assume otherwise.</p>
+
+  <div class="stack">
+    <div class="card" style="flex:1">
+      <h2>Guarantees that hold in full</h2>
+      <p class="sub">Left: what POSIX promises. Right: what an object-storage-backed mount does instead &mdash; the reason each row is worth stating.</p>
+      <table>
+        <colgroup><col style="width:20%"><col style="width:40%"><col style="width:40%"></colgroup>
+        <thead><tr><th>Guarantee</th><th>flint-lite</th><th>A filesystem where S3 answers the syscall</th></tr></thead>
+        <tbody>
+          <tr><td class="k">Partial writes</td><td>Ordinary <code>pwrite</code> at any offset; the write lands in the local file</td><td>Objects are immutable &mdash; a one-byte write reads, modifies and re-uploads the whole object</td></tr>
+          <tr><td class="k">Append</td><td>Ordinary <code>O_APPEND</code></td><td>Not expressible; the object is rewritten</td></tr>
+          <tr><td class="k">Atomic rename</td><td><code>rename(2)</code> is ext4&rsquo;s, atomic, including rename-over</td><td>COPY + DELETE: not atomic, and a directory rename is O(objects)</td></tr>
+          <tr><td class="k">Byte-range locks</td><td>NFSv4 locking, state persisted across restart</td><td>No locking primitive exists; coordination must be bolted on outside</td></tr>
+          <tr><td class="k">Unlinked-but-open</td><td>Data survives until the last descriptor closes</td><td>DELETE is immediate</td></tr>
+          <tr><td class="k"><code>mmap</code></td><td>Shared mappings work as the kernel NFS client implements them</td><td>Each dirty page implies an object rewrite</td></tr>
+          <tr><td class="k">Directory reads</td><td>Stable <code>readdir</code> cookies with a verifier</td><td>Pagination tokens are not seekable directory offsets</td></tr>
+          <tr><td class="k">Metadata cost</td><td><code>chmod</code>, <code>chown</code>, <code>utimes</code> are local inode writes</td><td><code>chmod</code> on a 1&nbsp;GiB object is a 1&nbsp;GiB server-side copy</td></tr>
+          <tr><td class="k">Latency</td><td>Local-filesystem latency behind one network hop</td><td>A round trip per metadata operation; <code>ls -lR</code> becomes thousands</td></tr>
+          <tr><td class="k">Empty directories</td><td>Exist, and survive a DR restore &mdash; the manifest carries directories as entries</td><td>Cannot exist: no object, no directory</td></tr>
+        </tbody>
+      </table>
+      <p class="note"><b>Where the trade actually lands.</b> These guarantees are bought with a real volume, and that volume is
+      also what creates the divergence class on page 4: a second authority that can disagree with the bucket. The same
+      architecture choice pays for page 2 and bills for page 4. flint&rsquo;s other front end, <b>flint-passthrough</b>, makes
+      the opposite choice and inherits the right-hand column in full.</p>
+    </div>
+  </div>
+
+  <p class="foot">Rows are properties of the architecture, not of a benchmark. Nothing on this page is a measured claim;
+  the measurement position is stated on page 5.</p>
+</div>
+
+<!-- ───────────────────────── PAGE 3 ───────────────────────── -->
+<div class="page">
+  <h1>Representation &mdash; state that S3 cannot encode</h1>
+  <p class="deck">These are the true POSIX differences. Each one exists because the object store has no way to express the
+  property, not because of a bug, and each fails identically whether the store is strongly or eventually consistent.</p>
+  <p class="legend"><span class="lg"><span class="dot d-loud"></span>refused &mdash; the caller is told</span>
+    <span class="lg"><span class="dot d-quiet"></span>quiet &mdash; the caller is not told</span>
+    <span class="lg"><span class="dot d-fixed"></span>fixed 2026-08-28</span>
+    <span class="lg"><span class="dot d-irred"></span>irreducible</span></p>
+
+  <div class="stack">
+    <div class="card" style="flex:1">
+      <table>
+        <colgroup><col style="width:15%"><col style="width:43%"><col style="width:42%"></colgroup>
+        <thead><tr><th>Property</th><th>What flint-lite does</th><th>Why, and what it means for you</th></tr></thead>
+        <tbody>
+          <tr><td class="k"><span class="dot d-loud"></span>Hard links</td>
+              <td><code>LINK</code> is refused with <code>NFS4ERR_NOTSUPP</code> while the tier is on, and
+                  <code>FATTR4_LINK_SUPPORT</code> now reports FALSE so clients ask before they try.</td>
+              <td>A bucket key names one object; a hard link is one content under two names. <code>tar</code>, <code>pax</code>,
+                  <code>rsync -H</code> and <code>cp -a</code> read the support bit and fall back to copying, which is why
+                  reporting it truthfully matters more than the refusal itself.</td></tr>
+          <tr><td class="k"><span class="dot d-fixed"></span>Pre-existing hard links</td>
+              <td>A pair that arrives by import, or predates the tier being switched on, is now safe: removing one name no
+                  longer deletes the shared object or drops the surviving name&rsquo;s rows.</td>
+              <td>Until 2026-08-28 it did, and if the inode had been evicted the surviving name became a permanent 0-byte
+                  file that read as EOF under <code>NFS4_OK</code>. Closed, with a test.</td></tr>
+          <tr><td class="k"><span class="dot d-quiet"></span>Special files</td>
+              <td><code>CREATE</code> of a socket, FIFO, block or character device makes a <b>regular file</b> and returns
+                  <code>NFS4_OK</code>.</td>
+              <td>Deliberate: <code>mknod</code> for devices needs root, and an export must not let callers dereference host
+                  devices. But <code>mkfifo(3)</code> succeeds with the wrong type and nothing says so &mdash; the one row here
+                  where the honest answer would be an error.</td></tr>
+          <tr><td class="k"><span class="dot d-quiet"></span>Sparseness</td>
+              <td>A restored file is dense: holes come back as real zero bytes, and <code>st_blocks</code> is not carried.</td>
+              <td>Documented by the tier as declined. Note the capacity consequence: a 1&nbsp;TiB sparse file restores as
+                  1&nbsp;TiB of zeros onto a volume sized for the working set.</td></tr>
+          <tr><td class="k"><span class="dot d-irred"></span>ctime</td>
+              <td>Not carried, and not restorable. A hydrated or DR-restored file&rsquo;s ctime is the restore time.</td>
+              <td>ctime is settable through no POSIX interface, and every path that restores content opens the file for
+                  writing. This one is documented rather than fixed because nothing on this architecture can fix it.</td></tr>
+          <tr><td class="k"><span class="dot d-irred"></span>atime</td>
+              <td>The tier has no atime concept; its eviction LRU is an approximation of one.</td>
+              <td>Arguably correct to decline: carrying atime faithfully means a metadata write per read.</td></tr>
+          <tr><td class="k"><span class="dot d-quiet"></span>mtime precision</td>
+              <td>Carried at <b>second</b> granularity through a DR restore. Evict &rarr; hydrate preserves it exactly.</td>
+              <td>POSIX carries nanoseconds. Build systems and <code>rsync</code> compare mtimes, so a restored tree can
+                  produce spurious or missed rebuilds.</td></tr>
+          <tr><td class="k"><span class="dot d-loud"></span>Filenames</td>
+              <td>A POSIX name is any byte string without NUL or <code>/</code>. An S3 key is UTF-8, at most 1024 bytes.</td>
+              <td>Names outside that set cannot be published. This is the least-explored corner of the design and the one
+                  most likely to still hold surprises.</td></tr>
+          <tr><td class="k"><span class="dot d-loud"></span>Reserved names</td>
+              <td>Two directory names are reserved throughout the tree: <code>.flint</code> (tier control objects) and
+                  <code>.flint-nfs</code> (the server&rsquo;s filehandle key and state database).</td>
+              <td>A real namespace carve-out. Until 2026-08-28 the second was not reserved <i>from the tier</i>, so the
+                  server&rsquo;s own key was publishable and evictable &mdash; truncating it would have made every filehandle in
+                  the volume permanently stale.</td></tr>
+          <tr><td class="k"><span class="dot d-loud"></span>xattrs and ACLs</td>
+              <td>No extended-attribute operations exist in the server at all; <code>GETATTR(acl)</code> returns an empty ACL
+                  and setting one is refused with <code>ATTRNOTSUPP</code>.</td>
+              <td><b>These are not tier losses.</b> There is no front door for the tier to lose anything through, so they are
+                  absent server features rather than round-trip gaps &mdash; a much larger project, planned separately.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <p class="foot">Every row verified against the code, not against the design documents. &ldquo;Fixed&rdquo; rows each have a
+  test that was observed failing before the fix and passing after it.</p>
+</div>
+
+<!-- ───────────────────────── PAGE 4 ───────────────────────── -->
+<div class="page">
+  <h1>Asynchrony and divergence &mdash; the two costs that are not representation</h1>
+  <p class="deck">Neither of these is a missing feature, and neither is fixable by carrying more metadata. They are
+  properties of putting a durable copy somewhere else, asynchronously.</p>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>Asynchrony &mdash; the durability boundary</h2>
+      <p class="sub">The bucket is a correct view of a past moment</p>
+      <p class="note"><b><code>fsync</code> means &ldquo;on the volume&rdquo;, not &ldquo;in the bucket&rdquo;.</b> Data is durable
+      locally when the call returns; it reaches S3 at the next flush barrier. A DR restore is therefore POSIX-faithful to a
+      point in the past, not to the moment of loss.</p>
+      <p class="note">This is not a defect and not a consistency problem &mdash; S3 is telling the truth. It is the RPO. The
+      manifest states its own loss bound: files present locally but never published are counted in <code>beyond_rpo</code>,
+      so the bucket can say how far behind it is <i>from the bucket alone</i>.</p>
+      <p class="keyline"><b>The limit worth understanding.</b> NFSv4 has no wire mechanism for &ldquo;this write succeeded and
+      is not yet durable elsewhere&rdquo;. Every surface that could report the lag &mdash; status, metrics, an operator condition
+      &mdash; is control plane. The application that called <code>write(2)</code> never sees it. No design removes this; it is a
+      property of the protocol, and it is why the honest posture is to make the lag <b>visible and bounded</b> rather than to
+      claim it away.</p>
+      <p class="note">Closing it entirely would mean flushing synchronously to S3 on every <code>fsync</code>, at object-store
+      latency per call. That is a different product.</p>
+    </div>
+
+    <div class="card">
+      <h2>Divergence &mdash; two authorities</h2>
+      <p class="sub">Created by the local volume, not removed by it</p>
+      <p class="note">A filesystem where S3 answers the syscall has one source of truth. flint-lite has two, and they can
+      disagree: someone writes into the prefix with <code>aws s3 cp</code>; a second hub adopts the same prefix; a crash lands
+      between a local truncate and its durable marker.</p>
+      <p class="note">The tier&rsquo;s epoch lease, tombstones, flush intents and HEAD-based 412 arbitration exist for exactly
+      this. They are not consistency machinery &mdash; they are <b>divergence</b> machinery, and they are the bill for page 2.</p>
+      <p class="note"><b>Two lanes, two fidelities.</b> A DR restore driven by the manifest carries mode, uid, gid, mtime,
+      directories and symlink targets. A restore that sweeps a bucket with no manifest cannot &mdash; those live only in the
+      manifest. The gap between the two lanes has not been measured.</p>
+      <p class="keyline"><b>Consistency is not the residual.</b> S3 has had strong read-after-write consistency, including for
+      listings, since December 2020, and flint does not rely on it: every publish is a compare-and-swap under
+      <code>If-Match</code>. The real risk is an S3-<i>compatible</i> store that accepts conditional headers and ignores them,
+      which would silently degrade arbitration to last-writer-wins. Since 2026-08-28 the hub probes for this at startup and
+      refuses to serve a store that fails it.</p>
+    </div>
+  </div>
+
+  <p class="foot">Foreign-write arbitration, epoch takeover and restart storms are drilled; the interleaving of a client
+  namespace operation with an in-flight eviction is not. See page 5.</p>
+</div>
+
+<!-- ───────────────────────── PAGE 5 ───────────────────────── -->
+<div class="page">
+  <h1>Status &mdash; and what has not been measured</h1>
+  <p class="deck">The most important thing on this page is the second half. A differences list is only as good as the
+  instrument that would have caught an omission, and that instrument does not exist yet for flint-lite.</p>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>Closed 2026-08-28</h2>
+      <p class="sub">Each with a test observed red before the fix and green after</p>
+      <table>
+        <colgroup><col style="width:36%"><col style="width:64%"></colgroup>
+        <tbody>
+          <tr><td class="k">Server&rsquo;s own directory</td><td><code>.flint-nfs</code> was publishable and evictable; truncating <code>fh.key</code> would have made every filehandle permanently stale</td></tr>
+          <tr><td class="k">Eviction race</td><td>The evictor opened a client-writable path by name with no symlink guard and no identity re-check &mdash; a substituted inode, or a planted symlink, could be truncated instead</td></tr>
+          <tr><td class="k">Hard-link removal</td><td>Unlinking one name deleted the shared object and dropped the surviving name&rsquo;s rows</td></tr>
+          <tr><td class="k">Re-key</td><td>A re-key deleted a bucket object another live row still cited</td></tr>
+          <tr><td class="k">Failed hydration</td><td>A failed restore permanently rewrote the file&rsquo;s mtime</td></tr>
+          <tr><td class="k">Restore permissions</td><td>A DR restore stripped setuid and setgid from every file it restored</td></tr>
+          <tr><td class="k">Capability honesty</td><td><code>LINK_SUPPORT</code> advertised hard links the server refuses</td></tr>
+          <tr><td class="k">Store conformance</td><td>The hub trusted, without checking, that its object store enforces conditional writes</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>What is not measured</h2>
+      <p class="sub">Stated plainly, because the alternative is a number that is not true</p>
+      <p class="keyline"><b>There is no POSIX conformance number for flint-lite.</b> The repository runs pjdfstest &mdash; 8,798
+      assertions, differenced against a knfsd control &mdash; and it runs with <b>the S3 tier switched off</b>. In that
+      configuration <code>LINK</code> is never refused and not one object is ever written, so no round-trip behaviour on this
+      page is exercised by it.</p>
+      <p class="note">The recorded figures &mdash; 645 flint-only failures in the default posture, 239 with permission
+      enforcement on, against 149 for the knfsd control &mdash; are a conformance result for the hub <b>as an NFS server</b>.
+      They are the floor for flint-lite, not a measurement of it.</p>
+      <p class="note"><b>Two arms would produce one.</b> First, the same suite with the tier live, expecting the hard-link
+      tests to newly fail as a recorded deliberate delta. Second &mdash; and this is the one that does not exist in any form &mdash;
+      a round-trip fidelity differential: build a deliberately hostile tree, fingerprint every attribute, force it through
+      evict&rarr;hydrate and through destroy&rarr;restore, and diff. pjdfstest structurally cannot do this: each of its tests
+      creates, asserts and removes inside one test body, leaving no seam where a flush barrier could land between the write
+      and the assertion.</p>
+      <p class="note">Until those run, every claim on pages 3 and 4 is a verified reading of the code and none of them is a
+      measured bound.</p>
+    </div>
+  </div>
+
+  <p class="foot">Method: a six-lens code audit (by NFSv4 attribute, by operation, by POSIX semantics, by round-trip stage,
+  by name encoding, by file identity), each lens&rsquo;s findings re-read by an adversarial refuter, then the high-severity
+  undocumented findings put to three independent skeptics each; 48 raw findings, 6 confirmed. Every fix listed above carries a
+  test that was observed failing with the fix removed. Known limits of that audit: its own adversarial pass killed only one
+  finding, several results were duplicated across lenses, eight tier modules were never opened, and no formal model covers
+  re-keying or link counts. Verified against code at <code>b871595e</code> plus the tier fixes of 2026-08-28; the fixes are
+  not yet committed. Companion documents: <code>docs/plans/posix-fidelity-measurement-plan.md</code> (the two arms) and
+  <code>docs/plans/xattr-acl-support-plan.md</code>.</p>
+</div>
+
+</body></html>
