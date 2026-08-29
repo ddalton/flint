@@ -745,7 +745,7 @@ async fn handle_tcp_connection(
                        crate::nfs::segment::total_len(&reply), reply.len());
                 reply
             },
-            move |reply| async move { bcw_write.send_record_segments(&reply).await },
+            move |reply| async move { bcw_write.send_record_segments(reply).await },
         ).await?;
 
         rpc_count += 1;

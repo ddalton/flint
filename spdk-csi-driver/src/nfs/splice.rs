@@ -302,6 +302,12 @@ mod imp {
     pub struct Staged(std::convert::Infallible);
 
     impl Staged {
+        /// This type is uninhabited off Linux, so a value of it cannot
+        /// exist. Lets call sites convert one without a `cfg` of their
+        /// own -- the branch is unreachable, but it must still typecheck.
+        pub fn absurd(self) -> ! {
+            match self.0 {}
+        }
         pub fn len(&self) -> usize {
             match self.0 {}
         }

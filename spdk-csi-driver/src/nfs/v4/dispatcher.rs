@@ -1729,7 +1729,7 @@ impl CompoundDispatcher {
                     use crate::nfs::v4::compound::ReadResult;
                     OperationResult::Read(res.status, Some(ReadResult {
                         eof: res.eof,
-                        data: res.data.into(),
+                        data: res.data,
                     }))
                 } else {
                     OperationResult::Read(res.status, None)

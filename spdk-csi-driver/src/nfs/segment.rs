@@ -25,6 +25,11 @@ use bytes::Bytes;
 pub enum Segment {
     /// Bytes the server already holds.
     Mem(Bytes),
+    /// A payload staged in a pipe, spliced from the file and never read
+    /// into userspace. Draining it moves the bytes kernel-to-kernel;
+    /// dropping it retracts them.
+    #[cfg(target_os = "linux")]
+    Piped(crate::nfs::splice::Staged),
 }
 
 impl Segment {
@@ -36,6 +41,8 @@ impl Segment {
     pub fn len(&self) -> usize {
         match self {
             Segment::Mem(b) => b.len(),
+            #[cfg(target_os = "linux")]
+            Segment::Piped(s) => s.len(),
         }
     }
 
@@ -53,6 +60,13 @@ impl Segment {
     pub fn as_mem(&self) -> &Bytes {
         match self {
             Segment::Mem(b) => b,
+            #[cfg(target_os = "linux")]
+            Segment::Piped(_) => panic!(
+                "BUG: a spliced READ payload reached a surface that needs \
+                 contiguous bytes (GSS sealing, the slot reply cache, or \
+                 the File API). Those paths must set can_splice=false; see \
+                 CompoundContext::can_splice. Refusing to serve wrong bytes."
+            ),
         }
     }
 
@@ -60,6 +74,11 @@ impl Segment {
     pub fn into_mem(self) -> Bytes {
         match self {
             Segment::Mem(b) => b,
+            #[cfg(target_os = "linux")]
+            Segment::Piped(_) => panic!(
+                "BUG: a spliced READ payload reached a surface that needs \
+                 contiguous bytes. See Segment::as_mem."
+            ),
         }
     }
 }
@@ -67,6 +86,22 @@ impl Segment {
 impl From<Bytes> for Segment {
     fn from(b: Bytes) -> Self {
         Segment::Mem(b)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<crate::nfs::splice::Staged> for Segment {
+    fn from(s: crate::nfs::splice::Staged) -> Self {
+        Segment::Piped(s)
+    }
+}
+
+/// Off Linux there is no piped variant and `Staged` is uninhabited, so
+/// this conversion exists only to let the READ path stay `cfg`-free.
+#[cfg(not(target_os = "linux"))]
+impl From<crate::nfs::splice::Staged> for Segment {
+    fn from(s: crate::nfs::splice::Staged) -> Self {
+        s.absurd()
     }
 }
 

@@ -153,7 +153,9 @@ pub struct ReadOp {
 pub struct ReadRes {
     pub status: Nfs4Status,
     pub eof: bool,
-    pub data: Bytes,
+    /// A `Segment`, not `Bytes`: the payload may be staged in a pipe and
+    /// never enter userspace at all. See `crate::nfs::segment`.
+    pub data: crate::nfs::segment::Segment,
 }
 
 /// WRITE operation (opcode 38)
@@ -1431,7 +1433,7 @@ impl IoOperationHandler {
                 return ReadRes {
                     status: Nfs4Status::NoFileHandle,
                     eof: false,
-                    data: Bytes::new(),
+                    data: Bytes::new().into(),
                 };
             }
         };
@@ -1443,7 +1445,7 @@ impl IoOperationHandler {
             return ReadRes {
                 status: Nfs4Status::BadStateId,
                 eof: false,
-                data: Bytes::new(),
+                data: Bytes::new().into(),
             };
         }
 
@@ -1465,7 +1467,7 @@ impl IoOperationHandler {
                     return ReadRes {
                         status: Nfs4Status::Stale,
                         eof: false,
-                        data: Bytes::new(),
+                        data: Bytes::new().into(),
                     };
                 }
             },
@@ -1501,7 +1503,7 @@ impl IoOperationHandler {
                          (offset {}) → NFS4ERR_DELAY",
                         n, path, since, op.offset
                     );
-                    return ReadRes { status: Nfs4Status::Delay, eof: false, data: Bytes::new() };
+                    return ReadRes { status: Nfs4Status::Delay, eof: false, data: Bytes::new().into() };
                 }
             }
         }
@@ -1544,8 +1546,15 @@ impl IoOperationHandler {
             .min(super::session::SERVER_MAX_RESPONSE as usize);
         let fd_cache = Arc::clone(&self.fd_cache);
         let stateid_other = op.stateid.other;
+        // Splice staging is opt-in per COMPOUND and default off. It also
+        // requires that no slot is caching this reply: the cache must
+        // store the exact octets a replay returns (RFC 8881 15.1.10.4),
+        // which a payload that never enters userspace cannot supply.
+        // SEQUENCE is op 0, so `cache_slot` is already decided here.
+        let may_splice = ctx.can_splice && ctx.cache_slot.is_none();
 
-        let read_result = tokio::task::spawn_blocking(move || -> std::io::Result<(Bytes, bool)> {
+        let read_result = tokio::task::spawn_blocking(
+            move || -> std::io::Result<(crate::nfs::segment::Segment, bool)> {
             let file = match cached {
                 Some(f) => f,
                 None => {
@@ -1631,7 +1640,7 @@ impl IoOperationHandler {
             };
             
             if actual_count == 0 {
-                return Ok((Bytes::new(), true));
+                return Ok((Bytes::new().into(), true));
             }
 
             // Read data using positioned I/O (no seek needed - concurrent safe!)
@@ -1644,11 +1653,29 @@ impl IoOperationHandler {
             // streams, while knfsd went 280 -> 235). See
             // `crate::nfs::read_pool`.
             let mut bytes_read = 0usize;
-            let payload = crate::nfs::read_pool::read_at_pooled(actual_count, |buf| {
-                let n = file.read_at(buf, offset)?;
-                bytes_read = n;
-                Ok(n)
-            })?;
+            let payload: crate::nfs::segment::Segment = {
+                let staged = if may_splice {
+                    // file -> pipe. Nothing is on the wire yet, which is
+                    // what lets the tier re-consult below still retract.
+                    crate::nfs::splice::stage_read(&file, offset, actual_count)?
+                } else {
+                    None
+                };
+                match staged {
+                    Some(st) => {
+                        bytes_read = st.len();
+                        st.into()
+                    }
+                    // Not spliceable (oversized, or the fs refused) — the
+                    // copy path is a complete fallback, not a degraded one.
+                    None => crate::nfs::read_pool::read_at_pooled(actual_count, |buf| {
+                        let n = file.read_at(buf, offset)?;
+                        bytes_read = n;
+                        Ok(n)
+                    })?
+                    .into(),
+                }
+            };
 
             // Re-consult AFTER the read (review finding (b), caught
             // live by the chaos drill's evict/hydrate churn: git once
@@ -1694,8 +1721,15 @@ impl IoOperationHandler {
 
             let eof = offset + bytes_read as u64 >= file_size;
 
+            // NOTE for the splice path: every error return between the
+            // stage above and this line DROPS `payload`, and dropping a
+            // staged payload retracts it — the pipe is destroyed and not
+            // one byte reaches the client. That is exactly what the tier
+            // re-consult needs, and it is why staging goes to a pipe
+            // rather than straight to the socket.
             Ok((payload, eof))
-        }).await;
+        })
+        .await;
 
         match read_result {
             Ok(Ok((data, eof))) => {
@@ -1734,7 +1768,7 @@ impl IoOperationHandler {
                 ReadRes {
                     status,
                     eof: false,
-                    data: Bytes::new(),
+                    data: Bytes::new().into(),
                 }
             }
             Err(e) => {
@@ -1742,7 +1776,7 @@ impl IoOperationHandler {
                 ReadRes {
                     status: Nfs4Status::Io,
                     eof: false,
-                    data: Bytes::new(),
+                    data: Bytes::new().into(),
                 }
             }
         }
@@ -2769,7 +2803,7 @@ mod tests {
             )
             .await;
         assert_eq!(r2.status, Nfs4Status::Ok, "the retry must serve the restored bytes");
-        assert_eq!(r2.data.as_ref(), content.as_slice(), "byte-identical after the round trip");
+        assert_eq!(r2.data.as_mem().as_ref(), content.as_slice(), "byte-identical after the round trip");
         assert!(!evict::is_evicted(dev, ino));
         assert!(
             capture::snapshot(dev, ino).is_none_or(|c| !c.is_dirty()),
@@ -3400,7 +3434,7 @@ mod tests {
         
         // Should succeed
         assert_eq!(read_res.status, Nfs4Status::Ok);
-        assert_eq!(read_res.data.as_ref(), b"test content");
+        assert_eq!(read_res.data.as_mem().as_ref(), b"test content");
     }
 
     #[tokio::test]
@@ -3474,7 +3508,7 @@ mod tests {
 
         let read_res = handler.handle_read(read_op, &ctx).await;
         assert_eq!(read_res.status, Nfs4Status::Ok);
-        assert_eq!(read_res.data.as_ref(), b"Hello, NFS!");
+        assert_eq!(read_res.data.as_mem().as_ref(), b"Hello, NFS!");
 
         // 4. CLOSE
         let close_op = CloseOp {

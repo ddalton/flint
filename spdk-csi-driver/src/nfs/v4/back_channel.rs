@@ -175,11 +175,13 @@ impl BackChannelWriter {
     /// middle of a reply. The point is that a READ payload reaches the
     /// socket as the `Bytes` the I/O layer produced, never copied into
     /// a reply buffer first. See `CompoundResponse::encode_segments`.
+    /// Takes the segments BY VALUE: a piped segment is drained, which
+    /// consumes it, and a pipe has one reader.
     pub async fn send_record_segments(
         &self,
-        segs: &[crate::nfs::segment::Segment],
+        segs: Vec<crate::nfs::segment::Segment>,
     ) -> std::io::Result<()> {
-        let len: usize = crate::nfs::segment::total_len(segs);
+        let len: usize = crate::nfs::segment::total_len(&segs);
         if len > 0x7FFF_FFFF {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -191,7 +193,20 @@ impl BackChannelWriter {
         let mut w = self.inner.lock().await;
         w.write_all(&marker.to_be_bytes()).await?;
         for seg in segs {
-            w.write_all(seg.as_mem()).await?;
+            match seg {
+                crate::nfs::segment::Segment::Mem(b) => w.write_all(&b).await?,
+                #[cfg(target_os = "linux")]
+                crate::nfs::segment::Segment::Piped(mut st) => {
+                    // FLUSH FIRST. The splice goes to the raw socket, so
+                    // anything still sitting in this BufWriter would be
+                    // written AFTER the payload — foreign bytes in the
+                    // middle of a frame, which is the corruption class
+                    // `nfs::pipeline` already guards against.
+                    w.flush().await?;
+                    let sock: &tokio::net::TcpStream = w.get_ref().as_ref();
+                    st.drain_to(sock).await?;
+                }
+            }
         }
         w.flush().await?;
         Ok(())
@@ -363,7 +378,7 @@ mod tests {
             Bytes::from(vec![b'T'; 20]).into(),
         ];
         let total: usize = 12 + 4096 + 3 + 20;
-        writer.send_record_segments(&segs).await.unwrap();
+        writer.send_record_segments(segs).await.unwrap();
 
         let mut marker = [0u8; 4];
         reader.read_exact(&mut marker).await.unwrap();
