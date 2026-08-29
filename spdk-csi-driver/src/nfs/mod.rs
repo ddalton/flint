@@ -35,6 +35,7 @@ pub mod rpcsec_gss;   // RPCSEC_GSS authentication (Kerberos support)
 pub mod sec_policy;   // Minimum security flavor floor (FLINT_NFS_MIN_SEC)
 pub mod pipeline;     // Per-connection RPC pipelining (RFC 8881 §2.10.6)
 pub mod read_pool;    // Reusable READ buffers (mmap_lock is why, not CPU)
+pub mod splice;       // Zero-copy READ staging via splice(2) (Linux; pipe = retract window)
 pub mod activity;     // Client-activity signal (the idle-lifecycle input)
 pub mod fence;        // F33: backing-store self-fencing watchdog
 pub mod privilege;       // startup probe: can this server chown? (finding 7)
