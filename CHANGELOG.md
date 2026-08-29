@@ -10,6 +10,203 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [1.42.0] - 2026-08-28
+
+The read path, and a conformance defect it uncovered.
+
+`splice(2)` was the last untried lever on NFS READ, and it is worth what
+the measurement said it was: **the payload costs 36% of the CPU per byte
+it used to**, which closes almost all of the distance to the in-kernel
+server — the CPU gap to knfsd goes from **1.83x to 1.07x**. It ships
+**dark**, behind `FLINT_NFS_SPLICE=1`, because the conformance suites
+have only been run with it off.
+
+Chasing an unrelated pynfs failure while measuring it turned up a real
+EXCHANGE_ID defect: a client colliding with another principal's
+confirmed record was answered `NFS4ERR_OK` where RFC 8881 requires
+`NFS4ERR_CLID_INUSE`.
+
+### Added
+
+- **Zero-copy READ behind `FLINT_NFS_SPLICE=1`** (default **off**). A
+  READ stages file → pipe inside the blocking task it already used, and
+  the reply path moves pipe → socket. The payload never enters
+  userspace.
+
+  Measured in-server, 5 interleaved reps per arm, paired per-rep ratios,
+  4 readers on an idle 2-vCPU Linux VM:
+
+  | arm | cpu-ms/GiB | MiB/s | CPU vs knfsd | throughput vs knfsd |
+  |---|---|---|---|---|
+  | copy path | 495 | 3195 | 1.83x | 56% |
+  | **splice** | **290** | **4935** | **1.07x** | **86%** |
+  | knfsd | 270 | 5753 | — | — |
+
+  Median CPU ratio **0.358** (range 0.344–0.397 over 10 paired reps) and
+  **+59% throughput** (median 1.59x).
+
+  Scoring is **cpu-ms/GiB, not MiB/s**: an earlier throughput-scored
+  measurement of the same change came back 0.989x — indistinguishable
+  from nothing — because a single-stream read is not CPU-bound. The
+  server-CPU metric is what the change is actually about, and the
+  throughput gain is a consequence of it rather than the thing measured.
+
+  Three constraints hold the path off by construction rather than by
+  remembering a guard: `can_splice` **defaults to false**, so every
+  in-process consumer of a READ result is correct without knowing splice
+  exists (this immediately caught the HTTP File API, which consumes READ
+  bytes in-process and touches no socket); GSS is excluded, because a MIC
+  computed over the body needs a body in userspace; and a slot-cached
+  reply is excluded, because the cache must be able to replay contiguous
+  bytes.
+
+  **The retract is structural, not added.** The tier's post-read consult
+  already runs inside that blocking closure, so every error return
+  between staging and success *drops* the staged pipe, and dropping
+  retracts it — the pipe is destroyed and not one byte reaches the
+  client. Staging to a pipe rather than straight to the socket is the
+  whole reason the existing control flow stays correct.
+
+  Still off by default: pynfs and nfstest have only been run with the
+  flag **off**. Running both with it **on** is the gate before this
+  becomes the default.
+
+- **The tier refuses to start against an object store that does not
+  enforce conditional writes.** The hub trusted, without ever checking,
+  that its store honours `If-Match`/`If-None-Match`. Against a store that
+  accepts those headers and ignores them — some S3-compatible backends,
+  and any proxy that strips them — the tier's compare-and-swap
+  arbitration silently degrades to last-writer-wins, with no error
+  anywhere to explain the lost writes. `flint-lean` already refused to
+  start on a non-conformant bucket; the hub started and trusted.
+
+  The probe is deliberately a strict *subset* of the existing version
+  probe: it does **not** require bucket versioning, which a hub does not
+  need and which would refuse a perfectly good deployment at startup.
+
+### Fixed
+
+- **`EXCHANGE_ID` answered a client collision with `OK`** where RFC 8881
+  §18.35.4 case 3 requires `NFS4ERR_CLID_INUSE`. A second principal
+  presenting an existing `co_ownerid` was allowed to supersede the
+  incumbent, with the incumbent's teardown merely *deferred* until the
+  newcomer confirmed.
+
+  Deferral is case **5**'s rule — client reboot, principal *unchanged* —
+  and applying it here was both non-conformant and **weaker than the
+  answer the RFC asks for**: the superseded clientid stayed usable
+  (pynfs `EID5e` caught exactly that, `CREATE_SESSION` answering `OK`
+  where `NFS4ERR_STALE_CLIENTID` was due), and it bought no safety,
+  because the colliding peer can confirm its own new clientid one
+  operation later and trigger the cascade anyway. Refusing outright is
+  strictly stronger.
+
+  Both arms of case 3 are fixed, not one: the RFC's record pattern for
+  it is `{ ownerid_arg, *, old_principal_arg, ..., confirmed }` — the
+  **verifier is a wildcard** — so a confirmed record held by a different
+  principal is a collision whether or not the verifier matches. The
+  matching-verifier arm was previously labelled "case 9 alt" in the
+  source, which is the `UPD_CONFIRMED_REC_A` update family and does not
+  apply without that flag.
+
+  The answer now turns on the incumbent, as the RFC specifies: live
+  state under an unexpired lease → `NFS4ERR_CLID_INUSE` and nothing is
+  touched; no state, or an expired lease → the record is deleted
+  **immediately** and a new shorthand clientid is minted.
+
+- **Seven POSIX-fidelity defects in the tier**, each seen red before the
+  fix. Every one is silent — nothing fails, and the damage surfaces
+  later as missing data or a wrong attribute:
+
+  - the server's own `.flint-nfs` directory was publishable and
+    evictable, so truncating `fh.key` would have made every filehandle in
+    the export permanently stale;
+  - the evictor opened a client-writable path **by name** with no symlink
+    guard and no identity re-check, so a substituted inode or a planted
+    symlink could be truncated instead of the intended file;
+  - unlinking one name of a hard-linked file deleted the shared object
+    and dropped the surviving name's rows, leaving the remaining link
+    pointing at nothing;
+  - a re-key deleted a bucket object another live row still cited;
+  - a failed hydration permanently rewrote the file's mtime, so a
+    transient S3 error silently changed metadata nothing would restore;
+  - a DR restore stripped setuid and setgid from every file it restored;
+  - `FATTR4_LINK_SUPPORT` was hardcoded true while `LINK` is refused with
+    `NOTSUPP` under the tier. Clients *ask* before they try — `tar`,
+    `pax`, `rsync -H` and `cp -a` read that bit to choose between linking
+    and copying — so the lie turned a supported fallback into a hard
+    error in the middle of an extract.
+
+- **A two-month-old test flake, correctly diagnosed this time.**
+  `read_count_is_clamped_to_the_response_ceiling` was green alone and red
+  in the full suite, and had been recorded as `(dev, ino)` marker
+  aliasing — a tier test's eviction marker landing on the test file's
+  reused inode. Instrumenting an actual failure refuted that: the failing
+  run showed **no marker on the file at all**.
+
+  The real cause is the *other* half of the window guard. `MARKER_CYCLE`
+  is one process-global counter bumped by every marker insert anywhere,
+  and a read window is valid only if it has not moved — so **any** test
+  planting **any** marker inside the window breaks it, related or not. It
+  needed the full suite because two process-global statics have to line
+  up: `capture::enable()` is deliberately sticky with no disable, so one
+  tier test leaves the consult live for every test after it; and
+  `is_evicted` is gated on capture being enabled while `marker_cycle()`
+  is not.
+
+  The product behaviour is deliberate and unchanged — a global counter
+  means an unrelated file's eviction costs one spurious `DELAY` retry,
+  which the eviction module weighs explicitly against per-identity
+  narrowing. Production evicts rarely; a test binary evicts constantly.
+  So the fix is test isolation: every cycle-bumping test now takes the
+  rig lock this one already held. The assertion is also self-diagnosing
+  now, reporting the capture state, the marker, and the cycle delta, so a
+  recurrence names its own cause instead of pointing at the response
+  ceiling it has nothing to do with.
+
+- **A Linux-only red suite that macOS could never have shown — and this
+  one *was* inode aliasing.** `tier::import`'s adopt test lost
+  `src/nested/main.rs`: the row never reached the backend while the
+  adopt still reported it marked. Not a race — it reproduced 5/5 in the
+  full suite, in `tier::import` alone, and **single-threaded**, then
+  narrowed to an exact pair of tests.
+
+  The preceding test marks one file durable and drops its `TempDir`.
+  Measured on the VM rather than argued: the next `TempDir`'s
+  `src/nested/main.rs` gets **inode 268093 — the same inode** ext4 just
+  freed. `capture::queue_mark` returns early for a known-durable
+  identity, so the mark is dropped in silence, and `adopt_local_tree`
+  counts at the note call rather than at the queueing, so it reports 3
+  files while 2 rows exist. APFS allocates differently, which is exactly
+  why every macOS run was green.
+
+  **Production is not exposed:** a real unlink goes through the server,
+  `tier::identity` fires, and `capture::forget` clears the memo — that
+  function's own comment already names ext4 inode reuse as the hazard.
+  Only a tree that vanishes without the server knowing leaves a stale
+  entry, and a `TempDir` drop is precisely that. So the fix is a
+  test-only reset of the capture maps at rig construction, not a change
+  to how the product keys them.
+
+### Changed
+
+- **A READ payload is no longer required to be memory the server holds.**
+  The reply path carries *segments* rather than buffers, and a segment is
+  either bytes or a staged pipe. Consequently `ReadResult` and
+  `OperationResult` lose `Clone` — a pipe has one reader — which is only
+  affordable because the size check no longer clones every result to
+  measure one length. That clone was itself the copy that mattered on the
+  read path; segmenting the RPC layer alone measured 0.989x.
+
+### Not published
+
+**No images or charts have been pushed for this release yet.** The tag
+records the code; `1.41.1` remains the current installable release until
+`dilipdalton/flint-driver:1.42.0`, `dilipdalton/flint-pnfs:1.42.0` and
+the three charts are published. This is called out because the same gap
+shipped silently once before — `1.41.0` was tagged and never published,
+and had to be superseded by `1.41.1`.
+
 ## [1.41.1] - 2026-08-27
 
 **Supersedes 1.41.0, which was tagged but never published.** The
@@ -2956,12 +3153,13 @@ neither tag represents a supported upgrade source.
 No security advisories at this release.
 
 [Unreleased]: https://github.com/ddalton/flint/compare/v1.35.1...HEAD
+[1.42.0]: https://github.com/ddalton/flint/compare/v1.41.1...v1.42.0
 [1.41.1]: https://github.com/ddalton/flint/compare/v1.41.0...v1.41.1
-[1.41.0]: https://github.com/ddalton/flint/compare/v1.39.0...v1.41.0
+[1.41.0]: https://github.com/ddalton/flint/compare/v1.40.0...v1.41.0
 # 1.40.0 was cut AFTER 1.41.0 (which reserved the number), so it is
 # compared against v1.41.0 rather than v1.39.0 — that diff is the
 # passthrough work and nothing else.
-[1.40.0]: https://github.com/ddalton/flint/compare/v1.41.0...v1.40.0
+[1.40.0]: https://github.com/ddalton/flint/compare/v1.39.0...v1.40.0
 [1.39.0]: https://github.com/ddalton/flint/compare/v1.38.0...v1.39.0
 [1.38.0]: https://github.com/ddalton/flint/compare/v1.37.0...v1.38.0
 [1.37.0]: https://github.com/ddalton/flint/compare/v1.36.0...v1.37.0

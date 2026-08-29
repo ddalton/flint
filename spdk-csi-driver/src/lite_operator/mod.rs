@@ -127,6 +127,17 @@ mod guide_pins {
                 format!("operator chart {chart_version} · images {app_version}"),
                 "the html footer",
             ),
+            // The line a reader actually COPIES. The .md's copy of this
+            // was gated from the start and the .html's was not, so the
+            // 1.42.0 bump left the html telling readers to install
+            // 0.2.9 while the header above it said 0.2.10 — caught by
+            // eye, not by this test. That is the same miss the doc
+            // drill made: proving the PROCEDURE works while the stated
+            // NUMBERS drift. Both copies are gated now.
+            (
+                format!("--version {chart_version}</span>"),
+                "the html helm install pin",
+            ),
         ] {
             assert!(
                 GUIDE_HTML.contains(&needle),
