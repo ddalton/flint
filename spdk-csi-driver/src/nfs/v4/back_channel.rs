@@ -336,6 +336,55 @@ mod tests {
         assert_eq!(&buf, b"hello");
     }
 
+    /// ONE record marker must cover the TOTAL of all segments.
+    ///
+    /// A segmented reply is header + payload + pad + tail, and the
+    /// marker is written BEFORE any of them. Getting its length from
+    /// the first segment (or from the segment count) produces a frame
+    /// the client silently mis-parses: it reads the wrong number of
+    /// bytes and every subsequent frame on that connection is
+    /// misaligned, which looks like random corruption much later.
+    ///
+    /// This matters most for what comes next: when a segment's bytes
+    /// live in a pipe rather than memory, the marker still has to be
+    /// correct while those bytes have not moved yet -- so the length
+    /// must come from the segment list, never from the buffers.
+    #[tokio::test]
+    async fn a_multi_segment_frame_carries_one_marker_over_the_total() {
+        use crate::nfs::segment::Segment;
+        let (writer, mut reader) = pair().await;
+
+        // Distinguishable sizes AND contents, so a dropped, reordered or
+        // short segment is visible rather than merely changing a count.
+        let segs: Vec<Segment> = vec![
+            Bytes::from(vec![b'H'; 12]).into(),
+            Bytes::from(vec![b'P'; 4096]).into(),
+            Bytes::from(vec![0u8; 3]).into(),
+            Bytes::from(vec![b'T'; 20]).into(),
+        ];
+        let total: usize = 12 + 4096 + 3 + 20;
+        writer.send_record_segments(&segs).await.unwrap();
+
+        let mut marker = [0u8; 4];
+        reader.read_exact(&mut marker).await.unwrap();
+        let raw = u32::from_be_bytes(marker);
+        assert_eq!(raw & 0x8000_0000, 0x8000_0000, "marker high bit");
+        assert_eq!(
+            (raw & 0x7FFF_FFFF) as usize,
+            total,
+            "the marker must be the SUM of every segment, not the first one"
+        );
+
+        let mut body = vec![0u8; total];
+        reader.read_exact(&mut body).await.unwrap();
+        let mut want = Vec::with_capacity(total);
+        want.extend_from_slice(&[b'H'; 12]);
+        want.extend_from_slice(&[b'P'; 4096]);
+        want.extend_from_slice(&[0u8; 3]);
+        want.extend_from_slice(&[b'T'; 20]);
+        assert_eq!(body, want, "segments must arrive in order, whole");
+    }
+
     #[tokio::test]
     async fn concurrent_sends_do_not_interleave() {
         // The Mutex inside BackChannelWriter must serialize so two

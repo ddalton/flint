@@ -467,6 +467,109 @@ mod tests {
         );
     }
 
+    /// **The failure mode with the worst blast radius.** Once the record
+    /// marker is on the wire a half-written frame cannot be recovered,
+    /// so a drain that dies partway must surface as an ERROR the caller
+    /// can act on (close the connection) -- never a silent success, and
+    /// never a hang.
+    ///
+    /// A 1 MiB payload cannot fit in the socket buffer, so the drain has
+    /// to touch a socket whose peer is already gone rather than
+    /// completing into kernel buffering.
+    #[tokio::test]
+    async fn a_disconnect_mid_drain_errors_and_does_not_hang() {
+        let _x = exclusive();
+        super::imp::reset_for_test();
+        let d = tempfile::tempdir().unwrap();
+        let f = file_of(&d, "a.bin", 13, MAX_STAGE);
+        let (tx, rx) = pair().await;
+
+        let mut st = stage_read(&f, 0, MAX_STAGE).unwrap().expect("must splice");
+        drop(rx); // peer goes away before the payload can move
+
+        let before = super::imp::pool_len();
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            st.drain_to(&tx),
+        )
+        .await
+        .expect("drain_to must not hang when the peer is gone");
+        assert!(
+            r.is_err(),
+            "a dead peer must surface as an error, not silent success"
+        );
+        drop(st);
+        assert_eq!(
+            super::imp::pool_len(),
+            before,
+            "a partly-drained pipe still holds bytes and must NOT be pooled"
+        );
+    }
+
+    /// Exercises the readiness retry loop, which nothing else does.
+    ///
+    /// The byte-for-byte test uses 64 KiB, which the socket buffer can
+    /// swallow in a single splice -- so it never sees EAGAIN and the
+    /// `writable().await` / re-arm path is untested by it. A 1 MiB
+    /// payload cannot fit, so the drain MUST go around the loop, and
+    /// every byte still has to arrive in order.
+    #[tokio::test]
+    async fn a_payload_larger_than_the_socket_buffer_drains_completely() {
+        let _x = exclusive();
+        super::imp::reset_for_test();
+        let d = tempfile::tempdir().unwrap();
+        let f = file_of(&d, "a.bin", 17, MAX_STAGE);
+        let (tx, mut rx) = pair().await;
+
+        // FORCE the retry loop. Left to itself the socket buffer
+        // auto-tunes, and a single splice can swallow the whole payload
+        // -- which would make this test pass without ever reaching the
+        // readiness path it exists to cover. Mutation testing showed
+        // exactly that: a short-drain mutation was caught by the
+        // disconnect test and NOT by this one. An 8 KiB send buffer
+        // against a 1 MiB payload guarantees many EAGAIN rounds.
+        {
+            use std::os::unix::io::AsRawFd;
+            let sz: libc::c_int = 8 * 1024;
+            let rc = unsafe {
+                libc::setsockopt(
+                    tx.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    &sz as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+            assert_eq!(rc, 0, "SO_SNDBUF must be settable or this test proves nothing");
+        }
+
+        // Drain the peer concurrently, or the sender wedges on a full
+        // socket buffer and the test times out instead of asserting.
+        let reader = tokio::spawn(async move {
+            let mut got = vec![0u8; MAX_STAGE];
+            rx.read_exact(&mut got).await.unwrap();
+            got
+        });
+
+        let mut st = stage_read(&f, 0, MAX_STAGE).unwrap().expect("must splice");
+        st.drain_to(&tx).await.unwrap();
+        drop(st);
+
+        // Timeout, not a bare await: a regression that declared the
+        // drain done early would leave the reader blocked forever, and a
+        // test that hangs is a test nobody can diagnose. Truncation must
+        // FAIL here, fast.
+        let got = tokio::time::timeout(std::time::Duration::from_secs(10), reader)
+            .await
+            .expect("drain must deliver the whole payload, not wedge the reader")
+            .unwrap();
+        assert_eq!(
+            got,
+            pattern(17, 0, MAX_STAGE),
+            "every byte must arrive, in order, across the retry loop"
+        );
+    }
+
     /// Above `MAX_STAGE` the retract window cannot be honoured, so the
     /// caller must be told to take the copy path — not handed fragments.
     #[tokio::test]
