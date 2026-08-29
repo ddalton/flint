@@ -384,3 +384,48 @@ Scoring on cpu-ms/GiB remains the right choice — it is the metric that
 still means something when the bottleneck moves elsewhere, e.g. more
 cores or a slower network. But the claim that a throughput gate would be
 UNINFORMATIVE here was overstated: it would have shown +59%.
+
+
+---
+
+## 10. vs knfsd — measured 2026-08-28, one session, one kernel
+
+`tests/lima/pnfs/splice-vs-knfsd.sh`. Three arms interleaved per rep,
+identical workload (4 readers, 64 MiB files, warm, O_DIRECT, 8 passes).
+
+| arm | cpu-ms/GiB | MiB/s | CPU vs knfsd | tput vs knfsd |
+|---|---|---|---|---|
+| flint, copy path | 495 | 3195 | 1.83x | 56% |
+| **flint, splice** | **290** | **4935** | **1.07x** | **86%** |
+| knfsd | 270 | 5753 | — | — |
+
+**Splice takes the CPU gap to knfsd from 1.83x to 1.07x, and throughput
+from 56% to 86% of it.**
+
+### Why the metric is total system CPU, not per-process
+
+S3 read `/proc/PID/stat`, which is BLIND to knfsd: its work is in kernel
+threads and softirq, not in any process the rig owns. Scoring flint's
+process CPU against knfsd measured that way would flatter flint by
+construction. Total system busy CPU (`/proc/stat`, minus idle and
+iowait) is the only number that means the same thing for an in-kernel
+server and a userspace one.
+
+### That choice UNDERSTATES the remaining gap — do not quote 1.07x alone
+
+The client's cost (dd, NFS client, TCP, softirq) is counted in every
+arm, so it dilutes the differences. Cross-checking against S3's
+per-process figures (110 splice / 300 copy) implies a client share of
+~180-195 cpu-ms/GiB, which would put knfsd's SERVER-SIDE cost near ~90
+against flint-splice's measured 110 — i.e. flint is probably still ~20%
+dearer in the server itself. **That is an inference from subtracting an
+estimated constant, not a measurement.** Treat 1.07x as the floor of
+flint's remaining deficit, not the ceiling.
+
+knfsd also remains 14% faster in wall time (356 ms vs 415 ms per 2 GiB).
+Splice narrowed the throughput gap; it did not close it.
+
+### Not general
+
+One configuration: 4 readers, 64 MiB files, cache-warm, 2 vCPU,
+loopback, O_DIRECT. No claim beyond it.

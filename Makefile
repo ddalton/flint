@@ -220,6 +220,12 @@ nfs-server-vm-stop: ## Stop the in-VM flint-nfs-server
 # enough apart to ship as defects. A pynfs number for one front-end is
 # not a pynfs number for the other, and this target is what makes the
 # claim checkable rather than assumed.
+# Splice staging is off unless asked for. `make test-nfs-protocol-mds
+# SPLICE=1` runs the whole conformance suite against the spliced READ
+# path -- which is the gate before FLINT_NFS_SPLICE could ever default
+# on, because S3 only proved correct bytes for sequential O_DIRECT
+# reads, a far narrower claim than protocol conformance.
+SPLICE         ?= 0
 MDS_VM_BIN     := $(CARGO_DIR)/target/$(LIMA_ARCH)-unknown-linux-musl/release/flint-pnfs-mds
 MDS_VM_EXPORT  := /srv/flint-mds-export
 MDS_VM_STATE   := /srv/flint-mds-state
@@ -243,6 +249,7 @@ pnfs-mds-vm: ## Build+run flint-pnfs-mds --standalone INSIDE the Lima VM as root
 	  chmod +x /tmp/flint-pnfs-mds-vm; \
 	  systemd-run --unit=flint-mds-vm --collect \
 	    --setenv=FLINT_NFS_GRACE_SECS=900 \
+	    --setenv=FLINT_NFS_SPLICE=$(SPLICE) \
 	    --setenv=RUST_LOG=$${MDS_LOG:-info} \
 	    /tmp/flint-pnfs-mds-vm --config /tmp/lite-pynfs.yaml'
 	@sleep 4
@@ -277,7 +284,7 @@ test-nfs-protocol-mds: pnfs-mds-vm ## Leg C1: full pynfs 4.1 suite against the H
 	# either way so a failure is diagnosable, and let the checker decide.
 	@limactl shell $(LIMA_VM) -- bash -lc '\
 	    cd /opt/pynfs/nfs4.1 && \
-	    python3 ./testserver.py 127.0.0.1:$(NFS_PORT)/tmp \
+	    PYTHONPATH=/opt/pynfs python3 ./testserver.py 127.0.0.1:$(NFS_PORT)/tmp \
 	      --maketree --nocleanup --json=/tmp/pynfs-mds.json all' \
 	    > /tmp/flint-pynfs-mds-run.log 2>&1; \
 	  limactl cp $(LIMA_VM):/tmp/pynfs-mds.json /tmp/flint-pynfs-mds-results.json || true; \
