@@ -294,3 +294,62 @@ and behave identically — if any of them moves a byte, stop.
 - `cachethis` and GSS must never splice
 - non-Linux must never construct `Piped`
 - ~~teardown still shuts the write half down~~ — moot: `into_split()` is kept
+
+
+---
+
+## 8. S3 RESULT — 2026-08-28: **splice costs 36% of the CPU in-server**
+
+`tests/lima/pnfs/splice-differential.sh`. One release binary, two units on
+private ports, `FLINT_NFS_SPLICE` toggled. 4 concurrent readers, client
+`O_DIRECT`, cache-warm, 8 passes per measurement, arms interleaved per rep.
+
+| arm | cpu-ms/GiB |
+|---|---|
+| off (copy path) | ~300 |
+| **on (splice)** | **110** |
+
+Two runs, 10 paired reps: **median ratio 0.358**, range 0.344-0.397.
+**2.8x less server CPU per byte.**
+
+### All four guards passed — and each exists because of a past failure
+
+- **CORRECTNESS** — md5 of the file on disk vs served through the mount,
+  plus exact byte counts, both arms. Added after noticing the rig read to
+  `/dev/null` and so was structurally blind to wrong bytes: a path serving
+  short or garbled reads would have scored as FAST. Every failure mode
+  this design guards against produces bad data, not slow data.
+- **EXECUTION** — pipe fds in `/proc/PID/fd`: **off 0, on 18**. A pipe is
+  created only by the splice pool, so this is a direct observation of the
+  mechanism. Without it, "both arms measure the same" is
+  indistinguishable from "the path never fired" — the 0.989x null.
+- **IDENTITY** — a `WHICH_ARM` marker read back through each mount. Two
+  units once bound the same port and a mount silently attached to the
+  wrong server.
+- **RIG HEALTH** — VM idle before and after. A runaway process once made
+  a gate PASS with a flattering ratio.
+
+### Consistent with S0, and not identical to it
+
+S0's standalone microbench said 0.283; in-server is 0.358. The gap is the
+work splice does not touch — XDR encoding, state lookups, the tier
+consult. A number that matched S0 exactly would have been MORE suspicious.
+
+### What is NOT claimed
+
+- **No knfsd comparison.** Recorded knfsd figures (210-280 cpu-ms/GiB)
+  come from a different session, build profile and workload. Comparing
+  cpu-ms/GiB across sessions already misled once this month, when knfsd's
+  own number moved 560 -> 400 between runs. That needs a knfsd arm in
+  THIS rig.
+- **One configuration.** 4 readers, 64 MiB files, warm cache, 2 vCPU,
+  O_DIRECT. Not a general statement.
+
+### Harness bug worth remembering
+
+`setup_arm` stopped the server BEFORE unmounting, which leaves an NFS
+mount pointing at a dead server — `umount -f` then blocks in D-state
+forever (observed: 286s, load 1.00 at 0% CPU). **`umount -l` before
+stopping the server** is the only safe order, and the script now also
+unmounts on EXIT. It surfaced only on the third run, because runs 1-2
+silently left mounts behind.
