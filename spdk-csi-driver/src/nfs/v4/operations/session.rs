@@ -20,29 +20,52 @@ use tracing::{debug, info, warn};
 
 /// Fore-channel buffer caps this server advertises in CREATE_SESSION.
 ///
-/// PINNED AT EXACTLY 1 MiB, AND THAT IS LOAD-BEARING IN A WAY THAT COSTS
-/// THROUGHPUT. Linux's `nfs4_session_set_rwsize()` derives the mount's
-/// rsize/wsize by SUBTRACTING its COMPOUND overhead
-/// (`nfs41_maxread_overhead` / `nfs41_maxwrite_overhead`) from whatever the
-/// server advertises here. So a client that asks for `rsize=1048576` — which
-/// is exactly what the pNFS CSI driver's mount string asks for, see
-/// `pnfs_csi::build_pnfs_mount_opts` — cannot get it, and settles for
-/// 1047672 / 1047532. Measured on a real 6.1 client (runaw, 2026-08-01);
-/// the shortfalls are 904 and 1044 bytes, matching the kernel's constants
-/// to the byte.
+/// SIZED SO THE CLIENT'S SUBTRACTION LANDS ON 1 MiB, WHICH IS THE WHOLE
+/// POINT. Linux's `nfs4_session_set_rwsize()` derives the mount's
+/// rsize/wsize by SUBTRACTING its own COMPOUND overhead
+/// (`nfs41_maxread_overhead` = 904, `nfs41_maxwrite_overhead` = 1044)
+/// from whatever the server advertises here, and then clamps to
+/// `NFS_MAX_FILE_IO_SIZE` (1 MiB). Advertising exactly 1 MiB therefore
+/// guaranteed the client could never reach 1 MiB: it settled for
+/// 1047672 / 1047532, measured byte-for-byte on a real 6.1 client
+/// (runaw, 2026-08-01).
 ///
-/// The consequence is a DOUBLED RPC COUNT for 1 MiB direct I/O: each one
-/// splits into a full-size RPC plus a runt, and on writes that runt is a
-/// sub-page, non-page-aligned tail.
+/// That cost a DOUBLED RPC COUNT for 1 MiB I/O. Every aligned megabyte
+/// split into a full-size RPC plus a runt of 904 bytes, and the runt
+/// paid a full round trip: SEQUENCE + PUTFH + READ, two `splice`s, two
+/// stats, ~3 futexes — for 0.09% of the bytes. A syscall census on
+/// 2026-08-29 measured 389 RPCs for 192 one-megabyte reads, and the
+/// client's own counters put the mean on-wire READ at 509 KiB, which is
+/// exactly the mean of a (1047672, 904) pair.
 ///
-/// Raising these is the fix, but it resizes buffers for EVERY NFSv4.1
-/// client and not just the pNFS path, so it is a deliberate change with its
-/// own gate — not a constant to bump casually. They are `pub(crate)` so the
-/// relationship can be asserted in a test instead of rediscovered from a
-/// `mount` output; see
-/// `pnfs_csi::mount_opts_tests::the_session_cap_holds_the_client_below_the_rsize_we_ask_for`.
-pub(crate) const SERVER_MAX_REQUEST: u32 = 1024 * 1024;
-pub(crate) const SERVER_MAX_RESPONSE: u32 = 1024 * 1024;
+/// Carrying `CHANNEL_HEADROOM` above the payload ceiling fixes it: the
+/// subtraction now lands above 1 MiB, the client's own clamp brings it
+/// back to exactly 1048576, and the RPC count halves. Measured on lima,
+/// paired arms rotating per rep: read_ops 1542 -> 771 exactly.
+///
+/// A second effect falls out of the same change. 1048576 is 4 KiB
+/// aligned where 1047672 was not, so a sequential reader now lands on
+/// aligned offsets on EVERY read rather than only the first. The DS
+/// O_DIRECT path therefore stops reading the two extra blocks that
+/// bracket an unaligned span, and stops shifting the payload to the
+/// front of the buffer — see `pnfs::ds::io::odirect_read`.
+///
+/// The advertised cap is NOT the payload ceiling. `MAX_IO_PAYLOAD`
+/// below is what the server will actually place in a reply; the
+/// headroom exists so a full-size payload plus its COMPOUND header
+/// still fits under the negotiated `ca_maxresponsesize` and does not
+/// trip the REP_TOO_BIG gate in the dispatcher.
+pub(crate) const SERVER_MAX_REQUEST: u32 = MAX_IO_PAYLOAD + CHANNEL_HEADROOM;
+pub(crate) const SERVER_MAX_RESPONSE: u32 = MAX_IO_PAYLOAD + CHANNEL_HEADROOM;
+
+/// The largest READ payload this server will ever put in a reply, and the
+/// figure a client should end up with as its `rsize`.
+pub(crate) const MAX_IO_PAYLOAD: u32 = 1024 * 1024;
+
+/// Room above `MAX_IO_PAYLOAD` in the advertised fore-channel caps, so the
+/// client's subtraction lands ON the payload figure instead of below it.
+/// 2 KiB covers both kernel constants (904 read, 1044 write) with slack.
+const CHANNEL_HEADROOM: u32 = 2048;
 
 /// Ceiling on `ca_maxresponsesize_cached` — the bytes a client can DEMAND
 /// the server pin per slot, for the life of the slot, by sending

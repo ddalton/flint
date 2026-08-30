@@ -2967,6 +2967,61 @@ mod segment_tests {
         }
     }
 
+    /// THE HEADROOM IS LOAD-BEARING, AND THIS IS WHERE IT IS CHECKED.
+    ///
+    /// The fore-channel cap we advertise is `MAX_IO_PAYLOAD +
+    /// CHANNEL_HEADROOM`, and a client that takes us at our word asks
+    /// for `MAX_IO_PAYLOAD` bytes in a single READ. What comes back is
+    /// that payload PLUS a COMPOUND envelope, and the dispatcher
+    /// refuses any reply longer than the negotiated `ca_maxresponsesize`
+    /// with REP_TOO_BIG. If the headroom does not cover the envelope,
+    /// the server rejects exactly the request its own advertisement
+    /// invited — on every full-size read, not as an edge case.
+    ///
+    /// The envelope is MEASURED, not written down. A constant would
+    /// keep agreeing with today's op list while a future compound grew
+    /// past it.
+    #[test]
+    fn a_full_size_read_reply_fits_under_the_cap_we_advertise() {
+        use crate::nfs::v4::operations::session::{MAX_IO_PAYLOAD, SERVER_MAX_RESPONSE};
+
+        // The real shape of a read compound: SEQUENCE, PUTFH, READ.
+        let payload = vec![0u8; MAX_IO_PAYLOAD as usize];
+        let mut r = CompoundResponse::new();
+        r.tag = String::new();
+        r.results.push(OperationResult::Sequence(
+            Nfs4Status::Ok,
+            Some(SequenceResult {
+                sessionid: SessionId([0u8; 16]),
+                sequenceid: 1,
+                slotid: 0,
+                highest_slotid: 127,
+                target_highest_slotid: 127,
+                status_flags: 0,
+            }),
+        ));
+        r.results.push(OperationResult::PutFh(Nfs4Status::Ok));
+        r.results.push(OperationResult::Read(
+            Nfs4Status::Ok,
+            Some(ReadResult { eof: false, data: Bytes::from(payload).into() }),
+        ));
+
+        let encoded: usize = r.encode_segments().iter().map(|s| s.len()).sum();
+        assert!(
+            encoded <= SERVER_MAX_RESPONSE as usize,
+            "a MAX_IO_PAYLOAD READ encodes to {encoded} bytes, above the advertised \
+             ca_maxresponsesize {SERVER_MAX_RESPONSE} — the dispatcher would answer \
+             REP_TOO_BIG to the very read the negotiated rsize invites",
+        );
+        // Anti-vacuity: the margin has to be the headroom absorbing a
+        // real envelope, not an envelope that encoded to nothing.
+        assert!(
+            encoded > MAX_IO_PAYLOAD as usize,
+            "the COMPOUND envelope encoded to zero bytes — this assertion would \
+             hold with no headroom at all and is not testing anything",
+        );
+    }
+
     /// The payload must travel as its OWN segment, not be copied into a
     /// buffer. Without this the test above would still pass for an
     /// implementation that segmented nothing and simply called `encode`.

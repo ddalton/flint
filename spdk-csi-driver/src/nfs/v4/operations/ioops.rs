@@ -1630,7 +1630,7 @@ impl IoOperationHandler {
         // negotiated session cap exceeds this constant, and a reply
         // above it could never be sent anyway.
         let count = (op.count as usize)
-            .min(super::session::SERVER_MAX_RESPONSE as usize);
+            .min(super::session::MAX_IO_PAYLOAD as usize);
         let fd_cache = Arc::clone(&self.fd_cache);
         let stateid_other = op.stateid.other;
         // Splice staging is opt-in per COMPOUND and default off. It also
@@ -3008,7 +3008,7 @@ mod tests {
     /// for one ~100-byte request frame.
     #[tokio::test]
     async fn read_count_is_clamped_to_the_response_ceiling() {
-        use crate::nfs::v4::operations::session::SERVER_MAX_RESPONSE;
+        use crate::nfs::v4::operations::session::MAX_IO_PAYLOAD;
         // Hold the tier rig lock: MARKER_CYCLE is process-global and
         // every marker INSERT bumps it, so a concurrent planter breaks
         // this test's read window. See the block below for the measured
@@ -3020,7 +3020,7 @@ mod tests {
         // A file 4x larger than the response ceiling.
         let big_path = fh_mgr.get_export_path().join("big.bin");
         let f = std::fs::File::create(&big_path).unwrap();
-        f.set_len(4 * SERVER_MAX_RESPONSE as u64).unwrap();
+        f.set_len(4 * MAX_IO_PAYLOAD as u64).unwrap();
         drop(f);
 
         // WAS A FLAKE — green alone, red in the full suite. CLOSED by
@@ -3120,9 +3120,12 @@ mod tests {
         );
         let data = res.data;
         assert!(
-            data.len() <= SERVER_MAX_RESPONSE as usize,
+            data.len() <= MAX_IO_PAYLOAD as usize,
             "count=0xFFFFFFFF returned {} bytes — the allocation tracked the FILE, \
-             not the response ceiling (the ~100-byte-frame-to-gigabytes amplification)",
+             not the payload ceiling (the ~100-byte-frame-to-gigabytes amplification). \
+             Asserted against MAX_IO_PAYLOAD, not the advertised channel cap: the \
+             cap now sits 2 KiB above it, and a clamp that used the cap would slip \
+             through an assertion written against it.",
             data.len()
         );
         assert!(!data.is_empty(), "the clamp must not turn the read into an empty reply");

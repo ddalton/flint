@@ -1543,24 +1543,22 @@ fn parse_host_port(endpoint: &str) -> Result<(String, String), PnfsError> {
 /// The rest: `nconnect=4` (the knob that turned the bench-sweep 1.6x win
 /// into the steady-state result), `noresvport` (needed when running
 /// unprivileged, matching the rwx_nfs path), and `rsize=wsize=1M` — which
-/// we ASK for and do not get.
+/// we ask for and now get.
 ///
-/// The mount actually negotiates `rsize=1047672,wsize=1047532` (measured
-/// on a real 6.1 client, runaw 2026-08-01). The shortfalls are exactly 904
-/// and 1044 bytes: Linux's `nfs41_maxread_overhead` /
-/// `nfs41_maxwrite_overhead`, which `nfs4_session_set_rwsize()` subtracts
-/// from the session fore-channel limits the SERVER advertised. Those come
-/// from `SERVER_MAX_REQUEST` / `SERVER_MAX_RESPONSE` in
-/// `nfs::v4::operations::session`, both pinned at exactly `1024 * 1024`,
-/// so the client can never reach the 1 MiB this string requests.
+/// It did not always. The mount used to negotiate
+/// `rsize=1047672,wsize=1047532` (measured on a real 6.1 client, runaw
+/// 2026-08-01), short by exactly 904 and 1044 bytes: Linux's
+/// `nfs41_maxread_overhead` / `nfs41_maxwrite_overhead`, which
+/// `nfs4_session_set_rwsize()` subtracts from the session fore-channel
+/// limits the SERVER advertised. Those were pinned at exactly
+/// `1024 * 1024`, so the client could never reach the 1 MiB this string
+/// requests, and every 1 MiB I/O split into a full-size RPC plus a runt.
 ///
-/// The cost is a doubled RPC count: every 1 MiB O_DIRECT I/O splits into
-/// one full-size RPC plus a runt, and on writes that runt is a sub-page,
-/// non-page-aligned tail. Fixing it means raising those two session
-/// constants above 1 MiB, which changes buffer sizing for EVERY NFS
-/// client and not just pNFS — so it is deliberately not done here. See
-/// `mount_opts_tests::the_session_cap_holds_the_client_below_the_rsize_we_ask_for`,
-/// which pins the arithmetic so the fix can be verified when it lands.
+/// `nfs::v4::operations::session` now advertises `MAX_IO_PAYLOAD +
+/// CHANNEL_HEADROOM`, so the subtraction lands above 1 MiB and the
+/// client's own clamp brings it back to exactly 1048576. See
+/// `mount_opts_tests::the_client_can_reach_the_rsize_we_ask_for`, which
+/// pins the arithmetic in both directions.
 /// An operator option REPLACES the driver default in the same family rather
 /// than joining it: the assembled string never contains a family twice, so
 /// nothing here depends on the kernel's option precedence.
@@ -2317,48 +2315,56 @@ mod mount_opts_tests {
     /// `mount` output was read on a live cluster (runaw, 2026-08-01).
     ///
     /// This pins the arithmetic. The driver asks for rsize=wsize=1 MiB; the
-    /// Linux client derives its real rsize/wsize by subtracting its COMPOUND
-    /// overhead from the fore-channel caps the SERVER advertises, which we
-    /// pin at exactly 1 MiB — so the request is unsatisfiable by
-    /// construction and every 1 MiB direct I/O splits into a full RPC plus
-    /// a runt.
+     /// The mount really does get the 1 MiB rsize/wsize it asks for.
     ///
-    /// This test documents a KNOWN DEFECT rather than a desired property.
-    /// When `SERVER_MAX_REQUEST`/`SERVER_MAX_RESPONSE` are raised above
-    /// 1 MiB the `assert!(negotiated < requested)` lines below will fail —
-    /// that failure is the fix landing, and the assertions should then flip
-    /// to `assert_eq!(negotiated, REQUESTED)`. Do not silence it by deleting
-    /// it.
+    /// THIS TEST USED TO DOCUMENT A DEFECT. Linux derives its real
+    /// rsize/wsize by subtracting its own COMPOUND overhead from the
+    /// fore-channel caps the SERVER advertises; those were pinned at
+    /// exactly 1 MiB, so the request was unsatisfiable by construction
+    /// and every 1 MiB direct I/O split into a full RPC plus a runt.
+    /// The caps now carry `CHANNEL_HEADROOM` above `MAX_IO_PAYLOAD`, so
+    /// the subtraction lands ABOVE 1 MiB and the client's own
+    /// `NFS_MAX_FILE_IO_SIZE` clamp brings it back to exactly 1048576.
+    ///
+    /// Both halves are asserted deliberately. Without the headroom
+    /// check a future edit could drop the caps back to 1 MiB and only
+    /// the clamp would keep this green — the clamp is the client's, and
+    /// it cannot raise what the server advertised too low.
     #[test]
-    fn the_session_cap_holds_the_client_below_the_rsize_we_ask_for() {
+    fn the_client_can_reach_the_rsize_we_ask_for() {
         use crate::nfs::v4::operations::session::{
             LINUX_NFS41_MAXREAD_OVERHEAD, LINUX_NFS41_MAXWRITE_OVERHEAD, SERVER_MAX_REQUEST,
             SERVER_MAX_RESPONSE,
         };
         const REQUESTED: u32 = 1024 * 1024;
+        /// The client's own ceiling on rsize/wsize (`NFS_MAX_FILE_IO_SIZE`).
+        const LINUX_MAX_FILE_IO: u32 = 1024 * 1024;
 
         // The mount string really does ask for the full 1 MiB.
         let opts = build_pnfs_mount_opts("2049", false, &[]);
         assert!(opts.contains(&format!("rsize={REQUESTED}")), "{opts}");
         assert!(opts.contains(&format!("wsize={REQUESTED}")), "{opts}");
 
-        // What a Linux client will actually settle on, given our caps.
-        let negotiated_rsize = SERVER_MAX_RESPONSE - LINUX_NFS41_MAXREAD_OVERHEAD;
-        let negotiated_wsize = SERVER_MAX_REQUEST - LINUX_NFS41_MAXWRITE_OVERHEAD;
+        // What our caps leave after the kernel's subtraction.
+        let after_overhead_r = SERVER_MAX_RESPONSE - LINUX_NFS41_MAXREAD_OVERHEAD;
+        let after_overhead_w = SERVER_MAX_REQUEST - LINUX_NFS41_MAXWRITE_OVERHEAD;
 
-        // Byte-exact against a real 6.1 client on runaw, 2026-08-01.
-        assert_eq!(negotiated_rsize, 1_047_672, "rsize arithmetic drifted");
-        assert_eq!(negotiated_wsize, 1_047_532, "wsize arithmetic drifted");
-
-        // The defect itself: we cannot get what we ask for.
+        // The headroom is real: the subtraction must not land below what
+        // the mount asked for, or the client is capped by US.
         assert!(
-            negotiated_rsize < REQUESTED,
-            "server cap now permits the requested rsize — flip this test to assert_eq!",
+            after_overhead_r >= REQUESTED,
+            "fore-channel response cap leaves {after_overhead_r} < {REQUESTED} after \
+             nfs41_maxread_overhead — the client cannot reach the requested rsize",
         );
         assert!(
-            negotiated_wsize < REQUESTED,
-            "server cap now permits the requested wsize — flip this test to assert_eq!",
+            after_overhead_w >= REQUESTED,
+            "fore-channel request cap leaves {after_overhead_w} < {REQUESTED} after \
+             nfs41_maxwrite_overhead — the client cannot reach the requested wsize",
         );
+
+        // And what a Linux client therefore settles on, after its own clamp.
+        assert_eq!(after_overhead_r.min(LINUX_MAX_FILE_IO), REQUESTED);
+        assert_eq!(after_overhead_w.min(LINUX_MAX_FILE_IO), REQUESTED);
     }
 
     /// The default must be NFSv4.2, not 4.1. pNFS volumes were pinned a

@@ -285,21 +285,26 @@ impl IoOperationHandler {
     /// if this request cannot take that path (caller then uses buffered).
     ///
     /// WHY READ-MODIFY-ALIGN RATHER THAN AN ALIGNMENT GATE. O_DIRECT
-    /// requires offset, length and buffer address all aligned. A gate
-    /// that simply skipped unaligned requests would be DEAD CODE on real
-    /// traffic: the pNFS mount negotiates `rsize=1047672`, not 1 MiB —
-    /// Linux subtracts `nfs41_maxread_overhead` from the fore-channel
-    /// limit the server advertises, and `SERVER_MAX_REQUEST` is pinned at
-    /// exactly 1024*1024 (see the note on the mount options in
-    /// `pnfs_csi.rs`). 1047672 % 4096 == 3192, so a sequential reader
-    /// lands on offsets 0, 1047672, 2095344, … — aligned exactly once,
-    /// on the first read of the file, and never again.
+    /// requires offset, length and buffer address all aligned, and an
+    /// unaligned request still has to be served rather than refused.
     ///
-    /// So instead read the smallest aligned range that CONTAINS the
-    /// request and return the interior slice. The extra I/O is at most
-    /// two blocks; the real cost is the memmove that shifts the payload
-    /// to the front, which is why this path is opt-in on a DS already
-    /// documented as copy-bound.
+    /// This used to be the COMMON case, not the edge one. While the
+    /// fore-channel caps were pinned at exactly 1 MiB the mount
+    /// negotiated `rsize=1047672`, and 1047672 % 4096 == 3192 — a
+    /// sequential reader landed on 0, 1047672, 2095344, …, aligned
+    /// exactly once, on the first read of a file, and never again. The
+    /// caps now carry `CHANNEL_HEADROOM` above `MAX_IO_PAYLOAD` so the
+    /// client's subtraction lands ON 1 MiB, which is 4 KiB-aligned; a
+    /// sequential reader is now aligned on EVERY read and skips the
+    /// memmove below entirely.
+    ///
+    /// The path stays because alignment is a property of the request,
+    /// not of the mount: unaligned offsets still arrive from clients
+    /// that chose a smaller rsize, from partial-file readers, and from
+    /// the tail of any file. Read the smallest aligned range that
+    /// CONTAINS the request and return the interior slice. The extra
+    /// I/O is at most two blocks; the real cost is the memmove that
+    /// shifts the payload to the front.
     fn odirect_read(
         direct: &File,
         offset: u64,
@@ -332,7 +337,13 @@ impl IoOperationHandler {
         // A short read (EOF inside the span) can land before `lead`, in
         // which case the caller's range is entirely past EOF.
         let payload = n.saturating_sub(lead).min(count);
-        buf.copy_within(pad + lead..pad + lead + payload, 0);
+        // Now that `rsize` is 4 KiB-aligned, a sequential reader arrives
+        // with lead == 0 and (for a page-aligned allocation) pad == 0,
+        // so the shift is a move of a region onto itself. Skip it: this
+        // is the COMMON case, not the edge one.
+        if pad + lead != 0 {
+            buf.copy_within(pad + lead..pad + lead + payload, 0);
+        }
         buf.truncate(payload);
         Ok(Some(buf))
     }
@@ -369,7 +380,7 @@ impl IoOperationHandler {
         // aad7a47 clamped the MDS at ioops.rs and never came here. Same
         // ceiling, deliberately: a short READ is legal (the client
         // resumes on eof=false) and a reply above it could not be sent.
-        let count = count.min(crate::nfs::v4::operations::session::SERVER_MAX_RESPONSE);
+        let count = count.min(crate::nfs::v4::operations::session::MAX_IO_PAYLOAD);
 
         debug!(
             "DS READ: fh={:?}, offset={}, count={}",
@@ -876,8 +887,8 @@ mod tests {
     /// would differ.
     #[tokio::test]
     async fn ds_read_count_is_clamped_to_the_response_ceiling() {
-        use crate::nfs::v4::operations::session::SERVER_MAX_RESPONSE;
-        let ceiling = SERVER_MAX_RESPONSE as usize;
+        use crate::nfs::v4::operations::session::MAX_IO_PAYLOAD;
+        let ceiling = MAX_IO_PAYLOAD as usize;
 
         let (h, dir) = handler();
         let fh = fh_for(&h, "big", &dir);
@@ -1018,11 +1029,19 @@ mod tests {
     /// math can be pinned on any filesystem — including the tmpfs that
     /// `TempDir` often is, which refuses the flag outright.
     ///
-    /// The offsets are not arbitrary. A pNFS mount negotiates
-    /// `rsize=1047672` (1 MiB minus `nfs41_maxread_overhead`), and
-    /// 1047672 % 4096 == 3192, so a sequential reader is aligned exactly
-    /// once and unaligned forever after. If read-modify-align is wrong,
-    /// it is wrong on literally every real READ but the first.
+    /// The offsets are not arbitrary — 1047672 is what a pNFS mount
+    /// negotiated while the fore-channel caps were pinned at exactly
+    /// 1 MiB, and 1047672 % 4096 == 3192, so a sequential reader was
+    /// aligned exactly once and unaligned forever after. The caps now
+    /// carry headroom and the negotiated rsize is 1048576, which IS
+    /// aligned, so this is no longer the shape of ordinary traffic.
+    ///
+    /// It is kept as the alignment torture case regardless. Alignment
+    /// is a property of the request, not of the mount: unaligned
+    /// offsets still arrive from clients that chose a smaller rsize,
+    /// from partial-file readers, and from every file's tail. A
+    /// sequential walk at a stride coprime with 4096 exercises every
+    /// residue this arithmetic can see, which no aligned stride does.
     #[test]
     fn odirect_read_returns_exact_bytes_at_the_rsize_offsets_a_client_uses() {
         use std::io::Write;
