@@ -90,7 +90,7 @@ pub const MAX_STAGE: usize = 1024 * 1024;
 mod imp {
     use super::MAX_STAGE;
     use std::os::unix::io::{AsRawFd, RawFd};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     /// Pipes retained at rest. A pipe costs TWO fds, and the test VM's
@@ -107,6 +107,22 @@ mod imp {
     /// a pipe on EVERY read — a slow path that looks like a leak.
     static UNDERSIZED: AtomicBool = AtomicBool::new(false);
 
+    /// The kernel's page size, which is what a pipe buffer holds one
+    /// of. Queried rather than assumed: aarch64 hosts run 4K, 16K and
+    /// 64K pages, and a hardcoded 4096 would under-count slots on two
+    /// of the three.
+    fn page_size() -> usize {
+        static PAGE: AtomicUsize = AtomicUsize::new(0);
+        let cached = PAGE.load(Ordering::Relaxed);
+        if cached != 0 {
+            return cached;
+        }
+        let n = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let n = if n > 0 { n as usize } else { 4096 };
+        PAGE.store(n, Ordering::Relaxed);
+        n
+    }
+
     #[derive(Debug)]
     struct Pipe {
         r: RawFd,
@@ -122,14 +138,34 @@ mod imp {
             if rc != 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            // Grow to MAX_STAGE so a whole payload fits: the retract
-            // window requires the ENTIRE payload staged before the
-            // caller's check runs. F_SETPIPE_SZ returns the size it
-            // actually installed, which the kernel rounds up — and
-            // which an unprivileged process cannot push past
-            // pipe-max-size. Take what we get and record it; a payload
-            // larger than `cap` is refused rather than fragmented.
-            let got = unsafe { libc::fcntl(fds[1], libc::F_SETPIPE_SZ, MAX_STAGE as libc::c_int) };
+            // Grow to MAX_STAGE **plus one page** so a whole payload
+            // fits: the retract window requires the ENTIRE payload
+            // staged before the caller's check runs, and a pipe's real
+            // limit is BUFFERS, not bytes. An unaligned offset spends
+            // its first buffer on a partial page, so a MAX_STAGE
+            // payload can need MAX_STAGE/page + 1 buffers. Asking for
+            // exactly MAX_STAGE left that read one buffer short, and
+            // `stage_read` then had to refuse it.
+            //
+            // The extra page is a REQUEST, not a requirement.
+            // `pipe-max-size` (1 MiB by default) caps an unprivileged
+            // process, so this attempt fails for a non-root server and
+            // the plain MAX_STAGE request below succeeds instead —
+            // whereupon the slot check in `stage_read` sends unaligned
+            // full-size reads down the copy path, correctly, rather
+            // than blocking on a buffer that will never come free.
+            //
+            // F_SETPIPE_SZ returns the size actually installed, which
+            // the kernel rounds up to a power of two.
+            let page = page_size() as libc::c_int;
+            let mut got =
+                unsafe { libc::fcntl(fds[1], libc::F_SETPIPE_SZ, MAX_STAGE as libc::c_int + page) };
+            if got <= 0 {
+                got = unsafe { libc::fcntl(fds[1], libc::F_SETPIPE_SZ, MAX_STAGE as libc::c_int) };
+            }
+            // Neither request landed: the pipe is whatever the kernel
+            // gave us by default. Record the floor, never a guess above
+            // it — `stage_read` trusts `cap` to decide what fits.
             let cap = if got > 0 { got as usize } else { 64 * 1024 };
             Ok(Pipe { r: fds[0], w: fds[1], cap })
         }
@@ -190,11 +226,34 @@ mod imp {
             Some(x) => x,
             None => Pipe::new()?,
         };
-        if pipe.cap < count {
-            // Cannot hold the whole payload, so the retract window cannot
-            // be honoured. Refuse rather than fragment, and latch so we
-            // stop paying for a pipe we will never be able to use.
-            if count <= MAX_STAGE {
+        // CAPACITY IS SLOTS, NOT BYTES, AND THAT DIFFERENCE DEADLOCKED
+        // THE SERVER. A pipe holds `cap / PAGE_SIZE` buffers; each holds
+        // at most one page and `filemap_splice_read` puts a PARTIAL page
+        // in the first buffer when `offset` is not page-aligned. So a
+        // payload of `cap` bytes at an unaligned offset needs one buffer
+        // MORE than the pipe has, and the final `splice` -- blocking, on
+        // a blocking pipe fd -- waited for space that only the drain
+        // could free, on a task that could not run until this one
+        // returned.
+        //
+        // Measured 2026-08-29 on lima: a 4 MiB O_DIRECT read wedged the
+        // server permanently, two workers in `pipe_wait_writable` inside
+        // `splice_file_to_pipe`, the client in `nfs_direct_wait`. It
+        // needed a full-size read at an unaligned offset, which is what
+        // a client issues when its request exceeds rsize -- so it did
+        // not reproduce at bs=1M and did at bs=4M.
+        //
+        // A byte comparison cannot see this. Count the buffers.
+        let page = page_size();
+        let lead = (offset as usize) % page;
+        let slots_needed = (lead + count).div_ceil(page);
+        let slots_have = pipe.cap / page;
+        if slots_have < slots_needed {
+            // Only latch UNDERSIZED for the aligned case: an unaligned
+            // payload that does not fit says nothing about whether this
+            // host can splice, and latching on it would disable splice
+            // for every subsequent read on the box.
+            if lead == 0 && count <= MAX_STAGE {
                 UNDERSIZED.store(true, Ordering::Relaxed);
             }
             return Ok(None);
@@ -212,7 +271,14 @@ mod imp {
                     pipe.w,
                     std::ptr::null_mut(),
                     want,
-                    libc::SPLICE_F_MOVE,
+                    // NONBLOCK is belt-and-braces behind the slot check
+                    // above: it makes the PIPE side non-blocking without
+                    // touching the file side, so a cold page still reads
+                    // from disk normally, but a full pipe returns EAGAIN
+                    // instead of parking the worker forever. If the slot
+                    // arithmetic is ever wrong again the failure is a
+                    // fallback to the copy path, not a deadlocked server.
+                    libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK,
                 )
             };
             if n <= 0 {
@@ -311,6 +377,22 @@ mod imp {
         UNDERSIZED.store(false, Ordering::Relaxed);
         POOL.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
+    /// Capacity a freshly created pipe actually gets, for tests that must
+    /// assert the EXACT consequence rather than accept either outcome.
+    /// Root can exceed `pipe-max-size` and gets the extra buffer; an
+    /// unprivileged server cannot and does not. Both are correct, but a
+    /// test that shrugs at the difference cannot tell a working fast path
+    /// from a fast path that silently stopped firing.
+    #[cfg(test)]
+    pub fn probe_pipe_cap() -> usize {
+        Pipe::new().map(|p| p.cap).unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub fn page_size_for_test() -> usize {
+        page_size()
+    }
+
     #[cfg(test)]
     pub fn pool_len() -> usize {
         POOL.lock().unwrap_or_else(|e| e.into_inner()).len()
@@ -617,6 +699,83 @@ mod tests {
 
     /// Above `MAX_STAGE` the retract window cannot be honoured, so the
     /// caller must be told to take the copy path — not handed fragments.
+    /// THE DEADLOCK. A full-size payload at a non-page-aligned offset
+    /// needs one more pipe buffer than the pipe has, because the first
+    /// buffer holds only a partial page. Before the slot check, the
+    /// final `splice` blocked in `pipe_wait_writable` and never
+    /// returned: the only thing that could free space was the drain,
+    /// which cannot run until this call returns.
+    ///
+    /// RUN ON A THREAD WITH A DEADLINE, deliberately. The pre-fix
+    /// behaviour is an unbounded block, and a test that simply called
+    /// `stage_read` would HANG THE SUITE rather than fail it -- an
+    /// untimed test here is not a weaker test, it is a broken one. The
+    /// thread is leaked on failure; the assertion has already fired.
+    #[test]
+    fn an_unaligned_full_size_stage_never_blocks() {
+        let _x = exclusive();
+        super::imp::reset_for_test();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let dir = tempfile::TempDir::new().unwrap();
+            // One byte past a page boundary is the minimal unaligned
+            // offset, and MAX_STAGE is the largest payload the byte
+            // guard admits: 1 + MAX_STAGE spans one buffer more than a
+            // MAX_STAGE pipe holds.
+            let f = file_of(&dir, "unaligned", 7, MAX_STAGE + 8192);
+            let r = stage_read(&f, 1, MAX_STAGE);
+            let _ = tx.send(r.map(|o| o.map(|s| s.len())));
+        });
+        // What SHOULD happen is decided by the pipe we can actually get,
+        // so assert that rather than accepting either branch. A pipe
+        // with room for the partial first buffer must splice; one
+        // without must fall back. "Either is fine" would keep passing
+        // if the fast path quietly stopped firing altogether.
+        let cap = super::imp::probe_pipe_cap();
+        let page = super::imp::page_size_for_test();
+        let expect_splice = cap / page >= (1 + MAX_STAGE).div_ceil(page);
+        match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(Ok(Some(n))) => {
+                assert!(
+                    expect_splice,
+                    "spliced an unaligned MAX_STAGE payload into a {cap}-byte pipe, \
+                     which holds {} buffers and needs {}",
+                    cap / page,
+                    (1 + MAX_STAGE).div_ceil(page),
+                );
+                assert_eq!(n, MAX_STAGE, "staged short");
+            }
+            Ok(Ok(None)) => assert!(
+                !expect_splice,
+                "fell back to the copy path with a {cap}-byte pipe that HAS room \
+                 ({} buffers, needs {}) — the fast path stopped firing",
+                cap / page,
+                (1 + MAX_STAGE).div_ceil(page),
+            ),
+            Ok(Err(e)) => panic!("stage_read errored: {e}"),
+            Err(_) => panic!(
+                "stage_read({}, {}) did not return within 20s -- it is blocked in \
+                 splice(file -> pipe) waiting for pipe space that only the drain can \
+                 free. This is the 4 MiB O_DIRECT server deadlock.",
+                1, MAX_STAGE
+            ),
+        }
+    }
+
+    /// The aligned case must still take the fast path, or the fix above
+    /// would "pass" by refusing to splice anything at all.
+    #[test]
+    fn an_aligned_full_size_stage_still_splices() {
+        let _x = exclusive();
+        super::imp::reset_for_test();
+        let dir = tempfile::TempDir::new().unwrap();
+        let f = file_of(&dir, "aligned", 9, MAX_STAGE + 8192);
+        let staged = stage_read(&f, 0, MAX_STAGE)
+            .expect("stage_read errored")
+            .expect("an aligned MAX_STAGE payload must still be spliceable");
+        assert_eq!(staged.len(), MAX_STAGE);
+    }
+
     #[tokio::test]
     async fn a_payload_over_max_stage_falls_back_to_the_copy_path() {
         let _x = exclusive();
