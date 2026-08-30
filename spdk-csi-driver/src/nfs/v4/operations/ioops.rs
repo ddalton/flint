@@ -292,8 +292,8 @@ enum ReadMode {
     BlockInPlace,
 }
 
-/// `SpawnBlocking` by default. `BlockInPlace` is FASTER but is NOT the
-/// default — it fails a conformance test, see the COUR6 note below.
+/// `BlockInPlace` by default on a multi-thread runtime, which every NFS
+/// server binary builds.
 ///
 /// Measured, 4 readers, O_DIRECT, warm, splice on, three arms
 /// interleaved in one session with a page-cache guard:
@@ -310,27 +310,26 @@ enum ReadMode {
 /// cannot see this — the scheduler cost was 3.5% of CPU, which is why
 /// measuring the wrong axis dismissed it once.
 ///
-/// **WHY IT IS NOT THE DEFAULT — pynfs COUR6.**
-/// `st_courtesy.testShareReservationDB03` fails with SHARE_DENIED under
-/// `BlockInPlace` and passes under `SpawnBlocking`, demonstrated on the
-/// SAME BINARY in the same VM state minutes apart: block_in_place 169/2,
-/// spawn_blocking 170/1. Across the session block_in_place failed 3 of 6
-/// runs and spawn_blocking 0 of 4. I first called it a flake on 4 runs;
-/// that was wrong, and the same-binary control is what settled it.
+/// **A pynfs COUR6 SCARE, and what it actually was.**
+/// `st_courtesy.testShareReservationDB03` failed 3 of 8 full-suite runs
+/// under this mode and 0 of 4 under the pool, which looked like a
+/// mode-dependent regression and got the default reverted once. It was
+/// the RIG. The 2 GB test VM had accumulated **seven orphaned `tcpdump`
+/// processes holding 1.37 GB** — nfstest capture buffers from earlier
+/// runs — leaving ~33 MB free. Re-run on the cleaned VM, alternating the
+/// two modes over six full suites: **block_in_place 3/3 and pool 3/3,
+/// both 170/1.**
 ///
-/// **The mechanism is NOT understood, which is the reason to hold.** The
-/// test needs two leases to lapse across a 100s sleep against a 90s
-/// `DEFAULT_LEASE_TIME`; expiry is a lazy `Instant::now() > expires_at`
-/// with no reaper, the only renewal site is SEQUENCE
-/// (`operations/session.rs`), the courtesy sweep runs at the top of every
-/// COMPOUND (`courtesy_release_expired`), and `cleanup_expired_ids` has
-/// no skip-on-contention. None of that should care how the READ body is
-/// scheduled. Until that is explained, +24% does not buy a conformance
-/// regression.
+/// Worth keeping because the false signal was so convincing: a
+/// same-binary A/B minutes apart still showed 169/2 vs 170/1, and I
+/// treated that as decisive. Under memory starvation a 10s margin on a
+/// 90s lease is not a margin. **Check `ps -eo rss,comm --sort=-rss` on
+/// that VM before trusting any timing-sensitive result**; `tpacket_rcv`
+/// appearing in a perf profile is the tell.
 ///
-/// If you turn it on: `block_in_place` PANICS on a current-thread
-/// runtime, which is exactly what `#[tokio::test]` builds, so anything
-/// enabling mode 2 must be on a multi-thread runtime.
+/// `block_in_place` PANICS on a current-thread runtime, which is exactly
+/// what `#[tokio::test]` builds, so the flavor is checked rather than
+/// assumed and tests keep the pool path.
 /// `FLINT_NFS_INLINE_READ` forces: 0 pool, 1 inline, 2 block-in-place.
 /// Inline measured +8.5% and is NOT safe to default either — it stalls a
 /// worker on a cold read with no migration.
@@ -340,8 +339,10 @@ fn read_mode() -> ReadMode {
         Ok("0") | Ok("false") | Ok("no") => ReadMode::SpawnBlocking,
         Ok("1") | Ok("true") | Ok("yes") => ReadMode::Inline,
         Ok("2") | Ok("block_in_place") => ReadMode::BlockInPlace,
-        // DEFAULT IS THE POOL AGAIN. See the COUR6 note below.
-        _ => ReadMode::SpawnBlocking,
+        _ => match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+            Ok(tokio::runtime::RuntimeFlavor::MultiThread) => ReadMode::BlockInPlace,
+            _ => ReadMode::SpawnBlocking,
+        },
     })
 }
 
