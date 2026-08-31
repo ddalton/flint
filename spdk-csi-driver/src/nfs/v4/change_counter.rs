@@ -63,8 +63,17 @@ pub fn bump_path(path: &std::path::Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if let Ok(md) = path.symlink_metadata() {
-            bump(md.dev(), md.ino(), ctime_ns(&md));
+        match path.symlink_metadata() {
+            Ok(md) => {
+                bump(md.dev(), md.ino(), ctime_ns(&md));
+                // Post-bump warm: the bracket's read-back and the
+                // GETATTR riding the same compound hit without
+                // another stat.
+                super::stat_cache::note_fresh(path, &md);
+            }
+            // The object is gone (raced or just removed): a cached
+            // entry for the path can no longer self-invalidate.
+            Err(_) => super::stat_cache::forget(path),
         }
     }
 }
@@ -82,7 +91,7 @@ pub fn current_of_path(path: &std::path::Path) -> Option<u64> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let md = path.symlink_metadata().ok()?;
+        let md = super::stat_cache::lstat(path).ok()?;
         Some(current(md.dev(), md.ino(), ctime_ns(&md)))
     }
     #[cfg(not(unix))]

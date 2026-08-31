@@ -1706,6 +1706,10 @@ impl IoOperationHandler {
         // SEQUENCE is op 0, so `cache_slot` is already decided here.
         let may_splice = ctx.can_splice && ctx.cache_slot.is_none();
 
+        // Kept out of the closure's move: the success arm forgets the
+        // path's attr-cache entry (the read moved its atime).
+        let read_path = path.clone();
+
         let read_job =
             move || -> std::io::Result<(crate::nfs::segment::Segment, bool)> {
             let file = match cached {
@@ -1893,6 +1897,12 @@ impl IoOperationHandler {
             Ok(Ok((data, eof))) => {
                 debug!("READ: Read {} bytes at offset {} from {:?}, eof={}",
                       data.len(), op.offset, filename.as_deref().unwrap_or("unknown"), eof);
+                // The read moved the file's atime, which no counter
+                // bump tracks (change must NOT advance on reads — it
+                // would invalidate every client's data cache). Drop
+                // the attr-cache entry so the next GETATTR sees the
+                // new atime instead of serving it stale for a TTL.
+                crate::nfs::v4::stat_cache::forget(&read_path);
                 ReadRes {
                     status: Nfs4Status::Ok,
                     eof,
@@ -2229,6 +2239,22 @@ impl IoOperationHandler {
             // file descriptor (no seek pointer is mutated). No mutex
             // needed; the kernel serializes at the page-cache level.
             let bytes_written = file_arc.write_at(&data_clone, offset)?;
+
+            // F14 + attr cache: the data is READ-VISIBLE the moment
+            // pwrite returns — the counter must advance NOW, not after
+            // the sync below (FILE_SYNC's fsync is milliseconds, and a
+            // GETATTR in that window answering from a counter-validated
+            // cache entry would pair the new bytes with the old size:
+            // the beyond-EOF disease at fsync scale). The change attr
+            // tracks mutation visibility, not durability.
+            if let Ok(md) = file_arc.metadata() {
+                use std::os::unix::fs::MetadataExt;
+                crate::nfs::v4::change_counter::bump(
+                    md.dev(),
+                    md.ino(),
+                    crate::nfs::v4::change_counter::ctime_ns(&md),
+                );
+            }
 
             // Handle stability requirement
             // UNSTABLE4 (0): Can cache, flush later (fast)

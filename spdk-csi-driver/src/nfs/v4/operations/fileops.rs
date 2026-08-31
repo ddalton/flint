@@ -100,8 +100,11 @@ impl AttributeSnapshot {
     /// IMPORTANT: Uses symlink_metadata() to NOT follow symlinks (lstat vs stat)
     pub async fn from_path(path: &Path) -> std::io::Result<Self> {
         // Use symlink_metadata() instead of metadata() to get symlink's own attributes
-        // This is equivalent to lstat() vs stat() - returns the symlink itself, not target
-        let metadata = tokio::fs::symlink_metadata(path).await?;
+        // This is equivalent to lstat() vs stat() - returns the symlink itself, not target.
+        // Served through the counter-validated cache: repeated attribute
+        // reads of an unmutated file cost a map hit, not a stat — and
+        // not the spawn_blocking hop tokio::fs wrapped around it.
+        let metadata = crate::nfs::v4::stat_cache::lstat(path)?;
         Self::from_metadata(metadata, path)
     }
 
@@ -2215,7 +2218,7 @@ impl FileOperationHandler {
         // (which pynfs's --maketree creates explicitly to test the
         // SYMLINK error class — st_lookupp / st_putfh / st_rename
         // tests all expected NOENT vs SYMLINK splits hinge on this).
-        let metadata = match tokio::fs::symlink_metadata(&target_path).await {
+        let metadata = match crate::nfs::v4::stat_cache::lstat(&target_path) {
             Ok(m) => m,
             Err(e) => {
                 debug!("LOOKUP: Path {:?} does not exist: {}", target_path, e);
@@ -3200,7 +3203,13 @@ impl FileOperationHandler {
         .await;
 
         let (names, stream_eof) = match scanned {
-            Ok(Ok(v)) => v,
+            Ok(Ok(v)) => {
+                // The scan moved the directory's atime, which no
+                // counter bump tracks — same contract as READ's forget:
+                // the next GETATTR must not serve it stale for a TTL.
+                crate::nfs::v4::stat_cache::forget(&dir_path);
+                v
+            }
             Ok(Err(e)) => {
                 warn!("READDIR: Failed to read directory: {}", e);
                 let status = if e.kind() == std::io::ErrorKind::NotFound {
@@ -3821,6 +3830,12 @@ impl FileOperationHandler {
                 // unlink so it matches the client's cached value.
                 let dir_before =
                     crate::nfs::v4::change_counter::current_of_path(&parent_path).unwrap_or(0);
+                // The unlink REPLACES what the name resolves to (with
+                // nothing); fence the path so no attribute read can
+                // pair a cache entry from one side of the swap with a
+                // filesystem answer from the other. Held to scope end,
+                // past the post-unlink bumps.
+                let _unlink_fence = crate::nfs::v4::stat_cache::fence(&[&target_path]);
                 let result = if metadata.is_dir() {
                     tokio::fs::remove_dir(&target_path).await
                 } else {
@@ -3843,6 +3858,11 @@ impl FileOperationHandler {
                             return RemoveRes { status: Nfs4Status::Io, change_info: None };
                         }
                         self.fh_mgr.note_fs_remove(&target_path);
+                        // The removed object's inode is gone, so no
+                        // counter bump can ever invalidate its cached
+                        // attributes — drop them explicitly or a LOOKUP
+                        // inside the TTL resurrects the name.
+                        crate::nfs::v4::stat_cache::forget(&target_path);
                         // F14: removed dirent mutates the parent.
                         crate::nfs::v4::change_counter::bump_path(&parent_path);
                         // A7: tombstone the removed file's generation
@@ -4083,6 +4103,15 @@ impl FileOperationHandler {
             }
         }
 
+        // The rename swaps what BOTH names resolve to; fence them so
+        // no attribute read pairs a cache entry from one side of the
+        // swap with filesystem state from the other (a rename-over
+        // lands a different inode at the dest path, whose stale entry
+        // no counter bump can ever invalidate). Held to scope end,
+        // past the post-rename bumps. Taken before the change_info
+        // brackets on purpose: their reads go to the kernel too.
+        let _rename_fence =
+            crate::nfs::v4::stat_cache::fence(&[&source_path, &dest_path]);
         // change_info4 pre-mutation halves for BOTH parents, sampled
         // before the rename.
         let src_dir_before = source_path
@@ -4118,6 +4147,12 @@ impl FileOperationHandler {
                 // handles follow the file; stale v1 cache entries for
                 // the old subtree are dropped.
                 self.fh_mgr.note_fs_rename(&source_path, &dest_path);
+                // The source path no longer names the object, and a
+                // rename bumps no counter for it — drop the stale
+                // attribute entry or the old name stays LOOKUPable for
+                // a TTL. (A rename-over also retargets dest, which the
+                // bump_path below re-stats fresh.)
+                crate::nfs::v4::stat_cache::forget(&source_path);
                 // F14: both parents' dirents changed, and the moved
                 // object's own ctime bumped (rename updates it).
                 if let Some(p) = source_path.parent() {
@@ -4371,6 +4406,9 @@ impl FileOperationHandler {
             Ok(target) => {
                 let target_str = target.to_string_lossy().to_string();
                 debug!("READLINK: {:?} -> {}", link_path, target_str);
+                // readlink moves the symlink's atime — same contract
+                // as READ's forget.
+                crate::nfs::v4::stat_cache::forget(&link_path);
                 ReadLinkRes {
                     status: Nfs4Status::Ok,
                     link: Some(target_str),

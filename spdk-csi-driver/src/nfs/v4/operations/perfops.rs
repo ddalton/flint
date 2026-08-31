@@ -1371,6 +1371,11 @@ impl PerfOperationHandler {
                     length as nix::libc::off_t,
                 )
                 .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+                // F14 at the visibility point, not after the task
+                // rejoins the runtime — the scheduling gap is a window
+                // a counter-validated attr cache would serve stale
+                // size/space through.
+                bump_change_counter(&file);
                 // A2 dirty capture: ALLOCATE materializes defined bytes
                 // (zeros in holes, size extension); DEALLOCATE punches
                 // zeros in place. Both dirty the range; the Zero hint
@@ -1400,10 +1405,9 @@ impl PerfOperationHandler {
         })
         .await;
         match res {
-            Ok(Ok(())) => {
-                crate::nfs::v4::change_counter::bump_path(&path);
-                Nfs4Status::Ok
-            }
+            // The counter bump already happened inside the blocking
+            // closure, at the syscall.
+            Ok(Ok(())) => Nfs4Status::Ok,
             // A4 gate refusal: the file is mid-evict/hydrate.
             Ok(Err(e)) if e.kind() == std::io::ErrorKind::WouldBlock => Nfs4Status::Delay,
             // Un-hydratable object. Matched on `kind` BEFORE the arm

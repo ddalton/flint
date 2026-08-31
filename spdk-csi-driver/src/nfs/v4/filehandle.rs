@@ -1190,8 +1190,10 @@ impl FileHandleManager {
             }
         }
         
-        // Verify the path exists (but don't follow symlinks)
-        if !normalized.symlink_metadata().is_ok() {
+        // Verify the path exists (but don't follow symlinks). Cached:
+        // this existence probe runs on every handle resolution, several
+        // times per compound for the same path.
+        if crate::nfs::v4::stat_cache::lstat(&normalized).is_err() {
             return Err(format!("Path does not exist: {:?}", normalized));
         }
         
