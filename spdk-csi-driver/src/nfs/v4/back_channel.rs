@@ -181,35 +181,8 @@ impl BackChannelWriter {
         &self,
         segs: Vec<crate::nfs::segment::Segment>,
     ) -> std::io::Result<()> {
-        let len: usize = crate::nfs::segment::total_len(&segs);
-        if len > 0x7FFF_FFFF {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "RPC fragment exceeds 2 GiB",
-            ));
-        }
-        let marker: u32 = 0x8000_0000 | (len as u32);
-
         let mut w = self.inner.lock().await;
-        w.write_all(&marker.to_be_bytes()).await?;
-        for seg in segs {
-            match seg {
-                crate::nfs::segment::Segment::Mem(b) => w.write_all(&b).await?,
-                #[cfg(target_os = "linux")]
-                crate::nfs::segment::Segment::Piped(mut st) => {
-                    // FLUSH FIRST. The splice goes to the raw socket, so
-                    // anything still sitting in this BufWriter would be
-                    // written AFTER the payload — foreign bytes in the
-                    // middle of a frame, which is the corruption class
-                    // `nfs::pipeline` already guards against.
-                    w.flush().await?;
-                    let sock: &tokio::net::TcpStream = w.get_ref().as_ref();
-                    st.drain_to(sock).await?;
-                }
-            }
-        }
-        w.flush().await?;
-        Ok(())
+        crate::nfs::segment::write_record(&mut w, segs).await
     }
 
     /// Allocate the next outgoing CB xid for this connection.

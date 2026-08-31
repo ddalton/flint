@@ -122,3 +122,46 @@ impl From<crate::nfs::splice::Staged> for Segment {
 pub fn total_len(segs: &[Segment]) -> usize {
     segs.iter().map(|s| s.len()).sum()
 }
+
+/// Write one RPC record to a connection writer the CALLER has locked:
+/// a 4-byte marker over the sum of the segments, each segment in
+/// order, then a flush so the peer sees the frame immediately.
+///
+/// This is the one place the segment-to-socket discipline lives — it
+/// used to exist verbatim in both the shared lane's
+/// `send_record_segments` and the DS's reply closure, and the copy
+/// that drifted first would have interleaved foreign bytes into the
+/// middle of a frame. The load-bearing rule: a piped segment splices
+/// to the RAW socket, so the BufWriter must FLUSH FIRST — anything
+/// still buffered would land AFTER the payload, which is the
+/// corruption class `nfs::pipeline` guards against.
+///
+/// Takes the segments BY VALUE: draining a piped segment consumes it,
+/// and a pipe has one reader.
+pub async fn write_record(
+    w: &mut tokio::io::BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+    segs: Vec<Segment>,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let len: usize = total_len(&segs);
+    if len > 0x7FFF_FFFF {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "RPC fragment exceeds 2 GiB",
+        ));
+    }
+    let marker: u32 = 0x8000_0000 | (len as u32);
+    w.write_all(&marker.to_be_bytes()).await?;
+    for seg in segs {
+        match seg {
+            Segment::Mem(b) => w.write_all(&b).await?,
+            #[cfg(target_os = "linux")]
+            Segment::Piped(mut st) => {
+                w.flush().await?;
+                let sock: &tokio::net::TcpStream = w.get_ref().as_ref();
+                st.drain_to(sock).await?;
+            }
+        }
+    }
+    w.flush().await
+}

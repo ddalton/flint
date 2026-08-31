@@ -22,7 +22,7 @@ use crate::nfs::v4::state::{ClientManager, LeaseManager};
 use bytes::{Bytes, BytesMut};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncReadExt, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
@@ -333,27 +333,8 @@ impl DataServer {
                 // the old single-buffer path issued a 4-BYTE flush (the
                 // marker alone) ahead of every megabyte reply.
                 move |reply: Vec<crate::nfs::segment::Segment>| async move {
-                    let total: usize = crate::nfs::segment::total_len(&reply);
-                    let reply_marker = 0x80000000 | total as u32;
                     let mut w = writer_c.lock().await;
-                    w.write_all(&reply_marker.to_be_bytes()).await?;
-                    for seg in reply {
-                        match seg {
-                            crate::nfs::segment::Segment::Mem(b) => w.write_all(&b).await?,
-                            #[cfg(target_os = "linux")]
-                            crate::nfs::segment::Segment::Piped(mut st) => {
-                                // FLUSH FIRST: the splice targets the raw
-                                // socket, so anything still buffered here
-                                // would land AFTER the payload — foreign
-                                // bytes mid-frame. Same discipline as
-                                // `send_record_segments` on the MDS lane.
-                                w.flush().await?;
-                                let sock: &tokio::net::TcpStream = w.get_ref().as_ref();
-                                st.drain_to(sock).await?;
-                            }
-                        }
-                    }
-                    w.flush().await
+                    crate::nfs::segment::write_record(&mut w, reply).await
                 },
             ).await?;
             rpc_count += 1;
