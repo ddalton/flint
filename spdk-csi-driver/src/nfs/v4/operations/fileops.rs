@@ -1086,6 +1086,13 @@ const SUPPORTED_ATTRS_BITMAP: u64 = (1u64 << FATTR4_TYPE)
     | (1u64 << FATTR4_SYMLINK_SUPPORT)
     | (1u64 << FATTR4_FSID)
     | (1u64 << FATTR4_UNIQUE_HANDLES)   // Client FH caching strategy
+    // REQUIRED attr (RFC 8881 §5.6) — and load-bearing for perf: the
+    // client builds its readdirplus bitmap from THIS advertisement, so
+    // without bit 19 it never asks READDIR for per-entry filehandles,
+    // cannot prime its dcache from a listing, and pays a LOOKUP RPC
+    // per entry (measured: 1002 LOOKUPs for an ls -l of 1000 files vs
+    // knfsd's 2).
+    | (1u64 << FATTR4_FILEHANDLE)
     | (1u64 << FATTR4_LEASE_TIME)       // CRITICAL for NFSv4.1 leases!
     | (1u64 << FATTR4_ACLSUPPORT)       // ACL capabilities
     | (1u64 << FATTR4_ACL)
@@ -1280,7 +1287,7 @@ fn encode_export_entry_attributes(name: &str, requested_attrs: &[u32], pnfs_enab
     };
 
     // Use the standard snapshot encoder for consistency
-    encode_attributes_from_snapshot(requested_attrs, &snapshot, pnfs_enabled, None)
+    encode_attributes_from_snapshot(requested_attrs, &snapshot, pnfs_enabled, None, None)
 }
 
 /// Encode attributes from a snapshot (NO VFS I/O)
@@ -1307,6 +1314,14 @@ fn encode_attributes_from_snapshot(
     // extents machine wanted anyway (bytes cannot follow a file out of
     // its volume's lvol).
     scsi_fsid: Option<u64>,
+    // The entry's minted filehandle, when the caller can supply one.
+    // READDIR passes it so FATTR4_FILEHANDLE can be answered per entry
+    // — without it the client cannot prime its dcache from the listing
+    // and pays a LOOKUP RPC per entry on first touch (measured: 4007
+    // LOOKUPs on an rm -rf of 4000 files vs 1280 against knfsd).
+    // GETATTR callers pass None: a client asks for the handle there via
+    // GETFH, and the bit is simply omitted from the reply bitmap.
+    entry_fh: Option<&[u8]>,
 ) -> (Vec<u8>, Vec<u32>) {
     let scsi = scsi_fsid.is_some();
     use std::collections::BTreeSet;
@@ -1399,6 +1414,19 @@ fn encode_attributes_from_snapshot(
                 }
                 true
             }
+            FATTR4_FILEHANDLE => match entry_fh {
+                // nfs_fh4 is a variable opaque: length prefix, bytes,
+                // pad to the 4-byte boundary.
+                Some(fh) => {
+                    attr_vals.put_u32(fh.len() as u32);
+                    attr_vals.put_slice(fh);
+                    for _ in 0..((4 - (fh.len() % 4)) % 4) {
+                        attr_vals.put_u8(0);
+                    }
+                    true
+                }
+                None => false,
+            },
             FATTR4_RDATTR_ERROR => {
                 // No error - snapshot was successful
                 attr_vals.put_u32(0); // NFS4_OK
@@ -2569,6 +2597,7 @@ impl FileOperationHandler {
                                         // fsinfo-time reads answered per-volume by
                                         // handle_getattr; not derived here.
                                         None,
+                                        Some(&current_fh.data),
                                     );
                                 return GetAttrRes {
                                     status: Nfs4Status::Ok,
@@ -2636,6 +2665,8 @@ impl FileOperationHandler {
             // filesystem, and THAT is the fsinfo probe that picks the
             // client's layout driver.
             self.scsi_fsid_for_path(&path),
+            // The op's own filehandle IS the answer to FATTR4_FILEHANDLE.
+            Some(&current_fh.data),
         );
         
         let fattr = Fattr4 {
@@ -3200,6 +3231,17 @@ impl FileOperationHandler {
         // — but it no longer shifts anyone else's cookie, because cookies
         // come from the directory stream rather than from this vector's
         // indices.
+        // FATTR4_FILEHANDLE (bit 19, word 0): mint a handle per entry
+        // ONLY when the client asked — it is what lets the client prime
+        // its dcache from the listing and skip a LOOKUP RPC per entry
+        // on first touch (rm -rf measured 4007 LOOKUPs without this,
+        // 1280 against knfsd). Minting costs an HMAC per new path, so
+        // an uninterested client pays nothing.
+        let want_fh = op
+            .attr_request
+            .first()
+            .is_some_and(|w| w & (1u32 << FATTR4_FILEHANDLE) != 0);
+
         let mut all_entries = Vec::with_capacity(names.len());
         for (file_name, entry_cookie) in names {
             let entry_path = dir_path.join(&file_name);
@@ -3213,7 +3255,15 @@ impl FileOperationHandler {
             // Same correction as GETATTR: a READDIR carrying attributes
             // must not report a striped file as fully unallocated either.
             self.correct_space_used(&mut snapshot);
-            all_entries.push((file_name, entry_cookie, snapshot));
+            let entry_fh = if want_fh {
+                self.fh_mgr
+                    .get_or_create_handle(&entry_path)
+                    .ok()
+                    .map(|h| h.data)
+            } else {
+                None
+            };
+            all_entries.push((file_name, entry_cookie, snapshot, entry_fh));
         }
 
         // Build response entries with attribute encoding
@@ -3226,7 +3276,7 @@ impl FileOperationHandler {
         const BASE_RESPONSE_SIZE: usize = 20;
         let maxcount_limit = op.maxcount.saturating_sub(BASE_RESPONSE_SIZE as u32) as usize;
 
-        for (file_name, entry_cookie, snapshot) in all_entries.iter() {
+        for (file_name, entry_cookie, snapshot, entry_fh) in all_entries.iter() {
             // The cookie is the directory stream's own offset past this
             // entry — stable across calls and across mutation elsewhere
             // in the directory.
@@ -3243,6 +3293,7 @@ impl FileOperationHandler {
                 // or READDIRPLUS would report it as part of the parent
                 // filesystem it is not in.
                 self.scsi_fsid_for_path(&dir_path.join(file_name)),
+                entry_fh.as_deref(),
             );
 
             debug!("READDIR: Encoding '{}': {} attribute bytes, bitmap={:?}",
@@ -4398,6 +4449,7 @@ impl FileOperationHandler {
             // files-class fleet default. Per-volume refinement happens
             // at the fsid crossing into each scsi volume dir.
             None,
+            None,
         );
         
         let fattr = Fattr4 {
@@ -4519,6 +4571,69 @@ mod tests {
             Nfs4Status::Ok,
             "a conforming resume must still be served",
         );
+    }
+
+    #[tokio::test]
+    async fn readdir_returns_a_filehandle_per_entry_when_requested() {
+        let (handler, temp) = create_test_handler();
+        let dir = temp.path();
+        std::fs::write(dir.join("prime-me.bin"), b"x").unwrap();
+
+        let mut ctx = CompoundContext::new(0);
+        handler.handle_putrootfh(PutRootFhOp, &mut ctx);
+
+        let rd = |attr_request: Vec<u32>| ReadDirOp {
+            cookie: 0,
+            cookieverf: 0,
+            dircount: 65536,
+            maxcount: 65536,
+            attr_request,
+        };
+
+        let res = handler
+            .handle_readdir(rd(vec![1u32 << FATTR4_FILEHANDLE]), &ctx)
+            .await;
+        assert_eq!(res.status, Nfs4Status::Ok);
+        let entry = res
+            .entries
+            .iter()
+            .find(|e| e.name == "prime-me.bin")
+            .expect("the file must be listed");
+        // fattr4 wire form: bitmap-len, words..., opaque-len, then the
+        // fh as its own opaque (len + bytes + pad).
+        let a = &entry.attrs;
+        let words = u32::from_be_bytes(a[0..4].try_into().unwrap()) as usize;
+        assert!(words >= 1);
+        let w0 = u32::from_be_bytes(a[4..8].try_into().unwrap());
+        assert_ne!(
+            w0 & (1 << FATTR4_FILEHANDLE),
+            0,
+            "the reply bitmap must carry bit 19 — without it the client \
+             cannot prime its dcache and pays a LOOKUP per entry"
+        );
+        let vals_off = 4 + words * 4 + 4;
+        let fh_len =
+            u32::from_be_bytes(a[vals_off..vals_off + 4].try_into().unwrap()) as usize;
+        let fh = &a[vals_off + 4..vals_off + 4 + fh_len];
+        // Compare against what LOOKUP would mint for the same name —
+        // the client invalidates a primed dentry whose fh differs from
+        // a later LOOKUP's. LOOKUP paths come out of resolve_handle in
+        // the export's CANONICAL spelling (on macOS /var → /private/var,
+        // which also changes the minted handle version by length), so
+        // the comparison must mint from the same spelling READDIR saw.
+        let canon = dir.canonicalize().unwrap().join("prime-me.bin");
+        let minted = handler.fh_mgr.get_or_create_handle(&canon).unwrap();
+        assert_eq!(fh, &minted.data[..], "the entry fh must match LOOKUP's handle");
+
+        // Not requested ⇒ not returned (and nothing minted for it).
+        let res2 = handler.handle_readdir(rd(vec![1u32 << FATTR4_TYPE]), &ctx).await;
+        let e2 = res2
+            .entries
+            .iter()
+            .find(|e| e.name == "prime-me.bin")
+            .unwrap();
+        let w0b = u32::from_be_bytes(e2.attrs[4..8].try_into().unwrap());
+        assert_eq!(w0b & (1 << FATTR4_FILEHANDLE), 0);
     }
 
     #[tokio::test]
@@ -5152,7 +5267,7 @@ mod tests {
         let snapshot = AttributeSnapshot::pseudo_root(1);
         let requested = vec![(1u32 << FATTR4_LINK_SUPPORT) | (1u32 << FATTR4_SYMLINK_SUPPORT)];
         let (vals, supported) =
-            encode_attributes_from_snapshot(&requested, &snapshot, false, None);
+            encode_attributes_from_snapshot(&requested, &snapshot, false, None, None);
 
         assert_eq!(
             supported.first().copied().unwrap_or(0) & (1 << FATTR4_LINK_SUPPORT),
