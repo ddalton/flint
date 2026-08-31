@@ -232,3 +232,47 @@ mod tests {
         assert_eq!(std::fs::read(&outside).unwrap(), b"token");
     }
 }
+
+/// Kernel-resolved containment probe: resolve `rel` beneath `root` with
+/// `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS, O_PATH)` — the
+/// module doc's "not yet" upgrade, applied at the containment layer.
+/// Success proves every component (symlinks included) resolves beneath
+/// `root`; the fd is closed immediately, only the verdict is used.
+/// Callers treat ANY error as "take the slow path", so a kernel without
+/// openat2 (< 5.6, ENOSYS) degrades to the historical behavior.
+#[cfg(target_os = "linux")]
+pub(crate) fn probe_beneath(root: &std::fs::File, rel: &Path) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let c = std::ffi::CString::new(rel.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+
+    #[repr(C)]
+    struct OpenHow {
+        flags: u64,
+        mode: u64,
+        resolve: u64,
+    }
+    const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+    const RESOLVE_BENEATH: u64 = 0x08;
+    let how = OpenHow {
+        flags: (libc::O_PATH | libc::O_CLOEXEC) as u64,
+        mode: 0,
+        resolve: RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS,
+    };
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            root.as_raw_fd(),
+            c.as_ptr(),
+            &how as *const OpenHow,
+            std::mem::size_of::<OpenHow>(),
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    unsafe { libc::close(fd as libc::c_int) };
+    Ok(())
+}

@@ -163,6 +163,14 @@ pub struct FileHandleManager {
     /// path, which is the path an agent fleet actually hammers.
     export_canon: PathBuf,
 
+    /// O_PATH fd of the canonical export root, opened once at
+    /// construction — the dirfd for the openat2(RESOLVE_BENEATH)
+    /// containment fast path in `ensure_within_export`. None when the
+    /// open failed; containment then always takes the canonicalize
+    /// slow path.
+    #[cfg(target_os = "linux")]
+    export_root_fd: Option<std::fs::File>,
+
     /// Pseudo-filesystem (RFC 7530 Section 7)
     pseudo_fs: Arc<PseudoFilesystem>,
 
@@ -325,6 +333,19 @@ impl FileHandleManager {
             }
         };
 
+        // The containment fast path's dirfd, held for the manager's
+        // lifetime. O_PATH: no read access needed, just an anchor for
+        // kernel-side beneath-resolution.
+        #[cfg(target_os = "linux")]
+        let export_root_fd = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
+                .open(&export_canon)
+                .ok()
+        };
+
         Self {
             instance_id,
             export_canon,
@@ -339,6 +360,8 @@ impl FileHandleManager {
             rename_aliases: Arc::new(RwLock::new(HashMap::new())),
             backend: RwLock::new(None),
             kernel,
+            #[cfg(target_os = "linux")]
+            export_root_fd,
         }
     }
 
@@ -1045,6 +1068,33 @@ impl FileHandleManager {
         }
 
         let export_canon = &self.export_canon;
+
+        // Fast path (Linux): ONE openat2(RESOLVE_BENEATH) resolves the
+        // parent entirely in the kernel — symlinks followed, escapes
+        // refused — replacing a userspace realpath walk that measured
+        // one (always-failing) readlinkat plus component stats on EVERY
+        // operation, the core of the small-file per-op cost. It can
+        // only APPROVE what the kernel proved is beneath the root; any
+        // refusal (ENOENT, ELOOP, EXDEV, an absolute symlink that may
+        // still be contained) falls through to the slow path below,
+        // which keeps the exact historical semantics.
+        #[cfg(target_os = "linux")]
+        if let Some(root) = &self.export_root_fd {
+            if let Some(parent) = normalized.parent() {
+                if let Ok(rel) = parent
+                    .strip_prefix(export_canon)
+                    .or_else(|_| parent.strip_prefix(&self.export_path))
+                {
+                    if rel.as_os_str().is_empty() {
+                        // The parent IS the export root.
+                        return Ok(());
+                    }
+                    if crate::nfs::v4::open_beneath::probe_beneath(root, rel).is_ok() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
 
         let resolved = match (normalized.parent(), normalized.file_name()) {
             (Some(parent), Some(leaf)) => {
