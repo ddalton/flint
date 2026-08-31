@@ -115,6 +115,57 @@ where
     }
 }
 
+/// Async-friendly variant of [`read_at_pooled`] for fills that must hold
+/// the buffer across await points (the ingress RPC-record read). Take a
+/// buffer, fill it however long that takes, then [`PooledMut::freeze`]
+/// the filled prefix zero-copy. Dropping without freezing returns the
+/// buffer to the pool — the early-error path costs nothing.
+///
+/// The second user of this pool: a payload-bearing inbound record (a
+/// 1 MiB WRITE) used to be a fresh `BytesMut` allocation per record —
+/// `split().freeze()` donates the storage to the request, so the next
+/// record cannot reuse it. The fresh pages showed up as
+/// `__pi_clear_page` (3.5% of system) plus kcompactd compaction churn
+/// in the write-path profile; a warm pooled buffer faults nothing.
+pub struct PooledMut {
+    buf: Option<Vec<u8>>,
+}
+
+pub fn take_mut(count: usize) -> PooledMut {
+    PooledMut { buf: Some(take(count)) }
+}
+
+impl std::ops::Deref for PooledMut {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        self.buf.as_ref().expect("owner outlives its borrows")
+    }
+}
+
+impl std::ops::DerefMut for PooledMut {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        self.buf.as_mut().expect("owner outlives its borrows")
+    }
+}
+
+impl PooledMut {
+    /// Freeze the first `len` filled bytes into a `Bytes` that returns
+    /// the buffer to the pool on last drop.
+    pub fn freeze(mut self, len: usize) -> Bytes {
+        let buf = self.buf.take().expect("freeze consumes the owner");
+        debug_assert!(len <= buf.len());
+        Bytes::from_owner(Pooled { buf: Some(buf), len })
+    }
+}
+
+impl Drop for PooledMut {
+    fn drop(&mut self) {
+        if let Some(b) = self.buf.take() {
+            give(b);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -295,6 +295,20 @@ pub(crate) fn max_connections_from_env() -> u64 {
 /// `handle_tcp_connection`.
 pub(crate) const MAX_RPC_RECORD_BYTES: usize = 4 * 1024 * 1024;
 
+/// Records larger than this read into a pooled buffer instead of `buf`.
+/// Below it the connection's `BytesMut` amortizes allocations across
+/// records; above it (the BufReader's capacity) every record forced a
+/// fresh allocation, because `split().freeze()` donates the storage to
+/// the request. A 1 MiB WRITE payload sits far above this line.
+pub(crate) const POOLED_RECORD_MIN: usize = 128 * 1024;
+
+/// Counts records that took the pooled ingress path — the anti-vacuity
+/// guard for the test that sends one: a green round-trip proves nothing
+/// if the record quietly took the `BytesMut` path instead.
+#[cfg(test)]
+pub(crate) static POOLED_RECORDS_FOR_TEST: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 360;
 
 /// Resolve the deadline. Unset → [`DEFAULT_IDLE_TIMEOUT_SECS`]; `0` →
@@ -626,7 +640,24 @@ async fn handle_tcp_connection(
         // observe uninitialized memory). `resize` is implemented as a single
         // `RawVec::reserve` + memset pair and is essentially free relative to
         // the I/O cost of receiving `length` bytes from the socket.
-        buf.resize(assembled + length, 0);
+        //
+        // A payload-bearing single-fragment record (a 1 MiB WRITE) takes
+        // a POOLED buffer instead: `split().freeze()` donates `buf`'s
+        // storage to the request, so above the BufReader's capacity the
+        // `BytesMut` path paid a fresh allocation whose pages the kernel
+        // zeroes on first touch — `__pi_clear_page` at 3.5% of system
+        // plus kcompactd compaction churn in the write-path profile. A
+        // warm pooled buffer faults nothing. Fragmented records keep the
+        // `BytesMut` path: fragments must append to what is assembled.
+        let mut pooled_buf: Option<crate::nfs::read_pool::PooledMut> =
+            if is_last && assembled == 0 && length > POOLED_RECORD_MIN {
+                #[cfg(test)]
+                POOLED_RECORDS_FOR_TEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some(crate::nfs::read_pool::take_mut(length))
+            } else {
+                buf.resize(assembled + length, 0);
+                None
+            };
 
         debug!("📥 Reading RPC payload: {} bytes from {}", length, peer);
         // Blocker 7, mid-request: a peer that sent a marker and then
@@ -634,13 +665,12 @@ async fn handle_tcp_connection(
         // Unlike the idle case above this is a malformed exchange — the
         // peer promised `length` bytes and did not deliver — so it is an
         // error, not a quiet close.
+        let dst: &mut [u8] = match pooled_buf.as_mut() {
+            Some(pb) => &mut pb[..length],
+            None => &mut buf[assembled..assembled + length],
+        };
         match idle_timeout {
-            Some(d) => match tokio::time::timeout(
-                d,
-                reader.read_exact(&mut buf[assembled..assembled + length]),
-            )
-            .await
-            {
+            Some(d) => match tokio::time::timeout(d, reader.read_exact(dst)).await {
                 Ok(r) => {
                     r?;
                 }
@@ -658,7 +688,7 @@ async fn handle_tcp_connection(
                 }
             },
             None => {
-                reader.read_exact(&mut buf[assembled..assembled + length]).await?;
+                reader.read_exact(dst).await?;
             }
         }
 
@@ -670,15 +700,19 @@ async fn handle_tcp_connection(
             continue;
         }
 
-        if buf.is_empty() {
-            warn!("⚠️  Zero-length RPC record from {}, ignoring", peer);
-            continue;
-        }
+        let request = match pooled_buf.take() {
+            Some(pb) => pb.freeze(length),
+            None => {
+                if buf.is_empty() {
+                    warn!("⚠️  Zero-length RPC record from {}, ignoring", peer);
+                    continue;
+                }
+                buf.split().freeze()
+            }
+        };
 
         debug!("✅ Received complete RPC record ({} bytes), first 32 bytes: {:02x?}",
-               buf.len(), &buf[..std::cmp::min(32, buf.len())]);
-
-        let request = buf.split().freeze();
+               request.len(), &request[..std::cmp::min(32, request.len())]);
 
         // RFC 5531 §9 frame layout: [0..4]=xid, [4..8]=msg_type
         // (0=CALL, 1=REPLY). The forward channel only ever sees
@@ -1644,6 +1678,70 @@ mod idle_timeout_tests {
         assert_eq!(
             split, whole,
             "a fragmented record must produce the SAME reply as the whole one",
+        );
+    }
+
+    /// A payload-bearing single-fragment record (> POOLED_RECORD_MIN)
+    /// reads into a pooled buffer: `split().freeze()` donates the
+    /// connection buffer's storage to the request, so the BytesMut path
+    /// paid a fresh allocation + kernel page-clear per large record.
+    ///
+    /// The oracle is reply equality against the same call sent small: a
+    /// pooled path that mis-sliced or corrupted the record would decode
+    /// garbage and answer differently. The counter is the anti-vacuity
+    /// guard — without it, a record that quietly took the BytesMut path
+    /// would pass this test for no reason.
+    #[tokio::test]
+    async fn a_large_single_fragment_record_takes_the_pooled_path_and_decodes() {
+        use std::sync::atomic::Ordering;
+        // RFC 5531 NULL CALL, as in the fragment test above.
+        let call: Vec<u8> = [0x2Cu32, 0, 2, 100_003, 4, 0, 0, 0, 0, 0]
+            .iter()
+            .flat_map(|w| w.to_be_bytes())
+            .collect();
+
+        async fn reply_to(payload: &[u8]) -> Vec<u8> {
+            let (mut client, handle, _t) =
+                one_served_connection(Some(Duration::from_secs(5))).await;
+            let marker = 0x8000_0000u32 | payload.len() as u32;
+            client.write_all(&marker.to_be_bytes()).await.unwrap();
+            client.write_all(payload).await.unwrap();
+            client.flush().await.unwrap();
+            let mut m = [0u8; 4];
+            tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut m))
+                .await
+                .expect("the server must answer within the window")
+                .expect("reply marker");
+            let len = (u32::from_be_bytes(m) & 0x7FFF_FFFF) as usize;
+            let mut body = vec![0u8; len];
+            client.read_exact(&mut body).await.expect("reply body");
+            drop(client);
+            let _ = handle.await;
+            body
+        }
+
+        // CONTROL: the bare call, small enough to take the BytesMut path.
+        let whole = reply_to(&call).await;
+        assert!(!whole.is_empty(), "the small control must get a reply");
+
+        // The same call padded past the pool threshold. The pad bytes are
+        // NULL-proc args, which the server ignores; the reply must match.
+        let mut big = call.clone();
+        big.resize(POOLED_RECORD_MIN + 4096, 0xAB);
+        let before = POOLED_RECORDS_FOR_TEST.load(Ordering::Relaxed);
+        let padded = reply_to(&big).await;
+        let after = POOLED_RECORDS_FOR_TEST.load(Ordering::Relaxed);
+
+        assert!(
+            after > before,
+            "the {}-byte record must take the POOLED path (counter {} -> {})",
+            big.len(),
+            before,
+            after
+        );
+        assert_eq!(
+            padded, whole,
+            "a pooled record must produce the SAME reply as the small control",
         );
     }
 
