@@ -199,6 +199,24 @@ mod imp {
         pub fn is_empty(&self) -> bool {
             self.len == 0
         }
+
+        /// Test-only: read the staged bytes OUT of the pipe into memory,
+        /// so a unit test that called a read path directly (no socket to
+        /// drain into) can assert on the payload. Marks the stage fully
+        /// drained — the pipe is empty afterwards, so Drop can pool it.
+        #[cfg(test)]
+        pub fn read_out_for_test(&mut self) -> Vec<u8> {
+            use std::io::Read;
+            use std::os::fd::FromRawFd;
+            let mut v = vec![0u8; self.len - self.drained];
+            if let (Some(p), false) = (&self.pipe, v.is_empty()) {
+                // dup so the File's close doesn't take the pipe fd with it.
+                let mut f = unsafe { std::fs::File::from_raw_fd(libc::dup(p.r)) };
+                f.read_exact(&mut v).expect("drain staged pipe in test");
+            }
+            self.drained = self.len;
+            v
+        }
     }
 
     /// Stage `count` bytes at `offset` from `file` into a pipe.

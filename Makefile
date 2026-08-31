@@ -480,6 +480,12 @@ test-f29-restage: ## F29 drill (Lima VM): a stale "staged" kubelet cache self-he
 	  DRIVER_BIN=$${DRIVER_BIN:-$(CURDIR)/spdk-csi-driver/target/aarch64-unknown-linux-musl/release/csi-driver} \
 	  EXPECT=heal bash $(CURDIR)/tests/lima/f29/restage-drill.sh
 
+.PHONY: test-ds-lane-perf
+test-ds-lane-perf: ## DS-lane read differential (Lima VM): flint MDS+DS vs standalone MDS vs knfsd, interleaved + guarded. Reports ratios; needs aarch64-musl cross-builds of flint-pnfs-mds and flint-pnfs-ds
+	MDS_BIN=$${MDS_BIN:-$(CURDIR)/spdk-csi-driver/target/aarch64-unknown-linux-musl/release/flint-pnfs-mds} \
+	  DS_BIN=$${DS_BIN:-$(CURDIR)/spdk-csi-driver/target/aarch64-unknown-linux-musl/release/flint-pnfs-ds} \
+	  bash $(CURDIR)/tests/lima/pnfs/ds-lane-differential.sh
+
 .PHONY: test-rw-visibility
 test-rw-visibility: ## pNFS read-after-write visibility drill (Lima VM): LAYOUTCOMMIT must move CHANGE, and an MDS restart must not wedge O_TRUNC of striped files. Needs aarch64-musl cross-builds of flint-pnfs-mds and flint-pnfs-ds
 	MDS_BIN=$${MDS_BIN:-$(CURDIR)/spdk-csi-driver/target/aarch64-unknown-linux-musl/release/flint-pnfs-mds} \

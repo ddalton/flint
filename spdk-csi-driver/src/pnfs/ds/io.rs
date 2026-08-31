@@ -419,7 +419,7 @@ impl IoOperationHandler {
                                 "DS READ: stripe file {:?} absent — hole, replying eof",
                                 file_path
                             );
-                            return Ok(ReadResult { eof: true, data: Bytes::new() });
+                            return Ok(ReadResult { eof: true, data: Bytes::new().into() });
                         }
                         Err(e) => {
                             warn!("Failed to open file {:?}: {}", file_path, e);
@@ -443,7 +443,7 @@ impl IoOperationHandler {
         // path, which is the pre-existing behaviour unchanged.
         let direct = self.cached_direct_fd(filehandle);
 
-        let (buffer, eof) = fast_blocking(count as usize, || -> std::io::Result<(Bytes, bool)> {
+        let (buffer, eof) = fast_blocking(count as usize, || -> std::io::Result<(crate::nfs::segment::Segment, bool)> {
             if let Some(direct) = direct.as_deref() {
                 // A failure here is NOT fatal: fall through to buffered.
                 // O_DIRECT can be refused per-request (misaligned memory
@@ -458,11 +458,37 @@ impl IoOperationHandler {
                         // The O_DIRECT path keeps its own aligned
                         // allocation: alignment is a property of the
                         // buffer the pool does not promise.
-                        return Ok((Bytes::from(buffer), eof));
+                        return Ok((Bytes::from(buffer).into(), eof));
                     }
                     Ok(None) => {} // below the size threshold — buffered
                     Err(e) => {
                         debug!("O_DIRECT read failed ({}), falling back to buffered", e);
+                    }
+                }
+            }
+
+            // Splice staging: file → pipe now, pipe → socket in the
+            // writer, and the payload never enters userspace. Same
+            // module, same default-ON gate as the standalone lane
+            // (`nfs::splice`; FLINT_NFS_SPLICE=0 opts out). The two
+            // surfaces that force the standalone lane to decline —
+            // GSS sealing and the slot reply cache — do not exist on
+            // the DS (rpc_gss_svc_none only, no replay cache), so a
+            // READ here can always stage. Clamp to EOF first: a
+            // splice that comes up short of `want` is treated as a
+            // failed stage, so asking for bytes past EOF would
+            // needlessly fall back to the copy path.
+            if crate::nfs::splice::enabled() {
+                let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                let actual = if offset >= file_size {
+                    0
+                } else {
+                    (count as usize).min((file_size - offset) as usize)
+                };
+                if actual > 0 {
+                    if let Some(staged) = crate::nfs::splice::stage_read(&file, offset, actual)? {
+                        let eof = offset + (staged.len() as u64) >= file_size;
+                        return Ok((staged.into(), eof));
                     }
                 }
             }
@@ -516,7 +542,7 @@ impl IoOperationHandler {
             // Check if we reached EOF
             let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
             let eof = offset + (bytes_read as u64) >= file_size;
-            Ok((buffer, eof))
+            Ok((buffer.into(), eof))
         })
         .map_err(crate::pnfs::Error::Io)?;
 
@@ -789,13 +815,15 @@ impl Default for IoOperationHandler {
 }
 
 /// READ operation result
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ReadResult {
     /// End of file reached
     pub eof: bool,
-    
-    /// Data read
-    pub data: Bytes,
+
+    /// Data read — memory (pooled or O_DIRECT) or a splice-staged pipe.
+    /// Same shape as the standalone lane's `compound::ReadResult`: the
+    /// payload travels to the socket as whatever the I/O layer produced.
+    pub data: crate::nfs::segment::Segment,
 }
 
 /// WRITE operation result
@@ -865,7 +893,7 @@ mod tests {
         assert_eq!(h.fd_cache.len(), 1);
 
         let r = h.read(&fh, 3, 5).await.unwrap();
-        assert_eq!(&r.data[..], b"hello");
+        assert_eq!(&r.data.into_test_bytes()[..], b"hello");
         assert!(r.eof);
         assert_eq!(h.fd_cache.len(), 1, "READ must hit the WRITE-cached fd");
 
@@ -940,14 +968,14 @@ mod tests {
         let fh = fh_for(&h, "ro", &dir);
 
         let r = h.read(&fh, 0, 4).await.unwrap();
-        assert_eq!(&r.data[..], b"data");
+        assert_eq!(&r.data.into_test_bytes()[..], b"data");
         assert_eq!(h.fd_cache.len(), 1);
 
         // WRITE must succeed whether READ cached the fd rw or ro.
         let w = h.write(&fh, 4, bytes::Bytes::from_static(b"more"), WriteStable::FileSync).await.unwrap();
         assert_eq!(w.count, 4);
         let r = h.read(&fh, 0, 8).await.unwrap();
-        assert_eq!(&r.data[..], b"datamore");
+        assert_eq!(&r.data.into_test_bytes()[..], b"datamore");
     }
 
     #[tokio::test]
@@ -995,8 +1023,8 @@ mod tests {
 
         let ra = h.read(&fh_a, 0, 4).await.unwrap();
         let rb = h.read(&fh_b, 0, 4).await.unwrap();
-        assert_eq!(&ra.data[..], b"AAAA", "dirA content clobbered by dirB write");
-        assert_eq!(&rb.data[..], b"BBBB");
+        assert_eq!(&ra.data.into_test_bytes()[..], b"AAAA", "dirA content clobbered by dirB write");
+        assert_eq!(&rb.data.into_test_bytes()[..], b"BBBB");
     }
 
     /// The FH path is client-supplied wire bytes: '..' must not

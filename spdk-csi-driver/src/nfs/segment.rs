@@ -70,6 +70,19 @@ impl Segment {
         }
     }
 
+    /// Test-only materialization: memory comes back as-is, a piped
+    /// payload is read out of its pipe. Lets a unit test that called a
+    /// read path directly (no socket) assert on payload bytes without
+    /// caring which arm the path chose.
+    #[cfg(test)]
+    pub fn into_test_bytes(self) -> Bytes {
+        match self {
+            Segment::Mem(b) => b,
+            #[cfg(target_os = "linux")]
+            Segment::Piped(mut s) => Bytes::from(s.read_out_for_test()),
+        }
+    }
+
     /// Consuming form of [`Segment::as_mem`].
     pub fn into_mem(self) -> Bytes {
         match self {

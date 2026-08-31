@@ -285,13 +285,27 @@ impl DataServer {
                 ));
             }
 
-            // Read message
-            buf.clear();
-            buf.reserve(length);
-            unsafe { buf.set_len(length); }
-            reader.read_exact(&mut buf[..length]).await?;
-
-            let request = buf.split().freeze();
+            // Read message.
+            //
+            // A payload-bearing record (a 1 MiB WRITE) reads into a
+            // POOLED buffer: `split().freeze()` donates `buf`'s storage
+            // to the request, so every large record used to pay a fresh
+            // allocation whose pages the kernel zeroes on first touch —
+            // the same page-fault churn `e399d031` removed from the
+            // standalone lane's ingress. Small records keep the
+            // `BytesMut`, now via `resize` — the old `unsafe set_len`
+            // exposed uninitialized memory if `read_exact` failed
+            // partway (the UB the shared lane fixed alongside pooling).
+            let request = if length > crate::nfs::server_v4::POOLED_RECORD_MIN {
+                let mut pb = crate::nfs::read_pool::take_mut(length);
+                reader.read_exact(&mut pb[..length]).await?;
+                pb.freeze(length)
+            } else {
+                buf.clear();
+                buf.resize(length, 0);
+                reader.read_exact(&mut buf[..length]).await?;
+                buf.split().freeze()
+            };
 
             // Dispatch through the pipeline; the reply is framed and
             // flushed under the shared writer mutex.
@@ -318,13 +332,26 @@ impl DataServer {
                 // two writes — ~100 B of framing, then the payload — where
                 // the old single-buffer path issued a 4-BYTE flush (the
                 // marker alone) ahead of every megabyte reply.
-                move |reply: Vec<Bytes>| async move {
-                    let total: usize = reply.iter().map(|s| s.len()).sum();
+                move |reply: Vec<crate::nfs::segment::Segment>| async move {
+                    let total: usize = crate::nfs::segment::total_len(&reply);
                     let reply_marker = 0x80000000 | total as u32;
                     let mut w = writer_c.lock().await;
                     w.write_all(&reply_marker.to_be_bytes()).await?;
-                    for seg in &reply {
-                        w.write_all(seg).await?;
+                    for seg in reply {
+                        match seg {
+                            crate::nfs::segment::Segment::Mem(b) => w.write_all(&b).await?,
+                            #[cfg(target_os = "linux")]
+                            crate::nfs::segment::Segment::Piped(mut st) => {
+                                // FLUSH FIRST: the splice targets the raw
+                                // socket, so anything still buffered here
+                                // would land AFTER the payload — foreign
+                                // bytes mid-frame. Same discipline as
+                                // `send_record_segments` on the MDS lane.
+                                w.flush().await?;
+                                let sock: &tokio::net::TcpStream = w.get_ref().as_ref();
+                                st.drain_to(sock).await?;
+                            }
+                        }
                     }
                     w.flush().await
                 },
@@ -344,13 +371,13 @@ impl DataServer {
         io_handler: Arc<IoOperationHandler>,
         session_mgr: Arc<DsSessionManager>,
         client_mgr: Arc<ClientManager>,
-    ) -> Vec<Bytes> {
+    ) -> Vec<crate::nfs::segment::Segment> {
         // Parse RPC call
         let (call, args) = match CallMessage::decode_with_args(request) {
             Ok(result) => result,
             Err(e) => {
                 warn!("❌ Failed to parse RPC: {}", e);
-                return vec![ReplyBuilder::garbage_args(0)];
+                return vec![ReplyBuilder::garbage_args(0).into()];
             }
         };
 
@@ -358,20 +385,20 @@ impl DataServer {
 
         // Validate program/version
         if call.program != NFS4_PROGRAM || call.version != 4 {
-            return vec![ReplyBuilder::prog_unavail(call.xid)];
+            return vec![ReplyBuilder::prog_unavail(call.xid).into()];
         }
 
         // Handle procedure
         match call.procedure {
             procedure::NULL => {
-                vec![ReplyBuilder::success(call.xid).finish()]
+                vec![ReplyBuilder::success(call.xid).finish().into()]
             }
 
             procedure::COMPOUND => {
                 Self::handle_minimal_compound(call, args, io_handler, session_mgr, client_mgr).await
             }
 
-            _ => vec![ReplyBuilder::proc_unavail(call.xid)],
+            _ => vec![ReplyBuilder::proc_unavail(call.xid).into()],
         }
     }
 
@@ -382,13 +409,13 @@ impl DataServer {
         io_handler: Arc<IoOperationHandler>,
         session_mgr: Arc<DsSessionManager>,
         client_mgr: Arc<ClientManager>,
-    ) -> Vec<Bytes> {
+    ) -> Vec<crate::nfs::segment::Segment> {
         let mut decoder = XdrDecoder::new(args);
 
         // Decode COMPOUND header
         let tag_len = match decoder.decode_u32() {
             Ok(len) => len,
-            Err(_) => return vec![ReplyBuilder::garbage_args(call.xid)],
+            Err(_) => return vec![ReplyBuilder::garbage_args(call.xid).into()],
         };
 
         // Skip tag
@@ -398,12 +425,12 @@ impl DataServer {
 
         let minor_version = match decoder.decode_u32() {
             Ok(v) => v,
-            Err(_) => return vec![ReplyBuilder::garbage_args(call.xid)],
+            Err(_) => return vec![ReplyBuilder::garbage_args(call.xid).into()],
         };
 
         let op_count = match decoder.decode_u32() {
             Ok(c) => c,
-            Err(_) => return vec![ReplyBuilder::garbage_args(call.xid)],
+            Err(_) => return vec![ReplyBuilder::garbage_args(call.xid).into()],
         };
 
         debug!("DS COMPOUND: minor_version={}, {} operations", minor_version, op_count);
@@ -559,19 +586,44 @@ impl DataServer {
                     // Decode CREATE_SESSION arguments
                     let clientid = decoder.decode_u64().unwrap_or(0);
                     let sequence = decoder.decode_u32().unwrap_or(0);
-                    
-                    // Skip channel attributes (complex structure, not critical for basic functionality)
-                    // Just decode enough to not break XDR stream
-                    let _ = decoder.decode_u32(); // fore attributes count
-                    let _ = decoder.decode_u32(); // back attributes count  
-                    let _ = decoder.decode_u32(); // cb_program
-                    
-                    // Skip security parameters array
-                    let sec_count = decoder.decode_u32().unwrap_or(0);
-                    for _ in 0..sec_count {
-                        let _ = decoder.decode_u32();
+                    let _csa_flags = decoder.decode_u32().unwrap_or(0);
+
+                    // Decode the client's REQUESTED channel attrs
+                    // (RFC 8881 §18.36: headerpadsz, maxreqsz, maxrespsz,
+                    // maxrespsz_cached, maxops, maxreqs, rdma_ird<0..1>).
+                    // The reply below must NEGOTIATE — Linux's
+                    // nfs4_verify_channel_attrs returns EINVAL for a
+                    // server that GRANTS MORE than the client asked, the
+                    // client then destroys the session, marks the
+                    // deviceid unavailable, and every read silently
+                    // detours through the MDS proxy (measured: the
+                    // DS-lane rig collapsed 1650 → 716 MiB/s when this
+                    // arm advertised fixed values above the request).
+                    // The previous code "skipped" these fields with
+                    // three u32 reads — not valid XDR for this struct —
+                    // and got away with it only because nothing after
+                    // them in the compound was ever used.
+                    fn chan_attrs(d: &mut XdrDecoder) -> (u32, u32, u32, u32, u32) {
+                        let _headerpad = d.decode_u32().unwrap_or(0);
+                        let max_rqst = d.decode_u32().unwrap_or(1048576);
+                        let max_resp = d.decode_u32().unwrap_or(1048576);
+                        let cached = d.decode_u32().unwrap_or(4096);
+                        let max_ops = d.decode_u32().unwrap_or(8);
+                        let max_reqs = d.decode_u32().unwrap_or(64);
+                        let rdma = d.decode_u32().unwrap_or(0);
+                        for _ in 0..rdma.min(2) {
+                            let _ = d.decode_u32();
+                        }
+                        (max_rqst, max_resp, cached, max_ops, max_reqs)
                     }
-                    
+                    let (req_rqst, req_resp, req_cached, req_ops, req_reqs) =
+                        chan_attrs(&mut decoder);
+                    let _back = chan_attrs(&mut decoder);
+                    let _cb_program = decoder.decode_u32();
+                    // csa_sec_parms left unparsed: nothing in this arm
+                    // reads the stream past here, and the DS ignores
+                    // callback security (it never issues callbacks).
+
                     info!("DS: CREATE_SESSION - clientid={}, sequence={}", clientid, sequence);
                     
                     // Create session via session manager
@@ -602,13 +654,21 @@ impl DataServer {
                             // flags (0 for now)
                             encoder.encode_u32(0);
                             
-                            // fore_chan_attrs - MUST match RFC 8881 Section 18.36
+                            // fore_chan_attrs — NEGOTIATED, never granted
+                            // above the request (RFC 8881 §18.36; Linux
+                            // rejects rcvd > sent with EINVAL — see the
+                            // decode above). The server ceiling carries
+                            // the same headroom as the MDS
+                            // (`session::SERVER_MAX_*`, `3104fc51`): a
+                            // client that ASKS for 1 MiB + overhead now
+                            // gets it, where the old fixed 1048576 forced
+                            // its subtraction below 1 MiB.
                             encoder.encode_u32(0);       // header_pad_size (CRITICAL: was missing!)
-                            encoder.encode_u32(1048576); // max_rqst_sz (1MB)
-                            encoder.encode_u32(1048576); // max_resp_sz (1MB)
-                            encoder.encode_u32(4096);    // max_resp_sz_cached
-                            encoder.encode_u32(128);     // max_ops
-                            encoder.encode_u32(64);      // max_reqs (match MDS)
+                            encoder.encode_u32(req_rqst.min(crate::nfs::v4::operations::session::SERVER_MAX_REQUEST));
+                            encoder.encode_u32(req_resp.min(crate::nfs::v4::operations::session::SERVER_MAX_RESPONSE));
+                            encoder.encode_u32(req_cached.min(4096)); // max_resp_sz_cached
+                            encoder.encode_u32(req_ops.min(128));     // max_ops
+                            encoder.encode_u32(req_reqs.min(64));     // max_reqs (match MDS)
                             encoder.encode_u32(0);       // rdma_ird count (array)
                             
                             // back_chan_attrs - for callbacks
@@ -708,7 +768,7 @@ impl DataServer {
                                 head.encode_u32(read_result.data.len() as u32);
                                 results.push((opcode, Nfs4Status::Ok, OpBody::Payload {
                                     head: head.finish(),
-                                    data: Bytes::from(read_result.data),
+                                    data: read_result.data,
                                 }));
                                 continue;
                             }
@@ -1321,23 +1381,6 @@ impl DataServer {
         info!("Status reporter started (interval: 60 seconds)");
     }
 
-    /// Handle READ operation (opcode 25)
-    /// 
-    /// Uses filesystem I/O - this is the correct approach for pNFS FILE layout
-    /// per RFC 8881 Chapter 13.
-    pub async fn handle_read(
-        &self,
-        filehandle: &[u8],
-        _stateid: &[u8; 16],  // Minimal validation - trust MDS
-        offset: u64,
-        count: u32,
-    ) -> Result<Vec<u8>> {
-        let result = self.io_handler.read(filehandle, offset, count).await?;
-        // This helper is a test/legacy surface; the hot path takes
-        // `ReadResult.data` as `Bytes` straight to `OpBody::Payload`.
-        Ok(result.data.to_vec())
-    }
-
     /// Handle WRITE operation (opcode 38)
     /// 
     /// Uses filesystem I/O - this is the correct approach for pNFS FILE layout
@@ -1616,7 +1659,10 @@ pub(crate) enum OpBody {
     /// READ: eof bool + data length). `data` = the payload, unpadded; XDR
     /// pad-to-4 is emitted by [`assemble_reply`] AFTER the payload, so a
     /// short read whose length is not a multiple of 4 stays wire-correct.
-    Payload { head: Bytes, data: Bytes },
+    /// A `Segment` since the splice port: memory (`Mem`) travels exactly
+    /// as the `Bytes` did, and a splice-staged payload (`Piped`) reaches
+    /// the writer without ever entering userspace.
+    Payload { head: Bytes, data: crate::nfs::segment::Segment },
 }
 
 /// Assemble the full RPC reply as an ordered list of wire segments whose
@@ -1629,8 +1675,11 @@ pub(crate) enum OpBody {
 /// and encoding resumes in a fresh segment with the payload's XDR pad.
 /// A compound with no payload op degenerates to one segment — the old
 /// behavior with one fewer copy.
-pub(crate) fn assemble_reply(xid: u32, results: Vec<(u32, Nfs4Status, OpBody)>) -> Vec<Bytes> {
-    let mut segs: Vec<Bytes> = Vec::with_capacity(3);
+pub(crate) fn assemble_reply(
+    xid: u32,
+    results: Vec<(u32, Nfs4Status, OpBody)>,
+) -> Vec<crate::nfs::segment::Segment> {
+    let mut segs: Vec<crate::nfs::segment::Segment> = Vec::with_capacity(3);
     let mut cur = XdrEncoder::new();
 
     // RPC reply header — same six words ReplyBuilder::success emits.
@@ -1661,7 +1710,7 @@ pub(crate) fn assemble_reply(xid: u32, results: Vec<(u32, Nfs4Status, OpBody)>) 
                     continue;
                 }
                 let pad = (4 - data.len() % 4) % 4;
-                segs.push(cur.finish());
+                segs.push(cur.finish().into());
                 cur = XdrEncoder::new();
                 segs.push(data);
                 if pad > 0 {
@@ -1673,7 +1722,7 @@ pub(crate) fn assemble_reply(xid: u32, results: Vec<(u32, Nfs4Status, OpBody)>) 
 
     let tail = cur.finish();
     if !tail.is_empty() {
-        segs.push(tail);
+        segs.push(tail.into());
     }
     segs
 }
@@ -1708,8 +1757,8 @@ mod reply_segment_tests {
         reply.finish()
     }
 
-    fn concat(segs: &[Bytes]) -> Vec<u8> {
-        segs.iter().flat_map(|s| s.iter().copied()).collect()
+    fn concat(segs: &[crate::nfs::segment::Segment]) -> Vec<u8> {
+        segs.iter().flat_map(|s| s.as_mem().iter().copied()).collect()
     }
 
     /// A READ result body as the old code built it, for the reference.
@@ -1724,7 +1773,7 @@ mod reply_segment_tests {
         let mut h = XdrEncoder::new();
         h.encode_bool(eof);
         h.encode_u32(data.len() as u32);
-        OpBody::Payload { head: h.finish(), data: Bytes::copy_from_slice(data) }
+        OpBody::Payload { head: h.finish(), data: Bytes::copy_from_slice(data).into() }
     }
 
     #[test]
