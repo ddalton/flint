@@ -346,6 +346,36 @@ fn read_mode() -> ReadMode {
     })
 }
 
+#[derive(Clone, Copy)]
+enum WriteMode {
+    SpawnBlocking,
+    BlockInPlace,
+}
+
+/// How the UNSTABLE write body runs. An UNSTABLE write is a page-cache
+/// pwrite (µs-scale); the `spawn_blocking` round trip costs more than
+/// the work it dispatches — 6.5 futex calls per WRITE measured under a
+/// 4-writer O_DIRECT load, the same enqueue/wake/complete shape the READ
+/// path shed in `f2a950e9` (+24%) and the DS lane never had
+/// (`ds/io.rs::fast_blocking`). DATA_SYNC/FILE_SYNC writes pay an fsync
+/// (ms-scale) and never come through here — they stay on the blocking
+/// pool so a migrated worker is not monopolised under pipelined dispatch.
+///
+/// `block_in_place` PANICS on a current-thread runtime (what
+/// `#[tokio::test]` builds), so the flavor is checked rather than
+/// assumed. `FLINT_NFS_INLINE_WRITE` forces: 0 pool, 2 block-in-place.
+fn write_mode() -> WriteMode {
+    static M: std::sync::OnceLock<WriteMode> = std::sync::OnceLock::new();
+    *M.get_or_init(|| match std::env::var("FLINT_NFS_INLINE_WRITE").as_deref() {
+        Ok("0") | Ok("false") | Ok("no") => WriteMode::SpawnBlocking,
+        Ok("2") | Ok("block_in_place") => WriteMode::BlockInPlace,
+        _ => match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+            Ok(tokio::runtime::RuntimeFlavor::MultiThread) => WriteMode::BlockInPlace,
+            _ => WriteMode::SpawnBlocking,
+        },
+    })
+}
+
 impl IoOperationHandler {
     /// Create a new I/O operation handler
     pub fn new(state_mgr: Arc<StateManager>, fh_mgr: Arc<FileHandleManager>) -> Self {
@@ -2099,7 +2129,7 @@ impl IoOperationHandler {
             }
         }
 
-        let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<usize> {
+        let write_job = move || -> std::io::Result<usize> {
             use std::os::unix::fs::FileExt;
 
             // A4 write gate: held across the pwrite AND the capture
@@ -2200,7 +2230,17 @@ impl IoOperationHandler {
             }
 
             Ok(bytes_written)
-        }).await;
+        };
+        // See `write_mode`: the handoff is skipped only for UNSTABLE
+        // writes; anything carrying an fsync keeps the blocking pool.
+        let write_result = if stable == UNSTABLE4 {
+            match write_mode() {
+                WriteMode::BlockInPlace => Ok(tokio::task::block_in_place(write_job)),
+                WriteMode::SpawnBlocking => tokio::task::spawn_blocking(write_job).await,
+            }
+        } else {
+            tokio::task::spawn_blocking(write_job).await
+        };
 
         match write_result {
             Ok(Ok(bytes_written)) => {
