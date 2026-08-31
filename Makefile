@@ -468,6 +468,12 @@ test-pnfs-crosscluster: build-pnfs ## Two DISTINCT NFS clients (netns+UTS = two 
 test-pnfs-lite: build-pnfs ## Flint-lite L0: ONE standalone hub (mode: standalone, no DS fleet) serves two distinct clients — coherence, locks, sqlite/git, no-LAYOUTGET oracle, MDS-lane baselines
 	tests/lima/pnfs/lite-drill.sh
 
+.PHONY: test-f29-restage
+test-f29-restage: ## F29 drill (Lima VM): a stale "staged" kubelet cache self-heals on NodePublish. Needs an aarch64-musl cross-build of csi-driver; override DRIVER_BIN to point at it
+	limactl shell flint-nfs-client -- sudo \
+	  DRIVER_BIN=$${DRIVER_BIN:-$(CURDIR)/spdk-csi-driver/target/aarch64-unknown-linux-musl/release/csi-driver} \
+	  EXPECT=heal bash $(CURDIR)/tests/lima/f29/restage-drill.sh
+
 .PHONY: test-tier-drill
 test-tier-drill: build-pnfs ## S3-tier e2e vs MinIO (docker): capture→flush→manifest, tombstones, restart, evict, hydrate under a kernel client, DR-from-bucket
 	tests/lima/pnfs/tier-drill.sh

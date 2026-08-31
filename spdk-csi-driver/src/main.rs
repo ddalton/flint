@@ -4967,31 +4967,29 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             // or, worse, the EMPTY directory under a vanished mount (the
             // F30 fresh-fh.key export). Probe first, bounded (the probe
             // itself can hang on a dead device).
-            match spdk_csi_driver::mount_util::probe_staging_liveness(
+            let needs_restage = match spdk_csi_driver::mount_util::probe_staging_liveness(
                 &staging_target_path,
                 readonly,
                 10,
             )
             .await
             {
-                spdk_csi_driver::mount_util::StagingLiveness::Live => {}
+                spdk_csi_driver::mount_util::StagingLiveness::Live => false,
                 spdk_csi_driver::mount_util::StagingLiveness::NotMounted => {
                     println!(
-                        "❌ [NODE] F29 refusal: staging path {} is NOT a mountpoint — \
+                        "🩹 [NODE] F29: staging path {} is NOT a mountpoint — \
                          kubelet cache is stale (skipped NodeUnstage / reboot); \
-                         refusing to bind-mount the bare directory",
+                         re-driving NodeStage instead of bind-mounting the \
+                         bare directory",
                         staging_target_path
                     );
-                    return Err(tonic::Status::failed_precondition(format!(
-                        "staging path {} is not mounted — restage required (F29)",
-                        staging_target_path
-                    )));
+                    true
                 }
                 spdk_csi_driver::mount_util::StagingLiveness::Dead(why) => {
                     println!(
-                        "❌ [NODE] F29 refusal: staging mount {} is DEAD ({}) — \
-                         lazy-unmounting it so recovery can restage instead of \
-                         serving a dead superblock",
+                        "🩹 [NODE] F29: staging mount {} is DEAD ({}) — \
+                         lazy-unmounting it and re-driving NodeStage instead \
+                         of serving a dead superblock",
                         staging_target_path, why
                     );
                     let _ = spdk_csi_driver::mount_util::bounded_umount(
@@ -5000,10 +4998,59 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                         10,
                     )
                     .await;
-                    return Err(tonic::Status::failed_precondition(format!(
-                        "staging mount {} dead ({}) — unmounted for restage (F29)",
-                        staging_target_path, why
-                    )));
+                    true
+                }
+            };
+
+            // F29 self-heal. Refusing here (the pre-fix behavior) wedged
+            // the volume PERMANENTLY: kubelet's actual-state-of-world
+            // still says "staged", so it retries publish — never stage —
+            // and a driver-side umount does not update that cache. The
+            // publish request carries the complete staging input set
+            // (publish_context, volume_context, capability, secrets),
+            // and NodeStage is idempotent over a live mount and refuses
+            // to reformat a device carrying a filesystem signature — so
+            // re-drive it, then require the probe to say Live before
+            // bind-mounting. A stage that cannot succeed still surfaces
+            // as an error: the heal never trades the refusal for a
+            // blind bind.
+            if needs_restage {
+                let stage_req = spdk_csi_driver::csi::NodeStageVolumeRequest {
+                    volume_id: req.volume_id.clone(),
+                    publish_context: req.publish_context.clone(),
+                    staging_target_path: staging_target_path.clone(),
+                    volume_capability: req.volume_capability.clone(),
+                    secrets: req.secrets.clone(),
+                    volume_context: req.volume_context.clone(),
+                };
+                self.node_stage_volume(tonic::Request::new(stage_req))
+                    .await
+                    .map_err(|e| {
+                        tonic::Status::new(
+                            e.code(),
+                            format!("F29 self-heal restage failed: {}", e.message()),
+                        )
+                    })?;
+                match spdk_csi_driver::mount_util::probe_staging_liveness(
+                    &staging_target_path,
+                    readonly,
+                    10,
+                )
+                .await
+                {
+                    spdk_csi_driver::mount_util::StagingLiveness::Live => {
+                        println!(
+                            "✅ [NODE] F29 self-heal: volume {} restaged at {}",
+                            volume_id, staging_target_path
+                        );
+                    }
+                    verdict => {
+                        return Err(tonic::Status::failed_precondition(format!(
+                            "staging path {} still not live after F29 self-heal \
+                             restage ({:?}) — refusing to bind-mount",
+                            staging_target_path, verdict
+                        )));
+                    }
                 }
             }
 
