@@ -89,6 +89,25 @@ impl DsSessionManager {
         self.sessions.retain(|sid, _| sid[0..8] != prefix);
     }
 
+    /// Destroy ONE session (DESTROY_SESSION). Returns whether it
+    /// existed — the caller answers BADSESSION when it did not
+    /// (RFC 8881 §18.37).
+    pub fn destroy_session(&self, sessionid: &[u8; 16]) -> bool {
+        self.sessions.remove(sessionid).is_some()
+    }
+
+    /// Sessions this clientid still holds — DESTROY_CLIENTID's BUSY
+    /// input (RFC 8881 §18.50: a clientid with live sessions must not
+    /// be destroyed). The DS tracks no stateids, locks or delegations,
+    /// so sessions are the whole answer here.
+    pub fn client_session_count(&self, clientid: u64) -> usize {
+        let prefix = clientid.to_be_bytes();
+        self.sessions
+            .iter()
+            .filter(|e| e.key()[0..8] == prefix)
+            .count()
+    }
+
     /// Handle SEQUENCE operation (minimal - just validate and echo back)
     ///
     /// # Arguments
@@ -255,5 +274,23 @@ mod tests {
             assert_eq!(result.sequenceid, seq);
         }
     }
-}
 
+    /// The teardown surface DESTROY_SESSION / DESTROY_CLIENTID rest on.
+    /// When these were no-op acks, a destroyed client's confirmed record
+    /// survived, the next incarnation's EXCHANGE_ID drew CONFIRMED_R,
+    /// and Linux answered with a PURGE (all-ones boot verifier) on every
+    /// re-association — case-5 churn plus a record/lease/session leak.
+    #[test]
+    fn destroy_session_removes_exactly_one_and_busy_counts_the_rest() {
+        let mgr = DsSessionManager::new();
+        let sid_a = mgr.create_session(7).unwrap();
+        let _sid_b = mgr.create_session(8).unwrap();
+        assert_eq!(mgr.client_session_count(7), 1);
+        assert_eq!(mgr.client_session_count(8), 1);
+
+        assert!(mgr.destroy_session(&sid_a), "existing session must destroy");
+        assert!(!mgr.destroy_session(&sid_a), "second destroy answers BADSESSION");
+        assert_eq!(mgr.client_session_count(7), 0, "clientid 7 is destroyable now");
+        assert_eq!(mgr.client_session_count(8), 1, "clientid 8 still BUSY");
+    }
+}

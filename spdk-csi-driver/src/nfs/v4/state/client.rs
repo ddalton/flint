@@ -675,8 +675,9 @@ impl ClientManager {
                         // return BADSESSION.
                         info!(
                             "EXCHANGE_ID: case 5 (client reboot detected) — deferring \
-                             cleanup of clientid {} until new client confirms",
-                            c.client_id,
+                             cleanup of clientid {} until new client confirms \
+                             (stored verifier {:#018x}, presented {:#018x})",
+                            c.client_id, c.verifier, verifier,
                         );
                         self.replace_when_confirmed(
                             owner, verifier, flags, principal, c.client_id,
@@ -1040,6 +1041,28 @@ mod tests {
             ExchangeIdOutcome::NewUnconfirmed { client_id, .. } => client_id,
             ExchangeIdOutcome::ExistingConfirmed { client_id, .. } => client_id,
             other => panic!("expected client id, got {:?}", other),
+        }
+    }
+
+    /// The DS-lane fingerprint: same owner, same verifier, empty
+    /// principal, USE_PNFS_DS flags — a reconnect after confirm must be
+    /// a case-1 renewal, never a case-5 reboot.
+    #[test]
+    fn a_reconnect_with_the_same_verifier_is_a_renewal_not_a_reboot() {
+        let lease_mgr = Arc::new(LeaseManager::new());
+        let m = ClientManager::new(lease_mgr, "ds-lane-1", crate::state_backend::memory_backend());
+        let owner = b"Linux NFSv4.1 lima-flint-nfs-client".to_vec();
+        let v = 0x18d0_ef6b_41a6_c364u64;
+        let flags = 0x0004_0103u32;
+
+        let id1 = new_id(m.exchange_id(owner.clone(), v, flags, Vec::new()));
+        assert!(m.mark_confirmed(id1).is_none(), "first confirm owes no cleanup");
+
+        match m.exchange_id(owner.clone(), v, flags, Vec::new()) {
+            ExchangeIdOutcome::ExistingConfirmed { client_id, .. } => {
+                assert_eq!(client_id, id1, "renewal must return the SAME clientid");
+            }
+            other => panic!("expected case-1 renewal, got {:?}", other),
         }
     }
 

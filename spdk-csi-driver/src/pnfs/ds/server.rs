@@ -602,6 +602,12 @@ impl DataServer {
                             if let Some(old_id) = client_mgr.mark_confirmed(clientid) {
                                 warn!("DS: CREATE_SESSION case-5 cleanup — discarding old client {}", old_id);
                                 session_mgr.destroy_client_sessions(old_id);
+                                // The incumbent's RECORD goes too — the
+                                // MDS cascade removes it, and this arm
+                                // only ever destroyed its sessions,
+                                // leaking a record + lease per case-5
+                                // handover.
+                                client_mgr.remove_client(old_id);
                             }
                             let mut encoder = XdrEncoder::new();
                             
@@ -839,17 +845,57 @@ impl DataServer {
                 }
 
                 opcode::DESTROY_CLIENTID => {
-                    // Client is cleaning up - just acknowledge it
-                    let _clientid = decoder.decode_u64().unwrap_or(0);
-                    info!("DS: DESTROY_CLIENTID - clientid={}", _clientid);
-                    (Nfs4Status::Ok, Bytes::new())
+                    // REAL, not an ack. When this was a no-op the record
+                    // outlived the client that destroyed it, and the NEXT
+                    // incarnation's EXCHANGE_ID found a confirmed record —
+                    // answered with CONFIRMED_R, which Linux
+                    // (nfs4state.c, nfs41_init_clientid) reads as "the
+                    // server holds state from a prior instance of me" and
+                    // answers by PURGING: EXCHANGE_ID with an all-ones
+                    // boot verifier, a forced case-5 discard, a fresh
+                    // establishment — every association, forever. Wire-
+                    // proven on lima: alternating boot/0xffff… verifiers,
+                    // 2-3 clientids minted per reconnect, and the DS
+                    // leaking a record, lease and session per cycle.
+                    let clientid = match decoder.decode_u64() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            results.push((opcode, Nfs4Status::BadXdr, OpBody::Inline(Bytes::new())));
+                            continue;
+                        }
+                    };
+                    if session_mgr.client_session_count(clientid) > 0 {
+                        // §18.50: live sessions block the destroy. The DS
+                        // holds no stateids/locks/delegations, so sessions
+                        // are the entire BUSY predicate.
+                        warn!("DS: DESTROY_CLIENTID {} refused — sessions still exist", clientid);
+                        (Nfs4Status::ClientIdBusy, Bytes::new())
+                    } else if client_mgr.get_client(clientid).is_none() {
+                        info!("DS: DESTROY_CLIENTID {} — unknown (stale)", clientid);
+                        (Nfs4Status::StaleClientId, Bytes::new())
+                    } else {
+                        client_mgr.remove_client(clientid);
+                        info!("DS: DESTROY_CLIENTID {} — record removed", clientid);
+                        (Nfs4Status::Ok, Bytes::new())
+                    }
                 }
-                
+
                 opcode::DESTROY_SESSION => {
-                    // Client is destroying session - acknowledge it
-                    let _sessionid = decoder.decode_fixed_opaque(16).unwrap_or_default();
-                    info!("DS: DESTROY_SESSION");
-                    (Nfs4Status::Ok, Bytes::new())
+                    match decoder.decode_fixed_opaque(16) {
+                        Ok(bytes) if bytes.len() == 16 => {
+                            let mut sid = [0u8; 16];
+                            sid.copy_from_slice(&bytes);
+                            if session_mgr.destroy_session(&sid) {
+                                info!("DS: DESTROY_SESSION {:02x?} — destroyed", &sid[0..8]);
+                                (Nfs4Status::Ok, Bytes::new())
+                            } else {
+                                // §18.37: the session does not exist.
+                                info!("DS: DESTROY_SESSION {:02x?} — unknown", &sid[0..8]);
+                                (Nfs4Status::BadSession, Bytes::new())
+                            }
+                        }
+                        _ => (Nfs4Status::BadXdr, Bytes::new()),
+                    }
                 }
 
                 _ => {
