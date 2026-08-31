@@ -60,6 +60,7 @@ pub mod identity;
 pub mod import;
 pub mod manifest;
 pub mod meter;
+pub mod owner;
 pub mod reporter;
 pub mod rpo;
 pub mod space;

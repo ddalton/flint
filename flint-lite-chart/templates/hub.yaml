@@ -32,7 +32,7 @@ chart_tier_knob_list_matches_tier_config. */}}
 {{- $known := list "flushFloorSecs" "quiesceSecs" "tickSecs" "wholePutMaxBytes" "partFloorBytes" "epochHeartbeatSecs" "epochLeaseMisses" "reserveBytes" "watermarkPct" "ballastBytes" "hydrateHoldSecs" "hydrateConcurrency" "hydrateFetchParallel" "hydrateWarmAfterImport" "hydrateWarmConcurrency" }}
 {{- range $k, $_ := .Values.tier.settings }}
 {{- if not (has $k $known) }}
-{{- fail (printf "tier.settings.%s is not a TierConfig knob (the server would silently ignore it — see spdk-csi-driver/src/pnfs/config.rs). Valid keys: %s. Identity fields (bucket, keyPrefix, endpoint, importOnStart) have first-class values under tier" $k (join ", " $known)) }}
+{{- fail (printf "tier.settings.%s is not a TierConfig knob (the server would silently ignore it — see spdk-csi-driver/src/pnfs/config.rs). Valid keys: %s. Identity fields (bucket, keyPrefix, endpoint, importOnStart, ownerIdentity, adoptData) have first-class values under tier" $k (join ", " $known)) }}
 {{- end }}
 {{- end }}
 {{- end }}

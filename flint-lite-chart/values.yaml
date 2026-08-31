@@ -86,6 +86,19 @@ tier:
   # resume a crashed import). false = flush-only posture.
   importOnStart: true
 
+  # B12: a stable identity stamped into <prefix>.flint/owner and
+  # required to match on every later start — the guard that keeps a
+  # REUSED prefix from silently serving the previous deployment's
+  # data. The operator passes its CR's uid; a chart deployment may pin
+  # any stable string (e.g. a project id). "" = enforcement off (the
+  # pre-B12 posture).
+  ownerIdentity: ""
+
+  # Take over a prefix whose owner object names someone ELSE — a
+  # deliberate migration. Set it for the takeover, then remove it:
+  # while set, this hub adopts ANY foreign owner it meets.
+  adoptData: false
+
   # Tuning knobs, rendered VERBATIM into the config's tier: section
   # (schema: TierConfig, spdk-csi-driver/src/pnfs/config.rs). Absent
   # keys take the server defaults, which are the ECONOMICS GATE'S

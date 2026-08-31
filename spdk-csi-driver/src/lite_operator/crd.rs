@@ -96,6 +96,8 @@ use serde::{Deserialize, Serialize};
     .message("spec.settings needs spec.bucket — the tier is off without one"))]
 #[x_kube(validation = Rule::new("!has(self.credentialsSecretRef) || has(self.bucket)")
     .message("spec.credentialsSecretRef needs spec.bucket — the tier is off without one"))]
+#[x_kube(validation = Rule::new("!has(self.adoptData) || has(self.bucket)")
+    .message("spec.adoptData needs spec.bucket — the tier is off without one"))]
 // Hibernation DELETES the PVC. Without a bucket that PVC is the only
 // copy of the data, so this is not a tuning mistake to discover at 3am
 // — it is refused at admission.
@@ -179,6 +181,17 @@ pub struct FlintShareSpec {
     /// Absent = the server default (on).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub import_on_start: Option<bool>,
+
+    /// B12: take over a prefix whose `<prefix>.flint/owner` object
+    /// names a DIFFERENT share (a deliberate migration, or recovering
+    /// a deleted project's data). Without it, a share pointed at a
+    /// prefix that already belongs to someone else refuses to start —
+    /// the guard that keeps a reused prefix from silently serving the
+    /// previous project's files. Set it for the takeover, then remove
+    /// it: while it stays set, this share adopts ANY foreign owner it
+    /// meets on that prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopt_data: Option<bool>,
 
     /// The hub's disk. Sized for the WORKING SET when the tier is on
     /// (durable data lives in the bucket), for the WHOLE DATASET when
@@ -1116,6 +1129,7 @@ mod tests {
             region: None,
             credentials_secret_ref: None,
             import_on_start: None,
+            adopt_data: None,
             persistence: PersistenceSpec {
                 size: "20Gi".into(),
                 storage_class_name: None,

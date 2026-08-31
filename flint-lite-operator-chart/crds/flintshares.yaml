@@ -53,6 +53,18 @@ spec:
               object-store backing is an option, not the identity (a tier-off
               share is a perfectly good share).
             properties:
+              adoptData:
+                description: |-
+                  B12: take over a prefix whose `<prefix>.flint/owner` object
+                  names a DIFFERENT share (a deliberate migration, or recovering
+                  a deleted project's data). Without it, a share pointed at a
+                  prefix that already belongs to someone else refuses to start —
+                  the guard that keeps a reused prefix from silently serving the
+                  previous project's files. Set it for the takeover, then remove
+                  it: while it stays set, this share adopts ANY foreign owner it
+                  meets on that prefix.
+                nullable: true
+                type: boolean
               bucket:
                 description: |-
                   Bucket this share publishes to. Must already exist, with
@@ -624,6 +636,8 @@ spec:
               rule: '!has(self.settings) || has(self.bucket)'
             - message: spec.credentialsSecretRef needs spec.bucket — the tier is off without one
               rule: '!has(self.credentialsSecretRef) || has(self.bucket)'
+            - message: spec.adoptData needs spec.bucket — the tier is off without one
+              rule: '!has(self.adoptData) || has(self.bucket)'
             - message: spec.idle.hibernateAfterSecs needs spec.bucket — hibernation deletes the PVC, and without a bucket that PVC is the only copy of the data
               rule: '!has(self.idle) || !has(self.idle.hibernateAfterSecs) || has(self.bucket)'
             - message: spec.persistence.autoExpand needs spec.bucket — the size comes from the bucket's manifest

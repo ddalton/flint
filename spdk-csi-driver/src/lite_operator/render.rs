@@ -311,6 +311,16 @@ pub fn mds_yaml(share: &FlintShare, d: &RenderDefaults) -> String {
         if let Some(v) = s.import_on_start {
             let _ = writeln!(y, "    importOnStart: {v}");
         }
+        // B12: the CR's uid is the prefix-owner identity — stable
+        // across hibernate/resume (same CR), different for a recreated
+        // share (which is exactly what the owner gate must refuse).
+        // Absent only for never-persisted CRs (unit tests).
+        if let Some(uid) = share.metadata.uid.as_deref().filter(|u| !u.is_empty()) {
+            let _ = writeln!(y, "    ownerIdentity: {}", yaml_str(uid));
+        }
+        if s.adopt_data == Some(true) {
+            let _ = writeln!(y, "    adoptData: true");
+        }
         // Only the knobs the user actually set — an unset knob must
         // reach the server as ABSENT so the server's own default
         // applies. This is the entire point of the all-Option mirror.
@@ -1233,6 +1243,7 @@ mod tests {
             region: None,
             credentials_secret_ref: None,
             import_on_start: None,
+            adopt_data: None,
             persistence: PersistenceSpec {
                 size: "20Gi".into(),
                 storage_class_name: None,
@@ -1388,6 +1399,34 @@ mod tests {
         assert_eq!(t.endpoint.as_deref(), Some("http://minio.minio:9000"));
         assert!(t.import_on_start);
         assert_eq!(cfg.exports[0].path, "/data/exports");
+    }
+
+    /// B12: the CR's uid is rendered as the tier's `ownerIdentity`,
+    /// and `adoptData` reaches the config only when the user set it —
+    /// the operator half of the prefix-owner gate.
+    #[test]
+    fn the_owner_identity_is_the_crs_uid() {
+        let d = RenderDefaults::default();
+        let tier_of = |y: &str| -> crate::pnfs::config::TierConfig {
+            let v: serde_yaml::Value = serde_yaml::from_str(y).unwrap();
+            serde_yaml::from_value(v["mds"]["tier"].clone()).unwrap()
+        };
+
+        let t = tier_of(&mds_yaml(&share_with_uid("t", UID, tiered_spec()), &d));
+        assert_eq!(t.owner_identity.as_deref(), Some(UID));
+        assert!(!t.adopt_data, "adoptData must default OFF");
+
+        let mut spec = tiered_spec();
+        spec.adopt_data = Some(true);
+        let t = tier_of(&mds_yaml(&share_with_uid("t", UID, spec), &d));
+        assert!(t.adopt_data);
+
+        // A never-persisted CR (unit tests) has no uid: no line at
+        // all, so the server's gate stays Unenforced rather than
+        // enforcing an empty string.
+        let y = mds_yaml(&share("t", tiered_spec()), &d);
+        assert!(!y.contains("ownerIdentity"), "{y}");
+        assert!(!y.contains("adoptData"), "{y}");
     }
 
     /// Names come from the CR, never from a release — that is what

@@ -1022,6 +1022,50 @@ impl MetadataServer {
             )));
         }
 
+        // B12: the prefix-reuse gate — BEFORE the epoch claim (never
+        // supersede an epoch on a prefix that is not ours) and long
+        // before import could materialize a stranger's namespace. A
+        // foreign owner refuses startup outright, the same posture as
+        // a failed bucket bootstrap: the pod restarts, the status says
+        // why, and nothing serves data it does not own.
+        match crate::tier::owner::enforce(
+            store.as_ref(),
+            &t.key_prefix,
+            t.owner_identity.as_deref(),
+            t.adopt_data,
+        )
+        .await
+        .map_err(|e| crate::pnfs::Error::Config(format!("tier: owner gate: {}", e)))?
+        {
+            crate::tier::owner::OwnerVerdict::Unenforced => {
+                info!("🪪 tier: no ownerIdentity configured — prefix-owner gate skipped");
+            }
+            crate::tier::owner::OwnerVerdict::FirstClaim => {
+                info!("🪪 tier: prefix owner stamped (first claim)");
+            }
+            crate::tier::owner::OwnerVerdict::Held => {
+                info!("🪪 tier: prefix owner verified");
+            }
+            crate::tier::owner::OwnerVerdict::Adopted { previous } => {
+                warn!(
+                    "🪪 tier: prefix ADOPTED from {} (adoptData is set — remove it \
+                     once the migration is done)",
+                    previous
+                );
+            }
+            crate::tier::owner::OwnerVerdict::Foreign { holder } => {
+                return Err(crate::pnfs::Error::Config(format!(
+                    "tier: prefix {} already belongs to {} (this share is {}) — a \
+                     reused prefix serves the previous project's data, so startup is \
+                     refused. Point this share at its own prefix, or set adoptData: \
+                     true to take this one over deliberately (B12)",
+                    t.key_prefix,
+                    holder,
+                    t.owner_identity.as_deref().unwrap_or("?"),
+                )));
+            }
+        }
+
         // Holder identity = the persisted server_id (the same one that
         // keeps filehandles stable across restart) — that is what
         // self-recognition recognizes after a pod restart.

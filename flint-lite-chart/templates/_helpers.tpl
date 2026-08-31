@@ -72,6 +72,12 @@ mds:
     endpoint: {{ . | quote }}
     {{- end }}
     importOnStart: {{ .Values.tier.importOnStart }}
+    {{- with .Values.tier.ownerIdentity }}
+    ownerIdentity: {{ . | quote }}
+    {{- end }}
+    {{- if .Values.tier.adoptData }}
+    adoptData: true
+    {{- end }}
     {{- with .Values.tier.settings }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

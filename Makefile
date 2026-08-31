@@ -468,6 +468,12 @@ test-pnfs-crosscluster: build-pnfs ## Two DISTINCT NFS clients (netns+UTS = two 
 test-pnfs-lite: build-pnfs ## Flint-lite L0: ONE standalone hub (mode: standalone, no DS fleet) serves two distinct clients — coherence, locks, sqlite/git, no-LAYOUTGET oracle, MDS-lane baselines
 	tests/lima/pnfs/lite-drill.sh
 
+.PHONY: test-tier-owner
+test-tier-owner: ## B12 drill (Lima VM): a reused bucket prefix refuses to serve the previous project's data. Needs an aarch64-musl cross-build of flint-pnfs-mds; override HUB_BIN to point at it
+	limactl shell flint-nfs-client -- sudo \
+	  HUB_BIN=$${HUB_BIN:-$(CURDIR)/spdk-csi-driver/target/aarch64-unknown-linux-musl/release/flint-pnfs-mds} \
+	  bash $(CURDIR)/tests/lima/tier-owner/reuse-drill.sh
+
 .PHONY: test-f29-restage
 test-f29-restage: ## F29 drill (Lima VM): a stale "staged" kubelet cache self-heals on NodePublish. Needs an aarch64-musl cross-build of csi-driver; override DRIVER_BIN to point at it
 	limactl shell flint-nfs-client -- sudo \

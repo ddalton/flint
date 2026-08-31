@@ -168,6 +168,20 @@ pub struct TierConfig {
     #[serde(rename = "importOnStart", default = "default_true")]
     pub import_on_start: bool,
 
+    /// B12: the identity stamped into `<prefix>.flint/owner` and
+    /// required to match on every later start (see `tier::owner`).
+    /// The operator passes the FlintShare's `metadata.uid`. Absent =
+    /// enforcement off (hand-rolled configs, pre-B12 charts).
+    #[serde(rename = "ownerIdentity", default, skip_serializing_if = "Option::is_none")]
+    pub owner_identity: Option<String>,
+
+    /// B12 escape hatch: take over a prefix whose owner object names
+    /// someone else (deliberate migration / recovered project). The
+    /// owner object is rewritten to `ownerIdentity` and startup
+    /// proceeds. Set it for the migration, then remove it.
+    #[serde(rename = "adoptData", default)]
+    pub adopt_data: bool,
+
     /// The tuning half — flattened, so this is NOT a nested block in
     /// the YAML.
     #[serde(flatten)]
@@ -1314,7 +1328,17 @@ mod tests {
 
         let t: TierConfig = serde_yaml::from_str("bucket: b\n").unwrap();
         let ser = serde_yaml::to_value(&t).unwrap();
-        let identity = ["enabled", "bucket", "keyPrefix", "endpoint", "importOnStart"];
+        let identity = [
+            "enabled",
+            "bucket",
+            "keyPrefix",
+            "endpoint",
+            "importOnStart",
+            // B12: first-class identity, rendered by the operator (or a
+            // chart value) — not a tuning knob for the $known list.
+            "ownerIdentity",
+            "adoptData",
+        ];
         let schema: std::collections::BTreeSet<String> = ser
             .as_mapping()
             .unwrap()
