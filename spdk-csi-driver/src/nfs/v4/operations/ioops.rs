@@ -20,7 +20,6 @@ use super::fd_cache::{CachedFile, FdCache};
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::os::unix::fs::FileExt;
 use tracing::{debug, info, warn};
 
 /// Open claim types
@@ -1789,50 +1788,19 @@ impl IoOperationHandler {
             }
             let file_size = metadata.len();
 
-            // Determine actual read count (don't read past EOF)
-            let actual_count = if offset >= file_size {
-                0
-            } else {
-                std::cmp::min(count, (file_size - offset) as usize)
-            };
-            
-            if actual_count == 0 {
+            // A read at or past EOF answers empty+eof BEFORE the tier
+            // re-consult below — preserved from before the fast path
+            // moved into `read_pool::read_segment`.
+            if offset >= file_size {
                 return Ok((Bytes::new().into(), true));
             }
 
-            // Read data using positioned I/O (no seek needed - concurrent safe!)
-            //
-            // POOLED, not `vec![0u8; actual_count]`. At a 1 MiB rsize
-            // that was an mmap per READ, and mmap/munmap take the
-            // process-wide `mmap_lock` for WRITE — so concurrent reads
-            // serialised on it and the server grew DEARER per byte as
-            // concurrency rose (520 -> 600 cpu-ms/GiB from 1 to 8
-            // streams, while knfsd went 280 -> 235). See
-            // `crate::nfs::read_pool`.
-            let mut bytes_read = 0usize;
-            let payload: crate::nfs::segment::Segment = {
-                let staged = if may_splice {
-                    // file -> pipe. Nothing is on the wire yet, which is
-                    // what lets the tier re-consult below still retract.
-                    crate::nfs::splice::stage_read(&file, offset, actual_count)?
-                } else {
-                    None
-                };
-                match staged {
-                    Some(st) => {
-                        bytes_read = st.len();
-                        st.into()
-                    }
-                    // Not spliceable (oversized, or the fs refused) — the
-                    // copy path is a complete fallback, not a degraded one.
-                    None => crate::nfs::read_pool::read_at_pooled(actual_count, |buf| {
-                        let n = file.read_at(buf, offset)?;
-                        bytes_read = n;
-                        Ok(n)
-                    })?
-                    .into(),
-                }
-            };
+            // The shared clamp → splice → pooled-read fast path. On the
+            // splice arm nothing is on the wire yet, which is what lets
+            // the tier re-consult below still retract the payload.
+            let (payload, eof) = crate::nfs::read_pool::read_segment(
+                &file, file_size, offset, count, may_splice,
+            )?;
 
             // Re-consult AFTER the read (review finding (b), caught
             // live by the chaos drill's evict/hydrate churn: git once
@@ -1875,8 +1843,6 @@ impl IoOperationHandler {
                     ));
                 }
             }
-
-            let eof = offset + bytes_read as u64 >= file_size;
 
             // NOTE for the splice path: every error return between the
             // stage above and this line DROPS `payload`, and dropping a

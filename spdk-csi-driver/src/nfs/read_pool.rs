@@ -96,6 +96,62 @@ impl Drop for Pooled {
     }
 }
 
+/// The READ payload fast path both lanes share: clamp to EOF, try to
+/// splice-stage, fall back to a pooled read, report EOF.
+///
+/// `may_splice` is the CALLER's verdict — the shared lane derives it
+/// from per-compound state (GSS sealing and a caching slot both forbid
+/// it), the DS from `splice::enabled()` alone (it has neither). The
+/// helper deliberately does not consult `splice::enabled()` itself:
+/// splice policy is lane policy, this is just the mechanism.
+///
+/// A zero-length result (offset at or past EOF) comes back as an empty
+/// segment with `eof = true` and touches neither the pipe pool nor the
+/// buffer pool. On the splice arm, DROPPING the returned segment
+/// retracts the staged bytes — nothing reaches the wire — which is
+/// what lets the MDS run its tier re-consult between this call and the
+/// reply.
+pub fn read_segment(
+    file: &std::fs::File,
+    file_size: u64,
+    offset: u64,
+    count: usize,
+    may_splice: bool,
+) -> std::io::Result<(crate::nfs::segment::Segment, bool)> {
+    use std::os::unix::fs::FileExt;
+
+    let actual = if offset >= file_size {
+        0
+    } else {
+        count.min((file_size - offset) as usize)
+    };
+    if actual == 0 {
+        return Ok((Bytes::new().into(), true));
+    }
+
+    if may_splice {
+        // file -> pipe. Nothing is on the wire yet; a drop retracts.
+        if let Some(staged) = crate::nfs::splice::stage_read(file, offset, actual)? {
+            let eof = offset + (staged.len() as u64) >= file_size;
+            return Ok((staged.into(), eof));
+        }
+    }
+
+    // Not spliceable (disabled, oversized, or the fs refused) — the
+    // copy path is a complete fallback, not a degraded one. POOLED,
+    // not `vec![0u8; actual]`: at a 1 MiB rsize that was an mmap per
+    // READ, and mmap/munmap take the process-wide `mmap_lock` for
+    // WRITE, which is why the server stopped scaling with readers.
+    let mut bytes_read = 0usize;
+    let payload = read_at_pooled(actual, |buf| {
+        let n = file.read_at(buf, offset)?;
+        bytes_read = n;
+        Ok(n)
+    })?;
+    let eof = offset + (bytes_read as u64) >= file_size;
+    Ok((payload.into(), eof))
+}
+
 /// Read `count` bytes at `offset` into a pooled buffer.
 ///
 /// The returned `Bytes` owns the buffer until dropped, at which point it

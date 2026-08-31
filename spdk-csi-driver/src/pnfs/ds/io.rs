@@ -467,82 +467,21 @@ impl IoOperationHandler {
                 }
             }
 
-            // Splice staging: file → pipe now, pipe → socket in the
-            // writer, and the payload never enters userspace. Same
-            // module, same default-ON gate as the standalone lane
-            // (`nfs::splice`; FLINT_NFS_SPLICE=0 opts out). The two
-            // surfaces that force the standalone lane to decline —
-            // GSS sealing and the slot reply cache — do not exist on
-            // the DS (rpc_gss_svc_none only, no replay cache), so a
-            // READ here can always stage. Clamp to EOF first: a
-            // splice that comes up short of `want` is treated as a
-            // failed stage, so asking for bytes past EOF would
-            // needlessly fall back to the copy path.
-            if crate::nfs::splice::enabled() {
-                let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
-                let actual = if offset >= file_size {
-                    0
-                } else {
-                    (count as usize).min((file_size - offset) as usize)
-                };
-                if actual > 0 {
-                    if let Some(staged) = crate::nfs::splice::stage_read(&file, offset, actual)? {
-                        let eof = offset + (staged.len() as u64) >= file_size;
-                        return Ok((staged.into(), eof));
-                    }
-                }
-            }
-
-            // POOLED — see `crate::nfs::read_pool`. This used to be
-            // `vec![0u8; count]`, which at a 1 MiB rsize is an mmap per
-            // READ and a munmap per reply drop, both taking the
-            // process-wide `mmap_lock` for WRITE.
-            //
-            // The old note here called a buffer pool "genuine engineering
-            // on a path nobody has profiled" and left the allocation
-            // alone. The path has since been profiled — on the MDS lane,
-            // which had the identical allocation — and the finding was
-            // that the churn is not merely CPU: `rwsem_down_write_slowpath`
-            // and `mt_find` under concurrency are `mmap_lock` and its
-            // maple tree, and they were why that server stopped scaling.
-            // Pooling it there gave +49% at 4 and 8 concurrent readers
-            // (`b1c1e351`). This is the same defect, so it gets the same fix.
-            //
-            // Context for whoever does profile it: a DS served 396 MiB/s
-            // over pNFS where the same node's local block path did 845
-            // (measured on runaw, 2026-08-01, with a client that provably
-            // had headroom) — the fleet's one real unexplained deficit.
-            //
-            // BUT THAT NUMBER IS STALE, AND THIS NOTE USED TO SAY SO
-            // WRONGLY. It named the encode_opaque copy in ds/server.rs as
-            // the larger contributor. `133e6db0` deleted that copy the very
-            // next day (2026-08-02): READ payloads now travel to the socket
-            // as the `Bytes` the I/O layer produced, see `OpBody::Payload`.
-            // The 8-agent review behind that commit also established the
-            // copies ran at <1 of 24 workers busy and predicted ~0%
-            // throughput change — so removing them almost certainly did not
-            // close the 2.13x either.
-            //
-            // The honest status is therefore UNRE-MEASURED at HEAD, not
-            // undiagnosed. And every DS ceiling investigated since landed
-            // somewhere other than the DS's own copies: runbb (Cilium
-            // WireGuard collapsing pod traffic into ONE UDP flow), runbd
-            // (the wire), runbh (the client kernel, ~3000 MiB/s).
-            //
-            // Re-measure on real hardware before attacking anything here.
-            // This memset is what remains of the original suspects, and
-            // the note that named it did not think it was the bulk.
-            let mut bytes_read = 0usize;
-            let buffer = crate::nfs::read_pool::read_at_pooled(count as usize, |buf| {
-                let n = file.read_at(buf, offset)?;
-                bytes_read = n;
-                Ok(n)
-            })?;
-
-            // Check if we reached EOF
+            // The shared clamp → splice → pooled-read fast path
+            // (`read_pool::read_segment`). The two surfaces that force
+            // the standalone lane to decline splice — GSS sealing and
+            // the slot reply cache — do not exist on the DS
+            // (rpc_gss_svc_none only, no replay cache), so its verdict
+            // is `splice::enabled()` alone (default ON,
+            // FLINT_NFS_SPLICE=0 opts out).
             let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
-            let eof = offset + (bytes_read as u64) >= file_size;
-            Ok((buffer.into(), eof))
+            crate::nfs::read_pool::read_segment(
+                &file,
+                file_size,
+                offset,
+                count as usize,
+                crate::nfs::splice::enabled(),
+            )
         })
         .map_err(crate::pnfs::Error::Io)?;
 
