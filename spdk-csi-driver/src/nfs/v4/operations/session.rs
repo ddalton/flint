@@ -79,6 +79,63 @@ const CHANNEL_HEADROOM: u32 = 2048;
 /// Linux client in the field mounts it, so 16 KiB is generous.
 pub(crate) const SERVER_MAX_RESPONSE_CACHED: u32 = 16 * 1024;
 
+/// Per-lane ceilings for fore-channel negotiation. The ARITHMETIC is
+/// shared (see [`negotiate_fore_channel`]); the values are policy each
+/// lane owns — the MDS caches replies and runs 128 slots, the DS has
+/// no replay cache and a 64-slot table.
+pub(crate) struct ForeChannelCeilings {
+    pub max_request: u32,
+    pub max_response: u32,
+    pub max_response_cached: u32,
+    pub max_ops: u32,
+    pub max_requests: u32,
+}
+
+/// The MDS/standalone lane's ceilings.
+pub(crate) const MDS_FORE_CEILINGS: ForeChannelCeilings = ForeChannelCeilings {
+    max_request: SERVER_MAX_REQUEST,
+    max_response: SERVER_MAX_RESPONSE,
+    max_response_cached: SERVER_MAX_RESPONSE_CACHED,
+    max_ops: 128,
+    max_requests: 128,
+};
+
+pub(crate) struct NegotiatedForeChannel {
+    pub max_request: u32,
+    pub max_response: u32,
+    pub max_response_cached: u32,
+    pub max_ops: u32,
+    pub max_requests: u32,
+}
+
+/// `min(request, ceiling)` for every fore-channel attribute — the one
+/// negotiation every lane must perform IDENTICALLY. A server that
+/// grants MORE than the client requested is rejected by Linux's
+/// `nfs4_verify_channel_attrs` with EINVAL; on a data server that
+/// rejection is silent and expensive — the client destroys the
+/// session, blacklists the deviceid, and detours all I/O through the
+/// MDS proxy (measured: the DS-lane rig collapsed 1650 → 716 MiB/s
+/// when the DS advertised fixed values above the request). The cached
+/// size is additionally clamped by the negotiated response size —
+/// a cache cannot hold more than a full response — and the slot count
+/// is floored at 1.
+pub(crate) fn negotiate_fore_channel(
+    req: &crate::nfs::v4::compound::ChannelAttrs,
+    ceil: &ForeChannelCeilings,
+) -> NegotiatedForeChannel {
+    let max_response = req.max_response_size.min(ceil.max_response);
+    NegotiatedForeChannel {
+        max_request: req.max_request_size.min(ceil.max_request),
+        max_response,
+        max_response_cached: req
+            .max_response_size_cached
+            .min(max_response)
+            .min(ceil.max_response_cached),
+        max_ops: req.max_operations.min(ceil.max_ops),
+        max_requests: req.max_requests.max(1).min(ceil.max_requests),
+    }
+}
+
 /// Linux NFSv4.1 COMPOUND overheads subtracted from the advertised
 /// fore-channel caps by `nfs4_session_set_rwsize()`. Recorded only so the
 /// test can state the arithmetic; the kernel owns these values, so they are
@@ -707,32 +764,20 @@ impl SessionOperationHandler {
             }
         }
 
-        // Negotiate session buffer sizes. Take the *minimum* of client-requested
-        // and server-maximum. We've already rejected requests below the server
-        // minimum above, so the negotiated value is always >= MIN_*.
-        const SERVER_MAX_OPS: u32 = 128;
-
-        let negotiated_max_request = op.fore_chan_attrs.max_request_size.min(SERVER_MAX_REQUEST);
-        let negotiated_max_response = op.fore_chan_attrs.max_response_size.min(SERVER_MAX_RESPONSE);
-        let negotiated_max_ops = op.fore_chan_attrs.max_operations.min(SERVER_MAX_OPS);
+        // Negotiate session buffer sizes — the shared min(request,
+        // ceiling) arithmetic, with this lane's ceilings. We've already
+        // rejected requests below the server minimum above, so the
+        // negotiated value is always >= MIN_*.
+        let neg = negotiate_fore_channel(&op.fore_chan_attrs, &MDS_FORE_CEILINGS);
 
         info!("CREATE_SESSION: Negotiated: req={}, resp={}, ops={}",
-              negotiated_max_request, negotiated_max_response, negotiated_max_ops);
+              neg.max_request, neg.max_response, neg.max_ops);
 
-        // Create session with negotiated sizes. We negotiate the cached
-        // response size by clamping the client's request: it MUST be ≤
-        // ca_maxresponsesize (caches can't be bigger than full responses)
-        // and is also ≤ our SERVER_MAX_RESPONSE.
-        let negotiated_max_response_cached = op.fore_chan_attrs
-            .max_response_size_cached
-            .min(negotiated_max_response)
-            .min(SERVER_MAX_RESPONSE_CACHED);
-        // Slot count = ca_maxrequests, capped at our MAX_SLOTS sentinel.
-        const SERVER_MAX_REQUESTS: u32 = 128;
-        let negotiated_max_requests = op.fore_chan_attrs
-            .max_requests
-            .max(1)
-            .min(SERVER_MAX_REQUESTS);
+        let negotiated_max_request = neg.max_request;
+        let negotiated_max_response = neg.max_response;
+        let negotiated_max_ops = neg.max_ops;
+        let negotiated_max_response_cached = neg.max_response_cached;
+        let negotiated_max_requests = neg.max_requests;
         let session = self.state_mgr.sessions.create_session(
             op.clientid,
             op.sequence,
@@ -1103,6 +1148,50 @@ impl SessionOperationHandler {
 
 #[cfg(test)]
 mod tests {
+    // ---- fore-channel negotiation: never grant above the request -----
+    //
+    // The invariant Linux's `nfs4_verify_channel_attrs` enforces with
+    // EINVAL. When the DS violated it (fixed advertisement above the
+    // request), the client destroyed the session and silently detoured
+    // every read through the MDS proxy — the failure is invisible from
+    // the server's logs, so this is pinned here for BOTH lanes'
+    // ceilings.
+    #[test]
+    fn negotiation_never_grants_above_the_request() {
+        use crate::nfs::v4::compound::ChannelAttrs;
+        let ds_ceilings = super::ForeChannelCeilings {
+            max_request: super::SERVER_MAX_REQUEST,
+            max_response: super::SERVER_MAX_RESPONSE,
+            max_response_cached: 4096,
+            max_ops: 128,
+            max_requests: 64,
+        };
+        for req_val in [1u32, 4096, 1_048_576, 1_050_624, u32::MAX] {
+            let req = ChannelAttrs {
+                header_pad_size: 0,
+                max_request_size: req_val,
+                max_response_size: req_val,
+                max_response_size_cached: req_val,
+                max_operations: req_val,
+                max_requests: req_val,
+                rdma_ird: Vec::new(),
+            };
+            for ceil in [&super::MDS_FORE_CEILINGS, &ds_ceilings] {
+                let n = super::negotiate_fore_channel(&req, ceil);
+                assert!(n.max_request <= req_val, "granted request size above ask");
+                assert!(n.max_response <= req_val, "granted response size above ask");
+                assert!(n.max_response_cached <= req_val, "granted cached size above ask");
+                assert!(n.max_ops <= req_val, "granted ops above ask");
+                assert!(n.max_requests <= req_val.max(1), "granted slots above ask");
+                assert!(n.max_requests >= 1, "a zero-slot session is unusable");
+                assert!(
+                    n.max_response_cached <= n.max_response,
+                    "a cache cannot hold more than a full response"
+                );
+            }
+        }
+    }
+
     // ---- C9: back-channel acceptance must be ANNOUNCED ----------------
     //
     // These tests exist because the pre-C9 server registered a

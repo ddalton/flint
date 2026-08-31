@@ -564,6 +564,47 @@ impl Default for ChannelAttrs {
     }
 }
 
+impl ChannelAttrs {
+    /// Decode one `channel_attrs4` (RFC 8881 §18.36) — the ONE wire
+    /// decode both lanes use. The struct ends with `ca_rdma_ird<1>`, an
+    /// optional one-element u32 array; skipping it (as two earlier
+    /// hand-rolled decoders did, one in this file and one in the DS)
+    /// silently mis-frames every subsequent field on the wire.
+    pub(crate) fn decode(d: &mut XdrDecoder) -> Result<ChannelAttrs, String> {
+        let header_pad_size = d.decode_u32()?;
+        let max_request_size = d.decode_u32()?;
+        let max_response_size = d.decode_u32()?;
+        let max_response_size_cached = d.decode_u32()?;
+        let max_operations = d.decode_u32()?;
+        let max_requests = d.decode_u32()?;
+
+        // ca_rdma_ird<1>: 0 or 1 u32. Anything longer is invalid per
+        // the XDR <1> bound; surface as a decode error so the caller
+        // returns BADXDR instead of silently desyncing.
+        let rdma_ird_len = d.decode_u32()? as usize;
+        if rdma_ird_len > 1 {
+            return Err(format!(
+                "ca_rdma_ird<1> length out of range: {} (max 1)",
+                rdma_ird_len
+            ));
+        }
+        let mut rdma_ird = Vec::with_capacity(rdma_ird_len);
+        for _ in 0..rdma_ird_len {
+            rdma_ird.push(d.decode_u32()?);
+        }
+
+        Ok(ChannelAttrs {
+            header_pad_size,
+            max_request_size,
+            max_response_size,
+            max_response_size_cached,
+            max_operations,
+            max_requests,
+            rdma_ird,
+        })
+    }
+}
+
 /// Change info for operations that modify namespace
 #[derive(Debug, Clone, Default)]
 pub struct ChangeInfo {
@@ -1618,51 +1659,12 @@ impl CompoundRequest {
                 //   csa_cb_program (u32)
                 //   csa_sec_parms<>   (callback_sec_parms4 array)
                 //
-                // channel_attrs4 itself ends with `ca_rdma_ird<1>`, an
-                // optional one-element u32 array. The decoder previously
-                // skipped that array, which silently mis-framed every
-                // subsequent field on the wire — this fixes that.
-
-                fn decode_channel_attrs(d: &mut XdrDecoder) -> Result<ChannelAttrs, String> {
-                    let header_pad_size = d.decode_u32()?;
-                    let max_request_size = d.decode_u32()?;
-                    let max_response_size = d.decode_u32()?;
-                    let max_response_size_cached = d.decode_u32()?;
-                    let max_operations = d.decode_u32()?;
-                    let max_requests = d.decode_u32()?;
-
-                    // ca_rdma_ird<1>: 0 or 1 u32. Anything longer is invalid
-                    // per the XDR <1> bound; surface as a decode error so the
-                    // dispatcher returns BADXDR instead of silently desyncing.
-                    let rdma_ird_len = d.decode_u32()? as usize;
-                    if rdma_ird_len > 1 {
-                        return Err(format!(
-                            "ca_rdma_ird<1> length out of range: {} (max 1)",
-                            rdma_ird_len
-                        ));
-                    }
-                    let mut rdma_ird = Vec::with_capacity(rdma_ird_len);
-                    for _ in 0..rdma_ird_len {
-                        rdma_ird.push(d.decode_u32()?);
-                    }
-
-                    Ok(ChannelAttrs {
-                        header_pad_size,
-                        max_request_size,
-                        max_response_size,
-                        max_response_size_cached,
-                        max_operations,
-                        max_requests,
-                        rdma_ird,
-                    })
-                }
-
                 let clientid = decoder.decode_u64()?;
                 let sequence = decoder.decode_u32()?;
                 let flags = decoder.decode_u32()?;
 
-                let fore_chan_attrs = decode_channel_attrs(decoder)?;
-                let back_chan_attrs = decode_channel_attrs(decoder)?;
+                let fore_chan_attrs = ChannelAttrs::decode(decoder)?;
+                let back_chan_attrs = ChannelAttrs::decode(decoder)?;
 
                 // csa_cb_program: the program number the client expects
                 // callback CALLs to be addressed to. We persist it on the

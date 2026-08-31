@@ -569,41 +569,43 @@ impl DataServer {
                     let sequence = decoder.decode_u32().unwrap_or(0);
                     let _csa_flags = decoder.decode_u32().unwrap_or(0);
 
-                    // Decode the client's REQUESTED channel attrs
-                    // (RFC 8881 §18.36: headerpadsz, maxreqsz, maxrespsz,
-                    // maxrespsz_cached, maxops, maxreqs, rdma_ird<0..1>).
-                    // The reply below must NEGOTIATE — Linux's
-                    // nfs4_verify_channel_attrs returns EINVAL for a
-                    // server that GRANTS MORE than the client asked, the
-                    // client then destroys the session, marks the
-                    // deviceid unavailable, and every read silently
-                    // detours through the MDS proxy (measured: the
-                    // DS-lane rig collapsed 1650 → 716 MiB/s when this
-                    // arm advertised fixed values above the request).
-                    // The previous code "skipped" these fields with
-                    // three u32 reads — not valid XDR for this struct —
-                    // and got away with it only because nothing after
-                    // them in the compound was ever used.
-                    fn chan_attrs(d: &mut XdrDecoder) -> (u32, u32, u32, u32, u32) {
-                        let _headerpad = d.decode_u32().unwrap_or(0);
-                        let max_rqst = d.decode_u32().unwrap_or(1048576);
-                        let max_resp = d.decode_u32().unwrap_or(1048576);
-                        let cached = d.decode_u32().unwrap_or(4096);
-                        let max_ops = d.decode_u32().unwrap_or(8);
-                        let max_reqs = d.decode_u32().unwrap_or(64);
-                        let rdma = d.decode_u32().unwrap_or(0);
-                        for _ in 0..rdma.min(2) {
-                            let _ = d.decode_u32();
+                    // Decode the client's REQUESTED channel attrs with
+                    // the shared `channel_attrs4` decode, and NEGOTIATE
+                    // with the shared min(request, ceiling) arithmetic —
+                    // Linux's nfs4_verify_channel_attrs EINVALs a server
+                    // that grants more than the client asked, the client
+                    // then destroys the session, marks the deviceid
+                    // unavailable, and every read silently detours
+                    // through the MDS proxy (measured: the DS-lane rig
+                    // collapsed 1650 → 716 MiB/s when this arm
+                    // advertised fixed values above the request).
+                    let fore = match crate::nfs::v4::compound::ChannelAttrs::decode(&mut decoder) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            warn!("DS: CREATE_SESSION bad fore_chan_attrs: {}", e);
+                            results.push((opcode, Nfs4Status::BadXdr, OpBody::Inline(Bytes::new())));
+                            continue;
                         }
-                        (max_rqst, max_resp, cached, max_ops, max_reqs)
-                    }
-                    let (req_rqst, req_resp, req_cached, req_ops, req_reqs) =
-                        chan_attrs(&mut decoder);
-                    let _back = chan_attrs(&mut decoder);
+                    };
+                    let _back = crate::nfs::v4::compound::ChannelAttrs::decode(&mut decoder);
                     let _cb_program = decoder.decode_u32();
                     // csa_sec_parms left unparsed: nothing in this arm
                     // reads the stream past here, and the DS ignores
                     // callback security (it never issues callbacks).
+
+                    // The DS's ceilings: the same wire maxima as the MDS
+                    // (SERVER_MAX_* carry the 3104fc51 headroom), its own
+                    // cached/slot policy — no replay cache, 64-slot table.
+                    let neg = crate::nfs::v4::operations::session::negotiate_fore_channel(
+                        &fore,
+                        &crate::nfs::v4::operations::session::ForeChannelCeilings {
+                            max_request: crate::nfs::v4::operations::session::SERVER_MAX_REQUEST,
+                            max_response: crate::nfs::v4::operations::session::SERVER_MAX_RESPONSE,
+                            max_response_cached: 4096,
+                            max_ops: 128,
+                            max_requests: 64,
+                        },
+                    );
 
                     info!("DS: CREATE_SESSION - clientid={}, sequence={}", clientid, sequence);
                     
@@ -635,21 +637,17 @@ impl DataServer {
                             // flags (0 for now)
                             encoder.encode_u32(0);
                             
-                            // fore_chan_attrs — NEGOTIATED, never granted
-                            // above the request (RFC 8881 §18.36; Linux
-                            // rejects rcvd > sent with EINVAL — see the
-                            // decode above). The server ceiling carries
-                            // the same headroom as the MDS
-                            // (`session::SERVER_MAX_*`, `3104fc51`): a
-                            // client that ASKS for 1 MiB + overhead now
-                            // gets it, where the old fixed 1048576 forced
-                            // its subtraction below 1 MiB.
+                            // fore_chan_attrs — the negotiated values
+                            // from above; never granted above the
+                            // request. A client that ASKS for 1 MiB +
+                            // overhead now gets it, where the old fixed
+                            // 1048576 forced its subtraction below 1 MiB.
                             encoder.encode_u32(0);       // header_pad_size (CRITICAL: was missing!)
-                            encoder.encode_u32(req_rqst.min(crate::nfs::v4::operations::session::SERVER_MAX_REQUEST));
-                            encoder.encode_u32(req_resp.min(crate::nfs::v4::operations::session::SERVER_MAX_RESPONSE));
-                            encoder.encode_u32(req_cached.min(4096)); // max_resp_sz_cached
-                            encoder.encode_u32(req_ops.min(128));     // max_ops
-                            encoder.encode_u32(req_reqs.min(64));     // max_reqs (match MDS)
+                            encoder.encode_u32(neg.max_request);
+                            encoder.encode_u32(neg.max_response);
+                            encoder.encode_u32(neg.max_response_cached);
+                            encoder.encode_u32(neg.max_ops);
+                            encoder.encode_u32(neg.max_requests);
                             encoder.encode_u32(0);       // rdma_ird count (array)
                             
                             // back_chan_attrs - for callbacks
