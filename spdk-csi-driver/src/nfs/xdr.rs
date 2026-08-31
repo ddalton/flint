@@ -280,21 +280,17 @@ impl XdrDecoder {
     }
 
     /// Consume and return remaining bytes as a Bytes object
-    pub fn into_remaining_bytes(mut self) -> Bytes {
-        // Extract all remaining bytes into a fresh Vec, then convert to Bytes
-        // This ensures we get a clean buffer with cursor at position 0
-        let len = self.buf.remaining();
-        if len == 0 {
-            return Bytes::new();
-        }
-
-        let mut vec = Vec::with_capacity(len);
-        while self.buf.has_remaining() {
-            vec.push(self.buf.get_u8());
-        }
-
-        tracing::trace!("into_remaining_bytes: extracted {} bytes into vec", vec.len());
-        Bytes::from(vec)
+    ///
+    /// Zero-copy: every decode method advances `buf` itself, so `buf`
+    /// already IS the remaining tail with its cursor at 0. The previous
+    /// form copied it out one `get_u8()` at a time — on a WRITE request
+    /// that tail is the full 1 MiB payload, and the loop measured 15%
+    /// of total system CPU under a 4-writer O_DIRECT workload. The
+    /// returned `Bytes` keeps the whole RPC record's allocation alive
+    /// until the last slice drops; the record already outlives dispatch,
+    /// so nothing new is pinned.
+    pub fn into_remaining_bytes(self) -> Bytes {
+        self.buf
     }
 
     /// Check if there's more data to decode
@@ -364,5 +360,30 @@ mod tests {
 
         assert_eq!(dec.decode_option(|d| d.decode_u32()).unwrap(), Some(42));
         assert_eq!(dec.decode_option(|d| d.decode_u32()).unwrap(), None);
+    }
+
+    #[test]
+    fn into_remaining_bytes_is_exactly_the_undecoded_tail() {
+        let mut enc = XdrEncoder::new();
+        enc.encode_u32(7);
+        enc.encode_u64(9);
+        let payload: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        let mut wire = enc.finish().to_vec();
+        wire.extend_from_slice(&payload);
+
+        let mut dec = XdrDecoder::new(Bytes::from(wire));
+        assert_eq!(dec.decode_u32().unwrap(), 7);
+        assert_eq!(dec.decode_u64().unwrap(), 9);
+        let tail = dec.into_remaining_bytes();
+        assert_eq!(tail.as_ref(), payload.as_slice());
+    }
+
+    #[test]
+    fn into_remaining_bytes_of_a_fully_drained_decoder_is_empty() {
+        let mut enc = XdrEncoder::new();
+        enc.encode_u32(1);
+        let mut dec = XdrDecoder::new(enc.finish());
+        dec.decode_u32().unwrap();
+        assert!(dec.into_remaining_bytes().is_empty());
     }
 }
