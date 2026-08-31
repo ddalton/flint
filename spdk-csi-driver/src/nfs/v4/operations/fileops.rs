@@ -2645,9 +2645,12 @@ impl FileOperationHandler {
 
         debug!("GETATTR: Returning {} bytes of attributes (from snapshot)", fattr.attr_vals.len());
         
-        // Detailed hex dump for debugging
+        // Detailed hex dump for debugging. The dump strings were built
+        // UNCONDITIONALLY — only the debug! consuming them is lazy — and
+        // GETATTR is the hottest metadata op: ~160 format! allocations
+        // per reply measured as ~3% of system CPU under a stat storm.
         debug!("GETATTR: Supported bitmap: {:?}", supported_bitmap);
-        if attr_vals.len() <= 256 {
+        if tracing::enabled!(tracing::Level::DEBUG) && attr_vals.len() <= 256 {
             // Hex dump in 16-byte rows
             for (i, chunk) in attr_vals.chunks(16).enumerate() {
                 let hex_str: String = chunk.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
@@ -3412,6 +3415,11 @@ impl FileOperationHandler {
             }
         }
 
+        // change_info4's pre-mutation half: what a client's last GETATTR
+        // of this directory reported. Sampled before the create.
+        let dir_before = crate::nfs::v4::change_counter::current_of_path(&parent_path)
+            .unwrap_or(0);
+
         // A10 admission: refuse new-object creation with NOSPC past
         // the reserve (one relaxed load when the tier is off).
         if crate::tier::space::admit_create(&obj_path).is_err() {
@@ -3621,10 +3629,18 @@ impl FileOperationHandler {
 
                         CreateRes {
                             status: Nfs4Status::Ok,
+                            // Real bracket (was a fabricated 0→1, which
+                            // told every client its directory caches were
+                            // stale on every CREATE): `before` sampled
+                            // ahead of the syscall, `after` read back
+                            // post-F14-bump.
                             change_info: Some(ChangeInfo {
                                 atomic: true,
-                                before: 0,
-                                after: 1,
+                                before: dir_before,
+                                after: crate::nfs::v4::change_counter::current_of_path(
+                                    &parent_path,
+                                )
+                                .unwrap_or_else(|| dir_before.wrapping_add(1)),
                             }),
                             attrset: attr_numbers_to_bitmap(&applied),
                         }
@@ -3750,6 +3766,10 @@ impl FileOperationHandler {
                         }
                     }
                 }
+                // change_info4's pre-mutation half, sampled before the
+                // unlink so it matches the client's cached value.
+                let dir_before =
+                    crate::nfs::v4::change_counter::current_of_path(&parent_path).unwrap_or(0);
                 let result = if metadata.is_dir() {
                     tokio::fs::remove_dir(&target_path).await
                 } else {
@@ -3782,10 +3802,18 @@ impl FileOperationHandler {
                         }
                         RemoveRes {
                             status: Nfs4Status::Ok,
+                            // Real bracket (was a fabricated 1→2): the
+                            // measured cost of the fabrication was ~3x
+                            // the LOOKUPs and one ACCESS per file on a
+                            // delete storm — the client re-resolving a
+                            // directory it already knew.
                             change_info: Some(ChangeInfo {
                                 atomic: true,
-                                before: 1,
-                                after: 2,
+                                before: dir_before,
+                                after: crate::nfs::v4::change_counter::current_of_path(
+                                    &parent_path,
+                                )
+                                .unwrap_or_else(|| dir_before.wrapping_add(1)),
                             }),
                         }
                     }
@@ -4004,6 +4032,16 @@ impl FileOperationHandler {
             }
         }
 
+        // change_info4 pre-mutation halves for BOTH parents, sampled
+        // before the rename.
+        let src_dir_before = source_path
+            .parent()
+            .and_then(crate::nfs::v4::change_counter::current_of_path)
+            .unwrap_or(0);
+        let dst_dir_before = dest_path
+            .parent()
+            .and_then(crate::nfs::v4::change_counter::current_of_path)
+            .unwrap_or(0);
         match tokio::fs::rename(&source_path, &dest_path).await {
             Ok(_) => {
                 // Blocker 2: a rename mutates TWO parents, and both must
@@ -4055,16 +4093,34 @@ impl FileOperationHandler {
                         crate::tier::identity::note_rename(moved, &dest_path, tier_covered);
                     }
                 }
-                let cinfo = if is_self_rename {
+                // Real brackets per directory (were fabricated 1→2
+                // constants, one shared struct for both dirs). A
+                // self-rename changed nothing: equal before/after keeps
+                // the client's caches.
+                let src_after = source_path
+                    .parent()
+                    .and_then(crate::nfs::v4::change_counter::current_of_path)
+                    .unwrap_or_else(|| src_dir_before.wrapping_add(1));
+                let dst_after = dest_path
+                    .parent()
+                    .and_then(crate::nfs::v4::change_counter::current_of_path)
+                    .unwrap_or_else(|| dst_dir_before.wrapping_add(1));
+                let (source_cinfo, target_cinfo) = if is_self_rename {
                     // No actual change to the directory.
-                    ChangeInfo { atomic: true, before: 1, after: 1 }
+                    (
+                        ChangeInfo { atomic: true, before: src_after, after: src_after },
+                        ChangeInfo { atomic: true, before: dst_after, after: dst_after },
+                    )
                 } else {
-                    ChangeInfo { atomic: true, before: 1, after: 2 }
+                    (
+                        ChangeInfo { atomic: true, before: src_dir_before, after: src_after },
+                        ChangeInfo { atomic: true, before: dst_dir_before, after: dst_after },
+                    )
                 };
                 RenameRes {
                     status: Nfs4Status::Ok,
-                    source_cinfo: Some(cinfo.clone()),
-                    target_cinfo: Some(cinfo),
+                    source_cinfo: Some(source_cinfo),
+                    target_cinfo: Some(target_cinfo),
                 }
             }
             Err(e) => {
@@ -4167,6 +4223,12 @@ impl FileOperationHandler {
         }
 
         // Create hard link
+        // change_info4 pre-mutation half for the target directory,
+        // sampled before the link lands.
+        let dir_before = link_path
+            .parent()
+            .and_then(crate::nfs::v4::change_counter::current_of_path)
+            .unwrap_or(0);
         match tokio::fs::hard_link(&file_path, &link_path).await {
             Ok(_) => {
                 // Blocker 2: the new dirent lives in the link's parent.
@@ -4189,10 +4251,14 @@ impl FileOperationHandler {
                 }
                 LinkRes {
                     status: Nfs4Status::Ok,
+                    // Real bracket (was a fabricated 1→2).
                     change_info: Some(ChangeInfo {
                         atomic: true,
-                        before: 1,
-                        after: 2,
+                        before: dir_before,
+                        after: link_path
+                            .parent()
+                            .and_then(crate::nfs::v4::change_counter::current_of_path)
+                            .unwrap_or_else(|| dir_before.wrapping_add(1)),
                     }),
                 }
             }

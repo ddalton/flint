@@ -815,6 +815,14 @@ impl IoOperationHandler {
                 }
             }
 
+            // change_info4 needs the parent's PRE-mutation change value,
+            // sampled before the create so it equals what a client's
+            // last GETATTR of this directory reported.
+            let dir_before = file_path
+                .parent()
+                .and_then(crate::nfs::v4::change_counter::current_of_path)
+                .unwrap_or(0);
+
             // read+write: this fd is seeded into the fd-cache below and
             // must serve BOTH directions (a write-only fd turns a later
             // READ through the cache into EBADF).
@@ -1059,10 +1067,29 @@ impl IoOperationHandler {
                             return OpenRes {
                                 status: Nfs4Status::Ok,
                                 stateid: Some(stateid),
-                                change_info: Some(ChangeInfo {
-                                    atomic: true,
-                                    before: 0,
-                                    after: 1,
+                                // REAL bracket, not the fabricated 0→1 it
+                                // used to be: the client compares `before`
+                                // to its cached directory change attr, and
+                                // a mismatch invalidates the directory's
+                                // dentry/access/attr caches — once per
+                                // OPEN. Measured as one extra ACCESS RPC
+                                // per created file (4021 vs knfsd's 8) and
+                                // 3x the LOOKUPs on a delete storm. An
+                                // OPEN of an EXISTING file made no dirent,
+                                // so before == after and the client keeps
+                                // its caches.
+                                change_info: Some({
+                                    let after = file_path
+                                        .parent()
+                                        .and_then(
+                                            crate::nfs::v4::change_counter::current_of_path,
+                                        )
+                                        .unwrap_or_else(|| dir_before.wrapping_add(1));
+                                    ChangeInfo {
+                                        atomic: true,
+                                        before: if existed { after } else { dir_before },
+                                        after,
+                                    }
                                 }),
                                 result_flags: OPEN4_RESULT_LOCKTYPE_POSIX,
                                 delegation: OpenDelegationType::None,
@@ -1349,10 +1376,19 @@ impl IoOperationHandler {
         OpenRes {
             status: Nfs4Status::Ok,
             stateid: Some(stateid),
-            change_info: Some(ChangeInfo {
-                atomic: true,
-                before: 0,
-                after: 1,
+            // A no-create OPEN mutates nothing: before == after at the
+            // directory's REAL change value, so the client keeps its
+            // directory caches. The fabricated 0→1 this replaces forced
+            // an invalidation on every open of an existing file.
+            // CLAIM_FH opens carry no directory (target_path None); an
+            // equal pair at 0 still never claims a change.
+            change_info: Some({
+                let cur = target_path
+                    .as_deref()
+                    .and_then(|p| p.parent())
+                    .and_then(crate::nfs::v4::change_counter::current_of_path)
+                    .unwrap_or(0);
+                ChangeInfo { atomic: true, before: cur, after: cur }
             }),
             result_flags: OPEN4_RESULT_LOCKTYPE_POSIX,
             delegation,
@@ -2688,6 +2724,53 @@ mod tests {
         worker.join().unwrap();
         // Every distinct stateid now maps to the shared fd.
         assert_eq!(handler.fd_cache.len(), 513);
+    }
+
+    /// change_info4 must carry the directory's REAL change bracket —
+    /// the values GETATTR serves — not fabricated constants. The client
+    /// compares `before` with its cached directory change attribute; a
+    /// mismatch invalidates the directory's dentry/access/attr caches,
+    /// which the fabricated 0→1 forced on EVERY OPEN (measured: one
+    /// extra ACCESS RPC per created file — 4021 vs knfsd's 8 — and 3x
+    /// the LOOKUPs on a delete storm). Falsified against the old code:
+    /// before read 0 and after 1 regardless of the directory.
+    #[tokio::test]
+    async fn open_change_info_is_the_directorys_real_change_bracket() {
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        let export_fh = fh_mgr.path_to_filehandle(fh_mgr.get_export_path()).unwrap();
+        ctx.current_fh = Some(export_fh.clone());
+        let open = |name: &str| OpenOp {
+            seqid: 0,
+            share_access: OPEN4_SHARE_ACCESS_BOTH,
+            share_deny: OPEN4_SHARE_DENY_NONE,
+            owner: b"cinfo-owner".to_vec(),
+            openhow: OpenHow::Create(Fattr4 { attrmask: vec![], attr_vals: vec![] }),
+            claim: OpenClaim::Null(name.to_string()),
+        };
+        let dir = fh_mgr.get_export_path().to_path_buf();
+
+        let cached = crate::nfs::v4::change_counter::current_of_path(&dir).unwrap();
+        let res = handler.handle_open(open("cinfo-a.bin"), &mut ctx).await;
+        assert_eq!(res.status, Nfs4Status::Ok);
+        let ci = res.change_info.expect("OPEN(create) must carry change_info");
+        assert!(ci.atomic);
+        assert_eq!(
+            ci.before, cached,
+            "before must equal the value a client's last GETATTR cached"
+        );
+        let now = crate::nfs::v4::change_counter::current_of_path(&dir).unwrap();
+        assert_eq!(ci.after, now, "after must equal what GETATTR now serves");
+        assert_ne!(ci.after, ci.before, "a create moved the directory");
+
+        // Re-open the SAME file: no dirent was made, so the bracket
+        // must report no change — what lets the client keep its
+        // directory caches on every open of an existing file.
+        ctx.current_fh = Some(export_fh.clone());
+        let res2 = handler.handle_open(open("cinfo-a.bin"), &mut ctx).await;
+        assert_eq!(res2.status, Nfs4Status::Ok);
+        let ci2 = res2.change_info.expect("change_info on an existing-open too");
+        assert_eq!(ci2.before, ci2.after, "no dirent made ⇒ before == after");
     }
 
     /// A10: with the space model exhausted (reserve > any disk),

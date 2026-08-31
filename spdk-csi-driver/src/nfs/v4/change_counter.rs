@@ -69,6 +69,49 @@ pub fn bump_path(path: &std::path::Path) {
     }
 }
 
+/// The change value GETATTR would report for `path` right now — what a
+/// client's cached copy of the object's CHANGE attribute holds.
+///
+/// This exists for change_info4: before/after must be REAL samples of
+/// the same value GETATTR serves, or the client's `before == cached`
+/// test never passes and every namespace mutation invalidates the
+/// parent directory's dentry/access/attribute caches. That fabrication
+/// (`0→1` constants) measured as one extra ACCESS RPC per created file
+/// and ~3x the LOOKUPs on a delete storm.
+pub fn current_of_path(path: &std::path::Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let md = path.symlink_metadata().ok()?;
+        Some(current(md.dev(), md.ino(), ctime_ns(&md)))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// change_info4 bracket for a mutation of the directory at `dir`:
+/// call [`dir_change_before`] ahead of the syscall, then this after it.
+/// Bumps the directory's counter (the mutation really happened) and
+/// returns the post value. `atomic: true` is honest to the extent the
+/// bracket is: the kernel serializes directory mutations on i_rwsem,
+/// and a raced concurrent mutation yields a stale `before`, which the
+/// client answers with a cache refresh — the safe direction.
+pub fn dir_change_after(dir: &std::path::Path) -> u64 {
+    bump_path(dir);
+    current_of_path(dir).unwrap_or(0)
+}
+
+/// The pre-mutation half of the bracket: the directory's change value
+/// as any client currently caches it. 0 when the directory is not
+/// statable — paired with a real `after`, a zero `before` mismatches
+/// every cache and forces a refresh, again the safe direction.
+pub fn dir_change_before(dir: &std::path::Path) -> u64 {
+    current_of_path(dir).unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
