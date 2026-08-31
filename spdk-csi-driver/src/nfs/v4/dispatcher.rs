@@ -1797,6 +1797,23 @@ impl CompoundDispatcher {
                                         return OperationResult::Write(Nfs4Status::Io, None);
                                     }
                                 }
+                                // The bytes changed on the DS; the stub is
+                                // the only place mtime/CHANGE can come
+                                // from, and set_len above runs only on
+                                // extension. Same contract as
+                                // LAYOUTCOMMIT's bump: without it the
+                                // attr cache (and every client's cached
+                                // CHANGE) survives the write.
+                                if let Ok(f) = crate::nfs::v4::open_beneath::open(
+                                    std::fs::OpenOptions::new().write(true),
+                                    &t.path,
+                                ) {
+                                    let _ = f.set_times(
+                                        std::fs::FileTimes::new()
+                                            .set_modified(std::time::SystemTime::now()),
+                                    );
+                                }
+                                crate::nfs::v4::change_counter::bump_path(&t.path);
                                 use crate::nfs::v4::compound::WriteResult;
                                 OperationResult::Write(
                                     Nfs4Status::Ok,
@@ -3999,22 +4016,41 @@ impl CompoundDispatcher {
                 }
             }
 
-            if let Some((secs, nsecs)) = time_modify {
-                // Best-effort mtime update. The size update is the
-                // load-bearing thing — if mtime doesn't apply we don't
-                // fail the op.
-                let ft = std::fs::FileTimes::new()
-                    .set_modified(
-                        std::time::UNIX_EPOCH
-                            + std::time::Duration::new(secs.max(0) as u64, nsecs),
-                    );
-                if let Ok(file) = crate::nfs::v4::open_beneath::open(
-                    std::fs::OpenOptions::new().write(true),
-                    &blocking_path,
-                ) {
-                    let _ = file.set_times(ft);
+            // Best-effort mtime update. The size update is the
+            // load-bearing thing — if mtime doesn't apply we don't
+            // fail the op. When the client sends no time, the server
+            // sets NOW: the commit means bytes changed on the DSes,
+            // and this stub's mtime/ctime are the only thing the
+            // change attribute can be derived from — an in-place
+            // overwrite that extends nothing would otherwise leave
+            // CHANGE exactly where it was and no reader would ever
+            // revalidate.
+            let modified = match time_modify {
+                Some((secs, nsecs)) => {
+                    std::time::UNIX_EPOCH
+                        + std::time::Duration::new(secs.max(0) as u64, nsecs)
                 }
+                None => std::time::SystemTime::now(),
+            };
+            if let Ok(file) = crate::nfs::v4::open_beneath::open(
+                std::fs::OpenOptions::new().write(true),
+                &blocking_path,
+            ) {
+                let _ = file.set_times(std::fs::FileTimes::new().set_modified(modified));
             }
+
+            // The set_len/set_times above changed what GETATTR must
+            // report, and nothing else on the pNFS path will ever say
+            // so — the WRITEs went to the data servers, so no local
+            // pwrite bumps this path's change counter. Without this
+            // bump the attr cache serves the pre-commit size for its
+            // full TTL, and a client that wrote through its layout
+            // then re-opened read its own file as EMPTY (5/5 on lima;
+            // the same loop passes with the cache disabled or this
+            // bump in place). Inside the blocking closure like
+            // ALLOCATE/DEALLOCATE: the counter must move before the
+            // reply a GETATTR can ride behind.
+            crate::nfs::v4::change_counter::bump_path(&blocking_path);
             Ok(new_size)
         })
         .await;

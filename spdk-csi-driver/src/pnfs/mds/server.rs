@@ -496,6 +496,18 @@ impl MetadataServer {
             extras.extend(ds.multipath.iter().cloned());
             device_info.endpoints = extras;
 
+            // The MDS→DS control endpoint travels with the same config
+            // stanza. Without it, this seeded entry serves truncates of
+            // striped files with "no DsControl listener" — parking them
+            // truncate-dirty while LAYOUTGET answers TRYLATER forever.
+            // And the seed MASKS the recovery: it satisfies heartbeats,
+            // so a DS that registered with a previous MDS incarnation
+            // never hears the NACK that would make it re-register with
+            // its real control port. Measured on lima: an O_TRUNC after
+            // an MDS restart wedged the client in nfs4_handle_exception
+            // indefinitely.
+            device_info.control_endpoint = ds.control_endpoint.clone();
+
             if let Err(e) = device_registry.register(device_info) {
                 warn!("Failed to register data server {}: {}", ds.device_id, e);
             }
