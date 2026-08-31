@@ -13,11 +13,11 @@ use super::v4::protocol::{NFS4_PROGRAM, procedure};
 use super::v4::state::StateManager;
 // LocalFilesystem removed - NFSv4 uses direct filesystem access via filehandle manager
 use super::xdr::{XdrDecoder, XdrEncoder};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::io::AsyncReadExt;
+
 use tracing::{debug, error, info, warn};
 
 /// NFS server configuration
@@ -290,24 +290,15 @@ pub(crate) fn max_connections_from_env() -> u64 {
 /// ordinary NFS client behaviour, whose replay path B3/B5 pinned.
 /// Precedent: knfsd ages out idle client sockets after ~6 minutes
 /// (sunrpc `svc_age_temp_sockets`); this default matches it.
-/// Ceiling on one assembled RPC record. Applies to the SUM of a
-/// record's fragments, not to any single one — see the reassembly in
-/// `handle_tcp_connection`.
-pub(crate) const MAX_RPC_RECORD_BYTES: usize = 4 * 1024 * 1024;
-
-/// Records larger than this read into a pooled buffer instead of `buf`.
-/// Below it the connection's `BytesMut` amortizes allocations across
-/// records; above it (the BufReader's capacity) every record forced a
-/// fresh allocation, because `split().freeze()` donates the storage to
-/// the request. A 1 MiB WRITE payload sits far above this line.
-pub(crate) const POOLED_RECORD_MIN: usize = 128 * 1024;
-
-/// Counts records that took the pooled ingress path — the anti-vacuity
-/// guard for the test that sends one: a green round-trip proves nothing
-/// if the record quietly took the `BytesMut` path instead.
+// Record caps, the pooled-ingress threshold, and its test counter now
+// live with the mechanism in `nfs::ingress`; re-exported so existing
+// references keep reading naturally.
+// The pooled-ingress threshold and its test counter live with the
+// mechanism in `nfs::ingress`; the tests below import them from there.
 #[cfg(test)]
-pub(crate) static POOLED_RECORDS_FOR_TEST: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+pub(crate) use crate::nfs::ingress::POOLED_RECORD_MIN;
+#[cfg(test)]
+pub(crate) use crate::nfs::ingress::POOLED_RECORDS_FOR_TEST;
 
 pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 360;
 
@@ -498,8 +489,12 @@ async fn handle_tcp_connection(
     // ONC RPC framing (RFC 1831).
     let bcw = crate::nfs::v4::back_channel::BackChannelWriter::new(writer);
 
-    // Reusable buffer
-    let mut buf = BytesMut::with_capacity(128 * 1024);
+    // Record ingress: markers, fragment reassembly, caps, pooling —
+    // the shared mechanism in `nfs::ingress`.
+    let mut ingress = crate::nfs::ingress::RecordReader::new(format!(
+        "[NFS_SERVER] Connection #{} from {}",
+        conn_id, peer
+    ));
 
     let mut rpc_count = 0;
 
@@ -554,160 +549,33 @@ async fn handle_tcp_connection(
         }
         debug!("📥 [NFS_SERVER] Connection #{}: Waiting for RPC message #{} from {}", conn_id, rpc_count + 1, peer);
 
-        // Read RPC record marker (4 bytes), under the blocker-7 deadline:
-        // this is where an idle connection parks between requests. A
-        // deadline here is an ordinary close, not an error — the peer
-        // simply had nothing to say for the whole window (a live NFS
-        // client renews its lease far more often), and a cut trunk
-        // reconnects transparently on its next use.
-        let mut marker_buf = [0u8; 4];
-        let marker_res = match idle_timeout {
-            Some(d) => match tokio::time::timeout(d, reader.read_exact(&mut marker_buf)).await {
-                Ok(r) => r,
-                Err(_elapsed) => {
-                    info!(
-                        "⏱️  [NFS_SERVER] Connection #{} from {} idle for {:?} with no \
-                         request — closing to free its slot (FLINT_NFS_IDLE_TIMEOUT_SECS; \
-                         {} RPCs served)",
-                        conn_id, peer, d, rpc_count
-                    );
-                    return Ok(());
-                }
-            },
-            None => reader.read_exact(&mut marker_buf).await,
-        };
-        match marker_res {
-            Ok(_) => {
-                debug!("✅ [NFS_SERVER] Connection #{}: Received RPC marker from {}: {:02x?}", conn_id, peer, marker_buf);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                // Connection closed gracefully
+        // One complete record from the shared ingress (markers,
+        // fragments, caps, pooled payload buffers — `nfs::ingress`).
+        // Between-records idleness and a clean EOF are ordinary closes;
+        // everything else is a connection error.
+        let request = match ingress.next(&mut reader, idle_timeout).await {
+            Ok(crate::nfs::ingress::NextRecord::Record(r)) => r,
+            Ok(crate::nfs::ingress::NextRecord::Closed) => {
                 let duration = connect_time.elapsed();
-                info!("🔌 [NFS_SERVER] Connection #{} from {} closed after {:?} ({} RPCs processed)", 
+                info!("🔌 [NFS_SERVER] Connection #{} from {} closed after {:?} ({} RPCs processed)",
                       conn_id, peer, duration, rpc_count);
                 if rpc_count == 0 {
                     warn!("⚠️  [NFS_SERVER] Client {} connected (conn #{}) but sent NO RPC messages!", peer, conn_id);
                 }
                 return Ok(());
             }
+            Ok(crate::nfs::ingress::NextRecord::IdleClosed) => {
+                info!(
+                    "⏱️  [NFS_SERVER] Connection #{} from {} idle for {:?} with no \
+                     request — closing to free its slot (FLINT_NFS_IDLE_TIMEOUT_SECS; \
+                     {} RPCs served)",
+                    conn_id, peer, idle_timeout, rpc_count
+                );
+                return Ok(());
+            }
             Err(e) => {
-                warn!("❌ [NFS_SERVER] Connection #{}: Error reading RPC marker from {}: {}", conn_id, peer, e);
+                warn!("❌ [NFS_SERVER] Connection #{}: ingress error from {}: {}", conn_id, peer, e);
                 return Err(e);
-            }
-        }
-
-        let marker = u32::from_be_bytes(marker_buf);
-        let is_last = (marker & 0x80000000) != 0;
-        let length = (marker & 0x7FFFFFFF) as usize;
-
-        debug!("📊 RPC marker decoded: is_last={}, length={} bytes", is_last, length);
-
-        // RFC 5531 §11 record marking: a record is a SEQUENCE of
-        // fragments, and only the last carries the high bit. `is_last`
-        // was decoded and then used in one `debug!` and nowhere else —
-        // so every fragment was handed to the RPC parser as though it
-        // were a whole record. A legal multi-fragment call would be
-        // decoded as garbage, and its continuation decoded again as a
-        // second call on the same connection.
-        //
-        // Nothing shipped has exercised it: the Linux client sends
-        // single-fragment records, which is the only reason this has
-        // never been seen. A structure-aware fuzzer (G1, still
-        // unwritten) would find it in the first minute.
-        //
-        // The cap moves with it. Bounding the FRAGMENT while accepting
-        // unlimited fragments is not a bound at all, so it applies to
-        // the assembled record.
-        let assembled = buf.len();
-        if assembled + length > MAX_RPC_RECORD_BYTES {
-            warn!(
-                "❌ Rejecting oversized RPC record from {}: {} + {} bytes exceeds {} \
-                 (a record may arrive in fragments; the limit is on the whole)",
-                peer, assembled, length, MAX_RPC_RECORD_BYTES
-            );
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "RPC record too large",
-            ));
-        }
-
-        // Read message.
-        //
-        // We size `buf` to the fragment length and let `read_exact` populate
-        // the slice. The previous form used `unsafe { set_len(length) }`,
-        // which is undefined behavior if `read_exact` returned an error
-        // before fully writing the buffer (the user of `buf` could then
-        // observe uninitialized memory). `resize` is implemented as a single
-        // `RawVec::reserve` + memset pair and is essentially free relative to
-        // the I/O cost of receiving `length` bytes from the socket.
-        //
-        // A payload-bearing single-fragment record (a 1 MiB WRITE) takes
-        // a POOLED buffer instead: `split().freeze()` donates `buf`'s
-        // storage to the request, so above the BufReader's capacity the
-        // `BytesMut` path paid a fresh allocation whose pages the kernel
-        // zeroes on first touch — `__pi_clear_page` at 3.5% of system
-        // plus kcompactd compaction churn in the write-path profile. A
-        // warm pooled buffer faults nothing. Fragmented records keep the
-        // `BytesMut` path: fragments must append to what is assembled.
-        let mut pooled_buf: Option<crate::nfs::read_pool::PooledMut> =
-            if is_last && assembled == 0 && length > POOLED_RECORD_MIN {
-                #[cfg(test)]
-                POOLED_RECORDS_FOR_TEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Some(crate::nfs::read_pool::take_mut(length))
-            } else {
-                buf.resize(assembled + length, 0);
-                None
-            };
-
-        debug!("📥 Reading RPC payload: {} bytes from {}", length, peer);
-        // Blocker 7, mid-request: a peer that sent a marker and then
-        // trickles (or stalls) holds the read loop inside one message.
-        // Unlike the idle case above this is a malformed exchange — the
-        // peer promised `length` bytes and did not deliver — so it is an
-        // error, not a quiet close.
-        let dst: &mut [u8] = match pooled_buf.as_mut() {
-            Some(pb) => &mut pb[..length],
-            None => &mut buf[assembled..assembled + length],
-        };
-        match idle_timeout {
-            Some(d) => match tokio::time::timeout(d, reader.read_exact(dst)).await {
-                Ok(r) => {
-                    r?;
-                }
-                Err(_elapsed) => {
-                    warn!(
-                        "⏱️  [NFS_SERVER] Connection #{} from {} stalled mid-request — \
-                         promised {} bytes, did not deliver within {:?} \
-                         (FLINT_NFS_IDLE_TIMEOUT_SECS)",
-                        conn_id, peer, length, d
-                    );
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "RPC payload read stalled past the idle deadline",
-                    ));
-                }
-            },
-            None => {
-                reader.read_exact(dst).await?;
-            }
-        }
-
-        if !is_last {
-            debug!(
-                "📎 RPC fragment from {}: {} bytes, record now {} — awaiting continuation",
-                peer, length, buf.len()
-            );
-            continue;
-        }
-
-        let request = match pooled_buf.take() {
-            Some(pb) => pb.freeze(length),
-            None => {
-                if buf.is_empty() {
-                    warn!("⚠️  Zero-length RPC record from {}, ignoring", peer);
-                    continue;
-                }
-                buf.split().freeze()
             }
         };
 
@@ -748,7 +616,7 @@ async fn handle_tcp_connection(
         // replies and CB_LAYOUTRECALL frames so wire framing stays
         // valid.
         debug!(">>> [NFS_SERVER] Connection #{}: Processing NFSv4 RPC #{} from {}, length={} bytes",
-               conn_id, rpc_count + 1, peer, length);
+               conn_id, rpc_count + 1, peer, request.len());
         let dispatcher_c = dispatcher.clone();
         let gss_c = gss_manager.clone();
         let bcw_dispatch = Arc::clone(&bcw);
@@ -1465,6 +1333,15 @@ mod state_persistence_tests {
     }
 }
 
+/// Serializes every test that observes or perturbs ACTIVE_CONNECTIONS.
+/// The counter is process-global and several tests park REAL served
+/// connections (each holding a ConnSlot) for their whole duration — a
+/// delta assertion sampled while one of those lives (or dies) mid-test
+/// reads someone else's slot. Scheduling luck hid this until the
+/// ingress extraction shifted connection-close timing.
+#[cfg(test)]
+pub(crate) static CONN_SLOT_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod connection_cap_tests {
     use super::*;
@@ -1482,6 +1359,9 @@ mod connection_cap_tests {
     /// than the unbounded accept the cap replaces.
     #[test]
     fn a_slot_is_released_even_when_the_holder_panics() {
+        let _serial = crate::nfs::server_v4::CONN_SLOT_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let before = ACTIVE_CONNECTIONS.load(Ordering::SeqCst);
 
         let r = std::panic::catch_unwind(|| {
@@ -1506,6 +1386,9 @@ mod connection_cap_tests {
 
     #[test]
     fn a_slot_is_released_on_the_ordinary_path() {
+        let _serial = crate::nfs::server_v4::CONN_SLOT_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let before = ACTIVE_CONNECTIONS.load(Ordering::SeqCst);
         {
             let _slot = ConnSlot::acquire();
@@ -1556,7 +1439,7 @@ mod connection_cap_tests {
 mod idle_timeout_tests {
     use super::*;
     use std::time::Duration;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// Accept one connection and serve it with the given deadline.
     /// Returns the client half and the handler's join handle.
@@ -1608,6 +1491,9 @@ mod idle_timeout_tests {
     /// its bounded wait.
     #[tokio::test]
     async fn an_idle_connection_is_closed_at_the_deadline() {
+        let _serial = crate::nfs::server_v4::CONN_SLOT_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (mut client, handle, _t) =
             one_served_connection(Some(Duration::from_millis(200))).await;
         server_closed_within(&mut client, Duration::from_secs(5))
@@ -1633,6 +1519,9 @@ mod idle_timeout_tests {
     /// did.
     #[tokio::test]
     async fn a_record_split_across_fragments_is_reassembled_before_dispatch() {
+        let _serial = crate::nfs::server_v4::CONN_SLOT_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // RFC 5531 CALL: xid, msg_type=0, rpcvers=2, prog=100003 (NFS),
         // vers=4, proc=0 (NULL), then null cred and null verf.
         let call: Vec<u8> = [0x0Bu32, 0, 2, 100_003, 4, 0, 0, 0, 0, 0]
@@ -1693,6 +1582,9 @@ mod idle_timeout_tests {
     /// would pass this test for no reason.
     #[tokio::test]
     async fn a_large_single_fragment_record_takes_the_pooled_path_and_decodes() {
+        let _serial = crate::nfs::server_v4::CONN_SLOT_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         use std::sync::atomic::Ordering;
         // RFC 5531 NULL CALL, as in the fragment test above.
         let call: Vec<u8> = [0x2Cu32, 0, 2, 100_003, 4, 0, 0, 0, 0, 0]
@@ -1750,6 +1642,9 @@ mod idle_timeout_tests {
     /// deadline, and as an ERROR, because the peer broke its promise.
     #[tokio::test]
     async fn a_mid_request_stall_is_closed_at_the_deadline() {
+        let _serial = crate::nfs::server_v4::CONN_SLOT_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (mut client, handle, _t) =
             one_served_connection(Some(Duration::from_millis(200))).await;
         // Last-fragment marker, length 100 — then silence.
@@ -1770,6 +1665,9 @@ mod idle_timeout_tests {
     /// hangs up idle sockets.
     #[tokio::test]
     async fn with_the_deadline_disabled_an_idle_connection_stays_open() {
+        let _serial = crate::nfs::server_v4::CONN_SLOT_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (mut client, handle, _t) = one_served_connection(None).await;
         assert!(
             server_closed_within(&mut client, Duration::from_secs(1)).await.is_err(),

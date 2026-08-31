@@ -19,10 +19,10 @@ use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
 use crate::nfs::v4::protocol::{procedure, NFS4_PROGRAM, opcode, Nfs4Status, exchgid_flags};
 use crate::nfs::v4::xdr::Nfs4XdrDecoder;
 use crate::nfs::v4::state::{ClientManager, LeaseManager};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, BufWriter};
+use tokio::io::BufWriter;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
@@ -257,54 +257,31 @@ impl DataServer {
         // FLINT_NFS_MAX_INFLIGHT (default 64, 0 = sequential).
         let pipeline = crate::nfs::pipeline::ConnectionPipeline::from_env();
 
-        let mut buf = BytesMut::with_capacity(128 * 1024);
+        // Record ingress: the shared mechanism in `nfs::ingress`. This
+        // is where the DS FINALLY gains fragment reassembly — its old
+        // hand-rolled loop dispatched every RPC fragment as a whole
+        // record (the `85184494` fix had reached only the shared lane)
+        // — along with the whole-record cap and the pooled payload
+        // buffers. No idle deadline here: the client tears DS
+        // connections down itself when the last layout goes away, and
+        // the DS holds no per-connection state worth reaping.
+        let mut ingress = crate::nfs::ingress::RecordReader::new(format!(
+            "DS connection from {}",
+            peer
+        ));
         let mut rpc_count = 0;
 
         loop {
-            // Read RPC record marker
-            let mut marker_buf = [0u8; 4];
-            match reader.read_exact(&mut marker_buf).await {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            let request = match ingress.next(&mut reader, None).await {
+                Ok(crate::nfs::ingress::NextRecord::Record(r)) => r,
+                Ok(crate::nfs::ingress::NextRecord::Closed)
+                | Ok(crate::nfs::ingress::NextRecord::IdleClosed) => {
                     let duration = connect_time.elapsed();
-                    info!("🔌 DS connection from {} closed after {:?} ({} RPCs)", 
+                    info!("🔌 DS connection from {} closed after {:?} ({} RPCs)",
                           peer, duration, rpc_count);
                     return Ok(());
                 }
                 Err(e) => return Err(e),
-            }
-
-            let marker = u32::from_be_bytes(marker_buf);
-            let length = (marker & 0x7FFFFFFF) as usize;
-
-            if length > 4 * 1024 * 1024 {
-                warn!("❌ Rejecting oversized RPC: {} bytes", length);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "RPC too large",
-                ));
-            }
-
-            // Read message.
-            //
-            // A payload-bearing record (a 1 MiB WRITE) reads into a
-            // POOLED buffer: `split().freeze()` donates `buf`'s storage
-            // to the request, so every large record used to pay a fresh
-            // allocation whose pages the kernel zeroes on first touch —
-            // the same page-fault churn `e399d031` removed from the
-            // standalone lane's ingress. Small records keep the
-            // `BytesMut`, now via `resize` — the old `unsafe set_len`
-            // exposed uninitialized memory if `read_exact` failed
-            // partway (the UB the shared lane fixed alongside pooling).
-            let request = if length > crate::nfs::server_v4::POOLED_RECORD_MIN {
-                let mut pb = crate::nfs::read_pool::take_mut(length);
-                reader.read_exact(&mut pb[..length]).await?;
-                pb.freeze(length)
-            } else {
-                buf.clear();
-                buf.resize(length, 0);
-                reader.read_exact(&mut buf[..length]).await?;
-                buf.split().freeze()
             };
 
             // Dispatch through the pipeline; the reply is framed and
