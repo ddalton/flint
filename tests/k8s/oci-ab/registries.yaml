@@ -1,0 +1,95 @@
+# Two registries, one image: the A3-vs-A5 endpoint swap.
+# registry-flint: filesystem driver on one RWX pNFS PVC (rung 0).
+# registry-s3:   s3 driver, redirect ON -> blob GETs 307 to presigned S3,
+#                so lazy range reads hit S3 directly (the ECR shape).
+# Secret oci-ab-s3 must exist first (drive-ab.sh creates it from
+# BUCKET/S3_KEY_ID/S3_SECRET).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-blobs
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: flint-pnfs
+  resources:
+    requests:
+      storage: 50Gi   # accounting only; capacity is DS-pool-side
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry-flint
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: registry-flint }
+  template:
+    metadata:
+      labels: { app: registry-flint }
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: oci-ab/role
+                    operator: NotIn
+                    values: ["client"]
+      containers:
+        - name: registry
+          image: registry:3
+          env:
+            - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
+              value: /var/lib/registry
+          ports: [{ containerPort: 5000 }]
+          volumeMounts:
+            - { name: blobs, mountPath: /var/lib/registry }
+      volumes:
+        - name: blobs
+          persistentVolumeClaim: { claimName: registry-blobs }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry-flint
+spec:
+  selector: { app: registry-flint }
+  ports: [{ port: 5000, targetPort: 5000 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry-s3
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: registry-s3 }
+  template:
+    metadata:
+      labels: { app: registry-s3 }
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: oci-ab/role
+                    operator: NotIn
+                    values: ["client"]
+      containers:
+        - name: registry
+          image: registry:3
+          env:
+            - name: REGISTRY_STORAGE
+              value: s3
+          envFrom:
+            - secretRef: { name: oci-ab-s3 }
+          ports: [{ containerPort: 5000 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry-s3
+spec:
+  selector: { app: registry-s3 }
+  ports: [{ port: 5000, targetPort: 5000 }]

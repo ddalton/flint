@@ -1,0 +1,17 @@
+# flint chart values for the oci-ab campaign (chart 1.43.0).
+# pNFS server fleet, file layout only — rung 0/1 need no block class.
+# DS count 3 of 4 workers; cordon the client node during install so the
+# fleet lands on the serving nodes (uncordon after).
+pnfs:
+  enabled: true
+  storageClass:
+    create: true
+    name: flint-pnfs
+    # defaults: 8 MiB stripeSize, full width — right for GB blobs
+  server:
+    enabled: true
+    mds:
+      count: 1
+    dataServers:
+      count: 3
+      spreadAcrossNodes: true
