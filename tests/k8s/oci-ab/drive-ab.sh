@@ -167,6 +167,19 @@ cold_and_verify() { # $1=iid $2=registry
   [ "$soci" = active ] || { echo "G-COLD:soci-snapshotter=$soci"; return 1; }
 }
 
+# Cold the SERVING registry: a fresh pod means a fresh page cache, so the
+# arm actually reads its storage backend instead of the previous rep's RAM.
+cold_backend() { # $1=FLINT|S3
+  local dep
+  case "$1" in
+    FLINT) dep=registry-flint;;
+    S3)    dep=registry-s3;;
+    *) return 1;;
+  esac
+  k rollout restart "deploy/$dep" >/dev/null 2>&1 || return 1
+  k rollout status "deploy/$dep" --timeout=4m >/dev/null 2>&1 || return 1
+}
+
 # ── one measured arm ─────────────────────────────────────────────────────
 # Emits exactly ONE json object on stdout. Everything else goes to stderr.
 # Timing is taken ON THE NODE: the host-side stopwatch in v1 wrapped SSM
@@ -180,6 +193,19 @@ measure_arm() { # $1=arm $2=snapshotter $3=registry $4=iid $5=rep $6=expected_di
   if ! void=$(cold_and_verify "$iid" "$reg"); then emit_void "$armn" "$rep" "$void"; return; fi
 
   if ! load=$(guard_idle "$iid"); then emit_void "$armn" "$rep" "$load"; return; fi
+
+  # G-COLD cools the CLIENT. The BACKEND has a page cache too, and on the
+  # filesystem-driver arm that is the whole measurement: the registry pod
+  # holds the blobs in RAM after the first pull, so every later rep is served
+  # from memory and the storage layer is never read. Measured on runby
+  # 2026-09-01: FIVE flint pulls of a ~400 MB image produced TWO
+  # `LAYOUTGET granted` lines — the arm was comparing the registry's RAM
+  # against S3's network fetch and calling it flint-vs-S3. Restart the
+  # serving registry so each rep is cold on BOTH sides. Only the arm's own
+  # backend needs cooling; G-ATTR already proves the other served nothing.
+  if ! cold_backend "$which"; then
+    emit_void "$armn" "$rep" "G-COLDBE:could-not-restart-$which-registry"; return
+  fi
 
   since=$(now_rfc3339)
   f0=$(reg_reqs_since registry-flint "$since"); s0=$(reg_reqs_since registry-s3 "$since")
@@ -257,10 +283,29 @@ emit_void() { # $1=arm $2=rep $3=reason
 # Arm order rotates per rep. A fixed order aliases order effects (registry
 # page cache, connection reuse) onto arm identity; interleaving is only
 # interleaving if the position changes.
-arm_order() { # $1=rep -> rotation of the three specs
-  local specs=("A1 overlayfs FLINT" "A3 soci S3" "A5 soci FLINT")
-  local n=${#specs[@]} i off=$(( ($1 - 1) % 3 ))
-  for i in 0 1 2; do echo "${specs[$(( (i + off) % n ))]}"; done
+# ARMS overrides the default set, as "<name> <snapshotter> <FLINT|S3>"
+# separated by ';'. Added because the soci arms are unmeasurable on a
+# registry without the OCI referrers API (runby, 2026-09-01: Distribution
+# 3.1.1 answers /v2/<n>/referrers/<d> with 404, so soci never finds its
+# index and silently falls back to an eager pull — valid-looking reps that
+# are not measuring lazy loading at all). Restricting to the eager arms
+# still answers the backend question (flint vs S3) with everything else
+# held identical, instead of quoting a lazy-vs-eager ratio that was
+# eager-vs-eager.
+arm_order() { # $1=rep -> rotation of the arm specs
+  local specs
+  if [ -n "${ARMS:-}" ]; then
+    local IFS=';'; read -ra specs <<< "$ARMS"
+  else
+    specs=("A1 overlayfs FLINT" "A3 soci S3" "A5 soci FLINT")
+  fi
+  # NOTE: n must be assigned in its OWN statement. `local n=… off=$((…% n))`
+  # expands every argument word BEFORE performing any assignment, so n is
+  # still empty inside off's arithmetic and it divides by zero. The original
+  # survived only because it used the literal `% 3`.
+  local n=${#specs[@]}
+  local i off=$(( ($1 - 1) % n ))
+  for ((i = 0; i < n; i++)); do echo "${specs[$(( (i + off) % n ))]}"; done
 }
 
 # ── G-WIDTH: the substrate stripe-width gate ─────────────────────────────

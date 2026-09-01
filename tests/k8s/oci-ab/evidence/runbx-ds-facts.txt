@@ -1,0 +1,16 @@
+runbx DS-side facts (2026-09-01, fixed image f68-351314d3, corruption reproducing)
+- stripe files live at /data/{file_id:016x}.stripeN; ds-0 holds only .stripe0,
+  ds-1 only .stripe1, ds-2 only .stripe2 (slot == DS index).
+- ZERO byte-empty stripe files on all three DSes  => outcome (b) EXCLUDED:
+  no case of "the write never landed".
+- Rotation check over 320 small (single-unit) stripe files:
+  stripe_index == file_id % 3 for 320/320, ZERO mismatches
+  => the WRITE side places stripes exactly where the rotation formula says.
+- F68a meter during a reproducing failure: served r0/w0, proxy r0/w0
+  => no client data crossed the MDS; neither Serve nor Proxy path involved.
+- Registry writes startedat as: create startedat.<uuid>.tmp -> RENAME -> startedat
+  (MDS logs "Placement re-keyed for rename"), and REMOVEs startedat on cleanup
+  with "Stripe cleanup enqueued" (async, path-keyed).
+- CAUTION recorded: file_id 00c5635dd23ae781 has no stripe on any DS, but it
+  belongs to a REMOVEd file (cleanup enqueued) — it is NOT evidence of a
+  reader pointed at an unwritten id. Inference withdrawn.
