@@ -557,6 +557,44 @@ that catches stale-cache-served-forever masquerading as RPC
 elimination. Positive WANT-bits pin: OPEN with WANT_READ_DELEG ORed
 in still grants.
 
+**★ LIVENESS PRECONDITION ON EVERY CONTROL ARM [V4, 2026-09-01 — from
+the oci-ab campaign's G-COLD confound].** Every leg above whose
+flag-ON assertion is *near-zero RPCs* must first assert that its
+flag-OFF control arm is **actually loud** — server-side RPCs > 0, in
+range of the stated expectation — and be **VOID, not PASS**, when it
+is not. Three-state like the stripe-width gate: the third state is
+the one that does the work.
+
+The reason a flag-OFF control alone is insufficient: **a control that
+is equally broken is not a control.** If both arms are warm enough to
+be quiet, flag-OFF also shows ~zero RPCs, the arms agree, and the leg
+reads "no difference" when the truth is "the rig is blind". Quiet is
+exactly what a broken rig produces, so a leg that concludes from quiet
+cannot distinguish success from blindness.
+
+What made this visible in the field was **a server-side counter with a
+known non-zero expectation**, not client timing and not the absence of
+errors: five cold pulls of a 400 MB image produced 2 `LAYOUTGET
+granted` lines where the workload should produce ~42. Absurd by
+inspection *because the expected magnitude was known in advance*. So
+each control arm states its expected count before the run, and the
+assertion is against that number.
+
+Concretely for the tier leg: after evicting to the stub, confirm a
+**cold** holder *does* generate server reads, and only then does "warm
+holder re-reads with zero RPCs" attribute to the delegation rather
+than to anyone's page cache. For the warm re-access rig: the flag-OFF
+pass-2 floor (~80% of pass-1) is a liveness assertion, not a
+formality — if it fails, the run is void and the flag-ON number means
+nothing. The arms must match on **warmth**, not merely on workload:
+cooling the client while the server stays warm cools one side of a
+two-sided measurement.
+
+Same rule as the §6 restart leg's "assert the precondition, not just
+the postcondition" and the F68 setup guard: in all three the failing
+version *looked healthier* than the working one, because absence of
+signal reads as success.
+
 **Negative legs** (the GSS lesson — negative legs find the defects),
 with the [V3] vacuity fixes baked in: legs that kill the backchannel
 must keep the holder's FORE path demonstrably alive — in v4.1 the

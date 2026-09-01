@@ -987,6 +987,7 @@ impl LockOperationHandler {
                         (md.dev(), md.ino()),
                         Some(client_id),
                         false,
+                        "lock_write",
                     ) {
                         crate::nfs::v4::state::FenceVerdict::Proceed(_g) => {
                             // Guard dropped immediately: the lock grab

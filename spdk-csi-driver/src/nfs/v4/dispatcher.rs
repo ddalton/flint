@@ -5119,14 +5119,7 @@ mod tests {
     #[tokio::test]
     async fn a_ready_client_gets_a_delegation_and_a_writer_forces_recall() {
         use crate::nfs::v4::compound::CallbackSecParms;
-        struct FlagGuard;
-        impl Drop for FlagGuard {
-            fn drop(&mut self) {
-                crate::nfs::v4::state::override_delegations_enabled(None);
-            }
-        }
-        crate::nfs::v4::state::override_delegations_enabled(Some(true));
-        let _flag = FlagGuard;
+        let _flag = crate::nfs::v4::state::with_delegations(true);
 
         let (dispatcher, t) = create_test_dispatcher();
         std::fs::write(t.path().join("warm.txt"), b"warm bytes").unwrap();
@@ -5266,6 +5259,12 @@ mod tests {
         // And with the flag off again, the same shaped OPEN grants
         // nothing (the pinned default, now proven against the LIVE
         // grant path rather than a stub).
+        // NOT `with_delegations` here: this test already holds the
+        // flag lock from the top of the function, and the guard is a
+        // plain non-reentrant Mutex — taking it twice on one thread
+        // deadlocks. Shadowing would not release the first guard
+        // either. Inside the lock, flipping the flag directly is the
+        // correct move; the outer guard still restores it on drop.
         crate::nfs::v4::state::override_delegations_enabled(Some(false));
         let mut ctx3 = CompoundContext::new(1);
         ctx3.session_id = Some(s1.session_id);
@@ -5298,14 +5297,7 @@ mod tests {
         use crate::nfs::v4::deleg_recall::{RecallDriver, RecallSender};
         use crate::nfs::v4::protocol::seq4_status;
 
-        struct FlagGuard;
-        impl Drop for FlagGuard {
-            fn drop(&mut self) {
-                crate::nfs::v4::state::override_delegations_enabled(None);
-            }
-        }
-        crate::nfs::v4::state::override_delegations_enabled(Some(true));
-        let _flag = FlagGuard;
+        let _flag = crate::nfs::v4::state::with_delegations(true);
 
         // A sender whose client always refuses the recall outright —
         // the ladder classifies NOTSUPP as definitive and revokes

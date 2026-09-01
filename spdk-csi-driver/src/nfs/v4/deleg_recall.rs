@@ -24,6 +24,7 @@
 use super::back_channel::CallbackError;
 use super::cb_compound::{CbCompoundReply, CbResult};
 use super::protocol::{seq4_status, Nfs4Status, StateId};
+use super::state::deleg_meter::{RecallOutcome, RevokeReason};
 use super::state::{DelegState, RecallOrder, StateManager};
 use std::future::Future;
 use std::pin::Pin;
@@ -163,8 +164,38 @@ impl RecallDriver {
             .filter(|s| matches!(s, DelegState::RecallPending | DelegState::RecallAcked))
     }
 
-    fn revoke(&self, order: &RecallOrder, why: &str) {
+    /// `cb_recall_sent_total` counts CB_RECALL calls that actually
+    /// reached the wire — Ok and Timeout both mean the call went out;
+    /// a Transport error means nothing did. Counting attempts that
+    /// never left would make the sent/acked ratio look like client
+    /// misbehaviour when the truth is a dead back-channel, which the
+    /// path_down outcome already reports honestly.
+    fn note_sent(&self) {
+        self.state_mgr.delegations.meter().note_recall_sent();
+    }
+
+    fn note_outcome(&self, o: crate::nfs::v4::state::deleg_meter::RecallOutcome) {
+        self.state_mgr.delegations.meter().note_outcome(o);
+    }
+
+    fn revoke(
+        &self,
+        order: &RecallOrder,
+        reason: crate::nfs::v4::state::deleg_meter::RevokeReason,
+        first_transmit: Option<Instant>,
+        why: &str,
+    ) {
         if let Some(client) = self.state_mgr.delegations.revoke(&order.stateid) {
+            let meter = self.state_mgr.delegations.meter();
+            meter.note_revoked(reason);
+            // §10's histogram is first-transmit -> RETURNED/REVOKED.
+            // A revoke with no first transmit (the back-channel never
+            // carried the call) has no latency to report, and inventing
+            // 0 there would make the p99 look healthy precisely when
+            // the recall path was dead.
+            if let Some(ft) = first_transmit {
+                meter.observe_recall_latency_ms(ft.elapsed().as_millis() as u64);
+            }
             warn!(
                 "deleg ladder: REVOKING {:?} held by client {} ({})",
                 order.stateid, client, why
@@ -200,7 +231,13 @@ impl RecallDriver {
             // send the client can no longer honor in time.
             if let Some(ft) = first_transmit {
                 if Instant::now() >= ft + self.cfg.revoke_deadline {
-                    self.revoke(&order, "recall deadline expired");
+                    self.note_outcome(RecallOutcome::Timeout);
+                    self.revoke(
+                        &order,
+                        RevokeReason::Deadline,
+                        first_transmit,
+                        "recall deadline expired",
+                    );
                     return;
                 }
             }
@@ -218,6 +255,7 @@ impl RecallDriver {
             match outcome {
                 Ok(reply) => {
                     // A reply proves transmission. Path is up.
+                    self.note_sent();
                     if first_transmit.is_none() {
                         first_transmit = Some(Instant::now());
                         self.state_mgr.delegations.note_first_transmit(&order.stateid);
@@ -228,12 +266,23 @@ impl RecallDriver {
                     match classify(&reply) {
                         Classified::Acked => {
                             self.state_mgr.delegations.note_recall_acked(&order.stateid);
+                            self.note_outcome(RecallOutcome::Acked);
                             // Wait out the deadline for the DELEGRETURN.
                             let deadline =
                                 first_transmit.unwrap() + self.cfg.revoke_deadline;
                             tokio::time::sleep_until(deadline).await;
                             if self.still_pending(&order.stateid).is_some() {
-                                self.revoke(&order, "acked but never returned");
+                                // Outcome stays `acked` — the client DID
+                                // answer. The revoke reason is what says
+                                // it then failed to return, and keeping
+                                // the two axes separate is what lets a
+                                // rig tell a rude client from a dead one.
+                                self.revoke(
+                                    &order,
+                                    RevokeReason::Deadline,
+                                    first_transmit,
+                                    "acked but never returned",
+                                );
                             }
                             return;
                         }
@@ -245,6 +294,7 @@ impl RecallDriver {
                                 // Re-probe confirmed: the client does
                                 // not hold it. Not a revocation — no
                                 // SEQ4 bit, no tombstone.
+                                self.note_outcome(RecallOutcome::ClientDisowns);
                                 if self.state_mgr.delegations.resolve_disown(&order.stateid)
                                 {
                                     info!(
@@ -259,13 +309,20 @@ impl RecallDriver {
                             continue;
                         }
                         Classified::Refused => {
-                            self.revoke(&order, "client refused the recall");
+                            self.note_outcome(RecallOutcome::Refused);
+                            self.revoke(
+                                &order,
+                                RevokeReason::Refused,
+                                first_transmit,
+                                "client refused the recall",
+                            );
                             return;
                         }
                     }
                 }
                 Err(CallbackError::Timeout) => {
                     // The CALL went out; the reply didn't come back.
+                    self.note_sent();
                     if first_transmit.is_none() {
                         first_transmit = Some(Instant::now());
                         self.state_mgr.delegations.note_first_transmit(&order.stateid);
@@ -285,7 +342,13 @@ impl RecallDriver {
                         .unwrap_or(false);
                     if past_deadline || (first_transmit.is_none() && window_over) {
                         if self.still_pending(&order.stateid).is_some() {
-                            self.revoke(&order, "back-channel down past the window");
+                            self.note_outcome(RecallOutcome::PathDown);
+                            self.revoke(
+                                &order,
+                                RevokeReason::ChannelDead,
+                                first_transmit,
+                                "back-channel down past the window",
+                            );
                         }
                         return;
                     }
@@ -299,7 +362,13 @@ impl RecallDriver {
                         "deleg ladder: {:?} recall reply unusable ({:?})",
                         order.stateid, e
                     );
-                    self.revoke(&order, "unusable recall reply");
+                    self.note_outcome(RecallOutcome::Refused);
+                    self.revoke(
+                        &order,
+                        RevokeReason::Refused,
+                        first_transmit,
+                        "unusable recall reply",
+                    );
                     return;
                 }
             }
@@ -463,6 +532,34 @@ mod tests {
             0,
             "revocation must raise the SEQ4 bit — silent revocation is the named worst case"
         );
+
+        // §10 wiring. Unit tests on DelegMeter prove the meter counts;
+        // only this proves the PRODUCTION path calls it. A metric that
+        // is never incremented reads exactly like a quiet server, and
+        // every §9 rig leg asserts on these numbers — so an unwired
+        // counter would make those legs pass by describing silence.
+        let m = state_mgr.delegations.meter();
+        assert_eq!(m.outcome_count(RecallOutcome::Acked), 1, "the client DID ack");
+        assert_eq!(
+            m.revoked_count(RevokeReason::Deadline),
+            1,
+            "and was revoked for never returning — outcome and reason are separate axes"
+        );
+        assert_eq!(m.revoked_count(RevokeReason::ChannelDead), 0);
+        assert_eq!(
+            m.seq4_count(seq4_status::RECALLABLE_STATE_REVOKED),
+            1,
+            "the SEQ4 raise is counted once, not once per ladder retry"
+        );
+        // first transmit -> revoke spans the 90s deadline, so the
+        // latency sample must land in a bucket that reflects that, not
+        // in the fast path.
+        assert_eq!(m.latency_count(), 1);
+        assert!(
+            m.latency_percentile_ms(0.99).unwrap() >= 60_000,
+            "a 90s deadline revoke is not a sub-minute recall: {:?}",
+            m.latency_percentile_ms(0.99)
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -486,6 +583,39 @@ mod tests {
         // Resends AT +30s and +60s from the first transmit.
         assert_eq!(times[1] - times[0], Duration::from_secs(30));
         assert_eq!(times[2] - times[0], Duration::from_secs(60));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_meter_separates_a_dead_channel_from_a_rude_client() {
+        // The two failure modes a fleet operator must be able to tell
+        // apart from the counters alone: nobody answered (path_down /
+        // channel_dead) versus answered and refused (refused/refused).
+        // If these collapsed into one number, "delegations are being
+        // revoked" would not say whether the network or the client is
+        // at fault.
+        let (state_mgr, _stateid, orders) = granted_and_recalled();
+        let sender = MockSender::new(
+            (0..40).map(|_| Err(CallbackError::ConnectionClosed)).collect(),
+        );
+        let d = driver(&state_mgr, Arc::clone(&sender));
+        d.spawn_recalls(orders);
+        tokio::time::sleep(Duration::from_secs(200)).await;
+
+        let m = state_mgr.delegations.meter();
+        assert_eq!(m.outcome_count(RecallOutcome::PathDown), 1);
+        assert_eq!(m.revoked_count(RevokeReason::ChannelDead), 1);
+        assert_eq!(m.outcome_count(RecallOutcome::Refused), 0, "nobody refused anything");
+        assert_eq!(m.revoked_count(RevokeReason::Deadline), 0);
+        // Nothing ever reached the wire, so there is no recall latency
+        // to report — and reporting 0ms here would make a dead
+        // back-channel look like the fastest recall the server ever did.
+        assert_eq!(m.latency_count(), 0);
+        assert_eq!(m.latency_percentile_ms(0.99), None);
+        assert_eq!(
+            m.cb_recall_sent.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a call that no transport accepted was never sent"
+        );
     }
 
     #[tokio::test(start_paused = true)]

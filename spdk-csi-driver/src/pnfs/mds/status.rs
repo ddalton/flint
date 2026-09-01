@@ -68,6 +68,12 @@ pub struct HubStatus {
     orchestrator: RwLock<Option<Arc<crate::tier::flush::FlushOrchestrator>>>,
     backend: RwLock<Option<Arc<dyn crate::state_backend::StateBackend>>>,
     leases: RwLock<Option<Arc<crate::nfs::v4::state::lease::LeaseManager>>>,
+    /// Outstanding READ delegations. Attached separately from
+    /// `leases` because the suspend guard needs it even when the
+    /// lease count is zero: a delegation holder makes NO RPCs — that
+    /// is the whole feature — so it is invisible to every other idle
+    /// signal this hub reports.
+    delegations: RwLock<Option<Arc<crate::nfs::v4::state::delegation::DelegationManager>>>,
     /// The persisted NFS server identity — the same one filehandles are
     /// stamped with and the tier epoch is held under.
     server_id: OnceLock<String>,
@@ -158,6 +164,15 @@ impl HubStatus {
         }
     }
 
+    pub fn attach_delegations(
+        &self,
+        delegations: Arc<crate::nfs::v4::state::delegation::DelegationManager>,
+    ) {
+        if let Ok(mut d) = self.delegations.write() {
+            *d = Some(delegations);
+        }
+    }
+
     /// Assemble the document served at `/status`.
     pub async fn render(&self) -> StatusDoc {
         let started = self.started_unix.get().copied().unwrap_or(0);
@@ -201,6 +216,17 @@ impl HubStatus {
                     .read()
                     .ok()
                     .and_then(|l| l.as_ref().map(|l| l.active_count())),
+                // ALWAYS Some, including 0 and including when the gate
+                // is off — see the consumer's `None` reasoning. A build
+                // that can grant must always say so, or the operator's
+                // suspend guard is deciding on an absence.
+                outstanding_delegations: Some(
+                    self.delegations
+                        .read()
+                        .ok()
+                        .and_then(|d| d.as_ref().map(|d| d.live_count()))
+                        .unwrap_or(0),
+                ),
             },
             activity: crate::nfs::activity::snapshot(),
             rpo_clean: rpo.as_ref().map(|r| r.clean),
@@ -295,6 +321,13 @@ pub struct TierDoc {
 #[serde(rename_all = "camelCase")]
 pub struct NfsDoc {
     pub active_leases: Option<usize>,
+    /// Live (non-revoked) READ delegations across all clients.
+    ///
+    /// Always `Some` from any build that can grant one — including
+    /// `Some(0)` when the gate is off. The operator treats `None` as
+    /// "an older hub that cannot grant", and that inference is only
+    /// sound because this is never omitted here.
+    pub outstanding_delegations: Option<u64>,
 }
 
 fn now_unix() -> u64 {

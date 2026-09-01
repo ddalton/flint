@@ -955,6 +955,7 @@ impl IoOperationHandler {
                         ident,
                         self.fence_mutator(ctx),
                         truncates,
+                        "open_create",
                     ) {
                         crate::nfs::v4::state::FenceVerdict::Proceed(g) => _deleg_guard = g,
                         crate::nfs::v4::state::FenceVerdict::Delay => {
@@ -1497,7 +1498,7 @@ impl IoOperationHandler {
         let mut _deleg_guard = None;
         if (op.share_access & 2 != 0) || (op.share_deny & 1 != 0) {
             if let Some(ident) = open_ident {
-                match self.state_mgr.deleg_fence(ident, Some(client_id), false) {
+                match self.state_mgr.deleg_fence(ident, Some(client_id), false, "open_write") {
                     crate::nfs::v4::state::FenceVerdict::Proceed(g) => _deleg_guard = g,
                     crate::nfs::v4::state::FenceVerdict::Delay => {
                         info!("OPEN(no-create): delegation recall in flight → DELAY");
@@ -2268,7 +2269,7 @@ impl IoOperationHandler {
             if let Some(ident) = open_ident_of(crate::nfs::v4::stat_cache::stat(&path)) {
                 match self
                     .state_mgr
-                    .deleg_fence(ident, self.fence_mutator(ctx), false)
+                    .deleg_fence(ident, self.fence_mutator(ctx), false, "write")
                 {
                     crate::nfs::v4::state::FenceVerdict::Proceed(g) => _deleg_guard = g,
                     crate::nfs::v4::state::FenceVerdict::Delay => {
@@ -4091,6 +4092,11 @@ mod tests {
         // grant path fires on — must yield OPEN_DELEGATE_NONE and mint no
         // server-side delegation record. Granting without a working
         // CB_RECALL path would let a client cache stale data forever.
+        // The gate is process-global and cargo runs tests in parallel,
+        // so asserting the DEFAULT requires excluding every test that
+        // forces it on. Without this the assertion is a coin flip that
+        // depends on which other tests the filter happened to select.
+        let _excl = crate::nfs::v4::state::deleg_flag_exclusive();
         let (handler, fh_mgr, _temp) = create_test_handler();
 
         assert!(!delegations_enabled());

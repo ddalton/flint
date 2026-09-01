@@ -190,6 +190,27 @@ pub struct Nfs {
     /// scales hubs to zero.
     #[serde(default)]
     pub active_leases: Option<usize>,
+
+    /// Live READ delegations the hub has handed out.
+    ///
+    /// **This is the only idle signal a delegation holder produces.**
+    /// A client holding a READ delegation makes no RPCs at all — that
+    /// is the entire point of the feature — so it registers as zero
+    /// activity, zero data ops, and (once its lease lapses) can even
+    /// stop looking like a session. Every other input to `suspendable`
+    /// reads a delegation-warm fleet as maximally idle.
+    ///
+    /// `None` is treated as zero, which is the one place this file
+    /// reads an absence as a value. The argument is by VERSION, not by
+    /// assumption: any build that can grant a delegation always
+    /// populates this, including `Some(0)` when the gate is off, so
+    /// `None` means a hub older than the field — and such a hub cannot
+    /// have granted anything. **The limit of that argument, stated so
+    /// nobody has to rediscover it: a build that predates this field
+    /// but has delegations force-enabled is invisible here. Those
+    /// builds are by definition pre-default-on and dark.**
+    #[serde(default)]
+    pub outstanding_delegations: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -234,6 +255,23 @@ impl HubSnapshot {
                 "last client activity {}s ago, under the {}s threshold",
                 self.activity.idle_secs, idle_after_secs
             ));
+        }
+        // Delegations outstanding: scaling to zero here is the design's
+        // named worst case, not a performance regret. The holder never
+        // revalidates, so it keeps serving its cached copy; the server
+        // that could have recalled is gone, and the recall it owed is
+        // never sent. The client goes stale FOREVER rather than for an
+        // acregmax window, and nothing in the system reports it.
+        //
+        // Refuse, and let the operator drain first (kill layer 2's
+        // rate-limited recall-all) if it wants the hub down now.
+        if let Some(n) = self.nfs.and_then(|n| n.outstanding_delegations) {
+            if n > 0 {
+                return Err(format!(
+                    "{n} READ delegation(s) still outstanding — suspending would strand \
+                     their holders on cached data with no recall possible; drain first"
+                ));
+            }
         }
         // A sweep that has not completed is unfinished work. It resumes
         // on wake, so this is not a correctness gate — but suspending
@@ -386,7 +424,7 @@ mod tests {
             import_refused: None,
             warm_fill: None,
             tier: TierDoc { gauges: None, meters: Default::default() },
-            nfs: NfsDoc { active_leases: Some(3) },
+            nfs: NfsDoc { active_leases: Some(3), outstanding_delegations: Some(0) },
             activity: ActivitySnapshot {
                 last_activity_unix: 900,
                 idle_secs: 1234,
@@ -564,6 +602,69 @@ mod tests {
                 "phase {phase} must not be suspendable even when idle"
             );
         }
+    }
+
+    /// The delegation suspend guard, and why it needs its own signal.
+    ///
+    /// A READ-delegation holder makes NO RPCs — that is the feature —
+    /// so it looks like maximum idleness to every other input here.
+    /// Suspending under it is the design's named worst case: the
+    /// holder never revalidates, the server that owed it a recall is
+    /// gone, and the staleness is permanent rather than acregmax-
+    /// bounded.
+    #[test]
+    fn outstanding_delegations_block_the_suspend() {
+        let s = snap(
+            r#"{"phase":"serving","activity":{"idleSecs":99999},
+                "nfs":{"outstandingDelegations":2}}"#,
+        );
+        let err = s.suspendable(60).unwrap_err();
+        assert!(err.contains("2 READ delegation(s)"), "{err}");
+        assert!(err.contains("drain first"), "the operator needs the remedy named: {err}");
+    }
+
+    /// ANTI-VACUITY: the guard must not be a blanket refuse. An idle
+    /// hub with zero delegations still suspends — otherwise the test
+    /// above would pass against a guard that never lets anything sleep.
+    #[test]
+    fn a_hub_with_no_delegations_still_suspends() {
+        let s = snap(
+            r#"{"phase":"serving","activity":{"idleSecs":99999},
+                "nfs":{"outstandingDelegations":0}}"#,
+        );
+        assert!(s.suspendable(60).is_ok(), "{:?}", s.suspendable(60));
+    }
+
+    /// An older hub omits the field entirely. That is read as zero —
+    /// the one place this file treats an absence as a value — and the
+    /// argument is by VERSION: any build that can grant always reports
+    /// the count, so an omission means a hub that cannot grant.
+    ///
+    /// Pinned as a test because it is a deliberate exception to the
+    /// rule `active_leases` states two fields up ("an absent count must
+    /// never be read as nobody"), and an undocumented exception is how
+    /// that rule gets broken somewhere it matters.
+    #[test]
+    fn an_older_hub_that_omits_the_field_still_suspends() {
+        let s = snap(r#"{"phase":"serving","activity":{"idleSecs":99999},"nfs":{}}"#);
+        assert!(s.suspendable(60).is_ok());
+        let no_nfs = snap(r#"{"phase":"serving","activity":{"idleSecs":99999}}"#);
+        assert!(no_nfs.suspendable(60).is_ok());
+    }
+
+    /// The guard is ordered AFTER the idle-threshold check, so a busy
+    /// hub still reports the activity reason rather than the
+    /// delegation one. Two true statements, and the operator should
+    /// see the one that will change first.
+    #[test]
+    fn a_busy_hub_reports_activity_not_delegations() {
+        let s = snap(
+            r#"{"phase":"serving","activity":{"idleSecs":5},
+                "nfs":{"outstandingDelegations":7}}"#,
+        );
+        let err = s.suspendable(900).unwrap_err();
+        assert!(err.contains("5s ago"), "{err}");
+        assert!(!err.contains("delegation"), "{err}");
     }
 
     #[test]

@@ -539,6 +539,7 @@ impl PerfOperationHandler {
         &self,
         path: &std::path::Path,
         ctx: &CompoundContext,
+        site: &'static str,
     ) -> Result<Option<crate::nfs::v4::state::MutationGuard>, Nfs4Status> {
         if !crate::nfs::v4::state::delegations_enabled() {
             return Ok(None);
@@ -555,7 +556,7 @@ impl PerfOperationHandler {
             .as_ref()
             .and_then(|sid| self.state_mgr.sessions.get_session(sid))
             .map(|s| s.client_id);
-        match self.state_mgr.deleg_fence(ident, mutator, false) {
+        match self.state_mgr.deleg_fence(ident, mutator, false, site) {
             crate::nfs::v4::state::FenceVerdict::Proceed(g) => Ok(g),
             crate::nfs::v4::state::FenceVerdict::Delay => Err(Nfs4Status::Delay),
         }
@@ -701,7 +702,7 @@ impl PerfOperationHandler {
 
         // Conflict site 8 (design §5.2): COPY writes into its
         // destination — recall the destination's delegations.
-        let _deleg_guard = match self.deleg_fence_path(&dst_path, ctx) {
+        let _deleg_guard = match self.deleg_fence_path(&dst_path, ctx, "copy_dst") {
             Ok(g) => g,
             Err(status) => {
                 info!("COPY: delegation recall on destination in flight → DELAY");
@@ -1092,7 +1093,7 @@ impl PerfOperationHandler {
 
         // Conflict site 8 (design §5.2): CLONE writes into its
         // destination — recall the destination's delegations.
-        let _deleg_guard = match self.deleg_fence_path(&dst_path, ctx) {
+        let _deleg_guard = match self.deleg_fence_path(&dst_path, ctx, "clone_dst") {
             Ok(g) => g,
             Err(status) => {
                 info!("CLONE: delegation recall on destination in flight → DELAY");
@@ -1344,6 +1345,14 @@ impl PerfOperationHandler {
         length: u64,
         mode: AllocMode,
     ) -> Nfs4Status {
+        // Derived from the mode rather than passed in: ALLOCATE and
+        // DEALLOCATE share this body, and a label that travels with
+        // the mode cannot drift out of sync with the operation the
+        // client actually sent.
+        let site = match mode {
+            AllocMode::Allocate => "allocate",
+            AllocMode::PunchHole => "deallocate",
+        };
         let Some(fh) = &ctx.current_fh else {
             return Nfs4Status::NoFileHandle;
         };
@@ -1357,7 +1366,7 @@ impl PerfOperationHandler {
 
         // Conflict site 8 (design §5.2): allocation changes observable
         // size/content on a possibly-delegated file.
-        let _deleg_guard = match self.deleg_fence_path(&path, ctx) {
+        let _deleg_guard = match self.deleg_fence_path(&path, ctx, site) {
             Ok(g) => g,
             Err(status) => {
                 info!("ALLOCATE/DEALLOCATE: delegation recall in flight → DELAY");

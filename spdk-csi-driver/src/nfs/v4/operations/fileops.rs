@@ -1872,6 +1872,7 @@ impl FileOperationHandler {
         path: &std::path::Path,
         ctx: &CompoundContext,
         truncate: bool,
+        site: &'static str,
     ) -> Result<Option<crate::nfs::v4::state::MutationGuard>, Nfs4Status> {
         if self.state_mgr.is_none() || !crate::nfs::v4::state::delegations_enabled() {
             return Ok(None);
@@ -1884,7 +1885,7 @@ impl FileOperationHandler {
             // Nothing at the path — nothing can be delegated there.
             Err(_) => return Ok(None),
         };
-        self.deleg_fence_ident(ident, ctx, truncate)
+        self.deleg_fence_ident(ident, ctx, truncate, site)
     }
 
     /// Same fence, for sites that already hold the target's identity
@@ -1894,6 +1895,7 @@ impl FileOperationHandler {
         ident: (u64, u64),
         ctx: &CompoundContext,
         truncate: bool,
+        site: &'static str,
     ) -> Result<Option<crate::nfs::v4::state::MutationGuard>, Nfs4Status> {
         let Some(state_mgr) = &self.state_mgr else {
             return Ok(None);
@@ -1906,7 +1908,7 @@ impl FileOperationHandler {
             .as_ref()
             .and_then(|sid| state_mgr.sessions.get_session(sid))
             .map(|s| s.client_id);
-        match state_mgr.deleg_fence(ident, mutator, truncate) {
+        match state_mgr.deleg_fence(ident, mutator, truncate, site) {
             crate::nfs::v4::state::FenceVerdict::Proceed(g) => Ok(g),
             crate::nfs::v4::state::FenceVerdict::Delay => Err(Nfs4Status::Delay),
         }
@@ -2821,7 +2823,7 @@ impl FileOperationHandler {
         // the blunt rule, because holders cache the attrs this op is
         // about to change (holder A's chmod must still recall holder
         // B). The sole-holder carve-out comes from the funnel.
-        let _deleg_guard = match self.deleg_fence_path(&path, ctx, decoded.size.is_some()) {
+        let _deleg_guard = match self.deleg_fence_path(&path, ctx, decoded.size.is_some(), "setattr") {
             Ok(g) => g,
             Err(status) => {
                 info!("SETATTR: delegation recall in flight → DELAY");
@@ -3925,6 +3927,7 @@ impl FileOperationHandler {
                         (metadata.dev(), metadata.ino()),
                         ctx,
                         true,
+                        "remove",
                     ) {
                         Ok(g) => g,
                         Err(status) => {
@@ -4138,14 +4141,14 @@ impl FileOperationHandler {
         // in v2). A self-rename mutates nothing and consults nothing.
         let mut _deleg_guards = (None, None);
         if !is_self_rename {
-            match self.deleg_fence_path(&source_path, ctx, false) {
+            match self.deleg_fence_path(&source_path, ctx, false, "rename_src") {
                 Ok(g) => _deleg_guards.0 = g,
                 Err(status) => {
                     info!("RENAME: delegation recall on source in flight → DELAY");
                     return rename_err(status);
                 }
             }
-            match self.deleg_fence_path(&dest_path, ctx, true) {
+            match self.deleg_fence_path(&dest_path, ctx, true, "rename_dst") {
                 Ok(g) => _deleg_guards.1 = g,
                 Err(status) => {
                     info!("RENAME: delegation recall on destination in flight → DELAY");
@@ -4426,7 +4429,7 @@ impl FileOperationHandler {
 
         // Conflict site 11 (design §5.2): LINK bumps the TARGET FILE's
         // nlink+ctime — attributes its delegation holders cache.
-        let _deleg_guard = match self.deleg_fence_path(&file_path, ctx, false) {
+        let _deleg_guard = match self.deleg_fence_path(&file_path, ctx, false, "link") {
             Ok(g) => g,
             Err(status) => {
                 info!("LINK: delegation recall in flight → DELAY");

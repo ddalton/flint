@@ -55,6 +55,12 @@ static DELEG_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
 /// Force the delegation gate for tests (process-wide; tests that flip
 /// it on must tolerate fence consults running everywhere).
+///
+/// **Hold [`deleg_flag_exclusive`] while this is set**, or prefer
+/// [`with_delegations`], which cannot be half-used. The override is
+/// PROCESS-GLOBAL and cargo runs tests in parallel threads, so a test
+/// that merely *asserts the default* races every test that flips it —
+/// an RAII reset bounds the duration but not the concurrency.
 pub fn override_delegations_enabled(on: Option<bool>) {
     DELEG_OVERRIDE.store(
         match on {
@@ -64,6 +70,44 @@ pub fn override_delegations_enabled(on: Option<bool>) {
         },
         Ordering::Relaxed,
     );
+}
+
+/// Serializes every test that reads or writes the process-global
+/// delegation gate. Same role as `tier::capture::test_exclusive`, kept
+/// next to the flag it protects so it is findable by whoever reaches
+/// for the flag next.
+///
+/// A poisoned lock is recovered rather than propagated: one panicking
+/// test must not convert every other flag test into a failure and bury
+/// the original signal.
+pub fn deleg_flag_exclusive() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Take the flag lock AND set the gate, restoring the env default on
+/// drop. The pair is one object because doing only one of the two is
+/// always a bug: setting without the lock races other tests, and
+/// locking without setting protects nothing.
+///
+/// Tests that assert the DEFAULT (gate off) must also hold this — via
+/// `let _g = deleg_flag_exclusive();` — since "no delegations were
+/// granted" is exactly the claim a concurrently-enabled test breaks.
+#[must_use = "the gate reverts as soon as this guard drops"]
+pub struct DelegFlagGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for DelegFlagGuard {
+    fn drop(&mut self) {
+        override_delegations_enabled(None);
+    }
+}
+
+pub fn with_delegations(on: bool) -> DelegFlagGuard {
+    let lock = deleg_flag_exclusive();
+    override_delegations_enabled(Some(on));
+    DelegFlagGuard { _lock: lock }
 }
 
 /// File identity: `(dev, ino)`. The same key the F14 change counter
@@ -299,6 +343,12 @@ pub struct DelegationManager {
     cooldown: Duration,
     /// Per-reason grant refusals (metrics surface reads these).
     refusals: DashMap<&'static str, u64>,
+    /// §10 recall/return/revoke/delay/SEQ4 metering. Lives here so
+    /// there is ONE owner of delegation counters — the recall driver
+    /// and the fence sites both already reach the manager, and a
+    /// second Arc threaded through those paths would be a second
+    /// thing to forget to wire.
+    meter: std::sync::Arc<super::deleg_meter::DelegMeter>,
     /// Grants ever made (metrics).
     grants_total: AtomicU64,
     /// Recent revocation stamps, pruned to the 5-minute breaker
@@ -359,6 +409,7 @@ impl DelegationManager {
             max_global,
             cooldown,
             refusals: DashMap::new(),
+            meter: std::sync::Arc::new(super::deleg_meter::DelegMeter::default()),
             grants_total: AtomicU64::new(0),
             revocations: Mutex::new(Vec::new()),
             revocations_by_client: DashMap::new(),
@@ -664,6 +715,16 @@ impl DelegationManager {
             return Err(DelegReturnError::OldSeqid);
         }
         let was_under_recall = e.records[idx].state != DelegState::Granted;
+        // §10: delegreturn_total, and the latency histogram's happy
+        // ending. A return that was never recalled has no first
+        // transmit and contributes no latency sample — the histogram
+        // measures the RECALL round trip, not how long a client
+        // happened to hold a delegation it gave back voluntarily.
+        self.meter.note_delegreturn();
+        if let Some(ft) = e.records[idx].first_transmit_at {
+            self.meter
+                .observe_recall_latency_ms(ft.elapsed().as_millis() as u64);
+        }
         let rec = e.records.remove(idx);
         if was_under_recall && !e.records.iter().any(|r| r.state != DelegState::Revoked) {
             e.cooldown_until = Some(Instant::now() + self.cooldown);
@@ -918,6 +979,58 @@ impl DelegationManager {
             }
         }
         false
+    }
+
+    /// The §10 meter. Cloned Arc so the reporter task can hold it
+    /// without holding the manager.
+    pub fn meter(&self) -> std::sync::Arc<super::deleg_meter::DelegMeter> {
+        self.meter.clone()
+    }
+
+    /// Files with at least one record under recall (RecallPending or
+    /// RecallAcked) — the `files_under_recall` gauge. Counted over
+    /// FILES, not records: two clients recalled on one file is one
+    /// file in flight, and the gauge is what a rig watches to know the
+    /// machine drained.
+    pub fn files_under_recall(&self) -> u64 {
+        self.files
+            .iter()
+            .filter(|e| {
+                let entry = e.value().lock().unwrap();
+                entry.records.iter().any(|r| {
+                    matches!(r.state, DelegState::RecallPending | DelegState::RecallAcked)
+                })
+            })
+            .count() as u64
+    }
+
+    /// One reporter line's worth of counters, read together so the
+    /// line is internally consistent. (Not atomic across counters —
+    /// a report that straddles a grant is off by one, which is the
+    /// right trade against locking the grant path to print a log
+    /// line.)
+    pub fn totals(&self) -> super::deleg_meter::DelegMeterTotals {
+        use super::deleg_meter::RecallOutcome as O;
+        let m = &self.meter;
+        super::deleg_meter::DelegMeterTotals {
+            granted: self.grants_total(),
+            refused: self.refusals_total(),
+            recall_sent: m.cb_recall_sent.load(Ordering::Relaxed),
+            acked: m.outcome_count(O::Acked),
+            timeout: m.outcome_count(O::Timeout),
+            refused_recalls: m.outcome_count(O::Refused),
+            path_down: m.outcome_count(O::PathDown),
+            disowns: m.outcome_count(O::ClientDisowns),
+            returned: m.delegreturn.load(Ordering::Relaxed),
+            revoked: m.revoked_total(),
+            delays: m.delays_total(),
+        }
+    }
+
+    /// Sum of every per-reason refusal (the `deleg_refused_total`
+    /// headline).
+    pub fn refusals_total(&self) -> u64 {
+        self.refusals.iter().map(|e| *e.value()).sum()
     }
 
     /// Live delegations across all clients (metrics; idle input).

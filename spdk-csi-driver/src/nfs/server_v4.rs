@@ -191,6 +191,11 @@ impl NfsServer {
     pub async fn serve(&self) -> std::io::Result<()> {
         let addr = format!("{}:{}", self.config.bind_addr, self.config.bind_port);
 
+        // §10 observability. Started here rather than in the
+        // constructor so it belongs to the serving runtime and not to
+        // whatever thread happened to build the server.
+        self.state_mgr.start_deleg_reporter();
+
         info!("🚀 Starting NFSv4.2 server on {}", addr);
         info!("📂 Exporting: {:?}", self.config.export_path);
         info!("💾 Volume ID: {}", self.config.volume_id);

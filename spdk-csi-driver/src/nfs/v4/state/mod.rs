@@ -20,13 +20,15 @@ pub mod session;
 pub mod stateid;
 pub mod lease;
 pub mod delegation;
+pub mod deleg_meter;
 
 pub use client::ClientManager;
 pub use session::SessionManager;
 pub use stateid::{CloseOutcome, StateIdManager, StateType, StateEntry};
 pub use lease::LeaseManager;
 pub use delegation::{
-    delegations_enabled, override_delegations_enabled, DelegReturnError, DelegSnapshot,
+    deleg_flag_exclusive, delegations_enabled, override_delegations_enabled, with_delegations,
+    DelegFlagGuard, DelegReturnError, DelegSnapshot,
     DelegState, DelegationManager, FenceOutcome, FenceVerdict, FileId, GrantRefusal,
     MutationGuard, RecallOrder,
 };
@@ -346,11 +348,19 @@ impl StateManager {
     /// NFS4ERR_DELAY (the recalls are already on their way). With the
     /// feature off — or before the spawner is installed, when no
     /// grant can have happened — this is one atomic load.
+    /// `site` names the §5.2 conflict site for
+    /// `delay_answered_total{site}`. It is a caller-supplied label
+    /// because only the caller knows which operation it is — deriving
+    /// it here would need a guess, and a mislabelled delay is worse
+    /// than none: the conflict-site matrix in §9 asserts per-site
+    /// equalities, so a wrong label turns a real regression into a
+    /// green leg somewhere else.
     pub fn deleg_fence(
         &self,
         ident: (u64, u64),
         mutator: Option<u64>,
         truncate: bool,
+        site: &'static str,
     ) -> FenceVerdict {
         if !delegation::delegations_enabled() {
             return FenceVerdict::Proceed(None);
@@ -375,6 +385,7 @@ impl StateManager {
                     // The conflictor gives up this attempt; its guard
                     // drops with the verdict.
                     drop(guard);
+                    self.delegations.meter().note_delay(site);
                     FenceVerdict::Delay
                 } else {
                     FenceVerdict::Proceed(Some(guard))
@@ -383,13 +394,82 @@ impl StateManager {
         }
     }
 
+    /// Start the delegation reporter (design §10). One line per
+    /// interval, INFO so it survives a server running at default
+    /// level — four discriminators in the F68 hunt were vacuous
+    /// because the evidence was `debug!`-only.
+    ///
+    /// **When the gate is ON the line is printed every interval even
+    /// if every counter is zero.** That is deliberate and is the
+    /// opposite of the f68a meter's silence-when-idle. §9's gate-off
+    /// vacuity leg asserts `deleg_granted_total == 0` under the full
+    /// rig, and a rig cannot tell "zero grants" from "no reporter
+    /// running" if zero is expressed as silence. A printed zero is
+    /// evidence; an inferred zero is an absence, and this codebase has
+    /// paid for that difference more than once.
+    ///
+    /// When the gate is OFF the feature is dark and there is nothing
+    /// to meter, so the reporter says so once and exits rather than
+    /// printing zeros forever.
+    ///
+    /// `FLINT_NFS_DELEG_REPORT_SECS` (default 60) tunes the interval.
+    pub fn start_deleg_reporter(self: &std::sync::Arc<Self>) {
+        let interval = std::env::var("FLINT_NFS_DELEG_REPORT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|s| *s > 0)
+            .unwrap_or(60);
+        if !delegation::delegations_enabled() {
+            tracing::info!(
+                "📊 deleg reporter: delegations are OFF (FLINT_NFS_DELEGATIONS unset) — \
+                 no grants will be made and no periodic report follows"
+            );
+            return;
+        }
+        let sm = std::sync::Arc::clone(self);
+        tokio::spawn(async move {
+            let mut prev = sm.delegations.totals();
+            let mut tick =
+                tokio::time::interval(std::time::Duration::from_secs(interval));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await; // fires immediately; skip so the first report is a full interval
+            loop {
+                tick.tick().await;
+                let cur = sm.delegations.totals();
+                let delta = cur.delta(&prev);
+                prev = cur;
+                let meter = sm.delegations.meter();
+                tracing::info!(
+                    "📊 deleg last {}s: {}",
+                    interval,
+                    delta.render(
+                        sm.delegations.live_count(),
+                        sm.delegations.files_under_recall(),
+                        meter.latency_percentile_ms(0.99),
+                    )
+                );
+            }
+        });
+    }
+
     /// Raise SEQ4_STATUS_* bits for a client. Every subsequent SEQUENCE
     /// from that client carries them until `lower_seq_flags` clears them.
     pub fn raise_seq_flags(&self, client_id: u64, bits: u32) {
         if bits == 0 {
             return;
         }
-        *self.seq_flags.entry(client_id).or_insert(0) |= bits;
+        let mut e = self.seq_flags.entry(client_id).or_insert(0);
+        // Count the TRANSITION, not the call. These flags are
+        // level-triggered, so a re-raise of an already-set bit is a
+        // no-op on the wire; counting it would inflate
+        // seq4_flag_raised_total every time the ladder retried and
+        // make a rig's "== 1" assertion unwritable.
+        let newly = bits & !*e;
+        *e |= bits;
+        drop(e);
+        if newly != 0 {
+            self.delegations.meter().note_seq4(newly);
+        }
     }
 
     /// Clear SEQ4_STATUS_* bits for a client (the condition resolved —
