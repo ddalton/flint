@@ -1037,12 +1037,29 @@ impl CompoundDispatcher {
                     // delegation revocation silent: a revoked holder
                     // sends no I/O RPCs, so its lease-renewal SEQUENCE
                     // is the ONLY place the news can ride.
-                    let status_flags = self
+                    let status_flags = match self
                         .state_mgr
                         .sessions
                         .session_limits(&res.sessionid)
-                        .map(|s| self.state_mgr.seq_flags(s.client_id))
-                        .unwrap_or(0);
+                    {
+                        Some(s) => {
+                            // Holder-evidence delivery bookkeeping
+                            // (design §6): this NEW SEQUENCE both
+                            // carries the pre-armed bit and, by
+                            // advancing its slot, acknowledges the
+                            // earlier reply that carried it.
+                            if res.status == Nfs4Status::Ok {
+                                self.state_mgr.note_seq4_delivery(
+                                    s.client_id,
+                                    res.sessionid,
+                                    res.slotid,
+                                    res.sequenceid,
+                                );
+                            }
+                            self.state_mgr.seq_flags(s.client_id)
+                        }
+                        None => 0,
+                    };
                     OperationResult::Sequence(res.status, Some(SequenceResult {
                         sessionid: res.sessionid,
                         sequenceid: res.sequenceid,

@@ -689,10 +689,11 @@ auto-reset) and sentinel; epoch-mixed unpersisted delegation
 stateids; the DELEGRETURN / TEST_STATEID(DELEG_REVOKED) /
 FREE_STATEID(tombstone + level-triggered SEQ4 lowering) loop —
 grant→recall→DELAY→return and grant→revoke→free proven end-to-end at
-the dispatcher level. **REMAINING for slice-3 complete:** §6
-holder-evidence markers + load-time SEQ4 pre-arm (the V2-fatal
-restart fix — until it lands, the §10 runbook note about rolling with
-grants outstanding STANDS); event-driven rearm-on-rebind (the
+the dispatcher level. §6 holder-evidence markers + load-time
+SEQ4 pre-arm with delivery-tracked consumption (the V2-fatal restart
+fix — a same-PVC roll now tells the holder its state is gone, so §10
+kill layer 1 is safe by construction). **REMAINING for slice-3
+complete:** event-driven rearm-on-rebind (the
 ladder's retry loop approximates it within ~5s); rule 6's (dev,ino)
 layout index (MDS posture refused wholesale until slice 5); metrics
 export; per-client recall batching; expired-courtesy short-circuit;

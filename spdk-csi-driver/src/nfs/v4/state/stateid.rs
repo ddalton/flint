@@ -540,9 +540,21 @@ impl StateIdManager {
     /// Repopulate the in-memory DashMap from a backend snapshot.
     /// Bumps `next_stateid` past the highest persisted id so freshly
     /// allocated stateids never collide.
-    pub fn load_records(&self, records: Vec<StateIdRecord>) {
+    pub fn load_records(&self, records: Vec<StateIdRecord>) -> Vec<u64> {
         let mut max_counter: u64 = 0;
+        let mut deleg_holders = Vec::new();
         for r in records {
+            // Delegation-typed rows are HOLDER-EVIDENCE MARKERS, not
+            // live state (design §6): real delegation stateids are
+            // never persisted — they die with the process — and the
+            // marker's synthetic `other` would poison the counter
+            // recovery below. Divert them to the caller, which
+            // pre-arms the client's SEQ4 bit so a restart can never
+            // silently orphan a holder's belief.
+            if r.state_type == StateTypeRecord::Delegation {
+                deleg_holders.push(r.client_id);
+                continue;
+            }
             // Recover the numeric counter from the high 8 bytes of
             // `other` — `allocate` encodes `(counter, client_id_low)`
             // there.
@@ -561,9 +573,11 @@ impl StateIdManager {
             self.next_stateid.store(max_counter + 1, Ordering::SeqCst);
         }
         info!(
-            "StateIdManager loaded {} records from backend",
-            self.states.len()
+            "StateIdManager loaded {} records from backend ({} delegation holder markers)",
+            self.states.len(),
+            deleg_holders.len(),
         );
+        deleg_holders
     }
 
     /// Ordered capture at the mutation site (F27): an OPEN's put and a

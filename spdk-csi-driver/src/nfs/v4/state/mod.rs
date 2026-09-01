@@ -130,6 +130,25 @@ pub struct StateManager {
     /// write-capable-layout check would hand out delegations that
     /// pNFS writers silently invalidate.
     pnfs_posture: std::sync::OnceLock<()>,
+    /// Clients whose persisted holder-evidence marker was found at
+    /// load (design §6): their SEQ4 RECALLABLE_STATE_REVOKED bit is
+    /// pre-armed, and the value tracks delivery — None until a
+    /// SEQUENCE reply has carried the bit, then the (session, slot,
+    /// seq) it rode on. A later SEQUENCE advancing that same slot is
+    /// the RFC's own acknowledgment that the reply was received
+    /// (§2.10.6.1), and only then is the marker consumed. This is the
+    /// model's RenewConsume: free the evidence only when the signal
+    /// provably arrived.
+    armed_markers: dashmap::DashMap<u64, Option<(SessionId, u32, u32)>>,
+}
+
+/// The synthetic `other` of a client's holder-evidence marker row:
+/// a 0xFD magic prefix (a counter would need ~2^32 boots of mints to
+/// collide) + the client id.
+fn marker_other(client_id: u64) -> [u8; 12] {
+    let mut o = [0xFDu8; 12];
+    o[4..12].copy_from_slice(&client_id.to_be_bytes());
+    o
 }
 
 impl StateManager {
@@ -147,6 +166,33 @@ impl StateManager {
         let stateid_manager = Arc::new(StateIdManager::new(Arc::clone(&backend)));
         let delegation_manager = Arc::new(DelegationManager::new());
 
+        // Holder evidence (design §6): every transition in whether a
+        // client holds recallable state Puts or Deletes its marker
+        // row — a Delegation-typed StateIdRecord with a synthetic
+        // key. The backend queue coalesces by key, so per-transition
+        // writes cost one queued row at most.
+        {
+            let b = Arc::clone(&backend);
+            delegation_manager.install_evidence(Arc::new(move |client_id, holds| {
+                if holds {
+                    b.enqueue_write(crate::state_backend::WriteOp::PutStateid(
+                        crate::state_backend::StateIdRecord {
+                            other: marker_other(client_id),
+                            seqid: 0,
+                            state_type: crate::state_backend::StateTypeRecord::Delegation,
+                            client_id,
+                            filehandle: None,
+                            revoked: true,
+                        },
+                    ));
+                } else {
+                    b.enqueue_write(crate::state_backend::WriteOp::DeleteStateid(
+                        marker_other(client_id),
+                    ));
+                }
+            }));
+        }
+
         Self {
             clients: client_manager,
             sessions: session_manager,
@@ -159,7 +205,59 @@ impl StateManager {
             recall_spawner: std::sync::OnceLock::new(),
             back_channels: std::sync::OnceLock::new(),
             pnfs_posture: std::sync::OnceLock::new(),
+            armed_markers: dashmap::DashMap::new(),
         }
+    }
+
+    /// Delivery bookkeeping for a load-armed holder-evidence marker
+    /// (design §6), called from the SEQUENCE arm for every NEW (non-
+    /// replay) request. First call records the reply that carries the
+    /// bit; a later new SEQUENCE advancing the SAME session+slot
+    /// proves that reply was received (RFC 8881 §2.10.6.1 slot-ack) —
+    /// the marker is consumed: row deleted, bit lowered unless real
+    /// tombstones (or a fresh restart's marker) still hold it up.
+    pub fn note_seq4_delivery(
+        &self,
+        client_id: u64,
+        session_id: SessionId,
+        slot: u32,
+        seq: u32,
+    ) {
+        let Some(mut armed) = self.armed_markers.get_mut(&client_id) else {
+            return;
+        };
+        match *armed {
+            None => {
+                *armed = Some((session_id, slot, seq));
+            }
+            Some((s, sl, sq)) if s == session_id && sl == slot && seq > sq => {
+                drop(armed);
+                self.armed_markers.remove(&client_id);
+                // The marker's job is done — unless the client
+                // meanwhile acquired NEW recallable state, in which
+                // case the evidence sink has already re-Put the row
+                // and deleting it here would erase live evidence.
+                if !self.delegations.client_holds_live(client_id)
+                    && !self.delegations.client_has_revoked(client_id)
+                {
+                    self.backend
+                        .enqueue_write(crate::state_backend::WriteOp::DeleteStateid(
+                            marker_other(client_id),
+                        ));
+                    self.lower_seq_flags(
+                        client_id,
+                        crate::nfs::v4::protocol::seq4_status::RECALLABLE_STATE_REVOKED,
+                    );
+                }
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// Is the client's load-armed marker still awaiting consumption?
+    /// (Rigs and the idle input read this.)
+    pub fn marker_armed(&self, client_id: u64) -> bool {
+        self.armed_markers.contains_key(&client_id)
     }
 
     /// Mark this server as running the MDS role (dispatcher, once).
@@ -346,7 +444,26 @@ impl StateManager {
         let n_st = stateids.len();
         self.clients.load_records(clients);
         self.sessions.load_records(sessions);
-        self.stateids.load_records(stateids);
+        let deleg_holders = self.stateids.load_records(stateids);
+        // Holder evidence (design §6): a marker row means a client
+        // held recallable state when this incarnation's predecessor
+        // died — and a same-PVC restart is TRANSPARENT to it
+        // (EXCHANGE_ID case 1, no CLAIM_PREVIOUS), so without this
+        // bit it would serve its page cache forever against a server
+        // that forgot the delegation. Pre-arm SEQ4 so its first lease
+        // renewal tells it to drop and revalidate.
+        for client_id in deleg_holders {
+            tracing::warn!(
+                "client {} held recallable state across the restart — \
+                 pre-arming SEQ4_STATUS_RECALLABLE_STATE_REVOKED",
+                client_id
+            );
+            self.raise_seq_flags(
+                client_id,
+                crate::nfs::v4::protocol::seq4_status::RECALLABLE_STATE_REVOKED,
+            );
+            self.armed_markers.insert(client_id, None);
+        }
         tracing::info!(
             "StateManager loaded {} clients, {} sessions, {} stateids from backend",
             n_c,

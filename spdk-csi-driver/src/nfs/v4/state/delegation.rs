@@ -315,6 +315,15 @@ pub struct DelegationManager {
     /// of `<export>/.flint-nfs/deleg-off`, re-checked at most every
     /// ~5s. The true manual, no-restart grant stop.
     sentinel_cache: Mutex<Option<(Instant, bool)>>,
+    /// Holder-evidence sink (design §6): called with (client, holds)
+    /// after every transition that changes whether the client holds
+    /// recallable state (live delegations OR revoked tombstones).
+    /// StateManager installs it to Put/Delete the client's persisted
+    /// marker row — the ONLY durable trace, and the thing that
+    /// re-arms SEQ4 after a same-PVC transparent restart. Without it
+    /// a pod roll with grants outstanding is the silent-stale
+    /// scenario (the model's NoEvidence counterexample).
+    evidence: std::sync::OnceLock<Arc<dyn Fn(u64, bool) + Send + Sync>>,
 }
 
 /// Breaker window (design §10: revocations within 5 minutes).
@@ -356,6 +365,22 @@ impl DelegationManager {
             breaker_trip: env_u64("FLINT_NFS_DELEG_REVOKE_TRIP", 10) as usize,
             breaker_client_trip: env_u64("FLINT_NFS_DELEG_CLIENT_REVOKE_TRIP", 3) as usize,
             sentinel_cache: Mutex::new(None),
+            evidence: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Install the holder-evidence sink (StateManager, once).
+    pub fn install_evidence(&self, sink: Arc<dyn Fn(u64, bool) + Send + Sync>) {
+        let _ = self.evidence.set(sink);
+    }
+
+    /// Re-evaluate and report the client's holds-recallable-state
+    /// fact. Idempotent — the backend queue coalesces by key, so
+    /// calling on every transition is free.
+    fn note_evidence(&self, client_id: u64) {
+        if let Some(sink) = self.evidence.get() {
+            let holds = self.client_holds_live(client_id) || self.client_has_revoked(client_id);
+            sink(client_id, holds);
         }
     }
 
@@ -511,6 +536,7 @@ impl DelegationManager {
         *self.live_per_client.entry(client_id).or_insert(0) += 1;
         self.live_global.fetch_add(1, Ordering::SeqCst);
         self.grants_total.fetch_add(1, Ordering::SeqCst);
+        self.note_evidence(client_id);
         info!(
             "deleg: granted READ delegation {:?} on {:?} to client {}",
             stateid, path, client_id
@@ -644,6 +670,7 @@ impl DelegationManager {
         }
         drop(e);
         self.unindex(&rec);
+        self.note_evidence(rec.client_id);
         info!(
             "deleg: client {} returned delegation {:?} on {:?}",
             rec.client_id, rec.stateid, rec.path
@@ -715,6 +742,10 @@ impl DelegationManager {
             .entry(client)
             .or_insert_with(Vec::new)
             .push(now);
+        // Tombstone retained ⇒ the client STILL holds recallable
+        // state; the marker must survive a restart so the SEQ4 bit
+        // re-arms (design §6: never erase the only durable evidence).
+        self.note_evidence(client);
         Some(client)
     }
 
@@ -753,6 +784,7 @@ impl DelegationManager {
             rec.client_id, rec.stateid, rec.path
         );
         self.unindex(&rec);
+        self.note_evidence(rec.client_id);
         true
     }
 
@@ -784,6 +816,7 @@ impl DelegationManager {
             v.retain(|o| o != &rec.stateid.other);
         }
         self.gc_entry(ident);
+        self.note_evidence(rec.client_id);
         true
     }
 
@@ -820,6 +853,7 @@ impl DelegationManager {
             self.gc_entry(ident);
         }
         self.live_per_client.remove(&client_id);
+        self.note_evidence(client_id);
         if !freed.is_empty() {
             info!(
                 "deleg: client {} teardown dropped {} delegation record(s)",
@@ -1370,6 +1404,178 @@ mod tests {
                 n
             );
         }
+    }
+
+    /// THE V2-FATAL RESTART HOLE (design §6), closed end to end
+    /// against a SHARED backend — the same shape a same-PVC pod roll
+    /// takes, where EXCHANGE_ID case 1 makes the restart TRANSPARENT
+    /// and the client never sends CLAIM_PREVIOUS. Without the
+    /// persisted holder-evidence marker the successor forgets the
+    /// delegation while the holder keeps serving its page cache
+    /// forever; with it, the first lease-renewal SEQUENCE carries
+    /// RECALLABLE_STATE_REVOKED. (The model's NoEvidence mutation is
+    /// the counterexample for skipping this.)
+    #[test]
+    fn holder_evidence_survives_a_restart_and_re_arms_seq4() {
+        use crate::nfs::v4::protocol::{seq4_status, SessionId};
+        use crate::nfs::v4::state::StateManager;
+
+        let backend = crate::state_backend::memory_backend();
+        let before = StateManager::new("vol", std::sync::Arc::clone(&backend));
+        let sid = before
+            .delegations
+            .try_grant(F, 42, vec![1], "/warm".into(), || true, || sid(1))
+            .expect("grant");
+
+        // The successor process: same volume, same backend, zero
+        // in-memory carry-over.
+        let after = StateManager::new("vol", std::sync::Arc::clone(&backend));
+        assert_eq!(
+            after.seq_flags(42),
+            0,
+            "precondition: nothing armed before the load"
+        );
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(after.load_from_backend(false))
+            .expect("load");
+
+        // The delegation itself is GONE (they die with the process)…
+        assert!(after.delegations.lookup(&sid).is_none());
+        assert_eq!(after.delegations.live_count(), 0);
+        // …but the client's belief is not, so the bit is pre-armed.
+        assert_ne!(
+            after.seq_flags(42) & seq4_status::RECALLABLE_STATE_REVOKED,
+            0,
+            "a holder across a restart MUST be told its state is gone"
+        );
+        assert!(after.marker_armed(42));
+        // And the marker row is NOT erased at load — erasing the only
+        // durable evidence before delivery is the hole itself.
+        assert!(
+            after.stateids.get_state(&StateId {
+                seqid: 0,
+                other: {
+                    let mut o = [0xFDu8; 12];
+                    o[4..12].copy_from_slice(&42u64.to_be_bytes());
+                    o
+                },
+            }).is_none(),
+            "the marker is evidence, not live state — it must not load as a stateid"
+        );
+
+        // Delivery: the first SEQUENCE carries the bit; the SECOND on
+        // the same slot proves the first reply arrived, and only then
+        // is the evidence consumed and the bit lowered.
+        let sess = SessionId([9u8; 16]);
+        after.note_seq4_delivery(42, sess, 0, 1);
+        assert_ne!(
+            after.seq_flags(42) & seq4_status::RECALLABLE_STATE_REVOKED,
+            0,
+            "one carrying reply is not proof of delivery"
+        );
+        assert!(after.marker_armed(42));
+        after.note_seq4_delivery(42, sess, 0, 2);
+        assert_eq!(
+            after.seq_flags(42) & seq4_status::RECALLABLE_STATE_REVOKED,
+            0,
+            "the slot advance is the acknowledgment — now the bit lowers"
+        );
+        assert!(!after.marker_armed(42));
+
+        // A THIRD incarnation must find nothing left to re-arm.
+        let third = StateManager::new("vol", std::sync::Arc::clone(&backend));
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(third.load_from_backend(false))
+            .expect("load");
+        assert_eq!(
+            third.seq_flags(42),
+            0,
+            "a consumed marker must not re-arm forever"
+        );
+    }
+
+    /// A voluntary DELEGRETURN deletes the evidence, so a restart
+    /// AFTER it arms nothing — the falsifiability arm for the test
+    /// above (an implementation that never deleted the marker would
+    /// pass that one and fail this).
+    #[test]
+    fn a_returned_delegation_leaves_no_evidence_to_re_arm() {
+        use crate::nfs::v4::state::StateManager;
+
+        let backend = crate::state_backend::memory_backend();
+        let before = StateManager::new("vol", std::sync::Arc::clone(&backend));
+        let s = before
+            .delegations
+            .try_grant(F, 42, vec![1], "/warm".into(), || true, || sid(1))
+            .expect("grant");
+        before.delegations.return_delegation(&s).expect("return");
+
+        let after = StateManager::new("vol", std::sync::Arc::clone(&backend));
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(after.load_from_backend(false))
+            .expect("load");
+        assert_eq!(
+            after.seq_flags(42),
+            0,
+            "no live delegation at shutdown ⇒ nothing to signal"
+        );
+        assert!(!after.marker_armed(42));
+    }
+
+    /// A REVOKED tombstone still counts as recallable state: the
+    /// marker must survive the restart too, because the client has
+    /// not yet FREE_STATEID'd and still believes.
+    #[test]
+    fn a_revoked_tombstone_keeps_the_evidence_alive() {
+        use crate::nfs::v4::protocol::seq4_status;
+        use crate::nfs::v4::state::StateManager;
+
+        let backend = crate::state_backend::memory_backend();
+        let before = StateManager::new("vol", std::sync::Arc::clone(&backend));
+        let s = before
+            .delegations
+            .try_grant(F, 42, vec![1], "/warm".into(), || true, || sid(1))
+            .expect("grant");
+        before.delegations.mutation_fence(F, Some(43), false).guard();
+        before.delegations.note_first_transmit(&s);
+        assert_eq!(before.delegations.revoke(&s), Some(42));
+
+        let after = StateManager::new("vol", std::sync::Arc::clone(&backend));
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(after.load_from_backend(false))
+            .expect("load");
+        assert_ne!(
+            after.seq_flags(42) & seq4_status::RECALLABLE_STATE_REVOKED,
+            0,
+            "an unfreed tombstone across a restart still owes the client a signal"
+        );
+
+        // Freeing it before the restart, however, clears the debt.
+        let b2 = crate::state_backend::memory_backend();
+        let m = StateManager::new("vol", std::sync::Arc::clone(&b2));
+        let s2 = m
+            .delegations
+            .try_grant(F, 42, vec![1], "/warm".into(), || true, || sid(1))
+            .expect("grant");
+        m.delegations.mutation_fence(F, Some(43), false).guard();
+        m.delegations.note_first_transmit(&s2);
+        m.delegations.revoke(&s2);
+        assert!(m.delegations.free_revoked(&s2));
+        let after2 = StateManager::new("vol", std::sync::Arc::clone(&b2));
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(after2.load_from_backend(false))
+            .expect("load");
+        assert_eq!(after2.seq_flags(42), 0, "a freed tombstone owes nothing");
     }
 
     #[test]
