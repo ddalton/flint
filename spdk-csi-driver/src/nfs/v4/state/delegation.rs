@@ -361,6 +361,25 @@ pub struct DelegationManager {
     revocations_by_client: DashMap<u64, Vec<Instant>>,
     breaker_trip: usize,
     breaker_client_trip: usize,
+    /// A trip that SURVIVED a restart, expressed as the instant it
+    /// stops applying. §10 requires the trip to persist so that a pod
+    /// roll cannot silently re-arm granting mid-incident — the
+    /// in-memory stamps below are `Instant`s and die with the process,
+    /// so a roll during a revocation storm would otherwise come back
+    /// granting freely into the same storm.
+    ///
+    /// Held as a deadline rather than by faking revocation stamps: the
+    /// restored fact is "a trip was in force and has this much window
+    /// left", not "these particular revocations happened", and
+    /// inventing stamps would corrupt the per-client accounting.
+    persisted_trip_until: Mutex<Option<Instant>>,
+    /// Persists the trip. `Some(unix_secs)` when it fires,
+    /// `None` when the window rolls quiet.
+    breaker_sink: std::sync::OnceLock<Arc<dyn Fn(Option<u64>) + Send + Sync>>,
+    /// Whether the sink currently believes a trip is stored, so the
+    /// breaker writes on TRANSITIONS instead of on every read —
+    /// `grants_paused` runs on the OPEN path.
+    breaker_persisted: std::sync::atomic::AtomicBool,
     /// Sentinel kill-switch cache (design §10 layer 2): the presence
     /// of `<export>/.flint-nfs/deleg-off`, re-checked at most every
     /// ~5s. The true manual, no-restart grant stop.
@@ -413,6 +432,9 @@ impl DelegationManager {
             grants_total: AtomicU64::new(0),
             revocations: Mutex::new(Vec::new()),
             revocations_by_client: DashMap::new(),
+            persisted_trip_until: Mutex::new(None),
+            breaker_sink: std::sync::OnceLock::new(),
+            breaker_persisted: std::sync::atomic::AtomicBool::new(false),
             breaker_trip: env_u64("FLINT_NFS_DELEG_REVOKE_TRIP", 10) as usize,
             breaker_client_trip: env_u64("FLINT_NFS_DELEG_CLIENT_REVOKE_TRIP", 3) as usize,
             sentinel_cache: Mutex::new(None),
@@ -441,20 +463,86 @@ impl DelegationManager {
     /// window auto-resets the trip.
     pub fn grants_paused(&self, client_id: u64) -> bool {
         let now = Instant::now();
+        // A trip restored from the backend applies for the remainder
+        // of its window, then clears itself.
+        {
+            let mut until = self.persisted_trip_until.lock().unwrap();
+            match *until {
+                Some(t) if now < t => return true,
+                Some(_) => *until = None,
+                None => {}
+            }
+        }
+        let tripped;
         {
             let mut v = self.revocations.lock().unwrap();
             v.retain(|t| now.duration_since(*t) < BREAKER_WINDOW);
-            if v.len() >= self.breaker_trip {
-                return true;
+            tripped = v.len() >= self.breaker_trip;
+        }
+        if !tripped {
+            if let Some(mut v) = self.revocations_by_client.get_mut(&client_id) {
+                v.retain(|t| now.duration_since(*t) < BREAKER_WINDOW);
+                // A per-client trip is NOT persisted: it is damping for
+                // one misbehaving client, and re-learning it after a
+                // roll costs that client a few grants. The global trip
+                // is the incident signal, and that is what must survive.
+                if v.len() >= self.breaker_client_trip {
+                    return true;
+                }
             }
         }
-        if let Some(mut v) = self.revocations_by_client.get_mut(&client_id) {
-            v.retain(|t| now.duration_since(*t) < BREAKER_WINDOW);
-            if v.len() >= self.breaker_client_trip {
-                return true;
-            }
+        self.sync_breaker_persistence(tripped);
+        tripped
+    }
+
+    /// Write the trip through to the backend on TRANSITIONS only.
+    /// `grants_paused` is on the OPEN path, so a write per call would
+    /// put a backend enqueue in front of every open.
+    fn sync_breaker_persistence(&self, tripped: bool) {
+        use std::sync::atomic::Ordering as O;
+        if tripped == self.breaker_persisted.load(O::Relaxed) {
+            return;
         }
-        false
+        self.breaker_persisted.store(tripped, O::Relaxed);
+        if let Some(sink) = self.breaker_sink.get() {
+            sink(tripped.then(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            }));
+        }
+    }
+
+    pub fn install_breaker_sink(&self, sink: Arc<dyn Fn(Option<u64>) + Send + Sync>) {
+        let _ = self.breaker_sink.set(sink);
+    }
+
+    /// Restore a trip read from the backend. `trip_unix` is when it
+    /// fired; it applies for the remainder of `BREAKER_WINDOW`.
+    ///
+    /// A trip older than the window is DROPPED, not restored: the
+    /// incident it recorded is over, and refusing grants on stale
+    /// evidence would be an outage the operator cannot see the cause
+    /// of. Returns whether it was restored, so the caller can say so.
+    pub fn restore_breaker_trip(&self, trip_unix: u64) -> bool {
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // A clock that ran backwards across the restart yields an age
+        // of 0 rather than a huge number, so the trip is honoured
+        // rather than silently discarded.
+        let age = now_unix.saturating_sub(trip_unix);
+        let Some(left) = BREAKER_WINDOW.checked_sub(std::time::Duration::from_secs(age)) else {
+            self.breaker_persisted
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            return false;
+        };
+        *self.persisted_trip_until.lock().unwrap() = Some(Instant::now() + left);
+        self.breaker_persisted
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        true
     }
 
     /// Is the sentinel kill-switch file present under the export?
@@ -1107,6 +1195,108 @@ pub enum DelegReturnError {
 impl Default for DelegationManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod breaker_persistence_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as O};
+
+    fn now_unix() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    #[test]
+    fn a_trip_restored_from_the_backend_still_pauses_grants() {
+        let m = DelegationManager::new();
+        assert!(!m.grants_paused(1), "clean manager grants");
+        assert!(m.restore_breaker_trip(now_unix()), "a fresh trip restores");
+        assert!(
+            m.grants_paused(1),
+            "a roll during a revocation storm must not come back granting into it"
+        );
+    }
+
+    /// ANTI-VACUITY. Without this the test above passes against a
+    /// breaker that refuses everything forever — which would be an
+    /// outage with no visible cause, and strictly worse than the bug
+    /// it is meant to fix.
+    #[test]
+    fn a_trip_older_than_the_window_is_dropped_not_restored() {
+        let m = DelegationManager::new();
+        let ancient = now_unix() - BREAKER_WINDOW.as_secs() - 60;
+        assert!(!m.restore_breaker_trip(ancient), "an expired trip is not restored");
+        assert!(!m.grants_paused(1), "and grants resume — the incident is over");
+    }
+
+    /// A clock that ran backwards across the restart makes the trip
+    /// look like it fired in the future. Saturating to age 0 honours
+    /// it; the alternative — a huge age — silently discards the trip
+    /// during exactly the incident it exists for.
+    #[test]
+    fn a_backwards_clock_honours_the_trip_rather_than_discarding_it() {
+        let m = DelegationManager::new();
+        assert!(m.restore_breaker_trip(now_unix() + 10_000));
+        assert!(m.grants_paused(1));
+    }
+
+    /// The sink must fire on TRANSITIONS only: `grants_paused` runs on
+    /// the OPEN path, so a write per call would put a backend enqueue
+    /// in front of every open.
+    #[test]
+    fn the_trip_is_persisted_on_transitions_not_on_every_open() {
+        let m = DelegationManager::new();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let w = Arc::clone(&writes);
+        m.install_breaker_sink(Arc::new(move |_| {
+            w.fetch_add(1, O::SeqCst);
+        }));
+
+        for _ in 0..50 {
+            assert!(!m.grants_paused(1));
+        }
+        assert_eq!(writes.load(O::SeqCst), 0, "an untripped breaker writes nothing");
+
+        // Trip it: enough global revocations inside the window.
+        {
+            let mut v = m.revocations.lock().unwrap();
+            for _ in 0..m.breaker_trip {
+                v.push(Instant::now());
+            }
+        }
+        for _ in 0..50 {
+            assert!(m.grants_paused(1));
+        }
+        assert_eq!(
+            writes.load(O::SeqCst),
+            1,
+            "fifty opens against a tripped breaker must produce ONE write"
+        );
+    }
+
+    /// A per-client trip is deliberately not persisted — it is damping
+    /// for one misbehaving client, not an incident signal. Pinned so
+    /// the asymmetry is a decision rather than an oversight.
+    #[test]
+    fn a_per_client_trip_pauses_that_client_without_persisting() {
+        let m = DelegationManager::new();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let w = Arc::clone(&writes);
+        m.install_breaker_sink(Arc::new(move |_| {
+            w.fetch_add(1, O::SeqCst);
+        }));
+        m.revocations_by_client
+            .entry(42)
+            .or_insert_with(Vec::new)
+            .extend((0..m.breaker_client_trip).map(|_| Instant::now()));
+
+        assert!(m.grants_paused(42), "the noisy client is damped");
+        assert!(!m.grants_paused(7), "its neighbours are not");
+        assert_eq!(writes.load(O::SeqCst), 0, "and nothing is persisted for it");
     }
 }
 

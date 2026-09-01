@@ -153,6 +153,14 @@ fn marker_other(client_id: u64) -> [u8; 12] {
     o
 }
 
+/// The single row that carries a persisted breaker trip. Tagged
+/// distinctly from holder markers (0xFD) so the loader can tell them
+/// apart, and keyed on a CONSTANT so a second trip overwrites the
+/// first rather than accumulating rows nothing ever deletes.
+fn breaker_marker_other() -> [u8; 12] {
+    [stateid::BREAKER_MARKER_TAG; 12]
+}
+
 impl StateManager {
     /// Create a new state manager backed by `backend`. Use
     /// `state_backend::memory_backend()` for tests / dev work, or a
@@ -191,6 +199,35 @@ impl StateManager {
                     b.enqueue_write(crate::state_backend::WriteOp::DeleteStateid(
                         marker_other(client_id),
                     ));
+                }
+            }));
+
+            let b2 = Arc::clone(&backend);
+            delegation_manager.install_breaker_sink(Arc::new(move |trip: Option<u64>| {
+                match trip {
+                    Some(unix) => {
+                        let mut other = breaker_marker_other();
+                        other[4..12].copy_from_slice(&unix.to_be_bytes());
+                        b2.enqueue_write(crate::state_backend::WriteOp::PutStateid(
+                            crate::state_backend::StateIdRecord {
+                                other,
+                                seqid: 0,
+                                state_type: crate::state_backend::StateTypeRecord::Delegation,
+                                // Not a client's row. Zero here is the
+                                // absence of a client, and the loader
+                                // never reads it as one because the tag
+                                // byte routes this row elsewhere.
+                                client_id: 0,
+                                filehandle: None,
+                                revoked: true,
+                            },
+                        ));
+                    }
+                    None => {
+                        b2.enqueue_write(crate::state_backend::WriteOp::DeleteStateid(
+                            breaker_marker_other(),
+                        ));
+                    }
                 }
             }));
         }
@@ -524,7 +561,28 @@ impl StateManager {
         let n_st = stateids.len();
         self.clients.load_records(clients);
         self.sessions.load_records(sessions);
-        let deleg_holders = self.stateids.load_records(stateids);
+        let markers = self.stateids.load_records(stateids);
+        // §10 layer 3: a trip that was in force when the predecessor
+        // died is restored for the REMAINDER of its window. Without
+        // this, a roll during a revocation storm comes back granting
+        // freely into the same storm — the breaker would protect
+        // against everything except the response to the incident.
+        if let Some(trip_unix) = markers.breaker_trip_unix {
+            if self.delegations.restore_breaker_trip(trip_unix) {
+                tracing::warn!(
+                    "grant breaker was TRIPPED when this hub's predecessor died \
+                     (at unix {}) — new delegation grants stay paused for the \
+                     remainder of the window",
+                    trip_unix
+                );
+            } else {
+                tracing::info!(
+                    "a breaker trip from unix {} was found but its window has \
+                     expired — not restored",
+                    trip_unix
+                );
+            }
+        }
         // Holder evidence (design §6): a marker row means a client
         // held recallable state when this incarnation's predecessor
         // died — and a same-PVC restart is TRANSPARENT to it
@@ -532,7 +590,7 @@ impl StateManager {
         // bit it would serve its page cache forever against a server
         // that forgot the delegation. Pre-arm SEQ4 so its first lease
         // renewal tells it to drop and revalidate.
-        for client_id in deleg_holders {
+        for client_id in markers.deleg_holders {
             tracing::warn!(
                 "client {} held recallable state across the restart — \
                  pre-arming SEQ4_STATUS_RECALLABLE_STATE_REVOKED",

@@ -173,6 +173,24 @@ impl StateEntry {
 /// - Lock-free stateid allocation and revocation
 /// - Per-stateid granularity for high concurrency
 /// - Critical for NFSv4.1+ exactly-once semantics (SEQUENCE operations)
+/// First byte of the synthetic `other` on a persisted BREAKER-TRIP
+/// marker. Holder-evidence markers use 0xFD; these must not collide,
+/// because both are Delegation-typed rows in one table.
+pub const BREAKER_MARKER_TAG: u8 = 0xFC;
+
+/// What a state-table load found among the Delegation-typed marker
+/// rows. Two different facts with two different consumers, so they are
+/// returned separately rather than as one list the caller has to
+/// re-classify.
+#[derive(Debug, Default)]
+pub struct LoadedMarkers {
+    /// Clients that held recallable state when the predecessor died.
+    pub deleg_holders: Vec<u64>,
+    /// Unix seconds at which the grant breaker tripped, if it was
+    /// tripped when the predecessor died.
+    pub breaker_trip_unix: Option<u64>,
+}
+
 pub struct StateIdManager {
     /// Counter for generating unique stateid identifiers (lock-free atomic)
     next_stateid: AtomicU64,
@@ -540,9 +558,9 @@ impl StateIdManager {
     /// Repopulate the in-memory DashMap from a backend snapshot.
     /// Bumps `next_stateid` past the highest persisted id so freshly
     /// allocated stateids never collide.
-    pub fn load_records(&self, records: Vec<StateIdRecord>) -> Vec<u64> {
+    pub fn load_records(&self, records: Vec<StateIdRecord>) -> LoadedMarkers {
         let mut max_counter: u64 = 0;
-        let mut deleg_holders = Vec::new();
+        let mut out = LoadedMarkers::default();
         for r in records {
             // Delegation-typed rows are HOLDER-EVIDENCE MARKERS, not
             // live state (design §6): real delegation stateids are
@@ -552,7 +570,19 @@ impl StateIdManager {
             // pre-arms the client's SEQ4 bit so a restart can never
             // silently orphan a holder's belief.
             if r.state_type == StateTypeRecord::Delegation {
-                deleg_holders.push(r.client_id);
+                // Two kinds of Delegation-typed marker share this
+                // table, told apart by the first byte of the synthetic
+                // `other`. Without the split, the breaker row would be
+                // read as a holder marker and pre-arm SEQ4 for a
+                // client id that never existed — a revocation notice
+                // sent to nobody, and a real one harder to find.
+                if r.other[0] == BREAKER_MARKER_TAG {
+                    let mut ts = [0u8; 8];
+                    ts.copy_from_slice(&r.other[4..12]);
+                    out.breaker_trip_unix = Some(u64::from_be_bytes(ts));
+                } else {
+                    out.deleg_holders.push(r.client_id);
+                }
                 continue;
             }
             // Recover the numeric counter from the high 8 bytes of
@@ -575,9 +605,9 @@ impl StateIdManager {
         info!(
             "StateIdManager loaded {} records from backend ({} delegation holder markers)",
             self.states.len(),
-            deleg_holders.len(),
+            out.deleg_holders.len(),
         );
-        deleg_holders
+        out
     }
 
     /// Ordered capture at the mutation site (F27): an OPEN's put and a
@@ -1170,6 +1200,48 @@ impl StateIdManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two kinds of Delegation-typed marker share the stateid table.
+    /// If the loader could not tell them apart, the breaker row would
+    /// be read as a holder marker for `client_id: 0` and the restart
+    /// path would pre-arm SEQ4_STATUS_RECALLABLE_STATE_REVOKED for a
+    /// client that never existed — a revocation notice addressed to
+    /// nobody, and a real one harder to find among the noise.
+    #[test]
+    fn a_breaker_marker_is_not_mistaken_for_a_holder_marker() {
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+
+        let mut holder = [0xFDu8; 12];
+        holder[4..12].copy_from_slice(&7u64.to_be_bytes());
+        let mut breaker = [BREAKER_MARKER_TAG; 12];
+        breaker[4..12].copy_from_slice(&1_700_000_000u64.to_be_bytes());
+
+        let out = mgr.load_records(vec![
+            StateIdRecord {
+                other: holder,
+                seqid: 0,
+                state_type: StateTypeRecord::Delegation,
+                client_id: 7,
+                filehandle: None,
+                revoked: true,
+            },
+            StateIdRecord {
+                other: breaker,
+                seqid: 0,
+                state_type: StateTypeRecord::Delegation,
+                client_id: 0,
+                filehandle: None,
+                revoked: true,
+            },
+        ]);
+
+        assert_eq!(out.deleg_holders, vec![7], "only the real holder is a holder");
+        assert_eq!(out.breaker_trip_unix, Some(1_700_000_000));
+        // And neither marker may leak into live stateid state: the
+        // synthetic `other` would poison the counter recovery.
+        assert!(mgr.validate(&StateId { seqid: 0, other: holder }).is_err());
+        assert!(mgr.validate(&StateId { seqid: 0, other: breaker }).is_err());
+    }
 
     #[test]
     fn test_stateid_allocation() {
