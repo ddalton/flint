@@ -1,0 +1,20 @@
+#cloud-config
+# vim:syntax=yaml
+
+growpart:
+  mode: auto
+  devices: ['/']
+timezone: America/Los_Angeles
+
+users:
+  - name: "ddalton"
+    # nuageinit does not support specifying the UID.
+    # The UID is fixed up in boot.essential.FreeBSD/00-freebsd-user-group.sh
+    uid: "503"
+    gecos: "Dilip Dalton"
+    homedir: "/home/ddalton.guest"
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+    ssh-authorized-keys:
+      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBqxE3Kxi0UX+vxL/bLDioKlELYgQTWrvSydMcPRi2Mz lima"
