@@ -454,6 +454,7 @@ impl PnfsOperationHandler {
                 stripe_unit: placement.stripe_size,
                 device_id_bin,
                 file_id: placement.file_id,
+                stripe_width: placement.device_ids.len(),
             }],
         })
     }
@@ -955,6 +956,16 @@ pub struct Layout {
     /// keyed by identity, rename-safe); 0 ⇒ legacy empty fh list (DSes
     /// rebase the MDS path filehandle).
     pub file_id: u64,
+    /// How many DSes the file is striped over, from the pinned
+    /// placement — the wire's stripe width. The encoder MUST take it
+    /// from here and never from `segments.len()`: the segment list is
+    /// internal bookkeeping whose length has been a per-unit count in
+    /// the past, and deriving the width from it advertised a rotation
+    /// that disagreed with where the bytes actually live (1.43.0's
+    /// F-OCIAB-1/2 — zeros returned with NFS4_OK). Same rule as
+    /// `stripe_unit`, `device_id_bin` and `file_id`: everything the
+    /// stripe map is made of comes from the placement.
+    pub stripe_width: usize,
 }
 
 /// LAYOUTGET errors

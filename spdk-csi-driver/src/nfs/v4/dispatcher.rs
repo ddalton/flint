@@ -3216,6 +3216,7 @@ impl CompoundDispatcher {
                         layout.stripe_unit,
                         layout.device_id_bin,
                         layout.file_id,
+                        layout.stripe_width,
                     );
 
                     debug!("   📤 FILE layout content encoded: {} bytes", layout_content.len());
@@ -4303,20 +4304,50 @@ impl CompoundDispatcher {
     
     /// Encode FILE layout with multiple segments for striping across DSes
     /// Per RFC 5661 Section 13.3 - NFSv4.1 File Layout Type
+    ///
+    /// `stripe_width` is the file's pinned DS count and is the ONLY
+    /// thing that may set the wire stripe width. It used to be
+    /// `segments.len()`, which is internal bookkeeping: for a bounded
+    /// LAYOUTGET that count was the number of stripe units the request
+    /// spanned, so a 4 KiB read produced a width-1 layout rotated to
+    /// `file_id % 1 == 0` — pointing the client at slot 0 while the
+    /// bytes lived on slot `file_id % N`, returning zeros with NFS4_OK
+    /// (1.43.0, F-OCIAB-1/2).
     fn encode_file_layout_striped(
         segments: &[crate::pnfs::mds::layout::LayoutSegment],
         filehandle: &[u8],
         stripe_unit: u64,
         device_id_bytes: [u8; 16],
         file_id: u64,
+        stripe_width: usize,
     ) -> Bytes {
         use crate::nfs::xdr::XdrEncoder;
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
-        if segments.is_empty() {
-            warn!("⚠️ encode_file_layout_striped called with no segments!");
+        if segments.is_empty() || stripe_width == 0 {
+            warn!(
+                "⚠️ encode_file_layout_striped called with {} segments / width {}!",
+                segments.len(),
+                stripe_width,
+            );
             return Bytes::new();
+        }
+
+        // The two must agree — `generate_stripe_layout` emits exactly
+        // one segment per pinned DS. If they ever diverge again the
+        // placement wins (it is what the DS storage is keyed on), but
+        // say so loudly: a divergence here is silent data corruption,
+        // not a cosmetic mismatch.
+        if segments.len() != stripe_width {
+            warn!(
+                "⚠️ stripe width disagreement: {} segments vs pinned width {} \
+                 (file_id {:016x}) — encoding the PINNED width; segments are \
+                 internal bookkeeping and must not set the wire pattern",
+                segments.len(),
+                stripe_width,
+                file_id,
+            );
         }
 
         let mut encoder = XdrEncoder::new();
@@ -4344,16 +4375,16 @@ impl CompoundDispatcher {
             // file — silent zeros on the client's next read.
             crate::pnfs::mds::layout::FilePlacement::wire_first_stripe_index(
                 file_id,
-                segments.len(),
+                stripe_width,
             )
         } else {
             let mut h = DefaultHasher::new();
             filehandle.hash(&mut h);
-            (h.finish() % segments.len() as u64) as u32
+            (h.finish() % stripe_width as u64) as u32
         };
 
         debug!("   🔧 Encoding STRIPED FILE layout (RFC 5661 Section 13.3):");
-        debug!("      Number of DSes in stripe: {}", segments.len());
+        debug!("      Number of DSes in stripe: {}", stripe_width);
         debug!("      device_id binary (16 bytes): {:02x?}", device_id_bytes);
         debug!("      stripe_unit: {} bytes ({} MB)", stripe_unit, stripe_unit / (1024*1024));
         debug!("      first_stripe_index: {} (per-file rotation)", first_stripe_index);
@@ -4381,8 +4412,8 @@ impl CompoundDispatcher {
             // That identity-keying is what makes RENAME a pure metadata
             // op and prevents a recreated same-name file from ever
             // reading its predecessor's stripes.
-            encoder.encode_u32(segments.len() as u32);
-            for j in 0..segments.len() {
+            encoder.encode_u32(stripe_width as u32);
+            for j in 0..stripe_width {
                 let fh = crate::nfs::v4::filehandle_pnfs::generate_pnfs_filehandle_from_id(
                     0, // instance check disabled DS-side (PNFS_INSTANCE_ID unset)
                     file_id,
@@ -4394,7 +4425,7 @@ impl CompoundDispatcher {
             debug!(
                 "      📦 Encoded STRIPED FILE layout: {} bytes total, {} v2 fh(s) (file_id {:016x})",
                 result.len(),
-                segments.len(),
+                stripe_width,
                 file_id
             );
             return result;
@@ -6954,9 +6985,97 @@ mod tests {
             .collect();
         let device_id = crate::pnfs::mds::layout::composite_device_id(&ids);
         let enc = CompoundDispatcher::encode_file_layout_striped(
-            &segments, fh, 8 << 20, device_id, file_id,
+            &segments, fh, 8 << 20, device_id, file_id, n_ds,
         );
         u32::from_be_bytes(enc[20..24].try_into().unwrap())
+    }
+
+    /// **F-OCIAB-1/2: the wire stripe width comes from the PLACEMENT,
+    /// never from the segment list.**
+    ///
+    /// `segments` is flint-internal bookkeeping. For a bounded
+    /// LAYOUTGET it used to be a per-stripe-unit decomposition, so its
+    /// length was "units this request spans" — 1 for a 4 KiB read of an
+    /// 8 MiB-striped file. The encoder read the stripe width off it and
+    /// emitted a width-1 layout: rotation `file_id % 1 == 0` and a lone
+    /// FH naming `.stripe0`, while the bytes lived on slot
+    /// `file_id % N`. Absent stripe file ⇒ zeros with NFS4_OK.
+    ///
+    /// `generate_stripe_layout` no longer produces that shape, but the
+    /// encoder must not depend on its caller getting it right — this
+    /// pins the contract by handing it the exact bad input.
+    #[test]
+    fn wire_stripe_width_follows_the_placement_not_the_segment_count() {
+        use crate::pnfs::mds::layout::{composite_device_id, IoMode, LayoutSegment};
+
+        const WIDTH: usize = 3;
+        // file_id % 3 == 2: a file whose data does NOT live on slot 0,
+        // so a width-1 encode is detectably wrong. (Picking a file_id
+        // divisible by the width is how this class of bug hides.)
+        const FILE_ID: u64 = 0x00d4_db4d_e5ab_4bff;
+        assert_eq!(FILE_ID % WIDTH as u64, 2, "the test's own premise");
+
+        let ids: Vec<String> = (0..WIDTH).map(|i| format!("ds-{}", i)).collect();
+        let device_id = composite_device_id(&ids);
+
+        // The poisoned input: ONE segment, as a 4 KiB request produced.
+        let one_segment = vec![LayoutSegment {
+            offset: 0,
+            length: 4096,
+            iomode: IoMode::Read,
+            device_id: ids[0].clone(),
+            stripe_index: 0,
+            pattern_offset: 0,
+        }];
+
+        let enc = CompoundDispatcher::encode_file_layout_striped(
+            &one_segment,
+            b"fh",
+            8 << 20,
+            device_id,
+            FILE_ID,
+            WIDTH,
+        );
+
+        // nfl_first_stripe_index: deviceid(16) + nfl_util(4).
+        let fsi = u32::from_be_bytes(enc[20..24].try_into().unwrap());
+        assert_eq!(
+            fsi as u64,
+            FILE_ID % WIDTH as u64,
+            "rotation must be file_id % pinned_width; a segment-derived width \
+             would have said 0 and pointed the client at the wrong DS",
+        );
+
+        // nfl_fh_list count: + nfl_pattern_offset(8).
+        let fh_count = u32::from_be_bytes(enc[32..36].try_into().unwrap());
+        assert_eq!(
+            fh_count, WIDTH as u32,
+            "one FH per pinned DS — a short list re-keys the whole stripe map",
+        );
+
+        // And the honest case encodes identically: the width is the
+        // placement's either way, so the segment count cannot matter.
+        let per_device: Vec<LayoutSegment> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| LayoutSegment {
+                offset: 0,
+                length: 4096,
+                iomode: IoMode::Read,
+                device_id: id.clone(),
+                stripe_index: i as u32,
+                pattern_offset: 0,
+            })
+            .collect();
+        let enc_ok = CompoundDispatcher::encode_file_layout_striped(
+            &per_device,
+            b"fh",
+            8 << 20,
+            device_id,
+            FILE_ID,
+            WIDTH,
+        );
+        assert_eq!(enc, enc_ok, "the segment list must not reach the wire at all");
     }
 
     /// The identity-keyed rotation — the live path for every file with

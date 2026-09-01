@@ -2003,7 +2003,27 @@ impl LayoutManager {
         Ok(layout)
     }
 
-    /// Generate round-robin layout (simplest policy)
+    /// Generate round-robin layout (simplest policy).
+    ///
+    /// Returns the pinned device set, exactly like
+    /// [`Self::generate_stripe_layout`]. This used to assign the whole
+    /// range to `devices[0]` and return a ONE-segment list, which was
+    /// never consistent with anything else in the system: the placement
+    /// pins every active DS whatever the policy (see
+    /// `placement_for_grant`), GETDEVICEINFO advertises all of them,
+    /// and the DS keeps each slot's bytes in its own `.stripeN` file.
+    /// A one-segment list made the encoder advertise stripe width 1 and
+    /// rotation `file_id % 1 == 0`, so under this policy EVERY file
+    /// whose `file_id % N != 0` had its reads addressed to a stripe
+    /// file that does not exist — zeros returned with NFS4_OK. Same
+    /// defect as F-OCIAB-1/2 but unconditional rather than only on
+    /// bounded reads.
+    ///
+    /// Round-robin spreading across DSes is delivered by the per-file
+    /// rotation (`wire_first_stripe_index`), not by pointing a whole
+    /// file at one DS; a single-DS file is expressed by pinning a
+    /// single-DS placement (`layout.stripeWidth`), which this correctly
+    /// reflects.
     fn generate_roundrobin_layout(
         &self,
         offset: u64,
@@ -2014,32 +2034,58 @@ impl LayoutManager {
             return Err("No devices available".to_string());
         }
 
-        let mut segments = Vec::new();
-        let current_offset = offset;
-        let _end_offset = offset.saturating_add(length);
-
-        // Simple round-robin: assign entire range to first device
-        // In a more sophisticated implementation, we would split across multiple devices
-        let device = &devices[0];
-
-        segments.push(LayoutSegment {
-            offset: current_offset,
-            length: if length == u64::MAX {
-                u64::MAX  // NFS4_UINT64_MAX means "rest of file"
-            } else {
-                length
-            },
-            iomode: IoMode::ReadWrite,
-            device_id: device.device_id.clone(),
-            stripe_index: 0,
-            pattern_offset: 0,
-        });
-
-        Ok(segments)
+        Ok(devices
+            .iter()
+            .enumerate()
+            .map(|(i, device)| LayoutSegment {
+                offset,
+                length,
+                iomode: IoMode::ReadWrite,
+                device_id: device.device_id.clone(),
+                stripe_index: i as u32,
+                pattern_offset: 0,
+            })
+            .collect())
     }
 
     /// Generate striped layout for parallel I/O. `stripe_size` comes
     /// from the file's pinned placement, not the live config.
+    ///
+    /// The returned list is the file's PARTICIPATING DEVICE SET — one
+    /// segment per pinned device, in placement order, `stripe_index`
+    /// == slot. It is deliberately NOT a decomposition of the request
+    /// into per-stripe-unit byte ranges.
+    ///
+    /// It used to be exactly that for bounded requests, and that
+    /// shipped silent corruption in 1.43.0 (F-OCIAB-1/2). Every
+    /// consumer of this list wants the device set; a per-unit list is a
+    /// different thing that merely looks like one, and the length of
+    /// the two coincides whenever the request happens to span exactly
+    /// one unit per DS — which is what the tests picked (24 MiB over 3
+    /// × 8 MiB), so nothing caught it:
+    ///   - the wire encoder derived the stripe WIDTH and the
+    ///     `nfl_fh_list` from `segments.len()`. A 4 KiB read of a
+    ///     striped file yields ONE unit, hence a one-segment list,
+    ///     hence a layout advertising width 1 with
+    ///     `nfl_first_stripe_index = file_id % 1 = 0` and a single FH
+    ///     naming `.stripe0`. The client then addressed unit 0 to slot
+    ///     0 while the bytes sat on slot `file_id % N` — an absent
+    ///     stripe file, i.e. ZEROS RETURNED WITH NFS4_OK. Two files in
+    ///     three corrupted; the third agreed by coincidence, exactly
+    ///     the disguise F66 wore.
+    ///   - `recall_layouts_for_device` matches on `seg.device_id`, so a
+    ///     per-unit list that touched only one DS made the layout
+    ///     invisible to every other DS's recall.
+    ///   - the per-device layout counts double-counted a device that
+    ///     appeared in more than one unit.
+    ///
+    /// The byte ranges never reached the wire and were never missed:
+    /// LAYOUTGET's `layout4` offset/length come from the REQUEST (see
+    /// `operations::layoutget`), and the stripe pattern itself travels
+    /// as stripe_unit + `nfl_first_stripe_index`. Rotation-aware
+    /// chunking, where it is genuinely needed (the fallback proxy), is
+    /// [`FilePlacement::split_at_stripe_bounds`] — which rotates, as
+    /// this function never did.
     fn generate_stripe_layout(
         &self,
         offset: u64,
@@ -2051,61 +2097,32 @@ impl LayoutManager {
             return Err("No devices available".to_string());
         }
 
-        let mut segments = Vec::new();
-        let num_devices = devices.len();
+        // Where the stripe pattern this request falls in begins. Kept
+        // for flint-internal bookkeeping only — the wire always encodes
+        // nfl_pattern_offset = 0, because flint's unit index is measured
+        // from the start of the file.
+        let unit = stripe_size.max(1);
+        let stripe_start = (offset / unit) * unit;
 
-        // Align offset to stripe boundary
-        let stripe_start = (offset / stripe_size) * stripe_size;
-        let mut current_offset = offset;
-        let end_offset = if length == u64::MAX {
-            u64::MAX
-        } else {
-            offset.saturating_add(length)
-        };
-
-        // If length is u64::MAX (rest of file), create a single segment
-        // spanning the entire remaining file across all devices
-        if length == u64::MAX {
-            for (i, device) in devices.iter().enumerate() {
-                segments.push(LayoutSegment {
-                    offset: current_offset,
-                    length: u64::MAX,
-                    iomode: IoMode::ReadWrite,
-                    device_id: device.device_id.clone(),
-                    stripe_index: i as u32,
-                    pattern_offset: stripe_start,
-                });
-            }
-            return Ok(segments);
-        }
-
-        // Generate striped segments
-        let mut stripe_index = ((offset / stripe_size) % (num_devices as u64)) as usize;
-
-        while current_offset < end_offset {
-            let device = &devices[stripe_index % num_devices];
-            
-            // Calculate segment length (either stripe_size or remaining bytes)
-            let remaining = end_offset - current_offset;
-            let segment_length = stripe_size.min(remaining);
-
-            segments.push(LayoutSegment {
-                offset: current_offset,
-                length: segment_length,
+        let segments: Vec<LayoutSegment> = devices
+            .iter()
+            .enumerate()
+            .map(|(i, device)| LayoutSegment {
+                offset,
+                length,
                 iomode: IoMode::ReadWrite,
                 device_id: device.device_id.clone(),
-                stripe_index: stripe_index as u32,
+                stripe_index: i as u32,
                 pattern_offset: stripe_start,
-            });
-
-            current_offset += segment_length;
-            stripe_index += 1;
-        }
+            })
+            .collect();
 
         debug!(
-            "Generated striped layout: {} segments across {} devices",
+            "Generated striped layout: {} segments (one per pinned DS) covering \
+             offset={} length={}",
             segments.len(),
-            num_devices
+            offset,
+            length,
         );
 
         Ok(segments)
@@ -2877,7 +2894,13 @@ mod tests {
             crate::state_backend::memory_backend(),
         );
 
-        // Request 24 MB (should create 3 segments of 8 MB each)
+        // 24 MiB over 3 × 8 MiB DSes. NOTE the number: this test used to
+        // assert "3 segments of 8 MiB each", which held for the old
+        // per-stripe-unit decomposition AND for the device set, because
+        // 24 MiB spans exactly one unit per DS. That coincidence is why
+        // it stayed green while a 4 KiB request produced a ONE-segment
+        // list and a width-1 layout (F-OCIAB-1/2). The sub-unit case is
+        // now covered by `every_request_shape_yields_the_pinned_device_set`.
         let layout = manager
             .generate_layout(
                 test_owner(1),
@@ -2889,19 +2912,123 @@ mod tests {
             )
             .unwrap();
 
-        // Should have 3 segments (one per device)
+        // One segment per pinned device, in placement order.
         assert_eq!(layout.segments.len(), 3);
 
-        // Each segment should be 8 MB
+        // Segments describe the DEVICE SET, so each covers the whole
+        // request; the stripe pattern itself rides on stripe_unit +
+        // nfl_first_stripe_index, not on segment lengths.
         for seg in &layout.segments {
-            assert_eq!(seg.length, 8 * 1024 * 1024);
+            assert_eq!(seg.length, 24 * 1024 * 1024);
         }
 
-        // All segments should use different devices
-        let device_ids: Vec<&String> = layout.segments.iter()
-            .map(|s| &s.device_id)
-            .collect();
-        assert_eq!(device_ids.len(), 3);
+        // Distinct devices — the old assertion counted the vector it had
+        // just built (always 3) and would have passed with all three
+        // segments on one DS.
+        let device_ids: std::collections::HashSet<&String> =
+            layout.segments.iter().map(|s| &s.device_id).collect();
+        assert_eq!(device_ids.len(), 3, "every pinned DS must appear exactly once");
+
+        // slot == index, which is what the DS-side `.stripeN` suffix and
+        // the wire's nfl_fh_list ordering both key on.
+        for (i, seg) in layout.segments.iter().enumerate() {
+            assert_eq!(seg.stripe_index, i as u32);
+        }
+    }
+
+    /// **The 1.43.0 silent-corruption regression (F-OCIAB-1/2).**
+    ///
+    /// A files-layout LAYOUTGET must describe the file's stripe pattern,
+    /// which is a property of the FILE, not of the byte range asked for.
+    /// `generate_stripe_layout` used to decompose a bounded request into
+    /// one segment per stripe unit, and the wire encoder read the stripe
+    /// WIDTH off `segments.len()`. So a 4 KiB read of a striped file —
+    /// what a registry does to every 20-byte metadata file, and what the
+    /// kernel does for the first touch of any file — produced a layout
+    /// advertising width 1, `nfl_first_stripe_index = file_id % 1 = 0`,
+    /// and a single FH naming `.stripe0`. The client dutifully read slot
+    /// 0 while the bytes lived on slot `file_id % 3`: an absent stripe
+    /// file, i.e. **zeros returned with NFS4_OK**, cached and never
+    /// revalidated. One file in three agreed by coincidence, which made
+    /// it look like flaky intermittency rather than a formula divergence
+    /// — the same disguise F66 wore.
+    ///
+    /// The invariant, stated the way the encoder's own comment demands:
+    /// EVERY grant for a file, whatever range it asks for, must yield
+    /// the same stripe pattern.
+    #[test]
+    fn every_request_shape_yields_the_pinned_device_set() {
+        let registry = Arc::new(DeviceRegistry::new());
+        for i in 0..3 {
+            registry.register(ds(&format!("ds-{}", i))).unwrap();
+        }
+        let stripe = 8 * 1024 * 1024u64;
+        let manager = stripe_mgr_on(&registry, stripe, crate::state_backend::memory_backend());
+
+        // The shapes a real client actually sends, sub-unit first —
+        // that is the one that broke, and the one no test covered.
+        let shapes: [(u64, u64); 7] = [
+            (0, 4096),               // the failing read: 20-byte file, 4 KiB request
+            (0, 1),                  // single byte
+            (0, stripe),             // exactly one unit
+            (0, stripe + 1),         // two units
+            (stripe * 2 + 17, 8192), // unaligned, deep in the file
+            (0, 24 * 1024 * 1024),   // the shape the old test picked
+            (0, u64::MAX),           // whole file
+        ];
+
+        let mut patterns = Vec::new();
+        for (i, (off, len)) in shapes.iter().enumerate() {
+            let layout = manager
+                .generate_layout(
+                    test_owner(1),
+                    vec![0, 1, 2, 3],
+                    "striped-file",
+                    *off,
+                    *len,
+                    IoMode::Read,
+                )
+                .unwrap();
+
+            // The pattern this grant would put on the wire.
+            let pattern: Vec<(String, u32)> = layout
+                .segments
+                .iter()
+                .map(|s| (s.device_id.clone(), s.stripe_index))
+                .collect();
+
+            assert_eq!(
+                pattern.len(),
+                3,
+                "shape {} (offset={} len={}) advertised stripe width {} — the file is \
+                 striped over 3 DSes. A narrower width re-rotates the whole pattern and \
+                 points the client at a stripe file that does not exist (zeros with OK).",
+                i, off, len, pattern.len(),
+            );
+            patterns.push(pattern);
+            manager.return_layout(&layout.stateid).unwrap();
+        }
+
+        // Every grant agrees — the property the rotation comment calls
+        // load-bearing: "every LAYOUTGET ever issued for the file has to
+        // agree, or readers reassemble the stripes in a different order
+        // than the writer laid them down."
+        for (i, p) in patterns.iter().enumerate() {
+            assert_eq!(
+                p, &patterns[0],
+                "shape {} disagrees with the whole-file grant about the stripe pattern",
+                i,
+            );
+        }
+
+        // And the wire rotation the encoder will derive from the pinned
+        // width is the placement's own — identical for every shape.
+        let placement = manager.placement_for("striped-file").expect("pinned at grant");
+        assert_eq!(placement.device_ids.len(), 3);
+        let fsi = FilePlacement::wire_first_stripe_index(placement.file_id, 3);
+        assert_eq!(fsi as u64, placement.file_id % 3);
+        // Unit 0 lives on the rotated slot, never unconditionally slot 0.
+        assert_eq!(placement.slot_for_offset(0), fsi as usize);
     }
 
     #[test]
@@ -4033,18 +4160,29 @@ mod tests {
             truncate_since_unix: None,
         }]);
 
-        let old = mgr
-            .generate_layout(test_owner(1), vec![1], "old-file", 0, 16 * 1024 * 1024, IoMode::ReadWrite)
+        // Assert the pinned size where it actually lives — the
+        // placement, which is what `operations::layoutget` copies into
+        // the layout's `stripe_unit` and the encoder puts on the wire as
+        // nfl_util. This used to read the stripe size back out of
+        // segment LENGTHS, which worked only because bounded requests
+        // were decomposed per stripe unit; the segment list is internal
+        // bookkeeping and using it as an observable for the stripe size
+        // is what let a wrong segment count go unnoticed (F-OCIAB-1/2).
+        mgr.generate_layout(test_owner(1), vec![1], "old-file", 0, 16 * 1024 * 1024, IoMode::ReadWrite)
             .unwrap();
-        assert!(
-            old.segments.iter().all(|s| s.length == 8 * 1024 * 1024),
+        assert_eq!(
+            mgr.placement_for("old-file").unwrap().stripe_size,
+            8 * 1024 * 1024,
             "pinned 8 MiB stripe must survive a 1 MiB config"
         );
 
-        let new = mgr
-            .generate_layout(test_owner(1), vec![2], "new-file", 0, 2 * 1024 * 1024, IoMode::ReadWrite)
+        mgr.generate_layout(test_owner(1), vec![2], "new-file", 0, 2 * 1024 * 1024, IoMode::ReadWrite)
             .unwrap();
-        assert!(new.segments.iter().all(|s| s.length == 1024 * 1024));
+        assert_eq!(
+            mgr.placement_for("new-file").unwrap().stripe_size,
+            1024 * 1024,
+            "a new file takes the live config's stripe size"
+        );
     }
 
     /// Grants register the composite deviceid → ordered-device-list
