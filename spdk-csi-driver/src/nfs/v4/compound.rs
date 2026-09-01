@@ -2487,8 +2487,27 @@ impl CompoundResponse {
                         encoder.encode_u32(res.result_flags);
                         // Attrset bitmap
                         encoder.encode_bitmap(&res.attrset);
-                        // Delegation (simplified - None for now)
-                        encoder.encode_u32(0); // OPEN_DELEGATE_NONE
+                        // open_delegation4 (RFC 8881 §18.16.2). The
+                        // chain lesson: this encoder, the server's
+                        // advertisement, and the client's heuristics
+                        // are three parties — never make this arm
+                        // live without DELEGRETURN decode shipped.
+                        match &res.delegation {
+                            Some(d) if d.delegation_type == 1 => {
+                                encoder.encode_u32(1); // OPEN_DELEGATE_READ
+                                encoder.encode_stateid(&d.stateid);
+                                encoder.encode_bool(false); // recall
+                                // One permissive nfsace4: ALLOW /
+                                // no flags / read mask / EVERYONE@.
+                                // Linux ignores it; a zero-length who
+                                // is riskier to foreign decoders.
+                                encoder.encode_u32(0); // ACCESS_ALLOWED_ACE_TYPE
+                                encoder.encode_u32(0); // aceflag
+                                encoder.encode_u32(0x0012_0089); // read set
+                                encoder.encode_string("EVERYONE@");
+                            }
+                            _ => encoder.encode_u32(0), // OPEN_DELEGATE_NONE
+                        }
                     }
                 }
             }
@@ -3109,6 +3128,80 @@ mod deleg_wire_tests {
         let words: Vec<u32> = b.chunks(4).map(|c| u32::from_be_bytes(c.try_into().unwrap())).collect();
         assert_eq!(words[3], opcode::DELEGRETURN);
         assert_eq!(words[4], Nfs4Status::BadStateId as u32);
+    }
+
+    /// A granted delegation actually reaches the wire: the OPEN result
+    /// encodes OPEN_DELEGATE_READ + stateid + recall=false + one
+    /// EVERYONE@ ALLOW ace — and without a grant the arm stays
+    /// OPEN_DELEGATE_NONE (the encoder hardcoded 0 for years; this is
+    /// the third party of the encoder/advertisement/heuristics chain).
+    #[test]
+    fn open_result_encodes_the_read_delegation_arm() {
+        let deleg_sid = StateId {
+            seqid: 1,
+            other: [7u8; 12],
+        };
+        let mk = |deleg: Option<Delegation>| {
+            let mut resp = CompoundResponse::new();
+            resp.status = Nfs4Status::Ok;
+            resp.tag = String::new();
+            resp.results.push(OperationResult::Open(
+                Nfs4Status::Ok,
+                Some(OpenResult {
+                    stateid: StateId {
+                        seqid: 1,
+                        other: [1u8; 12],
+                    },
+                    change_info: ChangeInfo {
+                        atomic: true,
+                        before: 0,
+                        after: 0,
+                    },
+                    result_flags: 0,
+                    attrset: vec![],
+                    delegation: deleg,
+                }),
+            ));
+            resp.encode()
+        };
+
+        // No grant: the delegation word (after stateid(4) + cinfo(5) +
+        // rflags(1) + empty bitmap(1) = 11 words past the op status)
+        // is OPEN_DELEGATE_NONE and the reply ends there.
+        let b = mk(None);
+        let words: Vec<u32> = b
+            .chunks(4)
+            .map(|c| u32::from_be_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(words[3], opcode::OPEN);
+        assert_eq!(words[4], Nfs4Status::Ok as u32);
+        let deleg_at = 5 + 4 + 5 + 1 + 1;
+        assert_eq!(words[deleg_at], 0, "OPEN_DELEGATE_NONE");
+        assert_eq!(words.len(), deleg_at + 1, "reply ends after the NONE arm");
+
+        // Granted: READ arm with the delegation stateid verbatim, then
+        // recall=false, then the single permissive ace.
+        let b = mk(Some(Delegation {
+            delegation_type: 1,
+            stateid: deleg_sid,
+        }));
+        let words: Vec<u32> = b
+            .chunks(4)
+            .map(|c| u32::from_be_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(words[deleg_at], 1, "OPEN_DELEGATE_READ");
+        assert_eq!(words[deleg_at + 1], 1, "delegation stateid.seqid");
+        assert_eq!(
+            words[deleg_at + 2],
+            u32::from_be_bytes([7, 7, 7, 7]),
+            "delegation stateid.other travels verbatim"
+        );
+        assert_eq!(words[deleg_at + 5], 0, "recall=false at grant");
+        assert_eq!(words[deleg_at + 6], 0, "ace type ALLOW");
+        assert_eq!(words[deleg_at + 7], 0, "ace flag");
+        assert_eq!(words[deleg_at + 8], 0x0012_0089, "ace access mask");
+        assert_eq!(words[deleg_at + 9], 9, "who length");
+        assert_eq!(&b[(deleg_at + 10) * 4..(deleg_at + 10) * 4 + 9], b"EVERYONE@");
     }
 }
 

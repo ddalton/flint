@@ -301,7 +301,26 @@ pub struct DelegationManager {
     refusals: DashMap<&'static str, u64>,
     /// Grants ever made (metrics).
     grants_total: AtomicU64,
+    /// Recent revocation stamps, pruned to the 5-minute breaker
+    /// window (design §10 layer 3). Global trip stops NEW grants only
+    /// — recalls, returns, and SEQ4 keep running so state drains —
+    /// and resets itself once the window rolls quiet.
+    revocations: Mutex<Vec<Instant>>,
+    /// Same, per client: one NAT-broken fleet member must not darken
+    /// delegations for everyone, so its grants are refused first.
+    revocations_by_client: DashMap<u64, Vec<Instant>>,
+    breaker_trip: usize,
+    breaker_client_trip: usize,
+    /// Sentinel kill-switch cache (design §10 layer 2): the presence
+    /// of `<export>/.flint-nfs/deleg-off`, re-checked at most every
+    /// ~5s. The true manual, no-restart grant stop.
+    sentinel_cache: Mutex<Option<(Instant, bool)>>,
 }
+
+/// Breaker window (design §10: revocations within 5 minutes).
+const BREAKER_WINDOW: Duration = Duration::from_secs(300);
+/// Sentinel re-check interval.
+const SENTINEL_TTL: Duration = Duration::from_secs(5);
 
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
@@ -332,7 +351,48 @@ impl DelegationManager {
             cooldown,
             refusals: DashMap::new(),
             grants_total: AtomicU64::new(0),
+            revocations: Mutex::new(Vec::new()),
+            revocations_by_client: DashMap::new(),
+            breaker_trip: env_u64("FLINT_NFS_DELEG_REVOKE_TRIP", 10) as usize,
+            breaker_client_trip: env_u64("FLINT_NFS_DELEG_CLIENT_REVOKE_TRIP", 3) as usize,
+            sentinel_cache: Mutex::new(None),
         }
+    }
+
+    /// Is the automatic circuit breaker refusing NEW grants — either
+    /// globally (fleet-wide revocation storm) or for this client (its
+    /// own recalls keep dying)? Pruning happens on read, so a quiet
+    /// window auto-resets the trip.
+    pub fn grants_paused(&self, client_id: u64) -> bool {
+        let now = Instant::now();
+        {
+            let mut v = self.revocations.lock().unwrap();
+            v.retain(|t| now.duration_since(*t) < BREAKER_WINDOW);
+            if v.len() >= self.breaker_trip {
+                return true;
+            }
+        }
+        if let Some(mut v) = self.revocations_by_client.get_mut(&client_id) {
+            v.retain(|t| now.duration_since(*t) < BREAKER_WINDOW);
+            if v.len() >= self.breaker_client_trip {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Is the sentinel kill-switch file present under the export?
+    /// Cached ~5s; the watcher IS this cache (no background task).
+    pub fn sentinel_blocked(&self, export_root: &std::path::Path) -> bool {
+        let mut cache = self.sentinel_cache.lock().unwrap();
+        if let Some((at, val)) = *cache {
+            if at.elapsed() < SENTINEL_TTL {
+                return val;
+            }
+        }
+        let present = export_root.join(".flint-nfs").join("deleg-off").exists();
+        *cache = Some((Instant::now(), present));
+        present
     }
 
     fn entry(&self, ident: FileId) -> Arc<Mutex<FileEntry>> {
@@ -364,6 +424,19 @@ impl DelegationManager {
     fn note_refusal(&self, r: GrantRefusal) -> GrantRefusal {
         *self.refusals.entry(r.counter_name()).or_insert(0) += 1;
         r
+    }
+
+    /// Count a handler-level refusal (gate/grace/claim/share_want/
+    /// no_cb/no_ident — the rules that run before the entry lock).
+    /// Same counter family as the manager's own reasons, so the
+    /// grant/refusal split reads as one surface.
+    pub fn count_refusal(&self, reason: &'static str) {
+        *self.refusals.entry(reason).or_insert(0) += 1;
+    }
+
+    /// Read any refusal counter by name (metrics + rigs).
+    pub fn refusal_count_named(&self, reason: &str) -> u64 {
+        self.refusals.get(reason).map(|v| *v).unwrap_or(0)
     }
 
     /// Grant a READ delegation on `ident` to `client_id`, or say why
@@ -634,6 +707,14 @@ impl DelegationManager {
         // until FREE_STATEID or teardown.
         self.live_global.fetch_sub(1, Ordering::SeqCst);
         self.dec_live_client(client);
+        // Feed the breaker (design §10 layer 3): enough of these in
+        // the window pauses new grants, per-client first.
+        let now = Instant::now();
+        self.revocations.lock().unwrap().push(now);
+        self.revocations_by_client
+            .entry(client)
+            .or_insert_with(Vec::new)
+            .push(now);
         Some(client)
     }
 
@@ -783,6 +864,26 @@ impl DelegationManager {
             .get(&client_id)
             .map(|v| v.len())
             .unwrap_or(0)
+    }
+
+    /// Does the client still hold any REVOKED tombstone? The SEQ4
+    /// RECALLABLE_STATE_REVOKED bit is level-triggered on exactly
+    /// this: raised at revocation, lowered when FREE_STATEID drops
+    /// the last one.
+    pub fn client_has_revoked(&self, client_id: u64) -> bool {
+        let others: Vec<[u8; 12]> = match self.by_client.get(&client_id) {
+            Some(v) => v.clone(),
+            None => return false,
+        };
+        for other in others {
+            let sid = StateId { seqid: 1, other };
+            if let Some(snap) = self.snapshot(&sid) {
+                if snap.state == DelegState::Revoked {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Live delegations across all clients (metrics; idle input).

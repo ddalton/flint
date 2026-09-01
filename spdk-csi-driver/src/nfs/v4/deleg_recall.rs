@@ -169,6 +169,10 @@ impl RecallDriver {
                 "deleg ladder: REVOKING {:?} held by client {} ({})",
                 order.stateid, client, why
             );
+            // Both managers carry the revocation: the delegation
+            // table's tombstone blocks re-grants; the stateid entry's
+            // revoked flag is what TEST_STATEID/FREE_STATEID key off.
+            let _ = self.state_mgr.stateids.revoke(&order.stateid);
             self.state_mgr
                 .raise_seq_flags(client, seq4_status::RECALLABLE_STATE_REVOKED);
         }

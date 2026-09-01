@@ -129,7 +129,10 @@ pub struct OpenRes {
     pub stateid: Option<StateId>,
     pub change_info: Option<ChangeInfo>,
     pub result_flags: u32,
-    pub delegation: OpenDelegationType,
+    /// A granted READ delegation's stateid (the only kind flint
+    /// grants), or None = OPEN_DELEGATE_NONE. The dispatcher threads
+    /// this into the OPEN result's delegation arm.
+    pub delegation: Option<StateId>,
     pub attrset: Vec<u32>,  // Which CREATE attrs were set
 }
 
@@ -607,6 +610,12 @@ impl IoOperationHandler {
                op.share_access, op.share_deny);
         debug!("OPEN: openhow={:?}, claim={:?}", op.openhow, op.claim);
 
+        // Grant rule 3 (design §4) wants the claim AS SENT: only
+        // CLAIM_NULL / CLAIM_FH opens are grantable, and the
+        // normalization below rewrites reclaim/conversion claims into
+        // those very shapes.
+        let claim_grantable = matches!(&op.claim, OpenClaim::Null(_) | OpenClaim::Fh);
+
         // Normalize the delegation-flavoured claims up front so the rest
         // of the handler keeps its two resolution shapes (by-name /
         // by-CFH). Order matters: a conversion open validates its
@@ -634,7 +643,7 @@ impl IoOperationHandler {
                             stateid: None,
                             change_info: None,
                             result_flags: 0,
-                            delegation: OpenDelegationType::None,
+                            delegation: None,
                             attrset: vec![],
                         };
                     }
@@ -667,7 +676,7 @@ impl IoOperationHandler {
                     stateid: None,
                     change_info: None,
                     result_flags: 0,
-                    delegation: OpenDelegationType::None,
+                    delegation: None,
                     attrset: vec![],
                 };
             }
@@ -686,7 +695,7 @@ impl IoOperationHandler {
                         stateid: None,
                         change_info: None,
                         result_flags: 0,
-                        delegation: OpenDelegationType::None,
+                        delegation: None,
                         attrset: vec![],
                     };
                 }
@@ -718,7 +727,7 @@ impl IoOperationHandler {
                         stateid: None,
                         change_info: None,
                         result_flags: 0,
-                        delegation: OpenDelegationType::None,
+                        delegation: None,
                         attrset: vec![],
                     };
                 }
@@ -744,7 +753,7 @@ impl IoOperationHandler {
                     stateid: None,
                     change_info: None,
                     result_flags: 0,
-                    delegation: OpenDelegationType::None,
+                    delegation: None,
                     attrset: vec![],
                 };
             }
@@ -791,7 +800,7 @@ impl IoOperationHandler {
                                     stateid: None,
                                     change_info: None,
                                     result_flags: 0,
-                                    delegation: OpenDelegationType::None,
+                                    delegation: None,
                                     attrset: vec![],
                                 };
                             }
@@ -818,7 +827,7 @@ impl IoOperationHandler {
                                 stateid: None,
                                 change_info: None,
                                 result_flags: 0,
-                                delegation: OpenDelegationType::None,
+                                delegation: None,
                                 attrset: vec![],
                             };
                         }
@@ -842,7 +851,7 @@ impl IoOperationHandler {
                     stateid: None,
                     change_info: None,
                     result_flags: 0,
-                    delegation: OpenDelegationType::None,
+                    delegation: None,
                     attrset: vec![],
                 };
             }
@@ -875,7 +884,7 @@ impl IoOperationHandler {
                                     stateid: None,
                                     change_info: None,
                                     result_flags: 0,
-                                    delegation: OpenDelegationType::None,
+                                    delegation: None,
                                     attrset: vec![],
                                 };
                             }
@@ -891,7 +900,7 @@ impl IoOperationHandler {
                                 stateid: None,
                                 change_info: None,
                                 result_flags: 0,
-                                delegation: OpenDelegationType::None,
+                                delegation: None,
                                 attrset: vec![],
                             };
                         }
@@ -935,7 +944,7 @@ impl IoOperationHandler {
                                 stateid: None,
                                 change_info: None,
                                 result_flags: 0,
-                                delegation: OpenDelegationType::None,
+                                delegation: None,
                                 attrset: vec![],
                             };
                         }
@@ -979,7 +988,7 @@ impl IoOperationHandler {
                                 stateid: None,
                                 change_info: None,
                                 result_flags: 0,
-                                delegation: OpenDelegationType::None,
+                                delegation: None,
                                 attrset: vec![],
                             };
                         }
@@ -1005,7 +1014,7 @@ impl IoOperationHandler {
                                 stateid: None,
                                 change_info: None,
                                 result_flags: 0,
-                                delegation: OpenDelegationType::None,
+                                delegation: None,
                                 attrset: attr_numbers_to_bitmap(&applied_attrs),
                             };
                         }
@@ -1110,7 +1119,7 @@ impl IoOperationHandler {
                                     stateid: None,
                                     change_info: None,
                                     result_flags: 0,
-                                    delegation: OpenDelegationType::None,
+                                    delegation: None,
                                     attrset: vec![],
                                 };
                             }
@@ -1136,7 +1145,7 @@ impl IoOperationHandler {
                                     stateid: None,
                                     change_info: None,
                                     result_flags: 0,
-                                    delegation: OpenDelegationType::None,
+                                    delegation: None,
                                     attrset: vec![],
                                 };
                             }
@@ -1214,7 +1223,7 @@ impl IoOperationHandler {
                                     }
                                 }),
                                 result_flags: OPEN4_RESULT_LOCKTYPE_POSIX,
-                                delegation: OpenDelegationType::None,
+                                delegation: None,
                                 // Attrs actually applied — not an echo of the
                                 // request mask (RFC 8881 §18.16.3 attrset).
                                 attrset: attr_numbers_to_bitmap(&applied_attrs),
@@ -1227,7 +1236,7 @@ impl IoOperationHandler {
                                 stateid: None,
                                 change_info: None,
                                 result_flags: 0,
-                                delegation: OpenDelegationType::None,
+                                delegation: None,
                                 attrset: vec![],
                             };
                         }
@@ -1253,7 +1262,7 @@ impl IoOperationHandler {
                         stateid: None,
                         change_info: None,
                         result_flags: 0,
-                        delegation: OpenDelegationType::None,
+                        delegation: None,
                         attrset: vec![],
                     };
                 }
@@ -1271,7 +1280,7 @@ impl IoOperationHandler {
                 stateid: None,
                 change_info: None,
                 result_flags: 0,
-                delegation: OpenDelegationType::None,
+                delegation: None,
                 attrset: vec![],
             };
         }
@@ -1349,7 +1358,7 @@ impl IoOperationHandler {
                                     stateid: None,
                                     change_info: None,
                                     result_flags: 0,
-                                    delegation: OpenDelegationType::None,
+                                    delegation: None,
                                     attrset: vec![],
                                 };
                             }
@@ -1387,7 +1396,7 @@ impl IoOperationHandler {
                     stateid: None,
                     change_info: None,
                     result_flags: 0,
-                    delegation: OpenDelegationType::None,
+                    delegation: None,
                     attrset: vec![],
                 };
             }
@@ -1419,7 +1428,7 @@ impl IoOperationHandler {
                             stateid: None,
                             change_info: None,
                             result_flags: 0,
-                            delegation: OpenDelegationType::None,
+                            delegation: None,
                             attrset: vec![],
                         };
                     }
@@ -1445,7 +1454,7 @@ impl IoOperationHandler {
                 stateid: None,
                 change_info: None,
                 result_flags: 0,
-                delegation: OpenDelegationType::None,
+                delegation: None,
                 attrset: vec![],
             };
         }
@@ -1477,7 +1486,7 @@ impl IoOperationHandler {
                             stateid: None,
                             change_info: None,
                             result_flags: 0,
-                            delegation: OpenDelegationType::None,
+                            delegation: None,
                             attrset: vec![],
                         };
                     }
@@ -1488,6 +1497,7 @@ impl IoOperationHandler {
         // Record-or-bump the open (RFC 7530 §16.16: same (client,
         // owner, fh) gets the SAME stateid.other with seqid bumped,
         // share-mask merged).
+        let fh_for_grant = target_fh_data.clone();
         let stateid = self.state_mgr.stateids.record_open(
             client_id,
             op.owner.clone(),
@@ -1505,11 +1515,18 @@ impl IoOperationHandler {
             self.seed_open_fd(&stateid, p, target_live);
         }
 
-        // Try to grant read delegation if appropriate
+        // Design §4: the full grant rule set. Runs AFTER open-state
+        // registration — the requester's own open is READ-only by
+        // rule 4, so it never trips the write-open predicate — and
+        // any refusal is free (NONE, never DELAY).
         let delegation = self.try_grant_read_delegation(
+            ctx,
             client_id,
-            current_fh,
-            op.share_access,
+            &op,
+            claim_grantable,
+            open_ident,
+            target_path.as_deref(),
+            &fh_for_grant,
         );
 
         // F69: CFH becomes the opened file (RFC 8881 §18.16.3) so the
@@ -1549,27 +1566,126 @@ impl IoOperationHandler {
     /// - Client is opening for READ only (not WRITE)
     /// - No other clients have the file open for WRITE
     /// - File is not being actively modified
+    /// The grant rule set (design §4), in order, first failure wins.
+    /// Every refusal answers OPEN_DELEGATE_NONE and bumps its
+    /// per-reason counter — delegations are optional and refusal must
+    /// be free, so nothing here ever DELAYs.
     fn try_grant_read_delegation(
         &self,
-        _client_id: u64,
-        _filehandle: &Nfs4FileHandle,
-        _share_access: u32,
-    ) -> OpenDelegationType {
-        // Delegations are disabled unless FLINT_NFS_DELEGATIONS=1: granting
-        // one is only safe with a working recall path (CB_RECALL + the
-        // mutation fence + the DELAY ladder). Never granting is fully
-        // RFC-compliant (RFC 8881 §10.4).
+        _ctx: &CompoundContext,
+        client_id: u64,
+        op: &OpenOp,
+        claim_grantable: bool,
+        ident: Option<(u64, u64)>,
+        path: Option<&std::path::Path>,
+        fh_bytes: &[u8],
+    ) -> Option<StateId> {
+        let d = &self.state_mgr.delegations;
+
+        // Rule 1 — gates. The env flag; the recall machinery (a
+        // delegation the server cannot recall is the stale-forever
+        // trap); the MDS posture (refused wholesale until slice 5
+        // lands the write-capable-layout rule behind its own flag);
+        // the circuit breaker (per-client quarantine first); the
+        // sentinel kill-switch file.
         if !delegations_enabled() {
-            return OpenDelegationType::None;
+            return None; // the default path — not a counted refusal
+        }
+        if !self.state_mgr.recall_machinery_ready() || self.state_mgr.pnfs_posture() {
+            d.count_refusal("gate");
+            return None;
+        }
+        if d.grants_paused(client_id) {
+            d.count_refusal("gate");
+            return None;
+        }
+        if d.sentinel_blocked(self.fh_mgr.get_export_path()) {
+            d.count_refusal("gate");
+            return None;
         }
 
-        // The DelegationManager core is in place, but the grant stays
-        // OFF until the recall path exists end-to-end: minting a record
-        // the server cannot recall — or one the client is never told
-        // about (the OPEN encoder still hardcodes OPEN_DELEGATE_NONE) —
-        // is exactly the phantom-grant trap this replaced. The full
-        // rule set is design §4; it goes live with the wire delivery.
-        OpenDelegationType::None
+        // Rule 2 — grace, with the anything_reclaimable nuance: a
+        // fresh-PVC / hibernate wake with nothing reclaimable does
+        // NOT blackout grants for 90s. When grace is real, no grants
+        // (a new grant could conflict with an unreclaimed
+        // pre-restart write open).
+        if self.state_mgr.leases.in_grace_period()
+            && self.state_mgr.leases.anything_reclaimable()
+        {
+            d.count_refusal("grace");
+            return None;
+        }
+
+        // Rule 3 — claim shape AS SENT: CLAIM_NULL / CLAIM_FH on the
+        // no-create arm only (this fn is only called from it). The
+        // create arm stays NONE on every path — a just-created file
+        // has no warm re-access value, and skipping it removes a
+        // class of create/truncate races.
+        if !claim_grantable {
+            d.count_refusal("claim");
+            return None;
+        }
+
+        // Rule 4 — share bits, MASKED not compared: read-only access,
+        // no deny, and the client isn't asking us not to (want bits
+        // WANT_NO_DELEG / WANT_CANCEL). The old exact-match `== 1`
+        // would silently refuse any client that sets want bits.
+        let want = op.share_access & 0xFF00;
+        if (op.share_access & 0x3) != 1
+            || op.share_deny != 0
+            || want == 0x0400 // OPEN4_SHARE_ACCESS_WANT_NO_DELEG
+            || want == 0x0500 // OPEN4_SHARE_ACCESS_WANT_CANCEL
+        {
+            d.count_refusal("share_want");
+            return None;
+        }
+
+        // Rule 7 — backchannel health: the recall path must exist for
+        // THIS client before the server owes it a recall.
+        if !self.state_mgr.callback_ready(client_id) {
+            d.count_refusal("no_cb");
+            return None;
+        }
+
+        // Rule 5 precondition — the file must be identifiable, or the
+        // write-open predicate could silently answer "no writers"
+        // about a file it cannot see.
+        let (Some(ident), Some(path)) = (ident, path) else {
+            d.count_refusal("no_ident");
+            return None;
+        };
+
+        // Rules 5, 8, 9 — re-checked UNDER the file entry lock, with
+        // the mint into the ONE stateid namespace (READ/TEST/FREE_
+        // STATEID work on delegation stateids; no disjoint-namespace
+        // BAD_STATEID trap). Unpersisted + epoch-mixed (design §6).
+        match d.try_grant(
+            crate::nfs::v4::state::FileId::new(ident.0, ident.1),
+            client_id,
+            fh_bytes.to_vec(),
+            path.to_path_buf(),
+            || !self.state_mgr.stateids.file_has_write_open(ident.0, ident.1),
+            || {
+                self.state_mgr
+                    .stateids
+                    .allocate_delegation(client_id, fh_bytes.to_vec())
+            },
+        ) {
+            Ok(sid) => {
+                info!(
+                    "OPEN: granted READ delegation {:?} on {:?} to client {}",
+                    sid, path, client_id
+                );
+                Some(sid)
+            }
+            Err(refusal) => {
+                debug!(
+                    "OPEN: delegation refused for client {} on {:?}: {:?}",
+                    client_id, path, refusal
+                );
+                None
+            }
+        }
     }
 
     /// Handle DELEGRETURN operation
@@ -3437,7 +3553,7 @@ mod tests {
         let res = handler.handle_open(op, &mut ctx).await;
         assert_eq!(res.status, Nfs4Status::Ok);
         assert!(res.stateid.is_some());
-        assert_eq!(res.delegation, OpenDelegationType::None);
+        assert_eq!(res.delegation, None, "gate off ⇒ OPEN_DELEGATE_NONE");
     }
 
     #[tokio::test]
@@ -3958,12 +4074,26 @@ mod tests {
         let (handler, fh_mgr, _temp) = create_test_handler();
 
         assert!(!delegations_enabled());
+        let ctx = CompoundContext::new(0);
+        let op = OpenOp {
+            seqid: 0,
+            share_access: OPEN4_SHARE_ACCESS_READ,
+            share_deny: 0,
+            owner: b"pin-owner".to_vec(),
+            openhow: OpenHow::NoCreate,
+            claim: OpenClaim::Fh,
+        };
         let delegation = handler.try_grant_read_delegation(
+            &ctx,
             1,
-            &fh_mgr.get_root_fh().unwrap(),
-            OPEN4_SHARE_ACCESS_READ,
+            &op,
+            true,
+            Some((1, 1)),
+            Some(std::path::Path::new("/x")),
+            fh_mgr.get_root_fh().unwrap().data.as_slice(),
         );
-        assert_eq!(delegation, OpenDelegationType::None);
+        assert_eq!(delegation, None);
+        assert_eq!(handler.state_mgr.delegations.live_count(), 0);
     }
 
     /// The escape, run end to end as a client would run it.

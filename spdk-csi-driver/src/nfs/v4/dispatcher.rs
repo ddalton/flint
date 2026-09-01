@@ -136,7 +136,7 @@ impl CompoundDispatcher {
         let lock_handler = LockOperationHandler::new(state_mgr.clone(), lock_mgr.clone())
             .with_fh_mgr(fh_mgr.clone());
 
-        Self {
+        let this = Self {
             state_mgr,
             session_handler,
             file_handler,
@@ -148,7 +148,16 @@ impl CompoundDispatcher {
             pnfs_handler,
             back_channels: Arc::new(dashmap::DashMap::new()),
             session_bound_conns: dashmap::DashMap::new(),
+        };
+        // The grant path's callback_ready (rule 7) and the MDS
+        // posture refusal both live on StateManager; hand it the
+        // listener-side facts it cannot know at its own construction.
+        this.state_mgr
+            .install_back_channels(Arc::clone(&this.back_channels));
+        if this.pnfs_handler.is_some() {
+            this.state_mgr.set_pnfs_posture();
         }
+        this
     }
 
     /// Record that the compound's connection is bound to `sid`. No-op for
@@ -235,32 +244,10 @@ impl CompoundDispatcher {
     /// wiring it in there is a ~5-line follow-up kept out of the
     /// delegation change's blast radius.
     pub fn callback_ready(&self, client_id: u64) -> bool {
-        for sid in self.state_mgr.sessions.get_client_sessions(client_id) {
-            let Some(sess) = self.state_mgr.sessions.get_session(&sid) else {
-                continue;
-            };
-            if sess.cb_program == 0 {
-                continue;
-            }
-            if matches!(
-                sess.cb_cred,
-                Some(crate::nfs::v4::compound::CallbackSecParms::Gss)
-            ) {
-                continue;
-            }
-            if sess.back_chan_maxops < 2 {
-                continue;
-            }
-            let has_writer = self
-                .back_channels
-                .get(&sid)
-                .map(|w| !w.is_empty())
-                .unwrap_or(false);
-            if has_writer {
-                return true;
-            }
-        }
-        false
+        // Body moved to StateManager (the grant path in the OPEN
+        // handler consults it there); the registry is installed at
+        // construction.
+        self.state_mgr.callback_ready(client_id)
     }
 
     /// Check if an opcode is a pNFS operation
@@ -1192,6 +1179,16 @@ impl CompoundDispatcher {
                 debug!("TEST_STATEID: testing {} stateids", stateids.len());
                 let mut statuses = Vec::with_capacity(stateids.len());
                 for stateid in stateids {
+                    // A revoked delegation answers its own name
+                    // (design §5.4): DELEG_REVOKED tells the client to
+                    // FREE_STATEID it, where BAD_STATEID would only
+                    // say "never heard of it".
+                    if let Some(snap) = self.state_mgr.delegations.snapshot(&stateid) {
+                        if snap.state == crate::nfs::v4::state::DelegState::Revoked {
+                            statuses.push(Nfs4Status::DelegRevoked);
+                            continue;
+                        }
+                    }
                     match self.state_mgr.stateids.validate(&stateid) {
                         Ok(()) => {
                             debug!("TEST_STATEID: {:?} is valid", stateid);
@@ -1690,7 +1687,14 @@ impl CompoundDispatcher {
                             },
                             result_flags: res.result_flags,
                             attrset: res.attrset,
-                            delegation: None,  // TODO: Implement delegation support
+                            // A granted READ delegation rides the OPEN
+                            // reply (design §4 wire delivery).
+                            delegation: res.delegation.map(|sid| {
+                                crate::nfs::v4::compound::Delegation {
+                                    delegation_type: 1, // OPEN_DELEGATE_READ
+                                    stateid: sid,
+                                }
+                            }),
                         }))
                     } else {
                         OperationResult::Open(res.status, None)
@@ -2227,6 +2231,24 @@ impl CompoundDispatcher {
                     // Revoked state exists precisely so the client can learn
                     // of the revocation and then free it — this must succeed.
                     Some(e) if e.revoked => {
+                        if e.state_type == StateType::Delegation {
+                            // A revoked delegation tombstone: drop it
+                            // from the delegation table (the re-grant
+                            // barrier lifts), and lower the SEQ4 bit
+                            // once the client's LAST tombstone is gone
+                            // — the flag is level-triggered (design
+                            // §5.4).
+                            let client = e.client_id;
+                            self.state_mgr.delegations.free_revoked(&stateid);
+                            self.state_mgr.stateids.close_open_state(&stateid.other);
+                            if !self.state_mgr.delegations.client_has_revoked(client) {
+                                self.state_mgr.lower_seq_flags(
+                                    client,
+                                    crate::nfs::v4::protocol::seq4_status::RECALLABLE_STATE_REVOKED,
+                                );
+                            }
+                            return OperationResult::FreeStateId(Nfs4Status::Ok);
+                        }
                         self.state_mgr.stateids.close_open_state(&stateid.other);
                         OperationResult::FreeStateId(Nfs4Status::Ok)
                     }
@@ -4960,6 +4982,376 @@ mod tests {
         assert!(
             !dispatcher.callback_ready(7),
             "un-negotiated back channel must not read as callback-capable",
+        );
+    }
+
+    /// THE GRANT PATH END TO END (design §4, slice 3): flag forced on,
+    /// machinery installed, callback-ready client — a read-only
+    /// CLAIM_NULL OPEN of an existing file carries OPEN_DELEGATE_READ
+    /// with a stateid minted in the ONE namespace; a second client's
+    /// write-OPEN answers DELAY and fires the recall spawner exactly
+    /// once (single-flight); DELEGRETURN drains the barrier and the
+    /// writer's retry proceeds. The same OPEN with the flag back off
+    /// stays NONE (the pinned default).
+    #[tokio::test]
+    async fn a_ready_client_gets_a_delegation_and_a_writer_forces_recall() {
+        use crate::nfs::v4::compound::CallbackSecParms;
+        struct FlagGuard;
+        impl Drop for FlagGuard {
+            fn drop(&mut self) {
+                crate::nfs::v4::state::override_delegations_enabled(None);
+            }
+        }
+        crate::nfs::v4::state::override_delegations_enabled(Some(true));
+        let _flag = FlagGuard;
+
+        let (dispatcher, t) = create_test_dispatcher();
+        std::fs::write(t.path().join("warm.txt"), b"warm bytes").unwrap();
+        dispatcher.state_mgr.leases.end_grace();
+
+        // The recall machinery, with the ladder replaced by a capture
+        // sink — this test is about the grant/fence/return story, and
+        // the ladder has its own paused-clock suite.
+        let captured: Arc<std::sync::Mutex<Vec<crate::nfs::v4::state::RecallOrder>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap = Arc::clone(&captured);
+        dispatcher
+            .state_mgr
+            .install_recall_spawner(Arc::new(move |orders| {
+                cap.lock().unwrap().extend(orders);
+            }));
+
+        let mk_writer = || async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (conn, acc) =
+                tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept());
+            let (_r, w) = conn.unwrap().into_split();
+            std::mem::forget(acc.unwrap());
+            crate::nfs::v4::back_channel::BackChannelWriter::new(
+                tokio::io::BufWriter::new(w),
+            )
+        };
+
+        // Reader: callback-ready client 71.
+        let s1 = dispatcher.state_mgr.sessions.create_session(
+            71, 0, 0, 65536, 65536, 16384, 16, 16, 0x40000000,
+            Some(CallbackSecParms::None), 1,
+        );
+        dispatcher
+            .state_mgr
+            .sessions
+            .set_back_chan_maxops(&s1.session_id, 2);
+        dispatcher
+            .back_channels
+            .insert(s1.session_id, vec![mk_writer().await]);
+
+        let open_op = |share_access: u32, owner: &[u8]| Operation::Open {
+            seqid: 0,
+            share_access,
+            share_deny: 0,
+            owner: owner.to_vec(),
+            openhow: crate::nfs::v4::compound::OpenHow {
+                createmode: 0,
+                attrs: None,
+                attrmask: Vec::new(),
+            },
+            claim: crate::nfs::v4::compound::OpenClaim {
+                claim_type: 0,
+                file: "warm.txt".to_string(),
+                delegate_type: None,
+                delegate_stateid: None,
+            },
+        };
+
+        let mut ctx1 = CompoundContext::new(1);
+        ctx1.session_id = Some(s1.session_id);
+        let put = dispatcher
+            .dispatch_operation(Operation::PutRootFh, &mut ctx1)
+            .await;
+        assert!(matches!(put, OperationResult::PutRootFh(Nfs4Status::Ok)));
+        let res = dispatcher
+            .dispatch_operation(open_op(1, b"reader"), &mut ctx1)
+            .await;
+        let deleg_sid = match res {
+            OperationResult::Open(Nfs4Status::Ok, Some(ref open_res)) => {
+                let d = open_res
+                    .delegation
+                    .as_ref()
+                    .expect("a ready client must be GRANTED a read delegation");
+                assert_eq!(d.delegation_type, 1, "OPEN_DELEGATE_READ");
+                d.stateid
+            }
+            other => panic!("expected a granted OPEN, got {other:?}"),
+        };
+        assert_eq!(dispatcher.state_mgr.delegations.live_count(), 1);
+        assert!(
+            dispatcher.state_mgr.stateids.is_delegation(&deleg_sid),
+            "the delegation stateid must live in the ONE stateid namespace"
+        );
+
+        // Writer: client 72 (not callback-ready — irrelevant for a
+        // write open) opens for WRITE → DELAY + exactly one recall.
+        let s2 = dispatcher.state_mgr.sessions.create_session(
+            72, 0, 0, 65536, 65536, 16384, 16, 16, 0, None, 1,
+        );
+        let mut ctx2 = CompoundContext::new(1);
+        ctx2.session_id = Some(s2.session_id);
+        let put = dispatcher
+            .dispatch_operation(Operation::PutRootFh, &mut ctx2)
+            .await;
+        assert!(matches!(put, OperationResult::PutRootFh(Nfs4Status::Ok)));
+        let res = dispatcher
+            .dispatch_operation(open_op(2, b"writer"), &mut ctx2)
+            .await;
+        assert!(
+            matches!(res, OperationResult::Open(Nfs4Status::Delay, None)),
+            "a write OPEN against a delegated file must DELAY, got {res:?}"
+        );
+        {
+            let orders = captured.lock().unwrap();
+            assert_eq!(orders.len(), 1, "exactly one recall order (single-flight)");
+            assert_eq!(orders[0].client_id, 71);
+            assert_eq!(orders[0].stateid, deleg_sid);
+        }
+        // The writer retries while the recall is pending: DELAY again,
+        // and NO new recall order.
+        let res = dispatcher
+            .dispatch_operation(open_op(2, b"writer"), &mut ctx2)
+            .await;
+        assert!(matches!(res, OperationResult::Open(Nfs4Status::Delay, None)));
+        assert_eq!(captured.lock().unwrap().len(), 1, "no re-send on retry");
+
+        // The reader returns its delegation; the barrier lifts and the
+        // writer's next retry proceeds.
+        let res = dispatcher
+            .dispatch_operation(Operation::DelegReturn { stateid: deleg_sid }, &mut ctx1)
+            .await;
+        assert!(
+            matches!(res, OperationResult::DelegReturn(Nfs4Status::Ok)),
+            "DELEGRETURN of the granted stateid must succeed, got {res:?}"
+        );
+        assert_eq!(dispatcher.state_mgr.delegations.live_count(), 0);
+        let res = dispatcher
+            .dispatch_operation(open_op(2, b"writer"), &mut ctx2)
+            .await;
+        assert!(
+            matches!(res, OperationResult::Open(Nfs4Status::Ok, Some(_))),
+            "after DELEGRETURN the writer proceeds, got {res:?}"
+        );
+
+        // And with the flag off again, the same shaped OPEN grants
+        // nothing (the pinned default, now proven against the LIVE
+        // grant path rather than a stub).
+        crate::nfs::v4::state::override_delegations_enabled(Some(false));
+        let mut ctx3 = CompoundContext::new(1);
+        ctx3.session_id = Some(s1.session_id);
+        let put = dispatcher
+            .dispatch_operation(Operation::PutRootFh, &mut ctx3)
+            .await;
+        assert!(matches!(put, OperationResult::PutRootFh(Nfs4Status::Ok)));
+        let res = dispatcher
+            .dispatch_operation(open_op(1, b"reader2"), &mut ctx3)
+            .await;
+        match res {
+            OperationResult::Open(Nfs4Status::Ok, Some(ref open_res)) => {
+                assert!(open_res.delegation.is_none(), "flag off ⇒ NONE");
+            }
+            other => panic!("expected plain OPEN, got {other:?}"),
+        }
+    }
+
+    /// THE REVOCATION LOOP, CLIENT-VISIBLE END TO END (design §5.4/§6):
+    /// a holder whose recall is definitively refused gets revoked by
+    /// the REAL ladder; the SEQ4 bit rises; TEST_STATEID names the
+    /// tombstone DELEG_REVOKED (not BAD_STATEID); FREE_STATEID drops
+    /// it, the level-triggered bit falls, and the DELAYed writer
+    /// proceeds. Silent revocation is the design's named worst case —
+    /// this is the test that says it cannot happen.
+    #[tokio::test]
+    async fn a_revoked_tombstone_walks_test_free_and_lowers_seq4() {
+        use crate::nfs::v4::cb_compound::{CbCompoundReply, CbResult};
+        use crate::nfs::v4::compound::CallbackSecParms;
+        use crate::nfs::v4::deleg_recall::{RecallDriver, RecallSender};
+        use crate::nfs::v4::protocol::seq4_status;
+
+        struct FlagGuard;
+        impl Drop for FlagGuard {
+            fn drop(&mut self) {
+                crate::nfs::v4::state::override_delegations_enabled(None);
+            }
+        }
+        crate::nfs::v4::state::override_delegations_enabled(Some(true));
+        let _flag = FlagGuard;
+
+        // A sender whose client always refuses the recall outright —
+        // the ladder classifies NOTSUPP as definitive and revokes
+        // without waiting out any window.
+        struct RefusingSender;
+        impl RecallSender for RefusingSender {
+            fn send_recall(
+                &self,
+                _client_id: u64,
+                _stateid: StateId,
+                _truncate: bool,
+                _fh: Vec<u8>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                CbCompoundReply,
+                                crate::nfs::v4::back_channel::CallbackError,
+                            >,
+                        > + Send,
+                >,
+            > {
+                Box::pin(async {
+                    Ok(CbCompoundReply {
+                        status: Nfs4Status::NotSupp,
+                        tag: String::new(),
+                        results: vec![CbResult::Recall {
+                            status: Nfs4Status::NotSupp,
+                        }],
+                    })
+                })
+            }
+        }
+
+        let (dispatcher, t) = create_test_dispatcher();
+        std::fs::write(t.path().join("doomed.txt"), b"bytes").unwrap();
+        dispatcher.state_mgr.leases.end_grace();
+
+        let driver = Arc::new(RecallDriver::new(
+            Arc::clone(&dispatcher.state_mgr),
+            Arc::new(RefusingSender),
+        ));
+        let d2 = Arc::clone(&driver);
+        dispatcher
+            .state_mgr
+            .install_recall_spawner(Arc::new(move |orders| d2.spawn_recalls(orders)));
+
+        let mk_writer = || async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (conn, acc) =
+                tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept());
+            let (_r, w) = conn.unwrap().into_split();
+            std::mem::forget(acc.unwrap());
+            crate::nfs::v4::back_channel::BackChannelWriter::new(
+                tokio::io::BufWriter::new(w),
+            )
+        };
+        let s1 = dispatcher.state_mgr.sessions.create_session(
+            81, 0, 0, 65536, 65536, 16384, 16, 16, 0x40000000,
+            Some(CallbackSecParms::None), 1,
+        );
+        dispatcher
+            .state_mgr
+            .sessions
+            .set_back_chan_maxops(&s1.session_id, 2);
+        dispatcher
+            .back_channels
+            .insert(s1.session_id, vec![mk_writer().await]);
+
+        let open_op = |share_access: u32, owner: &[u8]| Operation::Open {
+            seqid: 0,
+            share_access,
+            share_deny: 0,
+            owner: owner.to_vec(),
+            openhow: crate::nfs::v4::compound::OpenHow {
+                createmode: 0,
+                attrs: None,
+                attrmask: Vec::new(),
+            },
+            claim: crate::nfs::v4::compound::OpenClaim {
+                claim_type: 0,
+                file: "doomed.txt".to_string(),
+                delegate_type: None,
+                delegate_stateid: None,
+            },
+        };
+
+        let mut ctx1 = CompoundContext::new(1);
+        ctx1.session_id = Some(s1.session_id);
+        dispatcher
+            .dispatch_operation(Operation::PutRootFh, &mut ctx1)
+            .await;
+        let res = dispatcher
+            .dispatch_operation(open_op(1, b"holder"), &mut ctx1)
+            .await;
+        let deleg_sid = match res {
+            OperationResult::Open(Nfs4Status::Ok, Some(ref r)) => {
+                r.delegation.as_ref().expect("granted").stateid
+            }
+            other => panic!("expected grant, got {other:?}"),
+        };
+
+        // A second client's write OPEN triggers the recall; the
+        // refusing client gets revoked by the real ladder task.
+        let s2 = dispatcher.state_mgr.sessions.create_session(
+            82, 0, 0, 65536, 65536, 16384, 16, 16, 0, None, 1,
+        );
+        let mut ctx2 = CompoundContext::new(1);
+        ctx2.session_id = Some(s2.session_id);
+        dispatcher
+            .dispatch_operation(Operation::PutRootFh, &mut ctx2)
+            .await;
+        let res = dispatcher
+            .dispatch_operation(open_op(2, b"writer"), &mut ctx2)
+            .await;
+        assert!(matches!(res, OperationResult::Open(Nfs4Status::Delay, None)));
+
+        // Bounded wait for the ladder task's revocation.
+        let mut revoked = false;
+        for _ in 0..100 {
+            if dispatcher
+                .state_mgr
+                .delegations
+                .snapshot(&deleg_sid)
+                .map(|s| s.state == crate::nfs::v4::state::DelegState::Revoked)
+                .unwrap_or(false)
+            {
+                revoked = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(revoked, "a definitive refusal must revoke promptly");
+        assert_ne!(
+            dispatcher.state_mgr.seq_flags(81) & seq4_status::RECALLABLE_STATE_REVOKED,
+            0,
+            "revocation must raise the SEQ4 bit"
+        );
+
+        // TEST_STATEID names the tombstone truthfully.
+        let res = dispatcher
+            .dispatch_operation(Operation::TestStateId(vec![deleg_sid]), &mut ctx1)
+            .await;
+        match res {
+            OperationResult::TestStateId(Nfs4Status::Ok, Some(ref statuses)) => {
+                assert_eq!(statuses.as_slice(), &[Nfs4Status::DelegRevoked]);
+            }
+            other => panic!("expected TEST_STATEID result, got {other:?}"),
+        }
+
+        // FREE_STATEID drops it and the level-triggered bit falls.
+        let res = dispatcher
+            .dispatch_operation(Operation::FreeStateId(deleg_sid), &mut ctx1)
+            .await;
+        assert!(matches!(res, OperationResult::FreeStateId(Nfs4Status::Ok)));
+        assert_eq!(
+            dispatcher.state_mgr.seq_flags(81) & seq4_status::RECALLABLE_STATE_REVOKED,
+            0,
+            "the bit lowers with the last tombstone"
+        );
+
+        // The barrier is gone: the writer proceeds.
+        let res = dispatcher
+            .dispatch_operation(open_op(2, b"writer"), &mut ctx2)
+            .await;
+        assert!(
+            matches!(res, OperationResult::Open(Nfs4Status::Ok, Some(_))),
+            "after revocation + free the writer proceeds, got {res:?}"
         );
     }
 

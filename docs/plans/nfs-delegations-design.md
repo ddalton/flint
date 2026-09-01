@@ -673,6 +673,31 @@ with the flag ON.
 
 ## 11. Implementation shape
 
+**STATUS (2026-09-01):** slices 0-2 SHIPPED (`2d913055` formal model,
+`9f1fbdbb` wire fixes + foundations; validated macOS+Linux suites,
+pynfs 171/0/91 both binaries, TLA 207/207). **Slice 3 IN PROGRESS**
+(`454a03c4` + the grant increment): shipped so far — the reworked
+(dev,ino)-keyed state core with RAII mutation guards; the §5.2 fence
+funnel at every conflict site plus the EXECUTABLE completeness gate
+(`every_f14_bump_lane_is_fenced_or_exempted`); CB_RECALL wire +
+client-addressed sender with writer failover; the §5.4 recall ladder
+(paused-clock suite: rungs, deadline-from-first-transmit,
+CB_PATH_DOWN window with retry-as-rearm, disown re-probe); the §4
+grant rules with wire delivery (OPEN_DELEGATE_READ + ace), refusal
+counters, breaker (global + per-client quarantine, window
+auto-reset) and sentinel; epoch-mixed unpersisted delegation
+stateids; the DELEGRETURN / TEST_STATEID(DELEG_REVOKED) /
+FREE_STATEID(tombstone + level-triggered SEQ4 lowering) loop —
+grant→recall→DELAY→return and grant→revoke→free proven end-to-end at
+the dispatcher level. **REMAINING for slice-3 complete:** §6
+holder-evidence markers + load-time SEQ4 pre-arm (the V2-fatal
+restart fix — until it lands, the §10 runbook note about rolling with
+grants outstanding STANDS); event-driven rearm-on-rebind (the
+ladder's retry loop approximates it within ~5s); rule 6's (dev,ino)
+layout index (MDS posture refused wholesale until slice 5); metrics
+export; per-client recall batching; expired-courtesy short-circuit;
+breaker trip persistence.
+
 Slices, in order:
 0. **FlintDelegRecall formal module (§7) — gating, before slice 3.**
 1. Wire/decoder fixes (inert, ship early): DELEGRETURN/DELEGPURGE

@@ -31,6 +31,7 @@ pub use delegation::{
     MutationGuard, RecallOrder,
 };
 
+use crate::nfs::v4::protocol::SessionId;
 use crate::state_backend::{StateBackend, StateBackendError};
 use std::sync::Arc;
 
@@ -116,6 +117,19 @@ pub struct StateManager {
     /// A closure rather than the driver type keeps `state` from
     /// depending on `deleg_recall` (which depends back on `state`).
     recall_spawner: std::sync::OnceLock<Arc<dyn Fn(Vec<RecallOrder>) + Send + Sync>>,
+    /// The listener's per-session back-channel writer registry,
+    /// installed by the dispatcher at construction. `callback_ready`
+    /// (delegation grant rule 7) reads it; before installation no
+    /// client is callback-ready, so no delegation can be granted.
+    back_channels: std::sync::OnceLock<
+        Arc<dashmap::DashMap<SessionId, Vec<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>>>,
+    >,
+    /// Set when this server runs the MDS role. Grants refuse in that
+    /// posture until slice 5 lands the layout-conflict rule and its
+    /// own flag (FLINT_NFS_DELEGATIONS_PNFS) — granting without the
+    /// write-capable-layout check would hand out delegations that
+    /// pNFS writers silently invalidate.
+    pnfs_posture: std::sync::OnceLock<()>,
 }
 
 impl StateManager {
@@ -143,7 +157,73 @@ impl StateManager {
             backend,
             seq_flags: dashmap::DashMap::new(),
             recall_spawner: std::sync::OnceLock::new(),
+            back_channels: std::sync::OnceLock::new(),
+            pnfs_posture: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Mark this server as running the MDS role (dispatcher, once).
+    pub fn set_pnfs_posture(&self) {
+        let _ = self.pnfs_posture.set(());
+    }
+
+    pub fn pnfs_posture(&self) -> bool {
+        self.pnfs_posture.get().is_some()
+    }
+
+    /// Install the back-channel writer registry (dispatcher, once).
+    pub fn install_back_channels(
+        &self,
+        registry: Arc<
+            dashmap::DashMap<
+                SessionId,
+                Vec<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
+            >,
+        >,
+    ) {
+        let _ = self.back_channels.set(registry);
+    }
+
+    /// Is `client_id` reachable for callbacks — delegation grant rule
+    /// 7 (design §4), and the predicate `handle_layoutget` has always
+    /// lacked. Four clauses per session, first ready session wins:
+    /// cb_program advertised, an emittable cb_cred (AUTH_SYS/NONE —
+    /// GSS callbacks are recognised-but-unemittable, so a GSS-only
+    /// client would fail every recall), back-channel
+    /// ca_maxoperations >= 2 (CB_SEQUENCE+CB_RECALL is a 2-op
+    /// compound), and a live bound writer. No CB_NULL probe: in v4.1
+    /// the bound session back-channel is the RFC-sanctioned
+    /// verification; the recall ladder handles a channel that later
+    /// lies.
+    pub fn callback_ready(&self, client_id: u64) -> bool {
+        let Some(back_channels) = self.back_channels.get() else {
+            return false;
+        };
+        for sid in self.sessions.get_client_sessions(client_id) {
+            let Some(sess) = self.sessions.get_session(&sid) else {
+                continue;
+            };
+            if sess.cb_program == 0 {
+                continue;
+            }
+            if matches!(
+                sess.cb_cred,
+                Some(crate::nfs::v4::compound::CallbackSecParms::Gss)
+            ) {
+                continue;
+            }
+            if sess.back_chan_maxops < 2 {
+                continue;
+            }
+            let has_writer = back_channels
+                .get(&sid)
+                .map(|w| !w.is_empty())
+                .unwrap_or(false);
+            if has_writer {
+                return true;
+            }
+        }
+        false
     }
 
     /// Install the recall spawner (server bring-up, once). Grants are

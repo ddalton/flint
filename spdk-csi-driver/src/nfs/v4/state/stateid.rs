@@ -620,6 +620,46 @@ impl StateIdManager {
         stateid
     }
 
+    /// Mint a DELEGATION stateid: same counter and maps as
+    /// `allocate`, with two deliberate differences (design §6).
+    ///
+    /// 1. NOT persisted — delegations die with the process by design
+    ///    (holder EVIDENCE persists separately); writing rows the
+    ///    startup path must then convert to tombstones would bloat
+    ///    the DB for state that is defined to evaporate.
+    /// 2. A per-boot epoch is mixed into the `other` bytes.
+    ///    Unpersisted mints advance the in-memory counter PAST the
+    ///    persisted high-watermark, so after a restart the counter
+    ///    re-issues ids still live in some holder's memory; without
+    ///    the epoch, a pre-restart delegation stateid could equal a
+    ///    post-restart OPEN stateid byte-for-byte and validate as it.
+    pub fn allocate_delegation(&self, client_id: u64, filehandle: Vec<u8>) -> StateId {
+        static BOOT_EPOCH: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        let epoch = *BOOT_EPOCH.get_or_init(|| {
+            let t = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0);
+            t ^ std::process::id()
+        });
+        let id = self.next_stateid.fetch_add(1, Ordering::SeqCst);
+        let mut other = [0u8; 12];
+        other[0..8].copy_from_slice(&id.to_be_bytes());
+        other[8..12].copy_from_slice(&((client_id as u32) ^ epoch).to_be_bytes());
+        let stateid = StateId { seqid: 1, other };
+        let entry = StateEntry::new(stateid, StateType::Delegation, client_id, Some(filehandle));
+        self.states.insert(other, entry);
+        self.client_states
+            .entry(client_id)
+            .or_insert_with(Vec::new)
+            .push(other);
+        debug!(
+            "Delegation stateid allocated: {:?} for client {} (unpersisted, epoch-mixed)",
+            stateid, client_id
+        );
+        stateid
+    }
+
     /// Validate a stateid for any state-using operation (WRITE, OPEN_DOWNGRADE,
     /// CLOSE, LOCK, …).
     ///
