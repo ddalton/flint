@@ -66,6 +66,10 @@
                     {
                       "name": "FLINT_NFS_ENFORCE_PERMISSIONS",
                       "value": "1"
+                    },
+                    {
+                      "name": "FLINT_FH_KERNEL",
+                      "value": "1"
                     }
                   ],
                   "image": "dilipdalton/flint-pnfs:1.43.0",
@@ -103,6 +107,7 @@
                       "add": [
                         "CHOWN",
                         "DAC_OVERRIDE",
+                        "DAC_READ_SEARCH",
                         "FOWNER",
                         "FSETID"
                       ],
@@ -277,6 +282,10 @@
                       }
                     },
                     {
+                      "name": "FLINT_FH_KERNEL",
+                      "value": "1"
+                    },
+                    {
                       "name": "AWS_REGION",
                       "value": "us-east-1"
                     }
@@ -323,6 +332,7 @@
                       "add": [
                         "CHOWN",
                         "DAC_OVERRIDE",
+                        "DAC_READ_SEARCH",
                         "FOWNER",
                         "FSETID"
                       ],
@@ -561,6 +571,10 @@
                           "fieldPath": "metadata.name"
                         }
                       }
+                    },
+                    {
+                      "name": "FLINT_FH_KERNEL",
+                      "value": "1"
                     }
                   ],
                   "image": "dilipdalton/flint-pnfs:1.43.0",
@@ -598,6 +612,7 @@
                       "add": [
                         "CHOWN",
                         "DAC_OVERRIDE",
+                        "DAC_READ_SEARCH",
                         "FOWNER",
                         "FSETID"
                       ],
@@ -767,6 +782,10 @@
                           "fieldPath": "metadata.name"
                         }
                       }
+                    },
+                    {
+                      "name": "FLINT_FH_KERNEL",
+                      "value": "1"
                     }
                   ],
                   "image": "dilipdalton/flint-pnfs:1.43.0",
@@ -804,6 +823,7 @@
                       "add": [
                         "CHOWN",
                         "DAC_OVERRIDE",
+                        "DAC_READ_SEARCH",
                         "FOWNER",
                         "FSETID"
                       ],
@@ -988,6 +1008,10 @@
                       }
                     },
                     {
+                      "name": "FLINT_FH_KERNEL",
+                      "value": "1"
+                    },
+                    {
                       "name": "AWS_REGION",
                       "value": "us-east-1"
                     }
@@ -1034,6 +1058,7 @@
                       "add": [
                         "CHOWN",
                         "DAC_OVERRIDE",
+                        "DAC_READ_SEARCH",
                         "FOWNER",
                         "FSETID"
                       ],
@@ -1157,5 +1182,5 @@
       "values": "tier:\n  enabled: true\n  bucket: my-team-flint\n  keyPrefix: tenant-a/\n  endpoint: http://minio.minio:9000\n  region: us-east-1\n  credentialsSecret: flint-s3\n  importOnStart: true\n"
     }
   },
-  "chartSha256": "9d724b11f5407a4c80a966254652265bec1f6fcfadf9273d7865378dedf8aeac"
+  "chartSha256": "52fc959878b36338fddab46a15782fe36fa544810100bef5551021e81e757e45"
 }

@@ -207,6 +207,13 @@ spec:
             - name: FLINT_NFS_ENFORCE_PERMISSIONS
               value: "1"
             {{- end }}
+            # Kernel inode filehandles (F26 §12): 46-byte handles, ~15%
+            # more READDIRPLUS priming per page (a saved LOOKUP RPC per
+            # primed entry). Needs DAC_READ_SEARCH from the capability
+            # list above; the startup probe falls back to path handles
+            # loudly if the runtime denies it.
+            - name: FLINT_FH_KERNEL
+              value: "1"
             {{- if and .Values.tier.enabled .Values.tier.region }}
             - name: AWS_REGION
               value: {{ .Values.tier.region | quote }}

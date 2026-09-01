@@ -273,11 +273,13 @@ resources:
 # NET_BIND_SERVICE is deliberately absent: NFS is 2049, not privileged.
 # Add it if you move the listener below 1024.
 #
-# ⚠ DAC_READ_SEARCH is absent and is required by `FLINT_FH_KERNEL=1`:
-# kernel inode handles resolve through `open_by_handle_at(2)`
-# (`nfs/v4/fh_kernel.rs:31`). That path is off by default, so the
-# capability is not granted for a feature nobody runs. Turning
-# FLINT_FH_KERNEL on means adding DAC_READ_SEARCH in the same change.
+# DAC_READ_SEARCH is what `open_by_handle_at(2)` checks by name
+# (`nfs/v4/fh_kernel.rs:31`) — the resolver behind `FLINT_FH_KERNEL=1`,
+# which the hub now sets: 46-byte kernel handles instead of 77+-byte
+# path handles buy ~15% more READDIRPLUS priming per page, one saved
+# LOOKUP RPC per primed entry on a delete storm. If the runtime strips
+# the capability, the startup probe says so and the hub falls back to
+# path handles rather than serving STALE.
 securityContext:
   enabled: true
 
@@ -310,6 +312,7 @@ securityContext:
   capabilities:
     - CHOWN
     - DAC_OVERRIDE
+    - DAC_READ_SEARCH
     - FOWNER
     - FSETID
   seccompProfile: RuntimeDefault

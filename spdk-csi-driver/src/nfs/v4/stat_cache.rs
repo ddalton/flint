@@ -109,6 +109,19 @@ pub fn lstat(path: &Path) -> io::Result<std::fs::Metadata> {
     Ok(md)
 }
 
+/// Memoized `metadata` (follow-symlink stat). The cache stores lstat
+/// results, and follow-vs-nofollow differ only when the leaf IS a
+/// symlink — so answer from the cached lstat and pay a real follow
+/// stat only in that case. Callers keep exact `stat()` semantics; the
+/// overwhelmingly common non-symlink leaf costs a map hit.
+pub fn stat(path: &Path) -> io::Result<std::fs::Metadata> {
+    let md = lstat(path)?;
+    if md.is_symlink() {
+        return std::fs::metadata(path);
+    }
+    Ok(md)
+}
+
 /// Drop the entry for a path whose object was removed or renamed away —
 /// the two mutations that cannot advance a counter (no inode to stat,
 /// or the path no longer names it) and so cannot self-invalidate.

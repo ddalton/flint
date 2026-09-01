@@ -727,6 +727,12 @@ fn hub_security_context() -> k8s_openapi::api::core::v1::SecurityContext {
             add: Some(vec![
                 "CHOWN".to_string(),
                 "DAC_OVERRIDE".to_string(),
+                // open_by_handle_at(2) checks THIS capability by name —
+                // DAC_OVERRIDE does not substitute. Without it the
+                // kernel-filehandle probe fails at startup and the hub
+                // falls back (loudly) to 77-byte path handles, which
+                // cost ~20% of READDIRPLUS page-1 priming capacity.
+                "DAC_READ_SEARCH".to_string(),
                 "FOWNER".to_string(),
                 "FSETID".to_string(),
             ]),
@@ -803,6 +809,19 @@ pub fn deployment(
             ..Default::default()
         });
     }
+    // Kernel inode filehandles (F26 §12) — 46-byte handles instead of
+    // path-embedded 77+-byte ones. A READDIRPLUS page fits ~15% more
+    // entries, which is dcache priming the client would otherwise buy
+    // back one LOOKUP RPC per entry (measured on the delete storm:
+    // 1816 -> 1488 of knfsd's 1216). The CSI flint-nfs PodSpec has set
+    // this since F26; the hub posture had simply never adopted it. The
+    // startup probe (mint+resolve roundtrip) falls back to path
+    // handles loudly if the runtime denies DAC_READ_SEARCH.
+    env.push(EnvVar {
+        name: "FLINT_FH_KERNEL".to_string(),
+        value: Some("1".to_string()),
+        ..Default::default()
+    });
     if let Some(region) = s.region.as_deref().filter(|r| !r.is_empty() && s.tiered()) {
         env.push(EnvVar {
             name: "AWS_REGION".to_string(),

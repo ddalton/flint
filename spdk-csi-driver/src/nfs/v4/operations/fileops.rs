@@ -1096,6 +1096,11 @@ const SUPPORTED_ATTRS_BITMAP: u64 = (1u64 << FATTR4_TYPE)
     // per entry (measured: 1002 LOOKUPs for an ls -l of 1000 files vs
     // knfsd's 2).
     | (1u64 << FATTR4_FILEHANDLE)
+    // Same lesson as bit 19, smaller stakes: the encoder has answered
+    // RDATTR_ERROR forever, but without the advertisement the client's
+    // readdirplus bitmap never includes it — the one visible delta from
+    // knfsd in a delete-storm capture's READDIR requests.
+    | (1u64 << FATTR4_RDATTR_ERROR)
     | (1u64 << FATTR4_LEASE_TIME)       // CRITICAL for NFSv4.1 leases!
     | (1u64 << FATTR4_ACLSUPPORT)       // ACL capabilities
     | (1u64 << FATTR4_ACL)
@@ -2304,7 +2309,7 @@ impl FileOperationHandler {
         // symlink CFH MUST return NFS4ERR_SYMLINK (so the client knows it
         // can READLINK to follow it). Use symlink_metadata() so we don't
         // dereference symlinks at this step.
-        match current_path.symlink_metadata() {
+        match crate::nfs::v4::stat_cache::lstat(&current_path) {
             Ok(m) if m.is_symlink() => {
                 return LookupPRes { status: Nfs4Status::SymLink };
             }

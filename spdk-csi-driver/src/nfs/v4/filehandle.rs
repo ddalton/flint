@@ -83,9 +83,23 @@ const RENAME_ALIAS_MAX_HOPS: usize = 8;
 /// The current inode of `path`, by lstat (symlinks are objects too —
 /// the handle must pin the link itself, matching the lstat-based attr
 /// encoders). None when the object cannot be stat'd.
+///
+/// DELIBERATELY a raw lstat, never the attr cache: this is the
+/// staleness DETECTOR — rename-over/removal must stale a handle even
+/// when the mutation happened out-of-band (a local process on the
+/// export), which the cache's counter protocol cannot see. Serving it
+/// from the cache was tried and five staleness tests refused it
+/// (removed_file_stales_outstanding_handle et al.).
+///
+/// The consolidation lives one line down instead: the fresh result is
+/// PUBLISHED to the cache, so the attribute snapshot taken later in
+/// the same RPC reuses this syscall's answer rather than issuing its
+/// own — one stat serving both the generation check and the encoder.
 fn current_ino(path: &Path) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
-    std::fs::symlink_metadata(path).ok().map(|md| md.ino())
+    let md = std::fs::symlink_metadata(path).ok()?;
+    crate::nfs::v4::stat_cache::note_fresh(path, &md);
+    Some(md.ino())
 }
 
 /// Random non-zero file id for the v2 table. Same construction as the

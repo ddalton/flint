@@ -777,7 +777,7 @@ impl IoOperationHandler {
                 use crate::nfs::v4::authz;
                 let cred = ctx.cred();
                 if existed {
-                    if let Ok(md) = std::fs::metadata(&file_path) {
+                    if let Ok(md) = crate::nfs::v4::stat_cache::stat(&file_path) {
                         let mut want = 0u32;
                         if op.share_access & 1 != 0 { want |= authz::R; }
                         if op.share_access & 2 != 0 { want |= authz::W; }
@@ -797,7 +797,7 @@ impl IoOperationHandler {
                         }
                     }
                 } else if let Some(parent) = file_path.parent() {
-                    if let Ok(pmd) = std::fs::metadata(parent) {
+                    if let Ok(pmd) = crate::nfs::v4::stat_cache::stat(parent) {
                         if let Err(st) = authz::check(
                             cred.as_ref(), &pmd, authz::W | authz::X, "OPEN(create)", parent,
                         ) {
@@ -1294,7 +1294,7 @@ impl IoOperationHandler {
         {
             use crate::nfs::v4::authz;
             if let Some(tp) = target_path.as_ref() {
-              if let Ok(md) = std::fs::metadata(tp) {
+              if let Ok(md) = crate::nfs::v4::stat_cache::stat(tp) {
                 let mut want = 0u32;
                 if op.share_access & 1 != 0 { want |= authz::R; }
                 if op.share_access & 2 != 0 { want |= authz::W; }
