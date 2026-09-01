@@ -39,6 +39,9 @@ case "$args" in
   *"get pods -l app=flint-pnfs-ds"*)
       i=0; while [ $i -lt "${FK_DS_RUNNING:-3}" ]; do echo Running; i=$((i+1)); done
       i=0; while [ $i -lt "${FK_DS_PENDING:-0}" ]; do echo Pending; i=$((i+1)); done;;
+  *"logs -f"*"flint-pnfs-mds"*)
+      [ "${FK_CAPTURE_EMPTY:-0}" = 1 ] && exit 0
+      echo "DEBUG      Number of DSes in stripe: 3";;
   *"logs deploy/flint-pnfs-mds"*"--since-time"*)
       echo "DEBUG      Number of DSes in stripe: 3";;
   *"logs deploy/flint-pnfs-mds"*"--since=10m"*)
@@ -123,7 +126,7 @@ AWSFAKE
 drive() {
   local w=$1; shift
   ( export FKSTATE="$w/state" PATH="$w/bin:$PATH" KC=/dev/null CLUSTER=runbz \
-           DS_SETTLE_TRIES=${DS_SETTLE_TRIES:-1} REPS=${REPS:-1} \
+           DS_SETTLE_TRIES=${DS_SETTLE_TRIES:-1} REPS=${REPS:-1} CAPTURE_SETTLE=0 \
            FK_FLINT_IP=$FLINT_IP FK_S3_IP=$S3_IP
     eval "${FKENV:-}"
     "$w/drive-ab.sh" "$@" )
@@ -310,6 +313,31 @@ if [ -f "${o1:-/x}" ] && [ -f "${o2:-/x}" ] && [ "$o1" != "$o2" ] \
    && [ "$(grep -c '"arm"' "$o1")" -eq 3 ] && [ "$(grep -c '"arm"' "$o2")" -eq 3 ]; then
   ok "two runs in the same second stay in separate files (3 arms each)"
 else bad "same-second run collision" "o1=$o1($(grep -c '"arm"' "${o1:-/dev/null}" 2>/dev/null)) o2=$o2($(grep -c '"arm"' "${o2:-/dev/null}" 2>/dev/null))"; fi
+
+
+# ── the MDS log must be STREAMED during the run, not fetched after ───────
+# flint-29 measured the failure on runby: at debug level a 600 MB push
+# rotates the LAYOUTGET lines away in under a minute, so a post-hoc fetch
+# reads a window whose evidence is already gone.
+W=$(newdir)
+printf 'import sys\nsys.exit(0)\n' > "$W/stripe-width-gate.py"
+o=$(drive "$W" run 2>/dev/null | tail -1)
+if [ -f "${o:-/nonexistent}" ] && grep -q '"capture":"[^"]*mds-capture-' "$o" \
+   && ls "$W"/mds-capture-*.log >/dev/null 2>&1; then
+  ok "the run streams the MDS log to a capture file for its whole duration"
+else bad "MDS streaming" "$(grep substrate "${o:-/dev/null}" 2>/dev/null)"; fi
+if [ -f "${o:-/nonexistent}" ] && ! ls "$W"/mds-capture-*.log.pid >/dev/null 2>&1; then
+  ok "the log streamer is stopped and its pidfile cleaned up after the run"
+else bad "streamer cleanup" "pidfile survived the run"; fi
+
+# an empty capture is blindness — INCONCLUSIVE, and it must NOT silently
+# fall back to the post-hoc fetch that has the rotation hole
+W=$(newdir)
+printf 'import sys\nsys.exit(0)\n' > "$W/stripe-width-gate.py"
+o=$(FKENV='export FK_CAPTURE_EMPTY=1' drive "$W" run 2>/dev/null | tail -1)
+if [ -f "${o:-/nonexistent}" ] && grep -q 'INCONCLUSIVE:streamed-capture-empty' "$o"; then
+  ok "an empty capture is INCONCLUSIVE, never PASS and never a silent post-hoc fallback"
+else bad "empty capture" "$(grep substrate "${o:-/dev/null}" 2>/dev/null)"; fi
 
 echo "──────────────────────────────────────────────────────────────────"
 echo "  passed $PASS, failed $FAIL"

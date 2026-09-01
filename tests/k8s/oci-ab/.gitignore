@@ -1,2 +1,4 @@
 results-*.ndjson
 .pushed-digest
+mds-capture-*.log
+mds-capture-*.log.pid

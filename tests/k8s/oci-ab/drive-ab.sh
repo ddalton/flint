@@ -261,14 +261,40 @@ arm_order() { # $1=rep -> rotation of the three specs
 # reproduce this campaign's signature failure ("the check passed because the
 # question was never asked") on the one gate built to prevent it.
 # Sibling of G-SETTLE: never let an unasked question read as a clean answer.
-substrate_gate() { # $1=since-RFC3339 -> prints PASS|FAIL|INCONCLUSIVE:<why>
-  local gate="$HERE/stripe-width-gate.py" log rc
+# The MDS log must be STREAMED while the workload runs, never fetched after
+# it. flint-29 measured this on runby: at debug level a 600 MB push overruns
+# the container log and rotates the LAYOUTGET lines away in under a minute,
+# so a post-hoc `kubectl logs` returns a window with the evidence already
+# gone. Their first gate run came back INCONCLUSIVE and was RIGHT to.
+start_mds_capture() { # -> prints the capture path
+  local f="$HERE/mds-capture-$(date -u +%Y%m%d-%H%M%S)-$$.log"
+  k -n flint-system logs -f --tail=0 deploy/flint-pnfs-mds > "$f" 2>/dev/null &
+  echo $! > "$f.pid"
+  sleep "${CAPTURE_SETTLE:-2}"   # let the stream attach before the first rep generates traffic
+  echo "$f"
+}
+stop_mds_capture() { # $1=capture path
+  local pid; pid=$(cat "$1.pid" 2>/dev/null)
+  [ -n "${pid:-}" ] && kill "$pid" 2>/dev/null
+  rm -f "$1.pid"
+}
+
+substrate_gate() { # $1=since-RFC3339 [$2=streamed capture] -> PASS|FAIL|INCONCLUSIVE:<why>
+  local gate="$HERE/stripe-width-gate.py" log rc own=0
   [ -x "$gate" ] || [ -f "$gate" ] || { echo "INCONCLUSIVE:gate-script-absent"; return; }
-  log=$(mktemp)
-  k -n flint-system logs deploy/flint-pnfs-mds --since-time="$1" > "$log" 2>/dev/null
-  [ -s "$log" ] || { rm -f "$log"; echo "INCONCLUSIVE:no-mds-log"; return; }
+  if [ -n "${2:-}" ]; then
+    # An EMPTY capture means the streamer never attached — that is blindness,
+    # and blindness is INCONCLUSIVE. Falling back to a post-hoc fetch here
+    # would silently reintroduce the rotation hole this exists to close.
+    [ -s "$2" ] || { echo "INCONCLUSIVE:streamed-capture-empty"; return; }
+    log=$2
+  else
+    log=$(mktemp); own=1
+    k -n flint-system logs deploy/flint-pnfs-mds --since-time="$1" > "$log" 2>/dev/null
+    [ -s "$log" ] || { rm -f "$log"; echo "INCONCLUSIVE:no-mds-log"; return; }
+  fi
   python3 "$gate" "$log" >&2; rc=$?
-  rm -f "$log"
+  [ "$own" = 1 ] && rm -f "$log"
   case $rc in
     0) echo PASS;;
     1) echo FAIL;;
@@ -373,6 +399,8 @@ run)
   if ! r=$(guard_clock); then warn "$r"; exit 1; fi
   if ! r=$(guard_settle); then warn "REFUSING TO MEASURE: $r"; exit 1; fi
   run_start=$(now_rfc3339)
+  capture=$(start_mds_capture)
+  warn "streaming MDS log to $capture for the duration of the run"
   for rep in $(seq 1 "$REPS"); do
     arm_order "$rep" | while read -r armn snap which; do
       case $which in FLINT) reg=$rf;; S3) reg=$rs;; esac
@@ -382,8 +410,10 @@ run)
   done
   # The substrate verdict is a ROW in the results, not a side note: whoever
   # reads this file later must not have to remember to go and check.
-  verdict=$(substrate_gate "$run_start")
-  printf '{"record":"substrate","verdict":"%s","since":"%s"}\n' "$verdict" "$run_start" >> "$out"
+  stop_mds_capture "$capture"
+  verdict=$(substrate_gate "$run_start" "$capture")
+  printf '{"record":"substrate","verdict":"%s","since":"%s","capture":"%s"}\n' \
+    "$verdict" "$run_start" "$capture" >> "$out"
   case "$verdict" in
     PASS) warn "substrate gate: PASS — bounded grants present and correctly rotated";;
     FAIL) warn "⛔ substrate gate: FAIL — the fleet is serving wrong stripe maps; these numbers are VOID";;

@@ -37,6 +37,8 @@ RE_REQ = re.compile(r"LAYOUTGET: offset=(\d+), length=(\d+), iomode=(\w+)")
 RE_WIDTH = re.compile(r"Number of DSes in stripe: (\d+)")
 RE_FSI = re.compile(r"first_stripe_index: (\d+)")
 RE_FID = re.compile(r"file_id ([0-9a-f]{16})")
+RE_OPEN = re.compile(r"Encoding STRIPED FILE layout")
+RE_CLOSE = re.compile(r"Encoded STRIPED FILE layout")
 
 
 def load(path):
@@ -57,27 +59,46 @@ def main():
 
     lines = load(args[0])
 
-    # Walk forward: each encode block is (width, fsi, file_id), and the
-    # most recent LAYOUTGET request line before it supplies the shape.
-    grants, req = [], None
+    # ── Pairing must be interleaving-safe. ───────────────────────────
+    # The MDS is concurrent and tracing writes each line independently,
+    # so under load two encode blocks braid together *within the same
+    # microsecond*. A naive forward scan then pairs one grant's
+    # first_stripe_index with another's file_id and invents rotation
+    # mismatches: an earlier version of this gate reported 3 "failures"
+    # in 526 grants on a run that was in fact clean. A gate that cries
+    # wolf under concurrency is exactly as useless as one that passes
+    # everything, and concurrency is when this defect matters most.
+    #
+    # So: a block counts as PAIRABLE only when it runs from its opening
+    # marker to its closing marker with no second opening marker in
+    # between. Braided blocks are reported as unpairable, never as
+    # failures. The WIDTH check does not need pairing at all — the
+    # width is on one line by itself — so it keeps full coverage.
+    widths_all = [int(m.group(1)) for m in
+                  (RE_WIDTH.search(l) for l in lines) if m]
+
+    grants, unpairable, req = [], 0, None
+    open_i = None
     for i, l in enumerate(lines):
         m = RE_REQ.search(l)
         if m:
             req = (int(m.group(1)), int(m.group(2)), m.group(3))
-        m = RE_WIDTH.search(l)
-        if not m:
+        if RE_OPEN.search(l):
+            if open_i is not None:
+                unpairable += 1      # previous block never closed cleanly
+            open_i = i
             continue
-        width = int(m.group(1))
-        fsi = fid = None
-        for j in range(i, min(i + 12, len(lines))):
-            mm = RE_FSI.search(lines[j])
-            if mm and fsi is None:
-                fsi = int(mm.group(1))
-            mm = RE_FID.search(lines[j])
-            if mm and fid is None:
-                fid = mm.group(1)
-        if fsi is not None and fid is not None:
-            grants.append((width, fsi, int(fid, 16), fid, req))
+        if RE_CLOSE.search(l) and open_i is not None:
+            block = lines[open_i:i + 1]
+            w = next((RE_WIDTH.search(b) for b in block if RE_WIDTH.search(b)), None)
+            f = next((RE_FSI.search(b) for b in block if RE_FSI.search(b)), None)
+            d = RE_FID.search(l)
+            if w and f and d:
+                grants.append((int(w.group(1)), int(f.group(1)),
+                               int(d.group(1), 16), d.group(1), req))
+            else:
+                unpairable += 1
+            open_i = None
 
     if not grants:
         print("INCONCLUSIVE: no striped-layout encode lines found.")
@@ -85,7 +106,7 @@ def main():
         print("  so their absence says nothing about the stripe width.")
         return 2
 
-    widths = Counter(g[0] for g in grants)
+    widths = Counter(widths_all)
     modal = expect or widths.most_common(1)[0][0]
 
     # 1. Rotation must equal file_id % width, per grant.
@@ -96,11 +117,12 @@ def main():
         per_file[fid].add(w)
     split = {f: ws for f, ws in per_file.items() if len(ws) > 1}
     # 3. Every grant must be at the pinned width.
-    narrow = [g for g in grants if g[0] != modal]
+    narrow = [w for w in widths_all if w != modal]
     # 4. Anti-vacuity: the bounded path must actually have been exercised.
     bounded = [g for g in grants if g[4] and g[4][1] != (1 << 64) - 1]
 
-    print(f"grants analysed : {len(grants)}")
+    print(f"encode blocks   : {len(widths_all)} ({len(grants)} pairable, "
+          f"{unpairable} braided by concurrency — reported, never failed)")
     print(f"widths seen     : {dict(widths)}  (pinned width taken as {modal})")
     print(f"bounded grants  : {len(bounded)} (the path that carried the defect)")
     print()
@@ -108,8 +130,9 @@ def main():
     fail = False
     if narrow:
         fail = True
-        print(f"✗ {len(narrow)} grant(s) NOT at the pinned width {modal}:")
-        for w, fsi, fidv, fid, req in narrow[:8]:
+        print(f"✗ {len(narrow)} encode(s) NOT at the pinned width {modal}: "
+              f"widths {sorted(set(narrow))}")
+        for w, fsi, fidv, fid, req in [g for g in grants if g[0] != modal][:8]:
             shape = f"offset={req[0]} length={req[1]} iomode={req[2]}" if req else "?"
             print(f"    file_id {fid}  width={w} fsi={fsi}  "
                   f"(file_id%{modal}={fidv % modal})  <- {shape}")
