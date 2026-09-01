@@ -10,6 +10,99 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [1.43.0] - 2026-08-31
+
+The write path, the small-file path, and a deadlock that shipped dark.
+
+v1.42.0 measured `splice(2)` and shipped it dark; this release turns it
+on by default — after fixing the deadlock the dark path was hiding.
+**The kernel counts pipe capacity in slots, not bytes**, so a full-size
+READ at an unaligned offset could park the server on a pipe that looked
+half-empty. Any v1.42.0 image serving a client whose block size exceeds
+`rsize` (a 4 MiB O_DIRECT read is enough) can wedge permanently;
+upgrading is the fix, and `FLINT_NFS_SPLICE=1` should not be set on
+1.42.0 images.
+
+### Fixed
+
+- **splice pipe-slot deadlock**: the splice path counted pipe capacity
+  in bytes where the kernel counts buffer slots; a READ spanning more
+  slots than remained free wedged the connection permanently. Reachable
+  on v1.42.0 with `FLINT_NFS_SPLICE=1` and any reader whose block size
+  exceeds `rsize`. No test suite covered the shape (it needs a
+  full-size read at an unaligned offset); the perf gate's rig now does.
+- **EXCHANGE_ID purge storm against the pNFS data server**: the DS
+  answered DESTROY_CLIENTID and DESTROY_SESSION with no-op acks, so a
+  destroyed client's confirmed record survived, every fresh incarnation
+  of that client drew `EXCHGID4_FLAG_CONFIRMED_R`, and Linux answers
+  that with PURGE_STATE — an EXCHANGE_ID bearing the all-ones boot
+  verifier, forcing a case-5 discard on every re-association and
+  leaking client records, leases, and sessions without bound. Both
+  verbs are real now (CLIENTID_BUSY / STALE_CLIENTID / BADSESSION arms
+  per RFC 8881 §18.37 and §18.50); a full drill runs at zero case-5
+  discards.
+- **A layout write moves the change attribute**: LAYOUTCOMMIT now bumps
+  the change counter and sets mtime, so a client that wrote through the
+  data server no longer reads its own stale cache back; and an MDS
+  restart re-seeds device control endpoints instead of orphaning them.
+- **A reused S3 prefix refuses to serve the previous project** (B12):
+  the tier stamps `<prefix>.flint/owner` with the share's identity and
+  refuses foreign starts before the epoch claim; `adoptData` is the
+  explicit takeover path.
+- **NodePublish self-heals the stale-staged CSI wedge** (F29): publish
+  re-drives NodeStage from its own inputs, so an operator rollout that
+  raced staging no longer wedges the volume until a suspend/resume
+  cycle.
+
+### Performance
+
+- **NFS WRITE at parity with knfsd** (was 0.46x): the request tail was
+  copied one byte at a time (15% of total system CPU), UNSTABLE writes
+  hopped threads they did not need, and large inbound records now land
+  in pooled buffers (page faults per burst: 6540 → 1).
+- **READ: `splice(2)` on by default** — the payload moves file → pipe →
+  socket without entering userspace, at 2.8x less server CPU per byte;
+  with it, mimalloc as the default allocator, `block_in_place` for READ
+  bodies, and the per-operation deep clone of the session (slot table
+  plus every cached reply, cloned to read three u32s) is gone. The perf
+  gate's read ratio vs knfsd stands at 1.28 this release (baseline
+  floor 0.39).
+- **Fore-channel headroom**: advertising exactly 1 MiB as the maximum
+  request halved the effective RPC size the Linux client would use;
+  +2 KiB of headroom lets a 1 MiB READ actually be 1 MiB (READ op
+  count halved at bs=1M).
+- **Small-file metadata at knfsd wire parity**: repeated stats are
+  answered from a counter-validated attribute cache, containment checks
+  use one `openat2` instead of a realpath walk, READDIR hands out the
+  filehandles LOOKUP was minting (`ls -l` over 1000 files: 1002 LOOKUPs
+  → 2), and directory caches are no longer told they are stale on every
+  visit (the ACCESS storm is gone).
+- **The pNFS data server adopts the standalone lane's READ path**
+  (clamp → splice → pooled fallback): the DS-lane differential moves
+  from 0.63x to 0.95x of knfsd.
+
+### Changed
+
+- **One wire layer, two lanes**: the standalone server and the pNFS
+  data server now share a single RPC-record ingress (fragment
+  reassembly, whole-record ceiling, pooled reads), one
+  segment-to-socket writer, one `channel_attrs4` decode and
+  fore-channel negotiation, and one READ fast path. Policy — dispatch,
+  trust and stateid models, fd caches, the DRC — stays per-lane. The
+  DS gains the fragment reassembly and the 2 GiB reply guard it never
+  had.
+
+### Gates at the tag
+
+- Perf differential vs knfsd: read 1.280 / write 0.910 / meta 0.743
+  (floors 0.390 / 0.514 / 0.565); falsifiability arm refused as
+  required.
+- pynfs 4.1 full suite: **171/0/91 on both binaries** (standalone and
+  hub posture), exact baseline match.
+- fsx + fsstress torture: PASS (fsx 20000 ops buffered + O_DIRECT,
+  fsstress 4x500 namespace storm).
+- macOS suite 2228/0; Linux-in-lima suite 2249/0 (unprivileged).
+
 ## [1.42.0] - 2026-08-28
 
 The read path, and a conformance defect it uncovered.
@@ -3153,6 +3246,7 @@ neither tag represents a supported upgrade source.
 No security advisories at this release.
 
 [Unreleased]: https://github.com/ddalton/flint/compare/v1.35.1...HEAD
+[1.43.0]: https://github.com/ddalton/flint/compare/v1.42.0...v1.43.0
 [1.42.0]: https://github.com/ddalton/flint/compare/v1.41.1...v1.42.0
 [1.41.1]: https://github.com/ddalton/flint/compare/v1.41.0...v1.41.1
 [1.41.0]: https://github.com/ddalton/flint/compare/v1.40.0...v1.41.0
