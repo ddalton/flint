@@ -539,6 +539,20 @@ before the rollout shape or the per-pod-NQN default is fixed.
   runbi, runbd — is a read wall), so write claims get the widest error bars in this doc.
 - **Hot serving ranking**: RAM cache first (§6), wire second. A libflint registry without its
   LRU loses to a kernel-mount registry on hot traffic; with it, it wins on cold + concurrent.
+- **The S3 lazy-pull arm is the external comparison, and it gets the headline mechanism
+  for free** (added 2026-09-01): SOCI/nydus/stargz over an S3-backed registry delete the
+  same download+gunzip tax — AWS measured 4.1–4.9x cold-start on GB-scale images with
+  SOCI on ECR/S3. What the backend changes is the demand-fault path and the storm shape:
+  SOCI against in-region ECR measures ~4.6 ms per range fetch with a warm connection
+  pool and 62–290 ms cold (arXiv 2607.06868), with a userspace daemon on every miss;
+  lane 3's miss is a sub-ms kernel block read on the NVMe-oF namespace with no daemon
+  (§9's differentiator), and an N-node boot storm of one image is served from the DS's
+  cache and fleet bandwidth instead of N full-wire downloads. S3 keeps durability, zero
+  ops and per-request costs measured at ~5% of a pull's compute savings — so the honest
+  posture is both: the S3/external registry remains the origin and re-fetch lane (§15),
+  flint is the in-cluster serving tier. The cold-start A/B therefore runs THREE arms —
+  baseline pull, lazy-on-S3, lazy-on-flint — because the lazy format and the backend are
+  separable wins, and only the third arm attributes anything to flint.
 - **Discipline**: every ratio ships from a same-hardware A/B with one variable moved —
   a ratio between legs differing in more than one way is not an attribution (runbl's lesson,
   learned the expensive way). Results land as ADR 0006+ with pass criteria declared before
@@ -649,14 +663,27 @@ sessions, no slots, no pNFS).
   backchannel (`session.rs:634`). Nothing flags the hazard until a recall is actually
   attempted, which strengthens the case. Leaning refuse-for-block-class; decide in phase 1.
 - **The once-per-cluster store is a once-per-cluster loss** (§1's headline, read as a
-  threat): block-class volumes are single-replica lvols until block doc §12 replication
-  lands — undecided, unscheduled — and this design puts the cluster's only copy of every
-  layer and model weight on that substrate, while the snapshotter retires the per-node
-  content stores that used to be the implicit N-way copy. One storage-node/lvol loss would
-  stall container starts cluster-wide. Mitigations, gated not hoped: the CAS rides the
-  file-layout class (replicated substrate) until §12 replication ships — lane-3/registry GA
-  is gated on one of the two — and the external registry of record stays a re-fetch lane,
-  so blob loss degrades to a slow pull, not a dead cluster.
+  threat) — **AMENDED 2026-09-01: the premise is stale; block doc §12 replication has
+  SHIPPED.** `pnfs.flint.io/replicas: 2` (2 is the ceiling — the composition machine
+  reasons about ONE peer) places a mirrored raid1 leg on a second target, behind the
+  witness-arbitrated seat, the degrade barrier and the sparse-aware rebuild; the chart
+  needs per-shard `blockExport.shards` entries plus the composition witness, and refuses
+  a replicas: 2 volume loudly without them. Mirror, placement, witness and promotion
+  arbitration are proven on real hardware (runbo/runbq), so a storage-node loss no
+  longer costs the bytes — but state it the way the campaign record does:
+  **replicas: 2 is durability, not serving-through-failover.** The composer's MDS shard
+  is node-pinned with the volume's geometry and extent-allocator rows on its own RWO
+  PVC, so after a composer death the survivor holds in-sync bytes it cannot yet serve;
+  control-plane failover is a named future tranche, and the chart still calls the
+  surface experimental. Consequences for this design: put the CAS and lane-3 namespaces
+  on replicas: 2 — WORM image blobs are the friendly case for the machine (no churn to
+  rebuild, and lane-3's read-only EROFS consumers cannot hit the ext4 emergency-ro that
+  forces filesystem pods to restart after a failover window) — and the two mitigations
+  stand with sharpened jobs: the external registry of record stays a re-fetch lane for
+  AVAILABILITY now, not durability (new attaches of a dead composer's volumes stall
+  until recovery), and lane-3/registry GA gates on the control-plane-failover tranche
+  or an explicitly accepted stall-until-recovery posture in the runbook — no longer on
+  replication existing at all.
 - **EROFS ingest maturity**: tarerofs was marked experimental at erofs-utils 1.7; containerd's
   differ is production evidence, but our push-side conversion needs its own fuzz + diffID
   round-trip verification (the original-tar sha256 remains the verification key), plus a

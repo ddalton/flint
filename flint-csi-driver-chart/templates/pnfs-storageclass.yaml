@@ -67,9 +67,17 @@ write and again on every rebuilt byte. Cross-zone must be asked for
 by name (replicaCrossZone), and a fleet with no same-zone peer refuses
 the provision rather than spending the money quietly.
 
-NOT YET PROVEN ON HARDWARE: the composition machine is complete and
-unit-tested end to end, but no cluster has run it. Treat replicas: 2
-as experimental until a rig has.
+Hardware status (2026-09): DURABILITY is proven — runbo ran chart,
+witness and placement on a real cluster, and the lima replica rig
+proves the mirror, degrade barrier and rebuild byte for byte. What
+no cluster has is serving-through-FAILOVER: composer death is
+data-plane only (the seat promotes and the surviving copy is
+in-sync, but the volume's MDS shard — its geometry and allocator
+rows — is node-pinned and does not fail over), so serving resumes
+only after recovery. Treat replicas: 2 as experimental durability,
+never as failover. Placement needs topology.kubernetes.io/zone on
+the target nodes, read once at controller start — label first, or
+restart flint-csi-controller after labelling.
 */}}
 {{- if and .Values.pnfs.enabled (.Values.pnfs.blockLayout).enabled .Values.pnfs.blockLayout.storageClass.create }}
 ---

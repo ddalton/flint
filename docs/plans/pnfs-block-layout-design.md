@@ -47,10 +47,16 @@ This unifies flint's two data planes. Both tiers end at spdk-tgt; durability for
 block tier is block-level replication under the namespace instead of the file tier's
 DS-on-replicated-PVC layering. **Honest caveat on that claim**: today's raid1 is
 assembled on the *consumer* node's tgt (`driver.rs:3161-3236`) — a remote pNFS client
-cannot see it. Block-layout volumes are single-replica lvols until replication moves
+cannot see it. ~~Block-layout volumes are single-replica lvols until replication moves
 server-side (storage-node raid or MDS-level mirroring). That is real work, scoped in
 §12, not a freebie — reviewed and modeled 2026-08-12 (§12's replication entry;
-`formal/FlintComposition.tla`), still unimplemented.
+`formal/FlintComposition.tla`), still unimplemented.~~ **AMENDED 2026-09-01: that work
+has SHIPPED** — `pnfs.flint.io/replicas: 2` composes a server-side raid1 at the
+composer target from a mirrored leg placed on a peer, witness-arbitrated (modeled
+first, `formal/FlintComposition.tla`), and hardware has run it (runbo/runbq). The §12
+replication entry's amended tail carries the honest boundary: **replicas: 2 is
+durability, not serving-through-failover** — the composer's shard state does not fail
+over yet.
 
 ## 2. Motivation — the taxes this deletes
 
@@ -1783,10 +1789,21 @@ Each phase ships standalone value; none is gated on the next.
   No new schema: the rebuild's durable state is the leg's sync mark, and every
   intermediate — cuts named by volume and round, an attached destination, a quiesce
   lease — is reconstructible or self-expiring on the ONE target that owns them.
-  What remains: same-AZ leg PLACEMENT, expand-under-composition (`grow`'s read-back
+  ~~What remains: same-AZ leg PLACEMENT, expand-under-composition (`grow`'s read-back
   belt still validates one lvol, not the frame), and the StorageClass surface.
   **There is still no `replicas: 2` parameter** — the mechanism is complete but
-  nothing has yet run it on hardware, and the surface should not ship ahead of a rig.
+  nothing has yet run it on hardware, and the surface should not ship ahead of a
+  rig.~~ **AMENDED 2026-09-01 — every item on that list has since landed, and this
+  paragraph read as if none had.** Placement and expand-under-composition are the
+  next two entries in this section; the StorageClass surface ships
+  (`pnfs.flint.io/replicas`, 1 or 2 — 2 is a designed ceiling, the composition
+  machine reasons about ONE peer — plus `replicaCrossZone`, with the chart's
+  per-shard `blockExport.shards` entries and the composition witness both required
+  and refused loudly when absent); the rig ran green (the entry below); and hardware
+  ran it (runbo: first replicated block volume ever provisioned on a real cluster,
+  container-first I/O on a replicas: 2 volume, the witness live on Kubernetes
+  ConfigMaps). The boundary that survives all of it is recorded at the end of the
+  placement entry: replicas: 2 is durability, not serving-through-failover.
 - **PLACEMENT SHIPPED (same wave) — and it had to be the CONTROLLER'S decision,
   because MDS shards share nothing.** The chart is explicit about it
   (`pnfs-mds.yaml`: "Shards share nothing with each other" — N independent
@@ -1839,8 +1856,28 @@ Each phase ships standalone value; none is gated on the next.
   sweep (`DeleteVolumeResponse.leg_targets`) and the controller drops each one. That
   reply is the last thing in the system that knows where the copies are, so a failure
   there FAILS the delete rather than leaking an lvol no record will ever name again.
-  **Still not proven on hardware.** The chart ships `replicas` (default 1) and the
-  values file says experimental in as many words.
+  ~~**Still not proven on hardware.**~~ **PROVEN on runbo (2026-08, first
+  hardware campaign): chart + witness + placement all held on a real cluster** —
+  and the zone gate found its first operational trap: kubeadm/trove nodes carry NO
+  `topology.kubernetes.io/zone` labels, so every replicas: 2 provision is refused
+  with "the zone of '<node>' is unknown" until the nodes are labelled by hand AND
+  flint-csi-controller is restarted (it does not pick labels up live). The chart
+  ships `replicas` (default 1) and the values file says experimental in as many
+  words — a posture that stands, because what hardware did NOT prove is
+  serving-through-failover: **composer death is DATA-PLANE ONLY.** The seat
+  promotes (~20 s rv-CAS), the eviction horizon holds, the surviving leg is
+  in-sync, and the client's device node survives — but the volume's MDS shard is
+  node-pinned to its lvstore with the geometry and extent-allocator rows on its
+  own RWO PVC. The class half is closed (the attach lane derives class from the
+  seat, so a sibling shard answers a re-attach for a volume it never created —
+  runbr measured the sibling answering 39 s after composer node death), yet the
+  write-path authority (geometry + allocator rows) is shard-local and the client's
+  NFS metadata mount still targets the dead shard's ClusterIP, so serving does not
+  resume; their transfer, and a reachable serving MDS, are a named future tranche,
+  not a bug fix. An ext4 consumer additionally ends emergency-ro across the
+  no-path window (not clearable in place — `mount -o remount,rw` returns 0 and
+  changes nothing), so a filesystem pod restarts regardless. **State replicas: 2
+  in release notes as durability, never failover.**
 - **EXPAND-UNDER-COMPOSITION SHIPPED (same wave) — the review's finding, and its
   mirror.** The finding: `grow`'s read-back belt validated ONE LVOL, not the array, so
   a one-leg ENOSPC could raise the ceiling past what the composition can serve. raid1

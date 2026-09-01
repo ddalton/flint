@@ -450,14 +450,22 @@ pnfs:
       # 2 (a second copy on another target, kept mirrored, rebuilt
       # after an outage — design §12).
       #
-      # EXPERIMENTAL: the composition machine is complete and unit
-      # tested end to end, but no cluster has run it yet.
+      # EXPERIMENTAL — with the boundary stated precisely (2026-09):
+      # durability is hardware-proven (runbo ran chart + witness +
+      # placement on a real cluster; the lima replica rig proves
+      # mirror, degrade barrier and rebuild byte for byte). Failover
+      # is NOT: a composer death promotes the seat and preserves an
+      # in-sync copy, but the volume's node-pinned MDS shard does
+      # not fail over, so serving resumes only after recovery.
+      # Durability, never failover.
       #
       # Placement is SAME-ZONE by default and refuses rather than
       # silently crossing zones, because a cross-zone copy pays
       # inter-zone egress on every mirrored write and again on every
       # rebuilt byte. Nodes must carry topology.kubernetes.io/zone —
-      # an unlabelled node is "unknown", never "the same place".
+      # an unlabelled node is "unknown", never "the same place" —
+      # and labels are read once at controller start, so label
+      # first or restart flint-csi-controller after labelling.
       replicas: 1
       # Permit the second copy to land outside the composer's zone.
       # Only meaningful with replicas: 2, and it is a bill, not a knob.
