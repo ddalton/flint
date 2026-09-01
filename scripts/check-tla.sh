@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# One hundred and ninety-six runs, ALL required.
+# Two hundred and seven runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -18,10 +18,10 @@
 #     scripts/check-tla.sh | sort | uniq -c | sort -rn
 #
 #   71 FlintReplication    33 FlintComposition    15 FlintExtents
-#   15 FlintClientIdentity   11 FlintExtentsProbe    8 FlintTierEpoch
-#    7 FlintTruncate        7 FlintShareDisk       7 FlintTierMarker
-#    7 FlintTierSession     5 FlintAdmission       4 FlintSnapshots
-#    3 FlintA2Probe         3 FlintClaims)
+#   15 FlintClientIdentity   11 FlintExtentsProbe   11 FlintDelegRecall
+#    8 FlintTierEpoch       7 FlintTruncate        7 FlintShareDisk
+#    7 FlintTierMarker      7 FlintTierSession     5 FlintAdmission
+#    4 FlintSnapshots       3 FlintA2Probe         3 FlintClaims)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -50,6 +50,12 @@
 # two-phase sweep; model AFTER code AFTER the many-clusters drill, which
 # found three defects in this one machine by hand in an afternoon.
 # Documented at the bottom of this file, next to its runs.
+#
+# FlintDelegRecall.tla — NFSv4.1 READ-delegation grant/recall/revoke (the
+# GATING step 0 of docs/plans/nfs-delegations-design.md — model BEFORE
+# code, the FlintExtents/FlintTierSession posture; the design's four
+# fatal verification holes are its mutations); documented at the bottom
+# of this file, next to its runs.
 #
 # FlintTierSession.tla — the multi-volume hub's TWO-LEVEL LEASE (one
 # session cell per hub, volume cells naming {hub, session generation};
@@ -1237,5 +1243,30 @@ strict_run FlintClientIdentity FlintClientIdentityLeaseNotifyUnique.cfg "lease-s
 # against the clientid it is destroying.
 strict_run FlintClientIdentity FlintClientIdentityLeaseHandshake.cfg "lease sweep landing MID-HANDSHAKE (nconnect=2 trunking probe + the lease dimension, everything fixed — the obligation carry must survive a concurrent sweep)"
 mutation_run FlintClientIdentity FlintClientIdentityLeaseHandshakeProbe.cfg "MID-HANDSHAKE VACUITY PROBE (same constants: TLC must reach a state where an agent is mid-EXCHANGE_ID while a sweep sits between its two steps — if this goes green the run above is vacuous and the question it answers is open again)" "Probe_SweepLandsMidHandshake"
+
+
+# ── FlintDelegRecall.tla — NFSv4.1 READ-delegation recall machine ──────────
+# The GATING step 0 of docs/plans/nfs-delegations-design.md (section 7):
+# model BEFORE code — no delegation implementation exists while this
+# tranche is the design's only executable artifact.  One file, one
+# holder, one abstract mutator standing for EVERY mutation lane at once
+# (that is the hole-1 fix: one RAII guard protocol shared by all lanes).
+# The signal to the holder is a RETAINED REVOKED TOMBSTONE fetched by
+# the holder's own lease-renewal SEQUENCE — the one RPC delegations do
+# not eliminate.  Restart is the SAME-PVC transparent restore
+# (EXCHANGE_ID case 1: the client's belief survives, no reboot
+# recovery), which is fatal hole 4's door and the reason the evidence
+# marker must persist.  The backchannel is killable and STAYS dead.
+strict_run FlintDelegRecall FlintDelegRecall.cfg "deleg-recall strict breadth (guard+fence+disown-evidence+rearm+holder-evidence+recheck ON: no admitted writer under a live delegation, stale belief always signalled, every believer leaves durable evidence, no unasked revoke)"
+strict_run FlintDelegRecall FlintDelegRecallLive.cfg "deleg-recall liveness depth (the recall barrier always lifts so the DELAYed writer proceeds; a stale believer eventually stops believing — WF on deadline/renewal/install only, never on the client's cooperation)"
+mutation_run FlintDelegRecall FlintDelegRecallNoGuard.cfg "deleg-recall guard mutation (MutationGuard=FALSE = fatal hole 1: the grant lands between a lane's clear fence consult and its execution — REMOVE/RENAME/SETATTR/anon-WRITE/file-API/LAYOUTGET register nothing the original design's grant re-check looked at)" "Inv_(NoAdmittedWriterUnderLiveDeleg|NoUnsignalledStaleness)"
+mutation_run FlintDelegRecall FlintDelegRecallNoFence.cfg "deleg-recall fence-inventory mutation (FenceComplete=FALSE = the C5-drift lane: a bump site with no consult, the LINK class — the executable completeness check in code is what keeps this world unreachable)" "Inv_NoUnsignalledStaleness"
+mutation_run FlintDelegRecall FlintDelegRecallDisownDrop.cfg "deleg-recall disown mutation (DisownEvidence=FALSE = fatal hole 2: CB_RECALL crosses the granting OPEN reply, the client's BAD_STATEID insta-drops the record, and the client then installs an orphaned delegation no conflict will ever recall)" "Inv_(BelieverHasEvidence|NoUnsignalledStaleness)"
+mutation_run FlintDelegRecall FlintDelegRecallNoEvidence.cfg "deleg-recall restart mutation (PersistHolderEvidence=FALSE = fatal hole 4: the same-PVC roll wipes records and seq-flags while the client's belief survives — grant, install, RESTART, mutate: stale cache served forever with no signal ever coming)" "Inv_NoUnsignalledStaleness"
+mutation_run FlintDelegRecall FlintDelegRecallNoRecheck.cfg "deleg-recall ladder mutation (LadderRecheck=FALSE: the detached recall task outlives its returned record and revokes the successor grant — a revocation the design never asked for)" "Inv_RevokeOnlyFromRecall"
+mutation_run FlintDelegRecall FlintDelegRecallRearmWorks.cfg "deleg-recall rearm proof (fixed constants, the Inv_RaidRecoveryUnreachable idiom — violation is the GOOD news: TLC must find a recall DELIVERED after a channel die+rebind, proving rearm-on-rebind re-drives pending recalls)" "Inv_NoDeliveryAfterRebind"
+strict_run FlintDelegRecall FlintDelegRecallRearmStale.cfg "deleg-recall HEAD-world documentation (RebindRearm=FALSE = the append-only registry + .first() send: delivery-after-rebind is UNREACHABLE — after one TCP reconnect every conflict converts to revocation; safety still holds because the deadline raises the signal, which is exactly why fatal hole 3 would ship silently)"
+mutation_run FlintDelegRecall FlintDelegRecallProbeDisown.cfg "deleg-recall crossing VACUITY PROBE (required-fail: the recall-crosses-grant-reply state must be reachable, or the DisownEvidence coverage is a green light over an empty road)" "Probe_DisownRaceReachable"
+mutation_run FlintDelegRecall FlintDelegRecallProbeStale.cfg "deleg-recall antecedent VACUITY PROBE (required-fail: a believing, stale, SIGNALLED holder must be reachable, or the central invariant protects a state space that cannot occur)" "Probe_StaleSignalledReachable"
 
 echo "TLA GATE PASSED"

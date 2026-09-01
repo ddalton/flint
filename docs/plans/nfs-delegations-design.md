@@ -458,6 +458,13 @@ drain before any out-of-band write to a delegation-enabled export.**
 
 ## 7. Formal model — GATING, written before ladder code
 
+**STATUS: DONE (2026-08-31)** — `formal/FlintDelegRecall.tla`, 11 runs
+in the gate (now 207): strict breadth + liveness, the four fatal holes
+as required-to-fail mutations (NoGuard / DisownDrop / NoEvidence, and
+hole 3 as the RearmWorks/RearmStale inverse pair), the C5-drift lane,
+the detached-ladder discipline, and two vacuity probes. See the
+`FlintDelegRecall` section of `formal/README.md`.
+
 `formal/FlintDelegRecall` (TLA+), added to the 196-run gate, written
 BEFORE the recall-task code. Both judges and two verifiers converged
 on gating (upgrading D1's "recommended"): this state machine is
@@ -492,7 +499,15 @@ Fatal:
    it worse). Fix §5.3.
 3. **Append-only back_channels + `.first()` ⇒ one TCP reconnect makes
    every later recall revoke instantly.** Fix §5.4 (reap, iterate,
-   rearm, CB_PATH_DOWN window).
+   rearm, CB_PATH_DOWN window). CORRECTION (verified in code
+   2026-08-31): the REAP half already shipped — `server_v4.rs`'s
+   `InflightGuard` purges a connection's writer from the registry on
+   every exit path (the F18/audit-C5 fix; the verifier's "grep
+   confirms no retain" was wrong). The `.first()` iteration half stood
+   and is fixed in slice 2; a write can still beat the reap (the read
+   loop notices the EOF after the send fails), so iteration remains
+   load-bearing, and rearm + the CB_PATH_DOWN window remain slice-3
+   work.
 4. **Same-PVC restart is transparent to clients ⇒ unpersisted
    delegations vanish with zero client-visible signal — stale cache
    served forever on every pod roll**; and **idle-suspend is

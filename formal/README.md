@@ -1,4 +1,4 @@
-# Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, the pNFS truncate gate, the block-layout extent allocator, the block admission layer, the block serving-composition machine, the S3-tier volume epoch, the S3-tier eviction marker, the multi-volume hub's session lease, and the NFSv4 client-record lifecycle
+# Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, the pNFS truncate gate, the block-layout extent allocator, the block admission layer, the block serving-composition machine, the S3-tier volume epoch, the S3-tier eviction marker, the multi-volume hub's session lease, the NFSv4 client-record lifecycle, and the NFSv4.1 delegation recall machine
 
 Twelve spec modules plus two probe modules (`FlintA2Probe`, `FlintExtentsProbe` —
 ghost-witness overlays on `FlintReplication` / `FlintExtents`), one gate
@@ -1429,3 +1429,110 @@ always equal, because AUTH_SYS derives it from the same nodename — so a
 co_ownerid collision is a principal collision too, and the arms that turn
 on a principal mismatch cannot arise in the situation this module is
 about.
+
+
+## `FlintDelegRecall.tla` — the NFSv4.1 READ-delegation recall machine, modelled before the code exists
+
+The GATING step 0 of `docs/plans/nfs-delegations-design.md` (§7): no
+delegation implementation may land until this module's runs are in the
+gate, because the design's adversarial verification found four fatal
+holes and every one of them is an *interleaving* — the shape this
+repo's models have refuted pre-code three times. The module is the
+FlintExtents/FlintTierSession posture: the model is the first
+executable artifact of the design, and the implementation will be
+written to satisfy it, not the other way round.
+
+**Why a delegation deserves a model more than most state does.** Every
+other piece of server state the repo has ever leaked stale was
+eventually corrected by the client's next RPC. A delegation's entire
+purpose is that the next RPC never comes — the client trusts its cache
+without asking. So any hole in grant/recall/restart converts directly
+into the design's named worst case, *stale cache served forever*, and
+no rig leg that watches RPCs can see a client that has stopped sending
+them.
+
+**The world.** One file, one delegation-holding client, one abstract
+mutator. The mutator stands for every mutation lane at once — OPEN
+for write, REMOVE, RENAME, SETATTR, anonymous-stateid WRITE, LINK, the
+in-process file API, LAYOUTGET(RW/ANY) — because the fix for fatal
+hole 1 is precisely that they all share one protocol: an RAII
+mutation-pending guard taken under the file entry lock at consult and
+held to commit, with the grant re-check refusing while any guard is
+live. A lane that skips the protocol is not a different machine; it
+is the `FenceComplete=FALSE` mutation.
+
+**The load-bearing modelling decisions:**
+
+- **The signal is a retained revoked tombstone, not a flag.** Per the
+  design, SEQ4_STATUS_RECALLABLE_STATE_REVOKED is computed from
+  retained revoked records, so here `signal == revTomb`, and the
+  persisted holder-evidence marker *re-materializes as a tombstone* at
+  restart — the design's "convert to revoked-tombstones, never erase"
+  rule, executable. FREE_STATEID retires the tombstone only when no
+  grant reply is still in flight (a stateid the client has not seen
+  cannot be freed), which is what makes revoke-crosses-install safe.
+- **Lease renewal is the delivery channel.** `RenewConsume` models the
+  one fact that makes SEQ4 signalling sound at all: a Linux client
+  renews by SEQUENCE on a timer even when delegations have eliminated
+  every I/O RPC. A client that stops renewing is lease-expired and
+  cascade-destroyed — a different, already-modelled door
+  (FlintClientIdentity's sweep).
+- **The backchannel is killable and stays dead.** `ChannelDie` has no
+  fairness and nothing forces `Rebind` — the design demands exactly
+  this, because a lossy-but-eventually-delivering channel would assume
+  fatal hole 3 away.
+- **Restart is the same-PVC transparent restore** (EXCHANGE_ID case 1):
+  the client's belief survives in its own memory, the in-flight grant
+  reply dies with its TCP connection, all in-memory server state is
+  wiped, and the persisted client record means Linux sees session
+  loss, not a reboot — no CLAIM_PREVIOUS, no recovery. Idle-suspend +
+  wake is the same transition. The fresh-PVC/STALE arm is a rig leg,
+  not a model arm.
+- **The 90s deadline is `RevokeDeadline`, enabled whenever a recall is
+  outstanding** — time abstracted away. It may revoke a slow-but-
+  cooperative client; that is a performance event, not a safety one.
+  The deadline-from-first-transmit amendment is a timing rule TLC
+  cannot discharge (the FlintClaims grace-axiom species) and lives in
+  code review plus the conflict-matrix rig.
+
+**The theorems** (mapping the design doc's invariants (a)–(c)):
+`Inv_NoAdmittedWriterUnderLiveDeleg` (a — the guard protocol's whole
+claim), `Inv_NoUnsignalledStaleness` (c — believes ∧ stale ⇒ the
+tombstone is up; the heart of the module),
+`Inv_BelieverHasEvidence` (the restart re-arm's premise),
+`Inv_RevokeOnlyFromRecall` (ladder-wakeup discipline), and the
+liveness pair `RecallResolves` / `StaleBeliefResolves` (b — WF on
+deadline/renewal/install only, never on the client's cooperation).
+
+**The mutations are the four fatal holes** (plus two disciplines), each
+required to fail: `NoGuard` (hole 1 — its counterexample is
+MutConsultClear → Grant, the grant inside the consult-to-commit
+window), `DisownDrop` (hole 2 — Grant → Conflict → DeliverDisown →
+InstallGrant, the orphaned install), `NoEvidence` (hole 4 — Grant →
+Install → **Restart** → consult → commit, the silent-stale pod roll),
+`NoFence` (the C5-drift lane), `NoRecheck` (the detached ladder task
+revoking a successor grant). Fatal hole 3 is an **inverse pair** (the
+`Inv_RaidRecoveryUnreachable` idiom — violation is the good news):
+`RearmWorks` requires TLC to *find* a delivery after die+rebind,
+proving rearm re-drives recalls; `RearmStale` (`RebindRearm=FALSE` =
+HEAD's append-only registry + `.first()` send) holds
+`Inv_NoDeliveryAfterRebind` **and the full safety bundle** — after one
+TCP reconnect no recall is ever delivered again, every conflict
+converts to revocation, and nothing stale is ever served. That green
+bundle is the finding: hole 3 is operational rot the safety invariants
+cannot see, which is exactly why it would ship silently.
+
+**Vacuity probes**, both required to fail: `Probe_DisownRaceReachable`
+(the crossing actually occurs) and `Probe_StaleSignalledReachable`
+(the central invariant's antecedent is exercised).
+
+State space: 1,978 distinct states at the strict budgets (2 grants, 2
+mutations, 1 death, 1 restart) — the whole tranche runs in seconds.
+
+Out of scope, deliberately (checks, not interleavings — owned by unit
+tests and the design's rig legs): OPENMODE rejection, claim-arm
+conversion, the self-conflict carve-out, the post-recall cooldown,
+multi-holder attribute coherence, (dev,ino)-vs-fh keying, the
+stateid-counter epoch, grace gating, quotas, the circuit breaker,
+out-of-band PVC edits (no lane exists — an operator contract), and
+voluntary DELEGRETURN (removes state, threatens nothing).
