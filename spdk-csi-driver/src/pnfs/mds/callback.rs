@@ -366,6 +366,138 @@ impl CallbackManager {
         Ok(reply)
     }
 
+    /// CB_RECALL to a CLIENT (design §5.3): try each session the
+    /// client holds until one has a back-channel and answers. The
+    /// session that was granted the delegation is not necessarily the
+    /// session that can be reached now (trunking, restarted mounts) —
+    /// same resolution rule as the device-notify address book.
+    ///
+    /// The reply is returned RAW: classification (DELAY at either
+    /// level ⇒ ladder retry, definitive refusal ⇒ revoke, the disown
+    /// rule for BAD_STATEID) is the recall ladder's job, because only
+    /// it knows the record's history.
+    pub async fn send_cb_recall(
+        &self,
+        client_id: u64,
+        deleg_stateid: &StateId,
+        truncate: bool,
+        fh: Vec<u8>,
+    ) -> Result<CbCompoundReply, CallbackError> {
+        let sessions = self.state_mgr.sessions.get_client_sessions(client_id);
+        if sessions.is_empty() {
+            debug!("CB_RECALL: client {} holds no session", client_id);
+            return Err(CallbackError::ConnectionClosed);
+        }
+        let mut last = CallbackError::ConnectionClosed;
+        for sid in &sessions {
+            match self
+                .send_cb_recall_on_session(sid, deleg_stateid, truncate, fh.clone())
+                .await
+            {
+                Ok(reply) => return Ok(reply),
+                // Only channel-level failures justify trying a sibling
+                // session: the CALL never reached the client (Transport
+                // exhausted every writer; ConnectionClosed = no channel
+                // at all). Anything else may have executed — a sibling
+                // retry could recall twice with a fresh CB_SEQUENCE,
+                // which the client would treat as a NEW call.
+                Err(e @ CallbackError::Transport(_))
+                | Err(e @ CallbackError::ConnectionClosed) => last = e,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last)
+    }
+
+    /// CB_SEQUENCE + CB_RECALL on one session. Same slot-0 discipline
+    /// as the layout recall: the mutex is held across the round trip,
+    /// the sequence advances only if some transport accepted the
+    /// write, and within the session the send fails over across every
+    /// bound back-channel writer on refused writes.
+    pub async fn send_cb_recall_on_session(
+        &self,
+        session_id: &SessionId,
+        deleg_stateid: &StateId,
+        truncate: bool,
+        fh: Vec<u8>,
+    ) -> Result<CbCompoundReply, CallbackError> {
+        if self
+            .back_channels
+            .get(session_id)
+            .map(|w| w.is_empty())
+            .unwrap_or(true)
+        {
+            debug!("CB_RECALL: no back-channel for session {:?}", session_id);
+            return Err(CallbackError::ConnectionClosed);
+        }
+        let (cb_program, cb_minorversion) =
+            match self.state_mgr.sessions.get_session(session_id) {
+                Some(s) if s.cb_program != 0 => (s.cb_program, s.minorversion),
+                Some(_) => {
+                    warn!(
+                        "CB_RECALL: session {:?} advertised cb_program=0",
+                        session_id,
+                    );
+                    return Err(CallbackError::ConnectionClosed);
+                }
+                None => {
+                    warn!("CB_RECALL: session {:?} not found", session_id);
+                    return Err(CallbackError::ConnectionClosed);
+                }
+            };
+
+        let slot = self.slot(session_id);
+        let mut seq_guard = slot.lock().await;
+        let seq = seq_guard.wrapping_add(1);
+        let seq = if seq == 0 { 1 } else { seq };
+
+        let call = CbCompoundCall {
+            tag: String::new(),
+            minorversion: cb_minorversion,
+            callback_ident: 0,
+            ops: vec![
+                CbOp::Sequence {
+                    sessionid: *session_id,
+                    sequenceid: seq,
+                    slotid: 0,
+                    highest_slotid: 0,
+                    cachethis: false,
+                },
+                CbOp::Recall {
+                    stateid: *deleg_stateid,
+                    truncate,
+                    fh,
+                },
+            ],
+        };
+        let cb_cred = self
+            .state_mgr
+            .sessions
+            .get_session(session_id)
+            .and_then(|s| s.cb_cred.clone());
+        info!(
+            "CB_RECALL {:?} → session {:?} (truncate={}, cb_program={})",
+            deleg_stateid, session_id, truncate, cb_program,
+        );
+        let (result, seq_consumed) = self
+            .send_on_session_writers(session_id, cb_program, cb_cred.as_ref(), &call)
+            .await;
+        if seq_consumed {
+            *seq_guard = seq;
+        }
+        drop(seq_guard);
+        let reply = result?;
+        info!(
+            "CB_RECALL ← session {:?}: status={:?}",
+            session_id, reply.status,
+        );
+        Ok(reply)
+    }
+
+    // (RecallSender impl for Arc<CallbackManager> follows the impl
+    // block — the ladder holds the manager by Arc and the future must
+    // own its handle.)
+
     /// Tell one client that a device it cached has changed — the
     /// online half of block-volume expansion (design doc §7).
     ///
@@ -582,6 +714,27 @@ impl CallbackManager {
             results.len(),
         );
         results
+    }
+}
+
+/// The recall ladder's one send, over the real back-channel. The
+/// ladder owns retries, deadlines, and reply classification; this
+/// just addresses the client (every session, writer failover within
+/// each — `send_cb_recall` above).
+impl crate::nfs::v4::deleg_recall::RecallSender for Arc<CallbackManager> {
+    fn send_recall(
+        &self,
+        client_id: u64,
+        stateid: StateId,
+        truncate: bool,
+        fh: Vec<u8>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<CbCompoundReply, CallbackError>> + Send,
+        >,
+    > {
+        let me = Arc::clone(self);
+        Box::pin(async move { me.send_cb_recall(client_id, &stateid, truncate, fh).await })
     }
 }
 
@@ -827,6 +980,7 @@ mod tests {
     use crate::nfs::rpc::{AcceptStatus, AuthFlavor, MessageType, ReplyStatus};
     use crate::nfs::v4::cb_compound::CbResult;
     use crate::nfs::v4::protocol::{cb_opcode, Nfs4Status};
+    use crate::nfs::v4::xdr::Nfs4XdrDecoder;
     use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
     use bytes::{Bytes, BytesMut};
     use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -1833,5 +1987,120 @@ mod tests {
             .await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].outcome, RecallOutcome::NoChannel);
+    }
+
+    /// CB_RECALL round trip, client-addressed (design §5.3, slice 3):
+    /// the manager resolves the client's sessions, sends CB_SEQUENCE +
+    /// CB_RECALL on the reachable one, and the args carry the
+    /// delegation stateid, the truncate hint, and the fh VERBATIM as
+    /// granted.
+    #[tokio::test]
+    async fn cb_recall_reaches_the_client_with_verbatim_fh() {
+        let (writer, server_read, client_read, mut client_write) = pair().await;
+        let (state_mgr, session_id) = fixture_state(0x40000000);
+        let back_channels = Arc::new(DashMap::new());
+        back_channels.insert(session_id, vec![Arc::clone(&writer)]);
+        let cb_mgr = CallbackManager::new(back_channels, Arc::clone(&state_mgr))
+            .with_timeout(Duration::from_secs(5));
+        let _loop_handle = spawn_read_loop(Arc::clone(&writer), server_read);
+
+        let deleg_stateid = StateId {
+            seqid: 1,
+            other: [9u8; 12],
+        };
+        let granted_fh = vec![0xca, 0xfe, 0xba, 0xbe, 0x01];
+
+        let seen: Arc<std::sync::Mutex<Option<(StateId, bool, Vec<u8>)>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let seen_c = Arc::clone(&seen);
+        let mock_client = tokio::spawn(async move {
+            let mut r = BufReader::new(client_read);
+            let call = read_record(&mut r).await;
+            let xid = u32::from_be_bytes([call[0], call[1], call[2], call[3]]);
+            // Walk the CALL: 10-u32 RPC header (empty cred+verf), then
+            // CB_COMPOUND args.
+            let mut dec = XdrDecoder::new(call.slice(40..));
+            dec.decode_string().unwrap(); // tag
+            dec.decode_u32().unwrap(); // minorversion
+            dec.decode_u32().unwrap(); // callback_ident
+            assert_eq!(dec.decode_u32().unwrap(), 2); // ops
+            assert_eq!(dec.decode_u32().unwrap(), cb_opcode::CB_SEQUENCE);
+            dec.decode_sessionid().unwrap();
+            dec.decode_u32().unwrap(); // sequenceid
+            dec.decode_u32().unwrap(); // slotid
+            dec.decode_u32().unwrap(); // highest_slotid
+            dec.decode_bool().unwrap(); // cachethis
+            assert_eq!(dec.decode_u32().unwrap(), 0); // referring_call_lists<>
+            assert_eq!(dec.decode_u32().unwrap(), cb_opcode::CB_RECALL);
+            let sid = dec.decode_stateid().unwrap();
+            let truncate = dec.decode_bool().unwrap();
+            let fh = dec.decode_opaque().unwrap().to_vec();
+            *seen_c.lock().unwrap() = Some((sid, truncate, fh));
+
+            // Reply: CB_SEQUENCE OK + CB_RECALL OK.
+            let mut enc = XdrEncoder::new();
+            enc.encode_u32(xid);
+            enc.encode_u32(MessageType::Reply as u32);
+            enc.encode_u32(ReplyStatus::Accepted as u32);
+            enc.encode_u32(AuthFlavor::Null as u32);
+            enc.encode_opaque(&[]);
+            enc.encode_u32(AcceptStatus::Success as u32);
+            enc.encode_u32(Nfs4Status::Ok.to_u32());
+            enc.encode_opaque(&[]); // tag
+            enc.encode_u32(2);
+            enc.encode_u32(cb_opcode::CB_SEQUENCE);
+            enc.encode_u32(Nfs4Status::Ok.to_u32());
+            for _ in 0..8 {
+                enc.encode_u32(0);
+            }
+            enc.encode_u32(cb_opcode::CB_RECALL);
+            enc.encode_u32(Nfs4Status::Ok.to_u32());
+            write_record(&mut client_write, enc.finish()).await;
+        });
+
+        // Address the CLIENT (42, from fixture_state), not the session.
+        let reply = cb_mgr
+            .send_cb_recall(42, &deleg_stateid, true, granted_fh.clone())
+            .await
+            .expect("recall should round-trip");
+        mock_client.await.unwrap();
+
+        assert_eq!(reply.status, Nfs4Status::Ok);
+        assert_eq!(reply.results.len(), 2);
+        assert_eq!(
+            reply.results[1],
+            CbResult::Recall {
+                status: Nfs4Status::Ok
+            }
+        );
+        let (sid, truncate, fh) = seen.lock().unwrap().clone().expect("client saw the CALL");
+        assert_eq!(sid, deleg_stateid);
+        assert!(truncate);
+        assert_eq!(fh, granted_fh, "fh must be echoed verbatim as granted");
+    }
+
+    /// A client with NO sessions — or none reachable — refuses with
+    /// ConnectionClosed rather than pretending a recall happened. The
+    /// ladder turns this into the CB_PATH_DOWN window, never a silent
+    /// success.
+    #[tokio::test]
+    async fn cb_recall_to_an_unreachable_client_says_so() {
+        let (state_mgr, _session_id) = fixture_state(0x40000000);
+        let back_channels = Arc::new(DashMap::new());
+        let cb_mgr = CallbackManager::new(back_channels, state_mgr);
+        let sid = StateId {
+            seqid: 1,
+            other: [9u8; 12],
+        };
+        // Client 999 has no sessions at all.
+        match cb_mgr.send_cb_recall(999, &sid, false, vec![1]).await {
+            Err(CallbackError::ConnectionClosed) => {}
+            other => panic!("expected ConnectionClosed, got {:?}", other),
+        }
+        // Client 42 has a session but no back-channel writer bound.
+        match cb_mgr.send_cb_recall(42, &sid, false, vec![1]).await {
+            Err(CallbackError::ConnectionClosed) => {}
+            other => panic!("expected ConnectionClosed, got {:?}", other),
+        }
     }
 }

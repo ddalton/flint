@@ -126,13 +126,15 @@ impl CompoundDispatcher {
         let io_handler = IoOperationHandler::new(state_mgr.clone(), fh_mgr.clone());
         let file_handler = FileOperationHandler::new(fh_mgr.clone(), pnfs_enabled)
             .with_pnfs_handler(pnfs_handler.clone())
-            .with_open_files(io_handler.open_file_view());
+            .with_open_files(io_handler.open_file_view())
+            .with_state_mgr(state_mgr.clone());
         let perf_handler = PerfOperationHandler::new_with_pnfs(
             state_mgr.clone(),
             fh_mgr.clone(),
             pnfs_handler.clone(),
         );
-        let lock_handler = LockOperationHandler::new(state_mgr.clone(), lock_mgr.clone());
+        let lock_handler = LockOperationHandler::new(state_mgr.clone(), lock_mgr.clone())
+            .with_fh_mgr(fh_mgr.clone());
 
         Self {
             state_mgr,
@@ -1170,11 +1172,7 @@ impl CompoundDispatcher {
                 }
                 let stateids = self.state_mgr.stateids.count_for_client(clientid);
                 let locks = self.lock_mgr.lock_count_for_client(clientid);
-                let delegations = self
-                    .state_mgr
-                    .delegations
-                    .get_delegations_for_client(clientid)
-                    .len();
+                let delegations = self.state_mgr.delegations.count_for_client(clientid);
                 if stateids > 0 || locks > 0 || delegations > 0 {
                     warn!(
                         "DESTROY_CLIENTID: clientid {} still holds {} stateid(s), {} lock(s), \

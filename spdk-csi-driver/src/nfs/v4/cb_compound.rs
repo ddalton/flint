@@ -77,6 +77,18 @@ pub enum CbOp {
     /// without a notification a grown volume stays invisible to it
     /// until its device cache is dropped some other way (design doc §7).
     NotifyDeviceId { changes: Vec<DeviceIdNotify> },
+    /// `CB_RECALL` (RFC 8881 §20.2) — recall a delegation. `fh` is the
+    /// filehandle VERBATIM as granted (byte-identical in both fh
+    /// modes, so the client's lookup by fh always matches); `truncate`
+    /// hints that the file is about to be truncated/removed so the
+    /// client may skip flushing cached data it would otherwise write
+    /// back (READ delegations have none — the hint still travels for
+    /// RFC fidelity and REMOVE sets it).
+    Recall {
+        stateid: StateId,
+        truncate: bool,
+        fh: Vec<u8>,
+    },
 }
 
 /// One entry of `CB_NOTIFY_DEVICEID4args.cnda_changes<>` — a `notify4`
@@ -171,6 +183,11 @@ pub enum CbResult {
     /// mode worth naming: it is silent otherwise (the device stays
     /// cached and the client just keeps using stale geometry).
     NotifyDeviceId { status: Nfs4Status },
+    /// `CB_RECALL4res` — a bare status. NFS4_OK means the client
+    /// acknowledged and will DELEGRETURN; the full reply
+    /// classification (DELAY at either level, definitive refusals,
+    /// the disown rule) lives with the recall ladder, not here.
+    Recall { status: Nfs4Status },
     /// Catch-all for any operation we sent but didn't model a typed
     /// result for. The caller can still see the status; a rich client
     /// might want to re-decode this lazily.
@@ -185,6 +202,7 @@ impl CbResult {
             CbResult::Sequence { status, .. } => *status,
             CbResult::LayoutRecall { status } => *status,
             CbResult::NotifyDeviceId { status } => *status,
+            CbResult::Recall { status } => *status,
             CbResult::OtherStatus { status, .. } => *status,
         }
     }
@@ -279,6 +297,17 @@ fn encode_cb_op(enc: &mut XdrEncoder, op: &CbOp) {
                     // void payload
                 }
             }
+        }
+        CbOp::Recall {
+            stateid,
+            truncate,
+            fh,
+        } => {
+            // CB_RECALL4args (RFC 8881 §20.2.1): stateid, truncate, fh.
+            enc.encode_u32(cb_opcode::CB_RECALL);
+            enc.encode_stateid(stateid);
+            enc.encode_bool(*truncate);
+            enc.encode_opaque(fh);
         }
         CbOp::NotifyDeviceId { changes } => {
             enc.encode_u32(cb_opcode::CB_NOTIFY_DEVICEID);
@@ -563,6 +592,8 @@ fn decode_cb_result(dec: &mut XdrDecoder) -> Result<CbResult, CbReplyError> {
         }
         // Same shape: CB_NOTIFY_DEVICEID4res is the status alone.
         cb_opcode::CB_NOTIFY_DEVICEID => Ok(CbResult::NotifyDeviceId { status }),
+        // CB_RECALL4res likewise: `switch(nfsstat4) { default: void }`.
+        cb_opcode::CB_RECALL => Ok(CbResult::Recall { status }),
         other => Ok(CbResult::OtherStatus {
             opcode: other,
             status,
@@ -663,6 +694,77 @@ mod tests {
         assert_eq!(dec.decode_u64().unwrap(), u64::MAX);
         assert_eq!(dec.decode_stateid().unwrap(), sample_layout_stateid());
         assert_eq!(dec.remaining(), 0, "no trailing bytes after CB_COMPOUND args");
+    }
+
+    /// CB_RECALL args are stateid + truncate + fh, in that order (RFC
+    /// 8881 §20.2.1) — and the fh must be the granted bytes VERBATIM
+    /// (the client looks its delegation up by fh; a re-derived handle
+    /// in the other fh mode would miss).
+    #[test]
+    fn cb_recall_args_encode_stateid_truncate_fh_in_order() {
+        let deleg_stateid = StateId {
+            seqid: 1,
+            other: [7u8; 12],
+        };
+        let call = CbCompoundCall {
+            tag: String::new(),
+            minorversion: 1,
+            callback_ident: 0,
+            ops: vec![
+                CbOp::Sequence {
+                    sessionid: sample_session_id(),
+                    sequenceid: 3,
+                    slotid: 0,
+                    highest_slotid: 0,
+                    cachethis: false,
+                },
+                CbOp::Recall {
+                    stateid: deleg_stateid,
+                    truncate: true,
+                    fh: vec![0xca, 0xfe, 0xf0, 0x0d],
+                },
+            ],
+        };
+        let mut dec = XdrDecoder::new(call.encode());
+        dec.decode_string().unwrap(); // tag
+        dec.decode_u32().unwrap(); // minorversion
+        dec.decode_u32().unwrap(); // callback_ident
+        assert_eq!(dec.decode_u32().unwrap(), 2); // ops
+
+        // CB_SEQUENCE skipped field-by-field.
+        assert_eq!(dec.decode_u32().unwrap(), cb_opcode::CB_SEQUENCE);
+        dec.decode_sessionid().unwrap();
+        dec.decode_u32().unwrap();
+        dec.decode_u32().unwrap();
+        dec.decode_u32().unwrap();
+        dec.decode_bool().unwrap();
+        assert_eq!(dec.decode_u32().unwrap(), 0); // referring_call_lists<>
+
+        assert_eq!(dec.decode_u32().unwrap(), cb_opcode::CB_RECALL);
+        assert_eq!(dec.decode_stateid().unwrap(), deleg_stateid);
+        assert!(dec.decode_bool().unwrap()); // truncate
+        assert_eq!(
+            dec.decode_opaque().unwrap().as_ref(),
+            &[0xca, 0xfe, 0xf0, 0x0d][..]
+        );
+        assert_eq!(dec.remaining(), 0, "no trailing bytes after CB_RECALL");
+    }
+
+    /// A CB_RECALL reply decodes to CbResult::Recall, both statuses.
+    #[test]
+    fn cb_recall_reply_decodes_ok_and_error() {
+        for (st, want) in [
+            (Nfs4Status::Ok, Nfs4Status::Ok),
+            (Nfs4Status::BadStateId, Nfs4Status::BadStateId),
+        ] {
+            let mut enc = XdrEncoder::new();
+            enc.encode_u32(cb_opcode::CB_RECALL);
+            enc.encode_u32(st.to_u32());
+            let mut dec = XdrDecoder::new(enc.finish());
+            let res = decode_cb_result(&mut dec).unwrap();
+            assert_eq!(res, CbResult::Recall { status: want });
+            assert_eq!(res.status(), want);
+        }
     }
 
     /// CB_NOTIFY_DEVICEID, byte-for-byte against LINUX'S DECODER —
@@ -941,6 +1043,10 @@ mod tests {
                 }
                 CbResult::NotifyDeviceId { status } => {
                     enc.encode_u32(cb_opcode::CB_NOTIFY_DEVICEID);
+                    enc.encode_u32(status.to_u32());
+                }
+                CbResult::Recall { status } => {
+                    enc.encode_u32(cb_opcode::CB_RECALL);
                     enc.encode_u32(status.to_u32());
                 }
                 CbResult::OtherStatus { opcode, status } => {

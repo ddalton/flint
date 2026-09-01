@@ -26,7 +26,7 @@ use bytes::Bytes;
 use std::sync::Arc;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Resolve a wire `count` against the source file, or reject the request.
 ///
@@ -530,6 +530,37 @@ pub struct PerfOperationHandler {
 }
 
 impl PerfOperationHandler {
+    /// Fence a write-capable mutation on `path` — design §5.2 site 8:
+    /// ALLOCATE / DEALLOCATE / COPY(dest) / CLONE(dest). Ok(guard) =
+    /// proceed, holding the guard until the mutation completes;
+    /// Err(Delay) = answer NFS4ERR_DELAY. One atomic load when the
+    /// feature is off.
+    fn deleg_fence_path(
+        &self,
+        path: &std::path::Path,
+        ctx: &CompoundContext,
+    ) -> Result<Option<crate::nfs::v4::state::MutationGuard>, Nfs4Status> {
+        if !crate::nfs::v4::state::delegations_enabled() {
+            return Ok(None);
+        }
+        let ident = match crate::nfs::v4::stat_cache::lstat(path) {
+            Ok(md) => {
+                use std::os::unix::fs::MetadataExt;
+                (md.dev(), md.ino())
+            }
+            Err(_) => return Ok(None),
+        };
+        let mutator = ctx
+            .session_id
+            .as_ref()
+            .and_then(|sid| self.state_mgr.sessions.get_session(sid))
+            .map(|s| s.client_id);
+        match self.state_mgr.deleg_fence(ident, mutator, false) {
+            crate::nfs::v4::state::FenceVerdict::Proceed(g) => Ok(g),
+            crate::nfs::v4::state::FenceVerdict::Delay => Err(Nfs4Status::Delay),
+        }
+    }
+
     /// Create a new performance operation handler (standalone / DS role:
     /// no pNFS, every file is served locally).
     pub fn new(state_mgr: Arc<StateManager>, fh_mgr: Arc<FileHandleManager>) -> Self {
@@ -584,7 +615,7 @@ impl PerfOperationHandler {
     pub async fn handle_copy(
         &self,
         op: CopyOp,
-        _ctx: &CompoundContext,
+        ctx: &CompoundContext,
     ) -> CopyRes {
         debug!("COPY: src_offset={}, dst_offset={}, count={}",
               op.src_offset, op.dst_offset, op.count);
@@ -661,6 +692,21 @@ impl PerfOperationHandler {
                 warn!("COPY: Failed to resolve destination handle: {}", e);
                 return CopyRes {
                     status: Nfs4Status::Stale,
+                    sync: true,
+                    count: 0,
+                    completion: CopyCompletion::Synchronous,
+                };
+            }
+        };
+
+        // Conflict site 8 (design §5.2): COPY writes into its
+        // destination — recall the destination's delegations.
+        let _deleg_guard = match self.deleg_fence_path(&dst_path, ctx) {
+            Ok(g) => g,
+            Err(status) => {
+                info!("COPY: delegation recall on destination in flight → DELAY");
+                return CopyRes {
+                    status,
                     sync: true,
                     count: 0,
                     completion: CopyCompletion::Synchronous,
@@ -978,7 +1024,7 @@ impl PerfOperationHandler {
     pub async fn handle_clone(
         &self,
         op: CloneOp,
-        _ctx: &CompoundContext,
+        ctx: &CompoundContext,
     ) -> CloneRes {
         debug!("CLONE: src_offset={}, dst_offset={}, count={}",
               op.src_offset, op.dst_offset, op.count);
@@ -1041,6 +1087,16 @@ impl PerfOperationHandler {
                 return CloneRes {
                     status: Nfs4Status::Stale,
                 };
+            }
+        };
+
+        // Conflict site 8 (design §5.2): CLONE writes into its
+        // destination — recall the destination's delegations.
+        let _deleg_guard = match self.deleg_fence_path(&dst_path, ctx) {
+            Ok(g) => g,
+            Err(status) => {
+                info!("CLONE: delegation recall on destination in flight → DELAY");
+                return CloneRes { status };
             }
         };
 
@@ -1296,6 +1352,16 @@ impl PerfOperationHandler {
             Err(e) => {
                 warn!("ALLOCATE/DEALLOCATE: unresolvable filehandle: {}", e);
                 return Nfs4Status::Stale;
+            }
+        };
+
+        // Conflict site 8 (design §5.2): allocation changes observable
+        // size/content on a possibly-delegated file.
+        let _deleg_guard = match self.deleg_fence_path(&path, ctx) {
+            Ok(g) => g,
+            Err(status) => {
+                info!("ALLOCATE/DEALLOCATE: delegation recall in flight → DELAY");
+                return status;
             }
         };
         if length == 0 {

@@ -31,6 +31,7 @@ pub mod stat_cache;       // Counter-validated lstat cache (the F14 counter doub
 pub mod authz;            // POSIX permission checks against the CALLER (finding 7, §2A)
 pub mod metadata_sync;    // fsync the parent dirent after CREATE/REMOVE/RENAME/LINK (blocker 2)
 pub mod cb_compound;      // CB_COMPOUND XDR + ONC RPC framing for the v4.1 callback channel
+pub mod deleg_recall;     // The delegation recall ladder — recall-or-die (design §5.4)
 
 pub use protocol::*;
 pub use xdr::{Nfs4XdrEncoder, Nfs4XdrDecoder, AttrEncoder, AttrDecoder};

@@ -874,14 +874,28 @@ pub struct LockURes {
 pub struct LockOperationHandler {
     state_mgr: Arc<StateManager>,
     lock_mgr: Arc<LockManager>,
+    /// For the delegation fence (design §5.2 site 7): a write lock
+    /// needs the file's identity. None only in unit tests, which run
+    /// unfenced like production with delegations off.
+    fh_mgr: Option<Arc<crate::nfs::v4::filehandle::FileHandleManager>>,
 }
 
 impl LockOperationHandler {
+    /// Attach the filehandle manager (the dispatcher always does).
+    pub fn with_fh_mgr(
+        mut self,
+        fh_mgr: Arc<crate::nfs::v4::filehandle::FileHandleManager>,
+    ) -> Self {
+        self.fh_mgr = Some(fh_mgr);
+        self
+    }
+
     /// Create a new lock operation handler
     pub fn new(state_mgr: Arc<StateManager>, lock_mgr: Arc<LockManager>) -> Self {
         Self {
             state_mgr,
             lock_mgr,
+            fh_mgr: None,
         }
     }
 
@@ -954,6 +968,47 @@ impl LockOperationHandler {
                 };
             }
         };
+
+        // Conflict site 7 (design §5.2): a WRITE lock on a delegated
+        // file. Should be unreachable — a write lock rides a write
+        // open, and THAT open's fence already recalled — so this is
+        // the belt-and-braces consult, with a warn when it fires.
+        if matches!(op.locktype, LockType::Write | LockType::WriteRead)
+            && crate::nfs::v4::state::delegations_enabled()
+        {
+            if let Some(path) = self
+                .fh_mgr
+                .as_ref()
+                .and_then(|f| f.resolve_handle(current_fh).ok())
+            {
+                if let Ok(md) = crate::nfs::v4::stat_cache::lstat(&path) {
+                    use std::os::unix::fs::MetadataExt;
+                    match self.state_mgr.deleg_fence(
+                        (md.dev(), md.ino()),
+                        Some(client_id),
+                        false,
+                    ) {
+                        crate::nfs::v4::state::FenceVerdict::Proceed(_g) => {
+                            // Guard dropped immediately: the lock grab
+                            // below registers real lock state that the
+                            // grant path independently refuses on.
+                        }
+                        crate::nfs::v4::state::FenceVerdict::Delay => {
+                            warn!(
+                                "LOCK: WRITE_LT hit a live delegation on {:?} — \
+                                 recalling (this lane should be unreachable)",
+                                path
+                            );
+                            return LockRes {
+                                status: Nfs4Status::Delay,
+                                stateid: None,
+                                denied: None,
+                            };
+                        }
+                    }
+                }
+            }
+        }
 
         // Lock reclaim (client detected a server reboot). Only legal in
         // grace; and if the server RESTORED this exact lock from the

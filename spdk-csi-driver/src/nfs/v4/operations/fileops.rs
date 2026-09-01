@@ -1811,6 +1811,10 @@ pub struct FileOperationHandler {
     /// Present only in the MDS role. Used to answer SPACE_USED honestly
     /// for striped files — see [`Self::correct_space_used`].
     pnfs_handler: Option<Arc<dyn crate::pnfs::PnfsOperations>>,
+    /// For the delegation mutation fence (design §5.2). None only in
+    /// unit tests constructed without a dispatcher — those run
+    /// unfenced, same as production with delegations off.
+    state_mgr: Option<Arc<crate::nfs::v4::state::StateManager>>,
 }
 
 impl FileOperationHandler {
@@ -1841,7 +1845,71 @@ impl FileOperationHandler {
     }
 
     pub fn new(fh_mgr: Arc<FileHandleManager>, pnfs_enabled: bool) -> Self {
-        Self { fh_mgr, pnfs_enabled, open_files: None, pnfs_handler: None }
+        Self {
+            fh_mgr,
+            pnfs_enabled,
+            open_files: None,
+            pnfs_handler: None,
+            state_mgr: None,
+        }
+    }
+
+    /// Attach the state manager (the dispatcher always does; unit
+    /// tests built without one simply run unfenced, which is also
+    /// what production does with delegations off).
+    pub fn with_state_mgr(mut self, state_mgr: Arc<crate::nfs::v4::state::StateManager>) -> Self {
+        self.state_mgr = Some(state_mgr);
+        self
+    }
+
+    /// Fence consult for a mutation on the file at `path` (design
+    /// §5.2 — SETATTR/REMOVE/RENAME/LINK live here). Ok(guard) =
+    /// proceed, holding the guard until the mutation completes;
+    /// Err(Delay) = answer NFS4ERR_DELAY. One atomic load when the
+    /// feature is off.
+    fn deleg_fence_path(
+        &self,
+        path: &std::path::Path,
+        ctx: &CompoundContext,
+        truncate: bool,
+    ) -> Result<Option<crate::nfs::v4::state::MutationGuard>, Nfs4Status> {
+        if self.state_mgr.is_none() || !crate::nfs::v4::state::delegations_enabled() {
+            return Ok(None);
+        }
+        let ident = match crate::nfs::v4::stat_cache::lstat(path) {
+            Ok(md) => {
+                use std::os::unix::fs::MetadataExt;
+                (md.dev(), md.ino())
+            }
+            // Nothing at the path — nothing can be delegated there.
+            Err(_) => return Ok(None),
+        };
+        self.deleg_fence_ident(ident, ctx, truncate)
+    }
+
+    /// Same fence, for sites that already hold the target's identity
+    /// (REMOVE stats the victim pre-unlink anyway).
+    fn deleg_fence_ident(
+        &self,
+        ident: (u64, u64),
+        ctx: &CompoundContext,
+        truncate: bool,
+    ) -> Result<Option<crate::nfs::v4::state::MutationGuard>, Nfs4Status> {
+        let Some(state_mgr) = &self.state_mgr else {
+            return Ok(None);
+        };
+        if !crate::nfs::v4::state::delegations_enabled() {
+            return Ok(None);
+        }
+        let mutator = ctx
+            .session_id
+            .as_ref()
+            .and_then(|sid| state_mgr.sessions.get_session(sid))
+            .map(|s| s.client_id);
+        match state_mgr.deleg_fence(ident, mutator, truncate) {
+            crate::nfs::v4::state::FenceVerdict::Proceed(g) => Ok(g),
+            crate::nfs::v4::state::FenceVerdict::Delay => Err(Nfs4Status::Delay),
+        }
     }
 
     /// Attach the pNFS handler (MDS role only).
@@ -2744,6 +2812,19 @@ impl FileOperationHandler {
             Err(status) => {
                 warn!("SETATTR: undecodable/unsupported attrs (mask {:?}) → {:?}",
                       op.obj_attributes.attrmask, status);
+                return SetAttrRes { status, attrsset: vec![] };
+            }
+        };
+
+        // Conflict site 5 (design §5.2): ANY SETATTR on a delegated
+        // file recalls EVERY record whose holder isn't the mutator —
+        // the blunt rule, because holders cache the attrs this op is
+        // about to change (holder A's chmod must still recall holder
+        // B). The sole-holder carve-out comes from the funnel.
+        let _deleg_guard = match self.deleg_fence_path(&path, ctx, decoded.size.is_some()) {
+            Ok(g) => g,
+            Err(status) => {
+                info!("SETATTR: delegation recall in flight → DELAY");
                 return SetAttrRes { status, attrsset: vec![] };
             }
         };
@@ -3831,6 +3912,27 @@ impl FileOperationHandler {
                         }
                     }
                 }
+
+                // Conflict site 3 (design §5.2): REMOVE of a delegated
+                // file — CLOSE never touches delegations, so a
+                // zero-opens file can still be delegated; the consult
+                // is against the delegation table, not the open table.
+                // truncate=true rides the CB_RECALL. Directories are
+                // never delegated but the fence is a no-op for them.
+                let _deleg_guard = {
+                    use std::os::unix::fs::MetadataExt;
+                    match self.deleg_fence_ident(
+                        (metadata.dev(), metadata.ino()),
+                        ctx,
+                        true,
+                    ) {
+                        Ok(g) => g,
+                        Err(status) => {
+                            info!("REMOVE: delegation recall in flight → DELAY");
+                            return RemoveRes { status, change_info: None };
+                        }
+                    }
+                };
                 // change_info4's pre-mutation half, sampled before the
                 // unlink so it matches the client's cached value.
                 let dir_before =
@@ -4023,6 +4125,31 @@ impl FileOperationHandler {
             if let (Ok(s), Ok(d)) = (source_path.symlink_metadata(), dest_path.symlink_metadata()) {
                 if s.dev() == d.dev() && s.ino() == d.ino() && !s.file_type().is_symlink() {
                     is_self_rename = true;
+                }
+            }
+        }
+
+        // Conflict site 4 (design §5.2): a rename that OVERWRITES a
+        // delegated destination is a REMOVE of it (truncate=true on
+        // the recall); renaming a delegated SOURCE recalls too in v1
+        // (conservative — holders key their caches by fh, which
+        // survives the rename in kernel-handles mode, but path-handle
+        // deployments would go stale; revisit under (dev,ino) keying
+        // in v2). A self-rename mutates nothing and consults nothing.
+        let mut _deleg_guards = (None, None);
+        if !is_self_rename {
+            match self.deleg_fence_path(&source_path, ctx, false) {
+                Ok(g) => _deleg_guards.0 = g,
+                Err(status) => {
+                    info!("RENAME: delegation recall on source in flight → DELAY");
+                    return rename_err(status);
+                }
+            }
+            match self.deleg_fence_path(&dest_path, ctx, true) {
+                Ok(g) => _deleg_guards.1 = g,
+                Err(status) => {
+                    info!("RENAME: delegation recall on destination in flight → DELAY");
+                    return rename_err(status);
                 }
             }
         }
@@ -4296,6 +4423,16 @@ impl FileOperationHandler {
 
         // Build path for new link
         let link_path = target_dir_path.join(&op.newname);
+
+        // Conflict site 11 (design §5.2): LINK bumps the TARGET FILE's
+        // nlink+ctime — attributes its delegation holders cache.
+        let _deleg_guard = match self.deleg_fence_path(&file_path, ctx, false) {
+            Ok(g) => g,
+            Err(status) => {
+                info!("LINK: delegation recall in flight → DELAY");
+                return LinkRes { status, change_info: None };
+            }
+        };
 
         // ── §2A leg A3: the new name lands in target_dir_path ───────
         {

@@ -210,6 +210,16 @@ pub struct StateIdManager {
     /// without iterating the full `open_states` map.
     opens_by_fh: DashMap<Vec<u8>, Vec<(u64, Vec<u8>)>>,
 
+    /// (dev,ino) ↔ fh indices for `file_has_write_open`: the
+    /// delegation grant predicate must see write opens on EVERY fh
+    /// aliasing an inode — in path-handles mode hardlinks give one
+    /// inode many fhs, so an fh-keyed check would falsify the
+    /// no-conflicting-opens invariant (design §4 rule 5). Populated by
+    /// `record_open` when the caller knows the identity, drained with
+    /// `opens_by_fh` on last close.
+    fhs_by_ident: DashMap<(u64, u64), Vec<Vec<u8>>>,
+    idents_by_fh: DashMap<Vec<u8>, (u64, u64)>,
+
     /// Persistence target. See `client.rs` for the full rationale;
     /// stateids surviving restart is what prevents `BAD_STATEID` on
     /// the client's next WRITE after an MDS pod roll.
@@ -249,6 +259,8 @@ impl StateIdManager {
             open_states: DashMap::new(),
             open_state_keys: DashMap::new(),
             opens_by_fh: DashMap::new(),
+            fhs_by_ident: DashMap::new(),
+            idents_by_fh: DashMap::new(),
             backend,
             closed_recently: Mutex::new((
                 VecDeque::with_capacity(CLOSED_TOMBSTONES),
@@ -347,8 +359,13 @@ impl StateIdManager {
         share_access: u32,
         share_deny: u32,
         verifier: Option<u64>,
+        ident: Option<(u64, u64)>,
     ) -> StateId {
         let key = (client_id, owner.clone(), fh.clone());
+        // Identity index first (before any early return below): the
+        // grant predicate must never miss an open because its arm
+        // skipped the indexing line.
+        self.index_ident(&key.2, ident);
         // F31: the whole decide-and-mutate sequence runs under the
         // open_states ENTRY guard, so two concurrent OPENs for the same
         // key cannot both take the fresh path (the double-allocation
@@ -796,6 +813,84 @@ impl StateIdManager {
     /// seqid means a newer OPEN by the same owner advanced the state
     /// after this CLOSE was sent: report `OldStateId` and destroy
     /// nothing — the newer opener legitimately holds this stateid.
+    /// Record fh → (dev,ino). An fh re-binding to a DIFFERENT inode
+    /// (file replaced under a path handle) migrates between ident
+    /// buckets. Never holds one ident-map guard while acquiring the
+    /// other map's same entry twice; callers must not hold either map.
+    fn index_ident(&self, fh: &[u8], ident: Option<(u64, u64)>) {
+        let Some(ident) = ident else { return };
+        use dashmap::mapref::entry::Entry;
+        match self.idents_by_fh.entry(fh.to_vec()) {
+            Entry::Occupied(mut occ) => {
+                let old = *occ.get();
+                if old == ident {
+                    return;
+                }
+                occ.insert(ident);
+                drop(occ);
+                if let Some(mut v) = self.fhs_by_ident.get_mut(&old) {
+                    v.retain(|f| f != fh);
+                    let empty = v.is_empty();
+                    drop(v);
+                    if empty {
+                        self.fhs_by_ident.remove_if(&old, |_, v| v.is_empty());
+                    }
+                }
+                let mut v = self.fhs_by_ident.entry(ident).or_insert_with(Vec::new);
+                if !v.iter().any(|f| f == fh) {
+                    v.push(fh.to_vec());
+                }
+            }
+            Entry::Vacant(vac) => {
+                vac.insert(ident);
+                let mut v = self.fhs_by_ident.entry(ident).or_insert_with(Vec::new);
+                if !v.iter().any(|f| f == fh) {
+                    v.push(fh.to_vec());
+                }
+            }
+        }
+    }
+
+    /// Drop fh from the identity indices (last open on it closed).
+    fn unindex_ident(&self, fh: &[u8]) {
+        if let Some((_, ident)) = self.idents_by_fh.remove(fh) {
+            if let Some(mut v) = self.fhs_by_ident.get_mut(&ident) {
+                v.retain(|f| f != fh);
+                let empty = v.is_empty();
+                drop(v);
+                if empty {
+                    self.fhs_by_ident.remove_if(&ident, |_, v| v.is_empty());
+                }
+            }
+        }
+    }
+
+    /// Does ANY client hold a write-capable open on this inode, on any
+    /// fh aliasing it? The delegation grant's rule-5 predicate (design
+    /// §4). Clones the small index vectors up front so no map guard is
+    /// held while other maps are read — `record_open` acquires in the
+    /// opposite direction and a held guard here would be a lock cycle.
+    pub fn file_has_write_open(&self, dev: u64, ino: u64) -> bool {
+        let fhs: Vec<Vec<u8>> = match self.fhs_by_ident.get(&(dev, ino)) {
+            Some(v) => v.clone(),
+            None => return false,
+        };
+        for fh in fhs {
+            let owners: Vec<(u64, Vec<u8>)> = match self.opens_by_fh.get(&fh) {
+                Some(o) => o.clone(),
+                None => continue,
+            };
+            for (client_id, owner) in owners {
+                if let Some(st) = self.open_states.get(&(client_id, owner, fh.clone())) {
+                    if st.share_access & 2 != 0 {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     pub fn close_open(&self, stateid: &StateId) -> CloseOutcome {
         let other = &stateid.other;
         let Some(key) = self.open_state_keys.get(other).map(|e| e.value().clone()) else {
@@ -890,6 +985,7 @@ impl StateIdManager {
             if owners.is_empty() {
                 drop(owners);
                 self.opens_by_fh.remove(fh);
+                self.unindex_ident(fh);
             }
         }
         self.remove_master(other);
@@ -990,6 +1086,7 @@ impl StateIdManager {
                 drop(entry);
                 if now_empty {
                     self.opens_by_fh.remove(&fh);
+                    self.unindex_ident(&fh);
                 }
             }
         }
@@ -1123,10 +1220,10 @@ mod tests {
         let owner = b"alice".to_vec();
         let fh = b"/path/to/file".to_vec();
 
-        let s1 = mgr.record_open(1, owner.clone(), fh.clone(), 2 /*WRITE*/, 0, None);
+        let s1 = mgr.record_open(1, owner.clone(), fh.clone(), 2 /*WRITE*/, 0, None, None);
         assert_eq!(s1.seqid, 1);
 
-        let s2 = mgr.record_open(1, owner.clone(), fh.clone(), 1 /*READ*/, 0, None);
+        let s2 = mgr.record_open(1, owner.clone(), fh.clone(), 1 /*READ*/, 0, None, None);
         assert_eq!(s2.seqid, 2);
         assert_eq!(s2.other, s1.other, "same owner+fh must reuse stateid.other");
 
@@ -1146,7 +1243,7 @@ mod tests {
         let owner = b"fio-worker".to_vec();
         let fh = b"/bench/file0".to_vec();
 
-        let s1 = mgr.record_open(1, owner.clone(), fh.clone(), 2, 0, None);
+        let s1 = mgr.record_open(1, owner.clone(), fh.clone(), 2, 0, None, None);
         assert_eq!(s1.seqid, 1);
 
         // F31: EVERY follow-on OPEN bumps the seqid, even with an
@@ -1154,7 +1251,7 @@ mod tests {
         // opposite — that misreading of §18.16.4 removed the protocol's
         // only defense against reordered same-owner CLOSEs and was the
         // root of the ~7% CLOSE not-found residual / churn collapse.)
-        let s2 = mgr.record_open(1, owner.clone(), fh.clone(), 2, 0, None);
+        let s2 = mgr.record_open(1, owner.clone(), fh.clone(), 2, 0, None, None);
         assert_eq!(s2.other, s1.other);
         assert_eq!(s2.seqid, 2, "every OPEN must advance the seqid (F31)");
 
@@ -1172,7 +1269,7 @@ mod tests {
         let fh = b"/bench/testfile".to_vec();
 
         let ids: Vec<_> = (0..4)
-            .map(|_| mgr.record_open(1, owner.clone(), fh.clone(), 2, 0, None))
+            .map(|_| mgr.record_open(1, owner.clone(), fh.clone(), 2, 0, None, None))
             .collect();
 
         for (i, sid) in ids.iter().enumerate() {
@@ -1195,8 +1292,8 @@ mod tests {
         let fh = b"/pgdata/base/16384/1259".to_vec();
 
         // A opens (seq=1); B re-opens (same mask) → same other, seq=2.
-        let a = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None);
-        let b = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None);
+        let a = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None, None);
+        let b = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None, None);
         assert_eq!(a.other, b.other);
 
         // A's CLOSE arrives late, carrying the stale seq=1 view.
@@ -1225,12 +1322,12 @@ mod tests {
         let owner = b"uid-999".to_vec();
         let fh = b"/pgdata/pg_wal/0001".to_vec();
 
-        let s1 = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None);
+        let s1 = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None, None);
         // Simulate the crash-artifact path: master revoked, open_states
         // entry left behind — the next OPEN's stale-guard must clean
         // BOTH the entry and its reverse-index record.
         mgr.revoke(&s1).unwrap();
-        let s2 = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None);
+        let s2 = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None, None);
         assert_ne!(s1.other, s2.other, "stale guard → fresh allocation");
 
         // Late duplicate closes of the dead stateid: refused, harmless.
@@ -1263,7 +1360,7 @@ mod tests {
                 let owner = b"uid-999".to_vec();
                 for i in 0..500 {
                     let fh = format!("/pgdata/rel{}", (t + i) % 4).into_bytes();
-                    let sid = mgr.record_open(1, owner.clone(), fh, 3, 0, None);
+                    let sid = mgr.record_open(1, owner.clone(), fh, 3, 0, None, None);
                     if mgr.close_open(&sid) == CloseOutcome::NotFound {
                         not_found.fetch_add(1, AOrd::SeqCst);
                     }
@@ -1299,13 +1396,13 @@ mod tests {
         let owner = b"linux-owner".to_vec();
         let fh = b"/tmp/testfile".to_vec();
 
-        let sid1 = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None);
+        let sid1 = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None, None);
         assert!(mgr.validate(&sid1).is_ok());
 
         mgr.close_open_state(&sid1.other);
         assert!(mgr.validate(&sid1).is_err());
 
-        let sid2 = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None);
+        let sid2 = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None, None);
         assert_ne!(sid1.other, sid2.other);
         assert!(mgr.validate(&sid2).is_ok());
     }
@@ -1316,7 +1413,7 @@ mod tests {
         let fh = b"/path/to/file".to_vec();
 
         // Owner A opens with deny=WRITE.
-        mgr.record_open(1, b"alice".to_vec(), fh.clone(), 1, 2, None);
+        mgr.record_open(1, b"alice".to_vec(), fh.clone(), 1, 2, None, None);
 
         // Different (client, owner) trying to access WRITE — conflicts.
         assert!(mgr.share_conflict(&fh, 2, b"bob", 2 /*WRITE*/, 0));
@@ -1339,7 +1436,7 @@ mod tests {
         let mgr = StateIdManager::new(crate::state_backend::memory_backend());
         let fh = b"/excl/file".to_vec();
 
-        mgr.record_open(1, b"alice".to_vec(), fh.clone(), 3, 0, Some(0xdead_beef));
+        mgr.record_open(1, b"alice".to_vec(), fh.clone(), 3, 0, Some(0xdead_beef), None);
 
         // Same verifier → matches.
         assert!(mgr.find_exclusive_match(&fh, 0xdead_beef).is_some());
@@ -1443,7 +1540,7 @@ mod tests {
     fn open_downgrade_shrinks_masks_and_bumps_seqid() {
         let mgr = StateIdManager::new(crate::state_backend::memory_backend());
         // BOTH access (3), deny NONE.
-        let sid = mgr.record_open(1, b"owner".to_vec(), b"fh".to_vec(), 3, 0, None);
+        let sid = mgr.record_open(1, b"owner".to_vec(), b"fh".to_vec(), 3, 0, None, None);
 
         let refreshed = mgr
             .downgrade_open(&sid, 1 /* READ only */, 0)
@@ -1461,7 +1558,7 @@ mod tests {
         use crate::nfs::v4::protocol::Nfs4Status;
         let mgr = StateIdManager::new(crate::state_backend::memory_backend());
         // READ only.
-        let sid = mgr.record_open(1, b"owner".to_vec(), b"fh".to_vec(), 1, 0, None);
+        let sid = mgr.record_open(1, b"owner".to_vec(), b"fh".to_vec(), 1, 0, None, None);
 
         // Asking for WRITE (2) is an upgrade → INVAL.
         assert_eq!(mgr.downgrade_open(&sid, 2, 0), Err(Nfs4Status::Inval));
@@ -1470,5 +1567,61 @@ mod tests {
         // Unknown stateid → BAD_STATEID.
         let bogus = StateId { seqid: 1, other: [9u8; 12] };
         assert_eq!(mgr.downgrade_open(&bogus, 1, 0), Err(Nfs4Status::BadStateId));
+    }
+
+    #[test]
+    fn write_open_is_visible_by_inode_and_gone_on_close() {
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+        let ident = Some((7, 700));
+        // Read-only open: no write visible.
+        let s1 = mgr.record_open(1, b"a".to_vec(), b"fh1".to_vec(), 1, 0, None, ident);
+        assert!(!mgr.file_has_write_open(7, 700));
+        // A second client opens WRITE on the same inode.
+        let s2 = mgr.record_open(2, b"b".to_vec(), b"fh1".to_vec(), 2, 0, None, ident);
+        assert!(mgr.file_has_write_open(7, 700));
+        // Different inode untouched.
+        assert!(!mgr.file_has_write_open(7, 701));
+        // Writer closes: predicate clears. Reader closes: index drains.
+        assert_eq!(mgr.close_open(&s2), CloseOutcome::Closed);
+        assert!(!mgr.file_has_write_open(7, 700));
+        assert_eq!(mgr.close_open(&s1), CloseOutcome::Closed);
+        assert!(!mgr.file_has_write_open(7, 700));
+    }
+
+    #[test]
+    fn a_hardlink_alias_write_is_seen_across_fhs() {
+        // One inode, two fhs (path-handles mode hardlinks). A write
+        // open through EITHER name must be visible to the predicate —
+        // the invariant fh-keying would have falsified (design §4
+        // rule 5).
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+        let ident = Some((7, 700));
+        mgr.record_open(1, b"a".to_vec(), b"name-a".to_vec(), 1, 0, None, ident);
+        let w = mgr.record_open(2, b"b".to_vec(), b"name-b".to_vec(), 2, 0, None, ident);
+        assert!(mgr.file_has_write_open(7, 700));
+        assert_eq!(mgr.close_open(&w), CloseOutcome::Closed);
+        assert!(!mgr.file_has_write_open(7, 700));
+    }
+
+    #[test]
+    fn an_unidentified_open_is_invisible_to_the_predicate() {
+        // ident None (stat failed at OPEN): the open is not indexed,
+        // the predicate answers false, and the only consequence is
+        // that grants on the file are refused elsewhere — never a
+        // false "no writers" that a grant could trust... which is why
+        // the grant path must ALSO refuse when it cannot resolve the
+        // opened file's own identity (design §4: refusal is free).
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+        mgr.record_open(1, b"a".to_vec(), b"fh1".to_vec(), 2, 0, None, None);
+        assert!(!mgr.file_has_write_open(7, 700));
+    }
+
+    #[test]
+    fn client_teardown_drains_the_identity_index() {
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+        mgr.record_open(1, b"a".to_vec(), b"fh1".to_vec(), 2, 0, None, Some((7, 700)));
+        assert!(mgr.file_has_write_open(7, 700));
+        mgr.remove_client_stateids(1);
+        assert!(!mgr.file_has_write_open(7, 700));
     }
 }

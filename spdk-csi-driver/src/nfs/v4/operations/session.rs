@@ -356,7 +356,7 @@ impl SessionOperationHandler {
     fn cascade_destroy_client(&self, old_id: u64) {
         self.state_mgr.sessions.destroy_client_sessions(old_id);
         self.state_mgr.stateids.remove_client_stateids(old_id);
-        self.state_mgr.delegations.cleanup_client_delegations(old_id);
+        let _ = self.state_mgr.delegations.cleanup_client_delegations(old_id);
         // LOCKS BEFORE THE CLIENT RECORD. `remove_client` drops the lease,
         // and the only production caller of `remove_client_locks` iterates
         // `get_expired_clients()` — which reads the lease map. Anything
@@ -390,12 +390,7 @@ impl SessionOperationHandler {
         if self.state_mgr.stateids.count_for_client(id) > 0 {
             return true;
         }
-        if !self
-            .state_mgr
-            .delegations
-            .get_delegations_for_client(id)
-            .is_empty()
-        {
+        if self.state_mgr.delegations.count_for_client(id) > 0 {
             return true;
         }
         if let Some(l) = &self.lock_mgr {

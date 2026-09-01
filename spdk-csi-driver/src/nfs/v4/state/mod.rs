@@ -25,7 +25,11 @@ pub use client::ClientManager;
 pub use session::SessionManager;
 pub use stateid::{CloseOutcome, StateIdManager, StateType, StateEntry};
 pub use lease::LeaseManager;
-pub use delegation::{DelegationManager, Delegation, DelegationType, DelegationStats};
+pub use delegation::{
+    delegations_enabled, override_delegations_enabled, DelegReturnError, DelegSnapshot,
+    DelegState, DelegationManager, FenceOutcome, FenceVerdict, FileId, GrantRefusal,
+    MutationGuard, RecallOrder,
+};
 
 use crate::state_backend::{StateBackend, StateBackendError};
 use std::sync::Arc;
@@ -105,6 +109,13 @@ pub struct StateManager {
     /// holder-evidence markers, not from this map.
     /// (docs/plans/nfs-delegations-design.md §5.4/§6, slice 2.)
     seq_flags: dashmap::DashMap<u64, u32>,
+    /// How a fence conflict's CB_RECALLs get sent — installed at
+    /// server bring-up once a RecallDriver exists (the driver needs a
+    /// CallbackManager, which needs the listener's back-channel
+    /// registry, so it cannot exist at StateManager construction).
+    /// A closure rather than the driver type keeps `state` from
+    /// depending on `deleg_recall` (which depends back on `state`).
+    recall_spawner: std::sync::OnceLock<Arc<dyn Fn(Vec<RecallOrder>) + Send + Sync>>,
 }
 
 impl StateManager {
@@ -131,6 +142,66 @@ impl StateManager {
             quotas: StateQuotas::from_env(),
             backend,
             seq_flags: dashmap::DashMap::new(),
+            recall_spawner: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Install the recall spawner (server bring-up, once). Grants are
+    /// refused until this exists — a delegation the server cannot
+    /// recall is the stale-forever trap.
+    pub fn install_recall_spawner(
+        &self,
+        spawner: Arc<dyn Fn(Vec<RecallOrder>) + Send + Sync>,
+    ) {
+        let _ = self.recall_spawner.set(spawner);
+    }
+
+    /// Can the grant path run at all? (Design §4 precondition: no
+    /// recall machinery, no grants.)
+    pub fn recall_machinery_ready(&self) -> bool {
+        self.recall_spawner.get().is_some()
+    }
+
+    /// THE fence funnel (design §5.2) — every mutation lane consults
+    /// here pre-op. `Proceed(guard)` means run the mutation and hold
+    /// the guard until it completes; `Delay` means answer
+    /// NFS4ERR_DELAY (the recalls are already on their way). With the
+    /// feature off — or before the spawner is installed, when no
+    /// grant can have happened — this is one atomic load.
+    pub fn deleg_fence(
+        &self,
+        ident: (u64, u64),
+        mutator: Option<u64>,
+        truncate: bool,
+    ) -> FenceVerdict {
+        if !delegation::delegations_enabled() {
+            return FenceVerdict::Proceed(None);
+        }
+        let Some(spawn) = self.recall_spawner.get() else {
+            return FenceVerdict::Proceed(None);
+        };
+        match self
+            .delegations
+            .mutation_fence(FileId::new(ident.0, ident.1), mutator, truncate)
+        {
+            FenceOutcome::Clear(g) => FenceVerdict::Proceed(Some(g)),
+            FenceOutcome::Conflict {
+                guard,
+                recalls,
+                delay,
+            } => {
+                if !recalls.is_empty() {
+                    spawn(recalls);
+                }
+                if delay {
+                    // The conflictor gives up this attempt; its guard
+                    // drops with the verdict.
+                    drop(guard);
+                    FenceVerdict::Delay
+                } else {
+                    FenceVerdict::Proceed(Some(guard))
+                }
+            }
         }
     }
 
@@ -309,8 +380,10 @@ impl StateManager {
             // Remove the client itself
             self.clients.remove_client(client_id);
 
-            // Cleanup any delegations for this client
-            self.delegations.cleanup_client_delegations(client_id);
+            // Cleanup any delegations for this client. The freed
+            // stateids' master entries were already dropped by
+            // remove_client_stateids above.
+            let _ = self.delegations.cleanup_client_delegations(client_id);
         }
     }
 }

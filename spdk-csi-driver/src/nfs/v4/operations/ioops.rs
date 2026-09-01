@@ -256,15 +256,17 @@ fn cacheable_stateid(other: &[u8; 12]) -> bool {
     *other != [0u8; 12] && *other != [0xffu8; 12]
 }
 
-/// Whether the server may grant delegations (FLINT_NFS_DELEGATIONS=1).
-/// Off by default: see the gate in `try_grant_read_delegation`.
-fn delegations_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("FLINT_NFS_DELEGATIONS")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    })
+// The FLINT_NFS_DELEGATIONS gate lives with the delegation state core.
+use crate::nfs::v4::state::delegations_enabled;
+
+/// (dev,ino) of an opened file, for the open-identity index the
+/// delegation grant predicate reads (`file_has_write_open` — design §4
+/// rule 5). Best-effort: a failed stat skips the indexing, and the
+/// only consequence is that no delegation is granted on the file this
+/// cycle — refusal is free by design.
+fn open_ident_of(md: std::io::Result<std::fs::Metadata>) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    md.ok().map(|m| (m.dev(), m.ino()))
 }
 
 /// I/O operation handler with file descriptor caching
@@ -566,6 +568,20 @@ impl IoOperationHandler {
             return true;
         }
         false
+    }
+
+    /// The mutator identity a fence consult reports (design §5.2 site
+    /// 10): the session's client, or None for sessionless lanes (the
+    /// in-process file API, v4.0 paths) — where every delegation
+    /// holder is "another client" and must be recalled with DELAY.
+    /// Distinct from `get_client_id_from_context`, whose fallback of 1
+    /// could collide with a real client id and hand that client a
+    /// self-conflict carve-out it has no right to.
+    fn fence_mutator(&self, ctx: &CompoundContext) -> Option<u64> {
+        ctx.session_id
+            .as_ref()
+            .and_then(|sid| self.state_mgr.sessions.get_session(sid))
+            .map(|s| s.client_id)
     }
 
     fn get_client_id_from_context(&self, ctx: &CompoundContext) -> u64 {
@@ -891,6 +907,42 @@ impl IoOperationHandler {
                 .and_then(crate::nfs::v4::change_counter::current_of_path)
                 .unwrap_or(0);
 
+            // Conflict sites 1+8 (design §5.2), create arm: an
+            // UNCHECKED create over an EXISTING delegated file opens
+            // it write-capable and may truncate it via createattrs-
+            // size — the fence runs BEFORE the create executes. A
+            // genuinely new file has no identity yet and nothing to
+            // fence.
+            let mut _deleg_guard = None;
+            if crate::nfs::v4::state::delegations_enabled() {
+                if let Some(ident) =
+                    open_ident_of(crate::nfs::v4::stat_cache::stat(&file_path))
+                {
+                    let truncates = createattrs
+                        .as_ref()
+                        .map(|a| a.size.is_some())
+                        .unwrap_or(false);
+                    match self.state_mgr.deleg_fence(
+                        ident,
+                        self.fence_mutator(ctx),
+                        truncates,
+                    ) {
+                        crate::nfs::v4::state::FenceVerdict::Proceed(g) => _deleg_guard = g,
+                        crate::nfs::v4::state::FenceVerdict::Delay => {
+                            info!("OPEN(create): delegation recall in flight → DELAY");
+                            return OpenRes {
+                                status: Nfs4Status::Delay,
+                                stateid: None,
+                                change_info: None,
+                                result_flags: 0,
+                                delegation: OpenDelegationType::None,
+                                attrset: vec![],
+                            };
+                        }
+                    }
+                }
+            }
+
             // read+write: this fd is seeded into the fd-cache below and
             // must serve BOTH directions (a write-only fd turns a later
             // READ through the cache into EBADF).
@@ -1099,6 +1151,8 @@ impl IoOperationHandler {
                                 op.share_access,
                                 op.share_deny,
                                 exclusive_verifier,
+                                // fstat the create's own fd — no path race.
+                                open_ident_of(created.metadata()),
                             );
 
                             debug!("OPEN: stateid {:?} for client {}", stateid, client_id);
@@ -1339,21 +1393,6 @@ impl IoOperationHandler {
             }
         }
 
-        // If opening for WRITE, recall any read delegations
-        // share_access: 1 = READ, 2 = WRITE, 3 = BOTH
-        if op.share_access & 2 != 0 {
-            // Opening for write - recall read delegations
-            if let Ok(file_path) = self.fh_mgr.resolve_handle(current_fh) {
-                let recalled = self.state_mgr.delegations.recall_read_delegations(&file_path);
-                if !recalled.is_empty() {
-                    info!("📢 OPEN: Recalled {} read delegations for write access to {:?}",
-                          recalled.len(), file_path);
-                    // In a full implementation, we would wait for clients to return delegations
-                    // For now, we just mark them as recalled and proceed
-                }
-            }
-        }
-
         // ── §2A leg A3: the NO-CREATE OPEN path ─────────────────────
         //
         // There are TWO open paths, and the first version of this fix
@@ -1411,6 +1450,41 @@ impl IoOperationHandler {
             };
         }
 
+        // Served from the attr cache the OPEN compound already
+        // warmed — not a fresh syscall on the smallfile hot path.
+        let open_ident = target_path
+            .as_deref()
+            .and_then(|p| open_ident_of(crate::nfs::v4::stat_cache::stat(p)));
+
+        // Conflict sites 1+2 (design §5.2): an OPEN with write access,
+        // or one denying READ, on a delegated file recalls every
+        // holder and answers DELAY. The consult runs BEFORE
+        // open-state registration so a DELAYed conflictor leaves no
+        // phantom open behind (the rollback rule — the original
+        // register-first ordering left a write open visible to
+        // share_conflict for the whole recall window, with no CLOSE
+        // ever coming). The guard rides to the end of the handler:
+        // grants refuse while the registration is in flight.
+        let mut _deleg_guard = None;
+        if (op.share_access & 2 != 0) || (op.share_deny & 1 != 0) {
+            if let Some(ident) = open_ident {
+                match self.state_mgr.deleg_fence(ident, Some(client_id), false) {
+                    crate::nfs::v4::state::FenceVerdict::Proceed(g) => _deleg_guard = g,
+                    crate::nfs::v4::state::FenceVerdict::Delay => {
+                        info!("OPEN(no-create): delegation recall in flight → DELAY");
+                        return OpenRes {
+                            status: Nfs4Status::Delay,
+                            stateid: None,
+                            change_info: None,
+                            result_flags: 0,
+                            delegation: OpenDelegationType::None,
+                            attrset: vec![],
+                        };
+                    }
+                }
+            }
+        }
+
         // Record-or-bump the open (RFC 7530 §16.16: same (client,
         // owner, fh) gets the SAME stateid.other with seqid bumped,
         // share-mask merged).
@@ -1421,6 +1495,7 @@ impl IoOperationHandler {
             op.share_access,
             op.share_deny,
             None,
+            open_ident,
         );
 
         debug!("OPEN: stateid {:?} for client {}", stateid, client_id);
@@ -1476,55 +1551,25 @@ impl IoOperationHandler {
     /// - File is not being actively modified
     fn try_grant_read_delegation(
         &self,
-        client_id: u64,
-        filehandle: &Nfs4FileHandle,
-        share_access: u32,
+        _client_id: u64,
+        _filehandle: &Nfs4FileHandle,
+        _share_access: u32,
     ) -> OpenDelegationType {
         // Delegations are disabled unless FLINT_NFS_DELEGATIONS=1: granting
-        // one is only safe with a working recall path (CB_NULL probe +
-        // CB_RECALL + block-conflicting-opens), which doesn't exist yet — a
-        // client holding an unrecallable read delegation may serve stale
-        // cache forever after another client writes. Never granting is
-        // fully RFC-compliant (RFC 8881 §10.4). Note the OPEN encoder
-        // currently hardcodes OPEN_DELEGATE_NONE anyway; this gate keeps
-        // the server from minting phantom delegation records the client
-        // never hears about, and keeps the trap disarmed if the encoder is
-        // ever made honest.
+        // one is only safe with a working recall path (CB_RECALL + the
+        // mutation fence + the DELAY ladder). Never granting is fully
+        // RFC-compliant (RFC 8881 §10.4).
         if !delegations_enabled() {
             return OpenDelegationType::None;
         }
 
-        // Only grant read delegations for READ-only opens
-        // share_access: 1 = READ, 2 = WRITE, 3 = BOTH
-        if share_access != 1 {
-            debug!("OPEN: Not granting delegation - not read-only access");
-            return OpenDelegationType::None;
-        }
-
-        // Resolve file path
-        let file_path = match self.fh_mgr.resolve_handle(filehandle) {
-            Ok(path) => path,
-            Err(e) => {
-                debug!("OPEN: Cannot grant delegation - failed to resolve path: {}", e);
-                return OpenDelegationType::None;
-            }
-        };
-
-        // Try to grant read delegation
-        match self.state_mgr.delegations.grant_read_delegation(
-            client_id,
-            filehandle.data.clone(),
-            file_path,
-        ) {
-            Some(deleg_stateid) => {
-                info!("✅ OPEN: Granted read delegation {:?} to client {}", deleg_stateid, client_id);
-                OpenDelegationType::Read
-            }
-            None => {
-                debug!("OPEN: Cannot grant delegation - conflicts exist");
-                OpenDelegationType::None
-            }
-        }
+        // The DelegationManager core is in place, but the grant stays
+        // OFF until the recall path exists end-to-end: minting a record
+        // the server cannot recall — or one the client is never told
+        // about (the OPEN encoder still hardcodes OPEN_DELEGATE_NONE) —
+        // is exactly the phantom-grant trap this replaced. The full
+        // rule set is design §4; it goes live with the wire delivery.
+        OpenDelegationType::None
     }
 
     /// Handle DELEGRETURN operation
@@ -1535,18 +1580,29 @@ impl IoOperationHandler {
     ) -> DelegReturnRes {
         debug!("DELEGRETURN: stateid={:?}", stateid);
 
-        // Return the delegation
+        // Return the delegation. Error mapping is design §5.4: unknown
+        // ⇒ BAD_STATEID, stale seqid ⇒ OLD_STATEID, revoked tombstone
+        // ⇒ DELEG_REVOKED (retained until FREE_STATEID).
         match self.state_mgr.delegations.return_delegation(&stateid) {
-            Ok(()) => {
-                info!("✅ DELEGRETURN: Successfully returned delegation {:?}", stateid);
+            Ok(client_id) => {
+                info!(
+                    "DELEGRETURN: client {} returned delegation {:?}",
+                    client_id, stateid
+                );
                 DelegReturnRes {
                     status: Nfs4Status::Ok,
                 }
             }
-            Err(status) => {
-                warn!("❌ DELEGRETURN: Failed to return delegation {:?}: {:?}", stateid, status);
+            Err(e) => {
+                warn!("DELEGRETURN: refused for {:?}: {:?}", stateid, e);
                 DelegReturnRes {
-                    status,
+                    status: match e {
+                        crate::nfs::v4::state::DelegReturnError::Unknown => Nfs4Status::BadStateId,
+                        crate::nfs::v4::state::DelegReturnError::OldSeqid => Nfs4Status::OldStateId,
+                        crate::nfs::v4::state::DelegReturnError::Revoked => {
+                            Nfs4Status::DelegRevoked
+                        }
+                    },
                 }
             }
         }
@@ -2064,6 +2120,33 @@ impl IoOperationHandler {
                 }
             },
         };
+
+        // Conflict site 6 (design §5.2): WRITE is the mandatory
+        // backstop — anonymous/special stateids bypass OPEN entirely,
+        // so the OPEN fence alone cannot protect a delegated file
+        // from writes. Recall + DELAY like any other mutation lane.
+        // The stat is behind the flag: with delegations off this whole
+        // block is one atomic load.
+        let mut _deleg_guard = None;
+        if crate::nfs::v4::state::delegations_enabled() {
+            if let Some(ident) = open_ident_of(crate::nfs::v4::stat_cache::stat(&path)) {
+                match self
+                    .state_mgr
+                    .deleg_fence(ident, self.fence_mutator(ctx), false)
+                {
+                    crate::nfs::v4::state::FenceVerdict::Proceed(g) => _deleg_guard = g,
+                    crate::nfs::v4::state::FenceVerdict::Delay => {
+                        info!("WRITE: delegation recall in flight → DELAY");
+                        return WriteRes {
+                            status: Nfs4Status::Delay,
+                            count: 0,
+                            committed: UNSTABLE4,
+                            writeverf: 0,
+                        };
+                    }
+                }
+            }
+        }
 
         // Get filename for logging before moving path
         let filename = path.file_name().map(|n| n.to_string_lossy().to_string());
