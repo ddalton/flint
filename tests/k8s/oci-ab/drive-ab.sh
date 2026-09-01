@@ -303,6 +303,17 @@ substrate_gate() { # $1=since-RFC3339 [$2=streamed capture] -> PASS|FAIL|INCONCL
   esac
 }
 
+# `soci push` needs --plain-http (soci does NOT read the certs.d hosts config
+# nerdctl uses), and `soci create` REJECTS the flag — so it cannot be applied
+# to the whole chain. Verified on soci v0.11.1, runby.
+build_index() { # $1=iid $2=registry-flint $3=registry-s3
+  ssm_run "$1" "nerdctl pull --hosts-dir /etc/containerd/certs.d $2/$IMG \
+    && soci create $2/$IMG \
+    && soci push --plain-http $2/$IMG \
+    && nerdctl tag $2/$IMG $3/$IMG \
+    && soci push --plain-http $3/$IMG" | tail -3
+}
+
 pushed_digest() { # digest recorded by push-image, so G-INTEG has a reference
   [ -f "$HERE/.pushed-digest" ] && cat "$HERE/.pushed-digest" || echo none
 }
@@ -344,10 +355,32 @@ push-image)
       echo \"#RIG registry=\$r digest=\$d\"
     done") || { warn "FATAL: push failed"; exit 1; }
   echo "$pout" >&2
+  # G4: both registries must serve the SAME manifest digest.
+  #
+  # The first version of this check extracted well-formed digests and
+  # required the unique set to have size 1 — which PASSES when a registry
+  # answers nothing at all, because an empty answer never becomes a set
+  # member. flint-29 hit exactly that on runby: registry-s3 was 500ing every
+  # blob PUT and 404ing the manifest, one digest came back empty, and G4
+  # reported satisfied. It proved "the digests I could parse agree", not
+  # "both registries agree" — indistinguishable from absence, which is this
+  # campaign's signature failure shape appearing inside its own guard.
+  #
+  # So: assert the EXPECTED NUMBER OF ANSWERS first, and require a
+  # well-formed digest from each named registry, before comparing them.
+  # Count what should be there; never just deduplicate what arrived.
+  answers=$(echo "$pout" | grep -c "#RIG registry=")
+  [ "$answers" -eq 2 ] || { warn "FATAL(G4): expected 2 registry answers, got $answers"; exit 1; }
+  missing=$(echo "$pout" | awk '/#RIG registry=/ {
+      r=""; d="";
+      for (i=1;i<=NF;i++) {
+        if ($i ~ /^registry=/) r=substr($i,10);
+        if ($i ~ /^digest=/)   d=substr($i,8);
+      }
+      if (d !~ /^sha256:[0-9a-f]+$/) print r }')
+  [ -z "$missing" ] || { warn "FATAL(G4): no usable manifest digest from: $missing"; warn "  (a registry that answers nothing is not a registry that agrees)"; exit 1; }
   digs=$(echo "$pout" | sed -n 's/.*digest=\(sha256:[0-9a-f]*\).*/\1/p' | sort -u)
   n=$(echo "$digs" | grep -c . )
-  # G4: both registries must serve the SAME manifest digest, or the arms are
-  # not comparing the same image and every ratio downstream is meaningless.
   [ "$n" -eq 1 ] || { warn "FATAL(G4): registries disagree on the manifest digest:"; warn "$digs"; exit 1; }
   echo "$digs" > "$HERE/.pushed-digest"; warn "pushed digest: $digs"
   ;;
@@ -356,7 +389,20 @@ setup-client)
   rf=$(reg_ip registry-flint):5000; rs=$(reg_ip registry-s3):5000
   b64=$(base64 < "$HERE/node-soci-setup.sh" | tr -d '\n')
   ssm_run "$iid" "echo $b64 | base64 -d > /tmp/node-soci-setup.sh && REG_FLINT=$rf REG_S3=$rs bash /tmp/node-soci-setup.sh" | tail -6
-  ssm_run "$iid" "nerdctl pull --hosts-dir /etc/containerd/certs.d $rf/$IMG && soci create $rf/$IMG && soci push $rf/$IMG && nerdctl tag $rf/$IMG $rs/$IMG && soci push $rs/$IMG" | tail -3
+  build_index "$iid" "$rf" "$rs"
+  ;;
+install-node)
+  # Split out of setup-client: `push-image` needs nerdctl, and nerdctl is
+  # what node-soci-setup.sh installs, so the old documented order
+  # (push-image then setup-client) could not run on a fresh node.
+  cn=$(client_node); iid=$(node_iid "$cn") || exit 1
+  rf=$(reg_ip registry-flint):5000; rs=$(reg_ip registry-s3):5000
+  b64=$(base64 < "$HERE/node-soci-setup.sh" | tr -d '\n')
+  ssm_run "$iid" "echo $b64 | base64 -d > /tmp/node-soci-setup.sh && REG_FLINT=$rf REG_S3=$rs bash /tmp/node-soci-setup.sh" | tail -6
+  ;;
+build-index)
+  cn=$(client_node); iid=$(node_iid "$cn") || exit 1
+  build_index "$iid" "$(reg_ip registry-flint):5000" "$(reg_ip registry-s3):5000"
   ;;
 stage-blob)
   cn=$(client_node); iid=$(node_iid "$cn") || exit 1
@@ -377,8 +423,11 @@ preflight)
   # INFO the stripe-width gate is structurally blind and no run can be
   # certified. Say so while the cluster is still empty.
   if ! k -n flint-system logs deploy/flint-pnfs-mds --since=10m 2>/dev/null | grep -q "Number of DSes in stripe"; then
-    warn "PREFLIGHT: no debug-level layout lines from the MDS — the stripe-width gate will report INCONCLUSIVE."
-    warn "PREFLIGHT: run the MDS at debug LEVEL (the 'DEBUG BUILD' banner is the BINARY, a different thing)."
+    warn "PREFLIGHT (advisory): no debug-level layout lines in the last 10m. This cannot"
+    warn "  distinguish 'MDS not at debug' from 'no layouts granted recently', so on an idle"
+    warn "  cluster it is expected noise. If RUST_LOG=debug is not set, fix it now — the"
+    warn "  gate is blind without it ('DEBUG BUILD' in the banner is the BINARY, a different"
+    warn "  thing). The run's streamed capture, not this check, is what feeds the gate."
   fi
   [ $rc -eq 0 ] && warn "preflight OK: node=$cn iid=$iid digest=$d"
   exit $rc
@@ -499,5 +548,5 @@ teardown-check)
   aws ec2 describe-instances --filters Name=instance-state-name,Values=running,pending,stopping,stopped \
     --query 'length(Reservations[].Instances[])' --output text
   ;;
-*) echo "usage: $0 setup-cluster|setup-registries|push-image|setup-client|stage-blob|preflight|run|warm-leg|broken-lazy-leg|substrate-gate [min]|score <file>|teardown-check" >&2; exit 2 ;;
+*) echo "usage: $0 setup-cluster|setup-registries|push-image|setup-client|install-node|build-index|stage-blob|preflight|run|warm-leg|broken-lazy-leg|substrate-gate [min]|score <file>|teardown-check" >&2; exit 2 ;;
 esac

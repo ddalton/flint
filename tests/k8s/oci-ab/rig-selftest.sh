@@ -86,6 +86,7 @@ case "$sub" in
     cmd=$(cat "$FKSTATE/$cid.cmd" 2>/dev/null)
     kind=other
     case "$cmd" in
+      *"#RIG registry="*)  kind=push;;
       *"/proc/loadavg"*)   kind=idle;;
       *"system prune"*)    kind=cold;;
       *"pull --quiet"*)    kind=pull;;
@@ -100,6 +101,12 @@ case "$sub" in
     case $kind in
       idle) echo "${FK_LOADAVG:-0.20}"; echo "${FK_NPROC:-4}";;
       cold) echo "#RIG images=${FK_IMAGES_AFTER_PRUNE:-0} socistate=absent soci=${FK_SOCI:-active}";;
+      push)
+        # one line per registry; a knob can blank a digest or drop a line
+        [ "${FK_PUSH_DROP_FLINT:-0}" = 1 ] || \
+          echo "#RIG registry=${FK_FLINT_IP:-10.0.0.1}:5000 digest=${FK_PUSH_DIG_FLINT-sha256:e52bfbfb}"
+        [ "${FK_PUSH_DROP_S3:-0}" = 1 ] || \
+          echo "#RIG registry=${FK_S3_IP:-10.0.0.2}:5000 digest=${FK_PUSH_DIG_S3-sha256:e52bfbfb}";;
       pull)
         # model backend traffic: the arm's own registry gets FK_REQS_OWN,
         # the other gets FK_REQS_LEAK (0 unless a leg is testing attribution)
@@ -338,6 +345,36 @@ o=$(FKENV='export FK_CAPTURE_EMPTY=1' drive "$W" run 2>/dev/null | tail -1)
 if [ -f "${o:-/nonexistent}" ] && grep -q 'INCONCLUSIVE:streamed-capture-empty' "$o"; then
   ok "an empty capture is INCONCLUSIVE, never PASS and never a silent post-hoc fallback"
 else bad "empty capture" "$(grep substrate "${o:-/dev/null}" 2>/dev/null)"; fi
+
+
+# ── G4: a registry that answers NOTHING is not a registry that agrees ────
+# flint-29 hit this on runby: registry-s3 was 500ing every blob PUT, its
+# digest came back EMPTY, and the old check — unique-set-of-parsed-digests
+# has size 1 — reported satisfied. The guard could not tell agreement from
+# absence, which is this campaign's signature failure inside its own guard.
+g4_leg() { # $1=label $2=env $3=expect-pass|expect-fail $4=grep on stderr
+  local w; w=$(newdir); local err rc
+  err=$(FKENV="$2" drive "$w" push-image 2>&1 >/dev/null); rc=$?
+  case "$3" in
+    expect-fail)
+      if [ $rc -ne 0 ] && echo "$err" | grep -q "$4"; then ok "$1"
+      else bad "$1" "rc=$rc  $(echo "$err" | grep FATAL | head -2)"; fi;;
+    expect-pass)
+      if [ $rc -eq 0 ] && [ -f "$w/.pushed-digest" ] \
+         && grep -q '^sha256:[0-9a-f]*$' "$w/.pushed-digest"; then ok "$1"
+      else bad "$1" "rc=$rc digest=$(cat "$w/.pushed-digest" 2>/dev/null)"; fi;;
+  esac
+}
+g4_leg "G4 ANCHOR: two matching digests pass and record .pushed-digest" \
+       '' expect-pass
+g4_leg "G4 fires when a registry answers with an EMPTY digest (the runby hole)" \
+       'export FK_PUSH_DIG_S3=' expect-fail 'no usable manifest digest'
+g4_leg "G4 fires when a registry does not answer at all" \
+       'export FK_PUSH_DROP_S3=1' expect-fail 'expected 2 registry answers, got 1'
+g4_leg "G4 fires when the two registries disagree" \
+       'export FK_PUSH_DIG_S3=sha256:deadbeef' expect-fail 'disagree on the manifest digest'
+g4_leg "G4 fires on a malformed digest, not just an absent one" \
+       'export FK_PUSH_DIG_S3=not-a-digest' expect-fail 'no usable manifest digest'
 
 echo "──────────────────────────────────────────────────────────────────"
 echo "  passed $PASS, failed $FAIL"

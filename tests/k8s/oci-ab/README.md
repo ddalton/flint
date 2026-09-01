@@ -38,6 +38,11 @@ phase 2 (scale-out later; kind/loopback reps are never quoted).
 - `BUCKET` — existing S3 bucket (rolesanywhere cannot CreateBucket); plus a
   bucket-scoped access key in `S3_KEY_ID`/`S3_SECRET` for the registry-s3
   Secret. us-west-1.
+  **The key needs `s3:ListBucketMultipartUploads` at the BUCKET level** —
+  object-level multipart permissions are not enough, because Distribution
+  lists uploads on the bucket. Without it every blob PUT 500s with
+  `AccessDenied … s3:ListBucketMultipartUploads` and nothing upstream says
+  why (runby, 2026-09-01).
 - Image: python:3.12 linux/amd64, pushed identically to both registries;
   SOCI index built once, pushed to both; EROFS blob (pinned 5.4 profile)
   written to the RWX PVC for A4.
@@ -48,11 +53,21 @@ phase 2 (scale-out later; kind/loopback reps are never quoted).
    /dev name) + label the client node `oci-ab/role=client`.
 2. `helm upgrade --install` flint with values-oci-ab.yaml; wait DS fleet.
 3. Disable WG, restart cilium ds; record.
-4. `kubectl apply -f registries.yaml` (+ the S3 Secret); push image + SOCI
-   index to both registries; stage the EROFS blob.
-5. `node-soci-setup.sh <client-node>` via SSM: containerd 1.7 config
+4. `kubectl apply -f registries.yaml` (+ the S3 Secret), then
+   `drive-ab.sh push-image` (after step 5's install-node); stage the EROFS
+   blob. **G4 refuses unless BOTH registries return a well-formed manifest
+   digest and the two agree** — a registry that answers nothing is not a
+   registry that agrees.
+5. **`drive-ab.sh install-node`** — containerd 1.7 config
    (`disable_snapshot_annotations = false`, soci proxy plugin), soci
-   0.11.1, restart containerd.
+   0.11.1, nerdctl, restart containerd. **This must precede `push-image`**:
+   the push runs on the node and needs the nerdctl this step installs.
+   (`setup-client` still does install + index in one go, but on a fresh
+   node the two-step order is the working one.)
+5b. **`drive-ab.sh build-index`** — `soci create` then `soci push`, after
+   the image exists in both registries. `soci push` needs `--plain-http`
+   because soci does not read the `certs.d` hosts config nerdctl uses, and
+   `soci create` REJECTS that flag — so it goes on the push only.
 6. **`drive-ab.sh preflight`** — clock, client label, instance-id, fleet
    settle, digest reference, and whether the MDS is at debug level (if it is
    not, the stripe-width gate is blind and no run can be certified). Cheap,
