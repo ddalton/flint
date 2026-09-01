@@ -256,6 +256,11 @@ pub enum FenceOutcome {
     Conflict {
         guard: MutationGuard,
         recalls: Vec<RecallOrder>,
+        /// Holders whose lease had already lapsed: recalled in FORM
+        /// (the record is RecallPending, so the model's
+        /// "revoke only from recall" holds) but never waited on. The
+        /// caller revokes these outside the entry lock.
+        expired: Vec<StateId>,
         delay: bool,
     },
 }
@@ -376,6 +381,10 @@ pub struct DelegationManager {
     /// Persists the trip. `Some(unix_secs)` when it fires,
     /// `None` when the window rolls quiet.
     breaker_sink: std::sync::OnceLock<Arc<dyn Fn(Option<u64>) + Send + Sync>>,
+    /// "Has this client's lease already lapsed?" — installed by
+    /// `StateManager` so the fence can consult leases without this
+    /// module depending on the lease table.
+    lease_expired: std::sync::OnceLock<Arc<dyn Fn(u64) -> bool + Send + Sync>>,
     /// Whether the sink currently believes a trip is stored, so the
     /// breaker writes on TRANSITIONS instead of on every read —
     /// `grants_paused` runs on the OPEN path.
@@ -434,6 +443,7 @@ impl DelegationManager {
             revocations_by_client: DashMap::new(),
             persisted_trip_until: Mutex::new(None),
             breaker_sink: std::sync::OnceLock::new(),
+            lease_expired: std::sync::OnceLock::new(),
             breaker_persisted: std::sync::atomic::AtomicBool::new(false),
             breaker_trip: env_u64("FLINT_NFS_DELEG_REVOKE_TRIP", 10) as usize,
             breaker_client_trip: env_u64("FLINT_NFS_DELEG_CLIENT_REVOKE_TRIP", 3) as usize,
@@ -512,6 +522,20 @@ impl DelegationManager {
                     .unwrap_or(0)
             }));
         }
+    }
+
+    pub fn install_lease_probe(&self, probe: Arc<dyn Fn(u64) -> bool + Send + Sync>) {
+        let _ = self.lease_expired.set(probe);
+    }
+
+    fn holder_lease_expired(&self, client_id: u64) -> bool {
+        self.lease_expired
+            .get()
+            .map(|p| p(client_id))
+            // No probe installed ⇒ answer "not expired". The
+            // short-circuit is an optimisation; guessing "expired"
+            // without evidence would revoke live holders.
+            .unwrap_or(false)
     }
 
     pub fn install_breaker_sink(&self, sink: Arc<dyn Fn(Option<u64>) + Send + Sync>) {
@@ -716,6 +740,7 @@ impl DelegationManager {
             // the mutation nor needs recalling. (The barrier it holds
             // is against GRANTS, not mutations.)
             let mut recalls = Vec::new();
+            let mut expired = Vec::new();
             let mut foreign_live = false;
             let now = Instant::now();
             for r in e.records.iter_mut() {
@@ -727,12 +752,39 @@ impl DelegationManager {
                         }
                     }
                     DelegState::Granted => {
-                        if Some(r.client_id) != mutator {
-                            foreign_live = true;
-                        }
+                        // Expired-courtesy short-circuit (design §5.3
+                        // graft): a holder whose lease already lapsed
+                        // cannot honour a recall, so waiting out the
+                        // 90s ladder for it delays the mutator for a
+                        // client that is gone.
+                        //
+                        // The record still passes THROUGH RecallPending
+                        // rather than jumping Granted -> Revoked: the
+                        // model's Inv_RevokeOnlyFromRecall holds, and
+                        // this is the same shape as a recall whose
+                        // back-channel was never reachable — which for
+                        // an expired holder is simply true.
+                        //
+                        // The lease check races a renewal, and that is
+                        // SAFE rather than merely unlikely: revocation
+                        // always retains a tombstone and raises
+                        // SEQ4_STATUS_RECALLABLE_STATE_REVOKED, so a
+                        // client that renews a microsecond later is
+                        // TOLD on its next SEQUENCE. Silent revocation
+                        // is the named worst case; a loud one against a
+                        // client that just came back is a cache miss.
                         r.state = DelegState::RecallPending;
                         r.recall_started_at = Some(now);
                         r.truncate = truncate;
+                        if Some(r.client_id) != mutator
+                            && self.holder_lease_expired(r.client_id)
+                        {
+                            expired.push(r.stateid);
+                            continue;
+                        }
+                        if Some(r.client_id) != mutator {
+                            foreign_live = true;
+                        }
                         recalls.push(RecallOrder {
                             stateid: r.stateid,
                             client_id: r.client_id,
@@ -743,13 +795,14 @@ impl DelegationManager {
                 }
             }
 
-            if recalls.is_empty() && !foreign_live {
+            if recalls.is_empty() && expired.is_empty() && !foreign_live {
                 // Only tombstones on the file.
                 return FenceOutcome::Clear(guard);
             }
             FenceOutcome::Conflict {
                 guard,
                 recalls,
+                expired,
                 delay: foreign_live,
             }
         })

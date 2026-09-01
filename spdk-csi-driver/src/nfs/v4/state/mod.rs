@@ -202,6 +202,24 @@ impl StateManager {
                 }
             }));
 
+            let lm = Arc::clone(&lease_manager);
+            delegation_manager.install_lease_probe(Arc::new(move |client_id| {
+                // Expired means "there IS a lease row and it has
+                // lapsed" — NOT `!is_valid`, which also answers false
+                // for a client with no row at all.
+                //
+                // An absent row is ambiguous: it can mean the lease was
+                // swept (the client really is gone) or that this code
+                // path never created one. Absence is not evidence, and
+                // the safe reading for a REVOCATION decision is "do not
+                // short-circuit" — the ladder will discover an
+                // unreachable client on its own and take the
+                // path_down route, which is slower and correct.
+                lm.get_remaining(client_id)
+                    .map(|d| d.is_zero())
+                    .unwrap_or(false)
+            }));
+
             let b2 = Arc::clone(&backend);
             delegation_manager.install_breaker_sink(Arc::new(move |trip: Option<u64>| {
                 match trip {
@@ -413,8 +431,32 @@ impl StateManager {
             FenceOutcome::Conflict {
                 guard,
                 recalls,
+                expired,
                 delay,
             } => {
+                // Expired-courtesy holders: revoke here, outside the
+                // entry lock, instead of spending the 90s ladder on a
+                // client whose lease already lapsed. Loud, never
+                // silent — the tombstone and the SEQ4 bit are what
+                // make the lease-check race safe rather than merely
+                // unlikely.
+                for stateid in expired {
+                    if let Some(client) = self.delegations.revoke(&stateid) {
+                        let _ = self.stateids.revoke(&stateid);
+                        self.raise_seq_flags(
+                            client,
+                            crate::nfs::v4::protocol::seq4_status::RECALLABLE_STATE_REVOKED,
+                        );
+                        self.delegations
+                            .meter()
+                            .note_revoked(deleg_meter::RevokeReason::LeaseExpired);
+                        tracing::warn!(
+                            "deleg: client {} held a delegation on an EXPIRED lease — \
+                             revoked without a recall (it cannot answer one)",
+                            client
+                        );
+                    }
+                }
                 if !recalls.is_empty() {
                     spawn(recalls);
                 }
@@ -733,6 +775,102 @@ impl Default for StateManager {
 
 #[cfg(test)]
 mod tests {
+    /// The expired-courtesy short-circuit (design §5.3 graft).
+    ///
+    /// A holder whose lease has lapsed cannot answer a recall, so
+    /// making the mutator wait out the 90s ladder for it is 90s of
+    /// DELAY spent on a client that is gone.
+    #[test]
+    fn an_expired_holder_is_revoked_at_the_consult_instead_of_recalled() {
+        use crate::nfs::v4::protocol::seq4_status;
+        use crate::nfs::v4::state::deleg_meter::RevokeReason;
+        // deleg_fence is gated on BOTH the flag and an installed recall
+        // spawner — without them it proceeds without consulting the
+        // table at all, and this test would pass while exercising
+        // nothing.
+        let _flag = with_delegations(true);
+        let sm = std::sync::Arc::new(StateManager::new_in_memory(""));
+        sm.install_recall_spawner(Arc::new(|_orders| {}));
+        let ident = FileId::new(1, 1);
+        sm.leases.create_lease(7);
+        let sid = crate::nfs::v4::protocol::StateId { seqid: 1, other: [7u8; 12] };
+        sm.delegations
+            .try_grant(ident, 7, vec![0xf], std::path::PathBuf::from("/f"), || true, || sid)
+            .unwrap();
+        sm.leases.expire_now(7);
+
+        // A different client mutates.
+        let verdict = sm.deleg_fence((1, 1), Some(8), false, "write");
+        assert!(
+            matches!(verdict, FenceVerdict::Proceed(_)),
+            "the writer must NOT wait on a client whose lease already lapsed"
+        );
+        assert_eq!(
+            sm.delegations.snapshot(&sid).unwrap().state,
+            delegation::DelegState::Revoked
+        );
+        // Loud, never silent — this is what makes the lease-check race
+        // against a renewal safe rather than merely unlikely.
+        assert_ne!(
+            sm.seq_flags(7) & seq4_status::RECALLABLE_STATE_REVOKED,
+            0,
+            "an expired-holder revoke must still raise SEQ4"
+        );
+        let m = sm.delegations.meter();
+        assert_eq!(m.revoked_count(RevokeReason::LeaseExpired), 1);
+        assert_eq!(
+            m.revoked_count(RevokeReason::ChannelDead),
+            0,
+            "a lapsed lease is not a broken back-channel — collapsing them \
+             would hide a real reachability failure inside client churn"
+        );
+    }
+
+    /// ANTI-VACUITY: a LIVE holder is still recalled and still delays
+    /// the mutator. Without this, the test above passes against a
+    /// fence that short-circuits everything — which would revoke every
+    /// delegation on first conflict and make the feature pointless.
+    #[test]
+    fn a_live_holder_is_recalled_and_the_mutator_waits() {
+        let sm = std::sync::Arc::new(StateManager::new_in_memory(""));
+        let ident = FileId::new(2, 2);
+        sm.leases.create_lease(7);
+        let sid = crate::nfs::v4::protocol::StateId { seqid: 1, other: [9u8; 12] };
+        sm.delegations
+            .try_grant(ident, 7, vec![0xf], std::path::PathBuf::from("/g"), || true, || sid)
+            .unwrap();
+
+        match sm.delegations.mutation_fence(ident, Some(8), false) {
+            FenceOutcome::Conflict { recalls, expired, delay, .. } => {
+                assert_eq!(recalls.len(), 1, "a live holder gets a real recall");
+                assert!(expired.is_empty());
+                assert!(delay, "and the mutator waits for it");
+            }
+            FenceOutcome::Clear(_) => panic!("expected a conflict"),
+        }
+    }
+
+    /// A client with NO lease row is not short-circuited. Absence is
+    /// ambiguous — swept, or never created on this path — and absence
+    /// is not evidence. The ladder discovers an unreachable client on
+    /// its own via path_down, which is slower and correct.
+    #[test]
+    fn a_holder_with_no_lease_row_is_not_treated_as_expired() {
+        let sm = std::sync::Arc::new(StateManager::new_in_memory(""));
+        let ident = FileId::new(3, 3);
+        let sid = crate::nfs::v4::protocol::StateId { seqid: 1, other: [11u8; 12] };
+        sm.delegations
+            .try_grant(ident, 7, vec![0xf], std::path::PathBuf::from("/h"), || true, || sid)
+            .unwrap();
+        match sm.delegations.mutation_fence(ident, Some(8), false) {
+            FenceOutcome::Conflict { recalls, expired, .. } => {
+                assert_eq!(recalls.len(), 1);
+                assert!(expired.is_empty(), "no lease row is not a lapsed lease");
+            }
+            FenceOutcome::Clear(_) => panic!("expected a conflict"),
+        }
+    }
+
     use super::*;
 
     /// An empty load must record whether anything is RECLAIMABLE — and

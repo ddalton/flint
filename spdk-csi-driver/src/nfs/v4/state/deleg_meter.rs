@@ -53,6 +53,13 @@ pub enum RevokeReason {
     ChannelDead,
     /// The client answered the recall with a definitive refusal.
     Refused,
+    /// The holder's lease had already lapsed at the conflict consult,
+    /// so no recall was attempted — it could not have been answered.
+    /// Distinct from `ChannelDead`, which is a REACHABILITY failure
+    /// against a client that still holds a valid lease: collapsing
+    /// them would hide a broken back-channel inside ordinary client
+    /// churn.
+    LeaseExpired,
 }
 
 impl RecallOutcome {
@@ -73,6 +80,7 @@ impl RevokeReason {
             RevokeReason::Deadline => "deadline",
             RevokeReason::ChannelDead => "channel_dead",
             RevokeReason::Refused => "refused",
+            RevokeReason::LeaseExpired => "lease_expired",
         }
     }
 }
@@ -89,6 +97,7 @@ pub struct DelegMeter {
     revoked_deadline: AtomicU64,
     revoked_channel_dead: AtomicU64,
     revoked_refused: AtomicU64,
+    revoked_lease_expired: AtomicU64,
     seq4_path_down: AtomicU64,
     seq4_state_revoked: AtomicU64,
     recall_latency_sum_ms: AtomicU64,
@@ -126,6 +135,7 @@ impl DelegMeter {
             RevokeReason::Deadline => &self.revoked_deadline,
             RevokeReason::ChannelDead => &self.revoked_channel_dead,
             RevokeReason::Refused => &self.revoked_refused,
+            RevokeReason::LeaseExpired => &self.revoked_lease_expired,
         }
         .fetch_add(1, Relaxed);
     }
@@ -181,6 +191,7 @@ impl DelegMeter {
             RevokeReason::Deadline => &self.revoked_deadline,
             RevokeReason::ChannelDead => &self.revoked_channel_dead,
             RevokeReason::Refused => &self.revoked_refused,
+            RevokeReason::LeaseExpired => &self.revoked_lease_expired,
         }
         .load(Relaxed)
     }
@@ -189,6 +200,7 @@ impl DelegMeter {
         self.revoked_deadline.load(Relaxed)
             + self.revoked_channel_dead.load(Relaxed)
             + self.revoked_refused.load(Relaxed)
+            + self.revoked_lease_expired.load(Relaxed)
     }
 
     pub fn seq4_count(&self, flag: u32) -> u64 {
