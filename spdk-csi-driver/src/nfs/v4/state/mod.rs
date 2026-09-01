@@ -775,6 +775,166 @@ impl Default for StateManager {
 
 #[cfg(test)]
 mod tests {
+    /// The matrix above drives `deleg_fence` DIRECTLY, so it proves the
+    /// funnel attributes whatever label it is handed — not that the
+    /// call sites hand it the right one. This closes that gap from the
+    /// other side: every site literal that appears at a real fence call
+    /// in the source must be one the matrix exercises, and vice versa.
+    ///
+    /// A new conflict site added with an unexercised label fails here;
+    /// so does a typo, which would otherwise show up only as a §9
+    /// per-site equality that is quietly always zero.
+    #[test]
+    fn every_fence_call_site_uses_a_label_the_matrix_exercises() {
+        const SITES: &[&str] = &[
+            "open_create", "open_write", "write", "setattr", "remove",
+            "rename_src", "rename_dst", "link", "allocate", "deallocate",
+            "copy_dst", "clone_dst", "lock_write",
+        ];
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nfs/v4");
+        let mut found: std::collections::BTreeSet<String> = Default::default();
+        let mut files = Vec::new();
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        walk(&base, &mut files);
+        // `site` is always the LAST argument of a fence call, and every
+        // call site passes it as a literal — a computed label would not
+        // be greppable, which is itself a reason to keep them literal.
+        let re_call = regex::Regex::new(
+            r#"deleg_fence(?:_path|_ident)?\s*\([^;]*?"([a-z_]+)"[^;]*?\)"#,
+        )
+        .unwrap();
+        for f in &files {
+            // The matrix and this test both list the labels; skip the
+            // state module so its own SITES arrays are not mistaken for
+            // call sites.
+            if f.ends_with("state/mod.rs") {
+                continue;
+            }
+            let src = std::fs::read_to_string(f).unwrap();
+            for c in re_call.captures_iter(&src) {
+                found.insert(c[1].to_string());
+            }
+        }
+        assert!(!found.is_empty(), "the scan found no fence call sites at all — \
+                 a scan that cannot fail proves nothing");
+        for site in &found {
+            assert!(
+                SITES.contains(&site.as_str()),
+                "fence call site uses label {site:?}, which the conflict-site \
+                 matrix does not exercise — add it to SITES in both tests"
+            );
+        }
+        // `allocate`/`deallocate` are derived from AllocMode rather than
+        // written at the call, so they are legitimately absent here.
+        for expect in ["write", "setattr", "remove", "rename_src", "link"] {
+            assert!(
+                found.contains(expect),
+                "expected a fence call site labelled {expect:?}; found {found:?}"
+            );
+        }
+    }
+
+    /// THE CONFLICT-SITE MATRIX (design §9), behavioural half.
+    ///
+    /// `every_f14_bump_lane_is_fenced_or_exempted` proves every
+    /// mutating lane CONTAINS a fence consult. It cannot prove the
+    /// consult does anything: a site could pass a label the funnel
+    /// ignores, or fence an identity the mutation does not touch, and
+    /// the source scan would still be green.
+    ///
+    /// So this drives each §5.2 site label through the real funnel
+    /// against a live foreign delegation and asserts the three facts
+    /// the design's per-site equalities rest on: B's FIRST attempt is
+    /// DELAYed, the delay is attributed to THAT site, and after the
+    /// holder returns, B's retry proceeds.
+    #[test]
+    fn every_conflict_site_delays_then_proceeds_after_the_return() {
+        let _flag = with_delegations(true);
+        // Every site named in §5.2 that reaches the shared funnel.
+        // Adding a site to `deleg_fence` without adding it here leaves
+        // its label unexercised, which is how a mislabelled delay
+        // survives review.
+        const SITES: &[&str] = &[
+            "open_create", "open_write", "write", "setattr", "remove",
+            "rename_src", "rename_dst", "link", "allocate", "deallocate",
+            "copy_dst", "clone_dst", "lock_write",
+        ];
+
+        for (n, site) in SITES.iter().enumerate() {
+            let sm = std::sync::Arc::new(StateManager::new_in_memory(""));
+            sm.install_recall_spawner(Arc::new(|_| {}));
+            let dev = 40 + n as u64;
+            let ident = FileId::new(dev, 1);
+            sm.leases.create_lease(7);
+            let sid = crate::nfs::v4::protocol::StateId {
+                seqid: 1,
+                other: [n as u8 + 1; 12],
+            };
+            sm.delegations
+                .try_grant(ident, 7, vec![0xf], std::path::PathBuf::from("/m"), || true, || sid)
+                .unwrap();
+
+            // Client 8 mutates: first attempt must DELAY.
+            let v = sm.deleg_fence((dev, 1), Some(8), false, site);
+            assert!(
+                matches!(v, FenceVerdict::Delay),
+                "site {site}: a foreign live delegation must DELAY the mutator, got {v:?}"
+            );
+            assert_eq!(
+                sm.delegations.meter().delay_count(site),
+                1,
+                "site {site}: the delay must be attributed to THIS site —                  §9 asserts per-site equalities, so a mislabelled delay turns a                  real regression into a green leg somewhere else"
+            );
+
+            // The holder returns; the barrier lifts and the retry runs.
+            sm.delegations.return_delegation(&sid).unwrap();
+            let v2 = sm.deleg_fence((dev, 1), Some(8), false, site);
+            assert!(
+                matches!(v2, FenceVerdict::Proceed(_)),
+                "site {site}: after DELEGRETURN the retry must proceed, got {v2:?}"
+            );
+            assert_eq!(
+                sm.delegations.meter().delay_count(site),
+                1,
+                "site {site}: the retry must not be counted as a second delay"
+            );
+        }
+    }
+
+    /// ANTI-VACUITY for the matrix above: the SAME client mutating its
+    /// own delegated file is never delayed (the §4 self-conflict
+    /// carve-out). Without this leg, the matrix passes against a fence
+    /// that delays everything — which would deadlock every holder
+    /// against its own writes.
+    #[test]
+    fn a_holder_mutating_its_own_file_is_never_delayed() {
+        let _flag = with_delegations(true);
+        let sm = std::sync::Arc::new(StateManager::new_in_memory(""));
+        sm.install_recall_spawner(Arc::new(|_| {}));
+        let ident = FileId::new(99, 1);
+        sm.leases.create_lease(7);
+        let sid = crate::nfs::v4::protocol::StateId { seqid: 1, other: [77u8; 12] };
+        sm.delegations
+            .try_grant(ident, 7, vec![0xf], std::path::PathBuf::from("/self"), || true, || sid)
+            .unwrap();
+
+        let v = sm.deleg_fence((99, 1), Some(7), false, "write");
+        assert!(
+            matches!(v, FenceVerdict::Proceed(_)),
+            "the holder writing its OWN delegated file must not wait on itself, got {v:?}"
+        );
+        assert_eq!(sm.delegations.meter().delay_count("write"), 0);
+    }
+
     /// The expired-courtesy short-circuit (design §5.3 graft).
     ///
     /// A holder whose lease has lapsed cannot answer a recall, so

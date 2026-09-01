@@ -179,6 +179,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tier: TierDoc { gauges: None, meters: Default::default() },
                     nfs: NfsDoc {
                         active_leases: Some(env_u64("STUB_ACTIVE_LEASES", 0) as usize),
+                        // Knob so the fleet rig can exercise the
+                        // delegation suspend guard at scale — a stub
+                        // that always says zero could never show the
+                        // ladder refusing to suspend.
+                        outstanding_delegations: Some(env_u64("STUB_DELEGATIONS", 0)),
                     },
                     activity: ActivitySnapshot {
                         last_activity_unix: now_unix().saturating_sub(idle),

@@ -285,6 +285,19 @@ pub enum FenceVerdict {
     Delay,
 }
 
+/// Hand-written so the guard's Arcs stay out of the output: an
+/// assertion message wants to say WHICH verdict came back, not dump
+/// the delegation table behind it.
+impl std::fmt::Debug for FenceVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FenceVerdict::Proceed(Some(_)) => write!(f, "Proceed(guard)"),
+            FenceVerdict::Proceed(None) => write!(f, "Proceed(no guard)"),
+            FenceVerdict::Delay => write!(f, "Delay"),
+        }
+    }
+}
+
 /// Why a grant was refused. Every refusal is free (OPEN_DELEGATE_NONE,
 /// never DELAY) and counted per-reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
