@@ -1773,7 +1773,8 @@ impl CompoundDispatcher {
                 // path, so a fatal completion is the only way it ever
                 // recovers (kernel-verified; see the runbook's
                 // "DELAY livelock" section).
-                let (disp, stub) = self.stub_io_disposition(context, "READ");
+                let (disp, stub) =
+                    self.stub_io_disposition(context, "READ", &stateid, false);
                 match disp {
                     crate::pnfs::FallbackIoDisposition::Serve => {}
                     crate::pnfs::FallbackIoDisposition::Delay => {
@@ -1856,7 +1857,8 @@ impl CompoundDispatcher {
                 // the sparse stub would silently diverge from the DS
                 // stripes (worse than the read case: persistent, not
                 // transient). Same bounded escalation.
-                let (disp, stub) = self.stub_io_disposition(context, "WRITE");
+                let (disp, stub) =
+                    self.stub_io_disposition(context, "WRITE", &stateid, true);
                 match disp {
                     crate::pnfs::FallbackIoDisposition::Serve => {}
                     crate::pnfs::FallbackIoDisposition::Delay => {
@@ -2740,26 +2742,69 @@ impl CompoundDispatcher {
         &self,
         context: &CompoundContext,
         op: &str,
+        stateid: &StateId,
+        want_writable: bool,
     ) -> (crate::pnfs::FallbackIoDisposition, Option<StubTarget>) {
         use crate::pnfs::FallbackIoDisposition as D;
+        // No pNFS handler = not an MDS = no striped files exist here,
+        // so a local serve is the only correct answer and cannot
+        // substitute a stub for stripes. The one fail-open that is
+        // safe by construction rather than by argument.
         let pnfs = match &self.pnfs_handler {
             Some(p) => p,
             None => return (D::Serve, None),
         };
+        // No CFH: the op names no file, so it cannot produce bytes —
+        // the io handler answers NFS4ERR_NOFILEHANDLE below.
         let fh = match &context.current_fh {
             Some(fh) => fh,
             None => return (D::Serve, None),
         };
-        let path = match self.file_handler.fh_manager().resolve_handle(fh) {
-            Ok(p) => p,
-            Err(_) => return (D::Serve, None),
+
+        // THE COMPLETENESS ARGUMENT (F68 correctness fix).
+        //
+        // The io handler can produce bytes from exactly two places: a
+        // path `resolve_handle` gives it, or — when that fails — the
+        // open fd its own `stale_open_fallback` finds by stateid /
+        // embedded path / ino. This gate used to ask about the FIRST
+        // only and answer Serve when it was unavailable, so an
+        // unresolvable handle skipped the striped-file check while
+        // READ went right on serving the cached fd. On an MDS that fd
+        // is the file's SPARSE STUB: zeros returned with NFS4_OK, no
+        // error, no short read, DS logs clean — and the WRITE mirror
+        // lands client bytes in the stub where no layout reader will
+        // ever see them (silent write loss, the same trigger).
+        //
+        // Both routes are consulted here, so every path that can
+        // produce bytes is covered. When NEITHER yields a path the
+        // io handler cannot serve either — it answers STALE — so
+        // Serve is safe there by the same argument.
+        // The stateid is NOT optional, deliberately. `stale_open_fallback`
+        // tries three keys — the stateid's cache entry, then the handle's
+        // embedded path, then its ino — and the last two are INDEPENDENT
+        // lookups that succeed with no stateid hit at all. So a caller
+        // that passed "no stateid" would skip this gate's fallback consult
+        // while the io handler's own fallback still found an fd and served
+        // it: a hole of exactly the shape this fix closes. Requiring the
+        // stateid makes that unrepresentable rather than merely absent.
+        let resolved = self.file_handler.fh_manager().resolve_handle(fh).ok();
+        let via_fallback = resolved.is_none();
+        let path = match resolved.or_else(|| {
+            self.io_handler
+                .fallback_serve_path(fh, &stateid.other, want_writable)
+        }) {
+            Some(p) => p,
+            None => return (D::Serve, None),
         };
+
         let export = self.file_handler.fh_manager().get_export_path().to_path_buf();
         let file_key = path
             .strip_prefix(&export)
             .unwrap_or(&path)
             .to_string_lossy()
             .into_owned();
+        // The export root itself: a READ/WRITE of a directory, which
+        // the io handler refuses. No file, nothing to substitute.
         if file_key.is_empty() {
             return (D::Serve, None);
         }
@@ -2792,6 +2837,18 @@ impl CompoundDispatcher {
                 D::Proxy
             }
         };
+        // A striped file that only the FALLBACK route could name is
+        // the corruption trigger itself: before this gate covered it,
+        // this exact op served the stub. Say so at WARN — the defect
+        // shipped in v1.43.0 and its whole cost was silence.
+        if via_fallback && !matches!(disp, D::Serve) {
+            warn!(
+                "🚨 {} on striped '{}' reached the MDS lane with an UNRESOLVABLE filehandle — \
+                 the pre-fix build served this file's sparse stub here (zeros with NFS4_OK on \
+                 READ, lost bytes on WRITE). Refusing per the disposition above.",
+                op, file_key
+            );
+        }
         (disp, Some(StubTarget { file_key, path }))
     }
 
@@ -4223,6 +4280,24 @@ impl CompoundDispatcher {
             }
         }
 
+        // One INFO line per commit. LAYOUTCOMMIT is the operation that
+        // PUBLISHES DS-written data to every other client, and until
+        // now the files class logged it only at debug (the sole info!
+        // above is inside the scsi branch) — so on an INFO-level
+        // server the entire publish path was invisible. That silence
+        // cost a live corruption investigation hours of false
+        // negatives: "no LAYOUTCOMMIT lines in the log" could not
+        // distinguish never-sent from never-logged. Per-commit, not
+        // per-RPC, so the rate is bounded by file closes.
+        info!(
+            "📥 LAYOUTCOMMIT {:?}: last_write_offset={:?} → size {}",
+            path,
+            last_write_offset,
+            match new_size_reported {
+                Some(n) => n.to_string(),
+                None => "unchanged".to_string(),
+            },
+        );
         OperationResult::LayoutCommit(Nfs4Status::Ok, new_size_reported)
     }
     
@@ -5767,6 +5842,22 @@ mod tests {
         )
     }
 
+    /// A filehandle that fails resolution but still names the object
+    /// by ino — the shape a v4 kernel handle takes when the kernel can
+    /// no longer reconnect the inode (ESTALE), which is precisely when
+    /// the io handler falls back to its cached fd. Byte 0 marks it v4,
+    /// bytes 9..17 carry the ino; the fixture runs without kernel-handle
+    /// mode, so resolution refuses it on every platform.
+    fn unresolvable_handle_for(path: &std::path::Path) -> Nfs4FileHandle {
+        use std::os::unix::fs::MetadataExt;
+        let ino = std::fs::metadata(path).unwrap().ino();
+        let mut data = vec![crate::nfs::v4::fh_kernel::FH_V4_VERSION];
+        data.extend_from_slice(&0u64.to_be_bytes()); // instance id
+        data.extend_from_slice(&ino.to_be_bytes()); // bytes 9..17
+        data.resize(crate::nfs::v4::fh_kernel::FH_V4_MIN, 0);
+        Nfs4FileHandle { data }
+    }
+
     /// A dispatcher whose pinned files are block-class, with a real
     /// sqlite extent backend behind them.
     fn create_test_dispatcher_block(
@@ -6000,6 +6091,236 @@ mod tests {
                 .await;
             assert_eq!(write.status(), expected, "WRITE under {:?}", disposition);
         }
+    }
+
+    /// F68 CORRECTNESS FIX — the gate must cover the SECOND
+    /// byte-producing route, not just the first.
+    ///
+    /// `stub_io_disposition` used to answer Serve whenever
+    /// `resolve_handle` failed, on the reasoning that an unresolvable
+    /// handle names nothing. It does not: `handle_read` has its own
+    /// fallback (`stale_open_fallback`) that finds the still-open fd
+    /// by stateid/ino and serves from it. So an unresolvable handle
+    /// skipped the striped-file check while READ went right on
+    /// serving — and on an MDS that fd is the file's SPARSE STUB, so
+    /// the client got zeros with NFS4_OK: no error, no short read, DS
+    /// logs clean. The WRITE mirror landed client bytes in the stub
+    /// where no layout reader would ever see them.
+    ///
+    /// Root-caused 2026-09-01 against a live 1.43.0 fleet (the oci-ab
+    /// campaign: a registry blob read back with page-aligned zero
+    /// holes while the DS stripes held it intact, and a 20-byte file
+    /// read back as 20 NULs). The F68a meter — which fires only on a
+    /// locally-served op that returned OK — landed on both windows.
+    ///
+    /// This test drives the exact shape: open a striped file so its fd
+    /// is cached, move it out from under its filehandle so resolution
+    /// fails, then read. Before the fix that READ returned Ok with the
+    /// local file's bytes; it must now honour the disposition.
+    #[tokio::test]
+    async fn an_unresolvable_handle_cannot_smuggle_a_striped_file_onto_the_mds_lane() {
+        for (disposition, expected) in [
+            (crate::pnfs::FallbackIoDisposition::Delay, Nfs4Status::Delay),
+            (crate::pnfs::FallbackIoDisposition::FailFast, Nfs4Status::Io),
+        ] {
+            let (d, temp) = create_test_dispatcher_pnfs(&["striped.dat"], disposition);
+            d.state_mgr.leases.end_grace();
+            let root = temp.path().canonicalize().unwrap();
+            std::fs::write(root.join("striped.dat"), b"STUBBYTES").unwrap();
+
+            // A real OPEN, so the fd cache is seeded the way production
+            // seeds it — this is what the fallback will later find.
+            let mut ctx = CompoundContext::new(2);
+            assert!(matches!(
+                d.dispatch_operation(Operation::PutRootFh, &mut ctx).await,
+                OperationResult::PutRootFh(Nfs4Status::Ok)
+            ));
+            let opened = d
+                .dispatch_operation(
+                    Operation::Open {
+                        seqid: 0,
+                        share_access: 3,
+                        share_deny: 0,
+                        owner: b"o".to_vec(),
+                        openhow: crate::nfs::v4::compound::OpenHow {
+                            createmode: 0,
+                            attrs: None,
+                            attrmask: Vec::new(),
+                        },
+                        claim: crate::nfs::v4::compound::OpenClaim {
+                            claim_type: 0,
+                            file: "striped.dat".to_string(),
+                            delegate_type: None,
+                            delegate_stateid: None,
+                        },
+                    },
+                    &mut ctx,
+                )
+                .await;
+            let sid = match opened {
+                OperationResult::Open(Nfs4Status::Ok, Some(ref r)) => r.stateid,
+                other => panic!("OPEN of the striped file failed: {other:?}"),
+            };
+
+            // Now present the file through a handle that CANNOT be
+            // resolved but still carries the object's ino — the
+            // production ESTALE shape (a v4 kernel handle whose inode
+            // the kernel can no longer reconnect). The fd stays cached
+            // and the fallback finds it by ino, exactly as it does in
+            // the field.
+            ctx.current_fh = Some(unresolvable_handle_for(&root.join("striped.dat")));
+            assert!(
+                d.file_handler
+                    .fh_manager()
+                    .resolve_handle(ctx.current_fh.as_ref().unwrap())
+                    .is_err(),
+                "precondition: the filehandle must not resolve — otherwise this test \
+                 exercises the ordinary path and proves nothing",
+            );
+
+            let read = d
+                .dispatch_operation(
+                    Operation::Read { stateid: sid, offset: 0, count: 9 },
+                    &mut ctx,
+                )
+                .await;
+            assert_eq!(
+                read.status(),
+                expected,
+                "an unresolvable handle must NOT serve a striped file's stub ({:?})",
+                disposition,
+            );
+            if let OperationResult::Read(_, Some(ref r)) = read {
+                panic!(
+                    "the MDS served {} bytes of the stub for a striped file — this is \
+                     the shipped corruption (zeros with OK to the client)",
+                    r.data.len()
+                );
+            }
+
+            // The WRITE mirror: silent loss rather than silent zeros.
+            let write = d
+                .dispatch_operation(
+                    Operation::Write {
+                        stateid: sid,
+                        offset: 0,
+                        stable: 2,
+                        data: bytes::Bytes::from_static(b"LOSTBYTES"),
+                    },
+                    &mut ctx,
+                )
+                .await;
+            assert_eq!(
+                write.status(),
+                expected,
+                "an unresolvable handle must NOT land client bytes in a striped \
+                 file's stub ({:?})",
+                disposition,
+            );
+        }
+    }
+
+    /// The falsifiability arm: the same unresolvable-handle shape on a
+    /// file that was NEVER layouted must still be SERVED. Without this,
+    /// a fix that simply refused every unresolvable handle on an MDS
+    /// would pass the test above while breaking the renamed-over-file
+    /// fallback (F17b) for ordinary files.
+    #[tokio::test]
+    async fn an_unresolvable_handle_to_an_ordinary_file_is_still_served() {
+        let (d, temp) = create_test_dispatcher_pnfs(
+            &["striped.dat"],
+            crate::pnfs::FallbackIoDisposition::FailFast,
+        );
+        d.state_mgr.leases.end_grace();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::write(root.join("plain.dat"), b"REALBYTES").unwrap();
+
+        let mut ctx = CompoundContext::new(2);
+        d.dispatch_operation(Operation::PutRootFh, &mut ctx).await;
+        let opened = d
+            .dispatch_operation(
+                Operation::Open {
+                    seqid: 0,
+                    share_access: 3,
+                    share_deny: 0,
+                    owner: b"o".to_vec(),
+                    openhow: crate::nfs::v4::compound::OpenHow {
+                        createmode: 0,
+                        attrs: None,
+                        attrmask: Vec::new(),
+                    },
+                    claim: crate::nfs::v4::compound::OpenClaim {
+                        claim_type: 0,
+                        file: "plain.dat".to_string(),
+                        delegate_type: None,
+                        delegate_stateid: None,
+                    },
+                },
+                &mut ctx,
+            )
+            .await;
+        let sid = match opened {
+            OperationResult::Open(Nfs4Status::Ok, Some(ref r)) => r.stateid,
+            other => panic!("OPEN failed: {other:?}"),
+        };
+        ctx.current_fh = Some(unresolvable_handle_for(&root.join("plain.dat")));
+        assert!(
+            d.file_handler
+                .fh_manager()
+                .resolve_handle(ctx.current_fh.as_ref().unwrap())
+                .is_err(),
+            "precondition: resolution must fail, so this exercises the fallback route",
+        );
+
+        let read = d
+            .dispatch_operation(
+                Operation::Read { stateid: sid, offset: 0, count: 9 },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(
+            read.status(),
+            Nfs4Status::Ok,
+            "an ordinary file's open-fd fallback must keep working on an MDS",
+        );
+        match read {
+            OperationResult::Read(_, Some(ref r)) => {
+                assert_eq!(
+                    r.data.as_mem().as_ref(),
+                    b"REALBYTES",
+                    "and serve the real bytes",
+                );
+            }
+            other => panic!("expected data, got {other:?}"),
+        }
+    }
+
+    /// The two remaining pre-placement fail-opens are safe by
+    /// construction rather than by check, and this pins the reasoning
+    /// so a later "tighten them too" change has to confront it: with no
+    /// CURRENT filehandle the op names no file at all, so it cannot
+    /// produce bytes — the io handler answers NFS4ERR_NOFILEHANDLE
+    /// before any file is touched. (The other is "no pNFS handler",
+    /// i.e. not an MDS, where no striped file can exist.)
+    #[tokio::test]
+    async fn a_read_with_no_filehandle_names_no_file_to_substitute() {
+        let (d, _t) = create_test_dispatcher_pnfs(
+            &["striped.dat"],
+            crate::pnfs::FallbackIoDisposition::FailFast,
+        );
+        let mut ctx = CompoundContext::new(2);
+        let sid = d.state_mgr.stateids.allocate(
+            crate::nfs::v4::state::StateType::Open,
+            1,
+            None,
+        );
+        let read = d
+            .dispatch_operation(
+                Operation::Read { stateid: sid, offset: 0, count: 4 },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(read.status(), Nfs4Status::NoFileHandle);
     }
 
     /// The same guard must not touch a file that was never layouted. An

@@ -524,6 +524,26 @@ impl IoOperationHandler {
     /// path names the ORIGINAL file, which is still alive if any open
     /// fd targets it. Returns (embedded path, cached fd for this
     /// stateid or any other open of the same path).
+    /// The path this handler WOULD serve bytes from when
+    /// `resolve_handle` fails — i.e. the second and last of its two
+    /// byte-producing routes (the first being a resolvable path).
+    ///
+    /// The pNFS fallback gate consults this so its striped-file check
+    /// covers every route that can produce bytes. Without it the gate
+    /// asked only about the resolvable path, and an unresolvable
+    /// handle skipped the check entirely while READ still served the
+    /// cached fd — which on an MDS is the file's SPARSE STUB, i.e.
+    /// zeros with NFS4_OK. (dispatcher.rs `stub_io_disposition`.)
+    pub fn fallback_serve_path(
+        &self,
+        fh: &crate::nfs::v4::protocol::Nfs4FileHandle,
+        stateid_other: &[u8; 12],
+        want_writable: bool,
+    ) -> Option<PathBuf> {
+        self.stale_open_fallback(fh, stateid_other, want_writable)
+            .map(|(p, _)| p)
+    }
+
     fn stale_open_fallback(
         &self,
         fh: &crate::nfs::v4::protocol::Nfs4FileHandle,
