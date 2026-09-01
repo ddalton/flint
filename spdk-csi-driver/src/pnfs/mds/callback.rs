@@ -117,6 +117,61 @@ impl CallbackManager {
         self
     }
 
+    /// Try the CALL on every transport the session has bound, in order.
+    ///
+    /// Failover happens ONLY on `Transport` (send_record failed — the
+    /// bytes never left this process, so retrying the SAME slot-0
+    /// sequenceid on a sibling transport is a first transmission, not a
+    /// replay). Any other error means the CALL may have reached the
+    /// client: it surfaces immediately — a sibling-transport retry there
+    /// could execute the callback twice. The old form took `.first()`
+    /// and burned the whole attempt on a connection the client had
+    /// already abandoned: nconnect keeps several bound, and the registry
+    /// reaps a dead one only when its read loop sees the EOF, which a
+    /// write can beat. (docs/plans/nfs-delegations-design.md §5.3.)
+    ///
+    /// The bool says whether the slot-0 sequence was consumed: true on
+    /// success and on every ambiguous error, false when no transport
+    /// accepted the write (nothing was sent, the sequence must not
+    /// advance).
+    async fn send_on_session_writers(
+        &self,
+        session_id: &SessionId,
+        cb_program: u32,
+        cb_cred: Option<&crate::nfs::v4::compound::CallbackSecParms>,
+        call: &CbCompoundCall,
+    ) -> (Result<CbCompoundReply, CallbackError>, bool) {
+        let writers: Vec<Arc<BackChannelWriter>> = self
+            .back_channels
+            .get(session_id)
+            .map(|w| w.value().clone())
+            .unwrap_or_default();
+        if writers.is_empty() {
+            return (Err(CallbackError::ConnectionClosed), false);
+        }
+        let mut last: Option<CallbackError> = None;
+        for writer in &writers {
+            match writer
+                .send_cb_compound(cb_program, cb_cred, call, self.timeout)
+                .await
+            {
+                Ok(r) => return (Ok(r), true),
+                Err(CallbackError::Transport(e)) => {
+                    warn!(
+                        "CB send refused by one transport of session {:?} ({}); trying the next bound writer",
+                        session_id, e,
+                    );
+                    last = Some(CallbackError::Transport(e));
+                }
+                Err(e) => return (Err(e), true),
+            }
+        }
+        (
+            Err(last.expect("writers checked non-empty above")),
+            false,
+        )
+    }
+
     /// Send a CB_LAYOUTRECALL for one specific layout to the client
     /// behind `session_id`. Returns the parsed reply on success;
     /// [`CallbackError`] otherwise.
@@ -169,19 +224,22 @@ impl CallbackManager {
         iomode: u32,
         changed: bool,
     ) -> Result<CbCompoundReply, CallbackError> {
-        // Resolve the writer first — if the session never bound a
-        // back-channel, there's nothing to send.
-        // Any bound transport will do — they all reach the same client.
-        let writer = match self.back_channels.get(session_id).and_then(|w| w.first().cloned()) {
-            Some(w) => w,
-            None => {
-                warn!(
-                    "CB_LAYOUTRECALL: no back-channel for session {:?}",
-                    session_id,
-                );
-                return Err(CallbackError::ConnectionClosed);
-            }
-        };
+        // If the session never bound a back-channel, there's nothing to
+        // send. (The actual writer choice happens at send time — every
+        // bound transport reaches the same client, and the send fails
+        // over across them on a refused write.)
+        if self
+            .back_channels
+            .get(session_id)
+            .map(|w| w.is_empty())
+            .unwrap_or(true)
+        {
+            warn!(
+                "CB_LAYOUTRECALL: no back-channel for session {:?}",
+                session_id,
+            );
+            return Err(CallbackError::ConnectionClosed);
+        }
 
         // Resolve cb_program from the session. If the client
         // CREATE_SESSION'd with cb_program=0 ("I won't host
@@ -286,23 +344,19 @@ impl CallbackManager {
                 _ => "AUTH_NONE".to_string(),
             },
         );
-        let reply = match writer
-            .send_cb_compound(cb_program, cb_cred.as_ref(), &call, self.timeout)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                // The call may or may not have reached the client. Advance
-                // anyway: re-sending `seq` after a timeout would look like a
-                // retry of a request the client may have already executed,
-                // and RFC 8881 §2.10.6.1's retry semantics make that the
-                // more dangerous of the two readings.
-                *seq_guard = seq;
-                return Err(e);
-            }
-        };
-        *seq_guard = seq;
+        let (result, seq_consumed) = self
+            .send_on_session_writers(session_id, cb_program, cb_cred.as_ref(), &call)
+            .await;
+        // Ambiguous outcomes (timeout, reply-path death) advance the
+        // sequence: re-sending `seq` would look like a retry of a request
+        // the client may have already executed, and RFC 8881 §2.10.6.1's
+        // retry semantics make that the more dangerous reading. A write
+        // no transport accepted advances nothing — the call never left.
+        if seq_consumed {
+            *seq_guard = seq;
+        }
         drop(seq_guard);
+        let reply = result?;
         info!(
             "✅ CB_LAYOUTRECALL ← session {:?}: status={:?}, {} results",
             session_id,
@@ -373,13 +427,15 @@ impl CallbackManager {
         deviceid: [u8; 16],
         notify_type: u32,
     ) -> Result<CbCompoundReply, CallbackError> {
-        let writer = match self.back_channels.get(session_id).and_then(|w| w.first().cloned()) {
-            Some(w) => w,
-            None => {
-                debug!("CB_NOTIFY_DEVICEID: no back-channel for session {:?}", session_id);
-                return Err(CallbackError::ConnectionClosed);
-            }
-        };
+        if self
+            .back_channels
+            .get(session_id)
+            .map(|w| w.is_empty())
+            .unwrap_or(true)
+        {
+            debug!("CB_NOTIFY_DEVICEID: no back-channel for session {:?}", session_id);
+            return Err(CallbackError::ConnectionClosed);
+        }
         let (cb_program, cb_minorversion) = match self.state_mgr.sessions.get_session(session_id) {
             Some(s) if s.cb_program != 0 => (s.cb_program, s.minorversion),
             _ => return Err(CallbackError::ConnectionClosed),
@@ -429,18 +485,14 @@ impl CallbackManager {
             layout_type,
             &deviceid[..4],
         );
-        let reply = match writer
-            .send_cb_compound(cb_program, cb_cred.as_ref(), &call, self.timeout)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                *seq_guard = seq;
-                return Err(e);
-            }
-        };
-        *seq_guard = seq;
+        let (result, seq_consumed) = self
+            .send_on_session_writers(session_id, cb_program, cb_cred.as_ref(), &call)
+            .await;
+        if seq_consumed {
+            *seq_guard = seq;
+        }
         drop(seq_guard);
+        let reply = result?;
         // A refusal is worth a WARN of its own: the failure is otherwise
         // SILENT (the client keeps serving the stale device and nothing
         // else complains), and NFS4ERR_INVAL specifically means our
@@ -981,6 +1033,59 @@ mod tests {
                 "CB_COMPOUND must carry the session's minor version"
             );
         }
+    }
+
+    /// WITHIN-SESSION WRITER FAILOVER (design doc §5.3, slice 2): an
+    /// nconnect mount binds several transports to one session; a client
+    /// abandons one and the registry only reaps it when the read loop
+    /// sees the EOF — a write can beat that. `.first()` burned the whole
+    /// recall attempt on the dead writer. The send must walk the Vec:
+    /// writer[0] refuses the write (peer gone, error primed past the
+    /// kernel buffers), writer[1] round-trips.
+    #[tokio::test]
+    async fn a_dead_first_writer_fails_over_to_the_next_bound_transport() {
+        // Writer A: peer fully closed, then primed until the socket
+        // surfaces the error state (see closed_socket_surfaces_io_error
+        // in back_channel.rs — small writes buffer silently).
+        let (dead_writer, dead_server_read, dead_client_read, dead_client_write) = pair().await;
+        drop(dead_server_read);
+        drop(dead_client_read);
+        drop(dead_client_write);
+        let big: bytes::Bytes = vec![0u8; 4 * 1024 * 1024].into();
+        let mut primed = false;
+        for _ in 0..4 {
+            if dead_writer.send_record(big.clone()).await.is_err() {
+                primed = true;
+                break;
+            }
+        }
+        assert!(primed, "precondition: writer A must refuse writes");
+
+        // Writer B: live, with the usual mock client behind it.
+        let (writer, server_read, client_read, mut client_write) = pair().await;
+        let (state_mgr, session_id) = fixture_state(0x40000000);
+        let back_channels = Arc::new(DashMap::new());
+        back_channels.insert(
+            session_id,
+            vec![Arc::clone(&dead_writer), Arc::clone(&writer)],
+        );
+        let cb_mgr = CallbackManager::new(Arc::clone(&back_channels), Arc::clone(&state_mgr))
+            .with_timeout(Duration::from_secs(5));
+        let _loop_handle = spawn_read_loop(Arc::clone(&writer), server_read);
+        let mock_client = tokio::spawn(async move {
+            let mut r = BufReader::new(client_read);
+            let call = read_record(&mut r).await;
+            let xid = u32::from_be_bytes([call[0], call[1], call[2], call[3]]);
+            write_record(&mut client_write, build_reply(xid, Nfs4Status::Ok)).await;
+        });
+
+        let stateid = [0u8; 16];
+        let reply = cb_mgr
+            .send_layoutrecall(&session_id, &stateid, 1, 3, true)
+            .await
+            .expect("the live second writer must carry the recall");
+        assert_eq!(reply.status, Nfs4Status::Ok);
+        mock_client.await.unwrap();
     }
 
     /// Happy path: send a CB_LAYOUTRECALL, mock client replies OK,

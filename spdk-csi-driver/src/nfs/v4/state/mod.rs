@@ -94,6 +94,17 @@ pub struct StateManager {
     /// post-startup helpers can reach the trait without going through
     /// a sub-manager.
     backend: Arc<dyn StateBackend>,
+    /// Per-client pending SEQ4_STATUS_* bits, OR'd into every SEQUENCE
+    /// reply for that client (RFC 8881 §18.46.3 — the reply's
+    /// sr_status_flags used to be hardcoded 0, which is how a lease
+    /// sweep once stripped a client's locks without the client ever
+    /// being told). LEVEL-triggered, not edge: a bit stays up until the
+    /// condition clears (e.g. RECALLABLE_STATE_REVOKED until the last
+    /// revoked delegation is FREE_STATEID'd), so readers never consume
+    /// it. In-memory only — restart re-arming comes from the persisted
+    /// holder-evidence markers, not from this map.
+    /// (docs/plans/nfs-delegations-design.md §5.4/§6, slice 2.)
+    seq_flags: dashmap::DashMap<u64, u32>,
 }
 
 impl StateManager {
@@ -119,7 +130,31 @@ impl StateManager {
             delegations: delegation_manager,
             quotas: StateQuotas::from_env(),
             backend,
+            seq_flags: dashmap::DashMap::new(),
         }
+    }
+
+    /// Raise SEQ4_STATUS_* bits for a client. Every subsequent SEQUENCE
+    /// from that client carries them until `lower_seq_flags` clears them.
+    pub fn raise_seq_flags(&self, client_id: u64, bits: u32) {
+        if bits == 0 {
+            return;
+        }
+        *self.seq_flags.entry(client_id).or_insert(0) |= bits;
+    }
+
+    /// Clear SEQ4_STATUS_* bits for a client (the condition resolved —
+    /// e.g. its last revoked delegation was freed, or a backchannel
+    /// rebind ended CB_PATH_DOWN).
+    pub fn lower_seq_flags(&self, client_id: u64, bits: u32) {
+        if let Some(mut e) = self.seq_flags.get_mut(&client_id) {
+            *e &= !bits;
+        }
+    }
+
+    /// The bits a SEQUENCE reply to this client must carry right now.
+    pub fn seq_flags(&self, client_id: u64) -> u32 {
+        self.seq_flags.get(&client_id).map(|e| *e).unwrap_or(0)
     }
 
     /// Test/dev convenience: build a `StateManager` over a fresh

@@ -611,7 +611,7 @@ impl HubFs {
                 attrs: Some(Bytes::new()),
                 attrmask: vec![],
             },
-            claim: OpenClaim { claim_type: CLAIM_NULL, file: leaf.to_string() },
+            claim: OpenClaim { claim_type: CLAIM_NULL, file: leaf.to_string(), delegate_type: None, delegate_stateid: None },
         });
         let results = self.compound(ops).await?;
         results
@@ -637,7 +637,7 @@ impl HubFs {
             // UNCHECKED4 with NO createattrs is how the wire spells
             // "do not create" (dispatcher.rs's conversion).
             openhow: OpenHow { createmode: CREATE_UNCHECKED4, attrs: None, attrmask: vec![] },
-            claim: OpenClaim { claim_type: CLAIM_NULL, file: leaf.to_string() },
+            claim: OpenClaim { claim_type: CLAIM_NULL, file: leaf.to_string(), delegate_type: None, delegate_stateid: None },
         });
         let results = self.compound(ops).await?;
         results

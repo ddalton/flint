@@ -252,6 +252,18 @@ pub enum Operation {
         count: u32,
     },
 
+    // Delegation operations. Decoded even though the server has never
+    // granted a delegation: an undecodable known opcode used to fall
+    // through to `Unsupported`, which STOPS the compound decode (the
+    // cursor sits mid-argument), so a client probing DELEGPURGE or
+    // returning a delegation truncated every op behind it.
+    DelegPurge {
+        clientid: u64,
+    },
+    DelegReturn {
+        stateid: StateId,
+    },
+
     // Attribute operations
     GetAttr(Vec<u32>),           // bitmap of requested attributes
     SetAttr {
@@ -647,6 +659,10 @@ pub enum OperationResult {
     Write(Nfs4Status, Option<WriteResult>),
     Commit(Nfs4Status, Option<[u8; 8]>),  // verifier
 
+    // Delegations (both results are status-only)
+    DelegPurge(Nfs4Status),
+    DelegReturn(Nfs4Status),
+
     // Attributes
     GetAttr(Nfs4Status, Option<Bytes>),   // encoded attributes
     SetAttr(Nfs4Status, Vec<u32> /* attrsset bitmap words */),
@@ -723,6 +739,8 @@ impl OperationResult {
             OperationResult::Read(s, _) => *s,
             OperationResult::Write(s, _) => *s,
             OperationResult::Commit(s, _) => *s,
+            OperationResult::DelegPurge(s) => *s,
+            OperationResult::DelegReturn(s) => *s,
             OperationResult::GetAttr(s, _) => *s,
             OperationResult::SetAttr(s, _) => *s,
             OperationResult::Verify(s) => *s,
@@ -778,6 +796,15 @@ pub struct OpenHow {
 pub struct OpenClaim {
     pub claim_type: u32,
     pub file: String,
+    /// CLAIM_PREVIOUS (1) only: the open_delegation_type4 the client says
+    /// it held before the restart. Threaded (not discarded) so the reclaim
+    /// arm answers the delegation half deliberately — today always NONE.
+    pub delegate_type: Option<u32>,
+    /// CLAIM_DELEGATE_CUR (2) / CLAIM_DELEG_CUR_FH (5) only: the delegation
+    /// stateid the client is converting a locally-cached open under. Used
+    /// to be decoded and DROPPED, so a conversion open executed with the
+    /// stateid never validated.
+    pub delegate_stateid: Option<StateId>,
 }
 
 #[derive(Debug, Clone)]
@@ -1296,6 +1323,18 @@ impl CompoundRequest {
                 }
             }
 
+            // Delegation operations (RFC 8881 §18.5 / §18.6). Both replies
+            // are status-only; the args must decode so the ops behind them
+            // in the compound survive.
+            opcode::DELEGPURGE => {
+                let clientid = decoder.decode_u64()?;
+                Ok(Operation::DelegPurge { clientid })
+            }
+            opcode::DELEGRETURN => {
+                let stateid = decoder.decode_stateid()?;
+                Ok(Operation::DelegReturn { stateid })
+            }
+
             // File I/O operations
             opcode::OPEN => {
                 tracing::trace!("DEBUG OPEN: Starting decode, {} bytes remaining", decoder.remaining());
@@ -1392,6 +1431,8 @@ impl CompoundRequest {
                 // Claim (discriminated union) - RFC 5661 Section 18.16
                 let claim_type = decoder.decode_u32()?;
                 tracing::trace!("DEBUG OPEN: claim_type={}, {} bytes remaining", claim_type, decoder.remaining());
+                let mut delegate_type = None;
+                let mut delegate_stateid = None;
                 let file = match claim_type {
                     0 => {
                         // CLAIM_NULL - filename
@@ -1400,14 +1441,12 @@ impl CompoundRequest {
                     1 => {
                         // CLAIM_PREVIOUS - delegate_type (u32)
                         // Used for reclaim after server reboot
-                        tracing::trace!("DEBUG OPEN: CLAIM_PREVIOUS - decoding delegate_type, {} bytes before", decoder.remaining());
-                        let delegate_type = decoder.decode_u32()?;
-                        tracing::trace!("DEBUG OPEN: CLAIM_PREVIOUS - decoded delegate_type={}, {} bytes after", delegate_type, decoder.remaining());
+                        delegate_type = Some(decoder.decode_u32()?);
                         String::new()
                     }
                     2 => {
                         // CLAIM_DELEGATE_CUR - delegate_stateid + filename
-                        let _delegate_stateid = decoder.decode_stateid()?;
+                        delegate_stateid = Some(decoder.decode_stateid()?);
                         decoder.decode_string()?
                     }
                     3 => {
@@ -1420,7 +1459,7 @@ impl CompoundRequest {
                     }
                     5 => {
                         // CLAIM_DELEG_CUR_FH (NFSv4.1) - delegate_stateid only
-                        let _delegate_stateid = decoder.decode_stateid()?;
+                        delegate_stateid = Some(decoder.decode_stateid()?);
                         String::new()
                     }
                     6 => {
@@ -1431,7 +1470,7 @@ impl CompoundRequest {
                         return Err(format!("Unknown OPEN claim type: {}", claim_type));
                     }
                 };
-                let claim = OpenClaim { claim_type, file };
+                let claim = OpenClaim { claim_type, file, delegate_type, delegate_stateid };
                 
                 Ok(Operation::Open {
                     seqid,
@@ -2863,6 +2902,16 @@ impl CompoundResponse {
                     }
                 }
             }
+            OperationResult::DelegPurge(status) => {
+                // DELEGPURGE4res (RFC 8881 §18.5.2): status only.
+                encoder.encode_u32(opcode::DELEGPURGE);
+                encoder.encode_status(status);
+            }
+            OperationResult::DelegReturn(status) => {
+                // DELEGRETURN4res (RFC 8881 §18.6.2): status only.
+                encoder.encode_u32(opcode::DELEGRETURN);
+                encoder.encode_status(status);
+            }
             OperationResult::LayoutReturn(status) => {
                 encoder.encode_u32(opcode::LAYOUTRETURN);
                 encoder.encode_status(status);
@@ -2912,6 +2961,154 @@ impl CompoundResponse {
                 encoder.encode_status(resstatus);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod deleg_wire_tests {
+    //! The delegation ops' WIRE honesty, pinned. Before these arms
+    //! existed, DELEGPURGE/DELEGRETURN hit the decoder's default arm,
+    //! which STOPS the compound decode with the cursor mid-argument —
+    //! every op behind them was silently dropped from the reply
+    //! (design doc: docs/plans/nfs-delegations-design.md, negative
+    //! leg 7). The claim arms decoded their delegation payloads and
+    //! DISCARDED them; claim threading is what the grant/recall
+    //! machine will validate against.
+
+    use super::*;
+    use crate::nfs::v4::protocol::StateId;
+
+    fn req(build_ops: impl FnOnce(&mut XdrEncoder), op_count: u32) -> CompoundRequest {
+        let mut e = XdrEncoder::new();
+        e.encode_opaque(b"t");        // tag
+        e.encode_u32(1);              // minorversion
+        e.encode_u32(op_count);       // op count
+        build_ops(&mut e);
+        CompoundRequest::decode(XdrDecoder::new(e.finish())).expect("compound must decode")
+    }
+
+    fn sid() -> StateId {
+        StateId { seqid: 7, other: [0xab; 12] }
+    }
+
+    #[test]
+    fn delegpurge_decodes_and_the_op_behind_it_survives() {
+        let r = req(
+            |e| {
+                e.encode_u32(opcode::DELEGPURGE);
+                e.encode_u64(0xdead_beef);   // clientid4
+                e.encode_u32(opcode::GETFH); // no args
+            },
+            2,
+        );
+        assert_eq!(r.operations.len(), 2, "DELEGPURGE truncated the compound");
+        assert!(
+            matches!(r.operations[0], Operation::DelegPurge { clientid: 0xdead_beef }),
+            "got {:?}",
+            r.operations[0]
+        );
+        assert!(matches!(r.operations[1], Operation::GetFh));
+    }
+
+    #[test]
+    fn delegreturn_decodes_and_the_op_behind_it_survives() {
+        let r = req(
+            |e| {
+                e.encode_u32(opcode::DELEGRETURN);
+                e.encode_u32(7);                 // stateid.seqid
+                e.encode_fixed_opaque(&[0xab; 12]); // stateid.other
+                e.encode_u32(opcode::GETFH);
+            },
+            2,
+        );
+        assert_eq!(r.operations.len(), 2, "DELEGRETURN truncated the compound");
+        match &r.operations[0] {
+            Operation::DelegReturn { stateid } => assert_eq!(*stateid, sid()),
+            other => panic!("got {:?}", other),
+        }
+        assert!(matches!(r.operations[1], Operation::GetFh));
+    }
+
+    /// One OPEN with the given claim payload; returns the decoded claim.
+    fn open_with_claim(claim: impl FnOnce(&mut XdrEncoder)) -> OpenClaim {
+        let r = req(
+            |e| {
+                e.encode_u32(opcode::OPEN);
+                e.encode_u32(0);            // seqid
+                e.encode_u32(1);            // share_access READ
+                e.encode_u32(0);            // share_deny NONE
+                e.encode_u64(0);            // open_owner4.clientid
+                e.encode_opaque(b"owner");  // open_owner4.owner
+                e.encode_u32(0);            // OPEN4_NOCREATE
+                claim(e);
+            },
+            1,
+        );
+        match r.operations.into_iter().next().expect("one op") {
+            Operation::Open { claim, .. } => claim,
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn claim_previous_threads_its_delegate_type() {
+        let c = open_with_claim(|e| {
+            e.encode_u32(1); // CLAIM_PREVIOUS
+            e.encode_u32(1); // OPEN_DELEGATE_READ
+        });
+        assert_eq!(c.claim_type, 1);
+        assert_eq!(c.delegate_type, Some(1), "delegate_type discarded again");
+        assert_eq!(c.delegate_stateid, None);
+    }
+
+    #[test]
+    fn claim_deleg_cur_fh_threads_its_stateid() {
+        let c = open_with_claim(|e| {
+            e.encode_u32(5); // CLAIM_DELEG_CUR_FH
+            e.encode_u32(7);
+            e.encode_fixed_opaque(&[0xab; 12]);
+        });
+        assert_eq!(c.claim_type, 5);
+        assert_eq!(c.delegate_stateid, Some(sid()), "delegation stateid discarded again");
+    }
+
+    #[test]
+    fn claim_delegate_cur_threads_stateid_and_name() {
+        let c = open_with_claim(|e| {
+            e.encode_u32(2); // CLAIM_DELEGATE_CUR
+            e.encode_u32(7);
+            e.encode_fixed_opaque(&[0xab; 12]);
+            e.encode_string("cached.bin");
+        });
+        assert_eq!(c.claim_type, 2);
+        assert_eq!(c.delegate_stateid, Some(sid()));
+        assert_eq!(c.file, "cached.bin");
+    }
+
+    /// Both replies are status-only and must echo their own opcode —
+    /// a reply the client can correlate, instead of the truncated
+    /// compound the default arm produced.
+    #[test]
+    fn deleg_results_encode_opcode_and_status_only() {
+        let mut resp = CompoundResponse::new();
+        resp.status = Nfs4Status::NotSupp;
+        resp.tag = String::new();
+        resp.results.push(OperationResult::DelegPurge(Nfs4Status::NotSupp));
+        let b = resp.encode();
+        // status, tag(len 0), count=1, opcode, op status
+        let words: Vec<u32> = b.chunks(4).map(|c| u32::from_be_bytes(c.try_into().unwrap())).collect();
+        assert_eq!(words[2], 1, "result count");
+        assert_eq!(words[3], opcode::DELEGPURGE);
+        assert_eq!(words[4], Nfs4Status::NotSupp as u32);
+
+        let mut resp = CompoundResponse::new();
+        resp.status = Nfs4Status::BadStateId;
+        resp.tag = String::new();
+        resp.results.push(OperationResult::DelegReturn(Nfs4Status::BadStateId));
+        let b = resp.encode();
+        let words: Vec<u32> = b.chunks(4).map(|c| u32::from_be_bytes(c.try_into().unwrap())).collect();
+        assert_eq!(words[3], opcode::DELEGRETURN);
+        assert_eq!(words[4], Nfs4Status::BadStateId as u32);
     }
 }
 

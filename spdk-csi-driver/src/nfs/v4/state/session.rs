@@ -130,6 +130,18 @@ pub struct Session {
     /// client DENIED the RPC for it.
     pub cb_cred: Option<crate::nfs::v4::compound::CallbackSecParms>,
 
+    /// ca_maxoperations the client negotiated for the BACK channel
+    /// (RFC 8881 §18.36 csa_back_chan_attrs). A CB_SEQUENCE+CB_RECALL
+    /// is a TWO-op compound, so a backchannel bound with
+    /// max_operations=1 can legally refuse the second op with
+    /// NFS4ERR_RESOURCE — the delegation grant gate (callback_ready,
+    /// design doc §4 rule 7d) refuses to grant to such a session
+    /// instead of granting and revoking at first conflict. 0 means
+    /// "never negotiated" (sessions built by paths that skip
+    /// CREATE_SESSION, e.g. tests) and reads as not-callback-capable.
+    /// In-memory only, like `minorversion`.
+    pub back_chan_maxops: u32,
+
     /// The NFSv4 MINOR VERSION this session was created at, echoed in
     /// the header of every callback CB_COMPOUND we send on it.
     ///
@@ -212,6 +224,7 @@ impl Session {
             fore_chan_maxrequests: slot_count,
             cb_program,
             cb_cred,
+            back_chan_maxops: 0,
             minorversion,
             slots,
             highest_slotid: 0,
@@ -439,6 +452,17 @@ impl SessionManager {
     /// Get a session by ID
     ///
     /// LOCK-FREE: Concurrent reads without blocking other operations
+    /// Record the negotiated back-channel ca_maxoperations on a stored
+    /// session (set by the CREATE_SESSION handler; `Session::new`
+    /// defaults it to 0 = not negotiated). Kept out of the constructor
+    /// so the twelve-argument signature does not grow at every call
+    /// site for one callback-side attribute.
+    pub fn set_back_chan_maxops(&self, session_id: &SessionId, maxops: u32) {
+        if let Some(mut sess) = self.sessions.get_mut(session_id) {
+            sess.back_chan_maxops = maxops;
+        }
+    }
+
     pub fn get_session(&self, session_id: &SessionId) -> Option<Session> {
         self.sessions.get(session_id).map(|r| r.clone())
     }

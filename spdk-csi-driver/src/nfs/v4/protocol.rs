@@ -432,6 +432,22 @@ impl Nfs4Status {
     }
 }
 
+/// SEQ4_STATUS_* flags carried in a SEQUENCE reply's sr_status_flags
+/// (RFC 8881 §18.46.1). Only the bits this server actually raises are
+/// listed; the field is a bitmask and clients ignore bits they don't
+/// know.
+pub mod seq4_status {
+    /// The backchannel is unusable (every bound transport dead). RFC
+    /// 8881 §2.10.13.1.2 — the client should BIND_CONN_TO_SESSION or
+    /// create a new connection.
+    pub const CB_PATH_DOWN: u32 = 0x00000001;
+    /// Recallable state (a delegation or layout) was administratively
+    /// or deadline-revoked; the client must TEST_STATEID/FREE_STATEID
+    /// to find and release it. Stays raised until the last revoked
+    /// record is freed.
+    pub const RECALLABLE_STATE_REVOKED: u32 = 0x00000040;
+}
+
 /// Stateid - 128-bit identifier for state (NFSv4 core concept)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StateId {

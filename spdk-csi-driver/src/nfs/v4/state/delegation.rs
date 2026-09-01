@@ -209,6 +209,19 @@ impl DelegationManager {
     ///
     /// # Returns
     /// Ok if delegation was found and returned, Err otherwise
+    /// Look up a live delegation by stateid: (owning client, file path).
+    ///
+    /// This is what a conversion open (CLAIM_DELEGATE_CUR /
+    /// CLAIM_DELEG_CUR_FH) validates the presented delegation stateid
+    /// against. While the server has never granted a delegation the
+    /// answer is always None and the caller refuses with BAD_STATEID —
+    /// the honest arm the old collapse-to-Fh path skipped.
+    pub fn lookup(&self, stateid: &StateId) -> Option<(u64, PathBuf)> {
+        self.delegations
+            .get(stateid)
+            .map(|d| (d.client_id, d.file_path.clone()))
+    }
+
     pub fn return_delegation(&self, stateid: &StateId) -> Result<(), Nfs4Status> {
         // Remove delegation
         if let Some((_, delegation)) = self.delegations.remove(stateid) {

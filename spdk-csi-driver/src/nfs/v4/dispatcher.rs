@@ -208,6 +208,59 @@ impl CompoundDispatcher {
         Arc::clone(&self.back_channels)
     }
 
+    /// Can the server actually deliver a callback to this CLIENT right
+    /// now? Rule 7 of the delegation grant gate
+    /// (docs/plans/nfs-delegations-design.md §4): true iff the client
+    /// has at least one session with
+    ///   (a) a callback program (`cb_program != 0`),
+    ///   (b) a live bound back-channel writer,
+    ///   (c) a credential the server can emit — AUTH_SYS or AUTH_NONE;
+    ///       a GSS-only cb_sec is recognised-but-unemittable, so a
+    ///       client granted state on its strength could NEVER be
+    ///       recalled, and
+    ///   (d) back-channel ca_maxoperations >= 2 — CB_SEQUENCE+CB_RECALL
+    ///       is a two-op compound, and a channel bound at 1 (legal)
+    ///       may refuse the second op with NFS4ERR_RESOURCE; refusing
+    ///       the grant here beats granting and revoking at the first
+    ///       conflict.
+    ///
+    /// In v4.1 the bound session backchannel IS the RFC-sanctioned
+    /// verification (CREATE_SESSION CONN_BACK_CHAN, audit C9) — no
+    /// CB_NULL probe; a channel that later lies is the recall ladder's
+    /// problem. Built as ONE shared predicate deliberately: this is
+    /// the same test `handle_layoutget` has never made (the known
+    /// layout soft spot — the warnings at callback.rs / session.rs);
+    /// wiring it in there is a ~5-line follow-up kept out of the
+    /// delegation change's blast radius.
+    pub fn callback_ready(&self, client_id: u64) -> bool {
+        for sid in self.state_mgr.sessions.get_client_sessions(client_id) {
+            let Some(sess) = self.state_mgr.sessions.get_session(&sid) else {
+                continue;
+            };
+            if sess.cb_program == 0 {
+                continue;
+            }
+            if matches!(
+                sess.cb_cred,
+                Some(crate::nfs::v4::compound::CallbackSecParms::Gss)
+            ) {
+                continue;
+            }
+            if sess.back_chan_maxops < 2 {
+                continue;
+            }
+            let has_writer = self
+                .back_channels
+                .get(&sid)
+                .map(|w| !w.is_empty())
+                .unwrap_or(false);
+            if has_writer {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Check if an opcode is a pNFS operation
     #[allow(dead_code)]
     fn is_pnfs_opcode(opcode: u32) -> bool {
@@ -987,17 +1040,27 @@ impl CompoundDispatcher {
                     // to the session (RFC 8881 §2.10.3.1, SP4_NONE).
                     self.bind_conn_to_session(res.sessionid, context);
 
+                    // sr_status_flags: the client's pending SEQ4_STATUS_*
+                    // bits (RFC 8881 §18.46.3). This was hardcoded 0 —
+                    // which is how a lease sweep once stripped a client's
+                    // locks with the client never told (the LeaseSilent
+                    // counterexample), and would have made every future
+                    // delegation revocation silent: a revoked holder
+                    // sends no I/O RPCs, so its lease-renewal SEQUENCE
+                    // is the ONLY place the news can ride.
+                    let status_flags = self
+                        .state_mgr
+                        .sessions
+                        .session_limits(&res.sessionid)
+                        .map(|s| self.state_mgr.seq_flags(s.client_id))
+                        .unwrap_or(0);
                     OperationResult::Sequence(res.status, Some(SequenceResult {
                         sessionid: res.sessionid,
                         sequenceid: res.sequenceid,
                         slotid: res.slotid,
                         highest_slotid: res.highest_slotid,
                         target_highest_slotid: res.target_highest_slotid,
-                        // Status flags indicate session/callback state
-                        // 0 = no special status (all good)
-                        // Could return flags like CB_PATH_DOWN, EXPIRED_STATE, etc.
-                        // For basic implementation, 0 is sufficient
-                        status_flags: 0,
+                        status_flags,
                     }))
                 } else {
                     OperationResult::Sequence(res.status, None)
@@ -1471,7 +1534,21 @@ impl CompoundDispatcher {
                 // mount, so the GRACE gate doesn't fire for them in
                 // steady state. pynfs's RECC suite + the §18.51.3
                 // wording is what we're protecting.
-                let is_reclaim_claim = matches!(claim.claim_type, 1 | 3 | 6);
+                // CLAIM_DELEGATE_PREV (3) / CLAIM_DELEG_PREV_FH (6):
+                // deliberate non-support, in and out of grace. They only
+                // apply when a server retains delegations across CLIENT
+                // reboot/lease-expiry, which this server never does (the
+                // lease cascade destroys them), and Linux clients do not
+                // use them. NOTSUPP matches knfsd. Before this arm they
+                // collapsed to a plain CLAIM_FH open — for claim 3 the
+                // CFH is the PARENT DIRECTORY and the decoded filename
+                // was discarded, so the open landed on the wrong object
+                // entirely.
+                if matches!(claim.claim_type, 3 | 6) {
+                    return OperationResult::Open(Nfs4Status::NotSupp, None);
+                }
+
+                let is_reclaim_claim = claim.claim_type == 1;
                 let client_id = context
                     .session_id
                     .and_then(|sid| self.state_mgr.sessions.session_limits(&sid))
@@ -1522,11 +1599,30 @@ impl CompoundDispatcher {
                     return OperationResult::Open(Nfs4Status::Grace, None);
                 }
 
-                // Convert compound::OpenClaim to ioops::OpenClaim
+                // Convert compound::OpenClaim to ioops::OpenClaim. Claims
+                // 3/6 returned NOTSUPP above; anything else out of range
+                // never decoded. The old `_ => Fh` default silently
+                // collapsed every delegation claim onto the CFH with its
+                // stateid/delegate_type dropped.
                 let converted_claim = match claim.claim_type {
                     0 => crate::nfs::v4::operations::ioops::OpenClaim::Null(claim.file),
-                    4 => crate::nfs::v4::operations::ioops::OpenClaim::Fh,
-                    _ => crate::nfs::v4::operations::ioops::OpenClaim::Fh, // Default to Fh
+                    1 => crate::nfs::v4::operations::ioops::OpenClaim::Previous {
+                        delegate_type: claim.delegate_type.unwrap_or(0),
+                    },
+                    2 | 5 => {
+                        let Some(stateid) = claim.delegate_stateid else {
+                            // Decoder always populates it for 2/5; a miss
+                            // is a server-side inconsistency, not a client
+                            // error worth inventing a status for.
+                            warn!("OPEN claim_type={} without a decoded delegation stateid", claim.claim_type);
+                            return OperationResult::Open(Nfs4Status::BadXdr, None);
+                        };
+                        crate::nfs::v4::operations::ioops::OpenClaim::DelegCur {
+                            stateid,
+                            file: if claim.claim_type == 2 { Some(claim.file) } else { None },
+                        }
+                    }
+                    _ => crate::nfs::v4::operations::ioops::OpenClaim::Fh,
                 };
 
                 // A size createattr (O_CREAT|O_TRUNC) that lands on an
@@ -2422,6 +2518,28 @@ impl CompoundDispatcher {
             // The COMPOUND-level (top-of-reply) status is set from the result's
             // status() and aborts the chain, so the choice has to be made here
             // rather than at encode time.
+            Operation::DelegPurge { clientid } => {
+                // Deliberate non-support (matches knfsd): DELEGPURGE only
+                // means something for a server that retains delegations
+                // across CLIENT restart (CLAIM_DELEGATE_PREV), which this
+                // server never does. The args are DECODED so the ops
+                // behind it in the compound survive — the old default-arm
+                // path truncated the whole tail.
+                debug!("DELEGPURGE clientid={:#x} -> NOTSUPP", clientid);
+                OperationResult::DelegPurge(Nfs4Status::NotSupp)
+            }
+
+            Operation::DelegReturn { stateid } => {
+                // Resolve the "current stateid" sentinel (RFC 8881
+                // §16.2.3.1.2) like every other stateid-carrying op.
+                let stateid = match context.resolve_stateid(stateid) {
+                    Some(s) => s,
+                    None => return OperationResult::DelegReturn(Nfs4Status::BadStateId),
+                };
+                let res = self.io_handler.handle_delegreturn(stateid, context);
+                OperationResult::DelegReturn(res.status)
+            }
+
             Operation::Unsupported(opcode) => {
                 let is_illegal = opcode < 3 || opcode > opcode::CLONE;
                 let status = if is_illegal {
@@ -4653,6 +4771,261 @@ mod tests {
         let lock_mgr = Arc::new(LockManager::new());
         let dispatcher = CompoundDispatcher::new(fh_mgr, state_mgr, lock_mgr);
         (dispatcher, temp_dir)
+    }
+
+    /// THE DELEGATION WIRE ARMS, pinned at the dispatch level
+    /// (docs/plans/nfs-delegations-design.md, slice 1 — inert without
+    /// grants, but each answer is a live decoder-bug fix):
+    ///
+    ///   * DELEGPURGE  → clean NOTSUPP (used to truncate the compound);
+    ///   * DELEGRETURN with an unknown stateid → BAD_STATEID through the
+    ///     real DelegationManager lookup (used to truncate the compound);
+    ///   * CLAIM_DELEGATE_PREV (3) / CLAIM_DELEG_PREV_FH (6) → NOTSUPP
+    ///     in AND out of grace. Claim 3 used to collapse to a CLAIM_FH
+    ///     open against the PARENT DIRECTORY with the name discarded —
+    ///     the silent-misexecution class;
+    ///   * CLAIM_DELEG_CUR_FH (5) with a stateid naming no delegation →
+    ///     BAD_STATEID, never a plain open that ignores the stateid.
+    #[tokio::test]
+    async fn delegation_wire_arms_answer_honestly() {
+        let (dispatcher, _t) = create_test_dispatcher();
+
+        let res = dispatcher
+            .dispatch_operation(
+                Operation::DelegPurge { clientid: 0xdead },
+                &mut CompoundContext::new(1),
+            )
+            .await;
+        assert!(
+            matches!(res, OperationResult::DelegPurge(Nfs4Status::NotSupp)),
+            "DELEGPURGE must answer NOTSUPP cleanly, got {res:?}",
+        );
+
+        let bogus = StateId { seqid: 3, other: [0x5a; 12] };
+        let res = dispatcher
+            .dispatch_operation(
+                Operation::DelegReturn { stateid: bogus },
+                &mut CompoundContext::new(1),
+            )
+            .await;
+        assert!(
+            matches!(res, OperationResult::DelegReturn(Nfs4Status::BadStateId)),
+            "DELEGRETURN of an unknown delegation must answer BAD_STATEID, got {res:?}",
+        );
+
+        // An OPEN claim needs a CFH; aim at the export root.
+        let open = |claim: crate::nfs::v4::compound::OpenClaim| Operation::Open {
+            seqid: 0,
+            share_access: 1,
+            share_deny: 0,
+            owner: b"o".to_vec(),
+            openhow: crate::nfs::v4::compound::OpenHow {
+                createmode: 0,
+                attrs: None,
+                attrmask: Vec::new(),
+            },
+            claim,
+        };
+        for claim_type in [3u32, 6] {
+            let mut ctx = CompoundContext::new(1);
+            let put = dispatcher
+                .dispatch_operation(Operation::PutRootFh, &mut ctx)
+                .await;
+            assert!(matches!(put, OperationResult::PutRootFh(Nfs4Status::Ok)));
+            let res = dispatcher
+                .dispatch_operation(
+                    open(crate::nfs::v4::compound::OpenClaim {
+                        claim_type,
+                        file: "victim.txt".to_string(),
+                        delegate_type: None,
+                        delegate_stateid: None,
+                    }),
+                    &mut ctx,
+                )
+                .await;
+            assert!(
+                matches!(res, OperationResult::Open(Nfs4Status::NotSupp, None)),
+                "claim {claim_type} must answer NOTSUPP, got {res:?}",
+            );
+        }
+
+        // Claim 5 is NOT a reclaim claim, so it rides the ordinary
+        // non-reclaim OPEN gate — end grace first or the fresh fixture
+        // answers GRACE before the stateid is ever looked at.
+        dispatcher.state_mgr.leases.end_grace();
+        let mut ctx = CompoundContext::new(1);
+        let put = dispatcher
+            .dispatch_operation(Operation::PutRootFh, &mut ctx)
+            .await;
+        assert!(matches!(put, OperationResult::PutRootFh(Nfs4Status::Ok)));
+        let res = dispatcher
+            .dispatch_operation(
+                open(crate::nfs::v4::compound::OpenClaim {
+                    claim_type: 5,
+                    file: String::new(),
+                    delegate_type: None,
+                    delegate_stateid: Some(bogus),
+                }),
+                &mut ctx,
+            )
+            .await;
+        assert!(
+            matches!(res, OperationResult::Open(Nfs4Status::BadStateId, None)),
+            "a conversion open with an unknown delegation stateid must answer \
+             BAD_STATEID, got {res:?}",
+        );
+    }
+
+    /// callback_ready IS THE GRANT GATE'S RULE 7 (design doc §4): each
+    /// clause refused independently — no callback program, no live
+    /// writer, an unemittable (GSS-only) callback cred, or a
+    /// back-channel negotiated at ca_maxoperations=1 (CB_SEQUENCE +
+    /// CB_RECALL is a two-op compound). A client is ready only when ONE
+    /// session satisfies all four.
+    #[tokio::test]
+    async fn callback_ready_demands_program_writer_cred_and_two_ops() {
+        use crate::nfs::v4::compound::CallbackSecParms;
+
+        let (dispatcher, _t) = create_test_dispatcher();
+        let mk_session = |client: u64, cb_program: u32, cred: Option<CallbackSecParms>| {
+            dispatcher.state_mgr.sessions.create_session(
+                client, 0, 0, 65536, 65536, 16384, 16, 16, cb_program, cred, 1,
+            )
+        };
+        // A real writer needs a real socket; loopback pair, write half.
+        let mk_writer = || async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (conn, acc) =
+                tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept());
+            let (_r, w) = conn.unwrap().into_split();
+            // Keep the accepted side alive by leaking it into the test's
+            // lifetime — dropping it would not fail this test (nothing
+            // is sent), but keep the shape honest.
+            std::mem::forget(acc.unwrap());
+            crate::nfs::v4::back_channel::BackChannelWriter::new(
+                tokio::io::BufWriter::new(w),
+            )
+        };
+
+        // Client 1: no sessions at all.
+        assert!(!dispatcher.callback_ready(1), "no sessions");
+
+        // Client 2: session but cb_program=0, writer bound, maxops fine.
+        let s2 = mk_session(2, 0, Some(CallbackSecParms::None));
+        dispatcher.state_mgr.sessions.set_back_chan_maxops(&s2.session_id, 8);
+        dispatcher
+            .back_channels
+            .insert(s2.session_id, vec![mk_writer().await]);
+        assert!(!dispatcher.callback_ready(2), "cb_program=0 refuses");
+
+        // Client 3: program + cred + maxops, but NO bound writer.
+        let s3 = mk_session(3, 0x40000000, Some(CallbackSecParms::None));
+        dispatcher.state_mgr.sessions.set_back_chan_maxops(&s3.session_id, 8);
+        assert!(!dispatcher.callback_ready(3), "no live writer refuses");
+
+        // Client 4: everything but the back channel negotiated maxops=1.
+        let s4 = mk_session(4, 0x40000000, Some(CallbackSecParms::None));
+        dispatcher.state_mgr.sessions.set_back_chan_maxops(&s4.session_id, 1);
+        dispatcher
+            .back_channels
+            .insert(s4.session_id, vec![mk_writer().await]);
+        assert!(
+            !dispatcher.callback_ready(4),
+            "a 2-op CB compound cannot fit a maxops=1 backchannel",
+        );
+
+        // Client 5: GSS-only cb_sec — recognised but unemittable; a
+        // grant on its strength could never be recalled.
+        let s5 = mk_session(5, 0x40000000, Some(CallbackSecParms::Gss));
+        dispatcher.state_mgr.sessions.set_back_chan_maxops(&s5.session_id, 8);
+        dispatcher
+            .back_channels
+            .insert(s5.session_id, vec![mk_writer().await]);
+        assert!(!dispatcher.callback_ready(5), "GSS-only cred refuses");
+
+        // Client 6: all four clauses satisfied.
+        let s6 = mk_session(6, 0x40000000, Some(CallbackSecParms::None));
+        dispatcher.state_mgr.sessions.set_back_chan_maxops(&s6.session_id, 2);
+        dispatcher
+            .back_channels
+            .insert(s6.session_id, vec![mk_writer().await]);
+        assert!(dispatcher.callback_ready(6), "ready at exactly maxops=2");
+
+        // ...and a session created but never CREATE_SESSION-negotiated
+        // (back_chan_maxops defaults 0) must read not-ready: the
+        // default is conservative by construction.
+        let s7 = mk_session(7, 0x40000000, Some(CallbackSecParms::None));
+        dispatcher
+            .back_channels
+            .insert(s7.session_id, vec![mk_writer().await]);
+        assert!(
+            !dispatcher.callback_ready(7),
+            "un-negotiated back channel must not read as callback-capable",
+        );
+    }
+
+    /// THE SEQ4 STATUS FLAGS ARE THE ONLY DELIVERABLE SIGNAL A
+    /// DELEGATION HOLDER HAS LEFT (design doc §5.4, slice 2): a revoked
+    /// holder sends no I/O RPCs — its lease-renewal SEQUENCE is the one
+    /// place the news can ride, and sr_status_flags was hardcoded 0.
+    /// Level-triggered: raised bits appear on EVERY SEQUENCE until
+    /// lowered, and are never consumed by the read.
+    #[tokio::test]
+    async fn sequence_carries_raised_seq4_flags_until_lowered() {
+        use crate::nfs::v4::protocol::seq4_status;
+
+        let (dispatcher, _t) = create_test_dispatcher();
+        let client_id = 42u64;
+        let session = dispatcher.state_mgr.sessions.create_session(
+            client_id, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0, None, 1,
+        );
+        let sid = session.session_id;
+
+        let seq = |n: u32| Operation::Sequence {
+            sessionid: sid,
+            sequenceid: n,
+            slotid: 0,
+            highest_slotid: 0,
+            cachethis: false,
+        };
+        let flags_of = |r: &OperationResult| match r {
+            OperationResult::Sequence(Nfs4Status::Ok, Some(sr)) => sr.status_flags,
+            other => panic!("SEQUENCE failed: {other:?}"),
+        };
+
+        let r = dispatcher
+            .dispatch_operation(seq(1), &mut CompoundContext::new(1))
+            .await;
+        assert_eq!(flags_of(&r), 0, "no condition pending — no bits");
+
+        dispatcher
+            .state_mgr
+            .raise_seq_flags(client_id, seq4_status::RECALLABLE_STATE_REVOKED);
+        let r = dispatcher
+            .dispatch_operation(seq(2), &mut CompoundContext::new(1))
+            .await;
+        assert_eq!(
+            flags_of(&r),
+            seq4_status::RECALLABLE_STATE_REVOKED,
+            "a raised bit must ride the next SEQUENCE",
+        );
+        let r = dispatcher
+            .dispatch_operation(seq(3), &mut CompoundContext::new(1))
+            .await;
+        assert_eq!(
+            flags_of(&r),
+            seq4_status::RECALLABLE_STATE_REVOKED,
+            "level-triggered: the read must not consume the bit",
+        );
+
+        dispatcher
+            .state_mgr
+            .lower_seq_flags(client_id, seq4_status::RECALLABLE_STATE_REVOKED);
+        let r = dispatcher
+            .dispatch_operation(seq(4), &mut CompoundContext::new(1))
+            .await;
+        assert_eq!(flags_of(&r), 0, "lowered — the condition resolved");
     }
 
     /// The nfsv4_1_file_layout_ds_addr4 encoding must keep the two

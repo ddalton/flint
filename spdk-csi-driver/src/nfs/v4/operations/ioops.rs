@@ -87,6 +87,25 @@ pub enum OpenClaim {
 
     /// Open by filehandle (NFSv4.1)
     Fh,
+
+    /// CLAIM_PREVIOUS (1): reclaim during grace. The CFH is the file
+    /// (same resolution as `Fh`); carries the open_delegation_type4 the
+    /// client says it held before the restart, so the delegation half
+    /// of the reply is answered DELIBERATELY — always NONE today:
+    /// delegations are never retained across a restart, and declining a
+    /// READ-delegation reclaim is legal and loses nothing (RFC 8881
+    /// §10.4). Before this variant the value was decoded and discarded.
+    Previous { delegate_type: u32 },
+
+    /// CLAIM_DELEGATE_CUR (2) / CLAIM_DELEG_CUR_FH (5): a conversion
+    /// open — the client turning a locally-cached open under a
+    /// delegation into a real open stateid (what Linux does on recall,
+    /// before DELEGRETURN). `file` is Some for the 4.0-style claim 2
+    /// (name relative to the CFH directory), None for claim 5 (the CFH
+    /// is the file). The presented delegation stateid MUST validate:
+    /// these claims used to collapse to `Fh` with the stateid dropped,
+    /// which for claim 2 executed the open against the PARENT DIRECTORY.
+    DelegCur { stateid: StateId, file: Option<String> },
 }
 
 /// Share access bits
@@ -567,9 +586,57 @@ impl IoOperationHandler {
         op: OpenOp,
         ctx: &mut CompoundContext,
     ) -> OpenRes {
+        let mut op = op;
         debug!("OPEN: share_access=0x{:08x}, share_deny=0x{:08x}",
                op.share_access, op.share_deny);
         debug!("OPEN: openhow={:?}, claim={:?}", op.openhow, op.claim);
+
+        // Normalize the delegation-flavoured claims up front so the rest
+        // of the handler keeps its two resolution shapes (by-name /
+        // by-CFH). Order matters: a conversion open validates its
+        // delegation stateid BEFORE any path work.
+        match &op.claim {
+            OpenClaim::Previous { delegate_type } => {
+                // Reclaim: the dispatcher's grace gate already admitted
+                // it; the CFH is the file, so resolution is the Fh shape.
+                // The delegation half of the reclaim stays NONE (we never
+                // retain delegations across restart — declining a READ
+                // reclaim is legal and the client just revalidates).
+                debug!("OPEN: CLAIM_PREVIOUS reclaim, claimed delegate_type={}", delegate_type);
+                op.claim = OpenClaim::Fh;
+            }
+            OpenClaim::DelegCur { stateid, file } => {
+                match self.state_mgr.delegations.lookup(stateid) {
+                    None => {
+                        // No live delegation by that stateid — the only
+                        // possible answer while the server never grants,
+                        // and the correct one for a bogus/foreign stateid
+                        // once it does.
+                        warn!("OPEN: conversion claim with unknown delegation stateid {:?}", stateid);
+                        return OpenRes {
+                            status: Nfs4Status::BadStateId,
+                            stateid: None,
+                            change_info: None,
+                            result_flags: 0,
+                            delegation: OpenDelegationType::None,
+                            attrset: vec![],
+                        };
+                    }
+                    Some((_client, _path)) => {
+                        // A live delegation exists (grants are not
+                        // implemented yet, so this arm is unreachable
+                        // today; the full validation — owner match, file
+                        // match, fence exemption during recall — lands
+                        // with the grant/recall machine).
+                        op.claim = match file {
+                            Some(name) => OpenClaim::Null(name.clone()),
+                            None => OpenClaim::Fh,
+                        };
+                    }
+                }
+            }
+            OpenClaim::Null(_) | OpenClaim::Fh => {}
+        }
 
         // Check current filehandle (directory we're creating in).
         // Clone it so we don't keep an immutable borrow on `ctx`
@@ -614,6 +681,8 @@ impl IoOperationHandler {
                 debug!("OPEN: CLAIM_FH - file must exist");
                 String::new()
             }
+            // Normalized away at the top of the handler.
+            OpenClaim::Previous { .. } | OpenClaim::DelegCur { .. } => String::new(),
         };
 
         // Determine if we need to create the file
@@ -1238,6 +1307,10 @@ impl IoOperationHandler {
                     (parent_fh_data.clone(), embedded, false, None)
                 }
             },
+            // Normalized away at the top of the handler.
+            OpenClaim::Previous { .. } | OpenClaim::DelegCur { .. } => {
+                (parent_fh_data.clone(), None, false, None)
+            }
         };
 
         // RFC 8881 §18.16.3, the no-create arm — and the one that
@@ -1947,6 +2020,20 @@ impl IoOperationHandler {
             warn!("WRITE: Invalid stateid: {}", e);
             return WriteRes {
                 status: Nfs4Status::BadStateId,
+                count: 0,
+                committed: UNSTABLE4,
+                writeverf: 0,
+            };
+        }
+
+        // A READ-delegation stateid on WRITE is an access-mode violation
+        // (RFC 8881 §18.32.3): the delegation conveys read rights only,
+        // and RFC requires OPENMODE, not a recall of the writer's own
+        // delegation followed by a write under a stateid naming no open.
+        if self.state_mgr.stateids.is_delegation(&op.stateid) {
+            warn!("WRITE: READ-delegation stateid presented for write -> OPENMODE");
+            return WriteRes {
+                status: Nfs4Status::OpenMode,
                 count: 0,
                 committed: UNSTABLE4,
                 writeverf: 0,

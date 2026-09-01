@@ -638,6 +638,23 @@ impl StateIdManager {
             .unwrap_or(false)
     }
 
+    /// True when this stateid names a DELEGATION entry. A READ delegation
+    /// stateid presented on WRITE is an access-mode violation — RFC 8881
+    /// §18.32.3 / §8.2.4 requires NFS4ERR_OPENMODE, and no access-mode
+    /// check existed anywhere before this (the misuse validated cleanly).
+    /// WRITE delegations are never granted, so every delegation entry is
+    /// read-mode; if that ever changes this check must consult the mode.
+    /// (docs/plans/nfs-delegations-design.md, slice 1.)
+    pub fn is_delegation(&self, stateid: &StateId) -> bool {
+        if stateid == &ANONYMOUS_STATEID || stateid == &READ_BYPASS_STATEID {
+            return false;
+        }
+        self.states
+            .get(&stateid.other)
+            .map(|e| e.state_type == StateType::Delegation)
+            .unwrap_or(false)
+    }
+
     pub fn validate(&self, stateid: &StateId) -> Result<(), String> {
         if stateid == &ANONYMOUS_STATEID {
             return Ok(());
@@ -1018,6 +1035,25 @@ mod tests {
         assert_eq!(stateid2.seqid, 1);
 
         assert_eq!(mgr.active_count(), 2);
+    }
+
+    /// A delegation stateid presented where write rights are required is
+    /// an ACCESS-MODE violation, not a bad stateid — RFC 8881 §18.32.3
+    /// requires OPENMODE, and before `is_delegation` existed no
+    /// access-mode check existed anywhere (the misuse validated
+    /// cleanly). WRITE delegations are never granted, so a delegation
+    /// entry is read-mode by construction.
+    #[test]
+    fn a_delegation_stateid_is_flagged_for_openmode() {
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+        let deleg = mgr.allocate(StateType::Delegation, 1, None);
+        assert!(mgr.validate(&deleg).is_ok(), "validates — that is the trap");
+        assert!(mgr.is_delegation(&deleg), "the WRITE path's OPENMODE gate");
+
+        let open = mgr.allocate(StateType::Open, 1, None);
+        assert!(!mgr.is_delegation(&open), "open stateids must not trip it");
+        assert!(!mgr.is_delegation(&super::ANONYMOUS_STATEID));
+        assert!(!mgr.is_delegation(&super::READ_BYPASS_STATEID));
     }
 
     /// RFC 8881 §8.2.2 "current stateid" form: seqid=0 with a known

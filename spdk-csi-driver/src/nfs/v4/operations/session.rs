@@ -811,6 +811,18 @@ impl SessionOperationHandler {
             ctx.minor_version,
         );
 
+        // Record the BACK channel's negotiated ca_maxoperations on the
+        // stored session. A CB_SEQUENCE+CB_RECALL is a two-op compound,
+        // so max_operations=1 (legal — MIN_OPERATIONS above) means the
+        // client may refuse the second op with NFS4ERR_RESOURCE; the
+        // delegation grant gate (callback_ready, rule 7d) reads this
+        // and refuses to grant rather than granting and revoking at
+        // the first conflict.
+        self.state_mgr.sessions.set_back_chan_maxops(
+            &session.session_id,
+            op.back_chan_attrs.max_operations,
+        );
+
         // C8 evidence, logged rather than assumed: what the client will
         // actually ACCEPT on a callback. The pre-C8 code hardcoded
         // AUTH_NONE on the belief this "matches Linux client behaviour";
