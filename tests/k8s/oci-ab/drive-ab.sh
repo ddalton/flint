@@ -184,13 +184,24 @@ measure_arm() { # $1=arm $2=snapshotter $3=registry $4=iid $5=rep $6=expected_di
   since=$(now_rfc3339)
   f0=$(reg_reqs_since registry-flint "$since"); s0=$(reg_reqs_since registry-s3 "$since")
 
-  # node-side stopwatch + digest of what was ACTUALLY pulled
+  # node-side stopwatch + digest of what was ACTUALLY pulled.
+  #
+  # `--net host` is load-bearing on a CNI node, not a shortcut. cold_and_verify
+  # runs `nerdctl system prune -af`, which removes the default bridge NETWORK
+  # but leaves the `nerdctl0` kernel interface holding 10.4.0.0/24. The next
+  # `run` then tries to recreate that network and fails
+  # "subnet 10.4.0.0/24 overlaps with other one on this address space" — so
+  # rep 1 succeeds and every rep after it voids on G-RUN. Deleting the orphan
+  # is not enough: the run recreates it and the poststop hook fails the same
+  # way. Host networking removes the bridge from the measurement entirely.
+  # Applied to EVERY arm, so it cannot bias the comparison; recorded as an arm
+  # property. (runby, 2026-09-01 — observed as 4x G-RUN:run-rc=1.)
   out=$(ssm_run "$iid" "
     set -u
     t0=\$(date +%s%N)
     nerdctl --snapshotter $snap pull --quiet --hosts-dir /etc/containerd/certs.d $reg/$IMG >/dev/null 2>&1; prc=\$?
     t1=\$(date +%s%N)
-    nerdctl --snapshotter $snap run --rm $reg/$IMG python3 -c '$PYEXEC' >/dev/null 2>&1; rrc=\$?
+    nerdctl --snapshotter $snap run --rm --net host $reg/$IMG python3 -c '$PYEXEC' >/dev/null 2>&1; rrc=\$?
     t2=\$(date +%s%N)
     dig=\$(nerdctl image inspect --format '{{index .RepoDigests 0}}' $reg/$IMG 2>/dev/null | sed 's/.*@//')
     echo \"#RIG pull_ms=\$(( (t1-t0)/1000000 )) ready_ms=\$(( (t2-t0)/1000000 )) prc=\$prc rrc=\$rrc digest=\${dig:-none}\"
@@ -307,11 +318,17 @@ substrate_gate() { # $1=since-RFC3339 [$2=streamed capture] -> PASS|FAIL|INCONCL
 # nerdctl uses), and `soci create` REJECTS the flag — so it cannot be applied
 # to the whole chain. Verified on soci v0.11.1, runby.
 build_index() { # $1=iid $2=registry-flint $3=registry-s3
-  ssm_run "$1" "nerdctl pull --hosts-dir /etc/containerd/certs.d $2/$IMG \
+  local bout brc
+  bout=$(ssm_run "$1" "nerdctl pull --hosts-dir /etc/containerd/certs.d $2/$IMG \
     && soci create $2/$IMG \
     && soci push --plain-http $2/$IMG \
     && nerdctl tag $2/$IMG $3/$IMG \
-    && soci push --plain-http $3/$IMG" | tail -3
+    && soci push --plain-http $3/$IMG")
+  brc=$?
+  echo "$bout" | tail -4 >&2
+  # No index means the lazy arms are not lazy — A3/A5 would measure a plain
+  # pull and the comparison would be silently meaningless rather than absent.
+  [ $brc -eq 0 ] || { warn "FATAL: SOCI index build/push failed — A3/A5 cannot be measured without it"; return 1; }
 }
 
 pushed_digest() { # digest recorded by push-image, so G-INTEG has a reference
@@ -389,7 +406,7 @@ setup-client)
   rf=$(reg_ip registry-flint):5000; rs=$(reg_ip registry-s3):5000
   b64=$(base64 < "$HERE/node-soci-setup.sh" | tr -d '\n')
   ssm_run "$iid" "echo $b64 | base64 -d > /tmp/node-soci-setup.sh && REG_FLINT=$rf REG_S3=$rs bash /tmp/node-soci-setup.sh" | tail -6
-  build_index "$iid" "$rf" "$rs"
+  build_index "$iid" "$rf" "$rs" || exit 1
   ;;
 install-node)
   # Split out of setup-client: `push-image` needs nerdctl, and nerdctl is
@@ -398,11 +415,20 @@ install-node)
   cn=$(client_node); iid=$(node_iid "$cn") || exit 1
   rf=$(reg_ip registry-flint):5000; rs=$(reg_ip registry-s3):5000
   b64=$(base64 < "$HERE/node-soci-setup.sh" | tr -d '\n')
-  ssm_run "$iid" "echo $b64 | base64 -d > /tmp/node-soci-setup.sh && REG_FLINT=$rf REG_S3=$rs bash /tmp/node-soci-setup.sh" | tail -6
+  # node-soci-setup.sh ends in its own verification and exits 1 when the soci
+  # plugin is not registered. Piping it into `tail` printed that failure and
+  # then ignored it — the same recorded-but-unenforced shape this rig exists
+  # to remove, and it is how a node with an unloaded snapshotter reached the
+  # measurement (runby: 10x G-PULL:pull-rc=1 on the lazy arms).
+  # Status captured on its own line: a pipeline's exit status is `tail`'s.
+  nout=$(ssm_run "$iid" "echo $b64 | base64 -d > /tmp/node-soci-setup.sh && REG_FLINT=$rf REG_S3=$rs bash /tmp/node-soci-setup.sh")
+  nrc=$?
+  echo "$nout" | tail -8 >&2
+  [ $nrc -eq 0 ] || { warn "FATAL: node setup failed its own verification — do not measure this node"; exit 1; }
   ;;
 build-index)
   cn=$(client_node); iid=$(node_iid "$cn") || exit 1
-  build_index "$iid" "$(reg_ip registry-flint):5000" "$(reg_ip registry-s3):5000"
+  build_index "$iid" "$(reg_ip registry-flint):5000" "$(reg_ip registry-s3):5000" || exit 1
   ;;
 stage-blob)
   cn=$(client_node); iid=$(node_iid "$cn") || exit 1

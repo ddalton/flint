@@ -86,7 +86,9 @@ case "$sub" in
     cmd=$(cat "$FKSTATE/$cid.cmd" 2>/dev/null)
     kind=other
     case "$cmd" in
-      *"#RIG registry="*)  kind=push;;
+      *"#RIG registry="*)      kind=push;;
+      *"node-soci-setup.sh"*)  kind=nodesetup;;
+      *"soci push"*)           kind=index;;
       *"/proc/loadavg"*)   kind=idle;;
       *"system prune"*)    kind=cold;;
       *"pull --quiet"*)    kind=pull;;
@@ -108,6 +110,7 @@ case "$sub" in
         [ "${FK_PUSH_DROP_S3:-0}" = 1 ] || \
           echo "#RIG registry=${FK_S3_IP:-10.0.0.2}:5000 digest=${FK_PUSH_DIG_S3-sha256:e52bfbfb}";;
       pull)
+        echo "$cmd" >> "$FKSTATE/pullcmds"
         # model backend traffic: the arm's own registry gets FK_REQS_OWN,
         # the other gets FK_REQS_LEAK (0 unless a leg is testing attribution)
         own=${FK_REQS_OWN:-42}; leak=${FK_REQS_LEAK:-0}
@@ -120,6 +123,8 @@ case "$sub" in
              echo $(( $(cat "$FKSTATE/reqs_flint") + leak )) > "$FKSTATE/reqs_flint";;
         esac
         echo "#RIG pull_ms=${FK_PULL_MS:-900} ready_ms=${FK_READY_MS:-1200} prc=${FK_PULL_RC:-0} rrc=${FK_RUN_RC:-0} digest=${FK_DIGEST:-sha256:aaaa}";;
+      nodesetup) echo "node-soci-setup: OK";;
+      index)     echo "SOCI-PUSHED";;
       *) echo "";;
     esac
     exit 0;;
@@ -375,6 +380,58 @@ g4_leg "G4 fires when the two registries disagree" \
        'export FK_PUSH_DIG_S3=sha256:deadbeef' expect-fail 'disagree on the manifest digest'
 g4_leg "G4 fires on a malformed digest, not just an absent one" \
        'export FK_PUSH_DIG_S3=not-a-digest' expect-fail 'no usable manifest digest'
+
+
+# ── the arms must differ ONLY in the two dimensions under test ───────────
+# flint-29 added `--net host` to the measured run (correctly — a pruned
+# nerdctl bridge orphans its interface and every rep after the first dies
+# on a subnet overlap). It is safe BECAUSE it is applied to every arm. That
+# property is exactly what nobody re-checks after the next edit, so pin it:
+# mask the snapshotter and the registry, and every arm's command must be
+# byte-identical. Catches a flag, an env var or an image that reached one
+# arm and not the others — a bias no guard downstream can see.
+W=$(newdir); o=$(REPS=2 drive "$W" run 2>/dev/null | tail -1)
+if [ -f "${o:-/nonexistent}" ] && [ -s "$W/state/pullcmds" ]; then
+  if python3 - "$W/state/pullcmds" <<'PYX'
+import re,sys
+# Each SSM payload is a multi-line block; compare the MEASURED lines, one
+# kind at a time, not every line that happens to mention nerdctl.
+lines=[l.strip() for l in open(sys.argv[1])]
+runs =[l for l in lines if 'nerdctl' in l and ' run ' in l]
+pulls=[l for l in lines if 'nerdctl' in l and ' pull ' in l]
+def norm(c):
+    c=re.sub(r'--snapshotter \S+','--snapshotter SNAP',c)
+    return re.sub(r'10\.0\.0\.\d+:5000','REG',c)
+assert len(runs)>=6 and len(pulls)>=6, f'expected >=6 of each, got runs={len(runs)} pulls={len(pulls)}'
+for kind,group in (('run',runs),('pull',pulls)):
+    u={norm(c) for c in group}
+    assert len(u)==1, f'{kind} commands differ by more than snapshotter+registry:\n'+'\n---\n'.join(sorted(u))
+PYX
+  then ok "every arm runs a byte-identical command once snapshotter+registry are masked"
+  else bad "arm symmetry" "see diff above"; fi
+else bad "arm symmetry" "no command log captured"; fi
+
+# --net host specifically must be on the measured run for ALL arms or NONE
+if [ -s "$W/state/pullcmds" ]; then
+  tot=$(grep -c "nerdctl.* run " "$W/state/pullcmds")
+  net=$(grep -c "nerdctl.* run .*--net host" "$W/state/pullcmds")
+  if [ "$tot" -gt 0 ] && [ "$tot" -eq "$net" ]; then
+    ok "--net host is applied to every measured arm ($net/$tot runs), never a subset"
+  else bad "--net host symmetry" "$net of $tot run commands carry it"; fi
+else bad "--net host symmetry" "no command log"; fi
+
+# ── a failed node setup or index build must be FATAL, not printed ────────
+# node-soci-setup.sh ends in its own verification and exits 1; piping it to
+# `tail` printed the failure and measured the node anyway.
+w=$(newdir); err=$(FKENV='export FK_SSM_FAIL_ON=nodesetup' drive "$w" install-node 2>&1 >/dev/null); rc=$?
+if [ $rc -ne 0 ] && echo "$err" | grep -q "do not measure this node"; then
+  ok "install-node is FATAL when the node fails its own verification"
+else bad "install-node fatality" "rc=$rc $(echo "$err" | tail -2)"; fi
+
+w=$(newdir); err=$(FKENV='export FK_SSM_FAIL_ON=index' drive "$w" build-index 2>&1 >/dev/null); rc=$?
+if [ $rc -ne 0 ] && echo "$err" | grep -q "A3/A5 cannot be measured without it"; then
+  ok "build-index is FATAL when the SOCI index push fails (no index = not lazy)"
+else bad "build-index fatality" "rc=$rc $(echo "$err" | tail -2)"; fi
 
 echo "──────────────────────────────────────────────────────────────────"
 echo "  passed $PASS, failed $FAIL"
