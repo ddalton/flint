@@ -82,7 +82,7 @@ import testmod
 tests, fdict, cdict = testmod.createtests(\"server41tests\")
 codes = sorted(c for c in cdict if c.startswith(\"FLINTNEG\"))
 print(\"discovered:\", \" \".join(codes))
-assert len(codes) >= 5, codes
+assert len(codes) >= 6, codes
 "' > "$OUT/discover.log" 2>&1 || { cat "$OUT/discover.log"; fail "the tests are not discoverable"; }
 note "$(grep discovered "$OUT/discover.log")"
 
@@ -160,7 +160,7 @@ print(f"\n  {'code':<12} {'off':<7} {'on':<7}")
 for c in codes:
     print(f"  {c:<12} {off.get(c,('-',''))[0]:<7} {on.get(c,('-',''))[0]:<7}")
 
-if len(codes) < 5:
+if len(codes) < 6:
     bad.append(f"G1: only {len(codes)} flintneg tests ran — the run did not happen")
 
 # The calibration gates the two shape legs. A shape verdict on top of a
@@ -184,6 +184,8 @@ EXPECT = {
     # client's arithmetic rather than the server, so their verdicts are
     # withdrawn rather than reported.
     "FLINTNEG5": ("PASS", "PASS"),
+    # Refusal is flag-independent: flint never supports reclaim.
+    "FLINTNEG6": ("PASS", "PASS"),
 }
 for code, (want_off, want_on) in EXPECT.items():
     got_off = off.get(code, ("-",""))[0]

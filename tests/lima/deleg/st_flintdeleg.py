@@ -253,3 +253,53 @@ def testWantNoDelegIsAnsweredNotIgnored(t, env):
         fail("the operation after OPEN decoded as op %d — the NONE_EXT "
              "arm shifted the rest of the compound"
              % res.resarray[-1].resop)
+
+
+def testClaimDelegatePrevIsRefused(t, env):
+    """CLAIM_DELEGATE_PREV must be refused, and must not open anything
+
+    flint does not support delegation reclaim across a client restart
+    (design §13 open question 2 — CLAIM_PREVIOUS re-grant is v2), so
+    the claim has to be refused rather than quietly reinterpreted.
+
+    The second half is the F69 shape and is the reason this leg exists
+    at all: a no-create OPEN that fails must not leave the current
+    filehandle sitting on the PARENT directory. When it does, the error
+    is returned correctly and the NEXT operation in the compound
+    silently addresses the wrong object — a GETFH after the failed OPEN
+    would hand the client the directory's handle and it would never
+    know. So this sends a GETFH after the OPEN and requires that the
+    compound stopped instead of answering it.
+
+    FLAGS: deleg flintneg
+    CODE: FLINTNEG6
+    """
+    sess = env.c1.new_client_session(env.testname(t))
+    check(create_file(sess, env.testname(t), access=OPEN4_SHARE_ACCESS_READ))
+
+    # The CLAIM_DELEGATE_PREV arm of the union is `file_delegate_prev`;
+    # the second positional is `file`, which belongs to CLAIM_NULL.
+    claim = open_claim4(CLAIM_DELEGATE_PREV,
+                        file_delegate_prev=env.testname(t))
+    owner = open_owner4(0, b"claim delegate prev owner")
+    how = openflag4(OPEN4_NOCREATE)
+    open_op = op.open(0, OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE,
+                      owner, how, claim)
+    res = sess.compound(env.home + [open_op, op.getfh()])
+
+    if res.status == NFS4_OK:
+        fail("CLAIM_DELEGATE_PREV was ACCEPTED (%s) — flint does not "
+             "support delegation reclaim, so this must be refused"
+             % (_shape(res),))
+    if res.status not in (NFS4ERR_NOTSUPP, NFS4ERR_RECLAIM_BAD,
+                          NFS4ERR_NO_GRACE, NFS4ERR_INVAL):
+        fail("CLAIM_DELEGATE_PREV answered %d; expected NOTSUPP or a "
+             "reclaim error: %s" % (res.status, _shape(res)))
+    # The compound must have STOPPED at the failed OPEN. If a GETFH
+    # result came back, the OPEN left a current filehandle behind and
+    # the client is being handed some other object's handle.
+    if res.resarray and res.resarray[-1].resop == OP_GETFH:
+        fail("the GETFH after a failed CLAIM_DELEGATE_PREV was ANSWERED: "
+             "%s — the failed OPEN left a current filehandle (the parent "
+             "directory), so the next op addressed the wrong object"
+             % (_shape(res),))

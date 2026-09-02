@@ -779,6 +779,7 @@ get sessions, credentials and compound plumbing for free):
   FLINTNEG3  [PUTFH, GETATTR, DELEGRETURN(bogus)]   off PASS / on PASS
   FLINTNEG4  WANT_NO_DELEG => NONE_EXT/NOT_WANTED   off FAIL / on PASS
   FLINTNEG5  compound-shape calibration             off PASS / on PASS
+  FLINTNEG6  CLAIM_DELEGATE_PREV refused, no CFH    off PASS / on PASS
 ```
 
 **Grant rule 7 is now proven on the wire.** FLINTNEG1 carries its own
@@ -811,10 +812,28 @@ the CREATE arm never grants at all, so a delegation control must use a
 NO-CREATE open. Both produced a "server won't grant" failure that was
 entirely the test's.
 
-Still open in this leg: dead-backchannel revoke (needs `ss -K` on one
-connection of an nconnect pair, or a scripted client that keeps
-SEQUENCEing while refusing CB traffic), GSS-only cb_sec (this pynfs
-build has no gssapi module), and CLAIM_DELEGATE_PREV ⇒ NOTSUPP.
+FLINTNEG6 carries the F69 shape as its second half, which is the
+reason it is a leg rather than a status check: a no-create OPEN that
+fails must not leave the current filehandle on the PARENT directory.
+When it does, the error is returned correctly and the NEXT operation
+addresses the wrong object — so the leg sends a GETFH after the failed
+OPEN and requires that the compound stopped instead of answering it.
+Refusal is flag-independent (flint never supports reclaim), so this one
+passes on both arms.
+
+"Acks but never returns ⇒ revoke at deadline" is NOT repeated here: the
+`on-short` arm of `pynfs-deleg.sh` already runs it end to end through
+DELEG8 at a 5s deadline — revoke, READ ⇒ DELEG_REVOKED, SEQ4
+RECALLABLE_STATE_REVOKED, TEST_STATEID ⇒ DELEG_REVOKED, FREE_STATEID
+clears the bit.
+
+Still open in this leg: dead-backchannel revoke, which is a TRANSPORT
+failure rather than a client that acks and holds — it needs `ss -K` on
+one connection of an nconnect pair, or a scripted client that keeps
+SEQUENCEing while refusing CB traffic, because the naive version severs
+lease renewal and makes the ladder indistinguishable from lease expiry.
+And GSS-only cb_sec, which this pynfs build cannot run: it reports "no
+gssapi module" at import.
 
 **★ CONFLICT-SITE MATRIX MEASURED, 2026-09-02 —
 `tests/lima/deleg/conflict-matrix.sh` + `st_flintconf.py`.** Two
