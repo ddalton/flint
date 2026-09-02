@@ -562,6 +562,35 @@ impl StateManager {
             );
             return;
         }
+        // The server's OWN word for the posture it is in and the gates
+        // that apply to it. Without this line a rig (and an operator)
+        // can only infer from silence why an MDS granted nothing —
+        // and "refused every grant" is indistinguishable from "no
+        // workload qualified", which is exactly how this feature
+        // shipped inert once. Three things decide whether an MDS ever
+        // grants, so all three are stated.
+        let posture = if self.pnfs_posture() { "MDS" } else { "standalone" };
+        let gate = if !self.pnfs_posture() {
+            "n/a (not an MDS)".to_string()
+        } else if delegation::pnfs_delegations_enabled() {
+            "ON".to_string()
+        } else {
+            "OFF (FLINT_NFS_DELEGATIONS_PNFS unset) — every grant refused in this posture"
+                .to_string()
+        };
+        let probe = if !self.pnfs_posture() {
+            "n/a"
+        } else if self.layout_probe_installed() {
+            "installed"
+        } else {
+            "MISSING — grant rule 6 fails CLOSED, so every grant is refused"
+        };
+        tracing::info!(
+            "📊 deleg reporter: delegations are ON · posture={} · pnfs gate={} · layout probe={}",
+            posture,
+            gate,
+            probe
+        );
         let sm = std::sync::Arc::clone(self);
         tokio::spawn(async move {
             let mut prev = sm.delegations.totals();

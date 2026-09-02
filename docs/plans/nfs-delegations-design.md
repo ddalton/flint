@@ -729,6 +729,93 @@ acks-but-never-returns ⇒ revoke at deadline; gate-off vacuity
 — per-op status, NO truncation; CLAIM_DELEGATE_PREV ⇒ NOTSUPP, never
 an Fh open on the parent.
 
+**★ MDS ARM MEASURED, 2026-09-02 — `tests/lima/deleg/pynfs-mds.sh`.**
+The delegation legs against `flint-pnfs-mds` in real MDS posture (mode:
+mds, so `pnfs_ops` is Some and `pnfs_posture()` is true), three arms:
+
+```
+                       grants   DELEG1/3/4/5/6/7/9/23   DELEG2   DELEG8
+  off       (no flags)      0   FAIL                     FAIL     FAIL
+  pnfs-off  (DELEGATIONS)   0   FAIL (DELEG4 PASS)       FAIL     FAIL
+  on        (both flags)    7   PASS                     FAIL     FAIL
+```
+
+**Slice 5's gate is real on the wire: zero grants with
+`FLINT_NFS_DELEGATIONS_PNFS` unset, seven with it set**, on the same
+binary and the same posture. The `pnfs-off` arm is the one that makes
+this a measurement rather than a demonstration — without it, "the gate
+works" and "the MDS cannot grant at all" produce identical output, and
+the rig treats agreement between that arm and the ON arm as VOID.
+
+The expectation table is IDENTICAL to the standalone binary's, which is
+the answer to "does the MDS posture change the grant decision": it does
+not, once its gate is open. DELEG2 (asks for a WRITE delegation) and
+DELEG8 (pynfs's DELAY budget, not a server fault) stay pinned FAIL for
+the reasons recorded above.
+
+**DELEG4 PASSES on the `pnfs-off` arm** — and that is the want-bit
+ordering rule, observed on the wire in the exact posture it was written
+for. The client's own WANT_NO_DELEG instruction is answered
+(NONE_EXT/WND4_NOT_WANTED) even though the posture gate would refuse
+any grant, because the client's instruction is consulted BELOW the
+master flag but ABOVE every server-side gate. No previous run could
+show this: it needs a posture where the flag is on and a gate is shut.
+
+The server now states its own posture at startup —
+`posture=MDS · pnfs gate=ON · layout probe=installed` — so a rig has
+the server's word for all three things that decide whether it will ever
+grant, rather than inferring from silence. The probe field is there
+because rule 6 fails CLOSED without its oracle, and "refused
+everything" and "granted nothing because nothing qualified" look
+identical in a log.
+
+**★ NEGATIVE LEGS MEASURED, 2026-09-02 — `tests/lima/deleg/negative-legs.sh`
++ `st_flintdeleg.py`** (installed into pynfs's own harness, so the legs
+get sessions, credentials and compound plumbing for free):
+
+```
+  FLINTNEG1  no back channel  => no delegation      off FAIL / on PASS
+  FLINTNEG2  [PUTROOTFH, DELEGPURGE, GETATTR]       off PASS / on PASS
+  FLINTNEG3  [PUTFH, GETATTR, DELEGRETURN(bogus)]   off PASS / on PASS
+  FLINTNEG4  WANT_NO_DELEG => NONE_EXT/NOT_WANTED   off FAIL / on PASS
+  FLINTNEG5  compound-shape calibration             off PASS / on PASS
+```
+
+**Grant rule 7 is now proven on the wire.** FLINTNEG1 carries its own
+control, and it has to: "no delegation" is equally the answer of a
+working gate, a switched-off feature and a broken server. So it first
+opens on an ORDINARY session and requires a delegation, then makes the
+identical open on a session created without
+CREATE_SESSION4_FLAG_CONN_BACK_CHAN and requires none. That the shape
+legs (2/3/5) pass on the OFF arm is what proves the rig ran there at
+all, which is what licenses reading 1 and 4's failures on that arm as
+refusals rather than as a dead rig.
+
+**FLINTNEG5 exists because it caught three phantom defects.** The first
+cut of legs 2 and 3 reported that flint truncated compounds before the
+failing operation — the BACKCHANNEL_CTL shape, three findings, all
+false. pynfs's `resarray` does not carry the SEQUENCE result that
+`sess.compound` prepends, so every count was off by one. The replies
+were correct throughout: `[(PUTROOTFH,OK), (DELEGPURGE,NOTSUPP)]` and
+`[(PUTFH,OK), (GETATTR,OK), (DELEGRETURN,BAD_STATEID)]` — the failing
+operation's own result present in both, the compound stopping exactly
+where it should. The calibration leg pins the arithmetic against a
+known-good and a known-bad compound, and the runner WITHDRAWS the
+shape verdicts rather than reporting them if it fails. A shape verdict
+on top of a miscalibrated counter is not a finding, it is a rumour.
+
+Two rig traps worth carrying: `create_file` opens SHARE_ACCESS_BOTH by
+default, and a write open by the same client refuses the grant by rule
+5 — a control built on it can never succeed; and design §4 rule 3 means
+the CREATE arm never grants at all, so a delegation control must use a
+NO-CREATE open. Both produced a "server won't grant" failure that was
+entirely the test's.
+
+Still open in this leg: dead-backchannel revoke (needs `ss -K` on one
+connection of an nconnect pair, or a scripted client that keeps
+SEQUENCEing while refusing CB traffic), GSS-only cb_sec (this pynfs
+build has no gssapi module), and CLAIM_DELEGATE_PREV ⇒ NOTSUPP.
+
 **Restart/suspend legs**, rewritten for the same-PVC arm [V2]:
 (a) same-PVC pod roll with grants outstanding (pre-kill: assert
 `deleg_granted_total > 0` and holder TEST_STATEID OK) ⇒ the holder's
