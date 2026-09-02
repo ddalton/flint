@@ -2577,6 +2577,40 @@ impl CompoundDispatcher {
                 OperationResult::DelegPurge(Nfs4Status::NotSupp)
             }
 
+            Operation::BackchannelCtl { cb_program, cb_sec } => {
+                // RFC 8881 §18.33: applies to the session the compound is
+                // running on, so it requires a preceding SEQUENCE.
+                let Some(sid) = context.session_id else {
+                    warn!("BACKCHANNEL_CTL outside a session");
+                    return OperationResult::BackchannelCtl(
+                        Nfs4Status::OpNotInSession,
+                    );
+                };
+                let cred = crate::nfs::v4::compound::pick_cb_cred(&cb_sec);
+                info!(
+                    "BACKCHANNEL_CTL: session {:?} cb_program {} → {},                      client offered {} credential(s): {:?} → selected {:?}",
+                    sid,
+                    self.state_mgr
+                        .sessions
+                        .get_session(&sid)
+                        .map(|s| s.cb_program)
+                        .unwrap_or(0),
+                    cb_program,
+                    cb_sec.len(),
+                    cb_sec,
+                    cred,
+                );
+                if self
+                    .state_mgr
+                    .sessions
+                    .set_back_channel(&sid, cb_program, cred)
+                {
+                    OperationResult::BackchannelCtl(Nfs4Status::Ok)
+                } else {
+                    OperationResult::BackchannelCtl(Nfs4Status::BadSession)
+                }
+            }
+
             Operation::DelegReturn { stateid } => {
                 // Resolve the "current stateid" sentinel (RFC 8881
                 // §16.2.3.1.2) like every other stateid-carrying op.

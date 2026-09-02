@@ -789,15 +789,7 @@ impl SessionOperationHandler {
             // used only when explicitly offered or when nothing was.
             // RPCSEC_GSS is recognised but not emittable, so it is
             // skipped rather than selected.
-            op.cb_sec
-                .iter()
-                .find(|p| matches!(p, crate::nfs::v4::compound::CallbackSecParms::Sys { .. }))
-                .or_else(|| {
-                    op.cb_sec
-                        .iter()
-                        .find(|p| matches!(p, crate::nfs::v4::compound::CallbackSecParms::None))
-                })
-                .cloned(),
+            crate::nfs::v4::compound::pick_cb_cred(&op.cb_sec),
             // The COMPOUND's own minor version. Every callback on this
             // session must carry it: Linux looks its client up by
             // (address, sessionid, MINOR VERSION), so a 4.2 mount sent

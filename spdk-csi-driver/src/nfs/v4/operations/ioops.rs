@@ -1245,7 +1245,36 @@ impl IoOperationHandler {
                                     }
                                 }),
                                 result_flags: OPEN4_RESULT_LOCKTYPE_POSIX,
-                                delegation: None,
+                                // The CREATE arm never GRANTS (design §4
+                                // rule 3: a just-created file has no warm
+                                // re-access value, and skipping it removes
+                                // a class of create/truncate races) — but
+                                // it must still ANSWER a client that set a
+                                // WANT bit. `claim_grantable: false` is
+                                // what makes the refusal unconditional
+                                // here; the want-bit arms sit above it in
+                                // the rule order, so WANT_NO_DELEG still
+                                // gets WND4_NOT_WANTED rather than a
+                                // reason about the claim.
+                                //
+                                // Missing this was DELEG4's actual cause.
+                                // The NONE_EXT encoder was already in
+                                // place and correct; the create arm simply
+                                // never asked, so pynfs kept reporting
+                                // "Got no delegation, expected
+                                // OPEN_DELEGATE_NONE_EXT" against a server
+                                // that could produce one — and the test
+                                // that creates a file is the one the RFC
+                                // case is written around.
+                                delegation: self.deleg_answer(
+                                    ctx,
+                                    client_id,
+                                    &op,
+                                    false,
+                                    None,
+                                    None,
+                                    &[],
+                                ),
                                 // Attrs actually applied — not an echo of the
                                 // request mask (RFC 8881 §18.16.3 attrset).
                                 attrset: attr_numbers_to_bitmap(&applied_attrs),
@@ -1927,7 +1956,7 @@ impl IoOperationHandler {
         if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.stateid) {
             warn!("READ: Invalid stateid: {}", e);
             return ReadRes {
-                status: Nfs4Status::BadStateId,
+                status: self.state_mgr.stateids.invalid_status(&op.stateid),
                 eof: false,
                 data: Bytes::new().into(),
             };

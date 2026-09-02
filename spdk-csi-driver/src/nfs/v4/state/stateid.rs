@@ -756,6 +756,38 @@ impl StateIdManager {
             .unwrap_or(false)
     }
 
+    /// The status to answer when validation has just failed for this
+    /// stateid.
+    ///
+    /// RFC 8881 §8.2.4: a stateid whose state was REVOKED does not get
+    /// NFS4ERR_BAD_STATEID. The two send a client down different
+    /// recovery paths — BAD_STATEID says "this was never yours", so the
+    /// client discards it as a protocol error, while DELEG_REVOKED says
+    /// "you held this and the server took it back", which is what tells
+    /// the holder its cached data is no longer authoritative and must
+    /// be re-fetched. Answering BAD_STATEID to a revoked delegation is
+    /// therefore not a cosmetic error-code difference: it is the server
+    /// declining to say the one thing that makes a revocation safe.
+    ///
+    /// Deliberately narrow. Only a revoked DELEGATION maps to
+    /// DELEG_REVOKED; a revoked open or lock stateid keeps today's
+    /// answer, because their correct codes (EXPIRED vs ADMIN_REVOKED)
+    /// depend on WHY they were revoked, and this manager does not
+    /// record that yet. Guessing would trade one wrong code for
+    /// another.
+    ///
+    /// Found by pynfs DELEG8: "Read with a revoked delegation should
+    /// return NFS4ERR_DELEG_REVOKED, instead got NFS4ERR_BAD_STATEID".
+    pub fn invalid_status(&self, stateid: &StateId) -> crate::nfs::v4::protocol::Nfs4Status {
+        use crate::nfs::v4::protocol::Nfs4Status;
+        match self.states.get(&stateid.other) {
+            Some(e) if e.revoked && e.state_type == StateType::Delegation => {
+                Nfs4Status::DelegRevoked
+            }
+            _ => Nfs4Status::BadStateId,
+        }
+    }
+
     pub fn validate(&self, stateid: &StateId) -> Result<(), String> {
         if stateid == &ANONYMOUS_STATEID {
             return Ok(());
@@ -1258,6 +1290,120 @@ mod tests {
         assert_eq!(stateid2.seqid, 1);
 
         assert_eq!(mgr.active_count(), 2);
+    }
+
+    /// RFC 8881 §8.2.4: a REVOKED delegation answers DELEG_REVOKED, not
+    /// BAD_STATEID.
+    ///
+    /// The distinction is the whole safety story of a revocation.
+    /// BAD_STATEID tells the client "this was never yours", so it drops
+    /// the stateid as a protocol error and keeps whatever it cached
+    /// under it. DELEG_REVOKED tells it "you held this and the server
+    /// took it back", which is the signal that its cached data is no
+    /// longer authoritative. Answering the first to a holder that is
+    /// still serving reads from its page cache is how a delegation
+    /// becomes stale-forever — the exact failure the whole recall
+    /// design exists to prevent.
+    ///
+    /// Found in the field by pynfs DELEG8, not by any unit test here.
+    #[test]
+    fn a_revoked_delegation_answers_deleg_revoked_not_bad_stateid() {
+        use crate::nfs::v4::protocol::Nfs4Status;
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+
+        let deleg = mgr.allocate(StateType::Delegation, 1, None);
+        // Precondition: while it is LIVE it validates, so the assertion
+        // below is about revocation and not about a stateid that was
+        // always broken.
+        assert!(mgr.validate_for_read(&deleg).is_ok());
+        mgr.revoke(&deleg).unwrap();
+        assert!(
+            mgr.validate_for_read(&deleg).is_err(),
+            "precondition: a revoked stateid must fail validation at all",
+        );
+        assert_eq!(mgr.invalid_status(&deleg), Nfs4Status::DelegRevoked);
+
+        // A revoked OPEN keeps today's answer on purpose: its correct
+        // code is EXPIRED or ADMIN_REVOKED depending on WHY, and this
+        // manager does not record why. Guessing would swap one wrong
+        // code for another.
+        let open = mgr.allocate(StateType::Open, 1, None);
+        mgr.revoke(&open).unwrap();
+        assert_eq!(mgr.invalid_status(&open), Nfs4Status::BadStateId);
+
+        // An unknown stateid is a bad stateid, and a LIVE delegation
+        // must not be reported as revoked — this is consulted only
+        // after a failure (a seqid mismatch, say), and it must not
+        // manufacture a revocation that never happened.
+        assert_eq!(
+            mgr.invalid_status(&StateId { seqid: 1, other: [0x5a; 12] }),
+            Nfs4Status::BadStateId,
+        );
+        let live = mgr.allocate(StateType::Delegation, 2, None);
+        assert_eq!(mgr.invalid_status(&live), Nfs4Status::BadStateId);
+    }
+
+/// The part of a source file that is NOT the trailing `mod tests`.
+    ///
+    /// Cutting at the first `#[cfg(test)]` is WRONG and was wrong here: a
+    /// `#[cfg(test)]` attribute on a single production helper appears at
+    /// ioops.rs:459, so a scan that stopped there covered 459 lines of a
+    /// 4000-line file and its red proof passed. Cut only at the attribute
+    /// that actually introduces a module.
+    fn production_source(src: &str) -> &str {
+        let lines: Vec<&str> = src.lines().collect();
+        let mut off = 0usize;
+        for (i, l) in lines.iter().enumerate() {
+            if l.trim() == "#[cfg(test)]" {
+                let next = lines[i + 1..]
+                    .iter()
+                    .find(|x| !x.trim().is_empty())
+                    .map(|x| x.trim_start())
+                    .unwrap_or("");
+                if next.starts_with("mod ") || next.starts_with("pub mod ") {
+                    return &src[..off];
+                }
+            }
+            off += l.len() + 1;
+        }
+        src
+    }
+
+    /// No stateid-validating op may hardcode BAD_STATEID again.
+    ///
+    /// Every one of these ten sites was written the same way, by
+    /// copying the one before it — which is exactly how the next op
+    /// added will be written. A reviewer cannot see the omission,
+    /// because the wrong code is the plausible one.
+    #[test]
+    fn no_read_validation_site_hardcodes_bad_stateid() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut offenders = Vec::new();
+        for rel in ["src/nfs/v4/operations/ioops.rs", "src/nfs/v4/operations/perfops.rs"] {
+            let src = std::fs::read_to_string(root.join(rel)).unwrap();
+            let production = production_source(&src);
+            let lines: Vec<&str> = production.lines().collect();
+            for (i, l) in lines.iter().enumerate() {
+                if !(l.contains("validate_for_read(&op.") && l.contains("if let Err")) {
+                    continue;
+                }
+                // The refusal block is the handful of lines that follow.
+                let end = (i + 9).min(lines.len());
+                if lines[i..end]
+                    .iter()
+                    .take_while(|x| !x.trim_start().starts_with("};"))
+                    .any(|x| x.contains("Nfs4Status::BadStateId"))
+                {
+                    offenders.push(format!("{rel}:{}", i + 1));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these refuse with a hardcoded BAD_STATEID; use \
+             stateids.invalid_status(&stateid) so a revoked delegation \
+             gets DELEG_REVOKED: {offenders:?}",
+        );
     }
 
     /// A delegation stateid presented where write rights are required is

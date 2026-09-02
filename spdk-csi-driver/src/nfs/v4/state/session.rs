@@ -457,6 +457,30 @@ impl SessionManager {
     /// defaults it to 0 = not negotiated). Kept out of the constructor
     /// so the twelve-argument signature does not grow at every call
     /// site for one callback-side attribute.
+    /// BACKCHANNEL_CTL (RFC 8881 §18.33): re-point an existing session's
+    /// back channel at a new program and credential. Returns false if
+    /// the session is gone.
+    ///
+    /// The credential is what every later CB_RECALL on this session will
+    /// carry, so leaving it at the CREATE_SESSION value means a client
+    /// that rotated its callback identity gets callbacks it is entitled
+    /// to reject — and a rejected recall is a revoked delegation.
+    pub fn set_back_channel(
+        &self,
+        session_id: &SessionId,
+        cb_program: u32,
+        cb_cred: Option<crate::nfs::v4::compound::CallbackSecParms>,
+    ) -> bool {
+        match self.sessions.get_mut(session_id) {
+            Some(mut sess) => {
+                sess.cb_program = cb_program;
+                sess.cb_cred = cb_cred;
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn set_back_chan_maxops(&self, session_id: &SessionId, maxops: u32) {
         if let Some(mut sess) = self.sessions.get_mut(session_id) {
             sess.back_chan_maxops = maxops;

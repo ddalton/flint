@@ -625,7 +625,7 @@ impl PerfOperationHandler {
         if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.src_stateid) {
             warn!("COPY: Invalid source stateid: {}", e);
             return CopyRes {
-                status: Nfs4Status::BadStateId,
+                status: self.state_mgr.stateids.invalid_status(&op.src_stateid),
                 sync: true,
                 count: 0,
                 completion: CopyCompletion::Synchronous,
@@ -636,7 +636,7 @@ impl PerfOperationHandler {
         if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.dst_stateid) {
             warn!("COPY: Invalid destination stateid: {}", e);
             return CopyRes {
-                status: Nfs4Status::BadStateId,
+                status: self.state_mgr.stateids.invalid_status(&op.dst_stateid),
                 sync: true,
                 count: 0,
                 completion: CopyCompletion::Synchronous,
@@ -1034,7 +1034,7 @@ impl PerfOperationHandler {
         if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.src_stateid) {
             warn!("CLONE: Invalid source stateid: {}", e);
             return CloneRes {
-                status: Nfs4Status::BadStateId,
+                status: self.state_mgr.stateids.invalid_status(&op.src_stateid),
             };
         }
 
@@ -1042,7 +1042,7 @@ impl PerfOperationHandler {
         if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.dst_stateid) {
             warn!("CLONE: Invalid destination stateid: {}", e);
             return CloneRes {
-                status: Nfs4Status::BadStateId,
+                status: self.state_mgr.stateids.invalid_status(&op.dst_stateid),
             };
         }
 
@@ -1324,7 +1324,7 @@ impl PerfOperationHandler {
         if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.stateid) {
             warn!("ALLOCATE: Invalid stateid: {}", e);
             return AllocateRes {
-                status: Nfs4Status::BadStateId,
+                status: self.state_mgr.stateids.invalid_status(&op.stateid),
             };
         }
 
@@ -1523,7 +1523,7 @@ impl PerfOperationHandler {
         if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.stateid) {
             warn!("DEALLOCATE: Invalid stateid: {}", e);
             return DeallocateRes {
-                status: Nfs4Status::BadStateId,
+                status: self.state_mgr.stateids.invalid_status(&op.stateid),
             };
         }
 
@@ -1551,7 +1551,7 @@ impl PerfOperationHandler {
         if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.stateid) {
             warn!("SEEK: Invalid stateid: {}", e);
             return SeekRes {
-                status: Nfs4Status::BadStateId,
+                status: self.state_mgr.stateids.invalid_status(&op.stateid),
                 eof: false,
                 offset: 0,
             };
@@ -1708,7 +1708,7 @@ impl PerfOperationHandler {
         if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.stateid) {
             warn!("READ_PLUS: Invalid stateid: {}", e);
             return ReadPlusRes {
-                status: Nfs4Status::BadStateId,
+                status: self.state_mgr.stateids.invalid_status(&op.stateid),
                 eof: false,
                 segments: vec![],
             };
@@ -1741,7 +1741,7 @@ impl PerfOperationHandler {
         if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.stateid) {
             warn!("IO_ADVISE: Invalid stateid: {}", e);
             return IoAdviseRes {
-                status: Nfs4Status::BadStateId,
+                status: self.state_mgr.stateids.invalid_status(&op.stateid),
                 hints: op.hints,
             };
         }

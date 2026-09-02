@@ -49,6 +49,27 @@ pub enum CallbackSecParms {
     Gss,
 }
 
+/// The credential the server will actually EMIT on this session's back
+/// channel, chosen from what the client said it would accept.
+///
+/// AUTH_SYS is preferred when offered — it is what Linux advertises and
+/// what it will honour; AUTH_NONE only when explicitly offered or when
+/// nothing was. RPCSEC_GSS is recognised but not emittable, so it is
+/// skipped rather than selected (a client granted state on a GSS-only
+/// cb_sec could never be recalled — the grant gate refuses it).
+///
+/// Shared by CREATE_SESSION and BACKCHANNEL_CTL on purpose: they set
+/// the same field, and two copies of this policy would be two chances
+/// for a session to end up with a credential one of them would have
+/// refused.
+pub fn pick_cb_cred(offered: &[CallbackSecParms]) -> Option<CallbackSecParms> {
+    offered
+        .iter()
+        .find(|p| matches!(p, CallbackSecParms::Sys { .. }))
+        .or_else(|| offered.iter().find(|p| matches!(p, CallbackSecParms::None)))
+        .cloned()
+}
+
 /// Decode `csa_sec_parms<>`.
 ///
 /// Returns Err on a malformed body so the caller can degrade to
@@ -259,6 +280,13 @@ pub enum Operation {
     // returning a delegation truncated every op behind it.
     DelegPurge {
         clientid: u64,
+    },
+    /// BACKCHANNEL_CTL (RFC 8881 §18.33): re-point the CURRENT session's
+    /// back channel. No sessionid argument — it applies to the session
+    /// the compound is running on.
+    BackchannelCtl {
+        cb_program: u32,
+        cb_sec: Vec<CallbackSecParms>,
     },
     DelegReturn {
         stateid: StateId,
@@ -662,6 +690,7 @@ pub enum OperationResult {
     // Delegations (both results are status-only)
     DelegPurge(Nfs4Status),
     DelegReturn(Nfs4Status),
+    BackchannelCtl(Nfs4Status),
 
     // Attributes
     GetAttr(Nfs4Status, Option<Bytes>),   // encoded attributes
@@ -741,6 +770,7 @@ impl OperationResult {
             OperationResult::Commit(s, _) => *s,
             OperationResult::DelegPurge(s) => *s,
             OperationResult::DelegReturn(s) => *s,
+            OperationResult::BackchannelCtl(s) => *s,
             OperationResult::GetAttr(s, _) => *s,
             OperationResult::SetAttr(s, _) => *s,
             OperationResult::Verify(s) => *s,
@@ -1804,6 +1834,19 @@ impl CompoundRequest {
                     dir,
                     use_conn_in_rdma_mode,
                 })
+            }
+            opcode::BACKCHANNEL_CTL => {
+                // BACKCHANNEL_CTL4args (RFC 8881 §18.33.1): the callback
+                // program and a fresh `bca_sec_parms<>`. Decoded for the
+                // same reason DELEGPURGE is: an undecodable KNOWN opcode
+                // fell through to `Unsupported`, which stops the compound
+                // decode with the cursor mid-argument — so a client that
+                // changed its callback credential truncated every op
+                // behind it in the same compound, and the change itself
+                // was silently lost.
+                let cb_program = decoder.decode_u32()?;
+                let cb_sec = decode_callback_sec_parms(decoder)?;
+                Ok(Operation::BackchannelCtl { cb_program, cb_sec })
             }
             opcode::DESTROY_CLIENTID => {
                 let clientid = decoder.decode_u64()?;
@@ -2983,6 +3026,11 @@ impl CompoundResponse {
                 encoder.encode_u32(opcode::DELEGPURGE);
                 encoder.encode_status(status);
             }
+            OperationResult::BackchannelCtl(status) => {
+                // BACKCHANNEL_CTL4res (RFC 8881 §18.33.2): status only.
+                encoder.encode_u32(opcode::BACKCHANNEL_CTL);
+                encoder.encode_status(status);
+            }
             OperationResult::DelegReturn(status) => {
                 // DELEGRETURN4res (RFC 8881 §18.6.2): status only.
                 encoder.encode_u32(opcode::DELEGRETURN);
@@ -3084,6 +3132,75 @@ mod deleg_wire_tests {
             r.operations[0]
         );
         assert!(matches!(r.operations[1], Operation::GetFh));
+    }
+
+    #[test]
+    fn backchannel_ctl_decodes_and_the_op_behind_it_survives() {
+        // Until this decoded, BACKCHANNEL_CTL fell to the `Unsupported`
+        // arm with the cursor sitting mid-argument, so it truncated
+        // every op behind it AND lost the credential change itself.
+        // pynfs DELEG7 saw only the second half of that: a CB_RECALL
+        // still carrying the CREATE_SESSION uid/gid.
+        let r = req(
+            |e| {
+                e.encode_u32(opcode::BACKCHANNEL_CTL);
+                e.encode_u32(0x4000_0001);      // bca_cb_program
+                e.encode_u32(1);                // bca_sec_parms<> count
+                e.encode_u32(1);                // AUTH_SYS
+                e.encode_u32(13);               // stamp
+                e.encode_string("fake name");   // machinename
+                e.encode_u32(29);               // uid
+                e.encode_u32(31);               // gid
+                e.encode_u32(0);                // gids<>
+                e.encode_u32(opcode::GETFH);    // no args
+            },
+            2,
+        );
+        assert_eq!(r.operations.len(), 2, "BACKCHANNEL_CTL truncated the compound");
+        match &r.operations[0] {
+            Operation::BackchannelCtl { cb_program, cb_sec } => {
+                assert_eq!(*cb_program, 0x4000_0001);
+                assert_eq!(cb_sec.len(), 1);
+                assert!(
+                    matches!(&cb_sec[0], CallbackSecParms::Sys { uid: 29, gid: 31, .. }),
+                    "got {:?}",
+                    cb_sec[0],
+                );
+            }
+            other => panic!("got {other:?}"),
+        }
+        assert!(matches!(r.operations[1], Operation::GetFh));
+    }
+
+    /// One policy, two callers. CREATE_SESSION and BACKCHANNEL_CTL both
+    /// set `cb_cred`, and a second copy of the preference order would be
+    /// a second chance to store a credential the other would have
+    /// refused — notably a GSS-only offer, which is recognised but not
+    /// emittable, so a client granted state on its strength could never
+    /// be recalled.
+    #[test]
+    fn the_callback_credential_policy_prefers_sys_then_none_and_never_gss() {
+        let sys = CallbackSecParms::Sys {
+            stamp: 1,
+            machinename: "m".to_string(),
+            uid: 5,
+            gid: 6,
+            gids: vec![],
+        };
+        assert!(matches!(
+            pick_cb_cred(&[CallbackSecParms::None, sys.clone()]),
+            Some(CallbackSecParms::Sys { uid: 5, .. }),
+        ), "AUTH_SYS wins even when offered second");
+        assert!(matches!(
+            pick_cb_cred(&[CallbackSecParms::None]),
+            Some(CallbackSecParms::None),
+        ));
+        assert_eq!(
+            pick_cb_cred(&[CallbackSecParms::Gss]),
+            None,
+            "a GSS-only offer is unemittable, so nothing is selected",
+        );
+        assert_eq!(pick_cb_cred(&[]), None);
     }
 
     #[test]
