@@ -879,6 +879,65 @@ than argued — §13 open question 3), the v4.2 sites
 `open_create`. The server-side writer leg (hub file-API upload against
 a held delegation ⇒ first response 503) is also still open.
 
+**★ nfstest_delegation MEASURED, 2026-09-02 —
+`tests/lima/deleg/nfstest-deleg.sh`.** Suite #2 is live. It asks what
+pynfs does not: it reads the PACKET TRACE and asserts what the CLIENT
+did with the delegation, which is where §1's claims actually live.
+
+```
+  basic set, flag ON     165 / 177 passed   (12 failed)
+  READ subset, flag ON    60 /  60 passed   (basic01, 03, 05)
+  READ subset, flag OFF   31 /  35 passed   ← the control
+```
+
+**Every read-delegation assertion passes.** From the trace, on a real
+Linux 6.8 kernel client: OPEN sent with CLAIM_NULL, the file's name and
+the directory's filehandle; **READ delegation granted**; **no second
+OPEN for the same file**; READs carried the DELEGATION stateid and
+returned NFS4_OK; **no READ at all when a different process read the
+delegated file**; CLOSE with the correct OPEN stateid; DELEGRETURN
+after the close, carrying the delegation stateid. That is the §1 claim
+— the metadata round trips do not happen — verified on the wire rather
+than inferred from a counter.
+
+**All 12 failures are confined to the nine WRITE-delegation tests**,
+which flint refuses by design (§1, an explicit non-goal): 9 are
+literally "WRITE delegation should be granted". The other 3 are "OPEN
+should be sent with the filehandle of the file to be opened", and that
+one is a DEPENDENT rather than a separate defect — **it fails on the
+control arm too**, alongside the missing delegation, because a client
+holding nothing re-opens by name. Running the read-only subset alone
+(60/60) is what proves the confinement rather than assuming it.
+
+**The control is loud**: with the flag off, "READ delegation should be
+granted" fails three times. Without that, 60/60 would be a statement
+about nfstest's willingness to pass, not about the feature.
+
+TWO RIG FACTS, both of which produced convincing false results first,
+and both now baked into the script:
+
+- **The server runs INSIDE the VM, as root, on ext4.** A macOS-hosted
+  server runs as a non-root uid against a root client; 35 of 42
+  nfstest_posix "failures" were once exactly that. The rule stands.
+- **Client and server need DISTINCT IP addresses.** nfstest identifies
+  calls and replies by source/destination, so with both ends on
+  127.0.0.1 every packet has src == dst and its matching finds
+  nothing. It reported "OPEN should be sent" about a trace that
+  plainly contained OPENs, and "READ delegation should be granted"
+  about a trace that plainly contained `rd_deleg_stid` — two failures,
+  one cause, neither of them the server's. `nfstest_pkt` on the same
+  capture is what settled it. The rig now puts the server in a netns
+  behind a veth pair (10.200.0.2) with the client in the root
+  namespace (10.200.0.1), and passes `--client-ipaddr` explicitly —
+  without it nfstest auto-detects the VM's main address, tcpdump
+  captures nothing, and the failure surfaces as "Packet trace file is
+  empty".
+
+**The recall set (recall01-54) is NOT run**: it needs `--client`, a
+SECOND host with passwordless ssh and sudo, and there is one VM. The
+conflict-site matrix above covers the same ground from pynfs with two
+sessions; a second VM would be needed to run nfstest's version.
+
 **Restart/suspend legs**, rewritten for the same-PVC arm [V2]:
 (a) same-PVC pod roll with grants outstanding (pre-kill: assert
 `deleg_granted_total > 0` and holder TEST_STATEID OK) ⇒ the holder's
