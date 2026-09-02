@@ -1,38 +1,35 @@
 #!/usr/bin/env bash
 #
-# Design §9's negative delegation legs, on the wire.
+# Design §9's conflict-site matrix, on the wire, two clients.
 #
-# "Negative legs find the defects" is the GSS lesson, and the three
-# protocol defects the first pynfs run turned up (the CREATE arm never
-# answering WANT bits, BACKCHANNEL_CTL truncating any compound holding
-# it, a revoked delegation answering BAD_STATEID) were all of this
-# shape: reachable only by asking the server to REFUSE something.
+# For every mutating site §5.2 routes through the fence, client A holds
+# a READ delegation and client B performs the mutation. The required
+# sequence is: B's FIRST attempt is DELAYed, A observes CB_RECALL and
+# returns, B's retry succeeds.
 #
-# The tests live in tests/lima/deleg/st_flintdeleg.py and run inside
-# pynfs's own harness, so they get sessions, credentials and compound
-# plumbing for free. This script installs that module into the VM's
-# pynfs tree, runs it against both arms of the flag, and checks the
-# outcomes against a table.
+# The first of those is the assertion that matters. pynfs's own DELEG1
+# accepts either OK or DELAY from the conflicting open, which passes
+# equally against a server that never fenced anything — silent success
+# is exactly the failure this matrix exists to catch. The tests in
+# st_flintconf.py require DELAY.
 #
-# WHY BOTH ARMS. Two of these legs (FLINTNEG2/3) are about compound
-# SHAPE and must pass whether or not delegations are enabled. That is
-# what makes the other two meaningful: if the shape legs pass on the
-# OFF arm, the rig demonstrably ran there, so FLINTNEG1/4 failing on
-# that arm is a refusal the server made — not a rig that never
-# connected. A rig that only ran the ON arm could not tell those apart.
+# The OFF arm is expected to FAIL every leg: each one begins by
+# requiring client A to actually hold a delegation, which cannot happen
+# with the feature switched off. That asymmetry is the control — if the
+# legs passed on both arms they would not be measuring the fence.
 #
-# Usage:  tests/lima/deleg/negative-legs.sh [outdir]
+# Usage:  tests/lima/deleg/conflict-matrix.sh [outdir]
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 BIN="$REPO/spdk-csi-driver/target/release/flint-nfs-server"
 MOD="$REPO/tests/lima/deleg/st_flintdeleg.py"
 MOD2="$REPO/tests/lima/deleg/st_flintconf.py"
-OUT="${1:-/tmp/flint-deleg-neg}"
+OUT="${1:-/tmp/flint-deleg-conf}"
 VM="${LIMA_VM:-flint-nfs-client}"
-PORT="${DELEG_NEG_PORT:-20499}"
-EXPORT="${DELEG_NEG_EXPORT:-/tmp/flint-deleg-neg-export}"
-VOL="negvol"
+PORT="${DELEG_CONF_PORT:-20498}"
+EXPORT="${DELEG_NEG_EXPORT:-/tmp/flint-deleg-conf-export}"
+VOL="confvol"
 HOST="host.lima.internal"
 
 mkdir -p "$OUT"
@@ -80,7 +77,7 @@ limactl shell "$VM" -- bash -lc '
   cd /opt/pynfs/nfs4.1 && PYTHONPATH=/opt/pynfs python3 -c "
 import testmod
 tests, fdict, cdict = testmod.createtests(\"server41tests\")
-codes = sorted(c for c in cdict if c.startswith(\"FLINTNEG\"))
+codes = sorted(c for c in cdict if c.startswith(\"FLINTCONF\"))
 print(\"discovered:\", \" \".join(codes))
 assert len(codes) >= 5, codes
 "' > "$OUT/discover.log" 2>&1 || { cat "$OUT/discover.log"; fail "the tests are not discoverable"; }
@@ -115,13 +112,13 @@ run_arm() {
       || fail "G5($arm): control arm did not announce delegations OFF"
   fi
 
-  limactl shell "$VM" -- sudo rm -f /tmp/pynfs-neg.json
+  limactl shell "$VM" -- sudo rm -f /tmp/pynfs-conf.json
   limactl shell "$VM" -- bash -lc "
       cd /opt/pynfs/nfs4.1 && \
       timeout 600 python3 ./testserver.py ${HOST}:${PORT}/tmp \
-        --maketree --nocleanup --json=/tmp/pynfs-neg.json flintneg" \
+        --maketree --nocleanup --json=/tmp/pynfs-conf.json flintconf" \
     > "$OUT/pynfs-$arm.log" 2>&1
-  limactl cp "$VM:/tmp/pynfs-neg.json" "$OUT/neg-$arm.json" >/dev/null 2>&1 \
+  limactl cp "$VM:/tmp/pynfs-conf.json" "$OUT/conf-$arm.json" >/dev/null 2>&1 \
     || fail "G1($arm): no results JSON — the run did not happen"
   kill -0 "$(cat "$OUT/pid")" 2>/dev/null \
     || { tail -30 "$OUT/server-$arm.log"; fail "G4($arm): server died DURING the run"; }
@@ -137,12 +134,12 @@ import json, os, sys
 out = sys.argv[1]
 
 def outcomes(arm):
-    with open(os.path.join(out, f"neg-{arm}.json")) as f:
+    with open(os.path.join(out, f"conf-{arm}.json")) as f:
         doc = json.load(f)
     res = {}
     for tc in doc.get("testcase", []):
         code = tc.get("code") or ""
-        if not code.startswith("FLINTNEG"):
+        if not code.startswith("FLINTCONF"):
             continue
         if   "skipped" in tc: st = "SKIP"
         elif "failure" in tc: st = "FAIL"
@@ -161,29 +158,15 @@ for c in codes:
     print(f"  {c:<12} {off.get(c,('-',''))[0]:<7} {on.get(c,('-',''))[0]:<7}")
 
 if len(codes) < 5:
-    bad.append(f"G1: only {len(codes)} flintneg tests ran — the run did not happen")
+    bad.append(f"G1: only {len(codes)} flintconf tests ran — the run did not happen")
 
-# The calibration gates the two shape legs. A shape verdict on top of a
-# miscalibrated counter is not a finding, it is a rumour.
-if off.get("FLINTNEG5", ("-",))[0] != "PASS":
-    bad.append("CALIBRATION: FLINTNEG5 did not pass — the compound-shape "
-               "verdicts from FLINTNEG2/3 are WITHDRAWN, not reported: "
-               f"{off.get('FLINTNEG5', ('-',''))[1][:300]}")
-
-# The table. FLINTNEG2/3 are about compound SHAPE and hold on both
-# arms; that they pass on the OFF arm is what proves the rig ran there,
-# which is what licenses reading FLINTNEG1/4's failures on that arm as
-# the server's refusals rather than as a dead rig.
 EXPECT = {
-    #            off      on
-    "FLINTNEG1": ("FAIL", "PASS"),   # control cannot grant with the flag off
-    "FLINTNEG2": ("PASS", "PASS"),   # compound shape, flag-independent
-    "FLINTNEG3": ("PASS", "PASS"),   # compound shape, flag-independent
-    "FLINTNEG4": ("FAIL", "PASS"),   # NONE_EXT is never sent with the flag off
-    # The calibration. If this fails, FLINTNEG2/3 are measuring this
-    # client's arithmetic rather than the server, so their verdicts are
-    # withdrawn rather than reported.
-    "FLINTNEG5": ("PASS", "PASS"),
+    #              off      on
+    "FLINTCONF1": ("FAIL", "PASS"),   # open_write
+    "FLINTCONF2": ("FAIL", "PASS"),   # remove
+    "FLINTCONF3": ("FAIL", "PASS"),   # rename_src
+    "FLINTCONF4": ("FAIL", "PASS"),   # link  (the hardlink-alias site)
+    "FLINTCONF5": ("FAIL", "PASS"),   # setattr
 }
 for code, (want_off, want_on) in EXPECT.items():
     got_off = off.get(code, ("-",""))[0]
@@ -194,15 +177,18 @@ for code, (want_off, want_on) in EXPECT.items():
         bad.append(f"{code}: ON arm is {got_on}, expected {want_on}"
                    f"  ← {on.get(code,('',''))[1][:200]}")
 
-# The liveness precondition: at least one leg must pass on the OFF arm,
-# or the arm never ran and every "FAIL" there is meaningless.
-if not any(v[0] == "PASS" for v in off.values()):
-    bad.append("LIVENESS: nothing passed on the OFF arm — the rig did not run there, "
-               "so its failures say nothing about the server")
+# LIVENESS, stated differently here. Every leg is expected to fail on
+# the OFF arm, so "nothing passed" cannot distinguish a working control
+# from a rig that never connected. What can: the arm has to have RUN the
+# same set of tests. If the OFF arm reports fewer legs than the ON arm,
+# it did not run them and its failures are silence, not refusals.
+if set(off) != set(on):
+    bad.append(f"LIVENESS: the arms ran different tests (off={sorted(off)}, "
+               f"on={sorted(on)}) — the OFF arm's failures say nothing")
 
 if bad:
     print("\n✗ FAILED")
     for b in bad: print(f"  ✗ {b}")
     sys.exit(1)
-print("\n✓ negative legs PASS on both arms")
+print("\n✓ conflict-site matrix PASS — every site DELAYed B, recalled A, then let B through")
 PY

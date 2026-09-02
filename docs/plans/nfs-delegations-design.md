@@ -816,6 +816,50 @@ connection of an nconnect pair, or a scripted client that keeps
 SEQUENCEing while refusing CB traffic), GSS-only cb_sec (this pynfs
 build has no gssapi module), and CLAIM_DELEGATE_PREV ⇒ NOTSUPP.
 
+**★ CONFLICT-SITE MATRIX MEASURED, 2026-09-02 —
+`tests/lima/deleg/conflict-matrix.sh` + `st_flintconf.py`.** Two
+clients, five sites, the full sequence required at each:
+
+```
+  FLINTCONF1  open_write   off FAIL / on PASS
+  FLINTCONF2  remove       off FAIL / on PASS
+  FLINTCONF3  rename_src   off FAIL / on PASS
+  FLINTCONF4  link         off FAIL / on PASS
+  FLINTCONF5  setattr      off FAIL / on PASS
+```
+
+At every site: **B's FIRST attempt answered NFS4ERR_DELAY**, A observed
+CB_RECALL and returned, B's retry succeeded. Server-side counters per
+leg confirm the chain rather than the client's impression of it —
+`granted +1 · recall sent +1 acked +1 · returned +1 · delay +N`, and
+`revoked +0` throughout: every recall was honoured by the client, none
+timed out.
+
+DELAY is REQUIRED here, not merely permitted, and that is the whole
+difference between this matrix and pynfs's own DELEG1 — which accepts
+`[NFS4_OK, NFS4ERR_DELAY]` from its conflicting open and therefore
+passes just as happily against a server that never fenced anything and
+let the writer straight through. Silent success is the failure mode
+this matrix exists to catch, so it is spelled out as a failure.
+
+Every leg begins by requiring client A to actually hold a delegation,
+so every leg FAILS on the control arm with "client A got no
+delegation". That asymmetry is the control: legs that passed on both
+arms would not be measuring the fence.
+
+`link` earns its place separately from the others — the new name is a
+second path to the same inode, so a fence keyed on the filehandle
+rather than on the file's identity would let it through while looking
+correct at every other site.
+
+Sites still unmeasured on the wire: `layoutget_rw`, `layoutcommit` and
+`write_proxy` (they need a kernel pNFS mount against the MDS with a DS
+fleet, which is also where LAYOUTTRYLATER vs DELAY gets OBSERVED rather
+than argued — §13 open question 3), the v4.2 sites
+(allocate/deallocate/copy_dst/clone_dst), `lock_write`, and
+`open_create`. The server-side writer leg (hub file-API upload against
+a held delegation ⇒ first response 503) is also still open.
+
 **Restart/suspend legs**, rewritten for the same-PVC arm [V2]:
 (a) same-PVC pod roll with grants outstanding (pre-kill: assert
 `deleg_granted_total > 0` and holder TEST_STATEID OK) ⇒ the holder's
