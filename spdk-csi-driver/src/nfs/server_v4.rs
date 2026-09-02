@@ -184,6 +184,22 @@ impl NfsServer {
         let keytab_path = std::env::var("KRB5_KTNAME").ok();
         let gss_manager = Arc::new(RpcSecGssManager::new(keytab_path));
 
+        // Wire the recall path HERE, not in `serve()`: the grant gate
+        // refuses every delegation until it exists, so its absence is
+        // a property of a CONSTRUCTED server and a test can say so.
+        // Installing it in `serve()` would put it behind a call that
+        // never returns, where nothing can check it — which is how it
+        // came to be missing from both binaries in the first place.
+        // It only stores a closure; nothing is spawned until a
+        // conflict actually needs a ladder.
+        crate::nfs::v4::deleg_recall::install_recall_machinery(
+            &state_mgr,
+            Arc::new(crate::pnfs::mds::callback::CallbackManager::new(
+                dispatcher.back_channels(),
+                Arc::clone(&state_mgr),
+            )),
+        );
+
         Ok(Self { config, dispatcher, gss_manager, state_mgr, lock_mgr, state_lost })
     }
 
@@ -1715,4 +1731,42 @@ mod idle_timeout_tests {
     }
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+}
+
+#[cfg(test)]
+mod deleg_wiring_tests {
+    use super::*;
+
+    /// The production wiring of the delegation feature, asserted on a
+    /// server built the way `main` builds one.
+    ///
+    /// This test exists because its absence was the whole bug.
+    /// `install_recall_spawner` had callers ONLY in `#[cfg(test)]`
+    /// code, so every unit test wired the recall path by hand and went
+    /// green while both real binaries shipped without it. The grant
+    /// gate's rule 1 then refused every delegation — correctly, by its
+    /// own logic — and the symptom was silence: no grants, no errors,
+    /// nothing in the log to distinguish "misconfigured" from "no
+    /// workload qualified". pynfs answered "Could not get delegation"
+    /// ten times out of ten before anything on the server said why.
+    #[tokio::test]
+    async fn a_constructed_server_can_actually_recall() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".flint-nfs")).unwrap();
+        std::fs::write(dir.path().join(".flint-nfs/volume-id"), b"wire-vol").unwrap();
+        let server = NfsServer::new(NfsConfig {
+            bind_addr: "127.0.0.1".to_string(),
+            bind_port: 0,
+            volume_id: "wire-vol".to_string(),
+            export_path: dir.path().to_path_buf(),
+            read_only: false,
+        })
+        .await
+        .expect("server construction");
+
+        assert!(
+            server.state_mgr.recall_machinery_ready(),
+            "a server that cannot recall refuses every delegation and says nothing about it",
+        );
+    }
 }

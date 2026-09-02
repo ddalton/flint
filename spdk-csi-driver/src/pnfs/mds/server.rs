@@ -357,6 +357,13 @@ impl MetadataServer {
         // DSes (F65). Without this line the truncate gate still holds
         // but the held-layout window is wide open.
         operation_handler.attach_callback_manager(Arc::clone(&callback_manager));
+        // The delegation recall ladder rides the SAME manager — see
+        // install_recall_machinery: a second one would keep its own
+        // slot-0 sequence counters for the same sessions.
+        crate::nfs::v4::deleg_recall::install_recall_machinery(
+            &state_mgr,
+            Arc::clone(&callback_manager),
+        );
         // The layout manager needs it too, for a callback the operation
         // handler never sees: CB_NOTIFY_DEVICEID on block expand is
         // driven from the CONTROL plane (ExpandVolume), which reaches

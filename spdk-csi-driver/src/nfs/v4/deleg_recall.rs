@@ -70,6 +70,49 @@ pub struct RecallLadderConfig {
     pub disown_probe_delay: Duration,
 }
 
+/// Read a duration from the environment, in whole seconds, falling
+/// back to the design's number. A value of 0 is ignored rather than
+/// honoured: a zero deadline would revoke every delegation the instant
+/// it was recalled, which is not a tuning anyone means.
+fn env_secs(name: &str, default: Duration) -> Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(default)
+}
+
+impl RecallLadderConfig {
+    /// The ladder's timings, overridable for rigs and for operators who
+    /// have measured their own clients.
+    ///
+    /// The defaults ARE the design's numbers and stay that way; this
+    /// only makes them reachable. The reason it exists: a client's
+    /// DELAY-retry budget can be far shorter than our 90s deadline —
+    /// pynfs gives a compound 10 retries at 1s and then gives up — so a
+    /// conformance leg that watches a revocation happen cannot run at
+    /// the production deadline at all. Being unable to exercise the
+    /// revoke path against a real client is worse than being able to
+    /// exercise it at 5s.
+    pub fn from_env() -> Self {
+        let d = Self::default();
+        Self {
+            revoke_deadline: env_secs("FLINT_NFS_DELEG_REVOKE_SECS", d.revoke_deadline),
+            // Rungs are left alone: they are offsets INSIDE the
+            // deadline, and the wake calculation already clamps them to
+            // it, so a shortened deadline simply skips them.
+            rungs: d.rungs,
+            path_down_window: env_secs(
+                "FLINT_NFS_DELEG_PATH_DOWN_SECS",
+                d.path_down_window,
+            ),
+            path_retry: env_secs("FLINT_NFS_DELEG_PATH_RETRY_SECS", d.path_retry),
+            disown_probe_delay: d.disown_probe_delay,
+        }
+    }
+}
+
 impl Default for RecallLadderConfig {
     fn default() -> Self {
         Self {
@@ -80,6 +123,44 @@ impl Default for RecallLadderConfig {
             disown_probe_delay: Duration::from_secs(2),
         }
     }
+}
+
+/// Wire the production recall path. Call once, at server start.
+///
+/// This is not optional plumbing. Until it runs,
+/// `StateManager::recall_machinery_ready()` is false and the grant
+/// gate's rule 1 refuses EVERY delegation — deliberately, because a
+/// delegation the server cannot recall is the stale-forever trap the
+/// whole design exists to avoid. The consequence is that a server
+/// missing this call is INERT with the flag on, and its only symptom
+/// is that no grants ever happen: a silence indistinguishable from a
+/// workload that simply never qualified. (It was missing from both
+/// binaries until 2026-09-01. `install_recall_spawner` had callers
+/// only in `#[cfg(test)]` code, so every unit test wired it by hand
+/// and passed, while pynfs against the real server answered "Could
+/// not get delegation" ten times out of ten.)
+///
+/// Takes the `CallbackManager` rather than building one, and the
+/// difference matters: the manager owns the per-session slot-0
+/// mutexes. Two managers over the same back-channel registry would
+/// each keep their own sequence counter for a session and both send
+/// on slot 0, which is precisely the CB_SEQUENCE misordering the
+/// mutex exists to prevent. The MDS already has one; the standalone
+/// server builds its own and then has exactly one.
+pub fn install_recall_machinery(
+    state_mgr: &Arc<StateManager>,
+    callbacks: Arc<crate::pnfs::mds::callback::CallbackManager>,
+) {
+    let cfg = RecallLadderConfig::from_env();
+    let driver = Arc::new(
+        RecallDriver::new(Arc::clone(state_mgr), Arc::new(callbacks)).with_config(cfg.clone()),
+    );
+    state_mgr.install_recall_spawner(Arc::new(move |orders| driver.spawn_recalls(orders)));
+    info!(
+        "deleg: recall machinery installed — grants are now possible          (revoke deadline {}s, CB_PATH_DOWN window {}s)",
+        cfg.revoke_deadline.as_secs(),
+        cfg.path_down_window.as_secs(),
+    );
 }
 
 /// Spawns and drives recall tasks. Cheap to clone-by-Arc; one per
@@ -504,6 +585,94 @@ mod tests {
 
     fn driver(state_mgr: &Arc<StateManager>, sender: Arc<MockSender>) -> Arc<RecallDriver> {
         Arc::new(RecallDriver::new(Arc::clone(state_mgr), Arc::new(sender)))
+    }
+
+/// The part of a source file that is NOT the trailing `mod tests`.
+    ///
+    /// Cutting at the first `#[cfg(test)]` is WRONG and was wrong here: a
+    /// `#[cfg(test)]` attribute on a single production helper appears at
+    /// ioops.rs:459, so a scan that stopped there covered 459 lines of a
+    /// 4000-line file and its red proof passed. Cut only at the attribute
+    /// that actually introduces a module.
+    fn production_source(src: &str) -> &str {
+        let lines: Vec<&str> = src.lines().collect();
+        let mut off = 0usize;
+        for (i, l) in lines.iter().enumerate() {
+            if l.trim() == "#[cfg(test)]" {
+                let next = lines[i + 1..]
+                    .iter()
+                    .find(|x| !x.trim().is_empty())
+                    .map(|x| x.trim_start())
+                    .unwrap_or("");
+                if next.starts_with("mod ") || next.starts_with("pub mod ") {
+                    return &src[..off];
+                }
+            }
+            off += l.len() + 1;
+        }
+        src
+    }
+
+    /// Every production server must install the recall machinery.
+    ///
+    /// `NfsServer` gets a direct behavioural test (server_v4.rs's
+    /// `a_constructed_server_can_actually_recall`). `MdsServer::new`
+    /// needs a backend, a config tree and a DS registry, so there is
+    /// no cheap way to construct one here — and "too expensive to
+    /// test" is exactly the gap the missing wiring lived in. A source
+    /// scan is coarse, but it fails when someone deletes the call,
+    /// which is the failure that actually happened.
+    ///
+    /// Scoped to the text BEFORE any `#[cfg(test)]`, so a test that
+    /// wires the spawner by hand — as every unit test did while both
+    /// binaries shipped without it — cannot satisfy this. Comment
+    /// lines are stripped first, and that is not fastidiousness: the
+    /// first version of this test matched the bare identifier, and its
+    /// red proof PASSED, because deleting the call left behind a
+    /// comment two lines above it that mentioned the function by name.
+    /// A scan that a comment can satisfy is a scan that proves nothing.
+    #[test]
+    fn every_production_server_installs_the_recall_machinery() {
+        const SERVERS: &[&str] = &["src/nfs/server_v4.rs", "src/pnfs/mds/server.rs"];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for rel in SERVERS {
+            let src = std::fs::read_to_string(root.join(rel))
+                .unwrap_or_else(|e| panic!("{rel}: {e}"));
+            let production = production_source(&src);
+            let code: String = production
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let re = regex::Regex::new(r"install_recall_machinery\s*\(").unwrap();
+            assert!(
+                re.is_match(&code),
+                "{rel} never CALLS install_recall_machinery, so its grant gate \
+                 refuses every delegation — silently, because a refused grant \
+                 looks exactly like a workload that never qualified",
+            );
+        }
+    }
+
+    /// The design's numbers are the DEFAULTS, and stay so.
+    ///
+    /// `from_env` exists to let a rig shorten the deadline, which is
+    /// exactly the kind of knob that quietly becomes the production
+    /// value. This pins the unset case against §5.4 directly, so
+    /// changing the shipped behaviour has to be a deliberate edit here
+    /// and not a side effect of making something testable.
+    #[test]
+    fn the_shipped_ladder_timings_are_the_designs_numbers() {
+        let d = RecallLadderConfig::default();
+        assert_eq!(d.revoke_deadline, Duration::from_secs(90));
+        assert_eq!(d.rungs, [Duration::from_secs(30), Duration::from_secs(60)]);
+        assert_eq!(d.path_down_window, Duration::from_secs(30));
+        assert_eq!(d.path_retry, Duration::from_secs(5));
+
+        // A zero is refused rather than honoured: "revoke immediately"
+        // is not a tuning anyone means by writing 0, and it would make
+        // every recall a revocation.
+        assert_eq!(env_secs("FLINT_NFS_DELEG_NO_SUCH_VAR", d.revoke_deadline), d.revoke_deadline);
     }
 
     #[tokio::test(start_paused = true)]

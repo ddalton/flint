@@ -318,6 +318,19 @@ impl DelegMeterTotals {
             // "n/a" rather than 0: no observations is not a fast p99,
             // and a rig grepping this must not read silence as health.
             match p99_ms {
+                // The overflow sentinel, rendered as what it means.
+                // A bucketed histogram cannot say how far past its top
+                // bound an observation was, and printing u64::MAX as a
+                // number put "recall p99 18446744073709551615ms" in the
+                // log the first time a recall was revoked AT the 90s
+                // deadline (the deadline sleep wakes a hair after it,
+                // so the sample lands just outside the last bucket).
+                // A comparison against it still fails correctly; a
+                // human reading it saw garbage.
+                Some(u64::MAX) => format!(
+                    ">{}ms",
+                    RECALL_LATENCY_BUCKETS_MS[RECALL_LATENCY_BUCKETS_MS.len() - 1],
+                ),
                 Some(ms) => format!("{}ms", ms),
                 None => "n/a".to_string(),
             }
@@ -346,6 +359,32 @@ impl DelegMeterTotals {
 mod tests {
     use super::*;
     use crate::nfs::v4::protocol::seq4_status;
+
+    /// A recall slower than the largest bucket must read as ">90000ms",
+    /// not as the sentinel. This is not cosmetic: the FIRST revocation
+    /// this server ever performed against a real client landed here —
+    /// the 90s deadline sleep wakes a hair after 90s, so the sample
+    /// falls just outside the last bucket — and the log said
+    /// "recall p99 18446744073709551615ms".
+    #[test]
+    fn a_recall_past_the_last_bucket_renders_as_greater_than_not_as_u64_max() {
+        let m = DelegMeter::default();
+        m.observe_recall_latency_ms(90_001);
+        let p99 = m.latency_percentile_ms(0.99);
+        assert_eq!(p99, Some(u64::MAX), "the sentinel is what a rig compares against");
+        let line = DelegMeterTotals::default().render(0, 0, p99);
+        assert!(line.ends_with("recall p99 >90000ms"), "got {line}");
+        assert!(
+            !line.contains("18446744073709551615"),
+            "the sentinel must never reach a human as a number: {line}",
+        );
+
+        // ...and an in-range observation still prints as itself.
+        let m2 = DelegMeter::default();
+        m2.observe_recall_latency_ms(1_500);
+        let line2 = DelegMeterTotals::default().render(0, 0, m2.latency_percentile_ms(0.99));
+        assert!(line2.ends_with("recall p99 2000ms"), "got {line2}");
+    }
 
     #[test]
     fn the_reporter_line_says_n_a_not_zero_when_nothing_was_recalled() {
