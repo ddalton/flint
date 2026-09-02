@@ -999,6 +999,88 @@ grace; sqlite has zero live Delegation rows (tombstones only);
 grant floor asserted); (e) idle-suspend: a delegation-warm fleet does
 NOT suspend (or drains first), pinned at the operator.
 
+**★ RESTART LEGS (a) AND (c) MEASURED, 2026-09-02 —
+`tests/lima/deleg/restart-legs.sh` + `restart-probe.py`.** Both pass
+against a server restarted on the SAME export, and the run found a
+core session defect that had nothing to do with delegations (below).
+
+```
+hold      {"clientid": 1, "deleg_type": 1, "deleg_stateid": [...,2,6,17,93,160]}
+leg (a)   {"clientid": 1, "seq_status_flags": 64,
+           "recallable_state_revoked": true, "test_stateid_code": 10025}
+control   {"clientid": 3, "seq_status_flags": 0,
+           "recallable_state_revoked": false}
+leg (c)   during grace {"clientid": 2, "deleg_type": 3}
+          after  grace {"clientid": 2, "deleg_type": 1, "deleg_stateid": [...]}
+```
+
+Leg (a): the holder's first SEQUENCE after the restart carries
+`SEQ4_STATUS_RECALLABLE_STATE_REVOKED` (bit 0x40 = 64) and
+TEST_STATEID answers `NFS4ERR_EXPIRED` (10025) for the pre-restart
+delegation stateid. Leg (c): during grace the OPEN answers
+`OPEN_DELEGATE_NONE` (type 3); once grace ends the same client is
+granted (type 1). The precondition is asserted before the restart —
+a run where the hold phase got no delegation FAILS rather than
+passing on an empty forget.
+
+**The control is a client that never held anything**, restarted the
+same way: flags 0, bit clear. Without it, "the bit is set" is
+consistent with a server that sets the bit on every post-restart
+SEQUENCE, which would be a different (and wrong) server.
+
+**Two rig defects, both of which read the bit as 0 and would have
+been reported as server defects.** First, `RECLAIM_COMPLETE`'s own
+SEQUENCE consumed the flag before the probe looked — §2.10.6.1 says
+the status is delivered on a slot and acknowledged by use, so the
+probe must be the FIRST SEQUENCE of the incarnation and the rig
+must not send RECLAIM_COMPLETE on the probing arm. Second, leg (c)'s
+grace probe reused the holder's identity, so it read the holder's
+already-consumed state; it now uses a separate `OWNER_GRACE`. Both
+were caught by the control arm disagreeing with the theory, not by
+inspection.
+
+**★ THE RESTART LEG FOUND A DEFECT IN THE SESSION PATH, NOT THE
+DELEGATION PATH [2026-09-02, FIXED].** The first run failed with
+`NFS4ERR_SEQ_MISORDERED` (10063) on the post-restart CREATE_SESSION.
+Root cause, reproduced on a live server **with no restart at all**:
+the case-1 (`ExistingConfirmed`) EXCHANGE_ID reply returned the
+legacy `sequence_id` field — always 0 for a confirmed record — while
+CREATE_SESSION validates the client's `csa_sequence` against
+`initial_cs_sequence` (1). So EXCHANGE_ID told the client to send a
+value that CREATE_SESSION was guaranteed to reject. The wire before
+and after:
+
+```
+before  {"eid2_seqid": 0, "create_session2_status": 10063}   SEQ_MISORDERED
+after   {"eid2_seqid": 2, "create_session2_status": 0}
+```
+
+Fixed by `Client::next_cs_sequence()` (`state/client.rs`), used at
+BOTH `ExistingConfirmed` sites — case 1 (renewal) and case 6
+(idempotent update) — so the reply names the sequence CREATE_SESSION
+will actually accept. The regression test asserts exactly that
+relation rather than a literal: `process_create_session_seq` must
+never answer `Misordered` to the value EXCHANGE_ID just named. It was
+verified RED against the old code before the fix landed.
+
+**Why no suite caught it, and why a kernel client does not either.**
+A Linux client survives a same-PVC restart cleanly — sessions are
+persisted, so it renews and never needs a new one. The defect bites
+only a client that must obtain a NEW session against a SURVIVING
+confirmed record: a fresh connection after a restart, a client whose
+session was lost but whose record was not. pynfs's own tests always
+arrive at CREATE_SESSION from a fresh EXCHANGE_ID (case 3), which
+returns `initial_cs_sequence` correctly. It took a rig that
+deliberately restarts the server under a client that keeps its
+identity.
+
+**Residual on leg (a):** the design asks for a *content* oracle
+showing revalidation after the revoke. This rig is a scripted pynfs
+client, so it proves the protocol contract (flag + EXPIRED stateid)
+but not the kernel's cache behaviour on the far side. Legs (b), (d)
+and (e) remain open — (b) and (d) need hub restage machinery, (e)
+needs a cluster and is out of lima scope.
+
 **Conflict-site matrix** (two clients, every site in §5.2 including
 LINK and LAYOUTGET-ANY): assert B's FIRST attempt answered DELAY (not
 silent success), A observed the recall **scored on

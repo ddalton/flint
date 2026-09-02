@@ -100,24 +100,47 @@ fn readers_racing_writers_over_hardlink_pairs_hold_the_fence_invariants() {
             let queue = Arc::clone(&queue);
             let stop = Arc::clone(&stop);
             let returned = Arc::clone(&returned_by_client);
-            scope.spawn(move || loop {
-                let next = queue.lock().unwrap().pop_front();
-                match next {
-                    Some(order) => {
-                        std::thread::yield_now();
-                        sm.delegations.note_first_transmit(&order.stateid);
-                        sm.delegations.note_recall_acked(&order.stateid);
-                        // A reader may have returned it voluntarily
-                        // first; either way the record resolves.
-                        if sm.delegations.return_delegation(&order.stateid).is_ok() {
-                            returned.fetch_add(1, Ordering::Relaxed);
+            scope.spawn(move || {
+                // The deadline is not belt-and-braces, it is the whole
+                // failure mode: the scope joins this thread, so a loop
+                // that never breaks does not fail the test — it stops
+                // the suite with no message at all. A full macOS run sat
+                // here for eighty-five minutes and printed nothing.
+                // Whatever kept the exit condition from being seen, the
+                // rig owes the next reader the state it was staring at.
+                let deadline = std::time::Instant::now() + Duration::from_secs(120);
+                let mut idle: u64 = 0;
+                loop {
+                    let next = queue.lock().unwrap().pop_front();
+                    match next {
+                        Some(order) => {
+                            idle = 0;
+                            std::thread::yield_now();
+                            sm.delegations.note_first_transmit(&order.stateid);
+                            sm.delegations.note_recall_acked(&order.stateid);
+                            // A reader may have returned it voluntarily
+                            // first; either way the record resolves.
+                            if sm.delegations.return_delegation(&order.stateid).is_ok() {
+                                returned.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
-                    }
-                    None => {
-                        if stop.load(Ordering::Acquire) && queue.lock().unwrap().is_empty() {
-                            break;
+                        None => {
+                            if stop.load(Ordering::Acquire) && queue.lock().unwrap().is_empty() {
+                                break;
+                            }
+                            idle += 1;
+                            if idle % 8192 == 0 && std::time::Instant::now() > deadline {
+                                panic!(
+                                    "recall handler never reached its exit condition after \
+                                     120s: stop={} queue_len={} returned={} — reported \
+                                     rather than hung, because the scope joins this thread",
+                                    stop.load(Ordering::Acquire),
+                                    queue.lock().unwrap().len(),
+                                    returned.load(Ordering::Relaxed),
+                                );
+                            }
+                            std::thread::yield_now();
                         }
-                        std::thread::yield_now();
                     }
                 }
             });

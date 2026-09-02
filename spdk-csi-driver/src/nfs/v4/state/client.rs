@@ -170,6 +170,25 @@ pub struct Client {
 }
 
 impl Client {
+    /// The `csa_sequence` this client must send on its NEXT
+    /// CREATE_SESSION, i.e. the value `eir_sequenceid` has to carry.
+    ///
+    /// This is the ONLY correct source for `eir_sequenceid`, and it is
+    /// deliberately derived from the same two fields
+    /// `process_create_session_seq` validates against. Both EXCHANGE_ID
+    /// return sites used to answer `Client::sequence_id`, which is the
+    /// LEGACY monotonic counter (see `update_sequence`) and has nothing
+    /// to do with §18.36.4: it is initialised to 0 and never touched on
+    /// this path, so a returning client was told "send 0" and then had 0
+    /// rejected as SEQ_MISORDERED. The client had done exactly what the
+    /// server instructed.
+    pub fn next_cs_sequence(&self) -> u32 {
+        match self.last_cs_sequence {
+            None => self.initial_cs_sequence,
+            Some(last) => last.wrapping_add(1),
+        }
+    }
+
     /// Create a new client
     pub fn new(
         client_id: u64,
@@ -580,7 +599,7 @@ impl ClientManager {
                         debug!("EXCHANGE_ID upd: case 6 (idempotent), client {}", c.client_id);
                         ExchangeIdOutcome::ExistingConfirmed {
                             client_id: c.client_id,
-                            sequence_id: c.sequence_id,
+                            sequence_id: c.next_cs_sequence(),
                         }
                     }
                     (false, _) => {
@@ -655,7 +674,7 @@ impl ClientManager {
                         debug!("EXCHANGE_ID: case 1 (renewal), client {}", c.client_id);
                         ExchangeIdOutcome::ExistingConfirmed {
                             client_id: c.client_id,
-                            sequence_id: c.sequence_id,
+                            sequence_id: c.next_cs_sequence(),
                         }
                     }
                     (false, true) => {
@@ -1063,6 +1082,72 @@ mod tests {
                 assert_eq!(client_id, id1, "renewal must return the SAME clientid");
             }
             other => panic!("expected case-1 renewal, got {:?}", other),
+        }
+    }
+
+    /// EXCHANGE_ID must name a `csa_sequence` that CREATE_SESSION will
+    /// then accept. The two used to disagree: the renewal arm answered
+    /// the LEGACY `sequence_id` counter (0, always) while
+    /// `process_create_session_seq` validated against
+    /// `initial_cs_sequence` (1) — so a client that did exactly what the
+    /// server told it got NFS4ERR_SEQ_MISORDERED and could not open a
+    /// session at all.
+    ///
+    /// Reachable with no restart involved, which is what makes it worth
+    /// a test rather than a note: any client holding a confirmed record
+    /// that needs a NEW session walks into it. Found by the §9 restart
+    /// leg, reproduced on a live server over the wire.
+    #[test]
+    fn exchange_id_names_a_sequence_create_session_will_accept() {
+        let lease_mgr = Arc::new(LeaseManager::new());
+        let mgr = ClientManager::new(lease_mgr, "test-vol",
+                                     crate::state_backend::memory_backend());
+
+        // First contact, then a session at the sequence we were given.
+        let first = mgr.exchange_id(b"c".to_vec(), 7, 0, b"p".to_vec());
+        let (id, seq1) = match first {
+            ExchangeIdOutcome::NewUnconfirmed { client_id, sequence_id } => (client_id, sequence_id),
+            other => panic!("expected NewUnconfirmed, got {:?}", other),
+        };
+        assert!(matches!(mgr.process_create_session_seq(id, seq1),
+                         CreateSessionSeq::Execute),
+                "the sequence EXCHANGE_ID handed out was rejected on first use");
+        mgr.mark_confirmed(id);
+        mgr.record_create_session_reply(id, seq1, CachedCreateSessionRes {
+            sessionid: SessionId([0u8; 16]),
+            sequence: seq1,
+            flags: 0,
+            fore_max_request_size: 8192,
+            fore_max_response_size: 8192,
+            fore_max_response_size_cached: 8192,
+            fore_max_operations: 8,
+            fore_max_requests: 64,
+            back_max_request_size: 8192,
+            back_max_response_size: 8192,
+            back_max_response_size_cached: 8192,
+            back_max_operations: 2,
+            back_max_requests: 16,
+        });
+
+        // Case 1 renewal: same owner, same verifier, same principal.
+        let again = mgr.exchange_id(b"c".to_vec(), 7, 0, b"p".to_vec());
+        let (id2, seq2) = match again {
+            ExchangeIdOutcome::ExistingConfirmed { client_id, sequence_id } => (client_id, sequence_id),
+            other => panic!("expected a case-1 renewal, got {:?}", other),
+        };
+        assert_eq!(id, id2, "case 1 must return the same clientid");
+
+        // THE ASSERTION. Whatever EXCHANGE_ID just named, CREATE_SESSION
+        // has to accept — as Execute or as a Replay, but never as
+        // Misordered. The server does not get to contradict itself.
+        match mgr.process_create_session_seq(id2, seq2) {
+            CreateSessionSeq::Execute | CreateSessionSeq::Replay(_) => {}
+            CreateSessionSeq::Misordered => panic!(
+                "EXCHANGE_ID told the client to send csa_sequence={} and \
+                 CREATE_SESSION answered SEQ_MISORDERED to that very value \
+                 — the client cannot obtain a session by following \
+                 instructions", seq2),
+            other => panic!("unexpected verdict {:?}", other),
         }
     }
 
