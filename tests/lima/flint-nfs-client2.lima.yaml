@@ -1,0 +1,54 @@
+# Second Lima VM: the SECOND NFS CLIENT that nfstest_delegation's recall
+# tests need.
+#
+#   limactl start --name=flint-nfs-client2 tests/lima/flint-nfs-client2.lima.yaml
+#
+# WHY A SECOND VM AT ALL. nfstest's recall set (recall01-54) drives the
+# conflicting operation from a DIFFERENT NFS client and then asserts, on
+# the first client's packet trace, that the delegation was recalled and
+# returned. `--client` therefore needs a host it can ssh to and run
+# `sudo` on. One VM cannot supply that.
+#
+# WHY vzNAT. The primary VM uses default user-mode networking, under
+# which two VMs cannot reach each other at all — they each see only the
+# host. `vzNAT` puts the VM on Apple's shared NAT network (192.168.64.x)
+# where the host AND other vz VMs are reachable, and unlike
+# `networks: lima: shared` it needs no privileged socket_vmnet helper.
+# Both VMs must have it; a one-sided vzNAT is not connectivity.
+
+vmType: "vz"
+arch: "default"
+cpus: 2
+memory: "2GiB"
+disk: "10GiB"
+
+networks:
+  - vzNAT: true
+
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+
+mounts:
+  - location: "~"
+    writable: false
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y --no-install-recommends \
+        nfs-common \
+        python3 \
+        nfstest \
+        tcpdump
+      # nfstest drives both ends over ssh+sudo and expects neither to
+      # prompt. The lima user already has passwordless sudo; this makes
+      # it explicit and survives image changes.
+      echo "%sudo ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/99-nfstest
+      chmod 0440 /etc/sudoers.d/99-nfstest

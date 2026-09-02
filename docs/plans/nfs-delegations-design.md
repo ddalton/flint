@@ -933,10 +933,58 @@ and both now baked into the script:
   captures nothing, and the failure surfaces as "Packet trace file is
   empty".
 
-**The recall set (recall01-54) is NOT run**: it needs `--client`, a
-SECOND host with passwordless ssh and sudo, and there is one VM. The
-conflict-site matrix above covers the same ground from pynfs with two
-sessions; a second VM would be needed to run nfstest's version.
+**★ THE RECALL SET RAN, 2026-09-02 — `tests/lima/deleg/nfstest-recall.sh`.**
+All 54 recall tests, two clients, from the packet trace:
+
+```
+  754 assertions — 712 passed, 42 failed
+   54 recall tests — 12 fully clean, 42 with failures
+   42 failures, ALL of them the one line "WRITE delegation should be granted"
+    0 server-side revocations across the whole run
+```
+
+**Every failure in the entire set is flint declining a WRITE
+delegation** (§1, an explicit non-goal), and each of those 42 tests
+still passes its other 8-9 assertions — they are all named "Recall
+WRITE delegation with ...". Not one READ-delegation recall test failed
+any assertion. Zero revocations means every recall was honoured by the
+client inside the deadline; none reached the ladder.
+
+recall01 alone shows what the set verifies: READ delegation granted;
+**CB_RECALL NOT sent** when a second client merely OPENs for READ;
+**CB_RECALL NOT sent** when the second client is itself granted a READ
+delegation; CB_RECALL sent on a conflicting OPEN(WRITE); the recall
+names the right delegation; the reply returns NFS4_OK; DELEGRETURN
+carries the recalled stateid; the second client's OPEN(WRITE) is
+answered only AFTER the return; **no delegation is granted to the
+second client**; and subsequent READs use the OPEN stateid.
+
+**The second client is a NETWORK NAMESPACE, and that is not a
+shortcut.** Linux keys NFS client state on the netns, so a mount inside
+`flintcli2` has its own `nfs_client`, clientid and callback channel —
+exactly what "a different client" means to a delegation. It also gets a
+PRIVATE MOUNT NAMESPACE: netns isolates the network but NOT mounts, and
+without `unshare --mount` client 2's mount stacks on client 1's at the
+same path, after which client 1's I/O travels through client 2's mount
+and the tests keep passing while measuring the wrong client. The rig
+asserts that isolation rather than assuming it.
+
+**A second VM was provisioned and could not be used for this.** lima's
+`vzNAT` NATs each guest separately: the host reaches both VMs and each
+VM reaches the gateway, but the guests cannot reach each other at all —
+ARP fails between them — so nfstest cannot ssh from client 1 to client
+2. Guest-to-guest needs the privileged `socket_vmnet` helper and a
+sudoers file on the host. `tests/lima/flint-nfs-client2.lima.yaml` is
+kept for whenever that is wanted.
+
+**⚠ THE TWO CLIENTS MUST RUN DIFFERENT NFS VERSIONS**, and this is
+load-bearing: nfstest picks the second client's version from
+`--client-nfsvers` and requires one that DIFFERS from `--nfsversion`.
+Give it only the same version and it silently runs ZERO tests while
+exiting successfully. Its default list is `4.0,4.1`, so against a 4.1
+main client it chooses 4.0 — which flint does not serve, so client 2's
+mount fails and every test errors in setup. The rig runs client 1 at
+**4.2** and client 2 at **4.1**: different, and both spoken by flint.
 
 **Restart/suspend legs**, rewritten for the same-PVC arm [V2]:
 (a) same-PVC pod roll with grants outstanding (pre-kill: assert
