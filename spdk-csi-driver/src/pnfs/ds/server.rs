@@ -2117,9 +2117,14 @@ mod deleg_stateid_pin_tests {
             cred_span: Bytes::new(),
         };
         let segs = DataServer::handle_minimal_compound(call, args.finish(), io, sessions, clients).await;
+        // `into_test_bytes`, not `as_mem`: on Linux the DS answers a
+        // READ through the splice path, so the payload segment is a
+        // pipe, not bytes. `as_mem` panics on it by design. (macOS
+        // compiles the splice arm out entirely, which is why this only
+        // ever showed up on the Linux suite.)
         let mut reply = Vec::new();
-        for s in &segs {
-            reply.extend_from_slice(s.as_mem());
+        for s in segs {
+            reply.extend_from_slice(&s.into_test_bytes());
         }
         // RPC accepted-reply header: xid, REPLY, MSG_ACCEPTED, verf
         // (AUTH_NONE, len 0), SUCCESS = 6 words; then COMPOUND4res.

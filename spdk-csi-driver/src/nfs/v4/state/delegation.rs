@@ -935,17 +935,33 @@ impl DelegationManager {
                 first_transmit_at: None,
                 truncate: false,
             });
+            // The index and the live accounting go in UNDER THE ENTRY
+            // LOCK, with the record. Every path that can remove this
+            // record reaches it through `by_stateid` and decrements on
+            // the way out, so publishing the record's INDEX before its
+            // COUNT lets a removal run to completion in the window
+            // between: its `dec_live_client` finds no `live_per_client`
+            // entry yet, silently does nothing (`get_mut` on a missing
+            // key), and the grant's `+= 1` then lands on a record that
+            // no longer exists — a phantom live delegation that never
+            // goes away and eventually refuses the client its quota.
+            // `live_global` survives the same interleaving because
+            // fetch_sub and fetch_add on a u64 commute; the per-client
+            // map does not, which is why only it showed the leak.
+            // Found by the §9 stress rig on a 2-vCPU Linux box under
+            // full-suite load — 10/10 green standalone on the Mac and
+            // in the VM, so only the loaded box could reach it.
+            self.by_stateid.insert(stateid.other, ident);
+            self.by_client
+                .entry(client_id)
+                .or_insert_with(Vec::new)
+                .push(stateid.other);
+            *self.live_per_client.entry(client_id).or_insert(0) += 1;
+            self.live_global.fetch_add(1, Ordering::SeqCst);
             Ok(stateid)
         });
         let stateid = granted?;
 
-        self.by_stateid.insert(stateid.other, ident);
-        self.by_client
-            .entry(client_id)
-            .or_insert_with(Vec::new)
-            .push(stateid.other);
-        *self.live_per_client.entry(client_id).or_insert(0) += 1;
-        self.live_global.fetch_add(1, Ordering::SeqCst);
         self.grants_total.fetch_add(1, Ordering::SeqCst);
         self.note_evidence(client_id);
         info!(
@@ -1074,6 +1090,12 @@ impl DelegationManager {
     /// refusal — the state the fence protocol exists to make
     /// unreachable, produced by hand so the release-time exclusivity
     /// assert can be shown to fire. Test-only by construction.
+    ///
+    /// Keeps the pre-fix publish order (index and counters after the
+    /// lock) deliberately: it has exactly one single-threaded caller,
+    /// and the shape is harmless there. Do NOT copy it into anything
+    /// concurrent — see the comment in `try_grant` for what that
+    /// ordering costs.
     #[cfg(test)]
     pub(crate) fn plant_record_for_test(&self, ident: FileId, client_id: u64, stateid: StateId) {
         self.with_live_entry(ident, |_entry, e| {

@@ -895,6 +895,69 @@ binary). In this increment:
 - Also: `DelegationManager::set_cooldown` (rigs), the
   `granted_holders` probe, and a refusal reason `posture`.
 
+**THE STRESS RIG EARNED ITS KEEP (2026-09-02, follow-up).** The Linux
+suite — which is the suite; the macOS one compiles out every
+`cfg(linux)` arm — failed the new stress leg on a 2-vCPU box with
+`live_per_client[2] 1 != 0 live records`. A real defect in `try_grant`,
+present since slice 1: the record was pushed under the entry lock, but
+`by_stateid` / `by_client` / the live counters were written AFTER
+releasing it. Every removal path reaches a record through `by_stateid`,
+so that gap is a window in which a DELEGRETURN can run to completion —
+and its `dec_live_client` finds no `live_per_client` entry yet and
+silently does nothing, after which the grant's `+= 1` lands on a record
+that no longer exists. Two consequences, both permanent: a phantom live
+delegation that counts against the client's per-client cap for the life
+of the server, and dangling `by_client` entries (the return's `retain`
+runs before the grant's `push`) which grow without bound AND inflate
+`count_for_client` — the busy check DESTROY_CLIENTID reads, so the
+client can become undestroyable. `live_global` survives the identical
+interleaving because `fetch_sub`/`fetch_add` on a `u64` commute, which
+is exactly why only the per-client map ever showed it. Fixed by moving
+the index and the accounting INSIDE the entry lock, atomic with the
+record push.
+
+The verification is the part worth keeping. The full stress rig hit it
+ONCE, in-suite; 10 standalone runs and 20 more under CPU hogs never
+reproduced it, so "the suite is green now" would have been worth
+nothing. `a_grant_is_counted_before_it_becomes_findable` gets inside
+the window deliberately — the granter publishes the id it is ABOUT to
+mint, so the returner is already spinning on that id when the grant
+opens the window; a returner that learns the id from the grant's return
+value is by construction too late. **Control arm (old publish order):
+12/12 FAIL, reproducing the suite's exact violation string plus the
+dangling `by_client` entries. Fixed arm: 12/12 PASS, 60k grants and
+8k-19k returner wins per run, ~3s.** An earlier cut of that rig minted ONE stateid
+for every grant and manufactured index violations of its own —
+`unindex` removes by key, so a reused id lets a return delete the NEXT
+record's index. Production mints fresh ids; that was the rig lying
+about the server, and a rig that manufactures its own violations cannot
+testify about anything.
+
+A second rig lesson, paid for the same day: the first working cut of it
+ran 35s, because the granter's retry loop hit `AlreadyHolder` on most
+iterations and answered each one with `yield_now()` — a syscall per
+refusal. Two hot threads for 35s on a 2-vCPU box starved the suite
+badly enough that an unrelated tier test began failing, and the
+attribution experiment (run the suite with ONLY this test skipped: 2/2
+clean, 40s faster) is the only reason that was not written off as
+someone else's flake. Spinning instead of yielding was worse — the
+granter monopolises its core, the returner never runs, and the run
+collapses to ~10 grants, which "fails" the control for the wrong
+reason. The shape that works: the granter clears the record ITSELF
+after a short spin, so every iteration grants, no syscalls, the
+returner still races the publish window, and 60k iterations take ~3s.
+**A control arm that fails because a FLOOR tripped is not a control
+arm.**
+
+Same run, second Linux-only failure: the DS discard pin called
+`Segment::as_mem()` on the READ reply. On Linux the DS answers READ
+through the splice path (default ON since the splice workstream), so
+the payload segment is a pipe and `as_mem` panics by design; macOS
+compiles that arm out entirely, so the test had been passing there
+while exercising a path the product does not take. It materializes with
+`into_test_bytes` now, which also means the pin covers the splice lane
+it is actually served from.
+
 **STATUS (2026-09-01):** slices 0-2 SHIPPED (`2d913055` formal model,
 `9f1fbdbb` wire fixes + foundations; validated macOS+Linux suites,
 pynfs 171/0/91 both binaries, TLA 207/207). **Slice 3 IN PROGRESS**

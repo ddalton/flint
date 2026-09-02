@@ -322,3 +322,164 @@ fn the_release_time_exclusivity_check_fires_on_a_foreign_live_record() {
     );
     drop(guard); // panics here
 }
+
+/// The publish-order regression: a grant must be COUNTED before it is
+/// FINDABLE.
+///
+/// `try_grant` used to push the record under the entry lock and then
+/// index it and bump the live counters after releasing that lock.
+/// Every removal path reaches a record through `by_stateid`, so the
+/// gap between the index insert and the counter bump is a window in
+/// which a return can run to completion — and its decrement is
+/// silently dropped, because `dec_live_client` is a no-op on a
+/// `live_per_client` entry that does not exist yet. The grant's
+/// `+= 1` then lands on a record that is already gone: a phantom live
+/// delegation that never clears, and which counts against the
+/// client's quota for the life of the server. `live_global` survives
+/// the identical interleaving (fetch_sub and fetch_add on a u64
+/// commute), which is why only the per-client map ever showed it.
+///
+/// Reaching the window is the whole trick. A returner that learns the
+/// stateid from the grant's RETURN VALUE is by construction too late,
+/// so the granter publishes the id it is ABOUT to mint and the
+/// returner spins on it — already inside the window before the grant
+/// opens it. That is what makes this loud where the full stress rig
+/// was rare: the leak took a 2-vCPU Linux box under whole-suite load
+/// to surface once, and 20 standalone runs under CPU hogs never
+/// reproduced it.
+///
+/// The ids are FRESH every grant, as the real `allocate_delegation`
+/// mints them. An earlier cut of this rig reused one stateid forever
+/// and produced index violations of its own — `unindex` removes by
+/// key, so a reused id lets a return delete the index of the NEXT
+/// record. That is a property of the rig, not of the server, and a
+/// rig that manufactures its own violations cannot testify about the
+/// server's.
+#[test]
+fn a_grant_is_counted_before_it_becomes_findable() {
+    let _flag = with_delegations(true);
+    let sm = Arc::new(StateManager::new_in_memory("publish-order"));
+    sm.delegations.set_cooldown(Duration::from_millis(0));
+
+    const ITERS: usize = 60_000;
+    const CLIENT: u64 = 7;
+    let ident = FileId::new(77, 4242);
+
+    fn sid_of(k: u64) -> StateId {
+        let mut other = [0u8; 12];
+        other[..8].copy_from_slice(&k.to_be_bytes());
+        StateId { seqid: 1, other }
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let pending = Arc::new(AtomicU64::new(1));
+    let grants = Arc::new(AtomicU64::new(0));
+    let returns = Arc::new(AtomicU64::new(0));
+
+    std::thread::scope(|scope| {
+        {
+            let sm = Arc::clone(&sm);
+            let stop = Arc::clone(&stop);
+            let pending = Arc::clone(&pending);
+            let returns = Arc::clone(&returns);
+            scope.spawn(move || {
+                while !stop.load(Ordering::Acquire) {
+                    // Both the id the granter is publishing NOW and the
+                    // one before it: the granter advances as soon as a
+                    // grant lands, so the live record can be either.
+                    // Spinning on only one of them deadlocks the rig.
+                    let k = pending.load(Ordering::Acquire);
+                    for cand in [k, k.saturating_sub(1)] {
+                        if cand > 0 && sm.delegations.return_delegation(&sid_of(cand)).is_ok() {
+                            returns.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            });
+        }
+        let granter = {
+            let sm = Arc::clone(&sm);
+            let pending = Arc::clone(&pending);
+            let grants = Arc::clone(&grants);
+            scope.spawn(move || {
+                let mut k: u64 = 1;
+                for _ in 0..ITERS {
+                    pending.store(k, Ordering::Release);
+                    let got = sm.delegations.try_grant(
+                        ident,
+                        CLIENT,
+                        vec![0xB0, 0x0B],
+                        std::path::PathBuf::from("/race"),
+                        || true,
+                        || sid_of(k),
+                    );
+                    if got.is_ok() {
+                        grants.fetch_add(1, Ordering::Relaxed);
+                        // Clear it ourselves if the returner did not
+                        // get there first. Without this the loop is
+                        // mostly AlreadyHolder refusals waiting on the
+                        // other thread, and the only way to make
+                        // progress is `yield_now` on each one — a
+                        // syscall per refusal that made this the
+                        // slowest test in the suite (35s in the 2-vCPU
+                        // VM) and starved its neighbours enough to
+                        // fail an unrelated tier test. Spinning
+                        // instead is worse: the granter monopolises
+                        // its core and the returner never runs, which
+                        // collapses the run to ~10 grants. Doing the
+                        // cleanup here means every iteration grants,
+                        // so the races per second go up while the
+                        // syscalls go to zero. The returner still
+                        // races the publish window — and only IT can
+                        // trip the defect, since this return is
+                        // ordered after the grant on the same thread.
+                        //
+                        // Spin briefly first so the returner gets a
+                        // real chance at the entry lock before we take
+                        // it back. Without this the granter reclaims
+                        // the record almost every time, and the
+                        // returner's win rate collapses — the FIX in
+                        // particular holds the entry lock across the
+                        // whole publish, so the returner is already
+                        // fighting a narrower window than it is in the
+                        // control arm.
+                        for _ in 0..256 {
+                            std::hint::spin_loop();
+                        }
+                        let _ = sm.delegations.return_delegation(&sid_of(k));
+                        k += 1;
+                    }
+                }
+            })
+        };
+        granter.join().expect("granter panicked");
+        stop.store(true, Ordering::Release);
+    });
+
+    // Settle: drop whatever the last iteration left, so the scan reads
+    // a quiescent manager rather than a half-finished handoff.
+    let k = pending.load(Ordering::Acquire);
+    for cand in [k, k.saturating_sub(1)] {
+        if cand > 0 {
+            let _ = sm.delegations.return_delegation(&sid_of(cand));
+        }
+    }
+
+    let g = grants.load(Ordering::Relaxed);
+    let r = returns.load(Ordering::Relaxed);
+    let violations = sm.delegations.check_invariants();
+    eprintln!("publish-order race: grants {g} · returns {r} · violations {violations:?}");
+
+    // Floors first: a run that granted nothing, or in which the
+    // returner never won a race, never opened the window and cannot
+    // testify about it. INCONCLUSIVE is not PASS.
+    assert!(g > 500, "granted floor: only {g} of {ITERS} attempts granted");
+    // 8 control runs won between 572 and 2424 races; 100 is well clear
+    // of a flake and still says plainly that the returner was inside
+    // the window, many times, rather than watching from outside it.
+    assert!(
+        r > 100,
+        "return floor: the returner only won {r} races — it never entered the window"
+    );
+    assert!(violations.is_empty(), "invariant scan: {violations:#?}");
+}
