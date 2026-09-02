@@ -1,7 +1,7 @@
 # Lima VM for NFSv4.1 protocol testing.
 #
 # Usage:
-#   limactl start --name=flint-nfs-client tests/lima/nfs-client.yaml
+#   limactl start --name=flint-nfs-client tests/lima/flint-nfs-client.lima.yaml
 #   limactl shell flint-nfs-client
 #
 # Inside the VM the host is reachable at host.lima.internal.
@@ -65,11 +65,30 @@ provision:
       cd /opt/pynfs
       python3 -m venv .venv
       .venv/bin/pip install --upgrade pip setuptools wheel
-      # pynfs needs gssapi bindings for sec=krb5 tests; skip if it fails — sec=sys is enough for us.
-      .venv/bin/pip install ply || true
+      # gssapi is only needed for sec=krb5 tests; sec=sys does not need it,
+      # and tests/krb5/setup-pynfs.sh installs it properly when it is.
       .venv/bin/pip install gssapi || true
-      # Build the XDR-generated bits.
-      cd nfs4.1 && make || true
+
+      # TWO TRAPS, both of which made this step a silent no-op and left
+      # xdrdef/ holding nothing but __init__.py — so every pynfs run in a
+      # freshly provisioned VM died at `import rpc.rpc`:
+      #
+      # 1. There is NO nfs4.1/Makefile. The old `cd nfs4.1 && make || true`
+      #    could never have built anything; `|| true` hid the failure.
+      #    The build is setup.py at the REPO ROOT, which chdirs into
+      #    xdr/rpc/nfs4.1/nfs4.0 in that order and shells out per subdir.
+      # 2. It shells out with `os.system("python3 setup.py build")` — the
+      #    SYSTEM python, not this venv. So `ply` installed into .venv is
+      #    invisible to the generator, every sub-build dies on
+      #    ModuleNotFoundError, and os.system's status is discarded. ply
+      #    therefore has to be installed system-wide.
+      #
+      # Verify by IMPORTING rather than by exit status, for the same
+      # reason: the build reports success whatever happens inside it.
+      apt-get install -y python3-ply
+      python3 setup.py build
+      cd /opt/pynfs/nfs4.1
+      PYTHONPATH=/opt/pynfs python3 -c 'import nfs4lib, rpc.rpc'
   - mode: system
     script: |
       #!/bin/bash
@@ -78,11 +97,16 @@ provision:
       chmod 0777 /mnt/flint
 
 probes:
-  - description: "pynfs is installed"
+  - description: "pynfs is installed AND its XDR bindings were generated"
     script: |
       #!/bin/bash
       set -eux
-      test -d /opt/pynfs/nfs4.1
+      # `test -d /opt/pynfs/nfs4.1` was the old probe, and a bare clone
+      # passes it: the directory exists the moment git finishes, whether
+      # or not anything was ever built into it. Import the generated
+      # modules instead — that is the thing a run actually needs.
+      cd /opt/pynfs/nfs4.1
+      PYTHONPATH=/opt/pynfs python3 -c 'import nfs4lib, rpc.rpc'
     hint: "pynfs failed to clone or build; check the provision logs."
 
 message: |

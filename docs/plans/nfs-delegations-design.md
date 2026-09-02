@@ -542,6 +542,38 @@ DELEG2 stays SKIP (assert SKIP, not FAIL). Re-run the full 262 with
 the flag ON: floor-171 must not regress. **nfstest_delegation** as
 suite #2 (Linux server; never quote nfstest with the server on macOS).
 
+**★ DELEG4 could not have passed as this paragraph assumed [2026-09-01].**
+`testNoDeleg` sets OPEN4_SHARE_ACCESS_WANT_NO_DELEG and requires
+OPEN_DELEGATE_NONE_EXT with `ond_why == WND4_NOT_WANTED`.
+NONE_EXT was implemented NOWHERE — no constant, no encoder arm, no
+reason code — so every refusal encoded a bare OPEN_DELEGATE_NONE and
+DELEG4 was a guaranteed FAIL. Fixed; the paragraph's prediction is
+sound only from that commit forward. Two rules came out of it and are
+now enforced by unit tests:
+
+- NONE_EXT is also how a server signals it understands WANT bits at
+  all, so it is sent ONLY to a client that set one. Volunteering it
+  answers a question nobody asked.
+- It is NEVER sent with the flag off. The kill switch's promise is a
+  wire identical to the pre-feature server, and an informational arm
+  is still a wire change. **So DELEG4 is a flag-ON expectation and
+  FAILS on the control arm — that is the pin, not a regression.**
+
+The ordering defect underneath it is the more general lesson: the
+want-bit check sat BELOW the server-side gates, so a server that
+merely happened to be unable to grant answered WND4_RESOURCE to a
+client that had asked for no delegation. "I would have, but I could
+not" is a different statement from "you told me not to". The client's
+own instruction is now consulted before any gate but after the flag.
+
+And the encoding trap worth carrying to any future union work:
+`open_none_delegation4` switches on ond_why, and only WND4_CONTENTION
+and WND4_RESOURCE carry a trailing bool — every other arm is `void`.
+A bool on a void arm raises no error; it shifts every following word
+of the compound, so the client mis-decodes the NEXT operation and
+blames that. The test asserts reply LENGTH per arm, not the reason
+code.
+
 **Warm re-access rig leg** (the feature's raison d'être; paired
 per-rep, interleaved arms): pass 1 opens+reads N files, sleep past
 acregmax, pass 2 re-opens+re-reads; score OPEN/GETATTR/CLOSE/ACCESS
@@ -556,6 +588,48 @@ exactly 10 files; exactly those 10 re-fetch sha256-fresh content,
 that catches stale-cache-served-forever masquerading as RPC
 elimination. Positive WANT-bits pin: OPEN with WANT_READ_DELEG ORed
 in still grants.
+
+**★ MEASURED, 2026-09-01 — `tests/lima/deleg/pynfs-deleg.sh`.** Three
+arms against one build: flag OFF (control), flag ON at the shipped 90s
+deadline, flag ON at a 5s deadline. Result with the flag ON: **9 of 10
+st_delegation tests pass** (DELEG1/3/4/5/6/7/8/9/23), 14 grants
+observed, zero grants on the control.
+
+Two pinned non-passes, both expectations rather than deferrals:
+
+- **DELEG2 FAILs by design.** It asks for a WRITE delegation; flint
+  grants only READ (§1, an explicit non-goal). The earlier note that
+  it "stays SKIP" holds only under the `writedelegations` flag gating —
+  selecting the `deleg` set runs it, and it fails.
+- **DELEG8 FAILs at the shipped 90s deadline for a CLIENT-side
+  reason**, and this is a finding about the deadline, not about pynfs.
+  pynfs allows a compound 10 DELAY retries at 1s and then gives up; its
+  slot bookkeeping then leaks the slot it acquired for the retry it
+  never made, so the outer loop dies "Out of slots". **At the
+  production deadline no pynfs test can ever WATCH a revocation
+  happen.** The ladder timings are therefore env-overridable (defaults
+  unchanged, pinned by a unit test) and the third arm runs at 5s, where
+  DELEG8 passes and exercises the whole revocation chain end to end:
+  recall → ack → deadline → revoke → READ answers DELEG_REVOKED → SEQ4
+  RECALLABLE_STATE_REVOKED → TEST_STATEID → FREE_STATEID clears the
+  bit. That is §9's "acks-but-never-returns" and TEST_STATEID negative
+  legs, discharged against a real client.
+
+  The general lesson for §10's rollout: **90s exceeds what a real
+  client's DELAY budget may be.** The server-side writer leg's open
+  question ("nothing pins today that REST callers retry for up to 90s
+  — measure and state the budget") now has one measured data point,
+  and it is a client that gives up at 10s.
+
+**What the run found that no unit test could.** The feature was INERT
+in both binaries — `install_recall_spawner` had callers only in
+`#[cfg(test)]` code — and the symptom was silence, because a refused
+grant is indistinguishable from a workload that never qualified. Then,
+once it could ask, a real client found three protocol defects in one
+run: the CREATE arm never answered WANT bits, BACKCHANNEL_CTL was
+undecodable (truncating any compound containing it), and a revoked
+delegation answered BAD_STATEID instead of DELEG_REVOKED. None was
+reachable from the Rust suite, which was green at 2300+ throughout.
 
 **★ LIVENESS PRECONDITION ON EVERY CONTROL ARM [V4, 2026-09-01 — from
 the oci-ab campaign's G-COLD confound].** Every leg above whose
