@@ -11,7 +11,7 @@
 // Every I/O operation (READ/WRITE) requires a valid stateid.
 
 use crate::nfs::v4::protocol::*;
-use crate::nfs::v4::compound::CompoundContext;
+use crate::nfs::v4::compound::{CompoundContext, WhyNoDelegation};
 use crate::nfs::v4::state::StateManager;
 use crate::nfs::v4::operations::fileops::Fattr4;
 use crate::nfs::v4::filehandle::FileHandleManager;
@@ -129,10 +129,11 @@ pub struct OpenRes {
     pub stateid: Option<StateId>,
     pub change_info: Option<ChangeInfo>,
     pub result_flags: u32,
-    /// A granted READ delegation's stateid (the only kind flint
-    /// grants), or None = OPEN_DELEGATE_NONE. The dispatcher threads
-    /// this into the OPEN result's delegation arm.
-    pub delegation: Option<StateId>,
+    /// The OPEN reply's delegation arm, ready to encode:
+    /// `Read` for a granted READ delegation (the only kind flint
+    /// grants), `NoneExt` for "none, and here is why" when the client
+    /// set a WANT bit, and `None` for a plain OPEN_DELEGATE_NONE.
+    pub delegation: Option<crate::nfs::v4::compound::Delegation>,
     pub attrset: Vec<u32>,  // Which CREATE attrs were set
 }
 
@@ -1540,7 +1541,7 @@ impl IoOperationHandler {
         // registration — the requester's own open is READ-only by
         // rule 4, so it never trips the write-open predicate — and
         // any refusal is free (NONE, never DELAY).
-        let delegation = self.try_grant_read_delegation(
+        let delegation = self.deleg_answer(
             ctx,
             client_id,
             &op,
@@ -1587,10 +1588,53 @@ impl IoOperationHandler {
     /// - Client is opening for READ only (not WRITE)
     /// - No other clients have the file open for WRITE
     /// - File is not being actively modified
+    /// What the OPEN reply's delegation arm should say.
+    ///
+    /// `Silent` is not the same as `Explained(..)`: a client that set
+    /// no WANT bit asked nothing, and OPEN_DELEGATE_NONE_EXT is also
+    /// the signal that a server understands WANT bits at all, so
+    /// volunteering it would answer a question that was never posed.
+    /// With the feature flag off the answer is ALWAYS `Silent` — the
+    /// kill switch's promise is that the wire looks exactly as it did
+    /// before the feature existed, and an informational arm is still
+    /// a wire change.
+    fn deleg_answer(
+        &self,
+        ctx: &CompoundContext,
+        client_id: u64,
+        op: &OpenOp,
+        claim_grantable: bool,
+        ident: Option<(u64, u64)>,
+        path: Option<&std::path::Path>,
+        fh_bytes: &[u8],
+    ) -> Option<crate::nfs::v4::compound::Delegation> {
+        use crate::nfs::v4::compound::Delegation;
+        let want = op.share_access & 0xFF00;
+        match self.try_grant_read_delegation(
+            ctx,
+            client_id,
+            op,
+            claim_grantable,
+            ident,
+            path,
+            fh_bytes,
+        ) {
+            Ok(stateid) => Some(Delegation::Read { stateid }),
+            // The flag is off: say nothing new.
+            Err(None) => None,
+            Err(Some(why)) if want != 0 => Some(Delegation::NoneExt { why }),
+            Err(Some(_)) => None,
+        }
+    }
+
     /// The grant rule set (design §4), in order, first failure wins.
-    /// Every refusal answers OPEN_DELEGATE_NONE and bumps its
-    /// per-reason counter — delegations are optional and refusal must
-    /// be free, so nothing here ever DELAYs.
+    /// Every refusal answers no delegation and bumps its per-reason
+    /// counter — delegations are optional and refusal must be free, so
+    /// nothing here ever DELAYs.
+    ///
+    /// `Err(None)` means the feature is off, which is deliberately
+    /// distinct from every other refusal: it is the one case where the
+    /// server must not even admit the question was understood.
     fn try_grant_read_delegation(
         &self,
         _ctx: &CompoundContext,
@@ -1600,7 +1644,7 @@ impl IoOperationHandler {
         ident: Option<(u64, u64)>,
         path: Option<&std::path::Path>,
         fh_bytes: &[u8],
-    ) -> Option<StateId> {
+    ) -> Result<StateId, Option<WhyNoDelegation>> {
         let d = &self.state_mgr.delegations;
 
         // Rule 1 — gates. The env flag; the recall machinery (a
@@ -1610,19 +1654,40 @@ impl IoOperationHandler {
         // the circuit breaker (per-client quarantine first); the
         // sentinel kill-switch file.
         if !delegations_enabled() {
-            return None; // the default path — not a counted refusal
+            return Err(None); // the default path — not a counted refusal
         }
+
+        // Rule 4a — the client's OWN instruction, consulted before any
+        // server-side gate. WANT_NO_DELEG and WANT_CANCEL are the
+        // client telling us something rather than asking, and RFC 8881
+        // §18.16.2 makes NOT_WANTED / CANCELLED the answer. Left below
+        // the gates, a server that merely happened to be unable to
+        // grant would answer WND4_RESOURCE to a client that asked for
+        // no delegation — "I would have, but I could not", which is a
+        // different statement and a false one.
+        match op.share_access & 0xFF00 {
+            0x0400 => {
+                d.count_refusal("share_want");
+                return Err(Some(WhyNoDelegation::NotWanted));
+            }
+            0x0500 => {
+                d.count_refusal("share_want");
+                return Err(Some(WhyNoDelegation::Cancelled));
+            }
+            _ => {}
+        }
+
         if !self.state_mgr.recall_machinery_ready() || self.state_mgr.pnfs_posture() {
             d.count_refusal("gate");
-            return None;
+            return Err(Some(WhyNoDelegation::Resource));
         }
         if d.grants_paused(client_id) {
             d.count_refusal("gate");
-            return None;
+            return Err(Some(WhyNoDelegation::Resource));
         }
         if d.sentinel_blocked(self.fh_mgr.get_export_path()) {
             d.count_refusal("gate");
-            return None;
+            return Err(Some(WhyNoDelegation::Resource));
         }
 
         // Rule 2 — grace, with the anything_reclaimable nuance: a
@@ -1634,7 +1699,7 @@ impl IoOperationHandler {
             && self.state_mgr.leases.anything_reclaimable()
         {
             d.count_refusal("grace");
-            return None;
+            return Err(Some(WhyNoDelegation::Resource));
         }
 
         // Rule 3 — claim shape AS SENT: CLAIM_NULL / CLAIM_FH on the
@@ -1644,28 +1709,25 @@ impl IoOperationHandler {
         // class of create/truncate races.
         if !claim_grantable {
             d.count_refusal("claim");
-            return None;
+            return Err(Some(WhyNoDelegation::Resource));
         }
 
-        // Rule 4 — share bits, MASKED not compared: read-only access,
-        // no deny, and the client isn't asking us not to (want bits
-        // WANT_NO_DELEG / WANT_CANCEL). The old exact-match `== 1`
-        // would silently refuse any client that sets want bits.
-        let want = op.share_access & 0xFF00;
-        if (op.share_access & 0x3) != 1
-            || op.share_deny != 0
-            || want == 0x0400 // OPEN4_SHARE_ACCESS_WANT_NO_DELEG
-            || want == 0x0500 // OPEN4_SHARE_ACCESS_WANT_CANCEL
-        {
+        // Rule 4 — share bits, MASKED not compared: read-only access
+        // and no deny. (The two want bits that refuse outright are
+        // rule 4a above.) The old exact-match `== 1` would silently
+        // refuse any client that sets want bits at all.
+        if (op.share_access & 0x3) != 1 || op.share_deny != 0 {
             d.count_refusal("share_want");
-            return None;
+            // The share mode itself makes a delegation unsafe, which
+            // is contention by any honest reading.
+            return Err(Some(WhyNoDelegation::Contention));
         }
 
         // Rule 7 — backchannel health: the recall path must exist for
         // THIS client before the server owes it a recall.
         if !self.state_mgr.callback_ready(client_id) {
             d.count_refusal("no_cb");
-            return None;
+            return Err(Some(WhyNoDelegation::Resource));
         }
 
         // Rule 5 precondition — the file must be identifiable, or the
@@ -1673,7 +1735,7 @@ impl IoOperationHandler {
         // about a file it cannot see.
         let (Some(ident), Some(path)) = (ident, path) else {
             d.count_refusal("no_ident");
-            return None;
+            return Err(Some(WhyNoDelegation::Resource));
         };
 
         // Rules 5, 8, 9 — re-checked UNDER the file entry lock, with
@@ -1697,14 +1759,18 @@ impl IoOperationHandler {
                     "OPEN: granted READ delegation {:?} on {:?} to client {}",
                     sid, path, client_id
                 );
-                Some(sid)
+                Ok(sid)
             }
             Err(refusal) => {
                 debug!(
                     "OPEN: delegation refused for client {} on {:?}: {:?}",
                     client_id, path, refusal
                 );
-                None
+                // Everything `try_grant` refuses is another party's
+                // hold on the file — a live write open, a conflicting
+                // record, a revoked tombstone, the post-recall
+                // cooldown — except the quotas, which are ours.
+                Err(Some(refusal.why_no_delegation()))
             }
         }
     }
@@ -4085,6 +4151,91 @@ mod tests {
         assert_eq!(close_res.status, Nfs4Status::Ok);
     }
 
+    /// The WANT bits, and the two things that must stay separate:
+    /// what the server DID (no delegation) and whether it says WHY.
+    ///
+    /// OPEN_DELEGATE_NONE_EXT is not just an explanation — it is also
+    /// how a server tells a client it understands WANT bits at all
+    /// (RFC 8881 §18.16.2/3). So it is sent only to a client that
+    /// actually set one, and NEVER with the feature flag off: the kill
+    /// switch's promise is that the wire looks exactly as it did before
+    /// delegations existed, and an informational arm is still a change
+    /// on the wire.
+    #[test]
+    fn the_none_ext_arm_answers_want_bits_and_only_with_the_flag_on() {
+        use crate::nfs::v4::compound::Delegation;
+        const WANT_READ: u32 = 0x0100;
+        const WANT_NO_DELEG: u32 = 0x0400;
+        const WANT_CANCEL: u32 = 0x0500;
+
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let ctx = CompoundContext::new(0);
+        let root = fh_mgr.get_root_fh().unwrap();
+        let ask = |handler: &IoOperationHandler, want: u32| {
+            let op = OpenOp {
+                seqid: 0,
+                share_access: OPEN4_SHARE_ACCESS_READ | want,
+                share_deny: 0,
+                owner: b"want-owner".to_vec(),
+                openhow: OpenHow::NoCreate,
+                claim: OpenClaim::Fh,
+            };
+            handler.deleg_answer(
+                &ctx,
+                1,
+                &op,
+                true,
+                Some((1, 1)),
+                Some(std::path::Path::new("/x")),
+                root.data.as_slice(),
+            )
+        };
+
+        // ── flag OFF: the dark-behavior pin. Even a client that set
+        // WANT_NO_DELEG — the one case the RFC makes mandatory for a
+        // want-bit-aware server — gets the plain NONE arm, because a
+        // server with delegations switched off is not one.
+        {
+            let _g = crate::nfs::v4::state::with_delegations(false);
+            assert!(
+                ask(&handler, WANT_NO_DELEG).is_none(),
+                "the kill switch must not leak a NONE_EXT arm",
+            );
+            assert!(ask(&handler, WANT_READ).is_none());
+        }
+
+        // ── flag ON. No callback path is wired in this harness, so
+        // every grant is refused at rule 7 — which is exactly the
+        // point: the ANSWER differs by what the client asked, not by
+        // what the server decided.
+        let _g = crate::nfs::v4::state::with_delegations(true);
+        assert!(
+            !handler.state_mgr.recall_machinery_ready(),
+            "precondition: this harness cannot grant, so every leg below \
+             is a refusal and the want bits are the only variable",
+        );
+
+        assert_eq!(
+            ask(&handler, WANT_NO_DELEG),
+            Some(Delegation::NoneExt { why: WhyNoDelegation::NotWanted }),
+        );
+        assert_eq!(
+            ask(&handler, WANT_CANCEL),
+            Some(Delegation::NoneExt { why: WhyNoDelegation::Cancelled }),
+        );
+        // Asked for one and could not have it: the reason is the
+        // server's own state, not the client's request.
+        assert_eq!(
+            ask(&handler, WANT_READ),
+            Some(Delegation::NoneExt { why: WhyNoDelegation::Resource }),
+        );
+        // Asked nothing, so is told nothing. Same refusal underneath.
+        assert!(
+            ask(&handler, 0).is_none(),
+            "a client that set no WANT bit is owed no explanation",
+        );
+    }
+
     #[test]
     fn read_only_open_grants_no_delegation_by_default() {
         // Delegations are gated off (FLINT_NFS_DELEGATIONS unset): a
@@ -4109,7 +4260,7 @@ mod tests {
             openhow: OpenHow::NoCreate,
             claim: OpenClaim::Fh,
         };
-        let delegation = handler.try_grant_read_delegation(
+        let delegation = handler.deleg_answer(
             &ctx,
             1,
             &op,
@@ -4118,7 +4269,7 @@ mod tests {
             Some(std::path::Path::new("/x")),
             fh_mgr.get_root_fh().unwrap().data.as_slice(),
         );
-        assert_eq!(delegation, None);
+        assert!(delegation.is_none());
         assert_eq!(handler.state_mgr.delegations.live_count(), 0);
     }
 

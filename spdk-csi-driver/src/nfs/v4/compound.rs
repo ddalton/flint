@@ -816,10 +816,60 @@ pub struct OpenResult {
     pub delegation: Option<Delegation>,
 }
 
-#[derive(Debug, Clone)]
-pub struct Delegation {
-    pub delegation_type: u32,
-    pub stateid: StateId,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delegation {
+    /// OPEN_DELEGATE_READ (1) — the only type flint grants.
+    Read { stateid: StateId },
+    /// OPEN_DELEGATE_NONE_EXT (3) — "no delegation, and here is why"
+    /// (RFC 8881 §18.16.2). Emitted ONLY when the client set a
+    /// share_access WANT bit: NONE_EXT is also how a server signals
+    /// that it understands those bits at all, so sending it to a
+    /// client that never asked answers a question it did not pose.
+    NoneExt { why: WhyNoDelegation },
+}
+
+/// `why_no_delegation4` (RFC 8881 §18.16.2), narrowed to the reasons
+/// flint can actually give. The full enum has nine arms; carrying the
+/// five we never emit would be five untested encode paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhyNoDelegation {
+    /// WND4_NOT_WANTED — the client set WANT_NO_DELEG. The one case
+    /// the RFC makes mandatory for a want-bit-aware server.
+    NotWanted,
+    /// WND4_CONTENTION — someone else's use of the file stopped it:
+    /// a write open, a live conflicting record, the post-recall
+    /// cooldown.
+    Contention,
+    /// WND4_RESOURCE — the server could not, rather than would not:
+    /// quota, circuit breaker, kill switch, grace, no back-channel.
+    Resource,
+    /// WND4_CANCELLED — the client set WANT_CANCEL.
+    Cancelled,
+}
+
+impl WhyNoDelegation {
+    pub fn code(self) -> u32 {
+        match self {
+            WhyNoDelegation::NotWanted => 0,
+            WhyNoDelegation::Contention => 1,
+            WhyNoDelegation::Resource => 2,
+            WhyNoDelegation::Cancelled => 7,
+        }
+    }
+
+    /// The union arm. `open_none_delegation4` switches on ond_why and
+    /// only CONTENTION and RESOURCE carry a trailing bool; every other
+    /// case is `void`, and encoding a bool there would desynchronise
+    /// the whole rest of the compound for the client.
+    pub fn trailing_bool(self) -> Option<bool> {
+        match self {
+            // We never push a delegation at the client later...
+            WhyNoDelegation::Contention => Some(false),
+            // ...nor signal that one has become available.
+            WhyNoDelegation::Resource => Some(false),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2493,9 +2543,9 @@ impl CompoundResponse {
                         // are three parties — never make this arm
                         // live without DELEGRETURN decode shipped.
                         match &res.delegation {
-                            Some(d) if d.delegation_type == 1 => {
+                            Some(Delegation::Read { stateid }) => {
                                 encoder.encode_u32(1); // OPEN_DELEGATE_READ
-                                encoder.encode_stateid(&d.stateid);
+                                encoder.encode_stateid(stateid);
                                 encoder.encode_bool(false); // recall
                                 // One permissive nfsace4: ALLOW /
                                 // no flags / read mask / EVERYONE@.
@@ -2506,7 +2556,14 @@ impl CompoundResponse {
                                 encoder.encode_u32(0x0012_0089); // read set
                                 encoder.encode_string("EVERYONE@");
                             }
-                            _ => encoder.encode_u32(0), // OPEN_DELEGATE_NONE
+                            Some(Delegation::NoneExt { why }) => {
+                                encoder.encode_u32(3); // OPEN_DELEGATE_NONE_EXT
+                                encoder.encode_u32(why.code());
+                                if let Some(b) = why.trailing_bool() {
+                                    encoder.encode_bool(b);
+                                }
+                            }
+                            None => encoder.encode_u32(0), // OPEN_DELEGATE_NONE
                         }
                     }
                 }
@@ -3130,6 +3187,80 @@ mod deleg_wire_tests {
         assert_eq!(words[4], Nfs4Status::BadStateId as u32);
     }
 
+    /// OPEN_DELEGATE_NONE_EXT and its union, which is where an encoder
+    /// can quietly corrupt everything downstream of it.
+    ///
+    /// `open_none_delegation4` switches on ond_why and only
+    /// WND4_CONTENTION and WND4_RESOURCE carry a trailing bool — every
+    /// other arm is `void`. Encoding a bool on a void arm does not
+    /// produce a visible error: it shifts every following word of the
+    /// compound by four bytes, so the client mis-decodes the NEXT
+    /// operation's result and blames that. So the assertion that
+    /// matters here is the reply LENGTH, not the reason code.
+    #[test]
+    fn the_none_ext_arm_encodes_its_union_and_nothing_more() {
+        let mk = |deleg: Option<Delegation>| {
+            let mut resp = CompoundResponse::new();
+            resp.status = Nfs4Status::Ok;
+            resp.tag = String::new();
+            resp.results.push(OperationResult::Open(
+                Nfs4Status::Ok,
+                Some(OpenResult {
+                    stateid: StateId { seqid: 1, other: [1u8; 12] },
+                    change_info: ChangeInfo { atomic: true, before: 0, after: 0 },
+                    result_flags: 0,
+                    attrset: vec![],
+                    delegation: deleg,
+                }),
+            ));
+            let b = resp.encode();
+            b.chunks(4)
+                .map(|c| u32::from_be_bytes(c.try_into().unwrap()))
+                .collect::<Vec<u32>>()
+        };
+        let deleg_at = 5 + 4 + 5 + 1 + 1;
+
+        // WND4_NOT_WANTED — the DELEG4 case, and a VOID union arm.
+        let w = mk(Some(Delegation::NoneExt {
+            why: WhyNoDelegation::NotWanted,
+        }));
+        assert_eq!(w[deleg_at], 3, "OPEN_DELEGATE_NONE_EXT");
+        assert_eq!(w[deleg_at + 1], 0, "WND4_NOT_WANTED");
+        assert_eq!(
+            w.len(),
+            deleg_at + 2,
+            "a void union arm must add NOTHING after ond_why",
+        );
+
+        // WND4_CANCELLED — also void, and a different code, so this
+        // is not the previous case passing by coincidence.
+        let w = mk(Some(Delegation::NoneExt {
+            why: WhyNoDelegation::Cancelled,
+        }));
+        assert_eq!(w[deleg_at + 1], 7, "WND4_CANCELLED");
+        assert_eq!(w.len(), deleg_at + 2);
+
+        // WND4_CONTENTION — one bool, ond_server_will_push_deleg.
+        let w = mk(Some(Delegation::NoneExt {
+            why: WhyNoDelegation::Contention,
+        }));
+        assert_eq!(w[deleg_at + 1], 1, "WND4_CONTENTION");
+        assert_eq!(w.len(), deleg_at + 3, "CONTENTION carries one bool");
+        assert_eq!(w[deleg_at + 2], 0, "we never push a delegation later");
+
+        // WND4_RESOURCE — one bool, ond_server_will_signal_avail.
+        let w = mk(Some(Delegation::NoneExt {
+            why: WhyNoDelegation::Resource,
+        }));
+        assert_eq!(w[deleg_at + 1], 2, "WND4_RESOURCE");
+        assert_eq!(w.len(), deleg_at + 3, "RESOURCE carries one bool");
+        assert_eq!(w[deleg_at + 2], 0, "we never signal availability");
+
+        // And the plain NONE arm is still shorter than either — the
+        // three shapes are distinguishable on the wire by length alone.
+        assert_eq!(mk(None).len(), deleg_at + 1);
+    }
+
     /// A granted delegation actually reaches the wire: the OPEN result
     /// encodes OPEN_DELEGATE_READ + stateid + recall=false + one
     /// EVERYONE@ ALLOW ace — and without a grant the arm stays
@@ -3181,8 +3312,7 @@ mod deleg_wire_tests {
 
         // Granted: READ arm with the delegation stateid verbatim, then
         // recall=false, then the single permissive ace.
-        let b = mk(Some(Delegation {
-            delegation_type: 1,
+        let b = mk(Some(Delegation::Read {
             stateid: deleg_sid,
         }));
         let words: Vec<u32> = b

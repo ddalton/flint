@@ -1715,14 +1715,12 @@ impl CompoundDispatcher {
                             },
                             result_flags: res.result_flags,
                             attrset: res.attrset,
-                            // A granted READ delegation rides the OPEN
-                            // reply (design §4 wire delivery).
-                            delegation: res.delegation.map(|sid| {
-                                crate::nfs::v4::compound::Delegation {
-                                    delegation_type: 1, // OPEN_DELEGATE_READ
-                                    stateid: sid,
-                                }
-                            }),
+                            // The delegation arm rides the OPEN reply
+                            // (design §4 wire delivery), already in
+                            // wire shape — a granted READ delegation,
+                            // or NONE_EXT with the reason the client
+                            // asked for.
+                            delegation: res.delegation,
                         }))
                     } else {
                         OperationResult::Open(res.status, None)
@@ -5271,12 +5269,14 @@ mod tests {
             .await;
         let deleg_sid = match res {
             OperationResult::Open(Nfs4Status::Ok, Some(ref open_res)) => {
-                let d = open_res
+                match open_res
                     .delegation
                     .as_ref()
-                    .expect("a ready client must be GRANTED a read delegation");
-                assert_eq!(d.delegation_type, 1, "OPEN_DELEGATE_READ");
-                d.stateid
+                    .expect("a ready client must be GRANTED a read delegation")
+                {
+                    crate::nfs::v4::compound::Delegation::Read { stateid } => *stateid,
+                    other => panic!("expected OPEN_DELEGATE_READ, got {other:?}"),
+                }
             }
             other => panic!("expected a granted OPEN, got {other:?}"),
         };
@@ -5476,7 +5476,10 @@ mod tests {
             .await;
         let deleg_sid = match res {
             OperationResult::Open(Nfs4Status::Ok, Some(ref r)) => {
-                r.delegation.as_ref().expect("granted").stateid
+                match r.delegation.as_ref().expect("granted") {
+                    crate::nfs::v4::compound::Delegation::Read { stateid } => *stateid,
+                    other => panic!("expected OPEN_DELEGATE_READ, got {other:?}"),
+                }
             }
             other => panic!("expected grant, got {other:?}"),
         };

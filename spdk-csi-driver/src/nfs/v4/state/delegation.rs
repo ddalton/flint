@@ -318,6 +318,31 @@ pub enum GrantRefusal {
 }
 
 impl GrantRefusal {
+    /// The RFC 8881 §18.16.2 reason to put on the wire when the client
+    /// asked for a delegation with a WANT bit and this refusal is what
+    /// it got.
+    ///
+    /// `AlreadyHolder` is the inexact one and is worth naming: the
+    /// client is not contending with anybody, it simply already holds a
+    /// delegation on this file and flint does not re-hand the existing
+    /// one on a second OPEN. No `why_no_delegation4` code says that, so
+    /// it takes the closest available — something about the file's
+    /// current delegation state stopped the grant — rather than a code
+    /// that would be actively misleading.
+    pub fn why_no_delegation(self) -> crate::nfs::v4::compound::WhyNoDelegation {
+        use crate::nfs::v4::compound::WhyNoDelegation as W;
+        match self {
+            // Ours, not the client's: a limit we chose.
+            GrantRefusal::QuotaClient | GrantRefusal::QuotaGlobal => W::Resource,
+            // Another party's hold on the file.
+            GrantRefusal::Barrier
+            | GrantRefusal::MutationPending
+            | GrantRefusal::Cooldown
+            | GrantRefusal::Precheck
+            | GrantRefusal::AlreadyHolder => W::Contention,
+        }
+    }
+
     pub fn counter_name(self) -> &'static str {
         match self {
             GrantRefusal::Barrier => "barrier",
