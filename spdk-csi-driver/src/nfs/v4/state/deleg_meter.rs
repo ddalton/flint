@@ -100,6 +100,13 @@ pub struct DelegMeter {
     revoked_lease_expired: AtomicU64,
     seq4_path_down: AtomicU64,
     seq4_state_revoked: AtomicU64,
+    /// `deleg_rearm_total` — back-channel rebinds that woke at least
+    /// one ladder parked in its CB_PATH_DOWN window. Counted at the
+    /// FIRE, not at the bind: a bind for a client with nothing parked
+    /// is an ordinary mount, and counting it would bury the signal
+    /// this exists to show — that a reconnect turned a would-be
+    /// revocation back into a recall.
+    rearm: AtomicU64,
     recall_latency_sum_ms: AtomicU64,
     recall_latency_count: AtomicU64,
     recall_latency_buckets: [AtomicU64; RECALL_LATENCY_BUCKETS_MS.len()],
@@ -150,6 +157,15 @@ impl DelegMeter {
         if flag & seq4_status::RECALLABLE_STATE_REVOKED != 0 {
             self.seq4_state_revoked.fetch_add(1, Relaxed);
         }
+    }
+
+    /// A rebind re-drove parked ladders for one client.
+    pub fn note_rearm(&self) {
+        self.rearm.fetch_add(1, Relaxed);
+    }
+
+    pub fn rearm_total(&self) -> u64 {
+        self.rearm.load(Relaxed)
     }
 
     pub fn note_delay(&self, site: &'static str) {
@@ -268,6 +284,7 @@ pub struct DelegMeterTotals {
     pub returned: u64,
     pub revoked: u64,
     pub delays: u64,
+    pub rearms: u64,
 }
 
 impl DelegMeterTotals {
@@ -283,7 +300,7 @@ impl DelegMeterTotals {
     /// rigs grep this, so the field names are part of the contract.
     pub fn render(&self, outstanding: u64, under_recall: u64, p99_ms: Option<u64>) -> String {
         format!(
-            "granted +{} refused +{} · recall sent +{} acked +{} timeout +{} refused +{} path_down +{} disown +{} · returned +{} revoked +{} · delay +{} · outstanding {} under_recall {} · recall p99 {}",
+            "granted +{} refused +{} · recall sent +{} acked +{} timeout +{} refused +{} path_down +{} disown +{} · returned +{} revoked +{} · delay +{} rearm +{} · outstanding {} under_recall {} · recall p99 {}",
             self.granted,
             self.refused,
             self.recall_sent,
@@ -295,6 +312,7 @@ impl DelegMeterTotals {
             self.returned,
             self.revoked,
             self.delays,
+            self.rearms,
             outstanding,
             under_recall,
             // "n/a" rather than 0: no observations is not a fast p99,
@@ -319,6 +337,7 @@ impl DelegMeterTotals {
             returned: self.returned.saturating_sub(prev.returned),
             revoked: self.revoked.saturating_sub(prev.revoked),
             delays: self.delays.saturating_sub(prev.delays),
+            rearms: self.rearms.saturating_sub(prev.rearms),
         }
     }
 }

@@ -214,6 +214,11 @@ impl RecallDriver {
         let mut first_transmit: Option<Instant> = None;
         let mut disown_seen = false;
         let mut rung = 0usize;
+        // Held for the task's whole life so the signal exists across
+        // every window we might be woken in — minting it lazily at the
+        // first failure would leave a gap where a rebind fires into an
+        // empty map and is lost.
+        let rearm = self.state_mgr.delegations.rearm_signal(order.client_id);
 
         loop {
             // The recheck (model: LadderRecheck). Gone or revoked or —
@@ -242,6 +247,9 @@ impl RecallDriver {
                 }
             }
 
+            // Read BEFORE the send: a rebind that lands while the send
+            // is in flight must not be slept through (see RearmSignal).
+            let rearm_epoch = rearm.epoch();
             let outcome = self
                 .sender
                 .send_recall(
@@ -352,7 +360,18 @@ impl RecallDriver {
                         }
                         return;
                     }
-                    tokio::time::sleep(self.cfg.path_retry).await;
+                    // Park on the rearm signal, not just the timer: a
+                    // reconnect re-drives here immediately instead of
+                    // costing the fenced writer another `path_retry` of
+                    // DELAY cycles. The timer remains the floor, so a
+                    // client that never comes back still walks the
+                    // window out to the revoke.
+                    if rearm.wait(rearm_epoch, self.cfg.path_retry).await {
+                        debug!(
+                            "deleg ladder: {:?} rearmed by a back-channel rebind — retrying now",
+                            order.stateid
+                        );
+                    }
                     continue;
                 }
                 Err(e) => {
@@ -668,6 +687,142 @@ mod tests {
         state_mgr.delegations.return_delegation(&stateid).unwrap();
         tokio::time::sleep(Duration::from_secs(120)).await;
         assert_eq!(state_mgr.seq_flags(7), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rebind_wakes_a_parked_ladder_instead_of_waiting_out_the_retry_timer() {
+        // CONTROL FIRST, and it is not a formality: the treatment leg
+        // below asserts the second attempt lands 1s after the first,
+        // and that number means nothing unless the timer alone would
+        // have put it somewhere else. This leg pins where.
+        let (sm_c, _sid_c, orders_c) = granted_and_recalled();
+        let sender_c = MockSender::new(vec![
+            Err(CallbackError::ConnectionClosed),
+            reply(Nfs4Status::Ok),
+        ]);
+        let d_c = driver(&sm_c, Arc::clone(&sender_c));
+        d_c.spawn_recalls(orders_c);
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        let t_c = sender_c.call_times();
+        assert_eq!(t_c.len(), 2);
+        assert_eq!(
+            t_c[1] - t_c[0],
+            Duration::from_secs(5),
+            "control: with no rebind the retry timer is the only wake",
+        );
+        assert_eq!(sm_c.delegations.meter().rearm_total(), 0);
+
+        // TREATMENT: identical script, but the client rebinds at +1s.
+        let (sm, stateid, orders) = granted_and_recalled();
+        let sender = MockSender::new(vec![
+            Err(CallbackError::ConnectionClosed),
+            reply(Nfs4Status::Ok),
+        ]);
+        let d = driver(&sm, Arc::clone(&sender));
+        d.spawn_recalls(orders);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        sm.delegations.note_rearm(7);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let t = sender.call_times();
+        assert_eq!(t.len(), 2, "the rebind re-drove the recall");
+        assert_eq!(
+            t[1] - t[0],
+            Duration::from_secs(1),
+            "the rebind, not the 5s timer, is what woke the ladder",
+        );
+        assert_eq!(
+            sm.delegations.snapshot(&stateid).unwrap().state,
+            DelegState::RecallAcked,
+        );
+        assert_eq!(sm.delegations.meter().rearm_total(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rebind_landing_before_the_park_is_caught_by_the_epoch() {
+        // The race the epoch exists for. The ladder reads the epoch,
+        // its send fails, and the rebind lands in the gap BEFORE it
+        // parks — so `notify_waiters` fires with no waiter registered
+        // and wakes nobody. Only the counter can catch this, and it is
+        // the single epoch read in `wait` that does: delete it and
+        // this test sleeps out the hour below.
+        let sm = Arc::new(StateManager::new_in_memory(""));
+        let sig = sm.delegations.rearm_signal(7);
+        let since = sig.epoch();
+        sm.delegations.note_rearm(7);
+
+        // An hour of budget makes the failure unmissable: without the
+        // epoch re-read, the paused clock jumps the whole hour and
+        // `wait` comes back false.
+        let t0 = Instant::now();
+        assert!(
+            sig.wait(since, Duration::from_secs(3600)).await,
+            "a rebind that landed before the park must not be slept through",
+        );
+        assert_eq!(Instant::now() - t0, Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cb_path_down_outlives_the_ladder_and_only_a_rebind_takes_it_down() {
+        let (state_mgr, _stateid, orders) = granted_and_recalled();
+        let session = state_mgr
+            .sessions
+            .create_session(7, 0, 0, 10, 4096, 4096, 8, 10, 0x4000_0000, None, 1);
+        // Never reachable: the ladder walks the window out and revokes.
+        let sender = MockSender::new(vec![]);
+        let d = driver(&state_mgr, Arc::clone(&sender));
+        d.spawn_recalls(orders);
+        tokio::time::sleep(Duration::from_secs(60)).await;
+
+        // The ladder has revoked and RETURNED. The bit it raised is
+        // still on every SEQUENCE reply and — before this change —
+        // nothing left in the server had any reason to lower it. That
+        // is the state a client sits in once its network heals: told
+        // to repair a path that is already fine, for the rest of its
+        // life. RFC 8881 §2.10.4 makes BIND_CONN_TO_SESSION the
+        // client's response to the bit, so the stuck bit drives the
+        // repair in a loop.
+        assert_ne!(
+            state_mgr.seq_flags(7) & seq4_status::CB_PATH_DOWN,
+            0,
+            "precondition: the ladder left the bit up",
+        );
+
+        state_mgr.note_back_channel_bound(&session.session_id);
+        assert_eq!(state_mgr.seq_flags(7) & seq4_status::CB_PATH_DOWN, 0);
+
+        // ...and it clears ONLY that. The client still holds a revoked
+        // delegation it has not been told about, and that bit is a
+        // different fact with a different resolution (FREE_STATEID).
+        assert_ne!(
+            state_mgr.seq_flags(7) & seq4_status::RECALLABLE_STATE_REVOKED,
+            0,
+            "a healed back-channel does not un-revoke anything",
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rebind_is_scoped_to_the_client_that_rebound() {
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let s7 = state_mgr
+            .sessions
+            .create_session(7, 0, 0, 10, 4096, 4096, 8, 10, 0x4000_0000, None, 1);
+        state_mgr.raise_seq_flags(7, seq4_status::CB_PATH_DOWN);
+        state_mgr.raise_seq_flags(8, seq4_status::CB_PATH_DOWN);
+
+        state_mgr.note_back_channel_bound(&s7.session_id);
+        assert_eq!(state_mgr.seq_flags(7) & seq4_status::CB_PATH_DOWN, 0);
+        assert_ne!(
+            state_mgr.seq_flags(8) & seq4_status::CB_PATH_DOWN,
+            0,
+            "one client's reconnect says nothing about another's path",
+        );
+
+        // An unknown session resolves to no client and must be inert
+        // rather than clearing something at random.
+        let bogus = crate::nfs::v4::protocol::SessionId([0xab; 16]);
+        state_mgr.note_back_channel_bound(&bogus);
+        assert_ne!(state_mgr.seq_flags(8) & seq4_status::CB_PATH_DOWN, 0);
     }
 
     #[tokio::test(start_paused = true)]

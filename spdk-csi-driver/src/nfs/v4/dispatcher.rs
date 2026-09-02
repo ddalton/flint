@@ -194,7 +194,12 @@ impl CompoundDispatcher {
     /// up `Arc<BackChannelWriter>` by session id and emit callback
     /// frames. Returning the `Arc` keeps the lifetime decoupled from
     /// `&self` and lets long-lived background tasks cache it.
-    /// Register one more back-channel writer for a session, idempotently.
+    /// Register one more back-channel writer for a session,
+    /// idempotently. Returns true iff this writer was NOT already
+    /// registered — the caller uses that to distinguish a real rebind
+    /// (a reconnect after the old writer was reaped) from the same
+    /// connection re-announcing itself, which is not an event and must
+    /// not lower CB_PATH_DOWN.
     fn bind_back_channel(
         map: &Arc<dashmap::DashMap<
             crate::nfs::v4::protocol::SessionId,
@@ -202,12 +207,14 @@ impl CompoundDispatcher {
         >>,
         session: crate::nfs::v4::protocol::SessionId,
         bcw: &Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
-    ) {
+    ) -> bool {
         bcw.mark_back_channel();
         let mut entry = map.entry(session).or_default();
-        if !entry.iter().any(|w| Arc::ptr_eq(w, bcw)) {
-            entry.push(Arc::clone(bcw));
+        if entry.iter().any(|w| Arc::ptr_eq(w, bcw)) {
+            return false;
         }
+        entry.push(Arc::clone(bcw));
+        true
     }
 
     pub fn back_channels(
@@ -980,7 +987,9 @@ impl CompoundDispatcher {
                     // ever disagreeing again.
                     if res.back_chan_bound {
                         if let Some(bcw) = context.back_channel.as_ref() {
-                            Self::bind_back_channel(&self.back_channels, res.sessionid, bcw);
+                            if Self::bind_back_channel(&self.back_channels, res.sessionid, bcw) {
+                                self.state_mgr.note_back_channel_bound(&res.sessionid);
+                            }
                             info!(
                                 "CREATE_SESSION: back channel ACCEPTED for session {:?} — \
                                  csr_flags echoes CONN_BACK_CHAN, callbacks will use this connection",
@@ -1114,7 +1123,9 @@ impl CompoundDispatcher {
                     const CDFC_BOTH: u32 = 3;
                     if dir == CDFC_BACK || dir == CDFC_BOTH {
                         if let Some(bcw) = context.back_channel.as_ref() {
-                            Self::bind_back_channel(&self.back_channels, sessionid, bcw);
+                            if Self::bind_back_channel(&self.back_channels, sessionid, bcw) {
+                                self.state_mgr.note_back_channel_bound(&sessionid);
+                            }
                             info!(
                                 "BIND_CONN_TO_SESSION: registered back-channel writer for session {:?}",
                                 sessionid,
@@ -5017,6 +5028,75 @@ mod tests {
             "a conversion open with an unknown delegation stateid must answer \
              BAD_STATEID, got {res:?}",
         );
+    }
+
+    /// Rearm-on-rebind is an EVENT, and `bind_back_channel`'s return
+    /// value is what makes it one (design §5.4). The registry is
+    /// idempotent — the same connection re-announcing itself is
+    /// ordinary v4.1 traffic — so if every call counted as a rebind,
+    /// CB_PATH_DOWN would come down on traffic over the very
+    /// connection whose CB_RECALL just failed, and the bit would be
+    /// unable to mean anything.
+    #[tokio::test]
+    async fn only_a_genuinely_new_writer_counts_as_a_rebind() {
+        use crate::nfs::v4::protocol::seq4_status::CB_PATH_DOWN;
+
+        let (dispatcher, _t) = create_test_dispatcher();
+        let session = dispatcher
+            .state_mgr
+            .sessions
+            .create_session(42, 0, 0, 65536, 65536, 16384, 16, 16, 0x4000_0000, None, 1);
+        let sid = session.session_id;
+        let mk_writer = || async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (conn, acc) =
+                tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept());
+            let (_r, w) = conn.unwrap().into_split();
+            std::mem::forget(acc.unwrap());
+            crate::nfs::v4::back_channel::BackChannelWriter::new(
+                tokio::io::BufWriter::new(w),
+            )
+        };
+
+        let w1 = mk_writer().await;
+        dispatcher.state_mgr.raise_seq_flags(42, CB_PATH_DOWN);
+        assert!(
+            CompoundDispatcher::bind_back_channel(&dispatcher.back_channels, sid, &w1),
+            "first bind of a writer is new",
+        );
+        dispatcher.state_mgr.note_back_channel_bound(&sid);
+        assert_eq!(dispatcher.state_mgr.seq_flags(42) & CB_PATH_DOWN, 0);
+
+        // The same connection announcing itself again. Not an event —
+        // and the assertion that matters is the one on the FLAG, not
+        // on the bool: a caller that ignored the bool would leave this
+        // green while lowering the bit on every SEQUENCE.
+        dispatcher.state_mgr.raise_seq_flags(42, CB_PATH_DOWN);
+        assert!(
+            !CompoundDispatcher::bind_back_channel(&dispatcher.back_channels, sid, &w1),
+            "re-announcing a registered writer is not a rebind",
+        );
+        assert_ne!(
+            dispatcher.state_mgr.seq_flags(42) & CB_PATH_DOWN,
+            0,
+            "an idempotent re-bind must leave CB_PATH_DOWN standing",
+        );
+
+        // Now the reconnect the feature is for: the dead writer is
+        // reaped (server_v4's InflightGuard does this on every
+        // connection exit) and a fresh one binds.
+        dispatcher.back_channels.retain(|_, ws| {
+            ws.retain(|w| !Arc::ptr_eq(w, &w1));
+            !ws.is_empty()
+        });
+        let w2 = mk_writer().await;
+        assert!(
+            CompoundDispatcher::bind_back_channel(&dispatcher.back_channels, sid, &w2),
+            "a reconnect after the reap IS a rebind",
+        );
+        dispatcher.state_mgr.note_back_channel_bound(&sid);
+        assert_eq!(dispatcher.state_mgr.seq_flags(42) & CB_PATH_DOWN, 0);
     }
 
     /// callback_ready IS THE GRANT GATE'S RULE 7 (design doc §4): each

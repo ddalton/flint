@@ -341,6 +341,66 @@ pub struct DelegSnapshot {
     pub truncate: bool,
 }
 
+/// The back-channel rearm signal for one client (design §5.4,
+/// "rearm-on-rebind").
+///
+/// A recall ladder whose CB_RECALL found no live transport parks in
+/// the CB_PATH_DOWN window and retries on a timer. The timer alone is
+/// enough to be CORRECT — a rebind before the window closes makes some
+/// later retry succeed — but it costs up to one full `path_retry` of
+/// avoidable DELAY cycles for whichever writer is being fenced, and on
+/// a fleet every parked ladder wakes on the same cadence whether or
+/// not anything changed.
+///
+/// The epoch is what makes this race-free, and it is not optional. A
+/// rebind landing between the failed send and the ladder's wait is
+/// otherwise LOST: the notification fires with no waiter registered,
+/// the ladder then parks, and the very event it was waiting for has
+/// already gone by. So the ladder reads the epoch BEFORE its send and
+/// re-reads it after registering — the counter catches what the
+/// notification cannot.
+#[derive(Default)]
+pub struct RearmSignal {
+    epoch: AtomicU64,
+    notify: tokio::sync::Notify,
+}
+
+impl RearmSignal {
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Relaxed)
+    }
+
+    fn fire(&self) {
+        self.epoch.fetch_add(1, Ordering::Relaxed);
+        self.notify.notify_waiters();
+    }
+
+    /// Park until a rebind or `dur`, whichever lands first. `since` is
+    /// the epoch read before the send that failed. Returns true iff a
+    /// rebind is what woke us.
+    ///
+    /// Register, THEN read the epoch — the order is the whole
+    /// argument, and one check in this position covers every case:
+    /// a rebind before the load is seen by the load, and one after
+    /// registration is delivered to a waiter that is already there.
+    /// There is no third window. (An earlier draft also had a
+    /// fast-path check before registering; it caught nothing this
+    /// one misses, and it made the real guard impossible to
+    /// red-prove — a deleted `if` that no test noticed.)
+    pub async fn wait(&self, since: u64, dur: Duration) -> bool {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        // `Notified` otherwise registers on its first poll — which
+        // happens inside the timeout below, after the epoch read —
+        // and a rebind in that gap would wake nobody.
+        notified.as_mut().enable();
+        if self.epoch() != since {
+            return true;
+        }
+        tokio::time::timeout(dur, notified).await.is_ok()
+    }
+}
+
 pub struct DelegationManager {
     files: Arc<DashMap<FileId, Arc<Mutex<FileEntry>>>>,
     /// stateid.other → file, so per-stateid ops are point lookups.
@@ -415,6 +475,11 @@ pub struct DelegationManager {
     /// a pod roll with grants outstanding is the silent-stale
     /// scenario (the model's NoEvidence counterexample).
     evidence: std::sync::OnceLock<Arc<dyn Fn(u64, bool) + Send + Sync>>,
+    /// Per-client back-channel rearm signals, created on demand by the
+    /// ladder that needs one. Absent means nothing is parked for that
+    /// client, so a bind fires nothing — which is why an ordinary
+    /// mount does not tick `deleg_rearm_total`.
+    rearm: DashMap<u64, Arc<RearmSignal>>,
 }
 
 /// Breaker window (design §10: revocations within 5 minutes).
@@ -462,12 +527,32 @@ impl DelegationManager {
             breaker_client_trip: env_u64("FLINT_NFS_DELEG_CLIENT_REVOKE_TRIP", 3) as usize,
             sentinel_cache: Mutex::new(None),
             evidence: std::sync::OnceLock::new(),
+            rearm: DashMap::new(),
         }
     }
 
     /// Install the holder-evidence sink (StateManager, once).
     pub fn install_evidence(&self, sink: Arc<dyn Fn(u64, bool) + Send + Sync>) {
         let _ = self.evidence.set(sink);
+    }
+
+    /// The rearm signal for a client, minted on first ask. The ladder
+    /// takes one at task start and holds it for its life, so the
+    /// signal exists across the whole window it might be woken in.
+    pub fn rearm_signal(&self, client_id: u64) -> Arc<RearmSignal> {
+        self.rearm
+            .entry(client_id)
+            .or_insert_with(|| Arc::new(RearmSignal::default()))
+            .clone()
+    }
+
+    /// A back-channel writer was newly bound for this client: wake
+    /// every ladder parked in its CB_PATH_DOWN window.
+    pub fn note_rearm(&self, client_id: u64) {
+        if let Some(sig) = self.rearm.get(&client_id) {
+            sig.fire();
+            self.meter.note_rearm();
+        }
     }
 
     /// Re-evaluate and report the client's holds-recallable-state
@@ -1068,6 +1153,7 @@ impl DelegationManager {
             self.gc_entry(ident);
         }
         self.live_per_client.remove(&client_id);
+        self.rearm.remove(&client_id);
         self.note_evidence(client_id);
         if !freed.is_empty() {
             info!(
@@ -1178,6 +1264,7 @@ impl DelegationManager {
             returned: m.delegreturn.load(Ordering::Relaxed),
             revoked: m.revoked_total(),
             delays: m.delays_total(),
+            rearms: m.rearm_total(),
         }
     }
 

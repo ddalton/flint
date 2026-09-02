@@ -551,6 +551,41 @@ impl StateManager {
         }
     }
 
+    /// A back-channel writer was NEWLY bound for `session_id` — a
+    /// CREATE_SESSION whose reply echoed CONN_BACK_CHAN, or a
+    /// BIND_CONN_TO_SESSION with dir BACK/BOTH. Two things follow, and
+    /// design §5.4 ("rearm-on-rebind") wants both:
+    ///
+    /// 1. **CB_PATH_DOWN comes down.** The bit is level-triggered, and
+    ///    until this existed the only site that lowered it was a
+    ///    recall that later succeeded. A client whose channel died,
+    ///    whose recall then revoked, and whose ladder exited therefore
+    ///    carried the bit on EVERY SEQUENCE reply for the rest of its
+    ///    life — asserting a broken path long after it was repaired.
+    ///    RFC 8881 §2.10.4 makes BIND_CONN_TO_SESSION the client's
+    ///    prescribed response to the bit, so a stuck bit does not just
+    ///    misinform: it drives the repair operation in a loop, and the
+    ///    loop's every iteration lands right back here.
+    /// 2. **Parked ladders re-drive at once** instead of up to one
+    ///    `path_retry` later — the difference between a reconnect
+    ///    completing a recall and a conflicting writer eating another
+    ///    round of DELAY.
+    ///
+    /// Called only on a genuinely new writer. An idempotent re-bind of
+    /// a connection already in the registry is not an event: treating
+    /// it as one would lower CB_PATH_DOWN on traffic over the very
+    /// connection whose send just failed.
+    pub fn note_back_channel_bound(&self, session_id: &crate::nfs::v4::protocol::SessionId) {
+        let Some(client_id) = self.sessions.get_session(session_id).map(|s| s.client_id) else {
+            return;
+        };
+        self.lower_seq_flags(
+            client_id,
+            crate::nfs::v4::protocol::seq4_status::CB_PATH_DOWN,
+        );
+        self.delegations.note_rearm(client_id);
+    }
+
     /// Clear SEQ4_STATUS_* bits for a client (the condition resolved —
     /// e.g. its last revoked delegation was freed, or a backchannel
     /// rebind ended CB_PATH_DOWN).
