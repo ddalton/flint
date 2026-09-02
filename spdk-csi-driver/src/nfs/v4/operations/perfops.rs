@@ -2070,6 +2070,9 @@ mod tests {
         fn is_pnfs_managed(&self, file_key: &str) -> bool {
             self.0.contains(file_key)
         }
+        fn write_layout_holders(&self, _file_key: &str) -> Vec<u64> {
+            Vec::new()
+        }
     }
 
     /// An MDS-role handler in whose export `pinned` are striped files.

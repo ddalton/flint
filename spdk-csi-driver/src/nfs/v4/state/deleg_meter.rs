@@ -88,6 +88,13 @@ impl RevokeReason {
 #[derive(Debug, Default)]
 pub struct DelegMeter {
     pub cb_recall_sent: AtomicU64,
+    /// CB_COMPOUNDs that carried MORE than one CB_RECALL (design §5.4
+    /// batching), and the recalls they carried. A compound of one is
+    /// the unbatched path and is not counted here, so against a
+    /// Linux client (back-channel maxops 2) both stay at zero —
+    /// which is the honest reading, not a defect.
+    recall_batches: AtomicU64,
+    recall_batched_ops: AtomicU64,
     outcome_acked: AtomicU64,
     outcome_timeout: AtomicU64,
     outcome_refused: AtomicU64,
@@ -120,6 +127,23 @@ pub struct DelegMeter {
 impl DelegMeter {
     pub fn note_recall_sent(&self) {
         self.cb_recall_sent.fetch_add(1, Relaxed);
+    }
+
+    /// One batched compound went out carrying `n` recalls. `n <= 1`
+    /// is not a batch and is not counted.
+    pub fn note_recall_batch(&self, n: u64) {
+        if n > 1 {
+            self.recall_batches.fetch_add(1, Relaxed);
+            self.recall_batched_ops.fetch_add(n, Relaxed);
+        }
+    }
+
+    pub fn recall_batches(&self) -> u64 {
+        self.recall_batches.load(Relaxed)
+    }
+
+    pub fn recall_batched_ops(&self) -> u64 {
+        self.recall_batched_ops.load(Relaxed)
     }
 
     pub fn note_outcome(&self, o: RecallOutcome) {
@@ -285,6 +309,8 @@ pub struct DelegMeterTotals {
     pub revoked: u64,
     pub delays: u64,
     pub rearms: u64,
+    /// Batched compounds (>1 CB_RECALL each).
+    pub batches: u64,
 }
 
 impl DelegMeterTotals {
@@ -300,7 +326,7 @@ impl DelegMeterTotals {
     /// rigs grep this, so the field names are part of the contract.
     pub fn render(&self, outstanding: u64, under_recall: u64, p99_ms: Option<u64>) -> String {
         format!(
-            "granted +{} refused +{} · recall sent +{} acked +{} timeout +{} refused +{} path_down +{} disown +{} · returned +{} revoked +{} · delay +{} rearm +{} · outstanding {} under_recall {} · recall p99 {}",
+            "granted +{} refused +{} · recall sent +{} acked +{} timeout +{} refused +{} path_down +{} disown +{} · returned +{} revoked +{} · delay +{} rearm +{} batched +{} · outstanding {} under_recall {} · recall p99 {}",
             self.granted,
             self.refused,
             self.recall_sent,
@@ -313,6 +339,7 @@ impl DelegMeterTotals {
             self.revoked,
             self.delays,
             self.rearms,
+            self.batches,
             outstanding,
             under_recall,
             // "n/a" rather than 0: no observations is not a fast p99,
@@ -333,7 +360,7 @@ impl DelegMeterTotals {
                 ),
                 Some(ms) => format!("{}ms", ms),
                 None => "n/a".to_string(),
-            }
+            },
         )
     }
 
@@ -351,6 +378,7 @@ impl DelegMeterTotals {
             revoked: self.revoked.saturating_sub(prev.revoked),
             delays: self.delays.saturating_sub(prev.delays),
             rearms: self.rearms.saturating_sub(prev.rearms),
+            batches: self.batches.saturating_sub(prev.batches),
         }
     }
 }

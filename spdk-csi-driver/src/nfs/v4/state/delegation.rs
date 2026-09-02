@@ -53,6 +53,51 @@ pub fn delegations_enabled() -> bool {
 /// the real dispatcher.
 static DELEG_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
+/// The MDS-posture gate (design §3/§10, slice 5):
+/// `FLINT_NFS_DELEGATIONS_PNFS=1`, read once. A server running the MDS
+/// role grants only when BOTH this and [`delegations_enabled`] hold —
+/// so fleet enablement cannot leak in via Helm values copied from a
+/// standalone hub. Standalone hubs ignore it entirely.
+///
+/// Why a second flag rather than one: the MDS posture has a mutation
+/// lane no standalone server has — a client holding a write-capable
+/// layout writes straight to the data servers, and the MDS never sees
+/// a byte of it. Granting there is safe only with grant rule 6 (no
+/// foreign write-capable layout, consulted through the layout index)
+/// and the LAYOUTGET / LAYOUTCOMMIT / proxied-WRITE fences in place;
+/// the flag exists so that machinery can be validated on the pNFS rig
+/// before a fleet ever grants.
+pub fn pnfs_delegations_enabled() -> bool {
+    match PNFS_OVERRIDE.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *ENABLED.get_or_init(|| {
+                std::env::var("FLINT_NFS_DELEGATIONS_PNFS")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false)
+            })
+        }
+    }
+}
+
+static PNFS_OVERRIDE: AtomicU8 = AtomicU8::new(0);
+
+/// Force the MDS-posture gate for tests. Same discipline as
+/// [`override_delegations_enabled`]: hold the flag lock, or use
+/// [`with_delegations_pnfs`].
+pub fn override_pnfs_delegations_enabled(on: Option<bool>) {
+    PNFS_OVERRIDE.store(
+        match on {
+            None => 0,
+            Some(true) => 1,
+            Some(false) => 2,
+        },
+        Ordering::Relaxed,
+    );
+}
+
 /// Force the delegation gate for tests (process-wide; tests that flip
 /// it on must tolerate fence consults running everywhere).
 ///
@@ -101,12 +146,23 @@ pub struct DelegFlagGuard {
 impl Drop for DelegFlagGuard {
     fn drop(&mut self) {
         override_delegations_enabled(None);
+        override_pnfs_delegations_enabled(None);
     }
 }
 
 pub fn with_delegations(on: bool) -> DelegFlagGuard {
     let lock = deleg_flag_exclusive();
     override_delegations_enabled(Some(on));
+    DelegFlagGuard { _lock: lock }
+}
+
+/// Both gates at once, under the one lock. `pnfs` is the MDS-posture
+/// flag; a standalone server never consults it, so tests of the
+/// standalone grant path pass `false` and lose nothing.
+pub fn with_delegations_pnfs(on: bool, pnfs: bool) -> DelegFlagGuard {
+    let lock = deleg_flag_exclusive();
+    override_delegations_enabled(Some(on));
+    override_pnfs_delegations_enabled(Some(pnfs));
     DelegFlagGuard { _lock: lock }
 }
 
@@ -230,6 +286,42 @@ pub struct MutationGuard {
     entry: Arc<Mutex<FileEntry>>,
     files: Arc<DashMap<FileId, Arc<Mutex<FileEntry>>>>,
     ident: FileId,
+    /// Who is mutating (None = a server-local lane, for which every
+    /// holder is foreign).
+    mutator: Option<u64>,
+    /// Whether the mutation actually EXECUTED under this guard — set
+    /// only on the Proceed arms. A guard minted for a DELAYed
+    /// conflictor is dropped with foreign records legitimately still
+    /// under recall, and must not assert anything about them.
+    checked: bool,
+}
+
+impl MutationGuard {
+    /// Arm the release-time exclusivity check (design §9, "a
+    /// write-time debug assert in the fence"). Called on the arms that
+    /// proceed with the mutation; see [`Drop`].
+    pub(crate) fn arm_exclusivity_check(&mut self) {
+        self.checked = true;
+    }
+
+    /// The write-time invariant, checked at RELEASE: a mutation that
+    /// executed under this guard must finish with no foreign live
+    /// delegation on the file. Everything that could violate it is
+    /// refused while the guard is held (the grant's under-lock
+    /// re-check refuses on `live_guards > 0`), so a violation here
+    /// means the fence protocol itself has a hole — the transient
+    /// window a post-hoc invariant scan cannot see, because the guard
+    /// is gone by the time the scan runs.
+    ///
+    /// Only records of OTHER clients count: the self-conflict carve-out
+    /// proceeds with the mutator's own record under recall by design.
+    /// Revoked tombstones do not count: they are not live state.
+    fn foreign_live_at_release(&self, e: &FileEntry) -> Option<(u64, DelegState)> {
+        e.records
+            .iter()
+            .find(|r| Some(r.client_id) != self.mutator && r.state != DelegState::Revoked)
+            .map(|r| (r.client_id, r.state))
+    }
 }
 
 impl Drop for MutationGuard {
@@ -237,6 +329,24 @@ impl Drop for MutationGuard {
         {
             let mut e = self.entry.lock().unwrap();
             debug_assert!(e.live_guards > 0);
+            if self.checked {
+                if let Some((client, state)) = self.foreign_live_at_release(&e) {
+                    debug_assert!(
+                        false,
+                        "deleg fence hole: mutation on {:?} by {:?} executed while client {} \
+                         held a {:?} delegation — a foreign live record survived the fence",
+                        self.ident, self.mutator, client, state
+                    );
+                    // Release builds: loud, never silent. The mutation
+                    // already happened; the holder's cache is stale and
+                    // only a recall can say so.
+                    warn!(
+                        "deleg: mutation on {:?} by {:?} executed with client {} holding a {:?} \
+                         delegation — fence protocol violated",
+                        self.ident, self.mutator, client, state
+                    );
+                }
+            }
             e.live_guards = e.live_guards.saturating_sub(1);
         }
         gc_map_entry(&self.files, self.ident);
@@ -443,7 +553,10 @@ pub struct DelegationManager {
     live_global: AtomicU64,
     max_per_client: u64,
     max_global: u64,
-    cooldown: Duration,
+    /// Post-recall cooldown, in milliseconds (design §4 rule 8). Atomic
+    /// so the concurrency stress can shorten it on a fully-wired
+    /// StateManager; production never writes it after construction.
+    cooldown_ms: AtomicU64,
     /// Per-reason grant refusals (metrics surface reads these).
     refusals: DashMap<&'static str, u64>,
     /// §10 recall/return/revoke/delay/SEQ4 metering. Lives here so
@@ -538,7 +651,7 @@ impl DelegationManager {
             live_global: AtomicU64::new(0),
             max_per_client,
             max_global,
-            cooldown,
+            cooldown_ms: AtomicU64::new(cooldown.as_millis() as u64),
             refusals: DashMap::new(),
             meter: std::sync::Arc::new(super::deleg_meter::DelegMeter::default()),
             grants_total: AtomicU64::new(0),
@@ -554,6 +667,18 @@ impl DelegationManager {
             evidence: std::sync::OnceLock::new(),
             rearm: DashMap::new(),
         }
+    }
+
+    fn cooldown(&self) -> Duration {
+        Duration::from_millis(self.cooldown_ms.load(Ordering::Relaxed))
+    }
+
+    /// Override the post-recall cooldown (tests and rigs). The shipped
+    /// value is 30s; a stress that wants grants to flow again inside
+    /// its run needs it near zero.
+    pub fn set_cooldown(&self, d: Duration) {
+        self.cooldown_ms
+            .store(d.as_millis() as u64, Ordering::Relaxed);
     }
 
     /// Install the holder-evidence sink (StateManager, once).
@@ -849,13 +974,16 @@ impl DelegationManager {
     ) -> FenceOutcome {
         self.with_live_entry(ident, |entry, e| {
             e.live_guards += 1;
-            let guard = MutationGuard {
+            let mut guard = MutationGuard {
                 entry: Arc::clone(entry),
                 files: Arc::clone(&self.files),
                 ident,
+                mutator,
+                checked: false,
             };
 
             if e.records.is_empty() {
+                guard.arm_exclusivity_check();
                 return FenceOutcome::Clear(guard);
             }
 
@@ -920,7 +1048,18 @@ impl DelegationManager {
 
             if recalls.is_empty() && expired.is_empty() && !foreign_live {
                 // Only tombstones on the file.
+                guard.arm_exclusivity_check();
                 return FenceOutcome::Clear(guard);
+            }
+            // A proceeding mutator with nothing foreign left to resolve
+            // (the self-conflict carve-out) executes under a checked
+            // guard. With expired holders present the CALLER revokes
+            // them outside this lock and arms the check itself — at
+            // this instant they are still RecallPending, and a check
+            // armed here would fire on a record the funnel is about
+            // to tombstone.
+            if !foreign_live && expired.is_empty() {
+                guard.arm_exclusivity_check();
             }
             FenceOutcome::Conflict {
                 guard,
@@ -929,6 +1068,155 @@ impl DelegationManager {
                 delay: foreign_live,
             }
         })
+    }
+
+    /// Plant a Granted record UNDER a live guard, bypassing every
+    /// refusal — the state the fence protocol exists to make
+    /// unreachable, produced by hand so the release-time exclusivity
+    /// assert can be shown to fire. Test-only by construction.
+    #[cfg(test)]
+    pub(crate) fn plant_record_for_test(&self, ident: FileId, client_id: u64, stateid: StateId) {
+        self.with_live_entry(ident, |_entry, e| {
+            e.records.push(DelegRecord {
+                stateid,
+                client_id,
+                fh: vec![0],
+                ident,
+                path: PathBuf::from("/planted"),
+                state: DelegState::Granted,
+                granted_at: Instant::now(),
+                recall_started_at: None,
+                first_transmit_at: None,
+                truncate: false,
+            });
+        });
+        self.by_stateid.insert(stateid.other, ident);
+        self.by_client
+            .entry(client_id)
+            .or_insert_with(Vec::new)
+            .push(stateid.other);
+        *self.live_per_client.entry(client_id).or_insert(0) += 1;
+        self.live_global.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Clients holding a GRANTED (never-recalled) record on `ident`.
+    /// The stress rig's write-window probe: while a write open is
+    /// registered on a file, this must be empty — the fence recalled
+    /// every holder before the writer proceeded, and the grant's
+    /// precheck refuses new ones while the open lasts.
+    pub fn granted_holders(&self, ident: FileId) -> Vec<u64> {
+        let Some(entry) = self.files.get(&ident).map(|e| e.clone()) else {
+            return Vec::new();
+        };
+        let e = entry.lock().unwrap();
+        e.records
+            .iter()
+            .filter(|r| r.state == DelegState::Granted)
+            .map(|r| r.client_id)
+            .collect()
+    }
+
+    /// Structural invariants of the table, as a list of violations
+    /// (empty = healthy). Meant for QUIESCENT points — the counters are
+    /// updated outside the entry lock, so a scan racing a grant can see
+    /// a transient off-by-one that is not a bug. The concurrency stress
+    /// (design §9) runs it after every worker has joined.
+    ///
+    /// The invariants:
+    /// - `live_guards > 0 ⇒ no Granted record` on that file: the fence
+    ///   transitions every Granted record out before minting a guard,
+    ///   and the grant refuses while one is live.
+    /// - at most one record per client per file (rule 8: AlreadyHolder).
+    /// - every record is indexed by stateid and by client, and every
+    ///   index entry points at a record that exists.
+    /// - the live counters equal the count of non-Revoked records.
+    pub fn check_invariants(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut live_total = 0u64;
+        let mut live_by_client: std::collections::HashMap<u64, u64> = Default::default();
+        let mut seen: std::collections::HashSet<[u8; 12]> = Default::default();
+
+        for f in self.files.iter() {
+            let ident = *f.key();
+            let e = f.value().lock().unwrap();
+            let mut per_client: std::collections::HashMap<u64, usize> = Default::default();
+            for r in &e.records {
+                if r.ident != ident {
+                    out.push(format!("{:?}: record {:?} filed under {:?}", ident, r.stateid, r.ident));
+                }
+                if e.live_guards > 0 && r.state == DelegState::Granted {
+                    out.push(format!(
+                        "{:?}: Granted record {:?} (client {}) coexists with {} live guard(s)",
+                        ident, r.stateid, r.client_id, e.live_guards
+                    ));
+                }
+                *per_client.entry(r.client_id).or_insert(0) += 1;
+                match self.by_stateid.get(&r.stateid.other) {
+                    Some(i) if *i == ident => {}
+                    Some(i) => out.push(format!(
+                        "{:?}: by_stateid maps {:?} to {:?}",
+                        ident, r.stateid, *i
+                    )),
+                    None => out.push(format!("{:?}: {:?} missing from by_stateid", ident, r.stateid)),
+                }
+                let in_client_index = self
+                    .by_client
+                    .get(&r.client_id)
+                    .map(|v| v.contains(&r.stateid.other))
+                    .unwrap_or(false);
+                if !in_client_index {
+                    out.push(format!(
+                        "{:?}: {:?} missing from by_client[{}]",
+                        ident, r.stateid, r.client_id
+                    ));
+                }
+                if !seen.insert(r.stateid.other) {
+                    out.push(format!("{:?}: stateid {:?} appears twice", ident, r.stateid));
+                }
+                if r.state != DelegState::Revoked {
+                    live_total += 1;
+                    *live_by_client.entry(r.client_id).or_insert(0) += 1;
+                }
+            }
+            for (c, n) in per_client {
+                if n > 1 {
+                    out.push(format!("{:?}: client {} holds {} records (max 1)", ident, c, n));
+                }
+            }
+        }
+        for s in self.by_stateid.iter() {
+            if !seen.contains(s.key()) {
+                out.push(format!("by_stateid has dangling {:?} → {:?}", s.key(), s.value()));
+            }
+        }
+        for c in self.by_client.iter() {
+            for other in c.value().iter() {
+                if !seen.contains(other) {
+                    out.push(format!("by_client[{}] has dangling {:?}", c.key(), other));
+                }
+            }
+        }
+        let counted = self.live_global.load(Ordering::SeqCst);
+        if counted != live_total {
+            out.push(format!("live_global {} != {} live records", counted, live_total));
+        }
+        for c in self.live_per_client.iter() {
+            let actual = live_by_client.get(c.key()).copied().unwrap_or(0);
+            if *c.value() != actual {
+                out.push(format!(
+                    "live_per_client[{}] {} != {} live records",
+                    c.key(),
+                    c.value(),
+                    actual
+                ));
+            }
+        }
+        for (c, n) in live_by_client {
+            if n > 0 && !self.live_per_client.contains_key(&c) {
+                out.push(format!("client {} has {} live records but no live_per_client entry", c, n));
+            }
+        }
+        out
     }
 
     /// Live delegation lookup: (owning client, path). Conversion opens
@@ -991,7 +1279,7 @@ impl DelegationManager {
         }
         let rec = e.records.remove(idx);
         if was_under_recall && !e.records.iter().any(|r| r.state != DelegState::Revoked) {
-            e.cooldown_until = Some(Instant::now() + self.cooldown);
+            e.cooldown_until = Some(Instant::now() + self.cooldown());
         }
         drop(e);
         self.unindex(&rec);
@@ -1051,7 +1339,7 @@ impl DelegationManager {
             r.stateid, r.path, client
         );
         if !e.records.iter().any(|x| x.state != DelegState::Revoked) {
-            e.cooldown_until = Some(Instant::now() + self.cooldown);
+            e.cooldown_until = Some(Instant::now() + self.cooldown());
         }
         drop(e);
         // The tombstone leaves the LIVE accounting (quotas, idle
@@ -1101,7 +1389,7 @@ impl DelegationManager {
         };
         let rec = e.records.remove(idx);
         if !e.records.iter().any(|r| r.state != DelegState::Revoked) {
-            e.cooldown_until = Some(Instant::now() + self.cooldown);
+            e.cooldown_until = Some(Instant::now() + self.cooldown());
         }
         drop(e);
         info!(
@@ -1290,6 +1578,7 @@ impl DelegationManager {
             revoked: m.revoked_total(),
             delays: m.delays_total(),
             rearms: m.rearm_total(),
+            batches: m.recall_batches(),
         }
     }
 
@@ -1746,12 +2035,11 @@ mod tests {
         }
         use Req::*;
         let expected: &[((&str, &str), Req)] = &[
-            (("nfs/v4/dispatcher.rs", "dispatch_operation_inner"),
-             Allowed("MDS proxy-fallback WRITE for striped files — an MDS-posture \
-                      lane; slice 5 (FLINT_NFS_DELEGATIONS_PNFS) must fence it \
-                      before that flag ships")),
-            (("nfs/v4/dispatcher.rs", "handle_layoutcommit"),
-             Allowed("MDS-posture lane, same slice-5 obligation as above")),
+            // The two MDS-posture lanes. Exempted until slice 5; fenced
+            // now, because FLINT_NFS_DELEGATIONS_PNFS lets an MDS grant
+            // and a DS-path writer's bytes never cross the MDS.
+            (("nfs/v4/dispatcher.rs", "dispatch_operation_inner"), FencedHere),
+            (("nfs/v4/dispatcher.rs", "handle_layoutcommit"), FencedHere),
             (("nfs/v4/operations/fileops.rs", "apply_settable_attrs"),
              FencedInCallers(&["handle_setattr"])),
             (("nfs/v4/operations/fileops.rs", "handle_create"),

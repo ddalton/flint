@@ -2053,3 +2053,129 @@ mod storage_health_probe_tests {
         );
     }
 }
+
+/// THE DS CLIENT-BEHAVIOUR PIN (docs/plans/nfs-delegations-design.md
+/// §9, slice 5).
+///
+/// A client holding a READ delegation plus a READ layout sends its
+/// READs to the data servers, and RFC 8881 §13.9.1 lets it present the
+/// DELEGATION stateid there. Delegation stateids are minted on the
+/// MDS, unpersisted and epoch-mixed; the DS has never heard of them.
+/// The path works today for one reason: the DS discards the stateid
+/// on READ and WRITE (`let _stateid = ...` in the compound arm) and
+/// trusts the MDS's layout grant as its authorization.
+///
+/// Any "the DS validates the stateid" assertion is therefore
+/// vacuously green, and this test deliberately asserts the OPPOSITE:
+/// a stateid the DS cannot know is ACCEPTED. If DS-side stateid
+/// validation is ever added, this fails first — which is the point:
+/// that work must then teach the DS about delegation stateids (or
+/// keep trusting the MDS), instead of silently breaking every
+/// delegation-holding pNFS reader with BAD_STATEID.
+#[cfg(test)]
+mod deleg_stateid_pin_tests {
+    use super::*;
+    use crate::nfs::v4::filehandle_pnfs::generate_pnfs_filehandle_from_id;
+    use crate::nfs::rpc::Auth;
+
+    /// One COMPOUND [PUTFH, READ(stateid)] through the DS's real
+    /// compound arm, decoded back to (PUTFH status, READ status, data).
+    async fn ds_read_with_stateid(
+        base: &std::path::Path,
+        fh: &[u8],
+        stateid_seqid: u32,
+        stateid_other: [u8; 12],
+    ) -> (Nfs4Status, Nfs4Status, Vec<u8>) {
+        let io = Arc::new(IoOperationHandler::new(base).unwrap());
+        let sessions = Arc::new(DsSessionManager::new());
+        let leases = Arc::new(LeaseManager::new());
+        let clients = Arc::new(ClientManager::new(
+            leases,
+            "ds-pin",
+            crate::state_backend::memory_backend(),
+        ));
+
+        let mut args = XdrEncoder::new();
+        args.encode_u32(0); // tag length
+        args.encode_u32(1); // minorversion
+        args.encode_u32(2); // ops
+        args.encode_u32(opcode::PUTFH);
+        args.encode_opaque(fh);
+        args.encode_u32(opcode::READ);
+        args.encode_u32(stateid_seqid);
+        args.append_raw(&stateid_other);
+        args.encode_u64(0); // offset
+        args.encode_u32(64); // count
+
+        let call = CallMessage {
+            xid: 0x5eed,
+            program: NFS4_PROGRAM,
+            version: 4,
+            procedure: procedure::COMPOUND,
+            cred: Auth::null(),
+            verf: Auth::null(),
+            cred_span: Bytes::new(),
+        };
+        let segs = DataServer::handle_minimal_compound(call, args.finish(), io, sessions, clients).await;
+        let mut reply = Vec::new();
+        for s in &segs {
+            reply.extend_from_slice(s.as_mem());
+        }
+        // RPC accepted-reply header: xid, REPLY, MSG_ACCEPTED, verf
+        // (AUTH_NONE, len 0), SUCCESS = 6 words; then COMPOUND4res.
+        let mut dec = XdrDecoder::new(Bytes::from(reply));
+        for _ in 0..6 {
+            dec.decode_u32().unwrap();
+        }
+        let _tag_len = dec.decode_u32().unwrap();
+        let _status = dec.decode_u32().unwrap();
+        let nres = dec.decode_u32().unwrap();
+        assert_eq!(nres, 2, "both ops must answer — a truncated compound is its own bug");
+        assert_eq!(dec.decode_u32().unwrap(), opcode::PUTFH);
+        let putfh = Nfs4Status::from_u32(dec.decode_u32().unwrap());
+        assert_eq!(dec.decode_u32().unwrap(), opcode::READ);
+        let read = Nfs4Status::from_u32(dec.decode_u32().unwrap());
+        let data = if read == Nfs4Status::Ok {
+            let _eof = dec.decode_bool().unwrap();
+            dec.decode_opaque().unwrap().to_vec()
+        } else {
+            Vec::new()
+        };
+        (putfh, read, data)
+    }
+
+    #[tokio::test]
+    async fn a_delegation_shaped_stateid_the_ds_never_saw_is_accepted_on_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_id: u64 = 0x0000_0000_dead_beef;
+        std::fs::write(
+            dir.path().join(format!("{:016x}.stripe0", file_id)),
+            b"bytes the holder reads from the DS",
+        )
+        .unwrap();
+        let fh = generate_pnfs_filehandle_from_id(0, file_id, 0);
+
+        // A delegation stateid as the MDS mints one: seqid 1 for life,
+        // an `other` no DS table contains (epoch-mixed on the MDS).
+        let mut other = [0xE7u8; 12];
+        other[0..4].copy_from_slice(&0xDE1E_6A7Eu32.to_be_bytes());
+        let (putfh, read, data) = ds_read_with_stateid(dir.path(), &fh.data, 1, other).await;
+        assert_eq!(putfh, Nfs4Status::Ok);
+        assert_eq!(
+            read,
+            Nfs4Status::Ok,
+            "the DS must not validate stateids it cannot know: a delegation holder's \
+             DS READ carries the MDS-minted delegation stateid, and BAD_STATEID here \
+             would break every delegation-holding pNFS reader"
+        );
+        assert_eq!(&data[..], b"bytes the holder reads from the DS");
+
+        // ANTI-VACUITY: the arm is not accepting because it ignores
+        // everything — a stateid it could never resolve AND a bogus
+        // filehandle is refused at PUTFH, so the OK above is the READ
+        // arm's own verdict on a resolvable fh with an unknown stateid.
+        let bogus_fh = [0xFFu8; 4];
+        let (_putfh, read2, _) = ds_read_with_stateid(dir.path(), &bogus_fh, 1, other).await;
+        assert_ne!(read2, Nfs4Status::Ok, "a garbage fh must not read OK");
+    }
+}

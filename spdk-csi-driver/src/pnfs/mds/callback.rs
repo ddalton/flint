@@ -383,6 +383,55 @@ impl CallbackManager {
         truncate: bool,
         fh: Vec<u8>,
     ) -> Result<CbCompoundReply, CallbackError> {
+        self.send_cb_recalls(
+            client_id,
+            vec![crate::nfs::v4::deleg_recall::RecallItem {
+                stateid: *deleg_stateid,
+                truncate,
+                fh,
+            }],
+        )
+        .await
+    }
+
+    /// How many CB_RECALLs one compound to `client_id` may carry: the
+    /// smallest back-channel `ca_maxoperations` across the client's
+    /// callback-capable sessions, minus the CB_SEQUENCE. The minimum
+    /// because `send_cb_recalls` fails over across sessions and the
+    /// compound must fit whichever one it lands on. Floor 1; a client
+    /// with no usable session gets 1 and the send then says
+    /// ConnectionClosed on its own.
+    pub fn recall_batch_limit(&self, client_id: u64) -> usize {
+        let mut limit: Option<u32> = None;
+        for sid in self.state_mgr.sessions.get_client_sessions(client_id) {
+            let Some(sess) = self.state_mgr.sessions.get_session(&sid) else {
+                continue;
+            };
+            if sess.cb_program == 0 {
+                continue;
+            }
+            let has_writer = self
+                .back_channels
+                .get(&sid)
+                .map(|w| !w.is_empty())
+                .unwrap_or(false);
+            if !has_writer {
+                continue;
+            }
+            let ops = sess.back_chan_maxops.saturating_sub(1);
+            limit = Some(limit.map_or(ops, |l| l.min(ops)));
+        }
+        (limit.unwrap_or(1) as usize).max(1)
+    }
+
+    /// One CB_COMPOUND — CB_SEQUENCE + one CB_RECALL per item — to
+    /// whichever of the client's sessions answers. The caller keeps
+    /// `items.len() <= recall_batch_limit(client_id)`.
+    pub async fn send_cb_recalls(
+        &self,
+        client_id: u64,
+        items: Vec<crate::nfs::v4::deleg_recall::RecallItem>,
+    ) -> Result<CbCompoundReply, CallbackError> {
         let sessions = self.state_mgr.sessions.get_client_sessions(client_id);
         if sessions.is_empty() {
             debug!("CB_RECALL: client {} holds no session", client_id);
@@ -391,7 +440,7 @@ impl CallbackManager {
         let mut last = CallbackError::ConnectionClosed;
         for sid in &sessions {
             match self
-                .send_cb_recall_on_session(sid, deleg_stateid, truncate, fh.clone())
+                .send_cb_recalls_on_session(sid, &items)
                 .await
             {
                 Ok(reply) => return Ok(reply),
@@ -420,6 +469,24 @@ impl CallbackManager {
         deleg_stateid: &StateId,
         truncate: bool,
         fh: Vec<u8>,
+    ) -> Result<CbCompoundReply, CallbackError> {
+        self.send_cb_recalls_on_session(
+            session_id,
+            &[crate::nfs::v4::deleg_recall::RecallItem {
+                stateid: *deleg_stateid,
+                truncate,
+                fh,
+            }],
+        )
+        .await
+    }
+
+    /// The batched form of `send_cb_recall_on_session`: one compound,
+    /// CB_SEQUENCE then every item's CB_RECALL in order.
+    pub async fn send_cb_recalls_on_session(
+        &self,
+        session_id: &SessionId,
+        items: &[crate::nfs::v4::deleg_recall::RecallItem],
     ) -> Result<CbCompoundReply, CallbackError> {
         if self
             .back_channels
@@ -451,34 +518,46 @@ impl CallbackManager {
         let seq = seq_guard.wrapping_add(1);
         let seq = if seq == 0 { 1 } else { seq };
 
+        let mut ops = Vec::with_capacity(1 + items.len());
+        ops.push(CbOp::Sequence {
+            sessionid: *session_id,
+            sequenceid: seq,
+            slotid: 0,
+            highest_slotid: 0,
+            cachethis: false,
+        });
+        for it in items {
+            ops.push(CbOp::Recall {
+                stateid: it.stateid,
+                truncate: it.truncate,
+                fh: it.fh.clone(),
+            });
+        }
         let call = CbCompoundCall {
             tag: String::new(),
             minorversion: cb_minorversion,
             callback_ident: 0,
-            ops: vec![
-                CbOp::Sequence {
-                    sessionid: *session_id,
-                    sequenceid: seq,
-                    slotid: 0,
-                    highest_slotid: 0,
-                    cachethis: false,
-                },
-                CbOp::Recall {
-                    stateid: *deleg_stateid,
-                    truncate,
-                    fh,
-                },
-            ],
+            ops,
         };
         let cb_cred = self
             .state_mgr
             .sessions
             .get_session(session_id)
             .and_then(|s| s.cb_cred.clone());
-        info!(
-            "CB_RECALL {:?} → session {:?} (truncate={}, cb_program={})",
-            deleg_stateid, session_id, truncate, cb_program,
-        );
+        for it in items {
+            info!(
+                "CB_RECALL {:?} → session {:?} (truncate={}, cb_program={}{})",
+                it.stateid,
+                session_id,
+                it.truncate,
+                cb_program,
+                if items.len() > 1 {
+                    format!(", batch of {}", items.len())
+                } else {
+                    String::new()
+                },
+            );
+        }
         let (result, seq_consumed) = self
             .send_on_session_writers(session_id, cb_program, cb_cred.as_ref(), &call)
             .await;
@@ -722,19 +801,21 @@ impl CallbackManager {
 /// just addresses the client (every session, writer failover within
 /// each — `send_cb_recall` above).
 impl crate::nfs::v4::deleg_recall::RecallSender for Arc<CallbackManager> {
-    fn send_recall(
+    fn send_recalls(
         &self,
         client_id: u64,
-        stateid: StateId,
-        truncate: bool,
-        fh: Vec<u8>,
+        items: Vec<crate::nfs::v4::deleg_recall::RecallItem>,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<CbCompoundReply, CallbackError>> + Send,
         >,
     > {
         let me = Arc::clone(self);
-        Box::pin(async move { me.send_cb_recall(client_id, &stateid, truncate, fh).await })
+        Box::pin(async move { me.send_cb_recalls(client_id, items).await })
+    }
+
+    fn recall_batch_limit(&self, client_id: u64) -> usize {
+        CallbackManager::recall_batch_limit(self, client_id)
     }
 }
 

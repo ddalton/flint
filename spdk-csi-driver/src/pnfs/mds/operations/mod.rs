@@ -2733,6 +2733,20 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
         }
     }
 
+    /// Delegation grant rule 6. The layout index is keyed by the
+    /// placement's file identity (the truncate-gate key), so the
+    /// export-relative path is resolved through the placement first.
+    /// A file with no placement has never been layouted: nobody holds
+    /// anything on it.
+    fn write_layout_holders(&self, file_key: &str) -> Vec<u64> {
+        match self.layout_manager.placement_for(file_key) {
+            Some(p) => self
+                .layout_manager
+                .write_capable_holders(&truncate_gate_key(&p, file_key)),
+            None => Vec::new(),
+        }
+    }
+
     fn link_allowed(&self, target_key: &str) -> bool {
         // scsi-class: extents key on the stub's inode and REMOVE of any
         // name reclaims them — a hard link would let one name's removal

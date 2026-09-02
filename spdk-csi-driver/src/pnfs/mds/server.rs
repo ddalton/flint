@@ -676,6 +676,11 @@ impl MetadataServer {
 
     /// Start the metadata server
     pub async fn serve(&self) -> Result<()> {
+        // §10 observability, both postures. The standalone hub is the
+        // v1 delegation target and this is its binary; the reporter
+        // prints every interval with the gate on — a printed zero is
+        // evidence, an absent line is not.
+        self.state_mgr.start_deleg_reporter();
         warn!("FLINT-PNFS-MDS STARTING WITH DEBUG LOGGING");
         warn!("MDS SERVER BINARY VERSION: DEBUG BUILD");
         info!("╔════════════════════════════════════════════════════╗");

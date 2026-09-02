@@ -10,6 +10,21 @@
 //! SEQ4 bit raised (the client finds out on its next lease renewal,
 //! the one RPC delegations don't eliminate).
 //!
+//! The FIRST transmit is batched per client (design §5.4, "batch
+//! per-client recalls into one CB_COMPOUND where ca_maxoperations
+//! permits"): `rm -rf` over forty delegated files is forty orders for
+//! one client, and forty serialized slot-0 round trips would put the
+//! fortieth holder's 90s deadline a long way behind the first's. One
+//! compound carries as many CB_RECALLs as the client's back channel
+//! allows; the reply is split positionally and each record's ladder
+//! then runs on its own — rungs and deadlines are per record, and
+//! resends are rare enough not to be worth re-batching. Against
+//! Linux this is inert: it advertises a back-channel
+//! ca_maxoperations of 2 (NFS4_MAX_BACK_CHANNEL_OPS), which is
+//! CB_SEQUENCE plus exactly one CB_RECALL, so the chunk size is 1
+//! and the wire is byte-identical to the unbatched path. Clients
+//! with a wider back channel get the fan-in.
+//!
 //! Every wakeup re-snapshots the record and no-ops on gone/changed:
 //! dropping a JoinHandle detaches, it does not cancel, so a task that
 //! outlives its record must never act on a re-granted successor (the
@@ -33,16 +48,143 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
+/// One CB_RECALL's arguments — one op of a batched compound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecallItem {
+    pub stateid: StateId,
+    pub truncate: bool,
+    pub fh: Vec<u8>,
+}
+
+impl From<&RecallOrder> for RecallItem {
+    fn from(o: &RecallOrder) -> Self {
+        Self {
+            stateid: o.stateid,
+            truncate: o.truncate,
+            fh: o.fh.clone(),
+        }
+    }
+}
+
 /// The one send the ladder needs. Implemented by `CallbackManager`
 /// (client-addressed: every session, writer failover within each).
 pub trait RecallSender: Send + Sync + 'static {
+    /// ONE CB_COMPOUND to `client_id`: CB_SEQUENCE followed by one
+    /// CB_RECALL per item, in order. The reply's CB_RECALL results are
+    /// positional; a compound that stops at a failing op carries fewer
+    /// results than items, and the ladder resends the tail
+    /// individually. Callers never pass more items than
+    /// [`recall_batch_limit`](Self::recall_batch_limit) allows.
+    fn send_recalls(
+        &self,
+        client_id: u64,
+        items: Vec<RecallItem>,
+    ) -> Pin<Box<dyn Future<Output = Result<CbCompoundReply, CallbackError>> + Send>>;
+
+    /// How many CB_RECALLs one compound to this client may carry —
+    /// the back channel's `ca_maxoperations` minus the CB_SEQUENCE.
+    /// Floor 1. The default is 1 (no batching), which is also the
+    /// honest answer for a Linux client.
+    fn recall_batch_limit(&self, _client_id: u64) -> usize {
+        1
+    }
+
+    /// One recall. Every resend on the ladder goes through here.
     fn send_recall(
         &self,
         client_id: u64,
         stateid: StateId,
         truncate: bool,
         fh: Vec<u8>,
-    ) -> Pin<Box<dyn Future<Output = Result<CbCompoundReply, CallbackError>> + Send>>;
+    ) -> Pin<Box<dyn Future<Output = Result<CbCompoundReply, CallbackError>> + Send>> {
+        self.send_recalls(
+            client_id,
+            vec![RecallItem {
+                stateid,
+                truncate,
+                fh,
+            }],
+        )
+    }
+}
+
+/// `CallbackError` holds an `io::Error` and is not `Clone`; a batch
+/// outcome has to be handed to every record it covered.
+fn clone_cb_error(e: &CallbackError) -> CallbackError {
+    match e {
+        CallbackError::Timeout => CallbackError::Timeout,
+        CallbackError::Transport(io) => {
+            CallbackError::Transport(std::io::Error::new(io.kind(), io.to_string()))
+        }
+        CallbackError::Reply(r) => CallbackError::Reply(r.clone()),
+        CallbackError::ConnectionClosed => CallbackError::ConnectionClosed,
+    }
+}
+
+/// Split one batched reply into per-record replies, positionally.
+///
+/// `None` for a record means "the compound stopped before reaching
+/// your op" — a SIBLING failed, the client never saw this recall, and
+/// it must be sent again on its own. A compound that failed at
+/// CB_SEQUENCE itself (no CB_RECALL result at all) is every record's
+/// failure, and each gets the sequence-level reply to classify —
+/// DELAY there is DELAY for all; anything else is a refusal for all,
+/// exactly as the unbatched ladder treats it.
+///
+/// Each synthesized reply carries only ITS record's CB_RECALL result
+/// next to the CB_SEQUENCE result: `classify` treats a DELAY on any
+/// result as DELAY, and a sibling's DELAY must not become this
+/// record's.
+pub(crate) fn split_batch_reply(reply: &CbCompoundReply, n: usize) -> Vec<Option<CbCompoundReply>> {
+    let seq = reply
+        .results
+        .iter()
+        .find(|r| matches!(r, CbResult::Sequence { .. }))
+        .cloned();
+    let recalls: Vec<Nfs4Status> = reply
+        .results
+        .iter()
+        .filter_map(|r| match r {
+            CbResult::Recall { status } => Some(*status),
+            _ => None,
+        })
+        .collect();
+    let seq_delay = seq.as_ref().map(|s| s.status() == Nfs4Status::Delay).unwrap_or(false)
+        || (recalls.is_empty() && reply.status == Nfs4Status::Delay);
+
+    (0..n)
+        .map(|i| {
+            let mut results = Vec::with_capacity(2);
+            if let Some(s) = &seq {
+                results.push(s.clone());
+            }
+            match recalls.get(i) {
+                Some(status) => {
+                    results.push(CbResult::Recall { status: *status });
+                    Some(CbCompoundReply {
+                        status: if seq_delay { Nfs4Status::Delay } else { *status },
+                        tag: reply.tag.clone(),
+                        results,
+                    })
+                }
+                None if recalls.is_empty() => Some(CbCompoundReply {
+                    status: reply.status,
+                    tag: reply.tag.clone(),
+                    results,
+                }),
+                None => None,
+            }
+        })
+        .collect()
+}
+
+/// A first-transmit outcome obtained by the batch send, handed to the
+/// record's ladder in place of its own first send.
+struct Primed {
+    outcome: Result<CbCompoundReply, CallbackError>,
+    /// The rearm epoch read BEFORE the batch send — the ladder's
+    /// park-on-transport-failure needs the pre-send value.
+    rearm_epoch: u64,
 }
 
 /// Ladder timing. Defaults are the design's numbers; tests shrink
@@ -222,15 +364,86 @@ impl RecallDriver {
         self
     }
 
-    /// Spawn one ladder task per order. Callers hand this the
+    /// Spawn the ladders for a fence's orders. Callers hand this the
     /// `recalls` from a `FenceOutcome::Conflict` — each order is
-    /// returned by the fence exactly once, which is what makes the
+    /// returned by the fence exactly once, which is what makes every
     /// task single-flight.
+    ///
+    /// Orders for one client are grouped and their FIRST transmit
+    /// batched into compounds of at most `recall_batch_limit` recalls;
+    /// a group of one (or a limit of one) is the plain per-record
+    /// ladder with no batch task in between.
     pub fn spawn_recalls(self: &Arc<Self>, orders: Vec<RecallOrder>) {
+        // Group by client, preserving first-seen order so a rig
+        // reading the log sees recalls in fence order.
+        let mut groups: Vec<(u64, Vec<RecallOrder>)> = Vec::new();
         for order in orders {
-            let driver = Arc::clone(self);
+            match groups.iter_mut().find(|(c, _)| *c == order.client_id) {
+                Some((_, v)) => v.push(order),
+                None => groups.push((order.client_id, vec![order])),
+            }
+        }
+        for (client_id, group) in groups {
+            let limit = self.sender.recall_batch_limit(client_id).max(1);
+            let mut group = group;
+            while !group.is_empty() {
+                let take = limit.min(group.len());
+                let chunk: Vec<RecallOrder> = group.drain(..take).collect();
+                let driver = Arc::clone(self);
+                if chunk.len() == 1 {
+                    let order = chunk.into_iter().next().unwrap();
+                    tokio::spawn(async move {
+                        driver.drive_one(order, None).await;
+                    });
+                } else {
+                    tokio::spawn(async move {
+                        driver.drive_batch(chunk).await;
+                    });
+                }
+            }
+        }
+    }
+
+    /// One compound for a client's chunk, then one ladder per record
+    /// primed with its slice of the reply. The ladders are spawned
+    /// rather than joined so a slow record cannot hold up its
+    /// siblings' rungs.
+    async fn drive_batch(self: Arc<Self>, chunk: Vec<RecallOrder>) {
+        let client_id = chunk[0].client_id;
+        let n = chunk.len();
+        let rearm = self.state_mgr.delegations.rearm_signal(client_id);
+        let rearm_epoch = rearm.epoch();
+        let items: Vec<RecallItem> = chunk.iter().map(RecallItem::from).collect();
+        debug!(
+            "deleg ladder: batching {} recalls to client {} in one CB_COMPOUND",
+            n, client_id
+        );
+        let outcome = self.sender.send_recalls(client_id, items).await;
+        self.state_mgr.delegations.meter().note_recall_batch(n as u64);
+
+        let primed: Vec<Option<Primed>> = match &outcome {
+            Ok(reply) => split_batch_reply(reply, n)
+                .into_iter()
+                .map(|r| {
+                    r.map(|reply| Primed {
+                        outcome: Ok(reply),
+                        rearm_epoch,
+                    })
+                })
+                .collect(),
+            Err(e) => (0..n)
+                .map(|_| {
+                    Some(Primed {
+                        outcome: Err(clone_cb_error(e)),
+                        rearm_epoch,
+                    })
+                })
+                .collect(),
+        };
+        for (order, primed) in chunk.into_iter().zip(primed) {
+            let driver = Arc::clone(&self);
             tokio::spawn(async move {
-                driver.drive_one(order).await;
+                driver.drive_one(order, primed).await;
             });
         }
     }
@@ -290,7 +503,7 @@ impl RecallDriver {
         }
     }
 
-    async fn drive_one(&self, order: RecallOrder) {
+    async fn drive_one(&self, order: RecallOrder, mut primed: Option<Primed>) {
         let started = Instant::now();
         let mut first_transmit: Option<Instant> = None;
         let mut disown_seen = false;
@@ -330,16 +543,24 @@ impl RecallDriver {
 
             // Read BEFORE the send: a rebind that lands while the send
             // is in flight must not be slept through (see RearmSignal).
-            let rearm_epoch = rearm.epoch();
-            let outcome = self
-                .sender
-                .send_recall(
-                    order.client_id,
-                    order.stateid,
-                    order.truncate,
-                    order.fh.clone(),
-                )
-                .await;
+            // A primed first transmit (the batch already sent it)
+            // carries the epoch its own send read.
+            let (rearm_epoch, outcome) = match primed.take() {
+                Some(p) => (p.rearm_epoch, p.outcome),
+                None => {
+                    let epoch = rearm.epoch();
+                    let outcome = self
+                        .sender
+                        .send_recall(
+                            order.client_id,
+                            order.stateid,
+                            order.truncate,
+                            order.fh.clone(),
+                        )
+                        .await;
+                    (epoch, outcome)
+                }
+            };
 
             match outcome {
                 Ok(reply) => {
@@ -500,11 +721,20 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    /// Scripted sender: pops the next outcome per call, records the
-    /// paused-clock instant of every attempt.
+    /// Scripted sender: pops the next outcome per CALL (one compound,
+    /// batched or not), records the paused-clock instant and the
+    /// batch size of every attempt.
+    ///
+    /// A scripted reply carrying exactly ONE CB_RECALL result answers
+    /// a batched call of N items with that result replicated N times
+    /// — so the single-record scripts below need no rewriting, and a
+    /// batch test that wants per-position statuses builds them with
+    /// `reply_multi`.
     struct MockSender {
         script: Mutex<Vec<Result<CbCompoundReply, CallbackError>>>,
         calls: Mutex<Vec<Instant>>,
+        batch_sizes: Mutex<Vec<usize>>,
+        limit: std::sync::atomic::AtomicUsize,
     }
 
     impl MockSender {
@@ -512,23 +742,31 @@ mod tests {
             Arc::new(Self {
                 script: Mutex::new(script),
                 calls: Mutex::new(Vec::new()),
+                batch_sizes: Mutex::new(Vec::new()),
+                limit: std::sync::atomic::AtomicUsize::new(1),
             })
+        }
+        fn with_batch_limit(self: Arc<Self>, limit: usize) -> Arc<Self> {
+            self.limit.store(limit, std::sync::atomic::Ordering::Relaxed);
+            self
         }
         fn call_times(&self) -> Vec<Instant> {
             self.calls.lock().unwrap().clone()
         }
+        fn batch_sizes(&self) -> Vec<usize> {
+            self.batch_sizes.lock().unwrap().clone()
+        }
     }
 
     impl RecallSender for Arc<MockSender> {
-        fn send_recall(
+        fn send_recalls(
             &self,
             _client_id: u64,
-            _stateid: StateId,
-            _truncate: bool,
-            _fh: Vec<u8>,
+            items: Vec<RecallItem>,
         ) -> Pin<Box<dyn Future<Output = Result<CbCompoundReply, CallbackError>> + Send>>
         {
             self.calls.lock().unwrap().push(Instant::now());
+            self.batch_sizes.lock().unwrap().push(items.len());
             let mut script = self.script.lock().unwrap();
             let next = if script.is_empty() {
                 // Script exhausted: keep answering the last-known
@@ -537,7 +775,28 @@ mod tests {
             } else {
                 script.remove(0)
             };
+            let next = match next {
+                Ok(mut reply) if items.len() > 1 => {
+                    let recalls: Vec<CbResult> = reply
+                        .results
+                        .iter()
+                        .filter(|r| matches!(r, CbResult::Recall { .. }))
+                        .cloned()
+                        .collect();
+                    if recalls.len() == 1 {
+                        for _ in 1..items.len() {
+                            reply.results.push(recalls[0].clone());
+                        }
+                    }
+                    Ok(reply)
+                }
+                other => other,
+            };
             Box::pin(async move { next })
+        }
+
+        fn recall_batch_limit(&self, _client_id: u64) -> usize {
+            self.limit.load(std::sync::atomic::Ordering::Relaxed)
         }
     }
 
@@ -561,6 +820,29 @@ mod tests {
         })
     }
 
+    /// A batched reply with per-position CB_RECALL statuses — the
+    /// shape a client answers when it processed some recalls and
+    /// stopped at the first failing one (a shorter list than the
+    /// batch is exactly that).
+    fn reply_multi(statuses: &[Nfs4Status]) -> Result<CbCompoundReply, CallbackError> {
+        let mut results = vec![CbResult::Sequence {
+            status: Nfs4Status::Ok,
+            sessionid: crate::nfs::v4::protocol::SessionId([0; 16]),
+            sequenceid: 1,
+            slotid: 0,
+            highest_slotid: 0,
+            target_highest_slotid: 0,
+        }];
+        for s in statuses {
+            results.push(CbResult::Recall { status: *s });
+        }
+        Ok(CbCompoundReply {
+            status: *statuses.last().unwrap_or(&Nfs4Status::Ok),
+            tag: String::new(),
+            results,
+        })
+    }
+
     fn sid(n: u8) -> StateId {
         let mut other = [0u8; 12];
         other[0] = n;
@@ -568,6 +850,33 @@ mod tests {
     }
 
     const F: FileId = FileId { dev: 1, ino: 500 };
+
+    /// `n` grants to `client` on distinct files, each then fenced by
+    /// client 8 — the shape of `rm -rf` over a holder's warm set. The
+    /// orders come back in ONE Vec because a real fence over a
+    /// directory would hand them over per file; the driver's grouping
+    /// is what this exercises.
+    fn granted_and_recalled_n(
+        client: u64,
+        n: u8,
+    ) -> (Arc<StateManager>, Vec<StateId>, Vec<RecallOrder>) {
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let mut sids = Vec::new();
+        let mut orders = Vec::new();
+        for i in 1..=n {
+            let ident = FileId { dev: 1, ino: 500 + i as u64 };
+            let s = state_mgr
+                .delegations
+                .try_grant(ident, client, vec![i], PathBuf::from(format!("/f{i}")), || true, || sid(i))
+                .unwrap();
+            sids.push(s);
+            match state_mgr.delegations.mutation_fence(ident, Some(8), false) {
+                FenceOutcome::Conflict { recalls, .. } => orders.extend(recalls),
+                FenceOutcome::Clear(_) => panic!("expected a conflict"),
+            }
+        }
+        (state_mgr, sids, orders)
+    }
 
     /// Grant + fence: returns (state_mgr, stateid, the fence's orders).
     fn granted_and_recalled() -> (Arc<StateManager>, StateId, Vec<RecallOrder>) {
@@ -1073,5 +1382,246 @@ mod tests {
         );
         let times = sender.call_times();
         assert_eq!(times.len(), 3, "first transmit + two rung resends");
+    }
+
+    // ── Per-client recall batching (design §5.4) ─────────────────────
+
+    /// `split_batch_reply` is the whole correctness of batching: every
+    /// record must get ITS OWN result and nothing of its siblings'.
+    #[test]
+    fn a_batched_reply_is_split_positionally_and_a_siblings_delay_stays_its_own() {
+        let r = reply_multi(&[Nfs4Status::Ok, Nfs4Status::Delay, Nfs4Status::BadStateId]).unwrap();
+        let parts = split_batch_reply(&r, 3);
+        assert_eq!(parts.len(), 3);
+        let p0 = parts[0].as_ref().unwrap();
+        let p1 = parts[1].as_ref().unwrap();
+        let p2 = parts[2].as_ref().unwrap();
+        assert!(matches!(classify(p0), Classified::Acked), "position 0 is OK");
+        assert!(matches!(classify(p1), Classified::Delay), "position 1 is DELAY");
+        assert!(matches!(classify(p2), Classified::Disown), "position 2 is BAD_STATEID");
+        // Each synthesized reply carries exactly [Sequence, own Recall].
+        for p in [p0, p1, p2] {
+            assert_eq!(p.results.len(), 2);
+        }
+        // A compound that STOPPED after two ops leaves the third with
+        // no result: None, to be resent alone — never a sibling's
+        // status.
+        let short = reply_multi(&[Nfs4Status::Ok, Nfs4Status::NotSupp]).unwrap();
+        let parts = split_batch_reply(&short, 3);
+        assert!(parts[0].is_some() && parts[1].is_some());
+        assert!(parts[2].is_none(), "the unreached op is nobody's answer");
+        // A failure AT CB_SEQUENCE (no recall ran) is everyone's.
+        let seq_only = CbCompoundReply {
+            status: Nfs4Status::BadSession,
+            tag: String::new(),
+            results: vec![CbResult::Sequence {
+                status: Nfs4Status::BadSession,
+                sessionid: crate::nfs::v4::protocol::SessionId([0; 16]),
+                sequenceid: 1,
+                slotid: 0,
+                highest_slotid: 0,
+                target_highest_slotid: 0,
+            }],
+        };
+        let parts = split_batch_reply(&seq_only, 2);
+        for p in &parts {
+            assert!(matches!(classify(p.as_ref().unwrap()), Classified::Refused));
+        }
+        let mut seq_delay = seq_only.clone();
+        seq_delay.status = Nfs4Status::Delay;
+        seq_delay.results[0] = CbResult::Sequence {
+            status: Nfs4Status::Delay,
+            sessionid: crate::nfs::v4::protocol::SessionId([0; 16]),
+            sequenceid: 1,
+            slotid: 0,
+            highest_slotid: 0,
+            target_highest_slotid: 0,
+        };
+        for p in split_batch_reply(&seq_delay, 2) {
+            assert!(matches!(classify(&p.unwrap()), Classified::Delay));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_clients_recalls_share_one_compound_when_its_back_channel_allows() {
+        let (state_mgr, sids, orders) = granted_and_recalled_n(7, 3);
+        assert_eq!(orders.len(), 3);
+        let sender = MockSender::new(vec![reply(Nfs4Status::Ok)]).with_batch_limit(8);
+        let d = driver(&state_mgr, Arc::clone(&sender));
+        d.spawn_recalls(orders);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        assert_eq!(sender.batch_sizes(), vec![3], "one compound carried all three");
+        for s in &sids {
+            assert_eq!(
+                state_mgr.delegations.snapshot(s).unwrap().state,
+                DelegState::RecallAcked,
+                "every record in the batch is acked from its own result"
+            );
+        }
+        let m = state_mgr.delegations.meter();
+        assert_eq!(m.recall_batches(), 1);
+        assert_eq!(m.recall_batched_ops(), 3);
+        assert_eq!(
+            m.cb_recall_sent.load(std::sync::atomic::Ordering::Relaxed),
+            3,
+            "sent counts CB_RECALL ops, not compounds — the sent/acked ratio stays per op"
+        );
+        assert_eq!(m.outcome_count(RecallOutcome::Acked), 3);
+        // The ladders are still independent: all three return, none
+        // is revoked at the deadline.
+        for s in &sids {
+            state_mgr.delegations.return_delegation(s).unwrap();
+        }
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(state_mgr.seq_flags(7), 0);
+    }
+
+    /// THE LINUX PIN. A Linux client advertises back-channel
+    /// ca_maxoperations 2 (CB_SEQUENCE + one op), so its batch limit is
+    /// 1 and the driver must send three compounds — byte-identical to
+    /// the unbatched ladder. Without this leg the test above would
+    /// pass against a driver that batched regardless of the limit,
+    /// which a Linux client answers with NFS4ERR_TOO_MANY_OPS.
+    #[tokio::test(start_paused = true)]
+    async fn a_back_channel_of_two_ops_gets_no_batching() {
+        let (state_mgr, sids, orders) = granted_and_recalled_n(7, 3);
+        let sender = MockSender::new(vec![
+            reply(Nfs4Status::Ok),
+            reply(Nfs4Status::Ok),
+            reply(Nfs4Status::Ok),
+        ])
+        .with_batch_limit(1);
+        let d = driver(&state_mgr, Arc::clone(&sender));
+        d.spawn_recalls(orders);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(sender.batch_sizes(), vec![1, 1, 1]);
+        for s in &sids {
+            assert_eq!(state_mgr.delegations.snapshot(s).unwrap().state, DelegState::RecallAcked);
+        }
+        assert_eq!(state_mgr.delegations.meter().recall_batches(), 0, "a compound of one is not a batch");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_group_larger_than_the_limit_is_chunked() {
+        let (state_mgr, sids, orders) = granted_and_recalled_n(7, 5);
+        let sender = MockSender::new(vec![
+            reply(Nfs4Status::Ok),
+            reply(Nfs4Status::Ok),
+            reply(Nfs4Status::Ok),
+        ])
+        .with_batch_limit(2);
+        let d = driver(&state_mgr, Arc::clone(&sender));
+        d.spawn_recalls(orders);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(sender.batch_sizes(), vec![2, 2, 1]);
+        for s in &sids {
+            assert_eq!(state_mgr.delegations.snapshot(s).unwrap().state, DelegState::RecallAcked);
+        }
+        let m = state_mgr.delegations.meter();
+        assert_eq!(m.recall_batches(), 2, "the trailing single is not a batch");
+        assert_eq!(m.recall_batched_ops(), 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn two_clients_get_two_compounds() {
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let mut orders = Vec::new();
+        for (i, client) in [(1u8, 7u64), (2, 7), (3, 9), (4, 9)] {
+            let ident = FileId { dev: 1, ino: 600 + i as u64 };
+            state_mgr
+                .delegations
+                .try_grant(ident, client, vec![i], PathBuf::from(format!("/g{i}")), || true, || sid(i))
+                .unwrap();
+            match state_mgr.delegations.mutation_fence(ident, Some(8), false) {
+                FenceOutcome::Conflict { recalls, .. } => orders.extend(recalls),
+                FenceOutcome::Clear(_) => panic!(),
+            }
+        }
+        let sender = MockSender::new(vec![reply(Nfs4Status::Ok), reply(Nfs4Status::Ok)])
+            .with_batch_limit(8);
+        let d = driver(&state_mgr, Arc::clone(&sender));
+        d.spawn_recalls(orders);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(sender.batch_sizes(), vec![2, 2], "one compound per client, never across clients");
+        assert_eq!(state_mgr.delegations.meter().recall_batches(), 2);
+    }
+
+    /// A batch where the SECOND recall is disowned: the compound stops
+    /// there, so the first is acked from its result, the second walks
+    /// the disown re-probe on its own ladder, and the third — never
+    /// reached — is resent alone rather than inheriting anyone's
+    /// answer.
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_sibling_stops_the_compound_and_the_tail_is_resent_alone() {
+        let (state_mgr, sids, orders) = granted_and_recalled_n(7, 3);
+        let sender = MockSender::new(vec![
+            reply_multi(&[Nfs4Status::Ok, Nfs4Status::BadStateId]),
+            // The two follow-ups, in whatever order they land: the
+            // third record's solo resend (immediate) and the second
+            // record's re-probe (+2s). Both OK.
+            reply(Nfs4Status::Ok),
+            reply(Nfs4Status::Ok),
+        ])
+        .with_batch_limit(8);
+        let d = driver(&state_mgr, Arc::clone(&sender));
+        d.spawn_recalls(orders);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            state_mgr.delegations.snapshot(&sids[0]).unwrap().state,
+            DelegState::RecallAcked,
+            "first record: acked from position 0"
+        );
+        assert_eq!(
+            state_mgr.delegations.snapshot(&sids[1]).unwrap().state,
+            DelegState::RecallPending,
+            "second record: disowned once, awaiting its re-probe — NOT dropped, NOT revoked"
+        );
+        assert_eq!(
+            state_mgr.delegations.snapshot(&sids[2]).unwrap().state,
+            DelegState::RecallAcked,
+            "third record: unreached in the compound, resent alone, acked"
+        );
+        assert_eq!(sender.batch_sizes(), vec![3, 1], "so far: the batch and the solo resend");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(
+            state_mgr.delegations.snapshot(&sids[1]).unwrap().state,
+            DelegState::RecallAcked,
+            "the re-probe's OK saves the second record"
+        );
+        assert_eq!(sender.batch_sizes(), vec![3, 1, 1]);
+        assert_eq!(state_mgr.seq_flags(7), 0, "nothing was revoked");
+    }
+
+    /// A batch whose compound never reached the client is every
+    /// record's path-down: each ladder parks in the window with the
+    /// epoch the batch read, and a rebind re-drives them all.
+    #[tokio::test(start_paused = true)]
+    async fn a_batch_that_finds_no_transport_parks_every_record_and_a_rebind_re_drives_them() {
+        let (state_mgr, sids, orders) = granted_and_recalled_n(7, 3);
+        let sender = MockSender::new(vec![
+            Err(CallbackError::ConnectionClosed),
+            // After the rebind each record retries ALONE (resends are
+            // per record); three OKs.
+            reply(Nfs4Status::Ok),
+            reply(Nfs4Status::Ok),
+            reply(Nfs4Status::Ok),
+        ])
+        .with_batch_limit(8);
+        let d = driver(&state_mgr, Arc::clone(&sender));
+        d.spawn_recalls(orders);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(sender.batch_sizes(), vec![3]);
+        assert_ne!(state_mgr.seq_flags(7) & seq4_status::CB_PATH_DOWN, 0);
+        for s in &sids {
+            assert_eq!(state_mgr.delegations.snapshot(s).unwrap().state, DelegState::RecallPending);
+        }
+        state_mgr.delegations.note_rearm(7);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(sender.batch_sizes(), vec![3, 1, 1, 1], "the rebind woke all three parked ladders");
+        for s in &sids {
+            assert_eq!(state_mgr.delegations.snapshot(s).unwrap().state, DelegState::RecallAcked);
+        }
+        assert_eq!(state_mgr.seq_flags(7) & seq4_status::CB_PATH_DOWN, 0);
     }
 }

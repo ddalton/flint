@@ -21,14 +21,17 @@ pub mod stateid;
 pub mod lease;
 pub mod delegation;
 pub mod deleg_meter;
+#[cfg(test)]
+mod deleg_stress_tests;
 
 pub use client::ClientManager;
 pub use session::SessionManager;
 pub use stateid::{CloseOutcome, StateIdManager, StateType, StateEntry};
 pub use lease::LeaseManager;
 pub use delegation::{
-    deleg_flag_exclusive, delegations_enabled, override_delegations_enabled, with_delegations,
-    DelegFlagGuard, DelegReturnError, DelegSnapshot,
+    deleg_flag_exclusive, delegations_enabled, override_delegations_enabled,
+    override_pnfs_delegations_enabled, pnfs_delegations_enabled, with_delegations,
+    with_delegations_pnfs, DelegFlagGuard, DelegReturnError, DelegSnapshot,
     DelegState, DelegationManager, FenceOutcome, FenceVerdict, FileId, GrantRefusal,
     MutationGuard, RecallOrder,
 };
@@ -126,12 +129,20 @@ pub struct StateManager {
     back_channels: std::sync::OnceLock<
         Arc<dashmap::DashMap<SessionId, Vec<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>>>,
     >,
-    /// Set when this server runs the MDS role. Grants refuse in that
-    /// posture until slice 5 lands the layout-conflict rule and its
-    /// own flag (FLINT_NFS_DELEGATIONS_PNFS) — granting without the
-    /// write-capable-layout check would hand out delegations that
-    /// pNFS writers silently invalidate.
+    /// Set when this server runs the MDS role. Grants in that posture
+    /// additionally require FLINT_NFS_DELEGATIONS_PNFS (design §3,
+    /// slice 5) and pass grant rule 6 through `layout_probe` below —
+    /// granting without the write-capable-layout check would hand out
+    /// delegations that pNFS writers silently invalidate.
     pnfs_posture: std::sync::OnceLock<()>,
+    /// Grant rule 6's oracle (design §4): the clients holding a
+    /// write-capable (RW or ANY) layout on the file at `file_key`
+    /// (export-relative path). Installed by the dispatcher alongside
+    /// `set_pnfs_posture`, from the pNFS handler's layout index. In
+    /// MDS posture with NO probe installed the rule answers "held by
+    /// someone else" — fail closed — because an MDS that grants
+    /// without consulting its layouts is the silent-stale case.
+    layout_probe: std::sync::OnceLock<Arc<dyn Fn(&str) -> Vec<u64> + Send + Sync>>,
     /// Clients whose persisted holder-evidence marker was found at
     /// load (design §6): their SEQ4 RECALLABLE_STATE_REVOKED bit is
     /// pre-armed, and the value tracks delivery — None until a
@@ -262,6 +273,7 @@ impl StateManager {
             recall_spawner: std::sync::OnceLock::new(),
             back_channels: std::sync::OnceLock::new(),
             pnfs_posture: std::sync::OnceLock::new(),
+            layout_probe: std::sync::OnceLock::new(),
             armed_markers: dashmap::DashMap::new(),
         }
     }
@@ -324,6 +336,43 @@ impl StateManager {
 
     pub fn pnfs_posture(&self) -> bool {
         self.pnfs_posture.get().is_some()
+    }
+
+    /// Install grant rule 6's layout oracle (dispatcher, once, whenever
+    /// it sets the MDS posture). `probe(file_key)` answers the client
+    /// ids holding a write-capable layout on that file.
+    pub fn install_layout_probe(
+        &self,
+        probe: Arc<dyn Fn(&str) -> Vec<u64> + Send + Sync>,
+    ) {
+        let _ = self.layout_probe.set(probe);
+    }
+
+    /// Whether rule 6 has its oracle. A constructor test pins that
+    /// every MDS-posture dispatcher installs one: without it the rule
+    /// fails closed and every grant is refused — silently, like the
+    /// missing recall machinery was.
+    pub fn layout_probe_installed(&self) -> bool {
+        self.layout_probe.get().is_some()
+    }
+
+    /// Grant rule 6 (design §4): does a client OTHER than `requester`
+    /// hold a write-capable (RW or ANY) layout on `file_key`? Always
+    /// false outside the MDS posture (no layouts exist). Inside it,
+    /// consulted through the layout index the pNFS handler maintains
+    /// — that index is keyed by the placement's immutable file
+    /// identity, so it follows the file through RENAME; the design's
+    /// concern about a path-keyed layout table applies only to legacy
+    /// `path:` pins, which cannot be renamed at all (the op is
+    /// refused). No probe in MDS posture ⇒ true (refuse).
+    pub fn write_layout_held_by_other(&self, file_key: &str, requester: u64) -> bool {
+        if !self.pnfs_posture() {
+            return false;
+        }
+        match self.layout_probe.get() {
+            Some(probe) => probe(file_key).into_iter().any(|c| c != requester),
+            None => true,
+        }
     }
 
     /// Install the back-channel writer registry (dispatcher, once).
@@ -429,7 +478,7 @@ impl StateManager {
         {
             FenceOutcome::Clear(g) => FenceVerdict::Proceed(Some(g)),
             FenceOutcome::Conflict {
-                guard,
+                mut guard,
                 recalls,
                 expired,
                 delay,
@@ -440,6 +489,7 @@ impl StateManager {
                 // silent — the tombstone and the SEQ4 bit are what
                 // make the lease-check race safe rather than merely
                 // unlikely.
+                let had_expired = !expired.is_empty();
                 for stateid in expired {
                     if let Some(client) = self.delegations.revoke(&stateid) {
                         let _ = self.stateids.revoke(&stateid);
@@ -467,6 +517,13 @@ impl StateManager {
                     self.delegations.meter().note_delay(site);
                     FenceVerdict::Delay
                 } else {
+                    // The expired holders are tombstones now, so the
+                    // release-time exclusivity check can be armed
+                    // (the funnel left it unarmed for exactly this
+                    // arm — see `mutation_fence`).
+                    if had_expired {
+                        guard.arm_exclusivity_check();
+                    }
                     FenceVerdict::Proceed(Some(guard))
                 }
             }
@@ -825,6 +882,10 @@ mod tests {
             "open_create", "open_write", "write", "setattr", "remove",
             "rename_src", "rename_dst", "link", "allocate", "deallocate",
             "copy_dst", "clone_dst", "lock_write",
+            // MDS-posture lanes (slice 5): a write-capable LAYOUTGET, the
+            // LAYOUTCOMMIT that publishes DS-written bytes, and the
+            // proxied fallback WRITE that never reaches ioops.
+            "layoutget_rw", "layoutcommit", "write_proxy",
         ];
         let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nfs/v4");
         let mut found: std::collections::BTreeSet<String> = Default::default();
@@ -902,6 +963,10 @@ mod tests {
             "open_create", "open_write", "write", "setattr", "remove",
             "rename_src", "rename_dst", "link", "allocate", "deallocate",
             "copy_dst", "clone_dst", "lock_write",
+            // MDS-posture lanes (slice 5): a write-capable LAYOUTGET, the
+            // LAYOUTCOMMIT that publishes DS-written bytes, and the
+            // proxied fallback WRITE that never reaches ioops.
+            "layoutget_rw", "layoutcommit", "write_proxy",
         ];
 
         for (n, site) in SITES.iter().enumerate() {
@@ -1436,5 +1501,34 @@ mod tests {
             new_session.session_id, session.session_id,
             "post-restart CREATE_SESSION must mint a fresh session_id",
         );
+    }
+
+    /// Grant rule 6's posture semantics (slice 5). Outside the MDS
+    /// posture no layout can exist and the rule is a constant false;
+    /// inside it the rule consults the probe, and WITHOUT a probe it
+    /// fails closed — an MDS that grants without consulting its
+    /// layouts is the silent-stale case, so the absent wiring must
+    /// refuse rather than allow.
+    #[test]
+    fn rule_6_is_false_standalone_and_fails_closed_in_mds_posture_without_a_probe() {
+        let sm = StateManager::new_in_memory("");
+        assert!(!sm.write_layout_held_by_other("f", 1), "standalone: no layouts, no conflict");
+        assert!(!sm.layout_probe_installed());
+
+        sm.set_pnfs_posture();
+        assert!(
+            sm.write_layout_held_by_other("f", 1),
+            "MDS posture with no probe must REFUSE, not allow"
+        );
+
+        let holders: Arc<std::sync::Mutex<Vec<u64>>> = Arc::new(std::sync::Mutex::new(vec![1, 2]));
+        let h = Arc::clone(&holders);
+        sm.install_layout_probe(Arc::new(move |_key: &str| h.lock().unwrap().clone()));
+        assert!(sm.layout_probe_installed());
+        assert!(sm.write_layout_held_by_other("f", 1), "client 2's layout conflicts with 1's grant");
+        *holders.lock().unwrap() = vec![1];
+        assert!(!sm.write_layout_held_by_other("f", 1), "the requester's OWN layout does not");
+        holders.lock().unwrap().clear();
+        assert!(!sm.write_layout_held_by_other("f", 1));
     }
 }

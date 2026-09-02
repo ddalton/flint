@@ -350,6 +350,18 @@ pub struct LayoutManager {
     /// in `generate_layout` / `return_layout` / `recall_layouts_for_device`.
     by_owner: Arc<DashMap<u64, Vec<LayoutStateId>>>,
 
+    /// Secondary index: file identity (`LayoutState::file_ident`, the
+    /// truncate-gate key — `id:<file_id>` for every non-legacy pin, so
+    /// it follows the file through RENAME) → the layouts on it. What
+    /// delegation grant rule 6 consults: a READ delegation may not be
+    /// granted while another client holds a write-capable layout on
+    /// the file, and the grant runs per OPEN, so a scan of `layouts`
+    /// there would put every outstanding layout in front of every
+    /// open. Maintained by `index_file`/`unindex_file` at EVERY insert
+    /// and remove of `layouts`; `by_file_index_is_consistent` in the
+    /// tests pins that no site was missed.
+    by_file_ident: Arc<DashMap<String, Vec<LayoutStateId>>>,
+
     /// Layout policy
     policy: LayoutPolicyImpl,
 
@@ -741,6 +753,7 @@ impl LayoutManager {
             device_registry,
             layouts: Arc::new(DashMap::new()),
             by_owner: Arc::new(DashMap::new()),
+            by_file_ident: Arc::new(DashMap::new()),
             revoked: Arc::new(DashMap::new()),
             policy: policy_impl,
             stripe_size,
@@ -1245,6 +1258,7 @@ impl LayoutManager {
             let stateid = r.stateid;
             let layout = LayoutState::from_record(r);
             let cid = layout.owner.client_id;
+            self.index_file(&layout);
             self.layouts.insert(state_key(&stateid), layout);
             self.by_owner
                 .entry(cid)
@@ -1802,6 +1816,62 @@ impl LayoutManager {
         (written, failed)
     }
 
+    /// Add `l` to the per-file index. Every `layouts.insert` pairs
+    /// with one of these; every `layouts.remove` with `unindex_file`.
+    /// Keyed by the normalised stateid (`state_key`), the same form
+    /// `layouts` is keyed by, so a recall's seqid bump does not orphan
+    /// the entry.
+    fn index_file(&self, l: &LayoutState) {
+        if l.file_ident.is_empty() {
+            // A pre-v7 restore with no identity: unmatchable by design
+            // (see `recall_layouts_for_file`), and unindexed for the
+            // same reason — a wildcard here would refuse every grant.
+            return;
+        }
+        self.by_file_ident
+            .entry(l.file_ident.clone())
+            .or_insert_with(Vec::new)
+            .push(state_key(&l.stateid));
+    }
+
+    fn unindex_file(&self, l: &LayoutState) {
+        if l.file_ident.is_empty() {
+            return;
+        }
+        let key = state_key(&l.stateid);
+        if let Some(mut v) = self.by_file_ident.get_mut(&l.file_ident) {
+            v.retain(|s| *s != key);
+            let empty = v.is_empty();
+            drop(v);
+            if empty {
+                self.by_file_ident
+                    .remove_if(&l.file_ident, |_, v| v.is_empty());
+            }
+        }
+    }
+
+    /// Delegation grant rule 6's answer (design §4): the distinct
+    /// client ids holding a write-capable layout — iomode RW or ANY,
+    /// the latter because LAYOUTGET accepts iomode 3 and a client
+    /// holding ANY may write — on the file whose identity is
+    /// `file_ident`. Read layouts do not conflict with a READ
+    /// delegation and are not reported.
+    pub fn write_capable_holders(&self, file_ident: &str) -> Vec<u64> {
+        let keys: Vec<LayoutStateId> = match self.by_file_ident.get(file_ident) {
+            Some(v) => v.clone(),
+            None => return Vec::new(),
+        };
+        let mut out: Vec<u64> = Vec::new();
+        for k in keys {
+            if let Some(l) = self.layouts.get(&k) {
+                if l.iomode != IoMode::Read && !out.contains(&l.owner.client_id) {
+                    out.push(l.owner.client_id);
+                }
+            }
+        }
+        out
+    }
+
     fn persist(&self, l: &LayoutState) {
         self.backend.enqueue_write(WriteOp::PutLayout(l.to_record()));
     }
@@ -1844,6 +1914,7 @@ impl LayoutManager {
             return_on_close: true,
         };
         self.persist(&layout);
+        self.index_file(&layout);
         self.layouts.insert(state_key(&stateid), layout);
         self.by_owner
             .entry(owner.client_id)
@@ -1869,7 +1940,9 @@ impl LayoutManager {
         let mut n = 0;
         for sid in stateids {
             if let Some(mut l) = self.layouts.get_mut(&state_key(&sid)) {
+                self.unindex_file(&l);
                 l.file_ident = new_key.to_string();
+                self.index_file(&l);
                 self.persist(&l);
                 n += 1;
             }
@@ -1883,6 +1956,7 @@ impl LayoutManager {
     /// BadStateId shape, benign on the return path.
     pub fn take_scsi_layout(&self, stateid: &[u8; 16]) -> Option<LayoutState> {
         let (_, layout) = self.layouts.remove(&state_key(stateid))?;
+        self.unindex_file(&layout);
         self.persist_delete(*stateid);
         if let Some(mut v) = self.by_owner.get_mut(&layout.owner.client_id) {
             v.retain(|s| s != stateid);
@@ -1971,9 +2045,11 @@ impl LayoutManager {
         // entry is visible before the recheck — so any interleaving is caught
         // by one side or the other.
         self.persist(&layout);
+        self.index_file(&layout);
         self.layouts.insert(state_key(&stateid), layout.clone());
         if self.truncate_dirty.contains_key(&gate_ident) {
             self.layouts.remove(&state_key(&stateid));
+            self.unindex_file(&layout);
             self.persist_delete(stateid);
             warn!(
                 "⏳ LAYOUTGET for '{}' raced a truncate — mark armed between the \
@@ -2142,6 +2218,7 @@ impl LayoutManager {
             return Ok(());
         }
         if let Some((_, layout)) = self.layouts.remove(&state_key(stateid)) {
+            self.unindex_file(&layout);
             debug!(
                 "Layout returned: stateid={:?}, segments={}, client={}",
                 &stateid[0..4],
@@ -2196,6 +2273,7 @@ impl LayoutManager {
         let Some((_, layout)) = self.layouts.remove(&state_key(stateid)) else {
             return false;
         };
+        self.unindex_file(&layout);
         let now = std::time::Instant::now();
         self.revoked.retain(|_, t| now.duration_since(*t) < REVOKED_TOMBSTONE_TTL);
         self.revoked.insert(state_key(stateid), now);
@@ -4426,5 +4504,171 @@ mod tests {
         }]);
         assert!(mgr.has_legacy_placements_under("old"));
         assert!(!mgr.has_legacy_placements_under("old2"));
+    }
+}
+
+/// Delegation grant rule 6's index (docs/plans/nfs-delegations-design.md
+/// §4, slice 5): `by_file_ident` must say exactly which clients hold a
+/// write-capable layout on a file, and must be maintained at EVERY
+/// insert and remove of `layouts` — a missed remove site leaves a
+/// phantom holder that refuses grants forever; a missed insert site
+/// grants over a live DS-path writer.
+#[cfg(test)]
+mod by_file_index_tests {
+    use super::*;
+
+    fn fixture() -> LayoutManager {
+        let registry = Arc::new(DeviceRegistry::new());
+        for i in 1..=2 {
+            registry
+                .register(DeviceInfo::new(
+                    format!("ds-{}", i),
+                    format!("10.0.0.{}:2049", i),
+                    vec![format!("nvme{}n1", i)],
+                ))
+                .unwrap();
+        }
+        LayoutManager::new(
+            registry,
+            ConfigLayoutPolicy::RoundRobin,
+            8 * 1024 * 1024,
+            crate::state_backend::memory_backend(),
+        )
+    }
+
+    fn owner(client_id: u64) -> LayoutOwner {
+        LayoutOwner { client_id, session_id: [0u8; 16], fsid: 1 }
+    }
+
+    /// Rebuild the index from `layouts` and compare — the check that
+    /// every maintenance site was hit.
+    fn index_is_consistent(mgr: &LayoutManager) {
+        let mut expect: std::collections::BTreeMap<String, Vec<LayoutStateId>> = Default::default();
+        for e in mgr.layouts.iter() {
+            if !e.file_ident.is_empty() {
+                expect.entry(e.file_ident.clone()).or_default().push(*e.key());
+            }
+        }
+        let mut have: std::collections::BTreeMap<String, Vec<LayoutStateId>> = Default::default();
+        for e in mgr.by_file_ident.iter() {
+            assert!(!e.value().is_empty(), "empty index rows are removed, not kept");
+            have.insert(e.key().clone(), e.value().clone());
+        }
+        for v in expect.values_mut().chain(have.values_mut()) {
+            v.sort();
+        }
+        assert_eq!(have, expect, "by_file_ident drifted from layouts");
+    }
+
+    #[test]
+    fn write_capable_holders_reports_rw_and_any_but_not_read() {
+        let mgr = fixture();
+        let ident = |key: &str| {
+            let p = mgr.placement_for(key).expect("grant pinned a placement");
+            truncate_gate_key(&p, key)
+        };
+        mgr.generate_layout(owner(1), vec![1], "f", 0, 1024, IoMode::Read).unwrap();
+        assert!(mgr.write_capable_holders(&ident("f")).is_empty(), "a READ layout does not conflict");
+        mgr.generate_layout(owner(2), vec![2], "f", 0, 1024, IoMode::ReadWrite).unwrap();
+        mgr.generate_layout(owner(3), vec![3], "f", 0, 1024, IoMode::Any).unwrap();
+        // Two RW layouts for one client count once.
+        mgr.generate_layout(owner(2), vec![4], "f", 4096, 1024, IoMode::ReadWrite).unwrap();
+        let mut holders = mgr.write_capable_holders(&ident("f"));
+        holders.sort();
+        assert_eq!(holders, vec![2, 3], "RW and ANY hold; READ does not; distinct clients");
+        assert!(mgr.write_capable_holders("id:0000000000000000").is_empty(), "unknown file: nobody");
+        index_is_consistent(&mgr);
+    }
+
+    #[test]
+    fn every_removal_path_unindexes() {
+        let mgr = fixture();
+        let l1 = mgr.generate_layout(owner(1), vec![1], "a", 0, 1024, IoMode::ReadWrite).unwrap();
+        let l2 = mgr.generate_layout(owner(2), vec![2], "a", 0, 1024, IoMode::ReadWrite).unwrap();
+        let l3 = mgr.generate_layout(owner(3), vec![3], "a", 0, 1024, IoMode::ReadWrite).unwrap();
+        let l4 = mgr.generate_layout(owner(4), vec![4], "b", 0, 1024, IoMode::ReadWrite).unwrap();
+        let ident_a = truncate_gate_key(&mgr.placement_for("a").unwrap(), "a");
+        let ident_b = truncate_gate_key(&mgr.placement_for("b").unwrap(), "b");
+        assert_eq!(mgr.write_capable_holders(&ident_a).len(), 3);
+        index_is_consistent(&mgr);
+
+        // LAYOUTRETURN of one.
+        mgr.return_layout(&l1.stateid).unwrap();
+        assert_eq!(mgr.write_capable_holders(&ident_a).len(), 2);
+        index_is_consistent(&mgr);
+        // Server-side revoke of another.
+        assert!(mgr.revoke_layout(&l2.stateid));
+        assert_eq!(mgr.write_capable_holders(&ident_a), vec![3]);
+        index_is_consistent(&mgr);
+        // LAYOUTRETURN ALL for the last holder.
+        assert_eq!(mgr.return_all_for_client(3), vec![l3.stateid]);
+        assert!(mgr.write_capable_holders(&ident_a).is_empty());
+        assert!(!mgr.by_file_ident.contains_key(&ident_a), "an emptied row is dropped");
+        // FSID return on the other file.
+        assert_eq!(mgr.return_fsid_for_client(4, 1), vec![l4.stateid]);
+        assert!(mgr.write_capable_holders(&ident_b).is_empty());
+        index_is_consistent(&mgr);
+        assert!(mgr.by_file_ident.is_empty());
+    }
+
+    #[test]
+    fn a_recall_seqid_bump_does_not_orphan_the_index_entry() {
+        let mgr = fixture();
+        mgr.generate_layout(owner(1), vec![1], "t", 0, 1024, IoMode::ReadWrite).unwrap();
+        let ident = truncate_gate_key(&mgr.placement_for("t").unwrap(), "t");
+        // The truncate recall bumps the stateid's seqid in place.
+        let recalled = mgr.recall_layouts_for_file(&ident);
+        assert_eq!(recalled.len(), 1);
+        assert_eq!(mgr.write_capable_holders(&ident), vec![1], "still indexed after the bump");
+        index_is_consistent(&mgr);
+        // And the bumped stateid returns cleanly, unindexing.
+        mgr.return_layout(&recalled[0].1).unwrap();
+        assert!(mgr.write_capable_holders(&ident).is_empty());
+        index_is_consistent(&mgr);
+    }
+
+    #[test]
+    fn restored_records_are_indexed_and_scsi_rekeys_move_the_row() {
+        let mgr = fixture();
+        let l = mgr.generate_layout(owner(1), vec![1], "r", 0, 1024, IoMode::ReadWrite).unwrap();
+        let ident = truncate_gate_key(&mgr.placement_for("r").unwrap(), "r");
+        let rec = l.to_record();
+        // A successor process: load the record, no in-memory carry-over.
+        let succ = fixture();
+        succ.load_records(vec![rec]);
+        assert_eq!(succ.write_capable_holders(&ident), vec![1], "a restored RW layout is a holder");
+        index_is_consistent(&succ);
+
+        // scsi-class handles are keyed by file_key and re-keyed on RENAME.
+        let sid = mgr.register_scsi_layout(owner(5), vec![9], "vol/old", IoMode::ReadWrite);
+        assert_eq!(mgr.write_capable_holders("vol/old"), vec![5]);
+        assert_eq!(mgr.rekey_scsi_layouts("vol/old", "vol/new"), 1);
+        assert!(mgr.write_capable_holders("vol/old").is_empty());
+        assert_eq!(mgr.write_capable_holders("vol/new"), vec![5]);
+        index_is_consistent(&mgr);
+        assert!(mgr.take_scsi_layout(&sid).is_some());
+        assert!(mgr.write_capable_holders("vol/new").is_empty());
+        index_is_consistent(&mgr);
+    }
+
+    /// The C6 publish-then-recheck race path removes a just-published
+    /// layout; it must unindex too, or the refused grant leaves a
+    /// phantom holder.
+    #[test]
+    fn a_grant_that_raced_a_truncate_leaves_no_phantom_holder() {
+        let mgr = fixture();
+        // First grant pins the placement.
+        let l = mgr.generate_layout(owner(1), vec![1], "z", 0, 1024, IoMode::ReadWrite).unwrap();
+        mgr.return_layout(&l.stateid).unwrap();
+        let placement = mgr.placement_for("z").unwrap();
+        let ident = truncate_gate_key(&placement, "z");
+        // Arm the truncate-dirty mark so the recheck fires.
+        mgr.mark_truncate_dirty(&ident, 0);
+        let err = mgr
+            .generate_layout(owner(2), vec![2], "z", 0, 1024, IoMode::ReadWrite)
+            .unwrap_err();
+        assert_eq!(err, GRANT_RACED_TRUNCATE);
+        assert!(mgr.write_capable_holders(&ident).is_empty(), "the refused grant is not a holder");
+        index_is_consistent(&mgr);
     }
 }

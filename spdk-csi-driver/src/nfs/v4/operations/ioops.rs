@@ -1706,8 +1706,20 @@ impl IoOperationHandler {
             _ => {}
         }
 
-        if !self.state_mgr.recall_machinery_ready() || self.state_mgr.pnfs_posture() {
+        if !self.state_mgr.recall_machinery_ready() {
             d.count_refusal("gate");
+            return Err(Some(WhyNoDelegation::Resource));
+        }
+        // The MDS posture has its own flag (design §3, slice 5): a
+        // layout holder's writes never cross the MDS, so granting
+        // there rests on rule 6 and the LAYOUTGET/LAYOUTCOMMIT/proxy
+        // fences, which get their own rig before a fleet grants.
+        // Counted apart from "gate" so a rig against the MDS binary
+        // can tell "posture refused" from "machinery missing".
+        if self.state_mgr.pnfs_posture()
+            && !crate::nfs::v4::state::pnfs_delegations_enabled()
+        {
+            d.count_refusal("posture");
             return Err(Some(WhyNoDelegation::Resource));
         }
         if d.grants_paused(client_id) {
@@ -1767,7 +1779,16 @@ impl IoOperationHandler {
             return Err(Some(WhyNoDelegation::Resource));
         };
 
-        // Rules 5, 8, 9 — re-checked UNDER the file entry lock, with
+        // Rule 6's key: the export-relative path the layout index is
+        // consulted by. Outside the MDS posture the predicate is a
+        // constant false and the key is never read.
+        let file_key: String = path
+            .strip_prefix(self.fh_mgr.get_export_path())
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned();
+
+        // Rules 5, 6, 8, 9 — re-checked UNDER the file entry lock, with
         // the mint into the ONE stateid namespace (READ/TEST/FREE_
         // STATEID work on delegation stateids; no disjoint-namespace
         // BAD_STATEID trap). Unpersisted + epoch-mixed (design §6).
@@ -1776,7 +1797,10 @@ impl IoOperationHandler {
             client_id,
             fh_bytes.to_vec(),
             path.to_path_buf(),
-            || !self.state_mgr.stateids.file_has_write_open(ident.0, ident.1),
+            || {
+                !self.state_mgr.stateids.file_has_write_open(ident.0, ident.1)
+                    && !self.state_mgr.write_layout_held_by_other(&file_key, client_id)
+            },
             || {
                 self.state_mgr
                     .stateids

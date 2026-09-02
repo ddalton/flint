@@ -1,9 +1,11 @@
 # NFSv4.1 READ delegations — "recall-or-die" — design of record
 
-Status: **DESIGN OF RECORD (2026-08-31) — no implementation code.** Read
-this document, and pass the formal-model gate in §7, before writing ANY
-delegation code. The only delegation code at HEAD is a quarantined
-prototype (§2) whose grant is wire-invisible.
+Status: **DESIGN OF RECORD (2026-08-31); IMPLEMENTATION CODE-COMPLETE
+2026-09-02 — see the STATUS blocks at the top of §11 for what is
+shipped and what remains (the §9 wire legs).** Read this document, and
+pass the formal-model gate in §7, before changing ANY delegation code.
+§2 describes HEAD as it was before the work began and is kept as the
+record of what the design started from.
 
 Provenance: multi-agent design workflow `wf_f2f28ed6-0d1` — 4
 understanding agents over the state/wire/callback/conformance machinery,
@@ -343,7 +345,10 @@ without re-sending):
   serialization to one slow client (rm -rf over 40 delegated files)
   must not revoke delegations that were never asked for. Batch
   per-client recalls into one CB_COMPOUND where ca_maxoperations
-  permits.
+  permits. *(Implemented 2026-09-02 — first transmit only, chunked to
+  `ca_maxoperations - 1`, positional reply split. Linux advertises 2,
+  so against Linux the chunk is 1 and nothing changes on the wire;
+  the fan-in is for clients with a wider back channel.)*
 - Acked ⇒ RECALL_ACKED; resend on timeout/DELAY at +30s and +60s.
 - Transport/ConnectionClosed/NoChannel on every session ⇒ **bounded
   ~30s CB_PATH_DOWN wait window, NOT immediate revoke** [graft/V1] —
@@ -759,13 +764,17 @@ recall ⇒ hydrate ⇒ write succeeds. **Concurrency stress** (10k
 iterations, readers racing a writer loop, WITH hardlink pairs): the
 post-iteration invariant scan plus a **write-time debug assert in the
 fence** (no live foreign delegation at write execution — transient
-windows the scan misses) plus a granted floor for the run. **DS
+windows the scan misses) plus a granted floor for the run. *(SHIPPED
+2026-09-02 as `state/deleg_stress_tests.rs` — see §11 for the shape
+and the first run's numbers.)* **DS
 client-behavior pin** (MDS posture): a client holding delegation +
 READ layout demonstrably serves its READs from the DS (mountstats/DS
 op counters) — NOT a DS "validation" assertion; the DS discards
 stateids at HEAD (ds/server.rs:707/745/1393), so acceptance-shaped
 assertions are vacuously green; pin the discard so future DS work
-cannot silently break the path. Rust legs run on real Linux (zig
+cannot silently break the path *(the discard pin SHIPPED 2026-09-02 —
+`pnfs/ds/server.rs` `deleg_stateid_pin_tests`; the mountstats/DS-op-
+counter wire leg is still open)*. Rust legs run on real Linux (zig
 cross-build; the macOS suite is NOT the suite); `cargo test
 --all-targets` (plain `cargo test` does not build bins).
 
@@ -820,6 +829,71 @@ shipped, and one full regression sweep (pynfs floor-171, nfstest)
 with the flag ON.
 
 ## 11. Implementation shape
+
+**STATUS (2026-09-02, slice 5 + the last slice-3/4 code items):**
+everything in this document that is CODE is now implemented and
+unit-tested on macOS; what remains is the wire work in §9 (the
+negative legs, the restart/suspend legs, the two-client conflict
+matrix, the tier leg, nfstest, and pynfs flag-ON against the MDS
+binary). In this increment:
+
+- **Slice 5, MDS posture.** `FLINT_NFS_DELEGATIONS_PNFS` exists and
+  gates grants in the MDS posture (refusals counted under `posture`,
+  distinct from `gate`, so a rig against the MDS binary can tell the
+  two apart). Grant rule 6 is live: `StateManager::
+  write_layout_held_by_other` consults a probe the dispatcher installs
+  in the same step as the posture (a constructor test pins the pair;
+  no probe ⇒ the rule fails CLOSED). The index behind it,
+  `LayoutManager::by_file_ident`, is keyed by the layout's
+  `file_ident` — the truncate-gate key, which for every non-legacy pin
+  is `id:<placement file_id>` and therefore follows the file through
+  RENAME. That is the (dev,ino)-index requirement of §4/[V3] met by a
+  different immutable identity: the placement's, which the MDS already
+  keys stripes by. Legacy `path:` pins cannot be renamed at all (the op
+  is refused), so the path-keyed residual the verifier worried about
+  has no reachable instance. Every `layouts` insert/remove site
+  maintains the index and a rebuild-and-compare test pins that.
+  Conflict site 9 is fenced at LAYOUTGET for iomode RW **and ANY**,
+  before the class dispatch (scsi included), answering
+  **NFS4ERR_LAYOUTTRYLATER** with the guard held across the grant so
+  the index sees the layout before any grant re-checks. LAYOUTCOMMIT
+  and the proxied fallback WRITE — the two lanes the completeness gate
+  had exempted "until slice 5" — are fenced (`layoutcommit`,
+  `write_proxy`) and the gate now requires it. The MDS binary starts
+  the §10 reporter. **DS client-behaviour pin:** a test drives the
+  DS's real compound arm with a delegation-shaped stateid the DS has
+  never seen and asserts it is ACCEPTED (with a garbage-fh
+  anti-vacuity leg), so DS-side stateid validation cannot be added
+  without first teaching the DS about delegation stateids.
+- **Per-client recall batching (§5.4).** The FIRST transmit of a
+  fence's orders is grouped per client and chunked to the client's
+  back-channel `ca_maxoperations - 1`; one CB_COMPOUND carries the
+  chunk, the reply is split positionally, and each record's ladder
+  runs on from its own slice (a sibling's DELAY or BAD_STATEID is
+  never yours; an op the compound stopped before is resent alone; a
+  CB_SEQUENCE-level failure is everyone's). Rungs and deadlines stay
+  per record. **Against Linux this is inert by construction** — it
+  advertises back-channel maxops 2 (`NFS4_MAX_BACK_CHANNEL_OPS`), so
+  the chunk is 1 and the wire is byte-identical to before; a test pins
+  that. Metered as `batched +N` on the reporter line (compounds with
+  >1 recall; zero against Linux is the honest number).
+- **Concurrency stress (§9).** `state/deleg_stress_tests.rs`: 4
+  readers × 2500 grant attempts racing 2 writers × 1000 OPEN-write →
+  WRITE → CLOSE cycles over 8 files each reached by TWO filehandles,
+  through the production funnel with the real stateid manager and a
+  cooperative client thread returning recalls. Scored on the
+  post-run invariant scan (`check_invariants`), a write-window probe
+  from inside the writer (no Granted record while its write open is
+  registered — through either alias), the new **release-time
+  exclusivity assert armed on every proceeding guard** (a foreign
+  non-revoked record at guard drop is a debug panic, and a
+  should-panic test proves the assert is live), a granted floor, and
+  a contention floor (a run with no writer DELAY never exercised an
+  interleaving). First run: 1855 grants (921/934 by alias), 379
+  writer DELAYs, 2000/2000 writer proceeds, 0 revocations, scan
+  clean, 40ms.
+- Also: `DelegationManager::set_cooldown` (rigs), the
+  `granted_holders` probe, and a refusal reason `posture`.
 
 **STATUS (2026-09-01):** slices 0-2 SHIPPED (`2d913055` formal model,
 `9f1fbdbb` wire fixes + foundations; validated macOS+Linux suites,
@@ -897,7 +971,14 @@ the smaller number.
    `mutation_fence`).
 2. CLAIM_PREVIOUS delegation re-grant during grace (v2, from D3).
 3. LAYOUTTRYLATER vs DELAY for site 9 — verify Linux pNFS client
-   behavior on the lima rig.
+   behavior on the lima rig. *(2026-09-02: implemented as
+   LAYOUTTRYLATER, by codebase precedent — it is what the
+   truncate-dirty gate already answers, and Linux's
+   `pnfs_update_layout` retries TRYLATER for ~2 lease times before
+   falling back to MDS I/O, whose WRITE lane is itself fenced, so
+   both client paths converge on the recall. DELAY would make the
+   client retry LAYOUTGET indefinitely instead of falling back;
+   either is safe. Still to be OBSERVED on the rig, not just argued.)*
 4. Per-client cap default (4096) — measure Linux client delegation
    cache pressure under the fleet rig; too low silently caps the win,
    too high inflates recall fan-out.

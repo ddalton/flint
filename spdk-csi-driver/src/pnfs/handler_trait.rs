@@ -94,6 +94,20 @@ pub trait PnfsOperations: Send + Sync {
         args: LayoutReturnArgs,
     ) -> Result<(), crate::pnfs::mds::operations::LayoutReturnError>;
     
+    /// Delegation grant rule 6 (docs/plans/nfs-delegations-design.md
+    /// §4): the client ids holding a write-capable layout — iomode RW
+    /// or ANY — on `file_key` (export-relative path). A READ delegation
+    /// is refused while any client OTHER than the requester appears
+    /// here: a layout holder writes straight to the data servers and
+    /// the MDS never sees a byte of it, so no fence could recall the
+    /// delegation in time.
+    ///
+    /// REQUIRED rather than defaulted on purpose. A default of "nobody"
+    /// would be fail-open for any handler that forgot to override it —
+    /// the silent shape this feature has been bitten by twice. Test
+    /// handlers answer an empty Vec explicitly.
+    fn write_layout_holders(&self, file_key: &str) -> Vec<u64>;
+
     /// Handle LAYOUTCOMMIT operation (opcode 49)
     fn layoutcommit(&self) -> Result<(), String> {
         // Default implementation: not required for basic pNFS

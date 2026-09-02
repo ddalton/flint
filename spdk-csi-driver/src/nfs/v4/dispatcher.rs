@@ -154,8 +154,17 @@ impl CompoundDispatcher {
         // listener-side facts it cannot know at its own construction.
         this.state_mgr
             .install_back_channels(Arc::clone(&this.back_channels));
-        if this.pnfs_handler.is_some() {
+        if let Some(pnfs) = this.pnfs_handler.as_ref() {
             this.state_mgr.set_pnfs_posture();
+            // Grant rule 6's oracle rides with the posture: the two are
+            // one wiring step so a posture without its rule cannot be
+            // constructed (the rule fails closed without it, and a
+            // silently-refusing grant path is the shape this feature
+            // was inert in for a whole slice).
+            let probe = Arc::clone(pnfs);
+            this.state_mgr.install_layout_probe(Arc::new(move |file_key: &str| {
+                probe.write_layout_holders(file_key)
+            }));
         }
         this
     }
@@ -1893,6 +1902,19 @@ impl CompoundDispatcher {
                             (Some(p), Some(t)) => (p, t),
                             _ => return OperationResult::Write(Nfs4Status::Io, None),
                         };
+                        // Conflict site 6 for the MDS lane (design
+                        // §5.2, slice 5): this WRITE never reaches
+                        // ioops, so it carries its own fence. Held
+                        // across the proxied write and the stub
+                        // extension.
+                        let _deleg_guard = match self.deleg_fence_stub_path(
+                            &t.path,
+                            context,
+                            "write_proxy",
+                        ) {
+                            Ok(g) => g,
+                            Err(status) => return OperationResult::Write(status, None),
+                        };
                         let len = data.len() as u64;
                         return match pnfs
                             .proxy_fallback_write(&t.file_key, offset, data)
@@ -2702,6 +2724,41 @@ impl CompoundDispatcher {
         if key.is_empty() { None } else { Some(key) }
     }
 
+    /// The fence consult for the dispatcher-level MDS lanes, which
+    /// have a stub PATH rather than the fh-derived identity ioops
+    /// works from. Stats the stub for its (dev,ino); an unstattable
+    /// stub is a file that is gone, and there is nothing to fence.
+    /// `Err(DELAY)` when a recall is in flight.
+    fn deleg_fence_stub_path(
+        &self,
+        path: &std::path::Path,
+        context: &CompoundContext,
+        site: &'static str,
+    ) -> Result<Option<crate::nfs::v4::state::MutationGuard>, Nfs4Status> {
+        if !crate::nfs::v4::state::delegations_enabled() {
+            return Ok(None);
+        }
+        use std::os::unix::fs::MetadataExt;
+        let Some(ident) = crate::nfs::v4::stat_cache::stat(path)
+            .ok()
+            .map(|m| (m.dev(), m.ino()))
+        else {
+            return Ok(None);
+        };
+        let mutator = context
+            .session_id
+            .as_ref()
+            .and_then(|sid| self.state_mgr.sessions.get_session(sid))
+            .map(|s| s.client_id);
+        match self.state_mgr.deleg_fence(ident, mutator, false, site) {
+            crate::nfs::v4::state::FenceVerdict::Proceed(g) => Ok(g),
+            crate::nfs::v4::state::FenceVerdict::Delay => {
+                info!("{}: delegation recall in flight → DELAY", site);
+                Err(Nfs4Status::Delay)
+            }
+        }
+    }
+
     /// Export-relative key of the file the CURRENT FH names (SETATTR's
     /// and OPEN's target). None when there's no pnfs handler, no FH, or
     /// the FH doesn't resolve — callers treat None as "not
@@ -3125,6 +3182,33 @@ impl CompoundDispatcher {
             client_id: owner_client_id,
             session_id: owner_session_id,
             fsid: 1,
+        };
+
+        // Conflict site 9 (design §5.2, slice 5): a write-capable
+        // layout — RW, or ANY, which the client may write under — on a
+        // file some other client holds a READ delegation on. The
+        // holder's cache would go stale with no RPC ever crossing the
+        // MDS, so recall first and answer LAYOUTTRYLATER: the same
+        // "come back once the stripes are consistent" the truncate-
+        // dirty gate answers, and Linux retries it for ~2 lease times
+        // before falling back to MDS I/O — whose WRITE lane is fenced
+        // too, so both paths converge on the recall. The guard rides
+        // across the grant so rule 6's index sees the layout before
+        // any grant can re-check. Both classes: a scsi RW layout is a
+        // block-level writer the MDS sees even less of.
+        let _deleg_guard = if matches!(iomode, 2 | 3) {
+            match self.deleg_fence_stub_path(&fs_path, context, "layoutget_rw") {
+                Ok(g) => g,
+                Err(_) => {
+                    info!(
+                        "LAYOUTGET '{}' iomode {}: delegation recall in flight → LAYOUTTRYLATER",
+                        file_key, iomode
+                    );
+                    return OperationResult::LayoutGet(Nfs4Status::LayoutTrylater, None);
+                }
+            }
+        } else {
+            None
         };
 
         // Per-volume class dispatch (design doc §5): the scsi grant
@@ -4136,6 +4220,19 @@ impl CompoundDispatcher {
                 warn!("LAYOUTCOMMIT: stale/invalid CFH: {}", e);
                 return OperationResult::LayoutCommit(Nfs4Status::Stale, None);
             }
+        };
+
+        // Conflict site for the MDS lane (design §5.2, slice 5): the
+        // commit publishes bytes written on the data servers — size,
+        // mtime and the change attribute move here, on the MDS, and
+        // this is the only op that moves them. Rule 6 and the
+        // LAYOUTGET fence make a foreign live holder unreachable by
+        // the time a commit arrives; the consult is the backstop that
+        // says so rather than assumes it. Guard held across the
+        // blocking closure that bumps the change counter.
+        let _deleg_guard = match self.deleg_fence_stub_path(&path, context, "layoutcommit") {
+            Ok(g) => g,
+            Err(status) => return OperationResult::LayoutCommit(status, None),
         };
 
         // AUDIT C4: never extend the stub past a cut that is still landing
@@ -5418,12 +5515,10 @@ mod tests {
         // without waiting out any window.
         struct RefusingSender;
         impl RecallSender for RefusingSender {
-            fn send_recall(
+            fn send_recalls(
                 &self,
                 _client_id: u64,
-                _stateid: StateId,
-                _truncate: bool,
-                _fh: Vec<u8>,
+                _items: Vec<crate::nfs::v4::deleg_recall::RecallItem>,
             ) -> std::pin::Pin<
                 Box<
                     dyn std::future::Future<
@@ -5705,6 +5800,9 @@ mod tests {
         /// file-layout-only fake would leave them unreachable.
         scsi: bool,
         backend: Option<Arc<dyn crate::state_backend::StateBackend>>,
+        /// Grant rule 6 fixture: file_key → clients holding a
+        /// write-capable layout. Shared so a test can flip it mid-run.
+        write_holders: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u64>>>>,
     }
 
     impl FakePnfs {
@@ -5717,6 +5815,22 @@ mod tests {
                 disposition,
                 scsi: false,
                 backend: None,
+                write_holders: Arc::new(std::sync::Mutex::new(Default::default())),
+            })
+        }
+
+        /// Same as `new`, returning the concrete type so a test can
+        /// reach `write_holders`.
+        fn new_concrete(
+            pinned: &[&str],
+            disposition: crate::pnfs::FallbackIoDisposition,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                pinned: pinned.iter().map(|s| s.to_string()).collect(),
+                disposition,
+                scsi: false,
+                backend: None,
+                write_holders: Arc::new(std::sync::Mutex::new(Default::default())),
             })
         }
 
@@ -5731,6 +5845,7 @@ mod tests {
                 disposition: crate::pnfs::FallbackIoDisposition::FailFast,
                 scsi: true,
                 backend: Some(backend),
+                write_holders: Arc::new(std::sync::Mutex::new(Default::default())),
             })
         }
     }
@@ -5766,6 +5881,15 @@ mod tests {
 
         fn is_pnfs_managed(&self, file_key: &str) -> bool {
             self.pinned.contains(file_key)
+        }
+
+        fn write_layout_holders(&self, file_key: &str) -> Vec<u64> {
+            self.write_holders
+                .lock()
+                .unwrap()
+                .get(file_key)
+                .cloned()
+                .unwrap_or_default()
         }
 
         fn fallback_io_disposition(
@@ -7478,5 +7602,287 @@ mod tests {
             ),
             other => panic!("expected a Link result, got {:?}", other),
         }
+    }
+
+    // ── Slice 5: the MDS posture (design §3/§4 rule 6/§5.2 site 9) ──
+
+    /// A callback-ready session for `client_id` with a live back-channel
+    /// writer, so grant rule 7 passes and the grant decision is the
+    /// posture's alone.
+    async fn ready_session(
+        d: &CompoundDispatcher,
+        client_id: u64,
+    ) -> crate::nfs::v4::protocol::SessionId {
+        use crate::nfs::v4::compound::CallbackSecParms;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (conn, acc) = tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept());
+        let (_r, w) = conn.unwrap().into_split();
+        std::mem::forget(acc.unwrap());
+        let writer = crate::nfs::v4::back_channel::BackChannelWriter::new(
+            tokio::io::BufWriter::new(w),
+        );
+        let s = d.state_mgr.sessions.create_session(
+            client_id, 0, 0, 65536, 65536, 16384, 16, 16, 0x40000000,
+            Some(CallbackSecParms::None), 1,
+        );
+        d.state_mgr.sessions.set_back_chan_maxops(&s.session_id, 2);
+        d.back_channels.insert(s.session_id, vec![writer]);
+        s.session_id
+    }
+
+    fn read_open(owner: &[u8], file: &str) -> Operation {
+        Operation::Open {
+            seqid: 0,
+            share_access: 1,
+            share_deny: 0,
+            owner: owner.to_vec(),
+            openhow: crate::nfs::v4::compound::OpenHow {
+                createmode: 0,
+                attrs: None,
+                attrmask: Vec::new(),
+            },
+            claim: crate::nfs::v4::compound::OpenClaim {
+                claim_type: 0,
+                file: file.to_string(),
+                delegate_type: None,
+                delegate_stateid: None,
+            },
+        }
+    }
+
+    /// OPEN(read) as `sid`'s client; Some(delegation stateid) if granted.
+    async fn open_read(
+        d: &CompoundDispatcher,
+        sid: crate::nfs::v4::protocol::SessionId,
+        owner: &[u8],
+        file: &str,
+    ) -> Option<StateId> {
+        let mut ctx = CompoundContext::new(1);
+        ctx.session_id = Some(sid);
+        let put = d.dispatch_operation(Operation::PutRootFh, &mut ctx).await;
+        assert!(matches!(put, OperationResult::PutRootFh(Nfs4Status::Ok)));
+        match d.dispatch_operation(read_open(owner, file), &mut ctx).await {
+            OperationResult::Open(Nfs4Status::Ok, Some(res)) => match res.delegation {
+                Some(crate::nfs::v4::compound::Delegation::Read { stateid }) => Some(stateid),
+                _ => None,
+            },
+            other => panic!("expected an OPEN, got {other:?}"),
+        }
+    }
+
+    /// The posture and its rule are ONE wiring step: a dispatcher
+    /// with a pNFS handler has both, one without has neither. Without
+    /// the probe the rule fails closed and every grant is refused —
+    /// silently, the way the missing recall machinery was.
+    #[test]
+    fn an_mds_posture_dispatcher_installs_the_layout_probe_with_its_posture() {
+        let (d, _t) = create_test_dispatcher_pnfs(&[], crate::pnfs::FallbackIoDisposition::Serve);
+        assert!(d.state_mgr.pnfs_posture());
+        assert!(
+            d.state_mgr.layout_probe_installed(),
+            "MDS posture without rule 6's oracle refuses every grant with no visible cause"
+        );
+        let (plain, _t2) = create_test_dispatcher();
+        assert!(!plain.state_mgr.pnfs_posture());
+        assert!(!plain.state_mgr.layout_probe_installed());
+    }
+
+    /// FLINT_NFS_DELEGATIONS alone does not grant on an MDS; the
+    /// posture needs FLINT_NFS_DELEGATIONS_PNFS too, and the refusal is
+    /// counted under its own reason so a rig against the MDS binary can
+    /// tell "posture" from "machinery missing".
+    #[tokio::test]
+    async fn the_mds_posture_needs_its_own_flag_to_grant() {
+        let _flag = crate::nfs::v4::state::with_delegations_pnfs(true, false);
+        let (d, t) = create_test_dispatcher_pnfs(&[], crate::pnfs::FallbackIoDisposition::Serve);
+        std::fs::write(t.path().join("warm.txt"), b"warm").unwrap();
+        d.state_mgr.leases.end_grace();
+        d.state_mgr.install_recall_spawner(Arc::new(|_| {}));
+        let sid = ready_session(&d, 71).await;
+
+        assert!(open_read(&d, sid, b"r1", "warm.txt").await.is_none(), "PNFS flag off ⇒ NONE");
+        assert_eq!(d.state_mgr.delegations.refusal_count_named("posture"), 1);
+        assert_eq!(d.state_mgr.delegations.grants_total(), 0);
+
+        // Flip the posture flag inside the held lock (see the note on
+        // re-entrancy in the grant test above).
+        crate::nfs::v4::state::override_pnfs_delegations_enabled(Some(true));
+        assert!(
+            open_read(&d, sid, b"r2", "warm.txt").await.is_some(),
+            "both flags on ⇒ the MDS grants"
+        );
+        assert_eq!(d.state_mgr.delegations.refusal_count_named("posture"), 1, "no second refusal");
+        assert_eq!(d.state_mgr.delegations.grants_total(), 1);
+    }
+
+    /// Grant rule 6, through the real OPEN path: a write-capable layout
+    /// held by ANOTHER client refuses the grant (a DS-path writer's
+    /// bytes never cross the MDS, so no fence could recall in time);
+    /// the requester's own layout does not; and a returned layout lets
+    /// the next OPEN through.
+    #[tokio::test]
+    async fn a_foreign_write_capable_layout_refuses_the_grant() {
+        let _flag = crate::nfs::v4::state::with_delegations_pnfs(true, true);
+        let temp_dir = TempDir::new().unwrap();
+        let export_path = temp_dir.path().canonicalize().unwrap();
+        std::fs::write(export_path.join("warm.txt"), b"warm").unwrap();
+        let fake = FakePnfs::new_concrete(&[], crate::pnfs::FallbackIoDisposition::Serve);
+        let d = CompoundDispatcher::new_with_pnfs(
+            Arc::new(FileHandleManager::new(export_path)),
+            Arc::new(StateManager::new_in_memory("")),
+            Arc::new(LockManager::new()),
+            Some(Arc::clone(&fake) as Arc<dyn crate::pnfs::PnfsOperations>),
+        );
+        d.state_mgr.leases.end_grace();
+        d.state_mgr.install_recall_spawner(Arc::new(|_| {}));
+        let sid = ready_session(&d, 71).await;
+
+        // Client 99 holds an RW layout on the file.
+        fake.write_holders.lock().unwrap().insert("warm.txt".into(), vec![99]);
+        assert!(open_read(&d, sid, b"a", "warm.txt").await.is_none(), "foreign RW layout ⇒ NONE");
+        assert_eq!(
+            d.state_mgr.delegations.refusal_count(crate::nfs::v4::state::GrantRefusal::Precheck),
+            1,
+            "rule 6 refuses under the entry lock, as a precheck"
+        );
+        // Only the requester holds one: no conflict.
+        fake.write_holders.lock().unwrap().insert("warm.txt".into(), vec![71]);
+        let own = open_read(&d, sid, b"b", "warm.txt").await;
+        assert!(own.is_some(), "the requester's own layout is not a conflict");
+        d.dispatch_operation(
+            Operation::DelegReturn { stateid: own.unwrap() },
+            &mut {
+                let mut c = CompoundContext::new(1);
+                c.session_id = Some(sid);
+                c
+            },
+        )
+        .await;
+        // Layout returned: grants flow.
+        fake.write_holders.lock().unwrap().clear();
+        assert!(open_read(&d, sid, b"c", "warm.txt").await.is_some());
+        // ANTI-VACUITY: the refusal above was rule 6's, not some other
+        // gate's — the identical OPEN with a foreign holder refuses again.
+        fake.write_holders.lock().unwrap().insert("warm.txt".into(), vec![5]);
+        assert!(open_read(&d, sid, b"d", "warm.txt").await.is_none());
+    }
+
+    /// Conflict site 9: a write-capable LAYOUTGET on a delegated file
+    /// recalls the holder and answers LAYOUTTRYLATER; a READ LAYOUTGET
+    /// does not touch the delegation at all; after DELEGRETURN the RW
+    /// request passes the fence.
+    #[tokio::test]
+    async fn a_write_capable_layoutget_on_a_delegated_file_recalls_and_answers_trylater() {
+        let _flag = crate::nfs::v4::state::with_delegations_pnfs(true, true);
+        let (d, t) = create_test_dispatcher_pnfs(&[], crate::pnfs::FallbackIoDisposition::Serve);
+        let export = t.path().canonicalize().unwrap();
+        std::fs::write(export.join("warm.txt"), b"warm").unwrap();
+        d.state_mgr.leases.end_grace();
+        let captured: Arc<std::sync::Mutex<Vec<crate::nfs::v4::state::RecallOrder>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap = Arc::clone(&captured);
+        d.state_mgr
+            .install_recall_spawner(Arc::new(move |orders| cap.lock().unwrap().extend(orders)));
+        let s_holder = ready_session(&d, 71).await;
+        let deleg = open_read(&d, s_holder, b"h", "warm.txt")
+            .await
+            .expect("precondition: the holder is granted");
+
+        // Client 72 asks for layouts on the same file.
+        let s_writer = d.state_mgr.sessions.create_session(72, 0, 0, 65536, 65536, 16384, 16, 16, 0, None, 1);
+        let fh = d.file_handler.fh_manager().path_to_filehandle(&export.join("warm.txt")).unwrap();
+        let layoutget = |iomode: u32| Operation::LayoutGet {
+            signal_layout_avail: false,
+            layout_type: 1,
+            iomode,
+            offset: 0,
+            length: u64::MAX,
+            minlength: 4096,
+            stateid: StateId { seqid: 0, other: [0; 12] },
+            maxcount: 65536,
+        };
+        let mut ctx = CompoundContext::new(1);
+        ctx.session_id = Some(s_writer.session_id);
+        ctx.current_fh = Some(fh.clone());
+
+        // READ layout: not a conflict; the fake refuses layouts, and
+        // that refusal — not TRYLATER — is what comes back.
+        let r = d.dispatch_operation(layoutget(1), &mut ctx).await;
+        assert!(matches!(r, OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None)), "{r:?}");
+        assert!(captured.lock().unwrap().is_empty(), "a READ layout recalls nothing");
+
+        // RW layout: recall + LAYOUTTRYLATER.
+        let r = d.dispatch_operation(layoutget(2), &mut ctx).await;
+        assert!(matches!(r, OperationResult::LayoutGet(Nfs4Status::LayoutTrylater, None)), "{r:?}");
+        assert_eq!(captured.lock().unwrap().len(), 1, "exactly one recall order");
+        assert_eq!(captured.lock().unwrap()[0].stateid, deleg);
+        assert_eq!(d.state_mgr.delegations.meter().delay_count("layoutget_rw"), 1);
+        // ANY is write-capable too: still fenced, still no second recall.
+        let r = d.dispatch_operation(layoutget(3), &mut ctx).await;
+        assert!(matches!(r, OperationResult::LayoutGet(Nfs4Status::LayoutTrylater, None)));
+        assert_eq!(captured.lock().unwrap().len(), 1, "single-flight");
+
+        // The holder returns; the fence lifts and the RW request reaches
+        // the handler (whose refusal is the fake's, proving it got there).
+        let mut hctx = CompoundContext::new(1);
+        hctx.session_id = Some(s_holder);
+        let r = d.dispatch_operation(Operation::DelegReturn { stateid: deleg }, &mut hctx).await;
+        assert!(matches!(r, OperationResult::DelegReturn(Nfs4Status::Ok)));
+        let r = d.dispatch_operation(layoutget(2), &mut ctx).await;
+        assert!(matches!(r, OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None)), "{r:?}");
+    }
+
+    /// The LAYOUTCOMMIT lane: it moves size/mtime/change on the MDS for
+    /// bytes written on the DSes, and it is fenced like every other
+    /// mutation — a foreign holder is recalled and the commit DELAYed.
+    #[tokio::test]
+    async fn layoutcommit_on_a_delegated_file_recalls_and_delays() {
+        let _flag = crate::nfs::v4::state::with_delegations_pnfs(true, true);
+        let (d, t) = create_test_dispatcher_pnfs(&[], crate::pnfs::FallbackIoDisposition::Serve);
+        let export = t.path().canonicalize().unwrap();
+        std::fs::write(export.join("warm.txt"), b"warm").unwrap();
+        d.state_mgr.leases.end_grace();
+        let captured: Arc<std::sync::Mutex<Vec<crate::nfs::v4::state::RecallOrder>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap = Arc::clone(&captured);
+        d.state_mgr
+            .install_recall_spawner(Arc::new(move |orders| cap.lock().unwrap().extend(orders)));
+        let s_holder = ready_session(&d, 71).await;
+        let deleg = open_read(&d, s_holder, b"h", "warm.txt").await.expect("granted");
+
+        let s_writer = d.state_mgr.sessions.create_session(72, 0, 0, 65536, 65536, 16384, 16, 16, 0, None, 1);
+        let fh = d.file_handler.fh_manager().path_to_filehandle(&export.join("warm.txt")).unwrap();
+        let commit = || Operation::LayoutCommit {
+            offset: 0,
+            length: u64::MAX,
+            reclaim: false,
+            stateid: StateId { seqid: 0, other: [0; 12] },
+            last_write_offset: Some(4095),
+            time_modify: None,
+            layout_type: 1,
+            layoutupdate: Bytes::new(),
+        };
+        let mut ctx = CompoundContext::new(1);
+        ctx.session_id = Some(s_writer.session_id);
+        ctx.current_fh = Some(fh.clone());
+
+        let r = d.dispatch_operation(commit(), &mut ctx).await;
+        assert!(matches!(r, OperationResult::LayoutCommit(Nfs4Status::Delay, None)), "{r:?}");
+        assert_eq!(captured.lock().unwrap().len(), 1);
+        assert_eq!(captured.lock().unwrap()[0].stateid, deleg);
+        assert_eq!(d.state_mgr.delegations.meter().delay_count("layoutcommit"), 1);
+        assert_eq!(
+            std::fs::metadata(export.join("warm.txt")).unwrap().len(),
+            4,
+            "a DELAYed commit must not have extended the stub"
+        );
+
+        let mut hctx = CompoundContext::new(1);
+        hctx.session_id = Some(s_holder);
+        d.dispatch_operation(Operation::DelegReturn { stateid: deleg }, &mut hctx).await;
+        let r = d.dispatch_operation(commit(), &mut ctx).await;
+        assert!(matches!(r, OperationResult::LayoutCommit(Nfs4Status::Ok, _)), "{r:?}");
+        assert_eq!(std::fs::metadata(export.join("warm.txt")).unwrap().len(), 4096, "now it extends");
     }
 }
