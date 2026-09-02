@@ -1784,8 +1784,15 @@ impl IoOperationHandler {
             },
         ) {
             Ok(sid) => {
-                info!(
-                    "OPEN: granted READ delegation {:?} on {:?} to client {}",
+                // DEBUG, not INFO: `try_grant` already logs this exact
+                // event at INFO from the state layer, and two INFO
+                // lines per grant is not just noise — a rig counting
+                // "granted READ delegation" to prove grants happened
+                // reads DOUBLE, which silently halves whatever
+                // coverage floor it thought it was enforcing. One
+                // event, one line.
+                debug!(
+                    "OPEN: delegation {:?} granted on {:?} to client {}",
                     sid, path, client_id
                 );
                 Ok(sid)

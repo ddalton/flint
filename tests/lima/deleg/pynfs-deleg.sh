@@ -184,6 +184,13 @@ print(f"  · G1 ok — {len(codes)} delegation testcases in both arms")
 
 # G2 — the ON arm actually GRANTED something. Without this, "DELEG1
 # passed" can mean the test never got far enough to need a delegation.
+# Count the STATE-LAYER grant line specifically. `try_grant` and the
+# OPEN handler both used to log "granted READ delegation" at INFO, so
+# counting the phrase read DOUBLE — which does not just inflate a
+# number, it silently halves whatever coverage floor a caller thought
+# it was enforcing. The OPEN-side line is debug now; the prefix here
+# pins which one this counts either way.
+#
 # Count the per-grant INFO line, not the reporter's delta line. The
 # reporter ticks every FLINT_NFS_DELEG_REPORT_SECS and prints nothing
 # in between, so a run shorter than one interval emits zero lines —
@@ -192,7 +199,7 @@ print(f"  · G1 ok — {len(codes)} delegation testcases in both arms")
 granted = 0
 with open(os.path.join(out, "server-on.final.log")) as f:
     for line in f:
-        if "granted READ delegation" in line:
+        if "deleg: granted READ delegation" in line:
             granted += 1
 print(f"  · grants observed on the ON arm: {granted}")
 
@@ -202,7 +209,7 @@ print(f"  · grants observed on the ON arm: {granted}")
 off_granted = 0
 with open(os.path.join(out, "server-off.final.log")) as f:
     for line in f:
-        if "granted READ delegation" in line:
+        if "deleg: granted READ delegation" in line:
             off_granted += 1
 if off_granted != 0:
     print(f"✗ G6: the CONTROL arm granted {off_granted} delegations — the flag is not what separates the arms")

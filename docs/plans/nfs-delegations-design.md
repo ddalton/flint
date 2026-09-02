@@ -631,6 +631,42 @@ undecodable (truncating any compound containing it), and a revoked
 delegation answered BAD_STATEID instead of DELEG_REVOKED. None was
 reachable from the Rust suite, which was green at 2300+ throughout.
 
+**★ WARM RE-ACCESS, MEASURED 2026-09-02 — `tests/lima/deleg/warm-reaccess.sh`.**
+Real Linux 6.x client, 40 files, `/proc/self/mountstats` per-op deltas,
+two arms differing only in the flag. Three passes: cold, warm past the
+attribute cache, warm inside it.
+
+```
+                pass1  pass2  pass3   per-op pass2 / pass3
+flag OFF           80     80     80   OPEN_NOATTR=40 CLOSE=40 / OPEN_NOATTR=40 CLOSE=40
+flag ON            80     40      0   GETATTR=40              / (none)
+```
+
+**Inside the attribute-cache window the elimination is TOTAL: 80 → 0.**
+Past it, the OPEN/CLOSE pair is gone but ONE GETATTR PER FILE REMAINS —
+50%, not the "<5% of pass 1" this section predicted. The prediction was
+wrong and the number stands as measured.
+
+The control is loud on every pass (80 RPCs, ratio 1.00), which is what
+licenses reading the treatment's silence at all — and note the control
+is loud in pass 3 too: Linux re-OPENs on every `open(2)` regardless of
+its attribute cache, so the OPEN/CLOSE saving is unconditional and it
+is the GETATTR that is timer-driven.
+
+**The residual is not a lost or recalled delegation.** Server-side
+counters for the whole run: 40 granted, `outstanding 40` throughout,
+`recall sent +0`, `returned +0`, `revoked +0`. The client held all
+forty continuously and revalidated attributes anyway. Cause not yet
+attributed — do not guess it; it is a client-behaviour question and the
+pass-3 discriminator is what narrows it.
+
+Practical reading for §1's claim: this rig mounts with `acregmax=5` so
+the control is loud without a 60s wait. **Linux's default is 60s**, so a
+workload re-accessing inside a minute gets the 100% regime and one
+re-accessing beyond it gets 50%. §1's "60-90% of steady-state metadata
+traffic on warm files" is consistent with the first regime and
+optimistic for the second.
+
 **★ LIVENESS PRECONDITION ON EVERY CONTROL ARM [V4, 2026-09-01 — from
 the oci-ab campaign's G-COLD confound].** Every leg above whose
 flag-ON assertion is *near-zero RPCs* must first assert that its
