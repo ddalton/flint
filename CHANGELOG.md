@@ -10,6 +10,87 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [1.44.0] - 2026-09-02
+
+Two silent data defects that shipped in 1.43.0, and a session handshake
+that refused its own advice.
+
+Nothing here announces itself on the wire. A striped read could return
+**zeros with `NFS4_OK`** — no error, no log line, no client-visible
+anomaly — and the MDS could serve a tiered file's **stub** as if it were
+the file. Both are 1.43.0 regressions and both are invisible from the
+client, so there is no mitigation to apply: the upgrade is the fix.
+
+### Fixed
+
+- **A bounded LAYOUTGET advertised the wrong stripe width — zeros with
+  `NFS4_OK`.** The width came from `segments.len()`, which is a
+  per-unit count, so a bounded READ grant advertised width **1**. The
+  client then read stripe index 0 while the bytes actually lived on
+  `file_id % 3`, and the DS answered the read of an unwritten region
+  successfully. The width now comes from the pinned placement.
+  Root-caused and field-verified on a live fleet: 98 read errors before,
+  **0 after**, with the serving gate at 548/548.
+
+- **F68: the MDS served a striped file's tier stub.** A separate hole in
+  the same area, and equally quiet — the client receives stub bytes and
+  a success status.
+
+- **EXCHANGE_ID named a `csa_sequence` that CREATE_SESSION was
+  guaranteed to reject.** A case-1 (`ExistingConfirmed`) EXCHANGE_ID
+  replied with the legacy `sequence_id` field — always 0 for a confirmed
+  record — while CREATE_SESSION validates against `initial_cs_sequence`.
+  The server told the client to send a value it would then refuse with
+  `NFS4ERR_SEQ_MISORDERED`. It bites any client that needs a **new**
+  session against a **surviving confirmed** record: a fresh connection
+  after a server restart, or a client whose session was lost but whose
+  record was not. A Linux client that renews its persisted session never
+  reaches the path, which is why no suite caught it.
+
+- **Tier eviction starved by delegated reads, and a leaked descriptor
+  per delegated file.** Both are reachable only with delegations
+  enabled, which is off by default in this release. The eviction probe
+  asked the fd cache "is there a writable descriptor for this inode"
+  rather than asking the open state "does a client hold a write open";
+  since the READ path opens read+write deliberately and a delegation
+  holder reads under the delegation stateid — a key CLOSE never reaps —
+  one read pinned a file as non-evictable permanently. The probe now
+  consults `file_has_write_open`, and delegation teardown releases the
+  cached descriptor on every removal path.
+
+### Added
+
+- **NFSv4.1 READ delegations — implemented, and shipping DARK behind
+  `FLINT_NFS_DELEGATIONS`.** OPEN_DELEGATE_READ with the full
+  recall-or-die machinery: CB_RECALL, DELEGRETURN, DELEGPURGE,
+  TEST_STATEID/FREE_STATEID, `SEQ4_STATUS_RECALLABLE_STATE_REVOKED`,
+  an anti-flap cooldown and a circuit breaker. Measured on the wire
+  against a kernel client: inside the attribute-cache window warm
+  re-access metadata traffic goes **80 → 0**, and across a full tier
+  evict/hydrate cycle a holder re-reads **nothing** (40 → 0 READs).
+  pynfs and nfstest both clean for the read-delegation set; every
+  remaining failure in those suites is a WRITE delegation, which is an
+  explicit non-goal. **The feature is not finished** — several restart
+  and DS legs are open — and the default stays off.
+
+- **Concurrency model checking** of the delegation table with AWS
+  `shuttle`, behind the non-default `shuttle-test` feature. Nothing
+  ships with it enabled.
+
+### Gates at the tag
+
+Rust suite **2391/0 on macOS, 2363/0 on Linux** (the Linux suite is the
+one that counts — a third of this code is `cfg(target_os = "linux")`).
+pynfs full NFSv4.1 conformance on both binaries. Tier leg passes on its
+data claim with a demonstrably loud control arm.
+
+**One measured number that does not match the design, recorded rather
+than smoothed over:** across a tier cycle past `acregmax`, a delegation
+holder's *metadata* RPCs do not go to zero — they are unchanged in total
+(42 vs 42) and merely reshaped from OPEN/CLOSE into GETATTR/ACCESS. The
+data path delivers what was claimed; the metadata path does not. This is
+open, and it is one reason delegations stay dark.
+
 ## [1.43.0] - 2026-08-31
 
 The write path, the small-file path, and a deadlock that shipped dark.
@@ -3246,6 +3327,7 @@ neither tag represents a supported upgrade source.
 No security advisories at this release.
 
 [Unreleased]: https://github.com/ddalton/flint/compare/v1.35.1...HEAD
+[1.44.0]: https://github.com/ddalton/flint/compare/v1.43.0...v1.44.0
 [1.43.0]: https://github.com/ddalton/flint/compare/v1.42.0...v1.43.0
 [1.42.0]: https://github.com/ddalton/flint/compare/v1.41.1...v1.42.0
 [1.41.1]: https://github.com/ddalton/flint/compare/v1.41.0...v1.41.1
