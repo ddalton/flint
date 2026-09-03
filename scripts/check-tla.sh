@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Two hundred and seven runs, ALL required.
+# Two hundred and nineteen runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -19,9 +19,10 @@
 #
 #   71 FlintReplication    33 FlintComposition    15 FlintExtents
 #   15 FlintClientIdentity   11 FlintExtentsProbe   11 FlintDelegRecall
-#    8 FlintTierEpoch       7 FlintTruncate        7 FlintShareDisk
-#    7 FlintTierMarker      7 FlintTierSession     5 FlintAdmission
-#    4 FlintSnapshots       3 FlintA2Probe         3 FlintClaims)
+#   12 FlintCsiMount        8 FlintTierEpoch       7 FlintTruncate
+#    7 FlintShareDisk       7 FlintTierMarker      7 FlintTierSession
+#    5 FlintAdmission       4 FlintSnapshots       3 FlintA2Probe
+#    3 FlintClaims)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -56,6 +57,13 @@
 # code, the FlintExtents/FlintTierSession posture; the design's four
 # fatal verification holes are its mutations); documented at the bottom
 # of this file, next to its runs.
+#
+# FlintCsiMount.tla — the s3.flint.io CSI node driver's volume lifecycle
+# across CLUSTERS SHARING ONE BUCKET PREFIX, with the mount test modelled
+# as an UNRELIABLE SENSOR rather than as ground truth; model AFTER code
+# AFTER the kind drills, which found a data loss no state-machine model
+# could have caught because the state machine was right and a predicate
+# was wrong.  Documented at the bottom of this file, next to its runs.
 #
 # FlintTierSession.tla — the multi-volume hub's TWO-LEVEL LEASE (one
 # session cell per hub, volume cells naming {hub, session generation};
@@ -1268,5 +1276,43 @@ mutation_run FlintDelegRecall FlintDelegRecallRearmWorks.cfg "deleg-recall rearm
 strict_run FlintDelegRecall FlintDelegRecallRearmStale.cfg "deleg-recall HEAD-world documentation (RebindRearm=FALSE = the append-only registry + .first() send: delivery-after-rebind is UNREACHABLE — after one TCP reconnect every conflict converts to revocation; safety still holds because the deadline raises the signal, which is exactly why fatal hole 3 would ship silently)"
 mutation_run FlintDelegRecall FlintDelegRecallProbeDisown.cfg "deleg-recall crossing VACUITY PROBE (required-fail: the recall-crosses-grant-reply state must be reachable, or the DisownEvidence coverage is a green light over an empty road)" "Probe_DisownRaceReachable"
 mutation_run FlintDelegRecall FlintDelegRecallProbeStale.cfg "deleg-recall antecedent VACUITY PROBE (required-fail: a believing, stale, SIGNALLED holder must be reachable, or the central invariant protects a state space that cannot occur)" "Probe_StaleSignalledReachable"
+
+
+# ── FlintCsiMount.tla — the CSI volume lifecycle, and the mount test as a ──
+# SENSOR THAT CAN LIE.  The drills (s3csi/e2e, s3csi/e2e/multi) found a
+# data loss the design review had not: `is_mountpoint` compared st_dev
+# with the parent's, which cannot see a bind whose source and target
+# share a filesystem — every lean bind.  The republish ladder therefore
+# read a live mount as "unfinished publish", and cleanup removed the
+# tenant's tree under a running agent; the syncer's next full-snapshot
+# publish overwrote the prefix with what was left (measured: a manifest
+# citing the last 22 of 200 seeded files).
+#
+# The lesson this tranche makes permanent is the directory's oldest one —
+# THE ABSTRACTION WAS THE BUG.  A model of the state machine verifies
+# happily, because the state machine is right; what was wrong is a
+# PREDICATE such a model takes as given.  So here the mount test is a
+# state variable that can disagree with the kernel, and the two runs
+# either side of it are the whole argument: the same blind oracle LOSES
+# data on a same-filesystem bind and HOLDS on a foreign-filesystem one,
+# which is exactly why months of green passthrough drills sat over a live
+# defect.
+#
+# The multi-cluster axis is in the same module on purpose: agents on
+# several clusters against one project prefix is the common case, the
+# bucket is the only coupling, and a truncated tree is only fully a
+# durability bug once its contents flow to the shared prefix.
+strict_run FlintCsiMount FlintCsiMount.cfg "csi-mount strict breadth (two clusters, one prefix, lean binds, mountinfo oracle + cleanup guard + prefix lease + drain-before-release: no acked file leaves the bucket, no published tree is removed under a live pod, one writer at a time, and both liveness properties)"
+strict_run FlintCsiMount FlintCsiMountDeep.cfg "csi-mount strict depth (two pod generations per cluster: the handoff runs both ways — seed, drain, take over, drain back, return — the shape the two-cluster drill runs on the wire)"
+mutation_run FlintCsiMount FlintCsiMountDevOracle.cfg "THE DEFECT (MountOracle=dev, CleanupGuard=FALSE: the device-number test cannot see a same-filesystem bind, so a republish takes the start-over branch)" "Inv_NoTreeLoss"
+mutation_run FlintCsiMount FlintCsiMountDevDurability.cfg "THE DEFECT AT THE BUCKET (same, durability only: TLC must walk the whole path — lie, wipe, agent writes on, next full-snapshot publish overwrites the prefix)" "Inv_NoAckedLoss"
+strict_run FlintCsiMount FlintCsiMountDevGuarded.cfg "defence in depth (blind oracle, guard ON: cleanup refuses a published lean volume — either fix alone stops the loss, which is why the guard stays after the oracle is fixed)"
+strict_run FlintCsiMount FlintCsiMountPassthrough.cfg "why the bug was lean-only (blind oracle, guard OFF, SameFsBind=FALSE: a foreign-filesystem FUSE source IS visible to the device test — the machine-checked form of the sentence that explains the green passthrough drills)"
+mutation_run FlintCsiMount FlintCsiMountNoLease.cfg "multi-cluster mutation (LeaseCheck=FALSE: two clusters serve one workspace at once, each publishing full snapshots of its own tree)" "Inv_SingleWriter"
+mutation_run FlintCsiMount FlintCsiMountReleaseFirst.cfg "multi-cluster mutation (DrainBeforeRelease=FALSE: the lease goes before the final publish, the next cluster checks out the stale manifest and republishes over it — a silent loss with no error anywhere)" "Inv_NoAckedLoss"
+strict_run FlintCsiMount FlintCsiMountCrash.cfg "cluster death (a cluster is reclaimed holding the workspace: nothing drains, the lease is stamped with a holder that no longer exists — durability and exclusivity hold, the supersede arm frees the prefix and the surviving cluster is SERVED)"
+liveness_mutation_run FlintCsiMount FlintCsiMountCrashStuck.cfg "cluster-death liveness mutation (LeaseExpiry=FALSE: the stamp outlives the cluster, every other cluster waits forever on a holder that cannot return, and nothing in the data plane says why)"
+mutation_run FlintCsiMount FlintCsiMountProbeHandoff.cfg "cross-cluster VACUITY PROBE (required-fail: a cluster must be able to SERVE a file another cluster wrote, or the multi-cluster tranche is a green light over an empty road)" "Probe_HandoffReachable"
+mutation_run FlintCsiMount FlintCsiMountProbeCleanup.cfg "cleanup-branch VACUITY PROBE (required-fail: the start-over branch must be reachable under the blind oracle, or the mutations that depend on it check nothing)" "Probe_CleanupReachable"
 
 echo "TLA GATE PASSED"

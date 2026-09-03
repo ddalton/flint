@@ -236,8 +236,36 @@ record in §11.1.
   left. The test now reads `/proc/self/mountinfo`, and `cleanup`
   refuses a published lean volume outright.
 
-  **Would the formal models have caught it?** No, and the reason is the
-  one `[[project_formal_models]]` already records three times over: the
+  **Would the formal models have caught it?** No — and there is now a
+  module that does. `formal/FlintCsiMount.tla` (12 TLC runs in
+  `scripts/check-tla.sh`) models this lifecycle across CLUSTERS SHARING
+  ONE PREFIX with the mount test as a FIRST-CLASS STATE VARIABLE that
+  can disagree with the kernel. Under `MountOracle = "mountinfo"` the
+  strict run holds; under `"dev"` TLC finds the tree loss, and a second
+  run restricted to the durability invariant walks the whole path —
+  sensor lies, cleanup wipes, agent writes on, the next full-snapshot
+  publish overwrites the prefix — in eight steps. Two runs either side
+  of `SameFsBind` are the argument in miniature: the same blind oracle
+  loses data on a same-filesystem bind and HOLDS on a foreign-filesystem
+  one, which is why months of green passthrough drills sat over a live
+  defect. The multi-cluster mutations are in the same module because the
+  bucket is the only coupling between clusters: `LeaseCheck = FALSE`
+  violates single-writer exclusivity, `DrainBeforeRelease = FALSE` loses
+  the departing cluster's late files to the next cluster's checkout, and
+  two required-fail vacuity probes keep the tranche from going green
+  over an empty road. The module also carries the failure this fleet
+  actually has — a cluster reclaimed while it holds the workspace, which
+  takes the node, the worker and the tree with it and leaves the prefix
+  stamped with a holder that no longer exists. Durability and
+  exclusivity survive it (what the app was told is in the bucket; the
+  un-published tree is a known loss with a named recovery), and the
+  supersede arm of the bucket's CAS cell is what lets the surviving
+  cluster proceed: turn it off and TLC finds the starvation lasso, a
+  project unreachable from every cluster with nothing in the data plane
+  saying why.
+
+  The reason the EXISTING models could not have caught it is the one
+  `[[project_formal_models]]` already records three times over: the
   ABSTRACTION was the bug. The state machine here is correct —
   publishing → checking-out → published → drain → unpublish — and a
   model of it verifies happily. What was wrong is a PREDICATE the model
