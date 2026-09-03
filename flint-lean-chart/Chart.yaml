@@ -2,19 +2,25 @@ apiVersion: v2
 name: flint-lean
 description: >-
   The flint-lean control plane — one FlintLeanWorkspace per project
-  subtree, a mutating webhook that injects the checkout/publish sidecar
-  into opted-in pods, and (optionally) the lean gateway for HITL writes
-  and sync reads. No per-workspace Deployments, PVCs or Services: an
-  idle workspace is bucket objects and nothing else.
+  subtree, a thin controller (claim, posture, sweep), and (optionally)
+  the lean gateway for HITL writes and sync reads. A pod gets its
+  workspace as a csi: ephemeral volume through the s3.chert.us node
+  driver (flint-s3-csi chart); nothing is injected. No per-workspace
+  Deployments, PVCs or Services: an idle workspace is bucket objects
+  and nothing else.
 type: application
 
 # Chart version, independent of the flint release train.
-version: 0.5.1
+# 0.6.0: the mutating webhook, its cert Secret, its Service and every
+# webhook.* value are gone — delivery moved to the s3.chert.us CSI node
+# driver. Breaking for any values file that configured the webhook.
+version: 0.6.0
 
 # The flint release whose images this chart runs. The operator and the
-# sidecar ship from the same build and speak the same bucket format —
-# keep them in step.
-appVersion: "1.41.1"
+# syncer ship from the same build and speak the same bucket format —
+# keep them in step, and in step with flint-s3-csi, which runs the
+# syncer in its worker pod.
+appVersion: "1.45.0"
 
 keywords:
   - s3
