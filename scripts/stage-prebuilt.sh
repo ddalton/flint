@@ -33,13 +33,16 @@ dest="$crate/docker/prebuilt"
 # 1.38.0 changelog records ("the chart execs /usr/local/bin/
 # flint-lean-operator and that binary was not in it"), and the same
 # shape as the 1.30.0 near-miss described above.
-# `flint-passthrough-operator` is NOT optional in any scope, and that is
-# a property of the recipe rather than a preference: Dockerfile.operator.
+# flint-lean-gateway is NOT optional in any scope, and that is a
+# property of the recipe rather than a preference: Dockerfile.operator.
 # prebuilt COPYs it unconditionally, so a scope that omits it does not
-# produce an operator image without passthrough — it produces no image
-# at all, failing the release at `docker build` with "COPY failed". The
-# same is true of flint-lean-gateway below.
-BINS="csi-driver flint-nfs-server flint-pnfs-mds flint-pnfs-ds flint-lite-operator flint-hub-gateway flint-lean-operator flint-passthrough-operator"
+# produce an operator image without it — it produces no image at all,
+# failing the release at `docker build` with "COPY failed".
+#
+# flint-s3-csi-node and flint-s3-broker are the s3.flint.io image
+# (Dockerfile.s3csi.prebuilt); the worker that image's plugin launches
+# comes from its own crate, below.
+BINS="csi-driver flint-nfs-server flint-pnfs-mds flint-pnfs-ds flint-lite-operator flint-hub-gateway flint-lean-operator flint-s3-csi-node flint-s3-broker"
 
 # A LEAN-SCOPED release (the 1.38.0 shape: only the flint-lean chart and
 # the two images it pulls) republishes the operator image and the sidecar
@@ -49,18 +52,19 @@ BINS="csi-driver flint-nfs-server flint-pnfs-mds flint-pnfs-ds flint-lite-operat
 # which is the hole this script just grew to cover. `lean` stages exactly
 # what those two images COPY, with the SAME staleness rules.
 #
-# A PASSTHROUGH-scoped release (the 1.40.0 shape) publishes the
-# flint-passthrough chart, the operator image its webhook runs out of,
-# and the mounter image the webhook injects. The mounter image carries
-# no flint binary at all — it is a Debian base with mount-s3 from AWS's
-# .deb — so it stages nothing here; the operator image is the same one
-# lean publishes, which is why this list is lean's plus nothing.
+# An S3CSI-scoped release publishes the flint-s3-csi chart (the node
+# DaemonSet + broker image and the two worker images), the CRD-only
+# flint-passthrough chart, and the mounter base image. The mounter base
+# carries no flint binary — it is a Debian base with mount-s3 from AWS's
+# .deb — so it stages nothing here. `passthrough` is accepted as the
+# same scope: that chart is now the CRD, and its delivery is this one.
 SCOPE=${1:-all}
 case "$SCOPE" in
     all)  ;;
-    lean|passthrough)
-          BINS="flint-lite-operator flint-hub-gateway flint-lean-operator flint-passthrough-operator" ;;
-    *)    echo "usage: stage-prebuilt.sh [all|lean|passthrough]" >&2; exit 2 ;;
+    lean) BINS="flint-lite-operator flint-hub-gateway flint-lean-operator" ;;
+    s3csi|passthrough)
+          SCOPE=s3csi; BINS="flint-s3-csi-node flint-s3-broker" ;;
+    *)    echo "usage: stage-prebuilt.sh [all|lean|s3csi]" >&2; exit 2 ;;
 esac
 
 # Binaries from the LEAN crate (lean/sidecar) — a separate crate with a
@@ -71,13 +75,18 @@ esac
 # Hub?" check standing between it and a silent wrong-code release.
 LEAN_BINS="flint-sync flint-lean-gateway"
 
-# ...and `flint-sync` is the one binary here a passthrough release does
-# NOT need: it is the lean sidecar image's whole payload, and a
-# passthrough release publishes no sidecar image — the mounter comes
-# from AWS's .deb. flint-lean-gateway stays, because the OPERATOR image
-# COPYs it and that image is republished.
-if [ "$SCOPE" = passthrough ]; then
-    LEAN_BINS="flint-lean-gateway"
+# An s3csi release publishes neither lean image, so it stages neither
+# lean binary; it stages the worker crate's binary instead (below).
+if [ "$SCOPE" = s3csi ]; then
+    LEAN_BINS=""
+fi
+
+# Binaries from the WORKER crate (crates/flint-s3-worker): PID 1 of
+# every worker pod the s3.flint.io plugin creates, and the payload both
+# worker images COPY (Dockerfile.s3worker, Dockerfile.s3worker-lean).
+WORKER_BINS="flint-s3-worker"
+if [ "$SCOPE" = lean ]; then
+    WORKER_BINS=""
 fi
 
 # Newest thing that can change a binary. Cargo.lock matters as much as
@@ -119,6 +128,22 @@ case "$lean_mtime" in
 esac
 echo "newest lean source: $(date -r "$lean_mtime" '+%Y-%m-%d %H:%M:%S')  ${lean_name#$here/../}"
 
+# The worker crate (crates/flint-s3-worker) has its own clock too. It
+# links nothing of ours, so its own sources and lockfile are the whole
+# of it.
+worker_crate=$(cd "$here/../crates/flint-s3-worker" && pwd)
+newest_worker=$(find "$worker_crate/src" "$worker_crate/Cargo.toml" "$worker_crate/Cargo.lock" \
+                     -type f -print0 \
+                | xargs -0 stat -f '%m %N' | sort -rn | head -1)
+worker_mtime=${newest_worker%% *}
+worker_name=${newest_worker#* }
+case "$worker_mtime" in
+    ''|*[!0-9]*)
+        echo "cannot determine the newest WORKER source mtime — refusing to stage blind" >&2
+        exit 2 ;;
+esac
+echo "newest worker source: $(date -r "$worker_mtime" '+%Y-%m-%d %H:%M:%S')  ${worker_name#$here/../}"
+
 stale=0
 for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
     triple="${arch_pair%%:*}-unknown-linux-musl"
@@ -149,6 +174,21 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
         m=$(stat -f '%m' "$src")
         if [ "$m" -lt "$lean_mtime" ]; then
             echo "  ✗ STALE   $arch/$b built $(date -r "$m" '+%m-%d %H:%M') — older than the lean source" >&2
+            stale=1; continue
+        fi
+        cp "$src" "$dest/$arch/$b"
+        echo "  ✓ staged  $arch/$b  ($(date -r "$m" '+%m-%d %H:%M'), $(( $(stat -f '%z' "$src") / 1048576 )) MiB)"
+    done
+    for b in $WORKER_BINS; do
+        src="$worker_crate/target/$triple/release/$b"
+        if [ ! -f "$src" ]; then
+            echo "  ✗ MISSING $arch/$b — build it before staging" >&2
+            echo "            (cd crates/flint-s3-worker && cargo zigbuild --release --target $triple)" >&2
+            stale=1; continue
+        fi
+        m=$(stat -f '%m' "$src")
+        if [ "$m" -lt "$worker_mtime" ]; then
+            echo "  ✗ STALE   $arch/$b built $(date -r "$m" '+%m-%d %H:%M') — older than the worker source" >&2
             stale=1; continue
         fi
         cp "$src" "$dest/$arch/$b"

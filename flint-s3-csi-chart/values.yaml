@@ -1,0 +1,298 @@
+# flint-s3-csi — an S3 prefix, or a lean workspace, as a CSI ephemeral
+# inline volume. One privileged node DaemonSet, one unprivileged worker
+# pod per mounted volume, one broker. This replaces the flint-passthrough
+# and flint-lean sidecar-injection webhooks.
+#
+#   helm install flint-s3-csi ./flint-s3-csi-chart \
+#     -n flint-system --create-namespace \
+#     --set broker.static.secretRef=<Secret with AWS_* keys>
+#
+# Then a pod mounts a FlintPassthroughMount from ITS OWN namespace with
+#
+#   volumes:
+#     - name: data
+#       csi:
+#         driver: s3.flint.io
+#         volumeAttributes: { flint.io/mount: datasets }
+#
+# and needs no label, no sidecar, no credential and no privilege — it is
+# admissible under PodSecurity `restricted`.
+#
+# Design of record: docs/plans/csi-node-mount-design.md (§3.1 components,
+# §3.6 privilege accounting, §4 the identity chain, §10.1 coexistence
+# with the webhooks).
+#
+# ─────────────────────────────────────────────────────────────────────
+# READ THIS BEFORE INSTALLING: WHERE THE PRIVILEGE WENT
+#
+# The webhooks put a privileged (passthrough) or credential-holding
+# (lean) container into every tenant pod. This chart moves that to
+# exactly three places, none of them a tenant namespace:
+#
+#   · flint-s3-csi-node — one pod per node, `privileged: true`. It
+#     performs the mount(2) itself and needs /dev/fuse and a
+#     Bidirectional mount of /var/lib/kubelet; the API server allows
+#     that mode on privileged containers only. It holds NO S3
+#     credential and has NO Secrets RBAC anywhere. It may create and
+#     delete pods in ONE namespace (workers.namespace) and, with the
+#     admission policy below, only on its own node.
+#
+#   · worker pods — one per mounted volume, in workers.namespace.
+#     Non-root, every capability dropped, seccomp RuntimeDefault,
+#     read-only rootfs, no ServiceAccount token, no hostPath
+#     (passthrough) or exactly one (the lean tree). A passthrough worker
+#     receives the already-mounted FUSE fd over a socket and runs an
+#     unchanged mount-s3 on it; the mounter needs no privilege because
+#     the mount(2) already happened. The namespace carries the
+#     PodSecurity `privileged` label ONLY because hostPath is
+#     baseline-forbidden; the ValidatingAdmissionPolicy is the real
+#     guard (workers.admissionPolicy).
+#
+#   · flint-s3-broker — a `restricted` Deployment and the only component
+#     with a standing credential. It verifies every pod-bound
+#     ServiceAccount token with TokenReview, checks the CR's `consumers`
+#     list, and hands back a short-lived credential for that one pod.
+#
+# The tenant pod gets nothing. Two things do NOT change from the
+# webhook world: a mounter crash is still ENOTCONN for containers that
+# already opened the mount (recreate the pod), and the mount presents as
+# ONE uid (CR spec.uid → flint.io/uid → 65534) because NodePublish never
+# sees the pod's securityContext.
+# ─────────────────────────────────────────────────────────────────────
+
+# ── The node plugin ──────────────────────────────────────────────────
+
+node:
+  # The plugin image, {repository}:{tag|appVersion}. Carries BOTH
+  # binaries: /usr/local/bin/flint-s3-csi-node (this DaemonSet) and
+  # /usr/local/bin/flint-s3-broker (the broker Deployment below). Built
+  # from spdk-csi-driver/docker/Dockerfile.s3csi.prebuilt.
+  image:
+    repository: dilipdalton/flint-s3-csi
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  # RUST_LOG for the plugin. `volume_context` is never logged wholesale
+  # at any level — it carries the pod-bound token.
+  logLevel: info
+
+  # Lifetime the plugin asks of the broker per exchange, in seconds
+  # (FLINT_S3CSI_CREDS_LIFETIME_SECS). Capped server-side by
+  # broker.maxLifetimeSecs. Republish rewrites the credential every
+  # ~60-90 s, so 900 leaves ~10 refresh opportunities before expiry.
+  credsLifetimeSecs: 900
+
+  # AWS_REGION handed to the mounter when the CR names none
+  # (FLINT_S3CSI_REGION).
+  region: us-east-1
+
+  # Above every tenant workload: a kubelet DiskPressure eviction of this
+  # pod would strand every mounted pod on the node with nobody to
+  # unpublish it (§6.2). Same class the block CSI node uses.
+  priorityClassName: system-node-critical
+
+  # RollingUpdate is safe here, unlike the block CSI node: the mounts
+  # are held by the worker pods and the kernel, not by this process,
+  # and a restarted plugin adopts its on-disk state at startup. One
+  # node at a time keeps a bad image from taking publishes down
+  # cluster-wide before the first pod fails its probe.
+  updateStrategy:
+    maxUnavailable: 1
+
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }
+
+  # Every node that can run a tenant pod needs the plugin, taints
+  # included — the tenant already scheduled there.
+  nodeSelector:
+    kubernetes.io/os: linux
+  tolerations:
+    - operator: Exists
+  affinity: {}
+
+# The sig-storage sidecars. Pinned; a moving sidecar next to a
+# privileged container is a change nobody chose.
+csiSidecars:
+  repository: registry.k8s.io/sig-storage
+  nodeDriverRegistrar:
+    name: csi-node-driver-registrar
+    tag: v2.13.0
+  livenessprobe:
+    name: livenessprobe
+    tag: v2.15.0
+
+# ── The CSIDriver object ─────────────────────────────────────────────
+
+driver:
+  # Kubernetes >= 1.35 only: kubelet delivers the pod-bound token in
+  # NodePublishVolumeRequest.secrets instead of volume_context, so a
+  # driver that logs volume_context cannot leak it. Off by default
+  # because an older API server silently DROPS the unknown field, which
+  # would look like a no-op rather than an error.
+  serviceAccountTokenInSecrets: false
+
+# ── Worker pods ──────────────────────────────────────────────────────
+
+workers:
+  # The system namespace every worker lives in. Changing it after
+  # install strands the workers already running: the plugin adopts by
+  # (namespace, volume) at startup and would create duplicates.
+  namespace: flint-workers
+
+  # Create the namespace with its PodSecurity labels. Set false if you
+  # manage namespaces elsewhere — then label it yourself:
+  #   pod-security.kubernetes.io/enforce: privileged
+  # (hostPath, which the lean tree needs, is forbidden under baseline).
+  createNamespace: true
+
+  # The image EVERY passthrough worker runs — chart-pinned, never from
+  # a CR or a pod (FLINT_S3CSI_PASSTHROUGH_IMAGE). FROM the
+  # flint-passthrough-mounter image, so the mount-s3 pin is that
+  # image's; built from spdk-csi-driver/docker/Dockerfile.s3worker.
+  passthroughImage:
+    repository: dilipdalton/flint-s3-worker
+    tag: ""
+
+  # The lean worker image (FLINT_S3CSI_LEAN_IMAGE): FROM flint-sync,
+  # plus the worker as PID 1 to forward SIGTERM and serve the loopback
+  # credential door. Built from Dockerfile.s3worker-lean. The lean arm
+  # is design milestone M5; the plugin in this release refuses lean
+  # volumes with a message that says so.
+  leanImage:
+    repository: dilipdalton/flint-s3-worker-lean
+    tag: ""
+
+  # Resources for EVERY worker (FLINT_S3CSI_WORKER_RESOURCES). No
+  # per-mount override: the CR is tenant-writable. The memory limit is
+  # the knob that matters — mount-s3 sizes its prefetch against machine
+  # RAM, not the cgroup, and an OOMKilled mounter takes the MOUNT with
+  # it (ENOTCONN in the tenant pod, which must then be recreated).
+  # Raise this before blaming the bucket. `{}` ⇒ no requests or limits.
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 1Gi }
+
+  # Optional priorityClassName for workers
+  # (FLINT_S3CSI_WORKER_PRIORITY_CLASS). Empty ⇒ none. A worker should
+  # never be preempted BEFORE the tenant pod it serves, so if you set
+  # one, set it at or above your tenants' classes.
+  priorityClassName: ""
+
+  # Size limits for the two emptyDirs every worker carries: `comm`
+  # (memory-backed; the launch socket, the token and the credential
+  # file) and `scratch` (mount-s3's cache, at /tmp). Empty ⇒ the
+  # binary's defaults, 16Mi and 1Gi (FLINT_S3CSI_COMM_SIZE,
+  # FLINT_S3CSI_SCRATCH_SIZE).
+  commSize: ""
+  scratchSize: ""
+
+  # THE REAL GUARD on workers.namespace (§3.6). A ValidatingAdmissionPolicy
+  # that admits a pod there only if the creator is the node
+  # ServiceAccount, the pod is pinned to the node whose kubelet minted
+  # the caller's token, every image is one of the two above, nothing is
+  # privileged / hostNetwork / hostPID, the only hostPath allowed is
+  # under the plugin's own volumes dir, and no ServiceAccount token is
+  # mounted; and a DELETE only for a pod on the caller's own node.
+  # Without the node rule, one compromised node could delete every
+  # worker in the cluster and strand every S3-mounted pod on ENOTCONN.
+  #
+  # Needs ValidatingAdmissionPolicy (GA in Kubernetes 1.30) and the
+  # pod-bound token metadata it keys on
+  # (authentication.kubernetes.io/node-name: beta 1.30, stable 1.32).
+  # On an older cluster the policy fails CLOSED — no worker can be
+  # created — so disable it there and accept the wider blast radius
+  # knowingly.
+  admissionPolicy:
+    enabled: true
+    # Principals other than the node ServiceAccount that may DELETE a
+    # worker. Workers carry a Node ownerReference so a vanished node
+    # garbage-collects them, terminated ones are reaped by the pod GC,
+    # and deleting the namespace must be able to finish — all three run
+    # as kube-system controllers, and none of them holds a node-bound
+    # token. Nothing here may CREATE. Add a human principal only to
+    # debug; the plugin recreates a deleted worker on the next publish
+    # retry, not before, and the tenant pod is ENOTCONN meanwhile.
+    deleteExemptPrincipals:
+      - system:serviceaccount:kube-system:generic-garbage-collector
+      - system:serviceaccount:kube-system:pod-garbage-collector
+      - system:serviceaccount:kube-system:namespace-controller
+
+  # Egress from workers, off by default because a NetworkPolicy needs a
+  # CNI that enforces one and a wrong CIDR list is every mount failing
+  # at first read. When on, a worker may reach the broker, DNS, and the
+  # CIDRs below (your S3 endpoint or proxy) and nothing else. The
+  # credential door is loopback and needs no rule.
+  networkPolicy:
+    enabled: false
+    # IP ranges the mounters may talk to. Empty with enabled: true ⇒
+    # no S3 egress at all, which is a config error, not a healthy idle.
+    egressCIDRs: []
+    # Allow UDP/TCP 53 to kube-dns; without it the S3 endpoint's name
+    # never resolves and the failure reads as a network partition.
+    allowDNS: true
+
+# ── The broker ───────────────────────────────────────────────────────
+
+# The STS-shaped identity exchange (§4). Off only for clusters where
+# every CR uses identity.mode `static` (nodePublishSecretRef) or
+# `ambient`; with it off, the plugin refuses `broker` and `webIdentity`
+# modes with a message naming this knob.
+broker:
+  enabled: true
+
+  # Two: the broker is stateless and every publish and every republish
+  # of a broker-mode volume goes through it.
+  replicas: 2
+
+  # Where the broker gets the credential it hands out
+  # (FLINT_S3B_BACKEND):
+  #   static — one fixed key set from a Secret, re-issued to every
+  #            entitled pod with a synthetic Expiration so clients keep
+  #            refreshing. The interim arm (§4.5): the pod is still
+  #            authenticated and authorized per publish, but every
+  #            project shares one key.
+  #   sts    — forward AssumeRoleWithWebIdentity, with the POD's token,
+  #            to a real STS that trusts this cluster's issuer.
+  #   rest   — POST the pod's token to your own credential service and
+  #            expect JSON keys back.
+  backend: static
+
+  # backend: static. A Secret in the RELEASE namespace with keys
+  # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY VERBATIM (optionally
+  # AWS_SESSION_TOKEN). Delivered to the broker by kubelet as env, so
+  # the broker needs no Secrets RBAC. Empty is refused at render time —
+  # a broker with nothing to hand out is not a healthy idle.
+  static:
+    secretRef: ""
+
+  # backend: sts.
+  sts:
+    url: ""            # FLINT_S3B_STS_URL, e.g. https://sts.amazonaws.com
+    roleArn: ""        # FLINT_S3B_STS_ROLE_ARN, optional
+
+  # backend: rest.
+  rest:
+    url: ""            # FLINT_S3B_REST_URL
+    headers: ""        # FLINT_S3B_REST_HEADERS, "K=V;K2=V2"
+
+  # Lifetimes in seconds. The plugin asks for node.credsLifetimeSecs;
+  # the broker issues that or maxLifetimeSecs, whichever is smaller,
+  # and defaultLifetimeSecs when the request names none.
+  defaultLifetimeSecs: 900
+  maxLifetimeSecs: 3600
+
+  # The broker mints only for publishes the node plugin registered
+  # first (FLINT_S3B_REQUIRE_REGISTRATION). `false` exists for rigs that
+  # exercise the exchange without a plugin; never in production.
+  requireRegistration: true
+
+  logLevel: info
+
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 256Mi }
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

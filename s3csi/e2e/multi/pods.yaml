@@ -1,0 +1,51 @@
+# Tenant pods, identical on both clusters (the drill applies the ones a
+# leg needs, where it needs them). uid 1001, restricted, ONE csi volume.
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: reader, namespace: s3-tenants }
+spec:
+  serviceAccountName: trainer
+  securityContext: { runAsNonRoot: true, runAsUser: 1001, runAsGroup: 1001, seccompProfile: { type: RuntimeDefault } }
+  volumes:
+    - { name: data, csi: { driver: s3.flint.io, volumeAttributes: { flint.io/mount: datasets } } }
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; sleep 86400 & wait"]
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumeMounts: [{ name: data, mountPath: /mnt/s3 }]
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: reader-elsewhere, namespace: s3-tenants }
+spec:
+  serviceAccountName: trainer
+  securityContext: { runAsNonRoot: true, runAsUser: 1001, runAsGroup: 1001, seccompProfile: { type: RuntimeDefault } }
+  volumes:
+    - { name: data, csi: { driver: s3.flint.io, volumeAttributes: { flint.io/mount: elsewhere } } }
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; sleep 86400 & wait"]
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumeMounts: [{ name: data, mountPath: /mnt/s3 }]
+---
+# Holds its own projected s3.flint.io token, for the cross-cluster
+# identity leg: a token minted by cluster A is presented to cluster B's
+# broker from here.
+apiVersion: v1
+kind: Pod
+metadata: { name: self-minter, namespace: s3-tenants }
+spec:
+  serviceAccountName: trainer
+  securityContext: { runAsNonRoot: true, runAsUser: 1001, seccompProfile: { type: RuntimeDefault } }
+  volumes:
+    - name: tok
+      projected: { sources: [ { serviceAccountToken: { audience: s3.flint.io, expirationSeconds: 3600, path: token } } ] }
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; sleep 86400 & wait"]
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumeMounts: [{ name: tok, mountPath: /tok, readOnly: true }]

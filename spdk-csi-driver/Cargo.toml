@@ -82,13 +82,18 @@ path = "src/bin/flint_hub_stub.rs"
 name = "flint-lean-operator"
 path = "src/bin/flint_lean_operator.rs"
 
+[[bin]]
+name = "flint-s3-csi-node"
+path = "src/bin/flint_s3_csi_node.rs"
+
+[[bin]]
+name = "flint-s3-broker"
+path = "src/bin/flint_s3_broker.rs"
+
+
 # flint-passthrough's webhook. Same image, different binary; NO
 # controller — see src/passthrough/mod.rs for why the whole component
 # is a webhook and three files.
-[[bin]]
-name = "flint-passthrough-operator"
-path = "src/bin/flint_passthrough_operator.rs"
-
 # Removed old binaries:
 # - node-agent: now a library module, not standalone binary
 # - spdk-dashboard-backend: replaced by spdk_dashboard_backend_minimal.rs
@@ -156,7 +161,6 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 anyhow = "1.0"
 base64 = "0.22"
-rcgen = "0.13"  # lean webhook: self-signed CA + serving cert, persisted in a Secret
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
@@ -170,7 +174,7 @@ futures = "0.3"
 tokio-stream = { version = "0.1", features = ["net"] }
 bytes = "1.0"
 async-trait = "0.1"
-nix = { version = "0.27", features = ["fs", "user"] }
+nix = { version = "0.27", features = ["fs", "user", "mount", "socket", "uio"] }  # mount+socket+uio: s3csi's mount(2) and SCM_RIGHTS fd passing
 libc = "0.2"  # raw name_to_handle_at/open_by_handle_at (fh_kernel, Linux-only paths)
 thiserror = "1.0"
 rand = "0.8"

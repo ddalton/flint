@@ -67,9 +67,9 @@ pub mod reserved_devices;  // Device reservation for direct SPDK access (device 
 pub mod state_backend;  // Persistence trait + impls for NFSv4/pNFS server state (Phase B)
 pub mod tier;  // S3 cold tier (L2) — design of record: docs/plans/s3-tier-l2-design-review.md
 pub mod lite_operator;  // flint-lite operator: the FlintShare CRD + its reconcile (docs/plans/flint-lite-operator-plan.md)
-pub mod lean_operator;  // flint-lean operator: FlintLeanWorkspace CRD + claim/adopt + sidecar injection (docs/plans/flint-lean-plan.md §2.4); separate controller, shared image
-pub mod passthrough;  // flint-passthrough: FlintPassthroughMount + a privileged mount-s3 FUSE sidecar, injected by the same webhook mechanism. No controller: a passthrough mount owns no state to converge.
-pub mod webhook_certs;  // one webhook TLS implementation, shared by the lean and passthrough webhooks
+pub mod lean_operator;  // flint-lean: FlintLeanWorkspace CRD + claim/adopt reconcile + the syncer env the CSI plugin launches with (docs/plans/flint-lean-plan.md §2.4); separate controller, shared image
+pub mod passthrough;  // flint-passthrough: the FlintPassthroughMount CR and the mount-s3 argv the CSI plugin's worker execs. No controller: a passthrough mount owns no state to converge.
+pub mod s3csi;  // s3.flint.io: the CSI node driver that delivers both (docs/plans/csi-node-mount-design.md)
 pub mod lite_gateway;  // flint-hub-gateway: one door in front of every hub's file API (docs/flint-hub-gateway.md)
 
 /// Install the process-wide rustls crypto provider. **Call this first

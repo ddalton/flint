@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1
+# flint-s3-worker — PID 1 of every passthrough worker pod the
+# s3.flint.io node plugin creates (one per mounted volume, in the
+# flint-workers namespace).
+#
+#   for T in x86_64 aarch64; do
+#     (cd crates/flint-s3-worker && cargo zigbuild --release \
+#       --target $T-unknown-linux-musl --bin flint-s3-worker); done
+#   # stage: docker/prebuilt/{amd64,arm64}/flint-s3-worker
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#       -f docker/Dockerfile.s3worker --build-arg BIN_DIR=docker/prebuilt \
+#       -t dilipdalton/flint-s3-worker:<tag> --push .
+#
+# WHAT THIS PROCESS IS. The worker is UNPRIVILEGED: non-root, every
+# capability dropped, seccomp RuntimeDefault, read-only rootfs, no
+# ServiceAccount token, no /dev/fuse, no hostPath. It listens on a Unix
+# socket in the pod's memory-backed `comm` emptyDir, receives ONE launch
+# message from the node plugin carrying an already-mounted FUSE fd over
+# SCM_RIGHTS, and execs the pinned mount-s3 on `/dev/fd/3` (Mountpoint's
+# fd mode — the mount(2) already happened, as root, in the plugin, so
+# the mounter needs nothing). It then forwards SIGTERM, reaps orphans,
+# mirrors the mounter's last stderr lines into comm/mount.error for the
+# plugin's Event, and serves the loopback credential door mount-s3
+# reads its keys from. It NEVER restarts: an fd passed once cannot be
+# re-acquired, and pretending otherwise would hide a dead mount.
+#
+# THE MOUNTER PIN COMES FROM THE BASE IMAGE. This image adds one binary
+# to flint-passthrough-mounter (Dockerfile.passthrough), whose
+# MOUNT_S3_VERSION is the mount-s3 every passthrough volume runs. Bump
+# the mounter there, then rebuild this; never install a second copy
+# here. The base's shell and fusermount are unused by the worker but
+# harmless — this container holds no privilege for them to spend.
+ARG MOUNTER_IMAGE=dilipdalton/flint-passthrough-mounter:1.40.0
+FROM ${MOUNTER_IMAGE}
+
+ARG BIN_DIR=docker/prebuilt
+ARG TARGETARCH
+
+COPY ${BIN_DIR}/${TARGETARCH}/flint-s3-worker /usr/local/bin/flint-s3-worker
+
+# Where the base image's .deb put the mounter; the worker's own default
+# is the same path, spelled here so the contract is visible.
+ENV FLINT_S3W_MOUNTER=/usr/bin/mount-s3
+
+# The base has no ENTRYPOINT (the webhook used to supply command+args);
+# here the worker IS the entrypoint, and the node plugin's pod spec
+# names the same path (s3csi::worker::WORKER_BIN).
+ENTRYPOINT ["/usr/local/bin/flint-s3-worker"]

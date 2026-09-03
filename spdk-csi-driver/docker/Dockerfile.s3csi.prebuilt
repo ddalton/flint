@@ -1,0 +1,54 @@
+# syntax=docker/dockerfile:1
+# flint-s3-csi — the s3.flint.io CSI node plugin AND the flint-s3-broker,
+# runtime-only image for HOST-CROSS-COMPILED binaries (the
+# Dockerfile.csi.prebuilt recipe: stage per-arch binaries, let buildx
+# pick them by TARGETARCH, emit one manifest list).
+#
+#   for T in x86_64 aarch64; do
+#     cargo zigbuild --release --target $T-unknown-linux-musl \
+#       --bin flint-s3-csi-node --bin flint-s3-broker; done
+#   # stage: docker/prebuilt/{amd64,arm64}/{flint-s3-csi-node,flint-s3-broker}
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#       -f docker/Dockerfile.s3csi.prebuilt --build-arg BIN_DIR=docker/prebuilt \
+#       -t dilipdalton/flint-s3-csi:<tag> --push .
+#
+# WHAT RUNS FROM IT, AND HOW. Two binaries, two workloads, one image, so
+# that the plugin and the broker can never disagree about the launch and
+# registration protocol between them:
+#
+#  · flint-s3-csi-node — the ENTRYPOINT. Runs as a PRIVILEGED DaemonSet
+#    (flint-s3-csi-chart/templates/node.yaml): it performs the mount(2)
+#    itself, opens /dev/fuse and hands the fd to an unprivileged worker
+#    pod. It needs `mount`/`umount` from util-linux for the bind and the
+#    unpublish ladder, and ca-certificates for an https broker. It needs
+#    NO nfs-common and NO nvme-cli — this is not the block driver's
+#    image, and the packages it does not carry are the packages a
+#    privileged process cannot be tricked into running.
+#
+#  · flint-s3-broker — `command:` override in the chart's Deployment,
+#    `restricted`-admissible, non-root (65532). The STS-shaped identity
+#    exchange; the only component with a standing credential.
+#
+# Neither binary carries a shell requirement; ubuntu is here for
+# util-linux's mount and the CA bundle, and to stay on the base the
+# other privileged flint image (Dockerfile.csi.prebuilt) already uses.
+FROM ubuntu:24.04
+
+# BIN_DIR holds per-arch subdirs (amd64/, arm64/); TARGETARCH is buildx's
+# per-platform value. Single-arch callers can still point BIN_DIR at a dir
+# that itself contains an amd64/ or arm64/ subdir.
+ARG BIN_DIR=docker/prebuilt
+ARG TARGETARCH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    util-linux \
+    mount \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY ${BIN_DIR}/${TARGETARCH}/flint-s3-csi-node /usr/local/bin/flint-s3-csi-node
+COPY ${BIN_DIR}/${TARGETARCH}/flint-s3-broker /usr/local/bin/flint-s3-broker
+
+# Default entrypoint is the node plugin; the broker Deployment overrides
+# `command` to /usr/local/bin/flint-s3-broker.
+ENTRYPOINT ["/usr/local/bin/flint-s3-csi-node"]

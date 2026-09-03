@@ -1,0 +1,193 @@
+{{- if .Values.workers.admissionPolicy.enabled }}
+# THE GUARD on the workers' namespace (§3.6). PodSecurity `privileged`
+# on that namespace is a concession to hostPath; this policy is what
+# makes the concession safe. It admits a pod there only when
+#
+#   · the creator is the node ServiceAccount (one SA, every node);
+#   · the pod is pinned to the node whose kubelet minted the caller's
+#     token — request.userInfo.extra["authentication.kubernetes.io/
+#     node-name"], which the API server stamps on a POD-BOUND
+#     ServiceAccount token (beta 1.30, stable 1.32; the DaemonSet's
+#     projected token is pod-bound) — so a node can create workers only
+#     on itself and delete only its own;
+#   · every image is one of the two the chart pins;
+#   · nothing is privileged, hostNetwork or hostPID;
+#   · the only hostPath is under the plugin's own volumes directory
+#     (the lean tree), never anywhere else on the host;
+#   · no ServiceAccount token is mounted.
+#
+# Without the node rule, one compromised node could delete every worker
+# in the cluster and strand every S3-mounted pod on ENOTCONN — the
+# ISTIO-SECURITY-2023-005 shape, scoped to one namespace but covering
+# the whole data plane. With it, the blast radius is that node's own
+# workers.
+#
+# ValidatingAdmissionPolicy is GA in Kubernetes 1.30 (admissionregistration
+# .k8s.io/v1). failurePolicy Fail: on a cluster that cannot evaluate this
+# policy, NO worker is admitted — loud, not silently open.
+#
+# DELETE is validated against oldObject (object is null on DELETE), and
+# every CREATE-only rule is guarded by request.operation so it never
+# dereferences a null object.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "flint-s3-csi.name" . }}-workers
+  labels: {{- include "flint-s3-csi.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.workers.namespace }}
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "DELETE"]
+        resources: ["pods"]
+  variables:
+    - name: nodePrincipal
+      expression: {{ printf "'%s'" (include "flint-s3-csi.nodePrincipal" .) | quote }}
+    - name: allowedImages
+      expression: {{ printf "['%s', '%s']" (include "flint-s3-csi.passthroughImage" .) (include "flint-s3-csi.leanImage" .) | quote }}
+    - name: hostPathPrefix
+      expression: {{ printf "'%s/volumes/'" (include "flint-s3-csi.pluginDir" .) | quote }}
+    # kube-system controllers that must be able to DELETE: the Node
+    # ownerReference GC, the terminated-pod reaper, namespace deletion.
+    # None of them may CREATE. The kubelet is handled below, by node.
+    - name: deleteExempt
+      expression: {{ printf "[%s]" (include "flint-s3-csi.celStringList" .Values.workers.admissionPolicy.deleteExemptPrincipals) | quote }}
+    # The KUBELET issues the final delete of every pod that has exited
+    # (status_manager "Failed to delete status for pod" when refused —
+    # the pod then sits Succeeded+deletionTimestamp forever, measured on
+    # kind). A kubelet may finalize only workers bound to its own node.
+    - name: kubeletOwnDelete
+      expression: "request.operation == 'DELETE' && ('system:nodes' in request.userInfo.groups) && request.userInfo.username == 'system:node:' + oldObject.spec.nodeName"
+    - name: exemptDelete
+      expression: "(request.operation == 'DELETE' && request.userInfo.username in variables.deleteExempt) || variables.kubeletOwnDelete"
+    # '' when the caller's token is not pod-bound (or predates 1.30).
+    - name: callerNode
+      expression: "has(request.userInfo.extra) && 'authentication.kubernetes.io/node-name' in request.userInfo.extra ? request.userInfo.extra['authentication.kubernetes.io/node-name'][0] : ''"
+    - name: containers
+      expression: "request.operation == 'CREATE' ? object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : []) : []"
+  validations:
+    - expression: "request.userInfo.username == variables.nodePrincipal || variables.exemptDelete"
+      message: "only the flint-s3-csi-node ServiceAccount may create or delete pods in the workers namespace"
+    - expression: "variables.exemptDelete || variables.callerNode != ''"
+      message: "the caller's token carries no authentication.kubernetes.io/node-name (a pod-bound ServiceAccount token, Kubernetes >= 1.30): refusing to place or remove a worker without knowing the node"
+    - expression: "request.operation != 'CREATE' || object.spec.nodeName == variables.callerNode"
+      message: "a node may create workers only on itself: spec.nodeName must equal the node that minted the caller's token"
+    - expression: "request.operation != 'DELETE' || variables.exemptDelete || oldObject.spec.nodeName == variables.callerNode"
+      message: "a node may delete only its own workers: the pod's spec.nodeName is not the node that minted the caller's token"
+    - expression: "request.operation != 'CREATE' || (has(object.metadata.labels) && 'flint.io/node' in object.metadata.labels && object.metadata.labels['flint.io/node'] == object.spec.nodeName)"
+      message: "label flint.io/node must equal spec.nodeName"
+    - expression: "request.operation != 'CREATE' || variables.containers.all(c, c.image in variables.allowedImages)"
+      message: "every container image must be one of the two worker images this chart pins (workers.passthroughImage, workers.leanImage)"
+    - expression: "request.operation != 'CREATE' || variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged)"
+      message: "no worker container may be privileged"
+    - expression: "request.operation != 'CREATE' || !has(object.spec.hostNetwork) || !object.spec.hostNetwork"
+      message: "workers may not use hostNetwork"
+    - expression: "request.operation != 'CREATE' || !has(object.spec.hostPID) || !object.spec.hostPID"
+      message: "workers may not use hostPID"
+    - expression: "request.operation != 'CREATE' || !has(object.spec.hostIPC) || !object.spec.hostIPC"
+      message: "workers may not use hostIPC"
+    - expression: "request.operation != 'CREATE' || !has(object.spec.volumes) || object.spec.volumes.all(v, !has(v.hostPath) || v.hostPath.path.startsWith(variables.hostPathPrefix))"
+      message: "the only hostPath a worker may mount is under the plugin's own volumes directory (/var/lib/kubelet/plugins/s3.flint.io/volumes/)"
+    - expression: "request.operation != 'CREATE' || (has(object.spec.automountServiceAccountToken) && object.spec.automountServiceAccountToken == false)"
+      message: "workers must set automountServiceAccountToken: false"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "flint-s3-csi.name" . }}-workers
+  labels: {{- include "flint-s3-csi.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "flint-s3-csi.name" . }}-workers
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.workers.namespace }}
+{{- end }}
+---
+# Workers are BARE pods, and a bare pod is what `kubectl drain` and the
+# cluster autoscaler evict first. A worker evicted from under a tenant
+# pod is ENOTCONN in that pod with nothing to restart it — the worker
+# must go when its tenant goes (NodeUnpublish deletes it), not before.
+# This budget makes every voluntary eviction wait for exactly that:
+# drain sees the Node ownerReference (controller: true), treats the
+# worker as managed, and waits on the eviction API until the tenants
+# leave and the plugin removes the worker.
+#
+# minAvailable is an INTEGER larger than any plausible worker count on
+# purpose. Bare pods may not use maxUnavailable or a percentage — both
+# need a controller's scale to compute against, and the disruption
+# controller answers with DisruptionAllowed=False reason SyncFailed (a
+# block through an error path, with a Warning UnmanagedPods event)
+# rather than a clean refusal; the integer minAvailable branch is clean.
+# kubernetes.io/docs/tasks/run-application/configure-pdb, "Arbitrary
+# workloads and arbitrary selectors".
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "flint-s3-csi.name" . }}-workers
+  namespace: {{ .Values.workers.namespace }}
+  labels: {{- include "flint-s3-csi.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1000000000
+  selector:
+    matchLabels:
+      app.kubernetes.io/managed-by: {{ include "flint-s3-csi.node.name" . }}
+{{- if .Values.workers.networkPolicy.enabled }}
+{{- if not .Values.workers.networkPolicy.egressCIDRs }}
+{{- fail "workers.networkPolicy.enabled requires workers.networkPolicy.egressCIDRs — a worker that can reach no S3 endpoint fails every mount at first read, which is a config error, not a healthy idle" }}
+{{- end }}
+---
+# Egress from workers: the broker, DNS, and the CIDRs the operator
+# named (the S3 endpoint or the project proxy). Everything else on the
+# pod network is off-limits to a mounter — a worker holds a project's
+# credential for 15 minutes at a time, and this is the layer that keeps
+# a compromised mounter from spending it anywhere but the bucket. The
+# credential door is loopback and needs no rule; today the node plugin
+# does the broker exchange host-side, and the broker rule is here so a
+# worker that exchanges its own token (§4.7) needs no chart change.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "flint-s3-csi.name" . }}-workers-egress
+  namespace: {{ .Values.workers.namespace }}
+  labels: {{- include "flint-s3-csi.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/managed-by: {{ include "flint-s3-csi.node.name" . }}
+  policyTypes: ["Egress"]
+  egress:
+{{- if .Values.broker.enabled }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels: {{- include "flint-s3-csi.broker.selectorLabels" . | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 8080 }
+{{- end }}
+{{- if .Values.workers.networkPolicy.allowDNS }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+{{- end }}
+    - to:
+{{- range .Values.workers.networkPolicy.egressCIDRs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+{{- end }}
+{{- end }}

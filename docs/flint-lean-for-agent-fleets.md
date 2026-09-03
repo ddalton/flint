@@ -1,5 +1,30 @@
 # flint-lean on a Kubernetes cluster
 
+> **Delivery changed (2026-09-03).** A workspace now reaches a pod as
+> ONE `csi:` volume served by the `s3.flint.io` node driver
+> (`flint-s3-csi-chart`), not as a webhook-injected sidecar. The label
+> `flint.io/lean-workspace`, the injected `flint-sync` container, the
+> per-namespace credential Secret and the webhook described below are
+> the RETIRED shape; the workspace protocol (claim, checkout gate,
+> `.flint/publish`, boundaries, drain on delete) is unchanged and the
+> syncer binary is the same. What a pod writes today:
+>
+> ```yaml
+> spec:
+>   serviceAccountName: agent            # listed in the CR's spec.consumers
+>   volumes:
+>     - name: ws
+>       csi:
+>         driver: s3.flint.io
+>         volumeAttributes: { flint.io/workspace: proj1 }
+>   containers:
+>     - volumeMounts: [{ name: ws, mountPath: /workspace }]
+> ```
+>
+> and the CR gains `spec.uid` (the uid the syncer runs as — the app's)
+> and `spec.consumers.serviceAccounts`. See
+> `docs/plans/csi-node-mount-design.md` §0 and §3.5.
+
 Give every agent pod its own workspace: **plain local files** checked out
 of your S3 bucket at pod start, published back on a cadence — or when the
 agent says so. No FUSE, no NFS, no privileged pods, no mount to wedge.

@@ -1,0 +1,175 @@
+# The s3.flint.io node plugin: one pod per node, and THE privileged
+# component of this design (§3.6). It performs the mount(2), opens
+# /dev/fuse, hands the fd to an unprivileged worker, and bind-mounts the
+# result into the tenant pod's kubelet dir. It holds no S3 credential.
+#
+# What it must NOT have, and does not: hostNetwork (it serves one Unix
+# socket), hostPID (it unmounts, it never signals a mounter), Secrets
+# RBAC, pod verbs outside workers.namespace.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "flint-s3-csi.node.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flint-s3-csi.node.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels: {{- include "flint-s3-csi.node.selectorLabels" . | nindent 6 }}
+  # RollingUpdate, unlike the block CSI node's OnDelete: the mounts are
+  # held by the worker pods and the kernel, not by this process, and a
+  # restarted plugin adopts its on-disk state (§6.2). A publish that
+  # lands during the restart is retried by kubelet.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ .Values.node.updateStrategy.maxUnavailable }}
+  template:
+    metadata:
+      labels: {{- include "flint-s3-csi.node.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: node
+    spec:
+      serviceAccountName: {{ include "flint-s3-csi.node.name" . }}
+      hostNetwork: false
+      hostPID: false
+      priorityClassName: {{ .Values.node.priorityClassName }}
+      terminationGracePeriodSeconds: 30
+{{- with .Values.node.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+{{- end }}
+{{- with .Values.node.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+{{- end }}
+{{- with .Values.node.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+{{- end }}
+      containers:
+        - name: node
+          image: {{ include "flint-s3-csi.node.image" . }}
+          imagePullPolicy: {{ .Values.node.image.pullPolicy }}
+          command: ["/usr/local/bin/flint-s3-csi-node"]
+          env:
+            # The socket lives under the kubelet dir, reached through the
+            # ONE Bidirectional mount below — never through a second,
+            # private view of the same host directory. Every mount(2)
+            # the plugin makes under volumes/<id>/ must propagate to the
+            # host and back into the NEXT plugin pod: a FUSE source mount
+            # made through a private view exists only in that container's
+            # namespace, so a DaemonSet roll loses it and an unpublish
+            # after the roll finds the directory busy (measured on kind).
+            - { name: FLINT_S3CSI_ENDPOINT, value: "unix://{{ include "flint-s3-csi.pluginDir" . }}/csi.sock" }
+            - name: FLINT_S3CSI_NODE_NAME
+              valueFrom:
+                fieldRef: { fieldPath: spec.nodeName }
+            # The images every worker runs. Chart-pinned; a CR cannot
+            # name one, and the admission policy admits only these two.
+            - { name: FLINT_S3CSI_PASSTHROUGH_IMAGE, value: {{ include "flint-s3-csi.passthroughImage" . | quote }} }
+            - { name: FLINT_S3CSI_LEAN_IMAGE, value: {{ include "flint-s3-csi.leanImage" . | quote }} }
+            - { name: FLINT_S3CSI_WORKER_NAMESPACE, value: {{ .Values.workers.namespace | quote }} }
+            - { name: FLINT_S3CSI_WORKER_RESOURCES, value: {{ .Values.workers.resources | toJson | quote }} }
+{{- if .Values.workers.priorityClassName }}
+            - { name: FLINT_S3CSI_WORKER_PRIORITY_CLASS, value: {{ .Values.workers.priorityClassName | quote }} }
+{{- end }}
+{{- if .Values.workers.commSize }}
+            - { name: FLINT_S3CSI_COMM_SIZE, value: {{ .Values.workers.commSize | quote }} }
+{{- end }}
+{{- if .Values.workers.scratchSize }}
+            - { name: FLINT_S3CSI_SCRATCH_SIZE, value: {{ .Values.workers.scratchSize | quote }} }
+{{- end }}
+{{- if .Values.broker.enabled }}
+            # Unset ⇒ no broker: only identity.mode static and ambient
+            # can publish.
+            - { name: FLINT_S3CSI_BROKER_URL, value: {{ include "flint-s3-csi.brokerUrl" . | quote }} }
+{{- end }}
+            # The plugin's OWN token (audience s3.flint.io, pod-bound) —
+            # what it presents to the broker to register a publish.
+            - { name: FLINT_S3CSI_NODE_TOKEN_FILE, value: "/var/run/secrets/flint-s3/token" }
+            - { name: FLINT_S3CSI_CREDS_LIFETIME_SECS, value: {{ .Values.node.credsLifetimeSecs | quote }} }
+            - { name: FLINT_S3CSI_REGION, value: {{ .Values.node.region | quote }} }
+            - { name: RUST_LOG, value: {{ .Values.node.logLevel | quote }} }
+          # Served by the liveness-probe sidecar (same pod netns): it
+          # calls the plugin's CSI Probe over the socket and answers
+          # here, so a wedged gRPC loop restarts THIS container.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9808
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 5
+          # The API server refuses mountPropagation: Bidirectional on a
+          # non-privileged container, and mount(2) needs CAP_SYS_ADMIN
+          # in the host's mount namespace. There is no smaller grant
+          # that does this job; AWS's and Google's FUSE CSI drivers
+          # carry the same line (§3.6).
+          securityContext:
+            privileged: true
+          resources: {{- toYaml .Values.node.resources | nindent 12 }}
+          volumeMounts:
+            # Bidirectional: the bind mount the plugin makes under
+            # /var/lib/kubelet/pods/<uid>/volumes/kubernetes.io~csi/...
+            # must be visible to the host, and the workers' comm
+            # emptyDirs (also under pods/) must be visible to the plugin.
+            - name: kubelet-dir
+              mountPath: {{ include "flint-s3-csi.kubeletDir" . }}
+              mountPropagation: Bidirectional
+            - name: registration-dir
+              mountPath: /registration
+            - name: fuse
+              mountPath: /dev/fuse
+            - name: node-token
+              mountPath: /var/run/secrets/flint-s3
+              readOnly: true
+        - name: node-driver-registrar
+          image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.nodeDriverRegistrar.name }}:{{ .Values.csiSidecars.nodeDriverRegistrar.tag }}"
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--kubelet-registration-path={{ include "flint-s3-csi.pluginDir" . }}/csi.sock"
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+        - name: liveness-probe
+          image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.livenessprobe.name }}:{{ .Values.csiSidecars.livenessprobe.tag }}"
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--health-port=9808"
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+      volumes:
+        - name: kubelet-dir
+          hostPath:
+            path: {{ include "flint-s3-csi.kubeletDir" . }}
+            type: Directory
+        # The plugin's own directory: the CSI socket, and volumes/<id>/
+        # with state.json and the src/ mount point (and the lean tree).
+        # The ONLY hostPath prefix the admission policy lets a worker
+        # mount.
+        - name: plugin-dir
+          hostPath:
+            path: {{ include "flint-s3-csi.pluginDir" . }}
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: {{ include "flint-s3-csi.kubeletDir" . }}/plugins_registry
+            type: Directory
+        # Explicit, though a privileged container sees /dev anyway: the
+        # grant is written down where a reviewer looks for it.
+        - name: fuse
+          hostPath:
+            path: /dev/fuse
+            type: CharDevice
+        # The plugin's identity to the broker. Pod-bound, so
+        # TokenReview yields this pod's node in userInfo.extra — the
+        # same fact the admission policy checks.
+        - name: node-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: {{ include "flint-s3-csi.driverName" . }}
+                  expirationSeconds: 3600
+                  path: token

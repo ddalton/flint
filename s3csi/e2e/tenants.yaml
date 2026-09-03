@@ -1,0 +1,213 @@
+# The tenant half: CRs, ServiceAccounts, and the pods that mount them.
+#
+# Every pod here is RESTRICTED-admissible (runAsNonRoot, seccomp
+# RuntimeDefault, no privilege escalation, all capabilities dropped) —
+# the namespace enforces it, so a regression that needed privilege in
+# the tenant pod would fail at admission, not silently.
+#
+# Readers run as uid 1001 and never as root, so a mount only root can
+# traverse fails rather than passing (the passthrough rig's rule 1).
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: trainer, namespace: s3-tenants }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: bob, namespace: s3-tenants }
+---
+# The project: consumers lists `trainer` ONLY. `bob` is refused (S6).
+apiVersion: flint.io/v1alpha1
+kind: FlintPassthroughMount
+metadata:
+  name: datasets
+  namespace: s3-tenants
+spec:
+  bucket: s3bucket
+  keyPrefix: datasets/imagenet
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  uid: 1001
+  gid: 1001
+  consumers:
+    serviceAccounts: [trainer]
+  identity:
+    mode: broker
+---
+# The same prefix, read-only at the CR (policy, not presentation).
+apiVersion: flint.io/v1alpha1
+kind: FlintPassthroughMount
+metadata:
+  name: datasets-ro
+  namespace: s3-tenants
+spec:
+  bucket: s3bucket
+  keyPrefix: datasets/imagenet
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  readOnly: true
+  uid: 1001
+  consumers:
+    serviceAccounts: [trainer]
+---
+# S2's falsifier: same bucket, other prefix, one file with other bytes.
+apiVersion: flint.io/v1alpha1
+kind: FlintPassthroughMount
+metadata:
+  name: elsewhere
+  namespace: s3-tenants
+spec:
+  bucket: s3bucket
+  keyPrefix: elsewhere
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  uid: 1001
+  consumers:
+    serviceAccounts: ["*"]
+---
+# The interim static arm: the POD names the Secret; the CR only says so.
+apiVersion: flint.io/v1alpha1
+kind: FlintPassthroughMount
+metadata:
+  name: datasets-static
+  namespace: s3-tenants
+spec:
+  bucket: s3bucket
+  keyPrefix: datasets/imagenet
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  uid: 1001
+  consumers:
+    serviceAccounts: [trainer]
+  identity:
+    mode: static
+---
+# A CR with NO consumers block at all: absent = deny (S6b).
+apiVersion: flint.io/v1alpha1
+kind: FlintPassthroughMount
+metadata:
+  name: datasets-noconsumers
+  namespace: s3-tenants
+spec:
+  bucket: s3bucket
+  keyPrefix: datasets/imagenet
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  uid: 1001
+---
+# ── the pods ─────────────────────────────────────────────────────────
+# The headline reader: restricted namespace, SA trainer, one csi volume.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: reader
+  namespace: s3-tenants
+spec:
+  serviceAccountName: trainer
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    seccompProfile: { type: RuntimeDefault }
+  volumes:
+    - name: data
+      csi:
+        driver: s3.flint.io
+        volumeAttributes:
+          flint.io/mount: datasets
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c"]
+      args: ["trap 'exit 0' TERM INT; sleep 86400 & wait"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: data, mountPath: /mnt/s3 }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: reader-ro
+  namespace: s3-tenants
+spec:
+  serviceAccountName: trainer
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    seccompProfile: { type: RuntimeDefault }
+  volumes:
+    - name: data
+      csi:
+        driver: s3.flint.io
+        volumeAttributes:
+          flint.io/mount: datasets-ro
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c"]
+      args: ["trap 'exit 0' TERM INT; sleep 86400 & wait"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: data, mountPath: /mnt/ro }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: reader-elsewhere
+  namespace: s3-tenants
+spec:
+  serviceAccountName: trainer
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    seccompProfile: { type: RuntimeDefault }
+  volumes:
+    - name: data
+      csi:
+        driver: s3.flint.io
+        volumeAttributes:
+          flint.io/mount: elsewhere
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c"]
+      args: ["trap 'exit 0' TERM INT; sleep 86400 & wait"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: data, mountPath: /mnt/s3 }
+---
+# The static arm: the pod names the Secret (kubelet fetches it; the node
+# SA has no Secrets RBAC).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: reader-static
+  namespace: s3-tenants
+spec:
+  serviceAccountName: trainer
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    seccompProfile: { type: RuntimeDefault }
+  volumes:
+    - name: data
+      csi:
+        driver: s3.flint.io
+        volumeAttributes:
+          flint.io/mount: datasets-static
+        nodePublishSecretRef:
+          name: minio-creds
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c"]
+      args: ["trap 'exit 0' TERM INT; sleep 86400 & wait"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: data, mountPath: /mnt/s3 }

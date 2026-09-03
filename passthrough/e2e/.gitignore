@@ -1,4 +1,0 @@
-# The cross-compiled binary the e2e image is built from. Staged here by
-# hand for a kind run and rebuilt on every code change — a 14 MiB
-# artifact that is never the thing under review.
-flint-passthrough-operator

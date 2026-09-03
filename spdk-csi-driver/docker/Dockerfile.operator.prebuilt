@@ -7,7 +7,7 @@
 #   for T in x86_64 aarch64; do
 #     cargo zigbuild --release --target $T-unknown-linux-musl \
 #       --bin flint-lite-operator --bin flint-hub-gateway \
-#       --bin flint-lean-operator --bin flint-passthrough-operator
+#       --bin flint-lean-operator
 #     (cd ../lean/sidecar && cargo zigbuild --release --features s3 \
 #       --target $T-unknown-linux-musl --bin flint-lean-gateway); done
 #   # stage: docker/prebuilt/amd64/{flint-lite-operator,flint-hub-gateway}
@@ -54,22 +54,16 @@ COPY ${BIN_DIR}/${TARGETARCH}/flint-hub-gateway /usr/local/bin/flint-hub-gateway
 # file or directory" — the 1.2.0 unpublished-image bug one layer deeper,
 # where the image exists and the binary inside it does not.
 #
-# The mutating webhook needs no third binary: flint-lean-operator serves
-# it in-process and provisions its own TLS secret and
-# MutatingWebhookConfiguration at startup, which is why the chart ships
-# neither.
+# There is no webhook in this image any more: pods get their lean
+# workspace from the s3.flint.io CSI node driver (Dockerfile.s3csi.
+# prebuilt); flint-lean-operator is the claim/posture/sweep controller
+# and nothing else.
 #
 # NOTE flint-lean-gateway is the one binary here that does NOT build
 # from this crate — it comes from lean/sidecar. Same staging tree, two
 # cargo invocations; see the header.
 COPY ${BIN_DIR}/${TARGETARCH}/flint-lean-operator /usr/local/bin/flint-lean-operator
 COPY ${BIN_DIR}/${TARGETARCH}/flint-lean-gateway /usr/local/bin/flint-lean-gateway
-
-# flint-passthrough's webhook, same story: same crate, same build, one
-# fewer image at release. It is a webhook and nothing else — no
-# controller, no store client — so it adds a binary and no runtime
-# requirements to this image.
-COPY ${BIN_DIR}/${TARGETARCH}/flint-passthrough-operator /usr/local/bin/flint-passthrough-operator
 
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/flint-lite-operator"]

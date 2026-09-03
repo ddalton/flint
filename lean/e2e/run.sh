@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+# RETIRED PATH (2026-09-03): the lean webhook and sidecar injector are
+# gone — a workspace reaches a pod as ONE csi: volume served by the
+# s3.flint.io node driver (docs/plans/csi-node-mount-design.md §3.5).
+# This rig and its siblings (run-agent.sh, run-boundary.sh,
+# run-verbs.sh, run-chaos.sh) still label pods and exec into an
+# injected `flint-sync` container, so they no longer run as written.
+# The CSI delivery of lean is drilled by s3csi/e2e/run-s3csi.sh legs
+# S11/S13; the protocol suites here (B1-B25, C1-C12) are the lean
+# ORACLE and are to be re-targeted at the worker pod in flint-workers
+# (design §10.2 S12) — not deleted, not silently green.
 # The lean operator kind e2e (plan §5 Phase 4): injection, the
 # checkout gate, a real publish through MinIO, and the failing control
 # (a pod naming a missing workspace MUST be refused — failurePolicy

@@ -1,0 +1,100 @@
+flint-s3-csi is installed in namespace {{ .Release.Namespace }}.
+
+Confirm the driver registered on every node (the registrar sidecar does
+this; give a fresh node a few seconds):
+
+  kubectl get csidriver {{ include "flint-s3-csi.driverName" . }}
+  kubectl -n {{ .Release.Namespace }} rollout status ds/{{ include "flint-s3-csi.node.name" . }}
+{{- if .Values.broker.enabled }}
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "flint-s3-csi.broker.name" . }}
+{{- end }}
+
+Declare a mount IN THE TENANT'S NAMESPACE, and say who may use it:
+
+  apiVersion: flint.io/v1alpha1
+  kind: FlintPassthroughMount
+  metadata: { name: datasets, namespace: team-a }
+  spec:
+    bucket: my-bucket
+    keyPrefix: datasets/imagenet
+    endpoint: http://minio.flint-system.svc:9000   # unset ⇒ AWS S3
+    readOnly: true
+    consumers:
+      serviceAccounts: ["trainer"]   # ABSENT = DENY; "*" = any SA here
+    identity:
+      mode: broker                   # broker | webIdentity | static | ambient
+
+Then a pod mounts it with a volume — no label, no sidecar:
+
+  spec:
+    serviceAccountName: trainer      # must be in consumers
+    volumes:
+      - name: data
+        csi:
+          driver: {{ include "flint-s3-csi.driverName" . }}
+          readOnly: true
+          volumeAttributes:
+            flint.io/mount: datasets
+            # flint.io/uid: "1001"   # presentation only; default 65534
+    containers:
+      - name: app
+        volumeMounts:
+          - { name: data, mountPath: /mnt/s3, readOnly: true }
+
+volumeAttributes are a REQUEST, never an authorization: exactly one of
+flint.io/mount / flint.io/workspace, optionally flint.io/uid and
+flint.io/gid, and every other key is refused by name. bucket, keyPrefix,
+endpoint, image and credentials come from the CR and only the CR.
+
+WHERE THINGS RUN. Each mounted volume is one worker pod in
+{{ .Values.workers.namespace }}, pinned to the tenant's node:
+
+  kubectl -n {{ .Values.workers.namespace }} get pods -l app.kubernetes.io/managed-by={{ include "flint-s3-csi.node.name" . }}
+
+The tenant pod carries no credential and no privilege and is admissible
+under PodSecurity `restricted`. The node plugin is the privileged
+component (one per node); the broker is the one with a standing
+credential. A refused publish shows up as a FailedMount event on the
+tenant pod, retried with backoff — `kubectl describe pod` names the
+reason (a missing CR, a ServiceAccount not in consumers, a refused
+attribute).
+{{- if .Values.broker.enabled }}
+
+IDENTITY. Every publish registers with the broker, and every credential
+is minted from the POD's own kubelet-issued token (1 h, audience
+{{ include "flint-s3-csi.driverName" . }}) after a TokenReview. A pod
+gets a credential only for a CR whose consumers name its ServiceAccount,
+{{ .Values.node.credsLifetimeSecs }} s at a time.
+{{- if eq .Values.broker.backend "static" }}
+
+THIS INSTALL RUNS THE STATIC BACKEND: the broker hands the ONE key set in
+Secret {{ .Values.broker.static.secretRef }} to every entitled pod. The
+pod is still authenticated and authorized per publish, but every project
+shares that key at the bucket. Move to broker.backend sts or rest when a
+per-project credential source exists.
+{{- end }}
+{{- else }}
+
+NO BROKER. broker.enabled is false, so only CRs with identity.mode
+`static` (the pod names a Secret via nodePublishSecretRef, delivered by
+kubelet) or `ambient` can publish; `broker` and `webIdentity` are
+refused with a message naming FLINT_S3CSI_BROKER_URL.
+{{- end }}
+
+A MOUNTER CRASH IS STILL NOT RECOVERABLE IN PLACE. Containers that
+already opened the mount read ENOTCONN once the worker dies; the volume
+stays unhealthy until the pod is recreated. Run S3-mounted workloads
+under a controller.
+
+THE MOUNT PRESENTS AS ONE UID. NodePublish never sees the pod's
+securityContext, so ownership is CR spec.uid, else flint.io/uid, else
+65534 — with nothing declared, files no longer present as root as they
+did under the webhook.
+{{- if not .Values.workers.admissionPolicy.enabled }}
+
+WARNING: workers.admissionPolicy.enabled is false. Nothing but RBAC
+stops the node ServiceAccount from creating or deleting workers on
+OTHER nodes, and nothing pins what runs in {{ .Values.workers.namespace }}
+to the two chart images. Acceptable on a cluster older than 1.30 that
+cannot run a ValidatingAdmissionPolicy; a choice everywhere else.
+{{- end }}

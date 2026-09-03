@@ -1,0 +1,23 @@
+{{- if .Values.workers.createNamespace }}
+# The workers' namespace. PodSecurity `privileged` is here ONLY because
+# hostPath is baseline-forbidden and the lean worker needs exactly one
+# (the plugin-owned tree). Nothing in this namespace is privileged, and
+# PSA is not what keeps it so: the ValidatingAdmissionPolicy in
+# workers-policy.yaml is the guard — it pins the creator, the node, the
+# images, the securityContext and the one hostPath prefix. PSA `warn`
+# stays at baseline so a worker spec that drifts from the design shows
+# up as a warning in the plugin's logs even before the policy refuses
+# it. Same shape as Istio's CNI namespace: the agent's namespace is
+# privileged, the tenants' are restricted.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.workers.namespace }}
+  labels: {{- include "flint-s3-csi.labels" . | nindent 4 }}
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: baseline
+    # Helm's own guard: a namespace that outlives its release keeps the
+    # workers in it, and the plugin re-adopts them on the next start.
+  annotations:
+    helm.sh/resource-policy: keep
+{{- end }}

@@ -1,13 +1,5 @@
 flint-lean is installed in namespace {{ .Release.Namespace }}.
 
-{{ if .Values.webhook.enabled -}}
-The mutating webhook is REGISTERED BY THE OPERATOR at startup (it
-carries the caBundle for the cert it generates). Give it a few seconds,
-then confirm:
-
-  kubectl get mutatingwebhookconfiguration flint-lean-inject
-
-{{ end -}}
 Declare a workspace:
 
   apiVersion: flint.io/v1alpha1
@@ -29,14 +21,24 @@ Declare a workspace:
   # holds that prefix's claim. The operator NEVER adopts a foreign
   # claim on the fly; resolve it explicitly.
 
-Then opt a pod in with one label:
+Then give a pod the workspace as ONE volume — no label, no sidecar,
+no Secret in the pod's namespace (the s3.flint.io node driver from
+flint-s3-csi-chart must be installed; the CR's spec.consumers names the
+ServiceAccounts that may mount it, and spec.uid the uid the syncer
+runs as):
 
-  metadata:
-    labels:
-      flint.io/lean-workspace: proj1
+  spec:
+    serviceAccountName: agent          # listed in spec.consumers
+    volumes:
+      - name: ws
+        csi:
+          driver: s3.flint.io
+          volumeAttributes: { flint.io/workspace: proj1 }
+    containers:
+      - volumeMounts: [{ name: ws, mountPath: /workspace }]
 
-The webhook injects a NATIVE sidecar (initContainer, restartPolicy
-Always — needs Kubernetes >= 1.29) that materializes the workspace at
-{{ "/workspace" }} before your container starts and publishes snapshots
-at floorSecs. If the workspace is missing or Refused, the pod is
-REFUSED at admission rather than started ungated.
+The driver materializes the workspace before ANY container of the pod
+(init containers included) starts, and drains it when the pod is
+deleted. If the workspace is missing, Refused, or the ServiceAccount is
+not a consumer, the pod stays ContainerCreating with a FailedMount
+event naming the reason — it never starts ungated.

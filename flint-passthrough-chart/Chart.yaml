@@ -1,24 +1,21 @@
 apiVersion: v2
 name: flint-passthrough
 description: >-
-  Mount an S3 prefix into a pod with Mountpoint for S3, injected by a
-  mutating webhook. One FlintPassthroughMount per bucket subtree, one
-  label on the pod, and no control plane behind it: no checkout, no
-  manifest, no claim, no publish boundary, no controller. Reads are
-  fast and lazy; writes are whole new objects, with no rename, no
-  append and no in-place modification at any setting. The sidecar is
-  PRIVILEGED — see values.yaml.
+  The FlintPassthroughMount CRD: an S3 prefix a pod mounts with
+  Mountpoint for S3 through the s3.flint.io CSI node driver
+  (flint-s3-csi-chart). One CR per bucket subtree, one csi: volume in
+  the pod, and no control plane behind it: no checkout, no manifest, no
+  claim, no publish boundary, no controller, no webhook, no privilege
+  in the pod. Reads are fast and lazy; writes are whole new objects,
+  with no rename, no append and no in-place modification.
 type: application
 
 # Chart version, independent of the flint release train.
-version: 0.1.0
+version: 0.2.0
 
-# The flint release whose operator image carries
-# flint-passthrough-operator, and whose tag the mounter image also
-# takes. 1.40.0 was RESERVED for this front end by the 1.41.0 release
-# rather than claimed by it, which is why this number sits below the
-# tag that precedes it in time.
-appVersion: "1.40.0"
+# The flint release this CRD ships with. The mounter image tag is
+# flint-s3-csi-chart's business now.
+appVersion: "1.45.0"
 
 keywords:
   - s3

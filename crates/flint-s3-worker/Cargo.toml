@@ -1,0 +1,26 @@
+# flint-s3-worker — PID 1 of every flint-s3 worker pod (docs/plans/
+# csi-node-mount-design.md §3.1, §9.4). Deliberately its OWN crate:
+# it ships inside the mounter and syncer images, so it must be small,
+# static, and never drag the hub crate's dependency tree into a
+# container whose whole job is to hold one FUSE fd or one syncer.
+[package]
+name = "flint-s3-worker"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "flint-s3-worker"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+nix = { version = "0.27", features = ["socket", "signal", "process", "uio", "fs"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

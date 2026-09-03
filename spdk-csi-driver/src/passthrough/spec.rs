@@ -66,12 +66,22 @@ pub struct MountSpec {
     #[serde(default)]
     pub gid: Option<i64>,
     /// Extra mounter arguments, passed through as ARGV — never
-    /// concatenated into a shell string. See `inject::sidecar_command`.
+    /// concatenated into a shell string. See `mounter::mounter_args_for`.
     #[serde(default)]
     pub mount_options: Vec<String>,
     /// Per-mount image override (the chart's default otherwise).
+    /// WEBHOOK DELIVERY ONLY: the CSI node driver never reads it — the
+    /// worker image is chart-pinned, because this field is the
+    /// privileged-escape knob (design §2.3 T3).
     #[serde(default)]
     pub image: Option<String>,
+    /// CSI delivery: which ServiceAccounts in this namespace may mount
+    /// the CR. ABSENT = DENY under `s3.flint.io`; the webhook ignores it.
+    #[serde(default)]
+    pub consumers: Option<crate::s3csi::policy::Consumers>,
+    /// CSI delivery: how the worker gets its credential (design §4.4).
+    #[serde(default)]
+    pub identity: Option<crate::s3csi::policy::Identity>,
     // NO per-mount `resources`. There was a field here and it was dead:
     // the injector takes the sidecar's resources from the CHART
     // (`sidecarResources` → `InjectDefaults`) and never looked at the
@@ -220,6 +230,8 @@ mod tests {
             gid: Some(1),
             mount_options: vec!["--metadata-ttl".into(), "60".into()],
             image: Some("i".into()),
+            consumers: Some(crate::s3csi::policy::Consumers { service_accounts: vec!["a".into()] }),
+            identity: Some(crate::s3csi::policy::Identity { mode: "broker".into() }),
         };
         let value = serde_json::to_value(&all).unwrap();
         let in_struct: BTreeSet<String> =
@@ -265,5 +277,24 @@ mod tests {
                 "tombstone {t:?}'s message must name the field: {msg:?}"
             );
         }
+    }
+}
+
+pub const CRD_GROUP: &str = "flint.io";
+pub const CRD_VERSION: &str = "v1alpha1";
+pub const CRD_KIND: &str = "FlintPassthroughMount";
+
+/// Fetch a `FlintPassthroughMount` as raw JSON (the spec is plain
+/// serde over a hand-written CRD, so there is no typed `Api` for it).
+/// `None` when the CR does not exist in that namespace.
+pub async fn get_mount(client: &kube::Client, ns: &str, name: &str) -> Result<Option<serde_json::Value>, String> {
+    use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind};
+    let gvk = GroupVersionKind::gvk(CRD_GROUP, CRD_VERSION, CRD_KIND);
+    let ar = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &ar);
+    match api.get_opt(name).await {
+        Ok(Some(o)) => serde_json::to_value(o).map(Some).map_err(|e| e.to_string()),
+        Ok(None) => Ok(None),
+        Err(e) => Err(e.to_string()),
     }
 }

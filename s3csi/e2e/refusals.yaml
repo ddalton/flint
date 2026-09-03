@@ -1,0 +1,94 @@
+# Pods that must NOT mount, each with an accepted control elsewhere in
+# tenants.yaml. Every one sits in ContainerCreating with a FailedMount
+# event that names the reason; none ever starts.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: refused-bob            # S6: SA not in consumers
+  namespace: s3-tenants
+spec:
+  serviceAccountName: bob
+  securityContext: { runAsNonRoot: true, runAsUser: 1001, seccompProfile: { type: RuntimeDefault } }
+  volumes:
+    - name: data
+      csi: { driver: s3.flint.io, volumeAttributes: { flint.io/mount: datasets } }
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; sleep 86400 & wait"]
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumeMounts: [{ name: data, mountPath: /mnt/s3 }]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: refused-noconsumers    # S6b: CR without a consumers block
+  namespace: s3-tenants
+spec:
+  serviceAccountName: trainer
+  securityContext: { runAsNonRoot: true, runAsUser: 1001, seccompProfile: { type: RuntimeDefault } }
+  volumes:
+    - name: data
+      csi: { driver: s3.flint.io, volumeAttributes: { flint.io/mount: datasets-noconsumers } }
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; sleep 86400 & wait"]
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumeMounts: [{ name: data, mountPath: /mnt/s3 }]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: refused-missing        # S4: names a CR that does not exist
+  namespace: s3-tenants
+spec:
+  serviceAccountName: trainer
+  securityContext: { runAsNonRoot: true, runAsUser: 1001, seccompProfile: { type: RuntimeDefault } }
+  volumes:
+    - name: data
+      csi: { driver: s3.flint.io, volumeAttributes: { flint.io/mount: no-such-mount } }
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; sleep 86400 & wait"]
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumeMounts: [{ name: data, mountPath: /mnt/s3 }]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: refused-badattr        # S5: tries to choose the bucket from the pod
+  namespace: s3-tenants
+spec:
+  serviceAccountName: trainer
+  securityContext: { runAsNonRoot: true, runAsUser: 1001, seccompProfile: { type: RuntimeDefault } }
+  volumes:
+    - name: data
+      csi: { driver: s3.flint.io, volumeAttributes: { flint.io/mount: datasets, bucket: private } }
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; sleep 86400 & wait"]
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumeMounts: [{ name: data, mountPath: /mnt/s3 }]
+---
+# S2's inverted control: the OLD label in the RESTRICTED namespace. The
+# passthrough webhook is not installed in this rig, so this pod is not
+# mutated and simply runs with no mount — the assertion is that it
+# carries no sidecar and sees no bucket. (With the webhook installed,
+# PodSecurity would reject the privileged sidecar: passthrough leg A11.)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: labelled-only
+  namespace: s3-tenants
+  labels: { "flint.io/passthrough-mount": datasets }
+spec:
+  serviceAccountName: trainer
+  securityContext: { runAsNonRoot: true, runAsUser: 1001, seccompProfile: { type: RuntimeDefault } }
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; sleep 86400 & wait"]
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }

@@ -1,0 +1,58 @@
+# The lean AGENT pod of S11: applied by the drill only after the seeder
+# pod is gone, so nothing but bucket objects can explain what it sees.
+---
+# Created AFTER the seeder is deleted. The init container is the new
+# assertion of S11: the checkout gate must hold for init containers
+# too (the appended sidecar of the webhook design never gated them).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lean-agent
+  namespace: s3-tenants
+spec:
+  serviceAccountName: trainer
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    runAsGroup: 1001
+    seccompProfile: { type: RuntimeDefault }
+  volumes:
+    - name: ws
+      csi:
+        driver: s3.flint.io
+        volumeAttributes:
+          flint.io/workspace: proj
+    - name: scratch
+      emptyDir: {}
+  initContainers:
+    - name: init
+      image: busybox:1.36
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: ws, mountPath: /workspace }
+        - { name: scratch, mountPath: /scratch }
+      command: ["/bin/sh", "-c", "ls /workspace/src 2>/dev/null | wc -l > /scratch/init-seen; test -f /workspace/.flint-sync/checkout-complete && echo GATE-OK > /scratch/init-gate || echo GATE-BROKEN > /scratch/init-gate"]
+  containers:
+    - name: agent
+      image: busybox:1.36
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: ws, mountPath: /workspace }
+        - { name: scratch, mountPath: /scratch }
+      command:
+        - /bin/sh
+        - -c
+        - |
+          if [ -f /workspace/.flint-sync/checkout-complete ]; then echo GATE-OK > /tmp/gate; else echo GATE-BROKEN > /tmp/gate; fi
+          ls /workspace/src 2>/dev/null | wc -l > /tmp/seen-count
+          cat /workspace/src/f0042.txt > /tmp/seen-sample 2>/dev/null || echo MISSING > /tmp/seen-sample
+          env | grep -c '^AWS_' > /tmp/aws-count
+          env | grep -c '^FLINT_SYNC_' > /tmp/flint-count
+          trap 'exit 0' TERM INT
+          sleep 86400 &
+          wait

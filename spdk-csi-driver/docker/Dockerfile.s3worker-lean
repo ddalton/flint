@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1
+# flint-s3-worker-lean — PID 1 of every LEAN worker pod the s3.flint.io
+# node plugin creates: the unchanged flint-sync, supervised by the
+# worker.
+#
+#   # stage: docker/prebuilt/{amd64,arm64}/flint-s3-worker  (as Dockerfile.s3worker)
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#       -f docker/Dockerfile.s3worker-lean --build-arg BIN_DIR=docker/prebuilt \
+#       -t dilipdalton/flint-s3-worker-lean:<tag> --push .
+#
+# WHY A SUPERVISOR AND NOT flint-sync AS PID 1. The lean arm has no
+# FUSE fd: the plugin bind-mounts a tree it owns at /workspace and the
+# child is `flint-sync run` over it. But somebody has to forward SIGTERM
+# so the derived drain grace is honoured, reap orphans, persist the
+# launch message so a kubelet restart (`OnFailure`) relaunches WITHOUT
+# the plugin, and serve the loopback credential door flint-sync reads
+# its keys from. That is the worker; flint-sync stays byte-identical to
+# the sidecar the lean webhook injects.
+#
+# UNPRIVILEGED, like the passthrough worker: non-root at the CR's uid
+# (a syncer at any other uid cannot read the app's 0600 files and
+# silently skips them), every capability dropped, seccomp
+# RuntimeDefault, read-only rootfs, no ServiceAccount token, and exactly
+# ONE hostPath — the plugin's tree — which the admission policy pins.
+#
+# THE SYNCER PIN COMES FROM THE BASE IMAGE (Dockerfile.sync.prebuilt:
+# alpine + ca-certificates + /usr/local/bin/flint-sync). Bump flint-sync
+# there, then rebuild this.
+ARG SYNC_IMAGE=dilipdalton/flint-sync:1.41.1
+FROM ${SYNC_IMAGE}
+
+ARG BIN_DIR=docker/prebuilt
+ARG TARGETARCH
+
+COPY ${BIN_DIR}/${TARGETARCH}/flint-s3-worker /usr/local/bin/flint-s3-worker
+
+# Where Dockerfile.sync.prebuilt COPYs flint-sync. The worker's own
+# default is the same path; set explicitly so a base-image move breaks
+# HERE, at build review, and not in a worker at 3am.
+ENV FLINT_S3W_SYNC=/usr/local/bin/flint-sync
+
+# The base's ENTRYPOINT is flint-sync itself; the worker takes PID 1
+# and spawns it.
+ENTRYPOINT ["/usr/local/bin/flint-s3-worker"]

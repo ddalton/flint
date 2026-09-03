@@ -88,6 +88,19 @@ spec:
                   Bucket and subtree prefix (the proxy's tenancy boundary —
                   project-granular per plan §9 Q6).
                 type: string
+              consumers:
+                description: |-
+                  CSI delivery (`s3.flint.io`, docs/plans/csi-node-mount-design.md):
+                  which ServiceAccounts in this namespace may mount the workspace.
+                  ABSENT = DENY under CSI; the webhook delivery ignores it.
+                nullable: true
+                properties:
+                  serviceAccounts:
+                    default: []
+                    items:
+                      type: string
+                    type: array
+                type: object
               credentialsSecretRef:
                 description: |-
                   Secret with the SIDECAR's proxy credentials, keys AWS_* VERBATIM
@@ -142,6 +155,27 @@ spec:
                 format: uint64
                 minimum: 0.0
                 type: integer
+              gid:
+                format: int64
+                nullable: true
+                type: integer
+              identity:
+                description: 'CSI delivery: how the syncer gets its credential (design §4.4).'
+                nullable: true
+                properties:
+                  mode:
+                    default: broker
+                    description: |-
+                      `broker` (default): the node plugin exchanges the pod-bound
+                      ServiceAccount token at `flint-s3-broker` for short-lived keys
+                      and serves them to the worker over its loopback door.
+                      `webIdentity`: the worker itself calls the broker's STS façade
+                      (needs TLS trust in the mounter image).
+                      `static`: the pod's `nodePublishSecretRef` (AWS_* keys verbatim)
+                      — the interim arm, today's trust level.
+                      `ambient`: nothing; the worker's own AWS chain.
+                    type: string
+                type: object
               image:
                 description: Sidecar image override; None = the operator's default.
                 nullable: true
@@ -295,6 +329,15 @@ spec:
                   interface, and a bind failure degrades to a log line rather than
                   failing the workspace.
                 type: boolean
+              uid:
+                description: |-
+                  CSI delivery: the uid/gid the syncer runs as and the tree is
+                  owned by. REQUIRED under CSI for lean (design §3.5 step 6): a
+                  syncer at a uid other than the app's cannot read the app's 0600
+                  files and would silently skip them.
+                format: int64
+                nullable: true
+                type: integer
               visibilityLagBoundSecs:
                 description: |-
                   Gated only, and REQUIRED there: the hard cap on citation

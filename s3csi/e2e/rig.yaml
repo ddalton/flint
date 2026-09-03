@@ -1,0 +1,124 @@
+# The store half of the s3.flint.io rig: MinIO, a seeded bucket, a
+# durable mc pod, and the broker's static key Secret. Namespaces the
+# CHART does not create are here; `flint-workers` comes from the chart.
+#
+# Inherited from passthrough/e2e/rig.yaml: every read leg asserts on
+# CONTENT seeded by something other than the reading pod, and a second
+# prefix exists so a reader that were somehow seeing the bucket root or
+# another pod's mount shows the wrong bytes rather than the right count.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flint-system
+---
+# THE tenant namespace is RESTRICTED. That is the headline of the CSI
+# delivery (design §2.4 T6): a pod with a `csi:` volume is admissible
+# where a pod with the old label (a privileged sidecar) is not. Leg S2
+# proves both halves in this one namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: s3-tenants
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: flint-system
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: minio } }
+  template:
+    metadata: { labels: { app: minio } }
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio
+          args: ["server", "/data", "--address", ":9000"]
+          env:
+            - { name: MINIO_ROOT_USER, value: drill }
+            - { name: MINIO_ROOT_PASSWORD, value: drillsecret }
+          ports: [{ containerPort: 9000 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: flint-system
+spec:
+  selector: { app: minio }
+  ports: [{ port: 9000, targetPort: 9000 }]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seed-bucket
+  namespace: flint-system
+spec:
+  backoffLimit: 20
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: minio/mc
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until mc alias set m http://minio.flint-system.svc:9000 drill drillsecret; do sleep 2; done
+              mc mb --ignore-existing m/s3bucket
+              for i in 00 01 02 03 04 05 06 07 08 09; do
+                echo "seeded-object-$i" | mc pipe "m/s3bucket/datasets/imagenet/shard-$i.txt"
+              done
+              echo "deep-seeded" | mc pipe m/s3bucket/datasets/imagenet/sub/deep.txt
+              # The other prefix: one file, other bytes (S2's falsifier).
+              echo "elsewhere-only" | mc pipe m/s3bucket/elsewhere/only.txt
+              # Outside both prefixes.
+              echo "must-not-be-visible" | mc pipe m/s3bucket/private/secret.txt
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mc-s3
+  namespace: flint-system
+spec:
+  containers:
+    - name: mc
+      image: minio/mc
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          trap 'exit 0' TERM INT
+          until mc alias set m http://minio.flint-system.svc:9000 drill drillsecret; do sleep 2; done
+          sleep 86400 & wait
+---
+# The broker's static backend keys (rig only: in production the broker's
+# `sts` or `rest` backend mints per exchange and this Secret does not
+# exist). NOTE the namespace: flint-system, the broker's — never a
+# tenant namespace. No tenant object references it.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s3-broker-static
+  namespace: flint-system
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: drill
+  AWS_SECRET_ACCESS_KEY: drillsecret
+---
+# The interim STATIC arm's Secret, in the tenant namespace, named by a
+# pod's nodePublishSecretRef (leg S5c). Keys AWS_* verbatim.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-creds
+  namespace: s3-tenants
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: drill
+  AWS_SECRET_ACCESS_KEY: drillsecret
+  AWS_REGION: us-east-1

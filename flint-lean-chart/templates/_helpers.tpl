@@ -34,15 +34,8 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 {{- end }}
 
-{{- define "flint-lean.sidecarImage" -}}
-{{- if .Values.sidecarImage.ref }}{{ .Values.sidecarImage.ref }}
-{{- else }}{{ printf "%s/%s:%s" .Values.sidecarImage.repository .Values.sidecarImage.name (.Values.sidecarImage.tag | default .Chart.AppVersion) }}
-{{- end }}
-{{- end }}
-
-{{/* The gateway is its own workload: separate name and selector so it
-     is never picked up by the operator's Service (the webhook's
-     endpoints must be operator pods ONLY). */}}
+{{/* The gateway is its own workload: separate name and selector from
+     the operator's. */}}
 {{- define "flint-lean.gatewayName" -}}
 {{- printf "%s-gateway" (include "flint-lean.name" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}

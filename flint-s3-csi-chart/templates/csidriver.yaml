@@ -1,0 +1,42 @@
+# The s3.flint.io CSIDriver — its OWN object, not an extension of
+# flint.csi.storage.io: attachRequired, fsGroupPolicy, tokenRequests and
+# requiresRepublish are properties of one CSIDriver, and the block/pNFS
+# driver needs the opposite values (design §3.1).
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: {{ include "flint-s3-csi.driverName" . }}
+  labels: {{- include "flint-s3-csi.labels" . | nindent 4 }}
+spec:
+  # No controller service, no attach: the mount is made on the node the
+  # pod landed on and nowhere else.
+  attachRequired: false
+  # The plugin authorizes on the pod's kubelet-asserted namespace and
+  # ServiceAccount (csi.storage.k8s.io/pod.namespace,
+  # serviceAccount.name), never on anything the pod author writes.
+  podInfoOnMount: true
+  # Inline only. There is no PV, no StorageClass and no provisioner: the
+  # CR in the pod's namespace is the policy object.
+  volumeLifecycleModes:
+    - Ephemeral
+  # Never let kubelet chown a bucket. With the default policy an inline
+  # volume (always RWO to kubelet) with fsType + fsGroup triggers a
+  # recursive walk of the whole mount (§3.6).
+  fsGroupPolicy: None
+  # kubelet re-calls NodePublishVolume every ~60-90 s per pod with a
+  # fresh token; the plugin rewrites the worker's credential file and
+  # probes the mount, and never remounts (§3.7).
+  requiresRepublish: true
+  # kubelet mints a token BOUND TO THE POD for every publish, audience =
+  # the driver name. The broker's TokenReview is what turns it into
+  # (namespace, serviceAccount, pod uid).
+  tokenRequests:
+    - audience: {{ include "flint-s3-csi.driverName" . }}
+      expirationSeconds: 3600
+  # FUSE mounts carry no SELinux context to relabel.
+  seLinuxMount: false
+{{- if .Values.driver.serviceAccountTokenInSecrets }}
+  # Kubernetes >= 1.35: the token travels in NodePublishVolumeRequest
+  # .secrets, not volume_context (values.yaml driver.serviceAccountTokenInSecrets).
+  serviceAccountTokenInSecrets: true
+{{- end }}

@@ -28,13 +28,6 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
-{{- if .Values.webhook.enabled }}
-  # Webhook registration carries the caBundle for the cert the operator
-  # generates, so the operator owns the object.
-  - apiGroups: ["admissionregistration.k8s.io"]
-    resources: ["mutatingwebhookconfigurations"]
-    verbs: ["create", "get", "patch"]
-{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -49,35 +42,4 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "flint-lean.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
-{{- if .Values.webhook.enabled }}
----
-# The cert Secret is namespace-scoped and read/created by the operator
-# itself (replicas share one bundle; the loser of the create race
-# adopts the winner's material).
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: {{ include "flint-lean.name" . }}
-  namespace: {{ .Release.Namespace }}
-  labels: {{- include "flint-lean.labels" . | nindent 4 }}
-rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "create"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: {{ include "flint-lean.name" . }}
-  namespace: {{ .Release.Namespace }}
-  labels: {{- include "flint-lean.labels" . | nindent 4 }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: {{ include "flint-lean.name" . }}
-subjects:
-  - kind: ServiceAccount
-    name: {{ include "flint-lean.serviceAccountName" . }}
-    namespace: {{ .Release.Namespace }}
-{{- end }}
 {{- end }}

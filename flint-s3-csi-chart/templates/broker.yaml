@@ -1,0 +1,174 @@
+{{- if .Values.broker.enabled }}
+{{- if not (has .Values.broker.backend (list "static" "sts" "rest")) }}
+{{- fail (printf "broker.backend %q is not one of static | sts | rest" .Values.broker.backend) }}
+{{- end }}
+{{- if and (eq .Values.broker.backend "static") (not .Values.broker.static.secretRef) }}
+{{- fail "broker.backend is static and broker.static.secretRef is empty — name a Secret in the release namespace with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (optionally AWS_SESSION_TOKEN); a broker with nothing to hand out is a config error, not a healthy idle" }}
+{{- end }}
+{{- if and (eq .Values.broker.backend "sts") (not .Values.broker.sts.url) }}
+{{- fail "broker.backend is sts and broker.sts.url is empty — the broker forwards AssumeRoleWithWebIdentity to that URL and refuses to start without one" }}
+{{- end }}
+{{- if and (eq .Values.broker.backend "rest") (not .Values.broker.rest.url) }}
+{{- fail "broker.backend is rest and broker.rest.url is empty — the broker POSTs the pod's token there and refuses to start without one" }}
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "flint-s3-csi.broker.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flint-s3-csi.broker.labels" . | nindent 4 }}
+---
+# The broker authenticates pod tokens (TokenReview) and reads the policy
+# objects (the two CRDs) to decide entitlement. That is all. No Secrets
+# read anywhere: the static backend's key reaches it as env, delivered
+# by kubelet; no pod verbs; no bucket credential of its own beyond the
+# one it hands out.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "flint-s3-csi.broker.name" . }}
+  labels: {{- include "flint-s3-csi.broker.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: ["flint.io"]
+    resources: ["flintpassthroughmounts", "flintleanworkspaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "flint-s3-csi.broker.name" . }}
+  labels: {{- include "flint-s3-csi.broker.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "flint-s3-csi.broker.name" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flint-s3-csi.broker.name" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# The crown jewel (§3.6): one Deployment, one job, every issuance a
+# TokenReview-verified, pod-bound, short-lived grant with an audit line.
+# `restricted`-admissible; runs the SAME image as the node plugin, a
+# different binary.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flint-s3-csi.broker.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flint-s3-csi.broker.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.broker.replicas }}
+  selector:
+    matchLabels: {{- include "flint-s3-csi.broker.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "flint-s3-csi.broker.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: broker
+    spec:
+      serviceAccountName: {{ include "flint-s3-csi.broker.name" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: broker
+          image: {{ include "flint-s3-csi.node.image" . }}
+          imagePullPolicy: {{ .Values.node.image.pullPolicy }}
+          # The image's ENTRYPOINT is the node plugin; this Deployment
+          # runs the other binary out of the same image.
+          command: ["/usr/local/bin/flint-s3-broker"]
+          env:
+            - { name: FLINT_S3B_LISTEN, value: "0.0.0.0:8080" }
+            - { name: FLINT_S3B_BACKEND, value: {{ .Values.broker.backend | quote }} }
+{{- if eq .Values.broker.backend "static" }}
+            # Keys AWS_* VERBATIM in the Secret; kubelet delivers them,
+            # so the broker needs no Secrets RBAC.
+            - name: FLINT_S3B_STATIC_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.broker.static.secretRef | quote }}, key: AWS_ACCESS_KEY_ID }
+            - name: FLINT_S3B_STATIC_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.broker.static.secretRef | quote }}, key: AWS_SECRET_ACCESS_KEY }
+            - name: FLINT_S3B_STATIC_SESSION_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.broker.static.secretRef | quote }}, key: AWS_SESSION_TOKEN, optional: true }
+{{- else if eq .Values.broker.backend "sts" }}
+            - { name: FLINT_S3B_STS_URL, value: {{ .Values.broker.sts.url | quote }} }
+{{- if .Values.broker.sts.roleArn }}
+            - { name: FLINT_S3B_STS_ROLE_ARN, value: {{ .Values.broker.sts.roleArn | quote }} }
+{{- end }}
+{{- else if eq .Values.broker.backend "rest" }}
+            - { name: FLINT_S3B_REST_URL, value: {{ .Values.broker.rest.url | quote }} }
+{{- if .Values.broker.rest.headers }}
+            - { name: FLINT_S3B_REST_HEADERS, value: {{ .Values.broker.rest.headers | quote }} }
+{{- end }}
+{{- end }}
+            # The only principal allowed to register publishes: the node
+            # plugin, as TokenReview spells it.
+            - { name: FLINT_S3B_NODE_PRINCIPAL, value: {{ include "flint-s3-csi.nodePrincipal" . | quote }} }
+            - { name: FLINT_S3B_DEFAULT_LIFETIME_SECS, value: {{ .Values.broker.defaultLifetimeSecs | quote }} }
+            - { name: FLINT_S3B_MAX_LIFETIME_SECS, value: {{ .Values.broker.maxLifetimeSecs | quote }} }
+            - { name: FLINT_S3B_REQUIRE_REGISTRATION, value: {{ .Values.broker.requireRegistration | quote }} }
+            - { name: RUST_LOG, value: {{ .Values.broker.logLevel | quote }} }
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities: { drop: ["ALL"] }
+            seccompProfile: { type: RuntimeDefault }
+          resources: {{- toYaml .Values.broker.resources | nindent 12 }}
+{{- with .Values.broker.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+{{- end }}
+{{- with .Values.broker.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+{{- end }}
+{{- with .Values.broker.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+{{- end }}
+---
+# What the node plugin dials (FLINT_S3CSI_BROKER_URL). Port 80 so the
+# URL in the plugin's env carries no port to get wrong.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "flint-s3-csi.broker.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flint-s3-csi.broker.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "flint-s3-csi.broker.selectorLabels" . | nindent 4 }}
+  ports:
+    - { name: http, port: 80, targetPort: http }
+{{- if gt (int .Values.broker.replicas) 1 }}
+---
+# Every publish and republish of a broker-mode volume goes through the
+# broker; a drain must never take the last replica. Only rendered with
+# more than one replica — on a single replica, minAvailable 1 would
+# forbid every drain instead of protecting one.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "flint-s3-csi.broker.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flint-s3-csi.broker.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {{- include "flint-s3-csi.broker.selectorLabels" . | nindent 6 }}
+{{- end }}
+{{- end }}

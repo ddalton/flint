@@ -1,5 +1,15 @@
 # Git on a flint-lean workspace
 
+> **Delivery changed (2026-09-03).** The label
+> `flint.io/lean-workspace` and the injected `flint-sync` sidecar shown
+> below are the RETIRED shape. A workspace now reaches a pod as ONE
+> `csi:` volume served by the `s3.flint.io` node driver
+> (`volumeAttributes: { flint.io/workspace: <cr> }`,
+> `flint-s3-csi-chart`), and the CR names `spec.uid` and
+> `spec.consumers.serviceAccounts`. The workspace protocol below —
+> checkout gate, `.flint/publish`, boundaries, drain on delete — is
+> unchanged. See `docs/plans/csi-node-mount-design.md` §0.
+
 The recommended way to do git-based collaboration between agents whose
 workspaces are flint-lean checkouts. **Use plain git against a real git
 host; let flint-lean keep the workspace durable.** Two mechanisms, two

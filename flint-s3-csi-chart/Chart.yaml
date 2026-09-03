@@ -1,0 +1,31 @@
+apiVersion: v2
+name: flint-s3-csi
+description: >-
+  The s3.flint.io CSI node driver: an S3 prefix (Mountpoint for S3) or a
+  flint-lean workspace as a CSI ephemeral inline volume, served by one
+  privileged node DaemonSet and one unprivileged worker pod per volume in
+  a system namespace. Replaces the flint-passthrough and flint-lean
+  sidecar-injection webhooks — the tenant pod gets no sidecar, no
+  credential, no privilege and no label, and is admissible under
+  PodSecurity `restricted`. Ships the flint-s3-broker, the STS-shaped
+  identity exchange that is the only component holding a standing
+  credential. Design of record: docs/plans/csi-node-mount-design.md.
+type: application
+
+# Chart version, independent of the flint release train.
+version: 0.1.0
+
+# The flint release whose images this chart runs: the node plugin and
+# the broker come out of ONE image (flint-s3-csi), the workers out of
+# two (flint-s3-worker, flint-s3-worker-lean). All four speak the same
+# launch-socket protocol — keep them in step.
+appVersion: "1.45.0"
+
+keywords:
+  - s3
+  - csi
+  - fuse
+  - mountpoint-s3
+  - agents
+  - flint
+home: https://github.com/ddalton/flint

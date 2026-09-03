@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "flint-s3-csi.node.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flint-s3-csi.node.labels" . | nindent 4 }}
+---
+# The node plugin's cluster-wide view: READ the two policy CRDs, post
+# Events on tenant pods, and read its own Node (for the workers'
+# ownerReference). Nothing else.
+#
+# NO SECRETS, ANYWHERE. The plugin never reads a credential: the
+# static arm's Secret is fetched by KUBELET (nodePublishSecretRef) and
+# delivered inside the RPC, and every other arm goes through the
+# broker. "No component may be granted get secrets across tenant
+# namespaces" — docs/plans/file-api-fleet-auth.md. A privileged
+# DaemonSet with Secret reads is a node compromise turned into every
+# tenant's keys.
+#
+# NO CLUSTER-WIDE POD VERBS. The pod verbs are a Role in ONE namespace
+# below. ISTIO-SECURITY-2023-005 turned a node agent's cluster-wide pod
+# DELETE into a node-to-cluster escalation; the admission policy then
+# narrows that namespace to the caller's own node.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "flint-s3-csi.node.name" . }}
+  labels: {{- include "flint-s3-csi.node.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["flint.io"]
+    resources: ["flintpassthroughmounts", "flintleanworkspaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "flint-s3-csi.node.name" . }}
+  labels: {{- include "flint-s3-csi.node.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "flint-s3-csi.node.name" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flint-s3-csi.node.name" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Worker pods live in exactly one namespace, and this is the only place
+# the plugin may write a pod. `get`/`list`/`watch` are the adopt-at-
+# startup path (a plugin restart finds its workers by label); `delete`
+# is NodeUnpublish. No `pods/log`: the worker mirrors its last stderr
+# lines into a file the plugin reads host-side, so the plugin can name a
+# mounter failure in an Event without log RBAC.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "flint-s3-csi.node.name" . }}
+  namespace: {{ .Values.workers.namespace }}
+  labels: {{- include "flint-s3-csi.node.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "flint-s3-csi.node.name" . }}
+  namespace: {{ .Values.workers.namespace }}
+  labels: {{- include "flint-s3-csi.node.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "flint-s3-csi.node.name" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flint-s3-csi.node.name" . }}
+    namespace: {{ .Release.Namespace }}

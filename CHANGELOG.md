@@ -10,6 +10,78 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [Unreleased]
+
+The passthrough and lean sidecar-injection webhooks are gone. Both
+front ends are delivered by one CSI node DaemonSet, `s3.flint.io`.
+
+### Changed
+
+- **`s3.flint.io` (new chart `flint-s3-csi`) replaces both mutating
+  webhooks.** A pod gets an S3 prefix or a lean workspace as ONE
+  `csi:` ephemeral volume naming a `FlintPassthroughMount` or
+  `FlintLeanWorkspace` in its own namespace — no label, no injected
+  container, no Secret in the pod's namespace, no privilege in the pod,
+  and the tenant namespace can enforce PodSecurity `restricted`. The
+  privileged part is one DaemonSet that performs the `mount(2)` and
+  hands the FUSE fd to an unprivileged, flint-owned worker pod (the
+  AWS Mountpoint CSI v2 shape); the lean syncer runs unchanged in the
+  same kind of worker. `spec.consumers.serviceAccounts` on both CRDs
+  names who may mount (ABSENT = nobody); the pod's ServiceAccount is
+  kubelet-asserted, never chosen by the pod. Design of record:
+  `docs/plans/csi-node-mount-design.md`. Drills: `s3csi/e2e`
+  (single cluster, 16 legs) and `s3csi/e2e/multi` (two clusters, one
+  S3 endpoint outside both).
+- **`flint-s3-broker`**: an STS-shaped identity exchange
+  (`AssumeRoleWithWebIdentity`) that turns the kubelet-minted, pod-bound
+  ServiceAccount token into short-lived keys — backend `static`, `sts`,
+  or `rest` (the application's own JWT-enforcing REST API decides). The
+  worker reads its keys from a loopback credential door; the pod never
+  sees them.
+- **flint-passthrough chart is now the CRD alone** (0.2.0): no
+  Deployment, no RBAC, no webhook. **flint-lean chart** keeps the thin
+  controller (claim, posture, sweep) and drops the webhook, its cert
+  Secret and its Service. `flint-passthrough-operator` no longer exists;
+  `flint-lean-operator` injects nothing.
+- CRDs: `FlintPassthroughMount` gains `consumers`, `identity`;
+  `FlintLeanWorkspace` gains `consumers`, `identity`, `uid`, `gid`
+  (`uid` is REQUIRED under the CSI delivery: the syncer runs as the
+  app's uid).
+- Release scope `passthrough` is now `s3csi` (accepted as an alias):
+  the `flint-s3-csi` chart and its three images, the CRD chart, the
+  mounter base.
+
+### Fixed
+
+- **A published lean workspace could have its tree deleted under the
+  running pod.** `is_mountpoint` compared device numbers, which cannot
+  see a bind mount whose source and target share a filesystem — which
+  is every lean bind (both live under `/var/lib/kubelet`). A republish
+  therefore missed the "already published" branch, took the "unfinished
+  publish, start over" path, and removed the volume directory while an
+  agent was writing into it; the next publish captured only the files
+  written after the wipe. The test now reads `/proc/self/mountinfo`,
+  and the cleanup path refuses a published lean volume outright. Found
+  by the kind drill, in code that had never been released.
+- The credential document the worker serves on its loopback door now
+  always carries `Token` (empty when there is none): the CRT tolerates
+  its absence, the AWS Rust SDK the lean syncer uses does not, and both
+  read the same file. The door is also bound before the child process
+  is spawned, and every credential arm carries a region.
+- The broker's registration table is in memory, so the node plugin
+  re-registers before every credential refresh; a broker restart no
+  longer leaves mounted pods unable to refresh until their keys expire.
+- The workers admission policy admits the kubelet's own delete of a
+  pod bound to its node — without it every exited worker sat
+  `Terminating` forever, retried every ten seconds.
+
+### Removed
+
+- The webhook e2e rig `passthrough/e2e`. The lean rigs under `lean/e2e`
+  still describe the label-injected shape and no longer run as written;
+  the protocol suites there are to be re-targeted at the worker pod
+  (design §10.2 S12).
+
 ## [1.44.0] - 2026-09-02
 
 Two silent data defects that shipped in 1.43.0, and a session handshake

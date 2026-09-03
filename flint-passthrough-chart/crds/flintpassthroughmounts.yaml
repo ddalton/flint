@@ -153,7 +153,38 @@ spec:
                   type: string
                   description: >-
                     Per-mount mounter image override. The chart's
-                    sidecarImage otherwise.
+                    sidecarImage otherwise. WEBHOOK DELIVERY ONLY: the
+                    s3.flint.io CSI driver never reads it (the worker
+                    image is chart-pinned; this field is the
+                    privileged-escape knob the CSI design removes).
+                consumers:
+                  type: object
+                  description: >-
+                    CSI delivery (s3.flint.io): which ServiceAccounts in
+                    this namespace may mount the CR. ABSENT = DENY under
+                    CSI — list them, or ["*"] for any SA in the namespace
+                    (the webhook delivery's trust level, made explicit).
+                    The webhook delivery ignores this field.
+                  properties:
+                    serviceAccounts:
+                      type: array
+                      items:
+                        type: string
+                identity:
+                  type: object
+                  description: >-
+                    CSI delivery: how the worker obtains its credential.
+                    broker (default) — the node plugin exchanges the
+                    pod-bound ServiceAccount token at flint-s3-broker for
+                    short-lived proxy keys; webIdentity — the worker calls
+                    the broker's STS facade itself; static — the pod's
+                    nodePublishSecretRef (AWS_* keys verbatim, the
+                    interim arm); ambient — the worker's own AWS chain.
+                  properties:
+                    mode:
+                      type: string
+                      enum: [broker, webIdentity, static, ambient]
+                      default: broker
               # No `additionalProperties: false` here — a structural
               # schema forbids it alongside `properties`, and it would
               # be redundant: the API server PRUNES unknown fields

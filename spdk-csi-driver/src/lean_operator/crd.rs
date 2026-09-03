@@ -60,6 +60,23 @@ pub struct FlintLeanWorkspaceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials_secret_ref: Option<String>,
 
+    /// CSI delivery (`s3.flint.io`, docs/plans/csi-node-mount-design.md):
+    /// which ServiceAccounts in this namespace may mount the workspace.
+    /// ABSENT = DENY under CSI; the webhook delivery ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumers: Option<crate::s3csi::policy::Consumers>,
+    /// CSI delivery: how the syncer gets its credential (design §4.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<crate::s3csi::policy::Identity>,
+    /// CSI delivery: the uid/gid the syncer runs as and the tree is
+    /// owned by. REQUIRED under CSI for lean (design §3.5 step 6): a
+    /// syncer at a uid other than the app's cannot read the app's 0600
+    /// files and would silently skip them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gid: Option<i64>,
+
     /// Publish cadence floor, seconds: the durability (RPO) contract.
     #[serde(default = "default_floor_secs")]
     pub floor_secs: u64,

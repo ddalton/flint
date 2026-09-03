@@ -19,7 +19,7 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-ver=${1:?usage: publish-images.sh <version> [all|lean|passthrough] [--dry-run]}
+ver=${1:?usage: publish-images.sh <version> [all|lean|s3csi] [--dry-run]}
 # Scope, matching stage-prebuilt.sh. A lean-scoped release publishes the
 # operator image (which carries the lean binaries) and the sidecar, then
 # aliases the operator to its lean name — it does not republish the CSI
@@ -39,7 +39,7 @@ dry=
 for a in "$@"; do
     case "$a" in
         lean)        SCOPE=lean ;;
-        passthrough) SCOPE=passthrough ;;
+        s3csi|passthrough) SCOPE=s3csi ;;
         all)         SCOPE=all ;;
         --dry-run)   dry=--dry-run ;;
     esac
@@ -69,7 +69,10 @@ set -- \
     "flint-pnfs:docker/Dockerfile.pnfs.prebuilt" \
     "flint-lite-operator:docker/Dockerfile.operator.prebuilt" \
     "flint-sync:docker/Dockerfile.sync.prebuilt" \
-    "flint-passthrough-mounter:docker/Dockerfile.passthrough"
+    "flint-passthrough-mounter:docker/Dockerfile.passthrough" \
+    "flint-s3-csi:docker/Dockerfile.s3csi.prebuilt" \
+    "flint-s3-worker:docker/Dockerfile.s3worker" \
+    "flint-s3-worker-lean:docker/Dockerfile.s3worker-lean"
 
 if [ "$SCOPE" = lean ]; then
     set -- \
@@ -77,15 +80,17 @@ if [ "$SCOPE" = lean ]; then
         "flint-sync:docker/Dockerfile.sync.prebuilt"
 fi
 
-# The mounter image is the odd one here: no staged binary, no BIN_DIR,
-# nothing of ours inside it. It is in this script anyway because the
-# thing that matters about it is the same thing that matters about every
-# other image — that the tag the chart names was built by the release
-# and not by hand. It is the image a workload's PRIVILEGED sidecar runs.
-if [ "$SCOPE" = passthrough ]; then
+# The s3csi scope: the mounter BASE (no staged binary, no BIN_DIR,
+# nothing of ours inside it — in this script because the tag the worker
+# image builds FROM must be the release's, not a hand push), then the
+# plugin+broker image and the two worker images. Order matters: the
+# worker images are FROM the mounter and the sync images by tag.
+if [ "$SCOPE" = s3csi ]; then
     set -- \
-        "flint-lite-operator:docker/Dockerfile.operator.prebuilt" \
-        "flint-passthrough-mounter:docker/Dockerfile.passthrough"
+        "flint-passthrough-mounter:docker/Dockerfile.passthrough" \
+        "flint-s3-csi:docker/Dockerfile.s3csi.prebuilt" \
+        "flint-s3-worker:docker/Dockerfile.s3worker" \
+        "flint-s3-worker-lean:docker/Dockerfile.s3worker-lean"
 fi
 
 minor=${ver%.*}      # 1.31.0 -> 1.31
