@@ -130,10 +130,12 @@ VARIABLES
   writes,   \* [Clusters -> Nat]
   cycles,   \* [Clusters -> Nat]
   crashes,  \* node losses so far
-  wiped     \* WITNESS: a published volume's tree was removed under a live pod
+  wiped,    \* WITNESS: a published volume's tree was removed under a live pod
+  drainLost \* WITNESS: a pod exited cleanly and its FINAL publish was refused
+            \* because the prefix had been superseded under it
 
 vars == <<phase, pod, tree, bound, manifest, acked, origin, lease,
-          writes, cycles, crashes, wiped>>
+          writes, cycles, crashes, wiped, drainLost>>
 
 TypeOK ==
   /\ phase \in [Clusters -> {"idle", "checkingout", "published", "draining"}]
@@ -148,6 +150,7 @@ TypeOK ==
   /\ cycles \in [Clusters -> 0..MaxCycles]
   /\ crashes \in 0..MaxCrashes
   /\ wiped \in BOOLEAN
+  /\ drainLost \in BOOLEAN
 
 Init ==
   /\ phase = [c \in Clusters |-> "idle"]
@@ -162,6 +165,7 @@ Init ==
   /\ cycles = [c \in Clusters |-> 0]
   /\ crashes = 0
   /\ wiped = FALSE
+  /\ drainLost = FALSE
 
 (***************************************************************************)
 (* THE SENSOR.  `bound` is the kernel; these two are what the driver's      *)
@@ -195,7 +199,7 @@ PodAdmitted(c) ==
   /\ pod' = [pod EXCEPT ![c] = "waiting"]
   /\ cycles' = [cycles EXCEPT ![c] = cycles[c] + 1]
   /\ UNCHANGED <<phase, tree, bound, manifest, acked, origin, lease, writes,
-                 crashes, wiped>>
+                 crashes, wiped, drainLost>>
 
 (***************************************************************************)
 (* The publish path.  Taking the prefix lease is what keeps two clusters    *)
@@ -209,7 +213,7 @@ StartPublish(c) ==
   /\ lease' = IF LeaseCheck THEN c ELSE lease
   /\ phase' = [phase EXCEPT ![c] = "checkingout"]
   /\ UNCHANGED <<pod, tree, bound, manifest, acked, origin, writes, cycles,
-                 crashes, wiped>>
+                 crashes, wiped, drainLost>>
 
 \* The checkout materialises the published snapshot into the tree, writes
 \* the marker, binds the tree into the pod, and only THEN do the pod's
@@ -223,7 +227,7 @@ Checkout(c) ==
   /\ phase' = [phase EXCEPT ![c] = "published"]
   /\ pod' = [pod EXCEPT ![c] = "running"]
   /\ UNCHANGED <<manifest, acked, origin, lease, writes, cycles, crashes,
-                 wiped>>
+                 wiped, drainLost>>
 
 (***************************************************************************)
 (* The app and its syncer.  Both are gated on the POD being alive and not   *)
@@ -243,14 +247,20 @@ AppWrite(c, f) ==
   /\ origin' = [origin EXCEPT ![f] = c]
   /\ writes' = [writes EXCEPT ![c] = writes[c] + 1]
   /\ UNCHANGED <<phase, pod, bound, manifest, acked, lease, cycles, crashes,
-                 wiped>>
+                 wiped, drainLost>>
 
+\* FENCED on the lease: the syncer's publish is a conditional write against
+\* the prefix's epoch (FlintTierEpoch's If-Match), so a holder that has
+\* been superseded cannot land bytes.  Modelling the publish as
+\* unconditional would make the model WEAKER than the code and would
+\* produce counterexamples the real system refuses.
 DeclaredPublish(c) ==
   /\ pod[c] = "running"
+  /\ (LeaseCheck => lease = c)
   /\ manifest' = tree[c]
   /\ acked' = acked \cup tree[c]
   /\ UNCHANGED <<phase, pod, tree, bound, origin, lease, writes, cycles,
-                 crashes, wiped>>
+                 crashes, wiped, drainLost>>
 
 (***************************************************************************)
 (* THE REPUBLISH LADDER — the branch the sensor decides, verbatim from      *)
@@ -272,7 +282,7 @@ RepublishRebind(c) ==        \* target unseen, source seen: rebind, no data touc
   /\ SensorSrcIsMount
   /\ bound' = [bound EXCEPT ![c] = TRUE]
   /\ UNCHANGED <<phase, pod, tree, manifest, acked, origin, lease, writes,
-                 cycles, crashes, wiped>>
+                 cycles, crashes, wiped, drainLost>>
 
 RepublishGuarded(c) ==       \* the fix's second line: cleanup refuses a published volume
   /\ pod[c] = "running"
@@ -295,7 +305,7 @@ RepublishCleanup(c) ==
   /\ bound' = [bound EXCEPT ![c] = FALSE]
   /\ phase' = [phase EXCEPT ![c] = "idle"]
   /\ wiped' = TRUE
-  /\ UNCHANGED <<pod, manifest, acked, origin, lease, writes, cycles, crashes>>
+  /\ UNCHANGED <<pod, manifest, acked, origin, lease, writes, cycles, crashes, drainLost>>
 
 \* Kubelet's retry re-materialises the tree under the still-running pod.
 \* Whether this lands before or after the syncer's next publish is the
@@ -307,7 +317,7 @@ RepublishRetry(c) ==
   /\ bound' = [bound EXCEPT ![c] = TRUE]
   /\ phase' = [phase EXCEPT ![c] = "published"]
   /\ UNCHANGED <<pod, manifest, acked, origin, lease, writes, cycles, crashes,
-                 wiped>>
+                 wiped, drainLost>>
 
 (***************************************************************************)
 (* Teardown.  NodeUnpublishVolume runs only after every container has       *)
@@ -319,7 +329,7 @@ DeletePod(c) ==
   /\ pod[c] = "running"
   /\ pod' = [pod EXCEPT ![c] = "gone"]
   /\ UNCHANGED <<phase, tree, bound, manifest, acked, origin, lease, writes,
-                 cycles, crashes, wiped>>
+                 cycles, crashes, wiped, drainLost>>
 
 Unpublish(c) ==
   /\ pod[c] = "gone"
@@ -336,17 +346,38 @@ Unpublish(c) ==
             /\ lease' = IF lease = c THEN NoHolder ELSE lease
             /\ phase' = [phase EXCEPT ![c] = "draining"]
             /\ UNCHANGED <<manifest, acked, tree, bound, pod>>
-  /\ UNCHANGED <<origin, writes, cycles, crashes, wiped>>
+  /\ UNCHANGED <<origin, writes, cycles, crashes, wiped, drainLost>>
 
 DrainLate(c) ==
   /\ phase[c] = "draining"
+  /\ (LeaseCheck => lease = c)
   /\ manifest' = tree[c]
   /\ acked' = acked \cup tree[c]
   /\ tree' = [tree EXCEPT ![c] = {}]
   /\ bound' = [bound EXCEPT ![c] = FALSE]
   /\ phase' = [phase EXCEPT ![c] = "idle"]
   /\ pod' = [pod EXCEPT ![c] = "absent"]
-  /\ UNCHANGED <<origin, lease, writes, cycles, crashes, wiped>>
+  /\ UNCHANGED <<origin, lease, writes, cycles, crashes, wiped, drainLost>>
+
+\* THE LOSS THE ORDERING RULE EXISTS TO PREVENT.  The pod exited cleanly,
+\* so everything it wrote should be in the bucket — but the lease was
+\* released before the final publish, another cluster superseded the
+\* prefix in the gap, and this drain's conditional write is refused.  The
+\* agent's last work is gone and nothing in the data plane says so: the
+\* pod is Terminated, the volume is unpublished, the bucket is intact and
+\* simply older than it should be.
+DrainRefused(c) ==
+  /\ phase[c] = "draining"
+  /\ LeaseCheck
+  /\ lease # c
+  /\ tree[c] # {}
+  /\ tree' = [tree EXCEPT ![c] = {}]
+  /\ bound' = [bound EXCEPT ![c] = FALSE]
+  /\ phase' = [phase EXCEPT ![c] = "idle"]
+  /\ pod' = [pod EXCEPT ![c] = "absent"]
+  /\ drainLost' = TRUE
+  /\ UNCHANGED <<manifest, acked, origin, lease, writes, cycles, crashes,
+                  wiped>>
 
 (***************************************************************************)
 (* THE COMMON MULTI-CLUSTER FAILURE: a cluster DIES holding the workspace.  *)
@@ -372,7 +403,7 @@ ClusterCrash(c) ==
   /\ tree' = [tree EXCEPT ![c] = {}]
   /\ bound' = [bound EXCEPT ![c] = FALSE]
   /\ crashes' = crashes + 1
-  /\ UNCHANGED <<manifest, acked, origin, lease, writes, cycles, wiped>>
+  /\ UNCHANGED <<manifest, acked, origin, lease, writes, cycles, wiped, drainLost>>
 
 LeaseExpire ==
   /\ LeaseExpiry
@@ -381,7 +412,7 @@ LeaseExpire ==
   /\ phase[lease] = "idle"
   /\ lease' = NoHolder
   /\ UNCHANGED <<phase, pod, tree, bound, manifest, acked, origin, writes,
-                  cycles, crashes, wiped>>
+                  cycles, crashes, wiped, drainLost>>
 
 Next ==
   \/ \E c \in Clusters :
@@ -389,7 +420,7 @@ Next ==
        \/ DeclaredPublish(c)
        \/ RepublishRefresh(c) \/ RepublishRebind(c)
        \/ RepublishGuarded(c) \/ RepublishCleanup(c) \/ RepublishRetry(c)
-       \/ DeletePod(c) \/ Unpublish(c) \/ DrainLate(c)
+       \/ DeletePod(c) \/ Unpublish(c) \/ DrainLate(c) \/ DrainRefused(c)
        \/ ClusterCrash(c)
   \/ LeaseExpire
   \/ \E c \in Clusters, f \in Files : AppWrite(c, f)
@@ -410,6 +441,7 @@ Fairness ==
        /\ WF_vars(RepublishRetry(c))
        /\ WF_vars(DeletePod(c))
        /\ WF_vars(Unpublish(c)) /\ WF_vars(DrainLate(c))
+       /\ WF_vars(DrainRefused(c))
   /\ WF_vars(LeaseExpire)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
@@ -433,10 +465,20 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 
 Inv_NoAckedLoss == acked \subseteq manifest
 Inv_NoTreeLoss == ~wiped
+
+\* A pod that exits CLEANLY always gets its final publish in.  This is the
+\* half of durability that `acked` cannot see: the last work an agent did
+\* was never acknowledged to anyone, so losing it violates no promise made
+\* to the app — but it is the promise the drain itself makes, and the
+\* ordering of the drain and the lease release is the only thing keeping
+\* it.  (A cluster RECLAIMED mid-run is a different story with a named
+\* recovery: nothing drains, and nothing claimed it would.)
+Inv_NoLostDrain == ~drainLost
 Inv_SingleWriter ==
   Cardinality({c \in Clusters : phase[c] = "published"}) <= 1
 
 Inv == TypeOK /\ Inv_NoAckedLoss /\ Inv_NoTreeLoss /\ Inv_SingleWriter
+       /\ Inv_NoLostDrain
 
 \* Durability alone, for the runs where a wipe is expected but must not
 \* reach the bucket (the CleanupGuard=FALSE-with-mountinfo world does not
