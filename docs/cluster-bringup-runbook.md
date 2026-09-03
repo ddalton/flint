@@ -159,15 +159,15 @@ because `storageclass.yaml` hardcodes the four SPDK keys:
 ### pNFS StorageClass parameters
 
 All are optional; omitting one means the MDS default. Unknown
-`pnfs.flint.io/*` keys are **rejected** at provision — a typo used to be
+`pnfs.chert.us/*` keys are **rejected** at provision — a typo used to be
 indistinguishable from success.
 
 | parameter | meaning |
 |---|---|
-| `pnfs.flint.io/stripeSize` | stripe unit, power of two, 4 KiB..1 GiB. At the 8 MiB default a file smaller than 8 MiB lives on ONE data server and gets no parallelism. |
-| `pnfs.flint.io/stripeWidth` | how many DSes a file is striped across. Omit = all of them, which maximises bandwidth **and** makes the failure domain the whole fleet. |
-| `pnfs.flint.io/dirGid` | group owner of the volume root; also sets setgid so files inherit the group (this is what makes a pod `fsGroup` usable). |
-| `pnfs.flint.io/dirMode` | octal mode for the volume root. Default 0777. A mode denying "other" without a `dirGid` is refused — no pod could write. |
+| `pnfs.chert.us/stripeSize` | stripe unit, power of two, 4 KiB..1 GiB. At the 8 MiB default a file smaller than 8 MiB lives on ONE data server and gets no parallelism. |
+| `pnfs.chert.us/stripeWidth` | how many DSes a file is striped across. Omit = all of them, which maximises bandwidth **and** makes the failure domain the whole fleet. |
+| `pnfs.chert.us/dirGid` | group owner of the volume root; also sets setgid so files inherit the group (this is what makes a pod `fsGroup` usable). |
+| `pnfs.chert.us/dirMode` | octal mode for the volume root. Default 0777. A mode denying "other" without a `dirGid` is refused — no pod could write. |
 
 Both geometry parameters are **fixed at create**: a file's placement is
 pinned at its first layout grant and never re-striped.

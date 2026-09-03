@@ -541,7 +541,7 @@ hash of the volume name and never move; the pin rides in the CSI
 - **Requires images ≥ 1.13.0** (CSI shard routing + DS fan-out). On
   older images, leave count at 1.
 - **Which shard owns a volume?** Read the PV: the `volume_id` suffix
-  (`…~m2` ⇒ shard 2), or `pnfs.flint.io/mds-ip` = that shard's Service
+  (`…~m2` ⇒ shard 2), or `pnfs.chert.us/mds-ip` = that shard's Service
   IP. Volumes with no suffix are pre-sharding and live on shard 0.
 - **Per-shard incidents** (the CreateVolume-DeadlineExceeded landmine,
   a wedged export) scope to that shard's volumes. Fix is the same

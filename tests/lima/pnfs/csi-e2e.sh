@@ -10,7 +10,7 @@
 #
 # What it asserts (directory-per-volume model)
 #   1. CreateVolume returns a volume_context carrying the six
-#      pnfs.flint.io/* keys (mds-ip, mds-port, export-path,
+#      pnfs.chert.us/* keys (mds-ip, mds-port, export-path,
 #      volume-file, size-bytes, volume-mode) with volume-mode=dir,
 #      and the MDS created a directory.
 #   2. Mounting the per-volume subtree (MDS:/<volume>) with production
@@ -129,21 +129,21 @@ echo "  context: $CTX_JSON"
 # pnfs_csi::ctx_keys module — if any of these is missing or renamed,
 # this test catches it before the CSI driver does in production).
 for key in \
-    "pnfs.flint.io/mds-ip" \
-    "pnfs.flint.io/mds-port" \
-    "pnfs.flint.io/export-path" \
-    "pnfs.flint.io/volume-file" \
-    "pnfs.flint.io/size-bytes" \
-    "pnfs.flint.io/volume-mode"; do
+    "pnfs.chert.us/mds-ip" \
+    "pnfs.chert.us/mds-port" \
+    "pnfs.chert.us/export-path" \
+    "pnfs.chert.us/volume-file" \
+    "pnfs.chert.us/size-bytes" \
+    "pnfs.chert.us/volume-mode"; do
   echo "$CTX_JSON" | jq -e "has(\"$key\")" >/dev/null \
     || fail "volume_context missing required key: $key"
 done
 ok "volume_context carries all six required keys"
 
-EXPORT_PATH=$(echo "$CTX_JSON" | jq -r '."pnfs.flint.io/export-path"')
-VOLUME_FILE=$(echo "$CTX_JSON" | jq -r '."pnfs.flint.io/volume-file"')
-VOLUME_MODE=$(echo "$CTX_JSON" | jq -r '."pnfs.flint.io/volume-mode"')
-SIZE_REPORTED=$(echo "$CTX_JSON" | jq -r '."pnfs.flint.io/size-bytes"')
+EXPORT_PATH=$(echo "$CTX_JSON" | jq -r '."pnfs.chert.us/export-path"')
+VOLUME_FILE=$(echo "$CTX_JSON" | jq -r '."pnfs.chert.us/volume-file"')
+VOLUME_MODE=$(echo "$CTX_JSON" | jq -r '."pnfs.chert.us/volume-mode"')
+SIZE_REPORTED=$(echo "$CTX_JSON" | jq -r '."pnfs.chert.us/size-bytes"')
 [ "$SIZE_REPORTED" = "$SIZE_BYTES" ] \
   || fail "size mismatch: requested $SIZE_BYTES, got $SIZE_REPORTED"
 [ "$VOLUME_MODE" = "dir" ] \
@@ -323,7 +323,7 @@ CTX3=$("$BIN_DIR/pnfs-csi-cli" create \
   --size-bytes "$SIZE_BYTES" 2>&1) \
   || { echo "$CTX3"; fail "second CreateVolume failed"; }
 
-EXPORT_PATH3=$(echo "$CTX3" | jq -r '."pnfs.flint.io/export-path"')
+EXPORT_PATH3=$(echo "$CTX3" | jq -r '."pnfs.chert.us/export-path"')
 [ -d "$EXPORT_PATH3/$VOLUME_FILE" ] \
   || fail "re-CreateVolume didn't recreate the directory"
 

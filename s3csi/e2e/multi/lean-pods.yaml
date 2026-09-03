@@ -11,7 +11,7 @@ spec:
   restartPolicy: Never
   securityContext: { runAsNonRoot: true, runAsUser: 1001, runAsGroup: 1001, seccompProfile: { type: RuntimeDefault } }
   volumes:
-    - { name: ws, csi: { driver: s3.flint.io, volumeAttributes: { flint.io/workspace: proj } } }
+    - { name: ws, csi: { driver: s3.chert.us, volumeAttributes: { chert.us/workspace: proj } } }
   containers:
     - name: agent
       image: busybox:1.36
@@ -48,7 +48,7 @@ spec:
   restartPolicy: Never
   securityContext: { runAsNonRoot: true, runAsUser: 1001, runAsGroup: 1001, seccompProfile: { type: RuntimeDefault } }
   volumes:
-    - { name: ws, csi: { driver: s3.flint.io, volumeAttributes: { flint.io/workspace: proj } } }
+    - { name: ws, csi: { driver: s3.chert.us, volumeAttributes: { chert.us/workspace: proj } } }
   containers:
     - name: agent
       image: busybox:1.36

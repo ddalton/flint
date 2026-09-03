@@ -161,9 +161,9 @@ DRILL=$?
 #
 # One ConfigMap per volume: a sweep that does not sweep is a leak that
 # outlives every volume the cluster ever had.
-LEFT=$(kubectl get cm -n "$NS" -l flint.io/kind -o name 2>/dev/null | wc -l | tr -d ' ')
+LEFT=$(kubectl get cm -n "$NS" -l chert.us/kind -o name 2>/dev/null | wc -l | tr -d ' ')
 [ "$LEFT" = "0" ] || {
-  kubectl get cm -n "$NS" -l flint.io/kind -o name 2>/dev/null | sed 's/^/    /'
+  kubectl get cm -n "$NS" -l chert.us/kind -o name 2>/dev/null | sed 's/^/    /'
   fail "$LEFT witness object(s) survived the drill"
 }
 pass "no witness objects left behind"

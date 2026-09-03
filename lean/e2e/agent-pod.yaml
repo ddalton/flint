@@ -27,7 +27,7 @@ stringData:
   AWS_REGION: us-east-1
 ---
 # ── the project every agent in the fleet checks out ──────────────────
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace
 metadata:
   name: proj
@@ -47,7 +47,7 @@ spec:
   maxFiles: 5000
 ---
 # A second project, same bucket, different subtree — the tenancy leg.
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace
 metadata:
   name: other

@@ -6,7 +6,7 @@
 # than the MDS threshold (5s) and the MDS oscillates the DS between
 # Active and Offline before the test even kills DS1.
 
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: ds
 

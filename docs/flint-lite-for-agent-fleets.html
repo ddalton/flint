@@ -271,8 +271,8 @@ kubectl -n workspaces create secret generic flint-s3 \
 <table>
 <tr><th>What</th><th>How</th><th>Restart?</th></tr>
 <tr><td>Gateway token</td><td>edit the Secret; re-read every 10s</td><td class="yes">no</td></tr>
-<tr><td>Per-share token</td><td>bump <code>flint.io/api-token-version</code>, rewrite that Secret</td><td class="yes">no</td></tr>
-<tr><td>Bucket keys</td><td>rewrite <code>flint-s3</code>; label it <code>flint.io/credentials=true</code> so the operator notices at once</td><td class="yes">no</td></tr>
+<tr><td>Per-share token</td><td>bump <code>chert.us/api-token-version</code>, rewrite that Secret</td><td class="yes">no</td></tr>
+<tr><td>Bucket keys</td><td>rewrite <code>flint-s3</code>; label it <code>chert.us/credentials=true</code> so the operator notices at once</td><td class="yes">no</td></tr>
 <tr><td>Gateway root key</td><td>rewrite, then re-derive <b>every</b> share's token</td><td class="no">gateway rollout</td></tr>
 </table>
 <p>The root key is the only fleet-wide rotation — every per-share token is a function of it, so change it least often.</p>
@@ -283,12 +283,12 @@ kubectl -n workspaces create secret generic flint-s3 \
   --from-literal=<span class="hl">AWS_ACCESS_KEY_ID</span>=... --from-literal=<span class="hl">AWS_SECRET_ACCESS_KEY</span>=...</code></pre>
 <div class="note"><span class="lb">Key names are load-bearing</span>
 <p>The secret is loaded with <code>envFrom</code>, so its <b>keys become environment variables verbatim</b>. Name one <code>accessKeyId</code> and the SDK has no credentials at all; the hub crash-loops with <code>tier: bucket posture refused: bucket &lt;name&gt; unreachable</code> — which names <b>the bucket, not the credentials</b>.</p></div>
-<pre><code><span class="kw">apiVersion</span>: flint.io/v1alpha1
+<pre><code><span class="kw">apiVersion</span>: chert.us/v1alpha1
 <span class="kw">kind</span>: FlintShare
 <span class="kw">metadata</span>:
   name: fs-proj-a
   namespace: workspaces
-  labels: { flint.io/project-id: proj-a }
+  labels: { chert.us/project-id: proj-a }
 <span class="kw">spec</span>:
   bucket: my-team-flint          <span class="cm"># must exist, versioning ON</span>
   keyPrefix: proj-a/             <span class="cm"># immutable, must end in "/"</span>

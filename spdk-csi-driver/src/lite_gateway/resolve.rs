@@ -128,7 +128,7 @@ pub struct ShareView {
     pub bucket: Option<String>,
     pub key_prefix: Option<String>,
     pub token_version: u64,
-    /// `flint.io/volume-id`, when the share carries one.
+    /// `chert.us/volume-id`, when the share carries one.
     pub volume_id: Option<String>,
     /// `spec.idle.suspendAfterSecs`. `None` = the ladder is OFF for
     /// this share and it will never be suspended for quiet.
@@ -240,7 +240,7 @@ impl ShareView {
 pub enum Decision {
     /// Serving, and here is where.
     Dial(String),
-    /// Parked and wakeable: arm `flint.io/requested-at`, then wait.
+    /// Parked and wakeable: arm `chert.us/requested-at`, then wait.
     Wake,
     /// Coming up already — do not arm anything, just wait.
     Wait,
@@ -453,14 +453,14 @@ pub fn hub_phase_blocks(v: &ShareView) -> Option<Refusal> {
 /// idempotent (two replicas racing issue the same create, one gets 409),
 /// while the label is what makes the mapping legible from the cluster
 /// side — it is already a printer column on the CRD.
-pub const LABEL_PROJECT_ID: &str = "flint.io/project-id";
+pub const LABEL_PROJECT_ID: &str = "chert.us/project-id";
 
 /// Which of a project's volumes a share is.
 ///
 /// **A project may have several hubs, and the operator has no opinion
 /// about it.** `conflict::overlaps` keys fleet uniqueness on
 /// `(endpoint, bucket, prefix-subtree)` and nothing in the operator
-/// reads `flint.io/project-id` at all — so N shares on N different
+/// reads `chert.us/project-id` at all — so N shares on N different
 /// prefixes, all labelled with one project id, is a legal and
 /// unremarkable configuration. (One HUB serving several volumes is a
 /// different thing entirely and is not implemented; see
@@ -471,7 +471,7 @@ pub const LABEL_PROJECT_ID: &str = "flint.io/project-id";
 /// single-volume project working with no labels at all, and gives a
 /// multi-volume one a usable identifier before anyone thinks to add
 /// this label.
-pub const LABEL_VOLUME_ID: &str = "flint.io/volume-id";
+pub const LABEL_VOLUME_ID: &str = "chert.us/volume-id";
 
 pub fn project_id_of(share: &FlintShare) -> Option<String> {
     share.metadata.labels.as_ref()?.get(LABEL_PROJECT_ID).cloned()
@@ -608,7 +608,7 @@ pub fn find<T: AsRef<FlintShare> + Clone>(
 /// mount, and what to do about it.
 ///
 /// **This is the sharp edge for a consumer that mounts.** The ladder
-/// suspends when two signals agree: `flint.io/requested-at` is stale
+/// suspends when two signals agree: `chert.us/requested-at` is stale
 /// AND the hub's own activity clock is quiet. A consumer doing file
 /// I/O is held up by the second for free. A consumer that holds a
 /// mount and does no I/O — an agent computing in memory, which is the
@@ -906,15 +906,15 @@ mod tests {
     #[test]
     fn the_view_reads_the_shape_the_operator_actually_writes() {
         let share: FlintShare = serde_json::from_value(serde_json::json!({
-            "apiVersion": "flint.io/v1alpha1",
+            "apiVersion": "chert.us/v1alpha1",
             "kind": "FlintShare",
             "metadata": {
                 "name": "fs-proj-a",
                 "namespace": "workspaces",
-                "labels": { "flint.io/project-id": "proj-a" },
+                "labels": { "chert.us/project-id": "proj-a" },
                 "annotations": {
-                    "flint.io/requested-at": "2026-08-21T00:00:00Z",
-                    "flint.io/api-token-version": "4"
+                    "chert.us/requested-at": "2026-08-21T00:00:00Z",
+                    "chert.us/api-token-version": "4"
                 }
             },
             "spec": {
@@ -968,13 +968,13 @@ mod tests {
         // Version 0 would make `previous()` produce a token no hub has
         // ever held, so every rotation retry would present garbage.
         let base = serde_json::json!({
-            "apiVersion": "flint.io/v1alpha1", "kind": "FlintShare",
+            "apiVersion": "chert.us/v1alpha1", "kind": "FlintShare",
             "metadata": {"name": "p", "namespace": "ns", "annotations": {}},
             "spec": {"persistence": {"size": "1Gi"}}
         });
-        for ann in [serde_json::json!({}), serde_json::json!({"flint.io/api-token-version": "0"}),
-                    serde_json::json!({"flint.io/api-token-version": "nonsense"}),
-                    serde_json::json!({"flint.io/api-token-version": "-2"})] {
+        for ann in [serde_json::json!({}), serde_json::json!({"chert.us/api-token-version": "0"}),
+                    serde_json::json!({"chert.us/api-token-version": "nonsense"}),
+                    serde_json::json!({"chert.us/api-token-version": "-2"})] {
             let mut j = base.clone();
             j["metadata"]["annotations"] = ann.clone();
             let share: FlintShare = serde_json::from_value(j).unwrap();
@@ -985,11 +985,11 @@ mod tests {
     fn share(ns: &str, name: &str, label: Option<&str>) -> std::sync::Arc<FlintShare> {
         let mut labels = serde_json::Map::new();
         if let Some(l) = label {
-            labels.insert("flint.io/project-id".into(), serde_json::json!(l));
+            labels.insert("chert.us/project-id".into(), serde_json::json!(l));
         }
         std::sync::Arc::new(
             serde_json::from_value(serde_json::json!({
-                "apiVersion": "flint.io/v1alpha1", "kind": "FlintShare",
+                "apiVersion": "chert.us/v1alpha1", "kind": "FlintShare",
                 "metadata": {"name": name, "namespace": ns, "labels": labels},
                 "spec": {"persistence": {"size": "1Gi"}}
             }))
@@ -1065,13 +1065,13 @@ mod tests {
 
     fn vshare(ns: &str, name: &str, project: &str, volume: Option<&str>) -> std::sync::Arc<FlintShare> {
         let mut labels = serde_json::Map::new();
-        labels.insert("flint.io/project-id".into(), serde_json::json!(project));
+        labels.insert("chert.us/project-id".into(), serde_json::json!(project));
         if let Some(v) = volume {
-            labels.insert("flint.io/volume-id".into(), serde_json::json!(v));
+            labels.insert("chert.us/volume-id".into(), serde_json::json!(v));
         }
         std::sync::Arc::new(
             serde_json::from_value(serde_json::json!({
-                "apiVersion": "flint.io/v1alpha1", "kind": "FlintShare",
+                "apiVersion": "chert.us/v1alpha1", "kind": "FlintShare",
                 "metadata": {"name": name, "namespace": ns, "labels": labels},
                 "spec": {"persistence": {"size": "1Gi"}}
             }))
@@ -1081,7 +1081,7 @@ mod tests {
 
     /// A project may legally have several hubs: the operator keys
     /// uniqueness on the bucket prefix subtree and never reads
-    /// `flint.io/project-id`. So N shares on N prefixes with one project
+    /// `chert.us/project-id`. So N shares on N prefixes with one project
     /// label is ordinary, and the lookup has to address them.
     #[test]
     fn a_project_may_have_several_volumes_and_each_is_addressable() {
@@ -1176,7 +1176,7 @@ mod tests {
             spec["idle"] = serde_json::Value::Object(idle);
         }
         let share: FlintShare = serde_json::from_value(serde_json::json!({
-            "apiVersion": "flint.io/v1alpha1", "kind": "FlintShare",
+            "apiVersion": "chert.us/v1alpha1", "kind": "FlintShare",
             "metadata": {"name": "fs-p", "namespace": "ws"},
             "spec": spec
         }))
@@ -1340,9 +1340,9 @@ mod tests {
     #[test]
     fn a_volume_row_reports_serving_only_when_a_request_would_be_proxied() {
         let ready: FlintShare = serde_json::from_value(serde_json::json!({
-            "apiVersion": "flint.io/v1alpha1", "kind": "FlintShare",
+            "apiVersion": "chert.us/v1alpha1", "kind": "FlintShare",
             "metadata": {"name": "fs-p-data", "namespace": "ws",
-                         "labels": {"flint.io/project-id": "p", "flint.io/volume-id": "data"}},
+                         "labels": {"chert.us/project-id": "p", "chert.us/volume-id": "data"}},
             "spec": {"bucket": "b", "keyPrefix": "p/data/", "persistence": {"size": "1Gi"}},
             "status": {"phase": "Ready", "apiEndpoint": "http://x:8080",
                        "conditions": [{"type": "ApiEndpointPublished", "status": "True",
@@ -1377,7 +1377,7 @@ mod tests {
     #[test]
     fn a_bucketless_share_has_no_binding() {
         let share: FlintShare = serde_json::from_value(serde_json::json!({
-            "apiVersion": "flint.io/v1alpha1", "kind": "FlintShare",
+            "apiVersion": "chert.us/v1alpha1", "kind": "FlintShare",
             "metadata": {"name": "p", "namespace": "ns"},
             "spec": {"persistence": {"size": "1Gi"}}
         }))

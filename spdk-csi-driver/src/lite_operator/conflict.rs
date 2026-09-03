@@ -108,7 +108,7 @@ pub fn overlaps(a: &ShareKey, b: &ShareKey) -> bool {
 /// So the front door asks, with a verb it already holds (`patch`), and
 /// the operator — which can actually check what the share owns —
 /// decides.
-pub const ANN_ABANDON: &str = "flint.io/abandon";
+pub const ANN_ABANDON: &str = "chert.us/abandon";
 
 /// What to do about an abandon request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -684,7 +684,7 @@ mod tests {
     /// the same serde path the API server feeds the controller.
     fn share_at(ns: &str, name: &str, prefix: &str, addr: Option<&str>) -> FlintShare {
         let mut v = serde_json::json!({
-            "apiVersion": "flint.io/v1alpha1",
+            "apiVersion": "chert.us/v1alpha1",
             "kind": "FlintShare",
             "metadata": { "namespace": ns, "name": name },
             "spec": { "bucket": "shared", "persistence": { "size": "1Gi" } },

@@ -279,7 +279,7 @@ caps fleet objects at ~30,600 instead of ~54,600. A preflight names the
 dataplane requirement rather than pretending to fix it.
 
 ### S10 — Give the hibernate rung an abort path *(days, dep S6)*
-Kills B6. A deadline from `flint.io/idle-since`; past it, fall back to
+Kills B6. A deadline from `chert.us/idle-since`; past it, fall back to
 `Suspended` (disk kept, nothing deleted).
 
 > **[review, MAJOR] The deadline could not fire on the branch that

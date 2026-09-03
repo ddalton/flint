@@ -381,7 +381,7 @@ CONSTANTS
   \* honest theorems, and a run with teeth) -------------------------------
   GateDeadline, \* TRUE = the shipped freshness gate's wall-clock defer
                \* bound (FLINT_F36C_DEFER_SECS, default 180s; the
-               \* flint.io/f36c-defer PV annotation): once a deferral's
+               \* chert.us/f36c-defer PV annotation): once a deferral's
                \* deadline passes, NodeStage serves-with-risk EVEN IF the
                \* missing writers are only transiently unavailable
                \* ("Never hang" — the drill-2.4 obligation,
@@ -873,7 +873,7 @@ VARIABLES
   epochCut,      \* SUBSET 1..MaxWrites — content captured at the last cut
   claim,         \* {"none", "catchup", "admission"} — the R2 volume claim
   deferExpired,  \* the persisted f36c-defer deadline has passed while the
-                 \* volume was down (GateDeadline; flint.io/f36c-defer is
+                 \* volume was down (GateDeadline; chert.us/f36c-defer is
                  \* per-volume and survives NodeStage retries) — cleared
                  \* by the next assembly, exactly like the code's two
                  \* clear sites (missing-empty and ServeWithRisk)
@@ -1932,7 +1932,7 @@ Assemble ==
   \* "did it come back" half, and the only place bounceWindow clears).
   /\ bounceWindow' = "none"
   /\ zombie' = IF FenceZombie THEN {} ELSE zombie
-  \* Both code clear-sites for flint.io/f36c-defer are assembly-tick
+  \* Both code clear-sites for chert.us/f36c-defer are assembly-tick
   \* decisions (missing-empty and ServeWithRisk): the deadline re-arms
   \* fresh on the next deferral.
   /\ deferExpired' = FALSE
@@ -3489,7 +3489,7 @@ PvGrow ==
   /\ UNCHANGED bounceVars
 
 \* Wall-clock passage on a deferring volume: the persisted
-\* flint.io/f36c-defer deadline (default 180s) elapses.  WF — time
+\* chert.us/f36c-defer deadline (default 180s) elapses.  WF — time
 \* always advances; this is the engine of the gate's "Never hang"
 \* obligation and of the GateRealHollow finding.
 DeferClockExpire ==

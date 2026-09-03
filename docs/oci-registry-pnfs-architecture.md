@@ -59,10 +59,10 @@ else in this doc follows from that:
 Model image layers are multi-GB content-addressed blobs, read and
 written sequentially — the ideal stripe workload.
 
-- `pnfs.flint.io/stripeSize` (default 8 MiB): a file smaller than this
+- `pnfs.chert.us/stripeSize` (default 8 MiB): a file smaller than this
   lives whole on one DS. Model blobs stripe; the small JSON manifests
   land on a single DS each, which is fine and cheap.
-- `pnfs.flint.io/stripeWidth` (empty = all DSes): maximum per-file
+- `pnfs.chert.us/stripeWidth` (empty = all DSes): maximum per-file
   bandwidth, but the failure domain becomes the whole fleet. For a
   model store where any blob may be pulled hot, full width is usually
   the right trade; narrow it if you want blast-radius isolation more

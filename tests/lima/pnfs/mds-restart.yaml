@@ -13,7 +13,7 @@
 # Path is /tmp/flint-pnfs-restart-state/state.db; the e2e script
 # `mkdir -p`'s and clears the parent before each run.
 
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: mds
 

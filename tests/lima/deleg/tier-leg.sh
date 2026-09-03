@@ -124,7 +124,7 @@ start_server() { # $1 = arm ("off"|"on")
   local flag=""
   [ "$1" = "on" ] && flag=1
   cat > "$CFG" <<EOF
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: standalone
 

@@ -20,9 +20,9 @@
 //!
 //! On `DeleteVolume`, the symmetric path runs.
 //!
-//! The `pnfs.flint.io/*` namespace was chosen over `nfs.flint.io/*` so
+//! The `pnfs.chert.us/*` namespace was chosen over `nfs.chert.us/*` so
 //! it visibly does not collide with the existing single-server-NFS
-//! `nfs.flint.io/*` keys written by `rwx_nfs.rs`. Future tooling can
+//! `nfs.chert.us/*` keys written by `rwx_nfs.rs`. Future tooling can
 //! tell the two volume shapes apart by which prefix is present.
 
 use std::collections::HashMap;
@@ -36,48 +36,48 @@ use crate::pnfs::grpc::{
 /// expected by `node_publish_volume`. Centralising them here keeps the
 /// producer and consumer in sync.
 pub mod ctx_keys {
-    pub const MDS_IP: &str = "pnfs.flint.io/mds-ip";
-    pub const MDS_PORT: &str = "pnfs.flint.io/mds-port";
-    pub const EXPORT_PATH: &str = "pnfs.flint.io/export-path";
-    pub const VOLUME_FILE: &str = "pnfs.flint.io/volume-file";
-    pub const SIZE_BYTES: &str = "pnfs.flint.io/size-bytes";
+    pub const MDS_IP: &str = "pnfs.chert.us/mds-ip";
+    pub const MDS_PORT: &str = "pnfs.chert.us/mds-port";
+    pub const EXPORT_PATH: &str = "pnfs.chert.us/export-path";
+    pub const VOLUME_FILE: &str = "pnfs.chert.us/volume-file";
+    pub const SIZE_BYTES: &str = "pnfs.chert.us/size-bytes";
     /// "dir" for directory-per-volume PVs (NodePublish mounts the
     /// `MDS:/<volume>` subtree), "file" for legacy sparse-file PVs
     /// (NodePublish mounts the export root). Absent on PVs provisioned
     /// before this key existed — treat as "file".
-    pub const VOLUME_MODE: &str = "pnfs.flint.io/volume-mode";
+    pub const VOLUME_MODE: &str = "pnfs.chert.us/volume-mode";
     /// The stripe geometry the MDS actually recorded, stamped onto the
     /// PV so it is visible with `kubectl get pv -o yaml`. Observability
     /// only — nothing reads these back, because no RPC exists to assert
     /// geometry on an existing volume. They answer "what is this volume
     /// actually striped at?", which otherwise requires reading MDS logs.
-    pub const STRIPE_SIZE: &str = "pnfs.flint.io/stripe-size";
-    pub const STRIPE_WIDTH: &str = "pnfs.flint.io/stripe-width";
+    pub const STRIPE_SIZE: &str = "pnfs.chert.us/stripe-size";
+    pub const STRIPE_WIDTH: &str = "pnfs.chert.us/stripe-width";
     /// The volume-context DISCRIMINATOR (design doc §7): "block" for a
     /// pnfs-block (scsi-layout) volume; absent = files layout. Every
     /// downstream classifier keys on `mds-ip` presence or the `~m`
     /// shard suffix, and a block volume reuses both — without this key
     /// NodeUnstage cannot tell the classes apart, and a block volume's
     /// unstage must deref nvme sessions where a file volume's must not.
-    pub const LAYOUT: &str = "pnfs.flint.io/layout";
+    pub const LAYOUT: &str = "pnfs.chert.us/layout";
 }
 
 /// StorageClass parameter names understood by the pNFS provisioning
-/// path. Everything under `pnfs.flint.io/` that is NOT in this list is
+/// path. Everything under `pnfs.chert.us/` that is NOT in this list is
 /// REJECTED at CreateVolume — a typo in a parameter name would
 /// otherwise be indistinguishable from success, and the mistake only
 /// becomes visible as a performance or layout surprise much later.
 pub mod sc_params {
-    pub const STRIPE_SIZE: &str = "pnfs.flint.io/stripeSize";
-    pub const STRIPE_WIDTH: &str = "pnfs.flint.io/stripeWidth";
-    pub const DIR_GID: &str = "pnfs.flint.io/dirGid";
-    pub const DIR_MODE: &str = "pnfs.flint.io/dirMode";
+    pub const STRIPE_SIZE: &str = "pnfs.chert.us/stripeSize";
+    pub const STRIPE_WIDTH: &str = "pnfs.chert.us/stripeWidth";
+    pub const DIR_GID: &str = "pnfs.chert.us/dirGid";
+    pub const DIR_MODE: &str = "pnfs.chert.us/dirMode";
     /// Copies of a block-class volume: 1 (the default) or 2.
-    pub const REPLICAS: &str = "pnfs.flint.io/replicas";
+    pub const REPLICAS: &str = "pnfs.chert.us/replicas";
     /// Permit the second copy to land in a DIFFERENT failure domain.
     /// Off by default, and the default is a COST decision — see
     /// [`choose_leg_host`].
-    pub const CROSS_ZONE: &str = "pnfs.flint.io/replicaCrossZone";
+    pub const CROSS_ZONE: &str = "pnfs.chert.us/replicaCrossZone";
 
     pub const ALL: &[&str] =
         &[STRIPE_SIZE, STRIPE_WIDTH, DIR_GID, DIR_MODE, REPLICAS, CROSS_ZONE];
@@ -355,7 +355,7 @@ pub struct VolumeOptions {
     pub dir_mode: u32,
     /// Layout class from the StorageClass `layout` parameter: File for
     /// `pnfs` (and everything historical), Scsi for `pnfs-block`. Not a
-    /// `pnfs.flint.io/*` parameter — the top-level `layout` key is the
+    /// `pnfs.chert.us/*` parameter — the top-level `layout` key is the
     /// class selector, dispatched in main.rs before this struct exists.
     pub layout_class: crate::pnfs::mds::layout::LayoutClass,
     /// Copies of a block-class volume. 0 and 1 both mean "one copy",
@@ -377,7 +377,7 @@ impl VolumeOptions {
     ) -> Result<Self, String> {
         // Unknown keys in our namespace are a hard error, not a warning.
         for key in params.keys() {
-            if key.starts_with("pnfs.flint.io/") && !sc_params::ALL.contains(&key.as_str()) {
+            if key.starts_with("pnfs.chert.us/") && !sc_params::ALL.contains(&key.as_str()) {
                 return Err(format!(
                     "unknown StorageClass parameter '{}'; supported: {}",
                     key,
@@ -1126,7 +1126,7 @@ impl PnfsCsi {
 }
 
 /// nvme-tcp session coordinates for a staged block volume, as the MDS
-/// answered them. The producer half of the `pnfs.flint.io/nvme-*`
+/// answered them. The producer half of the `pnfs.chert.us/nvme-*`
 /// publish-context keys (`block_ctx_keys`); `from_publish_context` is
 /// the consumer half, used by NodeStage.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1187,15 +1187,15 @@ pub struct BlockInitiatorView {
 /// stamped at provision): these are per-(volume, node) session facts
 /// that only exist once the attach admitted the node.
 pub mod block_ctx_keys {
-    pub const TRADDR: &str = "pnfs.flint.io/nvme-traddr";
-    pub const TRSVCID: &str = "pnfs.flint.io/nvme-trsvcid";
-    pub const SUBNQN: &str = "pnfs.flint.io/nvme-subnqn";
-    pub const NGUID: &str = "pnfs.flint.io/nvme-nguid";
-    pub const HOST_NQN: &str = "pnfs.flint.io/nvme-host-nqn";
+    pub const TRADDR: &str = "pnfs.chert.us/nvme-traddr";
+    pub const TRSVCID: &str = "pnfs.chert.us/nvme-trsvcid";
+    pub const SUBNQN: &str = "pnfs.chert.us/nvme-subnqn";
+    pub const NGUID: &str = "pnfs.chert.us/nvme-nguid";
+    pub const HOST_NQN: &str = "pnfs.chert.us/nvme-host-nqn";
     /// The MDS control endpoint that answered the attach — what lets
     /// the node ask "where does this volume live NOW" instead of
     /// replaying an address that a failover may have retired.
-    pub const MDS_CONTROL: &str = "pnfs.flint.io/mds-control";
+    pub const MDS_CONTROL: &str = "pnfs.chert.us/mds-control";
 }
 
 impl BlockAttach {
@@ -2615,11 +2615,11 @@ mod volume_options_tests {
     fn an_unknown_pnfs_parameter_is_refused() {
         let e = VolumeOptions::from_parameters(&params(&[
             ("layout", "pnfs"),
-            ("pnfs.flint.io/stripesize", "1048576"), // wrong case
+            ("pnfs.chert.us/stripesize", "1048576"), // wrong case
         ]))
         .unwrap_err();
         assert!(e.contains("unknown StorageClass parameter"), "{e}");
-        assert!(e.contains("pnfs.flint.io/stripeSize"), "error should list the real names: {e}");
+        assert!(e.contains("pnfs.chert.us/stripeSize"), "error should list the real names: {e}");
     }
 
     /// Parameters outside our namespace belong to other provisioners

@@ -288,7 +288,7 @@ flint_ublk_disks() { # <node> — "id<TAB>bdev" lines of ublk disks SPDK serves
 }
 
 pv_ublk_id() { # <pv> — stage-time id annotation (authoritative)
-  kubectl get pv "$1" -o jsonpath='{.metadata.annotations.flint\.io/ublk-id}' 2>/dev/null
+  kubectl get pv "$1" -o jsonpath='{.metadata.annotations.chert\.us/ublk-id}' 2>/dev/null
 }
 
 # SPDK-initiator controllers for flint volumes on a node, as bare pv names

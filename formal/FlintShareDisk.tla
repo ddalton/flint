@@ -142,7 +142,7 @@ VARIABLES
   specSize,    \* USER-owned: spec.persistence.size
   tBasis,      \* auto-expand target's basis (0 = no target recorded)
   tSize,       \* auto-expand target's size (0 = no target recorded)
-  wakeReq,     \* the front door's flint.io/requested-at is present
+  wakeReq,     \* the front door's chert.us/requested-at is present
   rebuilds,    \* budget counter
   edits,       \* budget counter
   askedFor,    \* the size the user last explicitly asked for (0 = never)

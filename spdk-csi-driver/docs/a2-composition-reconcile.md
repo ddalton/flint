@@ -379,7 +379,7 @@ raid at all:
 ```
 base_bdevs.len() == 1 && total_replicas > 1
   → "SINGLE-SURVIVOR DIRECT SERVE ... (no raid layer)"
-  → stamps flint.io/degraded-direct              driver.rs:2511-2530
+  → stamps chert.us/degraded-direct              driver.rs:2511-2530
 ```
 
 Redundancy is gone, writes resume on one leg, and the leg that was merely *late*

@@ -446,7 +446,7 @@ serving (ea948ed: floor is now 1; staleness is policed explicitly by
 the sync-record admission); (2) SPDK v26.05 raid1 refuses a
 single-base create (EINVAL, verified live), so a multi-replica volume
 down to ONE in-sync leg now serves that leg DIRECT — no raid layer, r1
-semantics, `flint.io/degraded-direct` PV annotation; the
+semantics, `chert.us/degraded-direct` PV annotation; the
 consumer-blindness monitor skips annotated PVs and the controller
 reaper protects direct-serve initiator bdevs like raid legs (819262c).
 Validation: pg-0 Ready on the survivor path, **heap probe MISSING=0 of
@@ -1514,7 +1514,7 @@ not a ublk kernel limitation.**
   swallowed as "Non-fatal" (hard evidence:
   `tests/chaos/artifacts/3-3.2-1784577349/driver-logs.txt:2414`,
   `persistentvolumes "nfs-server-pvc-e13acd1b-…" not found`). The
-  `flint.io/ublk-id` annotation therefore NEVER persists for RWX
+  `chert.us/ublk-id` annotation therefore NEVER persists for RWX
   backing volumes. (User RWO PVs are unaffected: PV name ==
   volumeHandle — which is why phases 1–2 never saw this.)
 - On the abrupt csi-node restart (3.3b), rehydration's
@@ -1603,7 +1603,7 @@ cluster session to live-validate):**
 - **F32 FIXED:** `identity::pv_name_of_handle` (+`backing_pv_name`/
   `backing_pvc_name`) is now THE handle→PV-name resolver;
   `store/get_block_device_info`, rwx_nfs, and cutover route through
-  it. The rehydrate walk **backfills** the `flint.io/ublk-id`
+  it. The rehydrate walk **backfills** the `chert.us/ublk-id`
   annotation with the actual serving id (startup + every monitor
   tick), healing volumes staged before the fix. NodeUnstage's
   annotation-less fallback now stops the disk **by backing bdev**
@@ -1645,7 +1645,7 @@ cordoned c5d spot builder), workers kernel-swapped to mainline
 `flint-driver:1.17.0-u12.4` (= b0427ca fix wave) + `spdk-tgt:1.6.0`.
 
 **Every fix in the wave validated live:**
-- **F32 DEAD.** Stage-time `flint.io/ublk-id` annotation present on
+- **F32 DEAD.** Stage-time `chert.us/ublk-id` annotation present on
   the backing PV from the first attach (never existed pre-fix; zero
   store errors). 3.3b: abrupt csi-node kill → rehydrate resolved id
   0 from the annotation → `ublk_recover_disk` → "recovered quiesced
@@ -2569,8 +2569,8 @@ e1b1288. Backlog worked after the cut (unvalidated → v1.19.0 material):
   the run-3 defer and the 2.4 immediate-serve shapes), wired
   gate-before-forced-stale in `create_raid_from_replicas`; claim-block
   counts as writer-set membership; defer bound = wall-clock
-  `flint.io/f36c-defer` (180s default, re-armed on missing-set change);
-  permanent branch serves + `flint.io/acked-tail-risk` + AckedTailRisk
+  `chert.us/f36c-defer` (180s default, re-armed on missing-set change);
+  permanent branch serves + `chert.us/acked-tail-risk` + AckedTailRisk
   event; kill switch FLINT_F36C_GATE=disabled (chart default enabled).
   RELEASE GATE: drills 3.6c AND a 2.4 re-run (gate enabled, first-tick
   survivor serve, marker raise/clear) on a live cluster. The remaining
@@ -2607,7 +2607,7 @@ e1b1288. Backlog worked after the cut (unvalidated → v1.19.0 material):
 
 Cluster: **runaa** (trove project 45) — 6× i4i.xlarge spot workers +
 on-demand CP + cordoned c5d.4xlarge spot builder (DS-excluded via
-`flint.io/builder` nodeAffinity — the chart's top-level affinity value;
+`chert.us/builder` nodeAffinity — the chart's top-level affinity value;
 cordon alone does not stop a DaemonSet and the tgt crashloops on a
 node whose NVMe belongs to Docker, wedging the roll). Driver
 `dilipdalton/flint-driver:1.19.0-rc1` (a33246c) rolled over the trove
@@ -2701,7 +2701,7 @@ Gate: 9 defers, StaleReplicaAdmitted=0, resurrect 529s, witness 543s,
 pg-0 rescheduled 760s (server/client CO-LOCATED this run — the
 attribution "FAIL" is that topology, not a defect). db: ledger PASS at
 drill time (973/973), clean re-verify PASS (1104/1104 + amcheck).
-**rc2 fix live**: flint.io/acked-tail-risk persisted across assembly
+**rc2 fix live**: chert.us/acked-tail-risk persisted across assembly
 ticks and named the stranded leg exactly. **rc3 fix live**:
 degraded-direct landed on the BACKING PV; ONE single-survivor assembly
 total vs rc1's one-per-90s livelock.

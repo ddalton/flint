@@ -229,13 +229,13 @@ Driver bugs found + fixed (all in the CSI driver, none pNFS-server):
 1. **pNFS PVCs could never attach** — ControllerPublishVolume fell
    into the SPDK PV-metadata lookup ("PV found but missing flint
    metadata") because attachRequired is driver-global. Fix: no-op
-   publish branch keyed on `pnfs.flint.io/mds-ip` in volume_context,
+   publish branch keyed on `pnfs.chert.us/mds-ip` in volume_context,
    plus a NodeStage no-op branch and a NodeUnstage unmount-only
    classification via new `Driver::pv_is_pnfs` (context-free RPC reads
    the PV's attrs).
 2. **Mount port was the gRPC port** — `pnfs_csi::create_volume`
    stamped the dialed endpoint's port (50051) into
-   `pnfs.flint.io/mds-port`; the kernel would mount NFS against the
+   `pnfs.chert.us/mds-port`; the kernel would mount NFS against the
    gRPC listener. Fix: `CreateVolumeResponse.nfs_port` (proto field 5,
    MDS reports its bind.port; 0 → 2049 fallback for older MDSes). The
    lima csi-e2e masked this by using its own port variable for mounts.

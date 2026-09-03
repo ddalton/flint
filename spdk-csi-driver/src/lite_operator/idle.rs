@@ -19,9 +19,9 @@
 //!
 //! ## The three annotations
 //!
-//! - `flint.io/idle-state` — operator-written: what the ladder did.
-//! - `flint.io/idle-since` — operator-written: when, RFC3339.
-//! - `flint.io/requested-at` — FRONT-DOOR-written: someone wants this
+//! - `chert.us/idle-state` — operator-written: what the ladder did.
+//! - `chert.us/idle-since` — operator-written: when, RFC3339.
+//! - `chert.us/requested-at` — FRONT-DOOR-written: someone wants this
 //!   share awake. The operator reads it and never writes it. This is the
 //!   whole wake protocol: touch an annotation, and the level-triggered
 //!   reconcile does the rest.
@@ -39,16 +39,16 @@ use crate::lite_operator::crd::{FlintShare, IdleSpec, Lifecycle};
 use kube::ResourceExt;
 
 /// What the ladder has done to this share.
-pub const ANN_IDLE_STATE: &str = "flint.io/idle-state";
+pub const ANN_IDLE_STATE: &str = "chert.us/idle-state";
 /// When it did it (RFC3339), for observability and for the hibernate
 /// rung's own timer.
-pub const ANN_IDLE_SINCE: &str = "flint.io/idle-since";
+pub const ANN_IDLE_SINCE: &str = "chert.us/idle-since";
 /// The front door's wake request / keepalive (RFC3339). Written by the
 /// front door, never by the operator.
-pub const ANN_REQUESTED_AT: &str = "flint.io/requested-at";
+pub const ANN_REQUESTED_AT: &str = "chert.us/requested-at";
 /// Optional hint consumed once at wake: `warm` asks the hub to bulk-fill
 /// after its import instead of hydrating on demand.
-pub const ANN_WAKE_INTENT: &str = "flint.io/wake-intent";
+pub const ANN_WAKE_INTENT: &str = "chert.us/wake-intent";
 
 /// The ladder's durable position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

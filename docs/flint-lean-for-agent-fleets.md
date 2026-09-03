@@ -1,9 +1,9 @@
 # flint-lean on a Kubernetes cluster
 
 > **Delivery changed (2026-09-03).** A workspace now reaches a pod as
-> ONE `csi:` volume served by the `s3.flint.io` node driver
+> ONE `csi:` volume served by the `s3.chert.us` node driver
 > (`flint-s3-csi-chart`), not as a webhook-injected sidecar. The label
-> `flint.io/lean-workspace`, the injected `flint-sync` container, the
+> `chert.us/lean-workspace`, the injected `flint-sync` container, the
 > per-namespace credential Secret and the webhook described below are
 > the RETIRED shape; the workspace protocol (claim, checkout gate,
 > `.flint/publish`, boundaries, drain on delete) is unchanged and the
@@ -15,8 +15,8 @@
 >   volumes:
 >     - name: ws
 >       csi:
->         driver: s3.flint.io
->         volumeAttributes: { flint.io/workspace: proj1 }
+>         driver: s3.chert.us
+>         volumeAttributes: { chert.us/workspace: proj1 }
 >   containers:
 >     - volumeMounts: [{ name: ws, mountPath: /workspace }]
 > ```
@@ -148,7 +148,7 @@ sidecar as environment.
 One CR per project subtree.
 
 ```yaml
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace
 metadata:
   name: proj1
@@ -183,7 +183,7 @@ metadata:
   name: agent-1
   namespace: agents
   labels:
-    flint.io/lean-workspace: proj1     # ← the webhook keys on this
+    chert.us/lean-workspace: proj1     # ← the webhook keys on this
 spec:
   containers:
     - name: agent

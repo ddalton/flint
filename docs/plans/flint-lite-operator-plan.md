@@ -66,7 +66,7 @@ bitten by on real clusters (runbr). An operator gives:
 ## The API (v1alpha1, namespaced)
 
 ```yaml
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata:
   name: tenant-a
@@ -259,7 +259,7 @@ operator polls it into conditions. No log scraping.
    exists to retire. At startup, before the Controller, the operator
    SSA-applies its compiled-in CRD (`FlintShare::crd()` — the same
    artifact crdgen prints), guarded by a
-   `flint.io/crd-schema-version` annotation compared before apply
+   `chert.us/crd-schema-version` annotation compared before apply
    (bare SSA would let a briefly-restarted OLD operator stomp a newer
    schema mid-fleet-upgrade). RBAC gains CRD get/list/watch/create/
    patch. Degraded path is LOUD: apply denied or served schema older

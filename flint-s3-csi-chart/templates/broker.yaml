@@ -32,7 +32,7 @@ rules:
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
     verbs: ["create"]
-  - apiGroups: ["flint.io"]
+  - apiGroups: ["chert.us"]
     resources: ["flintpassthroughmounts", "flintleanworkspaces"]
     verbs: ["get", "list", "watch"]
 ---

@@ -20,9 +20,9 @@ spec:
   volumes:
     - name: ws
       csi:
-        driver: s3.flint.io
+        driver: s3.chert.us
         volumeAttributes:
-          flint.io/workspace: proj
+          chert.us/workspace: proj
     - name: scratch
       emptyDir: {}
   initContainers:

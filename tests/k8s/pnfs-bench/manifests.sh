@@ -38,7 +38,7 @@ metadata:
   namespace: $NS
 data:
   pnfs.yaml: |
-    apiVersion: flint.io/v1alpha1
+    apiVersion: chert.us/v1alpha1
     kind: PnfsConfig
     mode: mds
     mds:
@@ -122,7 +122,7 @@ metadata:
   namespace: $NS
 data:
   pnfs.yaml: |
-    apiVersion: flint.io/v1alpha1
+    apiVersion: chert.us/v1alpha1
     kind: PnfsConfig
     mode: ds
     ds:

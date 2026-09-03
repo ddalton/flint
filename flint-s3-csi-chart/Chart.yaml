@@ -1,7 +1,7 @@
 apiVersion: v2
 name: flint-s3-csi
 description: >-
-  The s3.flint.io CSI node driver: an S3 prefix (Mountpoint for S3) or a
+  The s3.chert.us CSI node driver: an S3 prefix (Mountpoint for S3) or a
   flint-lean workspace as a CSI ephemeral inline volume, served by one
   privileged node DaemonSet and one unprivileged worker pod per volume in
   a system namespace. Replaces the flint-passthrough and flint-lean
@@ -28,4 +28,6 @@ keywords:
   - mountpoint-s3
   - agents
   - flint
-home: https://github.com/ddalton/flint
+home: https://flint.chert.us
+sources:
+  - https://github.com/ddalton/flint

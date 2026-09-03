@@ -87,7 +87,7 @@ pub fn backing_pvc_name(storage_id: &str) -> String {
 /// name. THE resolver for PV get/patch by handle. F32 root cause: the
 /// block-device annotation writer patched the PV *named by the raw
 /// handle*, which does not exist for backing volumes (`nfs-server-…` vs
-/// `flint-nfs-pv-…`), so `flint.io/ublk-id` never persisted and abrupt
+/// `flint-nfs-pv-…`), so `chert.us/ublk-id` never persisted and abrupt
 /// csi-node restarts re-minted the ublk device under the hash-fallback id
 /// while the nfs pod's mount stayed pinned to the dead device.
 pub fn pv_name_of_handle(handle: &str) -> String {
@@ -1143,7 +1143,7 @@ mod tests {
     /// F32 regression: the PV name for a BACKING handle is the synthetic
     /// PV's name, never the handle itself. The old code patched
     /// `persistentvolumes/<handle>` — a 404 for backing volumes — so the
-    /// `flint.io/ublk-id` annotation silently never persisted and
+    /// `chert.us/ublk-id` annotation silently never persisted and
     /// rehydration fell back to the hash id, re-minting the ublk device
     /// out from under the nfs pod's mount (drill 3.3b, testflnt2).
     #[test]

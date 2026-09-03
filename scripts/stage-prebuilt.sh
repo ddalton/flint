@@ -39,7 +39,7 @@ dest="$crate/docker/prebuilt"
 # produce an operator image without it — it produces no image at all,
 # failing the release at `docker build` with "COPY failed".
 #
-# flint-s3-csi-node and flint-s3-broker are the s3.flint.io image
+# flint-s3-csi-node and flint-s3-broker are the s3.chert.us image
 # (Dockerfile.s3csi.prebuilt); the worker that image's plugin launches
 # comes from its own crate, below.
 BINS="csi-driver flint-nfs-server flint-pnfs-mds flint-pnfs-ds flint-lite-operator flint-hub-gateway flint-lean-operator flint-s3-csi-node flint-s3-broker"
@@ -82,7 +82,7 @@ if [ "$SCOPE" = s3csi ]; then
 fi
 
 # Binaries from the WORKER crate (crates/flint-s3-worker): PID 1 of
-# every worker pod the s3.flint.io plugin creates, and the payload both
+# every worker pod the s3.chert.us plugin creates, and the payload both
 # worker images COPY (Dockerfile.s3worker, Dockerfile.s3worker-lean).
 WORKER_BINS="flint-s3-worker"
 if [ "$SCOPE" = lean ]; then

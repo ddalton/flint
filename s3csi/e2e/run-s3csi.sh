@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# s3.flint.io end to end on kind — the CSI delivery of an S3 prefix into
+# s3.chert.us end to end on kind — the CSI delivery of an S3 prefix into
 # a tenant pod, with NO webhook, NO sidecar, NO credential and NO
 # privilege in the tenant pod (docs/plans/csi-node-mount-design.md §10.2).
 #
@@ -63,7 +63,7 @@ worker_of() {
 import json,sys
 want='$NS/$1'
 for p in json.load(sys.stdin)['items']:
-    if p['metadata'].get('annotations',{}).get('flint.io/tenant-pod')==want and p.get('status',{}).get('phase')=='Running' and not p['metadata'].get('deletionTimestamp'):
+    if p['metadata'].get('annotations',{}).get('chert.us/tenant-pod')==want and p.get('status',{}).get('phase')=='Running' and not p['metadata'].get('deletionTimestamp'):
         print(p['metadata']['name']); break"
 }
 # Wait for a pod phase, bounded.
@@ -132,27 +132,27 @@ if [ "${1:-}" = "teardown" ]; then
     exit 0
 fi
 
-echo "s3.flint.io e2e — context $CTX, node $NODE"
+echo "s3.chert.us e2e — context $CTX, node $NODE"
 # The refusal fixtures are re-applied here, not only in setup: a leg
 # that finds its pod absent reports an empty event, never a verdict.
 $K apply -f refusals.yaml >/dev/null
 
 # ── S1 registration, and fail-closed ─────────────────────────────────
 leg S1 "the driver is registered, the plugin is Ready, and there is NO webhook"
-$K get csidriver s3.flint.io >/dev/null 2>&1 && ok "CSIDriver s3.flint.io exists" || bad "CSIDriver s3.flint.io missing"
-csinode_lists() { $K get csinode "$NODE" -o json | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(x['name']=='s3.flint.io' for x in (d['spec'].get('drivers') or [])) else 1)"; }
+$K get csidriver s3.chert.us >/dev/null 2>&1 && ok "CSIDriver s3.chert.us exists" || bad "CSIDriver s3.chert.us missing"
+csinode_lists() { $K get csinode "$NODE" -o json | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(x['name']=='s3.chert.us' for x in (d['spec'].get('drivers') or [])) else 1)"; }
 i=0; while [ $i -lt 30 ] && ! csinode_lists; do sleep 2; i=$((i + 2)); done
 if csinode_lists; then
-    ok "CSINode $NODE lists s3.flint.io (the registrar did its job, ${i}s after the plugin came up)"
+    ok "CSINode $NODE lists s3.chert.us (the registrar did its job, ${i}s after the plugin came up)"
 else
-    bad "CSINode $NODE does not list s3.flint.io"
+    bad "CSINode $NODE does not list s3.chert.us"
 fi
 ready=$($K -n $SYS get ds flint-s3-csi-node -o jsonpath='{.status.numberReady}')
 [ "${ready:-0}" -ge 1 ] && ok "DaemonSet numberReady=$ready" || bad "DaemonSet numberReady=${ready:-0}"
 mwc=$($K get mutatingwebhookconfigurations -o name | grep -c flint || true)
 [ "$mwc" = "0" ] && ok "zero flint MutatingWebhookConfigurations" || bad "$mwc flint MutatingWebhookConfigurations present"
 # Control: with the plugin gone, a NEW pod stays ContainerCreating (fail-closed).
-$K -n $SYS patch ds flint-s3-csi-node -p '{"spec":{"template":{"spec":{"nodeSelector":{"flint.io/absent":"true"}}}}}' >/dev/null
+$K -n $SYS patch ds flint-s3-csi-node -p '{"spec":{"template":{"spec":{"nodeSelector":{"chert.us/absent":"true"}}}}}' >/dev/null
 sleep 8
 $K -n $NS delete pod reader --ignore-not-found --wait=true --timeout=120s >/dev/null 2>&1
 $K apply -f tenants.yaml >/dev/null
@@ -160,9 +160,9 @@ if wait_phase reader Running 40; then
     bad "CONTROL: reader started with the plugin absent — fail-closed does not hold"
 else
     ev=$(mount_events reader)
-    echo "$ev" | grep -q 'FailedMount\|kubernetes.io/csi\|not found\|driver name s3.flint.io not found' && ok "CONTROL: without the plugin a new pod stays ContainerCreating with a mount event" || { note "events: $ev"; ok "CONTROL: without the plugin the pod did not start (no explicit event yet)"; }
+    echo "$ev" | grep -q 'FailedMount\|kubernetes.io/csi\|not found\|driver name s3.chert.us not found' && ok "CONTROL: without the plugin a new pod stays ContainerCreating with a mount event" || { note "events: $ev"; ok "CONTROL: without the plugin the pod did not start (no explicit event yet)"; }
 fi
-$K -n $SYS patch ds flint-s3-csi-node --type=json -p '[{"op":"remove","path":"/spec/template/spec/nodeSelector/flint.io~1absent"}]' >/dev/null
+$K -n $SYS patch ds flint-s3-csi-node --type=json -p '[{"op":"remove","path":"/spec/template/spec/nodeSelector/chert.us~1absent"}]' >/dev/null
 $K -n $SYS rollout status ds/flint-s3-csi-node --timeout=180s >/dev/null
 wait_phase reader Running 180 && ok "the same pod mounts once the plugin is back" || bad "reader never came back after the plugin returned: $(mount_events reader | tail -2)"
 
@@ -295,7 +295,7 @@ fi
 require_pod reader >/dev/null && ok "CONTROL: the identical pod under SA trainer is Running" || bad "CONTROL failed"
 
 # ── S7 a pod cannot mint for itself ──────────────────────────────────
-leg S7 "a pod presenting its OWN projected s3.flint.io token to the broker is refused (no registration)"
+leg S7 "a pod presenting its OWN projected s3.chert.us token to the broker is refused (no registration)"
 cat <<EOF | $K apply -f - >/dev/null
 apiVersion: v1
 kind: Pod
@@ -305,7 +305,7 @@ spec:
   securityContext: { runAsNonRoot: true, runAsUser: 1001, seccompProfile: { type: RuntimeDefault } }
   volumes:
     - name: tok
-      projected: { sources: [ { serviceAccountToken: { audience: s3.flint.io, expirationSeconds: 600, path: token } } ] }
+      projected: { sources: [ { serviceAccountToken: { audience: s3.chert.us, expirationSeconds: 600, path: token } } ] }
   containers:
     - name: agent
       image: busybox:1.36
@@ -317,7 +317,7 @@ if wait_phase self-minter Running 60; then
     resp=$(inpod_out self-minter "T=\$(cat /tok/token); wget -q -O - --post-data \"Action=AssumeRoleWithWebIdentity&Version=2011-06-15&RoleArn=arn:flint:iam::passthrough:role/datasets&RoleSessionName=forged&WebIdentityToken=\$T\" http://flint-s3-broker.$SYS.svc/ 2>&1 || true")
     blog=$($K -n $SYS logs deploy/flint-s3-broker --since=60s 2>/dev/null)
     echo "$resp" | grep -q '403' && echo "$blog" | grep -q 'AccessDenied.*forged\|forged.*AccessDenied\|AccessDenied.*registration' && ok "broker refused the self-minted token with 403 AccessDenied: no live publish registration" || bad "broker answered: $(echo "$resp" | head -c 200) / log: $(echo "$blog" | grep -i refused | tail -1 | cut -c1-200)"
-    # And the same token with a bogus audience claim cannot exist: the token IS aud=s3.flint.io, so the refusal above is the registration check, not audience.
+    # And the same token with a bogus audience claim cannot exist: the token IS aud=s3.chert.us, so the refusal above is the registration check, not audience.
     resp=$(inpod_out self-minter "wget -q -O - --post-data 'Action=AssumeRoleWithWebIdentity&Version=2011-06-15&RoleArn=arn:flint:iam::passthrough:role/datasets&RoleSessionName=x&WebIdentityToken=not.a.jwt' http://flint-s3-broker.$SYS.svc/ 2>&1 || true")
     blog=$($K -n $SYS logs deploy/flint-s3-broker --since=60s 2>/dev/null)
     echo "$resp" | grep -q '400' && echo "$blog" | grep -q 'InvalidIdentityToken' && ok "a garbage token is refused with 400 InvalidIdentityToken at TokenReview" || bad "garbage token answer: $(echo "$resp" | head -c 200) / log: $(echo "$blog" | grep -i invalid | tail -1 | cut -c1-200)"
@@ -471,7 +471,7 @@ if wait_phase lean-seeder Running 300; then
         wsc=$($K -n $WNS get pod "$w" -o jsonpath='{.spec.securityContext.runAsUser} {.spec.containers[0].securityContext.capabilities.drop[0]} {.spec.containers[0].securityContext.privileged}')
         [ "$wsc" = "1001 ALL false" ] && ok "syncer worker $w is uid 1001, drop ALL, unprivileged" || bad "syncer worker securityContext: '$wsc'"
         hp=$($K -n $WNS get pod "$w" -o jsonpath='{.spec.volumes[*].hostPath.path}')
-        case "$hp" in /var/lib/kubelet/plugins/s3.flint.io/volumes/*/tree) ok "its only hostPath is the plugin-owned tree ($hp)";; *) bad "syncer hostPath: '$hp'";; esac
+        case "$hp" in /var/lib/kubelet/plugins/s3.chert.us/volumes/*/tree) ok "its only hostPath is the plugin-owned tree ($hp)";; *) bad "syncer hostPath: '$hp'";; esac
         [ "$($K -n $WNS exec "$w" -- sh -c 'ps | grep -c "[f]lint-sync run"' 2>/dev/null)" -ge 1 ] && ok "flint-sync run is alive in the worker" || bad "no flint-sync run process in the worker"
     else
         bad "no Running worker for lean-seeder"
@@ -511,7 +511,7 @@ if require_pod lean-agent; then
     [ "$(lobj tenants/proj/files/src/late.txt)" = "written after the seed publish" ] && ok "late.txt carries the bytes the agent wrote" || bad "late.txt in the bucket reads '$(lobj tenants/proj/files/src/late.txt)'"
     i=0; while [ $i -lt 90 ] && [ -n "$w" ] && $K -n $WNS get pod "$w" >/dev/null 2>&1; do sleep 2; i=$((i + 2)); done
     [ -z "$w" ] || $K -n $WNS get pod "$w" >/dev/null 2>&1 && bad "syncer worker $w still exists ${i}s after its tenant was deleted" || ok "syncer worker ${w:-?} is gone"
-    trees=$(onnode "ls -d /var/lib/kubelet/plugins/s3.flint.io/volumes/*/tree 2>/dev/null | wc -l")
+    trees=$(onnode "ls -d /var/lib/kubelet/plugins/s3.chert.us/volumes/*/tree 2>/dev/null | wc -l")
     [ "${trees:-0}" = "0" ] && ok "no lean tree remains under the plugin dir" || bad "$trees lean trees remain on the node"
 fi
 $K -n $NS delete pod lean-refused --ignore-not-found --wait=false >/dev/null 2>&1
@@ -522,10 +522,10 @@ if require_pod reader-elsewhere; then
     $K -n $NS delete pod reader-elsewhere --wait=true --timeout=180s >/dev/null 2>&1
     i=0; while [ $i -lt 60 ] && $K -n $WNS get pod "$w" >/dev/null 2>&1; do sleep 2; i=$((i + 2)); done
     $K -n $WNS get pod "$w" >/dev/null 2>&1 && bad "worker $w still exists ${i}s after the tenant was deleted" || ok "worker $w is gone"
-    vols=$(onnode "ls /var/lib/kubelet/plugins/s3.flint.io/volumes 2>/dev/null | wc -l")
+    vols=$(onnode "ls /var/lib/kubelet/plugins/s3.chert.us/volumes 2>/dev/null | wc -l")
     live=$($K -n $NS get pods -o name | grep -c 'reader' || true)
     note "state dirs on the node: ${vols:-?}; live readers: $live"
-    stale=$(onnode "grep -c 'plugins/s3.flint.io/volumes' /proc/mounts")
+    stale=$(onnode "grep -c 'plugins/s3.chert.us/volumes' /proc/mounts")
     [ "${stale:-0}" -le "$((live * 1))" ] && ok "plugin-dir mounts on the node ($stale) do not exceed live readers ($live)" || bad "stale plugin-dir mounts on the node: $stale for $live readers"
     $K apply -f tenants.yaml >/dev/null
 fi
@@ -536,5 +536,5 @@ for want in S1 S2 S3 S4 S5 S5c S6 S7 S8 S9 S10 S11 S13 S15 S19 SU; do
     echo " $RAN_LEGS " | grep -q " $want " || bad "leg $want never ran"
 done
 echo "════════════════════════════════════════"
-echo "s3.flint.io e2e: $PASS ok, $FAILED bad"
+echo "s3.chert.us e2e: $PASS ok, $FAILED bad"
 [ "$FAILED" = "0" ]

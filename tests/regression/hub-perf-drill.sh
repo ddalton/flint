@@ -120,12 +120,12 @@ kubectl -n "$NS" create secret generic flint-s3 \
   --from-literal=AWS_ACCESS_KEY_ID="$HUB_AK" --from-literal=AWS_SECRET_ACCESS_KEY="$HUB_SK" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n "$NS" apply -f - >/dev/null <<EOF || fail "FlintShare refused"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata:
   name: $SHARE
   namespace: $NS
-  labels: { flint.io/project-id: $PROJECT }
+  labels: { chert.us/project-id: $PROJECT }
 spec:
   bucket: $BUCKET
   keyPrefix: $PROJECT/
@@ -149,7 +149,7 @@ done
 [ "$(kubectl -n "$NS" get flintshare "$SHARE" -o jsonpath='{.status.phase}')" = Ready ] \
   || { kubectl -n "$NS" get flintshare "$SHARE" -o yaml | tail -20; fail "share never Ready"; }
 CIP=$(kubectl -n "$NS" get svc "$SHARE" -o jsonpath='{.spec.clusterIP}')
-HUBNODE=$(kubectl -n "$NS" get pod -l flint.io/share="$SHARE" -o jsonpath='{.items[0].spec.nodeName}')
+HUBNODE=$(kubectl -n "$NS" get pod -l chert.us/share="$SHARE" -o jsonpath='{.items[0].spec.nodeName}')
 pass "share Ready on $HUBNODE, ClusterIP $CIP"
 
 say "client pod: the NFS mount and a LOCAL DISK control, same pod"

@@ -33,7 +33,7 @@
 //! over. The witness needs a compare-and-swapped box of small facts,
 //! which every cluster already has. The cost is that the document is
 //! opaque to `kubectl get -o custom-columns`; `kubectl get cm -l
-//! flint.io/kind=composition -o yaml` is the operator surface, and the
+//! chert.us/kind=composition -o yaml` is the operator surface, and the
 //! JSON inside is deliberately readable.
 //!
 //! The TARGET REGISTRY is a separate object PER TARGET, and that is not
@@ -828,9 +828,9 @@ pub struct ConfigMapStore {
 
 /// The key the document lives under, and the label that makes a kind
 /// listable. Both are part of the operator surface — `kubectl get cm -l
-/// flint.io/kind=composition -o yaml` is how a human reads the record.
+/// chert.us/kind=composition -o yaml` is how a human reads the record.
 const DATA_KEY: &str = "record.json";
-const KIND_LABEL: &str = "flint.io/kind";
+const KIND_LABEL: &str = "chert.us/kind";
 
 impl ConfigMapStore {
     pub async fn new(namespace: &str) -> WitnessResult<Self> {

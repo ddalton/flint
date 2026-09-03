@@ -179,10 +179,10 @@ helm install flint-lite-operator "$OP_CHART" -n "$OPNS" --create-namespace \
 kubectl -n "$OPNS" rollout status deployment/flint-lite-operator --timeout=120s >/dev/null 2>&1 \
   || { kubectl -n "$OPNS" describe pod -l app.kubernetes.io/name=flint-lite-operator | tail -20; \
        fail "operator never became Ready"; }
-kubectl wait --for=condition=established --timeout=60s crd/flintshares.flint.io >/dev/null 2>&1 \
+kubectl wait --for=condition=established --timeout=60s crd/flintshares.chert.us >/dev/null 2>&1 \
   || fail "the CRD never became Established — the API server refused the schema"
-STAMP=$(kubectl get crd flintshares.flint.io -o jsonpath='{.metadata.annotations.flint\.io/crd-schema-version}')
-[ -n "$STAMP" ] || fail "CRD carries no flint.io/crd-schema-version annotation"
+STAMP=$(kubectl get crd flintshares.chert.us -o jsonpath='{.metadata.annotations.chert\.us/crd-schema-version}')
+[ -n "$STAMP" ] || fail "CRD carries no chert.us/crd-schema-version annotation"
 # The operator must have claimed field ownership of the CRD — i.e. it
 # really applied its own copy, rather than passively accepting the
 # chart's. --show-managed-fields is load-bearing: kubectl STRIPS
@@ -190,7 +190,7 @@ STAMP=$(kubectl get crd flintshares.flint.io -o jsonpath='{.metadata.annotations
 # fails no matter what the operator did.
 # jsonpath, not a grep of -o json: kubectl pretty-prints JSON with a
 # space after the colon, so '"manager":"x"' never matches.
-managers() { kubectl get crd flintshares.flint.io --show-managed-fields \
+managers() { kubectl get crd flintshares.chert.us --show-managed-fields \
   -o jsonpath='{.metadata.managedFields[*].manager}' 2>/dev/null; }
 for i in $(seq 1 30); do
   case " $(managers) " in *" flint-lite-operator "*) break ;; esac
@@ -207,7 +207,7 @@ pass "operator Ready; CRD established at schema version $STAMP, applied by the o
 say "leg 2: a FlintShare becomes Ready; ownership is right; a kernel client mounts it"
 kubectl create namespace "$NS" >/dev/null
 kubectl apply -f - >/dev/null <<EOF || fail "applying the FlintShare failed"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata:
   name: tenant-a
@@ -310,7 +310,7 @@ grep -qi "immutable" /tmp/op-e2e-cel.log \
 # misspelling — otherwise the CEL rule "settings needs a bucket" would
 # refuse it and the test would pass without testing anything.
 if kubectl apply --server-side --dry-run=server -f - >/tmp/op-e2e-typo.log 2>&1 <<EOF
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata:
   name: typo
@@ -333,7 +333,7 @@ grep -qiE "field not declared in schema|unknown field" /tmp/op-e2e-typo.log \
 # ... and the correctly-spelled one is accepted, so the refusal above
 # is about the SPELLING and not about settings being unusable.
 kubectl apply --server-side --dry-run=server -f - >/dev/null 2>&1 <<EOF || fail "a VALID settings block was refused"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata:
   name: typo
@@ -428,7 +428,7 @@ pass "edit → ConfigMap → one roll → live in the pod (generation $GEN_BEFOR
 say "leg 7: a second share on the same bucket subtree is refused, across namespaces"
 kubectl create namespace "$NS2" >/dev/null
 kubectl apply -f - >/dev/null <<EOF || fail "applying the winner failed"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata: { name: owner, namespace: $NS }
 spec:
@@ -438,7 +438,7 @@ spec:
 EOF
 sleep 3   # creationTimestamp has 1s granularity; make the winner unambiguous
 kubectl apply -f - >/dev/null <<EOF || fail "applying the loser failed"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata: { name: intruder, namespace: $NS2 }
 spec:
@@ -500,7 +500,7 @@ say "leg 7b: a share demoted while running is killed, not gracefully flushed"
 # one last time and writes a manifest barrier — into the subtree the
 # arbitration is protecting.
 kubectl apply -f - >/dev/null <<EOF || fail "applying elder failed"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata: { name: elder, namespace: $NS }
 spec:
@@ -511,7 +511,7 @@ spec:
 EOF
 sleep 3   # creationTimestamp has 1s granularity; make the elder unambiguous
 kubectl apply -f - >/dev/null <<EOF || fail "applying younger failed"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata: { name: younger, namespace: $NS }
 spec:
@@ -521,7 +521,7 @@ spec:
   persistence: { size: 1Gi }
 EOF
 for i in $(seq 1 60); do
-  YPOD=$(kubectl -n "$NS" get pods -l flint.io/share=younger -o name 2>/dev/null | head -1)
+  YPOD=$(kubectl -n "$NS" get pods -l chert.us/share=younger -o name 2>/dev/null | head -1)
   [ -n "$YPOD" ] && break
   sleep 2
 done
@@ -550,7 +550,7 @@ done
 reasons_for() { kubectl -n "$NS" get events --field-selector "involvedObject.name=$1" \
   -o jsonpath='{.items[*].reason}' 2>/dev/null; }
 for i in $(seq 1 30); do
-  LEFT=$(kubectl -n "$NS" get pods -l flint.io/share=younger -o name 2>/dev/null | grep -c .)
+  LEFT=$(kubectl -n "$NS" get pods -l chert.us/share=younger -o name 2>/dev/null | grep -c .)
   [ "${LEFT:-1}" = "0" ] && break
   sleep 2
 done
@@ -570,7 +570,7 @@ pass "the running loser was scaled to zero and its pod is gone; the winner untou
 # but it has a PVC and a Deployment, which means it may hold the only
 # local copy of bytes it has already published into the bucket. The
 # front door must not be able to delete that by setting a label.
-kubectl -n "$NS" annotate flintshare younger flint.io/abandon=true --overwrite >/dev/null
+kubectl -n "$NS" annotate flintshare younger chert.us/abandon=true --overwrite >/dev/null
 for i in $(seq 1 30); do
   REFUSED=$(reasons_for younger | tr ' ' '\n' | grep -c '^AbandonRefused$')
   [ "${REFUSED:-0}" -gt 0 ] && break
@@ -598,7 +598,7 @@ say "leg 7c: an abandoned loser is deleted, and its project id is free again"
 # front door's own remedy, and it is deliberately narrow — leg 7b holds
 # the half that must be REFUSED.
 kubectl apply -f - >/dev/null <<EOF || fail "applying the abandon winner failed"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata: { name: keeper, namespace: $NS }
 spec:
@@ -608,7 +608,7 @@ spec:
 EOF
 sleep 3   # creationTimestamp has 1s granularity; make the winner unambiguous
 kubectl apply -f - >/dev/null <<EOF || fail "applying the abandon loser failed"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata: { name: typo, namespace: $NS }
 spec:
@@ -630,7 +630,7 @@ pass "loser Failed, owning no claim and no Deployment"
 # A share that is NOT in conflict must survive it — and must be TOLD so,
 # because the front door sets this and then waits for the row to vanish.
 # Silence here is indistinguishable from a wedged operator.
-kubectl -n "$NS" annotate flintshare keeper flint.io/abandon=true --overwrite >/dev/null
+kubectl -n "$NS" annotate flintshare keeper chert.us/abandon=true --overwrite >/dev/null
 for i in $(seq 1 30); do
   R=$(reasons_for keeper | tr ' ' '\n' | grep -c '^AbandonRefused$')
   [ "${R:-0}" -gt 0 ] && break
@@ -640,11 +640,11 @@ done
   || fail "abandon on a HEALTHY share was silently ignored — a front door would wait forever"
 kubectl -n "$NS" get flintshare keeper >/dev/null 2>&1 \
   || fail "abandon DELETED a healthy share that legitimately owns its prefix"
-kubectl -n "$NS" annotate flintshare keeper flint.io/abandon- >/dev/null
+kubectl -n "$NS" annotate flintshare keeper chert.us/abandon- >/dev/null
 pass "a healthy share refuses the annotation and says why"
 
 # The path itself.
-kubectl -n "$NS" annotate flintshare typo flint.io/abandon=true --overwrite >/dev/null
+kubectl -n "$NS" annotate flintshare typo chert.us/abandon=true --overwrite >/dev/null
 for i in $(seq 1 45); do
   kubectl -n "$NS" get flintshare typo >/dev/null 2>&1 || break
   sleep 2
@@ -657,7 +657,7 @@ pass "the abandoned loser is gone"
 # ...and the whole point of it: the project id is reusable, so the same
 # project can be declared again on a prefix that does not collide.
 kubectl apply -f - >/dev/null <<EOF || fail "re-creating the project on a corrected prefix failed"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata: { name: typo, namespace: $NS }
 spec:
@@ -684,10 +684,10 @@ say "leg 8: a hand-mangled CRD schema is repaired on operator restart"
 # property a CEL rule references ("undefined field 'settings'" — the
 # rules pin their own fields, which is a good property and an
 # inconvenient one here). logLevel is pinned by nothing.
-knob_type() { kubectl get crd flintshares.flint.io \
+knob_type() { kubectl get crd flintshares.chert.us \
   -o jsonpath='{.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.logLevel.type}' 2>/dev/null; }
 [ "$(knob_type)" = "string" ] || fail "spec.logLevel is not in the served schema to begin with"
-kubectl patch crd flintshares.flint.io --type=json \
+kubectl patch crd flintshares.chert.us --type=json \
   -p '[{"op":"remove","path":"/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/logLevel"}]' \
   >/dev/null || fail "could not mangle the CRD for the test"
 [ -z "$(knob_type)" ] || fail "the mangle did not take"
@@ -723,7 +723,7 @@ kubectl -n "$NS" rollout status deployment/tenant-a --timeout=180s >/dev/null 2>
 # healthy under a new name. Ready-gated, so a pod that is up but still
 # pre-listener is not chosen either.
 hubpod_of() {
-  kubectl -n "${2:-$NS}" get pods -l "flint.io/share=$1" \
+  kubectl -n "${2:-$NS}" get pods -l "chert.us/share=$1" \
     --field-selector=status.phase=Running \
     -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}' \
     2>/dev/null | awk '{print $1}'
@@ -744,8 +744,8 @@ for i in $(seq 1 30); do
   sleep 2
 done
 if [ "${PH:-}" != "serving" ]; then
-  echo "  --- tenant-a pods ---";        kubectl -n "$NS" get pods -l flint.io/share=tenant-a -o wide
-  echo "  --- replicasets ---";          kubectl -n "$NS" get rs -l flint.io/share=tenant-a
+  echo "  --- tenant-a pods ---";        kubectl -n "$NS" get pods -l chert.us/share=tenant-a -o wide
+  echo "  --- replicasets ---";          kubectl -n "$NS" get rs -l chert.us/share=tenant-a
   echo "  --- recent events ---";        kubectl -n "$NS" get events --field-selector involvedObject.name=tenant-a -o custom-columns=REASON:.reason,MSG:.message --sort-by=.lastTimestamp | tail -15
   echo "  --- operator log ---";         kubectl -n "$OPNS" logs deployment/flint-lite-operator --tail=60 2>/dev/null | grep -i tenant-a | tail -20
   fail "/status never reported phase serving (got '${PH:-<none>}')"
@@ -753,7 +753,7 @@ fi
 # One ReplicaSet generation per deliberate edit. More than that means
 # something is rolling the hub on its own, and every exec-based leg
 # below would be racing it.
-RSGEN=$(kubectl -n "$NS" get rs -l flint.io/share=tenant-a --no-headers 2>/dev/null | grep -c .)
+RSGEN=$(kubectl -n "$NS" get rs -l chert.us/share=tenant-a --no-headers 2>/dev/null | grep -c .)
 echo "  (tenant-a replicasets: $RSGEN)"
 
 # rpoClean must be NULL for a tier-off share — never true. A controller
@@ -990,21 +990,21 @@ pass "idle-suspended: replicas 0, PVC kept, phase distinguishable from an admin 
 
 # The carrier must be an ANNOTATION, and it must SURVIVE the next
 # reconcile — a suspend the renderer does not read is undone in seconds.
-ST=$(kubectl -n "$NS" get flintshare tenant-a -o jsonpath='{.metadata.annotations.flint\.io/idle-state}')
+ST=$(kubectl -n "$NS" get flintshare tenant-a -o jsonpath='{.metadata.annotations.chert\.us/idle-state}')
 [ "$ST" = "Suspended" ] || fail "the idle state is not on the CR as an annotation (got '$ST')"
 sleep 20
 REPL=$(kubectl -n "$NS" get deployment tenant-a -o jsonpath='{.spec.replicas}')
 [ "$REPL" = "0" ] || fail "the suspend was UNDONE by a later reconcile (replicas back to $REPL)"
 pass "the suspend survives repeated reconciles — the annotation carrier holds"
 
-# `flint.io/requested-at` is the LADDER'S INPUT: whatever wants this
+# `chert.us/requested-at` is the LADDER'S INPUT: whatever wants this
 # share awake stamps it, and the level-triggered reconcile does the
 # rest. Asserted here as the operator's input and deliberately NOT as
 # any particular caller's contract — how a front door reaches a share
 # is a separate decision, and pinning it in a committed test now makes
 # changing it a test rewrite later.
 kubectl -n "$NS" annotate flintshare tenant-a \
-  "flint.io/requested-at=$(date -u +%FT%TZ)" --overwrite >/dev/null
+  "chert.us/requested-at=$(date -u +%FT%TZ)" --overwrite >/dev/null
 for i in $(seq 1 60); do
   P=$(kubectl -n "$NS" get flintshare tenant-a -o jsonpath='{.status.phase}' 2>/dev/null)
   [ "$P" = "Ready" ] && break
@@ -1012,7 +1012,7 @@ for i in $(seq 1 60); do
 done
 [ "${P:-}" = "Ready" ] || {
   kubectl -n "$NS" get flintshare tenant-a -o yaml | tail -30
-  fail "touching flint.io/requested-at did not wake the share (phase ${P:-<none>})"
+  fail "touching chert.us/requested-at did not wake the share (phase ${P:-<none>})"
 }
 pass "one annotation woke it back to Ready"
 
@@ -1027,7 +1027,7 @@ for i in $(seq 1 30); do
 done
 [ "${P:-}" = "Suspended" ] || fail "an admin suspend did not take (phase ${P:-<none>})"
 kubectl -n "$NS" annotate flintshare tenant-a \
-  "flint.io/requested-at=$(date -u +%FT%TZ)" --overwrite >/dev/null
+  "chert.us/requested-at=$(date -u +%FT%TZ)" --overwrite >/dev/null
 sleep 15
 P=$(kubectl -n "$NS" get flintshare tenant-a -o jsonpath='{.status.phase}')
 [ "$P" = "Suspended" ] || fail "a wake request overrode an ADMIN suspend (phase $P)"
@@ -1044,13 +1044,13 @@ say "leg 12: the front-door contract — ensure-live, idempotently, from zero"
 PROJ=p-7f31
 FS="fs-$PROJ"
 cat >/tmp/fs-ensure.yaml <<EOF
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata:
   name: $FS
   namespace: $NS
   labels:
-    flint.io/project-id: $PROJ
+    chert.us/project-id: $PROJ
 spec:
   persistence: { size: 1Gi }
   monitoring:
@@ -1073,7 +1073,7 @@ wait $E2; RC2=$?
   || fail "concurrent ensure: expected exactly one success (rc $RC1/$RC2)"
 grep -qi "already exists" /tmp/ensure-a.log /tmp/ensure-b.log \
   || fail "the losing ensure did not fail with AlreadyExists"
-COUNT=$(kubectl -n "$NS" get flintshares -l "flint.io/project-id=$PROJ" -o name | wc -l | tr -d ' ')
+COUNT=$(kubectl -n "$NS" get flintshares -l "chert.us/project-id=$PROJ" -o name | wc -l | tr -d ' ')
 [ "$COUNT" = "1" ] || fail "$COUNT shares for one project — the deterministic name did not hold"
 pass "concurrent double-ensure yielded exactly ONE share; the loser saw AlreadyExists"
 
@@ -1095,7 +1095,7 @@ pass "ensure-live from zero: distinguishable progression ($SEEN) and an address 
 
 # status.serverId is the "your mounts are stale" signal, and it must
 # agree with the hub's own answer.
-FSPOD=$(kubectl -n "$NS" get pods -l "flint.io/share=$FS" \
+FSPOD=$(kubectl -n "$NS" get pods -l "chert.us/share=$FS" \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
 [ -n "$FSPOD" ] || fail "no running pod for $FS"
 HUB_SID=$(kubectl -n "$NS" exec "$FSPOD" -- sh -c \
@@ -1123,8 +1123,8 @@ done
 
 # The front door's wake: requested-at, plus an intent for this one boot.
 kubectl -n "$NS" annotate flintshare "$FS" --overwrite \
-  "flint.io/requested-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  "flint.io/wake-intent=warm" >/dev/null
+  "chert.us/requested-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  "chert.us/wake-intent=warm" >/dev/null
 for i in $(seq 1 90); do
   P=$(kubectl -n "$NS" get flintshare "$FS" -o jsonpath='{.status.phase}' 2>/dev/null)
   [ "$P" = "Ready" ] && break
@@ -1136,17 +1136,17 @@ done
 # permanent. Clearing it must NOT roll the hub: it is a boot-only knob,
 # excluded from the rollout checksum, and a restart minutes after a
 # wake would hang the very agent the wake was for.
-WOKEN_POD=$(kubectl -n "$NS" get pods -l "flint.io/share=$FS" \
+WOKEN_POD=$(kubectl -n "$NS" get pods -l "chert.us/share=$FS" \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
 for i in $(seq 1 45); do
   INTENT=$(kubectl -n "$NS" get flintshare "$FS" \
-    -o jsonpath='{.metadata.annotations.flint\.io/wake-intent}' 2>/dev/null)
+    -o jsonpath='{.metadata.annotations.chert\.us/wake-intent}' 2>/dev/null)
   [ -z "$INTENT" ] && break
   sleep 2
 done
 [ -z "${INTENT:-}" ] || fail "wake-intent was never consumed (still '$INTENT')"
 sleep 8
-STILL=$(kubectl -n "$NS" get pods -l "flint.io/share=$FS" \
+STILL=$(kubectl -n "$NS" get pods -l "chert.us/share=$FS" \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
 [ "$STILL" = "$WOKEN_POD" ] \
   || fail "consuming wake-intent ROLLED the hub ($WOKEN_POD → $STILL) — a boot-only knob reached the rollout checksum"
@@ -1175,7 +1175,7 @@ PVC_PHASE=$(kubectl -n "$NS" get pvc tenant-a-data -o jsonpath='{.status.phase}'
 pass "children collected, PVC still Bound (the default keeps your data)"
 
 kubectl apply -f - >/dev/null <<EOF || fail "applying the reclaim: Delete share failed"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata: { name: ephemeral, namespace: $NS }
 spec:
@@ -1208,7 +1208,7 @@ say "leg 13b: a share being deleted reports Terminating and withdraws its addres
 # A holding finalizer of our own pins the object in that window, so this
 # is an assertion rather than a race against cleanup.
 kubectl apply -f - >/dev/null <<EOF || fail "applying the doomed share failed"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata: { name: doomed, namespace: $NS }
 spec:
@@ -1225,7 +1225,7 @@ done
 pass "doomed is serving at $ADDR"
 
 kubectl -n "$NS" patch flintshare doomed --type=json \
-  -p '[{"op":"add","path":"/metadata/finalizers/-","value":"e2e.flint.io/hold"}]' >/dev/null \
+  -p '[{"op":"add","path":"/metadata/finalizers/-","value":"e2e.chert.us/hold"}]' >/dev/null \
   || fail "could not add the holding finalizer"
 kubectl -n "$NS" delete flintshare doomed --wait=false >/dev/null 2>&1
 for i in $(seq 1 45); do
@@ -1265,7 +1265,7 @@ spec:
   resources: { requests: { storage: 1Gi } }
 EOF
 kubectl apply -f - >/dev/null <<EOF || fail "applying the adopting share failed"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata: { name: borrower, namespace: $NS }
 spec:
@@ -1301,7 +1301,7 @@ PVC_UID=$(kubectl -n "$CHARTNS" get pvc flint-lite-data -o jsonpath='{.metadata.
 # A differently-named share must be FENCED, not allowed to create a
 # second Deployment on the same RWO claim.
 kubectl apply -f - >/dev/null <<EOF || fail "applying the blocked share failed"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata: { name: tenant-z, namespace: $CHARTNS }
 spec:
@@ -1324,7 +1324,7 @@ pass "a differently-named share was fenced with AdoptionBlocked, and created not
 # In-place adoption: the CR is NAMED like the release, so the operator
 # applies over the very objects helm made.
 kubectl apply -f - >/dev/null <<EOF || fail "applying the adopting share failed"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata: { name: flint-lite, namespace: $CHARTNS }
 spec:

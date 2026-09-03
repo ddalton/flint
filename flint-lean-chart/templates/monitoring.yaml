@@ -21,7 +21,7 @@ spec:
     any: true
   selector:
     matchExpressions:
-      - key: flint.io/lean-workspace
+      - key: chert.us/lean-workspace
         operator: Exists
   podMetricsEndpoints:
     # By NAME, not by number: the port is a per-workspace CR knob, and
@@ -51,7 +51,7 @@ metadata:
 spec:
   podSelector:
     matchExpressions:
-      - key: flint.io/lean-workspace
+      - key: chert.us/lean-workspace
         operator: Exists
   policyTypes: ["Ingress"]
   ingress:

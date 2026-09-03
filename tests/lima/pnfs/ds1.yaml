@@ -2,7 +2,7 @@
 # out of /tmp/flint-pnfs-ds1. Test asserts that this directory grows
 # when the client writes a striped file through the MDS.
 
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: ds
 

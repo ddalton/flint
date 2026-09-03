@@ -8,7 +8,7 @@ spec:
   serviceAccountName: trainer
   securityContext: { runAsNonRoot: true, runAsUser: 1001, runAsGroup: 1001, seccompProfile: { type: RuntimeDefault } }
   volumes:
-    - { name: data, csi: { driver: s3.flint.io, volumeAttributes: { flint.io/mount: datasets } } }
+    - { name: data, csi: { driver: s3.chert.us, volumeAttributes: { chert.us/mount: datasets } } }
   containers:
     - name: agent
       image: busybox:1.36
@@ -23,7 +23,7 @@ spec:
   serviceAccountName: trainer
   securityContext: { runAsNonRoot: true, runAsUser: 1001, runAsGroup: 1001, seccompProfile: { type: RuntimeDefault } }
   volumes:
-    - { name: data, csi: { driver: s3.flint.io, volumeAttributes: { flint.io/mount: elsewhere } } }
+    - { name: data, csi: { driver: s3.chert.us, volumeAttributes: { chert.us/mount: elsewhere } } }
   containers:
     - name: agent
       image: busybox:1.36
@@ -31,7 +31,7 @@ spec:
       securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
       volumeMounts: [{ name: data, mountPath: /mnt/s3 }]
 ---
-# Holds its own projected s3.flint.io token, for the cross-cluster
+# Holds its own projected s3.chert.us token, for the cross-cluster
 # identity leg: a token minted by cluster A is presented to cluster B's
 # broker from here.
 apiVersion: v1
@@ -42,7 +42,7 @@ spec:
   securityContext: { runAsNonRoot: true, runAsUser: 1001, seccompProfile: { type: RuntimeDefault } }
   volumes:
     - name: tok
-      projected: { sources: [ { serviceAccountToken: { audience: s3.flint.io, expirationSeconds: 3600, path: token } } ] }
+      projected: { sources: [ { serviceAccountToken: { audience: s3.chert.us, expirationSeconds: 3600, path: token } } ] }
   containers:
     - name: agent
       image: busybox:1.36

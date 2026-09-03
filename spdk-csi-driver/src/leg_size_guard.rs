@@ -68,7 +68,7 @@ pub fn enabled() -> bool {
 /// — never a silent shrink.  The annotation goes stale-harmless once PV
 /// capacity catches up (max() makes it a no-op) and the next expansion
 /// overwrites it.
-pub const APPLIED_SIZE_KEY: &str = "flint.io/leg-size-applied";
+pub const APPLIED_SIZE_KEY: &str = "chert.us/leg-size-applied";
 
 /// Encode a successful per-leg grow into the annotation value, merging
 /// with the previous value (max bytes; union of uuids, sorted).

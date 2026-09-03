@@ -492,7 +492,7 @@ struct WakeReply {
 ///
 /// **It is a keepalive as much as a wake, and that is deliberate.**
 /// The idle ladder suspends only when TWO signals agree: the front
-/// door's `flint.io/requested-at` is stale AND the hub's own activity
+/// door's `chert.us/requested-at` is stale AND the hub's own activity
 /// clock says idle. A consumer doing file I/O is held up by the second
 /// signal for free. A consumer that is NOT doing I/O — an agent
 /// computing in memory for twenty minutes with a mount held open, which
@@ -1375,10 +1375,10 @@ mod tests {
             }]);
         }
         serde_json::from_value(serde_json::json!({
-            "apiVersion": "flint.io/v1alpha1", "kind": "FlintShare",
+            "apiVersion": "chert.us/v1alpha1", "kind": "FlintShare",
             "metadata": {
                 "name": name, "namespace": "workspaces",
-                "labels": {"flint.io/project-id": project},
+                "labels": {"chert.us/project-id": project},
             },
             "spec": {
                 "bucket": "tenant-bucket",
@@ -2523,7 +2523,7 @@ mod tests {
     //
     // Nothing in the operator forbids it. `conflict::overlaps` keys
     // fleet uniqueness on (endpoint, bucket, prefix-subtree) and NOTHING
-    // reads `flint.io/project-id` at all — so N shares on N different
+    // reads `chert.us/project-id` at all — so N shares on N different
     // prefixes, all labelled with one project id, is a legal and
     // unremarkable configuration. (One HUB serving several volumes is a
     // different thing and is not implemented; the model here is one
@@ -2541,12 +2541,12 @@ mod tests {
         endpoint: &str,
     ) -> FlintShare {
         serde_json::from_value(serde_json::json!({
-            "apiVersion": "flint.io/v1alpha1", "kind": "FlintShare",
+            "apiVersion": "chert.us/v1alpha1", "kind": "FlintShare",
             "metadata": {
                 "name": name, "namespace": "workspaces",
                 "labels": {
-                    "flint.io/project-id": project,
-                    "flint.io/volume-id": volume,
+                    "chert.us/project-id": project,
+                    "chert.us/volume-id": volume,
                 },
             },
             "spec": {
@@ -2712,7 +2712,7 @@ mod tests {
     }
 
     /// A single-volume project keeps working with no volume in the
-    /// path and no `flint.io/volume-id` label anywhere. This is the
+    /// path and no `chert.us/volume-id` label anywhere. This is the
     /// shape every existing caller uses.
     #[tokio::test]
     async fn a_single_volume_project_still_serves_the_bare_path() {
@@ -2842,7 +2842,7 @@ mod tests {
     // That matters for one property in particular: the patch must be a
     // MERGE patch touching one annotation. Server-side apply would make
     // the gateway a field owner and start a tug-of-war with whatever
-    // front door also writes `flint.io/requested-at` — and nothing
+    // front door also writes `chert.us/requested-at` — and nothing
     // short of watching the request body catches that.
     // ───────────────────────────────────────────────────────────────
 
@@ -2958,10 +2958,10 @@ mod tests {
             spec["idle"] = i;
         }
         serde_json::from_value(serde_json::json!({
-            "apiVersion": "flint.io/v1alpha1", "kind": "FlintShare",
+            "apiVersion": "chert.us/v1alpha1", "kind": "FlintShare",
             "metadata": {
                 "name": "fs-proj-a", "namespace": "workspaces",
-                "labels": {"flint.io/project-id": "proj-a"},
+                "labels": {"chert.us/project-id": "proj-a"},
             },
             "spec": spec,
             "status": status
@@ -2999,7 +2999,7 @@ mod tests {
         assert_eq!(patches.len(), 1, "{patches:?}");
         let (_, path, patch_body) = &patches[0];
         assert!(
-            path.contains("/apis/flint.io/v1alpha1/namespaces/workspaces/flintshares/fs-proj-a"),
+            path.contains("/apis/chert.us/v1alpha1/namespaces/workspaces/flintshares/fs-proj-a"),
             "{path}"
         );
         assert!(
@@ -3008,7 +3008,7 @@ mod tests {
              field owner and fight the front door for the annotation: {path}"
         );
         let j: serde_json::Value = serde_json::from_str(patch_body).unwrap();
-        assert!(j["metadata"]["annotations"]["flint.io/requested-at"].is_string(), "{j}");
+        assert!(j["metadata"]["annotations"]["chert.us/requested-at"].is_string(), "{j}");
         assert!(j["spec"].is_null(), "the wake patch must not touch spec: {j}");
 
         // A wake is a CONTROL operation: it must not dial the hub,

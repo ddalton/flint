@@ -10,14 +10,14 @@ use crate::csi::*;
 use crate::driver::SpdkCsiDriver;
 
 /// Detect whether a PV's volumeAttributes describe a pNFS volume.
-/// pNFS volumes are tagged at create time with pnfs.flint.io/* keys
+/// pNFS volumes are tagged at create time with pnfs.chert.us/* keys
 /// (see pnfs_csi::create_volume). Detection is by namespace prefix so
-/// future pnfs.flint.io/* attributes are caught automatically.
+/// future pnfs.chert.us/* attributes are caught automatically.
 ///
 /// Exposed `pub` so the binary crate (main.rs) can reuse it for the
 /// CreateVolume-from-snapshot and CreateVolume-from-PVC guards.
 pub fn is_pnfs_volume_attrs(volume_attrs: &BTreeMap<String, String>) -> bool {
-    volume_attrs.keys().any(|k| k.starts_with("pnfs.flint.io/"))
+    volume_attrs.keys().any(|k| k.starts_with("pnfs.chert.us/"))
 }
 
 /// Reject CreateSnapshot for source volumes whose deployment mode does
@@ -550,9 +550,9 @@ mod tests {
 
     fn pnfs_volume_attrs() -> BTreeMap<String, String> {
         let mut a = BTreeMap::new();
-        a.insert("pnfs.flint.io/mds-ip".to_string(), "10.0.0.1".to_string());
-        a.insert("pnfs.flint.io/mds-port".to_string(), "20049".to_string());
-        a.insert("pnfs.flint.io/volume-id".to_string(), "pvc-pnfs-1".to_string());
+        a.insert("pnfs.chert.us/mds-ip".to_string(), "10.0.0.1".to_string());
+        a.insert("pnfs.chert.us/mds-port".to_string(), "20049".to_string());
+        a.insert("pnfs.chert.us/volume-id".to_string(), "pvc-pnfs-1".to_string());
         a
     }
 
@@ -653,13 +653,13 @@ mod tests {
     fn post_fix_validate_rejects_any_pnfs_namespace_key() {
         let mut attrs = BTreeMap::new();
         attrs.insert(
-            "pnfs.flint.io/some-future-key".to_string(),
+            "pnfs.chert.us/some-future-key".to_string(),
             "x".to_string(),
         );
         let result = validate_snapshot_source(&attrs);
         assert!(
             result.is_err(),
-            "detection is by pnfs.flint.io/* prefix, not a single key"
+            "detection is by pnfs.chert.us/* prefix, not a single key"
         );
         assert_eq!(
             result.unwrap_err().code(),
@@ -695,7 +695,7 @@ mod tests {
 
     #[test]
     fn is_pnfs_volume_attrs_matches_namespace_prefix_only() {
-        // A key that contains "pnfs" but isn't in the pnfs.flint.io/
+        // A key that contains "pnfs" but isn't in the pnfs.chert.us/
         // namespace must NOT trigger detection (e.g. user labels).
         let mut attrs = BTreeMap::new();
         attrs.insert("user.example.com/pnfs-tag".to_string(), "x".to_string());

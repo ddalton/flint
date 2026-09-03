@@ -8,7 +8,7 @@
 //! controller: no FlintShare coupling, no hub lifecycle, no
 //! per-workspace Deployments/PVCs at all. Duties per reconcile: claim
 //! stamping with both adopt arms, bucket posture, the stale-MPU sweep,
-//! status. Pods get their workspace from the s3.flint.io CSI node
+//! status. Pods get their workspace from the s3.chert.us CSI node
 //! plugin (flint-s3-csi-chart); this binary injects nothing.
 //!
 //! Environment:
@@ -240,7 +240,7 @@ async fn main() -> anyhow::Result<()> {
         match crds.create(&PostParams::default(), &crd).await {
             Ok(_) => info!("FlintLeanWorkspace CRD created"),
             Err(kube::Error::Api(ae)) if ae.code == 409 => {
-                let name = "flintleanworkspaces.flint.io";
+                let name = "flintleanworkspaces.chert.us";
                 crds.patch(
                     name,
                     &PatchParams::apply("flint-lean-operator").force(),

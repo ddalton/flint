@@ -114,7 +114,7 @@ gen_cfg() {
   local PFX="${12:-$PREFIX}"
   local EP="${13:-http://127.0.0.1:$MINIO_PORT}"
   cat > "$1" <<EOF
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: standalone
 mds:

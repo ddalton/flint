@@ -289,7 +289,7 @@ FLINT_CUTOVER is default-ON (opt-out), chart-wired.
 
 | # | Change | Effort | Closes |
 |---|--------|--------|--------|
-| 9 | `flint.io/chain-gen` as separate CAS-co-written key; bump-before-attach; chokepoint re-reads before commit; r1 early-return lifted; CAS backoff | M | cross-node TOCTOU; corrupt-record generation reset |
+| 9 | `chert.us/chain-gen` as separate CAS-co-written key; bump-before-attach; chokepoint re-reads before commit; r1 early-return lifted; CAS backoff | M | cross-node TOCTOU; corrupt-record generation reset |
 | 10 | Per-volume node-local lock (probe→commit), binding on CSI handlers + HTTP mutations; hold time bounded by #1 | M | node-local TOCTOU |
 | 11 | Annotation homing: one resolver/accessor in the record layer + lint; degraded-direct read moves to the user-PV record (retires the rc3 dual-write); frontend datum subsumed | M | F32/rc3 class structurally |
 | 12 | Structured cancellation for the F39 watchdog (detach copy controller; placeholder unwind; back-off written by watchdog); drain-or-kill before re-copy | M | F39 abort-residue class |

@@ -111,9 +111,9 @@ metadata:
   labels:                       # labels(share), unchanged
     app.kubernetes.io/name: flint-lite
     app.kubernetes.io/instance: tenant-a
-    flint.io/share: tenant-a
+    chert.us/share: tenant-a
   ownerReferences:
-    - apiVersion: flint.io/v1alpha1
+    - apiVersion: chert.us/v1alpha1
       kind: FlintShare
       name: tenant-a
       uid: 3f9c1b7e-2a11-4c8e-9d0f-6b5a1c2d3e4f
@@ -128,7 +128,7 @@ spec:
       targetPort: http           # stage 2: `files`
   selector:
     app.kubernetes.io/name: flint-lite
-    flint.io/share: tenant-a
+    chert.us/share: tenant-a
 ```
 
 Rendered **iff `monitoring.enabled && monitoring.fileApi.enabled`**. `Rendered` gains `api_service: Option<Service>`; `Names` gains `api_service: String`.
@@ -184,7 +184,7 @@ Dropping the flag means the API Service has **no endpoints during the entire `St
 /// first: a parked share has no pod, so this name does not resolve.
 ///
 /// The intended consumer is a component that also reads this CR and can
-/// patch `flint.io/requested-at`. A caller holding only this URL cannot
+/// patch `chert.us/requested-at`. A caller holding only this URL cannot
 /// wake a parked share and is not a supported consumer.
 #[serde(default, skip_serializing_if = "Option::is_none")]
 pub api_endpoint: Option<String>,
@@ -312,7 +312,7 @@ Under this design a file-API-enabled share gains a stable cluster-DNS name resol
 
 ### 4.3 Endpoint impersonation by label squat — analysed and dominated
 
-The attack: any principal that can create a Pod in the share's namespace applies a pod with `app.kubernetes.io/name: flint-lite` and `flint.io/share: tenant-a` and a container port named `http`. It joins the EndpointSlice, kube-proxy or the headless A record spreads traffic across it, and it logs the `Authorization` header of every request a front door sends. There are no admission webhooks in this repo (verified: zero hits for `ValidatingWebhook|MutatingWebhook|admissionregistration` across both charts and all of `src/`), and the operator never reads EndpointSlices, so `ApiEndpointPublished` stays `True` and nothing is logged.
+The attack: any principal that can create a Pod in the share's namespace applies a pod with `app.kubernetes.io/name: flint-lite` and `chert.us/share: tenant-a` and a container port named `http`. It joins the EndpointSlice, kube-proxy or the headless A record spreads traffic across it, and it logs the `Authorization` header of every request a front door sends. There are no admission webhooks in this repo (verified: zero hits for `ValidatingWebhook|MutatingWebhook|admissionregistration` across both charts and all of `src/`), and the operator never reads EndpointSlices, so `ApiEndpointPublished` stays `True` and nothing is logged.
 
 **This is real, and it is not a privilege escalation, because the capability it requires already yields the credential more directly.** A pod may mount any Secret in its own namespace; that requires only pod-create, not RBAC on the Secret. So a principal with pod-create in the share's namespace can mount `flint-api-token` and read every file-API token in that namespace outright — no squat, no interception, no waiting for a request. EndpointSlice selection is namespace-scoped, so a squatter can only join Services whose Secrets it can already mount. The squat gains nothing an attacker did not already hold.
 
@@ -450,7 +450,7 @@ Back M4 with a **render-time refusal** as well, so a CR stored before the rule c
 
 **Filed, adjacent, not fixed here:** `hibernatable()` is not re-checked after the drain and before `claims.delete`, so nothing verifies that writes accepted after the first check were flushed.
 
-**Publishing in the down phases is kept, and its audience is narrowed.** The wake protocol is a `flint.io/requested-at` annotation patch on the FlintShare, cleared as the wake fires (`reconcile.rs:1678-1682`); nothing in the data path is a trigger, deliberately, because a wake-on-call would let a poller resurrect the fleet. So a caller holding only the URL cannot wake a parked share. Because the endpoint is uid-derived, learning it requires reading the CR anyway — which is exactly the audience that *can* patch `requested-at`. The schema says so. A caller handed only the URL is not a supported consumer.
+**Publishing in the down phases is kept, and its audience is narrowed.** The wake protocol is a `chert.us/requested-at` annotation patch on the FlintShare, cleared as the wake fires (`reconcile.rs:1678-1682`); nothing in the data path is a trigger, deliberately, because a wake-on-call would let a poller resurrect the fleet. So a caller holding only the URL cannot wake a parked share. Because the endpoint is uid-derived, learning it requires reading the CR anyway — which is exactly the audience that *can* patch `requested-at`. The schema says so. A caller handed only the URL is not a supported consumer.
 
 **Headless changes the failure shape in the down phases, for the better.** A headless Service with zero endpoints returns no A records, so a client gets a **resolution failure** rather than a connection refused or a hang. That is a clearer signal than either NFS door state.
 
@@ -480,7 +480,7 @@ If either audit finds hits in the field, split that rule out and land it with a 
 
 The merged design said "every monitoring-enabled share takes one full apply pass". That is wrong. `render_fingerprint` hashes a fixed array with `DefaultHasher` (`reconcile.rs:122-133`); adding a fifth element changes the digest for **every** input, including shares where `api_service` is `None`, because `Option::hash` writes a discriminant.
 
-So on a 3000-share fleet: every share's stored `flint.io/render-hash` mismatches, `apply_gate_state` returns `None`, `skip_applies` is false for all 3000, and each does ConfigMap + Service + Deployment applies plus a Deployment annotation restamp — roughly 12,000 writes spread over one `REQUEUE_PARKED` window (1800s) at reconcile concurrency 32. That is the write-rate class v1.33.0 spent effort reducing from ~99/s to ~0.24/s, and it should be stated in the release notes.
+So on a 3000-share fleet: every share's stored `chert.us/render-hash` mismatches, `apply_gate_state` returns `None`, `skip_applies` is false for all 3000, and each does ConfigMap + Service + Deployment applies plus a Deployment annotation restamp — roughly 12,000 writes spread over one `REQUEUE_PARKED` window (1800s) at reconcile concurrency 32. That is the write-rate class v1.33.0 spent effort reducing from ~99/s to ~0.24/s, and it should be stated in the release notes.
 
 **No pods restart.** `mds_yaml` is untouched in stage 1, so `config_checksum` does not move, so `checksum/config` does not move, so no mounted client loses its ~90s grace. That is the design's best compat property and it is a direct consequence of refusing to put an addressing knob in hub config — the hub has no notion of its own address by construction (`bind: 0.0.0.0`, `render.rs:216-219`).
 
@@ -592,7 +592,7 @@ Parity cannot cover this object, so these are the entire guard and none is optio
 - **`advertiseUrl` is neither arbitrated nor verified** (§4.5, §10 Q1).
 - **A token the operator did not project.** The operator sets only `RUST_LOG`, `POD_NAME`, `AWS_REGION` — but it `envFrom`s the whole `credentialsSecretRef` Secret when the share is tiered, so a tenant who puts a `FLINT_FILE_API_TOKEN` key there gets a working file API with a credential invisible to the operator. That makes the `TokenUnresolved` check very slightly over-strict in that obscure case, and it means a share can serve the file API with a credential the operator cannot see.
 - **Whether the routes are mounted is not observable from `/status`.** `StatusDoc` has no such field (checked every field). The operator's Secret check (§3.3) is a proxy, not an observation. Adding `fileApi: { routesMounted: bool }` to `StatusDoc` is filed and is worth doing regardless of this design.
-- **Waking.** `flint.io/requested-at` remains the entire protocol. No HTTP call — not even a 503'd one — may become a wake trigger, because file-API calls already count as activity (including a 304) and a wake-on-call would let a polling client resurrect every parked share. Poll `/status`, which deliberately does not count as activity — guidance that now has to reach callers who have never read this repo's docs.
+- **Waking.** `chert.us/requested-at` remains the entire protocol. No HTTP call — not even a 503'd one — may become a wake trigger, because file-API calls already count as activity (including a 304) and a wake-on-call would let a polling client resurrect every parked share. Poll `/status`, which deliberately does not count as activity — guidance that now has to reach callers who have never read this repo's docs.
 - **A 503 for a share with no pod.** The gate runs inside the hub process; in the down phases the failure is at DNS. The answer is `phase` and `hubPhase`, not a synthesised response.
 - **Interpreting a 503 fully.** Three unrelated causes — pre-`Serving` phase, hydration (`NFS4ERR_DELAY`), the write gate (`NFS4ERR_GRACE`) — share the status code and differ only in the body. `hubPhase` separates the first from the other two; it does not separate the second from the third.
 - **Egress amplification.** `maxDownloadBytes` bounds the response and hub memory below the 8 MiB stream threshold. It does **not** bound the egress: the first `Range` of a cold object still hydrates the whole object out of S3.

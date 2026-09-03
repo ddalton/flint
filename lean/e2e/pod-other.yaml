@@ -5,7 +5,7 @@ metadata:
   name: agent-other
   namespace: agents
   labels:
-    flint.io/lean-workspace: other
+    chert.us/lean-workspace: other
 spec:
   restartPolicy: Never
   containers:

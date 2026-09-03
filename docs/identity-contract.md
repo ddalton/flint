@@ -32,7 +32,7 @@ access modes immutable); DeleteVolume invalidates as hygiene.
 
 | RPC | Block | NfsShared (user RWX/ROX) | NfsBacking (`nfs-server-*`) |
 |---|---|---|---|
-| CreateVolume | mint storage id, create lvols/replicas; stamp role hint | same + `nfs.flint.io/*` context; server pod NOT created here | n/a — backing PV is driver-minted during publish |
+| CreateVolume | mint storage id, create lvols/replicas; stamp role hint | same + `nfs.chert.us/*` context; server pod NOT created here | n/a — backing PV is driver-minted during publish |
 | DeleteVolume | replica/lvol/target teardown | server pod delete + bounded flush wait → backing detach → storage teardown | REFUSED (driver-managed, never provisioner-driven) |
 | ControllerPublish | export + host-fence to node | ensure server pod (a Terminating pod is NOT reusable — bounded wait, then recreate), return Service endpoint | block export + fence to the server's node |
 | ControllerUnpublish | remote consumer ⇒ remove volume target (fencing) | **no-op** — departing party is an NFS client; the target is the server's live backing export | block-path bookkeeping; target lifecycle belongs to DeleteVolume |

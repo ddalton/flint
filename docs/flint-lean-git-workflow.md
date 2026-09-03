@@ -1,10 +1,10 @@
 # Git on a flint-lean workspace
 
 > **Delivery changed (2026-09-03).** The label
-> `flint.io/lean-workspace` and the injected `flint-sync` sidecar shown
+> `chert.us/lean-workspace` and the injected `flint-sync` sidecar shown
 > below are the RETIRED shape. A workspace now reaches a pod as ONE
-> `csi:` volume served by the `s3.flint.io` node driver
-> (`volumeAttributes: { flint.io/workspace: <cr> }`,
+> `csi:` volume served by the `s3.chert.us` node driver
+> (`volumeAttributes: { chert.us/workspace: <cr> }`,
 > `flint-s3-csi-chart`), and the CR names `spec.uid` and
 > `spec.consumers.serviceAccounts`. The workspace protocol below —
 > checkout gate, `.flint/publish`, boundaries, drain on delete — is
@@ -100,7 +100,7 @@ the sidecar's, never the app's.
 
 ```yaml
 # 1. The workspace (operator/webhook consume this; see the chart).
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace
 metadata: { name: proj1 }
 spec:
@@ -130,7 +130,7 @@ kind: Pod
 metadata:
   name: agent
   labels:
-    flint.io/lean-workspace: proj1     # webhook injects the sidecar
+    chert.us/lean-workspace: proj1     # webhook injects the sidecar
 spec:
   containers:
     - name: agent

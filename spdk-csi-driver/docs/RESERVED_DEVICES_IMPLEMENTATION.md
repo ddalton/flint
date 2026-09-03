@@ -221,7 +221,7 @@ spec:
     image: my-spdk-app:latest
     resources:
       limits:
-        flint.io/nvme: 1  # Request direct NVMe access
+        chert.us/nvme: 1  # Request direct NVMe access
         hugepages-2Mi: 1Gi
 ```
 

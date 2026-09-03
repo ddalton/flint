@@ -193,9 +193,9 @@ mkshare() {  # mkshare <name> <prefix>
     --from-literal=AWS_SECRET_ACCESS_KEY=$MINIO_PASS \
     --dry-run=client -o yaml 2>/dev/null | kubectl apply -f - >/dev/null 2>&1
   kubectl apply -f - >/dev/null <<EOF || fail "share $1 refused"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
-metadata: { name: $1, namespace: $NS, labels: { flint.io/project-id: $1 } }
+metadata: { name: $1, namespace: $NS, labels: { chert.us/project-id: $1 } }
 spec:
   bucket: $BUCKET
   region: us-east-1
@@ -212,7 +212,7 @@ EOF
   done
   return 1
 }
-hubpod() { kubectl -n "$NS" get pods -l flint.io/share="$1" \
+hubpod() { kubectl -n "$NS" get pods -l chert.us/share="$1" \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null; }
 
 # ══ F1: two hubs, two identities ═════════════════════════════════════

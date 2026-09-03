@@ -613,7 +613,7 @@ impl MdsControl for MdsControlService {
                 volume_file: String::new(),
                 message: "this MDS runs with state.backend: memory, which does not survive a \
                           restart; per-volume stripe geometry would be silently lost. Switch the \
-                          MDS to state.backend: sqlite, or drop the pnfs.flint.io/stripeSize and \
+                          MDS to state.backend: sqlite, or drop the pnfs.chert.us/stripeSize and \
                           stripeWidth parameters from the StorageClass"
                     .into(),
                 nfs_port: self.nfs_port as u32,
@@ -840,7 +840,7 @@ impl MdsControl for MdsControlService {
         // also the loosest possible setting, and gives a PVC author no
         // way to ask for anything tighter.
         //
-        // `dir_gid` + `dir_mode` (StorageClass `pnfs.flint.io/dirGid`
+        // `dir_gid` + `dir_mode` (StorageClass `pnfs.chert.us/dirGid`
         // and `dirMode`) let a workload run with a `fsGroup` instead:
         // chgrp the volume root to that gid, set the mode, and set the
         // setgid bit so files created inside inherit the group. Without

@@ -23,7 +23,7 @@
 //! A bare apply has one bad direction: during a fleet upgrade an OLD
 //! operator that restarts would stomp the NEW schema back down and
 //! prune everyone's new knobs. So the CRD carries
-//! `flint.io/crd-schema-version`, and the operator refuses to apply
+//! `chert.us/crd-schema-version`, and the operator refuses to apply
 //! over a version higher than its own — it degrades loudly instead,
 //! which is the correct behaviour for "someone is mid-upgrade and I am
 //! the old one".
@@ -36,7 +36,7 @@ use tracing::{error, info, warn};
 use super::crd::FlintShare;
 use super::reconcile::FIELD_MANAGER;
 
-pub const SCHEMA_VERSION_ANNOTATION: &str = "flint.io/crd-schema-version";
+pub const SCHEMA_VERSION_ANNOTATION: &str = "chert.us/crd-schema-version";
 
 /// Bump on EVERY schema change (a new spec field, a new CEL rule, a
 /// new printer column). It is what tells a mixed-version fleet which
@@ -212,7 +212,7 @@ mod tests {
     fn the_crd_we_would_install_is_stamped() {
         let crd = desired_crd();
         assert_eq!(served_version(&crd), Some(SCHEMA_VERSION));
-        assert_eq!(crd.metadata.name.as_deref(), Some("flintshares.flint.io"));
+        assert_eq!(crd.metadata.name.as_deref(), Some("flintshares.chert.us"));
     }
 
     /// The upgrade direction that must work: a new operator raises the

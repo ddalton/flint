@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the four s3.flint.io images for the LOCAL kind rig and load them.
+# Build the four s3.chert.us images for the LOCAL kind rig and load them.
 #
 #   ./build-images.sh [kind-cluster-name]     (default: flint-s3csi)
 #

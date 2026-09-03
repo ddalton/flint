@@ -77,7 +77,7 @@ async fn witness() -> KubeWitness {
 
 /// Remove what a leg made. Called on the way out of every test; a leg
 /// that fails early leaves its objects behind ON PURPOSE, labelled and
-/// findable with `kubectl get cm -l flint.io/kind=composition`.
+/// findable with `kubectl get cm -l chert.us/kind=composition`.
 async fn sweep(vols: &[String], targets: &[String]) {
     let s = store().await;
     for v in vols {

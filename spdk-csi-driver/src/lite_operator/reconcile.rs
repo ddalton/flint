@@ -54,7 +54,7 @@ use super::render::{self, RenderDefaults};
 pub const FIELD_MANAGER: &str = "flint-lite-operator";
 /// Finalizer name. Its only job is to give the operator a chance to
 /// honor `reclaim` before the CR (and with it, owner GC) disappears.
-pub const FINALIZER: &str = "flint.io/share-protection";
+pub const FINALIZER: &str = "chert.us/share-protection";
 
 /// Steady-state re-check. Drift repair does not depend on this (SSA
 /// re-applies on every event), so it is deliberately slow.
@@ -101,8 +101,8 @@ const RENDER_GRACE_FLOOR: Duration = Duration::from_secs(120);
 /// it last proved it. Both halves are needed — the hash alone cannot
 /// tell a match that is one reconcile old from one that is a week old,
 /// and a level-triggered operator must not let drift survive forever.
-const ANN_RENDER_HASH: &str = "flint.io/render-hash";
-const ANN_RENDER_VERIFIED: &str = "flint.io/render-verified-at";
+const ANN_RENDER_HASH: &str = "chert.us/render-hash";
+const ANN_RENDER_VERIFIED: &str = "chert.us/render-verified-at";
 
 /// How long a parked share may coast on a matching hash before the
 /// operator re-asserts everything regardless. Ten parked requeues.
@@ -471,7 +471,7 @@ pub fn claim_plan(
 /// Secret still rotates the hub — on the next periodic reconcile
 /// rather than instantly. The label buys immediacy, not correctness,
 /// which is why adding it can be a warning rather than a failure.
-pub const LABEL_CREDENTIALS: &str = "flint.io/credentials";
+pub const LABEL_CREDENTIALS: &str = "chert.us/credentials";
 
 /// Whether a Secret carries the watch label, whatever its value.
 pub fn is_watched_secret(secret: &Secret) -> bool {
@@ -2755,7 +2755,7 @@ async fn write_status(ctx: &Ctx, share: &FlintShare, status: FlintShareStatus) -
     let ns = share.namespace().unwrap_or_default();
     let api: Api<FlintShare> = Api::namespaced(ctx.client.clone(), &ns);
     let patch = json!({
-        "apiVersion": "flint.io/v1alpha1",
+        "apiVersion": "chert.us/v1alpha1",
         "kind": "FlintShare",
         "status": status,
     });
@@ -3345,7 +3345,7 @@ mod tests {
         let ours = dep_with_checksum(
             None,
             Some(BTreeMap::from([(
-                "flint.io/share".to_string(),
+                "chert.us/share".to_string(),
                 "tenant-a".to_string(),
             )])),
         );

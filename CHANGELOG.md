@@ -13,11 +13,43 @@ covered by the stability guarantee.
 ## [Unreleased]
 
 The passthrough and lean sidecar-injection webhooks are gone. Both
-front ends are delivered by one CSI node DaemonSet, `s3.flint.io`.
+front ends are delivered by one CSI node DaemonSet, `s3.chert.us`. Every
+machine identifier moved off `flint.io` to `chert.us`.
 
 ### Changed
 
-- **`s3.flint.io` (new chart `flint-s3-csi`) replaces both mutating
+- **Machine identifiers moved from `flint.io` to `chert.us` (BREAKING).**
+  The API group is `chert.us/v1alpha1`, the S3 CSI driver is
+  `s3.chert.us`, and every label, annotation and StorageClass parameter
+  key moves with them — `nfs.chert.us/server-ip`, `pnfs.chert.us/layout`,
+  `chert.us/share`, `chert.us/mount`, and the rest. The product is still
+  Flint: crate and binary names (`flint-s3-csi-node`, `flint-s3-broker`,
+  `flint-sync`), Docker Hub repositories, chart names (`flint-s3-csi`,
+  `flint-lean`, `flint-passthrough`) and the CRD kinds
+  (`FlintPassthroughMount`, `FlintLeanWorkspace`, `FlintShare`) are
+  unchanged. Identifiers carry the bare domain rather than
+  `flint.chert.us` deliberately: a future brand change should touch
+  charts and docs, never an API group. `home:` on every chart is now
+  <https://flint.chert.us>, with the repository moved to `sources:`.
+
+  This project's SemVer surface names the StorageClass `parameters`
+  schema and the `volume_context` key namespace, so this is breaking by
+  the definition at the top of this file — and no migration is attempted.
+  `flintshares.chert.us` is a different CustomResourceDefinition from
+  `flintshares.flint.io`, so an existing cluster would gain an empty new
+  CRD while its old CRs sat untouched under the old one; a PV annotated
+  `nfs.flint.io/server-ip` is simply invisible to a driver reading
+  `nfs.chert.us/server-ip`. On a cluster already running Flint: drain the
+  volumes, uninstall the old charts including their CRDs, then install
+  the new ones. The node driver's plugin directory moves as well
+  (`/var/lib/kubelet/plugins/s3.flint.io` becomes `.../s3.chert.us`), so
+  no mount may be live across that step.
+
+  Drill captures under `tests/chaos/artifacts/` keep the old identifiers
+  on purpose; they are dated evidence, not current configuration. See
+  `tests/chaos/README.md`.
+
+- **`s3.chert.us` (new chart `flint-s3-csi`) replaces both mutating
   webhooks.** A pod gets an S3 prefix or a lean workspace as ONE
   `csi:` ephemeral volume naming a `FlintPassthroughMount` or
   `FlintLeanWorkspace` in its own namespace — no label, no injected
@@ -1271,11 +1303,11 @@ is one door in front of all of them.
   that share's Secret; `flint-hub-gateway --derive-for <ns>/<name>`
   reads the CR and prints what the serving gateway will compute, so
   there is one implementation and not two. Revoke one project by
-  bumping its `flint.io/api-token-version` annotation.
+  bumping its `chert.us/api-token-version` annotation.
 
 - **A project may have several volumes.** Addressed as
   `/v1/projects/<id>/volumes/<v>/files*`, resolved from
-  `flint.io/project-id` + `flint.io/volume-id`. Nothing in the operator
+  `chert.us/project-id` + `chert.us/volume-id`. Nothing in the operator
   reads the project id — uniqueness keys on the bucket prefix subtree —
   so N hubs per project was always legal and is now addressable. A bare
   path on a multi-volume project answers **409 naming the choice**,
@@ -1966,7 +1998,7 @@ confirmed to fail first.
 
 - **The front-door contract** (`docs/flint-lite-operator.md`): the
   deterministic share name (`fs-<project-id>`) that makes ensure-live
-  idempotent across racing replicas, the `flint.io/project-id` label
+  idempotent across racing replicas, the `chert.us/project-id` label
   and its PROJECT printer column, the ensure-live loop, mandatory
   keepalive, and how to answer "why did my project suspend". Plus a
   narrow `frontDoor` ClusterRole (off by default): get/list/watch/
@@ -1981,7 +2013,7 @@ confirmed to fail first.
   bounced, carry on" from "remount before trusting that handle". The
   operator carries the last known value forward rather than blanking it
   on a pass that made no round trip.
-- **`flint.io/wake-intent: warm|cold` is now wired**, having been a
+- **`chert.us/wake-intent: warm|cold` is now wired**, having been a
   parsed-but-inert annotation a front door might reasonably have
   started writing. It overrides `hydrateWarmAfterImport` for exactly
   one boot — what the front door knows and the operator cannot, namely
@@ -2026,7 +2058,7 @@ confirmed to fail first.
   — while the restart costs mounted clients a ~90s grace window. Without
   this, consuming `wake-intent` would roll the hub minutes after it
   woke, hanging the agent the wake was for.
-- **The Secret watch is label-selected** (`flint.io/credentials`).
+- **The Secret watch is label-selected** (`chert.us/credentials`).
   Unselected, it held every Secret in the cluster in the operator's
   memory — service-account tokens, other tenants' credentials — to
   notice changes in the few a FlintShare names. A missing label is not
@@ -2065,7 +2097,7 @@ confirmed to fail first.
   visible and removable with one command. Now refused in both paths,
   with a `ReclaimRefused` event.
 - **A request stamp from the far future no longer pins a share awake.**
-  `flint.io/requested-at` is clamped to "wanted right now" when it is
+  `chert.us/requested-at` is clamped to "wanted right now" when it is
   in the future, which is the right reading of ordinary clock skew and
   the wrong one without a ceiling: a front door running an hour fast
   held the share up for an hour, reporting `requested 0s ago` every
@@ -2103,7 +2135,7 @@ confirmed to fail first.
   during the post-restart grace window answer 503 with a `Retry-After`
   rather than failing opaquely.
 - **The idle ladder** (`spec.idle`): a quiet share scales to zero and
-  keeps its PVC (`IdleSuspended`); stamping `flint.io/requested-at`
+  keeps its PVC (`IdleSuspended`); stamping `chert.us/requested-at`
   brings it back. Hibernation additionally deletes the PVC and is
   refused at admission without `spec.bucket`, because that PVC is then
   the only copy. **Suspending requires two independent signals to
@@ -2124,7 +2156,7 @@ confirmed to fail first.
 
 ### Added — the flint-lite operator (`FlintShare`)
 
-- **`flint.io/v1alpha1 FlintShare`** and `flint-lite-operator`: one
+- **`chert.us/v1alpha1 FlintShare`** and `flint-lite-operator`: one
   custom resource per volume instead of one helm release per volume.
   The operator renders the same four objects the lite chart renders
   (ConfigMap, RWO PVC, Service, single-replica Recreate Deployment) —
@@ -2155,7 +2187,7 @@ confirmed to fail first.
   writers on one `state.db`, which the epoch provably cannot fence
   (both pods self-recognize as the holder).
 - **The operator owns its CRD**: it server-side-applies its compiled-in
-  copy at startup, guarded by a `flint.io/crd-schema-version`
+  copy at startup, guarded by a `chert.us/crd-schema-version`
   annotation so an old operator cannot stomp a newer schema. Helm never
   upgrades `crds/`, and a frozen structural schema silently prunes
   every knob added later.
@@ -2589,9 +2621,9 @@ Never MDS-specific; standalone passed only because its export tree had no
 such links.
 
 **pNFS volumes are now tunable per PVC.** New StorageClass parameters
-`pnfs.flint.io/{stripeSize,stripeWidth,dirGid,dirMode}`, persisted through
+`pnfs.chert.us/{stripeSize,stripeWidth,dirGid,dirMode}`, persisted through
 the state backend and reloaded at MDS start so placement survives a
-restart, plus online expand. Unknown `pnfs.flint.io/*` keys are REFUSED at
+restart, plus online expand. Unknown `pnfs.chert.us/*` keys are REFUSED at
 provision — a typo used to be indistinguishable from success. The chart
 can finally render a pNFS StorageClass at all (`storageclass.yaml`
 hardcodes the four SPDK parameters, so `--set
@@ -3311,7 +3343,7 @@ version bump.
   pNFS data path. Default StorageClasses use single-server NFS or
   direct SPDK block per existing chart configuration.
 - **`volume_context` namespaces.** Production keys live under
-  `flint.csi.storage.io/*` (SPDK mode) and `pnfs.flint.io/*`
+  `flint.csi.storage.io/*` (SPDK mode) and `pnfs.chert.us/*`
   (pNFS mode). These namespaces are stable from 1.0.0; new keys may
   be added in `MINOR` releases, removals or renames require `MAJOR`.
 - **VolumeSnapshot CRD preflight.** At controller startup, the driver

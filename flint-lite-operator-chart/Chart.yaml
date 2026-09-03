@@ -22,4 +22,6 @@ keywords:
   - s3
   - operator
   - flint
-home: https://github.com/ddalton/flint
+home: https://flint.chert.us
+sources:
+  - https://github.com/ddalton/flint

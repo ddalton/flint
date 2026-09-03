@@ -60,7 +60,7 @@ metadata:
   labels:
     {{- include "flint-lite-operator.gatewayLabels" . | nindent 4 }}
 rules:
-  - apiGroups: ["flint.io"]
+  - apiGroups: ["chert.us"]
     resources: ["flintshares"]
     verbs: ["get", "list", "watch", "patch"]
 ---

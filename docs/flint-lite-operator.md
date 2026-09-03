@@ -10,7 +10,7 @@ computed values).
 The operator replaces that with one custom resource per volume:
 
 ```yaml
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata:
   name: tenant-a
@@ -167,7 +167,7 @@ neither edited nor replaced — the id is wedged until someone with
 cluster access deletes the row. The remedy is an annotation:
 
 ```
-kubectl annotate flintshare <name> flint.io/abandon=true
+kubectl annotate flintshare <name> chert.us/abandon=true
 ```
 
 The operator deletes the CR, and only under all of:
@@ -341,7 +341,7 @@ door speaks plain Kubernetes, and the operator does the rest.
 ### One project, one name, one prefix
 
 Derive the share's name from the project id — `fs-<project-id>` — and
-label it `flint.io/project-id`. The derived name is what makes
+label it `chert.us/project-id`. The derived name is what makes
 ensure-live idempotent: two front-door replicas racing a first touch
 issue the same `create`, one gets `409 AlreadyExists`, and both
 proceed. Allocating names any other way lets that race create two
@@ -356,8 +356,8 @@ not something this cluster can enforce** — see the section above.
 
 ```
 GET  flintshares/fs-<id>          → 404? create it
-PATCH metadata.annotations         → flint.io/requested-at: <now, RFC3339>
-                                     flint.io/wake-intent: warm   (optional)
+PATCH metadata.annotations         → chert.us/requested-at: <now, RFC3339>
+                                     chert.us/wake-intent: warm   (optional)
 poll GET until .status.phase == Ready
 read .status.address               → mount it (NFS only — see below)
 ```
@@ -453,7 +453,7 @@ default, because capacity is a decision. One share, one hub pod, one
 claim, nothing shared between shares. That is what makes
 `kubectl delete flintshare` a complete cleanup. (A project may own
 several shares — uniqueness keys on the bucket prefix subtree and
-nothing here reads `flint.io/project-id` — so "one claim" is per
+nothing here reads `chert.us/project-id` — so "one claim" is per
 volume, not per project.)
 
 One claim per share is a statement about provisioning, not about how
@@ -878,7 +878,7 @@ happens to the disk then. The bucket is never touched under any policy.
 
 A share comes down only when **both** are true:
 
-1. the front door's `flint.io/requested-at` annotation is older than
+1. the front door's `chert.us/requested-at` annotation is older than
    `suspendAfterSecs`, and
 2. the hub's own `/status` reports `activity.idleSecs` past the same
    threshold.
@@ -918,7 +918,7 @@ The front door touches an annotation:
 
 ```sh
 kubectl annotate flintshare fs-myproject \
-  flint.io/requested-at="$(date -u +%FT%TZ)" --overwrite
+  chert.us/requested-at="$(date -u +%FT%TZ)" --overwrite
 ```
 
 That is the whole protocol. Keep touching it on a heartbeat shorter
@@ -981,7 +981,7 @@ chart's exactly, and the operator server-side-applies over the
 existing objects:
 
 ```yaml
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata:
   name: flint-lite            # == the helm release's object names
@@ -1022,7 +1022,7 @@ structural schema silently PRUNES unknown fields — a knob added in a
 later flint release would be accepted by `kubectl apply`, dropped by
 the API server, and quietly take its server default.
 
-The CRD carries `flint.io/crd-schema-version`, and an operator refuses
+The CRD carries `chert.us/crd-schema-version`, and an operator refuses
 to apply over a version NEWER than its own, so a briefly-restarted old
 replica cannot stomp a new schema mid-rollout. `manageCrd: false`
 disables the mechanism for clusters whose policy forbids it — then

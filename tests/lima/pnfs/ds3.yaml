@@ -3,7 +3,7 @@
 # does not re-map existing files' stripes. Bind on host port 20493;
 # serves files out of /tmp/flint-pnfs-ds3.
 
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: ds
 

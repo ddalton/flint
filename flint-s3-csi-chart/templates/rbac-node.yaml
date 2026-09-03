@@ -27,7 +27,7 @@ metadata:
   name: {{ include "flint-s3-csi.node.name" . }}
   labels: {{- include "flint-s3-csi.node.labels" . | nindent 4 }}
 rules:
-  - apiGroups: ["flint.io"]
+  - apiGroups: ["chert.us"]
     resources: ["flintpassthroughmounts", "flintleanworkspaces"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]

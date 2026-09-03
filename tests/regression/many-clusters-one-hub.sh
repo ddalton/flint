@@ -209,7 +209,7 @@ ka -n "$OPNS" rollout status deployment/flint-lite-operator --timeout=180s >/dev
 
 SHARE=projx
 ka -n "$NS" apply -f - >/dev/null <<EOF || fail "FlintShare refused"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata: { name: $SHARE, namespace: $NS }
 spec:
@@ -308,7 +308,7 @@ else
 fi
 
 # ── L3 ─ a thinking agent in another cluster ───────────────────────────
-# The idle ladder suspends when TWO signals agree: `flint.io/requested-at`
+# The idle ladder suspends when TWO signals agree: `chert.us/requested-at`
 # is stale AND the hub's own activity clock says idle. NFS I/O does count
 # as activity and is source-agnostic, so a BUSY remote agent holds the
 # hub up for free. The gap the ladder's own comment names is the agent
@@ -319,7 +319,7 @@ fi
 #      stamp it."                                  (lite_gateway/proxy.rs)
 #
 # Cross-cluster, that gap is structural rather than merely awkward.
-# `flint.io/requested-at` is an annotation on a FlintShare that lives in
+# `chert.us/requested-at` is an annotation on a FlintShare that lives in
 # the HUB's API server; a workload cluster has no credential for it and
 # no CRD to read. So the keepalive that holds a thinking agent up cannot
 # be issued by the agent, only by a front door the fleet has to build.
@@ -344,7 +344,7 @@ for i in $(seq 1 30); do
 done
 if [ -n "$SUSPENDED_AT" ]; then
   bad "the hub SUSPENDED after ~${SUSPENDED_AT}s with a live remote mount held open (phase=$P)"
-  note "a remote cluster has no path to flint.io/requested-at, so nothing there can wake it"
+  note "a remote cluster has no path to chert.us/requested-at, so nothing there can wake it"
 else
   pass "the hub stayed up — C's I/O held it (phase=$P); the thinking-agent gap needs a front door"
 fi
@@ -387,7 +387,7 @@ ka -n "$NS" patch flintshare $SHARE --type=merge \
 mount_at "$CB" agent >/dev/null 2>&1
 idle_reason() { ka -n "$NS" get flintshare $SHARE -o jsonpath='{.status.conditions}' 2>/dev/null \
   | jq -r '.[]|select(.type=="IdleEligible")|.message' 2>/dev/null; }
-idle_state()  { ka -n "$NS" get flintshare $SHARE -o jsonpath='{.metadata.annotations.flint\.io/idle-state}' 2>/dev/null; }
+idle_state()  { ka -n "$NS" get flintshare $SHARE -o jsonpath='{.metadata.annotations.chert\.us/idle-state}' 2>/dev/null; }
 
 note "CONTROL: client CONNECTED and quiet, 3x the 60s threshold"
 CTRL_SUSPENDED=""
@@ -431,7 +431,7 @@ else
     elif [ -n "$P_SUSPENDED" ]; then
       bad "CONFIRMED: the guard engaged, then the lease was retired at ~${LEASE_ZERO:-?}s and the \
 share SUSPENDED at ~${P_SUSPENDED}s — under a client that is still mounted and still wants it"
-      note "the client's cluster has no path to flint.io/requested-at, so nothing there can wake it"
+      note "the client's cluster has no path to chert.us/requested-at, so nothing there can wake it"
     else
       pass "the guard held for the whole partition — suspendWithSessions:false is partition-safe"
     fi

@@ -206,9 +206,9 @@ helm install flint-lite-operator "$OP_CHART" -n "$OPNS" --create-namespace \
   >/tmp/reprov-helm.log 2>&1 || { tail -20 /tmp/reprov-helm.log; fail "helm install failed"; }
 kubectl -n "$OPNS" rollout status deployment/flint-lite-operator --timeout=180s >/dev/null 2>&1 \
   || fail "operator never became Ready"
-kubectl wait --for=condition=established --timeout=60s crd/flintshares.flint.io >/dev/null 2>&1 \
+kubectl wait --for=condition=established --timeout=60s crd/flintshares.chert.us >/dev/null 2>&1 \
   || fail "the CRD never became Established"
-STAMP=$(kubectl get crd flintshares.flint.io -o jsonpath='{.metadata.annotations.flint\.io/crd-schema-version}')
+STAMP=$(kubectl get crd flintshares.chert.us -o jsonpath='{.metadata.annotations.chert\.us/crd-schema-version}')
 [ "$STAMP" = "6" ] || fail "CRD schema stamp is '$STAMP', expected 6 (reprovision + autoExpand + Terminating + conflictWith)"
 pass "operator up, CRD stamped at schema $STAMP"
 
@@ -226,7 +226,7 @@ mk_share() {  # $1 name, $2 size, $3 reprovision(true/false), $4 bucket(yes/no)
     epochHeartbeatSecs: 2
     epochLeaseMisses: 3"
   kubectl -n "$NS" apply -f - >/dev/null <<EOF || fail "FlintShare $1 refused"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata: { name: $1 }
 spec:$extra
@@ -250,7 +250,7 @@ UID_BEFORE=$(claim_uid big)
 
 # Write a corpus through the file API and record checksums. The file
 # API is the hub's own door, so this needs no NFS mount in the drill.
-POD=$(kubectl -n "$NS" get pod -l flint.io/share=big -o jsonpath='{.items[0].metadata.name}')
+POD=$(kubectl -n "$NS" get pod -l chert.us/share=big -o jsonpath='{.items[0].metadata.name}')
 [ -n "$POD" ] || fail "no hub pod for share big"
 IP=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.podIP}')
 SUM1=""; SUM2=""; SUM3=""
@@ -323,7 +323,7 @@ esac
 # ── leg 4: the data comes back ───────────────────────────────────────
 say "leg 4: the share returns to Ready and every byte comes back"
 wait_phase big Ready 420
-POD=$(kubectl -n "$NS" get pod -l flint.io/share=big -o jsonpath='{.items[0].metadata.name}')
+POD=$(kubectl -n "$NS" get pod -l chert.us/share=big -o jsonpath='{.items[0].metadata.name}')
 [ -n "$POD" ] || fail "no hub pod after the rebuild"
 ok=0; bad=0
 for i in 1 2 3; do
@@ -361,7 +361,7 @@ esac
 # ── leg 6: auto-expand grows a deliberately under-sized claim ────────
 say "leg 6: autoExpand grows a 1Gi claim to fit the project"
 kubectl -n "$NS" apply -f - >/dev/null <<EOF || fail "FlintShare grow refused"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata: { name: grow }
 spec:
@@ -405,7 +405,7 @@ GUID=$(claim_uid grow)
 # Put ~600 MiB in. With a 100% buffer that wants ~1.2Gi > 1Gi, so the
 # operator must raise the target. Written through the file API in
 # chunks so the hub's manifest reflects real object sizes.
-GPOD=$(kubectl -n "$NS" get pod -l flint.io/share=grow -o jsonpath='{.items[0].metadata.name}')
+GPOD=$(kubectl -n "$NS" get pod -l chert.us/share=grow -o jsonpath='{.items[0].metadata.name}')
 [ -n "$GPOD" ] || fail "no hub pod for share grow"
 for i in 1 2 3 4 5 6; do
   kubectl -n "$NS" exec "$GPOD" -- sh -c \

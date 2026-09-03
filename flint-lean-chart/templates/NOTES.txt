@@ -2,7 +2,7 @@ flint-lean is installed in namespace {{ .Release.Namespace }}.
 
 Declare a workspace:
 
-  apiVersion: flint.io/v1alpha1
+  apiVersion: chert.us/v1alpha1
   kind: FlintLeanWorkspace
   metadata: { name: proj1 }
   spec:
@@ -22,7 +22,7 @@ Declare a workspace:
   # claim on the fly; resolve it explicitly.
 
 Then give a pod the workspace as ONE volume — no label, no sidecar,
-no Secret in the pod's namespace (the s3.flint.io node driver from
+no Secret in the pod's namespace (the s3.chert.us node driver from
 flint-s3-csi-chart must be installed; the CR's spec.consumers names the
 ServiceAccounts that may mount it, and spec.uid the uid the syncer
 runs as):
@@ -32,8 +32,8 @@ runs as):
     volumes:
       - name: ws
         csi:
-          driver: s3.flint.io
-          volumeAttributes: { flint.io/workspace: proj1 }
+          driver: s3.chert.us
+          volumeAttributes: { chert.us/workspace: proj1 }
     containers:
       - volumeMounts: [{ name: ws, mountPath: /workspace }]
 

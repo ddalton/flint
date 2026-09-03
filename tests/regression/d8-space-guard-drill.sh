@@ -36,7 +36,7 @@ trap cleanup EXIT
 
 # The hub's export root inside its container (render.rs: DATA_MOUNT/exports).
 EXPORT_ROOT=/data/exports
-hub_pod() { kubectl -n "$NS" get pods -l flint.io/share=$SHARE \
+hub_pod() { kubectl -n "$NS" get pods -l chert.us/share=$SHARE \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null; }
 avail_bytes() {
   local p; p=$(hub_pod); [ -n "$p" ] || { echo ""; return; }
@@ -92,9 +92,9 @@ kubectl -n "$NS" create secret generic tok-d8 \
 
 say "a share with a deliberately small disk (${PVC_SIZE})"
 kubectl apply -f - >/dev/null 2>&1 <<EOF || fail "share refused"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
-metadata: { name: $SHARE, namespace: $NS, labels: { flint.io/project-id: d8 } }
+metadata: { name: $SHARE, namespace: $NS, labels: { chert.us/project-id: d8 } }
 spec:
   bucket: $BUCKET
   region: $REGION

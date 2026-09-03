@@ -118,7 +118,7 @@ guard_clock() {
 # variables. Never measure a fleet in motion.
 guard_settle() {
   local want got rej i
-  want=$(k -n flint-system get deploy/flint-pnfs-mds -o jsonpath='{.metadata.annotations.flint\.io/ds-count}' 2>/dev/null)
+  want=$(k -n flint-system get deploy/flint-pnfs-mds -o jsonpath='{.metadata.annotations.chert\.us/ds-count}' 2>/dev/null)
   want=${want:-3}
   for i in $(seq 1 "$DS_SETTLE_TRIES"); do
     got=$(k -n flint-system get pods -l app=flint-pnfs-ds \

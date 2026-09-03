@@ -44,7 +44,7 @@ metadata:
 rules:
   # The API this operator serves.
   # `delete` is used on EXACTLY ONE path: a share that lost bucket-subtree
-  # arbitration, carries the owner's `flint.io/abandon: "true"`, and owns
+  # arbitration, carries the owner's `chert.us/abandon: "true"`, and owns
   # nothing — no claim, no Deployment, no epoch. It exists because
   # `keyPrefix` is CEL-immutable and the CR name is derived from the
   # project id, so a refused share can be neither edited nor replaced;
@@ -53,10 +53,10 @@ rules:
   # front-door role on purpose: the operator can check what the share
   # owns before acting, and a web service handling untrusted input
   # cannot.
-  - apiGroups: ["flint.io"]
+  - apiGroups: ["chert.us"]
     resources: ["flintshares"]
     verbs: ["get", "list", "watch", "update", "patch", "delete"]
-  - apiGroups: ["flint.io"]
+  - apiGroups: ["chert.us"]
     resources: ["flintshares/status", "flintshares/finalizers"]
     verbs: ["get", "update", "patch"]
   # The operator owns its own CRD (see the note above).

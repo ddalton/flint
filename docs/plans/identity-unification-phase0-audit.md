@@ -17,15 +17,15 @@ stay, but get consumed *after* the ref is parsed.
 |---|---|---|---|
 | 1 | `nfs-server-` handle prefix | NodeUnstage main.rs:2574; `record_pv_name` (replica_sync:776) + its 9 callers; orphan_sweep:225 | `parse_backing_handle` / `storage_id_of_handle` |
 | 2 | volume_context `originalVolumeId` | ControllerPublish main.rs:1443; NodeStage main.rs:2006 (both error InvalidArgument if absent) | retired — same fact as #1, parsed from the handle (attr stays written for debuggability) |
-| 3 | volume_context `nfs.flint.io/enabled` | ControllerPublish main.rs:1470 (`is_rwx`) | resolver (access modes) |
-| 4 | `nfs.flint.io/backend == emptydir` | ControllerPublish main.rs:1475; ControllerExpand main.rs:1905 | stays — backend variant, not role; consumed after parse |
+| 3 | volume_context `nfs.chert.us/enabled` | ControllerPublish main.rs:1470 (`is_rwx`) | resolver (access modes) |
+| 4 | `nfs.chert.us/backend == emptydir` | ControllerPublish main.rs:1475; ControllerExpand main.rs:1905 | stays — backend variant, not role; consumed after parse |
 | 5 | capability access_mode `MultiNodeReaderOnly` | ControllerPublish main.rs:1459 (`is_rox`) | resolver (`NfsShared{read_only}`) |
 | 6 | volume_context `type == "nfs"` | NodeStage early-exit (~main.rs:2042) | resolver |
 | 7 | `driver.pv_access_modes()` | ControllerUnpublish main.rs:1692 (c879bc3); NodeUnstage main.rs:2605 (d7490de) | THE resolver's source of truth, cached |
 | 8 | findmnt fstype on staging path | NodeUnstage main.rs:2617 | survives only inside the resolver as the PV-unreadable fallback |
-| 9 | publish_context `nfs.flint.io/server-ip` | NodePublish (~main.rs:2902) | stays — tells the client *where* to mount, not what it is |
+| 9 | publish_context `nfs.chert.us/server-ip` | NodePublish (~main.rs:2902) | stays — tells the client *where* to mount, not what it is |
 | 10 | PV-object classification: `is_rwx_pv` / `nfs_backing_parent` (replica_sync:801/790) | cutover:769/783/805, epoch_scheduler:483, catchup:2285, hot_rejoin:2410, node_agent:1843/2628 | stays as the PV-object form; bodies co-located with identity.rs parsers |
-| 11 | pNFS keys `pnfs.flint.io/mds-ip` | DeleteVolume main.rs:1226; NodePublish (~main.rs:2843) | out of scope — pNFS is a disjoint backend, checked before ref parsing |
+| 11 | pNFS keys `pnfs.chert.us/mds-ip` | DeleteVolume main.rs:1226; NodePublish (~main.rs:2843) | out of scope — pNFS is a disjoint backend, checked before ref parsing |
 
 ## 2. The behavior matrix (the contract)
 
@@ -39,7 +39,7 @@ RWX/ROX *user* handle (attachments are NFS clients), **NfsBacking** =
 
 | RPC (site) | Block | NfsShared (user RWX/ROX) | NfsBacking (`nfs-server-*`) |
 |---|---|---|---|
-| CreateVolume (main.rs:892) | mint storage id, create lvols/replicas | same + `nfs.flint.io/*` context; server pod NOT created here | n/a — backing PV minted by rwx_nfs (:219,269) during publish flow, never by the provisioner |
+| CreateVolume (main.rs:892) | mint storage id, create lvols/replicas | same + `nfs.chert.us/*` context; server pod NOT created here | n/a — backing PV minted by rwx_nfs (:219,269) during publish flow, never by the provisioner |
 | DeleteVolume (main.rs:1210) | replica/lvol/target teardown | `delete_nfs_server_pod` + bounded 90 s flush wait (567c582, rwx_nfs:647) → backing detach → same teardown (storage id is the same string) | never arrives — backing PV is driver-managed; refuse if ever seen |
 | ControllerPublish (main.rs:1432) | export + host-fence to node (publish_context: NQN/addr) | ensure NFS server pod (1498–1544), wait ready, return `server-ip` context; ROX via signal #5 | resolve via `originalVolumeId` (#2) → block export + fence to the *server's* node |
 | ControllerUnpublish (main.rs:1659) | if `volume_info.node_name != node_id` → `remove_nvmeof_target` (remote-consumer fencing) | **no-op** on the target (c879bc3 at 1692: departing party is an NFS client) | block-path unpublish bookkeeping; target lifecycle belongs to DeleteVolume |

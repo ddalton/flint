@@ -82,7 +82,7 @@ snap() {
   local share="$1" out="$2" idx="$3" s d
   s=$(k get flintshare "$share" -o json 2>/dev/null)
   [ -z "$s" ] && return 0
-  d=$(k get deploy,svc -l "flint.io/share=$share" -o json 2>/dev/null)
+  d=$(k get deploy,svc -l "chert.us/share=$share" -o json 2>/dev/null)
   [ -z "$d" ] && d='{"items":[]}'
   jq -cn --argjson s "$s" --argjson d "$d" --arg i "$idx" --arg t "$(date +%s)" '
     ($d.items // []) as $it |
@@ -113,7 +113,7 @@ cnt() { jq -s "map(select($1)) | length" "$2" 2>/dev/null; }
 
 mkshare() {  # mkshare <name> <svctype>
   k apply -f - >/dev/null 2>&1 <<EOF
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata:
   name: $1
@@ -243,7 +243,7 @@ spec:
     - cidr: "192.0.2.0/29"
 EOF
 fi
-SVC=$(k get svc -l flint.io/share=lb-b -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+SVC=$(k get svc -l chert.us/share=lb-b -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 [ -n "$SVC" ] || fatal "no Service for lb-b"
 
 if [ "$LB_MODE" = "cilium-lb-ipam" ]; then
@@ -292,7 +292,7 @@ for _ in $(seq 1 90); do
   if [ "$C_PHASE" = "Ready" ]; then C_READY_AT=$(date +%s); break; fi
   sleep 2
 done
-CSVC=$(k get svc -l flint.io/share=cip -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+CSVC=$(k get svc -l chert.us/share=cip -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 WANT="$CSVC.$NS.svc.cluster.local:$PORT"
 if [ "$C_PHASE" = "Ready" ] && [ "$C_ADDR" = "$WANT" ]; then
   pass "ClusterIP share Ready in $((C_READY_AT-C_T0))s with address '$C_ADDR' (the DNS form, so it took the ClusterIP branch)"

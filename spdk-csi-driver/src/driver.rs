@@ -1272,16 +1272,16 @@ impl SpdkCsiDriver {
         // and patch avoids clobbering concurrent PV updates.
         let mut annotations = serde_json::Map::new();
         annotations.insert(
-            "flint.io/block-device-backend".to_string(),
+            "chert.us/block-device-backend".to_string(),
             json!(format!("{:?}", device_info.backend_type)),
         );
         match &device_info.cleanup_data {
             CleanupData::Ublk { ublk_id } => {
-                annotations.insert("flint.io/ublk-id".to_string(), json!(ublk_id.to_string()));
+                annotations.insert("chert.us/ublk-id".to_string(), json!(ublk_id.to_string()));
             }
             CleanupData::Nvmeof { nqn, nvme_device } => {
-                annotations.insert("flint.io/nvmeof-nqn".to_string(), json!(nqn));
-                annotations.insert("flint.io/nvme-device".to_string(), json!(nvme_device));
+                annotations.insert("chert.us/nvmeof-nqn".to_string(), json!(nqn));
+                annotations.insert("chert.us/nvme-device".to_string(), json!(nvme_device));
             }
         }
         let patch = json!({ "metadata": { "annotations": annotations } });
@@ -1309,7 +1309,7 @@ impl SpdkCsiDriver {
         let annotations = pv.metadata.annotations.as_ref()
             .ok_or("No annotations found on PV")?;
 
-        let backend_str = annotations.get("flint.io/block-device-backend")
+        let backend_str = annotations.get("chert.us/block-device-backend")
             .ok_or("No block-device-backend annotation")?;
 
         let backend_type = if backend_str.contains("Nvmeof") {
@@ -1320,16 +1320,16 @@ impl SpdkCsiDriver {
 
         let cleanup_data = match backend_type {
             BlockDeviceBackend::Ublk => {
-                let ublk_id = annotations.get("flint.io/ublk-id")
+                let ublk_id = annotations.get("chert.us/ublk-id")
                     .ok_or("No ublk-id annotation")?
                     .parse::<u32>()?;
                 CleanupData::Ublk { ublk_id }
             }
             BlockDeviceBackend::Nvmeof => {
-                let nqn = annotations.get("flint.io/nvmeof-nqn")
+                let nqn = annotations.get("chert.us/nvmeof-nqn")
                     .ok_or("No nvmeof-nqn annotation")?
                     .clone();
-                let nvme_device = annotations.get("flint.io/nvme-device")
+                let nvme_device = annotations.get("chert.us/nvme-device")
                     .ok_or("No nvme-device annotation")?
                     .clone();
                 CleanupData::Nvmeof { nqn, nvme_device }
@@ -1611,7 +1611,7 @@ impl SpdkCsiDriver {
     }
 
     /// Whether the PV backing `volume_id` is a pNFS volume (tagged with
-    /// pnfs.flint.io/* volumeAttributes at create time). Used by the
+    /// pnfs.chert.us/* volumeAttributes at create time). Used by the
     /// context-free node RPCs (NodeUnstage) to classify without a
     /// volume_context. Any API failure reads as `false`: the caller
     /// falls through to the block-volume path, which has its own
@@ -1633,7 +1633,7 @@ impl SpdkCsiDriver {
         }
     }
 
-    /// The `pnfs.flint.io/layout` volumeAttribute of the PV whose
+    /// The `pnfs.chert.us/layout` volumeAttribute of the PV whose
     /// volumeHandle is `volume_id` — `Ok(Some("block"))` for pnfs-block
     /// PVs, `Ok(None)` when the PV exists without the key (files-class).
     /// `Err` when the PV cannot be found or read, which the caller must
@@ -2120,15 +2120,15 @@ impl SpdkCsiDriver {
         // the gate has ruled the missing writers gone (or the defer
         // deadline passed).
         let gate_cfg = crate::freshness_gate::GateConfig::from_env();
-        const F36C_DEFER_KEY: &str = "flint.io/f36c-defer";
-        const F36C_RISK_KEY: &str = "flint.io/acked-tail-risk";
+        const F36C_DEFER_KEY: &str = "chert.us/f36c-defer";
+        const F36C_RISK_KEY: &str = "chert.us/acked-tail-risk";
         // F46 fix 4: assembly LIVENESS, distinct from data-lineage health.
         // Run 3's record read a perfect `2/2 in_sync` (true — both legs held
         // every acked write) while the gate refused assembly forever and the
         // volume was unmountable. Sync state must not lie about data to
         // signal liveness; this marker carries "assembly is being refused"
         // instead, set while the gate defers and cleared when it stops.
-        const ASSEMBLY_BLOCKED_KEY: &str = "flint.io/assembly-blocked";
+        const ASSEMBLY_BLOCKED_KEY: &str = "chert.us/assembly-blocked";
         if gate_cfg.enabled {
             use crate::freshness_gate::{self as gate, GateDecision, LegAvailability, MissingWriter};
 
@@ -2149,7 +2149,7 @@ impl SpdkCsiDriver {
             // DEGRADED-DIRECT CORROBORATION (2026-07-30). Same idiom, second
             // reason: this assembly is headed for the single-survivor DIRECT
             // SERVE branch below — `min_required = 1`, no raid layer at all,
-            // `flint.io/degraded-direct` stamped, redundancy gone and the
+            // `chert.us/degraded-direct` stamped, redundancy gone and the
             // absent leg genuinely divergent from the next write on. That is
             // the exact outcome F36c exists to prevent, so a leg whose absence
             // would CAUSE it is corroborated as a writer whatever the record
@@ -2605,7 +2605,7 @@ impl SpdkCsiDriver {
                  redundancy lost until a replacement replica is provisioned)",
                 direct, current_node
             );
-            self.set_pv_annotation(&record_volume_id, "flint.io/degraded-direct", Some(current_node))
+            self.set_pv_annotation(&record_volume_id, "chert.us/degraded-direct", Some(current_node))
                 .await;
             crate::replica_sync::emit_pv_event(
                 &self.kube_client,
@@ -2646,7 +2646,7 @@ impl SpdkCsiDriver {
                             .unwrap_or_default();
                         // Identity-domain audit B1 (2026-07-27): ublk ids
                         // are minted from the INNER storage id and the
-                        // `flint.io/ublk-id` annotation lives on the
+                        // `chert.us/ublk-id` annotation lives on the
                         // BACKING PV — deriving both from the staged
                         // (wrapper) id made this attribution empty on RWX
                         // server nodes, defeating the converger it feeds.
@@ -2665,7 +2665,7 @@ impl SpdkCsiDriver {
                                 .get_pv_annotations(&pv)
                                 .await
                                 .unwrap_or_default()
-                                .get("flint.io/ublk-id")
+                                .get("chert.us/ublk-id")
                                 .and_then(|v| v.parse::<u32>().ok())
                             {
                                 if !expected_ids.contains(&anno) {
@@ -2741,14 +2741,14 @@ impl SpdkCsiDriver {
             } else {
                 println!("✅ [DRIVER] RAID 1 bdev created: {}", name);
             }
-            self.set_pv_annotation(&record_volume_id, "flint.io/degraded-direct", None)
+            self.set_pv_annotation(&record_volume_id, "chert.us/degraded-direct", None)
                 .await;
             // Mid-upgrade hygiene: clear any rc3-era copy on the backing PV
             // so the monitor's transition fallback can't keep exempting a
             // volume that regained its raid.
             if let Some(storage_id) = crate::identity::parse_backing_handle(volume_id) {
                 let legacy = crate::identity::backing_pv_name(storage_id);
-                self.set_pv_annotation(&legacy, "flint.io/degraded-direct", None).await;
+                self.set_pv_annotation(&legacy, "chert.us/degraded-direct", None).await;
             }
             name
         };
@@ -3049,7 +3049,7 @@ impl SpdkCsiDriver {
     }
 
     /// Best-effort PV annotation set/clear (merge patch; None removes).
-    /// Used for operational state markers like `flint.io/degraded-direct` —
+    /// Used for operational state markers like `chert.us/degraded-direct` —
     /// a failed patch must never fail the data-path operation it decorates.
     pub async fn set_pv_annotation(&self, pv_name: &str, key: &str, value: Option<&str>) {
         use k8s_openapi::api::core::v1::PersistentVolume;

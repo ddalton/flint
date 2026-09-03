@@ -69,7 +69,7 @@ const DOMAIN: &str = "flint-fileapi/v1:";
 /// the operator — it renders nothing from it and must not, or a
 /// revocation would roll the hub and cost every mounted client an NFS
 /// stall to change an HTTP credential.
-pub const ANN_TOKEN_VERSION: &str = "flint.io/api-token-version";
+pub const ANN_TOKEN_VERSION: &str = "chert.us/api-token-version";
 
 /// The identity a token is bound to.
 ///
@@ -83,7 +83,7 @@ pub struct Binding<'a> {
     pub bucket: &'a str,
     /// `spec.keyPrefix`.
     pub key_prefix: &'a str,
-    /// The `flint.io/api-token-version` annotation, 1 when absent.
+    /// The `chert.us/api-token-version` annotation, 1 when absent.
     pub version: u64,
 }
 

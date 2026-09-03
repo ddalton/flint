@@ -552,8 +552,8 @@ case "$DRILL" in
   EXPECT_BASE="$N_ALL"
   note "killing csi-node on ALL $N_ALL replica nodes INCLUDING raid host $RAID_HOST"
 
-  dd_ann()   { kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.io/degraded-direct}'   2>/dev/null; }
-  risk_ann() { kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.io/acked-tail-risk}'  2>/dev/null; }
+  dd_ann()   { kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.chert\.us/degraded-direct}'   2>/dev/null; }
+  risk_ann() { kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.chert\.us/acked-tail-risk}'  2>/dev/null; }
 
   for n in $ALL; do note "spdk-tgt restarts pre on $n: $(spdk_restarts "$n")"; done
   for n in $ALL; do
@@ -561,7 +561,7 @@ case "$DRILL" in
     note "csi-node pod on $n deleted"
   done
 
-  # SAMPLE THROUGHOUT — never at the end.  flint.io/degraded-direct is CLEARED
+  # SAMPLE THROUGHOUT — never at the end.  chert.us/degraded-direct is CLEARED
   # by the next >=2-leg assembly (driver.rs, the annotation-homing comment), so
   # a single post-hoc check would find it absent precisely BECAUSE the volume
   # recovered through a degraded serve.  That is the checkpoint-phase luck that

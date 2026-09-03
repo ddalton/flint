@@ -318,7 +318,7 @@ message CreateVolumeRequest {
   uint64 size_bytes = 2;
 
   // Per-volume stripe geometry, from StorageClass parameters
-  // `pnfs.flint.io/stripeSize` and `pnfs.flint.io/stripeWidth`.
+  // `pnfs.chert.us/stripeSize` and `pnfs.chert.us/stripeWidth`.
   // 0 means "unset — use the MDS's configured default".
   //
   // Geometry is fixed at volume creation and applies to every file
@@ -335,7 +335,7 @@ message CreateVolumeRequest {
   uint32 stripe_width = 4;
 
   // Ownership and permissions for the volume's root directory, from
-  // StorageClass parameters `pnfs.flint.io/dirGid` and `dirMode`.
+  // StorageClass parameters `pnfs.chert.us/dirGid` and `dirMode`.
   //
   // The historical behaviour — 0777, no group — is what 0 in both
   // fields still means. Setting dir_gid chgrps the volume root to that

@@ -12,8 +12,8 @@
 #   volumes:
 #     - name: data
 #       csi:
-#         driver: s3.flint.io
-#         volumeAttributes: { flint.io/mount: datasets }
+#         driver: s3.chert.us
+#         volumeAttributes: { chert.us/mount: datasets }
 #
 # and needs no label, no sidecar, no credential and no privilege — it is
 # admissible under PodSecurity `restricted`.
@@ -56,7 +56,7 @@
 # The tenant pod gets nothing. Two things do NOT change from the
 # webhook world: a mounter crash is still ENOTCONN for containers that
 # already opened the mount (recreate the pod), and the mount presents as
-# ONE uid (CR spec.uid → flint.io/uid → 65534) because NodePublish never
+# ONE uid (CR spec.uid → chert.us/uid → 65534) because NodePublish never
 # sees the pod's securityContext.
 # ─────────────────────────────────────────────────────────────────────
 

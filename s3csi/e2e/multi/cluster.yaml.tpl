@@ -30,7 +30,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata: { name: trainer, namespace: s3-tenants }
 ---
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintPassthroughMount
 metadata: { name: datasets, namespace: s3-tenants }
 spec:
@@ -42,7 +42,7 @@ spec:
   gid: 1001
   consumers: { serviceAccounts: [trainer] }
 ---
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintPassthroughMount
 metadata: { name: elsewhere, namespace: s3-tenants }
 spec:
@@ -53,7 +53,7 @@ spec:
   uid: 1001
   consumers: { serviceAccounts: [trainer] }
 ---
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace
 metadata: { name: proj, namespace: s3-tenants }
 spec:

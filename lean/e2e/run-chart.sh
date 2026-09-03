@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # RETIRED PATH (2026-09-03): the lean webhook and sidecar injector are
 # gone — a workspace reaches a pod as ONE csi: volume served by the
-# s3.flint.io node driver (docs/plans/csi-node-mount-design.md §3.5).
+# s3.chert.us node driver (docs/plans/csi-node-mount-design.md §3.5).
 # This rig labels pods and/or execs into an injected `flint-sync`
 # container, so it no longer runs as written. The CSI delivery of lean
 # is drilled by s3csi/e2e/run-s3csi.sh (S11, S13) and, across clusters,
@@ -44,7 +44,7 @@ ok "chart installed (operator Ready behind its own readiness probe)"
 
 # The CRD came from crds/ at install time; the webhook registration is
 # the operator's own doing.
-$K get crd flintleanworkspaces.flint.io > /dev/null 2>&1 || fail "CRD not installed by the chart"
+$K get crd flintleanworkspaces.chert.us > /dev/null 2>&1 || fail "CRD not installed by the chart"
 for i in $(seq 1 30); do
   $K get mutatingwebhookconfiguration flint-lean-inject > /dev/null 2>&1 && break
   sleep 2
@@ -86,7 +86,7 @@ done
 [ "$BODY" = "hello-from-agent" ] || fail "agent.txt never published (got '$BODY')"
 ok "publish reached the bucket through the chart-installed stack"
 
-if $K run bad-agent --image=busybox:stable --labels=flint.io/lean-workspace=no-such-ws \
+if $K run bad-agent --image=busybox:stable --labels=chert.us/lean-workspace=no-such-ws \
      --restart=Never --command -- sleep 1 > /dev/null 2>&1; then
   fail "a pod naming a missing workspace was ADMITTED — the gate is vacuous"
 fi

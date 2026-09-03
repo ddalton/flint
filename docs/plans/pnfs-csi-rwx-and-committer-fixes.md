@@ -25,7 +25,7 @@ always write past it into pool space). So per-volume enforcement is
 not lost — it never existed. Legacy file volumes keep their exact old
 semantics (same-size re-create ok, resize refused, root mount via
 volume-mode=file back-compat; NodePublish branches on the new
-`pnfs.flint.io/volume-mode` context key so pre-upgrade PVs are
+`pnfs.chert.us/volume-mode` context key so pre-upgrade PVs are
 untouched). Per-volume quota remains future work (option b).
 
 **Bonus finding while implementing:** `note_rename` re-keyed only the

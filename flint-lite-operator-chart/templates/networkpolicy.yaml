@@ -42,7 +42,7 @@ metadata:
 spec:
   # Every hub the operator creates, whatever its share is named. The
   # operator stamps this label on all four children (render.rs
-  # `labels()`); `flint.io/share` is the per-share one, deliberately
+  # `labels()`); `chert.us/share` is the per-share one, deliberately
   # NOT used here so a new share is covered the moment it exists.
   podSelector:
     matchLabels:

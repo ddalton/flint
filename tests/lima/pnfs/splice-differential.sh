@@ -62,7 +62,7 @@ setup_arm() { # name port splice_env
         dd if=/dev/urandom of=/srv/$n/export/f\$i.bin bs=1M count=$SIZE_MB status=none
       done
       cat > /srv/$n/mds.yaml <<CFG
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: standalone
 mds:

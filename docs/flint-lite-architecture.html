@@ -260,14 +260,14 @@
     <!-- ============ the CR ============ -->
     <rect x="30" y="70" width="390" height="470" rx="10" class="bx"/>
     <text xml:space="preserve" class="th" x="48" y="98">FlintShare — one per volume</text>
-    <text xml:space="preserve" class="tx" x="48" y="116">flint.io/v1alpha1 · namespaced</text>
+    <text xml:space="preserve" class="tx" x="48" y="116">chert.us/v1alpha1 · namespaced</text>
     <line class="hair" x1="48" y1="128" x2="402" y2="128"/>
     <text xml:space="preserve" class="mns" x="48" y="152">metadata:</text>
     <text xml:space="preserve" class="mns" x="48" y="171">  name: fs-tenant-a</text>
     <text xml:space="preserve" class="mns" x="48" y="190">  labels:</text>
-    <text xml:space="preserve" class="mns" x="48" y="209">    flint.io/project-id: tenant-a</text>
+    <text xml:space="preserve" class="mns" x="48" y="209">    chert.us/project-id: tenant-a</text>
     <text xml:space="preserve" class="mns" x="48" y="228">  annotations:</text>
-    <text xml:space="preserve" class="mns c-violet" x="48" y="247">    flint.io/requested-at: &lt;now&gt;</text>
+    <text xml:space="preserve" class="mns c-violet" x="48" y="247">    chert.us/requested-at: &lt;now&gt;</text>
     <text xml:space="preserve" class="mns" x="48" y="266">spec:</text>
     <text xml:space="preserve" class="mns" x="48" y="285">  bucket: my-team-flint</text>
     <text xml:space="preserve" class="mns" x="48" y="304">  keyPrefix: tenant-a/    # immutable</text>
@@ -408,14 +408,14 @@
 
     <text xml:space="preserve" class="th" x="1120" y="690">The front-door contract</text>
     <text xml:space="preserve" class="mns" x="1120" y="716">GET   flintshares/fs-&lt;id&gt; → 404? create</text>
-    <text xml:space="preserve" class="mns c-violet" x="1120" y="736">PATCH flint.io/requested-at: &lt;now&gt;</text>
+    <text xml:space="preserve" class="mns c-violet" x="1120" y="736">PATCH chert.us/requested-at: &lt;now&gt;</text>
     <text xml:space="preserve" class="mns" x="1120" y="756">poll  until .status.phase == Ready</text>
     <text xml:space="preserve" class="mns" x="1120" y="776">read  .status.address, .status.serverId</text>
     <text xml:space="preserve" class="tx" x="1120" y="796">a changed serverId means a fresh PVC — remount</text>
     <text xml:space="preserve" class="tx c-violet" x="1120" y="814">with a gateway in front, the middle three are one POST …/wake</text>
   </svg>
   <figcaption>
-    <b>Label the share <code>flint.io/project-id</code></b>, and <code>flint.io/volume-id</code> too once a project owns more than one — those labels are what the gateway resolves <code>/v1/projects/&lt;id&gt;/volumes/&lt;v&gt;</code> against, and <code>volume-id</code> defaults to the CR name. Deriving the name from the project id (<code>fs-&lt;project-id&gt;</code>) still works for a single-volume project and is what makes ensure-live idempotent: two front-door replicas racing a first touch issue the same create, one gets <code>409 AlreadyExists</code>, and both proceed.
+    <b>Label the share <code>chert.us/project-id</code></b>, and <code>chert.us/volume-id</code> too once a project owns more than one — those labels are what the gateway resolves <code>/v1/projects/&lt;id&gt;/volumes/&lt;v&gt;</code> against, and <code>volume-id</code> defaults to the CR name. Deriving the name from the project id (<code>fs-&lt;project-id&gt;</code>) still works for a single-volume project and is what makes ensure-live idempotent: two front-door replicas racing a first touch issue the same create, one gets <code>409 AlreadyExists</code>, and both proceed.
     <b>Uniqueness is enforced from the controller's cache</b>, not by the API server: Kubernetes cannot express "at most one share per <code>(endpoint, bucket, prefix subtree)</code>" in CEL, since both CEL and a ValidatingAdmissionPolicy see one object.
     Oldest wins; the loser goes <code>Failed</code> with a <code>Conflict</code> condition and gets no hub. <b>The project id is not part of that key</b>, and nothing in the operator reads it — which is precisely why one project may own several volumes: they collide only if their prefixes do.
     <b>That enforcement stops at the cluster boundary.</b> Two clusters each admit a share on one prefix and neither sees the other — and the store-side epoch only catches it when the prefixes are <i>equal</i>, because <code>tenant-a/</code> and <code>tenant-a/sub/</code> mint different epoch objects and never contend. Own prefix allocation upstream of Kubernetes.
@@ -680,7 +680,7 @@
     <text xml:space="preserve" class="txs ctr" x="1159" y="376">→ delete the PVC</text>
 
     <polyline class="ln-violet" points="575,504 575,552 230,552 230,506" marker-end="url(#p4-av)"/>
-    <text xml:space="preserve" class="tx ctr c-violet" x="402" y="570">wake — annotate flint.io/requested-at · Ready in ~41s</text>
+    <text xml:space="preserve" class="tx ctr c-violet" x="402" y="570">wake — annotate chert.us/requested-at · Ready in ~41s</text>
 
     <polyline class="ln-violet" points="1355,504 1355,612 140,612 140,506" marker-end="url(#p4-av)"/>
     <text xml:space="preserve" class="tx ctr c-violet" x="760" y="632">wake from Hibernated — the PVC is re-created, the bucket manifest imported, the full lease waited out · ~79s</text>
@@ -695,7 +695,7 @@
 
     <rect x="40" y="752" width="300" height="58" rx="8" class="bx"/>
     <text xml:space="preserve" class="tl" x="56" y="776">the front door's heartbeat is stale</text>
-    <text xml:space="preserve" class="mns" x="56" y="796">flint.io/requested-at</text>
+    <text xml:space="preserve" class="mns" x="56" y="796">chert.us/requested-at</text>
 
     <rect x="40" y="822" width="300" height="58" rx="8" class="bx"/>
     <text xml:space="preserve" class="tl" x="56" y="846">the hub agrees it is idle</text>

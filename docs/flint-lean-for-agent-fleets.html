@@ -147,7 +147,7 @@ kubectl -n agents create secret generic s3 --from-literal=... </code></pre>
 <hr>
 <h2>2. Create a workspace</h2>
 <p>One CR per project subtree.</p>
-<pre><code>apiVersion: flint.io/v1alpha1
+<pre><code>apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace
 metadata:
   name: proj1
@@ -170,7 +170,7 @@ metadata:
   name: agent-1
   namespace: agents
   labels:
-    flint.io/lean-workspace: proj1     # ← the webhook keys on this
+    chert.us/lean-workspace: proj1     # ← the webhook keys on this
 spec:
   containers:
     - name: agent

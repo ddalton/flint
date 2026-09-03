@@ -30,7 +30,7 @@ use kube::ResourceExt;
 
 /// Operator-written: `"<basis>|<target>"`. `basis` is the
 /// `persistence.size` the target was computed from.
-pub const ANN_SIZE_TARGET: &str = "flint.io/persistence-target";
+pub const ANN_SIZE_TARGET: &str = "chert.us/persistence-target";
 
 /// Default headroom over the project's logical size.
 pub const DEFAULT_BUFFER_PCT: u32 = 100;

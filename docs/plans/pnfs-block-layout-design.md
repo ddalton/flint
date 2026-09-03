@@ -51,7 +51,7 @@ cannot see it. ~~Block-layout volumes are single-replica lvols until replication
 server-side (storage-node raid or MDS-level mirroring). That is real work, scoped in
 §12, not a freebie — reviewed and modeled 2026-08-12 (§12's replication entry;
 `formal/FlintComposition.tla`), still unimplemented.~~ **AMENDED 2026-09-01: that work
-has SHIPPED** — `pnfs.flint.io/replicas: 2` composes a server-side raid1 at the
+has SHIPPED** — `pnfs.chert.us/replicas: 2` composes a server-side raid1 at the
 composer target from a mirrored leg placed on a peer, witness-arbitrated (modeled
 first, `formal/FlintComposition.tla`), and hardware has run it (runbo/runbq). The §12
 replication entry's amended tail carries the honest boundary: **replicas: 2 is
@@ -385,14 +385,14 @@ Class sketch (`pnfs-block-storageclass.yaml`, cloned from `pnfs-storageclass.yam
 provisioner: {{ .Values.driver.name }}  # renders flint.csi.storage.io (values.yaml:64)
 parameters:
   layout: pnfs-block
-  pnfs.flint.io/extentSize: "4Mi"     # allocation granularity, NOT the wire blksize
+  pnfs.chert.us/extentSize: "4Mi"     # allocation granularity, NOT the wire blksize
 volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: true            # now a REAL allocation op — see below
 ```
 
-- New `pnfs.flint.io/*` keys must be added to `sc_params::ALL` (`pnfs_csi.rs:63-70`) —
+- New `pnfs.chert.us/*` keys must be added to `sc_params::ALL` (`pnfs_csi.rs:63-70`) —
   the namespace is a closed set and unknown keys hard-fail the provision.
-- **volume_context needs a discriminator** (`pnfs.flint.io/layout: block`): every
+- **volume_context needs a discriminator** (`pnfs.chert.us/layout: block`): every
   downstream classifier keys on `mds-ip` presence or the `~m` shard suffix, and a block
   volume reusing both is indistinguishable. NodeUnstage classification order is the
   live landmine: RWX access modes resolve `NfsShared` *before* the pNFS check
@@ -1655,7 +1655,7 @@ Each phase ships standalone value; none is gated on the next.
   (3) **The per-client notify re-fire** is the ack's effect: `notify_device_changed`
   over every client that cached the device.
   The MDS control endpoint reaches the node in the publish context
-  (`pnfs.flint.io/mds-control`) and is persisted in the session record, stamped by
+  (`pnfs.chert.us/mds-control`) and is persisted in the session record, stamped by
   the controller with the endpoint it JUST USED — which is by construction the shard
   that owns that volume, so sharding needs no node-side re-derivation. Records
   written before this parse fine and keep the old behaviour, which is precisely the
@@ -1796,7 +1796,7 @@ Each phase ships standalone value; none is gated on the next.
   rig.~~ **AMENDED 2026-09-01 — every item on that list has since landed, and this
   paragraph read as if none had.** Placement and expand-under-composition are the
   next two entries in this section; the StorageClass surface ships
-  (`pnfs.flint.io/replicas`, 1 or 2 — 2 is a designed ceiling, the composition
+  (`pnfs.chert.us/replicas`, 1 or 2 — 2 is a designed ceiling, the composition
   machine reasons about ONE peer — plus `replicaCrossZone`, with the chart's
   per-shard `blockExport.shards` entries and the composition witness both required
   and refused loudly when absent); the rig ran green (the entry below); and hardware
@@ -1820,7 +1820,7 @@ Each phase ships standalone value; none is gated on the next.
   for the life of the volume, and again on the whole allocated set every time the leg
   is rebuilt — which on this tier happens after any unclean restart of the composer.
   So `choose_leg_host` keeps only candidates in the composer's zone unless
-  `pnfs.flint.io/replicaCrossZone` says otherwise, and REFUSES rather than quietly
+  `pnfs.chert.us/replicaCrossZone` says otherwise, and REFUSES rather than quietly
   spending the money; the refusal names the zones that do have targets and the
   parameter that would allow them. An unlabelled node is UNKNOWN, never "the same
   place as every other unlabelled node" — two empty strings are not a shared failure

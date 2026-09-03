@@ -71,7 +71,7 @@ setup() { # unit port binary
       for i in \$(seq 1 $READERS); do dd if=/dev/urandom of=/srv/$u/export/f\$i.bin bs=1M count=$SIZE_MB status=none; done
       echo $u > /srv/$u/export/WHICH_ARM
       cat > /srv/$u/mds.yaml <<CFG
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: standalone
 mds:

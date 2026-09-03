@@ -42,7 +42,7 @@ mkdir -p "$DATA_DIR"
 # block startup anyway.
 mkconfig() { # <device_id> <port> <out>
   cat > "$3" <<EOF
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: ds
 ds:

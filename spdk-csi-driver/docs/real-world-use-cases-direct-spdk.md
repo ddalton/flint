@@ -36,7 +36,7 @@ spec:
       value: /spdk-scratch  # Use SPDK-backed scratch space
     resources:
       limits:
-        flint.io/nvme: 1  # Direct SPDK access
+        chert.us/nvme: 1  # Direct SPDK access
         hugepages-2Mi: 2Gi
         cpu: "8"
         memory: "32Gi"
@@ -103,7 +103,7 @@ spec:
         "
     resources:
       limits:
-        flint.io/nvme: 1
+        chert.us/nvme: 1
         hugepages-2Mi: 4Gi
     volumeMounts:
     - name: data-cache
@@ -142,7 +142,7 @@ spec:
       value: "16"
     resources:
       limits:
-        flint.io/nvme: 1
+        chert.us/nvme: 1
         hugepages-2Mi: 2Gi
     volumeMounts:
     - name: kafka-logs
@@ -182,7 +182,7 @@ spec:
       value: /var/lib/clickhouse
     resources:
       limits:
-        flint.io/nvme: 1
+        chert.us/nvme: 1
         hugepages-2Mi: 8Gi
         cpu: "16"
         memory: "64Gi"
@@ -238,7 +238,7 @@ spec:
       value: /var/lib/postgresql/data
     resources:
       limits:
-        flint.io/nvme: 1
+        chert.us/nvme: 1
         hugepages-2Mi: 4Gi
 ```
 
@@ -289,7 +289,7 @@ spec:
     resources:
       limits:
         nvidia.com/gpu: 8  # 8x A100 GPUs
-        flint.io/nvme: 1   # Direct SPDK for data
+        chert.us/nvme: 1   # Direct SPDK for data
         hugepages-2Mi: 8Gi
     volumeMounts:
     - name: training-data
@@ -352,7 +352,7 @@ spec:
       value: "true"
     resources:
       limits:
-        flint.io/nvme: 1
+        chert.us/nvme: 1
         hugepages-2Mi: 16Gi
     volumeMounts:
     - name: milvus-data
@@ -408,7 +408,7 @@ spec:
     resources:
       limits:
         nvidia.com/gpu: 8
-        flint.io/nvme: 1
+        chert.us/nvme: 1
         hugepages-2Mi: 16Gi
 ```
 
@@ -465,7 +465,7 @@ spec:
       value: '[{"path":"/druid/segment-cache","maxSize":1000000000000}]'
     resources:
       limits:
-        flint.io/nvme: 1
+        chert.us/nvme: 1
         hugepages-2Mi: 8Gi
 ```
 
@@ -533,7 +533,7 @@ kubectl edit configmap flint-reserved-devices -n flint-system
 
 # Deploy Spark with device plugin
 helm install spark bitnami/spark \
-  --set worker.resources.limits."flint\.io/nvme"=1 \
+  --set worker.resources.limits."chert\.us/nvme"=1 \
   --set worker.resources.limits."hugepages-2Mi"=4Gi
 ```
 

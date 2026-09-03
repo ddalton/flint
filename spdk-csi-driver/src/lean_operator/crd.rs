@@ -5,17 +5,17 @@
 //! deliberately NO Deployment/PVC/Service in its wake — an idle lean
 //! workspace is bucket objects and nothing else (the scale-to-zero
 //! argument). Pods opt in to injection with the label
-//! `flint.io/lean-workspace: <name>`.
+//! `chert.us/lean-workspace: <name>`.
 
 use kube::{CustomResource, KubeSchema};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub const INJECT_LABEL: &str = "flint.io/lean-workspace";
+pub const INJECT_LABEL: &str = "chert.us/lean-workspace";
 
 #[derive(CustomResource, KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[kube(
-    group = "flint.io",
+    group = "chert.us",
     version = "v1alpha1",
     kind = "FlintLeanWorkspace",
     plural = "flintleanworkspaces",
@@ -60,7 +60,7 @@ pub struct FlintLeanWorkspaceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials_secret_ref: Option<String>,
 
-    /// CSI delivery (`s3.flint.io`, docs/plans/csi-node-mount-design.md):
+    /// CSI delivery (`s3.chert.us`, docs/plans/csi-node-mount-design.md):
     /// which ServiceAccounts in this namespace may mount the workspace.
     /// ABSENT = DENY under CSI; the webhook delivery ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

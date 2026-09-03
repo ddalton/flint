@@ -143,7 +143,7 @@ ordinary catch-up churn, and the align was moved BEFORE the final cut in
 `admit_one_standby` so each failed attempt no longer leaks an epoch.
 Separately, the audit's `ExpandShrinkReal` run machine-confirmed the
 PV-capacity-only belt floor is code-violable after a partial fan-out
-(volumeMode:Block); the fix is the `flint.io/leg-size-applied`
+(volumeMode:Block); the fix is the `chert.us/leg-size-applied`
 high-water annotation folded into the stage floor
 (`leg_size_guard::merge_floor`).
 

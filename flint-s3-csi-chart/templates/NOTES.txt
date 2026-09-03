@@ -11,7 +11,7 @@ this; give a fresh node a few seconds):
 
 Declare a mount IN THE TENANT'S NAMESPACE, and say who may use it:
 
-  apiVersion: flint.io/v1alpha1
+  apiVersion: chert.us/v1alpha1
   kind: FlintPassthroughMount
   metadata: { name: datasets, namespace: team-a }
   spec:
@@ -34,16 +34,16 @@ Then a pod mounts it with a volume — no label, no sidecar:
           driver: {{ include "flint-s3-csi.driverName" . }}
           readOnly: true
           volumeAttributes:
-            flint.io/mount: datasets
-            # flint.io/uid: "1001"   # presentation only; default 65534
+            chert.us/mount: datasets
+            # chert.us/uid: "1001"   # presentation only; default 65534
     containers:
       - name: app
         volumeMounts:
           - { name: data, mountPath: /mnt/s3, readOnly: true }
 
 volumeAttributes are a REQUEST, never an authorization: exactly one of
-flint.io/mount / flint.io/workspace, optionally flint.io/uid and
-flint.io/gid, and every other key is refused by name. bucket, keyPrefix,
+chert.us/mount / chert.us/workspace, optionally chert.us/uid and
+chert.us/gid, and every other key is refused by name. bucket, keyPrefix,
 endpoint, image and credentials come from the CR and only the CR.
 
 WHERE THINGS RUN. Each mounted volume is one worker pod in
@@ -87,7 +87,7 @@ stays unhealthy until the pod is recreated. Run S3-mounted workloads
 under a controller.
 
 THE MOUNT PRESENTS AS ONE UID. NodePublish never sees the pod's
-securityContext, so ownership is CR spec.uid, else flint.io/uid, else
+securityContext, so ownership is CR spec.uid, else chert.us/uid, else
 65534 — with nothing declared, files no longer present as root as they
 did under the webhook.
 {{- if not .Values.workers.admissionPolicy.enabled }}

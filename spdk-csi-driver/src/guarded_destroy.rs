@@ -382,7 +382,7 @@ pub async fn bdev_identity_and_bytes(
 /// deliberately skips multi-replica PVs; the F37 stranger-reap only fires
 /// for same-bdev strangers). Before the create, the driver stops disks
 /// that are (a) ATTRIBUTABLE to this volume — id ∈ its expected set (the
-/// `flint.io/ublk-id` annotation + the hash fallback) — and (b) NOT the
+/// `chert.us/ublk-id` annotation + the hash fallback) — and (b) NOT the
 /// volume's legitimate end-state disk (bdev_name == the raid itself, which
 /// a restage-reuse must keep). The stop routes through the node agent's
 /// guarded ublk_stop_disk, whose F37 kernel-opener probe refuses a disk

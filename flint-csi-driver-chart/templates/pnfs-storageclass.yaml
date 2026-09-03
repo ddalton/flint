@@ -34,16 +34,16 @@ allowVolumeExpansion: true
 parameters:
   layout: pnfs
   {{- with .Values.pnfs.storageClass.stripeSize }}
-  pnfs.flint.io/stripeSize: {{ . | quote }}
+  pnfs.chert.us/stripeSize: {{ . | quote }}
   {{- end }}
   {{- with .Values.pnfs.storageClass.stripeWidth }}
-  pnfs.flint.io/stripeWidth: {{ . | quote }}
+  pnfs.chert.us/stripeWidth: {{ . | quote }}
   {{- end }}
   {{- with .Values.pnfs.storageClass.dirGid }}
-  pnfs.flint.io/dirGid: {{ . | quote }}
+  pnfs.chert.us/dirGid: {{ . | quote }}
   {{- end }}
   {{- with .Values.pnfs.storageClass.dirMode }}
-  pnfs.flint.io/dirMode: {{ . | quote }}
+  pnfs.chert.us/dirMode: {{ . | quote }}
   {{- end }}
 {{- with .Values.pnfs.storageClass.mountOptions }}
 mountOptions:
@@ -95,10 +95,10 @@ allowVolumeExpansion: true
 parameters:
   layout: pnfs-block
 {{- with .Values.pnfs.blockLayout.storageClass.replicas }}
-  pnfs.flint.io/replicas: {{ . | quote }}
+  pnfs.chert.us/replicas: {{ . | quote }}
 {{- end }}
 {{- if (.Values.pnfs.blockLayout.storageClass).replicaCrossZone }}
-  pnfs.flint.io/replicaCrossZone: "true"
+  pnfs.chert.us/replicaCrossZone: "true"
 {{- end }}
 {{- with .Values.pnfs.blockLayout.storageClass.mountOptions }}
 mountOptions:

@@ -68,7 +68,7 @@ is **raid presence**: `attached && !raids.contains(raid_name(handle))`
 (node_agent.rs:4452), then every tick while the predicate holds.
 
 Direct serve never satisfies that predicate BY DESIGN — which is
-exactly why the `flint.io/degraded-direct` exemption exists
+exactly why the `chert.us/degraded-direct` exemption exists
 (node_agent.rs:4668-4681). **It never fires for RWX backing chains,
 because setter and reader disagree about which PV object holds it:**
 
@@ -232,7 +232,7 @@ actual question.
 
 - **Fix the exemption's annotation target** (independently shippable;
   alone sufficient to stop the runaa loop): write
-  `flint.io/degraded-direct` via
+  `chert.us/degraded-direct` via
   `pv_name_of_handle(volume_id)` — not `storage_id_of_handle` — at
   driver.rs:2180 and the clear at driver.rs:2221, so the monitor's
   read (node_agent.rs:4673) sees it on the PV it examines. Exactly the
@@ -288,7 +288,7 @@ into the same destructive loop.
 Setup: RWX r2, pvc-backed NFS server on node A holding a local leg.
 Drive the volume to single-survivor direct serve (permanent removal of
 the peer leg; F36c permanent branch). Confirm
-`flint.io/degraded-direct` lands on the **backing** PV
+`chert.us/degraded-direct` lands on the **backing** PV
 (`flint-nfs-pv-…`). Steady acked-write workload through NFS clients
 throughout.
 

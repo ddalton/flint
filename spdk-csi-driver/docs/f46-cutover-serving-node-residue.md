@@ -145,7 +145,7 @@ the reachable frontier by one failure.
 4. **Record honesty — DONE, with a correction: `in_sync` is not demoted.**
    Both legs genuinely held every acked write — demoting would trigger a
    pointless rebuild of a perfect leg. Instead a distinct liveness marker
-   `flint.io/assembly-blocked` (PV annotation, `<since>|<detail>`) is set
+   `chert.us/assembly-blocked` (PV annotation, `<since>|<detail>`) is set
    while the F36c gate defers and cleared when it stops. Data lineage and
    assembly liveness are now separate signals.
 5. **The wedge is bounded (new item — the piece the original list

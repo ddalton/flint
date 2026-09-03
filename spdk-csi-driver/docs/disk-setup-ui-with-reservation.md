@@ -157,7 +157,7 @@ When user clicks "Reserve for Plugin/Direct Use":
 │  │    ```yaml                                                     │  │
 │  │    resources:                                                  │  │
 │  │      limits:                                                   │  │
-│  │        flint.io/nvme: 1                                        │  │
+│  │        chert.us/nvme: 1                                        │  │
 │  │        hugepages-2Mi: 1Gi                                      │  │
 │  │    ```                                                         │  │
 │  │                                                                 │  │

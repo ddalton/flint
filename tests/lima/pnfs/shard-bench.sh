@@ -78,7 +78,7 @@ for i in $(seq 0 $((SHARDS-1))); do
   DS_ENDPOINTS="$DS_ENDPOINTS\"127.0.0.1:$((50161 + i))\","
   mkdir -p "$WORK/s$i-exports" "$WORK/s$i-state"; chmod 0777 "$WORK/s$i-exports"
   cat > "$WORK/mds$i.yaml" <<EOF
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: mds
 mds:
@@ -101,7 +101,7 @@ done
 for d in 1 2; do
   port=$((20490 + d)); ctl=$((21490 + d))
   cat > "$WORK/ds$d.yaml" <<EOF
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: ds
 ds:

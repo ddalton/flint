@@ -47,7 +47,7 @@ setup_flint() { # name port splice_env
       chmod 0777 /srv/$n/export"
   mkfiles "/srv/$n/export" "$n"
   vm "cat > /srv/$n/mds.yaml <<CFG
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: standalone
 mds:

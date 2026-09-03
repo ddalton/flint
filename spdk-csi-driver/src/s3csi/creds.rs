@@ -241,7 +241,7 @@ impl BrokerClient {
     /// `FLINT_S3CSI_BROKER_URL` (unset ⇒ no broker: only `static` and
     /// `ambient` can publish), `FLINT_S3CSI_BROKER_CA` (PEM path, for an
     /// https broker with a private CA), `FLINT_S3CSI_NODE_TOKEN_FILE`
-    /// (the plugin's own projected token, audience `s3.flint.io`).
+    /// (the plugin's own projected token, audience `s3.chert.us`).
     pub fn from_env() -> Result<Option<Self>, String> {
         let Some(base) = std::env::var("FLINT_S3CSI_BROKER_URL").ok().filter(|s| !s.is_empty()) else {
             return Ok(None);

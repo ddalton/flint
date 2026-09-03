@@ -134,12 +134,12 @@ pass "preflight ok ($NODE_COUNT node(s))"
 
 mkshare() {  # mkshare <share> <project>
   kubectl -n "$NS" apply -f - >/dev/null <<EOF || fail "FlintShare $1 refused"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata:
   name: $1
   namespace: $NS
-  labels: { flint.io/project-id: $2 }
+  labels: { chert.us/project-id: $2 }
 spec:
   bucket: $BUCKET
   keyPrefix: $2/
@@ -175,7 +175,7 @@ for sh in "$SA" "$SB"; do
 done
 pf_gw
 CIP=$(kubectl -n "$NS" get svc "$SA" -o jsonpath='{.spec.clusterIP}')
-HUBNODE=$(kubectl -n "$NS" get pod -l flint.io/share="$SA" -o jsonpath='{.items[0].spec.nodeName}')
+HUBNODE=$(kubectl -n "$NS" get pod -l chert.us/share="$SA" -o jsonpath='{.items[0].spec.nodeName}')
 pass "both shares Ready; project A hub on $HUBNODE (ClusterIP $CIP)"
 
 say "two agents on ONE workspace, on different nodes where possible"

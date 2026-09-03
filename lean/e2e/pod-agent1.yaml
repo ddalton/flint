@@ -6,7 +6,7 @@ metadata:
   name: agent-1
   namespace: agents
   labels:
-    flint.io/lean-workspace: proj
+    chert.us/lean-workspace: proj
 spec:
   restartPolicy: Never
   containers:

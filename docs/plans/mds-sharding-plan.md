@@ -24,7 +24,7 @@ validation + release pending a fresh cluster.
   Deployment/PVC/Service; controller gets the ordered shard-endpoint
   list, each MDS its own `FLINT_MDS_SHARD_ID`, the DS none (fans out via
   its ConfigMap `mds.endpoints` list); NetworkPolicies select by
-  `flint.io/role`, so shard ≥ 1 is reachable on DS:9091 (Phase-0 trap
+  `chert.us/role`, so shard ≥ 1 is reachable on DS:9091 (Phase-0 trap
   confirmed avoided).
 - **pynfs subset at baseline** (FAIL=3 SKIP=258 == the pinned baseline;
   the 3 are BLOCK-layout `st_getdevicelist` tests, expected for a
@@ -76,7 +76,7 @@ What users and machines actually touch:
 | consumer | endpoint | single? |
 |----------|----------|---------|
 | App pods / PVC authors | StorageClass `flint-pnfs` | **yes** — unchanged, the CSI layer hides everything |
-| Kernel client (NodePublish) | per-shard Service IP stamped in the PV's `pnfs.flint.io/mds-ip` | per-shard, stamped automatically at provision |
+| Kernel client (NodePublish) | per-shard Service IP stamped in the PV's `pnfs.chert.us/mds-ip` | per-shard, stamped automatically at provision |
 | CSI controller (Create/DeleteVolume) | the owning shard's gRPC :50051 | routed by controller (see §Assignment) |
 | DS registration/heartbeat | ALL shards — endpoint list rendered into the DS config by the chart (count is template-time) | one config key, N targets |
 | Dashboard / operators | `/api/*` aggregates all shards | yes (aggregation) |
@@ -108,7 +108,7 @@ fence the pre-sharding chart documents.)
 - Per-shard PVC (state.db + exports tree). Each shard's exports hold
   only its own volumes' directories.
 - `FLINT_MDS_SHARD_ID={i}` injected per Deployment.
-- All MDS/DS pods carry `flint.io/role` labels; the Tier-A
+- All MDS/DS pods carry `chert.us/role` labels; the Tier-A
   NetworkPolicies select by role (per-shard `app` values can't be
   enumerated in a selector).
 
@@ -120,7 +120,7 @@ fence the pre-sharding chart documents.)
   its volume count; add a trivial `GetShardInfo` RPC). Hash-mod is the
   v0 fallback. Least-loaded also makes scale-out self-balancing: new
   volumes prefer the new empty shard.
-- Stamp the shard's Service IP into `pnfs.flint.io/mds-ip` (the
+- Stamp the shard's Service IP into `pnfs.chert.us/mds-ip` (the
   NodePublish path reads it today — **zero node-side changes**).
 - Return `volume_id` with a shard suffix (`pvc-…~m2`). CSI hands
   DeleteVolume/Expand only the volume_id, not the context — the suffix

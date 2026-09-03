@@ -52,7 +52,7 @@ vm "rm -rf /srv/rwv-mds /srv/rwv-ds1
     mkdir -p /srv/rwv-mds/export /srv/rwv-mds/state /srv/rwv-ds1/data /mnt/rwv
     chmod 0777 /srv/rwv-mds/export
     cat > /srv/rwv-mds/mds.yaml <<CFG
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: mds
 mds:
@@ -76,7 +76,7 @@ monitoring:
   metrics: []
 CFG
     cat > /srv/rwv-ds1/ds.yaml <<CFG
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: ds
 ds:

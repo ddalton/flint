@@ -200,8 +200,8 @@ for C in "$CA" "$CB"; do
   kubectl --context "kind-$C" -n "$OPNS" rollout status deployment/flint-lite-operator \
     --timeout=180s >/dev/null 2>&1 || fail "operator in $C never became Ready"
 done
-STAMP=$(ka get crd flintshares.flint.io \
-  -o jsonpath='{.metadata.annotations.flint\.io/crd-schema-version}')
+STAMP=$(ka get crd flintshares.chert.us \
+  -o jsonpath='{.metadata.annotations.chert\.us/crd-schema-version}')
 [ -n "$STAMP" ] || fail "the CRD carries no schema-version annotation"
 pass "both operators Ready; CRD stamped at schema $STAMP"
 
@@ -209,7 +209,7 @@ pass "both operators Ready; CRD stamped at schema $STAMP"
 mk_share() {  # $1 ctx-fn, $2 name, $3 prefix, $4 endpoint
   local kc=$1 name=$2 prefix=$3 ep=$4
   $kc apply -f - >/dev/null <<EOF || fail "applying $name failed"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata: { name: $name, namespace: $NS }
 spec:
@@ -237,7 +237,7 @@ wait_phase_in() {  # $1 ctx-fn, $2 name, $3 want, $4 secs
   done
   $kc -n "$NS" get flintshare "$name" -o yaml | tail -25
   local pod
-  pod=$($kc -n "$NS" get pods -l "flint.io/share=$name" -o name 2>/dev/null | head -1)
+  pod=$($kc -n "$NS" get pods -l "chert.us/share=$name" -o name 2>/dev/null | head -1)
   if [ -n "$pod" ]; then
     echo "    --- $pod ---"
     $kc -n "$NS" logs "$pod" --tail=40 2>&1 | sed 's/^/    /'
@@ -247,7 +247,7 @@ wait_phase_in() {  # $1 ctx-fn, $2 name, $3 want, $4 secs
   fail "$name never reached $want (last: '${seen:-<none>}')"
 }
 hubpod_in() {  # resolve EVERY time: a rolled hub invalidates a captured name
-  $1 -n "$NS" get pods -l "flint.io/share=$2" --field-selector=status.phase=Running \
+  $1 -n "$NS" get pods -l "chert.us/share=$2" --field-selector=status.phase=Running \
     -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}' \
     2>/dev/null | awk '{print $1}'
 }
@@ -362,7 +362,7 @@ ka -n "$NS" patch flintshare alpha --type=merge \
   -p "{\"spec\":{\"endpoint\":\"$EP\"}}" >/dev/null || fail "converging the endpoint was refused"
 wait_phase_in ka beta Failed 180
 for _ in $(seq 1 40); do
-  L=$(ka -n "$NS" get pods -l flint.io/share=beta -o name 2>/dev/null | grep -c .)
+  L=$(ka -n "$NS" get pods -l chert.us/share=beta -o name 2>/dev/null | grep -c .)
   [ "${L:-1}" = "0" ] && break
   sleep 2
 done

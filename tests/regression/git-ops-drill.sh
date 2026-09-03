@@ -86,9 +86,9 @@ kubectl -n "$NS" create secret generic flint-s3 \
   --from-literal=AWS_ACCESS_KEY_ID="$HUB_AK" --from-literal=AWS_SECRET_ACCESS_KEY="$HUB_SK" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n "$NS" apply -f - >/dev/null <<EOF || fail "FlintShare refused"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
-metadata: { name: $SHARE, namespace: $NS, labels: { flint.io/project-id: $PROJECT } }
+metadata: { name: $SHARE, namespace: $NS, labels: { chert.us/project-id: $PROJECT } }
 spec:
   bucket: $BUCKET
   keyPrefix: $PROJECT/

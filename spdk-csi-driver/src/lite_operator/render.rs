@@ -18,7 +18,7 @@
 //! - **Selector labels.** The chart's `app: flint-lite` is fixed per
 //!   release; a fleet of them would have every Service selecting every
 //!   hub's pods. Operator children are labelled per share
-//!   (`flint.io/share`). This is the whole reason the operator can run
+//!   (`chert.us/share`). This is the whole reason the operator can run
 //!   a fleet in one namespace, so the test normalizes labels away
 //!   explicitly rather than pretending they match.
 //! - **`checksum/creds`.** Only the operator has it: `helm template`
@@ -232,7 +232,7 @@ pub fn api_service_name(base: &str, uid: Option<&str>) -> Option<String> {
     Some(format!("{head}-api-{short}"))
 }
 
-/// Labels every child carries. `flint.io/share` is the one that makes
+/// Labels every child carries. `chert.us/share` is the one that makes
 /// a fleet possible — it scopes selectors, and it is how PVC events
 /// (which cannot travel by ownerReference, see [`super::reconcile`])
 /// find their way back to a CR.
@@ -246,8 +246,8 @@ pub fn labels(share: &FlintShare) -> BTreeMap<String, String> {
             "app.kubernetes.io/managed-by".into(),
             "flint-lite-operator".into(),
         ),
-        ("flint.io/share".into(), name),
-        ("flint.io/role".into(), "lite".into()),
+        ("chert.us/share".into(), name),
+        ("chert.us/role".into(), "lite".into()),
     ])
 }
 
@@ -257,7 +257,7 @@ pub fn selector_labels(share: &FlintShare) -> BTreeMap<String, String> {
     let name = share.metadata.name.clone().unwrap_or_default();
     BTreeMap::from([
         ("app.kubernetes.io/name".into(), "flint-lite".into()),
-        ("flint.io/share".into(), name),
+        ("chert.us/share".into(), name),
     ])
 }
 
@@ -276,7 +276,7 @@ pub fn mds_yaml(share: &FlintShare, d: &RenderDefaults) -> String {
     let wake_warm = super::idle::wake_warm_fill(share);
     let mut y = String::new();
 
-    let _ = writeln!(y, "apiVersion: flint.io/v1alpha1");
+    let _ = writeln!(y, "apiVersion: chert.us/v1alpha1");
     let _ = writeln!(y, "kind: PnfsConfig");
     let _ = writeln!(y, "mode: standalone");
     let _ = writeln!(y, "mds:");
@@ -338,7 +338,7 @@ pub fn mds_yaml(share: &FlintShare, d: &RenderDefaults) -> String {
                 let _ = writeln!(y, "    {key}: {}", val.trim_end());
             }
         }
-        // `flint.io/wake-intent` — what the front door knows and the
+        // `chert.us/wake-intent` — what the front door knows and the
         // operator cannot: whether a person is about to open this
         // project (`warm`, pull the working set back during import) or
         // something merely touched it (`cold`, hydrate on demand). It
@@ -1299,7 +1299,7 @@ mod tests {
         }
     }
 
-    /// `flint.io/wake-intent` is what the front door knows and the
+    /// `chert.us/wake-intent` is what the front door knows and the
     /// operator cannot: whether a person is about to open this project
     /// or something merely touched it. It has to reach the pod, and it
     /// must not roll one that is already up.
@@ -1513,7 +1513,7 @@ mod tests {
         let spec = dep.spec.unwrap();
         assert_eq!(spec.selector, existing);
         let pod_labels = spec.template.metadata.unwrap().labels.unwrap();
-        assert_eq!(pod_labels.get("flint.io/share").map(String::as_str), Some("tenant-a"));
+        assert_eq!(pod_labels.get("chert.us/share").map(String::as_str), Some("tenant-a"));
         // ... and the template must SATISFY that selector, or the API
         // server refuses the object outright ("selector does not match
         // template labels") — on adoption, of all operations.
@@ -1653,7 +1653,7 @@ mod tests {
         let b = service(&share("tenant-b", base_spec()), &d);
         let sel = |s: &Service| s.spec.as_ref().unwrap().selector.clone().unwrap();
         assert_ne!(sel(&a), sel(&b));
-        assert_eq!(sel(&a)["flint.io/share"], "tenant-a");
+        assert_eq!(sel(&a)["chert.us/share"], "tenant-a");
     }
 
     // ---------------------------------------------------------------

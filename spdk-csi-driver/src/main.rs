@@ -968,7 +968,7 @@ impl MinimalControllerService {
         // Add NFS replica-nodes attribute (needed for ROX volumes from snapshots)
         // Since snapshot clones are always single replica, this is just the node where the snapshot was cloned
         volume_context.insert(
-            "nfs.flint.io/replica-nodes".to_string(),
+            "nfs.chert.us/replica-nodes".to_string(),
             node_name.clone(),
         );
         
@@ -980,7 +980,7 @@ impl MinimalControllerService {
         eprintln!("   lvs-name: {}", volume_context.get("flint.csi.storage.io/lvs-name").unwrap_or(&"MISSING".to_string()));
         eprintln!("   filesystem-initialized: {}", volume_context.get("flint.csi.storage.io/filesystem-initialized").unwrap_or(&"MISSING".to_string()));
         eprintln!("   source-snapshot: {}", volume_context.get("flint.csi.storage.io/source-snapshot").unwrap_or(&"MISSING".to_string()));
-        eprintln!("   ⚠️  nfs.flint.io/replica-nodes: {}", volume_context.get("nfs.flint.io/replica-nodes").unwrap_or(&"🔴 MISSING - THIS IS THE BUG!".to_string()));
+        eprintln!("   ⚠️  nfs.chert.us/replica-nodes: {}", volume_context.get("nfs.chert.us/replica-nodes").unwrap_or(&"🔴 MISSING - THIS IS THE BUG!".to_string()));
         eprintln!("   Total attributes: {}", volume_context.len());
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         
@@ -1151,7 +1151,7 @@ impl MinimalControllerService {
         // Add NFS replica-nodes attribute (needed for ROX volumes from PVC clones)
         // Since PVC clones are always single replica, this is just the node where the clone was created
         volume_context.insert(
-            "nfs.flint.io/replica-nodes".to_string(),
+            "nfs.chert.us/replica-nodes".to_string(),
             source_node.clone(),
         );
         
@@ -1163,7 +1163,7 @@ impl MinimalControllerService {
         eprintln!("   lvs-name: {}", volume_context.get("flint.csi.storage.io/lvs-name").unwrap_or(&"MISSING".to_string()));
         eprintln!("   filesystem-initialized: {}", volume_context.get("flint.csi.storage.io/filesystem-initialized").unwrap_or(&"MISSING".to_string()));
         eprintln!("   source-volume: {}", volume_context.get("flint.csi.storage.io/source-volume").unwrap_or(&"MISSING".to_string()));
-        eprintln!("   ⚠️  nfs.flint.io/replica-nodes: {}", volume_context.get("nfs.flint.io/replica-nodes").unwrap_or(&"🔴 MISSING - THIS IS THE BUG!".to_string()));
+        eprintln!("   ⚠️  nfs.chert.us/replica-nodes: {}", volume_context.get("nfs.chert.us/replica-nodes").unwrap_or(&"🔴 MISSING - THIS IS THE BUG!".to_string()));
         eprintln!("   Total attributes: {}", volume_context.len());
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
@@ -1545,7 +1545,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             // retries by name; a load-based pick could double-provision
             // on two shards). The pin travels in the returned volume_id
             // (`<name>~m<shard>`) so delete/expand route statelessly.
-            // StorageClass parameters. Unknown `pnfs.flint.io/*` keys are
+            // StorageClass parameters. Unknown `pnfs.chert.us/*` keys are
             // rejected rather than ignored: a typo would otherwise
             // provision a healthy-looking volume with none of the
             // geometry the author asked for, and stripe geometry is
@@ -1570,7 +1570,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     return Err(tonic::Status::invalid_argument(
                         "layout: pnfs-block does not take stripeSize/stripeWidth — \
                          extents are allocated, not striped; drop the \
-                         pnfs.flint.io/stripe* parameters",
+                         pnfs.chert.us/stripe* parameters",
                     ));
                 }
                 // ONE WRITER, ONE NODE, AND A FILESYSTEM. Refused HERE
@@ -1808,8 +1808,8 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             println!("   Size: {} bytes ({}Gi)", size_bytes, size_bytes / (1024 * 1024 * 1024));
 
             let mut volume_context = std::collections::HashMap::new();
-            volume_context.insert("nfs.flint.io/enabled".to_string(), "true".to_string());
-            volume_context.insert("nfs.flint.io/backend".to_string(), "emptydir".to_string());
+            volume_context.insert("nfs.chert.us/enabled".to_string(), "true".to_string());
+            volume_context.insert("nfs.chert.us/backend".to_string(), "emptydir".to_string());
             volume_context.insert("size".to_string(), format!("{}Gi", size_bytes / (1024 * 1024 * 1024)));
             // NOTE: for emptyDir volumes the canonical role can be Block
             // (RWO PVC) while the SERVING path is NFS — a pre-existing
@@ -1970,7 +1970,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 // Add NFS metadata if RWX or ROX is requested
                 if uses_nfs {
                     volume_context.insert(
-                        "nfs.flint.io/enabled".to_string(),
+                        "nfs.chert.us/enabled".to_string(),
                         "true".to_string(),
                     );
                     
@@ -1982,7 +1982,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     let replica_nodes_str = replica_nodes.join(",");
                     
                     volume_context.insert(
-                        "nfs.flint.io/replica-nodes".to_string(),
+                        "nfs.chert.us/replica-nodes".to_string(),
                         replica_nodes_str.clone(),
                     );
                     
@@ -2033,7 +2033,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         // pNFS branch — early-exit so we don't also try to delete
         // SPDK lvols / NFS-server pods for pNFS volumes (those don't
         // exist on this path). We detect pNFS by the presence of
-        // `pnfs.flint.io/mds-ip` in the PV's volumeAttributes — that
+        // `pnfs.chert.us/mds-ip` in the PV's volumeAttributes — that
         // key is only ever written by `pnfs_csi::create_volume`.
         // -------------------------------------------------------------
         if let Some(pnfs) = self.pnfs_csi.as_ref() {
@@ -2059,7 +2059,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                             .and_then(|s| s.csi.as_ref())
                             .filter(|csi| csi.volume_handle == volume_id)
                             .and_then(|csi| csi.volume_attributes.as_ref())
-                            .map(|attrs| attrs.contains_key("pnfs.flint.io/mds-ip"))
+                            .map(|attrs| attrs.contains_key("pnfs.chert.us/mds-ip"))
                             .unwrap_or(false)
                     }),
                     Err(_) => false,
@@ -2550,12 +2550,12 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             .unwrap_or(false);
         
         let is_rwx = req.volume_context
-            .get("nfs.flint.io/enabled")
+            .get("nfs.chert.us/enabled")
             .map(|v| v == "true")
             .unwrap_or(false);
 
         let is_emptydir_nfs = req.volume_context
-            .get("nfs.flint.io/backend")
+            .get("nfs.chert.us/backend")
             .map(|v| v == "emptydir")
             .unwrap_or(false);
 
@@ -2668,11 +2668,11 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             println!("✅ [RWX] NFS server ready at {}:{}", nfs_ip, 2049);
             
             // Add NFS connection info to publish_context
-            publish_context.insert("nfs.flint.io/server-ip".to_string(), nfs_ip);
-            publish_context.insert("nfs.flint.io/server-node".to_string(), nfs_node);
-            publish_context.insert("nfs.flint.io/export-path".to_string(), 
+            publish_context.insert("nfs.chert.us/server-ip".to_string(), nfs_ip);
+            publish_context.insert("nfs.chert.us/server-node".to_string(), nfs_node);
+            publish_context.insert("nfs.chert.us/export-path".to_string(), 
                                    format!("/exports/{}", volume_id));
-            publish_context.insert("nfs.flint.io/port".to_string(), "2049".to_string());
+            publish_context.insert("nfs.chert.us/port".to_string(), "2049".to_string());
             
             // For RWX volumes, we don't need to setup NVMe-oF to client nodes
             // Client nodes will mount NFS instead
@@ -3219,7 +3219,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             .and_then(|csi| csi.volume_attributes.as_ref());
 
         let is_nfs_emptydir = attrs
-            .and_then(|a| a.get("nfs.flint.io/backend"))
+            .and_then(|a| a.get("nfs.chert.us/backend"))
             .map(|v| v == "emptydir")
             .unwrap_or(false);
 
@@ -3470,7 +3470,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         if volume_type == "nfs" {
             println!("📡 [NODE_STAGE] NFS volume detected - skipping staging (mount happens in NodePublishVolume)");
             println!("   Volume ID: {}", volume_id);
-            println!("   NFS server IP: {}", publish_context.get("nfs.flint.io/server-ip").unwrap_or(&"unknown".to_string()));
+            println!("   NFS server IP: {}", publish_context.get("nfs.chert.us/server-ip").unwrap_or(&"unknown".to_string()));
             
             // For NFS volumes, just create the staging directory
             std::fs::create_dir_all(&staging_target_path)
@@ -4287,7 +4287,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         };
         // pNFS volumes own no SPDK objects either — same unmount-only
         // unstage. NodeUnstage is context-free, so classification reads
-        // the PV's volumeAttributes (pnfs.flint.io/* keys).
+        // the PV's volumeAttributes (pnfs.chert.us/* keys).
         let is_pnfs = !is_shared_nfs_consumer && self.driver.pv_is_pnfs(&actual_volume_id).await;
 
         if is_shared_nfs_consumer || is_pnfs {
@@ -4524,11 +4524,11 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         // pNFS branch — runs *before* the existing single-server-NFS
         // path so a pNFS PV can never accidentally end up in the
         // Backend B / rwx_nfs flow. We detect pNFS by the volume_id
-        // having `pnfs.flint.io/mds-ip` in its volume_context. These
+        // having `pnfs.chert.us/mds-ip` in its volume_context. These
         // keys are written by `pnfs_csi::create_volume` and survive
         // into NodePublishVolumeRequest.volume_context.
         // -------------------------------------------------------------
-        if let Some(mds_ip) = req.volume_context.get("pnfs.flint.io/mds-ip") {
+        if let Some(mds_ip) = req.volume_context.get("pnfs.chert.us/mds-ip") {
             use spdk_csi_driver::pnfs_csi::ctx_keys;
             // Context always carries the port (create_volume stamps the
             // MDS-reported NFS port); the default is a last resort and
@@ -4612,7 +4612,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         }
 
         // Check if this is an NFS volume (RWX)
-        let nfs_server_ip = req.publish_context.get("nfs.flint.io/server-ip");
+        let nfs_server_ip = req.publish_context.get("nfs.chert.us/server-ip");
         if let Some(server_ip) = nfs_server_ip {
             // ═══════════════════════════════════════════════════════════════
             // ENHANCED NFS MOUNT DEBUG LOGGING
@@ -4626,10 +4626,10 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             
             let export_path = req.publish_context
-                .get("nfs.flint.io/export-path")
+                .get("nfs.chert.us/export-path")
                 .ok_or_else(|| tonic::Status::internal("Missing NFS export path"))?;
             let port = req.publish_context
-                .get("nfs.flint.io/port")
+                .get("nfs.chert.us/port")
                 .map(|s| s.as_str())
                 .unwrap_or("2049");
             

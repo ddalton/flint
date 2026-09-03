@@ -216,8 +216,8 @@ and it never needs bucket keys.
 | What | How | Restart? |
 |---|---|---|
 | Gateway token | edit the Secret; re-read every 10s | no |
-| Per-share token | bump `flint.io/api-token-version`, rewrite that share's Secret | no |
-| Bucket keys | rewrite `flint-s3`; label it `flint.io/credentials=true` so the operator notices immediately | no |
+| Per-share token | bump `chert.us/api-token-version`, rewrite that share's Secret | no |
+| Bucket keys | rewrite `flint-s3`; label it `chert.us/credentials=true` so the operator notices immediately | no |
 | Gateway root key | rewrite, then re-derive **every** share's token | gateway rollout |
 
 The root key is the only one whose rotation is fleet-wide — every
@@ -301,13 +301,13 @@ The same posture check runs against non-AWS stores. A Ceph RGW or MinIO
 user needs the equivalent grants, and the same message tells you which.
 
 ```yaml
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata:
   name: fs-proj-a
   namespace: workspaces
   labels:
-    flint.io/project-id: proj-a       # how the gateway finds it
+    chert.us/project-id: proj-a       # how the gateway finds it
 spec:
   bucket: my-team-flint               # must exist, versioning ON
   keyPrefix: proj-a/                  # immutable, must end in "/"
@@ -333,7 +333,7 @@ frugality: two live hubs on one prefix is a cross-tenant data leak the
 moment one is judged dead and the other takes the prefix over.
 
 A project may have several volumes — give each its own `keyPrefix` and
-a `flint.io/volume-id` label, and address them as
+a `chert.us/volume-id` label, and address them as
 `/v1/projects/{id}/volumes/{vol}/…`.
 
 ## 3. Give the share its API token
@@ -390,7 +390,7 @@ workspaces   fs-proj-a   Ready   fs-proj-a.workspaces.svc.cluster.local:2049 my-
 
 Rotating a token is a Secret edit: the hub re-reads it every 10s and the
 gateway re-derives, so neither side restarts. Revoke one project by
-bumping its `flint.io/api-token-version` annotation and rewriting that
+bumping its `chert.us/api-token-version` annotation and rewriting that
 Secret. One field to watch: `spec.endpoint` is part of the binding and
 **is** mutable — changing it invalidates every token derived for that
 share.

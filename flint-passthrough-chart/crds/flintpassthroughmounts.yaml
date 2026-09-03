@@ -17,9 +17,9 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: flintpassthroughmounts.flint.io
+  name: flintpassthroughmounts.chert.us
 spec:
-  group: flint.io
+  group: chert.us
   scope: Namespaced
   names:
     kind: FlintPassthroughMount
@@ -43,7 +43,7 @@ spec:
           type: object
           description: >-
             An S3 prefix, mounted into every pod labelled
-            flint.io/passthrough-mount with this CR's name, by
+            chert.us/passthrough-mount with this CR's name, by
             Mountpoint for S3. Passthrough only: no cache, no manifest,
             no publish boundary, and no coordination between pods
             sharing it. Writes are sequential writes to whole objects —
@@ -154,13 +154,13 @@ spec:
                   description: >-
                     Per-mount mounter image override. The chart's
                     sidecarImage otherwise. WEBHOOK DELIVERY ONLY: the
-                    s3.flint.io CSI driver never reads it (the worker
+                    s3.chert.us CSI driver never reads it (the worker
                     image is chart-pinned; this field is the
                     privileged-escape knob the CSI design removes).
                 consumers:
                   type: object
                   description: >-
-                    CSI delivery (s3.flint.io): which ServiceAccounts in
+                    CSI delivery (s3.chert.us): which ServiceAccounts in
                     this namespace may mount the CR. ABSENT = DENY under
                     CSI — list them, or ["*"] for any SA in the namespace
                     (the webhook delivery's trust level, made explicit).

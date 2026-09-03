@@ -27,14 +27,14 @@ use sha2::{Digest, Sha256};
 
 use super::state::TenantRef;
 
-pub const LABEL_VOLUME_HASH: &str = "flint.io/volume-hash";
-pub const LABEL_NODE: &str = "flint.io/node";
-pub const LABEL_MODE: &str = "flint.io/mode";
-pub const LABEL_TENANT_NS: &str = "flint.io/tenant-namespace";
+pub const LABEL_VOLUME_HASH: &str = "chert.us/volume-hash";
+pub const LABEL_NODE: &str = "chert.us/node";
+pub const LABEL_MODE: &str = "chert.us/mode";
+pub const LABEL_TENANT_NS: &str = "chert.us/tenant-namespace";
 pub const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
-pub const ANN_VOLUME_ID: &str = "flint.io/volume-id";
-pub const ANN_TENANT_POD: &str = "flint.io/tenant-pod";
-pub const ANN_CR: &str = "flint.io/cr";
+pub const ANN_VOLUME_ID: &str = "chert.us/volume-id";
+pub const ANN_TENANT_POD: &str = "chert.us/tenant-pod";
+pub const ANN_CR: &str = "chert.us/cr";
 pub const MANAGED_BY: &str = "flint-s3-csi-node";
 pub const CONTAINER_NAME: &str = "worker";
 pub const COMM_VOLUME: &str = "comm";
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn lean_worker_gets_exactly_one_hostpath_and_restarts_on_failure() {
         let t = tenant();
-        let pod = build_pod(&inputs("lean", &t, Some("/var/lib/kubelet/plugins/s3.flint.io/volumes/csi-abc/tree".into())));
+        let pod = build_pod(&inputs("lean", &t, Some("/var/lib/kubelet/plugins/s3.chert.us/volumes/csi-abc/tree".into())));
         let spec = pod.spec.as_ref().unwrap();
         assert_eq!(spec.restart_policy.as_deref(), Some("OnFailure"));
         assert_eq!(spec.termination_grace_period_seconds, Some(90));

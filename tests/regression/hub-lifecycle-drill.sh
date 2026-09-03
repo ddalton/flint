@@ -116,7 +116,7 @@ cleanup() {
   # The hub's PVC has no ownerRef and reclaim: Retain, so it survives the
   # share. Left behind it blocks nothing here, but it does hold a PV in
   # Terminating on the next run's cleanup.
-  kubectl -n "$NS" delete pvc -l flint.io/share="$SHARE" --timeout=120s >/dev/null 2>&1
+  kubectl -n "$NS" delete pvc -l chert.us/share="$SHARE" --timeout=120s >/dev/null 2>&1
   kubectl -n "$NS" delete pvc "$SHARE-data" --ignore-not-found --timeout=120s >/dev/null 2>&1
   kubectl -n "$NS" delete secret "tok-$PROJECT" --ignore-not-found >/dev/null 2>&1
 }
@@ -172,7 +172,7 @@ replicas() { kubectl -n "$NS" get deploy "$SHARE" -o jsonpath='{.spec.replicas}'
 # so nothing is signalled and the count is real.
 pvc_gone() {
   local n
-  n=$(kubectl -n "$NS" get pvc -l flint.io/share="$SHARE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  n=$(kubectl -n "$NS" get pvc -l chert.us/share="$SHARE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
   [ "${n:-0}" -eq 0 ]
 }
 
@@ -224,13 +224,13 @@ say "creating the share with the idle ladder ARMED"
 EP_LINE=""; [ -n "$S3_ENDPOINT" ] && EP_LINE="
   endpoint: $S3_ENDPOINT"
 kubectl -n "$NS" apply -f - >/dev/null <<EOF || fail "FlintShare refused"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata:
   name: $SHARE
   namespace: $NS
   labels:
-    flint.io/project-id: $PROJECT
+    chert.us/project-id: $PROJECT
 spec:
   bucket: $BUCKET
   keyPrefix: $PROJECT/${EP_LINE}
@@ -309,7 +309,7 @@ if [ -n "$SUSPENDED" ]; then
     # EVIDENCE BEFORE THE ACCUSATION. This says the product deleted a disk
     # it promised to keep — a serious claim, so dump what the check saw,
     # including PVCs the label selector might have missed.
-    note "PVCs matching flint.io/share=$SHARE:"; kubectl -n "$NS" get pvc -l flint.io/share="$SHARE" 2>&1 | head -4
+    note "PVCs matching chert.us/share=$SHARE:"; kubectl -n "$NS" get pvc -l chert.us/share="$SHARE" 2>&1 | head -4
     note "ALL PVCs in $NS:";                     kubectl -n "$NS" get pvc 2>&1 | head -6
     note "phase=$(phase) replicas=$(replicas)"
     bad "the PVC is GONE after a SUSPEND — suspend must keep the disk"

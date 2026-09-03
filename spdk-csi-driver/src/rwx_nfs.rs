@@ -168,7 +168,7 @@ pub fn is_nfs_enabled() -> bool {
 /// Parse replica nodes from volume_context comma-separated string
 pub fn parse_replica_nodes(volume_context: &HashMap<String, String>) -> Result<Vec<String>, Status> {
     let nodes_str = volume_context
-        .get("nfs.flint.io/replica-nodes")
+        .get("nfs.chert.us/replica-nodes")
         .ok_or_else(|| Status::internal("Missing replica nodes in volume context"))?;
     
     let nodes: Vec<String> = nodes_str
@@ -199,7 +199,7 @@ pub fn parse_replica_nodes(volume_context: &HashMap<String, String>) -> Result<V
 /// - Preferred node affinity for performance
 /// 
 /// # Zero-Regression Design
-/// - Only called when nfs.flint.io/enabled=true in volume_context
+/// - Only called when nfs.chert.us/enabled=true in volume_context
 /// - Returns early if NFS_ENABLED=false
 /// - No modification to existing RWO pod creation
 /// - Pod lifecycle managed entirely within this module
@@ -249,7 +249,7 @@ pub async fn create_nfs_server_pod(
             name: Some(pv_name.clone()),
             labels: Some([
                 ("app".to_string(), "flint-nfs-server".to_string()),
-                ("flint.io/volume-id".to_string(), volume_id.to_string()),
+                ("chert.us/volume-id".to_string(), volume_id.to_string()),
             ].into_iter().collect()),
             ..Default::default()
         },
@@ -273,7 +273,7 @@ pub async fn create_nfs_server_pod(
                         .filter(|(k, _)| {
                             // Filter out NFS-specific attributes to prevent recursion
                             // The NFS PV should be treated as a regular RWO volume
-                            !k.starts_with("nfs.flint.io/")
+                            !k.starts_with("nfs.chert.us/")
                         })
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
@@ -311,7 +311,7 @@ pub async fn create_nfs_server_pod(
             namespace: Some(config.namespace.clone()),
             labels: Some([
                 ("app".to_string(), "flint-nfs-server".to_string()),
-                ("flint.io/volume-id".to_string(), volume_id.to_string()),
+                ("chert.us/volume-id".to_string(), volume_id.to_string()),
             ].into_iter().collect()),
             ..Default::default()
         },
@@ -393,12 +393,12 @@ pub async fn create_nfs_server_pod(
             namespace: Some(config.namespace.clone()),
             labels: Some([
                 ("app".to_string(), "flint-nfs-server".to_string()),
-                ("flint.io/volume-id".to_string(), volume_id.to_string()),
-                ("flint.io/component".to_string(), "nfs-server".to_string()),
+                ("chert.us/volume-id".to_string(), volume_id.to_string()),
+                ("chert.us/component".to_string(), "nfs-server".to_string()),
             ].into_iter().collect()),
             annotations: Some([
-                ("flint.io/volume-id".to_string(), volume_id.to_string()),
-                ("flint.io/replica-nodes".to_string(), replica_nodes.join(","))
+                ("chert.us/volume-id".to_string(), volume_id.to_string()),
+                ("chert.us/replica-nodes".to_string(), replica_nodes.join(","))
             ].into_iter().collect()),
             ..Default::default()
         },
@@ -550,14 +550,14 @@ pub async fn create_nfs_server_pod(
             namespace: Some(config.namespace.clone()),
             labels: Some([
                 ("app".to_string(), "flint-nfs-server".to_string()),
-                ("flint.io/volume-id".to_string(), volume_id.to_string()),
+                ("chert.us/volume-id".to_string(), volume_id.to_string()),
             ].into_iter().collect()),
             ..Default::default()
         },
         spec: Some(ServiceSpec {
             selector: Some([
                 ("app".to_string(), "flint-nfs-server".to_string()),
-                ("flint.io/volume-id".to_string(), volume_id.to_string()),
+                ("chert.us/volume-id".to_string(), volume_id.to_string()),
             ].into_iter().collect()),
             ports: Some(vec![ServicePort {
                 name: Some("nfs".to_string()),
@@ -805,7 +805,7 @@ pub async fn wait_for_nfs_pod_ready(
 /// Delete NFS server infrastructure (Pod, Service, PVC, PV) for a volume
 /// 
 /// # Safety
-/// - Only deletes resources with label flint.io/volume-id=<volume_id>
+/// - Only deletes resources with label chert.us/volume-id=<volume_id>
 /// - Safe to call even if resources don't exist
 pub async fn delete_nfs_server_pod(
     kube_client: Client,
@@ -1036,17 +1036,17 @@ pub async fn nfs_reconciler_pass(kube_client: &Client, source_node: &str) -> usi
         }
         let attrs = csi.volume_attributes.as_ref();
         let nfs_enabled = attrs
-            .and_then(|a| a.get("nfs.flint.io/enabled"))
+            .and_then(|a| a.get("nfs.chert.us/enabled"))
             .map(|v| v == "true")
             .unwrap_or(false);
         if !nfs_enabled {
             // Backing PVs are automatically excluded here too: their
-            // attributes are minted with every nfs.flint.io/* key filtered
+            // attributes are minted with every nfs.chert.us/* key filtered
             // out (create_nfs_server_pod), so only USER shared PVs match.
             continue;
         }
         let backend_is_emptydir = attrs
-            .and_then(|a| a.get("nfs.flint.io/backend"))
+            .and_then(|a| a.get("nfs.chert.us/backend"))
             .map(|v| v == "emptydir")
             .unwrap_or(false);
         let pv_terminating = pv.metadata.deletion_timestamp.is_some();
@@ -1215,14 +1215,14 @@ pub async fn nfs_reconciler_pass(kube_client: &Client, source_node: &str) -> usi
             .filter_map(|p| p.metadata.name.as_deref())
             .collect();
         let services_api: Api<Service> = Api::namespaced(kube_client.clone(), &config.namespace);
-        let lp = ListParams::default().labels("flint.io/volume-id");
+        let lp = ListParams::default().labels("chert.us/volume-id");
         if let Ok(svcs) = services_api.list(&lp).await {
             for svc in &svcs.items {
                 let Some(vol) = svc
                     .metadata
                     .labels
                     .as_ref()
-                    .and_then(|l| l.get("flint.io/volume-id"))
+                    .and_then(|l| l.get("chert.us/volume-id"))
                 else {
                     continue;
                 };

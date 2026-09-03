@@ -1,4 +1,4 @@
-//! `flint-s3-broker` — the STS-shaped identity exchange for `s3.flint.io`.
+//! `flint-s3-broker` — the STS-shaped identity exchange for `s3.chert.us`.
 //! See `spdk_csi_driver::s3csi::broker`.
 //!
 //! Environment:
@@ -8,7 +8,7 @@
 //!   FLINT_S3B_STATIC_ACCESS_KEY_ID / _STATIC_SECRET_ACCESS_KEY / _STATIC_SESSION_TOKEN
 //!   FLINT_S3B_STS_URL / _STS_ROLE_ARN
 //!   FLINT_S3B_REST_URL / _REST_HEADERS ("K=V;K2=V2")
-//!   FLINT_S3B_AUDIENCE               s3.flint.io
+//!   FLINT_S3B_AUDIENCE               s3.chert.us
 //!   FLINT_S3B_NODE_PRINCIPAL         system:serviceaccount:flint-system:flint-s3-csi-node
 //!   FLINT_S3B_DEFAULT_LIFETIME_SECS  900
 //!   FLINT_S3B_MAX_LIFETIME_SECS      3600

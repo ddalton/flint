@@ -129,7 +129,7 @@ Secret is rewritten. Nothing warns you.
 
 The fields are `<endpoint>,<bucket>,<keyPrefix>,<version>`; endpoint is
 empty for real S3. `version` comes from the share's
-`flint.io/api-token-version` annotation (absent = 1) — **bumping it and
+`chert.us/api-token-version` annotation (absent = 1) — **bumping it and
 rewriting that one Secret revokes one project**, which is the thing a
 single shared token cannot do.
 
@@ -151,7 +151,7 @@ none — a compromise of the gateway opens every project in either mode.
 **Nothing in the operator ties a project to one share.**
 `conflict::overlaps` keys fleet uniqueness on
 `(endpoint, bucket, prefix-subtree)`, and nothing in the operator reads
-`flint.io/project-id` at all. So a project with a `data/` prefix and a
+`chert.us/project-id` at all. So a project with a `data/` prefix and a
 `models/` prefix is two FlintShares, two hubs, two independent epochs —
 a legal and unremarkable configuration.
 
@@ -164,8 +164,8 @@ Label each share with the volume it is:
 ```yaml
 metadata:
   labels:
-    flint.io/project-id: proj-a
-    flint.io/volume-id: data      # optional; defaults to the CR name
+    chert.us/project-id: proj-a
+    chert.us/volume-id: data      # optional; defaults to the CR name
 ```
 
 and address it as `/v1/projects/proj-a/volumes/data/files`.
@@ -208,13 +208,13 @@ a live one.
 
 ### How a project's shares are found
 
-1. `flint.io/project-id` label — the documented index, already a printer
+1. `chert.us/project-id` label — the documented index, already a printer
    column on the CRD.
 2. Failing that, the derived name `fs-<project-id>` (`sharePrefix`).
 
 The label wins when both match, so relabelling actually moves a project
 rather than being shadowed by whatever object happens to be called
-`fs-<id>`. Within a project, the volume is the `flint.io/volume-id`
+`fs-<id>`. Within a project, the volume is the `chert.us/volume-id`
 label, or the CR's own name when it carries none — which keeps a project
 that never adopted the label addressable anyway.
 
@@ -253,7 +253,7 @@ against any hub the operator failed to poll once.
 
 ### Waking
 
-A parked share is woken by patching `flint.io/requested-at` — the same
+A parked share is woken by patching `chert.us/requested-at` — the same
 level-triggered annotation the front door uses, merge-patched so the
 gateway never becomes a field owner and never fights whoever else writes
 it. The wake **persists**, so a request that times out has still made
@@ -263,7 +263,7 @@ the share come back; the caller retries and does not need to ask again.
 The operator deletes it the moment it honours the wake
 (`reconcile.rs`: *"the NEXT idle window starts from the hub's own
 activity clock rather than from a stale heartbeat"*). So looking for
-`flint.io/requested-at` after a wake and finding nothing means it
+`chert.us/requested-at` after a wake and finding nothing means it
 worked, not that it failed — check `replicas` and `status.phase`
 instead. This cost two drill runs before it was understood.
 
@@ -359,7 +359,7 @@ mount target.
 
 **It stamps on every call, including when the share is already Ready —
 and that is the point.** The idle ladder suspends only when *two*
-independent signals agree: `flint.io/requested-at` is stale **and** the
+independent signals agree: `chert.us/requested-at` is stale **and** the
 hub's own activity clock says idle. A consumer doing file I/O is held up
 by the second signal for free. A consumer that holds a mount and does no
 I/O — an agent computing in memory for twenty minutes, which is exactly

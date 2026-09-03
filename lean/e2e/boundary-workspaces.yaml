@@ -14,7 +14,7 @@ stringData:
   AWS_REGION: us-east-1
 ---
 # (1) gated with NO lag bound ⇒ BoundaryModeAccepted=False.
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace
 metadata: { name: nolag, namespace: default }
 spec:
@@ -27,7 +27,7 @@ spec:
   boundaryMode: gated
 ---
 # (2) gated, lag bound set, retention shorter than one staging window.
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace
 metadata: { name: shortret, namespace: default }
 spec:
@@ -42,7 +42,7 @@ spec:
   noncurrentRetentionDays: 0
 ---
 # (3) gated, backlog caps nothing can drain inside a spot reclaim.
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace
 metadata: { name: bigbacklog, namespace: default }
 spec:
@@ -57,7 +57,7 @@ spec:
   stagedBacklogCapBytes: 21474836480
 ---
 # (4) THE ACCEPTED CONTROL: a coherent gated workspace with an agent.
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace
 metadata: { name: good, namespace: default }
 spec:
@@ -82,7 +82,7 @@ kind: Pod
 metadata:
   name: agent-good
   namespace: default
-  labels: { flint.io/lean-workspace: good }
+  labels: { chert.us/lean-workspace: good }
 spec:
   restartPolicy: Never
   containers:
@@ -98,7 +98,7 @@ spec:
 # (4b) A gated workspace with NO pod, used for the lifecycle legs: they
 # recreate the CR to force a posture pass, and recreating `good` would
 # take its agent (and every later leg) with it.
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace
 metadata: { name: lifecycle, namespace: default }
 spec:
@@ -113,7 +113,7 @@ spec:
 ---
 # (5) The METRICS BIND COLLISION: the agent takes the port first. The
 # workspace must stay fully operable and say so in a condition.
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace
 metadata: { name: portclash, namespace: default }
 spec:
@@ -134,7 +134,7 @@ kind: Pod
 metadata:
   name: agent-portclash
   namespace: default
-  labels: { flint.io/lean-workspace: portclash }
+  labels: { chert.us/lean-workspace: portclash }
 spec:
   restartPolicy: Never
   # The agent grabs the metrics port BEFORE the sidecar can bind it.

@@ -37,7 +37,7 @@
 - The **unselected cluster-wide Secret watch** (`bin:183-195`) caching every Secret in the cluster in operator memory — a stated trade against an unstable kube feature flag, not a requirement. A label selector fixes it.
 - **`replicas: 1` / `strategy: Recreate`** (`deployment.yaml:20-22`) — correct for *reconcilers* (two stale caches disagreeing), and irrelevant to a lease-independent read/proxy path.
 - **Pod-IP polling specifically.** The pod IP is the *only* route today; nothing forces it to be. It can be relayed.
-- **`kubectl` as the front-door interface** (`docs/flint-lite-operator.md:306-320`) — a doc recipe, not a shipped contract. Phase C artifacts are entirely absent: no `frontdoor` ClusterRole, no `flint.io/project-id` (zero hits), no deterministic name enforcement.
+- **`kubectl` as the front-door interface** (`docs/flint-lite-operator.md:306-320`) — a doc recipe, not a shipped contract. Phase C artifacts are entirely absent: no `frontdoor` ClusterRole, no `chert.us/project-id` (zero hits), no deterministic name enforcement.
 
 ---
 
@@ -88,7 +88,7 @@ The "forcing function" — *a central operator would need routable pod CIDRs acr
 
 **A9. One comment, three files** (`crd.rs:286-290`, `render.rs:401-408`, chart): name the gate as the *only* sanctioned external path for the file API and state the Service stays single-port permanently. *Why:* five places justify keeping 8080 off the Service and none names an alternative, so the first person who needs remote browse will helpfully add the port. Once one customer has a LoadBalancer'd whole-volume read-write API, you cannot walk it back.
 
-**A10. Retarget the uncommitted B4 legs before committing.** Leg 7 (`/status` + file API, 401, symlink 409) is topology-neutral — commit as is. Do **not** commit anything that pins `flint.io/requested-at` as *the front-door contract*; pin it as *the operator's ladder input*, which is what it is. *Why:* the working tree is `+243/-8` and uncommitted; retargeting is free today and is a test rewrite plus a contract change tomorrow.
+**A10. Retarget the uncommitted B4 legs before committing.** Leg 7 (`/status` + file API, 401, symlink 409) is topology-neutral — commit as is. Do **not** commit anything that pins `chert.us/requested-at` as *the front-door contract*; pin it as *the operator's ladder input*, which is what it is. *Why:* the working tree is `+243/-8` and uncommitted; retargeting is free today and is a test rewrite plus a contract change tomorrow.
 
 **A11. `Phase::IdleSuspended | Phase::Hibernated => REQUEUE_SETTLED`.** One match arm at `reconcile.rs:729-731`. *Why:* verified — parked shares requeue at 15s forever, each pass SSA-applying ConfigMap/PVC/Service/Deployment. At the plan's own 3000-CR/300-live target that is ~180 SSA-write reconciles/minute of pure waste, and B1's stated design was "~60s with jitter."
 
@@ -108,13 +108,13 @@ The "forcing function" — *a central operator would need routable pod CIDRs acr
 
 **B7. Cache the polled `HubSnapshot` in-process**, keyed by share with an observation timestamp; gate `GET` serves from it, `?deep=true` forces a poll. Otherwise every UI refresh adds a round trip on top of the ladder's own.
 
-**B8. Wire or delete `flint.io/wake-intent`** (`idle.rs:51`, getter `:119-121`, zero consumers). A parsed-but-inert protocol knob that a front door might reasonably start writing is worse than an absent one.
+**B8. Wire or delete `chert.us/wake-intent`** (`idle.rs:51`, getter `:119-121`, zero consumers). A parsed-but-inert protocol knob that a front door might reasonably start writing is worse than an absent one.
 
 **B9. Gate e2e legs**, minimum: ensure-from-zero returns `waking` then `ready`; concurrent double-ensure yields one CR; overlapping-prefix declare returns 409 *synchronously* (not `phase: Failed` asynchronously); browse against `IdleSuspended` returns 503+`Retry-After` **and** wakes; Range/`Retry-After`/status pass through byte-identically; a namespace-A token gets 403 for a namespace-B project; the per-share hub token never appears in any gate response; **and a mid-stream upstream failure resets the connection rather than ending the body cleanly**. Plus a fleet-budget leg at 3000/300 measuring apiserver write rate, `pods.list` rate, and RSS — B1 named that target and no leg asserts it.
 
 **B10. Two gaps the gate proposal missed.** (i) `DELETE /v1/projects/{pid}` under `reclaim: Delete` deletes an **adopted** PVC regardless (`reconcile.rs:1169-1174` logs `adopted` and deletes anyway), in direct contrast to the hibernate path which refuses (`:1056-1058`). One HTTP token would then destroy a user-supplied PVC over a WAN. Fix the inconsistency or refuse adopted claims on the delete verb. (ii) The hub buffers whole download bodies *deliberately* so a 200 can never be followed by a short body (`fileapi/mod.rs:483-491`); a `bytes_stream` hop **re-opens that class at the gate**.
 
-**B11. Single-flight keyed off the reflector, not process memory.** With `replicas: 2` mandatory (B3), in-process click suppression is wrong by construction — key it off the `flint.io/requested-at` value already in the store.
+**B11. Single-flight keyed off the reflector, not process memory.** With `replicas: 2` mandatory (B3), in-process click suppression is wrong by construction — key it off the `chert.us/requested-at` value already in the store.
 
 ### LATER
 

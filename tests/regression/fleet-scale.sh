@@ -77,7 +77,7 @@ done
 
 # --- seed ------------------------------------------------------------------
 # Parked shares are pre-stamped with the operator's OWN durable carrier
-# (flint.io/idle-state + idle-since), so they cost zero pods from birth.
+# (chert.us/idle-state + idle-since), so they cost zero pods from birth.
 # That is legitimate rather than a cheat: those annotations ARE how the
 # operator persists the rung, and `decide()` returns Hold for a share
 # that is down and unrequested.
@@ -94,7 +94,7 @@ while [ $i -lt "$N" ]; do
         ns="fleet-$((j % NS_COUNT))"
         if [ "$j" -lt "$LIVE" ]; then
             cat >> "$f" <<YAML
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata:
   name: s$j
@@ -113,14 +113,14 @@ spec:
 YAML
         else
             cat >> "$f" <<YAML
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata:
   name: s$j
   namespace: $ns
   annotations:
-    flint.io/idle-state: Suspended
-    flint.io/idle-since: "$IDLE_SINCE"
+    chert.us/idle-state: Suspended
+    chert.us/idle-since: "$IDLE_SINCE"
 spec:
   bucket: rig-bucket
   keyPrefix: "t$(printf '%05d' $j)/"

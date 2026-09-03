@@ -70,7 +70,7 @@ chmod 0777 $WORK/s0-exports $WORK/s1-exports
 for s in 0 1; do
   nfs_port=$((20480 + s))
   cat > "$WORK/mds$s.yaml" <<EOF
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: mds
 mds:
@@ -101,7 +101,7 @@ done
 for d in 1 2; do
   port=$((20490 + d)); ctl=$((21490 + d))
   cat > "$WORK/ds$d.yaml" <<EOF
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: ds
 ds:

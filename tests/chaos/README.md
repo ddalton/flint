@@ -31,6 +31,13 @@ tail -1 results.csv                         # verdict row appended per drill
 Per-drill artifacts land in `artifacts/<phase>-<drill>-<t0>/` (driver logs,
 VA dumps, nvme state, db verdict).
 
+Those captures are evidence of what a cluster actually held at a moment,
+so they are never rewritten. Runs older than the `chert.us` rename show
+the identifiers of their day — `flint.io/*`, `nfs.flint.io/*` — and that
+is correct: a capture edited to agree with today's keys would be a
+capture claiming a cluster printed something it never printed. Read them
+as dated, not as current.
+
 ## Cluster assumptions
 
 - trove-provisioned k8s with flint chart (SPDK three-container mode) in

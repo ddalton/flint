@@ -363,7 +363,7 @@ is why §3 keeps a pod-lifetime process — outside the tenant pod.
 
 ### 2.1 flint-passthrough (privileged FUSE sidecar)
 
-A pod carries the label `flint.io/passthrough-mount: <cr-name>`
+A pod carries the label `chert.us/passthrough-mount: <cr-name>`
 (`spdk-csi-driver/src/passthrough/inject.rs:52`). A cluster-wide
 `MutatingWebhookConfiguration` with `failurePolicy: Fail` and an
 `objectSelector` on that label sends every pod CREATE in any namespace to
@@ -393,7 +393,7 @@ driver do)" (`inject.rs:23-26`; `values.yaml:18-33`; e2e leg A11
 
 ### 2.2 flint-lean (unprivileged, root, credential-holding sidecar)
 
-Same admission shape (`objectSelector: flint.io/lean-workspace Exists`,
+Same admission shape (`objectSelector: chert.us/lean-workspace Exists`,
 `failurePolicy: Fail`, CR in the pod's namespace, `Refused` phase denies —
 `spdk-csi-driver/src/lean_operator/webhook.rs:64-115,166-192`). The
 injector adds an `emptyDir` `flint-workspace` with the CR's `sizeLimit`
@@ -449,7 +449,7 @@ admission listener, but a new pod's first exchange needs the broker
 critical-path Deployment with a PDB and ≥ 2 replicas. T2 **re-scoped**:
 no credential is *placed* in the tenant namespace, but any process under
 an entitled SA can obtain the same 15-minute keys by projecting its own
-`aud=s3.flint.io` token (`projected.sources[].serviceAccountToken.audience`
+`aud=s3.chert.us` token (`projected.sources[].serviceAccountToken.audience`
 is pod-author-chosen, kubernetes.io configure-service-account) and
 calling the broker — `TokenReview` passes (live pod), `consumers` passes
 (same SA), no plugin involvement — so entitlement is SA-granular and the
@@ -495,9 +495,9 @@ one tree). T9 unchanged by design. New surfaces are named in §3.6.
  │    mount(2) src, send fd) ─ write comm/token ─ wait init/marker ─ bind src→target ─ OK      │   │
  │  Republish (~60-90 s): rewrite comm/token if changed ─ liveness probe ─ OK, never remount   │   │
  │  NodeUnpublish: (lean: delete worker w/ derived grace ⇒ drain) ─ umount ─ delete ─ rm state │   │
- │  state: /var/lib/kubelet/plugins/s3.flint.io/volumes/<vol>/{state.json, src/ | tree.img, tree/}┘   │
+ │  state: /var/lib/kubelet/plugins/s3.chert.us/volumes/<vol>/{state.json, src/ | tree.img, tree/}┘   │
  └──────────────────────────────────┬────────────────────────────────────────────────────────────┘
-                                    │ pod-bound SA token (aud=s3.flint.io), from kubelet
+                                    │ pod-bound SA token (aud=s3.chert.us), from kubelet
                                     ▼                                 ┌──────────────────────┐
  ┌────────────────────────────────────────────────────┐               │ Apache Knox          │
  │ flint-s3-broker  (Deployment, restricted, 1 place) │ ─ K1/K2/K3 ─▶ │ (project AuthN)      │
@@ -509,7 +509,7 @@ one tree). T9 unchanged by design. New surfaces are named in §3.6.
 
 | Component | Lives in | Runs as | Job |
 |---|---|---|---|
-| `CSIDriver s3.flint.io` | cluster | — | `attachRequired: false`, `podInfoOnMount: true`, `volumeLifecycleModes: [Ephemeral]`, `fsGroupPolicy: None`, `requiresRepublish: true`, `tokenRequests: [{audience: s3.flint.io, expirationSeconds: 3600}]`; `serviceAccountTokenInSecrets: true` once the cluster is ≥ 1.35 ([web-k8s-csi-mechanics §3.1]) |
+| `CSIDriver s3.chert.us` | cluster | — | `attachRequired: false`, `podInfoOnMount: true`, `volumeLifecycleModes: [Ephemeral]`, `fsGroupPolicy: None`, `requiresRepublish: true`, `tokenRequests: [{audience: s3.chert.us, expirationSeconds: 3600}]`; `serviceAccountTokenInSecrets: true` once the cluster is ≥ 1.35 ([web-k8s-csi-mechanics §3.1]) |
 | `flint-s3-csi-node` DaemonSet | `flint-system` | `privileged: true`; **not** `hostNetwork`, **not** `hostPID` | the CSI node server: `NodePublish`/`NodeUnpublish`/`NodeGetVolumeStats`; performs `mount(2)`; creates and reaps worker pods on its own node |
 | worker pod (one per published volume) | `flint-workers` | non-root, `drop: [ALL]`, seccomp `RuntimeDefault`, `automountServiceAccountToken: false` **[graft: security]** | passthrough: receives the FUSE fd and execs the pinned `mount-s3`; lean: runs the unchanged `flint-sync run` over a plugin-owned tree |
 | `flint-s3-broker` Deployment | `flint-system` | `restricted`; ClusterRole `tokenreviews: create`, the two CRDs `get,list,watch`; Secrets `get` in `flint-system` only | the STS-shaped identity exchange (§4); the only component with a standing credential |
@@ -557,12 +557,12 @@ spec:
   volumes:
     - name: data
       csi:
-        driver: s3.flint.io
+        driver: s3.chert.us
         readOnly: true                         # presentation only; the CR/proxy decide RW (§2.4 T2)
         volumeAttributes:
-          flint.io/mount: datasets             # FlintPassthroughMount <datasets> in THIS namespace
-          # flint.io/workspace: team-a         # or a FlintLeanWorkspace (lean arm)
-          # flint.io/uid: "1001"               # optional presentation override (§3.5)
+          chert.us/mount: datasets             # FlintPassthroughMount <datasets> in THIS namespace
+          # chert.us/workspace: team-a         # or a FlintLeanWorkspace (lean arm)
+          # chert.us/uid: "1001"               # optional presentation override (§3.5)
         # nodePublishSecretRef: {name: minio-creds}   # interim static-credential arm ONLY (§4.5)
   containers:
     - name: app
@@ -577,8 +577,8 @@ support inline volumes will be responsible for secure handling of
 volumes"; kubernetes.io: parameters "normally defined in the StorageClass
 should not be exposed to users through the use of inline ephemeral
 volumes" — [web-k8s-csi-mechanics §1.4]). Exactly one of
-`flint.io/mount` / `flint.io/workspace` is accepted; `flint.io/uid` and
-`flint.io/gid` are accepted as narrowing presentation overrides; every
+`chert.us/mount` / `chert.us/workspace` is accepted; `chert.us/uid` and
+`chert.us/gid` are accepted as narrowing presentation overrides; every
 other key is refused with a message naming it. **`bucket`, `keyPrefix`,
 `endpoint`, `region`, `image`, credentials are never accepted from the
 pod** — the CR is the policy object, as today.
@@ -611,7 +611,7 @@ replacement for `ctl`; the pod-`runAsUser`-derived default owner
 (`mount_owner` = `spec.uid` → `securityContext.runAsUser` → none,
 `inject.rs:238-244`; `NOTES.txt:28-33` documents it as the user
 contract): `NodePublish` never sees `securityContext`, so a pod that
-today mounts as its own uid must say so in `flint.io/uid` or the CR, else
+today mounts as its own uid must say so in `chert.us/uid` or the CR, else
 files present as 65534 (today, with nothing declared: root).
 What improves: kubelet starts **no** container, init containers included,
 before `NodePublishVolume` returns (`kubelet.go:2232-2245`) — the
@@ -624,7 +624,7 @@ arithmetic; `restricted` PSA works.
 ### 3.3 What the CRs gain and lose (both CRDs; parity tests updated)
 
 ```yaml
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintPassthroughMount            # FlintLeanWorkspace gains the same block
 metadata: { name: datasets, namespace: team-a }
 spec:
@@ -668,7 +668,7 @@ the pod author put in `volumeAttributes` (`mergeMap(volAttribs,
 getPodInfoAttrs(...))`, `csi_util.go:208-217`, [web-k8s-csi-mechanics
 §2]): `csi.storage.k8s.io/pod.{name,namespace,uid,serviceAccount.name}`,
 `csi.storage.k8s.io/ephemeral`, and
-`csi.storage.k8s.io/serviceAccount.tokens` = `{"s3.flint.io": {"token":
+`csi.storage.k8s.io/serviceAccount.tokens` = `{"s3.chert.us": {"token":
 "<jwt>", "expirationTimestamp": "…"}}` (`csi_mounter.go:363-420`), or the
 same key in `secrets` once `serviceAccountTokenInSecrets` is on. The
 volume id is `csi-<sha256(podUID + volumeName)>` (`csi_mounter.go:611-615`)
@@ -677,14 +677,14 @@ plugin-owned path.
 
 ```
 NodePublishVolume(req):
-  1  parse: selector (exactly one of flint.io/mount|workspace), narrowing attrs, readonly,
+  1  parse: selector (exactly one of chert.us/mount|workspace), narrowing attrs, readonly,
      kubelet keys, SA token; reject unknown attributes naming them; require ephemeral == "true"
   2  idempotency: if `timeout 5 mountpoint -q target` (main.rs:4671-4682 shape) ⇒ REPUBLISH path (§3.7)
   3  lock on volume_id (node_volume_locks, 90 s budget < kubelet's 2 min csiTimeout)
   4  resolve FlintPassthroughMount <selector> in pod.namespace from the informer cache
        missing ⇒ NotFound (final) naming CR + namespace;  MountSpec::validate (spec.rs:39-165) reused
   5  authorize: pod.serviceAccount.name ∈ spec.consumers.serviceAccounts  else PermissionDenied naming SA + field
-  6  create-or-adopt worker pod (label flint.io/volume-id=<vid>, nodeName=<this node>, image chart-pinned,
+  6  create-or-adopt worker pod (label chert.us/volume-id=<vid>, nodeName=<this node>, image chart-pinned,
        runAsUser=effective uid, drop ALL, seccomp RuntimeDefault, emptyDir comm (10 MiB, Memory) + cache,
        resources from chart sidecarResources (values.yaml:94-107), env per §4.4);
        not Running within 60 s ⇒ Unavailable (non-final; kubelet retries, 500 ms → 2m2s backoff);
@@ -809,16 +809,16 @@ NodeUnpublishVolume (lean):
 | Cache | mount-s3 cache in the worker's own emptyDir; no host cache (the reason AWS moved it off the host, [web-fuse-csi-priorart §2]) |
 | Kernel | FUSE `default_permissions` + `allow_other` with `user_id`/`group_id` = the tenant uid; `nodev,nosuid`; the syncer's mount namespace holds one tree and nothing else of value |
 | Sharing | **none in v1.** AWS shares a Mountpoint Pod only when node, PV, volume id, options, auth source, fsGroup, namespace, SA and role ARN are all equal ([web-fuse-csi-priorart §2]); with per-pod credentials the equality class is one pod. Lean syncers are never shared (one writer per tree, the occupancy flock `state.rs:110-159`) |
-| uid/gid | `NodePublish` does not see the pod's `securityContext` (`code-passthrough §4.3`). Effective uid = CR `spec.uid` → `volumeAttributes.flint.io/uid` → 65534 (passthrough; lean REQUIRES the CR uid, §3.5 step 6). This drops today's `runAsUser` derivation and changes the no-declaration default from root to 65534 (`inject.rs:238-244`; test `:730-738` asserts no `--uid` at all when nothing is declared) — listed in §3.2 "What is lost". Letting the pod author choose the *presentation* uid is safe: `--uid` decides what `stat` reports and who passes `default_permissions`; the credential decides what the bucket allows. `fsGroupPolicy: None` so kubelet never recursively chowns a bucket — with the default policy an inline volume (always RWO to kubelet) with `fsType` + `fsGroup` triggers a walk of the whole mount (`csi_mounter.go:474-500`, [web-k8s-csi-mechanics §9]) |
+| uid/gid | `NodePublish` does not see the pod's `securityContext` (`code-passthrough §4.3`). Effective uid = CR `spec.uid` → `volumeAttributes.chert.us/uid` → 65534 (passthrough; lean REQUIRES the CR uid, §3.5 step 6). This drops today's `runAsUser` derivation and changes the no-declaration default from root to 65534 (`inject.rs:238-244`; test `:730-738` asserts no `--uid` at all when nothing is declared) — listed in §3.2 "What is lost". Letting the pod author choose the *presentation* uid is safe: `--uid` decides what `stat` reports and who passes `default_permissions`; the credential decides what the bucket allows. `fsGroupPolicy: None` so kubelet never recursively chowns a bucket — with the default policy an inline volume (always RWO to kubelet) with `fsType` + `fsGroup` triggers a walk of the whole mount (`csi_mounter.go:474-500`, [web-k8s-csi-mechanics §9]) |
 
 **Privilege accounting — said plainly.**
 
 | Component | Privilege | Why it cannot be less | Must NOT have |
 |---|---|---|---|
-| `flint-s3-csi-node` (1 per node) | `privileged: true`; hostPath `/var/lib/kubelet` **Bidirectional**, `/var/lib/kubelet/plugins/s3.flint.io`, `/var/lib/kubelet/plugins_registry`; `/dev/fuse` via privileged device access; `priorityClassName` above tenant workloads | the API server refuses `Bidirectional` on non-privileged containers (`validation.go:1473-1476`); `mount(2)` needs `CAP_SYS_ADMIN`; FUSE needs `/dev/fuse`; AWS keeps `privileged: true` for exactly this ("Kubernetes API validator currently enforces that this is set to true for bidirectional mounts", [web-fuse-csi-priorart §2 node.yaml]); identical to the existing `nfs-only` mode (`node.yaml:152-157`) | `hostNetwork` (serves Unix sockets only), `hostPID` (it unmounts, it never signals a mounter), any Secrets RBAC, any cluster-wide pod verb |
+| `flint-s3-csi-node` (1 per node) | `privileged: true`; hostPath `/var/lib/kubelet` **Bidirectional**, `/var/lib/kubelet/plugins/s3.chert.us`, `/var/lib/kubelet/plugins_registry`; `/dev/fuse` via privileged device access; `priorityClassName` above tenant workloads | the API server refuses `Bidirectional` on non-privileged containers (`validation.go:1473-1476`); `mount(2)` needs `CAP_SYS_ADMIN`; FUSE needs `/dev/fuse`; AWS keeps `privileged: true` for exactly this ("Kubernetes API validator currently enforces that this is set to true for bidirectional mounts", [web-fuse-csi-priorart §2 node.yaml]); identical to the existing `nfs-only` mode (`node.yaml:152-157`) | `hostNetwork` (serves Unix sockets only), `hostPID` (it unmounts, it never signals a mounter), any Secrets RBAC, any cluster-wide pod verb |
 | node SA RBAC | ClusterRole: the two CRDs `get,list,watch`; `events create,patch`; `nodes get`. **Role in `flint-workers` only**: `pods create,get,list,watch,delete` | it must read policy and place its own workers | Secrets anywhere (`docs/plans/file-api-fleet-auth.md:99-104`); pods outside `flint-workers` — ISTIO-SECURITY-2023-005 turned a node agent's cluster-wide pod DELETE into a node→cluster escalation ([web-istio-precedent §5.5]) |
 | worker pod (1 per volume) | none: `runAsNonRoot`, `drop: [ALL]`, `seccompProfile: RuntimeDefault`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, `automountServiceAccountToken: false`; passthrough: no hostPath, no `/dev/fuse`; lean: one hostPath to exactly `<plugin>/volumes/<vid>/tree` | mount-s3 in fd mode needs no capability ([web-fuse-csi-priorart §7]); `flint-sync` needs a directory | `hostNetwork`, `hostPID`, RBAC, any second hostPath |
-| `flint-workers` namespace | PSA `privileged` label (hostPath is baseline-forbidden) **plus** a `ValidatingAdmissionPolicy`: creator must be the node SA AND, on CREATE, `object.spec.nodeName == request.userInfo.extra["authentication.kubernetes.io/node-name"][0]`; on DELETE, `oldObject.spec.nodeName == request.userInfo.extra["authentication.kubernetes.io/node-name"][0]` (pod-bound token metadata, stable K8s 1.32, beta 1.30 — the DS pod's default projected token is pod-bound; `oldObject` is non-null on DELETE and DELETE is a valid `OperationType`, admissionregistration/v1) — a node may create and delete workers only on itself; image ∈ chart-pinned set; `securityContext` as above; hostPath only under `/var/lib/kubelet/plugins/s3.flint.io/volumes/`; no `privileged`, no `hostNetwork`, no `hostPID`; `spec.nodeName` == label `flint.io/node`; `PodDisruptionBudget minAvailable: <integer larger than any plausible worker count>` — bare pods may not use `maxUnavailable` or percentages (kubernetes.io configure-pdb §Arbitrary workloads; `maxUnavailable` forces the controller's scale lookup, `disruption.go:822-823`, which on a Node `ownerReference` fails into `DisruptionAllowed=False reason SyncFailed`, `:980-992`, and on no controllerRef emits `Warning UnmanagedPods` — an eviction block through an error path only; the integer-`minAvailable` branch is clean, `:841-843,1005-1008`); and the Node `ownerReference` carries `controller: true` so `kubectl drain` treats workers as managed and waits on the eviction API rather than refusing without `--force` (`kubectl/pkg/drain/filters.go:236-249`) | as Istio: only the agent's namespaces are `privileged`; app namespaces `baseline`/`restricted` ([web-istio-precedent §3.3]) | tenant RBAC of any kind |
+| `flint-workers` namespace | PSA `privileged` label (hostPath is baseline-forbidden) **plus** a `ValidatingAdmissionPolicy`: creator must be the node SA AND, on CREATE, `object.spec.nodeName == request.userInfo.extra["authentication.kubernetes.io/node-name"][0]`; on DELETE, `oldObject.spec.nodeName == request.userInfo.extra["authentication.kubernetes.io/node-name"][0]` (pod-bound token metadata, stable K8s 1.32, beta 1.30 — the DS pod's default projected token is pod-bound; `oldObject` is non-null on DELETE and DELETE is a valid `OperationType`, admissionregistration/v1) — a node may create and delete workers only on itself; image ∈ chart-pinned set; `securityContext` as above; hostPath only under `/var/lib/kubelet/plugins/s3.chert.us/volumes/`; no `privileged`, no `hostNetwork`, no `hostPID`; `spec.nodeName` == label `chert.us/node`; `PodDisruptionBudget minAvailable: <integer larger than any plausible worker count>` — bare pods may not use `maxUnavailable` or percentages (kubernetes.io configure-pdb §Arbitrary workloads; `maxUnavailable` forces the controller's scale lookup, `disruption.go:822-823`, which on a Node `ownerReference` fails into `DisruptionAllowed=False reason SyncFailed`, `:980-992`, and on no controllerRef emits `Warning UnmanagedPods` — an eviction block through an error path only; the integer-`minAvailable` branch is clean, `:841-843,1005-1008`); and the Node `ownerReference` carries `controller: true` so `kubectl drain` treats workers as managed and waits on the eviction API rather than refusing without `--force` (`kubectl/pkg/drain/filters.go:236-249`) | as Istio: only the agent's namespaces are `privileged`; app namespaces `baseline`/`restricted` ([web-istio-precedent §3.3]) | tenant RBAC of any kind |
 | `flint-s3-broker` | `restricted`; ClusterRole `tokenreviews: create`, CRDs read; Role `secrets get` in `flint-system` (its Knox identity under K2, its pinned client certificate under K1/endgame — §4.3; interim static keys) | it authenticates pod tokens and reads the policy object | tenant-namespace Secret reads; pod write RBAC; a bucket credential of its own |
 | tenant pod | nothing — `restricted`-admissible | — | everything |
 
@@ -947,7 +947,7 @@ stat and a possible 4 KiB write.
 ### 4.2 The chain (v1) — sequence
 
 ```
-kubelet ─ TokenRequest(aud=s3.flint.io, BoundObjectRef Pod/UID, 3600 s) ─▶ SA JWT T ─▶ NodePublish volume_context
+kubelet ─ TokenRequest(aud=s3.chert.us, BoundObjectRef Pod/UID, 3600 s) ─▶ SA JWT T ─▶ NodePublish volume_context
    │ (kubelet refreshes T at 80 % TTL; republish ~60-90 s rewrites the file)               │
    │                                                                                       ▼
    │                                              worker pod: comm/token (0600, memory emptyDir)
@@ -959,8 +959,8 @@ kubelet ─ TokenRequest(aud=s3.flint.io, BoundObjectRef Pod/UID, 3600 s) ─▶
    │                      ┌────────────────────────────────────────────────────────────────┘
    │                      ▼  POST /  Action=AssumeRoleWithWebIdentity&RoleArn=…&WebIdentityToken=T   (unsigned)
    │            flint-s3-broker
-   │              1  TokenReview{token: T, audiences: [s3.flint.io]} → authenticated, username
-   │                 system:serviceaccount:<ns>:<sa>, extra pod-uid; require status.audiences ∋ s3.flint.io
+   │              1  TokenReview{token: T, audiences: [s3.chert.us]} → authenticated, username
+   │                 system:serviceaccount:<ns>:<sa>, extra pod-uid; require status.audiences ∋ s3.chert.us
    │                 and (pod-uid, RoleArn's CR, RoleSessionName) match a LIVE publish registration whose
    │                 node-name extra equals the pod's node (the registration, below)   [graft: security]
    │                 (online review, not offline JWKS: offline verifiers "do not verify the claims … to be
@@ -1015,13 +1015,13 @@ Why this shape (the spine's, with security-first's discipline grafted in):
   (`docs/plans/flint-lean-plan.md:66-73`; the plan had the sidecar holding
   a proxy token, `:246-247` — now not even that). What the pod can
   *obtain* is another matter: a process under an entitled SA can project
-  its own `aud=s3.flint.io` token, and only the registration nonce
+  its own `aud=s3.chert.us` token, and only the registration nonce
   (above) stops the broker honouring it (§2.4 T2).
 - **The node holds no S3 key and no Knox credential.** The plugin only
   forwards kubelet's token into the worker and registers the publish
   over its own node SA token (a registration, never an exchange); the
   worker talks to the broker itself. A dump of node-plugin memory yields pod-bound tokens
-  useless outside audience `s3.flint.io`, dying with their pods. This is
+  useless outside audience `s3.chert.us`, dying with their pods. This is
   the answer to the un-partitioning objection on record
   (`docs/plans/multicluster-frontdoor-review.md:50-51`): the concentration
   point holds nothing long-lived and nothing usable elsewhere; the only
@@ -1067,7 +1067,7 @@ Why this shape (the spine's, with security-first's discipline grafted in):
 
 | Step | Claim | Status | Citation | Settles |
 |---|---|---|---|---|
-| K1 | Knox 2.1.0 `JWTProvider` verifies a K8s projected token via `knox.token.jwks.urls=<cluster>/openid/v1/jwks`, `jwt.expected.issuer=<--service-account-issuer>`, `knox.token.audiences=s3.flint.io`, then identity-assertion maps `system:serviceaccount:<ns>:<sa>` → project user and `KNOXTOKEN` mints. **REQUIRED on the K1 topology**: `knox.token.client.cert.required=true`, `knox.token.allowed.principals=<broker client-cert DN>` (v2.1.0 `TokenResource.enforceClientCertIfRequired()` → 403), `knox.token.audiences=<a proxy-only audience>`, `knox.token.ttl` ≤ 15 min, and the broker always passes `lifespan=PT15M`. Without the cert gate any pod under a mapped SA can mint a Knox SSO token for the project principal by projecting its own `aud=s3.flint.io` token straight at the topology — bypassing `TokenReview` and `consumers` — with the caller-chosen `lifespan` up to `knox.token.ttl`, and that token is valid at every Knox topology that sets no `knox.token.audiences` (v2.1.0 `AbstractJWTFilter.validateAudiences`: "if there were no expected audiences configured then just consider any audience acceptable"), i.e. WebHDFS, Hive, … for the project principal; the §3.6 worker NetworkPolicy does not constrain the tenant pod | parameters **VERIFIED** to exist in 2.1.0; the composition is exercised in no doc; the `typ` header is the blocker — **UNVERIFIED**, KNOX-3434 predicts failure | [web-knox-jwt §3.1-3.3]; v2.1.0 `TokenResource.java`, `AbstractJWTFilter.java` | whether v1 can run with a pinned client certificate as the broker's only standing credential |
+| K1 | Knox 2.1.0 `JWTProvider` verifies a K8s projected token via `knox.token.jwks.urls=<cluster>/openid/v1/jwks`, `jwt.expected.issuer=<--service-account-issuer>`, `knox.token.audiences=s3.chert.us`, then identity-assertion maps `system:serviceaccount:<ns>:<sa>` → project user and `KNOXTOKEN` mints. **REQUIRED on the K1 topology**: `knox.token.client.cert.required=true`, `knox.token.allowed.principals=<broker client-cert DN>` (v2.1.0 `TokenResource.enforceClientCertIfRequired()` → 403), `knox.token.audiences=<a proxy-only audience>`, `knox.token.ttl` ≤ 15 min, and the broker always passes `lifespan=PT15M`. Without the cert gate any pod under a mapped SA can mint a Knox SSO token for the project principal by projecting its own `aud=s3.chert.us` token straight at the topology — bypassing `TokenReview` and `consumers` — with the caller-chosen `lifespan` up to `knox.token.ttl`, and that token is valid at every Knox topology that sets no `knox.token.audiences` (v2.1.0 `AbstractJWTFilter.validateAudiences`: "if there were no expected audiences configured then just consider any audience acceptable"), i.e. WebHDFS, Hive, … for the project principal; the §3.6 worker NetworkPolicy does not constrain the tenant pod | parameters **VERIFIED** to exist in 2.1.0; the composition is exercised in no doc; the `typ` header is the blocker — **UNVERIFIED**, KNOX-3434 predicts failure | [web-knox-jwt §3.1-3.3]; v2.1.0 `TokenResource.java`, `AbstractJWTFilter.java` | whether v1 can run with a pinned client certificate as the broker's only standing credential |
 | K2 | The broker's own Knox identity calls `knoxtoken?doAs=<project user>&lifespan=PT15M` on a topology whose identity-assertion provider lists it under `hadoop.proxyuser.<broker>.users/.hosts` | `doAs` (KNOX-2714, 2.0.0) and `lifespan` **VERIFIED** to exist; whether `doAs` works with `knox.token.exp.server-managed=false` on 2.1.0 is **UNVERIFIED** (the 2.1.0 source couples the check to managed tokens); which auth provider fronts the customer's topology (Kerberos/LDAP/SSO/JWT) is **UNKNOWN** | [web-knox-jwt §2, §1.2] | how the broker authenticates to Knox at all |
 | K3 | Cloudera IDBroker: `GET /gateway/aws-cab/cab/api/v1/credentials` with a Knox bearer returns AWS keys | **REPORTED** only (Cloudera pages 403'd the fetcher); not in Apache Knox | [web-knox-jwt §4.1] | if present, step 4 collapses to one call |
 | K0 | The proxy/STS trusts the cluster issuer directly (MinIO `config_url`, RGW OIDC provider, AWS OIDC provider) — **ONLY with a per-SA condition at the STS**: AWS/Ceph trust policy `Condition: StringEquals <provider>:sub = system:serviceaccount:<ns>:<sa>` (the IRSA pattern); MinIO policy conditions on `${jwt:sub}` (`internal/config/identity/openid/jwt.go` `Validate`: the policy is selected by `RoleArn`, the only identity check is `aud`/`azp == ClientID`, `iss` is not compared, `role_policy` is per provider not per subject). In K0 the CR `consumers` list is not consulted — entitlement lives entirely at the STS, and any pod in the cluster can mint the audience | mechanisms **VERIFIED** for MinIO/RGW/AWS; the customer's proxy is **UNKNOWN** | [web-knox-jwt §5] | no broker at all |
@@ -1108,7 +1108,7 @@ already read.
 
 | Token | Lifetime | Refreshed by | Revoked by | Max staleness |
 |---|---|---|---|---|
-| SA JWT (aud=`s3.flint.io`) | 3600 s (min 600, `validation.go:559-579`); `--service-account-max-token-expiration` may cap it (default UNKNOWN) | kubelet at 80 % TTL from its cache (`token_manager.go:39-43`); delivered on every republish (~60-90 s) | pod deletion: the API server rejects it 60 s after `deletionTimestamp`, which for a pod is delete-time + its grace period (`k8s.io/apiserver rest/delete.go` `BeforeDelete` sets it to now + `GracePeriodSeconds`); immediately once the object is gone (`--force`); the broker sees it via `TokenReview` | next exchange, ≤ key lifetime |
+| SA JWT (aud=`s3.chert.us`) | 3600 s (min 600, `validation.go:559-579`); `--service-account-max-token-expiration` may cap it (default UNKNOWN) | kubelet at 80 % TTL from its cache (`token_manager.go:39-43`); delivered on every republish (~60-90 s) | pod deletion: the API server rejects it 60 s after `deletionTimestamp`, which for a pod is delete-time + its grace period (`k8s.io/apiserver rest/delete.go` `BeforeDelete` sets it to now + `GracePeriodSeconds`); immediately once the object is gone (`--force`); the broker sees it via `TokenReview` | next exchange, ≤ key lifetime |
 | Knox JWT | `lifespan=PT15M` (capped by `knox.token.ttl`) | never — minted fresh per exchange; no TSS renewal, no renewer whitelist needed | Knox-side revocation is seen at the next mint (TSS revocation is invisible to offline verifiers, [web-knox-jwt §1.7] — another reason the Knox JWT is consumed inside the broker, never on the data path) | ≤ key lifetime |
 | STS keys | `Expiration` = 15 min (chart value) | the client re-calls the broker before expiry | SA removed from `consumers` / CR deleted / Knox refuses ⇒ next exchange fails ⇒ 403 at expiry; the plugin emits a `CredentialRefreshFailed` Event on the tenant pod (kubelet volume-health reporting is gated off by default, §6.1; KEP-1855's policy for a failed republish is "keep the container running with old credentials") | ≤ key lifetime |
 
@@ -1173,7 +1173,7 @@ all; `flint-store` changes not at all.
 | **Restart over a live tree (node plugin)** | n/a | the syncer is a separate pod; the loop mount and both binds are in the host mount table; the plugin re-adopts state from `state.json` and worker labels on start (`cleanup_ghost_mounts` pattern, `main.rs:79-146`). **The plugin's own SIGTERM never drains anything** — rolling the DS must not fence live agents (`code-lean §6.3`); trivially true because syncers are separate pods | better than a child-process design (which would SIGKILL every syncer on the node per roll) |
 | **Drain / eviction** | pod SIGTERM → drain in the pod's grace | tenant eviction is a normal termination → `NodeUnpublish` → drain with its own grace. `kubectl drain` evicts tenants; the PDB (`minAvailable: <integer>`, §3.6 — bare pods may not use `maxUnavailable`) makes the eviction API refuse workers while they exist and drain retries; the plugin deletes workers directly (direct delete does not consult the PDB); workers carry `cluster-autoscaler.kubernetes.io/safe-to-evict: "true"` and an `ownerReference` to the Node with `controller: true` (so `kubectl drain` treats them as managed and waits on the eviction API instead of refusing controller-less pods without `--force`, `kubectl/pkg/drain/filters.go:236-249`) so a vanished node GC's them. Spot reclaim: nobody drains — same as today | same |
 | **Budgets** | `maxBytes`/`maxFiles` refused before the first byte; `fetchInflightMb` 512 MiB (`crd.rs:79-85`); emptyDir `sizeLimit` → eviction | first two unchanged (the syncer's); `fetchInflightMb` is the syncer pod's memory request/limit; `sizeLimit` is the loop-image filesystem → `ENOSPC`, no eviction | mixed, mostly better |
-| **Metrics** | `0.0.0.0:<port>` in the pod network; `PodMonitor` by label; per-namespace NetworkPolicy (`flint_sync.rs:388-440`; `monitoring.yaml:10-65`) | the syncer pod carries the port and `flint.io/tenant-namespace`/`flint.io/workspace` labels; the `PodMonitor` and NetworkPolicy move to `flint-workers` (one place) | moves |
+| **Metrics** | `0.0.0.0:<port>` in the pod network; `PodMonitor` by label; per-namespace NetworkPolicy (`flint_sync.rs:388-440`; `monitoring.yaml:10-65`) | the syncer pod carries the port and `chert.us/tenant-namespace`/`chert.us/workspace` labels; the `PodMonitor` and NetworkPolicy move to `flint-workers` (one place) | moves |
 | **Operator echo / conditions** | ride the lease renewal (`lease.rs:114-144`; `reconcile.rs:316-378`) | unchanged | same |
 | **Gated-mode recovery** | assumes the emptyDir dies with the pod (`crd.rs:136-141`) | the tree is deleted at unpublish — holds | same |
 
@@ -1240,7 +1240,7 @@ experiment, not a claim.
 The DS pod restarts; the 500 worker pods do not. Every FUSE fd is owned
 by a mounter; every syncer keeps publishing. On start the plugin rebuilds
 its table from `<plugin>/volumes/*/state.json` and by listing workers on
-its node (`flint.io/node=<name>`), re-arms liveness probes and resumes
+its node (`chert.us/node=<name>`), re-arms liveness probes and resumes
 token forwarding — which kubelet drives anyway via republish. **Zero
 data-plane events.** The DaemonSet may use `RollingUpdate` — the existing
 `OnDelete` roller exists because spdk-tgt dies under live mounts
@@ -1410,7 +1410,7 @@ housekeeping period (`kubelet_volumes.go:194-201`).
   namespace are unsafe under any delivery mechanism — exactly as the lean
   plan's "dedicated bucket or prefix per project" and "the CR lives in
   the pod's namespace" already assume. An optional VAP restricting
-  `serviceAccountName` for pods declaring `s3.flint.io` volumes is a
+  `serviceAccountName` for pods declaring `s3.chert.us` volumes is a
   cheap tightening, admission-side and therefore not a substitute for
   the broker check **[graft: security §3.4]**.
 - **The exchange step is not optional and its back half is unknown.**
@@ -1431,7 +1431,7 @@ housekeeping period (`kubelet_volumes.go:194-201`).
   barrier, mtime-granularity scan evasion, empty directories not
   round-tripping — `flint-lean-plan.md:304-322`) are untouched: the
   writer is the same binary.
-- **Admission-time UX.** A typo in `flint.io/mount` is a pod stuck in
+- **Admission-time UX.** A typo in `chert.us/mount` is a pod stuck in
   `ContainerCreating` with an event, not a 4xx at `kubectl apply`.
 - **The one-line opt-in** is gone unless the thin webhook (§7) is
   shipped, and it will not be in v1.
@@ -1579,7 +1579,7 @@ MWC/cert RBAC.
 Both mechanisms ship together. The label opt-in and the `csi:` volume
 are orthogonal; two guards make an overlap loud instead of doubled: the
 still-installed webhooks refuse a labelled pod that also declares an
-`s3.flint.io` volume, naming both; and the node plugin refuses to publish
+`s3.chert.us` volume, naming both; and the node plugin refuses to publish
 for a pod whose spec already carries the `flint-passthrough`/`flint-sync`
 sidecar (GCS's cross-check inverted — GCS refuses pods the webhook
 *missed*, [web-fuse-csi-priorart §3]; we refuse pods it *hit*). Chart
@@ -1622,14 +1622,14 @@ MinIO (`passthrough/e2e/rig.yaml`; `lean/e2e/minio.yaml`) + a stub
 
 | Leg | Asserts | Failing control |
 |---|---|---|
-| S1 | `CSIDriver s3.flint.io` registered on every node; DS Ready; **zero** flint `MutatingWebhookConfiguration`s in `csi` mode | scale the DS to 0 ⇒ a new tenant pod stays `ContainerCreating` with a `FailedMount` event (fail-closed) |
+| S1 | `CSIDriver s3.chert.us` registered on every node; DS Ready; **zero** flint `MutatingWebhookConfiguration`s in `csi` mode | scale the DS to 0 ⇒ a new tenant pod stays `ContainerCreating` with a `FailedMount` event (fail-closed) |
 | S2 | a pod in a namespace enforcing `restricted` with the `csi:` volume is admitted and Running; app (uid 1001) reads `shard-05.txt = seeded-object-05`, 11 entries, fstype `fuse*`, `elsewhere/` invisible (A2) | the same pod with the old label is rejected in that namespace naming `privileged` (A11 inverted); a second pod on prefix `elsewhere` sees exactly one file (A2b) |
 | S3 | zero `AWS_*`, zero `FLINT_SYNC_*`, no token files in the app container; no `envFrom`/Secret volumes in the pod spec; the worker's `comm/token` exists, is 0600, and is where the keys are (A4 anti-vacuity: the counter must find them somewhere) | — |
-| S4 | `flint.io/mount` naming a missing CR ⇒ `FailedMount` names the CR and the namespace; pod never starts | the same pod with a real CR mounts |
+| S4 | `chert.us/mount` naming a missing CR ⇒ `FailedMount` names the CR and the namespace; pod never starts | the same pod with a real CR mounts |
 | S5 | a CR present only in another namespace ⇒ refused naming the namespace; `volumeAttributes.bucket: other` refused naming `bucket`; `readOnly: true` over a RW CR yields a read-only *presentation* (write fails at the mount, nothing lands from it — the worker's keys are still RW, §2.4 T2) | the same CR name created in the pod's namespace ⇒ mounts; `readOnly: false` over a RO CR is still read-only (no widening); RW over RW: bytes land and unlink removes them (A6/A7) |
 | S6 | a pod under SA `bob` (not in `consumers`) stays `ContainerCreating`, event names `bob` and `spec.consumers.serviceAccounts`; the CR **exists** | the identical pod under SA `alice` mounts and reads content |
 | S7 | a captured SA token replayed to the broker after its pod is deleted is refused within 90 s (`TokenReview` `authenticated: false`); a token from worker A presented for project B is refused **[graft: security]** | the same token replayed while the pod lives, for its own project, is accepted |
-| S8 | rotation: 2-minute keys; a continuous reader sees ≥ 3 issuances carrying **different** pod-bound JWTs for two pods, zero I/O errors; the SA JWT has `aud = s3.flint.io` and is rejected by the API server's TokenReview for its own audience | broker blocked at t=0 ⇒ the reader fails between 2 and 3 minutes with an auth error, not a hang, and the pod's events say so |
+| S8 | rotation: 2-minute keys; a continuous reader sees ≥ 3 issuances carrying **different** pod-bound JWTs for two pods, zero I/O errors; the SA JWT has `aud = s3.chert.us` and is rejected by the API server's TokenReview for its own audience | broker blocked at t=0 ⇒ the reader fails between 2 and 3 minutes with an auth error, not a hang, and the pod's events say so |
 | S9 | DS rolled mid-`cat` of a 1 GiB object ⇒ checksum matches, zero `FailedMount`, worker pods unchanged | `crictl stop` the **worker** ⇒ reader gets `ENOTCONN` within 10 s; a plugin-authored `Warning` Event on the tenant pod within one republish — not kubelet's, whose volume-health reporting is gated off by default (§6.1) (A12 shape) |
 | S10 | revocation: SA removed from `consumers` ⇒ reader fails within one key lifetime + slack | untouched sibling pod keeps reading |
 | S11 | lean: a pod created after the seeder is gone finds all 200 files with correct bytes before its first instruction, **and its init container sees them too** (a NEW leg — lean A2, `run-agent.sh:187-200`, asserts nothing about init containers, and today's appended sidecar never gates them, §2.2) | a workspace with a forced-wedged checkout (proxy first-byte stall) stays `ContainerCreating`, the marker is never written, the event names the budget (C12) |
@@ -1666,7 +1666,7 @@ tenant-writable field selecting the principal the broker impersonates
 under K2 — removed from the CR (§3.3); the (ns, SA) → principal binding
 is now admin-owned and cluster-scoped (§4.2 step 2, §6.7). (2) K1 had no
 gate distinguishing the broker from a pod presenting its own
-`aud=s3.flint.io` projected token — `knox.token.client.cert.required` +
+`aud=s3.chert.us` projected token — `knox.token.client.cert.required` +
 `allowed.principals` + `audiences` + `ttl` are now REQUIRED on the K1
 topology (§4.3); the endgame broker keeps a pinned client certificate
 rather than "no standing credential" (§4.7, §4.2, §7, §0).

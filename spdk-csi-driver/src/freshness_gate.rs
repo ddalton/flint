@@ -120,7 +120,7 @@ impl LegAvailability {
 }
 
 /// Is this assembly headed for the single-survivor DIRECT SERVE branch —
-/// `min_required = 1`, no raid layer, `flint.io/degraded-direct` stamped?
+/// `min_required = 1`, no raid layer, `chert.us/degraded-direct` stamped?
 ///
 /// Pure so the arithmetic is pinned by test rather than read off a 700-line
 /// async function. `rescuable_stale` is the count of record-Stale legs the
@@ -457,7 +457,7 @@ mod tests {
         // 2 of 2 attached: the healthy case, no corroboration wanted.
         assert!(!headed_for_direct_serve(2, 2, 0));
         // 1 of 2 attached and nothing to rescue it: THIS is the degrade —
-        // min_required = 1, no raid layer, flint.io/degraded-direct.
+        // min_required = 1, no raid layer, chert.us/degraded-direct.
         assert!(headed_for_direct_serve(2, 1, 0));
         // 1 attached but a record-Stale leg the forced-stale admission can
         // still admit: it reaches 2 bases, so buying a defer here would be a

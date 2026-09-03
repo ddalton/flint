@@ -144,7 +144,7 @@ mod tests {
     use serde_json::json;
 
     fn pt(spec: Value) -> Value {
-        json!({ "apiVersion": "flint.io/v1alpha1", "kind": "FlintPassthroughMount",
+        json!({ "apiVersion": "chert.us/v1alpha1", "kind": "FlintPassthroughMount",
                 "metadata": { "name": "d", "namespace": "team-a" }, "spec": spec })
     }
 

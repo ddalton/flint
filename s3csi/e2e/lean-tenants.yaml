@@ -1,4 +1,4 @@
-# The lean arm of the s3.flint.io drill (design §3.5, §5, §10.2 S11/S13):
+# The lean arm of the s3.chert.us drill (design §3.5, §5, §10.2 S11/S13):
 # one FlintLeanWorkspace, a seeder that publishes, an agent created
 # after the seeder is gone. The pods carry ONE csi: volume and nothing
 # else — no label, no sidecar, no Secret, no env.
@@ -8,7 +8,7 @@
 # agent or DRAINED at its delete. Without this the drain leg would pass
 # on a tick.
 ---
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace
 metadata:
   name: proj
@@ -28,7 +28,7 @@ spec:
     serviceAccounts: [trainer]
 ---
 # Control for the consumers gate on the lean CRD: no consumers ⇒ deny.
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace
 metadata:
   name: proj-noconsumers
@@ -59,9 +59,9 @@ spec:
   volumes:
     - name: ws
       csi:
-        driver: s3.flint.io
+        driver: s3.chert.us
         volumeAttributes:
-          flint.io/workspace: proj
+          chert.us/workspace: proj
   containers:
     - name: agent
       image: busybox:1.36
@@ -110,9 +110,9 @@ spec:
   volumes:
     - name: ws
       csi:
-        driver: s3.flint.io
+        driver: s3.chert.us
         volumeAttributes:
-          flint.io/workspace: proj-noconsumers
+          chert.us/workspace: proj-noconsumers
   containers:
     - name: agent
       image: busybox:1.36

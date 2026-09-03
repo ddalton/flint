@@ -61,7 +61,7 @@ vm "systemctl stop flint-perf 2>/dev/null||true; systemctl reset-failed flint-pe
     rm -rf $MDS_EXPORT $MDS_STATE; mkdir -p $MDS_EXPORT $MDS_STATE $FLINT_MNT
     chmod 0777 $MDS_EXPORT
     cat > $MDS_CONFIG <<CFG
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: standalone
 

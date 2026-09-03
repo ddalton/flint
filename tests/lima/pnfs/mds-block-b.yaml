@@ -11,7 +11,7 @@
 # recorded at CreateVolume), never by discovery, and this pair of
 # configs is what makes that testable on one machine.
 
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: mds
 

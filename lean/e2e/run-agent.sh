@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # RETIRED PATH (2026-09-03): the lean webhook and sidecar injector are
 # gone — a workspace reaches a pod as ONE csi: volume served by the
-# s3.flint.io node driver (docs/plans/csi-node-mount-design.md §3.5).
+# s3.chert.us node driver (docs/plans/csi-node-mount-design.md §3.5).
 # This rig labels pods and/or execs into an injected `flint-sync`
 # container, so it no longer runs as written. The CSI delivery of lean
 # is drilled by s3csi/e2e/run-s3csi.sh (S11, S13) and, across clusters,
@@ -248,7 +248,7 @@ declared = {
     "volumeMounts":   [m for c in spec["containers"] for m in (c.get("volumeMounts") or [])],
 }
 nonempty = {k: len(v) for k, v in declared.items() if v}
-label = (meta.get("labels") or {}).get("flint.io/lean-workspace")
+label = (meta.get("labels") or {}).get("chert.us/lean-workspace")
 if nonempty:
     print("DECLARES " + ", ".join(f"{k}={n}" for k, n in nonempty.items()))
 elif label != "proj":
@@ -399,7 +399,7 @@ a8_missing_workspace_is_refused() {
   if apply_expect_denied <<EOF
 apiVersion: v1
 kind: Pod
-metadata: { name: ghost, namespace: $NS, labels: { flint.io/lean-workspace: no-such-ws } }
+metadata: { name: ghost, namespace: $NS, labels: { chert.us/lean-workspace: no-such-ws } }
 spec:
   restartPolicy: Never
   containers: [{ name: agent, image: busybox:stable, command: ["sleep","30"] }]
@@ -415,7 +415,7 @@ EOF
   if apply_expect_denied <<EOF
 apiVersion: v1
 kind: Pod
-metadata: { name: accepted-control, namespace: $NS, labels: { flint.io/lean-workspace: other } }
+metadata: { name: accepted-control, namespace: $NS, labels: { chert.us/lean-workspace: other } }
 spec:
   restartPolicy: Never
   containers: [{ name: agent, image: busybox:stable, command: ["sleep","30"] }]
@@ -438,7 +438,7 @@ a9_path_collision_is_refused_actionably() {
   if apply_expect_denied <<EOF
 apiVersion: v1
 kind: Pod
-metadata: { name: clash, namespace: $NS, labels: { flint.io/lean-workspace: other } }
+metadata: { name: clash, namespace: $NS, labels: { chert.us/lean-workspace: other } }
 spec:
   restartPolicy: Never
   volumes: [{ name: mine, emptyDir: {} }]

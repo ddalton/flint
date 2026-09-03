@@ -1,7 +1,7 @@
 # DS #2 — same shape as ds1.yaml but bound to port 20492 and exporting
 # /tmp/flint-pnfs-ds2.
 
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: ds
 

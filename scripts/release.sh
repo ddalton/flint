@@ -379,7 +379,7 @@ EOF
         push_chart "all lean" flint-lean "$lean_version" "$lean_pkg"
     fi
 
-    # The flint-passthrough chart is the CRD alone: the s3.flint.io node
+    # The flint-passthrough chart is the CRD alone: the s3.chert.us node
     # driver (next) delivers the mount, and nothing in this chart runs.
     # The one gate a hand-written CRD needs: the shipped schema agrees
     # with the struct in both directions — a pruned field is a knob that

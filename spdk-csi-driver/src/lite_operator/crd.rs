@@ -1,4 +1,4 @@
-//! The `FlintShare` API (flint.io/v1alpha1) — the operator's contract
+//! The `FlintShare` API (chert.us/v1alpha1) — the operator's contract
 //! with its users.
 //!
 //! # Shape rules (all of them load-bearing)
@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 /// share is a perfectly good share).
 #[derive(CustomResource, KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[kube(
-    group = "flint.io",
+    group = "chert.us",
     version = "v1alpha1",
     kind = "FlintShare",
     plural = "flintshares",
@@ -64,7 +64,7 @@ use serde::{Deserialize, Serialize};
     // The front door's index. A share's Kubernetes name is derived
     // (`fs-<project-id>`), so this is what makes the mapping legible
     // from the cluster side without decoding names by eye.
-    printcolumn = r#"{"name":"PROJECT","type":"string","jsonPath":".metadata.labels['flint.io/project-id']","priority":1}"#,
+    printcolumn = r#"{"name":"PROJECT","type":"string","jsonPath":".metadata.labels['chert.us/project-id']","priority":1}"#,
     printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
@@ -834,7 +834,7 @@ pub struct FlintShareStatus {
     /// routable address. See `docs/plans/hub-api-service-design.md`.
     ///
     /// The intended consumer is a component that also reads this CR and
-    /// can patch `flint.io/requested-at`. A caller holding only this URL
+    /// can patch `chert.us/requested-at`. A caller holding only this URL
     /// cannot wake a parked share and is not a supported consumer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_endpoint: Option<String>,
@@ -1295,7 +1295,7 @@ mod tests {
         // backslash escape is not valid JSON.
         assert_eq!(
             project["jsonPath"],
-            ".metadata.labels['flint.io/project-id']"
+            ".metadata.labels['chert.us/project-id']"
         );
         assert_eq!(crd["spec"]["names"]["shortNames"][0], "fsh");
         assert_eq!(crd["spec"]["scope"], "Namespaced");

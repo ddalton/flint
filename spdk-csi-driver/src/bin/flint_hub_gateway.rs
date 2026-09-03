@@ -57,7 +57,7 @@ struct Args {
     namespace: Option<String>,
 
     /// Prepended to a project id to derive its FlintShare name, for
-    /// shares that predate the `flint.io/project-id` label.
+    /// shares that predate the `chert.us/project-id` label.
     #[arg(long, env = "FLINT_GATEWAY_SHARE_PREFIX", default_value = "fs-")]
     share_prefix: String,
 
@@ -127,7 +127,7 @@ struct Args {
     ///
     /// `<namespace>/<name>`. Reads the FlintShare and derives from its
     /// own `spec.endpoint`, `spec.bucket`, `spec.keyPrefix` and
-    /// `flint.io/api-token-version`, so the binding cannot disagree
+    /// `chert.us/api-token-version`, so the binding cannot disagree
     /// with what the serving gateway will compute — it is the same
     /// code reading the same object.
     #[arg(long, value_name = "NAMESPACE/NAME")]

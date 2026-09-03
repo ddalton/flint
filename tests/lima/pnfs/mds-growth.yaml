@@ -11,7 +11,7 @@
 # fast without flapping the live ones. The drill sleeps past this
 # window before the first mount.
 
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: mds
 

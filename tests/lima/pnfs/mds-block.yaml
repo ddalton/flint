@@ -9,7 +9,7 @@
 # State is sqlite BY REQUIREMENT: block-class volumes refuse a memory
 # backend (the extent map IS the volume's data map — F67).
 
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: mds
 

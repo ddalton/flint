@@ -21,7 +21,7 @@
 #         once the fresh leg rejoins. Needs SC=flint-r2 + v1.19+ driver.
 #   3.6d ☠ F36c gate PERMANENT: same setup but TERMINATE the server node
 #         (fresh local leg dies with it) — must serve the trailing leg
-#         within the defer bound + raise flint.io/acked-tail-risk.
+#         within the defer bound + raise chert.us/acked-tail-risk.
 #         EXPECTED-BOUNDED-LOSS drill: db verdict shows the trailed tail.
 #   3.6e ☠ F43 ACCEPTANCE (r2-perm): TERMINATE a backing-LEG node that is
 #         NOT the nfs-server's node. The server stays alive and writing, so
@@ -165,7 +165,7 @@ pv_replicas_json() {
     | jq -r '(.metadata.annotations["flint.csi.storage.io/replicas-override"]
               // .spec.csi.volumeAttributes["flint.csi.storage.io/replicas"]) // empty'
 }
-risk_annotation()  { kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.io/acked-tail-risk}' 2>/dev/null; }
+risk_annotation()  { kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.chert\.us/acked-tail-risk}' 2>/dev/null; }
 
 ctrl_log() { # <t0> — the CONTROLLER's log since t0, ANSI-stripped.
   # The orchestrator block (catch-up, cutover, hot-rejoin window, claims)
@@ -540,7 +540,7 @@ case "$DRILL" in
 3.6d) # ☠ F36c gate PERMANENT — terminate the server node so the fresh
       # (co-located) leg dies with it. The gate must NOT hang: serve the
       # trailing leg within the defer bound and surface
-      # flint.io/acked-tail-risk + AckedTailRisk. EXPECTED-BOUNDED-LOSS:
+      # chert.us/acked-tail-risk + AckedTailRisk. EXPECTED-BOUNDED-LOSS:
       # the db verdict SHOWS the post-shrink tail; the assertion is that
       # the loss is surfaced and bounded, not that it is zero.
   pre_rwx
@@ -571,7 +571,7 @@ case "$DRILL" in
   wait_acks_fresh 420 && T_RESUME=$(( $(epoch) - T0 )) || T_RESUME=-1
   RISK=$(risk_annotation)
   RISK_EV=$(pv_events_since "$T0" AckedTailRisk)
-  [ -n "$RISK" ] && ok "acked-tail-risk surfaced: $RISK" || note "MISSING flint.io/acked-tail-risk annotation"
+  [ -n "$RISK" ] && ok "acked-tail-risk surfaced: $RISK" || note "MISSING chert.us/acked-tail-risk annotation"
   [ "${RISK_EV:-0}" -gt 0 ] && ok "AckedTailRisk event raised" || note "MISSING AckedTailRisk event"
   witness_verdict "$T0"
   EXPECT_RESCHEDULE=none READY_TIMEOUT=180 \
@@ -724,7 +724,7 @@ case "$DRILL" in
     NFS_PHASE=$(kubectl get pod -n "$DRIVER_NS" "$(nfs_pod)" -o jsonpath='{.status.phase}' 2>/dev/null)
     NFS_READY=$(kubectl get pod -n "$DRIVER_NS" "$(nfs_pod)" \
       -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
-    ASM_BLOCKED=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.io/assembly-blocked}' 2>/dev/null)
+    ASM_BLOCKED=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.chert\.us/assembly-blocked}' 2>/dev/null)
     if [ "$N_SYNC" = "2" ] && [ "$NFS_PHASE" = "Running" ] && [ "$NFS_READY" = "True" ] && [ -z "$ASM_BLOCKED" ]; then
       T_SETTLED=$(( $(epoch) - T0 ))
       ok "redundancy HELD through the settle window (2/2 in_sync, writer_set=$WS_N, head_in_use_events=$HEADINUSE, nfs Running/Ready, no assembly-blocked marker)"
@@ -1326,7 +1326,7 @@ case "$DRILL" in
     NFS_PHASE=$(kubectl get pod -n "$DRIVER_NS" "$(nfs_pod)" -o jsonpath='{.status.phase}' 2>/dev/null)
     NFS_READY=$(kubectl get pod -n "$DRIVER_NS" "$(nfs_pod)" \
       -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
-    ASM_BLOCKED=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.io/assembly-blocked}' 2>/dev/null)
+    ASM_BLOCKED=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.chert\.us/assembly-blocked}' 2>/dev/null)
     if [ "$N_SYNC" = "2" ] && [ "$NFS_PHASE" = "Running" ] && [ "$NFS_READY" = "True" ] && [ -z "$ASM_BLOCKED" ]; then
       T_SETTLED=$(( $(epoch) - T0 ))
       ok "redundancy HELD through the settle window (2/2 in_sync, writer_set=$WS_N, head_in_use_events=$HEADINUSE, nfs Running/Ready)"
@@ -1595,7 +1595,7 @@ case "$DRILL" in
     note "helm upgrade landed at $(( $(epoch) - T0 ))s — new DS revision pending; OnDelete means only the roller can act"
   else
     kubectl patch ds -n "$DRIVER_NS" flint-csi-node --type=merge \
-      -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"flint.io/drill-314\":\"$T0\"}}}}}" >/dev/null \
+      -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"chert.us/drill-314\":\"$T0\"}}}}}" >/dev/null \
       || fail "3.14: could not patch the DS pod template (the roll trigger)"
     note "DS pod template patched at 0s — new revision pending; OnDelete means only the roller can act"
   fi

@@ -14,7 +14,7 @@
 //!
 //! The chain, per exchange:
 //!
-//! 1. `TokenReview{token, audiences: [s3.flint.io]}` — online, not
+//! 1. `TokenReview{token, audiences: [s3.chert.us]}` — online, not
 //!    offline JWKS: a deleted pod's token is refused within 60 s of its
 //!    `deletionTimestamp`; offline verification would honour it to `exp`.
 //! 2. The `RoleSessionName` must equal the nonce of a LIVE registration
@@ -531,11 +531,11 @@ mod tests {
 
     #[test]
     fn token_review_identity_needs_authenticated_sa_and_audience() {
-        let ok = identity_from_review(&review(true, "system:serviceaccount:team-a:trainer", Some("p1"), vec!["s3.flint.io"]), "s3.flint.io").unwrap();
+        let ok = identity_from_review(&review(true, "system:serviceaccount:team-a:trainer", Some("p1"), vec!["s3.chert.us"]), "s3.chert.us").unwrap();
         assert_eq!(ok, id());
-        assert!(identity_from_review(&review(false, "system:serviceaccount:team-a:trainer", None, vec!["s3.flint.io"]), "s3.flint.io").is_err());
-        assert!(identity_from_review(&review(true, "system:serviceaccount:team-a:trainer", None, vec!["other"]), "s3.flint.io").unwrap_err().contains("audience"));
-        assert!(identity_from_review(&review(true, "alice", None, vec!["s3.flint.io"]), "s3.flint.io").unwrap_err().contains("not a ServiceAccount"));
+        assert!(identity_from_review(&review(false, "system:serviceaccount:team-a:trainer", None, vec!["s3.chert.us"]), "s3.chert.us").is_err());
+        assert!(identity_from_review(&review(true, "system:serviceaccount:team-a:trainer", None, vec!["other"]), "s3.chert.us").unwrap_err().contains("audience"));
+        assert!(identity_from_review(&review(true, "alice", None, vec!["s3.chert.us"]), "s3.chert.us").unwrap_err().contains("not a ServiceAccount"));
     }
 
     #[test]
@@ -567,7 +567,7 @@ mod tests {
     #[test]
     fn sts_xml_round_trips_through_the_client_parser() {
         let c = Creds { access_key_id: "AK".into(), secret_access_key: "s<k".into(), session_token: Some("t".into()), expiration: "2026-09-02T00:15:00Z".into() };
-        let body = sts_success(&id(), "datasets", "n1", &c, "s3.flint.io");
+        let body = sts_success(&id(), "datasets", "n1", &c, "s3.chert.us");
         assert_eq!(creds::parse_sts_xml(&body).unwrap(), c);
         let (code, err) = sts_error(StatusCode::FORBIDDEN, "AccessDenied", "bob & co");
         assert_eq!(code, StatusCode::FORBIDDEN);

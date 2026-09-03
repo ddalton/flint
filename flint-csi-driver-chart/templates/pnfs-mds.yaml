@@ -65,10 +65,10 @@ metadata:
   labels:
     {{- include "flint-csi-driver-chart.labels" $ | nindent 4 }}
     app.kubernetes.io/component: pnfs-mds
-    flint.io/mds-shard: {{ $i | quote }}
+    chert.us/mds-shard: {{ $i | quote }}
 data:
   mds.yaml: |
-    apiVersion: flint.io/v1alpha1
+    apiVersion: chert.us/v1alpha1
     kind: PnfsConfig
     mode: mds
     mds:
@@ -120,7 +120,7 @@ data:
 {{- end }}
 ---
 {{- /* Legacy alias Service — shard 0. Pre-sharding PVs carry this
-Service's ClusterIP in pnfs.flint.io/mds-ip, and the DS config points
+Service's ClusterIP in pnfs.chert.us/mds-ip, and the DS config points
 here until Phase 2; it must survive sharding untouched. */}}
 apiVersion: v1
 kind: Service
@@ -167,7 +167,7 @@ metadata:
   labels:
     {{- include "flint-csi-driver-chart.labels" $ | nindent 4 }}
     app.kubernetes.io/component: pnfs-mds
-    flint.io/mds-shard: {{ $i | quote }}
+    chert.us/mds-shard: {{ $i | quote }}
 spec:
   accessModes: ["ReadWriteOnce"]
   storageClassName: {{ $.Values.pnfs.server.mds.storage.storageClassName | default $.Values.storageClass.name }}
@@ -186,7 +186,7 @@ metadata:
   labels:
     {{- include "flint-csi-driver-chart.labels" $ | nindent 4 }}
     app.kubernetes.io/component: pnfs-mds
-    flint.io/mds-shard: {{ $i | quote }}
+    chert.us/mds-shard: {{ $i | quote }}
 spec:
   selector:
     app: {{ $name }}
@@ -208,7 +208,7 @@ metadata:
   labels:
     {{- include "flint-csi-driver-chart.labels" $ | nindent 4 }}
     app.kubernetes.io/component: pnfs-mds
-    flint.io/mds-shard: {{ $i | quote }}
+    chert.us/mds-shard: {{ $i | quote }}
 spec:
   replicas: 1
   strategy:
@@ -222,8 +222,8 @@ spec:
         app: {{ $name }}
         # Shard-agnostic role label — the NetworkPolicies select on
         # this (per-shard `app` values can't be enumerated there).
-        flint.io/role: pnfs-mds
-        flint.io/mds-shard: {{ $i | quote }}
+        chert.us/role: pnfs-mds
+        chert.us/mds-shard: {{ $i | quote }}
         {{- include "flint-csi-driver-chart.selectorLabels" $ | nindent 8 }}
     spec:
       {{- /* Spread MDS shards across nodes: a node loss should take down
@@ -238,7 +238,7 @@ spec:
               podAffinityTerm:
                 labelSelector:
                   matchLabels:
-                    flint.io/role: pnfs-mds
+                    chert.us/role: pnfs-mds
                 topologyKey: kubernetes.io/hostname
       {{- with $.Values.priorityClassName }}
       priorityClassName: {{ . }}

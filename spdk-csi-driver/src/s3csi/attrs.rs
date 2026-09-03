@@ -15,10 +15,10 @@ use std::collections::HashMap;
 
 use super::DRIVER_NAME;
 
-pub const ATTR_MOUNT: &str = "flint.io/mount";
-pub const ATTR_WORKSPACE: &str = "flint.io/workspace";
-pub const ATTR_UID: &str = "flint.io/uid";
-pub const ATTR_GID: &str = "flint.io/gid";
+pub const ATTR_MOUNT: &str = "chert.us/mount";
+pub const ATTR_WORKSPACE: &str = "chert.us/workspace";
+pub const ATTR_UID: &str = "chert.us/uid";
+pub const ATTR_GID: &str = "chert.us/gid";
 
 pub const K_POD_NAME: &str = "csi.storage.k8s.io/pod.name";
 pub const K_POD_NAMESPACE: &str = "csi.storage.k8s.io/pod.namespace";
@@ -29,9 +29,9 @@ pub const K_SA_TOKENS: &str = "csi.storage.k8s.io/serviceAccount.tokens";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selector {
-    /// `flint.io/mount: <FlintPassthroughMount name>`
+    /// `chert.us/mount: <FlintPassthroughMount name>`
     Mount(String),
-    /// `flint.io/workspace: <FlintLeanWorkspace name>`
+    /// `chert.us/workspace: <FlintLeanWorkspace name>`
     Workspace(String),
 }
 
@@ -271,7 +271,7 @@ mod tests {
         let mut ctx = kubelet(HashMap::from([(ATTR_MOUNT.into(), "d".into())]));
         ctx.insert(
             K_SA_TOKENS.into(),
-            r#"{"other":{"token":"zzz"},"s3.flint.io":{"token":"eyJ.secret","expirationTimestamp":"2026-09-02T00:00:00Z"}}"#.into(),
+            r#"{"other":{"token":"zzz"},"s3.chert.us":{"token":"eyJ.secret","expirationTimestamp":"2026-09-02T00:00:00Z"}}"#.into(),
         );
         let r = parse(&ctx).unwrap();
         let t = r.token.clone().unwrap();

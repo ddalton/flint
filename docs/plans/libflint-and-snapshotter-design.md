@@ -207,7 +207,7 @@ publish verb: for coordinates-class consumers, NodePublish writes a file instead
 
 **Coordinates-publish.** A new first-priority branch in `node_publish_volume` (before the
 pNFS mds-ip check at `main.rs:3969`), keyed on an explicit discriminator
-(`pnfs.flint.io/layout: block` + a publish-mode key — presence-based classification is the
+(`pnfs.chert.us/layout: block` + a publish-mode key — presence-based classification is the
 §7 landmine of the block doc; new SC keys must join `sc_params::ALL` or provisioning
 hard-fails, `pnfs_csi.rs:63-70`). It writes `volume.json` into `target_path`:
 
@@ -664,7 +664,7 @@ sessions, no slots, no pNFS).
   attempted, which strengthens the case. Leaning refuse-for-block-class; decide in phase 1.
 - **The once-per-cluster store is a once-per-cluster loss** (§1's headline, read as a
   threat) — **AMENDED 2026-09-01: the premise is stale; block doc §12 replication has
-  SHIPPED.** `pnfs.flint.io/replicas: 2` (2 is the ceiling — the composition machine
+  SHIPPED.** `pnfs.chert.us/replicas: 2` (2 is the ceiling — the composition machine
   reasons about ONE peer) places a mirrored raid1 leg on a second target, behind the
   witness-arbitrated seat, the degrade barrier and the sparse-aware rebuild; the chart
   needs per-shard `blockExport.shards` entries plus the composition witness, and refuses

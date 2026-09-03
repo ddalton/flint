@@ -10,7 +10,7 @@
 # between runs. The layout section is inert in this posture but the
 # config schema requires it.
 
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: standalone
 

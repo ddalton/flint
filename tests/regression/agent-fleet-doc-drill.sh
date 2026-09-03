@@ -536,7 +536,7 @@ kubectl -n "$NS" create secret generic flint-s3-wrong \
   --dry-run=client -o yaml 2>/dev/null | kubectl apply -f - >/dev/null \
   || fail "wrong-name Secret refused"
 kubectl -n "$NS" apply -f - >/dev/null <<EOF || fail "control share refused"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata: { name: fs-wrongkeys, namespace: $NS }
 spec:
@@ -557,7 +557,7 @@ done
 if [ -n "$WRONG_READY" ]; then
   fail "a share with accessKeyId/secretAccessKey reached Ready — the guide's warning is WRONG"
 fi
-WLOG=$(kubectl -n "$NS" logs -l flint.io/share=fs-wrongkeys --tail=40 2>/dev/null)
+WLOG=$(kubectl -n "$NS" logs -l chert.us/share=fs-wrongkeys --tail=40 2>/dev/null)
 note "phase after 120s: ${ph:-<none>}"
 case "$WLOG" in
   *unreachable*|*dispatch*|*credential*|*Credential*)
@@ -593,14 +593,14 @@ SC_LINE=""
 
 mkshare() {  # mkshare <name> <volume-id> <extra spec yaml>
   kubectl -n "$NS" apply -f - >/dev/null <<EOF || fail "FlintShare $1 refused"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata:
   name: $1
   namespace: $NS
   labels:
-    flint.io/project-id: $PROJECT
-    flint.io/volume-id: $2
+    chert.us/project-id: $PROJECT
+    chert.us/volume-id: $2
 spec:
   bucket: $BUCKET
   keyPrefix: $PROJECT/$2/${EP_LINE}
@@ -681,7 +681,7 @@ for s in data cold; do
   done
   [ "$ph" = "Ready" ] || {
     kubectl -n "$NS" get flintshare "fs-$PROJECT-$s" -o yaml | tail -30
-    kubectl -n "$NS" describe pod -l flint.io/share="fs-$PROJECT-$s" | sed -n '/Events:/,$p' | tail -10
+    kubectl -n "$NS" describe pod -l chert.us/share="fs-$PROJECT-$s" | sed -n '/Events:/,$p' | tail -10
     fail "fs-$PROJECT-$s never became Ready (phase=$ph)"; }
 done
 ADDR=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-data" -o jsonpath='{.status.address}')
@@ -1076,7 +1076,7 @@ say "L8: the ClusterIP mount works from a node that is NOT the hub's node"
 # put a ClusterIP in a PV precisely because kube-proxy programs it on
 # EVERY node; that claim is only tested when the client is somewhere
 # else.
-HUBNODE=$(kubectl -n "$NS" get pod -l flint.io/share="fs-$PROJECT-data" \
+HUBNODE=$(kubectl -n "$NS" get pod -l chert.us/share="fs-$PROJECT-data" \
   -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null)
 NODECOUNT=$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')
 OTHER=$(kubectl get nodes --no-headers -o custom-columns=N:.metadata.name 2>/dev/null \

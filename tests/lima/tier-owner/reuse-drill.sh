@@ -86,7 +86,7 @@ write_cfg() { # $1=dir $2=prefix $3=identity(or "") $4=adopt(or "")
   [ "$4" = true ] && extra="${extra}    adoptData: true
 "
   cat > "$1/config.yaml" <<EOF
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: standalone
 mds:

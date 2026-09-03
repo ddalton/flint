@@ -128,7 +128,7 @@ spec:
         checksum/config: {{ include "flint-lite.mdsYaml" . | sha256sum }}
       labels:
         app: flint-lite
-        flint.io/role: lite
+        chert.us/role: lite
         {{- include "flint-lite.selectorLabels" . | nindent 8 }}
     spec:
       # SIGTERM starts a real shutdown: drain in-flight replies, flush

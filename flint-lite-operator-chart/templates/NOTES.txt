@@ -6,7 +6,7 @@ Watching: {{ .Values.watchNamespace | default "all namespaces" }}
 Create a share:
 
   kubectl apply -f - <<'EOF'
-  apiVersion: flint.io/v1alpha1
+  apiVersion: chert.us/v1alpha1
   kind: FlintShare
   metadata:
     name: tenant-a

@@ -43,8 +43,8 @@ The integration approach inside the existing driver:
   remains `single-server` (today's behaviour). New option `pnfs`
   branches to a new `pnfs_volume::create_volume()` helper *before* the
   existing `rwx_nfs` and SPDK-block branches.
-- pNFS-specific volume_context keys live under `pnfs.flint.io/*` so they
-  don't collide with the existing `nfs.flint.io/*` namespace used by
+- pNFS-specific volume_context keys live under `pnfs.chert.us/*` so they
+  don't collide with the existing `nfs.chert.us/*` namespace used by
   the rwx_nfs path.
 - The MDS gRPC client is its own module under `src/pnfs_csi/`. SPDK
   modules don't import from it.

@@ -62,7 +62,7 @@ EOF
 [ -n "$DS_PAIRS" ] || die "no DS pods"
 NDS=$(echo "$DS_PAIRS" | wc -w | tr -d ' ')
 
-MDS_NODE=$(kubectl get pods -n "$NS" -l flint.io/role=pnfs-mds \
+MDS_NODE=$(kubectl get pods -n "$NS" -l chert.us/role=pnfs-mds \
   -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null)
 [ -n "$MDS_NODE" ] || MDS_NODE=$(kubectl get pods -n "$NS" -o wide \
   | awk '/pnfs-mds/{print $7; exit}')

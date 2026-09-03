@@ -1,4 +1,4 @@
-//! `s3.flint.io` — the CSI node driver that replaces the flint-passthrough
+//! `s3.chert.us` — the CSI node driver that replaces the flint-passthrough
 //! and flint-lean sidecar-injection webhooks.
 //!
 //! Design of record: `docs/plans/csi-node-mount-design.md`. The one-line
@@ -39,7 +39,7 @@ pub mod broker;
 
 /// The CSIDriver name. Also the audience of the pod-bound ServiceAccount
 /// token kubelet mints for each publish (`CSIDriver.spec.tokenRequests`).
-pub const DRIVER_NAME: &str = "s3.flint.io";
+pub const DRIVER_NAME: &str = "s3.chert.us";
 
 /// Where kubelet keeps pods on the node (the DaemonSet mounts it at the
 /// same path, `Bidirectional`), overridable for rigs.
@@ -51,7 +51,7 @@ pub fn kubelet_root() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/kubelet"))
 }
 
-/// The plugin's own directory: `<kubelet>/plugins/s3.flint.io/`.
+/// The plugin's own directory: `<kubelet>/plugins/s3.chert.us/`.
 pub fn plugin_root() -> std::path::PathBuf {
     std::env::var("FLINT_S3CSI_PLUGIN_ROOT")
         .ok()

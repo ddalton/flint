@@ -4,7 +4,7 @@
 # State backend = memory (in-process). Test runner is responsible for
 # cleaning the export tree between runs.
 
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: mds
 

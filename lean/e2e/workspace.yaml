@@ -12,7 +12,7 @@ stringData:
   AWS_SECRET_ACCESS_KEY: drillsecret
   AWS_REGION: us-east-1
 ---
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace
 metadata:
   name: proj1
@@ -33,7 +33,7 @@ metadata:
   name: agent-1
   namespace: default
   labels:
-    flint.io/lean-workspace: proj1
+    chert.us/lean-workspace: proj1
 spec:
   restartPolicy: Never
   containers:

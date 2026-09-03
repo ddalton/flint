@@ -83,7 +83,7 @@ block volumes:
      chain is driver-orchestrated).
    - pNFS shard-pinned volumes (`~m` suffix) refused at the top of the
      controller path.
-   - **NFS emptyDir-backed volumes** (`nfs.flint.io/backend=emptydir` PV
+   - **NFS emptyDir-backed volumes** (`nfs.chert.us/backend=emptydir` PV
      attribute) succeed as a controller-side **no-op** — emptyDir enforces
      no size, so there is nothing to grow (this arm was MISSING from the
      original analysis; it is what the `tests-nfs-only` kuttl suite

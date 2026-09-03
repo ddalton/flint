@@ -7,8 +7,8 @@ release. Code: `replica_sync.rs` (`WriterSet` + mutator maintenance),
 `driver.rs::create_raid_from_replicas` (gate wiring, gate-before-
 forced-stale, record-before-writes), chart `FLINT_F36C_GATE` env
 (default enabled; `disabled` is the kill switch). The acked-tail
-surface is a PV annotation `flint.io/acked-tail-risk` + Warning event
-`AckedTailRisk`; the defer bound persists as `flint.io/f36c-defer`.
+surface is a PV annotation `chert.us/acked-tail-risk` + Warning event
+`AckedTailRisk`; the defer bound persists as `chert.us/f36c-defer`.
 **Rev 2 (2026-07-21):** the freshness trigger is the **last-writer
 set**, not epoch rank — review showed rev 1's epoch rank ties in the
 exact run-3 scenario and would never fire (see "Why epoch rank alone
@@ -126,7 +126,7 @@ the just-admitted chaser.
      exists (claim holder count shrinking, node mid-boot).
    - **Permanent** (node object gone / terminated / NotReady past
      the AD-forced-detach horizon, AND the lvol probe is dead):
-     serve the reachable leg + set `flint.io/acked-tail-risk`
+     serve the reachable leg + set `chert.us/acked-tail-risk`
      VolumeCondition naming the writer-set gap. Never hang.
    - **Deadline expiry without progress** → fall through to the
      permanent branch (serve + condition). The gate bounds the
@@ -161,7 +161,7 @@ leg. Assert:
 - (b) zero acked-write loss once the fresher leg rejoins;
 - (c) permanent variant (terminate the node instead): the trailing
   leg IS served within the deadline, with the
-  `flint.io/acked-tail-risk` annotation set and the `AckedTailRisk`
+  `chert.us/acked-tail-risk` annotation set and the `AckedTailRisk`
   event raised naming the gap.
 
 **Drill 2.4 re-run is part of the F36c validation set** — the gate
@@ -171,7 +171,7 @@ node loss → serve the lone survivor, zero manufactured outage), so
 - (d) survivor served on the FIRST assembly tick (NodeGone branches
   straight to serve-with-risk — no defer round-trip, no added
   latency vs the phase-2 baseline: 2.2a's 16s bar);
-- (e) `flint.io/acked-tail-risk` is raised (the survivor may trail
+- (e) `chert.us/acked-tail-risk` is raised (the survivor may trail
   by the catch-up delta at kill time — 2.4 accepts that bounded
   risk, F36c makes it visible);
 - (f) the marker CLEARS on the next full-writer-set assembly after

@@ -2466,7 +2466,7 @@ pub struct VolumeHotRejoinView {
     pub rwo_bounce_enabled: bool,
     /// `flint.csi.storage.io/hot-rejoin` == "disabled" (the opt-out).
     pub hot_rejoin_disabled: bool,
-    /// Record-home PV carries flint.io/degraded-direct: single-survivor
+    /// Record-home PV carries chert.us/degraded-direct: single-survivor
     /// DIRECT serve — there is NO raid to admit into. Hot-rejoin planning
     /// against it just churns claims every tick (found live on runab,
     /// 2026-07-23); the healer for this state is restage admission.
@@ -2719,7 +2719,7 @@ async fn hot_rejoin_tick(
             rwx,
             nfs_backing: crate::replica_sync::nfs_backing_parent(&pv).is_some(),
             degraded_direct: annotations
-                .and_then(|a| a.get("flint.io/degraded-direct"))
+                .and_then(|a| a.get("chert.us/degraded-direct"))
                 .is_some(),
             rwo_bounce_enabled: annotations
                 .and_then(|a| a.get(crate::cutover::REJOIN_BOUNCE_ANNOTATION))

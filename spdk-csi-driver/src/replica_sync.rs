@@ -1281,7 +1281,7 @@ pub async fn emit_pv_event(
 /// and re-check before commit — a bump in between means the authority
 /// changed under them and the destruction is refused (C3's TOCTOU closure:
 /// correctness rests on this CAS token, clocks only affect availability).
-pub const CHAIN_GEN_ANNOTATION: &str = "flint.io/chain-gen";
+pub const CHAIN_GEN_ANNOTATION: &str = "chert.us/chain-gen";
 
 /// Pure bump rule: absent → 1; parseable → +1; corrupt → refuse (fail
 /// closed — a corrupted authority counter is manual-intervention territory,

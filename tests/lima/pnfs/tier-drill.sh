@@ -78,7 +78,7 @@ s3() {
 
 start_server() { # $1 = watermarkPct, $2 = hydrateWarmAfterImport (default false)
   cat > "$CFG" <<EOF
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: standalone
 

@@ -188,7 +188,7 @@ gateway:
   #     flint-hub-gateway --root-key-file=/path/key \
   #       --derive-token ',my-bucket,proj-a/,1'
   #
-  #   Revoke ONE project by bumping its `flint.io/api-token-version`
+  #   Revoke ONE project by bumping its `chert.us/api-token-version`
   #   annotation and rewriting that share's Secret.
   #
   # hubTokenSecretRef — a Secret with key `token`: one value every hub
@@ -208,7 +208,7 @@ gateway:
   watchNamespace: ""
 
   # Prepended to a project id to derive its FlintShare name, for shares
-  # that predate the `flint.io/project-id` label. The label wins when
+  # that predate the `chert.us/project-id` label. The label wins when
   # both are present.
   sharePrefix: "fs-"
 

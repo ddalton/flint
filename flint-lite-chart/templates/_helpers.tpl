@@ -36,7 +36,7 @@ no reload path, so the new setting reaches the running hub NEVER (and
 wrong). Same reason the operator carries the same annotation.
 */}}
 {{- define "flint-lite.mdsYaml" -}}
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: standalone
 mds:

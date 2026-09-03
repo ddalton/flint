@@ -1,7 +1,7 @@
 # DS #2 for the pNFS recall e2e (tests/lima/pnfs/recall.sh).
 # Same shape as ds2.yaml with heartbeatInterval: 2 — see ds1-recall.yaml.
 
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: ds
 

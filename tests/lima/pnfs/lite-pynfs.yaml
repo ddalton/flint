@@ -23,7 +23,7 @@
 # The export lives under /srv (not /tmp) so a tmpfs-backed /tmp cannot
 # quietly change the durability posture underneath the run.
 
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: standalone
 

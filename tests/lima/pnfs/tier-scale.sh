@@ -50,7 +50,7 @@ s3() {
 
 gen_cfg() { # OUT EXPORT STATEDIR BUCKET WATERMARK
   cat > "$1" <<EOF
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: standalone
 mds:

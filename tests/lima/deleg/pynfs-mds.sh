@@ -82,7 +82,7 @@ done
 # which is the posture under test. Adding DSes would add moving parts
 # without adding coverage.
 cat > "$OUT/mds.yaml" <<YAML
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: mds
 mds:

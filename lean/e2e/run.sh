@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # RETIRED PATH (2026-09-03): the lean webhook and sidecar injector are
 # gone — a workspace reaches a pod as ONE csi: volume served by the
-# s3.flint.io node driver (docs/plans/csi-node-mount-design.md §3.5).
+# s3.chert.us node driver (docs/plans/csi-node-mount-design.md §3.5).
 # This rig and its siblings (run-agent.sh, run-boundary.sh,
 # run-verbs.sh, run-chaos.sh) still label pods and exec into an
 # injected `flint-sync` container, so they no longer run as written.
@@ -80,7 +80,7 @@ ok "manifest cites the publish"
 
 # 6. THE FAILING CONTROL: a pod opting into a MISSING workspace must be
 #    REFUSED at admission (this leg fails if the webhook is vacuous).
-if $K run bad-agent --image=busybox:stable --labels=flint.io/lean-workspace=no-such-ws \
+if $K run bad-agent --image=busybox:stable --labels=chert.us/lean-workspace=no-such-ws \
      --restart=Never --command -- sleep 1 > /dev/null 2>&1; then
   fail "a pod naming a missing workspace was ADMITTED — the gate is vacuous"
 fi

@@ -30,7 +30,7 @@ metadata:
     app.kubernetes.io/component: pnfs-ds
 data:
   ds.yaml: |
-    apiVersion: flint.io/v1alpha1
+    apiVersion: chert.us/v1alpha1
     kind: PnfsConfig
     mode: ds
     ds:
@@ -161,9 +161,9 @@ spec:
     metadata:
       labels:
         app: flint-pnfs-ds
-        # Role label paired with the MDS pods' flint.io/role — the
+        # Role label paired with the MDS pods' chert.us/role — the
         # NetworkPolicies select the fleet by role, not per-shard app.
-        flint.io/role: pnfs-ds
+        chert.us/role: pnfs-ds
         {{- include "flint-csi-driver-chart.selectorLabels" . | nindent 8 }}
     spec:
       {{- with .Values.priorityClassName }}

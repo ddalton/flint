@@ -12,7 +12,7 @@
 # and 10s old at kill time — total wall-time before recall is up to
 # ~25s. The test waits 30s.
 
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: mds
 

@@ -185,7 +185,7 @@ nothing). **The refusal, not the substrate, is the gating work** (fact 2). The c
    Block) for now — relaxing it for assembled namespaces that never speak pNFS is open (§12).
    Call site (`main.rs:1584-1588`) runs before the fleet-wide multi-writer advertisement, so
    only the function changes.
-2. **A durable read-shared class flag** — new closed-set `pnfs.flint.io/*` SC key (unknown
+2. **A durable read-shared class flag** — new closed-set `pnfs.chert.us/*` SC key (unknown
    keys hard-fail, `pnfs_csi.rs:70-84`), stamped into volume_context **and the witness volume
    document**, not shard-local geometry. The runbq lesson (`operations/mod.rs:1707-1727`)
    applies verbatim: after promotion the survivor must know the namespace is read-shared to

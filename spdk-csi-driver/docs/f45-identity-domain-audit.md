@@ -24,7 +24,7 @@ never see them.
 
 **Convention map** (traced, load-bearing for every verdict below):
 - **Wrapper domain:** loopback/r1-remote export NQN, raid bdev name, kubelet
-  staging record, `flint.io/ublk-id` annotation home (the backing PV).
+  staging record, `chert.us/ublk-id` annotation home (the backing PV).
 - **Inner domain:** lvol/epoch names, ublk id mint (`hash(inner)`), sync
   record home (user PV), catch-up's replica-leg export mints.
 - **Mixed by construction (S3) — UNIFIED 2026-07-27:** replica-leg export

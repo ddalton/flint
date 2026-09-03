@@ -11,3 +11,7 @@ version: 0.4.12
 # release carrying `mode: standalone` and the S3 tier; 1.27.0 adds the
 # cold-read fan-out and the warm fill.
 appVersion: "1.44.0"
+
+home: https://flint.chert.us
+sources:
+  - https://github.com/ddalton/flint

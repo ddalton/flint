@@ -2965,14 +2965,14 @@ impl NodeAgent {
     }
 
     /// ublk id for a staged volume: the stage-time PV annotation is the
-    /// authority (`flint.io/ublk-id`, written by store_block_device_info);
+    /// authority (`chert.us/ublk-id`, written by store_block_device_info);
     /// the stable volume-id hash is the fallback for PVs staged before the
     /// annotation existed or whose patch was lost.
     fn resolve_ublk_id(&self, pv: &PersistentVolume, volume_handle: &str) -> u32 {
         pv.metadata
             .annotations
             .as_ref()
-            .and_then(|a| a.get("flint.io/ublk-id"))
+            .and_then(|a| a.get("chert.us/ublk-id"))
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or_else(|| {
                 self.driver
@@ -3282,7 +3282,7 @@ impl NodeAgent {
         }
     }
 
-    /// Backfill the PV's `flint.io/ublk-id` annotation with the ACTUAL
+    /// Backfill the PV's `chert.us/ublk-id` annotation with the ACTUAL
     /// serving id. Volumes staged before the F32 fix (or whose stage-time
     /// patch was lost) have no annotation, so an abrupt restart re-minted
     /// the device under the hash fallback instead of recovering the real
@@ -3295,7 +3295,7 @@ impl NodeAgent {
             .metadata
             .annotations
             .as_ref()
-            .and_then(|a| a.get("flint.io/ublk-id"))
+            .and_then(|a| a.get("chert.us/ublk-id"))
             .map(String::as_str);
         if current == Some(want.as_str()) {
             return;
@@ -5216,7 +5216,7 @@ impl NodeAgent {
             .metadata
             .annotations
             .as_ref()
-            .and_then(|a| a.get("flint.io/ublk-id"))
+            .and_then(|a| a.get("chert.us/ublk-id"))
             .and_then(|v| v.parse::<u32>().ok());
         if !Self::is_staged_here(volume_handle) {
             return Err(
@@ -5461,7 +5461,7 @@ impl NodeAgent {
                 p.metadata
                     .annotations
                     .as_ref()
-                    .and_then(|a| a.get("flint.io/degraded-direct"))
+                    .and_then(|a| a.get("chert.us/degraded-direct"))
                     .is_some()
             })
             .filter_map(|p| p.metadata.name.clone())

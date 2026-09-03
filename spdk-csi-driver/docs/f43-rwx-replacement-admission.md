@@ -270,7 +270,7 @@ all fixed, 855 tests green):**
    direct-serve → raid redundancy-restore path*: the volume's own stale
    direct-serve ublk disk over a leg 409'd the create with no healer (the
    rehydrate reaper skips multi-replica PVs). A pre-assembly CONVERGER now
-   stops disks attributable to THIS volume (id ∈ {`flint.io/ublk-id`
+   stops disks attributable to THIS volume (id ∈ {`chert.us/ublk-id`
    annotation, hash fallback}, bdev ≠ the raid itself) through the guarded
    stop — whose F37 kernel-opener probe still vetoes a genuinely live
    consumer. Foreign-id disks stay untouched (the boundary refusal is the

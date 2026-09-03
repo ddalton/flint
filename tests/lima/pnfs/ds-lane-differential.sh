@@ -74,7 +74,7 @@ vm "systemctl reset-failed flint-dsl-mds flint-dsl-ds flint-dsl-solo 2>/dev/null
 
 # ── configs ───────────────────────────────────────────────────────────
 vm "cat > /srv/dsl-mds/mds.yaml <<CFG
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: mds
 mds:
@@ -98,7 +98,7 @@ monitoring:
   metrics: []
 CFG
 cat > /srv/dsl-ds1/ds.yaml <<CFG
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: ds
 ds:
@@ -127,7 +127,7 @@ monitoring:
   metrics: []
 CFG
 cat > /srv/dsl-solo/mds.yaml <<CFG
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: standalone
 mds:

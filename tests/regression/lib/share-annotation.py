@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read one annotation off a FlintShare, given `kubectl get -o json` on stdin.
 
-Why not `-o jsonpath`: the key is `flint.io/requested-at`, which carries
+Why not `-o jsonpath`: the key is `chert.us/requested-at`, which carries
 BOTH a dot and a slash. `{.metadata.annotations.flint\\.io/requested-at}`
 looks right and silently yields nothing — which is how this drill
 reported "the gateway did not arm the wake annotation" against a gateway

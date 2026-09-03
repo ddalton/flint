@@ -1,6 +1,6 @@
 //! The syncer's environment: the FIXED `FLINT_SYNC_*` list a
 //! FlintLeanWorkspace turns into, and the derived checkout budget. The
-//! s3.flint.io node plugin (`crate::s3csi::node`) hands this list to
+//! s3.chert.us node plugin (`crate::s3csi::node`) hands this list to
 //! the lean worker over the launch socket; it is what the retired
 //! webhook used to stamp on an injected sidecar.
 

@@ -7,7 +7,7 @@ metadata:
   name: seeder
   namespace: agents
   labels:
-    flint.io/lean-workspace: proj
+    chert.us/lean-workspace: proj
 spec:
   restartPolicy: Never
   containers:

@@ -73,7 +73,7 @@ vm "umount -l /mnt/ncf 2>/dev/null||true; umount -l /mnt/nck 2>/dev/null||true
     echo flint > /srv/nc/export/WHICH_ARM"
 
 vm "cat > /srv/nc/mds.yaml <<CFG
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: PnfsConfig
 mode: standalone
 mds:

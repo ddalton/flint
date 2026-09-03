@@ -57,7 +57,7 @@
 #
 # On the two-hub shape: Nothing in the operator ties a project to one
 # share — `conflict::overlaps` keys uniqueness on the bucket prefix
-# subtree and nothing reads `flint.io/project-id` — so two volumes on
+# subtree and nothing reads `chert.us/project-id` — so two volumes on
 # two prefixes is ordinary, and the gateway has to keep them apart.
 #
 # ANTI-VACUITY
@@ -368,7 +368,7 @@ kubectl -n "$OPNS" rollout status deployment/flint-lite-operator-gateway --timeo
   || { kubectl -n "$OPNS" describe pod -l app.kubernetes.io/name=flint-lite-operator-gateway | tail -30
        kubectl -n "$OPNS" logs -l app.kubernetes.io/name=flint-lite-operator-gateway --tail=40
        fail "gateway never became Ready"; }
-kubectl wait --for=condition=established --timeout=60s crd/flintshares.flint.io >/dev/null 2>&1 \
+kubectl wait --for=condition=established --timeout=60s crd/flintshares.chert.us >/dev/null 2>&1 \
   || fail "the CRD never became Established"
 pf_gw
 # The gateway became READY, which means /readyz passed, which means the
@@ -435,13 +435,13 @@ kubectl -n "$NS" create secret generic tok-cold --from-literal=token="$TOK_COLD"
 
 mkshare() {  # mkshare <name> <volume>
   kubectl -n "$NS" apply -f - >/dev/null <<EOF || fail "FlintShare $1 refused"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata:
   name: $1
   labels:
-    flint.io/project-id: $PROJECT
-    flint.io/volume-id: $2
+    chert.us/project-id: $PROJECT
+    chert.us/volume-id: $2
 spec:
   bucket: $BUCKET
   keyPrefix: $PROJECT/$2/
@@ -497,13 +497,13 @@ mkshare "fs-$PROJECT-models" models
 #                             is warm again before anything asks.
 mkvol2() {  # mkvol2 <volume> <extra fileApi yaml> <extra settings yaml>
   kubectl -n "$NS" apply -f - >/dev/null <<EOF || fail "FlintShare $1 refused"
-apiVersion: flint.io/v1alpha1
+apiVersion: chert.us/v1alpha1
 kind: FlintShare
 metadata:
   name: fs-$PROJECT2-$1
   labels:
-    flint.io/project-id: $PROJECT2
-    flint.io/volume-id: $1
+    chert.us/project-id: $PROJECT2
+    chert.us/volume-id: $1
 spec:
   bucket: $BUCKET
   keyPrefix: $PROJECT2/$1/
@@ -550,7 +550,7 @@ for s in "fs-$PROJECT-data" "fs-$PROJECT-models" \
   done
   [ "$ph" = "Ready" ] || {
     kubectl -n "$NS" get flintshare "$s" -o yaml | tail -40
-    kubectl -n "$NS" logs -l flint.io/share="$s" --tail=40 2>/dev/null
+    kubectl -n "$NS" logs -l chert.us/share="$s" --tail=40 2>/dev/null
     fail "$s never became Ready (phase=$ph)"; }
 done
 pass "both volumes Ready; their derived tokens are distinct and deterministic"
@@ -749,10 +749,10 @@ if [ -z "$CLEAN" ]; then
   echo "  ── diagnostics (the hub's own view) ──"
   dbg "curl -s '$EP_DATA/status'" | head -c 1200; echo
   echo "  ── the tier config the operator rendered ──"
-  kubectl -n "$NS" get cm -l flint.io/share="fs-$PROJECT-data" -o yaml 2>/dev/null \
+  kubectl -n "$NS" get cm -l chert.us/share="fs-$PROJECT-data" -o yaml 2>/dev/null \
     | grep -A 25 'tier' | head -30
   echo "  ── hub log ──"
-  kubectl -n "$NS" logs -l flint.io/share="fs-$PROJECT-data" --tail=40 2>/dev/null
+  kubectl -n "$NS" logs -l chert.us/share="fs-$PROJECT-data" --tail=40 2>/dev/null
   fail "the hub never reached a clean recovery point ($(rpo)) — the write was not published"
 fi
 note "hub reports a clean recovery point: $(rpo)"
@@ -819,7 +819,7 @@ done
 # the way the idle rung does, then prove a GATEWAY request brings it
 # back — that is the whole wake protocol, driven by a file request.
 kubectl -n "$NS" annotate flintshare "fs-$PROJECT-models" \
-  flint.io/requested-at- >/dev/null 2>&1
+  chert.us/requested-at- >/dev/null 2>&1
 # `IdleSpec` is exactly three fields — suspendAfterSecs,
 # hibernateAfterSecs, suspendWithSessions. There is no `enabled` and no
 # `pollSecs`, and a structural CRD PRUNES unknown fields SILENTLY, so
@@ -840,7 +840,7 @@ for i in $(seq 1 40); do
   sleep 5
 done
 if [ -n "$WOKE" ]; then
-  REPL=$(kubectl -n "$NS" get deploy -l flint.io/share="fs-$PROJECT-models" \
+  REPL=$(kubectl -n "$NS" get deploy -l chert.us/share="fs-$PROJECT-models" \
     -o jsonpath='{.items[0].spec.replicas}' 2>/dev/null)
   note "parked at replicas=$REPL"
 
@@ -853,7 +853,7 @@ if [ -n "$WOKE" ]; then
   # failed on its own ordering.
   say "leg 9b: wake=false refuses a parked volume instead of starting it"
   ANN_BEFORE=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-models" -o json \
-    | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" flint.io/requested-at)
+    | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" chert.us/requested-at)
   C0=$(date +%s)
   code=$(gw GET "/v1/projects/$PROJECT/volumes/models/files?path=/&wake=false")
   C1=$(date +%s)
@@ -862,10 +862,10 @@ if [ -n "$WOKE" ]; then
   [ $((C1 - C0)) -lt 10 ] \
     || fail "wake=false waited out the wake budget ($((C1 - C0))s) — a crawl would stall"
   ANN_AFTER=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-models" -o json \
-    | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" flint.io/requested-at)
+    | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" chert.us/requested-at)
   [ "$ANN_BEFORE" = "$ANN_AFTER" ] \
     || fail "wake=false STAMPED the wake annotation ('$ANN_BEFORE' -> '$ANN_AFTER')"
-  R1=$(kubectl -n "$NS" get deploy -l flint.io/share="fs-$PROJECT-models" \
+  R1=$(kubectl -n "$NS" get deploy -l chert.us/share="fs-$PROJECT-models" \
     -o jsonpath='{.items[0].spec.replicas}' 2>/dev/null)
   [ "$R1" = "0" ] || fail "wake=false brought the hub back up (replicas=$R1)"
   pass "wake=false refuses in $((C1 - C0))s, stamps nothing, hub stays at replicas=0"
@@ -886,7 +886,7 @@ by={v["volume"]: v for v in d["volumes"]}
 assert by["models"]["serving"] is False, by["models"]
 assert by["data"]["serving"] is True, by["data"]
 ' || fail "the listing misreports which volumes are serving: $(gwbody)"
-  R1=$(kubectl -n "$NS" get deploy -l flint.io/share="fs-$PROJECT-models" \
+  R1=$(kubectl -n "$NS" get deploy -l chert.us/share="fs-$PROJECT-models" \
     -o jsonpath='{.items[0].spec.replicas}' 2>/dev/null)
   [ "$R1" = "0" ] || fail "listing volumes woke a parked hub (replicas=$R1)"
   pass "listing volumes reports serving per volume and wakes nothing"
@@ -898,11 +898,11 @@ assert by["data"]["serving"] is True, by["data"]
   T1=$(date +%s)
   ELAPSED=$((T1 - T0))
   ANN=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-models" -o json \
-    | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" flint.io/requested-at)
+    | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" chert.us/requested-at)
   note "request took ${ELAPSED}s, answered $code; requested-at='$ANN' (expected empty)"
   # ASSERT THE OUTCOME, NOT THE MECHANISM.
   #
-  # An earlier version of this leg required `flint.io/requested-at` to
+  # An earlier version of this leg required `chert.us/requested-at` to
   # still be set after the request, and failed twice against a gateway
   # whose unit tests prove it emits exactly that merge patch. The
   # annotation is DELIBERATELY TRANSIENT: `reconcile.rs` clears it the
@@ -919,7 +919,7 @@ assert by["data"]["serving"] is True, by["data"]
   # contract is unaffected by this.)
   WOKE_REPL=""
   for i in $(seq 1 30); do
-    R2=$(kubectl -n "$NS" get deploy -l flint.io/share="fs-$PROJECT-models" \
+    R2=$(kubectl -n "$NS" get deploy -l chert.us/share="fs-$PROJECT-models" \
       -o jsonpath='{.items[0].spec.replicas}' 2>/dev/null)
     [ "$R2" = "1" ] && { WOKE_REPL=1; break; }
     sleep 2
@@ -940,7 +940,7 @@ assert by["data"]["serving"] is True, by["data"]
     kubectl -n "$NS" get flintshare "fs-$PROJECT-models" \
       -o jsonpath='{.metadata.annotations}{"\n"}{.status.phase}{"\n"}' 2>/dev/null
     echo "  ── can the gateway SA patch it? ──"
-    kubectl auth can-i patch flintshares.flint.io \
+    kubectl auth can-i patch flintshares.chert.us \
       --as="system:serviceaccount:$OPNS:flint-lite-operator-gateway" -n "$NS"
     fail "the request did not bring the hub back (replicas=$R2, phase=$PH2)"
   fi
@@ -974,13 +974,13 @@ note "address=$ADDR serverId=${SRVID:0:16}…"
 # the share was already up — that is the whole point for a consumer
 # that holds a mount and does no file I/O.
 BEFORE=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-data" -o json \
-  | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" flint.io/requested-at)
+  | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" chert.us/requested-at)
 sleep 2
 curl -s -o /dev/null -X POST -H "Authorization: Bearer $GW_TOKEN" \
   "http://127.0.0.1:$PF_GW/v1/projects/$PROJECT/volumes/data/wake"
 AFTER=$(kubectl -n "$NS" get flintshare "fs-$PROJECT-data" -o json \
-  | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" flint.io/requested-at)
-[ -n "$AFTER" ] || fail "the wake endpoint never stamped flint.io/requested-at"
+  | python3 "$REPO_ROOT/tests/regression/lib/share-annotation.py" chert.us/requested-at)
+[ -n "$AFTER" ] || fail "the wake endpoint never stamped chert.us/requested-at"
 [ "$BEFORE" != "$AFTER" ] \
   || fail "a second wake did not re-stamp — it is not a keepalive, so a quiet mount would be suspended under"
 pass "wake returns a mountable address and re-stamps on every call (it is a keepalive)"
@@ -1057,17 +1057,17 @@ fi
 say "leg 12: the gateway's ServiceAccount can wake a share and cannot read a Secret"
 SA="system:serviceaccount:$OPNS:flint-lite-operator-gateway"
 can() { kubectl auth can-i "$1" "$2" --as="$SA" ${3:+-n "$3"} 2>/dev/null; }
-[ "$(can patch flintshares.flint.io "$NS")" = "yes" ] \
+[ "$(can patch flintshares.chert.us "$NS")" = "yes" ] \
   || fail "the gateway cannot patch flintshares — it could never wake anything"
-[ "$(can get flintshares.flint.io "$NS")" = "yes" ] || fail "the gateway cannot get flintshares"
-[ "$(can list flintshares.flint.io "$NS")" = "yes" ] || fail "the gateway cannot list flintshares"
+[ "$(can get flintshares.chert.us "$NS")" = "yes" ] || fail "the gateway cannot get flintshares"
+[ "$(can list flintshares.chert.us "$NS")" = "yes" ] || fail "the gateway cannot list flintshares"
 # THE ONE THAT MATTERS: the workspace namespaces hold the tenants' S3
 # credentials in the same place as the per-share API tokens.
 [ "$(can get secrets "$NS")" = "no" ] \
   || fail "the gateway CAN read Secrets in $NS — that is every tenant's S3 credentials"
-[ "$(can create flintshares.flint.io "$NS")" = "no" ] \
+[ "$(can create flintshares.chert.us "$NS")" = "no" ] \
   || fail "the gateway can create shares — provisioning is the front door's decision"
-[ "$(can delete flintshares.flint.io "$NS")" = "no" ] \
+[ "$(can delete flintshares.chert.us "$NS")" = "no" ] \
   || fail "the gateway can delete shares"
 [ "$(can get pods "$NS")" = "no" ] || fail "the gateway can read pods"
 pass "get/list/watch/patch on flintshares, and nothing else"
@@ -1226,7 +1226,7 @@ if [ -z "$EVICTED" ]; then
   note "headroom=$(gauge_at "$EP_COLD" tier.gauges.headroomBytes) evicted=$(gauge_at "$EP_COLD" tier.gauges.evictedFiles)"
   echo "  ── the hub's own view ──"; dbg "curl -s '$EP_COLD/status'" | head -c 900; echo
   echo "  ── the tier config the operator rendered ──"
-  kubectl -n "$NS" get cm -l flint.io/share="fs-$PROJECT2-cold" -o yaml 2>/dev/null \
+  kubectl -n "$NS" get cm -l chert.us/share="fs-$PROJECT2-cold" -o yaml 2>/dev/null \
     | grep -A 30 'tier' | head -35
   COLD_INCONCLUSIVE=1
 else
@@ -1328,7 +1328,7 @@ else
   kubectl -n "$NS" patch flintshare "fs-$PROJECT2-cold" --type=merge \
     -p '{"spec":{"monitoring":{"fileApi":{"hydrateWaitSecs":30}}}}' >/dev/null \
     || fail "hydrateWaitSecs patch refused"
-  OLDHUB=$(kubectl -n "$NS" get pod -l flint.io/share="fs-$PROJECT2-cold" \
+  OLDHUB=$(kubectl -n "$NS" get pod -l chert.us/share="fs-$PROJECT2-cold" \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
   helm_up --set gateway.upstreamTimeoutSecs=1 \
     || { tail -20 /tmp/gw-e2e-helm.log; fail "helm upgrade (upstreamTimeoutSecs=1) failed"; }
@@ -1345,7 +1345,7 @@ else
   # Ready. hydrateWarmAfterImport is off, so /bulk.bin is still a stub.
   RDY=""
   for i in $(seq 1 40); do
-    NEWHUB=$(kubectl -n "$NS" get pod -l flint.io/share="fs-$PROJECT2-cold" \
+    NEWHUB=$(kubectl -n "$NS" get pod -l chert.us/share="fs-$PROJECT2-cold" \
       -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
     RDY=$(kubectl -n "$NS" get flintshare "fs-$PROJECT2-cold" -o jsonpath='{.status.phase}')
     [ "$RDY" = "Ready" ] && [ -n "$NEWHUB" ] && [ "$NEWHUB" != "$OLDHUB" ] && break
@@ -1396,7 +1396,7 @@ say "leg 15: NetworkPolicy closes the hub, and the gateway is on the right side 
 # — chart-render-pass.sh greps the YAML — and it fails CLOSED: get the
 # selector wrong and every file request in the fleet times out, with the
 # policy still reading exactly right.
-HUBIP=$(kubectl -n "$NS" get pod -l flint.io/share="fs-$PROJECT-data" \
+HUBIP=$(kubectl -n "$NS" get pod -l chert.us/share="fs-$PROJECT-data" \
   -o jsonpath='{.items[0].status.podIP}')
 [ -n "$HUBIP" ] || fail "no pod ip for the data hub"
 probe8080() { dbg "curl -s -o /dev/null -w '%{http_code}' --max-time 6 'http://$HUBIP:8080/status'"; }

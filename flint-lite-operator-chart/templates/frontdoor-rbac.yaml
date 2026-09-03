@@ -40,7 +40,7 @@ rules:
   # touch the wake annotation. `patch` covers the annotation write;
   # there is no `update`, so the front door cannot rewrite a spec
   # wholesale, and no `delete`.
-  - apiGroups: ["flint.io"]
+  - apiGroups: ["chert.us"]
     resources: ["flintshares"]
     verbs: ["get", "list", "watch", "create", "patch"]
 ---
