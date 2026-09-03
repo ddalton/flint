@@ -24,6 +24,13 @@ spec:
   maxFiles: 5000
   uid: 1001
   gid: 1001
+  # §3.2 documents `curl --unix-socket <mountPath>/.flint-sync/ctl.sock`
+  # as the tenant's replacement for `flint-sync ctl`, which no tenant can
+  # run any more. That socket is NOT unconditional: the syncer binds it
+  # only under FLINT_SYNC_UDS_DOOR=true, which sync_env() derives from
+  # THIS field. Without it the documented replacement has nothing to talk
+  # to — S12 asserts the socket, so the fixture must opt in.
+  udsDoor: true
   consumers:
     serviceAccounts: [trainer]
 ---

@@ -55,6 +55,12 @@ require_pod() {
 # and a bare `printf %s` would silently under-count every listing by one
 # (measured: an 11-entry mount read as 10, a 1-entry mount as 0).
 inpod()  { local p=$1 try out rc; shift; for try in 1 2 3; do out=$($K -n $NS exec "$p" -c agent -- /bin/sh -c "$*" 2>/dev/null); rc=$?; [ $rc -eq 0 ] && break; sleep 2; done; [ -n "$out" ] && printf '%s\n' "$out"; return $rc; }
+# `inpod` retries, because most legs read a transient exec failure as
+# noise. S12 does not: it asks questions whose answer is legitimately
+# FALSE (`test -f` on a file that must not exist yet), so it needs the
+# command's own exit status, once.
+tsh()     { local p=$1; shift; $K -n $NS exec "$p" -c agent -- /bin/sh -c "$*" >/dev/null 2>&1; }
+tsh_out() { local p=$1; shift; $K -n $NS exec "$p" -c agent -- /bin/sh -c "$*" 2>/dev/null; }
 mcx()    { $K -n $SYS exec mc-s3 -- "$@" 2>/dev/null; }
 onnode() { docker exec "$NODE" sh -c "$*" 2>/dev/null; }
 # The worker pod serving a tenant pod, by annotation.
@@ -152,9 +158,20 @@ ready=$($K -n $SYS get ds flint-s3-csi-node -o jsonpath='{.status.numberReady}')
 mwc=$($K get mutatingwebhookconfigurations -o name | grep -c flint || true)
 [ "$mwc" = "0" ] && ok "zero flint MutatingWebhookConfigurations" || bad "$mwc flint MutatingWebhookConfigurations present"
 # Control: with the plugin gone, a NEW pod stays ContainerCreating (fail-closed).
-$K -n $SYS patch ds flint-s3-csi-node -p '{"spec":{"template":{"spec":{"nodeSelector":{"chert.us/absent":"true"}}}}}' >/dev/null
-sleep 8
+# ORDER MATTERS, and it used to be a race this leg could lose. Deleting
+# `reader` AFTER the plugin is parked cannot work: kubelet has no driver
+# to call NodeUnpublishVolume on, so the pod sits Terminating, the
+# --wait times out into /dev/null, and the `apply` that follows is a
+# silent no-op against a terminating object ("Detected changes to
+# resource reader which is currently being deleted"). The pod is then
+# ABSENT for every later leg, which reports as eight unrelated failures.
+# Delete while the plugin can still unmount, park second.
 $K -n $NS delete pod reader --ignore-not-found --wait=true --timeout=120s >/dev/null 2>&1
+$K -n $NS get pod reader >/dev/null 2>&1 \
+    && bad "reader is still present after its delete — the fail-closed control below would be testing a pod that already has its mount" \
+    || ok "PRECONDITION: reader is gone while the plugin can still unmount it"
+$K -n $SYS patch ds flint-s3-csi-node -p '{"spec":{"template":{"spec":{"nodeSelector":{"chert.us/absent":"true"}}}}}' >/dev/null
+i=0; while [ $i -lt 60 ] && [ "$($K -n $SYS get pods -l app.kubernetes.io/name=flint-s3-csi-node -o name 2>/dev/null | grep -c .)" != "0" ]; do sleep 2; i=$((i + 2)); done
 $K apply -f tenants.yaml >/dev/null
 if wait_phase reader Running 40; then
     bad "CONTROL: reader started with the plugin absent — fail-closed does not hold"
@@ -499,6 +516,81 @@ if wait_phase lean-refused Running 30; then bad "CONTROL: lean-refused is Runnin
     echo "$ev" | grep -q 'spec.consumers.serviceAccounts' && echo "$ev" | grep -q 'trainer' && ok "CONTROL: a lean CR without consumers denies, naming the SA and the field" || bad "CONTROL: lean-refused event: $(echo "$ev" | tail -1 | cut -c1-200)"
 fi
 
+# S12 (design §10.2). The B1-B25 / C1-C12 protocol suites in lean/e2e
+# are NOT re-targeted here: they never used the webhook, they create no
+# CR, and they need a subtree per leg — a CSI worker is one volume and
+# one prefix, so they stay where they are and keep testing the protocol.
+# What CSI delivery changes, and what this leg covers, is the in-band
+# publish verb driven from the tenant pod and the exec surface §3.2 had
+# to replace: `flint-sync ctl` is unreachable for a tenant now, so the
+# control socket inside its own mount of the tree is what it gets.
+leg S12 "lean: the in-band publish verb is acked under CSI delivery, the manifest advances, and the control door is reachable in the TENANT's own view of the tree"
+if require_pod lean-agent; then
+    seq0=$(lmseq tenants/proj)
+    # A `test -f` that comes back FALSE and an exec that never ran look
+    # identical from here, so prove the channel first: everything below
+    # reads a false as an answer.
+    tsh lean-agent "test -d /workspace/src" \
+        && ok "the exec channel into the tenant works (a FALSE below is an answer, not a broken exec)" \
+        || bad "cannot exec into lean-agent at all — every observation this leg makes would be indistinguishable from absence"
+    # floorSecs is an hour on this workspace, so the cadence CANNOT
+    # advance the manifest: any advance below is the sentinel's doing.
+    if tsh lean-agent "test -f /workspace/.flint/publish.ack"; then
+        bad "PRECONDITION: a publish.ack existed before this leg asked for one — the round trip would prove nothing"
+    else
+        ok "PRECONDITION: no publish.ack yet, manifest at seq $seq0"
+    fi
+    tsh lean-agent "printf 'in-band publish' > /workspace/src/s12.txt" || bad "the tenant could not write into its own workspace"
+    lmhas tenants/proj src/s12.txt \
+        && bad "PRECONDITION: src/s12.txt is cited before any publish was requested — the floor is not holding and the leg proves nothing" \
+        || ok "PRECONDITION: src/s12.txt is written but uncited (the 1-hour floor is the fixture)"
+    NONCE="s12-$(date +%s)"
+    tsh lean-agent "mkdir -p /workspace/.flint && printf '{\"nonce\":\"$NONCE\"}' > /workspace/.flint/publish.tmp && mv /workspace/.flint/publish.tmp /workspace/.flint/publish" \
+        || bad "the tenant could not write the publish sentinel"
+    i=0; ack=""
+    while [ $i -lt 90 ]; do
+        ack=$(tsh_out lean-agent "cat /workspace/.flint/publish.ack 2>/dev/null")
+        case "$ack" in *"$NONCE"*) break ;; esac
+        sleep 3; i=$((i + 3))
+    done
+    case "$ack" in
+        *"$NONCE"*) ok "the sentinel was acked in ${i}s, carrying THIS leg's nonce (not a stale ack)" ;;
+        *) bad "no ack carrying $NONCE within 90 s (ack: $(printf '%s' "$ack" | tr -d '\n' | cut -c1-140))" ;;
+    esac
+    astat=$(printf '%s' "$ack" | jq -r '.status // "?"' 2>/dev/null)
+    [ "$astat" = "ok" ] && ok "the ack status is ok" || bad "the ack status is '$astat'"
+    seq1=$(lmseq tenants/proj)
+    [ "${seq1:-0}" -gt "${seq0:-0}" ] && ok "the manifest advanced $seq0 → $seq1 (A5)" || bad "the manifest did not advance past seq $seq0"
+    lmhas tenants/proj src/s12.txt && ok "the manifest cites src/s12.txt" || bad "the seq advanced but src/s12.txt is not cited"
+    [ "$(lobj tenants/proj/files/src/s12.txt)" = "in-band publish" ] && ok "the bucket carries the bytes the tenant wrote" || bad "the object reads '$(lobj tenants/proj/files/src/s12.txt)'"
+
+    # §3.2's replacement for the lost in-pod exec surface.
+    tsh lean-agent "test -S /workspace/.flint-sync/ctl.sock" \
+        && ok "the control door is a SOCKET in the tenant's own view (/workspace/.flint-sync/ctl.sock)" \
+        || bad "no control socket in the tenant's view of the tree (the CR sets udsDoor: true — §3.2's replacement for \`flint-sync ctl\` needs it)"
+    w=$(worker_of lean-agent)
+    if [ -n "$w" ]; then
+        tree=$($K -n $WNS get pod "$w" -o jsonpath='{.spec.volumes[*].hostPath.path}')
+        ti=$(tsh_out lean-agent "stat -c %i /workspace/.flint-sync/ctl.sock")
+        ni=$(onnode "stat -c %i $tree/.flint-sync/ctl.sock")
+        [ -n "$ti" ] && [ "$ti" = "$ni" ] \
+            && ok "it is the SAME socket the worker bound (inode $ti) — a tenant that curls --unix-socket reaches the live door" \
+            || bad "tenant inode '$ti' vs plugin-tree inode '$ni': the tenant's socket is not the worker's door"
+        st=$($K -n $WNS exec "$w" -- /usr/local/bin/flint-sync ctl status 2>&1); rc=$?
+        if [ $rc -eq 0 ] && printf '%s' "$st" | jq -e 'type == "object" and (has("error") | not)' >/dev/null 2>&1; then
+            ok "the door ANSWERS: flint-sync ctl status returns a status document from the running syncer"
+        else
+            bad "flint-sync ctl status in $w (rc=$rc): $(printf '%s' "$st" | tr -d '\n' | cut -c1-140)"
+        fi
+        so=$($K -n $WNS exec "$w" -- /usr/local/bin/flint-sync status 2>&1); rc=$?
+        [ $rc -eq 0 ] && printf '%s' "$so" | jq -e . >/dev/null 2>&1 \
+            && ok "the operator-side recipe works: flint-sync status runs in $w while the syncer holds the occupancy flock" \
+            || bad "flint-sync status in $w (rc=$rc): $(printf '%s' "$so" | tr -d '\n' | cut -c1-140)"
+    else
+        bad "no Running worker for lean-agent"
+    fi
+fi
+
 leg S13 "lean drain: a file written after the last publish is in the bucket, cited, once the pod is deleted — and the worker follows the pod"
 if require_pod lean-agent; then
     inpod lean-agent "printf 'written after the seed publish\n' > /workspace/src/late.txt" || bad "could not write late.txt"
@@ -532,7 +624,7 @@ fi
 
 # ── roster ────────────────────────────────────────────────────────────
 echo
-for want in S1 S2 S3 S4 S5 S5c S6 S7 S8 S9 S10 S11 S13 S15 S19 SU; do
+for want in S1 S2 S3 S4 S5 S5c S6 S7 S8 S9 S10 S11 S12 S13 S15 S19 SU; do
     echo " $RAN_LEGS " | grep -q " $want " || bad "leg $want never ran"
 done
 echo "════════════════════════════════════════"

@@ -287,6 +287,52 @@ record in §11.1.
 - *STS codes.* `InvalidIdentityToken` is a 400 (as AWS answers it), not
   a 403, so a client can tell "not a token" from "no entitlement".
 
+- *S12's premise about the lean protocol suites was wrong.* This
+  document asked for "protocol legs B1-B25/C1-C12 run against the worker
+  pod unchanged, with every `kubectl exec -c flint-sync` step re-targeted
+  to the worker pod". Checked against the code: those suites never used
+  the webhook. `lean/e2e/run-verbs.sh` (B1-B25) and `run-chaos.sh`
+  (C1-C12) create no `FlintLeanWorkspace`, read no
+  `chert.us/lean-workspace` label and need no operator; their pods are
+  hand-authored in `verbs.yaml` / `chaos.yaml` with an EXPLICIT `sync`
+  container, and the drill execs `flint-sync` verbs into them with
+  per-leg env and per-leg subtrees. There is no injected container to
+  re-target. Nor could a worker pod host them: one CSI volume is one
+  prefix, while every leg there needs its own subtree, and `reset_pods`
+  kills the resident syncer — which under CSI would take PID 1 of the
+  worker with it. They test the bucket PROTOCOL, which delivery does not
+  change; delivery is S11/S12/S13 and M3. Both files briefly carried a
+  RETIRED banner saying otherwise; that banner was the real hazard (a
+  suite nobody runs because it says not to) and is corrected in place.
+  What S12 does cover is the part CSI genuinely changed: the in-band
+  publish verb driven from the tenant pod, and §3.2's replacement for
+  the in-pod exec surface. The gateway boundary request (B34) stays in
+  the lean rig, which is where the gateway is deployed.
+  `reconcile.rs`'s `StagedWorkRecovered` message was also still telling
+  operators to "Run `flint-sync recover-staged` in a pod on this
+  workspace" — a tenant pod has no such binary under CSI; it now names
+  the worker pod in `flint-workers`, with a unit test that fails if the
+  recipe stops naming a reachable place.
+
+- *S12 found §3.2's replacement recipe broken on BOTH sides, first run.*
+  (1) **The operator-side verb could not run.** The syncer's
+  configuration reached the child through the LAUNCH MESSAGE only, never
+  the worker's pod spec — so `kubectl -n flint-workers exec <worker> --
+  flint-sync status` (or `recover-staged`, the verb the operator's own
+  condition names) exited 2 with `FLINT_SYNC_BUCKET is required`. The
+  container carried exactly two variables, `FLINT_S3W_MODE` and
+  `FLINT_S3W_COMM`. `worker.rs`'s own doc comment already claimed the
+  lean `FLINT_SYNC_*` list belonged in the pod spec; `node.rs` did not
+  put it there. It does now — the non-secret list on the pod spec AND in
+  the launch message, credentials still only in the launch message and
+  the comm dir. (2) **The tenant-side socket is conditional and §3.2 did
+  not say so.** `.flint-sync/ctl.sock` is bound only under
+  `FLINT_SYNC_UDS_DOOR=true`, which `sync_env()` derives from the CR's
+  `spec.udsDoor` (default false). A workspace that does not opt in has
+  no socket, so the documented `curl --unix-socket` replacement has
+  nothing to talk to. Read §3.2's recipe as requiring `udsDoor: true`;
+  the drill's fixture sets it and S12 asserts the socket and its inode.
+
 ## 1. The question, restated precisely
 
 The ask, verbatim: *"The flint passthrough and lean operators require
@@ -1633,7 +1679,7 @@ MinIO (`passthrough/e2e/rig.yaml`; `lean/e2e/minio.yaml`) + a stub
 | S9 | DS rolled mid-`cat` of a 1 GiB object ⇒ checksum matches, zero `FailedMount`, worker pods unchanged | `crictl stop` the **worker** ⇒ reader gets `ENOTCONN` within 10 s; a plugin-authored `Warning` Event on the tenant pod within one republish — not kubelet's, whose volume-health reporting is gated off by default (§6.1) (A12 shape) |
 | S10 | revocation: SA removed from `consumers` ⇒ reader fails within one key lifetime + slack | untouched sibling pod keeps reading |
 | S11 | lean: a pod created after the seeder is gone finds all 200 files with correct bytes before its first instruction, **and its init container sees them too** (a NEW leg — lean A2, `run-agent.sh:187-200`, asserts nothing about init containers, and today's appended sidecar never gates them, §2.2) | a workspace with a forced-wedged checkout (proxy first-byte stall) stays `ContainerCreating`, the marker is never written, the event names the budget (C12) |
-| S12 | lean: `.flint/publish` acked `ok` within 90 s, manifest seq advances (A5); gateway boundary request honoured (B34); protocol legs B1-B25/C1-C12 run against the worker pod unchanged, with every `kubectl exec -c flint-sync` step (`run-boundary.sh:214-216`; `run-verbs.sh:147-161`) re-targeted to the worker pod in `flint-workers` (§3.2) | — (they are the oracle) |
+| S12 **(built 2026-09-03; scope corrected — see §0)** | lean: `.flint/publish` written by the TENANT is acked `ok` within 90 s carrying that request's own nonce, the manifest advances and cites the new file (A5), and §3.2's replacement for the lost in-pod exec surface holds — the control socket is a socket in the tenant's own view of the tree, on the same inode the worker bound, and `flint-sync ctl status` / `status` answer in the worker | the ack must not pre-exist and the file must be uncited before the request (the 1-hour floor is the fixture, so any manifest advance is the sentinel's); a stale ack fails the nonce check |
 | S13 | lean drain: `kubectl delete pod` ⇒ bucket carries a `source=drain` boundary, owed ack settled, lease released, the Pod object disappears only after (B11a); **`--grace-period=0 --force` also drains — with the delete timed so the drain starts after the worker's keys would have needed a refresh** (proves the long-key rule of §5, not just the happy case) | SIGKILL the syncer then delete ⇒ `orphans.json`, `recover-staged` re-cites (B11b); today's mechanism under `--force` drains nothing |
 | S14 | pod replacement ⇒ new volume id, takeover rotation observed (6 quiet polls, `seq++`) | container restart in the tenant pod ⇒ same worker, same holder id, no rotation |
 | S15 | two projects, one node: two workers, two distinct `AccessKeyId`s, no cross-visibility either way | delete one worker ⇒ only its tenant strands; the other keeps reading |
@@ -1699,8 +1745,10 @@ The lean tree's uid model chowned to a uid `NodePublish` cannot
 correlate with the app — tree `1777`, CR uid REQUIRED for lean, the L1
 bridge's uid 65534 dropped, new §9.2 item 18 (§3.5, §3.6, §10.1). The
 in-pod `flint-sync status|ctl|recover-staged` exec surface was silently
-lost — now listed in §3.2 with the replacement recipe, and S12 re-targets
-the exec steps.
+lost — now listed in §3.2 with the replacement recipe, and S12 asserts
+it (the tenant keeps the control SOCKET inside its own mount; `ctl` and
+`status` move to the worker pod). The "re-target the B/C suites' exec
+steps" half of S12 rested on a false premise and was dropped — see §0.
 
 *Major/minor, unsupported → cited or relabelled.* K0 "no broker" now
 carries the per-SA `sub` condition it depends on (§4.2, §4.3, §7). T5

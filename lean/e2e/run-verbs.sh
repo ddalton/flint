@@ -1,14 +1,25 @@
 #!/usr/bin/env bash
-# RETIRED PATH (2026-09-03): the lean webhook and sidecar injector are
-# gone — a workspace reaches a pod as ONE csi: volume served by the
-# s3.csi.chert.us node driver (docs/plans/csi-node-mount-design.md §3.5).
-# This rig labels pods and/or execs into an injected `flint-sync`
-# container, so it no longer runs as written. The CSI delivery of lean
-# is drilled by s3csi/e2e/run-s3csi.sh (S11, S13) and, across clusters,
-# s3csi/e2e/multi/run-multi.sh (M3). The PROTOCOL suites here (B1-B25,
-# C1-C12) remain the lean ORACLE and are to be re-targeted at the
-# worker pod in flint-workers (design §10.2 S12) — not deleted, and
-# never left silently green.
+# NOT RETIRED — re-checked 2026-09-03 against the CSI cutover (S12).
+# An earlier banner here declared this path retired. That was WRONG, and
+# a wrong banner is the worse failure: a suite nobody runs because it
+# says not to. This rig never used the lean webhook. It creates no
+# FlintLeanWorkspace, reads no chert.us/lean-workspace label, and needs
+# no operator: its pods are hand-authored in verbs.yaml (verbs-a, verbs-b, verbs-old, …) with an
+# EXPLICIT `sync` container, and the drill execs flint-sync verbs into
+# them with per-leg env and per-leg subtrees.
+#
+# What the CSI cutover changed is DELIVERY — how a workspace reaches a
+# pod — which this suite does not test and never did. Delivery is
+# drilled by s3csi/e2e/run-s3csi.sh (S11, S12, S13) and, across
+# clusters, s3csi/e2e/multi/run-multi.sh (M3). What B1-B25 tests is the
+# bucket PROTOCOL, and delivery does not change it.
+#
+# So design §10.2 S12's "re-target every `kubectl exec -c flint-sync`
+# step at the worker pod in flint-workers" does not apply here: there is
+# no injected container to re-target, and a worker pod could not host
+# these legs anyway — one CSI volume is one prefix, while every leg here
+# needs its own subtree, and reset_pods kills the resident syncer, which
+# under CSI would take PID 1 of the worker with it.
 # The BOUNDARY-VERBS bucket drill (plan §6, legs B1-B25 + B12b) —
 # against a real MinIO, through the real S3 backend, with the oracle
 # reading the bucket directly.

@@ -48,6 +48,30 @@ machine identifier moved off `flint.io` to `chert.us`.
   Drill captures under `tests/chaos/artifacts/` keep the old identifiers
   on purpose; they are dated evidence, not current configuration. See
   `tests/chaos/README.md`.
+- **Drill leg S12** closes the lean gap the CSI cutover opened: the
+  in-band publish verb, driven from the tenant pod. A tenant writes a
+  nonce to `.flint/publish` in its own mount and the leg holds the ack
+  to that nonce within 90 s, `status: ok`, a manifest that advanced and
+  cites the new file, and the bucket carrying the bytes — over a
+  workspace whose 1-hour floor means the cadence cannot have done it.
+  It also asserts §3.2's replacement for the in-pod exec surface that
+  CSI removed: `flint-sync ctl` is unreachable for a tenant now, so the
+  leg proves the control socket is a socket in the tenant's own view of
+  the tree, on the SAME inode the worker bound, and that
+  `flint-sync ctl status` and `flint-sync status` answer in the worker.
+- **The lean operator's `StagedWorkRecovered` message named a place that
+  no longer has the binary.** It said to run `flint-sync recover-staged`
+  "in a pod on this workspace"; under CSI that binary exists only in the
+  worker pod in `flint-workers`, which a tenant cannot exec into. The
+  condition now gives the reachable recipe, and a unit test fails if it
+  stops naming one.
+- **Two lean protocol suites were wrongly marked retired.**
+  `lean/e2e/run-verbs.sh` (B1-B25) and `run-chaos.sh` (C1-C12) never used
+  the lean webhook — they create no CR, read no label, need no operator,
+  and drive `flint-sync` directly against MinIO on hand-authored pods.
+  The banner claiming otherwise is the worse failure mode: a suite nobody
+  runs because it says not to. Corrected in place, with why a worker pod
+  could not host those legs anyway.
 - **The block/pNFS driver is `disk.csi.chert.us` (BREAKING).** Formerly
   `flint.csi.storage.io`, a domain that was never ours. Its keys move to
   `disk.chert.us/*` — `disk.chert.us/lvol-uuid`,

@@ -679,6 +679,21 @@ impl S3Node {
         }
 
         let (run_as, run_as_gid) = worker_owner(&st);
+        // The syncer's non-secret configuration goes on the POD SPEC as
+        // well as into the launch message. The child gets it either way,
+        // but only the pod spec is inherited by `kubectl exec`, and
+        // §3.2's operator-side recipe — `kubectl -n flint-workers exec
+        // <worker> -- flint-sync recover-staged|status` — is the only way
+        // left to run those verbs now that no tenant can. With the list
+        // in the launch message alone every one of them exits 2 with
+        // "FLINT_SYNC_BUCKET is required" (found by S12). Credentials are
+        // NOT here: they stay in the launch message and the comm dir.
+        let ws = crate::lean_operator::crd::FlintLeanWorkspace::new(&name, spec);
+        let mut sync_conf: BTreeMap<String, String> =
+            crate::lean_operator::sync_env::sync_env(&ws, SYNCER_ROOT).into_iter().collect();
+        sync_conf.insert("FLINT_SYNC_NAMESPACE".into(), pr.pod_namespace.clone());
+        let mut pod_env = sync_conf.clone();
+        pod_env.insert("FLINT_S3W_MODE".to_string(), "lean".to_string());
         let pod = worker::build_pod(&WorkerInputs {
             namespace: self.cfg.worker_namespace.clone(),
             node_name: self.cfg.node_name.clone(),
@@ -691,7 +706,7 @@ impl S3Node {
             run_as_uid: run_as,
             run_as_gid,
             resources: self.cfg.worker_resources.clone(),
-            env: BTreeMap::from([("FLINT_S3W_MODE".to_string(), "lean".to_string())]),
+            env: pod_env,
             lean_tree_hostpath: Some(st.src.clone()),
             grace_secs: Some(grace as i64),
             priority_class: self.cfg.priority_class.clone(),
@@ -725,10 +740,9 @@ impl S3Node {
         }
 
         // The syncer's environment: the same fixed list the webhook
-        // stamped, with the tenant namespace as a LITERAL (design §5).
-        let ws = crate::lean_operator::crd::FlintLeanWorkspace::new(&name, spec);
-        let mut env: BTreeMap<String, String> = crate::lean_operator::sync_env::sync_env(&ws, SYNCER_ROOT).into_iter().collect();
-        env.insert("FLINT_SYNC_NAMESPACE".into(), pr.pod_namespace.clone());
+        // stamped, with the tenant namespace as a LITERAL (design §5),
+        // plus the credentials, which live only here and never on the pod.
+        let mut env = sync_conf;
         env.extend(mat.env);
         let launch = Launch { mode: "lean".into(), args: vec!["run".into()], env };
         let sock = comm.join("mount.sock");

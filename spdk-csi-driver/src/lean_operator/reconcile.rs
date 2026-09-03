@@ -417,12 +417,21 @@ pub async fn full_pass(
                 if n == 0 {
                     None
                 } else {
+                    // The recipe must name a pod that EXISTS and that the
+                    // reader can reach. Under the CSI delivery the binary
+                    // lives only in the worker pod in `flint-workers` — a
+                    // tenant cannot exec there (the §3.6 admission policy
+                    // admits the node SA and the kubelet, nobody else), so
+                    // "in a pod on this workspace" sent operators somewhere
+                    // there is nothing to run (design §3.2).
                     Some(format!(
                         "{n} durable object(s) are staged and uncited with no live sidecar: \
                          invisible to every manifest-resolving reader, including import, DR \
                          checkout, GitOps re-apply and cross-cluster move. Run `flint-sync \
-                         recover-staged` in a pod on this workspace to re-cite them as one \
-                         flagged boundary"
+                         recover-staged` in the worker pod serving this workspace \
+                         (`kubectl -n flint-workers exec <worker> -- flint-sync recover-staged`) \
+                         to re-cite them as one flagged boundary; with no worker running, \
+                         start a pod that mounts this workspace and re-run it there"
                     ))
                 },
                 generation,
@@ -621,9 +630,15 @@ mod tests {
         let c = cond(&r, "StagedWorkRecovered").expect("stranded work was not surfaced");
         assert_eq!(c.status, "False");
         assert_eq!(r.stranded_candidates, Some(1));
+        let msg = c.message.as_ref().unwrap();
+        assert!(msg.contains("recover-staged"), "the condition must name the verb that fixes it");
+        // ...and a place the verb can actually be run. Under the CSI
+        // delivery flint-sync exists only in the worker pod; a recipe
+        // saying "in a pod on this workspace" points an operator at a
+        // tenant pod that does not carry the binary (design §3.2).
         assert!(
-            c.message.as_ref().unwrap().contains("recover-staged"),
-            "the condition must name the verb that fixes it"
+            msg.contains("flint-workers"),
+            "the recipe must name the namespace the binary is reachable in, not a tenant pod: {msg}"
         );
 
         // With a live sidecar this is a BACKLOG, not an orphan set: the
