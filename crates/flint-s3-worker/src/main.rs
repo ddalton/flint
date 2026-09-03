@@ -101,8 +101,82 @@ fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| default.to_string())
 }
 
+/// `await-release` — the container's preStop hook.
+///
+/// WHY THIS EXISTS. A worker holds the mount (passthrough) or the
+/// syncer (lean) for a tenant pod in another namespace. Nothing in
+/// Kubernetes orders the two deaths: `kubectl drain` evicts both at
+/// once, and kubelet's graceful node shutdown terminates by priority.
+/// A worker that dies first leaves its tenant on a dead mount —
+/// `ENOTCONN` for passthrough, and for lean a final publish that never
+/// runs, so everything written since the last one stays on the node.
+///
+/// A PodDisruptionBudget was the first answer and was wrong: it covers
+/// the eviction path ONLY, stalls autoscaler scale-down, blocks a drain
+/// for as long as any tenant refuses to die, and is bypassed by
+/// `--disable-eviction` exactly when someone is in a hurry. The
+/// upstream drivers with this same architecture hit exactly this and
+/// answered it with ordering rather than a budget:
+/// awslabs/mountpoint-s3-csi-driver#607 ("Draining nodes breaks
+/// applications depending on the mountpoint volume while draining")
+/// was answered by graceful eviction — a mount pod stays alive until
+/// every workload pod using its volume has terminated — and
+/// juicedata/juicefs-csi-driver#856 ("mount pod terminates before my
+/// application pod when draining a node") is the same failure, reported
+/// from a node-termination handler draining an AWS spot node. When the
+/// order of two shutdowns matters, a preStop hook is the tool
+/// Kubernetes offers.
+///
+/// So: kubelet runs this BEFORE it sends SIGTERM to the worker, on
+/// every path that terminates a pod. It returns as soon as the plugin
+/// has released the volume, which on the ordinary path has already
+/// happened — NodeUnpublish writes the marker before it deletes the
+/// worker, so the happy path costs one stat. On a drain it holds the
+/// worker open until the tenant is gone. It NEVER blocks forever: the
+/// budget is its own, well inside terminationGracePeriodSeconds, and it
+/// exits 0 on timeout so termination proceeds exactly as it would have.
+/// Blocking a shutdown is not on the table; the worst case here is the
+/// behaviour we already had.
+const RELEASED_MARKER: &str = "released";
+
+fn await_release(comm: &Path, budget: Duration) -> ! {
+    let marker = comm.join(RELEASED_MARKER);
+    let start = std::time::Instant::now();
+    if marker.exists() {
+        // The ordinary path: the plugin released the volume and then
+        // deleted us. Nothing to wait for.
+        std::process::exit(0);
+    }
+    eprintln!(
+        "flint-s3-worker: preStop — the volume is not released yet; holding the mount open for up to {}s \
+         so the tenant is not left on a dead mount",
+        budget.as_secs()
+    );
+    while start.elapsed() < budget {
+        if marker.exists() {
+            eprintln!("flint-s3-worker: preStop — released after {:?}; terminating", start.elapsed());
+            std::process::exit(0);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    // Timed out. Exit 0 on purpose: a non-zero preStop is logged as a
+    // FailedPreStopHook event and changes nothing about the outcome,
+    // and refusing to return would only spend the grace period the
+    // lean syncer still needs for its final publish.
+    eprintln!(
+        "flint-s3-worker: preStop — still unreleased after {}s; terminating anyway (the tenant may see \
+         a dead mount, and for lean the last writes are recoverable with recover-staged)",
+        budget.as_secs()
+    );
+    std::process::exit(0);
+}
+
 fn main() {
     let comm = PathBuf::from(env_or("FLINT_S3W_COMM", "/comm"));
+    if std::env::args().nth(1).as_deref() == Some("await-release") {
+        let budget = env_or("FLINT_S3W_PRESTOP_SECS", "60").parse().unwrap_or(60);
+        await_release(&comm, Duration::from_secs(budget));
+    }
     let accept_secs: u64 = env_or("FLINT_S3W_ACCEPT_SECS", "300").parse().unwrap_or(300);
     let door = env_or("FLINT_S3W_DOOR", "127.0.0.1:9911");
 

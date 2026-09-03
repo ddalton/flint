@@ -59,6 +59,50 @@ machine identifier moved off `flint.io` to `chert.us`.
   leg proves the control socket is a socket in the tenant's own view of
   the tree, on the SAME inode the worker bound, and that
   `flint-sync ctl status` and `flint-sync status` answer in the worker.
+- **Worker termination is ordered by a PriorityClass and a `preStop`
+  hook — there is no PodDisruptionBudget.** A budget over the workers
+  (`minAvailable`, the "never voluntarily evict" idiom for bare pods)
+  was built and then removed: it guarded only the eviction API, and a
+  worker is separated from its tenant on three paths, of which eviction
+  is the one a pure-spot fleet is *least* likely to take. Node reboot
+  and spot reclamation go through kubelet's graceful shutdown, where a
+  budget is inert; a panic goes through nothing at all. It also
+  contradicted the workers' own
+  `cluster-autoscaler.kubernetes.io/safe-to-evict: "true"` — a budget
+  refusing every eviction and an annotation inviting one resolve, in the
+  autoscaler, as "never scale this node down" — and it blocked drains
+  for as long as any tenant declined to terminate, which ends with
+  `--disable-eviction` and no protection at all.
+
+  What replaces it is one mechanism per path that has one. A chart-owned
+  PriorityClass `flint-s3-worker` (`value: 100000`, `preemptionPolicy:
+  Never`) ranks workers above tenants, and kubelet's graceful-shutdown
+  manager terminates by priority, lowest first — so on a reboot or a
+  spot reclaim the tenant stops writing before its worker goes. On the
+  eviction path, every worker now carries a `preStop` hook running
+  `flint-s3-worker await-release`, which blocks until
+  `NodeUnpublishVolume` writes a `released` marker into the worker's
+  `comm` directory: an evicted worker keeps serving its tenant's mount
+  until the volume is genuinely released. The eviction is *accepted* —
+  nothing is refused and the drain converges — it simply does not take
+  the mount with it. The wait is bounded by `workers.prestopSecs`
+  (default 60), **added to** `terminationGracePeriodSeconds` rather than
+  carved out of it so a lean syncer's final publish keeps its full drain
+  budget, and the hook exits 0 when the budget expires so it can never
+  wedge a node.
+
+  `safe-to-evict: "true"` and the Node `ownerReference` with
+  `controller: true` both stay, and the annotation is now load-bearing:
+  a Node ownerReference is not a controller kind the autoscaler
+  recognises, so a bare worker without it blocks scale-down outright.
+  Drill leg S16 asserts the ordering behaviourally — the worker
+  outranks its tenant, an eviction is accepted and sets a
+  `deletionTimestamp`, the tenant reads the same checksum ten seconds
+  into the worker's own termination, and a real `kubectl drain`
+  completes with no worker and no orphaned mount — and asserts that no
+  budget exists in the workers namespace, so one cannot creep back and
+  make the leg pass for the wrong reason. The broker keeps its budget:
+  a Deployment, `minAvailable: 1`, rendered only above one replica.
 - **The lean operator's `StagedWorkRecovered` message named a place that
   no longer has the binary.** It said to run `flint-sync recover-staged`
   "in a pod on this workspace"; under CSI that binary exists only in the
@@ -112,7 +156,7 @@ machine identifier moved off `flint.io` to `chert.us`.
   names who may mount (ABSENT = nobody); the pod's ServiceAccount is
   kubelet-asserted, never chosen by the pod. Design of record:
   `docs/plans/csi-node-mount-design.md`. Drills: `s3csi/e2e`
-  (single cluster, 16 legs) and `s3csi/e2e/multi` (two clusters, one
+  (single cluster, 18 legs) and `s3csi/e2e/multi` (two clusters, one
   S3 endpoint outside both).
 - **`flint-s3-broker`**: an STS-shaped identity exchange
   (`AssumeRoleWithWebIdentity`) that turns the kubelet-minted, pod-bound

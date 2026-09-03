@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, EmptyDirVolumeSource, EnvVar, HostPathVolumeSource, Pod, PodSecurityContext,
+    Capabilities, Container, EmptyDirVolumeSource, EnvVar, ExecAction, HostPathVolumeSource, Lifecycle,
+    LifecycleHandler, Pod, PodSecurityContext,
     PodSpec, ResourceRequirements, SeccompProfile, SecurityContext, Toleration, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -76,6 +77,9 @@ pub struct WorkerInputs<'a> {
     /// Non-secret env in the pod spec (FLINT_S3W_*, and the lean
     /// FLINT_SYNC_* list). Secrets never go here.
     pub env: BTreeMap<String, String>,
+    /// preStop budget in seconds: how long a worker holds itself open
+    /// waiting for NodeUnpublish to release its volume. None ⇒ 60.
+    pub prestop_secs: Option<i64>,
     /// Lean: the plugin-owned tree, hostPath'd at `/workspace`.
     pub lean_tree_hostpath: Option<String>,
     /// Lean: the derived drain budget.
@@ -146,11 +150,44 @@ pub fn build_pod(i: &WorkerInputs) -> Pod {
         .collect();
     env.push(EnvVar { name: "FLINT_S3W_COMM".into(), value: Some(super::creds::COMM_MOUNT.into()), value_from: None });
 
+    // Nothing in Kubernetes orders a worker's death against its tenant's:
+    // drain evicts both at once, and kubelet's graceful shutdown goes by
+    // priority. A worker that dies first leaves ENOTCONN behind, and for
+    // lean a final publish that never runs. kubelet runs this hook BEFORE
+    // the SIGTERM, on every termination path, and it returns as soon as
+    // NodeUnpublish has released the volume — one stat on the ordinary
+    // path, because the plugin writes the marker before it deletes us.
+    // A PodDisruptionBudget was the first answer and covered the eviction
+    // path only, while stalling scale-down and blocking drains; the
+    // upstream drivers with this architecture answered it with ordering
+    // instead (awslabs/mountpoint-s3-csi-driver#607 ships graceful
+    // eviction — a mount pod outlives the workloads using it;
+    // juicedata/juicefs-csi-driver#856 is the same failure on a drained
+    // spot node).
+    // It cannot wedge a shutdown: its budget is its own and it exits 0
+    // when the budget runs out. No shell is involved — the wait is a
+    // subcommand of this same binary, which both worker images carry at
+    // a fixed path, so it does not depend on the base image having sh.
+    let prestop = Duration::from_secs(i.prestop_secs.unwrap_or(60) as u64);
+    let lifecycle = Lifecycle {
+        pre_stop: Some(LifecycleHandler {
+            exec: Some(ExecAction { command: Some(vec![WORKER_BIN.into(), "await-release".into()]) }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    env.push(EnvVar {
+        name: "FLINT_S3W_PRESTOP_SECS".into(),
+        value: Some(prestop.as_secs().to_string()),
+        value_from: None,
+    });
+
     let container = Container {
         name: CONTAINER_NAME.into(),
         image: Some(i.image.clone()),
         image_pull_policy: Some("IfNotPresent".into()),
         command: Some(vec![WORKER_BIN.into()]),
+        lifecycle: Some(lifecycle),
         env: Some(env),
         volume_mounts: Some(mounts),
         resources: i.resources.clone(),
@@ -180,7 +217,12 @@ pub fn build_pod(i: &WorkerInputs) -> Pod {
             restart_policy: Some(if lean { "OnFailure".into() } else { "Never".into() }),
             automount_service_account_token: Some(false),
             enable_service_links: Some(false),
-            termination_grace_period_seconds: Some(i.grace_secs.unwrap_or(30)),
+            // kubelet counts the preStop hook AGAINST this budget, so the
+            // hook's seconds are ADDED rather than carved out — otherwise a
+            // worker that waited 60 s for its tenant would have nothing left
+            // for the lean syncer's final publish, which is the very thing
+            // the wait exists to make possible.
+            termination_grace_period_seconds: Some(i.grace_secs.unwrap_or(30) + prestop.as_secs() as i64),
             priority_class_name: i.priority_class.clone(),
             tolerations: Some(vec![Toleration { operator: Some("Exists".into()), ..Default::default() }]),
             security_context: Some(PodSecurityContext {
@@ -358,6 +400,7 @@ mod tests {
             volume_id: "csi-abc",
             tenant,
             cr: "datasets",
+            prestop_secs: Some(60),
             run_as_uid: 1001,
             run_as_gid: 1001,
             resources: None,
@@ -421,12 +464,46 @@ mod tests {
         let pod = build_pod(&inputs("lean", &t, Some("/var/lib/kubelet/plugins/s3.csi.chert.us/volumes/csi-abc/tree".into())));
         let spec = pod.spec.as_ref().unwrap();
         assert_eq!(spec.restart_policy.as_deref(), Some("OnFailure"));
-        assert_eq!(spec.termination_grace_period_seconds, Some(90));
+        // The grace budget is the drain's PLUS the preStop hook's, never
+        // the drain's alone: kubelet counts the hook against this number,
+        // so carving the wait out of it would spend exactly the seconds
+        // the lean syncer needs for its final publish.
+        assert_eq!(spec.termination_grace_period_seconds, Some(90 + 60));
         let hp: Vec<_> = spec.volumes.as_ref().unwrap().iter().filter(|v| v.host_path.is_some()).collect();
         assert_eq!(hp.len(), 1);
         assert_eq!(hp[0].host_path.as_ref().unwrap().type_.as_deref(), Some("Directory"));
         let m = spec.containers[0].volume_mounts.as_ref().unwrap().iter().find(|m| m.name == "workspace").unwrap();
         assert_eq!(m.mount_path, "/workspace");
+    }
+
+    /// Nothing in Kubernetes orders a worker's death against its
+    /// tenant's, and there is deliberately no PodDisruptionBudget: the
+    /// hook is the ordering. If it ever stops being emitted, a drain
+    /// silently goes back to evicting workers out from under live pods.
+    #[test]
+    fn every_worker_carries_the_prestop_hook_and_needs_no_shell_for_it() {
+        let t = tenant();
+        for mode in ["lean", "passthrough"] {
+            let pod = build_pod(&inputs(mode, &t, None));
+            let c = &pod.spec.as_ref().unwrap().containers[0];
+            let cmd = c
+                .lifecycle
+                .as_ref()
+                .and_then(|l| l.pre_stop.as_ref())
+                .and_then(|h| h.exec.as_ref())
+                .and_then(|e| e.command.clone())
+                .unwrap_or_else(|| panic!("{mode} worker has no preStop hook"));
+            assert_eq!(cmd, vec![WORKER_BIN.to_string(), "await-release".to_string()], "{mode}");
+            // A hook that needs /bin/sh is a hook that breaks the day a
+            // worker image goes distroless. It must be argv on our own
+            // binary, never a shell string.
+            assert!(!cmd[0].contains("sh"), "{mode} preStop goes through a shell");
+            let env = c.env.as_ref().unwrap();
+            assert!(
+                env.iter().any(|e| e.name == "FLINT_S3W_PRESTOP_SECS"),
+                "{mode} worker has a hook but no budget for it"
+            );
+        }
     }
 
     /// A retried publish must not adopt the previous attempt's worker

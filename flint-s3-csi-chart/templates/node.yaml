@@ -66,6 +66,7 @@ spec:
             - { name: FLINT_S3CSI_LEAN_IMAGE, value: {{ include "flint-s3-csi.leanImage" . | quote }} }
             - { name: FLINT_S3CSI_WORKER_NAMESPACE, value: {{ .Values.workers.namespace | quote }} }
             - { name: FLINT_S3CSI_WORKER_RESOURCES, value: {{ .Values.workers.resources | toJson | quote }} }
+            - { name: FLINT_S3CSI_PRESTOP_SECS, value: {{ .Values.workers.prestopSecs | quote }} }
 {{- if .Values.workers.priorityClassName }}
             - { name: FLINT_S3CSI_WORKER_PRIORITY_CLASS, value: {{ .Values.workers.priorityClassName | quote }} }
 {{- end }}

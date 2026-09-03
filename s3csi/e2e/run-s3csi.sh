@@ -622,9 +622,74 @@ if require_pod reader-elsewhere; then
     $K apply -f tenants.yaml >/dev/null
 fi
 
+# ── S16 termination ordering, WITHOUT a PodDisruptionBudget ──────────
+# LAST on purpose: it drains the node for real, and --force deletes the
+# rig's bare pods, which do not come back. Re-run `setup` after.
+#
+# There is deliberately no budget for workers (see the chart). A PDB
+# covers the eviction path only, stalls autoscaler scale-down and blocks
+# drains; the drivers with this same architecture answered it with
+# ordering instead (awslabs/mountpoint-s3-csi-driver#607 ships graceful
+# eviction; juicedata/juicefs-csi-driver#856 is the same failure on a
+# drained spot node). What orders the two
+# deaths here is a preStop hook — kubelet runs it BEFORE the SIGTERM on
+# every termination path — plus a PriorityClass for kubelet's graceful
+# node shutdown, which never consults a budget at all.
+leg S16 "termination ordering: an EVICTED worker keeps serving until its tenant is released, the priority ranks it above tenants, and the drain completes with no mount left behind"
+n=$($K -n $WNS get pdb -o name 2>/dev/null | grep -c . || true)
+[ "${n:-0}" = "0" ] && ok "there is NO PodDisruptionBudget for workers (the ordering is the hook, not a budget)" || bad "$n PodDisruptionBudget(s) in $WNS — a budget has crept back and this leg would prove the wrong mechanism"
+# Kubelet's graceful shutdown terminates by priority, lowest first, and
+# never consults a budget. A worker must outrank the tenant it serves.
+if require_pod reader; then
+    w=$(worker_of reader)
+    wp=$($K -n $WNS get pod "$w" -o jsonpath='{.spec.priority}' 2>/dev/null)
+    tp=$($K -n $NS get pod reader -o jsonpath='{.spec.priority}' 2>/dev/null)
+    [ -n "$wp" ] && [ -n "$tp" ] && [ "$wp" -gt "$tp" ] \
+        && ok "the worker outranks its tenant for node shutdown (worker $wp > tenant $tp)" \
+        || bad "worker priority '$wp' does not outrank tenant '$tp' — on a reboot the order is a coin flip"
+    # THE ORDERING ITSELF. Evict the worker with its tenant still live:
+    # the eviction is ACCEPTED (no budget refuses it), the pod enters
+    # termination — and the preStop hook holds the container open, so
+    # the tenant must keep reading. Without the hook the container is
+    # SIGTERMed at once and this read returns nothing.
+    sum0=$(inpod reader "cat /mnt/s3/shard-0*.txt | md5sum | cut -c1-32")
+    [ -n "$sum0" ] && ok "PRECONDITION: reader reads its mount before the eviction ($sum0)" || bad "PRECONDITION: reader reads nothing already"
+    f=$(mktemp); printf '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"%s","namespace":"%s"}}' "$w" "$WNS" > "$f"
+    out=$($K create --raw "/api/v1/namespaces/$WNS/pods/$w/eviction" -f "$f" 2>&1); rm -f "$f"
+    case "$out" in
+        *TooManyRequests*) bad "the eviction was REFUSED — something is still budgeting workers: $(printf '%s' "$out" | tr -d '\n' | cut -c1-100)" ;;
+        *) ok "the eviction is accepted (nothing refuses it; the ordering is not a refusal)" ;;
+    esac
+    dts=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null)
+    [ -n "$dts" ] && ok "the worker is terminating (deletionTimestamp $dts) — so what follows is the hook holding it, not a no-op" || bad "the worker has no deletionTimestamp; the eviction did not start termination and the read below proves nothing"
+    sleep 10
+    sum1=$(inpod reader "cat /mnt/s3/shard-0*.txt | md5sum | cut -c1-32")
+    [ "$sum1" = "$sum0" ] && ok "10s into its own termination the worker is STILL SERVING its tenant ($sum1) — the preStop hook is the ordering" || bad "the tenant lost its mount while the worker was still terminating: '$sum1' vs '$sum0'"
+    $K -n $WNS get pod "$w" >/dev/null 2>&1 && ok "the worker has not exited while its volume is still published" || bad "worker $w exited during its preStop window"
+    # Release it the way NodeUnpublish does: the tenant goes.
+    $K -n $NS delete pod reader --wait=true --timeout=180s >/dev/null 2>&1
+    i=0; while [ $i -lt 90 ] && $K -n $WNS get pod "$w" >/dev/null 2>&1; do sleep 3; i=$((i + 3)); done
+    $K -n $WNS get pod "$w" >/dev/null 2>&1 && bad "worker $w outlived its tenant by ${i}s — the hook is not being released" || ok "the worker followed its tenant ${i}s after the tenant was deleted"
+fi
+# THE DRAIN. --force because the rig's tenants are bare pods; the workers
+# do not need it (their Node ownerReference makes them managed). Nothing
+# refuses an eviction here, so a drain that hangs would be a real defect.
+before=$($K -n $WNS get pods --no-headers 2>/dev/null | grep -c . || true)
+note "draining $NODE with $before worker(s) resident"
+if $K drain "$NODE" --ignore-daemonsets --delete-emptydir-data --force --timeout=420s >/tmp/s16-drain.log 2>&1; then
+    ok "the drain COMPLETED — the hooks delayed each worker without blocking the drain"
+else
+    bad "drain did not complete in 420s: $(tail -2 /tmp/s16-drain.log | tr -d '\n' | cut -c1-140)"
+fi
+left=$($K -n $WNS get pods --no-headers 2>/dev/null | grep -c . || true)
+[ "${left:-0}" = "0" ] && ok "no worker pods remain after the drain" || bad "$left worker pod(s) still resident after a completed drain"
+stale=$(onnode "grep -c 'plugins/s3.csi.chert.us/volumes' /proc/mounts")
+[ "${stale:-0}" = "0" ] && ok "no plugin-dir mount is orphaned on the node" || bad "$stale plugin-dir mount(s) left on the node after the drain"
+$K uncordon "$NODE" >/dev/null 2>&1 && note "node uncordoned"
+
 # ── roster ────────────────────────────────────────────────────────────
 echo
-for want in S1 S2 S3 S4 S5 S5c S6 S7 S8 S9 S10 S11 S12 S13 S15 S19 SU; do
+for want in S1 S2 S3 S4 S5 S5c S6 S7 S8 S9 S10 S11 S12 S13 S15 S16 S19 SU; do
     echo " $RAN_LEGS " | grep -q " $want " || bad "leg $want never ran"
 done
 echo "════════════════════════════════════════"

@@ -110,34 +110,49 @@ spec:
         kubernetes.io/metadata.name: {{ .Values.workers.namespace }}
 {{- end }}
 ---
-# Workers are BARE pods, and a bare pod is what `kubectl drain` and the
-# cluster autoscaler evict first. A worker evicted from under a tenant
-# pod is ENOTCONN in that pod with nothing to restart it — the worker
-# must go when its tenant goes (NodeUnpublish deletes it), not before.
-# This budget makes every voluntary eviction wait for exactly that:
-# drain sees the Node ownerReference (controller: true), treats the
-# worker as managed, and waits on the eviction API until the tenants
-# leave and the plugin removes the worker.
+# THERE IS NO PodDisruptionBudget FOR WORKERS, on purpose (2026-09-03).
 #
-# minAvailable is an INTEGER larger than any plausible worker count on
-# purpose. Bare pods may not use maxUnavailable or a percentage — both
-# need a controller's scale to compute against, and the disruption
-# controller answers with DisruptionAllowed=False reason SyncFailed (a
-# block through an error path, with a Warning UnmanagedPods event)
-# rather than a clean refusal; the integer minAvailable branch is clean.
-# kubernetes.io/docs/tasks/run-application/configure-pdb, "Arbitrary
-# workloads and arbitrary selectors".
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: {{ include "flint-s3-csi.name" . }}-workers
-  namespace: {{ .Values.workers.namespace }}
-  labels: {{- include "flint-s3-csi.labels" . | nindent 4 }}
-spec:
-  minAvailable: 1000000000
-  selector:
-    matchLabels:
-      app.kubernetes.io/managed-by: {{ include "flint-s3-csi.node.name" . }}
+# One stood here with minAvailable: 1000000000 — a "never voluntarily
+# evict" expressed as a budget, because bare pods may not use
+# maxUnavailable or a percentage. It refused every worker eviction so a
+# `kubectl drain` could not take a worker out from under the tenant
+# still using its mount. It was removed because it protected ONE of the
+# three ways a worker and its tenant die together, and it was not the
+# protection that matters:
+#
+#   drain / autoscaler   eviction API      the budget applied
+#   node reboot, spot    kubelet shutdown  ordered by PriorityClass
+#   crash, power loss    nothing           no ordering is possible
+#
+# On a pure-spot fleet the middle row is the common case, and a budget
+# does nothing there. What covers all three is DETECTION: NodeUnpublish
+# asks `worker::is_gone` first, and a syncer that died early produces a
+# SyncerGoneAtUnpublish event on the tenant pod naming `recover-staged`,
+# with staged-but-uncited objects recoverable. The budget only upgraded
+# "detected and recoverable" to "did not happen", on one path — while
+# stalling autoscaler scale-down (it contradicted the workers' own
+# safe-to-evict: true) and blocking drain for as long as any tenant
+# refused to terminate, at which point an operator in a hurry reaches
+# for --disable-eviction and loses the protection anyway.
+#
+# What replaces it is ordering on each path that HAS one. On the
+# kubelet's own shutdown path that is workers.priorityClassName: the
+# graceful-shutdown manager terminates by priority, lowest first, so a
+# worker ranked above its tenants is torn down after they have stopped
+# writing. On the eviction path — drain, autoscaler, the API the budget
+# used to refuse — it is the worker's preStop hook: kubelet runs the
+# hook BEFORE the SIGTERM, and `flint-s3-worker await-release` waits
+# there until NodeUnpublish writes `released` into the worker's comm
+# dir. So an evicted worker keeps serving its tenant's mount for as
+# long as the tenant is still using it: the eviction is ACCEPTED, it
+# just does not take the mount with it. The hook is bounded by
+# workers.prestopSecs — ADDED to the grace, not carved out of it — and
+# exits 0 when that budget runs out, so it can never wedge a node.
+#
+# S16 asserts the priority ordering, that an eviction is accepted and
+# the tenant still reads the same bytes after it, that a real drain
+# completes with no worker and no orphaned mount left on the node, and
+# that no budget has crept back.
 {{- if .Values.workers.networkPolicy.enabled }}
 {{- if not .Values.workers.networkPolicy.egressCIDRs }}
 {{- fail "workers.networkPolicy.enabled requires workers.networkPolicy.egressCIDRs — a worker that can reach no S3 endpoint fails every mount at first read, which is a config error, not a healthy idle" }}

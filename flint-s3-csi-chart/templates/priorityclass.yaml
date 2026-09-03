@@ -1,0 +1,34 @@
+{{- if .Values.workers.priorityClass.create }}
+# A worker must outlive the tenant it serves, on every path that kills
+# them both. On the eviction path that used to be a PodDisruptionBudget;
+# it was removed (see workers-policy.yaml) because it covered only that
+# path. THIS covers the one a spot fleet actually takes: kubelet's
+# graceful-shutdown manager terminates pods in PriorityClass order,
+# lowest first, so a worker ranked above tenant workloads is torn down
+# AFTER the tenant has stopped writing — which is what lets the lean
+# syncer's final publish carry everything the app produced.
+#
+# preemptionPolicy: Never is not optional here. Priority is read by the
+# SCHEDULER too, and a worker that could preempt is a worker that evicts
+# a tenant's pod to make room for itself — the exact inversion this
+# object exists to prevent. Never keeps the shutdown ordering and gives
+# up the scheduling privilege, which a worker does not need: the plugin
+# creates it with spec.nodeName already set and it never goes through
+# the scheduler at all.
+#
+# The value sits far below system-cluster-critical (2000000000) so the
+# plugin, the CNI and kube-proxy all outrank it, and far above the 0 a
+# tenant pod carries by default.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ .Values.workers.priorityClass.name }}
+  labels: {{- include "flint-s3-csi.labels" . | nindent 4 }}
+value: {{ .Values.workers.priorityClass.value }}
+preemptionPolicy: Never
+globalDefault: false
+description: >-
+  flint s3 CSI worker pods. Ranked above tenant workloads so kubelet's
+  graceful node shutdown terminates the tenant first and the worker last,
+  letting the lean syncer's final publish run after the app has stopped.
+{{- end }}

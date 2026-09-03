@@ -59,6 +59,11 @@ pub struct Config {
     pub lean_image: Option<String>,
     pub worker_resources: Option<ResourceRequirements>,
     pub priority_class: Option<String>,
+    /// How long a worker's preStop hook holds it open waiting for its
+    /// volume to be released (FLINT_S3CSI_PRESTOP_SECS). This is the
+    /// ordering mechanism for drain and node shutdown; there is no
+    /// PodDisruptionBudget for workers.
+    pub prestop_secs: Option<i64>,
     pub broker: Option<BrokerClient>,
     /// Lifetime asked of the broker per exchange.
     pub creds_lifetime_secs: u64,
@@ -102,6 +107,7 @@ impl Config {
             lean_image: opt("FLINT_S3CSI_LEAN_IMAGE"),
             worker_resources,
             priority_class: opt("FLINT_S3CSI_WORKER_PRIORITY_CLASS"),
+            prestop_secs: opt("FLINT_S3CSI_PRESTOP_SECS").and_then(|v| v.parse().ok()),
             broker: BrokerClient::from_env()?,
             creds_lifetime_secs: opt("FLINT_S3CSI_CREDS_LIFETIME_SECS").and_then(|v| v.parse().ok()).unwrap_or(900),
             region: opt("FLINT_S3CSI_REGION").unwrap_or_else(|| "us-east-1".into()),
@@ -412,6 +418,7 @@ impl S3Node {
             run_as_uid: run_as,
             run_as_gid,
             resources: self.cfg.worker_resources.clone(),
+            prestop_secs: self.cfg.prestop_secs,
             env: BTreeMap::from([("FLINT_S3W_MODE".to_string(), "passthrough".to_string())]),
             lean_tree_hostpath: None,
             grace_secs: Some(30),
@@ -706,6 +713,7 @@ impl S3Node {
             run_as_uid: run_as,
             run_as_gid,
             resources: self.cfg.worker_resources.clone(),
+            prestop_secs: self.cfg.prestop_secs,
             env: pod_env,
             lean_tree_hostpath: Some(st.src.clone()),
             grace_secs: Some(grace as i64),
@@ -759,6 +767,22 @@ impl S3Node {
         st.phase = "checking-out".into();
         st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
         self.resume_lean(dir, st, target).await
+    }
+
+    /// Tell a worker its volume is released, so its preStop hook stops
+    /// holding it open. Written BEFORE the delete on every unpublish
+    /// path: on the ordinary path the hook then costs a single stat,
+    /// and on a drain — where the worker is terminated by someone else
+    /// entirely — its absence is what keeps the mount alive until the
+    /// tenant is actually gone. Best effort by design: a worker whose
+    /// comm dir has already vanished has nothing left to wait for.
+    fn release_worker(&self, st: &VolumeState) {
+        let Some(uid) = st.worker_uid.as_ref() else { return };
+        let marker = worker::comm_dir(&self.cfg.kubelet_root, uid).join("released");
+        match std::fs::write(&marker, b"released\n") {
+            Ok(()) => tracing::debug!(volume = %st.volume_id, marker = %marker.display(), "released the worker's preStop hook"),
+            Err(e) => tracing::warn!(volume = %st.volume_id, marker = %marker.display(), "could not write the release marker: {e}"),
+        }
     }
 
     fn marker_path(st: &VolumeState) -> PathBuf {
@@ -825,6 +849,7 @@ impl S3Node {
                     tracing::warn!(volume = %st.volume_id, "syncer was already gone at unpublish — nothing drained; recover-staged applies");
                     self.emit_event(&st.tenant, "SyncerGoneAtUnpublish", &format!("{}: the syncer was not running when the pod's volume was unpublished, so no final drain ran; run recover-staged on the workspace", st.cr), true).await;
                 } else {
+                    self.release_worker(&st);
                     worker::delete(&self.client, &st.worker_namespace, &st.worker_name, Some(grace as u32)).await.map_err(Status::unavailable)?;
                     tracing::info!(volume = %st.volume_id, grace, "draining: syncer deleted with the derived grace");
                 }
@@ -841,6 +866,7 @@ impl S3Node {
             let elapsed = chrono::Utc::now().timestamp() as u64 - started;
             if elapsed > grace + 30 {
                 tracing::warn!(volume = %st.volume_id, elapsed, "drain past its ceiling; killing the syncer");
+                self.release_worker(&st);
                 worker::delete(&self.client, &st.worker_namespace, &st.worker_name, Some(0)).await.map_err(Status::unavailable)?;
                 self.emit_event(&st.tenant, "DrainCeilingHit", &format!("{}: the syncer did not finish its drain within {}s; it was killed and staged work may need recover-staged", st.cr, grace + 30), true).await;
                 break;
@@ -884,6 +910,7 @@ impl S3Node {
         // Passthrough teardown: target, source, worker, registration, state.
         unmount_all(target).map_err(|e| Status::internal(format!("unmount target: {e}")))?;
         unmount_all(Path::new(&st.src)).map_err(|e| Status::internal(format!("unmount source: {e}")))?;
+        self.release_worker(&st);
         worker::delete(&self.client, &st.worker_namespace, &st.worker_name, Some(10)).await.map_err(Status::unavailable)?;
         if let Some(b) = &self.cfg.broker {
             if let Err(e) = b.deregister(&vid).await {

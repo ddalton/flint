@@ -173,11 +173,39 @@ workers:
     requests: { cpu: 50m, memory: 128Mi }
     limits: { memory: 1Gi }
 
-  # Optional priorityClassName for workers
-  # (FLINT_S3CSI_WORKER_PRIORITY_CLASS). Empty ⇒ none. A worker should
-  # never be preempted BEFORE the tenant pod it serves, so if you set
-  # one, set it at or above your tenants' classes.
-  priorityClassName: ""
+  # The worker's PriorityClass (FLINT_S3CSI_WORKER_PRIORITY_CLASS).
+  # This is the ORDERING mechanism for node shutdown and spot
+  # reclamation: kubelet terminates by priority, lowest first, so a
+  # worker ranked above its tenant is torn down after the tenant has
+  # stopped writing — and the lean syncer's final publish carries
+  # everything the app produced. There is deliberately no
+  # PodDisruptionBudget for workers; see templates/workers-policy.yaml
+  # for why that covered the wrong path.
+  #
+  # Set create: false and point priorityClassName at your own class if
+  # your tenants already rank above 0 — the only requirement is that a
+  # worker outranks the pods it serves. Empty ⇒ no class, priority 0,
+  # and the shutdown order between a worker and its tenant is a coin
+  # flip.
+  priorityClassName: flint-s3-worker
+
+  # How long a worker's preStop hook holds it open waiting for its volume
+  # to be released (FLINT_S3CSI_PRESTOP_SECS). This is the ordering
+  # mechanism for `kubectl drain` and for eviction: kubelet runs the hook
+  # before the SIGTERM, so a worker evicted out from under a live tenant
+  # keeps serving until NodeUnpublish releases it. On the ordinary path
+  # the marker is already there and the hook costs one stat.
+  #
+  # It is ADDED to the worker's terminationGracePeriodSeconds, not carved
+  # out of it, so a lean syncer's final publish keeps its full budget.
+  # It never blocks a shutdown: the hook exits 0 when the budget runs out.
+  prestopSecs: 60
+  priorityClass:
+    create: true
+    name: flint-s3-worker
+    # Far below system-cluster-critical (2000000000) so the plugin, CNI
+    # and kube-proxy all outrank it; far above the 0 a tenant carries.
+    value: 100000
 
   # Size limits for the two emptyDirs every worker carries: `comm`
   # (memory-backed; the launch socket, the token and the credential
