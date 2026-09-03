@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# s3.chert.us across TWO clusters, ONE S3 endpoint — the multi-cluster
+# s3.csi.chert.us across TWO clusters, ONE S3 endpoint — the multi-cluster
 # use case the user named: agents on different clusters working the same
 # project's artifacts (docs/plans/csi-node-mount-design.md §0).
 #
@@ -126,7 +126,7 @@ if [ "${1:-}" = "setup" ]; then
             --set broker.backend=static --set broker.static.secretRef=s3-broker-static --set broker.replicas=1 >/dev/null
         kc "$X" -n $SYS rollout status ds/flint-s3-csi-node --timeout=180s >/dev/null
         kc "$X" -n $SYS rollout status deploy/flint-s3-broker --timeout=180s >/dev/null
-        echo "cluster $C: s3.chert.us installed, CRs point at http://$IP:9000"
+        echo "cluster $C: s3.csi.chert.us installed, CRs point at http://$IP:9000"
     done
     echo "setup done"
     exit 0
@@ -140,9 +140,9 @@ fi
 
 IP=$(minio_ip)
 [ -n "$IP" ] || { echo "no $MINIO container — run setup"; exit 2; }
-echo "s3.chert.us multi-cluster e2e — $C1 + $C2, one MinIO at $IP"
+echo "s3.csi.chert.us multi-cluster e2e — $C1 + $C2, one MinIO at $IP"
 for X in "$X1" "$X2"; do
-    kc "$X" get csidriver s3.chert.us >/dev/null 2>&1 || { echo "cluster $X has no s3.chert.us — run setup"; exit 2; }
+    kc "$X" get csidriver s3.csi.chert.us >/dev/null 2>&1 || { echo "cluster $X has no s3.csi.chert.us — run setup"; exit 2; }
 done
 
 # ── M1 passthrough across clusters ───────────────────────────────────
@@ -178,7 +178,7 @@ leg M2 "a token minted by cluster 1 is refused by cluster 2's broker at TokenRev
 for X in "$X1" "$X2"; do delete_pod "$X" self-minter; apply_pod "$X" self-minter; done
 if wait_phase "$X1" self-minter Running 120 && wait_phase "$X2" self-minter Running 120; then
     T1=$(inpod_out "$X1" self-minter cat /tok/token)
-    [ -n "$T1" ] && ok "cluster 1 minted a pod-bound s3.chert.us token ($(echo -n "$T1" | wc -c | tr -d ' ') bytes)" || bad "no token on cluster 1"
+    [ -n "$T1" ] && ok "cluster 1 minted a pod-bound s3.csi.chert.us token ($(echo -n "$T1" | wc -c | tr -d ' ') bytes)" || bad "no token on cluster 1"
     resp=$(inpod_out "$X2" self-minter "wget -q -O - --post-data 'Action=AssumeRoleWithWebIdentity&Version=2011-06-15&RoleArn=arn:flint:iam::passthrough:role/datasets&RoleSessionName=foreign&WebIdentityToken=$T1' http://flint-s3-broker.$SYS.svc/ 2>&1 || true")
     blog=$(kc "$X2" -n $SYS logs deploy/flint-s3-broker --since=60s 2>/dev/null)
     echo "$resp" | grep -q '400' && echo "$blog" | grep -q 'InvalidIdentityToken' && ok "cluster 2's broker refused cluster 1's token: 400 InvalidIdentityToken (TokenReview against cluster 2's API server)" || bad "cluster 2 answered cluster 1's token with: $(echo "$resp" | head -c 160) / $(echo "$blog" | grep -i refused | tail -1 | cut -c1-160)"
@@ -244,5 +244,5 @@ for X in "$X1" "$X2"; do kc "$X" -n $NS delete pod reader reader-elsewhere lean-
 echo
 for want in M1 M2 M3; do echo " $RAN_LEGS " | grep -q " $want " || bad "leg $want never ran"; done
 echo "════════════════════════════════════════"
-echo "s3.chert.us multi-cluster e2e: $PASS ok, $FAILED bad"
+echo "s3.csi.chert.us multi-cluster e2e: $PASS ok, $FAILED bad"
 [ "$FAILED" = "0" ]

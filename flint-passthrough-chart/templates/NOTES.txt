@@ -1,6 +1,6 @@
 flint-passthrough: the FlintPassthroughMount CRD is installed.
 
-Mounts are delivered by the s3.chert.us CSI node driver (chart
+Mounts are delivered by the s3.csi.chert.us CSI node driver (chart
 flint-s3-csi); nothing in THIS chart runs. Declare a mount in the
 namespace of the pods that will use it:
 
@@ -24,7 +24,7 @@ Then give a pod the mount as ONE volume:
     volumes:
       - name: data
         csi:
-          driver: s3.chert.us
+          driver: s3.csi.chert.us
           volumeAttributes: { chert.us/mount: datasets }
     containers:
       - volumeMounts: [{ name: data, mountPath: /mnt/s3 }]

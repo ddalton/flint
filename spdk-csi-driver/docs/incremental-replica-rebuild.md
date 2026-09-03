@@ -232,7 +232,7 @@ phantoms within seconds of lvolstore load; the consumer raid silently ran
 un-redundant (leg failure detected only on the next real I/O; PV health still
 `online`; no rebuild attempted anywhere). Worse, today the re-export is not
 even *attempted*: `reconcile_replica_targets` selects PVs by the label
-`flint.csi.storage.io/replica-{node_uid}=true` (node_agent.rs:1666) which
+`disk.chert.us/replica-{node_uid}=true` (node_agent.rs:1666) which
 CreateVolume never applies — reconcile runs against an empty set.
 
 **Consequence (b) — re-staging on a new node fails (reproduced).** At NodeStage
@@ -926,7 +926,7 @@ Rejected alternatives:
      made retry loops permanently non-convergent; a partial stage that fails
      after `bdev_raid_create` re-writes sbs and re-arms the hazard);
    - **fix replica-PV labeling**: CreateVolume must apply
-     `flint.csi.storage.io/replica-{node_uid}=true` (or reconcile must select
+     `disk.chert.us/replica-{node_uid}=true` (or reconcile must select
      by volumeAttributes) — today `reconcile_replica_targets` matches nothing;
    - **health truthfulness**: update PV `replicas[].health` on leg failure,
      emit events, and lengthen/handle the 3 s kernel-device wait (stale kernel
@@ -976,7 +976,7 @@ Rejected alternatives:
 
    **Implementation status (2026-06-11):** implemented on `main` as
    `replica_sync.rs`. The record lives in one PV annotation
-   (`flint.csi.storage.io/replica-sync-state`): per-replica `{node_name,
+   (`disk.chert.us/replica-sync-state`): per-replica `{node_name,
    node_uid, lvol_uuid, sync_state, last_epoch, since, reason}` plus
    `current_epoch` (null until phase 2 cuts epochs). Immutable identity
    stays in volumeAttributes; the annotation is the mutable companion.
@@ -1196,7 +1196,7 @@ Rejected alternatives:
      the synthetic PV's detach is awaited (closes the §6 same-node
      staged-volume-reuse race) → recreated from the sanitized spec with
      `nodeName` cleared. RWO: strictly opt-in via the PV annotation
-     `flint.csi.storage.io/rejoin-bounce: "enabled"`; the claim's pods
+     `disk.chert.us/rejoin-bounce: "enabled"`; the claim's pods
      are deleted and their controller reschedules them. Every bounce is
      **verified**: standbys that flip → `CutoverSucceeded`; still standby
      after `FLINT_CUTOVER_COOLDOWN_SECS` (default 900) →
@@ -1500,7 +1500,7 @@ deliberate:
 
 `CreateSnapshot` resolves its source through `get_volume_info`
 (`snapshot_csi.rs:118`), which requires the singular
-`flint.csi.storage.io/node-name`/`lvol-uuid` volumeAttributes — set only for
+`disk.chert.us/node-name`/`lvol-uuid` volumeAttributes — set only for
 single-replica volumes (`main.rs:1046-1073`; multi-replica volumes set the
 `replicas` JSON instead). Snapshotting a multi-replica volume therefore
 fails "metadata not found" today. User snapshots are single-node objects

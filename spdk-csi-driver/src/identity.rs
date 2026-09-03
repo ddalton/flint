@@ -237,7 +237,7 @@ pub enum Role {
 ///
 /// Resolution order (the contract; Phase 1 wires steps 2–3):
 ///  1. `nfs-server-` prefix → `NfsBacking` (never consults the resolver);
-///  2. volume_context role hint (`flint.csi.storage.io/role`, Phase 2);
+///  2. volume_context role hint (`disk.chert.us/role`, Phase 2);
 ///  3. the cached role resolver (PV access modes → per-RPC failure
 ///     default, documented in the Phase-0 audit's matrix);
 ///  4. default `Block` — fencing semantics preserved (the c879bc3 choice).
@@ -765,7 +765,7 @@ impl RoleResolver {
 // ---------------------------------------------------------------------------
 
 /// volume_context / PV volumeAttributes key carrying the canonical role.
-pub const ROLE_CONTEXT_KEY: &str = "flint.csi.storage.io/role";
+pub const ROLE_CONTEXT_KEY: &str = "disk.chert.us/role";
 
 const ROLE_BLOCK_VALUE: &str = "block";
 const ROLE_NFS_SHARED_VALUE: &str = "nfs-shared";

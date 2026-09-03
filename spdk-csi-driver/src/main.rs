@@ -316,7 +316,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // cutover opportunities) — controller role. When a standby has caught up
     // (lag ≤ max_lag), creates the reassembly NodeStage needs: bounces the
     // RWX NFS server pod (delete → wait detach → recreate), or — strictly
-    // opt-in via the PV annotation flint.csi.storage.io/rejoin-bounce —
+    // opt-in via the PV annotation disk.chert.us/rejoin-bounce —
     // the RWO workload pods. Verifies the outcome (CutoverSucceeded /
     // CutoverIneffective events) instead of assuming it.
     if run_orchestrators {
@@ -342,7 +342,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // quiesce window (skip_rebuild patch) instead of waiting for a
     // reassembly that never comes on attached no-bounce RWO volumes, then
     // localizes the esnap chain. Decision 1 policy (B): automatic for that
-    // class, per-PV opt-out via flint.csi.storage.io/hot-rejoin=disabled.
+    // class, per-PV opt-out via disk.chert.us/hot-rejoin=disabled.
     // Default-ENABLED (runad drill 2.5): without it a converged standby
     // parks forever and a node-loss volume serves degraded indefinitely.
     // The flint-shipped spdk-tgt always carries the skip_rebuild patch, so
@@ -611,7 +611,7 @@ impl spdk_csi_driver::csi::identity_server::Identity for MinimalIdentityService 
     ) -> Result<tonic::Response<spdk_csi_driver::csi::GetPluginInfoResponse>, tonic::Status> {
         println!("🔵 [GRPC] Identity.GetPluginInfo called");
         Ok(tonic::Response::new(spdk_csi_driver::csi::GetPluginInfoResponse {
-            name: "flint.csi.storage.io".to_string(),
+            name: "disk.csi.chert.us".to_string(),
             vendor_version: env!("CARGO_PKG_VERSION").to_string(),
             manifest: std::collections::HashMap::new(),
         }))
@@ -938,30 +938,30 @@ impl MinimalControllerService {
         
         // Single replica (snapshot clones are always single replica)
         volume_context.insert(
-            "flint.csi.storage.io/replica-count".to_string(),
+            "disk.chert.us/replica-count".to_string(),
             "1".to_string(),
         );
         volume_context.insert(
-            "flint.csi.storage.io/node-name".to_string(),
+            "disk.chert.us/node-name".to_string(),
             node_name.clone(),
         );
         volume_context.insert(
-            "flint.csi.storage.io/lvol-uuid".to_string(),
+            "disk.chert.us/lvol-uuid".to_string(),
             clone_uuid.clone(),
         );
         volume_context.insert(
-            "flint.csi.storage.io/lvs-name".to_string(),
+            "disk.chert.us/lvs-name".to_string(),
             lvs_name.clone(),
         );
         
         // CRITICAL: Mark filesystem as initialized (clone has filesystem from snapshot)
         // Without this, node can't distinguish SPDK block reuse from real filesystem
         volume_context.insert(
-            "flint.csi.storage.io/filesystem-initialized".to_string(),
+            "disk.chert.us/filesystem-initialized".to_string(),
             "true".to_string(),
         );
         volume_context.insert(
-            "flint.csi.storage.io/source-snapshot".to_string(),
+            "disk.chert.us/source-snapshot".to_string(),
             snapshot_id.to_string(),
         );
 
@@ -974,12 +974,12 @@ impl MinimalControllerService {
         
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         eprintln!("📝 [SNAPSHOT_RESTORE] Volume context populated:");
-        eprintln!("   replica-count: {}", volume_context.get("flint.csi.storage.io/replica-count").unwrap_or(&"MISSING".to_string()));
-        eprintln!("   node-name: {}", volume_context.get("flint.csi.storage.io/node-name").unwrap_or(&"MISSING".to_string()));
-        eprintln!("   lvol-uuid: {}", volume_context.get("flint.csi.storage.io/lvol-uuid").unwrap_or(&"MISSING".to_string()));
-        eprintln!("   lvs-name: {}", volume_context.get("flint.csi.storage.io/lvs-name").unwrap_or(&"MISSING".to_string()));
-        eprintln!("   filesystem-initialized: {}", volume_context.get("flint.csi.storage.io/filesystem-initialized").unwrap_or(&"MISSING".to_string()));
-        eprintln!("   source-snapshot: {}", volume_context.get("flint.csi.storage.io/source-snapshot").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   replica-count: {}", volume_context.get("disk.chert.us/replica-count").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   node-name: {}", volume_context.get("disk.chert.us/node-name").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   lvol-uuid: {}", volume_context.get("disk.chert.us/lvol-uuid").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   lvs-name: {}", volume_context.get("disk.chert.us/lvs-name").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   filesystem-initialized: {}", volume_context.get("disk.chert.us/filesystem-initialized").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   source-snapshot: {}", volume_context.get("disk.chert.us/source-snapshot").unwrap_or(&"MISSING".to_string()));
         eprintln!("   ⚠️  nfs.chert.us/replica-nodes: {}", volume_context.get("nfs.chert.us/replica-nodes").unwrap_or(&"🔴 MISSING - THIS IS THE BUG!".to_string()));
         eprintln!("   Total attributes: {}", volume_context.len());
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -1055,11 +1055,11 @@ impl MinimalControllerService {
             ));
         }
 
-        let source_node = volume_attributes.get("flint.csi.storage.io/node-name")
+        let source_node = volume_attributes.get("disk.chert.us/node-name")
             .ok_or_else(|| tonic::Status::internal("Source volume missing node metadata"))?
             .clone();
         
-        let source_lvol_uuid = volume_attributes.get("flint.csi.storage.io/lvol-uuid")
+        let source_lvol_uuid = volume_attributes.get("disk.chert.us/lvol-uuid")
             .ok_or_else(|| tonic::Status::internal("Source volume missing lvol-uuid"))?
             .clone();
 
@@ -1138,15 +1138,15 @@ impl MinimalControllerService {
         // Step 4: Build volume_context with metadata
         let mut volume_context = std::collections::HashMap::new();
         
-        volume_context.insert("flint.csi.storage.io/replica-count".to_string(), "1".to_string());
-        volume_context.insert("flint.csi.storage.io/node-name".to_string(), source_node.clone());
-        volume_context.insert("flint.csi.storage.io/lvol-uuid".to_string(), clone_uuid.clone());
-        volume_context.insert("flint.csi.storage.io/lvs-name".to_string(), lvs_name.clone());
+        volume_context.insert("disk.chert.us/replica-count".to_string(), "1".to_string());
+        volume_context.insert("disk.chert.us/node-name".to_string(), source_node.clone());
+        volume_context.insert("disk.chert.us/lvol-uuid".to_string(), clone_uuid.clone());
+        volume_context.insert("disk.chert.us/lvs-name".to_string(), lvs_name.clone());
         
         // CRITICAL: Mark filesystem as initialized (clone has filesystem from source PVC)
         // Without this, node can't distinguish SPDK block reuse from real filesystem
-        volume_context.insert("flint.csi.storage.io/filesystem-initialized".to_string(), "true".to_string());
-        volume_context.insert("flint.csi.storage.io/source-volume".to_string(), source_volume_id.to_string());
+        volume_context.insert("disk.chert.us/filesystem-initialized".to_string(), "true".to_string());
+        volume_context.insert("disk.chert.us/source-volume".to_string(), source_volume_id.to_string());
         
         // Add NFS replica-nodes attribute (needed for ROX volumes from PVC clones)
         // Since PVC clones are always single replica, this is just the node where the clone was created
@@ -1157,12 +1157,12 @@ impl MinimalControllerService {
         
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         eprintln!("📝 [PVC_CLONE] Volume context populated:");
-        eprintln!("   replica-count: {}", volume_context.get("flint.csi.storage.io/replica-count").unwrap_or(&"MISSING".to_string()));
-        eprintln!("   node-name: {}", volume_context.get("flint.csi.storage.io/node-name").unwrap_or(&"MISSING".to_string()));
-        eprintln!("   lvol-uuid: {}", volume_context.get("flint.csi.storage.io/lvol-uuid").unwrap_or(&"MISSING".to_string()));
-        eprintln!("   lvs-name: {}", volume_context.get("flint.csi.storage.io/lvs-name").unwrap_or(&"MISSING".to_string()));
-        eprintln!("   filesystem-initialized: {}", volume_context.get("flint.csi.storage.io/filesystem-initialized").unwrap_or(&"MISSING".to_string()));
-        eprintln!("   source-volume: {}", volume_context.get("flint.csi.storage.io/source-volume").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   replica-count: {}", volume_context.get("disk.chert.us/replica-count").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   node-name: {}", volume_context.get("disk.chert.us/node-name").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   lvol-uuid: {}", volume_context.get("disk.chert.us/lvol-uuid").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   lvs-name: {}", volume_context.get("disk.chert.us/lvs-name").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   filesystem-initialized: {}", volume_context.get("disk.chert.us/filesystem-initialized").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   source-volume: {}", volume_context.get("disk.chert.us/source-volume").unwrap_or(&"MISSING".to_string()));
         eprintln!("   ⚠️  nfs.chert.us/replica-nodes: {}", volume_context.get("nfs.chert.us/replica-nodes").unwrap_or(&"🔴 MISSING - THIS IS THE BUG!".to_string()));
         eprintln!("   Total attributes: {}", volume_context.len());
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -1924,7 +1924,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
 
                 // Add replica count
                 volume_context.insert(
-                    "flint.csi.storage.io/replica-count".to_string(),
+                    "disk.chert.us/replica-count".to_string(),
                     result.replicas.len().to_string(),
                 );
 
@@ -1942,15 +1942,15 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     // SINGLE REPLICA: Store simple metadata
                     let replica = &result.replicas[0];
                     volume_context.insert(
-                        "flint.csi.storage.io/node-name".to_string(),
+                        "disk.chert.us/node-name".to_string(),
                         replica.node_name.clone(),
                     );
                     volume_context.insert(
-                        "flint.csi.storage.io/lvol-uuid".to_string(),
+                        "disk.chert.us/lvol-uuid".to_string(),
                         replica.lvol_uuid.clone(),
                     );
                     volume_context.insert(
-                        "flint.csi.storage.io/lvs-name".to_string(),
+                        "disk.chert.us/lvs-name".to_string(),
                         replica.lvs_name.clone(),
                     );
                     
@@ -1962,7 +1962,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                         .map_err(|e| tonic::Status::internal(format!("Failed to serialize replicas: {}", e)))?;
                     
                     volume_context.insert(
-                        "flint.csi.storage.io/replicas".to_string(),
+                        "disk.chert.us/replicas".to_string(),
                         replicas_json,
                     );
                 }
@@ -3680,7 +3680,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             std::thread::sleep(std::time::Duration::from_millis(300));
             
             // Check filesystem-initialized from volume_context (clones) OR PV annotations (regular volumes)
-            let fs_initialized_from_context = req.volume_context.get("flint.csi.storage.io/filesystem-initialized")
+            let fs_initialized_from_context = req.volume_context.get("disk.chert.us/filesystem-initialized")
                 .map(|v| v == "true")
                 .unwrap_or(false);
             
@@ -5074,7 +5074,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         // Write ephemeral marker so NodeUnpublishVolume knows to tear down the
         // block device and lvol (it doesn't receive volume_context).
         if is_ephemeral {
-            let marker_dir = "/var/lib/kubelet/plugins/flint.csi.storage.io/ephemeral";
+            let marker_dir = "/var/lib/kubelet/plugins/disk.csi.chert.us/ephemeral";
             let _ = std::fs::create_dir_all(marker_dir);
             let marker_path = format!("{}/{}", marker_dir, volume_id);
             if let Err(e) = std::fs::write(&marker_path, "") {
@@ -5332,7 +5332,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         // Ephemeral volume cleanup: tear down block device + lvol.
         // For ephemeral CSI volumes, NodeUnpublishVolume is the ONLY cleanup call —
         // NodeUnstageVolume and DeleteVolume are never called by kubelet.
-        let ephemeral_marker = format!("/var/lib/kubelet/plugins/flint.csi.storage.io/ephemeral/{}", volume_id);
+        let ephemeral_marker = format!("/var/lib/kubelet/plugins/disk.csi.chert.us/ephemeral/{}", volume_id);
         let is_ephemeral = std::path::Path::new(&ephemeral_marker).exists();
         if is_ephemeral {
             let _ = std::fs::remove_file(&ephemeral_marker);

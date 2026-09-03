@@ -25,7 +25,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
      ServiceAccount is named by the broker's FLINT_S3B_NODE_PRINCIPAL and
      by the admission policy; the broker Service is named by the node
      plugin's FLINT_S3CSI_BROKER_URL. One release per cluster. */}}
-{{- define "flint-s3-csi.driverName" -}}s3.chert.us{{- end }}
+{{- define "flint-s3-csi.driverName" -}}s3.csi.chert.us{{- end }}
 {{- define "flint-s3-csi.node.name" -}}flint-s3-csi-node{{- end }}
 {{- define "flint-s3-csi.broker.name" -}}flint-s3-broker{{- end }}
 

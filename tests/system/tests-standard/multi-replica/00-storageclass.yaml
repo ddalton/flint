@@ -2,7 +2,7 @@ apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: flint-multi-replica
-provisioner: flint.csi.storage.io
+provisioner: disk.csi.chert.us
 parameters:
   numReplicas: "2"
   thinProvision: "false"

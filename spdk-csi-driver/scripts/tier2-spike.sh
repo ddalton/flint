@@ -43,7 +43,7 @@ rpc() {
 # Topology discovery from the PV's replica-sync record.
 discover() {
 	local pv=$1
-	RECORD=$(kubectl get pv "$pv" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replica-sync-state}')
+	RECORD=$(kubectl get pv "$pv" -o jsonpath='{.metadata.annotations.disk\.chert\.us/replica-sync-state}')
 	[ -n "$RECORD" ] || die "no replica-sync record on $pv"
 
 	CONSUMER_NODE=$(kubectl get volumeattachment -o json | jq -r \

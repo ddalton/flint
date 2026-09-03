@@ -472,7 +472,7 @@ Node object is deleted — or NotReady past
 `FLINT_REPLICA_REPLACE_AFTER_SECS` (600) — gets its identity swapped to
 the max-free Ready node hosting no other leg. PV `volumeAttributes` are
 API-immutable, so the swapped list lives in a new
-`flint.csi.storage.io/replicas-override` annotation that every reader
+`disk.chert.us/replicas-override` annotation that every reader
 prefers (`raw_replicas_json` funnel; NodeStage re-reads the PV, so a
 restage picks up swaps with zero VA surgery). The swap writes override
 + sync record + node-label change in ONE rv-guarded metadata patch —

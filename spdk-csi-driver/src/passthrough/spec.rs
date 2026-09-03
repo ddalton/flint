@@ -76,7 +76,7 @@ pub struct MountSpec {
     #[serde(default)]
     pub image: Option<String>,
     /// CSI delivery: which ServiceAccounts in this namespace may mount
-    /// the CR. ABSENT = DENY under `s3.chert.us`; the webhook ignores it.
+    /// the CR. ABSENT = DENY under `s3.csi.chert.us`; the webhook ignores it.
     #[serde(default)]
     pub consumers: Option<crate::s3csi::policy::Consumers>,
     /// CSI delivery: how the worker gets its credential (design §4.4).

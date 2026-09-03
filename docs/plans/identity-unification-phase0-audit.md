@@ -171,7 +171,7 @@ SPDK-eligibility keys off the CP type). Build `identity-p3.0` = Phases
 
 ### Phase-2 status (2026-07-04): SHIPPED
 
-CreateVolume stamps `flint.csi.storage.io/role` =
+CreateVolume stamps `disk.chert.us/role` =
 `block|nfs-shared|nfs-shared-ro` into every returned volume_context
 (main path, emptydir path, both clone paths; pNFS excluded per #11).
 The value is derived from CSI capabilities via

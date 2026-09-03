@@ -150,7 +150,7 @@ wait_acks_fresh() { # [budget_s] — ledger acks something NEWER than T0
 }
 
 # ---- F36c / F37 observability helpers -----------------------------------
-SYNC_ANNO='flint\.csi\.storage\.io/replica-sync-state'
+SYNC_ANNO='disk\.chert\.us/replica-sync-state'
 sync_record()      { kubectl get pv "$PV" -o jsonpath="{.metadata.annotations.$SYNC_ANNO}" 2>/dev/null; }
 writer_uuids()     { sync_record | jq -r '.writer_set.lvol_uuids[]?' 2>/dev/null; }
 leg_state()        { sync_record | jq -r --arg u "$1" '.replicas[]? | select(.lvol_uuid==$u) | .sync_state' 2>/dev/null; }
@@ -162,8 +162,8 @@ pv_replicas_json() {
   # a missing instance-id stopped it. phase2's drills already prefer the
   # override; this is the same rule.
   kubectl get pv "$PV" -o json 2>/dev/null \
-    | jq -r '(.metadata.annotations["flint.csi.storage.io/replicas-override"]
-              // .spec.csi.volumeAttributes["flint.csi.storage.io/replicas"]) // empty'
+    | jq -r '(.metadata.annotations["disk.chert.us/replicas-override"]
+              // .spec.csi.volumeAttributes["disk.chert.us/replicas"]) // empty'
 }
 risk_annotation()  { kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.chert\.us/acked-tail-risk}' 2>/dev/null; }
 
@@ -609,7 +609,7 @@ case "$DRILL" in
   [ "$LEG_NODE" != "$PRE_NODE" ] \
     || note "CAVEAT: the leg node is also the pg client node — client loss is conflated with storage loss"
   evict_load_from "$LEG_NODE"
-  OVR_PRE=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replicas-override}' 2>/dev/null)
+  OVR_PRE=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.disk\.chert\.us/replicas-override}' 2>/dev/null)
   ACK_AT_KILL=$(last_ack_line)
   note "acked tail at kill: $ACK_AT_KILL"
   # F55 capture: the OUTGOING server instance's log is the only witness to
@@ -674,7 +674,7 @@ case "$DRILL" in
   # (b) F40: RWX re-placement must actually dispatch (identity swap).
   T_SWAP=-1; NEW_NODE=""
   for i in $(seq 1 60); do
-    OVR=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replicas-override}' 2>/dev/null)
+    OVR=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.disk\.chert\.us/replicas-override}' 2>/dev/null)
     if [ -n "$OVR" ] && [ "$OVR" != "$OVR_PRE" ]; then
       T_SWAP=$(( $(epoch) - T0 ))
       NEW_NODE=$(echo "$OVR" | jq -r '.[].node_name' | grep -v "^$NFS_NODE$" | head -1)
@@ -1166,7 +1166,7 @@ case "$DRILL" in
   [ "$LEG_NODE" != "$PRE_NODE" ] \
     || note "CAVEAT: the leg node is also the pg client node — client loss is conflated with storage loss"
   evict_load_from "$LEG_NODE"
-  OVR_PRE=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replicas-override}' 2>/dev/null)
+  OVR_PRE=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.disk\.chert\.us/replicas-override}' 2>/dev/null)
   NFS_RESTARTS_PRE=$(nfs_restarts)
   ACK_AT_KILL=$(last_ack_line)
   note "acked tail at kill: $ACK_AT_KILL"
@@ -1224,7 +1224,7 @@ case "$DRILL" in
   # (b) F40: re-placement must dispatch (identity swap) — unchanged from 3.6e.
   T_SWAP=-1; NEW_NODE=""
   for i in $(seq 1 60); do
-    OVR=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replicas-override}' 2>/dev/null)
+    OVR=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.disk\.chert\.us/replicas-override}' 2>/dev/null)
     if [ -n "$OVR" ] && [ "$OVR" != "$OVR_PRE" ]; then
       T_SWAP=$(( $(epoch) - T0 ))
       NEW_NODE=$(echo "$OVR" | jq -r '.[].node_name' | grep -v "^$NFS_NODE$" | head -1)
@@ -1565,7 +1565,7 @@ case "$DRILL" in
   ( while :; do
       b=$(raid_summary "$(nfs_node)" 2>/dev/null | grep -o 'base=[0-9]*/[0-9]*' | head -1)
       j=$(kubectl get pv "$PV" -o json 2>/dev/null \
-          | jq -r '.metadata.annotations["flint.csi.storage.io/replica-sync-state"] // "{}"')
+          | jq -r '.metadata.annotations["disk.chert.us/replica-sync-state"] // "{}"')
       m=$(printf '%s' "$j" | jq -r '[.replicas[]? | select(.maint_drain != null)] | length' 2>/dev/null)
       s=$(printf '%s' "$j" | jq -r '[.replicas[]? | select(.sync_state=="in_sync")] | length' 2>/dev/null)
       printf '%s\t%s\t%s\t%s\t%s\n' "$(( $(epoch) - T0 ))" "${b:-none}" "${m:-0}" "${s:-0}" "$(pg_restarts)" >> "$SAMP"

@@ -9,7 +9,7 @@ sites converted onto identity.rs + the cached `RoleResolver`
 unified on the handle with `IDENTITY-DIVERGENCE` transitional assertions;
 DeleteVolume enforces the backing-refusal matrix cell + cache hygiene).
 Phase 2: CreateVolume stamps the canonical role
-(`flint.csi.storage.io/role`) into every volume_context (all four create
+(`disk.chert.us/role`) into every volume_context (all four create
 paths); ControllerPublish/NodeStage seed the role caches from it
 (hint ≡ resolver by test-pinned construction), with a transitional
 publish-side divergence assertion. Phase 3: LIVE-VALIDATED
@@ -118,7 +118,7 @@ NodeUnstage which keeps its findmnt fallback (the d7490de choice).
 
 ### 3. Context hint for the fast path
 
-CreateVolume stamps `flint.csi.storage.io/role: nfs-shared|block` into
+CreateVolume stamps `disk.chert.us/role: nfs-shared|block` into
 volume_context. RPCs that carry context (ControllerPublish, NodeStage,
 NodePublish) resolve with zero lookups. Context-free RPCs
 (ControllerUnpublish, NodeUnstage, DeleteVolume) hit the cached

@@ -1,4 +1,4 @@
-# The lean arm of the s3.chert.us drill (design §3.5, §5, §10.2 S11/S13):
+# The lean arm of the s3.csi.chert.us drill (design §3.5, §5, §10.2 S11/S13):
 # one FlintLeanWorkspace, a seeder that publishes, an agent created
 # after the seeder is gone. The pods carry ONE csi: volume and nothing
 # else — no label, no sidecar, no Secret, no env.
@@ -59,7 +59,7 @@ spec:
   volumes:
     - name: ws
       csi:
-        driver: s3.chert.us
+        driver: s3.csi.chert.us
         volumeAttributes:
           chert.us/workspace: proj
   containers:
@@ -110,7 +110,7 @@ spec:
   volumes:
     - name: ws
       csi:
-        driver: s3.chert.us
+        driver: s3.csi.chert.us
         volumeAttributes:
           chert.us/workspace: proj-noconsumers
   containers:

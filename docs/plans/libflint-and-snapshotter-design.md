@@ -301,7 +301,7 @@ MinimalNodeService invariant this section just leaned on; if used-bytes ever mat
 controller pushes allocator stats into a volume attribute the node merely reads —
 **fixing a live defect: every pNFS
 volume is misreported `abnormal: true` on every kubelet stats poll today** because the stats
-path requires a `flint.csi.storage.io/node-name` attribute pNFS PVs don't have
+path requires a `disk.chert.us/node-name` attribute pNFS PVs don't have
 (`main.rs:4779-4791`, `driver.rs:1650`). Expansion is observed by the library via GETATTR
 size polling — no publish-time replumbing.
 

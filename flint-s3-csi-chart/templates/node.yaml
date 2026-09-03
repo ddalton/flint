@@ -1,4 +1,4 @@
-# The s3.chert.us node plugin: one pod per node, and THE privileged
+# The s3.csi.chert.us node plugin: one pod per node, and THE privileged
 # component of this design (§3.6). It performs the mount(2), opens
 # /dev/fuse, hands the fd to an unprivileged worker, and bind-mounts the
 # result into the tenant pod's kubelet dir. It holds no S3 credential.
@@ -80,7 +80,7 @@ spec:
             # can publish.
             - { name: FLINT_S3CSI_BROKER_URL, value: {{ include "flint-s3-csi.brokerUrl" . | quote }} }
 {{- end }}
-            # The plugin's OWN token (audience s3.chert.us, pod-bound) —
+            # The plugin's OWN token (audience s3.csi.chert.us, pod-bound) —
             # what it presents to the broker to register a publish.
             - { name: FLINT_S3CSI_NODE_TOKEN_FILE, value: "/var/run/secrets/flint-s3/token" }
             - { name: FLINT_S3CSI_CREDS_LIFETIME_SECS, value: {{ .Values.node.credsLifetimeSecs | quote }} }

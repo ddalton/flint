@@ -46,7 +46,7 @@ spec:
   volumes:
   - name: ephemeral-storage
     csi:
-      driver: flint.csi.storage.io
+      driver: disk.csi.chert.us
       fsType: ext4
       volumeAttributes:
         size: "100Mi"

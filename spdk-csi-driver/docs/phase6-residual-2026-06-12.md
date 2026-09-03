@@ -8,7 +8,7 @@ replaced mid-session after a spot retirement), Kubernetes v1.34.9, chart
 **Knobs:** `FLINT_EPOCH_SCHEDULER=enabled` (30 s), `FLINT_CATCHUP=enabled`,
 `FLINT_CUTOVER=enabled` — cutover's first cluster run ever.
 **Workload:** 2-replica RWO volume (`numReplicas: 2` SC), Deployment with a
-2 s fsync writer, PV annotated `flint.csi.storage.io/rejoin-bounce: enabled`.
+2 s fsync writer, PV annotated `disk.chert.us/rejoin-bounce: enabled`.
 **Method:** kill the replica-hosting flint node pod (spdk-tgt dies with it),
 track the PV sync record + workload pods at 10–20 s granularity, reconstruct
 from controller logs and PV events.
@@ -145,7 +145,7 @@ pinned at stage before it can be retested.
   volume ATTACHED to this node whose raid bdev is missing — the case
   the health monitor's stale predicate (online-raid-missing-a-base)
   cannot see. Three consecutive strikes (rides out in-flight stages) →
-  `flint.csi.storage.io/data-path-lost: <node>` PV annotation +
+  `disk.chert.us/data-path-lost: <node>` PV annotation +
   `VolumeDataPathLost` Warning with the remediation in the message; the
   flagging node clears it (+`VolumeDataPathRestored`) when the raid
   returns or the attachment leaves. Validated live: flag at T+3m07s,
@@ -204,7 +204,7 @@ pinned at stage before it can be retested.
 ## Scheduling escalation (landed same day)
 
 Every bounce now applies a self-expiring NoSchedule taint
-(`flint.csi.storage.io/bounce`) to the bounced workload's node before
+(`disk.chert.us/bounce`) to the bounced workload's node before
 deleting pods, so the replacement cannot reuse the dead/stale staged
 volume. A taint rather than cordon (operator cordon state is never
 touched) or pod anti-affinity (RWO replacements come from the

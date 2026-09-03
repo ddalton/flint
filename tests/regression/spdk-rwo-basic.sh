@@ -118,10 +118,10 @@ regression::log "PV name: $PV"
 # These are the four keys the inventory says CreateVolume writes for a
 # single-replica RWO volume (main.rs:841–865).
 regression::assert_pv_attribute "$PV" "size"
-regression::assert_pv_attribute "$PV" "flint.csi.storage.io/replica-count" "1"
-regression::assert_pv_attribute "$PV" "flint.csi.storage.io/node-name"
-regression::assert_pv_attribute "$PV" "flint.csi.storage.io/lvol-uuid"
-regression::assert_pv_attribute "$PV" "flint.csi.storage.io/lvs-name"
+regression::assert_pv_attribute "$PV" "disk.chert.us/replica-count" "1"
+regression::assert_pv_attribute "$PV" "disk.chert.us/node-name"
+regression::assert_pv_attribute "$PV" "disk.chert.us/lvol-uuid"
+regression::assert_pv_attribute "$PV" "disk.chert.us/lvs-name"
 
 # Snapshot the full attribute key set for baseline-drift detection. If a
 # refactor adds or removes a key, this asserts the change is intentional

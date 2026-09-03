@@ -91,7 +91,7 @@ apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: flint-nfs
-provisioner: flint.csi.storage.io
+provisioner: disk.csi.chert.us
 parameters:
   nfsEmptyDir: "true"
   numReplicas: "1"

@@ -13,14 +13,14 @@ covered by the stability guarantee.
 ## [Unreleased]
 
 The passthrough and lean sidecar-injection webhooks are gone. Both
-front ends are delivered by one CSI node DaemonSet, `s3.chert.us`. Every
+front ends are delivered by one CSI node DaemonSet, `s3.csi.chert.us`. Every
 machine identifier moved off `flint.io` to `chert.us`.
 
 ### Changed
 
 - **Machine identifiers moved from `flint.io` to `chert.us` (BREAKING).**
   The API group is `chert.us/v1alpha1`, the S3 CSI driver is
-  `s3.chert.us`, and every label, annotation and StorageClass parameter
+  `s3.csi.chert.us`, and every label, annotation and StorageClass parameter
   key moves with them — `nfs.chert.us/server-ip`, `pnfs.chert.us/layout`,
   `chert.us/share`, `chert.us/mount`, and the rest. The product is still
   Flint: crate and binary names (`flint-s3-csi-node`, `flint-s3-broker`,
@@ -42,14 +42,40 @@ machine identifier moved off `flint.io` to `chert.us`.
   `nfs.chert.us/server-ip`. On a cluster already running Flint: drain the
   volumes, uninstall the old charts including their CRDs, then install
   the new ones. The node driver's plugin directory moves as well
-  (`/var/lib/kubelet/plugins/s3.flint.io` becomes `.../s3.chert.us`), so
+  (`/var/lib/kubelet/plugins/s3.flint.io` becomes `.../s3.csi.chert.us`), so
   no mount may be live across that step.
 
   Drill captures under `tests/chaos/artifacts/` keep the old identifiers
   on purpose; they are dated evidence, not current configuration. See
   `tests/chaos/README.md`.
+- **The block/pNFS driver is `disk.csi.chert.us` (BREAKING).** Formerly
+  `flint.csi.storage.io`, a domain that was never ours. Its keys move to
+  `disk.chert.us/*` — `disk.chert.us/lvol-uuid`,
+  `disk.chert.us/replica-sync-state`, `disk.chert.us/role`,
+  `disk.chert.us/rejoin-bounce`, the `disk.chert.us/bounce` taint, and
+  the node topology key `topology.disk.chert.us/node`. The S3 driver
+  moves with it, from `s3.chert.us` to `s3.csi.chert.us`, so both drivers
+  read the way the ecosystem writes driver names (`ebs.csi.aws.com`,
+  `disk.csi.azure.com`) and are visibly distinct from the key prefixes
+  that share their domain. Key prefixes never carry the `.csi.` infix;
+  driver names always do.
 
-- **`s3.chert.us` (new chart `flint-s3-csi`) replaces both mutating
+  Note that `disk.chert.us/role` (`block` | `nfs-shared`, the
+  volume_context role hint) and `chert.us/role` (`lite`, the hub
+  operator's label) are different keys with different meanings. They were
+  distinct before this rename and are kept distinct by it — folding the
+  driver's keys into the bare `chert.us/*` family would have merged them.
+
+  BREAKING, and unlike the group rename there is no version of this that
+  an existing volume survives: `spec.csi.driver` is immutable on a PV, so
+  volumes bound to `flint.csi.storage.io` cannot be adopted by the
+  renamed driver — they must be drained and reprovisioned. The kubelet
+  plugin directory moves with the name
+  (`/var/lib/kubelet/plugins/disk.csi.chert.us`), and so does the
+  per-driver staging path under `plugins/kubernetes.io/csi/`, so no mount
+  may be live across the upgrade.
+
+- **`s3.csi.chert.us` (new chart `flint-s3-csi`) replaces both mutating
   webhooks.** A pod gets an S3 prefix or a lean workspace as ONE
   `csi:` ephemeral volume naming a `FlintPassthroughMount` or
   `FlintLeanWorkspace` in its own namespace — no label, no injected
@@ -3230,7 +3256,7 @@ forced failure injection.
   restart; and the cutover orchestrator bounces as a last-resort
   fallback. Escape hatch: `FLINT_DATA_PATH_REPAIR=disabled`.
 - **Scheduling escalation for cutover bounces.** Every bounce applies a
-  self-expiring `NoSchedule` taint (`flint.csi.storage.io/bounce`,
+  self-expiring `NoSchedule` taint (`disk.chert.us/bounce`,
   TTL `FLINT_CUTOVER_TAINT_SECS`, default 120 s) to the bounced node so
   the replacement cannot reuse the stale staged volume — reassembly
   bounces are now deterministic instead of scheduler-dependent.
@@ -3343,7 +3369,7 @@ version bump.
   pNFS data path. Default StorageClasses use single-server NFS or
   direct SPDK block per existing chart configuration.
 - **`volume_context` namespaces.** Production keys live under
-  `flint.csi.storage.io/*` (SPDK mode) and `pnfs.chert.us/*`
+  `disk.chert.us/*` (SPDK mode) and `pnfs.chert.us/*`
   (pNFS mode). These namespaces are stable from 1.0.0; new keys may
   be added in `MINOR` releases, removals or renames require `MAJOR`.
 - **VolumeSnapshot CRD preflight.** At controller startup, the driver

@@ -16,7 +16,7 @@ set -euo pipefail
 : "${REGRESSION_KUBECONFIG:=${KUBECONFIG:-$HOME/.kube/config}}"
 : "${REGRESSION_NAMESPACE:=flint-regression}"
 : "${REGRESSION_STORAGE_CLASS:=flint}"          # default SC from helm chart values.yaml
-: "${REGRESSION_PROVISIONER:=flint.csi.storage.io}"
+: "${REGRESSION_PROVISIONER:=disk.csi.chert.us}"
 : "${REGRESSION_TIMEOUT:=180}"                   # seconds for any single wait
 : "${REGRESSION_BASELINE_DIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../baseline/spdk-e2e" && pwd)}"
 

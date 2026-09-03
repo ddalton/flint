@@ -303,12 +303,12 @@ mod tests {
     fn mountinfo_finds_a_same_filesystem_bind() {
         let info = "\
 25 30 0:23 / /var/lib/kubelet rw,relatime shared:15 - ext4 /dev/vda1 rw
-900 25 0:23 /plugins/s3.chert.us/volumes/csi-abc/tree /var/lib/kubelet/pods/uid/volumes/kubernetes.io~csi/ws/mount rw,relatime shared:15 - ext4 /dev/vda1 rw
-901 25 0:44 / /var/lib/kubelet/plugins/s3.chert.us/volumes/csi-def/src rw,nosuid,nodev,noatime shared:99 - fuse mount-s3 rw,user_id=1001
+900 25 0:23 /plugins/s3.csi.chert.us/volumes/csi-abc/tree /var/lib/kubelet/pods/uid/volumes/kubernetes.io~csi/ws/mount rw,relatime shared:15 - ext4 /dev/vda1 rw
+901 25 0:44 / /var/lib/kubelet/plugins/s3.csi.chert.us/volumes/csi-def/src rw,nosuid,nodev,noatime shared:99 - fuse mount-s3 rw,user_id=1001
 ";
         assert!(mountinfo_has(info, "/var/lib/kubelet/pods/uid/volumes/kubernetes.io~csi/ws/mount"), "a same-filesystem bind IS a mount point");
-        assert!(mountinfo_has(info, "/var/lib/kubelet/plugins/s3.chert.us/volumes/csi-def/src"));
-        assert!(!mountinfo_has(info, "/var/lib/kubelet/plugins/s3.chert.us/volumes/csi-abc/tree"), "the bind SOURCE is not itself a mount point");
+        assert!(mountinfo_has(info, "/var/lib/kubelet/plugins/s3.csi.chert.us/volumes/csi-def/src"));
+        assert!(!mountinfo_has(info, "/var/lib/kubelet/plugins/s3.csi.chert.us/volumes/csi-abc/tree"), "the bind SOURCE is not itself a mount point");
         assert!(!mountinfo_has(info, "/var/lib/kubelet/pods/uid/volumes"));
     }
 

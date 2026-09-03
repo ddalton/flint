@@ -338,7 +338,7 @@ case "$DRILL" in
   evict_load_from "$REMOTE"
   IID=$(instance_id_for_node "$REMOTE")
   [ -n "$IID" ] || fail "no instance id for $REMOTE"
-  OVR_PRE=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replicas-override}' 2>/dev/null)
+  OVR_PRE=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.disk\.chert\.us/replicas-override}' 2>/dev/null)
   [ -z "$OVR_PRE" ] || note "override already present pre-drill (prior replacement)"
   aws ec2 terminate-instances --region "$AWS_REGION" --instance-ids "$IID" >/dev/null
   note "TERMINATED $IID ($REMOTE) — remote leg permanently lost"
@@ -348,7 +348,7 @@ case "$DRILL" in
   note "Node object deleted at ${T_NODEGONE}s — U11 trigger armed (catch-up tick 60s)"
   T_SWAP=-1; NEW_NODE=""
   for i in $(seq 1 60); do
-    OVR=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replicas-override}' 2>/dev/null)
+    OVR=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.disk\.chert\.us/replicas-override}' 2>/dev/null)
     if [ -n "$OVR" ] && [ "$OVR" != "$OVR_PRE" ]; then
       T_SWAP=$(( $(epoch) - T0 ))
       NEW_NODE=$(echo "$OVR" | jq -r '.[].node_name' 2>/dev/null | grep -v "^$RAID_HOST$" | head -1)
@@ -360,7 +360,7 @@ case "$DRILL" in
   ok "identity swapped to ${NEW_NODE:-?} at ${T_SWAP}s"
   T_SYNC=-1; ST=""
   for i in $(seq 1 120); do
-    REC=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replica-sync-state}' 2>/dev/null)
+    REC=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.disk\.chert\.us/replica-sync-state}' 2>/dev/null)
     ST=$(echo "$REC" | jq -r --arg n "$NEW_NODE" '.replicas[] | select(.node_name==$n) | .sync_state' 2>/dev/null | head -1)
     [ "$ST" = "in_sync" ] && { T_SYNC=$(( $(epoch) - T0 )); break; }
     sleep 10
@@ -386,10 +386,10 @@ case "$DRILL" in
   [ -n "$REMOTE" ] || fail "no remote leg found"
   evict_load_from "$REMOTE"
   LVS=$(kubectl get pv "$PV" -o json 2>/dev/null \
-    | jq -r --arg n "$REMOTE" '(.metadata.annotations["flint.csi.storage.io/replicas-override"] // .spec.csi.volumeAttributes["flint.csi.storage.io/replicas"]) | fromjson | .[] | select(.node_name==$n) | .lvs_name' | head -1)
+    | jq -r --arg n "$REMOTE" '(.metadata.annotations["disk.chert.us/replicas-override"] // .spec.csi.volumeAttributes["disk.chert.us/replicas"]) | fromjson | .[] | select(.node_name==$n) | .lvs_name' | head -1)
   [ -n "$LVS" ] || fail "no lvs_name for remote leg on $REMOTE"
   UUID_PRE=$(kubectl get pv "$PV" -o json 2>/dev/null \
-    | jq -r --arg n "$REMOTE" '(.metadata.annotations["flint.csi.storage.io/replicas-override"] // .spec.csi.volumeAttributes["flint.csi.storage.io/replicas"]) | fromjson | .[] | select(.node_name==$n) | .lvol_uuid' | head -1)
+    | jq -r --arg n "$REMOTE" '(.metadata.annotations["disk.chert.us/replicas-override"] // .spec.csi.volumeAttributes["disk.chert.us/replicas"]) | fromjson | .[] | select(.node_name==$n) | .lvol_uuid' | head -1)
   spdk_rpc "$REMOTE" bdev_lvol_delete_lvstore -l "$LVS" \
     || fail "could not delete lvstore $LVS on $REMOTE (drill needs direct RPC access)"
   note "lvstore $LVS on $REMOTE DESTROYED (F11 simulation: store gone, node alive)"
@@ -411,7 +411,7 @@ case "$DRILL" in
   # timeout is what let F50 hide behind F48.
   T_SYNC=-1; ST=""; PREV_ST=""; F50_CYCLES=0
   for i in $(seq 1 90); do
-    REC=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replica-sync-state}' 2>/dev/null)
+    REC=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.disk\.chert\.us/replica-sync-state}' 2>/dev/null)
     ST=$(echo "$REC" | jq -r --arg n "$REMOTE" '.replicas[] | select(.node_name==$n) | .sync_state' 2>/dev/null | head -1)
     [ "$ST" = "in_sync" ] && { T_SYNC=$(( $(epoch) - T0 )); break; }
     if [ "$PREV_ST" = "standby" ] && [ "$ST" = "stale" ]; then

@@ -12,7 +12,7 @@
 #   volumes:
 #     - name: data
 #       csi:
-#         driver: s3.chert.us
+#         driver: s3.csi.chert.us
 #         volumeAttributes: { chert.us/mount: datasets }
 #
 # and needs no label, no sidecar, no credential and no privilege — it is

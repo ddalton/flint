@@ -4,7 +4,7 @@ description: >-
   The flint-lean control plane — one FlintLeanWorkspace per project
   subtree, a thin controller (claim, posture, sweep), and (optionally)
   the lean gateway for HITL writes and sync reads. A pod gets its
-  workspace as a csi: ephemeral volume through the s3.chert.us node
+  workspace as a csi: ephemeral volume through the s3.csi.chert.us node
   driver (flint-s3-csi chart); nothing is injected. No per-workspace
   Deployments, PVCs or Services: an idle workspace is bucket objects
   and nothing else.
@@ -12,7 +12,7 @@ type: application
 
 # Chart version, independent of the flint release train.
 # 0.6.0: the mutating webhook, its cert Secret, its Service and every
-# webhook.* value are gone — delivery moved to the s3.chert.us CSI node
+# webhook.* value are gone — delivery moved to the s3.csi.chert.us CSI node
 # driver. Breaking for any values file that configured the webhook.
 version: 0.6.0
 

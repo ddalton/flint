@@ -11,7 +11,7 @@ commands:
 
       sync_state() {
         kubectl get pv $PV -o json \
-          | jq -r '.metadata.annotations["flint.csi.storage.io/replica-sync-state"]'
+          | jq -r '.metadata.annotations["disk.chert.us/replica-sync-state"]'
       }
 
       # Give the writer a moment to seed and the scheduler a first epoch cut.

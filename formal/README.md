@@ -986,7 +986,7 @@ cannot rediscover the bug classes it exists for proves nothing.
 | `BouncePlannable`'s two arms, with no health term | `plan_cutover` (cutover.rs:305-385) reading only `sync_state`/`last_epoch` off a `VolumeCutoverView` that carries no leg health, no serving membership, no writer set |
 | `BouncePreflight` | THE PROPOSED BELT — re-verify at commit that every recorded writer is responsive-or-verifiably-dead (the `drain_leg` probe-first discipline, which cutover does not have) |
 | `RogueBouncePlan`/`RogueBounceCommit` | the tick-top `is_leader()` read (cutover.rs:714, the file's only one) vs a tick whose per-volume `await_detached` runs to `detach_timeout`; no CAS exists anywhere to belt the commit |
-| `dpFlag` + `AgentFlag`/`AgentClear` | `flint.csi.storage.io/data-path-lost` — written by a leg's own agent, clearable ONLY by the flagging node (`node_agent.rs:5241-5247`, `flagged_by_me`) |
+| `dpFlag` + `AgentFlag`/`AgentClear` | `disk.chert.us/data-path-lost` — written by a leg's own agent, clearable ONLY by the flagging node (`node_agent.rs:5241-5247`, `flagged_by_me`) |
 | `AdmitAtStage` (unclaimed, `serving = {}`, writer set grows before the gate) | `admit_standbys_at_stage` (driver.rs:1967 → catchup.rs:2301) committing `record_in_sync` BEFORE `freshness_gate::evaluate` (driver.rs:2089) |
 | `consecutiveBounces` / `Inv_NoPointlessRebounce` | the attempt counter `cutover.rs` does NOT have — the ghost that makes its absence checkable |
 | **FlintClaims** | |

@@ -1,8 +1,8 @@
 ----------------------------- MODULE FlintCsiMount -----------------------------
 (***************************************************************************)
-(* The s3.chert.us CSI node driver's volume lifecycle, modelled AFTER the   *)
-(* code and AFTER the kind drills — because the drills found a DATA LOSS    *)
-(* the design review had not, and the reason it was invisible is a          *)
+(* The s3.csi.chert.us CSI node driver's volume lifecycle, modelled AFTER   *)
+(* the code and AFTER the kind drills — because the drills found a DATA     *)
+(* LOSS the design review had not, and the reason it was invisible is a     *)
 (* modelling lesson this module exists to make permanent.                   *)
 (*                                                                          *)
 (* THE DEFECT (spdk-csi-driver/src/s3csi/fuse.rs, node.rs; fixed in the     *)

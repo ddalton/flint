@@ -65,7 +65,7 @@ block volumes:
 1. **Controller phase** — `ControllerExpandVolume` (`src/main.rs:2138-2259`)
    resolves the volume's storage node via `get_volume_info_from_pv`
    (`src/driver.rs:1640-1689`), which reads the PV attribute
-   `flint.csi.storage.io/node-name`. It calls the node agent's
+   `disk.chert.us/node-name`. It calls the node agent's
    `POST /api/volumes/resize_lvol` (`src/main.rs:2247`), which issues the SPDK
    `bdev_lvol_resize` RPC with `size_in_mib` (`src/minimal_disk_service.rs:411-415`).
    Size rounds **up** to MiB: `(new_size_bytes + 1048575) / 1048576`
@@ -149,8 +149,8 @@ layer itself already supports online grow (see §2.1).
 - **Metadata lookup fails (RWO multi-replica).** `ControllerExpandVolume`
   calls `get_volume_info` (`src/main.rs:2222`) → `get_volume_info_from_pv`
   (`src/driver.rs:1640-1689`), which **requires** the PV attribute
-  `flint.csi.storage.io/node-name`. Multi-replica volumes (numReplicas > 1) do
-  **not** store that attribute — they store `flint.csi.storage.io/replicas` as
+  `disk.chert.us/node-name`. Multi-replica volumes (numReplicas > 1) do
+  **not** store that attribute — they store `disk.chert.us/replicas` as
   a JSON array instead (`src/main.rs:1297-1306`). Result: error `"PV found but
   missing flint metadata in volumeAttributes"` (`src/driver.rs:1682`),
   surfaced as `Status::failed_precondition("Volume metadata not found")`.

@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# flint-s3-worker-lean — PID 1 of every LEAN worker pod the s3.chert.us
+# flint-s3-worker-lean — PID 1 of every LEAN worker pod the s3.csi.chert.us
 # node plugin creates: the unchanged flint-sync, supervised by the
 # worker.
 #

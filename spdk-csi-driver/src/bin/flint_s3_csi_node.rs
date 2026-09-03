@@ -1,4 +1,4 @@
-//! `flint-s3-csi-node` — the `s3.chert.us` CSI node plugin, one per node.
+//! `flint-s3-csi-node` — the `s3.csi.chert.us` CSI node plugin, one per node.
 //!
 //! Node-only: Identity + Node services over the kubelet plugin socket;
 //! no controller service, no attach. See `spdk_csi_driver::s3csi`.
@@ -21,7 +21,7 @@
 //!   FLINT_S3CSI_COMM_SIZE            16Mi (the memory-backed comm emptyDir)
 //!   FLINT_S3CSI_SCRATCH_SIZE         1Gi  (the worker's /tmp)
 //!   FLINT_S3CSI_KUBELET_ROOT         /var/lib/kubelet
-//!   FLINT_S3CSI_PLUGIN_ROOT          <kubelet root>/plugins/s3.chert.us
+//!   FLINT_S3CSI_PLUGIN_ROOT          <kubelet root>/plugins/s3.csi.chert.us
 
 use kube::api::Api;
 use tracing::{info, warn};
@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let listener = tokio::net::UnixListener::bind(socket_path)?;
     let stream = tokio_stream::wrappers::UnixListenerStream::new(listener);
-    info!("s3.chert.us listening on {socket_path}");
+    info!("s3.csi.chert.us listening on {socket_path}");
     router.serve_with_incoming(stream).await?;
     Ok(())
 }

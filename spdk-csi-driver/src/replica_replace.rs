@@ -447,13 +447,13 @@ async fn swap_identity_on_pv(
         && !new_replicas.iter().any(|r| r.node_uid == old_node_uid)
     {
         labels.insert(
-            format!("flint.csi.storage.io/replica-{}", old_node_uid),
+            format!("disk.chert.us/replica-{}", old_node_uid),
             serde_json::Value::Null,
         );
     }
     if !new_node_uid.is_empty() {
         labels.insert(
-            format!("flint.csi.storage.io/replica-{}", new_node_uid),
+            format!("disk.chert.us/replica-{}", new_node_uid),
             json!("true"),
         );
     }

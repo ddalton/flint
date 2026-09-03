@@ -35,7 +35,7 @@ metadata:
 
 # Same provisioner as every other Flint StorageClass — the driver
 # branches on `parameters.layout` to pick the right backend.
-provisioner: flint.csi.storage.io
+provisioner: disk.csi.chert.us
 
 # WaitForFirstConsumer matches the chart default and is the right
 # choice for pNFS too: it lets the scheduler place pods first, after

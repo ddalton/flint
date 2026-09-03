@@ -1,4 +1,4 @@
-# The store half of the s3.chert.us rig: MinIO, a seeded bucket, a
+# The store half of the s3.csi.chert.us rig: MinIO, a seeded bucket, a
 # durable mc pod, and the broker's static key Secret. Namespaces the
 # CHART does not create are here; `flint-workers` comes from the chart.
 #

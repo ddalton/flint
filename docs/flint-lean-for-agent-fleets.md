@@ -1,7 +1,7 @@
 # flint-lean on a Kubernetes cluster
 
 > **Delivery changed (2026-09-03).** A workspace now reaches a pod as
-> ONE `csi:` volume served by the `s3.chert.us` node driver
+> ONE `csi:` volume served by the `s3.csi.chert.us` node driver
 > (`flint-s3-csi-chart`), not as a webhook-injected sidecar. The label
 > `chert.us/lean-workspace`, the injected `flint-sync` container, the
 > per-namespace credential Secret and the webhook described below are
@@ -15,7 +15,7 @@
 >   volumes:
 >     - name: ws
 >       csi:
->         driver: s3.chert.us
+>         driver: s3.csi.chert.us
 >         volumeAttributes: { chert.us/workspace: proj1 }
 >   containers:
 >     - volumeMounts: [{ name: ws, mountPath: /workspace }]

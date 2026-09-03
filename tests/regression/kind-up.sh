@@ -190,8 +190,8 @@ ok "helm install complete"
 
 step "verifying driver registration"
 
-if ! kubectl get csidriver flint.csi.storage.io >/dev/null 2>&1; then
-    fail "CSIDriver flint.csi.storage.io not registered after helm install"
+if ! kubectl get csidriver disk.csi.chert.us >/dev/null 2>&1; then
+    fail "CSIDriver disk.csi.chert.us not registered after helm install"
 fi
 log "  CSIDriver registered"
 
@@ -235,6 +235,6 @@ Tear down:
 
 Cluster context: kind-$CLUSTER_NAME
 Helm release:    $HELM_RELEASE in namespace $HELM_NAMESPACE
-Storage class:   flint (provisioner: flint.csi.storage.io)
+Storage class:   flint (provisioner: disk.csi.chert.us)
 ================================================================
 EOF

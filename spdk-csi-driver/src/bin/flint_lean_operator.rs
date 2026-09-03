@@ -8,7 +8,7 @@
 //! controller: no FlintShare coupling, no hub lifecycle, no
 //! per-workspace Deployments/PVCs at all. Duties per reconcile: claim
 //! stamping with both adopt arms, bucket posture, the stale-MPU sweep,
-//! status. Pods get their workspace from the s3.chert.us CSI node
+//! status. Pods get their workspace from the s3.csi.chert.us CSI node
 //! plugin (flint-s3-csi-chart); this binary injects nothing.
 //!
 //! Environment:

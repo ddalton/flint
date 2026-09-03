@@ -60,7 +60,7 @@ pub struct FlintLeanWorkspaceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials_secret_ref: Option<String>,
 
-    /// CSI delivery (`s3.chert.us`, docs/plans/csi-node-mount-design.md):
+    /// CSI delivery (`s3.csi.chert.us`, docs/plans/csi-node-mount-design.md):
     /// which ServiceAccounts in this namespace may mount the workspace.
     /// ABSENT = DENY under CSI; the webhook delivery ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

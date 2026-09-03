@@ -2554,7 +2554,7 @@ impl NodeAgent {
         let mut operations_performed = Vec::new();
 
         // Step 1: Find and unmount all staging paths for this volume
-        let staging_base = "/var/lib/kubelet/plugins/kubernetes.io/csi/flint.csi.storage.io";
+        let staging_base = "/var/lib/kubelet/plugins/kubernetes.io/csi/disk.csi.chert.us";
         
         if let Ok(entries) = std::fs::read_dir(staging_base) {
             for entry in entries.flatten() {
@@ -3444,7 +3444,7 @@ impl NodeAgent {
         for pv in pvs.list(&ListParams::default()).await?.items {
             let Some(pv_name) = pv.metadata.name.clone() else { continue };
             let Some(csi) = pv.spec.as_ref().and_then(|s| s.csi.as_ref()) else { continue };
-            if csi.driver != "flint.csi.storage.io" {
+            if csi.driver != "disk.csi.chert.us" {
                 continue;
             }
             // RWX PVs are NFS-mounted; their block export belongs to the
@@ -3456,7 +3456,7 @@ impl NodeAgent {
             // Replica volumes: export ownership lives with
             // reconcile_replica_targets (alias NQNs, raid semantics).
             let replica_count = attrs
-                .get("flint.csi.storage.io/replica-count")
+                .get("disk.chert.us/replica-count")
                 .and_then(|c| c.parse::<u32>().ok())
                 .unwrap_or(1);
             if replica_count > 1 {
@@ -3521,8 +3521,8 @@ impl NodeAgent {
                 }
                 continue;
             }
-            let Some(storage_node) = attrs.get("flint.csi.storage.io/node-name") else { continue };
-            let Some(lvol_uuid) = attrs.get("flint.csi.storage.io/lvol-uuid") else { continue };
+            let Some(storage_node) = attrs.get("disk.chert.us/node-name") else { continue };
+            let Some(lvol_uuid) = attrs.get("disk.chert.us/lvol-uuid") else { continue };
             if is_ublk {
                 attributable_lvols.insert(lvol_uuid.clone());
             }
@@ -3987,9 +3987,9 @@ impl NodeAgent {
         let node_uid = self.node_uid.read().await.clone();
         debug!(node_name = %self.node_name, node_uid, "[RECONCILE] Starting replica target reconciliation");
 
-        // Fast path: PVs labeled flint.csi.storage.io/replica-{node_uid}=true
+        // Fast path: PVs labeled disk.chert.us/replica-{node_uid}=true
         let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
-        let label_key = format!("flint.csi.storage.io/replica-{}", node_uid);
+        let label_key = format!("disk.chert.us/replica-{}", node_uid);
         let lp = ListParams::default().labels(&format!("{}=true", label_key));
 
         let mut pv_items = match pvs.list(&lp).await {
@@ -4245,7 +4245,7 @@ impl NodeAgent {
     /// Surface the health of node-local raid bdevs to the control plane
     /// (phase 0 fix, repro bug 6). For every `raid_{volume_id}` on this node:
     /// degraded → patch the PV annotation
-    /// `flint.csi.storage.io/replica-health` and emit a Warning event;
+    /// `disk.chert.us/replica-health` and emit a Warning event;
     /// healthy → clear the annotation. volumeAttributes are immutable, so
     /// the mutable annotation is the channel (same pattern as
     /// `filesystem-initialized`).
@@ -4412,7 +4412,7 @@ impl NodeAgent {
             let Some(csi) = pv.spec.as_ref().and_then(|s| s.csi.as_ref()) else {
                 continue;
             };
-            if csi.driver != "flint.csi.storage.io" {
+            if csi.driver != "disk.csi.chert.us" {
                 continue;
             }
             if self.resolve_ublk_id(pv, &csi.volume_handle) == id {
@@ -4451,7 +4451,7 @@ impl NodeAgent {
         for pv in pvs.list(&ListParams::default()).await?.items {
             let Some(pv_name) = pv.metadata.name.clone() else { continue };
             let Some(csi) = pv.spec.as_ref().and_then(|s| s.csi.as_ref()) else { continue };
-            if csi.driver != "flint.csi.storage.io" {
+            if csi.driver != "disk.csi.chert.us" {
                 continue;
             }
             match crate::replica_sync::replicas_from_pv(&pv) {
@@ -4466,12 +4466,12 @@ impl NodeAgent {
                 }
                 _ => {
                     let Some(attrs) = csi.volume_attributes.as_ref() else { continue };
-                    if attrs.get("flint.csi.storage.io/node-name").map(String::as_str)
+                    if attrs.get("disk.chert.us/node-name").map(String::as_str)
                         != Some(self.node_name.as_str())
                     {
                         continue;
                     }
-                    if let Some(lvs) = attrs.get("flint.csi.storage.io/lvs-name") {
+                    if let Some(lvs) = attrs.get("disk.chert.us/lvs-name") {
                         let e = expected.entry(lvs.clone()).or_default();
                         e.0.push(pv_name.clone());
                         e.1 = true; // single replica: the only copy lives here
@@ -4648,7 +4648,7 @@ impl NodeAgent {
                 .to_string();
                 let patch = json!({
                     "metadata": {
-                        "annotations": { "flint.csi.storage.io/replica-health": health }
+                        "annotations": { "disk.chert.us/replica-health": health }
                     }
                 });
                 match pvs.patch(pv_name, &PatchParams::default(), &Patch::Merge(&patch)).await {
@@ -4699,7 +4699,7 @@ impl NodeAgent {
                     .to_string();
                     let patch = json!({
                         "metadata": {
-                            "annotations": { "flint.csi.storage.io/replica-health": health }
+                            "annotations": { "disk.chert.us/replica-health": health }
                         }
                     });
                     let _ =
@@ -4709,7 +4709,7 @@ impl NodeAgent {
                     // deletes)
                     let patch = json!({
                         "metadata": {
-                            "annotations": { "flint.csi.storage.io/replica-health": null }
+                            "annotations": { "disk.chert.us/replica-health": null }
                         }
                     });
                     let _ =
@@ -5170,7 +5170,7 @@ impl NodeAgent {
     /// kubelet's in-flight unstage immediately tore it down — harmless
     /// there, but the repair could steal replica fences for a tick.
     fn is_staged_here(volume_handle: &str) -> bool {
-        let staging_base = "/var/lib/kubelet/plugins/kubernetes.io/csi/flint.csi.storage.io";
+        let staging_base = "/var/lib/kubelet/plugins/kubernetes.io/csi/disk.csi.chert.us";
         let Ok(entries) = std::fs::read_dir(staging_base) else {
             return false;
         };
@@ -5469,7 +5469,7 @@ impl NodeAgent {
         for pv in pv_items {
             let Some(pv_name) = pv.metadata.name.clone() else { continue };
             let Some(csi) = pv.spec.as_ref().and_then(|s| s.csi.as_ref()) else { continue };
-            if csi.driver != "flint.csi.storage.io" {
+            if csi.driver != "disk.csi.chert.us" {
                 continue;
             }
             // Single-replica volumes have no raid by design.

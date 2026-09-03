@@ -11,7 +11,7 @@ spec:
   securityContext: { runAsNonRoot: true, runAsUser: 1001, seccompProfile: { type: RuntimeDefault } }
   volumes:
     - name: data
-      csi: { driver: s3.chert.us, volumeAttributes: { chert.us/mount: datasets } }
+      csi: { driver: s3.csi.chert.us, volumeAttributes: { chert.us/mount: datasets } }
   containers:
     - name: agent
       image: busybox:1.36
@@ -29,7 +29,7 @@ spec:
   securityContext: { runAsNonRoot: true, runAsUser: 1001, seccompProfile: { type: RuntimeDefault } }
   volumes:
     - name: data
-      csi: { driver: s3.chert.us, volumeAttributes: { chert.us/mount: datasets-noconsumers } }
+      csi: { driver: s3.csi.chert.us, volumeAttributes: { chert.us/mount: datasets-noconsumers } }
   containers:
     - name: agent
       image: busybox:1.36
@@ -47,7 +47,7 @@ spec:
   securityContext: { runAsNonRoot: true, runAsUser: 1001, seccompProfile: { type: RuntimeDefault } }
   volumes:
     - name: data
-      csi: { driver: s3.chert.us, volumeAttributes: { chert.us/mount: no-such-mount } }
+      csi: { driver: s3.csi.chert.us, volumeAttributes: { chert.us/mount: no-such-mount } }
   containers:
     - name: agent
       image: busybox:1.36
@@ -65,7 +65,7 @@ spec:
   securityContext: { runAsNonRoot: true, runAsUser: 1001, seccompProfile: { type: RuntimeDefault } }
   volumes:
     - name: data
-      csi: { driver: s3.chert.us, volumeAttributes: { chert.us/mount: datasets, bucket: private } }
+      csi: { driver: s3.csi.chert.us, volumeAttributes: { chert.us/mount: datasets, bucket: private } }
   containers:
     - name: agent
       image: busybox:1.36

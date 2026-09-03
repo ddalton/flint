@@ -5,7 +5,7 @@ commands:
       # Verify Flint CSI driver is installed and supports ephemeral volumes
       echo "Checking CSIDriver configuration..."
       
-      if kubectl get csidriver flint.csi.storage.io &> /dev/null; then
+      if kubectl get csidriver disk.csi.chert.us &> /dev/null; then
         echo "✅ Flint CSIDriver found"
       else
         echo "❌ Flint CSIDriver not found"
@@ -13,7 +13,7 @@ commands:
       fi
       
       # Check if Ephemeral mode is enabled
-      LIFECYCLE_MODES=$(kubectl get csidriver flint.csi.storage.io -o jsonpath='{.spec.volumeLifecycleModes[*]}')
+      LIFECYCLE_MODES=$(kubectl get csidriver disk.csi.chert.us -o jsonpath='{.spec.volumeLifecycleModes[*]}')
       echo "Volume lifecycle modes: $LIFECYCLE_MODES"
       
       if echo "$LIFECYCLE_MODES" | grep -q "Ephemeral"; then

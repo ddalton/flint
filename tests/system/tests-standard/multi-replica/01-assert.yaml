@@ -41,7 +41,7 @@ commands:
       echo "PV Name: $PV_NAME"
       
       # Check replica count
-      REPLICA_COUNT=$(kubectl get pv $PV_NAME -o jsonpath='{.spec.csi.volumeAttributes.flint\.csi\.storage\.io/replica-count}')
+      REPLICA_COUNT=$(kubectl get pv $PV_NAME -o jsonpath='{.spec.csi.volumeAttributes.disk\.chert\.us/replica-count}')
       echo "Replica Count: $REPLICA_COUNT"
       if [ "$REPLICA_COUNT" != "2" ]; then
         echo "❌ Expected 2 replicas, got: $REPLICA_COUNT"
@@ -49,7 +49,7 @@ commands:
       fi
       
       # Check replicas JSON exists
-      REPLICAS_JSON=$(kubectl get pv $PV_NAME -o jsonpath='{.spec.csi.volumeAttributes.flint\.csi\.storage\.io/replicas}')
+      REPLICAS_JSON=$(kubectl get pv $PV_NAME -o jsonpath='{.spec.csi.volumeAttributes.disk\.chert\.us/replicas}')
       if [ -z "$REPLICAS_JSON" ]; then
         echo "❌ No replicas metadata found in PV"
         exit 1

@@ -4,9 +4,9 @@
 // The PV — not the raid superblock — is the authoritative record of which
 // replicas hold the volume's acknowledged write history (§2 governing
 // principle). Immutable replica identity lives in
-// PV.spec.csi.volumeAttributes["flint.csi.storage.io/replicas"]; this module
+// PV.spec.csi.volumeAttributes["disk.chert.us/replicas"]; this module
 // owns the mutable companion record in the PV annotation
-// "flint.csi.storage.io/replica-sync-state":
+// "disk.chert.us/replica-sync-state":
 //
 //   { "current_epoch": null,
 //     "replicas": [ { "node_name": "...", "node_uid": "...",
@@ -38,18 +38,18 @@ use crate::minimal_models::ReplicaInfo;
 
 /// Mutable sync record (this module). volumeAttributes hold the immutable
 /// identities; the annotation holds everything that changes over time.
-pub const SYNC_STATE_ANNOTATION: &str = "flint.csi.storage.io/replica-sync-state";
+pub const SYNC_STATE_ANNOTATION: &str = "disk.chert.us/replica-sync-state";
 /// Immutable replica identity list, written by CreateVolume.
-pub const REPLICAS_ATTRIBUTE: &str = "flint.csi.storage.io/replicas";
-pub const REPLICA_COUNT_ATTRIBUTE: &str = "flint.csi.storage.io/replica-count";
+pub const REPLICAS_ATTRIBUTE: &str = "disk.chert.us/replicas";
+pub const REPLICA_COUNT_ATTRIBUTE: &str = "disk.chert.us/replica-count";
 /// Mutable replica-identity override, written ONLY by the re-placement
 /// orchestrator (U11). PV spec.csi.volumeAttributes is API-immutable, so an
 /// identity swap after permanent node loss lives in metadata; every reader
 /// funnels through `raw_replicas_json`, which prefers this annotation.
-pub const REPLICAS_OVERRIDE_ANNOTATION: &str = "flint.csi.storage.io/replicas-override";
+pub const REPLICAS_OVERRIDE_ANNOTATION: &str = "disk.chert.us/replicas-override";
 /// autoRebuild StorageClass parameter, echoed into volumeAttributes by
 /// CreateVolume. "false" opts the volume out of replica re-placement.
-pub const AUTO_REBUILD_ATTRIBUTE: &str = "flint.csi.storage.io/auto-rebuild";
+pub const AUTO_REBUILD_ATTRIBUTE: &str = "disk.chert.us/auto-rebuild";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1259,7 +1259,7 @@ pub async fn emit_pv_event(
         type_: Some(event_type.to_string()),
         reason: Some(reason.to_string()),
         message: Some(message.to_string()),
-        reporting_component: Some("flint.csi.storage.io/node-agent".to_string()),
+        reporting_component: Some("disk.chert.us/node-agent".to_string()),
         reporting_instance: Some(reporting_instance.to_string()),
         event_time: Some(MicroTime(k8s_openapi::jiff::Timestamp::now())),
         action: Some("HealthCheck".to_string()),
@@ -1549,7 +1549,7 @@ mod tests {
             spec: Some(PersistentVolumeSpec {
                 access_modes: Some(access_modes.iter().map(|s| s.to_string()).collect()),
                 csi: Some(CSIPersistentVolumeSource {
-                    driver: "flint.csi.storage.io".to_string(),
+                    driver: "disk.csi.chert.us".to_string(),
                     volume_handle: handle.to_string(),
                     ..Default::default()
                 }),

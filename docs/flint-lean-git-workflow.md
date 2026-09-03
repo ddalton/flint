@@ -3,7 +3,7 @@
 > **Delivery changed (2026-09-03).** The label
 > `chert.us/lean-workspace` and the injected `flint-sync` sidecar shown
 > below are the RETIRED shape. A workspace now reaches a pod as ONE
-> `csi:` volume served by the `s3.chert.us` node driver
+> `csi:` volume served by the `s3.csi.chert.us` node driver
 > (`volumeAttributes: { chert.us/workspace: <cr> }`,
 > `flint-s3-csi-chart`), and the CR names `spec.uid` and
 > `spec.consumers.serviceAccounts`. The workspace protocol below —

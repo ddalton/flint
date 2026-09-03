@@ -90,7 +90,7 @@ spec:
                 type: string
               consumers:
                 description: |-
-                  CSI delivery (`s3.chert.us`, docs/plans/csi-node-mount-design.md):
+                  CSI delivery (`s3.csi.chert.us`, docs/plans/csi-node-mount-design.md):
                   which ServiceAccounts in this namespace may mount the workspace.
                   ABSENT = DENY under CSI; the webhook delivery ignores it.
                 nullable: true

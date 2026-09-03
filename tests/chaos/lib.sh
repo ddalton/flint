@@ -242,7 +242,7 @@ flint_sessions() { # <node>
 # Set of live flint PV names (one per line).
 live_flint_pvs() {
   kubectl get pv -o json | jq -r '.items[]
-    | select(.spec.csi.driver=="flint.csi.storage.io") | .metadata.name'
+    | select(.spec.csi.driver=="disk.csi.chert.us") | .metadata.name'
 }
 
 # Orphaned flint sessions across the fleet: a controller whose PV no longer

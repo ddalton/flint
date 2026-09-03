@@ -154,13 +154,13 @@ spec:
                   description: >-
                     Per-mount mounter image override. The chart's
                     sidecarImage otherwise. WEBHOOK DELIVERY ONLY: the
-                    s3.chert.us CSI driver never reads it (the worker
+                    s3.csi.chert.us CSI driver never reads it (the worker
                     image is chart-pinned; this field is the
                     privileged-escape knob the CSI design removes).
                 consumers:
                   type: object
                   description: >-
-                    CSI delivery (s3.chert.us): which ServiceAccounts in
+                    CSI delivery (s3.csi.chert.us): which ServiceAccounts in
                     this namespace may mount the CR. ABSENT = DENY under
                     CSI — list them, or ["*"] for any SA in the namespace
                     (the webhook delivery's trust level, made explicit).

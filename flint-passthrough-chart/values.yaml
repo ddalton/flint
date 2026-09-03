@@ -1,7 +1,7 @@
 # flint-passthrough — the FlintPassthroughMount CRD, and nothing else.
 #
 # There is no workload in this chart. A pod gets its mount from the
-# s3.chert.us CSI node driver (flint-s3-csi-chart): one `csi:` volume
+# s3.csi.chert.us CSI node driver (flint-s3-csi-chart): one `csi:` volume
 # naming a FlintPassthroughMount in the pod's own namespace, no label,
 # no webhook, no sidecar, no privilege in the pod. The mounter image the
 # driver runs is pinned there (`workers.passthroughImage`), never here.

@@ -2850,7 +2850,7 @@ async fn orchestrator_tick(
             .spec
             .as_ref()
             .and_then(|s| s.csi.as_ref())
-            .map(|c| c.driver == "flint.csi.storage.io")
+            .map(|c| c.driver == "disk.csi.chert.us")
             .unwrap_or(false);
         if !is_flint {
             continue;

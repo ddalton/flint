@@ -58,7 +58,7 @@
 # fatal verification holes are its mutations); documented at the bottom
 # of this file, next to its runs.
 #
-# FlintCsiMount.tla — the s3.chert.us CSI node driver's volume lifecycle
+# FlintCsiMount.tla — the s3.csi.chert.us CSI node driver's volume lifecycle
 # across CLUSTERS SHARING ONE BUCKET PREFIX, with the mount test modelled
 # as an UNRELIABLE SENSOR rather than as ground truth; model AFTER code
 # AFTER the kind drills, which found a data loss no state-machine model

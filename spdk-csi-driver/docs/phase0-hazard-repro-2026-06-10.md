@@ -80,7 +80,7 @@ on aws-1. Result, on aws-2 after reboot:
   the phantom's claim, leaving an **empty subsystem**.
 - **The reconcile that should re-export replicas is dead code in practice:**
   `reconcile_replica_targets` (node_agent.rs:1660) lists PVs by label
-  `flint.csi.storage.io/replica-{node_uid}=true`, but CreateVolume never
+  `disk.chert.us/replica-{node_uid}=true`, but CreateVolume never
   applies any label to PVs (verified: PVs have `LABELS: <none>`). Reconcile
   logged `success_count=0 skip_count=0 error_count=0` — it reconciles an empty
   set. vol1's replica re-export was therefore never even *attempted*.
@@ -145,7 +145,7 @@ that dies after raid create re-arms the §3 hazard (we had to wipe twice).
 | 1 | NodeUnstage never deletes the raid / detaches per-replica controllers / disconnects the kernel loopback controller | node unstage path | zombie raid + claims brick later restage; stale writer risk (§3 fencing) |
 | 2 | `nvmf_subsystem_add_ns` / `add_listener` not idempotent (only `create_subsystem` is) | export path used by NodeStage + reconcile | restage fails even on the original node; retry loops can never converge |
 | 3 | NodeStage not convergent across retries | whole stage sequence | any partial failure (e.g. device-wait timeout) permanently poisons subsequent retries |
-| 4 | `reconcile_replica_targets` queries PV label `flint.csi.storage.io/replica-{node_uid}` that CreateVolume never sets | node_agent.rs:1666 / CreateVolume | post-reboot replica re-export is dead code; replicas orphaned silently |
+| 4 | `reconcile_replica_targets` queries PV label `disk.chert.us/replica-{node_uid}` that CreateVolume never sets | node_agent.rs:1666 / CreateVolume | post-reboot replica re-export is dead code; replicas orphaned silently |
 | 5 | 3-second kernel-device wait too tight when a stale kernel controller must rescan | block-device creation | flaky NodeStage failure that then triggers bug 3 |
 | 6 | Leg failure detected only by I/O; PV `replicas[].health` never updated; no events; `autoRebuild` no-op | health/monitoring | silent redundancy loss, control plane reports healthy |
 | 7 | Node SA lacks RBAC to update PVs ("Failed to store block device info in PV … Forbidden", non-fatal log) | chart RBAC / node code | node-side PV state writes silently fail |

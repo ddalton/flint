@@ -1258,7 +1258,7 @@ async fn gather_volume_maint(driver: &SpdkCsiDriver) -> Result<Vec<VolumeMaint>,
         let Some(csi) = pv.spec.as_ref().and_then(|s| s.csi.as_ref()) else {
             continue;
         };
-        if csi.driver != "flint.csi.storage.io" {
+        if csi.driver != "disk.csi.chert.us" {
             continue;
         }
         // Synthetic RWX backing PVs: the record lives on the parent.

@@ -55,7 +55,7 @@ COPY ${BIN_DIR}/${TARGETARCH}/flint-hub-gateway /usr/local/bin/flint-hub-gateway
 # where the image exists and the binary inside it does not.
 #
 # There is no webhook in this image any more: pods get their lean
-# workspace from the s3.chert.us CSI node driver (Dockerfile.s3csi.
+# workspace from the s3.csi.chert.us CSI node driver (Dockerfile.s3csi.
 # prebuilt); flint-lean-operator is the claim/posture/sweep controller
 # and nothing else.
 #

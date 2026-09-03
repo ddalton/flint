@@ -2,7 +2,7 @@ apiVersion: v2
 name: flint-passthrough
 description: >-
   The FlintPassthroughMount CRD: an S3 prefix a pod mounts with
-  Mountpoint for S3 through the s3.chert.us CSI node driver
+  Mountpoint for S3 through the s3.csi.chert.us CSI node driver
   (flint-s3-csi-chart). One CR per bucket subtree, one csi: volume in
   the pod, and no control plane behind it: no checkout, no manifest, no
   claim, no publish boundary, no controller, no webhook, no privilege

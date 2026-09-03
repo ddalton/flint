@@ -187,7 +187,7 @@ cleanup() {
   vsudo "umount -lf $MNT 2>/dev/null; umount -lf ${MNT}-e 2>/dev/null;
          nvme disconnect -n $SUBNQN 2>/dev/null;
          nvme disconnect -n ${SUBNQN}-e 2>/dev/null;
-         rm -rf /var/lib/kubelet/plugins/flint.csi.storage.io/block-sessions" >/dev/null 2>&1
+         rm -rf /var/lib/kubelet/plugins/disk.csi.chert.us/block-sessions" >/dev/null 2>&1
   # Kill AND wait: a half-dead spdk_tgt still holds the core-claim lock
   # AND the 4420 listener, and a successor dies on either. Two traps
   # already paid for here: (1) -x exact comm, NEVER -f — the -f pattern

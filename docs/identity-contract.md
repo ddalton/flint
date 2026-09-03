@@ -20,7 +20,7 @@ parses identity-shaped names — CI lint
 Every RPC entry parses its handle into a `VolumeRef`
 (`Block` / `NfsShared{read_only}` / `NfsBacking`), resolution order:
 `nfs-server-` prefix → volume_context role hint
-(`flint.csi.storage.io/role`, stamped at CreateVolume) → the cached
+(`disk.chert.us/role`, stamped at CreateVolume) → the cached
 role resolver (PV access modes) → default `Block`.
 
 **Failure defaults:** unreadable PV ⇒ `Block` (fencing semantics

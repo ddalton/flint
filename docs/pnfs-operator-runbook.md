@@ -201,7 +201,7 @@ real-reclaim extras the drill's kubelet-kill can't show:
   node — unrecoverably.** Fleets deployed before the r2 claim template
   keep their original r1 claims (StatefulSet claims are never
   retrofitted). Check with:
-  `kubectl get pv <pv> -o jsonpath='{.spec.csi.volumeAttributes.flint\.csi\.storage\.io/replica-count}'`
+  `kubectl get pv <pv> -o jsonpath='{.spec.csi.volumeAttributes.disk\.chert\.us/replica-count}'`
   and migrate deliberately: delete the DS's PVC + pod together; the
   replacement claim provisions from the current (r2) template, the DS
   stamps a fresh identity marker and rejoins empty. Stripes that lived

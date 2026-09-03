@@ -142,7 +142,7 @@ pub fn kernel_block_layout_support() -> Result<(), String> {
 fn session_dir() -> std::path::PathBuf {
     std::env::var("FLINT_PNFS_SESSION_DIR")
         .unwrap_or_else(|_| {
-            "/var/lib/kubelet/plugins/flint.csi.storage.io/block-sessions".to_string()
+            "/var/lib/kubelet/plugins/disk.csi.chert.us/block-sessions".to_string()
         })
         .into()
 }

@@ -659,7 +659,7 @@ Phase 2 runs **two KUTTL test suites** to cover both Flint backends. Both must p
 1. **Confirm Flint is healthy** before running tests:
    ```bash
    kubectl get pods -n flint-system
-   kubectl get csidrivers flint.csi.storage.io
+   kubectl get csidrivers disk.csi.chert.us
    kubectl get storageclass
    ```
    All Flint pods should be Running. The CSIDriver should exist. Both the SPDK-backed default StorageClass `flint` and an NFS-only StorageClass should be present (per the chart's `values.yaml`; if the NFS-only StorageClass isn't registered, surface that as a finding before running suite 2).

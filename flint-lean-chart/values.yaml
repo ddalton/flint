@@ -27,7 +27,7 @@ image:
   pullPolicy: IfNotPresent
 
 # There is no sidecar image here any more: a workspace reaches a pod
-# through the s3.chert.us CSI driver (flint-s3-csi-chart), whose
+# through the s3.csi.chert.us CSI driver (flint-s3-csi-chart), whose
 # `workers.leanImage` is the flint-sync image every lean volume runs.
 # This chart is the CRD and the thin controller (claim, posture, sweep).
 

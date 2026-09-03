@@ -87,7 +87,7 @@ for i in json.load(sys.stdin)['items']:
     n=cr.get('name','')
     if not n.startswith('data-flint-pnfs-ds'): continue
     a=(i['spec'].get('csi') or {}).get('volumeAttributes',{})
-    node=a.get('flint.csi.storage.io/node-name','<unknown>')
+    node=a.get('disk.chert.us/node-name','<unknown>')
     c[node]+=1; rows.append((n,node))
 for n,node in sorted(rows): print('ROW',n,node)
 print('DISTINCT',len(c)); print('COUNT',len(rows))
@@ -137,7 +137,7 @@ for pod in $(kubectl get pods -n "$NS" -l app=flint-pnfs-ds \
   pv=$(kubectl get pvc -n "$NS" "data-flint-pnfs-ds-$idx" \
        -o jsonpath='{.spec.volumeName}' 2>/dev/null)
   vnode=$(kubectl get pv "$pv" \
-          -o jsonpath='{.spec.csi.volumeAttributes.flint\.csi\.storage\.io/node-name}' 2>/dev/null)
+          -o jsonpath='{.spec.csi.volumeAttributes.disk\.chert\.us/node-name}' 2>/dev/null)
   [ -z "$pnode" ] || [ -z "$vnode" ] && continue
   CHECKED=$((CHECKED+1))
   if [ "$pnode" != "$vnode" ]; then

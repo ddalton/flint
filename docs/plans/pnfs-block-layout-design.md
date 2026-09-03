@@ -382,7 +382,7 @@ explicit reject-unknown arm before anything else ships.
 Class sketch (`pnfs-block-storageclass.yaml`, cloned from `pnfs-storageclass.yaml`):
 
 ```yaml
-provisioner: {{ .Values.driver.name }}  # renders flint.csi.storage.io (values.yaml:64)
+provisioner: {{ .Values.driver.name }}  # renders disk.csi.chert.us (values.yaml:64)
 parameters:
   layout: pnfs-block
   pnfs.chert.us/extentSize: "4Mi"     # allocation granularity, NOT the wire blksize

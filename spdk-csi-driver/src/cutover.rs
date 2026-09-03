@@ -18,7 +18,7 @@
 //   in memory, so a bounce costs clients the 90s grace-window recovery;
 //   stateless I/O rides through.
 // - **RWO volumes**: opt-in only, via the PV annotation
-//   `flint.csi.storage.io/rejoin-bounce: "enabled"` — bouncing a workload
+//   `disk.chert.us/rejoin-bounce: "enabled"` — bouncing a workload
 //   pod is an application restart and never the driver's call to make
 //   unilaterally. The pods using the volume's claim are deleted; their
 //   owning controller reschedules them.
@@ -54,7 +54,7 @@ use crate::replica_sync::{self, epoch_seq, SyncState, VolumeSyncRecord};
 pub type RpcError = Box<dyn std::error::Error + Send + Sync>;
 
 /// PV annotation opting an RWO volume into workload-pod bounces.
-pub const REJOIN_BOUNCE_ANNOTATION: &str = "flint.csi.storage.io/rejoin-bounce";
+pub const REJOIN_BOUNCE_ANNOTATION: &str = "disk.chert.us/rejoin-bounce";
 
 /// PV annotation set by the node agent when a volume is ATTACHED to a node
 /// but its raid bdev does not exist there — a dead data path the health
@@ -62,7 +62,7 @@ pub const REJOIN_BOUNCE_ANNOTATION: &str = "flint.csi.storage.io/rejoin-bounce";
 /// yield, bug 1). Value = the flagging node's name; only that node clears
 /// it (raid reappeared, or the attachment left). Consumers: operators
 /// (event + annotation), and the future in-place repair / bounce fallback.
-pub const DATA_PATH_LOST_ANNOTATION: &str = "flint.csi.storage.io/data-path-lost";
+pub const DATA_PATH_LOST_ANNOTATION: &str = "disk.chert.us/data-path-lost";
 
 /// NoSchedule taint applied to the bounced workload's node for the duration
 /// of a bounce (scheduling escalation, phase-6 follow-up): without it the
@@ -76,7 +76,7 @@ pub const DATA_PATH_LOST_ANNOTATION: &str = "flint.csi.storage.io/data-path-lost
 /// workload's own controller template, which flint cannot mutate. On a
 /// cluster with no alternative node the taint still works: it outlives
 /// kubelet's unstage, so even a same-node replacement must restage.
-pub const BOUNCE_TAINT_KEY: &str = "flint.csi.storage.io/bounce";
+pub const BOUNCE_TAINT_KEY: &str = "disk.chert.us/bounce";
 
 /// PV annotation claiming the recreate of a volume's NFS server pod for the
 /// duration of a bounce. The value is the claim's EXPIRY (unix seconds), not
@@ -98,7 +98,7 @@ pub const BOUNCE_TAINT_KEY: &str = "flint.csi.storage.io/bounce";
 /// `Recreate` cell — so without this claim the reconciler rebuilds the pod
 /// inside the wait, kubelet reuses the staged volume, and the bounce is
 /// silently defeated (formal run `BouncePod`, eight states).
-pub const BOUNCE_IN_FLIGHT_ANNOTATION: &str = "flint.csi.storage.io/bounce-in-flight";
+pub const BOUNCE_IN_FLIGHT_ANNOTATION: &str = "disk.chert.us/bounce-in-flight";
 
 /// Margin added to `detach_timeout` when sizing a claim's deadline, covering
 /// the delete and the recreate round trips around the wait itself.
@@ -166,7 +166,7 @@ pub fn bounce_claim_active(
 /// stack-local `HashMap`, so a controller restart forgets everything. One
 /// persisted counter closes all three, and persisting it is also what makes
 /// the backoff survive the restart the in-memory map could not.
-pub const CUTOVER_ATTEMPTS_ANNOTATION: &str = "flint.csi.storage.io/cutover-attempts";
+pub const CUTOVER_ATTEMPTS_ANNOTATION: &str = "disk.chert.us/cutover-attempts";
 
 /// Cap on the backoff multiplier: 1×, 2×, 4×, 8× the cooldown, then flat.
 /// Bounded on purpose — an unbounded doubling becomes indistinguishable from
@@ -472,7 +472,7 @@ pub struct VolumeCutoverView {
     pub consumer: Option<String>,
     /// The volume's `flint-nfs-{vol}` server pod, if any (RWX path).
     pub nfs_pod: Option<NfsPodRef>,
-    /// PV annotation `flint.csi.storage.io/rejoin-bounce` == "enabled".
+    /// PV annotation `disk.chert.us/rejoin-bounce` == "enabled".
     pub rwo_bounce_enabled: bool,
     /// Workload pods mounting the volume's claim.
     pub workload_pods: Vec<PodRef>,
@@ -1511,7 +1511,7 @@ async fn cutover_tick(
             .spec
             .as_ref()
             .and_then(|s| s.csi.as_ref())
-            .map(|c| c.driver == "flint.csi.storage.io")
+            .map(|c| c.driver == "disk.csi.chert.us")
             .unwrap_or(false);
         if !is_flint {
             continue;

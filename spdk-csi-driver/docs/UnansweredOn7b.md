@@ -58,7 +58,7 @@ until an operator turns the mechanism on cluster-wide.
 **Options.**
 
 - **(A) Per-PV opt-in annotation.** Require
-  `flint.csi.storage.io/hot-rejoin: "enabled"` on the PV in addition to the
+  `disk.chert.us/hot-rejoin: "enabled"` on the PV in addition to the
   global gate. Parity with `rejoin-bounce`; the correctness-critical path
   fires only where an operator explicitly asked. Most conservative. Cost:
   the restart-intolerant class the feature exists for gets nothing until
@@ -106,7 +106,7 @@ risk it is meant to guard: a wrong `skip_rebuild` admission corrupts
 annotated volumes just as silently — what actually bounds the risk is the
 global gate (turning on `FLINT_HOT_REJOIN` is the operator's deliberate
 acceptance of the patch), the validation campaign, and staged rollout.
-Add `flint.csi.storage.io/hot-rejoin: "disabled"` as a surgical per-PV
+Add `disk.chert.us/hot-rejoin: "disabled"` as a surgical per-PV
 opt-out — a lever none of the three options as written provides. Side
 benefit: under (B) the cutover and hot-rejoin planners operate on disjoint
 classes (bounce-opted vs. not), so they cannot race on one volume. If

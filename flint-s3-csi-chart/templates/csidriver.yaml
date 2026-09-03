@@ -1,5 +1,5 @@
-# The s3.chert.us CSIDriver — its OWN object, not an extension of
-# flint.csi.storage.io: attachRequired, fsGroupPolicy, tokenRequests and
+# The s3.csi.chert.us CSIDriver — its OWN object, not an extension of
+# disk.csi.chert.us: attachRequired, fsGroupPolicy, tokenRequests and
 # requiresRepublish are properties of one CSIDriver, and the block/pNFS
 # driver needs the opposite values (design §3.1).
 apiVersion: storage.k8s.io/v1

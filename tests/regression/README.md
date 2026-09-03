@@ -67,7 +67,7 @@ Override via environment:
 | `REGRESSION_KUBECONFIG` | `$KUBECONFIG` or `~/.kube/config` | Cluster to test against |
 | `REGRESSION_NAMESPACE` | `flint-regression` | Per-run scratch namespace; recreated each run |
 | `REGRESSION_STORAGE_CLASS` | `flint` | StorageClass to use (helm chart default) |
-| `REGRESSION_PROVISIONER` | `flint.csi.storage.io` | CSIDriver name for preflight check |
+| `REGRESSION_PROVISIONER` | `disk.csi.chert.us` | CSIDriver name for preflight check |
 | `REGRESSION_TIMEOUT` | `180` | Per-step wait timeout in seconds |
 | `REGRESSION_RECORD` | `0` | When `1`, captures baselines instead of comparing |
 

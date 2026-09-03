@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # flint-s3-worker — PID 1 of every passthrough worker pod the
-# s3.chert.us node plugin creates (one per mounted volume, in the
+# s3.csi.chert.us node plugin creates (one per mounted volume, in the
 # flint-workers namespace).
 #
 #   for T in x86_64 aarch64; do

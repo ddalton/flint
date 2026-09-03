@@ -1,4 +1,4 @@
-//! The CSI Identity + Node services of `s3.chert.us` (design §3.4, §3.5,
+//! The CSI Identity + Node services of `s3.csi.chert.us` (design §3.4, §3.5,
 //! §3.7).
 //!
 //! `NodePublishVolume` is the whole product: parse → resolve → authorize

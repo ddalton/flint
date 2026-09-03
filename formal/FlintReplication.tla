@@ -508,7 +508,7 @@ CONSTANTS
                \* cfg.rwx_inplace defaults true and the planner returns
                \* Wait (366-370) — so this arm corresponds to
                \* FLINT_RWX_INPLACE_ADMISSION=disabled (S2's fallback rung)
-               \* or the RWO flint.csi.storage.io/rejoin-bounce opt-in.
+               \* or the RWO disk.chert.us/rejoin-bounce opt-in.
                \* Behind its own flag so each theorem names its world.
   DataPathArm, \* TRUE = plan_cutover's data_path_lost arm (312-334) and
                \* the annotation machinery exist.  It bypasses the standby

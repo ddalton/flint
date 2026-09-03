@@ -110,7 +110,7 @@ spec:
   volumes:
     - name: data
       csi:
-        driver: s3.chert.us
+        driver: s3.csi.chert.us
         volumeAttributes:
           chert.us/mount: datasets
   containers:
@@ -138,7 +138,7 @@ spec:
   volumes:
     - name: data
       csi:
-        driver: s3.chert.us
+        driver: s3.csi.chert.us
         volumeAttributes:
           chert.us/mount: datasets-ro
   containers:
@@ -166,7 +166,7 @@ spec:
   volumes:
     - name: data
       csi:
-        driver: s3.chert.us
+        driver: s3.csi.chert.us
         volumeAttributes:
           chert.us/mount: elsewhere
   containers:
@@ -196,7 +196,7 @@ spec:
   volumes:
     - name: data
       csi:
-        driver: s3.chert.us
+        driver: s3.csi.chert.us
         volumeAttributes:
           chert.us/mount: datasets-static
         nodePublishSecretRef:

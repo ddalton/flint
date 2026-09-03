@@ -61,7 +61,7 @@ priorityClassName: ""
 
 # CSI Driver configuration
 driver:
-  name: "flint.csi.storage.io"
+  name: "disk.csi.chert.us"
 
   # Ephemeral volume support (CSI inline volumes)
   # When enabled, Pods can declare Flint volumes directly in their spec without creating PVCs

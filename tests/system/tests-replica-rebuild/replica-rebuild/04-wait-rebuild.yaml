@@ -18,7 +18,7 @@ commands:
       while [ $(date +%s) -lt $DEADLINE ]; do
         ST=$(kubectl get pv $PV -o json 2>/dev/null \
           | jq -r --arg t "$TARGET" \
-            '.metadata.annotations["flint.csi.storage.io/replica-sync-state"]
+            '.metadata.annotations["disk.chert.us/replica-sync-state"]
              | fromjson | .replicas[] | select(.node_name == $t)
              | .sync_state + (if .hot_rejoin then "+marker" else "" end)' 2>/dev/null \
           || echo transient-read-error)

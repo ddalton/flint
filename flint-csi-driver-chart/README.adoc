@@ -104,7 +104,7 @@ helm install flint-csi ./flint-csi-driver-chart \
 # Verify installation
 kubectl get pods -n flint-system
 kubectl get storageclass flint
-kubectl get csidriver flint.csi.storage.io
+kubectl get csidriver disk.csi.chert.us
 ----
 
 == Configuration

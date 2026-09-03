@@ -474,7 +474,7 @@ async fn scheduler_tick(driver: &Arc<SpdkCsiDriver>, cfg: &EpochConfig) -> Resul
             .spec
             .as_ref()
             .and_then(|s| s.csi.as_ref())
-            .map(|c| c.driver == "flint.csi.storage.io")
+            .map(|c| c.driver == "disk.csi.chert.us")
             .unwrap_or(false);
         if !is_flint {
             continue;

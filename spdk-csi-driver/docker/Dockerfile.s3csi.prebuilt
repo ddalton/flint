@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# flint-s3-csi — the s3.chert.us CSI node plugin AND the flint-s3-broker,
+# flint-s3-csi — the s3.csi.chert.us CSI node plugin AND the flint-s3-broker,
 # runtime-only image for HOST-CROSS-COMPILED binaries (the
 # Dockerfile.csi.prebuilt recipe: stage per-arch binaries, let buildx
 # pick them by TARGETARCH, emit one manifest list).

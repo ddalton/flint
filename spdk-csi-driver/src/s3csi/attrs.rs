@@ -271,7 +271,7 @@ mod tests {
         let mut ctx = kubelet(HashMap::from([(ATTR_MOUNT.into(), "d".into())]));
         ctx.insert(
             K_SA_TOKENS.into(),
-            r#"{"other":{"token":"zzz"},"s3.chert.us":{"token":"eyJ.secret","expirationTimestamp":"2026-09-02T00:00:00Z"}}"#.into(),
+            r#"{"other":{"token":"zzz"},"s3.csi.chert.us":{"token":"eyJ.secret","expirationTimestamp":"2026-09-02T00:00:00Z"}}"#.into(),
         );
         let r = parse(&ctx).unwrap();
         let t = r.token.clone().unwrap();

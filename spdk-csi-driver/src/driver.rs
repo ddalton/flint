@@ -597,7 +597,7 @@ impl SpdkCsiDriver {
     }
 
     /// Add replica node labels to PV for node-based discovery on restart
-    /// Labels format: flint.csi.storage.io/replica-{node_uid}=true
+    /// Labels format: disk.chert.us/replica-{node_uid}=true
     /// Also seeds the per-replica sync-state annotation (incremental-rebuild
     /// phase 1) — all replicas in_sync at creation. Best effort either way:
     /// the node agent's reconcile/monitor lazily rebuilds both.
@@ -617,7 +617,7 @@ impl SpdkCsiDriver {
         let mut labels = serde_json::Map::new();
         for replica in replicas {
             if !replica.node_uid.is_empty() {
-                let label_key = format!("flint.csi.storage.io/replica-{}", replica.node_uid);
+                let label_key = format!("disk.chert.us/replica-{}", replica.node_uid);
                 labels.insert(label_key, serde_json::json!("true"));
                 let node_name = &replica.node_name;
                 let node_uid = &replica.node_uid;
@@ -1676,10 +1676,10 @@ impl SpdkCsiDriver {
                         // Found PV - read volumeAttributes
                         if let Some(attrs) = &csi.volume_attributes {
                             // Check if metadata exists
-                            if let Some(node_name) = attrs.get("flint.csi.storage.io/node-name") {
-                                let lvol_uuid = attrs.get("flint.csi.storage.io/lvol-uuid")
+                            if let Some(node_name) = attrs.get("disk.chert.us/node-name") {
+                                let lvol_uuid = attrs.get("disk.chert.us/lvol-uuid")
                                     .ok_or("Missing lvol-uuid in volumeAttributes")?;
-                                let lvs_name = attrs.get("flint.csi.storage.io/lvs-name")
+                                let lvs_name = attrs.get("disk.chert.us/lvs-name")
                                     .ok_or("Missing lvs-name in volumeAttributes")?;
                                 
                                 // Get size from PV capacity
@@ -1725,7 +1725,7 @@ impl SpdkCsiDriver {
         let patch = serde_json::json!({
             "metadata": {
                 "annotations": {
-                    "flint.csi.storage.io/filesystem-initialized": "true"
+                    "disk.chert.us/filesystem-initialized": "true"
                 }
             }
         });
@@ -1751,7 +1751,7 @@ impl SpdkCsiDriver {
         match pvs.get(crate::identity::storage_id_of_handle(volume_id)).await {
             Ok(pv) => {
                 let initialized = pv.metadata.annotations
-                    .and_then(|annot| annot.get("flint.csi.storage.io/filesystem-initialized").cloned())
+                    .and_then(|annot| annot.get("disk.chert.us/filesystem-initialized").cloned())
                     .map(|v| v == "true")
                     .unwrap_or(false);
                 Ok(initialized)

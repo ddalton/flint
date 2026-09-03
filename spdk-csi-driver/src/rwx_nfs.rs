@@ -266,7 +266,7 @@ pub async fn create_nfs_server_pod(
                 ..Default::default()
             }),
             csi: Some(CSIPersistentVolumeSource {
-                driver: "flint.csi.storage.io".to_string(),
+                driver: "disk.csi.chert.us".to_string(),
                 volume_handle: nfs_volume_handle.clone(),  // Synthetic handle!
                 volume_attributes: Some({
                     let mut attrs: BTreeMap<String, String> = volume_context.iter()
@@ -1031,7 +1031,7 @@ pub async fn nfs_reconciler_pass(kube_client: &Client, source_node: &str) -> usi
     for pv in &pvs.items {
         let Some(name) = pv.metadata.name.as_ref() else { continue };
         let Some(csi) = pv.spec.as_ref().and_then(|s| s.csi.as_ref()) else { continue };
-        if csi.driver != "flint.csi.storage.io" {
+        if csi.driver != "disk.csi.chert.us" {
             continue;
         }
         let attrs = csi.volume_attributes.as_ref();

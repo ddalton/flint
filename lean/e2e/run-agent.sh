@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # RETIRED PATH (2026-09-03): the lean webhook and sidecar injector are
 # gone — a workspace reaches a pod as ONE csi: volume served by the
-# s3.chert.us node driver (docs/plans/csi-node-mount-design.md §3.5).
+# s3.csi.chert.us node driver (docs/plans/csi-node-mount-design.md §3.5).
 # This rig labels pods and/or execs into an injected `flint-sync`
 # container, so it no longer runs as written. The CSI delivery of lean
 # is drilled by s3csi/e2e/run-s3csi.sh (S11, S13) and, across clusters,

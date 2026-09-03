@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn lean_worker_gets_exactly_one_hostpath_and_restarts_on_failure() {
         let t = tenant();
-        let pod = build_pod(&inputs("lean", &t, Some("/var/lib/kubelet/plugins/s3.chert.us/volumes/csi-abc/tree".into())));
+        let pod = build_pod(&inputs("lean", &t, Some("/var/lib/kubelet/plugins/s3.csi.chert.us/volumes/csi-abc/tree".into())));
         let spec = pod.spec.as_ref().unwrap();
         assert_eq!(spec.restart_policy.as_deref(), Some("OnFailure"));
         assert_eq!(spec.termination_grace_period_seconds, Some(90));

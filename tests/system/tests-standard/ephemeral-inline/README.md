@@ -93,7 +93,7 @@ spec:
   volumes:
   - name: scratch
     csi:
-      driver: flint.csi.storage.io
+      driver: disk.csi.chert.us
       fsType: ext4
       volumeAttributes:
         size: "1Gi"
@@ -124,7 +124,7 @@ Look for events like:
 ### Ephemeral Mode Not Enabled
 
 ```bash
-kubectl get csidriver flint.csi.storage.io -o yaml
+kubectl get csidriver disk.csi.chert.us -o yaml
 ```
 
 Should show:

@@ -38,7 +38,7 @@ exports, one lvol replica per storage node. Recovery is layered:
     exposure window (typically 2–5 s; O(delta) for cold volumes).
 
 **The single most important fact:** the volume's sync record — the
-`flint.csi.storage.io/replica-sync-state` PV annotation — is the
+`disk.chert.us/replica-sync-state` PV annotation — is the
 **authority**. SPDK state is derived from it, never the other way around.
 Every autonomous decision (assembly membership, catch-up source selection,
 rejoin eligibility) reads it, and every manual remediation in §6 is a
@@ -93,11 +93,11 @@ per-volume opt-out — whenever its most-converged standby trails by
 
 | Annotation | Who writes it | Meaning |
 |---|---|---|
-| `flint.csi.storage.io/replica-sync-state` | controller/node agent | **The sync record** (JSON; §4). Operator-writable only per §6. |
-| `flint.csi.storage.io/hot-rejoin: "disabled"` | operator | Per-PV opt-out from hot rejoin. |
-| `flint.csi.storage.io/rejoin-bounce` | operator | Opt-in to the Tier-1 disruptive bounce; such volumes are never hot-rejoined (disjoint classes). |
-| `flint.csi.storage.io/replica-health` | node agent | Present only while degraded (or `localizing` during esnap exposure); cleared when healthy. |
-| `flint.csi.storage.io/data-path-lost` | node agent | Cutover-flagged data-path loss marker. |
+| `disk.chert.us/replica-sync-state` | controller/node agent | **The sync record** (JSON; §4). Operator-writable only per §6. |
+| `disk.chert.us/hot-rejoin: "disabled"` | operator | Per-PV opt-out from hot rejoin. |
+| `disk.chert.us/rejoin-bounce` | operator | Opt-in to the Tier-1 disruptive bounce; such volumes are never hot-rejoined (disjoint classes). |
+| `disk.chert.us/replica-health` | node agent | Present only while degraded (or `localizing` during esnap exposure); cleared when healthy. |
+| `disk.chert.us/data-path-lost` | node agent | Cutover-flagged data-path loss marker. |
 
 ## 3. What normal recovery looks like — and when NOT to intervene
 
@@ -162,7 +162,7 @@ there, each of which is distinguishable by the record + events.
 
 ```sh
 PV=pvc-xxxxxxxx-...
-kubectl get pv "$PV" -o go-template='{{index .metadata.annotations "flint.csi.storage.io/replica-sync-state"}}' | jq .
+kubectl get pv "$PV" -o go-template='{{index .metadata.annotations "disk.chert.us/replica-sync-state"}}' | jq .
 ```
 
 Key fields per replica entry:
@@ -245,7 +245,7 @@ Read, transform with `jq`, write back via `kubectl annotate --overwrite`:
 
 ```sh
 PV=pvc-xxxxxxxx-...
-KEY=flint.csi.storage.io/replica-sync-state
+KEY=disk.chert.us/replica-sync-state
 REC=$(kubectl get pv "$PV" -o go-template="{{index .metadata.annotations \"$KEY\"}}")
 echo "$REC" | jq .   # inspect first, always
 

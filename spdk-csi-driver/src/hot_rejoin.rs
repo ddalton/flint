@@ -2381,7 +2381,7 @@ async fn localize(
 /// PV annotation opting a volume OUT of automatic hot rejoin (Decision 1:
 /// policy (B) auto-triggers on the no-opt-in class; this is the surgical
 /// per-volume lever). Only the literal "disabled" (any case) opts out.
-pub const HOT_REJOIN_ANNOTATION: &str = "flint.csi.storage.io/hot-rejoin";
+pub const HOT_REJOIN_ANNOTATION: &str = "disk.chert.us/hot-rejoin";
 
 #[derive(Debug, Clone)]
 pub struct HotRejoinTriggerConfig {
@@ -2461,10 +2461,10 @@ pub struct VolumeHotRejoinView {
     /// a literal policy (B) would hot-rejoin it — Decision 1's explicit
     /// exclusion: `plan_cutover` owns those bounces.
     pub nfs_backing: bool,
-    /// `flint.csi.storage.io/rejoin-bounce` == enabled: the volume opted
+    /// `disk.chert.us/rejoin-bounce` == enabled: the volume opted
     /// into the disruptive Tier-1 path — the two planners stay disjoint.
     pub rwo_bounce_enabled: bool,
-    /// `flint.csi.storage.io/hot-rejoin` == "disabled" (the opt-out).
+    /// `disk.chert.us/hot-rejoin` == "disabled" (the opt-out).
     pub hot_rejoin_disabled: bool,
     /// Record-home PV carries chert.us/degraded-direct: single-survivor
     /// DIRECT serve — there is NO raid to admit into. Hot-rejoin planning
@@ -2678,7 +2678,7 @@ async fn hot_rejoin_tick(
             .spec
             .as_ref()
             .and_then(|s| s.csi.as_ref())
-            .map(|c| c.driver == "flint.csi.storage.io")
+            .map(|c| c.driver == "disk.csi.chert.us")
             .unwrap_or(false);
         if !is_flint {
             continue;

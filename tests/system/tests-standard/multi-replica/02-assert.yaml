@@ -59,7 +59,7 @@ commands:
       
       # Verify volume has 2 replicas
       PV_NAME=$(kubectl get pvc test-multi-replica-pvc -n $NAMESPACE -o jsonpath='{.spec.volumeName}')
-      REPLICA_COUNT=$(kubectl get pv $PV_NAME -o jsonpath='{.spec.csi.volumeAttributes.flint\.csi\.storage\.io/replica-count}')
+      REPLICA_COUNT=$(kubectl get pv $PV_NAME -o jsonpath='{.spec.csi.volumeAttributes.disk\.chert\.us/replica-count}')
       if [ "$REPLICA_COUNT" = "2" ]; then
         echo "✅ Volume configured with 2 replicas"
       else

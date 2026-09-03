@@ -756,7 +756,7 @@ enum ClassifiedLvol {
 /// identity::lvol_owner. Names are the contract (identity.rs + CI lint)
 /// and survive `_hr` recovery renames that change UUIDs — which is why
 /// this does NOT key on the provision-time UUIDs in PV attributes. The
-/// predecessor allowlist (`flint.csi.storage.io/lvol-uuid`) only existed
+/// predecessor allowlist (`disk.chert.us/lvol-uuid`) only existed
 /// on legacy single-replica PVs, so on replica-set clusters every live
 /// replica, user snapshot, and epoch snapshot was reported as an orphaned
 /// "cleanup candidate".
@@ -1254,15 +1254,15 @@ async fn fetch_volumes_from_pvs(
     for pv in pvs.items {
         if let Some(spec) = &pv.spec {
             if let Some(csi) = &spec.csi {
-                if csi.driver == "flint.csi.storage.io" {
+                if csi.driver == "disk.csi.chert.us" {
                     let pv_name = pv.metadata.name.as_deref().unwrap_or("unknown");
                     
                     if let Some(attrs) = &csi.volume_attributes {
-                        let lvol_uuid = attrs.get("flint.csi.storage.io/lvol-uuid")
+                        let lvol_uuid = attrs.get("disk.chert.us/lvol-uuid")
                             .map(|s| s.as_str()).unwrap_or("");
-                        let node_name = attrs.get("flint.csi.storage.io/node-name")
+                        let node_name = attrs.get("disk.chert.us/node-name")
                             .map(|s| s.as_str()).unwrap_or("");
-                        let replica_count = attrs.get("flint.csi.storage.io/replica-count")
+                        let replica_count = attrs.get("disk.chert.us/replica-count")
                             .and_then(|s| s.parse::<i32>().ok()).unwrap_or(1);
                         let size_str = attrs.get("size")
                             .map(|s| s.as_str()).unwrap_or("0");
@@ -1725,7 +1725,7 @@ async fn get_events_minimal(
                     let flint_emitter = e
                         .reporting_component
                         .as_deref()
-                        .map(|c| c.starts_with("flint.csi.storage.io"))
+                        .map(|c| c.starts_with("disk.csi.chert.us"))
                         .unwrap_or(false);
                     if !flint_emitter {
                         return None;
@@ -2745,7 +2745,7 @@ async fn delete_snapshot_by_id(
 
 /// The CSI driver name VolumeSnapshotContents are matched against — only
 /// flint-owned snapshot objects appear in the timeline or may be deleted.
-const TIMELINE_CSI_DRIVER: &str = "flint.csi.storage.io";
+const TIMELINE_CSI_DRIVER: &str = "disk.csi.chert.us";
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]

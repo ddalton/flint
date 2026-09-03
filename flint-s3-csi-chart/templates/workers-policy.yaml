@@ -92,7 +92,7 @@ spec:
     - expression: "request.operation != 'CREATE' || !has(object.spec.hostIPC) || !object.spec.hostIPC"
       message: "workers may not use hostIPC"
     - expression: "request.operation != 'CREATE' || !has(object.spec.volumes) || object.spec.volumes.all(v, !has(v.hostPath) || v.hostPath.path.startsWith(variables.hostPathPrefix))"
-      message: "the only hostPath a worker may mount is under the plugin's own volumes directory (/var/lib/kubelet/plugins/s3.chert.us/volumes/)"
+      message: "the only hostPath a worker may mount is under the plugin's own volumes directory (/var/lib/kubelet/plugins/s3.csi.chert.us/volumes/)"
     - expression: "request.operation != 'CREATE' || (has(object.spec.automountServiceAccountToken) && object.spec.automountServiceAccountToken == false)"
       message: "workers must set automountServiceAccountToken: false"
 ---

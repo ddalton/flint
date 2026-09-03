@@ -559,29 +559,29 @@ mod tests {
     fn spdk_volume_attrs() -> BTreeMap<String, String> {
         let mut a = BTreeMap::new();
         a.insert(
-            "flint.csi.storage.io/node-name".to_string(),
+            "disk.chert.us/node-name".to_string(),
             "worker-1".to_string(),
         );
         a.insert(
-            "flint.csi.storage.io/lvol-uuid".to_string(),
+            "disk.chert.us/lvol-uuid".to_string(),
             "00000000-0000-0000-0000-000000000001".to_string(),
         );
         a.insert(
-            "flint.csi.storage.io/lvs-name".to_string(),
+            "disk.chert.us/lvs-name".to_string(),
             "lvs0".to_string(),
         );
         a
     }
 
     /// Mirrors the pre-fix code path that produced the crash loop: the
-    /// existing `get_volume_info_from_pv` requires `flint.csi.storage.io/
+    /// existing `get_volume_info_from_pv` requires `disk.chert.us/
     /// node-name` to be present in the PV's volumeAttributes, and
     /// `create_snapshot` mapped its missing-metadata error to
     /// `Status::not_found(...)`. NOT_FOUND is retryable per CSI, so
     /// external-snapshotter loops indefinitely. This simulation pins
     /// that broken behavior so the regression test is unambiguous.
     fn pre_fix_lookup_simulation(attrs: &BTreeMap<String, String>) -> Result<(), Status> {
-        if attrs.contains_key("flint.csi.storage.io/node-name") {
+        if attrs.contains_key("disk.chert.us/node-name") {
             Ok(())
         } else {
             Err(Status::not_found(
@@ -596,11 +596,11 @@ mod tests {
     fn pre_fix_pnfs_attrs_lack_spdk_metadata_keys() {
         let attrs = pnfs_volume_attrs();
         assert!(
-            !attrs.contains_key("flint.csi.storage.io/node-name"),
+            !attrs.contains_key("disk.chert.us/node-name"),
             "pNFS volumes do not carry SPDK node-name attribute"
         );
         assert!(
-            !attrs.contains_key("flint.csi.storage.io/lvol-uuid"),
+            !attrs.contains_key("disk.chert.us/lvol-uuid"),
             "pNFS volumes do not carry SPDK lvol-uuid attribute"
         );
     }
@@ -699,7 +699,7 @@ mod tests {
         // namespace must NOT trigger detection (e.g. user labels).
         let mut attrs = BTreeMap::new();
         attrs.insert("user.example.com/pnfs-tag".to_string(), "x".to_string());
-        attrs.insert("flint.csi.storage.io/node-name".to_string(), "n1".to_string());
+        attrs.insert("disk.chert.us/node-name".to_string(), "n1".to_string());
         assert!(!is_pnfs_volume_attrs(&attrs));
     }
 
