@@ -1117,6 +1117,140 @@ counter wire leg is still open)*. Rust legs run on real Linux (zig
 cross-build; the macOS suite is NOT the suite); `cargo test
 --all-targets` (plain `cargo test` does not build bins).
 
+**★ TIER LEG MEASURED, 2026-09-02 — `tests/lima/deleg/tier-leg.sh`.
+IT FOUND TWO DEFECTS, BOTH FIXED, AND ONE NUMBER THAT DOES NOT MATCH
+THIS DOCUMENT.** Twenty 1 MiB files, hub + kernel client, watermark 50
+so every clean file evicts on the next tick, no restart anywhere (a
+restart would revoke the delegations the leg is about). MinIO runs in
+the guest and is health-checked FROM THE HOST, because the hub is a
+host process and lima's port forward is the part most likely to be
+missing.
+
+```
+  op            cold OFF   cold ON  warm OFF   warm ON
+  READ                40        43        40         0
+  GETATTR              0         0         0        20
+  OPEN                20        20         0         0
+  OPEN_NOATTR          0         0        20         0
+  CLOSE               20        20        20         0
+  ACCESS               2         2         2        22
+```
+
+**The data claim holds: warm READ 40 → 0**, and OPEN+OPEN_NOATTR+CLOSE
+40 → 0, across a full evict/hydrate cycle that happened UNDER the
+holder. The control is loud (warm READ=40, revalidation=20), so the
+silence is attributable.
+
+**DEFECT 1 — a delegated read starved the evictor permanently.** The
+first run failed at phase 3: `refused d0/p40/v0`, zero files evicted in
+120s, against an OFF arm cycling 16/20/17/10 files cold. Debug logging
+named it — **1349 of 1349 refusals `OpenWriters`, unanimous**. The
+chain: the READ path opens read+write deliberately (`ioops.rs`, "prefer
+read+write so a later WRITE on this stateid reuses the entry") and
+caches `writable: true`, so a pure reader leaves a writable fd; the
+eviction probe was `has_writable_ino` → `find_by_ino(ino,
+require_writable=true)`, which reads that as open-hot. Fixed by asking
+the open state instead — `stateids.file_has_write_open(dev, ino)`, the
+same predicate grant rule 5 uses, and keyed on (dev,ino) rather than
+ino alone. `has_writable_ino` is now `#[cfg(test)]` with the trap
+written on it. `Refusal::OpenWriters`'s own doc comment claimed the
+probe reports "writable opens, delegations, or byte-range locks" —
+that sentence is what made the bug look intentional, and it is
+corrected: **evicting under a read delegation is the point of the
+feature, not a hazard.**
+
+*Two wrong hypotheses died on the way, both against evidence rather
+than inspection:* "delegations pin eviction" (refusals continued after
+the reporter said `outstanding 0`) and "the client withholds CLOSE"
+(mountstats showed **CLOSE=20 on both arms**, with OPEN/READ/ACCESS
+identical too).
+
+**DEFECT 2 — one leaked fd per delegated file, forever.** The test that
+settled defect 1 also settled this: **40 delegation stateids granted,
+0 of them ever fd-cache-closed, zero overlap.** CLOSE reaps
+`fd_cache[open_stateid]`; a holder serves READs under the DELEGATION
+stateid, so that entry is keyed where CLOSE never looks and no
+DELEGRETURN path looked either — and `FdCache` has no capacity bound or
+LRU. Fixed with a `fd_release` sink on `DelegationManager`, installed
+by the io handler and called from every removal path: `unindex`
+(return + disown), `free_revoked` (which removes its own indices), and
+`cleanup_client_delegations` (lease expiry / DESTROY_CLIENTID, after
+the loop). Every call site is outside the entry lock — the sink takes
+the fd cache's own map locks. Regression test verified RED at
+`ioops.rs:3570` with the sink disabled. This crate has already hit
+EMFILE at exactly `ulimit -n` once.
+
+**⚠ THE ONE NUMBER THAT CONTRADICTS §9 AS WRITTEN: metadata RPCs did
+NOT go to zero — ON=42 vs OFF=42, identical totals, only reshaped.**
+The holder stops OPENing and CLOSEing (40 → 0) and starts GETATTRing
+and ACCESSing (2 → 42). The leg text above says the warm holder
+re-reads "with zero server RPCs"; the data path delivers that and the
+metadata path does not. This leg sleeps PAST acregmax by construction,
+so the attribute cache has expired and it cannot show the total
+elimination `warm-reaccess.sh` measured INSIDE that window (80 → 0).
+The rig prints this as a warning rather than asserting it: an
+assertion tuned until it passes would bury the one number a reader
+should argue with. **Either the design text needs qualifying to
+"zero DATA RPCs past acregmax", or the residual GETATTR+ACCESS per
+warm open is a real gap worth chasing.** Not resolved here.
+
+**A rig correction, recorded because it nearly voided a good run.** The
+first scoring pass demanded `control warm GETATTR >= N` and VOIDed a
+run whose control was in fact loud: Linux revalidates by sending
+OPEN_NOATTR, whose reply carries the attributes, so the control shows
+GETATTR=0 and OPEN_NOATTR=20. The liveness principle was right and the
+op name was wrong; revalidation is now counted across
+OPEN+OPEN_NOATTR+GETATTR. The correction was stated before the ON arm
+was read, so it is not a threshold moved to fit a result.
+
+**★ CONCURRENCY MODEL CHECKING ADDED, 2026-09-02 —
+`state/deleg_shuttle_tests.rs`, feature `shuttle-test` (OFF by
+default).** `cargo test --features shuttle-test --lib shuttle_`.
+
+**The headline is a methodological one: `check_pct` passed against the
+known-bad ordering and `check_dfs` failed it in 1.24 seconds.**
+Randomized PCT at 2000 executions/depth 3 — the usual recommendation —
+explored the pre-fix publish order 2000 times and reported green.
+Exhaustive DFS produced the production defect verbatim, with a schedule
+to replay it:
+
+```
+invariant scan: ["live_per_client[7] 1 != 0 live records"]
+failing schedule: "910226f8acd1910100004992249224494a120800000000"
+```
+
+Worth holding against what that bug cost the first time: 60_000
+iterations in a hand-tuned rig with a spin count in it, reproducing
+only in-suite on a loaded 2-vCPU Linux box. The window is two
+statements wide and the returner must be scheduled inside it AND
+finish its decrement before the granter resumes; nothing aims a
+randomized scheduler at a specific two-operation seam.
+
+**What it took to make shuttle see this code at all** (both fixes are
+test-only and cfg-gated):
+1. `delegation.rs` aliases its `Mutex`/atomics so shuttle owns them —
+   it only preempts at its own primitives.
+2. The `DashMap`s get a scheduling seam in front of every operation
+   (`state/sched_map.rs`). Without this the whole index-publish
+   sequence is one atomic block to the scheduler, which is why the
+   first RED attempt still passed **even under DFS-less PCT with the
+   mutation applied** — the seam, not the search, was missing first.
+3. `gc_map_entry` is disabled under the feature. It takes the entry
+   lock inside a `DashMap::remove_if` predicate — correct in
+   production, impossible for shuttle, which runs every thread as a
+   coroutine on ONE OS thread: parking there deschedules a coroutine
+   still holding the shard's real write lock, and the next coroutine to
+   touch that shard blocks the OS thread. It hangs at 0% CPU with no
+   output and no timeout. `try_lock` does NOT fix it — shuttle treats
+   try_lock as a scheduling point too. **Rule: under a coroutine
+   scheduler, never take a lock the checker owns while holding one it
+   does not.**
+
+FIDELITY HOLES, stated: the GC path and the `dead`-entry retry in
+`with_live_entry` are not modelled (item 3), and the two-client check is
+capped at 20_000 iterations because unbounded DFS does not finish — that
+one is evidence, not proof. The other two are genuinely exhaustive.
+
 ## 10. Rollout, kill switches, observability
 
 Master gate `FLINT_NFS_DELEGATIONS` (existing env). **v1 ships DARK**

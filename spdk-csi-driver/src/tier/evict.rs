@@ -248,9 +248,16 @@ pub enum Refusal {
     /// The row's key differs from the path-derived key: a bucket
     /// re-key is pending; flush first.
     RekeyPending,
-    /// The caller's open-state probe reports writable opens,
-    /// delegations, or byte-range locks (open-hot files are
-    /// non-evictable, A4).
+    /// The caller's open-state probe reports a live WRITE open (A4:
+    /// open-hot files are non-evictable).
+    ///
+    /// Read delegations deliberately do NOT count. Evicting under one
+    /// is the point of the feature, not a hazard — content is
+    /// unchanged, a later read DELAYs and hydrates, and the holder's
+    /// cached bytes stay valid. An earlier probe that answered from the
+    /// fd cache treated every delegated reader as a writer and starved
+    /// the evictor permanently; see the probe's comment in
+    /// `pnfs/mds/server.rs`.
     OpenWriters,
     /// HEAD found no object at the recorded key.
     ObjectMissing,

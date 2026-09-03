@@ -1395,10 +1395,36 @@ impl MetadataServer {
             let store = Arc::clone(&orch_store);
             let export_root = export_root.clone();
             let key_prefix = t.key_prefix.clone();
-            let probe_view = self.base_dispatcher.open_file_view();
+            let probe_state = Arc::clone(&self.state_mgr);
             let tick = Duration::from_secs(t.knobs.tick_secs.max(1));
             tokio::spawn(async move {
-                let probe = move |_dev: u64, ino: u64| probe_view.has_writable_ino(ino);
+                // "Does a CLIENT hold a write open on this file", asked of
+                // the open state — NOT "is there a cached fd that happens
+                // to be writable", asked of the fd cache. The fd cache
+                // answered the second question and it starved the evictor
+                // dead: the READ path opens read+write deliberately, and a
+                // delegation holder's READs are served under the
+                // delegation stateid, whose cache entry CLOSE never reaps
+                // (it reaps the OPEN stateid's). One read under a
+                // delegation therefore pinned a file as "open-hot"
+                // forever. The §9 tier leg measured it at 1349/1349
+                // eviction attempts refused `OpenWriters` with the
+                // watermark evictor at a standstill.
+                //
+                // `file_has_write_open` is the same predicate the
+                // delegation grant's rule 5 consults, and it is keyed on
+                // (dev, ino) rather than ino alone, so it also stops
+                // answering about a same-inode file on another device.
+                // Evicting UNDER a read delegation is the intended
+                // behaviour, not a hazard: eviction leaves content
+                // unchanged, a later read DELAYs and hydrates, and the
+                // holder's cached bytes stay valid — which is exactly the
+                // "tier cycling is invisible to warm readers" claim the
+                // feature is built on. Concurrent writers remain fenced by
+                // the dirty-list and CRC-verify refusals in `evict_file`.
+                let probe = move |dev: u64, ino: u64| {
+                    probe_state.stateids.file_has_write_open(dev, ino)
+                };
                 let mut iv = interval(tick);
                 iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {

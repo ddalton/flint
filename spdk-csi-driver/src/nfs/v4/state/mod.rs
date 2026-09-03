@@ -20,9 +20,13 @@ pub mod session;
 pub mod stateid;
 pub mod lease;
 pub mod delegation;
+mod sched_map;
 pub mod deleg_meter;
 #[cfg(test)]
 mod deleg_stress_tests;
+
+#[cfg(all(test, feature = "shuttle-test"))]
+mod deleg_shuttle_tests;
 
 pub use client::ClientManager;
 pub use session::SessionManager;

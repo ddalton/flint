@@ -21,12 +21,39 @@
 //!   file see state != Granted and answer DELAY without re-sending.
 
 use super::super::protocol::StateId;
-use dashmap::DashMap;
+use super::sched_map::Map as DashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
+
+// The synchronisation primitives this module locks with are aliased,
+// not imported directly, so the `shuttle-test` feature can substitute
+// the model checker's versions. That substitution is the entire point:
+// shuttle only preempts at primitives it owns, so a table locked with
+// `std::sync::Mutex` gives its scheduler nowhere to interleave and
+// would be explored as if it were single-threaded.
+//
+// `Arc` is deliberately NOT aliased (shuttle does not need its own),
+// and neither is `deleg_flag_exclusive`'s static lock, which is a test
+// harness detail rather than part of the state machine.
+//
+// The DashMaps stay real under both. Every one of them is touched as a
+// self-contained operation — the Arc is cloned out and the shard guard
+// dropped BEFORE any entry lock is taken (`with_live_entry`) — so
+// under shuttle they behave as atomic steps rather than as blocking
+// points the scheduler cannot see. `check_invariants` is the one place
+// that holds a shard guard across an entry lock, which is why the
+// shuttle tests call it only when no other thread is running.
+#[cfg(not(feature = "shuttle-test"))]
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+#[cfg(not(feature = "shuttle-test"))]
+use std::sync::Mutex;
+
+#[cfg(feature = "shuttle-test")]
+use shuttle::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+#[cfg(feature = "shuttle-test")]
+use shuttle::sync::Mutex;
 
 /// Whether the server may grant delegations (FLINT_NFS_DELEGATIONS=1,
 /// read once). Every fence consult and every grant checks this first,
@@ -262,6 +289,39 @@ impl FileEntry {
 /// own lock INSIDE the predicate so the removal and the marking are
 /// one atomic step against the shard lock.
 fn gc_map_entry(files: &DashMap<FileId, Arc<Mutex<FileEntry>>>, ident: FileId) {
+    // Under the model checker, GC does nothing at all. The reason is
+    // structural, not a convenience.
+    //
+    // In production this predicate runs while the shard's WRITE lock is
+    // held, and taking the entry lock inside it is the point: the
+    // removal and the `dead` marking become one atomic step, and
+    // nothing anywhere takes those two in the other order, so there is
+    // no inversion to have.
+    //
+    // shuttle cannot execute that shape. It runs every thread as a
+    // coroutine on ONE OS thread and treats each operation on one of
+    // its primitives as a scheduling point — `try_lock` included, which
+    // is what made the obvious fix fail the same way the original did.
+    // So any touch of the entry lock here deschedules the coroutine
+    // while it still holds the shard's real, OS-level write lock, and
+    // the next coroutine to reach that shard blocks the OS thread
+    // outright. The execution stops with 0% CPU, no output and no
+    // timeout, because it is not a lock shuttle can see.
+    //
+    // Skipping collection is sound for what the checker asserts: an
+    // empty entry that lingers holds no records, so it contributes
+    // nothing to `check_invariants` and cannot manufacture a violation.
+    //
+    // FIDELITY NOTE, and it is a real hole: this means the GC path and
+    // the `dead`-entry retry loop in `with_live_entry` are NOT modelled
+    // by shuttle. They stay the stress rig's job.
+    #[cfg(feature = "shuttle-test")]
+    {
+        let _ = (files, ident);
+        return;
+    }
+
+    #[cfg(not(feature = "shuttle-test"))]
     files.remove_if(&ident, |_, e| {
         e.lock()
             .map(|mut g| {
@@ -613,6 +673,18 @@ pub struct DelegationManager {
     /// a pod roll with grants outstanding is the silent-stale
     /// scenario (the model's NoEvidence counterexample).
     evidence: std::sync::OnceLock<Arc<dyn Fn(u64, bool) + Send + Sync>>,
+    /// Called with a delegation stateid the moment its record stops
+    /// existing, by EVERY removal path. The io handler installs a sink
+    /// that drops the file descriptor cached under that stateid.
+    ///
+    /// It needs its own hook because the fd is cached under the
+    /// DELEGATION stateid — a holder serves its READs with it — while
+    /// CLOSE only reaps the OPEN stateid's entry. Nothing else was ever
+    /// going to reap it, and `FdCache` has neither a capacity bound nor
+    /// an LRU, so the server leaked one open fd per delegated file for
+    /// the life of the process. Measured on the §9 tier leg: 40
+    /// delegation stateids granted, 0 ever fd-cache-closed.
+    fd_release: std::sync::OnceLock<Arc<dyn Fn(&StateId) + Send + Sync>>,
     /// Per-client back-channel rearm signals, created on demand by the
     /// ladder that needs one. Absent means nothing is parked for that
     /// client, so a bind fires nothing — which is why an ordinary
@@ -665,6 +737,7 @@ impl DelegationManager {
             breaker_client_trip: env_u64("FLINT_NFS_DELEG_CLIENT_REVOKE_TRIP", 3) as usize,
             sentinel_cache: Mutex::new(None),
             evidence: std::sync::OnceLock::new(),
+            fd_release: std::sync::OnceLock::new(),
             rearm: DashMap::new(),
         }
     }
@@ -684,6 +757,20 @@ impl DelegationManager {
     /// Install the holder-evidence sink (StateManager, once).
     pub fn install_evidence(&self, sink: Arc<dyn Fn(u64, bool) + Send + Sync>) {
         let _ = self.evidence.set(sink);
+    }
+
+    /// Install the cached-fd release sink (io handler, once).
+    pub fn install_fd_release(&self, sink: Arc<dyn Fn(&StateId) + Send + Sync>) {
+        let _ = self.fd_release.set(sink);
+    }
+
+    /// Announce that a delegation stateid is gone. Called from every
+    /// record-removal path, and ALWAYS with no entry lock held: the
+    /// sink reaches into the fd cache, which takes its own map locks.
+    fn release_fd(&self, stateid: &StateId) {
+        if let Some(sink) = self.fd_release.get() {
+            sink(stateid);
+        }
     }
 
     /// The rearm signal for a client, minted on first ask. The ladder
@@ -1446,6 +1533,11 @@ impl DelegationManager {
         };
         let rec = e.records.remove(idx);
         drop(e);
+        // Not via `unindex` — this path removes its own indices — so the
+        // fd release is explicit here too. A revoked tombstone freed by
+        // FREE_STATEID has exactly the same leaked-fd problem as a
+        // returned one.
+        self.release_fd(&rec.stateid);
         self.by_stateid.remove(&rec.stateid.other);
         if let Some(mut v) = self.by_client.get_mut(&rec.client_id) {
             v.retain(|o| o != &rec.stateid.other);
@@ -1490,6 +1582,13 @@ impl DelegationManager {
         self.live_per_client.remove(&client_id);
         self.rearm.remove(&client_id);
         self.note_evidence(client_id);
+        // After the loop, so no entry lock is held while the sink takes
+        // the fd cache's locks. Teardown is the path a lease expiry or
+        // DESTROY_CLIENTID takes, and it would otherwise leak every fd
+        // the departed client's delegations were holding.
+        for sid in &freed {
+            self.release_fd(sid);
+        }
         if !freed.is_empty() {
             info!(
                 "deleg: client {} teardown dropped {} delegation record(s)",
@@ -1652,6 +1751,7 @@ impl DelegationManager {
     }
 
     fn unindex(&self, rec: &DelegRecord) {
+        self.release_fd(&rec.stateid);
         self.by_stateid.remove(&rec.stateid.other);
         if let Some(mut v) = self.by_client.get_mut(&rec.client_id) {
             v.retain(|o| o != &rec.stateid.other);

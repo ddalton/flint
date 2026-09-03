@@ -242,11 +242,34 @@ impl OpenFileView {
         self.fd_cache.find_by_ino(ino, false).map(|e| (e.path, e.file))
     }
 
-    /// Step 10/11's writable-open probe: does any cached fd hold this
-    /// inode writable? (A4: open-hot files are non-evictable. The
-    /// cache reflects live opens; the gate + marker consults are the
-    /// correctness fences — this is eviction POLICY, keeping hot files
-    /// from thrashing evict/hydrate.)
+    /// **NOT the tier's writable-open probe. Do not reach for it as
+    /// one — that is what this comment exists to stop.**
+    ///
+    /// It answers "is there a cached fd for this inode that happens to
+    /// be open for writing", which is not the same question as "does a
+    /// client hold a write open", and the difference is not academic:
+    ///
+    /// - The READ path opens read+write ON PURPOSE (see the fd_cache
+    ///   insert below: "prefer read+write so a later WRITE on this
+    ///   stateid reuses the entry"), so a pure reader leaves a
+    ///   `writable: true` entry behind.
+    /// - CLOSE reaps `fd_cache[open_stateid]`. A client holding a READ
+    ///   delegation serves its READs under the DELEGATION stateid, so
+    ///   that entry is keyed where CLOSE never looks and no
+    ///   DELEGRETURN path looks either.
+    ///
+    /// Used as the eviction probe, those two combine into: any file
+    /// read once under a delegation is non-evictable forever. Measured
+    /// on the §9 tier leg — 1349 of 1349 eviction attempts refused
+    /// `OpenWriters`, 40 delegation stateids granted and 0 of them ever
+    /// fd-cache-closed, watermark evictor starved to a standstill while
+    /// the reporter warned "PVC full in ~9m".
+    ///
+    /// The question the tier means to ask is
+    /// `StateIdManager::file_has_write_open(dev, ino)` — the same
+    /// predicate the delegation grant's rule 5 uses. This one stays for
+    /// the fd-reuse lookups it was built for.
+    #[cfg(test)]
     pub fn has_writable_ino(&self, ino: u64) -> bool {
         self.fd_cache.find_by_ino(ino, true).is_some()
     }
@@ -427,11 +450,37 @@ impl IoOperationHandler {
             nanos ^ rand::random::<u64>()
         };
 
+        let fd_cache = Arc::new(FdCache::new());
+
+        // Reap the fd cached under a delegation stateid when that
+        // delegation goes away — returned, revoked-and-freed, or torn
+        // down with its client.
+        //
+        // A delegation holder serves its READs under the DELEGATION
+        // stateid, so the entry those READs create is keyed there, while
+        // CLOSE reaps only `fd_cache[open_stateid]`. Nothing else looked
+        // at it and `FdCache` has no capacity bound, so every delegated
+        // file leaked an open fd for the life of the process. This crate
+        // has already hit EMFILE at exactly `ulimit -n` once.
+        {
+            let cache = Arc::clone(&fd_cache);
+            state_mgr
+                .delegations
+                .install_fd_release(Arc::new(move |sid: &StateId| {
+                    if let Some(cached) = cache.remove(&sid.other) {
+                        debug!(
+                            "🗑️ FD CACHE DELEG: released fd for {:?} (path: {:?})",
+                            sid, cached.path
+                        );
+                    }
+                }));
+        }
+
         Self {
             state_mgr,
             fh_mgr,
             write_verifier,
-            fd_cache: Arc::new(FdCache::new()),
+            fd_cache,
         }
     }
 
@@ -3452,6 +3501,79 @@ mod tests {
         assert!(
             capture::snapshot(dev, ino).is_none_or(|c| !c.is_dirty()),
             "hydration must not dirty the file"
+        );
+    }
+
+    /// A delegation's cached fd is released when the delegation ends.
+    ///
+    /// The leak this pins was invisible to every existing test because
+    /// it needs three things at once: a delegation, an fd cached under
+    /// the DELEGATION stateid (which is what a holder's READs create,
+    /// since it reads with that stateid), and the observation that CLOSE
+    /// reaps only `fd_cache[open_stateid]`. Nothing reaped this entry,
+    /// and `FdCache` has no capacity bound, so the server held an open
+    /// fd per delegated file until it exited.
+    ///
+    /// The second assertion is the one that matters operationally: the
+    /// stale entry is `writable: true`, because the READ path opens
+    /// read+write on purpose, and while it lingered the tier's eviction
+    /// probe read the file as open-hot and refused to evict it forever.
+    #[test]
+    fn a_returned_delegation_releases_the_fd_cached_under_its_stateid() {
+        use crate::nfs::v4::state::delegation::{with_delegations, FileId};
+        use std::os::unix::fs::MetadataExt;
+
+        let _flag = with_delegations(true);
+        let (handler, fh_mgr, temp) = create_test_handler();
+        let path = temp.path().join("delegated.dat");
+        std::fs::write(&path, b"payload").unwrap();
+        let md = std::fs::metadata(&path).unwrap();
+        let (dev, ino) = (md.dev(), md.ino());
+        let fh = fh_mgr.path_to_filehandle(&path).unwrap().data;
+        const CLIENT: u64 = 11;
+
+        let sid = handler
+            .state_mgr
+            .delegations
+            .try_grant(
+                FileId::new(dev, ino),
+                CLIENT,
+                fh.clone(),
+                path.clone(),
+                || true,
+                || handler.state_mgr.stateids.allocate_delegation(CLIENT, fh.clone()),
+            )
+            .expect("the gate is on and the file is idle, so the grant must land");
+
+        // What a holder's first READ leaves behind: an fd keyed by the
+        // DELEGATION stateid, marked writable because the READ path
+        // prefers read+write for later WRITE reuse.
+        handler.test_seed_fd(
+            sid.other,
+            Arc::new(std::fs::File::open(&path).unwrap()),
+            path.clone(),
+            true,
+        );
+        assert!(
+            handler.fd_cache.find_by_ino(ino, true).is_some(),
+            "precondition: the delegation's fd must be cached, or this test proves nothing"
+        );
+
+        handler
+            .state_mgr
+            .delegations
+            .return_delegation(&sid)
+            .expect("DELEGRETURN of a live delegation must succeed");
+
+        assert!(
+            handler.fd_cache.remove(&sid.other).is_none(),
+            "the fd cached under the delegation stateid outlived the delegation — CLOSE \
+             reaps only the OPEN stateid's entry, so nothing else will ever free this one"
+        );
+        assert!(
+            handler.fd_cache.find_by_ino(ino, true).is_none(),
+            "a stale writable entry still answers the tier's open-hot probe, which is how \
+             one read under a delegation made a file permanently non-evictable"
         );
     }
 
