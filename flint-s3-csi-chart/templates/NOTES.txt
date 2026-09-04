@@ -102,3 +102,24 @@ OTHER nodes, and nothing pins what runs in {{ .Values.workers.namespace }}
 to the two chart images. Acceptable on a cluster older than 1.30 that
 cannot run a ValidatingAdmissionPolicy; a choice everywhere else.
 {{- end }}
+
+IDENTITY MODES. broker, webIdentity and static are the driver's own and
+run unchanged against S3, MinIO or Ceph RGW. ambient hands the worker
+nothing: whatever the SDK's default credential chain finds on the node
+(environment, a shared file, a web-identity token, a container
+credential URI, instance metadata) is the identity, and when it finds
+nothing the FailedMount event carries the chain's own error. The
+platform must let a pod complete that chain — on a cloud instance
+behind an overlay network, the metadata service's hop limit has to
+admit pods — and the driver does not proxy or inject it.
+
+NODE LOSS. A tenant on a node that dies is Kubernetes' to reschedule; a
+Deployment's replacement pod mounts on its new node and the dead node's
+workers go with the node. What Kubernetes does NOT do without a
+cloud-controller-manager is delete the Node object of an instance that
+has vanished. Until someone does, a rolling update of this chart's
+DaemonSet stalls: the controller picks the dead node's pod first, it can
+never finish terminating, and with maxUnavailable 1 no live node is
+updated. `kubectl delete node <name>` is the operator's step on such a
+cluster; the roll then proceeds. Mounts on live nodes keep serving
+throughout — a plugin roll does not unmount tenants.

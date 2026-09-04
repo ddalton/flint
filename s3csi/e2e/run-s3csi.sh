@@ -181,7 +181,10 @@ broker_issued() {
     $K -n $SYS delete pod "$p" --wait=false >/dev/null 2>&1
 }
 # The FailedMount event text for a pod (kubelet's, carrying our message).
-mount_events() { $K -n $NS get events --field-selector involvedObject.name="$1" -o jsonpath='{range .items[*]}{.reason}: {.message}{"\n"}{end}' 2>/dev/null; }
+# Keyed on the pod's UID while it exists: events live an hour and are
+# looked up by name, so a re-created pod's first query returns its
+# predecessor's verdicts (a one-off judged a stale event at 0 s).
+mount_events() { local u; u=$($K -n $NS get pod "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null); $K -n $NS get events --field-selector involvedObject.name="$1"${u:+,involvedObject.uid=$u} -o jsonpath='{range .items[*]}{.reason}: {.message}{"\n"}{end}' 2>/dev/null; }
 # The fixtures name the MinIO rig's endpoint, bucket and region; STORE=s3
 # rewrites them at apply time. On the kind rig every substitution is the
 # identity, so the fixtures stay readable as written.

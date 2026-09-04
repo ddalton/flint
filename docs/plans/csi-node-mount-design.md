@@ -602,6 +602,73 @@ migration fence), 7 (lost acquire response skips rotation), 8 (the
 gated pair), 11 (`recover-staged` under CSI), and the model probe that
 deposes a writer BETWEEN chunks (`EpochCheck` is still a constant).
 
+**Passthrough on real nodes (2026-09-04).** Fourteen legs the kind rig
+cannot reach (`s3csi/e2e/aws-passthrough.sh`, P1–P14), on an all-spot
+EC2 cluster (control plane + two m6i.large workers, us-west-1) running
+the released 1.45.0 images against three real buckets — plain, SSE-KMS
+by bucket default, and one in us-east-1: throughput (512 MiB
+byte-identical; 170 MiB/s write, 256 MiB/s read), a 5000-object prefix,
+sixteen tenants on one node each with its own worker (all reclaimed in
+5 s), a tenant container restart, a kubelet restart mid-read, a real
+node reboot (the tenant back mounted with a fresh worker, no orphan),
+node LOSS under a Deployment tenant (instance terminated; the
+replacement pod Running on the survivor 471 s later and reading), a
+thirty-minute rotation soak (360 reads, zero errors, 69 keys issued
+under it), ambient identity, SSE-KMS, cross-region (245 ms a read), a
+VPC gateway endpoint, an S3 partition, and a broker roll mid-read. First
+pass 50 ok / 2 bad; both bads were the drill's own, and the corrected
+legs pass on the same cluster (P13 5/0, P9 4/0). What it found and what
+it settled:
+
+- *A mounter that died before serving lost its last words.* `wait_ready`
+  sees the dead FUSE endpoint the instant the fd closes and the publish
+  read `mount.error` before the worker's supervisor had written it, so
+  the tenant's event said "mounter died before serving the mount
+  (statfs: ENOTCONN)" and nothing else while the file held "No signing
+  credentials available". `wait_for_mount_error` waits up to 3 s for
+  the file and the event now ends with the mounter's own error chain
+  (verified on the node: the same failing mount, fixed plugin).
+- *Ambient is generic by delegation, and underspecified.* Nothing in
+  the plugin, broker or worker names a cloud. `broker`, `webIdentity`
+  and `static` are flint's own and run against MinIO or Ceph unchanged
+  (the kind rig is MinIO, the EC2 run is S3, same legs); `ambient`
+  hands the worker nothing and the SDK's default chain runs —
+  environment, shared file, web-identity token, container credential
+  URI, instance metadata. Whether that chain can complete is the
+  platform's business: on-premise a file or the environment; on EC2
+  without IRSA the metadata service, and under an overlay CNI its hop
+  limit must admit pods (trove's 2 let the GETs through but not the
+  token PUT's response; 3 did). No metadata proxy or token injector
+  goes into the plugin — that would be exactly the provider-specific
+  code the modes avoid; the product surfaces whatever the chain said.
+  P9 therefore GATES on the platform: a pod on the node with nothing
+  injected must obtain an identity from the chain, else the leg is
+  recorded skipped with the chain's own words rather than judged.
+  Lean's ambient arm (an unset `credentialsSecretRef`) is generic for
+  the same reason and has run on neither substrate.
+- *Node loss is Kubernetes' and the chart now says so.* Without a
+  cloud-controller-manager (trove has none) nothing deletes the Node
+  object of an instance that vanished; until someone does, a rolling
+  update of the DaemonSet stalls on the dead node's pod, which can
+  never finish terminating, and with `maxUnavailable: 1` no live node
+  is updated. Mounts on live nodes keep serving throughout.
+- *The plugin is becoming a small supervisor.* Relaunch on `Failed`,
+  a re-sent launch, refusal by exit code: each is tested, and together
+  they are a restart policy expressed in the plugin. If this keeps
+  growing, the honest next step is the opposite direction — let the
+  worker pod's own restart policy carry the contract and have the
+  plugin do less. Noted as the direction, not built.
+- *Drill craft, again.* Events are looked up by pod NAME and live an
+  hour, so a re-created pod's first query returned its predecessor's
+  verdict and a one-off judged a stale event at 0 s (`mount_events` is
+  keyed on the pod's UID while it exists); a probe the namespace's
+  PodSecurity refused read as "the platform said nothing" until the
+  probe's non-creation became its own failed precondition; a seed piped
+  through `kubectl exec` without `-i` wrote a zero-byte object and the
+  mount was blamed for reading exactly that; iptables OUTPUT rules cut
+  nothing under Cilium's tunnel (pod traffic is forwarded, not
+  host-originated), so the partition is blackhole routes.
+
 ## 1. The question, restated precisely
 
 The ask, verbatim: *"The flint passthrough and lean operators require

@@ -540,7 +540,16 @@ impl S3Node {
             Err(e) => return Err(self.fail(dir, &st,Status::internal(format!("launch task: {e}"))).await),
         }
         if let Err(e) = fuse::wait_ready(&src, FUSE_READY_WAIT).await {
-            let detail = std::fs::read_to_string(comm.join("mount.error")).unwrap_or_default();
+            // The mounter's last words. A dead mounter is seen HERE the
+            // instant its FUSE fd closes (statfs answers ENOTCONN), and
+            // the supervisor writes mount.error only after it has reaped
+            // the child and flushed the stderr tail — so an immediate
+            // read races it and loses. On a real node an ambient mount
+            // whose credential chain failed reported "mounter died
+            // before serving the mount (statfs: ENOTCONN)" and nothing
+            // else, while mount.error held "No signing credentials
+            // available" (EC2, 2026-09-04). Wait briefly for the file.
+            let detail = wait_for_mount_error(&comm, Duration::from_secs(3)).await;
             return Err(self.fail(dir, &st,Status::unavailable(format!("mounter did not serve the mount: {e}{}", if detail.is_empty() { String::new() } else { format!(" — {}", detail.trim()) }))).await);
         }
         if let Err(e) = fuse::bind_mount(&src, target, read_only) {
@@ -1407,6 +1416,24 @@ impl S3Node {
 /// directory removal failed on the busy mount, and every kubelet retry
 /// found no state and did nothing. `is_mountpoint` reports a dead mount
 /// as a mount and a missing path as not one, which is the whole answer.
+/// The worker's `mount.error`, polled for up to `budget` because the
+/// supervisor writes it AFTER the death the caller has already observed.
+async fn wait_for_mount_error(comm: &Path, budget: Duration) -> String {
+    let path = comm.join("mount.error");
+    let start = std::time::Instant::now();
+    loop {
+        if let Ok(s) = std::fs::read_to_string(&path) {
+            if !s.trim().is_empty() {
+                return s;
+            }
+        }
+        if start.elapsed() > budget {
+            return String::new();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn unmount_all(path: &Path) -> std::io::Result<()> {
     for _ in 0..8 {
         if !fuse::is_mountpoint(path).unwrap_or(false) {

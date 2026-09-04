@@ -12,6 +12,35 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added
+
+- **`s3.csi.chert.us`: the passthrough suite on real nodes**
+  (`s3csi/e2e/aws-passthrough.sh`, fourteen legs). On an all-spot EC2
+  cluster against three real buckets (plain, SSE-KMS by bucket default,
+  cross-region): throughput, a 5000-object prefix, sixteen tenants on
+  one node, a container restart, a kubelet restart mid-read, a real node
+  reboot, node loss under a Deployment tenant, a thirty-minute rotation
+  soak, ambient identity, SSE-KMS, cross-region, a VPC gateway endpoint,
+  an S3 partition, and a broker roll mid-read. Ambient identity is gated
+  on the platform rather than judged: a pod on the node with nothing
+  injected must obtain an identity from the default credential chain,
+  otherwise the leg is recorded as skipped with the chain's own words.
+  The chart's notes now say what a lost node does to a DaemonSet roll
+  on a cluster without a cloud controller, and that the driver neither
+  proxies nor injects a platform's metadata credentials.
+
+### Fixed
+
+- **A mounter that died before serving lost its last words.** The node
+  plugin sees a dead FUSE endpoint the instant its descriptor closes and
+  read the worker's `mount.error` before the supervisor had written it,
+  so the tenant's FailedMount event said only "mounter died before
+  serving the mount" while the file held the credential chain's own
+  verdict. The plugin now waits up to three seconds for the file and
+  the event carries it. Found on EC2 with an ambient mount whose
+  platform could not complete the chain.
+
+
 ## [1.45.0] - 2026-09-04
 
 The passthrough and lean sidecar-injection webhooks are gone. Both
