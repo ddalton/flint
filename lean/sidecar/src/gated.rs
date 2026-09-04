@@ -1062,7 +1062,9 @@ impl Sidecar {
             }
             let current = manifest::load(self.store.as_ref(), &self.cfg).await?;
             let (theirs, expected) = match &current {
-                Some(l) => (l.manifest.clone(), Some(l.etag.clone())),
+                // The handle carries the layout as well as the tag —
+                // see the fused barrier's copy of this.
+                Some(l) => (l.manifest.clone(), Some(l.handle())),
                 None => (Default::default(), None),
             };
             // Same rule as the fused barrier: if the bucket is still at
@@ -1072,7 +1074,9 @@ impl Sidecar {
             // would otherwise read its own boundary as foreign.
             let own_base;
             let base: &BTreeMap<String, String> =
-                if prev_installed.is_some() && prev_installed == expected {
+                if prev_installed.is_some()
+                    && prev_installed.as_deref() == expected.as_ref().map(|h| h.etag.as_str())
+                {
                     own_base = theirs
                         .entries
                         .iter()
@@ -1125,7 +1129,7 @@ impl Sidecar {
                 self.store.as_ref(),
                 &self.cfg,
                 &merged,
-                expected.as_deref(),
+                expected.as_ref(),
                 epoch,
                 &flush_uuid,
                 Some(source.as_str()),
@@ -1482,7 +1486,7 @@ impl Sidecar {
         let mut fresh = loaded;
         for attempt in 0..4u32 {
             let (mut m, expected) = match &fresh {
-                Some(l) => (l.manifest.clone(), Some(l.etag.clone())),
+                Some(l) => (l.manifest.clone(), Some(l.handle())),
                 None => (manifest::LeanManifest::default(), None),
             };
             for (p, e) in &upserts {
@@ -1494,7 +1498,7 @@ impl Sidecar {
                 self.store.as_ref(),
                 &self.cfg,
                 &m,
-                expected.as_deref(),
+                expected.as_ref(),
                 epoch,
                 &flush_uuid,
                 Some(CitationSource::Recovered.as_str()),

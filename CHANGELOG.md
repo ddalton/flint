@@ -59,6 +59,56 @@ machine identifier moved off `flint.io` to `chert.us`.
   leg proves the control socket is a socket in the tenant's own view of
   the tree, on the SAME inode the worker bound, and that
   `flint-sync ctl status` and `flint-sync status` answer in the worker.
+- **The lean manifest is an immutable generation plus a small mutable
+  pointer.** `<prefix>/.flint/lean/manifest` was ONE object holding every
+  entry, read whole and rewritten whole under `If-Match` — ~264 MiB at 1M
+  entries, where an idle barrier tick once cost 27 s and 1.3 GiB. The
+  cost of everything scaled with the size of the project rather than with
+  what changed. Entries now live in write-once
+  `.flint/lean/manifests/<seq>-<flush-uuid>` objects, and
+  `.flint/lean/current` — a few hundred bytes naming the live one — is
+  the only mutable metadata object and the only thing a publish CASes.
+
+  The immediate win is the takeover. `rotate_for_takeover` existed to
+  invalidate a straggler's outstanding handle, and did it by rewriting
+  the whole document: a multi-MB GET and PUT per claim, which also moved
+  the ETag every other syncer's no-change early exit compares against, so
+  one claim cost every follower a full fetch and parse of a document in
+  which nothing had changed. It is now one small CAS — asserted at **at
+  most three requests total**, with the entries object's ETag unchanged
+  across it. `seq` moves so a stale handle is still stale; `entries_seq`
+  does not, which is what will let a cross-cluster follower skip the
+  fetch entirely.
+
+  Worth knowing about the mechanism, because it is not what it looks
+  like: the manifest CAS is `If-Match` on the object's **ETag**, and
+  nothing on the write path ever compared epochs — `cas_write_stamped`
+  only *stamps* one. So the `seq` bump was never the fence. It existed
+  because a PUT of identical bytes reproduces the same MD5 ETag, the same
+  reason the epoch cell carries a salt. Moving `seq` elsewhere and
+  leaving the manifest alone would have silently removed the protection
+  rather than made it cheap.
+
+  Migration is fail-closed, and deliberately does not delete the legacy
+  key: `manifest::load` maps a missing object to `Ok(None)`, `None` means
+  *first write*, and a barrier answers that with `If-None-Match: *` — so
+  an old `flint-sync` pointed at a migrated workspace whose legacy key
+  had simply been removed would conclude the project is empty and re-seed
+  over it. The key is instead overwritten with a document that cannot
+  parse as a manifest, so an old binary refuses. A pointer naming a
+  missing generation is likewise an error, never an empty workspace.
+
+  Superseded generations are reaped, and the reaper is not symmetric:
+  below the live pointer everything is superseded and a window of five is
+  kept so a reader mid-resolve is never yanked; above it, an object may
+  be a publish still in flight, so age decides (one hour) and an object
+  the store cannot date is left alone — a leak beats deleting a live
+  publish. That also collects the orphan a crash between the entries PUT
+  and the pointer CAS leaves behind.
+
+  Design of record: `docs/plans/flint-lean-manifest-pointer-design.md`.
+  Chunked entries — a publish costing O(changed) rather than O(entries) —
+  build on this and land separately, so each can be attributed.
 - **A lean workspace's `sizeLimitGib` is now enforced by a filesystem —
   before this it was enforced by nothing.** Under the webhook delivery
   the workspace tree was an `emptyDir`, so kubelet's own accounting

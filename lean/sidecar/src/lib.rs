@@ -266,8 +266,32 @@ impl LeanConfig {
     pub fn file_key(&self, path: &str) -> String {
         format!("{}/files/{}", self.prefix, path)
     }
+    /// The LEGACY single-object manifest key. Still read (a workspace
+    /// written before the pointer layout has one) and, once migrated,
+    /// overwritten with a document that cannot parse as a manifest —
+    /// see `manifest::REFUSAL_DOC` for why deleting it would be a
+    /// data-loss shape rather than a tidy-up.
     pub fn manifest_key(&self) -> String {
         format!("{}/{}/manifest", self.prefix, LEAN_DIR)
+    }
+    /// The pointer: the ONLY mutable metadata object. Small, CAS'd on
+    /// every citation and on every takeover rotation.
+    pub fn current_key(&self) -> String {
+        format!("{}/{}/current", self.prefix, LEAN_DIR)
+    }
+    /// One immutable generation of the entries.
+    ///
+    /// Zero-padded seq FIRST, so a plain lexical listing is also
+    /// chronological — what the reaper and a human with `mc ls` both
+    /// want — and the writer's flush uuid after it, so the key is
+    /// unique per WRITE rather than per generation. Two writers that
+    /// reach the same seq therefore write two different objects and
+    /// race only at the pointer, which is the one place a race should
+    /// be decided; and a path that legitimately rewrites without
+    /// bumping (the gated lane's version-id backfill) is not refused by
+    /// a write-once key it never meant to collide with.
+    pub fn generation_key(&self, seq: u64, flush_uuid: &str) -> String {
+        format!("{}/{}/manifests/{seq:020}-{flush_uuid}", self.prefix, LEAN_DIR)
     }
     pub fn inbox_key(&self) -> String {
         format!("{}/{}/inbox", self.prefix, LEAN_DIR)

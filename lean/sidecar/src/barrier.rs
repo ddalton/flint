@@ -452,23 +452,32 @@ impl Sidecar {
             && classified.first_absence.is_empty()
             && !repairs_pending
         {
-            // HEAD, never GET: the 0b rig measured the idle tick at 1M
-            // entries as 27 s / 1.3 GiB — dominated by fetching and
-            // parsing a 264 MiB manifest just to read `seq`. The
-            // document ETag against the persisted one answers the same
-            // question for the price of one HEAD.
-            let unchanged = match self.store.head(&self.cfg.manifest_key()).await {
-                Ok(meta) => {
-                    // The HEAD's `flint-gen` stamp IS the remote seq
-                    // (`cas_write` stamps generation = m.seq), so the
-                    // news ticker rides this request for free — D5's
-                    // "zero added bucket requests" is literal.
-                    report.observed_seq = GenerationStamps::from_meta(&meta.meta).map(|s| s.generation);
-                    report.observed_etag = Some(meta.etag.clone());
-                    baseline.manifest_etag.as_deref() == Some(meta.etag.as_str())
+            // Read the POINTER, never the entries: the 0b rig measured
+            // the idle tick at 1M entries as 27 s / 1.3 GiB — dominated
+            // by fetching and parsing a 264 MiB document just to read
+            // `seq`. The pointer is a few hundred bytes and carries the
+            // seq in its body, so a GET of it costs one round trip and
+            // answers strictly more than a HEAD of the old object did.
+            //
+            // Legacy workspaces (no pointer yet) keep the HEAD they had.
+            let unchanged = match manifest::load_pointer(self.store.as_ref(), &self.cfg).await? {
+                Some(manifest::LoadedPointer { pointer: p, etag, .. }) => {
+                    // The news ticker rides this request for free — D5's
+                    // "zero added bucket requests" is still literal.
+                    report.observed_seq = Some(p.seq);
+                    report.observed_etag = Some(etag.clone());
+                    baseline.manifest_etag.as_deref() == Some(etag.as_str())
                 }
-                Err(StoreError::NotFound(_)) => baseline.manifest_etag.is_none(),
-                Err(e) => return Err(e.into()),
+                None => match self.store.head(&self.cfg.manifest_key()).await {
+                    Ok(meta) => {
+                        report.observed_seq =
+                            GenerationStamps::from_meta(&meta.meta).map(|s| s.generation);
+                        report.observed_etag = Some(meta.etag.clone());
+                        baseline.manifest_etag.as_deref() == Some(meta.etag.as_str())
+                    }
+                    Err(StoreError::NotFound(_)) => baseline.manifest_etag.is_none(),
+                    Err(e) => return Err(e.into()),
+                },
             };
             if unchanged {
                 report.no_change = true;
@@ -676,7 +685,10 @@ impl Sidecar {
             }
             let current = manifest::load(self.store.as_ref(), &self.cfg).await?;
             let (theirs, expected) = match &current {
-                Some(l) => (l.manifest.clone(), Some(l.etag.clone())),
+                // The handle carries the LAYOUT as well as the tag: a
+                // workspace still on the legacy single object CASes a
+                // pointer that must not exist yet, not one it read.
+                Some(l) => (l.manifest.clone(), Some(l.handle())),
                 None => (Default::default(), None),
             };
             // If the bucket is still at the document THIS workspace
@@ -687,7 +699,9 @@ impl Sidecar {
             // somebody else's change. See `IntentJournal::installed_etag`.
             let own_base;
             let base: &BTreeMap<String, String> =
-                if prev_installed.is_some() && prev_installed == expected {
+                if prev_installed.is_some()
+                    && prev_installed.as_deref() == expected.as_ref().map(|h| h.etag.as_str())
+                {
                     own_base = theirs
                         .entries
                         .iter()
@@ -703,7 +717,7 @@ impl Sidecar {
                 self.store.as_ref(),
                 &self.cfg,
                 &merged,
-                expected.as_deref(),
+                expected.as_ref(),
                 epoch,
                 &flush_uuid,
                 Some(source),
@@ -795,6 +809,17 @@ impl Sidecar {
             })
             .collect();
         inbox::clear_window(self.store.as_ref(), &self.cfg, epoch, &queue).await?;
+        // Reap superseded generations. Immutable metadata that is never
+        // collected is a leak that grows by a whole manifest per
+        // publish, and this also collects the orphan a crash between the
+        // entries PUT and the pointer CAS leaves behind. Best effort by
+        // design: a publish that succeeded is not un-done by a failure
+        // to tidy up after it.
+        match manifest::sweep_generations(self.store.as_ref(), &self.cfg).await {
+            Ok(0) => {}
+            Ok(n) => eprintln!("flint-sync: reaped {n} superseded manifest generation(s)"),
+            Err(e) => eprintln!("flint-sync: generation sweep: {e}"),
+        }
         Ok(report)
     }
 

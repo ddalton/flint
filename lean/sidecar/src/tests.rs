@@ -458,7 +458,7 @@ async fn local_delete_loses_to_foreign_modify() {
     let mut theirs = loaded.manifest.clone();
     theirs.seq += 1;
     theirs.entries.get_mut("shared.txt").unwrap().etag = newmeta.etag.clone();
-    manifest::cas_write(store.as_ref(), &sc.cfg, &theirs, Some(&loaded.etag), 0, "other-writer")
+    manifest::cas_write(store.as_ref(), &sc.cfg, &theirs, Some(&loaded.handle()), 0, "other-writer")
         .await
         .unwrap();
 
@@ -818,7 +818,7 @@ async fn sync_scan_first_dirty_wins_clean_applies() {
     let mut theirs = loaded.manifest.clone();
     theirs.seq += 1;
     theirs.entries.remove("mine.txt");
-    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.etag), 0, "remote-delete")
+    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.handle()), 0, "remote-delete")
         .await
         .unwrap();
 
@@ -939,7 +939,7 @@ async fn legacy_flint_citation_survives_upgrade() {
         },
     );
     let installed =
-        manifest::cas_write(store.as_ref(), &a.cfg, &m, Some(&loaded.etag), 0, "legacy")
+        manifest::cas_write(store.as_ref(), &a.cfg, &m, Some(&loaded.handle()), 0, "legacy")
             .await
             .unwrap();
     let mut b = a.state.load_baseline().unwrap();
@@ -1023,7 +1023,7 @@ async fn checkout_never_materializes_control_citation() {
             version_id: meta.version_id.clone(),
         },
     );
-    manifest::cas_write(store.as_ref(), &a.cfg, &m, Some(&loaded.etag), 0, "legacy")
+    manifest::cas_write(store.as_ref(), &a.cfg, &m, Some(&loaded.handle()), 0, "legacy")
         .await
         .unwrap();
 
@@ -1690,7 +1690,7 @@ async fn scoped_sync_preserves_out_of_scope_foreign_flow() {
         e.size = meta.size;
         e.generation = 2;
     }
-    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.etag), 0, "sibling")
+    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.handle()), 0, "sibling")
         .await
         .unwrap();
     let foreign_out_etag = theirs.entries["outputs/result.txt"].etag.clone();
@@ -1862,7 +1862,7 @@ async fn remote_seq_ticks_without_added_requests() {
     let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
     let mut theirs = loaded.manifest.clone();
     theirs.seq += 1;
-    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.etag), 0, "foreign")
+    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.handle()), 0, "foreign")
         .await
         .unwrap();
 
@@ -1904,7 +1904,7 @@ async fn sync_request_is_carried_never_executed() {
     let mut theirs = loaded.manifest.clone();
     theirs.seq += 1;
     theirs.entries.remove("keep.txt");
-    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.etag), 0, "remote-delete")
+    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.handle()), 0, "remote-delete")
         .await
         .unwrap();
 
@@ -2666,10 +2666,10 @@ async fn quiescence_fires_and_is_not_the_lag_cap() {
     );
     let r = a.citation_pass(source.unwrap()).await.unwrap();
     assert_eq!(r.source.as_deref(), Some("quiescence"));
-    // And the source is readable FROM THE BUCKET alone, by HEAD.
-    let head = store.head(&a.cfg.manifest_key()).await.unwrap();
-    let stamps = GenerationStamps::from_meta(&head.meta).unwrap();
-    assert_eq!(stamps.boundary_source.as_deref(), Some("quiescence"));
+    // And the source is readable FROM THE BUCKET alone, without
+    // fetching a single entry — the pointer carries it.
+    let lp = manifest::load_pointer(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    assert_eq!(lp.pointer.boundary_source.as_deref(), Some("quiescence"));
 }
 
 /// §2.4.1 — the lag cap forces a citation even mid-change, and stamps
@@ -2701,11 +2701,11 @@ async fn lag_cap_forces_citation_and_stamps_the_source() {
     assert_eq!(source, Some(CitationSource::ForcedLagCap));
     let r = a.citation_pass(source.unwrap()).await.unwrap();
     assert_eq!(r.source.as_deref(), Some("forced-lag-cap"));
-    let head = store.head(&a.cfg.manifest_key()).await.unwrap();
+    let lp = manifest::load_pointer(store.as_ref(), &a.cfg).await.unwrap().unwrap();
     assert_eq!(
-        GenerationStamps::from_meta(&head.meta).unwrap().boundary_source.as_deref(),
+        lp.pointer.boundary_source.as_deref(),
         Some("forced-lag-cap"),
-        "the forced source is not readable from the bucket manifest meta alone"
+        "the forced source is not readable from the bucket pointer alone"
     );
 }
 
@@ -4271,7 +4271,7 @@ async fn a_pinned_manifest_never_adopts_current_for_a_legacy_entry() {
     let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
     let mut m = loaded.manifest.clone();
     m.entries.get_mut("legacy.txt").unwrap().version_id = None;
-    manifest::cas_write(store.as_ref(), &a.cfg, &m, Some(&loaded.etag), 1, "legacy-writer")
+    manifest::cas_write(store.as_ref(), &a.cfg, &m, Some(&loaded.handle()), 1, "legacy-writer")
         .await
         .unwrap();
 
@@ -4329,7 +4329,7 @@ async fn an_unresolvable_legacy_citation_refuses_rather_than_adopts() {
     let mut m = loaded.manifest.clone();
     let v1 = m.entries["legacy.txt"].version_id.clone().unwrap();
     m.entries.get_mut("legacy.txt").unwrap().version_id = None;
-    manifest::cas_write(store.as_ref(), &a.cfg, &m, Some(&loaded.etag), 1, "legacy-writer")
+    manifest::cas_write(store.as_ref(), &a.cfg, &m, Some(&loaded.handle()), 1, "legacy-writer")
         .await
         .unwrap();
 
@@ -4805,7 +4805,7 @@ async fn a_gateway_sync_request_is_carried_and_never_executed() {
     let mut m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
     m.manifest.entries.remove("keep.txt");
     m.manifest.seq += 1;
-    manifest::cas_write(store.as_ref(), &a.cfg, &m.manifest, Some(&m.etag), 9, "foreign")
+    manifest::cas_write(store.as_ref(), &a.cfg, &m.manifest, Some(&m.handle()), 9, "foreign")
         .await
         .unwrap();
 
@@ -5194,7 +5194,7 @@ async fn the_gateway_never_tells_a_reader_to_retry_a_citation_that_cannot_come_b
     let mut m = loaded.manifest.clone();
     m.entries.get_mut("spec.md").unwrap().version_id = None;
     assert!(m.pinned_reads, "the fixture stopped being a pinned boundary");
-    manifest::cas_write(store.as_ref(), &sc.cfg, &m, Some(&loaded.etag), 1, "test-strip")
+    manifest::cas_write(store.as_ref(), &sc.cfg, &m, Some(&loaded.handle()), 1, "test-strip")
         .await
         .unwrap();
 
@@ -5577,7 +5577,7 @@ async fn sync_refuses_to_clobber_a_locally_dirty_path_and_says_so() {
         e.size = meta.size;
         e.generation = 2;
     }
-    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.etag), 0, "sibling")
+    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.handle()), 0, "sibling")
         .await
         .unwrap();
 
@@ -5751,7 +5751,7 @@ async fn a_resumed_checkout_adopts_identical_bytes_and_refetches_same_size_impos
     e.crc64_b64 = meta.crc64_b64.clone();
     e.size = meta.size;
     e.generation = 2;
-    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.etag), 0, "sibling")
+    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.handle()), 0, "sibling")
         .await
         .unwrap();
 
@@ -5847,7 +5847,7 @@ async fn sync_under_pinned_reads_resolves_the_cited_version_not_the_current_one(
         e.generation = 2;
         e.version_id = v2.version_id.clone();
     }
-    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.etag), 0, "sibling")
+    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.handle()), 0, "sibling")
         .await
         .unwrap();
 
@@ -6005,7 +6005,7 @@ async fn a_takeover_rotation_carries_the_boundary_stamp_with_the_document() {
         store.as_ref(),
         &sc.cfg,
         &loaded.manifest,
-        Some(&loaded.etag),
+        Some(&loaded.handle()),
         1,
         "u-cited",
         Some("sentinel"),
@@ -6013,28 +6013,364 @@ async fn a_takeover_rotation_carries_the_boundary_stamp_with_the_document() {
     .await
     .unwrap();
 
-    let head = store.head(&sc.cfg.manifest_key()).await.unwrap();
+    // The citation's clock lives on the POINTER now — one small object
+    // that a reader gets in full, instead of an object stamp that had to
+    // be kept in sync with a document nobody wanted to download.
+    let lp = manifest::load_pointer(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
     assert_eq!(
-        GenerationStamps::from_meta(&head.meta).unwrap().boundary_source.as_deref(),
+        lp.pointer.boundary_source.as_deref(),
         Some("sentinel"),
-        "precondition: the cited manifest names its clock on the object"
+        "precondition: the cited manifest names its clock on the pointer"
     );
 
     // Now the successor rotates the fence.
     manifest::rotate_for_takeover(store.as_ref(), &sc.cfg, 2).await.unwrap().unwrap();
 
-    let head = store.head(&sc.cfg.manifest_key()).await.unwrap();
-    let stamped = GenerationStamps::from_meta(&head.meta).unwrap();
+    let lp = manifest::load_pointer(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
     let doc = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
     assert_eq!(
-        stamped.boundary_source.as_deref(),
+        lp.pointer.boundary_source.as_deref(),
         Some("sentinel"),
-        "rotation must not drop the boundary stamp: a HEAD reader would report an \
+        "rotation must not drop the boundary stamp: a pointer reader would report an \
          unknown clock for a workspace whose document still says `sentinel`"
     );
     assert_eq!(
-        stamped.boundary_source, doc.manifest.boundary_source,
-        "a reader that GETs and a reader that HEADs must never disagree"
+        lp.pointer.boundary_source, doc.manifest.boundary_source,
+        "the pointer and the document a reader assembles from it must never disagree"
     );
-    assert_eq!(stamped.generation, doc.manifest.seq, "the stamped generation IS the seq");
+    assert_eq!(lp.pointer.seq, doc.manifest.seq, "the pointer's seq IS the document's seq");
+}
+
+
+/// A minimal entry for tests that care about the manifest's SHAPE
+/// rather than any file's content.
+fn entry(name: &str) -> manifest::LeanEntry {
+    manifest::LeanEntry {
+        key: format!("{PREFIX}/files/{name}"),
+        etag: "e".into(),
+        crc64_b64: None,
+        size: 1,
+        mode: 0o100644,
+        mtime_unix: 0,
+        generation: 1,
+        epoch: 1,
+        version_id: None,
+    }
+}
+
+// ── the manifest pointer layout ─────────────────────────────────────
+// Design of record: docs/plans/flint-lean-manifest-pointer-design.md.
+
+/// Everything a writer publishes lands in TWO objects, and the entries
+/// object is immutable — which is what lets a rotation be a small write.
+#[tokio::test]
+async fn a_publish_writes_an_immutable_generation_and_a_pointer_that_names_it() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_for(dir.path());
+    let mut m = manifest::LeanManifest::default();
+    m.seq = 1;
+    m.entries.insert("a.txt".into(), entry("x"));
+    manifest::cas_write(store.as_ref(), &cfg, &m, None, 3, "first").await.unwrap();
+
+    let lp = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap();
+    assert_eq!(lp.pointer.seq, 1);
+    assert_eq!(lp.pointer.entries_seq, 1);
+    assert_eq!(lp.pointer.entries_key, lp.pointer.entries_key.clone());
+    // The generation object exists and the pointer names it.
+    assert!(store.head(&lp.pointer.entries_key.clone()).await.is_ok());
+    // The legacy key is NOT written by a fresh workspace.
+    assert!(store.head(&cfg.manifest_key()).await.is_err());
+
+    let loaded = manifest::load(store.as_ref(), &cfg).await.unwrap().unwrap();
+    assert_eq!(loaded.manifest.seq, 1);
+    assert!(loaded.manifest.entries.contains_key("a.txt"));
+    assert!(!loaded.handle().legacy);
+}
+
+/// The point of the whole layout: a takeover rewrites a few hundred
+/// bytes, not the project. If this ever regresses, a claim on a 1M-entry
+/// workspace goes back to a multi-MB GET + PUT.
+#[tokio::test]
+async fn a_takeover_rotation_does_not_touch_the_entries_object() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_for(dir.path());
+    let mut m = manifest::LeanManifest::default();
+    m.seq = 4;
+    for i in 0..50 {
+        m.entries.insert(format!("f{i:03}.txt"), entry("x"));
+    }
+    manifest::cas_write(store.as_ref(), &cfg, &m, None, 1, "seed").await.unwrap();
+    let gen4 = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap().pointer.entries_key;
+    let before = store.head(&gen4).await.unwrap();
+
+    let (rotated, _) = manifest::rotate_for_takeover(store.as_ref(), &cfg, 2).await.unwrap().unwrap();
+    assert_eq!(rotated.seq, 5, "rotation must bump the generation");
+
+    let after = store.head(&gen4).await.unwrap();
+    assert_eq!(before.etag, after.etag, "the entries object was rewritten by a rotation");
+    let lp = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap();
+    assert_eq!(lp.pointer.seq, 5);
+    assert_eq!(lp.pointer.entries_seq, 4, "entries_seq must NOT move — a follower reads it to skip the GET");
+    assert_eq!(lp.pointer.entries_key, gen4);
+    // And the document still has every entry: rotation bumps, it does
+    // not truncate.
+    let loaded = manifest::load(store.as_ref(), &cfg).await.unwrap().unwrap();
+    assert_eq!(loaded.manifest.entries.len(), 50);
+    assert_eq!(loaded.manifest.seq, 5, "the POINTER is the authority for seq, not the entries object");
+}
+
+/// A workspace written by an older binary migrates on its first write,
+/// and the legacy key is left UNPARSEABLE rather than deleted.
+#[tokio::test]
+async fn migration_installs_the_pointer_and_poisons_the_legacy_key() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_for(dir.path());
+
+    // Hand-write the legacy layout, as an old flint-sync would.
+    let mut old = manifest::LeanManifest::default();
+    old.seq = 7;
+    old.entries.insert("kept.txt".into(), entry("x"));
+    let bytes = old.to_bytes();
+    let crc = flint_store::crc64_nvme(&bytes);
+    let stamps = flint_store::GenerationStamps {
+        generation: 7,
+        epoch: 1,
+        flush_uuid: "legacy".into(),
+        boundary_source: None,
+        posix: None,
+    };
+    store
+        .put_whole(&cfg.manifest_key(), bytes.into(), &PutCondition::IfNoneMatchAny, &stamps, crc)
+        .await
+        .unwrap();
+
+    // A new binary reads it as legacy.
+    let loaded = manifest::load(store.as_ref(), &cfg).await.unwrap().unwrap();
+    assert!(loaded.handle().legacy, "an un-migrated workspace must be recognised as legacy");
+    assert_eq!(loaded.manifest.seq, 7);
+
+    // Its first write migrates.
+    let mut next = loaded.manifest.clone();
+    next.seq += 1;
+    next.entries.insert("added.txt".into(), entry("x"));
+    manifest::cas_write(store.as_ref(), &cfg, &next, Some(&loaded.handle()), 2, "migrate")
+        .await
+        .unwrap();
+
+    let after = manifest::load(store.as_ref(), &cfg).await.unwrap().unwrap();
+    assert!(!after.handle().legacy);
+    assert_eq!(after.manifest.entries.len(), 2, "migration must not lose entries");
+
+    // THE HAZARD. The legacy key must still EXIST — deleting it would
+    // read as `Ok(None)` to an old binary, which means "first write",
+    // which a barrier answers with IfNoneMatchAny: it would re-seed over
+    // a live project. It exists and it cannot parse, so an old binary
+    // gets LeanError::State and refuses.
+    let (_, poisoned) = store.get_whole(&cfg.manifest_key(), None).await.unwrap();
+    assert!(
+        manifest::LeanManifest::parse(&poisoned).is_err(),
+        "the legacy key still parses as a manifest — an old syncer would serve a stale project from it"
+    );
+    assert!(String::from_utf8_lossy(&poisoned).contains("upgrade flint-sync"));
+}
+
+/// A pointer whose generation object is missing is a BROKEN workspace,
+/// never an empty one. Answering `None` here would be the same re-seed
+/// hazard the migration is careful about, arriving by another road.
+#[tokio::test]
+async fn a_pointer_naming_a_missing_generation_refuses_rather_than_reading_empty() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_for(dir.path());
+    let mut m = manifest::LeanManifest::default();
+    m.seq = 2;
+    m.entries.insert("a.txt".into(), entry("x"));
+    manifest::cas_write(store.as_ref(), &cfg, &m, None, 1, "seed").await.unwrap();
+    let gen2 = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap().pointer.entries_key;
+    store.delete(&gen2).await.unwrap();
+
+    match manifest::load(store.as_ref(), &cfg).await {
+        Err(LeanError::State(msg)) => {
+            assert!(msg.contains("does not exist"), "unexpected message: {msg}");
+        }
+        Ok(None) => panic!("a broken pointer read as an EMPTY workspace — the next barrier would re-seed over it"),
+        Ok(Some(_)) => panic!("a broken pointer read as a LOADED manifest"),
+        Err(e) => panic!("expected a State refusal, got {e:?}"),
+    }
+}
+
+/// Two writers that reach the same generation cannot both land: the
+/// entries object is write-once, so the loser is told at the PUT rather
+/// than discovering it after publishing.
+#[tokio::test]
+async fn a_second_writer_at_the_same_generation_is_refused() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_for(dir.path());
+    let mut m = manifest::LeanManifest::default();
+    m.seq = 1;
+    manifest::cas_write(store.as_ref(), &cfg, &m, None, 1, "a").await.unwrap();
+
+    let loaded = manifest::load(store.as_ref(), &cfg).await.unwrap().unwrap();
+    let mut mine = loaded.manifest.clone();
+    mine.seq += 1;
+    manifest::cas_write(store.as_ref(), &cfg, &mine, Some(&loaded.handle()), 1, "b").await.unwrap();
+
+    // A writer that still holds the OLD handle and reaches the same seq.
+    let mut theirs = loaded.manifest.clone();
+    theirs.seq += 1;
+    let err = manifest::cas_write(store.as_ref(), &cfg, &theirs, Some(&loaded.handle()), 1, "c")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, LeanError::Store(flint_store::StoreError::PreconditionFailed(_))),
+        "expected a precondition failure, got {err:?}"
+    );
+}
+
+/// Immutable metadata that is never collected is a leak that grows by a
+/// whole manifest per publish. The reaper keeps a window behind the live
+/// generation — not zero, because a reader resolves the pointer and the
+/// object it names in two separate requests.
+#[tokio::test]
+async fn superseded_generations_are_reaped_but_the_live_one_and_a_window_survive() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_for(dir.path());
+    let prefix = format!("{PREFIX}/.flint/lean/manifests/");
+
+    let mut handle = None;
+    for seq in 1..=12u64 {
+        let mut m = manifest::LeanManifest::default();
+        m.seq = seq;
+        m.entries.insert("a.txt".into(), entry("a.txt"));
+        let meta = manifest::cas_write(
+            store.as_ref(),
+            &cfg,
+            &m,
+            handle.as_ref(),
+            1,
+            &format!("flush-{seq}"),
+        )
+        .await
+        .unwrap();
+        handle = Some(manifest::ManifestHandle { etag: meta.etag, legacy: false });
+    }
+    // Twelve publishes, no sweep yet: twelve generations.
+    assert_eq!(store.list(&prefix).await.unwrap().len(), 12);
+
+    let removed = manifest::sweep_generations(store.as_ref(), &cfg).await.unwrap();
+    let left = store.list(&prefix).await.unwrap();
+    // The window is BEHIND the live one, so what survives is the live
+    // generation PLUS KEEP_GENERATIONS.
+    assert_eq!(left.len(), manifest::KEEP_GENERATIONS + 1);
+    assert_eq!(removed, 12 - (manifest::KEEP_GENERATIONS + 1));
+
+    // The live one is still there, and the workspace still reads.
+    let lp = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap();
+    assert!(
+        left.iter().any(|o| o.key == lp.pointer.entries_key),
+        "the reaper deleted the generation the pointer names"
+    );
+    let loaded = manifest::load(store.as_ref(), &cfg).await.unwrap().unwrap();
+    assert_eq!(loaded.manifest.seq, 12);
+    assert!(loaded.manifest.entries.contains_key("a.txt"));
+}
+
+/// A crash between the entries PUT and the pointer CAS leaves an object
+/// no pointer ever named. It is unreachable by construction, so the
+/// reaper must collect it with no special case — and must not mistake it
+/// for the live one.
+#[tokio::test]
+async fn the_reaper_collects_an_orphan_from_a_crash_before_the_pointer_cas() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_for(dir.path());
+    let mut m = manifest::LeanManifest::default();
+    m.seq = 1;
+    m.entries.insert("a.txt".into(), entry("a.txt"));
+    manifest::cas_write(store.as_ref(), &cfg, &m, None, 1, "live").await.unwrap();
+    let live = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap().pointer.entries_key;
+
+    // The orphan: a generation object at a HIGHER seq that no pointer
+    // names, exactly as an interrupted publish leaves behind.
+    let bytes = m.to_bytes();
+    let crc = flint_store::crc64_nvme(&bytes);
+    let stamps = flint_store::GenerationStamps {
+        generation: 99,
+        epoch: 1,
+        flush_uuid: "crashed".into(),
+        boundary_source: None,
+        posix: None,
+    };
+    let orphan = cfg.generation_key(99, "crashed");
+    store.put_whole(&orphan, bytes.into(), &PutCondition::IfNoneMatchAny, &stamps, crc).await.unwrap();
+
+    // A FRESH object above the live generation is indistinguishable
+    // from a publish in flight, and must survive: reaping it would
+    // break a writer that has put its entries and not yet CAS'd.
+    assert_eq!(
+        manifest::sweep_generations(store.as_ref(), &cfg).await.unwrap(),
+        0,
+        "the sweep reaped a generation above the pointer that could still be an in-flight publish"
+    );
+    assert!(store.head(&orphan).await.is_ok());
+
+    // Age it past the grace and it is wreckage, not a publish.
+    // `backdate_epoch` moves any key's Last-Modified, not just an
+    // epoch cell's — the store's clock is the only thing that can
+    // distinguish wreckage from a publish in flight, so a test about
+    // it has to move that clock rather than sleep an hour.
+    store.backdate_epoch(&orphan, manifest::ORPHAN_GRACE_SECS + 60);
+    assert_eq!(manifest::sweep_generations(store.as_ref(), &cfg).await.unwrap(), 1);
+    let left: Vec<String> = store
+        .list(&format!("{PREFIX}/.flint/lean/manifests/"))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert!(!left.contains(&orphan), "the orphan survived the sweep");
+    assert!(left.contains(&live), "the LIVE generation was reaped");
+    assert!(manifest::load(store.as_ref(), &cfg).await.unwrap().is_some());
+}
+
+/// THE MEASUREMENT the pointer layout exists for. Under the single-object
+/// layout a takeover was a GET and a PUT of the whole manifest — at 1M
+/// entries, 264 MiB each way, per claim. Here it must touch no
+/// generation object at all.
+#[tokio::test]
+async fn a_rotation_reads_and_writes_no_generation_object() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_for(dir.path());
+    let mut m = manifest::LeanManifest::default();
+    m.seq = 3;
+    for i in 0..200 {
+        m.entries.insert(format!("f{i:04}.txt"), entry("f"));
+    }
+    manifest::cas_write(store.as_ref(), &cfg, &m, None, 1, "seed").await.unwrap();
+    let gen = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap().pointer.entries_key;
+    let before = store.head(&gen).await.unwrap();
+
+    store.reset_op_counts();
+    manifest::rotate_for_takeover(store.as_ref(), &cfg, 2).await.unwrap().unwrap();
+    let ops = store.op_counts();
+
+    // The whole claim is: read the pointer, write the pointer.
+    assert!(
+        store.total_ops() <= 3,
+        "a rotation should be a couple of small requests, not {ops:?}"
+    );
+    // And the entries object is untouched, byte for byte.
+    let after = store.head(&gen).await.unwrap();
+    assert_eq!(before.etag, after.etag);
+    assert_eq!(
+        store.list(&format!("{PREFIX}/.flint/lean/manifests/")).await.unwrap().len(),
+        1,
+        "a rotation wrote a new generation object — it must reuse the standing one"
+    );
 }

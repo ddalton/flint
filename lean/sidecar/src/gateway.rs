@@ -548,17 +548,27 @@ async fn handle_status_authed(
     // construction; `cas_write_stamped` stamps the document's own
     // `boundary_source` precisely so a HEAD reader and a GET reader
     // cannot disagree.
+    //
+    // Under the pointer layout this reads the POINTER, which carries all
+    // three fields in a few hundred bytes — so the GET is now cheaper
+    // than the HEAD it replaces was, and it no longer depends on the
+    // stamp and the document agreeing, because there is only one
+    // document. Legacy workspaces keep the HEAD.
     let (seq, stamp_unix, boundary_source) =
-        match core.store.head(&cfg.manifest_key()).await {
-            Ok(meta) => {
-                let stamps = GenerationStamps::from_meta(&meta.meta);
-                (
-                    stamps.as_ref().map(|s| s.generation),
-                    meta.last_modified_unix,
-                    stamps.and_then(|s| s.boundary_source),
-                )
-            }
-            Err(StoreError::NotFound(_)) => (None, None, None),
+        match manifest::load_pointer(core.store.as_ref(), &cfg).await {
+            Ok(Some(lp)) => (Some(lp.pointer.seq), lp.last_modified_unix, lp.pointer.boundary_source),
+            Ok(None) => match core.store.head(&cfg.manifest_key()).await {
+                Ok(meta) => {
+                    let stamps = GenerationStamps::from_meta(&meta.meta);
+                    (
+                        stamps.as_ref().map(|s| s.generation),
+                        meta.last_modified_unix,
+                        stamps.and_then(|s| s.boundary_source),
+                    )
+                }
+                Err(StoreError::NotFound(_)) => (None, None, None),
+                Err(e) => return err_reply(StatusCode::BAD_GATEWAY, "store", e.to_string()),
+            },
             Err(e) => return err_reply(StatusCode::BAD_GATEWAY, "store", e.to_string()),
         };
     let ib = match inbox::load(core.store.as_ref(), &cfg).await {
@@ -755,11 +765,21 @@ async fn handle_manifest_cas(
     if let Err(res) = require_current_epoch(&core, &cfg, req.epoch).await {
         return res;
     }
+    // The wire carries an ETag, not a LAYOUT. A workspace mid-migration
+    // still has its legacy object and no pointer, and the two take
+    // different preconditions, so read which one this workspace is on
+    // rather than guessing — a HITL CAS must present exactly what a
+    // local writer would.
+    let legacy = matches!(manifest::load_pointer(core.store.as_ref(), &cfg).await, Ok(None));
+    let handle = req
+        .expected_etag
+        .as_deref()
+        .map(|e| manifest::ManifestHandle { etag: e.to_string(), legacy });
     match manifest::cas_write(
         core.store.as_ref(),
         &cfg,
         &req.manifest,
-        req.expected_etag.as_deref(),
+        handle.as_ref(),
         req.epoch,
         &req.flush_uuid,
     )
