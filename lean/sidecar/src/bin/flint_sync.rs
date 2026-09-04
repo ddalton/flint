@@ -124,6 +124,7 @@ async fn main() {
     cfg.max_bytes = env_u64("FLINT_SYNC_MAX_BYTES", 0);
     cfg.max_files = env_u64("FLINT_SYNC_MAX_FILES", 0);
     cfg.fanout = env_u64("FLINT_SYNC_FANOUT", 32).max(1) as usize;
+    cfg.project_id = std::env::var("FLINT_SYNC_PROJECT_ID").ok().filter(|p| !p.is_empty());
     cfg.fetch_inflight_max_bytes =
         env_u64("FLINT_SYNC_FETCH_INFLIGHT_MB", 512).max(1) * 1024 * 1024;
     if let Ok(m) = std::env::var("FLINT_SYNC_BOUNDARY_MODE") {
@@ -238,8 +239,17 @@ async fn main() {
     };
     if let Err(e) = result {
         eprintln!("flint-sync: {e}");
-        // A fence is a clean shutdown order, not a crash loop.
-        std::process::exit(if matches!(e, LeanError::Fenced(_)) { 0 } else { 1 });
+        // A fence is a clean shutdown order, not a crash loop. A
+        // refusal is final: EXIT_REFUSED is the code the CSI plugin
+        // reads as "tear the worker down and name the reason on the
+        // tenant" — under OnFailure any other code is relaunched in
+        // place forever, and a refusal that shared it looked to the
+        // tenant like a checkout that never finished (leg S22).
+        std::process::exit(match e {
+            LeanError::Fenced(_) => 0,
+            LeanError::Refused(_) => flint_lean::EXIT_REFUSED,
+            _ => 1,
+        });
     }
 }
 
@@ -274,6 +284,8 @@ enum Step {
 }
 
 async fn claim(sc: &mut Sidecar) -> Result<(), LeanError> {
+    // Before the first claim step: is this prefix ours to claim at all?
+    lease::verify_claim(sc).await?;
     let mut answered_owed = false;
     loop {
         match lease::claim_step(sc).await? {
@@ -370,6 +382,15 @@ async fn claim_then(sc: &mut Sidecar, step: Step) -> Result<(), LeanError> {
 
 async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
     claim(sc).await?;
+    // This incarnation owes its own drain attestation; one left by an
+    // earlier life of this tree must not vouch for it.
+    if let Err(e) = sc.state.clear_drained() {
+        eprintln!("flint-sync: could not clear a stale drain attestation: {e}");
+    }
+    // The drain's retry budget: the grace the delivery derived for it
+    // (the CSI node plugin stamps the tenant's grace), else the shipped
+    // three attempts.
+    let drain_budget = Duration::from_secs(env_u64("FLINT_SYNC_DRAIN_BUDGET_SECS", 6));
     // D11: the capability marker is written at EVERY run startup —
     // after claim, before the first poll — not inside checkout. The
     // live-tree restart row returns at `marker_present()` without
@@ -616,22 +637,54 @@ async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
                 // D10 rule 2: bounded retry. The shipped arm made ONE
                 // attempt and released the lease even on failure, so a
                 // transient store error silently forfeited everything
-                // since the last boundary.
+                // since the last boundary. Now: retried for at least
+                // three attempts and for as long as the budget allows;
+                // and the OUTCOME is attested rather than implied
+                // (audit 2026-09-03, finding 3). On success the marker
+                // is written and the lease released. On failure neither
+                // happens: the cell stays unreleased so a successor waits
+                // it out instead of reading a clean handoff, and the
+                // absent marker is what makes the node plugin PRESERVE
+                // the tree instead of removing it with the pod. A fence
+                // is the same — a deposed straggler drained nothing.
+                let started = std::time::Instant::now();
+                let mut attempt = 0u32;
                 let mut last = Ok(vec![]);
-                for attempt in 0..3u32 {
+                loop {
+                    attempt += 1;
                     last = sc.drain().await;
                     match &last {
                         Ok(_) => break,
                         Err(LeanError::Fenced(_)) => break,
                         Err(e) => {
-                            eprintln!("flint-sync: drain attempt {} failed: {e}", attempt + 1);
+                            eprintln!("flint-sync: drain attempt {attempt} failed: {e}");
+                            let again = attempt < 3
+                                || started.elapsed() + Duration::from_secs(2) < drain_budget;
+                            if !again { break; }
                             tokio::time::sleep(Duration::from_secs(2)).await;
                         }
                     }
                 }
-                let _ = lease::release(sc).await;
-                last?;
-                return Ok(());
+                match last {
+                    Ok(acks) => {
+                        let seq = sc.state.load_baseline().ok().map(|b| b.seq);
+                        if let Err(e) = sc.state.write_drained(seq, acks.len()) {
+                            eprintln!("flint-sync: drain published but its attestation could not be written: {e}");
+                        }
+                        let _ = lease::release(sc).await;
+                        return Ok(());
+                    }
+                    Err(e @ LeanError::Fenced(_)) => return Err(e),
+                    Err(e) => {
+                        eprintln!(
+                            "flint-sync: drain FAILED after {attempt} attempts over {}s — lease left \
+                             UNRELEASED, no drain attestation written; the tree keeps everything \
+                             since the last boundary",
+                            started.elapsed().as_secs()
+                        );
+                        return Err(e);
+                    }
+                }
             }
         }
     }

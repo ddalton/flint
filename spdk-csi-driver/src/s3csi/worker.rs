@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, EmptyDirVolumeSource, EnvVar, ExecAction, HostPathVolumeSource, Lifecycle,
+    Capabilities, Container, ContainerStatus, EmptyDirVolumeSource, EnvVar, ExecAction, HostPathVolumeSource, Lifecycle,
     LifecycleHandler, Pod, PodSecurityContext,
     PodSpec, ResourceRequirements, SeccompProfile, SecurityContext, Toleration, Volume, VolumeMount,
 };
@@ -310,49 +310,94 @@ pub enum WaitOutcome {
     Timeout { phase: String },
 }
 
+/// The syncer's exit code for a refusal a restart cannot change
+/// (`flint_lean::EXIT_REFUSED`, sysexits `EX_CONFIG`). The two crates
+/// share no dependency; drill leg S22 checks they agree.
+pub const SYNCER_EXIT_REFUSED: i32 = 78;
+
+/// A lean worker that REFUSED. Under `restartPolicy: OnFailure` the pod
+/// never reaches phase Failed: kubelet restarts the container, the
+/// supervisor relaunches the syncer from its persisted launch record,
+/// and it refuses again — a crash loop `wait_running` read as a pod
+/// still coming up, so the plugin answered "checkout in progress" to
+/// the tenant for as long as it lived (audit 2026-09-03, finding 5, leg
+/// S22). The container's termination record carries the code, whether
+/// it is the current state (between the exit and the restart) or the
+/// last one (restarted, refusing again); either is final.
+pub(crate) fn refused_exit(cs: &ContainerStatus) -> Option<WaitOutcome> {
+    let t = [cs.state.as_ref(), cs.last_state.as_ref()]
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s.terminated.as_ref())
+        .find(|t| t.exit_code == SYNCER_EXIT_REFUSED)?;
+    Some(WaitOutcome::Failed {
+        reason: "Refused".into(),
+        message: format!(
+            "container exited {} ({}) and a restart cannot change that ({} restart(s) so far): {}",
+            t.exit_code,
+            t.reason.clone().unwrap_or_default(),
+            cs.restart_count,
+            t.message.clone().unwrap_or_default().trim()
+        ),
+    })
+}
+
+/// One observation of the worker pod. `Timeout { phase }` here means
+/// "still coming up" — `wait_running` keeps polling until its deadline
+/// and then returns that observation as the timeout. Pure, so the
+/// ORDER of the checks is under test: the refused exit is judged before
+/// the phase, because `OnFailure` leaves a refusing worker at phase
+/// Running (restarting, forever), and a check that only ran on the
+/// not-yet-Running branch never ran at all — the first cut of finding
+/// 5's fix did exactly that, and S22 found it on the rig.
+pub(crate) fn observe(pod: &Pod) -> WaitOutcome {
+    let st = pod.status.as_ref();
+    let phase = st.and_then(|s| s.phase.clone()).unwrap_or_default();
+    let uid = pod.metadata.uid.clone().unwrap_or_default();
+    let cs = st.and_then(|s| s.container_statuses.as_ref()).and_then(|c| c.first());
+    if let Some(refused) = cs.and_then(refused_exit) {
+        return refused;
+    }
+    match phase.as_str() {
+        "Running" => WaitOutcome::Running { uid },
+        "Failed" | "Succeeded" => {
+            let reason = st.and_then(|s| s.reason.clone()).unwrap_or_else(|| phase.clone());
+            let mut message = st.and_then(|s| s.message.clone()).unwrap_or_default();
+            if let Some(t) = cs.and_then(|c| c.state.as_ref()).and_then(|s| s.terminated.as_ref()) {
+                message = format!(
+                    "{message} container exited {} ({}): {}",
+                    t.exit_code,
+                    t.reason.clone().unwrap_or_default(),
+                    t.message.clone().unwrap_or_default().trim()
+                );
+            }
+            WaitOutcome::Failed { reason, message: message.trim().to_string() }
+        }
+        _ => {
+            // A container that cannot start (ImagePullBackOff,
+            // CreateContainerConfigError) leaves the pod Pending
+            // forever; surface the waiting reason in the timeout.
+            let phase = match cs.and_then(|c| c.state.as_ref()).and_then(|s| s.waiting.as_ref()) {
+                Some(w) => format!("{phase} ({})", w.reason.clone().unwrap_or_default()),
+                None => phase,
+            };
+            WaitOutcome::Timeout { phase }
+        }
+    }
+}
+
 pub async fn wait_running(client: &Client, ns: &str, name: &str, deadline: Duration) -> Result<WaitOutcome, String> {
     let api: Api<Pod> = Api::namespaced(client.clone(), ns);
     let start = Instant::now();
     loop {
         let pod = api.get(name).await.map_err(|e| format!("get worker {ns}/{name}: {e}"))?;
-        let st = pod.status.as_ref();
-        let phase = st.and_then(|s| s.phase.clone()).unwrap_or_default();
-        let uid = pod.metadata.uid.clone().unwrap_or_default();
-        let last_phase: String;
-        match phase.as_str() {
-            "Running" => return Ok(WaitOutcome::Running { uid }),
-            "Failed" | "Succeeded" => {
-                let reason = st.and_then(|s| s.reason.clone()).unwrap_or_else(|| phase.clone());
-                let mut message = st.and_then(|s| s.message.clone()).unwrap_or_default();
-                if let Some(cs) = st.and_then(|s| s.container_statuses.as_ref()).and_then(|c| c.first()) {
-                    if let Some(t) = cs.state.as_ref().and_then(|s| s.terminated.as_ref()) {
-                        message = format!(
-                            "{message} container exited {} ({}): {}",
-                            t.exit_code,
-                            t.reason.clone().unwrap_or_default(),
-                            t.message.clone().unwrap_or_default().trim()
-                        );
-                    }
-                }
-                return Ok(WaitOutcome::Failed { reason, message: message.trim().to_string() });
-            }
-            _ => {
-                // A container that cannot start (ImagePullBackOff,
-                // CreateContainerConfigError) leaves the pod Pending
-                // forever; surface the waiting reason in the timeout.
-                if let Some(cs) = st.and_then(|s| s.container_statuses.as_ref()).and_then(|c| c.first()) {
-                    if let Some(w) = cs.state.as_ref().and_then(|s| s.waiting.as_ref()) {
-                        last_phase = format!("{phase} ({})", w.reason.clone().unwrap_or_default());
-                    } else {
-                        last_phase = phase.clone();
-                    }
-                } else {
-                    last_phase = phase.clone();
+        match observe(&pod) {
+            WaitOutcome::Timeout { phase } => {
+                if start.elapsed() > deadline {
+                    return Ok(WaitOutcome::Timeout { phase });
                 }
             }
-        }
-        if start.elapsed() > deadline {
-            return Ok(WaitOutcome::Timeout { phase: last_phase });
+            final_ => return Ok(final_),
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -622,5 +667,113 @@ mod tests {
             comm_dir(Path::new("/var/lib/kubelet"), "u-1"),
             PathBuf::from("/var/lib/kubelet/pods/u-1/volumes/kubernetes.io~empty-dir/comm")
         );
+    }
+
+    fn cs(current: Option<i32>, last: Option<i32>, restarts: i32) -> ContainerStatus {
+        use k8s_openapi::api::core::v1::{ContainerState, ContainerStateTerminated};
+        let term = |code: i32| ContainerState {
+            terminated: Some(ContainerStateTerminated { exit_code: code, reason: Some("Error".into()), ..Default::default() }),
+            ..Default::default()
+        };
+        ContainerStatus { state: current.map(term), last_state: last.map(term), restart_count: restarts, ..Default::default() }
+    }
+
+    /// AUDIT 2026-09-03, finding 5 (leg S22). A refusing syncer under
+    /// OnFailure never reaches phase Failed; its exit code is the only
+    /// evidence, and it sits in the current state before the restart
+    /// and in the last state after it.
+    #[test]
+    fn a_refused_exit_is_final_before_and_after_the_restart() {
+        for (c, l, r) in [(Some(SYNCER_EXIT_REFUSED), None, 0), (None, Some(SYNCER_EXIT_REFUSED), 1), (Some(SYNCER_EXIT_REFUSED), Some(SYNCER_EXIT_REFUSED), 4)] {
+            match refused_exit(&cs(c, l, r)) {
+                Some(WaitOutcome::Failed { reason, message }) => {
+                    assert_eq!(reason, "Refused");
+                    assert!(message.contains("exited 78"), "{message}");
+                }
+                other => panic!("({c:?},{l:?},{r}) ⇒ {other:?}, expected Failed/Refused"),
+            }
+        }
+    }
+
+    /// Every other exit stays kubelet's to retry in place: an OOM kill
+    /// or a store outage at startup is what OnFailure exists for, and
+    /// tearing the worker down on those would lose a resumable checkout.
+    #[test]
+    fn other_exits_are_kubelet_s_to_retry_in_place() {
+        assert_eq!(refused_exit(&cs(Some(1), None, 0)), None);
+        assert_eq!(refused_exit(&cs(None, Some(137), 3)), None);
+        assert_eq!(refused_exit(&cs(Some(2), Some(1), 2)), None);
+        assert_eq!(refused_exit(&cs(None, None, 0)), None);
+    }
+
+    fn pod(phase: &str, status: Option<ContainerStatus>) -> Pod {
+        use k8s_openapi::api::core::v1::PodStatus;
+        Pod {
+            metadata: ObjectMeta { uid: Some("u-1".into()), ..Default::default() },
+            status: Some(PodStatus {
+                phase: Some(phase.into()),
+                container_statuses: status.map(|s| vec![s]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// THE ORDER. The first cut checked the refused exit only on the
+    /// not-yet-Running branch, and a refusing worker under OnFailure is
+    /// never on that branch: its phase is Running while it restarts.
+    /// S22 saw "checkout in progress" for the whole leg. The refusal
+    /// must be judged before the phase is even looked at.
+    #[test]
+    fn a_refused_exit_is_final_even_while_the_phase_says_running() {
+        match observe(&pod("Running", Some(cs(Some(SYNCER_EXIT_REFUSED), None, 1)))) {
+            WaitOutcome::Failed { reason, .. } => assert_eq!(reason, "Refused"),
+            other => panic!("phase Running + exit 78 ⇒ {other:?}, expected Failed/Refused"),
+        }
+        match observe(&pod("Running", Some(cs(None, Some(SYNCER_EXIT_REFUSED), 5)))) {
+            WaitOutcome::Failed { reason, .. } => assert_eq!(reason, "Refused"),
+            other => panic!("phase Running + last exit 78 ⇒ {other:?}"),
+        }
+        match observe(&pod("Pending", Some(cs(Some(SYNCER_EXIT_REFUSED), None, 0)))) {
+            WaitOutcome::Failed { reason, .. } => assert_eq!(reason, "Refused"),
+            other => panic!("phase Pending + exit 78 ⇒ {other:?}"),
+        }
+    }
+
+    /// And nothing else changed: Running is Running, a Failed phase is
+    /// Failed with the exit in its message, Pending is the wait.
+    #[test]
+    fn the_phase_still_decides_when_nothing_was_refused() {
+        let running = ContainerStatus {
+            state: Some(k8s_openapi::api::core::v1::ContainerState {
+                running: Some(Default::default()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(observe(&pod("Running", Some(running))), WaitOutcome::Running { uid: "u-1".into() });
+        assert_eq!(observe(&pod("Running", None)), WaitOutcome::Running { uid: "u-1".into() });
+        match observe(&pod("Failed", Some(cs(Some(1), None, 0)))) {
+            WaitOutcome::Failed { reason, message } => {
+                assert_eq!(reason, "Failed");
+                assert!(message.contains("exited 1"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        match observe(&pod("Running", Some(cs(None, Some(137), 2)))) {
+            WaitOutcome::Running { .. } => {}
+            other => panic!("an OOM-killed, restarted worker is Running, not final: {other:?}"),
+        }
+        let waiting = ContainerStatus {
+            state: Some(k8s_openapi::api::core::v1::ContainerState {
+                waiting: Some(k8s_openapi::api::core::v1::ContainerStateWaiting {
+                    reason: Some("ImagePullBackOff".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(observe(&pod("Pending", Some(waiting))), WaitOutcome::Timeout { phase: "Pending (ImagePullBackOff)".into() });
     }
 }

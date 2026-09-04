@@ -1,0 +1,51 @@
+# S22 (audit 2026-09-03, finding 5): a workspace over a prefix whose
+# claim cell names ANOTHER project. The syncer must refuse before any
+# checkout; the operator's verdict is not what protects the data.
+---
+apiVersion: chert.us/v1alpha1
+kind: FlintLeanWorkspace
+metadata:
+  name: proj-claimed
+  namespace: s3-tenants
+spec:
+  projectId: team-a/proj-claimed
+  bucket: s3bucket
+  keyPrefix: tenants/proj-claimed
+  endpoint: http://minio.flint-system.svc:9000
+  floorSecs: 3600
+  expectedBytes: 1048576
+  expectedFiles: 50
+  maxFiles: 5000
+  uid: 1001
+  gid: 1001
+  consumers:
+    serviceAccounts: [trainer]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lean-claimed
+  namespace: s3-tenants
+spec:
+  serviceAccountName: trainer
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    runAsGroup: 1001
+    seccompProfile: { type: RuntimeDefault }
+  volumes:
+    - name: ws
+      csi:
+        driver: s3.csi.chert.us
+        volumeAttributes:
+          chert.us/workspace: proj-claimed
+  containers:
+    - name: agent
+      image: busybox:1.36
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: ws, mountPath: /workspace }
+      command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; sleep 86400 & wait"]

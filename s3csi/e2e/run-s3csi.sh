@@ -28,7 +28,39 @@ K="kubectl --context $CTX"
 NS=s3-tenants
 WNS=flint-workers
 SYS=flint-system
-NODE=$($K get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+# THE SUBSTRATE. The legs are the same on kind and on real nodes; four
+# things differ, and each is a knob rather than a fork of this file:
+#   STORE=minio|s3   the object store — the rig's in-cluster MinIO, or a
+#                    real bucket: BUCKET, S3_REGION, S3_ENDPOINT (default
+#                    the region's S3), and a key from S3_KEY_FILE (the
+#                    JSON `aws iam create-access-key` prints) or from
+#                    AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.
+#   NODE_EXEC=docker|nodesh   how `onnode` reaches the node's host: docker
+#                    exec into the kind node, or scripts/nodesh.sh (a
+#                    privileged pod that nsenters PID 1) on a cluster the
+#                    Mac cannot ssh into. nodesh needs KUBECONFIG set.
+#   NODE             the node the legs drain, roll and inspect: default
+#                    the first WORKER (no control-plane role), else the
+#                    first node — on kind the only one.
+#   TAG              the image tag; on a real cluster the images must
+#                    have been PUSHED (build-images.sh PUSH=1 ARCH=amd64).
+STORE=${STORE:-minio}
+BUCKET=${BUCKET:-s3bucket}
+S3_REGION=${S3_REGION:-us-east-1}
+S3_ENDPOINT=${S3_ENDPOINT:-http://minio.flint-system.svc:9000}
+NODE_EXEC=${NODE_EXEC:-docker}
+if [ "$STORE" = s3 ]; then
+    [ "$BUCKET" != s3bucket ] || { echo "STORE=s3 needs BUCKET (a real bucket name)" >&2; exit 2; }
+    [ "$S3_ENDPOINT" != http://minio.flint-system.svc:9000 ] || S3_ENDPOINT="https://s3.$S3_REGION.amazonaws.com"
+    if [ -n "${S3_KEY_FILE:-}" ]; then
+        AWS_ACCESS_KEY_ID=$(jq -r .AccessKey.AccessKeyId "$S3_KEY_FILE")
+        AWS_SECRET_ACCESS_KEY=$(jq -r .AccessKey.SecretAccessKey "$S3_KEY_FILE")
+    fi
+    [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] \
+        || { echo "STORE=s3 needs S3_KEY_FILE or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY" >&2; exit 2; }
+fi
+NODE=${NODE:-$($K get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)}
+[ -n "$NODE" ] || NODE=$($K get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 
 PASS=0
 FAILED=0
@@ -62,7 +94,12 @@ inpod()  { local p=$1 try out rc; shift; for try in 1 2 3; do out=$($K -n $NS ex
 tsh()     { local p=$1; shift; $K -n $NS exec "$p" -c agent -- /bin/sh -c "$*" >/dev/null 2>&1; }
 tsh_out() { local p=$1; shift; $K -n $NS exec "$p" -c agent -- /bin/sh -c "$*" 2>/dev/null; }
 mcx()    { $K -n $SYS exec mc-s3 -- "$@" 2>/dev/null; }
-onnode() { docker exec "$NODE" sh -c "$*" 2>/dev/null; }
+onnode() {
+    case "$NODE_EXEC" in
+        nodesh) "$REPO/scripts/nodesh.sh" "$NODE" "$*" 2>/dev/null ;;
+        *)      docker exec "$NODE" sh -c "$*" 2>/dev/null ;;
+    esac
+}
 # The worker pod serving a tenant pod, by annotation.
 # Like `worker_of` but matches a worker in ANY phase. S17 needs it: the
 # checkout of a 200-file project finishes in under 10 s (measured on
@@ -119,6 +156,22 @@ broker_issued() {
 }
 # The FailedMount event text for a pod (kubelet's, carrying our message).
 mount_events() { $K -n $NS get events --field-selector involvedObject.name="$1" -o jsonpath='{range .items[*]}{.reason}: {.message}{"\n"}{end}' 2>/dev/null; }
+# The fixtures name the MinIO rig's endpoint, bucket and region; STORE=s3
+# rewrites them at apply time. On the kind rig every substitution is the
+# identity, so the fixtures stay readable as written.
+fx() { sed -e "s#http://minio.flint-system.svc:9000#$S3_ENDPOINT#g" -e "s#bucket: s3bucket#bucket: $BUCKET#g" -e "s#region: us-east-1#region: $S3_REGION#g" "$1"; }
+apply_fx()  { fx "$1" | $K apply -f -; }
+delete_fx() { local f=$1; shift; fx "$f" | $K delete -f - "$@"; }
+# The store half of the rig: MinIO and its seed, or the real bucket's
+# seed, mc pod and Secrets (rig-s3.yaml.tpl, rendered with the key).
+rig() {
+    if [ "$STORE" = s3 ]; then
+        sed -e "s#__ENDPOINT__#$S3_ENDPOINT#g" -e "s#__BUCKET__#$BUCKET#g" -e "s#__REGION__#$S3_REGION#g" \
+            -e "s#__KEY__#$AWS_ACCESS_KEY_ID#g" -e "s#__SECRET__#$AWS_SECRET_ACCESS_KEY#g" rig-s3.yaml.tpl
+    else
+        cat rig.yaml
+    fi
+}
 
 # ── setup / teardown ─────────────────────────────────────────────────
 if [ "${1:-}" = "setup" ]; then
@@ -131,31 +184,35 @@ if [ "${1:-}" = "setup" ]; then
     # that cannot write. Recreating the Job every setup is cheap and
     # makes seeding unconditional.
     $K -n $SYS delete job seed-bucket --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1
-    $K apply -f rig.yaml
+    rig | $K apply -f -
     $K apply -f "$REPO/flint-passthrough-chart/crds/flintpassthroughmounts.yaml"
     $K apply -f "$REPO/flint-lean-chart/crds/flintleanworkspaces.yaml" 2>/dev/null || true
-    echo "waiting for MinIO + seed…"
-    $K -n $SYS rollout status deploy/minio --timeout=180s
+    echo "waiting for the store + seed ($STORE)…"
+    [ "$STORE" = s3 ] || $K -n $SYS rollout status deploy/minio --timeout=180s
     $K -n $SYS wait --for=condition=complete job/seed-bucket --timeout=180s
     $K -n $SYS wait --for=condition=ready pod/mc-s3 --timeout=120s
     # And VERIFY it, rather than trusting a Job's condition: the whole
     # point of the delete above is that "Complete" can be stale.
-    if ! mcx mc ls m/s3bucket/ >/dev/null 2>&1; then
-        echo "REFUSING: MinIO has no bucket s3bucket after seeding — every lean leg would read an empty project" >&2
+    if ! mcx mc ls m/$BUCKET/ >/dev/null 2>&1; then
+        echo "REFUSING: the store has no bucket $BUCKET after seeding — every lean leg would read an empty project" >&2
         exit 1
     fi
-    echo "seeded:"; mcx mc ls --recursive m/s3bucket/
+    echo "seeded:"; mcx mc ls --recursive m/$BUCKET/
     helm --kube-context "$CTX" upgrade --install flint-s3-csi "$REPO/flint-s3-csi-chart" -n $SYS \
         --set node.image.tag="$TAG" --set workers.passthroughImage.tag="$TAG" --set workers.leanImage.tag="$TAG" \
         --set node.image.pullPolicy=IfNotPresent \
         --set broker.backend=static --set broker.static.secretRef=s3-broker-static \
         --set node.credsLifetimeSecs="$CREDS_LIFETIME" --set broker.replicas=1 \
+        --set node.region="$S3_REGION" \
         --set node.logLevel=debug --set broker.logLevel=debug
     $K -n $SYS rollout status ds/flint-s3-csi-node --timeout=180s
     $K -n $SYS rollout status deploy/flint-s3-broker --timeout=180s
-    $K apply -f tenants.yaml
-    $K apply -f refusals.yaml
-    echo "setup done"
+    apply_fx tenants.yaml
+    apply_fx refusals.yaml
+    # One privileged sleeper per node, so `onnode` is an exec and not a
+    # pod lifecycle per call (scripts/nodesh-daemon.sh).
+    [ "$NODE_EXEC" = nodesh ] && "$REPO/scripts/nodesh-daemon.sh" up
+    echo "setup done (store=$STORE node=$NODE via $NODE_EXEC)"
     exit 0
 fi
 if [ "${1:-}" = "teardown" ]; then
@@ -170,7 +227,7 @@ if [ "${1:-}" = "teardown" ]; then
             'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = flint-sync ] && kill -CONT "${p#/proc/}"; done; exit 0' \
             >/dev/null 2>&1 || true
     done
-    $K delete -f refusals.yaml --ignore-not-found --wait=false
+    delete_fx refusals.yaml --ignore-not-found --wait=false
     # 2. EVERY tenant pod, before the plugin goes. `tenants.yaml` is not
     #    all of them: the lean fixtures (lean-agent, lean-agent2,
     #    slow-agent, the wide ones) hold CSI volumes too, and the helm
@@ -183,7 +240,7 @@ if [ "${1:-}" = "teardown" ]; then
         echo "WARNING: tenant pods still present after 300s; the plugin uninstall below will" >&2
         echo "         strand them (no driver ⇒ no unpublish): $($K -n $NS get pods -o name 2>/dev/null | tr '\n' ' ')" >&2
     fi
-    $K delete -f tenants.yaml --ignore-not-found --wait=true --timeout=180s
+    delete_fx tenants.yaml --ignore-not-found --wait=true --timeout=180s
     helm --kube-context "$CTX" uninstall flint-s3-csi -n $SYS || true
     # 3. ORPHANED WORKERS, after the uninstall and not before. Nothing
     #    else collects them: the plugin that creates a worker is the
@@ -199,14 +256,15 @@ if [ "${1:-}" = "teardown" ]; then
     #    the property S14 relies on; the uninstall takes the policy with
     #    it.
     $K -n $WNS delete pod --all --force --grace-period=0 --ignore-not-found >/dev/null 2>&1 || true
-    $K delete -f rig.yaml --ignore-not-found --wait=false
+    rig | $K delete -f - --ignore-not-found --wait=false
+    [ "$NODE_EXEC" = nodesh ] && "$REPO/scripts/nodesh-daemon.sh" down
     exit 0
 fi
 
 echo "s3.csi.chert.us e2e — context $CTX, node $NODE"
 # The refusal fixtures are re-applied here, not only in setup: a leg
 # that finds its pod absent reports an empty event, never a verdict.
-$K apply -f refusals.yaml >/dev/null
+apply_fx refusals.yaml >/dev/null
 
 # ── S1 registration, and fail-closed ─────────────────────────────────
 leg S1 "the driver is registered, the plugin is Ready, and there is NO webhook"
@@ -237,7 +295,7 @@ $K -n $NS get pod reader >/dev/null 2>&1 \
     || ok "PRECONDITION: reader is gone while the plugin can still unmount it"
 $K -n $SYS patch ds flint-s3-csi-node -p '{"spec":{"template":{"spec":{"nodeSelector":{"chert.us/absent":"true"}}}}}' >/dev/null
 i=0; while [ $i -lt 60 ] && [ "$($K -n $SYS get pods -l app.kubernetes.io/name=flint-s3-csi-node -o name 2>/dev/null | grep -c .)" != "0" ]; do sleep 2; i=$((i + 2)); done
-$K apply -f tenants.yaml >/dev/null
+apply_fx tenants.yaml >/dev/null
 if wait_phase reader Running 40; then
     bad "CONTROL: reader started with the plugin absent — fail-closed does not hold"
 else
@@ -339,17 +397,17 @@ if require_pod reader-ro; then
     got=$(inpod reader-ro cat /mnt/ro/shard-03.txt)
     [ "$got" = "seeded-object-03" ] && ok "read-only mount reads" || bad "read-only read: '$got'"
     inpod reader-ro "echo x > /mnt/ro/newfile.txt" && bad "read-only mount accepted a write" || ok "read-only mount refuses a write"
-    mcx mc stat m/s3bucket/datasets/imagenet/newfile.txt >/dev/null 2>&1 && bad "newfile.txt reached the bucket from the RO mount" || ok "nothing landed in the bucket from the RO mount"
+    mcx mc stat m/$BUCKET/datasets/imagenet/newfile.txt >/dev/null 2>&1 && bad "newfile.txt reached the bucket from the RO mount" || ok "nothing landed in the bucket from the RO mount"
 fi
 if require_pod reader; then
     inpod reader "echo written-by-reader > /mnt/s3/from-reader.txt" && ok "RW write accepted" || bad "RW write refused"
     sleep 2
-    got=$(mcx mc cat m/s3bucket/datasets/imagenet/from-reader.txt)
+    got=$(mcx mc cat m/$BUCKET/datasets/imagenet/from-reader.txt)
     [ "$got" = "written-by-reader" ] && ok "the object exists in the bucket with the written bytes" || bad "bucket object: '$got'"
     if [ "$got" = "written-by-reader" ]; then
         inpod reader "rm /mnt/s3/from-reader.txt" && ok "unlink accepted" || bad "unlink refused"
         sleep 2
-        mcx mc stat m/s3bucket/datasets/imagenet/from-reader.txt >/dev/null 2>&1 && bad "object still in the bucket after unlink" || ok "unlink removed the object"
+        mcx mc stat m/$BUCKET/datasets/imagenet/from-reader.txt >/dev/null 2>&1 && bad "object still in the bucket after unlink" || ok "unlink removed the object"
     fi
 fi
 
@@ -473,7 +531,7 @@ if require_pod reader; then
     [ "${seen:-0}" -ge 1 ] && ok "a MounterDead Warning landed on the tenant pod within ${i}s (the plugin's own event; kubelet emits none)" || bad "no MounterDead event within 200 s"
     # The pod must be recreated (FUSE semantics). Do it, and prove it comes back.
     $K -n $NS delete pod reader --wait=true --timeout=180s >/dev/null 2>&1
-    $K apply -f tenants.yaml >/dev/null
+    apply_fx tenants.yaml >/dev/null
     wait_phase reader Running 180 && [ "$(inpod reader cat /mnt/s3/shard-05.txt)" = "seeded-object-05" ] && ok "a recreated pod mounts and reads again" || bad "recreated reader did not come back reading"
 fi
 
@@ -530,8 +588,8 @@ $K -n $WNS delete pod forged-worker --ignore-not-found --wait=false >/dev/null 2
 # ── lean (design §3.5, §5; S11 + S13) ────────────────────────────────
 # Store helpers, the lean drill's (run-agent.sh): jq, not grep — the
 # manifest is nested JSON.
-lobj()   { mcx mc cat "m/s3bucket/$1" 2>/dev/null; }
-lcount() { mcx mc ls --recursive "m/s3bucket/$1" 2>/dev/null | grep -c . ; }
+lobj()   { mcx mc cat "m/$BUCKET/$1" 2>/dev/null; }
+lcount() { mcx mc ls --recursive "m/$BUCKET/$1" 2>/dev/null | grep -c . ; }
 # Resolve the manifest THROUGH the pointer (see `lptr` below).
 # `.flint/lean/current` is the mutable object; the entries live in the
 # write-once generation it names. These three helpers read
@@ -588,9 +646,9 @@ lmbody() {
 # counting the wrong prefix would compare 0 to 0.
 lgens()  {
     if lptr "$1" 'has("chunks")' 2>/dev/null | grep -q true; then
-        mcx mc ls "m/s3bucket/$1/.flint/lean/chunks/" 2>/dev/null | grep -c .
+        mcx mc ls "m/$BUCKET/$1/.flint/lean/chunks/" 2>/dev/null | grep -c .
     else
-        mcx mc ls "m/s3bucket/$1/.flint/lean/manifests/" 2>/dev/null | grep -c .
+        mcx mc ls "m/$BUCKET/$1/.flint/lean/manifests/" 2>/dev/null | grep -c .
     fi
 }
 # The identity of the ENTRIES a pointer names, whichever layout it is
@@ -635,8 +693,8 @@ lmhas()  { local m; m=$(lmbody "$1"); [ -z "$m" ] && return 1; printf '%s' "$m" 
 
 leg S11 "lean: the checkout gate holds for the app AND its init container; a cold pod finds the seeded project; the syncer lives in the worker, not the pod"
 $K -n $NS delete pod lean-agent lean-seeder lean-refused --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
-mcx mc rm --recursive --force m/s3bucket/tenants/proj/ >/dev/null 2>&1
-$K apply -f lean-tenants.yaml >/dev/null
+mcx mc rm --recursive --force m/$BUCKET/tenants/proj/ >/dev/null 2>&1
+apply_fx lean-tenants.yaml >/dev/null
 if wait_phase lean-seeder Running 300; then
     ok "lean-seeder is Running (claim + checkout of a fresh prefix, no operator, no webhook)"
     i=0; while [ $i -lt 120 ] && ! $K -n $NS logs lean-seeder 2>/dev/null | grep -q 'SEED PUBLISHED'; do sleep 2; i=$((i + 2)); done
@@ -659,7 +717,7 @@ if wait_phase lean-seeder Running 300; then
     # The cold agent: created only after the seeder pod is GONE.
     $K -n $NS delete pod lean-seeder --wait=true --timeout=180s >/dev/null 2>&1
     $K -n $NS get pod lean-seeder >/dev/null 2>&1 && bad "the seeder pod still exists" || ok "the seeder pod is gone; only bucket objects remain"
-    $K apply -f lean-agent.yaml >/dev/null
+    apply_fx lean-agent.yaml >/dev/null
     if wait_phase lean-agent Running 300; then
         [ "$(inpod lean-agent cat /scratch/init-gate)" = "GATE-OK" ] && ok "the INIT container ran only after checkout-complete existed" || bad "the init container saw no checkout-complete marker"
         [ "$(inpod lean-agent cat /scratch/init-seen | tr -d ' ')" = "200" ] && ok "the init container saw all 200 files" || bad "the init container saw $(inpod lean-agent cat /scratch/init-seen) files"
@@ -794,7 +852,7 @@ leg S14 "lean holder identity: a syncer restart over the same tree self-recognis
 # PREVIOUS pod. Refuse to start rather than measure the wrong thing.
 $K -n $NS delete pod lean-agent --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
 $K get -n $NS pod lean-agent >/dev/null 2>&1 && bad "PRECONDITION: lean-agent still exists before S14 applies it — the apply would be a no-op against a terminating object"
-$K apply -f lean-agent.yaml >/dev/null
+apply_fx lean-agent.yaml >/dev/null
 if wait_phase lean-agent Running 300; then
     h0=$(lepoch tenants/proj .holder_id); e0=$(lepoch tenants/proj .epoch)
     s0=$(lmseq tenants/proj); n0=$(lments tenants/proj)
@@ -878,7 +936,7 @@ if wait_phase lean-agent Running 300; then
         || bad "PRECONDITION: no readable entries identity for this workspace (got '$p_id0', $p_n0 object(s)); the takeover measurement below has nothing to measure"
 
     t0=$(date +%s)
-    $K apply -f lean-agent2.yaml >/dev/null
+    apply_fx lean-agent2.yaml >/dev/null
     if wait_phase lean-agent2 Running 400; then
         el=$(( $(date +%s) - t0 ))
         h2=$(lepoch tenants/proj .holder_id); e2=$(lepoch tenants/proj .epoch)
@@ -921,16 +979,23 @@ if wait_phase lean-agent Running 300; then
         # flint_sync.rs:209-211), so `restartPolicy: OnFailure` leaves it
         # down and the count never moves. Measured: the pod is Succeeded
         # within 15 s, its log naming `deposed at renew: 412`.
+        wuid_pre=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
         sig_syncer "$w" CONT
         i=0; ph=""
         while [ $i -lt 120 ]; do
             ph=$($K -n $WNS get pod "$w" -o jsonpath='{.status.phase}' 2>/dev/null)
+            u=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+            # S20's relaunch can land before this leg looks: a NEW pod
+            # under the old name is the fence having bitten already.
+            [ -n "$u" ] && [ "$u" != "$wuid_pre" ] && { ph="Relaunched"; break; }
             [ -n "$ph" ] && [ "$ph" != "Running" ] && break
             sleep 5; i=$((i + 5))
         done
         xc=$($K -n $WNS get pod "$w" -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null)
         if [ "$ph" = "Succeeded" ] && [ "${xc:-1}" = "0" ]; then
             ok "the woken straggler FENCED itself and shut down cleanly (${ph}, exit ${xc}, ${i}s after SIGCONT) — it did not resume publishing under a superseded epoch"
+        elif [ "$ph" = "Relaunched" ]; then
+            ok "the woken straggler fenced itself and the plugin had ALREADY relaunched its worker (uid $wuid_pre replaced, ${i}s after SIGCONT) — S20 measures the relaunch"
         elif [ "$ph" = "Running" ] || [ -z "$ph" ]; then
             bad "the woken straggler is STILL RUNNING ${i}s after SIGCONT: it never noticed it had been deposed, and rotation is the only thing standing between it and the successor's manifest"
         else
@@ -940,6 +1005,58 @@ if wait_phase lean-agent Running 300; then
         [ "$h3" = "$h2" ] \
             && ok "the cell still names the successor ($h3) after the straggler woke — a fenced holder does not take its lease back" \
             || bad "the woken straggler RECLAIMED the lease ($h2 → $h3): two writers, and the rotation bought nothing"
+
+        # ── S20 (audit 2026-09-03, findings 2 + 3) ───────────────────
+        # The fenced worker is Succeeded and nothing used to bring it
+        # back: OnFailure ignores exit 0, and the plugin relaunched only
+        # Failed pods, so a self-fence left a tenant unpublished for its
+        # life. Now a Succeeded worker under a still-mounted tenant is
+        # relaunched on the next republish; the relaunched syncer finds
+        # the successor's cell and WAITS — it never wins the quiet polls
+        # against a live holder. Then the tenant is deleted: the unpublish
+        # SIGTERMs a syncer holding no lease, which exits attesting
+        # nothing, and the tree must be PRESERVED — the pod's absence is
+        # no longer read as the drain's outcome.
+        leg S20 "a fenced syncer is relaunched under its still-mounted tenant, waits on the live successor, and at the tenant's delete its UNATTESTED tree is preserved rather than removed"
+        i=0; wuid_r=""
+        while [ $i -lt 240 ]; do
+            rph=$($K -n $WNS get pod "$w" -o jsonpath='{.status.phase}' 2>/dev/null)
+            u=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+            [ "$rph" = "Running" ] && [ -n "$u" ] && [ "$u" != "$wuid_pre" ] && { wuid_r=$u; break; }
+            sleep 5; i=$((i + 5))
+        done
+        [ -n "$wuid_r" ] \
+            && ok "the fenced worker was RELAUNCHED by a republish (${i}s; uid $wuid_pre → $wuid_r)" \
+            || bad "the fenced worker was not relaunched in ${i}s (phase '${rph:-?}'): a self-fenced holder stays gone for the tenant's life"
+        mount_events lean-agent | grep -q 'SyncerRecreated' \
+            && ok "the tenant's events name the relaunch (SyncerRecreated)" \
+            || bad "no SyncerRecreated event on lean-agent"
+        sleep 30
+        h4=$(lepoch tenants/proj .holder_id)
+        [ "$h4" = "$h2" ] \
+            && ok "30 s after the relaunch the cell still names the successor ($h4): the relaunched syncer waits, it does not depose a live holder" \
+            || bad "the relaunched syncer took the lease ($h2 → $h4) from a LIVE successor"
+        $K -n $WNS logs "$w" 2>/dev/null | grep -q 'waiting on the standing lease' \
+            && ok "the relaunched syncer is waiting on the standing lease" \
+            || note "relaunched syncer log: $($K -n $WNS logs "$w" 2>/dev/null | tail -2)"
+        before_und=$(onnode "ls -d /var/lib/kubelet/plugins/s3.csi.chert.us/undrained/* 2>/dev/null | wc -l")
+        $K -n $NS delete pod lean-agent --wait=true --timeout=240s >/dev/null 2>&1
+        after_und=$(onnode "ls -d /var/lib/kubelet/plugins/s3.csi.chert.us/undrained/* 2>/dev/null | wc -l")
+        [ "${after_und:-0}" -gt "${before_und:-0}" ] \
+            && ok "the straggler's tree was PRESERVED under undrained/ at its tenant's delete (its drain attested nothing)" \
+            || bad "no preserved tree appeared under undrained/ ($before_und → $after_und): an unattested drain lost its tree with the pod"
+        und=$(onnode "ls -dt /var/lib/kubelet/plugins/s3.csi.chert.us/undrained/* 2>/dev/null | head -1")
+        [ -n "$und" ] && onnode "test -d '$und/tree' && test -f '$und/state.json'" \
+            && ok "the preserved dir carries the tree and its state ($und)" \
+            || bad "the preserved dir is incomplete or absent: $(onnode "ls '${und:-/nonexistent}' 2>&1" | tr '\n' ' ')"
+        onnode "test -f '${und:-/nonexistent}/tree/.flint-sync/drained.json'" \
+            && bad "a drain attestation exists in a tree the plugin preserved — the sensor contradicts the decision" \
+            || ok "no drain attestation in the preserved tree — the decision matches its sensor"
+        ev=$(mount_events lean-agent)
+        echo "$ev" | grep -q 'DrainNotAttested' \
+            && ok "the tenant's events say why (DrainNotAttested)" \
+            || bad "no DrainNotAttested event on lean-agent: $(echo "$ev" | tail -2 | cut -c1-200)"
+        onnode "rm -rf /var/lib/kubelet/plugins/s3.csi.chert.us/undrained" >/dev/null 2>&1
     else
         bad "lean-agent2 never reached Running in 400s — the takeover arm made no observation at all"
     fi
@@ -964,7 +1081,7 @@ fi
 # enough to hit.
 leg S17 "a node-plugin restart mid-checkout does not restart the checkout: the syncer is a separate pod, and its marker predates the new plugin"
 $K -n $NS delete pod slow-agent --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
-$K apply -f lean-slow.yaml >/dev/null
+apply_fx lean-slow.yaml >/dev/null
 # Wait for the worker to exist — the checkout is running once it does.
 # Poll fast and accept ANY phase: every second spent here is a second
 # of the window spent. `sleep 2` on a Running-only match routinely
@@ -1051,7 +1168,7 @@ $K -n $NS delete pod slow-agent --ignore-not-found --wait=true --timeout=240s >/
 # plugin roll — so the leg below does not rely on timing at all.
 leg S17f-seed "seed a 4000-file project (proj-wide) through a lean seeder and its drain"
 $K -n $NS delete pod slow-agent wide-seeder --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
-$K apply -f lean-wide.yaml >/dev/null
+apply_fx lean-wide.yaml >/dev/null
 if wait_phase wide-seeder Succeeded 300; then
     ok "the seeder wrote its files and exited"
     $K -n $NS delete pod wide-seeder --wait=true --timeout=300s >/dev/null 2>&1
@@ -1071,7 +1188,7 @@ fi
 # tree — before the syncer is thawed and the checkout completes.
 leg S17f "adoption keeps a checkout in progress: syncer frozen mid-checkout, plugin rolled, volume kept, checkout completes after the thaw"
 $K -n $NS delete pod slow-agent --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
-$K apply -f lean-wide-agent.yaml >/dev/null
+apply_fx lean-wide-agent.yaml >/dev/null
 w=""; i=0
 while [ $i -lt 480 ] && [ -z "$w" ]; do w=$(worker_of_any slow-agent); [ -z "$w" ] && { sleep 0.25; i=$((i + 1)); }; done
 if [ -n "$w" ]; then
@@ -1149,8 +1266,8 @@ else
 fi
 # The wide project leaves the rig before S18.
 $K -n $NS delete pod slow-agent --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
-$K delete -f lean-wide.yaml --ignore-not-found --wait=false >/dev/null 2>&1
-mcx mc rm --recursive --force m/s3bucket/tenants/proj-wide >/dev/null 2>&1 || true
+delete_fx lean-wide.yaml --ignore-not-found --wait=false >/dev/null 2>&1
+mcx mc rm --recursive --force m/$BUCKET/tenants/proj-wide >/dev/null 2>&1 || true
 
 # ── S18 the tree's ceiling ───────────────────────────────────────────
 # `sizeLimitGib` was an emptyDir sizeLimit under the webhooks, where
@@ -1165,7 +1282,7 @@ mcx mc rm --recursive --force m/s3bucket/tenants/proj-wide >/dev/null 2>&1 || tr
 # workspace beside it is the control — if the node were what ran out,
 # its df would show no space either.
 leg S18 "lean quota: sizeLimitGib is a filesystem, so a workspace fills at its ceiling instead of filling the node — and an unbounded sibling proves the node did not"
-$K apply -f quota-tenants.yaml >/dev/null
+apply_fx quota-tenants.yaml >/dev/null
 if wait_phase quota-agent Running 300 && wait_phase noquota-agent Running 300; then
     qk=$(inpod quota-agent "df -P /workspace | tail -1 | awk '{print \$2}'")
     nk=$(inpod noquota-agent "df -P /workspace | tail -1 | awk '{print \$2}'")
@@ -1246,8 +1363,138 @@ if require_pod reader-elsewhere; then
     note "state dirs on the node: ${vols:-?}; live readers: $live"
     stale=$(onnode "grep -c 'plugins/s3.csi.chert.us/volumes' /proc/mounts")
     [ "${stale:-0}" -le "$((live * 1))" ] && ok "plugin-dir mounts on the node ($stale) do not exceed live readers ($live)" || bad "stale plugin-dir mounts on the node: $stale for $live readers"
-    $K apply -f tenants.yaml >/dev/null
+    apply_fx tenants.yaml >/dev/null
 fi
+
+# ── S21 (audit 2026-09-03, finding 4) ─────────────────────────────────
+# A node reboot empties the worker's memory-backed comm dir: the
+# supervisor restarts with no launch record, sits in its accept loop,
+# and the pod reads Running with NO syncer inside it — "alive" to the
+# plugin forever, nothing publishing. The shape is reproduced without a
+# reboot: erase the record and kill the syncer, so the container's
+# restart lands exactly there. The plugin must notice a listening
+# supervisor with no record and send the launch again — to the SAME pod.
+leg S21 "a Running worker with no syncer inside it (its launch record gone, the node-reboot shape) gets the launch sent again on the next republish, in the SAME pod"
+$K -n $NS delete pod lean-agent lean-agent2 --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
+apply_fx lean-agent.yaml >/dev/null
+if wait_phase lean-agent Running 300; then
+    w=$(worker_of lean-agent)
+    wuid0=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    rc0=$($K -n $WNS get pod "$w" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)
+    $K -n $WNS exec "$w" -- /bin/sh -c 'rm -f /comm/launch.json; for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = flint-sync ] && kill -9 "${p#/proc/}"; done; exit 0' >/dev/null 2>&1
+    i=0; rc1=$rc0
+    while [ $i -lt 90 ] && [ "${rc1:-0}" = "${rc0:-0}" ]; do
+        sleep 3; i=$((i + 3))
+        rc1=$($K -n $WNS get pod "$w" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)
+    done
+    [ "${rc1:-0}" -gt "${rc0:-0}" ] \
+        && ok "PRECONDITION: the worker container restarted (${rc0:-0} → ${rc1:-0}) with no launch record" \
+        || bad "PRECONDITION: the container did not restart in ${i}s — the shape was never produced"
+    sleep 5
+    nsy=$($K -n $WNS exec "$w" -- /bin/sh -c 'ps | grep -c "[f]lint-sync run"' 2>/dev/null)
+    [ "${nsy:-0}" = "0" ] \
+        && ok "PRECONDITION: the pod is Running with NO flint-sync inside it — the shape a reboot leaves" \
+        || bad "PRECONDITION: flint-sync came back on its own ($nsy) — the launch record was not gone, and this leg tests nothing"
+    i=0; back=0
+    while [ $i -lt 240 ]; do
+        nsy=$($K -n $WNS exec "$w" -- /bin/sh -c 'ps | grep -c "[f]lint-sync run"' 2>/dev/null)
+        [ "${nsy:-0}" -ge 1 ] && { back=1; break; }
+        sleep 5; i=$((i + 5))
+    done
+    [ "$back" = "1" ] \
+        && ok "flint-sync is back in the worker ${i}s later: the plugin sent the launch again" \
+        || bad "no flint-sync in the worker after ${i}s: a Running pod with no syncer is 'alive' forever"
+    wuid1=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    [ -n "$wuid1" ] && [ "$wuid1" = "$wuid0" ] \
+        && ok "the SAME pod (uid unchanged): the launch was re-sent, the worker was not recreated" \
+        || bad "the worker was recreated ($wuid0 → ${wuid1:-gone}) instead of re-launched"
+    $K -n $WNS exec "$w" -- test -f /comm/launch.json 2>/dev/null \
+        && ok "the launch record is persisted again" \
+        || bad "no launch.json in the worker after the re-send"
+    mount_events lean-agent | grep -q 'SyncerRelaunched' \
+        && ok "the tenant's events name it (SyncerRelaunched)" \
+        || bad "no SyncerRelaunched event on lean-agent"
+    r0=$(lrenew tenants/proj); sleep 40; r1=$(lrenew tenants/proj)
+    [ "${r1:-0}" -gt "${r0:-0}" ] \
+        && ok "the relaunched syncer holds and renews the lease ($r0 → $r1)" \
+        || bad "the lease is not being renewed after the relaunch ($r0 → $r1)"
+else
+    bad "lean-agent never reached Running in 300s — S21 made no observation at all"
+fi
+$K -n $NS delete pod lean-agent --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
+
+# ── S22 (audit 2026-09-03, finding 5) ─────────────────────────────────
+# The operator's refuse-foreign was ADVISORY on the data plane: a CR the
+# operator had not yet judged resolved to its spec, and the syncer
+# checked out and republished over another project's prefix. The claim
+# cell is durable in the bucket, so the SYNCER now reads it before its
+# first claim step — with the project id stamped into its environment.
+# This rig runs no operator, which is the point: the refusal must not
+# depend on one.
+leg S22 "lean claim precondition: a prefix whose claim cell names ANOTHER project is refused by the syncer itself, before any checkout — and the same pod mounts once the claim is its own"
+$K -n $NS delete pod lean-claimed --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
+delete_fx lean-claimed.yaml --ignore-not-found --wait=true >/dev/null 2>&1
+mcx mc rm --recursive --force m/$BUCKET/tenants/proj-claimed/ >/dev/null 2>&1
+mcx sh -c "printf '{\"project_id\":\"team-b/other\",\"created_unix\":1,\"stamped_by\":\"drill\"}' | mc pipe m/$BUCKET/tenants/proj-claimed/.flint/lean/claim" >/dev/null 2>&1
+[ "$(lobj tenants/proj-claimed/.flint/lean/claim | jq -r .project_id 2>/dev/null)" = "team-b/other" ] \
+    && ok "PRECONDITION: a standing claim by team-b/other is in the bucket" \
+    || bad "PRECONDITION: the foreign claim was not planted — this leg tests nothing"
+apply_fx lean-claimed.yaml >/dev/null
+if wait_phase lean-claimed Running 150; then
+    bad "lean-claimed is Running over a prefix claimed by another project: refuse-foreign is still advisory on the data plane"
+else
+    ev=$(mount_events lean-claimed)
+    echo "$ev" | grep -q 'team-b/other' && echo "$ev" | grep -q 'team-a/proj-claimed' \
+        && ok "the mount is refused, and the event names BOTH projects" \
+        || bad "refusal event: $(echo "$ev" | tail -1 | cut -c1-240)"
+    [ "$(lcount tenants/proj-claimed/files/)" = "0" ] \
+        && ok "nothing was published under the foreign prefix" \
+        || bad "objects appeared under the foreign prefix"
+    # The refusal is FINAL for the delivery: exit 78 (flint_lean::
+    # EXIT_REFUSED = worker::SYNCER_EXIT_REFUSED) is torn down and named,
+    # never relaunched. The first run of this leg found the two crates'
+    # contract missing: the syncer exited 1, OnFailure restarted it, the
+    # supervisor relaunched it from launch.json, and the plugin told the
+    # tenant "checkout in progress" for the whole 150 s. Kubelet retries
+    # the mount on a backoff, and each retry makes a worker that lives a
+    # few seconds before the plugin tears it down — so the observation
+    # is an instant with NO Running worker, not a single sample.
+    echo "$ev" | grep -q 'SyncerRefused' \
+        && ok "the plugin raised its own SyncerRefused event (the reason survives kubelet cutting the mount message)" \
+        || bad "no SyncerRefused event on the tenant: $(echo "$ev" | grep -c . ) events, none from the plugin's refusal arm"
+    echo "$ev" | grep -q 'exited 78' \
+        && ok "the refusal carried exit 78: the syncer's EXIT_REFUSED and the plugin's SYNCER_EXIT_REFUSED agree" \
+        || bad "the mount events never mention exit 78 — the two crates' refusal code disagrees, or the plugin classified it as something else"
+    i=0; gone=""
+    while [ $i -lt 90 ]; do
+        [ -z "$(worker_of lean-claimed)" ] && { gone=$i; break; }
+        sleep 3; i=$((i + 3))
+    done
+    [ -n "$gone" ] \
+        && ok "the refused syncer is torn down, not left crash-looping (no Running worker for lean-claimed at ${gone}s)" \
+        || bad "a syncer is still Running for the refused workspace after 90s: the refusal is being relaunched in place"
+fi
+# CONTROL: the claim becomes our own UNDER THE SAME TENANT POD — no
+# delete, no re-apply. Kubelet is still retrying the mount on its
+# backoff (up to ~2 min between attempts); the next attempt after the
+# flip makes a worker whose syncer finds its own claim, checks out, and
+# the tenant reaches Running. The check is the claim, not the pod: a
+# refusal must not need an operator to restart anything once it is
+# fixed.
+tuid0=$($K -n $NS get pod lean-claimed -o jsonpath='{.metadata.uid}' 2>/dev/null)
+mcx sh -c "printf '{\"project_id\":\"team-a/proj-claimed\",\"created_unix\":1,\"stamped_by\":\"drill\"}' | mc pipe m/$BUCKET/tenants/proj-claimed/.flint/lean/claim" >/dev/null 2>&1
+apply_fx lean-claimed.yaml >/dev/null
+if wait_phase lean-claimed Running 300; then
+    tuid1=$($K -n $NS get pod lean-claimed -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    [ -n "$tuid0" ] && [ "$tuid0" = "$tuid1" ] \
+        && ok "CONTROL: with its OWN claim standing the SAME tenant pod mounts on kubelet's next retry (uid unchanged; nothing was restarted)" \
+        || bad "CONTROL: lean-claimed mounted but as a different pod ($tuid0 → $tuid1): something recreated it"
+else
+    bad "CONTROL: lean-claimed did not mount under its own claim within 300s: $(mount_events lean-claimed | tail -1 | cut -c1-200)"
+fi
+$K -n $NS delete pod lean-claimed --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
+delete_fx lean-claimed.yaml --ignore-not-found --wait=false >/dev/null 2>&1
+mcx mc rm --recursive --force m/$BUCKET/tenants/proj-claimed/ >/dev/null 2>&1
 
 # ── S16 termination ordering, WITHOUT a PodDisruptionBudget ──────────
 # LAST on purpose: it drains the node for real, and --force deletes the
@@ -1316,7 +1563,7 @@ $K uncordon "$NODE" >/dev/null 2>&1 && note "node uncordoned"
 
 # ── roster ────────────────────────────────────────────────────────────
 echo
-for want in S1 S2 S3 S4 S5 S5c S6 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S17 S17f S18 S19 SU; do
+for want in S1 S2 S3 S4 S5 S5c S6 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S17 S17f S18 S19 S20 S21 S22 SU; do
     echo " $RAN_LEGS " | grep -q " $want " || bad "leg $want never ran"
 done
 echo "════════════════════════════════════════"

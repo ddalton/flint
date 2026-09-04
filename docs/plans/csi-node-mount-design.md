@@ -514,6 +514,82 @@ neither; on this rig that assertion fails until the fixture's checkout
 outlives a roll (a project of tens of thousands of objects, or a
 first-byte stall). Because no fixture on this rig can open the window by timing, a deterministic leg was added beside it, **S17f**: the syncer is SIGSTOPped mid-checkout (the S14 technique), the plugin is rolled while the on-disk state reads `checking-out`, and adoption is observed directly — the new plugin's log line, the worker's uid and absent `deletionTimestamp`, the tree and state still present, the state still `checking-out`; then the syncer is thawed and the checkout must complete under the new plugin with the same worker and a marker YOUNGER than that plugin. Run against the rebuilt plugin over a 4000-file project: 14/0. Against the previous binary the second assertion reads 'the new plugin CLEANED UP the checkout at startup', by construction of `adopt_existing` as it was.
 
+**Third pass (2026-09-04, after the integrity audit).** The read-only
+audit of record (`docs/plans/flint-lean-integrity-audit-2026-09-03.md`)
+confirmed eleven mechanisms; this pass closes the ones the user named
+important, in the lean crate and in this driver, each with a test that
+goes red without its fix.
+
+- *Finding 1 — the cadence barrier's between-chunk fence was a no-op.*
+  `renew_if_due` returned Ok on exactly the deposed condition and its
+  doc comment claimed the opposite. Narrow fix: the renewal now hands
+  back the cell it already read and the cadence barrier fences on it
+  between chunks (`fence_on_cell`), zero extra requests; the gated lanes
+  were already paired with `verify_not_deposed_pub` and are untouched.
+  Test: a store that deposes the writer from inside its 4th PUT; the
+  barrier must return `Fenced` with fewer than one chunk of PUTs after
+  the takeover (mutation-checked: 36-38 without the fix).
+- *Finding 2 — a lost renew response self-fenced a live holder, forever
+  under CSI.* `lease::renew` re-reads the cell on a 412; one that still
+  names this holder at this epoch, unreleased, was written by nobody
+  else, so its token is adopted. A genuine takeover still fences
+  (control arm in the test). Under CSI, `relaunch_reason` now treats a
+  `Succeeded` worker under a still-mounted tenant as lost, like `Failed`
+  and gone: the relaunched syncer self-recognises a cell that still
+  names it, and against a live successor waits out quiet polls it never
+  wins. S14's fenced exit stays 0; S14 tolerates the relaunch landing
+  before it looks.
+- *Finding 3 — an attempted drain that failed or fenced still lost its
+  tree.* The syncer now attests a completed drain in the tree
+  (`.flint-sync/drained.json`, written only after `drain()` returned
+  Ok, cleared by every fresh incarnation), retries for the budget this
+  driver stamps into the launch (`FLINT_SYNC_DRAIN_BUDGET_SECS` = the
+  derived grace less 5 s) rather than 3×2 s, and on failure leaves the
+  lease UNRELEASED. `unpublish_lean` removes the tree only when
+  `drain_attested` finds a marker younger than the SIGTERM; otherwise
+  `preserve_undrained` + `DrainNotAttested`. The first-pass `is_gone`
+  sensor said only that the pod was gone.
+- *Finding 4 — a Running worker with no syncer inside it was alive
+  forever.* After a node reboot the memory-backed comm dir is empty, the
+  supervisor has no launch to relaunch from and sits in its accept loop.
+  Republish now sends the launch again when `launch_missing` sees a
+  bound socket with no record (`SyncerRelaunched`), to the same pod.
+- *Finding 5 — refuse-foreign was advisory on the data plane.* The
+  syncer reads the claim cell before its first claim step
+  (`lease::verify_claim`) when `FLINT_SYNC_PROJECT_ID` is stamped, which
+  `sync_env` now does for both deliveries; a cell naming another project
+  refuses by name. Unstamped stays unchecked, which is what a rig with
+  no operator runs. The refusal is a distinct variant with a distinct
+  exit code, **78** (`flint_lean::EXIT_REFUSED` =
+  `worker::SYNCER_EXIT_REFUSED`; the crates share no dependency, S22
+  checks they agree). S22's first run found the delivery had no such
+  contract: exit 1 was restarted by `OnFailure`, relaunched by the
+  supervisor from `launch.json`, and `resume_lean` — which only knows
+  phase `Failed`/`Succeeded` — told the tenant "checkout in progress"
+  for the whole leg. `wait_running` now reads the container's
+  termination record (current state before the restart, last state
+  after it) and returns `Failed{Refused}` on 78; the publish fails
+  `FailedPrecondition` led by the syncer's last stderr line, raises
+  `SyncerRefused`, and tears the worker down. Every other non-zero exit
+  stays kubelet's to retry in place — an OOM kill or a store outage at
+  startup is what `OnFailure` is for, and tearing down on those would
+  lose a resumable checkout.
+- *Finding 9, the fsync half.* Every state and control file is fsynced
+  (file and directory); materialisations stay fast and the tree is
+  `syncfs`ed before the marker or a baseline that vouches for them. Not
+  drill-testable; the invariant is "the description is never more
+  durable than what it describes".
+
+Drill: S20 (the fenced worker is relaunched, waits, and its unattested
+tree is preserved at the tenant's delete), S21 (the reboot shape: launch
+re-sent, same pod), S22 (a foreign claim refuses before any checkout
+with exit 78 named on the tenant and the worker torn down; the claim is
+then flipped UNDER the same tenant pod and it mounts on kubelet's next
+retry, uid unchanged). Not built: findings 6 (legacy
+migration fence), 7 (lost acquire response skips rotation), 8 (the
+gated pair), 11 (`recover-staged` under CSI), and the model probe that
+deposes a writer BETWEEN chunks (`EpochCheck` is still a constant).
+
 ## 1. The question, restated precisely
 
 The ask, verbatim: *"The flint passthrough and lean operators require

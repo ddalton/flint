@@ -167,8 +167,42 @@ pub async fn renew(sc: &mut Sidecar) -> LeanResult<()> {
             Ok(())
         }
         Err(StoreError::PreconditionFailed(e)) => {
-            sc.lease = None;
-            Err(LeanError::Fenced(format!("deposed at renew: {e}")))
+            // A 412 is not yet a deposal. The renew CAS is If-Match on
+            // OUR token, and only two things move that token: a
+            // successor's acquire, or our own previous renew whose
+            // RESPONSE was lost (the PUT landed, the client saw a
+            // timeout). The second is not a takeover, and treating it as
+            // one made a live holder fence itself — exit 0, and under
+            // the CSI delivery nothing restarted it, so the workspace
+            // went unpublished for the rest of the tenant's life
+            // (audit 2026-09-03, finding 2). One read tells the cases
+            // apart: a cell that still names this holder at this epoch,
+            // unreleased, can only have been written by us, so its token
+            // is ours to adopt. Anything else is the fence.
+            match sc.store.epoch_read(&key).await {
+                Ok(Some(state))
+                    if state.holder_id == lease.holder_id
+                        && state.epoch == lease.epoch
+                        && !state.released =>
+                {
+                    eprintln!(
+                        "flint-sync: renew 412 on a cell that is still ours (epoch {}): a lost \
+                         renew response — adopting its token, not fencing",
+                        state.epoch
+                    );
+                    sc.lease = Some(EpochLease {
+                        holder_id: state.holder_id,
+                        epoch: state.epoch,
+                        token: state.token,
+                    });
+                    let _ = sc.clear_auth_pause();
+                    Ok(())
+                }
+                _ => {
+                    sc.lease = None;
+                    Err(LeanError::Fenced(format!("deposed at renew: {e}")))
+                }
+            }
         }
         // 401/403 is not contention and not a bucket fault; retrying
         // cannot fix it. We keep serving local files and keep trying —
@@ -181,6 +215,41 @@ pub async fn renew(sc: &mut Sidecar) -> LeanResult<()> {
             let _ = sc.note_auth_pause();
             Err(e.into())
         }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The claim precondition (audit 2026-09-03, finding 5). With a project
+/// id stamped (`FLINT_SYNC_PROJECT_ID`), refuse to run over a prefix
+/// whose claim cell names ANOTHER project. The operator's refuse-foreign
+/// was advisory on the data plane: a CR the operator had not yet judged
+/// resolved to its spec, and the syncer checked out and republished over
+/// the foreign project's manifest. The cell is durable in the bucket, so
+/// the data plane can read it — one GET before the first claim step.
+/// Absent cell ⇒ a fresh prefix, claimable; unstamped ⇒ no check (the
+/// pre-operator posture, which the drill runs). A foreign claim is
+/// `LeanError::Refused`: the process exits `EXIT_REFUSED`, which the
+/// delivery treats as final (tear down, name the reason) rather than
+/// as one more crash to restart.
+pub async fn verify_claim(sc: &Sidecar) -> LeanResult<()> {
+    let Some(mine) = sc.cfg.project_id.as_deref() else { return Ok(()) };
+    let key = sc.cfg.claim_key();
+    match sc.store.get_whole(&key, None).await {
+        Ok((_, body)) => {
+            let doc: serde_json::Value = serde_json::from_slice(&body)
+                .map_err(|e| LeanError::State(format!("claim cell {key} is unparseable: {e}")))?;
+            match doc.get("project_id").and_then(|v| v.as_str()) {
+                Some(p) if p == mine => Ok(()),
+                Some(p) => Err(LeanError::Refused(format!(
+                    "prefix {} is claimed by project {p:?}; this workspace is project {mine:?} — \
+                     refusing to check out or publish over another project's data (delete the \
+                     standing claim explicitly if this reuse is intended)",
+                    sc.cfg.prefix
+                ))),
+                None => Err(LeanError::State(format!("claim cell {key} names no project_id"))),
+            }
+        }
+        Err(StoreError::NotFound(_)) => Ok(()),
         Err(e) => Err(e.into()),
     }
 }

@@ -274,6 +274,53 @@ machine identifier moved off `flint.io` to `chert.us`.
 
 ### Fixed
 
+- **flint-lean: five holes around the manifest CAS, from the 2026-09-03
+  integrity audit** (`docs/plans/flint-lean-integrity-audit-2026-09-03.md`).
+  The cadence barrier's between-chunk renewal never fenced a deposed
+  writer (it returned Ok on exactly the deposed condition), so a
+  straggler taken over mid-barrier completed every remaining data PUT
+  over the cited generation; the barrier now fences on the cell that
+  renewal already read, at no extra request — the gated lanes were
+  already fenced. A renew whose own previous response was lost read
+  the resulting 412 as a deposal and self-fenced (exit 0; permanent
+  under CSI): one read now tells a cell that still names this holder
+  from a takeover. The SIGTERM drain attests a completed drain in the
+  tree (`.flint-sync/drained.json`), retries for the budget the
+  delivery stamps (`FLINT_SYNC_DRAIN_BUDGET_SECS`) and, on failure,
+  leaves the lease UNRELEASED instead of attesting a clean handoff.
+  State and control files are fsynced (file and directory), and the
+  tree is `syncfs`ed before the marker or a baseline that vouches for
+  materialised files, so a power loss cannot leave a baseline
+  describing zero-length files that the next scan publishes. With
+  `FLINT_SYNC_PROJECT_ID` stamped (the operator's env list and the CSI
+  delivery both stamp it), the syncer reads the claim cell before its
+  first claim step and refuses a prefix claimed by another project —
+  refuse-foreign is enforced on the data plane, not only by the
+  operator's verdict. The refusal is `LeanError::Refused` and exits
+  **78** (`EXIT_REFUSED`, sysexits `EX_CONFIG`): the one code the CSI
+  delivery treats as final. The first S22 run showed why that contract
+  has to exist — a refusal exiting 1 was restarted by `OnFailure`,
+  relaunched by the supervisor from its persisted launch record, and
+  reported to the tenant as "checkout in progress" for as long as the
+  pod lived.
+- **`s3.csi.chert.us`: four more from the same audit.** A lean worker
+  that exited on its own (`Succeeded`: fenced) under a still-mounted
+  tenant is relaunched on the next republish, not only a `Failed` one.
+  A syncer whose container exited **78** (a refusal a restart cannot
+  change) is recognised as final from its termination record even
+  though `OnFailure` keeps the pod `Running` — the publish fails
+  `FailedPrecondition` with the syncer's own last line (both project
+  names), a `SyncerRefused` event carries it too, and the worker is torn
+  down rather than relaunched in place; the tenant's mount succeeds on
+  kubelet's next retry once the claim is its own, with no restart. A `Running` worker whose supervisor lost its launch
+  record (a node reboot empties the memory-backed comm dir) gets the
+  launch sent again in the same pod (`SyncerRelaunched`). And
+  `NodeUnpublishVolume` removes a lean tree only when the syncer's own
+  drain attestation post-dates the SIGTERM; a drain that failed every
+  attempt or was fenced leaves the pod just as gone, and its tree is now
+  preserved under `<plugin>/undrained/` (`DrainNotAttested`) instead of
+  removed. Drill legs S20–S22 cover the four; S14 tolerates the
+  relaunch landing before it looks.
 - **`s3.csi.chert.us`: a plugin restart no longer restarts a lean
   checkout in progress**, a published lean workspace can no longer be
   started over by a republish that finds its target unmounted (it is

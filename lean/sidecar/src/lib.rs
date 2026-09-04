@@ -109,7 +109,23 @@ pub enum LeanError {
     /// A budget refused the operation (checkout bytes/file-count).
     #[error("budget: {0}")]
     Budget(String),
+    /// A precondition the OPERATOR must change refused the run (the
+    /// prefix is claimed by another project). A restart cannot fix it,
+    /// so the binary exits `EXIT_REFUSED` — the code the CSI delivery
+    /// reads as final. Any other non-zero exit is retried in place by
+    /// `restartPolicy: OnFailure`, and a refusal sharing that code was a
+    /// crash loop the plugin reported to the tenant as "checkout in
+    /// progress" for as long as it lived (audit 2026-09-03, finding 5,
+    /// leg S22).
+    #[error("refused: {0}")]
+    Refused(String),
 }
+
+/// Process exit code for `LeanError::Refused` (sysexits `EX_CONFIG`).
+/// Mirrored as `SYNCER_EXIT_REFUSED` in the CSI node plugin, which does
+/// not depend on this crate; drill leg S22 is where the two are checked
+/// against each other.
+pub const EXIT_REFUSED: i32 = 78;
 
 impl LeanError {
     /// The store refused our credentials (401/403, `ExpiredToken`,
@@ -249,6 +265,13 @@ pub struct LeanConfig {
     /// rig measured the sequential loops at 561-854 PUTs/s and
     /// 1,000-2,000 GETs/s; fan-out multiplies directly against those.
     pub fanout: usize,
+    /// The project this workspace claims to be, stamped from the CR
+    /// (`FLINT_SYNC_PROJECT_ID`). When set, `lease::verify_claim`
+    /// refuses to run over a prefix whose claim cell names another
+    /// project — the operator's refuse-foreign, enforced on the DATA
+    /// plane (audit 2026-09-03, finding 5). `None` = unstamped: no
+    /// check, the pre-operator posture.
+    pub project_id: Option<String>,
     /// Ceiling on bytes in flight across the checkout fan-out window.
     ///
     /// `fanout` bounds the number of concurrent fetches but NOT their
@@ -306,6 +329,7 @@ impl LeanConfig {
             max_files: 0,
             window_slack_secs: 180,
             fanout: 32,
+            project_id: None,
             fetch_inflight_max_bytes: 512 * 1024 * 1024,
             boundary_mode: BoundaryMode::Hybrid,
             sentinel_mode: SentinelMode::Auto,
@@ -364,6 +388,11 @@ impl LeanConfig {
     }
     pub fn epoch_key(&self) -> String {
         format!("{}/{}/epoch", self.prefix, LEAN_DIR)
+    }
+    /// The operator's claim cell for this prefix (`lean_operator::
+    /// reconcile::claim_key` writes it; the syncer only READS it).
+    pub fn claim_key(&self) -> String {
+        format!("{}/{}/claim", self.prefix, LEAN_DIR)
     }
     pub fn conflict_key(&self, uuid: &str, path: &str) -> String {
         format!("{}/{}/conflicts/{}/{}", self.prefix, LEAN_DIR, uuid, path)

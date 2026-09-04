@@ -52,11 +52,68 @@ pub(crate) fn check_parent(path: &Path) -> LeanResult<()> {
 /// Write `bytes` to `tmp`, never following a symlink at that name, then
 /// rename onto `path`. `mode`, when given, is applied to the open
 /// handle — never to the path, which would be one more lookup to race.
+///
+/// DURABLE: the file is fsynced before the rename and its directory
+/// after, so a power loss leaves either the old file or the new one,
+/// never a zero-length name. This is the writer for every STATE and
+/// CONTROL file (baseline, marker, incarnation, intent, acks, pending);
+/// those are small and few, and each one vouches for data elsewhere —
+/// a baseline that survives a crash while the files it describes come
+/// back empty makes the next scan publish zeros over the good version
+/// (audit 2026-09-03, finding 9). Bulk materialisations go through
+/// `write_via_tmp_fast` and are made durable by `sync_tree` before the
+/// record that vouches for them is written.
 pub(crate) fn write_via_tmp(
     path: &Path,
     tmp: &Path,
     bytes: &[u8],
     mode: Option<u32>,
+) -> LeanResult<()> {
+    write_via_tmp_opts(path, tmp, bytes, mode, true)
+}
+
+/// The same write without the per-file fsync: for checkout, consume and
+/// sync materialisations, where a million fsyncs would be the cost and
+/// one `sync_tree` before the marker/baseline is the equivalent.
+pub(crate) fn write_via_tmp_fast(
+    path: &Path,
+    tmp: &Path,
+    bytes: &[u8],
+    mode: Option<u32>,
+) -> LeanResult<()> {
+    write_via_tmp_opts(path, tmp, bytes, mode, false)
+}
+
+/// Flush every dirty page of the filesystem holding `dir` to stable
+/// storage. Linux `syncfs(2)`; elsewhere an fsync of the directory,
+/// which is the best the platform offers. Called before the checkout
+/// marker and before a baseline that vouches for materialised files.
+pub(crate) fn sync_tree(dir: &Path) -> LeanResult<()> {
+    let d = std::fs::File::open(dir)
+        .map_err(|e| LeanError::State(format!("open {} to sync: {e}", dir.display())))?;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: syncfs on an owned, open fd.
+        if unsafe { libc::syncfs(d.as_raw_fd()) } != 0 {
+            let e = std::io::Error::last_os_error();
+            return Err(LeanError::State(format!("syncfs {}: {e}", dir.display())));
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        d.sync_all()
+            .map_err(|e| LeanError::State(format!("fsync {}: {e}", dir.display())))
+    }
+}
+
+fn write_via_tmp_opts(
+    path: &Path,
+    tmp: &Path,
+    bytes: &[u8],
+    mode: Option<u32>,
+    durable: bool,
 ) -> LeanResult<()> {
     match std::fs::remove_file(tmp) {
         Ok(()) => {}
@@ -77,8 +134,21 @@ pub(crate) fn write_via_tmp(
     let _ = mode;
     f.write_all(bytes)
         .map_err(|e| LeanError::State(format!("write tmp for {}: {e}", path.display())))?;
+    if durable {
+        f.sync_all()
+            .map_err(|e| LeanError::State(format!("fsync tmp for {}: {e}", path.display())))?;
+    }
     drop(f);
     std::fs::rename(tmp, path)
         .map_err(|e| LeanError::State(format!("rename into {}: {e}", path.display())))?;
+    if durable {
+        // The rename is a directory write; without this the name can
+        // vanish on power loss even though the bytes reached the disk.
+        if let Some(parent) = path.parent() {
+            if let Ok(d) = std::fs::File::open(parent) {
+                let _ = d.sync_all();
+            }
+        }
+    }
     Ok(())
 }

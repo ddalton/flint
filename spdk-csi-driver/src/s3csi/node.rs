@@ -672,12 +672,11 @@ impl S3Node {
         // republish; this is that. `OnFailure` covers container exits;
         // this covers the pod. Decided by a GET, never by the cache.
         if st.mode == "lean" && !alive && st.drain_started_unix.is_none() {
-            let lost = match worker::phase(&self.client, &st.worker_namespace, &st.worker_name).await {
-                Ok(None) => true,
-                Ok(Some(p)) => p == "Failed",
-                Err(_) => false,
+            let why = match worker::phase(&self.client, &st.worker_namespace, &st.worker_name).await {
+                Ok(p) => relaunch_reason(p.as_deref()),
+                Err(_) => None,
             };
-            if lost {
+            if let Some(why) = why {
                 match self.relaunch_lean_worker(dir, &mut st, pr, secrets).await {
                     Ok(()) => {
                         changed = true;
@@ -685,8 +684,8 @@ impl S3Node {
                             &st.tenant,
                             "SyncerRecreated",
                             &format!(
-                                "{}: the syncer pod was gone (evicted, or failed at the pod level); worker {} was started \
-                                 over the same tree and self-recognises its lease",
+                                "{}: the syncer pod {why}; worker {} was started over the same tree and \
+                                 self-recognises its lease",
                                 st.cr, st.worker_name
                             ),
                             false,
@@ -711,10 +710,100 @@ impl S3Node {
                 }
             }
         }
+        // A Running worker with NO syncer inside it: after a node reboot
+        // the memory-backed comm dir is empty, so the supervisor has no
+        // launch to relaunch from and sits in its accept loop (exiting
+        // and restarting every accept budget) while the pod reads
+        // Running and nothing publishes (audit 2026-09-03, finding 4).
+        // The supervisor is listening; send the launch again.
+        if st.mode == "lean" && alive && st.drain_started_unix.is_none() {
+            if let Some(uid) = st.worker_uid.clone() {
+                let comm = worker::comm_dir(&self.cfg.kubelet_root, &uid);
+                if launch_missing(&comm) {
+                    match self.resend_lean_launch(dir, &mut st, pr, secrets, &comm).await {
+                        Ok(()) => {
+                            changed = true;
+                            self.emit_event(
+                                &st.tenant,
+                                "SyncerRelaunched",
+                                &format!(
+                                    "{}: worker {} was Running with no syncer inside it (its launch record was gone — a \
+                                     node reboot); the launch was sent again and the syncer self-recognises its lease",
+                                    st.cr, st.worker_name
+                                ),
+                                false,
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(volume = %st.volume_id, "syncer launch re-send: {}", e.message());
+                            self.emit_event(
+                                &st.tenant,
+                                "SyncerRelaunchFailed",
+                                &format!(
+                                    "{}: worker {} is Running with no syncer inside it and the launch could not be sent \
+                                     again ({}); nothing publishes this workspace until it is — retried every republish",
+                                    st.cr,
+                                    st.worker_name,
+                                    e.message()
+                                ),
+                                true,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+        }
         if changed {
             let _ = st.save(dir);
         }
         Ok(())
+    }
+
+    /// The launch, sent again to a worker whose supervisor lost it.
+    async fn resend_lean_launch(
+        &self,
+        dir: &Path,
+        st: &mut VolumeState,
+        pr: &PublishRequest,
+        secrets: &HashMap<String, String>,
+        comm: &Path,
+    ) -> Result<(), Status> {
+        let Some(sync_conf) = st.sync_env.clone() else {
+            return Err(Status::failed_precondition(
+                "the volume was published by a plugin that kept no syncer environment; recreate the tenant pod",
+            ));
+        };
+        let mode = CredentialMode::parse(&st.credential_mode).map_err(Status::failed_precondition)?;
+        let mat = self.credential(dir, mode, pr, st, secrets).await?;
+        creds::write_files(comm, &mat.files, worker_owner(st)).map_err(|e| Status::internal(format!("write comm files: {e}")))?;
+        let mut env = sync_conf;
+        env.extend(mat.env);
+        self.send_lean_launch(st, comm, env).await
+    }
+
+    /// The one message a lean worker's supervisor waits for. The drain
+    /// budget rides in it: the tenant's derived grace less a slack, so
+    /// the syncer retries a failing drain for as long as the delivery
+    /// actually allows rather than for three attempts.
+    async fn send_lean_launch(&self, st: &VolumeState, comm: &Path, mut env: BTreeMap<String, String>) -> Result<(), Status> {
+        env.insert(
+            "FLINT_SYNC_DRAIN_BUDGET_SECS".to_string(),
+            st.grace_secs.unwrap_or(30).saturating_sub(5).max(6).to_string(),
+        );
+        let launch = Launch { mode: "lean".into(), args: vec!["run".into()], env };
+        let sock = comm.join("mount.sock");
+        let reply = {
+            let sock = sock.clone();
+            tokio::task::spawn_blocking(move || fuse::send_launch(&sock, &launch, None, LAUNCH_REPLY_WAIT)).await
+        };
+        match reply {
+            Ok(Ok(r)) if r.ok => Ok(()),
+            Ok(Ok(r)) => Err(Status::unavailable(format!("syncer refused the launch: {}", r.error.unwrap_or_default()))),
+            Ok(Err(e)) => Err(Status::unavailable(format!("launch over {}: {e}", sock.display()))),
+            Err(e) => Err(Status::internal(format!("launch task: {e}"))),
+        }
     }
 
     /// A lean syncer lost at the pod level: start a new worker over the
@@ -945,18 +1034,7 @@ impl S3Node {
         // plus the credentials, which live only here and never on the pod.
         let mut env = sync_conf.clone();
         env.extend(mat.env);
-        let launch = Launch { mode: "lean".into(), args: vec!["run".into()], env };
-        let sock = comm.join("mount.sock");
-        let reply = {
-            let sock = sock.clone();
-            tokio::task::spawn_blocking(move || fuse::send_launch(&sock, &launch, None, LAUNCH_REPLY_WAIT)).await
-        };
-        match reply {
-            Ok(Ok(r)) if r.ok => {}
-            Ok(Ok(r)) => return Err(Status::unavailable(format!("syncer refused the launch: {}", r.error.unwrap_or_default()))),
-            Ok(Err(e)) => return Err(Status::unavailable(format!("launch over {}: {e}", sock.display()))),
-            Err(e) => return Err(Status::internal(format!("launch task: {e}"))),
-        }
+        self.send_lean_launch(st, &comm, env).await?;
         st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
         Ok(())
     }
@@ -999,7 +1077,25 @@ impl S3Node {
                         .as_ref()
                         .and_then(|u| std::fs::read_to_string(worker::comm_dir(&self.cfg.kubelet_root, u).join("mount.error")).ok())
                         .unwrap_or_default();
-                    return Err(self.fail(dir, &st, Status::failed_precondition(format!("syncer {}: {reason} {message} {}", st.worker_name, detail.trim()))).await);
+                    // A refusal names its reason on the syncer's LAST
+                    // stderr line (finding 5's claim check names both
+                    // projects there). The tenant reads it from the
+                    // mount event, so it leads; and it is an event of
+                    // its own, since kubelet may cut the mount message.
+                    let status = if reason == "Refused" {
+                        let why = detail.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+                        self.emit_event(
+                            &st.tenant,
+                            "SyncerRefused",
+                            &format!("{}: the syncer refused and its worker was torn down, not relaunched — {why}", st.cr),
+                            true,
+                        )
+                        .await;
+                        Status::failed_precondition(format!("syncer {} refused: {why} ({message})", st.worker_name))
+                    } else {
+                        Status::failed_precondition(format!("syncer {}: {reason} {message} {}", st.worker_name, detail.trim()))
+                    };
+                    return Err(self.fail(dir, &st, status).await);
                 }
                 Err(e) => return Err(Status::unavailable(e)),
                 Ok(WaitOutcome::Running { .. }) | Ok(WaitOutcome::Timeout { .. }) => {}
@@ -1179,6 +1275,34 @@ impl S3Node {
                 return Err(Status::unavailable(format!("draining {} ({}s of {}s); retrying", st.cr, elapsed, grace)));
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        // The pod is gone. That says nothing about whether the drain
+        // PUBLISHED: a drain that failed every attempt exits 1 and a
+        // fenced one exits 0, and both leave the pod just as gone as a
+        // drain that succeeded. The syncer attests a completed drain in
+        // the tree, and only that attestation lets the tree go
+        // (audit 2026-09-03, finding 3).
+        if !drain_attested(Path::new(&st.src), started) {
+            self.emit_event(
+                &st.tenant,
+                "DrainNotAttested",
+                &format!(
+                    "{}: the syncer exited without attesting a completed drain (every attempt failed, or it was \
+                     fenced), so what it did not publish is still in its tree, which is preserved (see \
+                     UndrainedTreePreserved)",
+                    st.cr
+                ),
+                true,
+            )
+            .await;
+            return self
+                .preserve_undrained(
+                    dir,
+                    &st,
+                    target,
+                    "exited without attesting a completed drain (every attempt failed, or it was fenced), so what it did not publish is still in the tree",
+                )
+                .await;
         }
         unmount_all(target).map_err(|e| Status::internal(format!("unmount target: {e}")))?;
         // The ceiling comes down AFTER the drain and after the tenant's
@@ -1576,5 +1700,90 @@ mod tests {
         let s = exchange_status("ws", ExchangeError::Refused("403: AccessDenied: bob is not a consumer".into()));
         assert_eq!(s.code(), tonic::Code::PermissionDenied);
         assert!(s.message().contains("bob"), "{}", s.message());
+    }
+}
+
+
+/// Why a lean worker the watch says is not Running should be started
+/// over the same tree — or `None` to leave it alone (a pod that is
+/// merely Pending or Unknown is not lost).
+pub(crate) fn relaunch_reason(phase: Option<&str>) -> Option<&'static str> {
+    match phase {
+        None => Some("was gone (evicted, or deleted)"),
+        Some("Failed") => Some("had failed at the pod level"),
+        // Exit 0 while the tenant is still mounted: a fence (a lost
+        // renew response, a takeover) or a refusal. `OnFailure` never
+        // restarts an exit 0, so without this the sole holder of the
+        // workspace stayed gone for the tenant's life and nothing
+        // published (audit 2026-09-03, finding 2). Relaunched, the syncer
+        // self-recognises a cell that still names it and, against a live
+        // successor, waits out the quiet polls it never wins.
+        Some("Succeeded") => Some("had exited on its own (fenced, or refused) while the tenant was still mounted"),
+        Some(_) => None,
+    }
+}
+
+/// A Running worker whose supervisor is waiting for a launch: the socket
+/// is bound and no launch record is persisted beside it. After a node
+/// reboot the memory-backed comm dir comes back empty, which is exactly
+/// this shape (audit 2026-09-03, finding 4).
+pub(crate) fn launch_missing(comm: &Path) -> bool {
+    comm.is_dir() && comm.join("mount.sock").exists() && !comm.join("launch.json").exists()
+}
+
+/// The syncer's drain attestation (`.flint-sync/drained.json`, written
+/// only after its drain returned Ok). True only when it post-dates this
+/// unpublish's SIGTERM, so an attestation from an earlier life of the
+/// tree cannot vouch for this drain.
+pub(crate) fn drain_attested(tree: &Path, drain_started_unix: u64) -> bool {
+    let p = tree.join(".flint-sync").join("drained.json");
+    let Ok(bytes) = std::fs::read(&p) else { return false };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false };
+    v.get("unix")
+        .and_then(|u| u.as_u64())
+        .map(|u| u >= drain_started_unix.saturating_sub(1))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod audit_2026_09_03 {
+    use super::*;
+
+    #[test]
+    fn a_worker_that_exited_on_its_own_is_relaunched_like_a_failed_one() {
+        assert!(relaunch_reason(None).is_some(), "gone");
+        assert!(relaunch_reason(Some("Failed")).is_some());
+        assert!(relaunch_reason(Some("Succeeded")).is_some(), "exit 0 while mounted is a lost syncer");
+        for p in ["Running", "Pending", "Unknown"] {
+            assert!(relaunch_reason(Some(p)).is_none(), "{p} is not lost");
+        }
+    }
+
+    #[test]
+    fn a_launch_is_missing_only_when_the_supervisor_is_listening_without_a_record() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(!launch_missing(&d.path().join("absent")), "no comm dir: nothing to send to");
+        assert!(!launch_missing(d.path()), "no socket: the supervisor is not listening");
+        std::fs::write(d.path().join("mount.sock"), b"").unwrap();
+        assert!(launch_missing(d.path()), "socket and no record: waiting for a launch");
+        std::fs::write(d.path().join("launch.json"), b"{}").unwrap();
+        assert!(!launch_missing(d.path()), "a persisted launch relaunches itself");
+    }
+
+    #[test]
+    fn a_drain_is_attested_only_by_a_marker_younger_than_the_sigterm() {
+        let d = tempfile::tempdir().unwrap();
+        let tree = d.path();
+        assert!(!drain_attested(tree, 1000), "no marker: a failed or fenced drain");
+        let st = tree.join(".flint-sync");
+        std::fs::create_dir_all(&st).unwrap();
+        std::fs::write(st.join("drained.json"), b"not json").unwrap();
+        assert!(!drain_attested(tree, 1000), "garbage is not an attestation");
+        std::fs::write(st.join("drained.json"), br#"{"unix":900,"seq":3,"acks":0}"#).unwrap();
+        assert!(!drain_attested(tree, 1000), "an attestation from an earlier life of the tree");
+        std::fs::write(st.join("drained.json"), br#"{"unix":1000,"seq":3,"acks":0}"#).unwrap();
+        assert!(drain_attested(tree, 1000));
+        std::fs::write(st.join("drained.json"), br#"{"unix":999,"seq":3,"acks":0}"#).unwrap();
+        assert!(drain_attested(tree, 1000), "one second of clock slack");
     }
 }

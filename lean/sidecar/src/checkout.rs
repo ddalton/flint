@@ -351,6 +351,12 @@ impl Sidecar {
         baseline.manifest_etag = metag;
         baseline.inst_base = m.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect();
         baseline.prev_scan = present;
+        // Every materialised file reaches stable storage BEFORE the
+        // baseline and the marker that vouch for it: after a power loss
+        // the tree is then at least as durable as its description, so
+        // the next scan cannot read a zero-length survivor as a local
+        // edit and publish it over the good version.
+        self.state.sync_tree()?;
         self.state.save_baseline(&baseline)?;
         // D11: the capability marker and the gauges exist BEFORE the
         // agent-start gate opens, so the first thing the agent does can

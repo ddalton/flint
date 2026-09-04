@@ -325,6 +325,8 @@ impl Sidecar {
         }
         let rescan = scan::scan(&self.cfg.root)?;
         baseline.prev_scan = rescan.keys().cloned().collect();
+        // Materialised files before the baseline that vouches for them.
+        self.state.sync_tree()?;
         self.state.save_baseline(&baseline)?;
         Ok(report)
     }

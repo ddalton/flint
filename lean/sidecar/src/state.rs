@@ -122,6 +122,10 @@ pub struct SidecarState {
 }
 
 const MARKER: &str = "checkout-complete";
+/// Written by the SIGTERM drain only after it published: the node
+/// plugin's evidence that a worker that is now gone actually drained
+/// (audit 2026-09-03, finding 3). Absent ⇒ the tree is preserved.
+pub const DRAINED: &str = "drained.json";
 const LOCK: &str = "lock";
 const BASELINE: &str = "baseline.json";
 const INCARNATION: &str = "incarnation.json";
@@ -161,6 +165,37 @@ impl SidecarState {
 
     pub fn marker_present(&self) -> bool {
         self.dir.join(MARKER).exists()
+    }
+
+    /// Flush the filesystem holding the tree (the state dir lives in
+    /// it) so everything materialised so far is on stable storage.
+    pub fn sync_tree(&self) -> LeanResult<()> {
+        super::safefs::sync_tree(&self.dir)
+    }
+
+    /// The drain's attestation. `seq` is the manifest the drain left
+    /// installed, when it knows it.
+    pub fn write_drained(&self, seq: Option<u64>, acks: usize) -> LeanResult<()> {
+        let doc = serde_json::json!({
+            "unix": super::now_unix(),
+            "seq": seq,
+            "acks": acks,
+        });
+        write_atomic(&self.dir.join(DRAINED), doc.to_string().as_bytes())
+    }
+
+    /// A fresh incarnation owes its own attestation; a stale one from
+    /// an earlier life of this tree must not vouch for it.
+    pub fn clear_drained(&self) -> LeanResult<()> {
+        match fs::remove_file(self.dir.join(DRAINED)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(LeanError::State(format!("clear {DRAINED}: {e}"))),
+        }
+    }
+
+    pub fn drained_path(&self) -> PathBuf {
+        self.dir.join(DRAINED)
     }
 
     /// Written LAST at checkout: the agent-start gate.

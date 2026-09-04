@@ -42,6 +42,7 @@ pub fn sync_env(ws: &FlintLeanWorkspace, root: &str) -> Vec<(String, String)> {
     let mut env = vec![
         p("FLINT_SYNC_BUCKET", s.bucket.clone()),
         p("FLINT_SYNC_PREFIX", s.key_prefix.clone()),
+        p("FLINT_SYNC_PROJECT_ID", s.project_id.clone()),
         p("FLINT_SYNC_ROOT", root.to_string()),
         p("FLINT_SYNC_FLOOR_SECS", s.floor_secs.to_string()),
         p("FLINT_SYNC_MAX_BYTES", s.max_bytes.to_string()),

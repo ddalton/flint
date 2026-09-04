@@ -9,6 +9,7 @@ use std::path::Path;
 use bytes::Bytes;
 
 use flint_store::{
+    EpochState,
     crc64_nvme, crc64_to_b64, GenerationStamps, PosixStamps, PutCondition, StoreError,
 };
 
@@ -243,6 +244,9 @@ impl Sidecar {
             }
             consumed.push(entry.clone());
         }
+        // The files this baseline vouches for reached the disk before
+        // the baseline does (audit 2026-09-03, finding 9).
+        self.state.sync_tree()?;
         self.state.save_baseline(&baseline)?;
         Ok(consumed)
     }
@@ -357,21 +361,32 @@ impl Sidecar {
         confirmed
     }
 
-    /// Renew the lease if it has gone stale MID-BARRIER.
+    /// Renew the lease if it has gone stale MID-BARRIER, and hand back
+    /// the cell as it was read so the CALLER can fence on it.
     ///
     /// Costs nothing on a short barrier: the renewal is skipped unless
     /// it was already due, so the request count is unchanged — this
-    /// moves WHEN the heartbeat can happen, not how often. A fence
-    /// propagates as `Fenced`, which aborts the barrier: that is the
-    /// mechanism by which a deposed straggler stops mid-flight instead
-    /// of running its upload set to completion.
-    pub(crate) async fn renew_if_due(&mut self) -> LeanResult<()> {
-        let Some(lease) = self.lease.clone() else { return Ok(()) };
+    /// moves WHEN the heartbeat can happen, not how often.
+    ///
+    /// What this does NOT do, stated because the previous comment
+    /// claimed it did: it never raises `Fenced` for a deposed holder.
+    /// `lease::renew` can only 412 when the cell is still at OUR epoch
+    /// with a token we do not hold; a cell at a FOREIGN epoch is
+    /// skipped here (renewing it would be nonsense), so a deposed
+    /// straggler passed straight through. The 2026-09-03 audit found
+    /// the cadence barrier relying on exactly that phantom fence
+    /// between upload chunks and completing every remaining data PUT
+    /// after a takeover. The cell is returned so the caller can compare
+    /// it against its lease — the gated lanes already pay a separate
+    /// `verify_not_deposed_pub` for the same purpose; the cadence
+    /// barrier uses the read it already paid for. `None` when there is
+    /// no lease or the read failed: neither is a fence, and the
+    /// ordinary renewal arm will try again.
+    pub(crate) async fn renew_if_due(&mut self) -> LeanResult<Option<EpochState>> {
+        let Some(lease) = self.lease.clone() else { return Ok(None) };
         let state = match self.store.epoch_read(&self.cfg.epoch_key()).await {
             Ok(Some(s)) => s,
-            // A read failure is not a fence: the barrier keeps going and
-            // the ordinary renewal arm will try again.
-            _ => return Ok(()),
+            _ => return Ok(None),
         };
         let now = super::now_unix();
         let fresh = state
@@ -379,11 +394,34 @@ impl Sidecar {
             .map(|t| now.saturating_sub(t) < RENEW_WITHIN_SECS)
             .unwrap_or(false);
         if fresh || state.epoch != lease.epoch {
-            // Not due, or already deposed — the epoch check the barrier
-            // already does owns the second case.
-            return Ok(());
+            // Not due, or not ours to renew. The caller decides what a
+            // foreign cell means; this function only knows it cannot
+            // renew one.
+            return Ok(Some(state));
         }
-        super::lease::renew(self).await
+        super::lease::renew(self).await?;
+        Ok(Some(state))
+    }
+
+    /// The between-chunk fence of the cadence barrier: a cell that no
+    /// longer names this holder at this epoch stops the upload set
+    /// HERE, before the next chunk's PUTs. Every one of those PUTs
+    /// carries If-Match on a baseline etag that still matches — the
+    /// successor has published nothing yet — so without this a deposed
+    /// straggler overwrites the cited generation of every key it still
+    /// had to upload, and every reader's S3-wins arm then adopts the
+    /// uncited bytes silently (audit 2026-09-03, finding 1).
+    fn fence_on_cell(&self, cell: &EpochState) -> LeanResult<()> {
+        let Some(lease) = self.lease.as_ref() else {
+            return Err(LeanError::Fenced("lease dropped mid-barrier".into()));
+        };
+        if cell.epoch != lease.epoch || cell.holder_id != lease.holder_id {
+            return Err(LeanError::Fenced(format!(
+                "deposed between upload chunks: cell at epoch {} holder {} (we are epoch {})",
+                cell.epoch, cell.holder_id, lease.epoch
+            )));
+        }
+        Ok(())
     }
 
     /// Steps 2–7. `barrier` = one full publish cycle (the cadence arm).
@@ -587,10 +625,15 @@ impl Sidecar {
                         .await;
                     outcomes.append(&mut part);
                 }
-                // Now that the borrow is released: keep the lease alive.
-                // A fence here aborts the barrier, which is the point —
-                // it is how a straggler stops mid-flight.
-                self.renew_if_due().await?;
+                // Now that the borrow is released: keep the lease alive,
+                // and FENCE on the cell that read returned. A deposed
+                // straggler stops here, before the next chunk's PUTs —
+                // the renewal alone never fenced a foreign cell (see
+                // `renew_if_due`), which is how a straggler used to run
+                // its upload set to completion after a takeover.
+                if let Some(cell) = self.renew_if_due().await? {
+                    self.fence_on_cell(&cell)?;
+                }
             }
             outcomes
         };
@@ -1219,5 +1262,7 @@ pub(super) fn write_file_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) ->
     ));
     // The temp sibling is computed AFTER containment ran, so the walk
     // never saw it: it needs its own refusal, not a plain write.
-    super::safefs::write_via_tmp(path, &tmp, bytes, mode)
+    // FAST (no per-file fsync): materialisations are made durable by
+    // `sync_tree` before the marker or baseline that vouches for them.
+    super::safefs::write_via_tmp_fast(path, &tmp, bytes, mode)
 }

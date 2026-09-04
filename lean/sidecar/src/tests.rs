@@ -7947,3 +7947,331 @@ async fn the_barrier_reaps_unreferenced_chunks_without_being_asked() {
     let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
     assert_eq!(m.manifest.entries.len(), 60, "the sweep left the manifest short");
 }
+
+// ---------------------------------------------------------------------
+// Audit 2026-09-03 — the lease fence, the lost renew response, the claim
+// precondition, and the drain attestation.
+// ---------------------------------------------------------------------
+
+/// A backend that DEPOSES the writer from inside its Nth `put_whole`: a
+/// takeover landing in the middle of an upload chunk, which no sequence
+/// of ordinary store calls from a test can produce. Counts every
+/// `put_whole` issued AFTER the deposal — the number the fence bounds.
+struct DeposeOnNthPut {
+    inner: Arc<MemoryStore>,
+    epoch_key: String,
+    at: usize,
+    puts: std::sync::atomic::AtomicUsize,
+    deposed: std::sync::atomic::AtomicBool,
+    puts_after: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for DeposeOnNthPut {
+    async fn put_whole(
+        &self,
+        key: &str,
+        body: Bytes,
+        cond: &PutCondition,
+        stamps: &GenerationStamps,
+        crc: u64,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let n = self.puts.fetch_add(1, SeqCst) + 1;
+        if self.deposed.load(SeqCst) {
+            self.puts_after.fetch_add(1, SeqCst);
+        }
+        let r = self.inner.put_whole(key, body, cond, stamps, crc).await;
+        if n == self.at && !self.deposed.swap(true, SeqCst) {
+            let state = self.inner.epoch_read(&self.epoch_key).await?.expect("a held cell");
+            self.inner.epoch_acquire(&self.epoch_key, "lean-usurper", Some(&state)).await?;
+        }
+        r
+    }
+    async fn compose_generation(
+        &self,
+        spec: &flint_store::ComposeSpec<'_>,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.compose_generation(spec).await
+    }
+    async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head(key).await
+    }
+    async fn get_whole(
+        &self,
+        key: &str,
+        if_match: Option<&str>,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.inner.get_whole(key, if_match).await
+    }
+    async fn get_range(
+        &self,
+        key: &str,
+        off: u64,
+        len: u64,
+        if_match: &str,
+    ) -> flint_store::StoreResult<Bytes> {
+        self.inner.get_range(key, off, len, if_match).await
+    }
+    fn min_part_size(&self) -> u64 {
+        self.inner.min_part_size()
+    }
+    fn max_parts(&self) -> usize {
+        self.inner.max_parts()
+    }
+    async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
+        self.inner.list(prefix).await
+    }
+    async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete(key).await
+    }
+    async fn head_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head_version(key, v).await
+    }
+    async fn get_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.inner.get_version(key, v).await
+    }
+    async fn delete_version(&self, key: &str, v: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete_version(key, v).await
+    }
+    async fn list_versions(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::ListedVersion>> {
+        self.inner.list_versions(prefix).await
+    }
+    async fn list_uploads(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::PendingUpload>> {
+        self.inner.list_uploads(prefix).await
+    }
+    async fn abort_upload(&self, key: &str, id: &str) -> flint_store::StoreResult<()> {
+        self.inner.abort_upload(key, id).await
+    }
+    async fn bootstrap(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<flint_store::BootstrapReport> {
+        self.inner.bootstrap(prefix).await
+    }
+    async fn epoch_read(
+        &self,
+        key: &str,
+    ) -> flint_store::StoreResult<Option<flint_store::EpochState>> {
+        self.inner.epoch_read(key).await
+    }
+    async fn epoch_acquire(
+        &self,
+        key: &str,
+        holder: &str,
+        observed: Option<&flint_store::EpochState>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.inner.epoch_acquire(key, holder, observed).await
+    }
+    async fn epoch_renew(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+        echo: Option<&str>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.inner.epoch_renew(key, lease, echo).await
+    }
+    async fn epoch_release(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+    ) -> flint_store::StoreResult<()> {
+        self.inner.epoch_release(key, lease).await
+    }
+}
+
+/// AUDIT 2026-09-03, finding 1 (the model's `Inv_NoDeposedPut`, whose
+/// `LeanNoEpochCheck` mutation the shipped code turned out to BE).
+///
+/// `renew_if_due` returned `Ok(())` on exactly the deposed condition
+/// (`state.epoch != lease.epoch`), so the between-chunk "fence" the
+/// cadence barrier relied on never fired, and a writer taken over
+/// mid-barrier completed every remaining data PUT — each with If-Match
+/// on a baseline etag that still matched, because the successor had
+/// published nothing yet. Every reader's S3-wins arm then adopted the
+/// straggler's uncited bytes. The gated lanes were fenced (they pair
+/// the renewal with `verify_not_deposed_pub`); the cadence barrier was
+/// not, and no test deposed a writer BETWEEN chunks — the two straggler
+/// tests fence at the barrier's first line.
+///
+/// Anti-vacuity, in order: the deposal must have fired; some PUTs must
+/// have landed AFTER it (so the chunk boundary, not the barrier's
+/// entry check, is what stopped the writer); and then fewer than one
+/// chunk's worth may follow. Without the fix this reads 36-38 PUTs
+/// after the takeover (the rest of the 40-file set).
+#[tokio::test]
+async fn a_deposed_writer_stops_at_the_next_chunk_boundary() {
+    let inner = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = cfg_for(dir.path());
+    cfg.fanout = 1; // one chunk = 16 files, uploads strictly sequential
+    let hooked = Arc::new(DeposeOnNthPut {
+        inner: inner.clone(),
+        epoch_key: cfg.epoch_key(),
+        at: 4,
+        puts: Default::default(),
+        deposed: Default::default(),
+        puts_after: Default::default(),
+    });
+    let state = SidecarState::open(cfg.state_dir()).unwrap();
+    let mut a = Sidecar {
+        store: hooked.clone() as Arc<dyn ObjectStore>,
+        cfg,
+        state,
+        lease: None,
+        noted_not_regular: Default::default(),
+    };
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    for i in 0..40 {
+        write(dir.path(), &format!("f{i:02}.txt"), &format!("body-{i}"));
+    }
+
+    let err = a
+        .run_barrier()
+        .await
+        .expect_err("a writer deposed mid-barrier completed its barrier");
+    assert!(matches!(err, LeanError::Fenced(_)), "expected Fenced, got: {err}");
+
+    use std::sync::atomic::Ordering::SeqCst;
+    assert!(hooked.deposed.load(SeqCst), "the fixture never deposed the writer — this run proves nothing");
+    let after = hooked.puts_after.load(SeqCst);
+    assert!(
+        after > 0,
+        "no PUT landed after the deposal: the barrier's entry check caught it, not the chunk boundary"
+    );
+    assert!(
+        after < 16,
+        "the deposed writer issued {after} more data PUTs after its takeover — it ran past the \
+         chunk boundary (16 files at fanout 1) instead of fencing there"
+    );
+    assert!(
+        manifest::load(inner.as_ref(), &a.cfg).await.unwrap().is_none(),
+        "the straggler installed a manifest after being deposed"
+    );
+}
+
+/// AUDIT 2026-09-03, finding 2. The renew CAS is If-Match on OUR token;
+/// when our own renew LANDED but its response was lost, the next renew
+/// 412s on the stale token and the holder read that as a deposal:
+/// exit 0, and under the CSI delivery nothing restarted it. One read
+/// tells the cases apart — a cell that still names this holder at this
+/// epoch was written by nobody else. The control at the end keeps the
+/// real deposal fencing.
+#[tokio::test]
+async fn a_lost_renew_response_does_not_self_fence() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    let key = a.cfg.epoch_key();
+
+    // The lost response: the renew lands (the cell's token moves) but
+    // the reply never reaches the holder, whose handle keeps the old
+    // token.
+    let stale = a.lease.clone().unwrap();
+    store.epoch_renew(&key, &stale, None).await.unwrap();
+    let landed = store.epoch_read(&key).await.unwrap().unwrap().token;
+    assert_ne!(landed, stale.token, "fixture: the renew did not move the token");
+
+    lease::renew(&mut a)
+        .await
+        .expect("a renew whose previous response was lost is not a deposal");
+    assert_eq!(
+        a.lease.as_ref().map(|l| l.token.as_str()),
+        Some(landed.as_str()),
+        "the holder did not adopt the token its own landed renew minted"
+    );
+    a.verify_not_deposed_pub().await.unwrap();
+
+    // Control: a GENUINE takeover still fences the old holder.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    assert!(claim_until_held(&mut b, 12).await, "quiet polls exhausted ⇒ takeover");
+    assert!(matches!(lease::renew(&mut a).await.unwrap_err(), LeanError::Fenced(_)));
+    assert!(a.lease.is_none(), "a fenced holder must drop its lease");
+}
+
+/// AUDIT 2026-09-03, finding 5. The operator's refuse-foreign was
+/// advisory on the data plane: a CR the operator had not yet judged
+/// resolved to its spec and the syncer checked out over another
+/// project's prefix. The claim cell is durable in the bucket, so the
+/// syncer reads it before its first claim step.
+#[tokio::test]
+async fn a_foreign_claim_refuses_the_syncer_before_it_claims() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+
+    // Unstamped: no check (the pre-operator posture the drill runs).
+    lease::verify_claim(&a).await.unwrap();
+    a.cfg.project_id = Some("team-a/p".into());
+    // No cell: a fresh prefix is claimable.
+    lease::verify_claim(&a).await.unwrap();
+
+    // The operator's standing claim for ANOTHER project.
+    let key = a.cfg.claim_key();
+    let body = br#"{"project_id":"team-b/q","created_unix":1,"stamped_by":"op"}"#.to_vec();
+    let stamps = GenerationStamps {
+        generation: 1,
+        epoch: 0,
+        flush_uuid: "claim".into(),
+        boundary_source: None,
+        posix: None,
+    };
+    let crc = crc64_nvme(&body);
+    store
+        .put_whole(&key, Bytes::from(body), &PutCondition::IfNoneMatchAny, &stamps, crc)
+        .await
+        .unwrap();
+    let err = lease::verify_claim(&a).await.unwrap_err();
+    assert!(
+        matches!(err, LeanError::Refused(_)),
+        "a foreign claim is a REFUSAL (exit EXIT_REFUSED, final for the delivery), not a \
+         state error a restart would retry: {err}"
+    );
+    let err = err.to_string();
+    assert!(
+        err.contains("team-b/q") && err.contains("team-a/p"),
+        "the refusal must name both projects: {err}"
+    );
+    assert!(a.lease.is_none());
+
+    // Our own standing claim: adopted.
+    a.cfg.project_id = Some("team-b/q".into());
+    lease::verify_claim(&a).await.unwrap();
+}
+
+/// AUDIT 2026-09-03, finding 3. The drain attests its outcome in the
+/// tree; the node plugin preserves a tree whose worker is gone without
+/// one. Written only by the drain, cleared by every fresh incarnation.
+#[test]
+fn the_drain_attestation_is_written_by_the_drain_and_cleared_at_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_for(dir.path());
+    let st = SidecarState::open(cfg.state_dir()).unwrap();
+    assert!(!st.drained_path().exists(), "a fresh state dir must carry no attestation");
+    st.sync_tree().unwrap();
+    st.write_drained(Some(7), 1).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(st.drained_path()).unwrap()).unwrap();
+    assert_eq!(v["seq"], 7);
+    assert_eq!(v["acks"], 1);
+    assert!(v["unix"].as_u64().unwrap() > 0);
+    st.clear_drained().unwrap();
+    assert!(!st.drained_path().exists());
+    st.clear_drained().unwrap(); // idempotent: absent is not an error
+}
