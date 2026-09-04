@@ -180,7 +180,14 @@ inpod()   { local x=$1 p=$2 try out rc; shift 2; for try in 1 2 3; do out=$(kc "
 inpod_out() { local x=$1 p=$2 try out; shift 2; for try in 1 2 3 4 5; do out=$(inpod "$x" "$p" "$@"); [ -n "$out" ] && break; sleep 3; done; [ -n "$out" ] && printf '%s\n' "$out"; }
 phase()   { kc "$1" -n $NS get pod "$2" -o jsonpath='{.status.phase}' 2>/dev/null; }
 wait_phase() { local x=$1 p=$2 want=$3 secs=$4 i=0; while [ $i -lt "$secs" ]; do [ "$(phase "$x" "$p")" = "$want" ] && return 0; sleep 2; i=$((i + 2)); done; return 1; }
-mount_events() { kc "$1" -n $NS get events --field-selector involvedObject.name="$2" -o jsonpath='{range .items[*]}{.reason}: {.message}{"\n"}{end}' 2>/dev/null; }
+# Events are keyed on the pod UID, not just the name. This rig deletes and
+# re-applies the SAME pod names (lean-agent, lean-seeder) and is re-run
+# against persistent clusters, and an event outlives its pod by the
+# ~1h TTL — so a name-only selector hands leg M3 the PREVIOUS run's
+# "checkout of proj in progress" and its EXCLUSIVITY assertion passes on
+# an event the current pod never got. That is a pass caused by staleness,
+# not by the property holding. (Same fix as run-s3csi.sh:187.)
+mount_events() { local u; u=$(kc "$1" -n $NS get pod "$2" -o jsonpath='{.metadata.uid}' 2>/dev/null); kc "$1" -n $NS get events --field-selector involvedObject.name="$2"${u:+,involvedObject.uid=$u} -o jsonpath='{range .items[*]}{.reason}: {.message}{"\n"}{end}' 2>/dev/null; }
 require_pod() { local ph; ph=$(phase "$1" "$2"); [ "$ph" = "Running" ] && return 0; bad "[$1] pod $2 is '${ph:-absent}', not Running — every observation this leg makes would be an empty string"; return 1; }
 apply_pod() { # ctx name — one pod out of pods.yaml / lean-pods.yaml
     python3 - "$2" <<'PY' | kc "$1" apply -f - >/dev/null
