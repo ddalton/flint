@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img"
+     aria-label="S3 is the durable store for all three front ends. Two views exist: the live view served by a hub or by local files, which is strongly consistent, and the published view in the bucket, which is a set of RPO-consistent whole-file snapshots. The control namespace holds the cells that make concurrent access safe, and the recovery point differs per front end.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .tt{font-size:17px;font-weight:600}
+  .th{font-size:13.5px;font-weight:600}
+  .tl{font-size:12.5px}
+  .ts{font-size:11.5px;fill:#64748b}
+  .tsb{font-size:11.5px;font-weight:600;fill:#475569}
+  .tx{font-size:11px;fill:#64748b}
+  .mns{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#475569}
+  .mn{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:11.5px}
+  .ctr{text-anchor:middle}
+  .c-blue{fill:#1a5f9e}.c-violet{fill:#6d4aa8}.c-ochre{fill:#a06b12}
+  .c-red{fill:#b4232a}.c-green{fill:#186a3b}
+  .bx{fill:#fff;stroke:#cbd5e1;stroke-width:1.4}
+  .bx-slate{fill:#f1f5f9;stroke:#94a3b8;stroke-width:1.4}
+  .bx-blue{fill:#e9f2fa;stroke:#1a5f9e;stroke-width:1.6}
+  .bx-ochre{fill:#fbf2de;stroke:#a06b12;stroke-width:1.6}
+  .bx-warn{fill:#fdf2f2;stroke:#b4232a;stroke-width:1.6}
+  .bx-ok{fill:#f0f8f3;stroke:#186a3b;stroke-width:1.6}
+  .band{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .ln-ochre{stroke:#a06b12;stroke-width:2.4;fill:none}
+  .ln-blue{stroke:#1a5f9e;stroke-width:2.2;fill:none}
+  .dash{stroke-dasharray:5 4}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+</style>
+<defs>
+  <marker id="d8-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
+  <marker id="d8-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
+</defs>
+
+<!-- ===== two views ===== -->
+<rect x="24" y="18" width="762" height="266" rx="10" class="bx-blue"/>
+<text class="tt c-blue" x="44" y="46">The LIVE view — strong, and never in the bucket</text>
+<text class="ts" x="44" y="66">a hub's port 2049 and its file API, or a lean workspace's local disk</text>
+<line class="hair" x1="44" y1="78" x2="766" y2="78"/>
+<text class="tl" x="44" y="102">close-to-open · byte-range locks · atomic rename · no RPO lag</text>
+<text class="tx" x="44" y="124">Reads and writes land on the working set, through whatever holds</text>
+<text class="tx" x="44" y="140">coherence for it — the hub process, or the agent's own kernel.</text>
+<text class="tsb" x="44" y="166">Who reads it: front doors, editors, agents — anything touching a</text>
+<text class="tsb" x="44" y="182">tree that is being changed right now.</text>
+<rect x="44" y="196" width="722" height="72" rx="6" class="bx"/>
+<text class="tx" x="62" y="218">The hub's live view offers one thing no real S3 can: assembly under a temp name, completed by an</text>
+<text class="tx" x="62" y="234">ATOMIC RENAME under a deny-both OPEN — an atomic, exclusive multipart-complete.</text>
+<text class="tx" x="62" y="256">flint-lean has no live view to share at all: its live tree is local disk, visible to exactly one pod.</text>
+
+<rect x="814" y="18" width="762" height="266" rx="10" class="bx-ochre"/>
+<text class="tt c-ochre" x="834" y="46">The PUBLISHED view — the bucket, and the durable copy</text>
+<text class="ts" x="834" y="66">RPO-consistent snapshots per subtree, made of untorn whole-file generations</text>
+<line class="hair" x1="834" y1="78" x2="1556" y2="78"/>
+<text class="tl" x="834" y="102">whole objects · versioned · read-only against a live subtree</text>
+<text class="tx" x="834" y="124">A reader never sees half a file. It may well see a file from before</text>
+<text class="tx" x="834" y="140">your last write — that is the contract, not a defect.</text>
+<text class="tsb" x="834" y="166">Who reads it: project browsers, DR, analytics, and any non-mount</text>
+<text class="tsb" x="834" y="182">access — plain S3, with no flint server in the read path at all.</text>
+<rect x="834" y="196" width="722" height="72" rx="6" class="bx-warn"/>
+<text class="tsb c-red" x="852" y="218">Do not write into a live subtree from the console.</text>
+<text class="tx" x="852" y="238">A hand-made PUT under a prefix a hub or syncer owns has three bad fates: overwritten at the next</text>
+<text class="tx" x="852" y="254">flush, reported as a conflict, or silently uncited. The bucket is the durable copy, not a second door.</text>
+
+<!-- ===== the bucket ===== -->
+<rect x="24" y="304" width="1552" height="286" rx="10" class="bx-ochre"/>
+<text class="tt c-ochre" x="46" y="334">Inside the prefix — the bytes, and the cells that make concurrency safe</text>
+<text class="ts" x="46" y="354">Every cell below exists to answer one question that cannot be answered from the object listing alone.</text>
+
+<rect x="46" y="368" width="360" height="204" rx="8" class="bx"/>
+<text class="th c-blue" x="64" y="392">flint-lite writes</text>
+<text class="mns" x="64" y="414">&lt;prefix&gt;/&lt;path&gt;</text>
+<text class="tx" x="64" y="432">the published generations</text>
+<line class="hair" x1="64" y1="444" x2="388" y2="444"/>
+<text class="mns" x="64" y="466">.flint/epoch</text>
+<text class="tx" x="64" y="484">"who is the hub right now?" — a lease, so a</text>
+<text class="tx" x="64" y="500">second hub is fenced instead of interleaved</text>
+<text class="mns" x="64" y="522">.flint/manifest</text>
+<text class="tx" x="64" y="540">"what is the whole tree?" — DR from one GET</text>
+<text class="mns" x="64" y="562">.flint/owner</text>
+
+<rect x="420" y="368" width="360" height="204" rx="8" class="bx"/>
+<text class="th c-violet" x="438" y="392">flint-lean writes</text>
+<text class="mns" x="438" y="414">&lt;prefix&gt;/files/&lt;path&gt;</text>
+<text class="tx" x="438" y="432">the workspace, file for file</text>
+<line class="hair" x1="438" y1="444" x2="762" y2="444"/>
+<text class="mns" x="438" y="466">.flint/lean/epoch · claim</text>
+<text class="tx" x="438" y="484">"who may write this subtree?" — one holder,</text>
+<text class="tx" x="438" y="500">enforced by CAS, across every cluster</text>
+<text class="mns" x="438" y="522">.flint/lean/current</text>
+<text class="tx" x="438" y="540">"what does the last boundary contain?"</text>
+<text class="mns" x="438" y="562">.flint/lean/inbox · conflicts/</text>
+
+<rect x="794" y="368" width="360" height="204" rx="8" class="bx"/>
+<text class="th c-ochre" x="812" y="392">flint-passthrough writes</text>
+<text class="mns" x="812" y="414">&lt;prefix&gt;/&lt;key&gt;</text>
+<text class="tx" x="812" y="432">the objects, and nothing else</text>
+<line class="hair" x1="812" y1="444" x2="1136" y2="444"/>
+<text class="tsb" x="812" y="466">There is no control namespace here,</text>
+<text class="tsb" x="812" y="482">and that is the entire feature.</text>
+<text class="tx" x="812" y="504">A prefix owned by somebody else's tooling stays</text>
+<text class="tx" x="812" y="520">exactly as it was. flint adds no cells, claims no</text>
+<text class="tx" x="812" y="536">lease and leaves no trace when the pod goes away.</text>
+<text class="tx" x="812" y="562">You also get no answer to any of the questions on the left.</text>
+
+<rect x="1168" y="368" width="386" height="204" rx="8" class="bx-slate"/>
+<text class="th" x="1186" y="392">Reserved, and enforced</text>
+<text class="tx" x="1186" y="414">`.flint` is control state. A client file under it</text>
+<text class="tx" x="1186" y="430">can never shadow a control object, and a NESTED</text>
+<text class="mns" x="1186" y="450">nested/.flint/epoch</text>
+<text class="tx" x="1186" y="468">is another share's namespace — never tiered into</text>
+<text class="tx" x="1186" y="484">this one. Both are tested, because both were once</text>
+<text class="tx" x="1186" y="500">a way to overwrite a live share's lease.</text>
+<line class="hair" x1="1186" y1="512" x2="1536" y2="512"/>
+<text class="tsb" x="1186" y="534">The formats are mutually convertible: a volume can</text>
+<text class="tsb" x="1186" y="550">move between front ends, and DR import is the same</text>
+<text class="tsb" x="1186" y="566">verb in each. Choosing today does not strand data.</text>
+
+<!-- ===== durability ===== -->
+<rect x="24" y="608" width="1552" height="282" rx="10" class="band"/>
+<text class="tt" x="46" y="638">What "durable" actually means here — the recovery point, per front end</text>
+
+<rect x="46" y="654" width="498" height="220" rx="8" class="bx"/>
+<text class="th c-blue" x="64" y="678">flint-lite — RPO is the flush cadence</text>
+<text class="tx" x="64" y="700">The PVC is a working set the hub flushes on a timer. Losing</text>
+<text class="tx" x="64" y="716">the disk is a REBUILD from the bucket, not a loss.</text>
+<text class="tx" x="64" y="738">A cold read hydrates on demand and both doors say so rather</text>
+<text class="tx" x="64" y="754">than hanging: NFS returns NFS4ERR_DELAY, HTTP returns 503.</text>
+<text class="tsb" x="64" y="780">Hibernation deletes the PVC, so it is VERIFIED, never assumed:</text>
+<text class="tx" x="64" y="798">the operator scales back to one, polls until the hub reports</text>
+<text class="tx" x="64" y="814">rpoClean, and only then deletes. A share with no bucket</text>
+<text class="tx" x="64" y="830">reports rpoClean: null — which is a refusal, not a pass.</text>
+<text class="tx" x="64" y="856">Waking a hibernated share re-imports the whole tree (~79 s).</text>
+
+<rect x="558" y="654" width="498" height="220" rx="8" class="bx"/>
+<text class="th c-violet" x="576" y="678">flint-lean — RPO is the last barrier</text>
+<text class="tx" x="576" y="700">A hard pod kill loses at most floorSecs of work (default 60 s).</text>
+<text class="tx" x="576" y="716">A graceful stop loses nothing: preStop runs a final barrier.</text>
+<text class="tx" x="576" y="738">A container restart over a live tree RESUMES from its baseline</text>
+<text class="tx" x="576" y="754">— it does not re-check-out, and does not lose the delta.</text>
+<text class="tsb" x="576" y="780">Publish at a breakpoint and the RPO becomes zero, knowably:</text>
+<text class="mns" x="576" y="800">echo &gt; .flint/publish   →   .flint/publish.ack = ok</text>
+<text class="tx" x="576" y="820">means the bytes are in S3. That is the difference between</text>
+<text class="tx" x="576" y="836">"probably durable" and "durable, and I was told so".</text>
+<text class="tx" x="576" y="862">Gated mode adds versions; retention must outlast the crash window.</text>
+
+<rect x="1070" y="654" width="506" height="220" rx="8" class="bx-ok"/>
+<text class="th c-green" x="1088" y="678">flint-passthrough — there is no RPO</text>
+<text class="tx" x="1088" y="700">Nothing is buffered on flint's behalf, so nothing can be lost</text>
+<text class="tx" x="1088" y="716">by flint. A completed PUT is durable the instant S3 says so,</text>
+<text class="tx" x="1088" y="732">and an interrupted one simply did not happen.</text>
+<text class="tsb c-green" x="1088" y="758">This is the strongest durability story of the three — and it</text>
+<text class="tsb c-green" x="1088" y="774">is strongest because flint is not in it.</text>
+<text class="tx" x="1088" y="800">The trade is on the other side of the ledger: a write is a</text>
+<text class="tx" x="1088" y="816">whole new object, there is no rename to make it atomic against</text>
+<text class="tx" x="1088" y="832">a reader, and two writers racing one key resolve as S3 resolves</text>
+<text class="tx" x="1088" y="848">them — last writer wins, with nothing recording that a race</text>
+<text class="tx" x="1088" y="864">occurred, because there is no cell in which to record it.</text>
+</svg>

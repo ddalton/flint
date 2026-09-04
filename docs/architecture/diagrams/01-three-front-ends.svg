@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
+     aria-label="Three front ends over one flint bucket: flint-lite serves live shared POSIX from a hub pod over NFSv4.2; flint-lean materializes plain local files and publishes boundaries with a worker; flint-passthrough mounts an S3 prefix directly with Mountpoint for S3. All three read and write the same bucket, whose control namespace differs per front end.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .tt{font-size:18px;font-weight:600}
+  .th{font-size:14px;font-weight:600}
+  .tl{font-size:12.5px}
+  .ts{font-size:11.5px;fill:#64748b}
+  .tsb{font-size:11.5px;font-weight:600;fill:#475569}
+  .tx{font-size:11px;fill:#64748b}
+  .mn{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:11.5px}
+  .mns{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#475569}
+  .ctr{text-anchor:middle}
+  .c-blue{fill:#1a5f9e}.c-violet{fill:#6d4aa8}.c-ochre{fill:#a06b12}
+  .bx{fill:#fff;stroke:#cbd5e1;stroke-width:1.4}
+  .bx-slate{fill:#f1f5f9;stroke:#94a3b8;stroke-width:1.4}
+  .bx-blue{fill:#e9f2fa;stroke:#1a5f9e;stroke-width:1.6}
+  .bx-violet{fill:#f0eafb;stroke:#6d4aa8;stroke-width:1.6}
+  .bx-ochre{fill:#fbf2de;stroke:#a06b12;stroke-width:1.6}
+  .hd-blue{fill:#1a5f9e}.hd-violet{fill:#6d4aa8}.hd-ochre{fill:#a06b12}
+  .band{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .ln-blue{stroke:#1a5f9e;stroke-width:2.4;fill:none}
+  .ln-violet{stroke:#6d4aa8;stroke-width:2.4;fill:none}
+  .ln-ochre{stroke:#a06b12;stroke-width:2.4;fill:none}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  /* On a filled header bar. These MUST come last: a class beats a
+     presentation attribute, so fill="#fff" on a .tt/.tx text is ignored. */
+  .on-dark{fill:#ffffff}
+  .on-dark-sub{fill:#eaf1fb}
+</style>
+<defs>
+  <marker id="d1-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
+  <marker id="d1-av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6d4aa8"/></marker>
+  <marker id="d1-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
+</defs>
+
+<!-- ============ column 1 — flint-lite ============ -->
+<rect x="30" y="16" width="490" height="58" rx="8" class="hd-blue"/>
+<text class="tt ctr on-dark" x="275" y="42">flint-lite — the hub</text>
+<text class="tx ctr on-dark-sub" x="275" y="62">live shared POSIX, many readers AND writers</text>
+
+<rect x="30" y="90" width="490" height="132" rx="8" class="bx"/>
+<text class="th" x="48" y="114">the consumer pod — any cluster</text>
+<text class="tx" x="48" y="136">nothing from flint is installed in it</text>
+<text class="mns" x="48" y="158">mount: /data  (an ordinary PVC)</text>
+<text class="tx" x="48" y="180">the node's KERNEL NFS client carries every byte —</text>
+<text class="tx" x="48" y="196">one mount per node, pods share it and its page cache</text>
+<text class="ts" x="48" y="214">full POSIX: byte-range locks, atomic rename, O_EXCL</text>
+
+<rect x="30" y="238" width="490" height="176" rx="8" class="bx-blue"/>
+<text class="th c-blue" x="48" y="262">flint-lite hub — ONE pod, one volume</text>
+<text class="mns" x="48" y="284">flint-pnfs-mds · mode: standalone</text>
+<line class="hair" x1="48" y1="298" x2="502" y2="298"/>
+<text class="tl" x="48" y="320">:2049  NFSv4.2 — the data plane</text>
+<text class="tl" x="48" y="342">:8080  status + file API — ClusterIP only</text>
+<text class="tx" x="48" y="364">PVC = the working set + .flint-nfs/state.db</text>
+<text class="tx" x="48" y="380">a CACHE of the bucket, never the only copy</text>
+<text class="tsb" x="48" y="402">single replica · Recreate · exclusive flock</text>
+
+<rect x="30" y="430" width="490" height="104" rx="8" class="bx-slate"/>
+<text class="tsb" x="48" y="454">coordination — the hub IS the authority</text>
+<text class="tx" x="48" y="476">leases, locks and close-to-open are enforced in one</text>
+<text class="tx" x="48" y="492">process, so every client sees one coherent tree</text>
+<text class="tx" x="48" y="514">a second hub on the prefix is fenced by the epoch cell</text>
+
+<line class="ln-blue" x1="275" y1="534" x2="275" y2="596" marker-end="url(#d1-ab)"/>
+<text class="tsb ctr c-blue" x="275" y="558">publish  ·  hydrate</text>
+<text class="tx ctr" x="275" y="576">RPO = the flush cadence</text>
+
+<!-- ============ column 2 — flint-lean ============ -->
+<rect x="555" y="16" width="490" height="58" rx="8" class="hd-violet"/>
+<text class="tt ctr on-dark" x="800" y="42">flint-lean — checkout / publish</text>
+<text class="tx ctr on-dark-sub" x="800" y="62">one agent, one workspace, one writer</text>
+
+<rect x="555" y="90" width="490" height="132" rx="8" class="bx"/>
+<text class="th" x="573" y="114">the agent pod</text>
+<text class="tx" x="573" y="136">the app image is unchanged and holds no S3 credential</text>
+<text class="mns" x="573" y="158">/workspace  (local disk — an emptyDir)</text>
+<text class="tx" x="573" y="180">PLAIN FILES. There is no interception anywhere in the</text>
+<text class="tx" x="573" y="196">read or write path — this is just a local filesystem</text>
+<text class="ts" x="573" y="214">so git, sqlite and build caches simply work, at disk speed</text>
+
+<rect x="555" y="238" width="490" height="176" rx="8" class="bx-violet"/>
+<text class="th c-violet" x="573" y="262">flint-sync — an unprivileged worker</text>
+<text class="mns" x="573" y="284">delivered by the s3.csi.chert.us CSI driver</text>
+<line class="hair" x1="573" y1="298" x2="1027" y2="298"/>
+<text class="tl" x="573" y="320">checkout at start — before the agent's first line</text>
+<text class="tl" x="573" y="342">barrier at cadence — an mtime/size scan</text>
+<text class="tx" x="573" y="364">boundary verbs: the agent writes .flint/publish,</text>
+<text class="tx" x="573" y="380">the sidecar answers .flint/publish.ack</text>
+<text class="tsb" x="573" y="402">preStop drains — a graceful stop loses nothing</text>
+
+<rect x="555" y="430" width="490" height="104" rx="8" class="bx-slate"/>
+<text class="tsb" x="573" y="454">coordination — a lease in the BUCKET</text>
+<text class="tx" x="573" y="476">one writer per subtree, admitted by a CAS on the epoch</text>
+<text class="tx" x="573" y="492">cell; a second syncer is REFUSED, never merged</text>
+<text class="tx" x="573" y="514">readers see the last published boundary, not the last write</text>
+
+<line class="ln-violet" x1="800" y1="534" x2="800" y2="596" marker-end="url(#d1-av)"/>
+<text class="tsb ctr c-violet" x="800" y="558">checkout  ·  publish</text>
+<text class="tx ctr" x="800" y="576">RPO = the last barrier</text>
+
+<!-- ============ column 3 — flint-passthrough ============ -->
+<rect x="1080" y="16" width="490" height="58" rx="8" class="hd-ochre"/>
+<text class="tt ctr on-dark" x="1325" y="42">flint-passthrough — the mount</text>
+<text class="tx ctr on-dark-sub" x="1325" y="62">an S3 prefix, mounted as-is — no flint semantics</text>
+
+<rect x="1080" y="90" width="490" height="132" rx="8" class="bx"/>
+<text class="th" x="1098" y="114">the tenant pod</text>
+<text class="tx" x="1098" y="136">no sidecar, no label, no credential, no privilege —</text>
+<text class="tx" x="1098" y="152">admissible under PodSecurity `restricted`</text>
+<text class="mns" x="1098" y="176">/mnt/s3  (a csi: volume naming a CR)</text>
+<text class="tx" x="1098" y="198">objects appear as files, served by Mountpoint for S3</text>
+<text class="ts" x="1098" y="216">NOT POSIX: no rename, no append, no in-place modification</text>
+
+<rect x="1080" y="238" width="490" height="176" rx="8" class="bx-ochre"/>
+<text class="th c-ochre" x="1098" y="262">s3.csi.chert.us — a CSI node DaemonSet</text>
+<text class="mns" x="1098" y="284">one privileged process per NODE, not per pod</text>
+<line class="hair" x1="1098" y1="298" x2="1552" y2="298"/>
+<text class="tl" x="1098" y="320">it opens /dev/fuse and calls mount(2) itself</text>
+<text class="tl" x="1098" y="342">then hands the fd to an unprivileged worker pod</text>
+<text class="tx" x="1098" y="364">the worker runs an unchanged mount-s3 and needs no</text>
+<text class="tx" x="1098" y="380">privilege, because the mount already happened</text>
+<text class="tsb" x="1098" y="402">the plugin holds NO S3 credential — a broker mints them</text>
+
+<rect x="1080" y="430" width="490" height="104" rx="8" class="bx-slate"/>
+<text class="tsb" x="1098" y="454">coordination — NONE, by design</text>
+<text class="tx" x="1098" y="476">no cache, no manifest, no publish boundary, and no</text>
+<text class="tx" x="1098" y="492">coordination whatsoever between pods sharing a prefix</text>
+<text class="tx" x="1098" y="514">S3's own consistency is the entire contract you get</text>
+
+<line class="ln-ochre" x1="1325" y1="534" x2="1325" y2="596" marker-end="url(#d1-ao)"/>
+<text class="tsb ctr c-ochre" x="1325" y="558">GET  ·  PUT</text>
+<text class="tx ctr" x="1325" y="576">no RPO — there is nothing to flush</text>
+
+<!-- ============ the bucket ============ -->
+<rect x="30" y="604" width="1540" height="200" rx="10" class="band"/>
+<text class="tt" x="52" y="634">One bucket. One format. Three front ends — and a volume can move between them.</text>
+<text class="ts" x="52" y="656">Whole-file objects plus a `.flint/` control namespace. The front end decides what that namespace contains; the bytes are the same bytes.</text>
+
+<rect x="52" y="672" width="488" height="112" rx="8" class="bx"/>
+<text class="tsb c-blue" x="70" y="694">flint-lite writes</text>
+<text class="mns" x="70" y="716">&lt;prefix&gt;/&lt;path&gt;</text>
+<text class="mns" x="70" y="734">&lt;prefix&gt;.flint/epoch</text>
+<text class="mns" x="70" y="752">&lt;prefix&gt;.flint/manifest</text>
+<text class="mns" x="70" y="770">&lt;prefix&gt;.flint/owner</text>
+
+<rect x="556" y="672" width="488" height="112" rx="8" class="bx"/>
+<text class="tsb c-violet" x="574" y="694">flint-lean writes</text>
+<text class="mns" x="574" y="716">&lt;prefix&gt;/files/&lt;path&gt;</text>
+<text class="mns" x="574" y="734">&lt;prefix&gt;/.flint/lean/epoch · claim</text>
+<text class="mns" x="574" y="752">&lt;prefix&gt;/.flint/lean/current</text>
+<text class="mns" x="574" y="770">&lt;prefix&gt;/.flint/lean/inbox</text>
+
+<rect x="1060" y="672" width="488" height="112" rx="8" class="bx"/>
+<text class="tsb c-ochre" x="1078" y="694">flint-passthrough writes</text>
+<text class="mns" x="1078" y="716">&lt;prefix&gt;/&lt;key&gt;</text>
+<text class="tx" x="1078" y="740">and nothing else. There is no control</text>
+<text class="tx" x="1078" y="756">namespace, because there is no state to</text>
+<text class="tx" x="1078" y="772">keep — it is somebody else's bucket layout.</text>
+
+<text class="tsb" x="52" y="836">Read the columns as an escalation ladder, cheapest first.</text>
+<text class="ts" x="392" y="836">Passthrough asks nothing of the workload and gives it nothing back; lean gives real POSIX at local speed for one writer; the hub is the only one of the three that can make several pods share one live tree.</text>
+</svg>

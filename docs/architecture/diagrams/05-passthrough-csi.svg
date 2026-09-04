@@ -1,0 +1,178 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img"
+     aria-label="flint-passthrough: a tenant pod declares a CSI inline volume naming a FlintPassthroughMount in its own namespace. The privileged node plugin resolves the CR, authorizes the pod's ServiceAccount, opens /dev/fuse, calls mount(2) itself and passes the file descriptor over a socket to an unprivileged worker pod running unchanged mount-s3. The bucket is mounted as-is with no flint control namespace. Privilege lands in three places, none of them the tenant namespace.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .tt{font-size:17px;font-weight:600}
+  .th{font-size:13.5px;font-weight:600}
+  .tl{font-size:12.5px}
+  .ts{font-size:11.5px;fill:#64748b}
+  .tsb{font-size:11.5px;font-weight:600;fill:#475569}
+  .tx{font-size:11px;fill:#64748b}
+  .mns{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#475569}
+  .mn{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:11.5px}
+  .ctr{text-anchor:middle}
+  .c-ochre{fill:#a06b12}.c-blue{fill:#1a5f9e}.c-red{fill:#b4232a}.c-green{fill:#186a3b}
+  .bx{fill:#fff;stroke:#cbd5e1;stroke-width:1.4}
+  .bx-slate{fill:#f1f5f9;stroke:#94a3b8;stroke-width:1.4}
+  .bx-ochre{fill:#fbf2de;stroke:#a06b12;stroke-width:1.6}
+  .bx-pod{fill:#fffdf7;stroke:#a06b12;stroke-width:2}
+  .bx-warn{fill:#fdf2f2;stroke:#b4232a;stroke-width:1.6}
+  .bx-ok{fill:#f0f8f3;stroke:#186a3b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.4;stroke-dasharray:6 5}
+  .band{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .ln{stroke:#475569;stroke-width:1.5;fill:none}
+  .ln-ochre{stroke:#a06b12;stroke-width:2.4;fill:none}
+  .ln-blue{stroke:#1a5f9e;stroke-width:2.2;fill:none}
+  .dash{stroke-dasharray:5 4}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .num{fill:#a06b12}
+  .numt{font-size:12px;font-weight:600;fill:#ffffff}
+</style>
+<defs>
+  <marker id="d5-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
+  <marker id="d5-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
+  <marker id="d5-ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+</defs>
+
+<!-- ===== tenant namespace ===== -->
+<rect x="24" y="26" width="452" height="418" rx="10" class="grp"/>
+<text class="tt" x="44" y="54">Tenant namespace</text>
+<text class="ts" x="44" y="74">PodSecurity: restricted — and it stays that way</text>
+
+<rect x="44" y="90" width="412" height="180" rx="8" class="bx-pod"/>
+<text class="th c-ochre" x="62" y="114">the tenant pod</text>
+<text class="mn" x="62" y="140">volumes:</text>
+<text class="mn" x="62" y="158">  - name: data</text>
+<text class="mn" x="62" y="176">    csi:</text>
+<text class="mn" x="62" y="194">      driver: s3.csi.chert.us</text>
+<text class="mn" x="62" y="212">      volumeAttributes:</text>
+<text class="mn" x="62" y="230">        chert.us/mount: datasets</text>
+<text class="tx" x="62" y="256">that is the whole integration. Nine lines of pod spec.</text>
+
+<rect x="44" y="284" width="412" height="70" rx="8" class="bx-ok"/>
+<text class="tsb c-green" x="62" y="306">No sidecar. No label. No webhook. No credential.</text>
+<text class="tsb c-green" x="62" y="322">No privileged container. No mount propagation.</text>
+<text class="tx" x="62" y="344">`spec.volumes[*].csi` is on the restricted allow-list.</text>
+
+<rect x="44" y="368" width="412" height="60" rx="8" class="bx"/>
+<text class="th" x="62" y="390">FlintPassthroughMount — in the POD'S namespace</text>
+<text class="tx" x="62" y="412">bucket · keyPrefix · endpoint · readOnly · uid · consumers</text>
+
+<!-- ===== the node plugin ===== -->
+<line class="ln-ochre" x1="476" y1="200" x2="546" y2="200" marker-end="url(#d5-ao)"/>
+<text class="tx ctr" x="511" y="184">NodePublish</text>
+<text class="tx ctr" x="511" y="222">Volume</text>
+
+<rect x="550" y="26" width="512" height="418" rx="10" class="bx-ochre"/>
+<text class="tt c-ochre" x="570" y="54">s3.csi.chert.us — the node DaemonSet</text>
+<text class="ts" x="570" y="74">ONE privileged process per node. Not per pod, and never in a tenant namespace.</text>
+<line class="hair" x1="570" y1="86" x2="1042" y2="86"/>
+
+<circle cx="588" cy="112" r="12" class="num"/><text class="numt ctr" x="588" y="117">1</text>
+<text class="th" x="610" y="117">resolve</text>
+<text class="tx" x="610" y="136">the CR named by volumeAttributes, in the TOKEN's namespace</text>
+
+<circle cx="588" cy="164" r="12" class="num"/><text class="numt ctr" x="588" y="169">2</text>
+<text class="th" x="610" y="169">authorize</text>
+<text class="tx" x="610" y="188">the pod's kubelet-asserted ServiceAccount must be listed in</text>
+<text class="mns" x="610" y="206">spec.consumers.serviceAccounts   — ABSENT MEANS DENY</text>
+
+<circle cx="588" cy="234" r="12" class="num"/><text class="numt ctr" x="588" y="239">3</text>
+<text class="th" x="610" y="239">mount</text>
+<text class="tx" x="610" y="258">it opens /dev/fuse and calls mount(2) ITSELF — the one act</text>
+<text class="tx" x="610" y="274">that genuinely needs privilege, done once, in one place</text>
+
+<circle cx="588" cy="302" r="12" class="num"/><text class="numt ctr" x="588" y="307">4</text>
+<text class="th" x="610" y="307">hand off the fd</text>
+<text class="tx" x="610" y="326">the FUSE file descriptor goes to the worker over SCM_RIGHTS</text>
+
+<circle cx="588" cy="354" r="12" class="num"/><text class="numt ctr" x="588" y="359">5</text>
+<text class="th" x="610" y="359">bind the result into the pod</text>
+<text class="tx" x="610" y="378">one Bidirectional view of the kubelet directory — a private</text>
+<text class="tx" x="610" y="394">view would lose every mount on a plugin roll</text>
+
+<rect x="570" y="408" width="472" height="24" rx="4" class="bx-slate"/>
+<text class="tsb" x="582" y="425">It holds NO S3 credential and has NO Secrets RBAC anywhere.</text>
+
+<!-- ===== worker ===== -->
+<line class="ln-ochre" x1="1062" y1="200" x2="1122" y2="200" marker-end="url(#d5-ao)"/>
+<text class="tx ctr" x="1092" y="184">/dev/fuse fd</text>
+
+<rect x="1126" y="26" width="450" height="204" rx="10" class="bx-ochre"/>
+<text class="tt c-ochre" x="1146" y="56">the worker pod — UNPRIVILEGED</text>
+<text class="ts" x="1146" y="76">in a system namespace, one per mounted volume</text>
+<line class="hair" x1="1146" y1="88" x2="1556" y2="88"/>
+<text class="tl" x="1146" y="112">an unchanged `mount-s3` serves the fd it was given</text>
+<text class="tx" x="1146" y="134">non-root · every capability dropped · seccomp RuntimeDefault</text>
+<text class="tx" x="1146" y="150">read-only rootfs · no ServiceAccount token · no hostPath</text>
+<text class="tsb" x="1146" y="176">The mounter needs no privilege because the mount(2)</text>
+<text class="tsb" x="1146" y="192">ALREADY HAPPENED. That is the entire trick.</text>
+<text class="tx" x="1146" y="214">Credentials arrive on a loopback door, never as pod env.</text>
+
+<!-- ===== broker ===== -->
+<line class="ln-blue" x1="1350" y1="230" x2="1350" y2="264" marker-end="url(#d5-ab)"/>
+<rect x="1126" y="268" width="450" height="176" rx="10" class="bx"/>
+<text class="th c-blue" x="1146" y="292">flint-s3-broker — the only standing credential</text>
+<text class="tx" x="1146" y="314">and it says so: every issuance is a TokenReview-verified,</text>
+<text class="tx" x="1146" y="330">registration-bound, consumer-checked grant with an audit</text>
+<text class="mns" x="1146" y="350">line (ns, sa, pod-uid, cr, expiry)</text>
+<line class="hair" x1="1146" y1="362" x2="1556" y2="362"/>
+<text class="tx" x="1146" y="384">TokenReview is ONLINE, not offline JWKS: a deleted pod's</text>
+<text class="tx" x="1146" y="400">token is refused within 60 s of its deletionTimestamp.</text>
+<text class="tx" x="1146" y="416">Offline verification would honour it all the way to `exp`.</text>
+<text class="tsb" x="1146" y="436">It never reads a tenant Secret. Keys are short-lived.</text>
+
+<!-- ===== S3 ===== -->
+<rect x="24" y="470" width="760" height="182" rx="10" class="bx-ochre"/>
+<text class="tt c-ochre" x="44" y="500">S3 — and it is just S3</text>
+<text class="ts" x="44" y="520">This is the one front end that writes NO control namespace at all.</text>
+<line class="hair" x1="44" y1="532" x2="764" y2="532"/>
+<text class="mns" x="44" y="556">&lt;prefix&gt;/&lt;key&gt;</text>
+<text class="tx" x="44" y="578">Objects appear as files and nothing else is written — no manifest, no epoch cell,</text>
+<text class="tx" x="44" y="594">no claim, no publish boundary. A prefix somebody else's tooling already owns stays</text>
+<text class="tx" x="44" y="610">exactly as it was, which is precisely the point of this front end.</text>
+<text class="tsb" x="44" y="636">Durability, consistency and access control are S3's, unmediated. flint adds none and removes none.</text>
+
+<!-- ===== what you don't get ===== -->
+<rect x="808" y="470" width="768" height="182" rx="10" class="bx-warn"/>
+<text class="tt c-red" x="828" y="500">What a passthrough mount is NOT</text>
+<text class="ts" x="828" y="520">every one of these is a design decision, not a gap waiting to be filled</text>
+<line class="hair" x1="828" y1="532" x2="1556" y2="532"/>
+<text class="tsb c-red" x="828" y="556">It is not POSIX.</text>
+<text class="tx" x="944" y="556">No rename, no append, no in-place modification — at any setting.</text>
+<text class="tsb c-red" x="828" y="580">It is not coordinated.</text>
+<text class="tx" x="964" y="580">Two pods on one prefix do not see each other. There is nothing to see with.</text>
+<text class="tsb c-red" x="828" y="604">It is not per-user.</text>
+<text class="tx" x="944" y="604">The mount presents as ONE uid — NodePublish never sees the pod's securityContext.</text>
+<text class="tsb c-red" x="828" y="628">It is not self-healing.</text>
+<text class="tx" x="964" y="628">If the mounter dies, running containers are stranded on ENOTCONN; recreate the pod.</text>
+
+<!-- ===== privilege accounting ===== -->
+<rect x="24" y="668" width="1552" height="210" rx="10" class="band"/>
+<text class="tt" x="46" y="698">Where the privilege went — the accounting, said plainly</text>
+<text class="ts" x="46" y="718">The webhook this replaced put a privileged container into every tenant pod. Privilege did not disappear; it was concentrated, the way Istio's CNI move concentrated it.</text>
+
+<rect x="46" y="732" width="498" height="130" rx="8" class="bx-warn"/>
+<text class="th c-red" x="64" y="756">flint-s3-csi-node — privileged</text>
+<text class="tx" x="64" y="778">One pod per node. It needs /dev/fuse and a Bidirectional</text>
+<text class="tx" x="64" y="794">mount of /var/lib/kubelet, and the API server permits that</text>
+<text class="tx" x="64" y="810">mode on privileged containers only.</text>
+<text class="tx" x="64" y="832">It may create and delete pods in ONE namespace, and — with</text>
+<text class="tx" x="64" y="848">the admission policy — only on its own node.</text>
+
+<rect x="558" y="732" width="498" height="130" rx="8" class="bx-ok"/>
+<text class="th c-green" x="576" y="756">worker pods — unprivileged</text>
+<text class="tx" x="576" y="778">One per mounted volume, in the workers namespace.</text>
+<text class="tx" x="576" y="794">The namespace carries the PodSecurity `privileged` label</text>
+<text class="tx" x="576" y="810">ONLY because hostPath is baseline-forbidden — the</text>
+<text class="tx" x="576" y="826">ValidatingAdmissionPolicy is the real guard.</text>
+<text class="tsb c-green" x="576" y="850">Read the label as a formality, and the policy as the fence.</text>
+
+<rect x="1070" y="732" width="506" height="130" rx="8" class="bx-ok"/>
+<text class="th c-green" x="1088" y="756">the tenant pod — nothing</text>
+<text class="tx" x="1088" y="778">It is given no privilege, no credential and no flint code.</text>
+<text class="tx" x="1088" y="794">Its ServiceAccount identity is asserted by kubelet, which</text>
+<text class="tx" x="1088" y="810">the pod cannot forge, and checked by the broker online.</text>
+<text class="tsb c-green" x="1088" y="836">This is the same chain flint-lean uses. The two front ends</text>
+<text class="tsb c-green" x="1088" y="852">differ in what runs in the worker, not in who is trusted.</text>
+</svg>

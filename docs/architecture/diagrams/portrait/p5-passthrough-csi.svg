@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 410" role="img"
+     aria-label="flint-passthrough: a tenant pod declares a CSI inline volume; the privileged node plugin resolves the CR, authorizes the pod's ServiceAccount, calls mount(2) itself and hands the FUSE descriptor to an unprivileged worker running mount-s3 against the S3 prefix. Privilege lands in three places, none of them the tenant namespace.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .tt{font-size:13px;font-weight:600}
+  .th{font-size:11.5px;font-weight:600}
+  .tx{font-size:10.5px;fill:#64748b}
+  .tsb{font-size:10.5px;font-weight:600;fill:#475569}
+  .mns{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:9.5px;fill:#475569}
+  .mn{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10px}
+  .ctr{text-anchor:middle}
+  .c-ochre{fill:#a06b12}.c-red{fill:#b4232a}.c-green{fill:#186a3b}.c-blue{fill:#1a5f9e}
+  .bx{fill:#fff;stroke:#cbd5e1;stroke-width:1.2}
+  .bx-ochre{fill:#fbf2de;stroke:#a06b12;stroke-width:1.4}
+  .bx-pod{fill:#fffdf7;stroke:#a06b12;stroke-width:2}
+  .bx-warn{fill:#fdf2f2;stroke:#b4232a;stroke-width:1.4}
+  .bx-ok{fill:#f0f8f3;stroke:#186a3b;stroke-width:1.4}
+  .bx-slate{fill:#f1f5f9;stroke:#94a3b8;stroke-width:1.2}
+  .ln-ochre{stroke:#a06b12;stroke-width:1.8;fill:none}
+  .ln-blue{stroke:#1a5f9e;stroke-width:1.6;fill:none}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .num{fill:#a06b12}
+  .numt{font-size:10px;font-weight:600;fill:#ffffff}
+</style>
+<defs>
+  <marker id="p5-o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
+  <marker id="p5-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
+</defs>
+
+<rect x="8" y="6" width="196" height="130" rx="7" class="bx-pod"/>
+<text class="th c-ochre" x="22" y="26">the tenant pod</text>
+<text class="mn" x="22" y="44">volumes:</text>
+<text class="mn" x="22" y="59">- name: data</text>
+<text class="mn" x="22" y="74">  csi:</text>
+<text class="mn" x="22" y="89">    driver: s3.csi.chert.us</text>
+<text class="tsb c-green" x="22" y="108">No sidecar. No credential.</text>
+<text class="tsb c-green" x="22" y="121">No privilege. No label.</text>
+
+<line class="ln-ochre" x1="204" y1="64" x2="234" y2="64" marker-end="url(#p5-o)"/>
+
+<rect x="238" y="6" width="222" height="130" rx="7" class="bx-ochre"/>
+<text class="th c-ochre" x="252" y="26">s3.csi.chert.us node DaemonSet</text>
+<text class="tx" x="252" y="42">one PRIVILEGED process per node</text>
+<circle cx="252" cy="59" r="8" class="num"/><text class="numt ctr" x="252" y="63">1</text>
+<text class="tx" x="266" y="63">resolve the CR in the pod's namespace</text>
+<circle cx="252" cy="80" r="8" class="num"/><text class="numt ctr" x="252" y="84">2</text>
+<text class="tx" x="266" y="84">authorize the SA against `consumers`</text>
+<circle cx="252" cy="101" r="8" class="num"/><text class="numt ctr" x="252" y="105">3</text>
+<text class="tx" x="266" y="105">open /dev/fuse and mount(2) ITSELF</text>
+
+<line class="ln-ochre" x1="460" y1="64" x2="480" y2="64" marker-end="url(#p5-o)"/>
+<text class="tx ctr" x="468" y="54">fd</text>
+
+<rect x="484" y="6" width="148" height="130" rx="7" class="bx-ok"/>
+<text class="th c-green" x="496" y="26">the worker pod</text>
+<text class="tx" x="496" y="43">UNPRIVILEGED</text>
+<line class="hair" x1="496" y1="53" x2="620" y2="53"/>
+<text class="tx" x="496" y="70">an unchanged mount-s3</text>
+<text class="tx" x="496" y="86">serves the fd it was given</text>
+<text class="tsb" x="496" y="105">no privilege needed: the</text>
+<text class="tsb" x="496" y="119">mount already happened</text>
+
+<line class="ln-blue" x1="380" y1="124" x2="380" y2="150" marker-end="url(#p5-b)"/>
+<rect x="238" y="154" width="212" height="76" rx="7" class="bx"/>
+<text class="th c-blue" x="252" y="174">flint-s3-broker</text>
+<text class="tx" x="252" y="190">the ONLY standing credential</text>
+<text class="tx" x="252" y="206">online TokenReview · registration</text>
+<text class="tx" x="252" y="222">binding · audit line per issuance</text>
+
+<line class="ln-ochre" x1="558" y1="124" x2="558" y2="150" marker-end="url(#p5-o)"/>
+<rect x="466" y="154" width="166" height="76" rx="7" class="bx-ochre"/>
+<text class="th c-ochre" x="480" y="174">S3 — and it is just S3</text>
+<text class="mns" x="480" y="192">&lt;prefix&gt;/&lt;key&gt;</text>
+<text class="tx" x="480" y="209">NO control namespace is</text>
+<text class="tx" x="480" y="224">written. That is the feature.</text>
+
+<rect x="8" y="154" width="212" height="76" rx="7" class="bx-slate"/>
+<text class="th" x="22" y="174">Where the privilege went</text>
+<text class="tx" x="22" y="191">It did not disappear — it was</text>
+<text class="tx" x="22" y="206">concentrated into the node plugin</text>
+<text class="tx" x="22" y="221">and the broker. Not the tenant.</text>
+
+<rect x="8" y="242" width="624" height="160" rx="7" class="bx-warn"/>
+<text class="tt c-red" x="22" y="264">What a passthrough mount is NOT</text>
+<text class="tx" x="22" y="281">Every one of these is a design decision, not a gap waiting to be filled.</text>
+<text class="tsb c-red" x="22" y="304">It is not POSIX.</text>
+<text class="tx" x="128" y="304">No rename, no append, no in-place modification — at any setting.</text>
+<text class="tsb c-red" x="22" y="326">It is not coordinated.</text>
+<text class="tx" x="152" y="326">Two pods on one prefix do not see each other. There is nothing to see with.</text>
+<text class="tsb c-red" x="22" y="348">It is not per-user.</text>
+<text class="tx" x="136" y="348">The mount presents ONE uid — NodePublish never sees the pod's securityContext.</text>
+<text class="tsb c-red" x="22" y="370">It is not self-healing.</text>
+<text class="tx" x="156" y="370">If the mounter dies, running containers are stranded on ENOTCONN; recreate the pod.</text>
+<text class="tx" x="22" y="393">A workload that needs any of those wants flint-lean, whose publish boundary is what makes them safe.</text>
+</svg>

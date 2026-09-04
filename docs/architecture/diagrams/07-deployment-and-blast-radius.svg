@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img"
+     aria-label="What each front end requires you to install in each cluster of a fleet, and what an attacker who compromises an agent pod actually reaches. flint-lite installs nothing in consumer clusters but concentrates one hub; flint-lean and flint-passthrough install a CSI driver and broker in every cluster and meet in the bucket.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .tt{font-size:17px;font-weight:600}
+  .th{font-size:13.5px;font-weight:600}
+  .tl{font-size:12.5px}
+  .ts{font-size:11.5px;fill:#64748b}
+  .tsb{font-size:11.5px;font-weight:600;fill:#475569}
+  .tx{font-size:11px;fill:#64748b}
+  .mns{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#475569}
+  .ctr{text-anchor:middle}
+  .c-blue{fill:#1a5f9e}.c-violet{fill:#6d4aa8}.c-ochre{fill:#a06b12}
+  .c-red{fill:#b4232a}.c-green{fill:#186a3b}
+  .bx{fill:#fff;stroke:#cbd5e1;stroke-width:1.4}
+  .bx-slate{fill:#f1f5f9;stroke:#94a3b8;stroke-width:1.4}
+  .bx-blue{fill:#e9f2fa;stroke:#1a5f9e;stroke-width:1.6}
+  .bx-violet{fill:#f0eafb;stroke:#6d4aa8;stroke-width:1.6}
+  .bx-ochre{fill:#fbf2de;stroke:#a06b12;stroke-width:1.6}
+  .bx-warn{fill:#fdf2f2;stroke:#b4232a;stroke-width:1.6}
+  .bx-ok{fill:#f0f8f3;stroke:#186a3b;stroke-width:1.6}
+  .band{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .hd-blue{fill:#1a5f9e}.hd-violet{fill:#6d4aa8}.hd-ochre{fill:#a06b12}
+  .ln-ochre{stroke:#a06b12;stroke-width:2.4;fill:none}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  /* On a filled header bar. These MUST come last: a class beats a
+     presentation attribute, so fill="#fff" on a .tt/.tx text is ignored. */
+  .on-dark{fill:#ffffff}
+  .on-dark-sub{fill:#eaf1fb}
+</style>
+<defs>
+  <marker id="d7-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
+</defs>
+
+<rect x="24" y="18" width="504" height="46" rx="8" class="hd-blue"/>
+<text class="tt ctr on-dark" x="276" y="47">flint-lite — one hub, N clusters</text>
+<rect x="548" y="18" width="504" height="46" rx="8" class="hd-violet"/>
+<text class="tt ctr on-dark" x="800" y="47">flint-lean — N syncers, one bucket</text>
+<rect x="1072" y="18" width="504" height="46" rx="8" class="hd-ochre"/>
+<text class="tt ctr on-dark" x="1324" y="47">flint-passthrough — N mounts, one bucket</text>
+
+<rect x="24" y="78" width="504" height="150" rx="8" class="bx-blue"/>
+<text class="th c-blue" x="42" y="102">the HUB cluster — install here, once per project</text>
+<text class="tx" x="42" y="124">· flint-lite-operator (or the chart, one release per hub)</text>
+<text class="tx" x="42" y="142">· the hub Deployment, Service, ConfigMap and PVC it renders</text>
+<text class="tx" x="42" y="160">· optionally flint-hub-gateway — one door for the whole fleet,</text>
+<text class="tx" x="42" y="176">  holding ONE credential instead of one per hub</text>
+<text class="tsb" x="42" y="202">This cluster is now a dependency of every other one.</text>
+<text class="tx" x="42" y="220">It holds the only copy of the live tree that is not in S3.</text>
+
+<rect x="24" y="240" width="504" height="122" rx="8" class="bx-ok"/>
+<text class="th c-green" x="42" y="264">every CONSUMER cluster — install NOTHING</text>
+<text class="tx" x="42" y="286">The data path is the node's own kernel NFS client. There is no</text>
+<text class="tx" x="42" y="302">driver, no DaemonSet, no CRD and no flint image anywhere.</text>
+<text class="tx" x="42" y="324">At most a PV and PVC — or the stock nfs-subdir provisioner,</text>
+<text class="tx" x="42" y="340">which mints directories and never carries a byte.</text>
+<text class="tsb c-green" x="42" y="358">This is the cheapest fleet onboarding of the three, by far.</text>
+
+<rect x="24" y="374" width="504" height="120" rx="8" class="bx-slate"/>
+<text class="th" x="42" y="398">what it costs you</text>
+<text class="tx" x="42" y="420">One pod is the coherence authority, so one pod is also the</text>
+<text class="tx" x="42" y="436">single point of failure and the NIC ceiling for the project.</text>
+<text class="tx" x="42" y="458">A hard NFS mount against a suspended hub HANGS — nothing in</text>
+<text class="tx" x="42" y="474">the data path wakes a share, so something must write the</text>
+<text class="tx" x="42" y="490">wake annotation before an address is handed to anyone.</text>
+
+<rect x="548" y="78" width="504" height="150" rx="8" class="bx-violet"/>
+<text class="th c-violet" x="566" y="102">EVERY cluster — install the same three things</text>
+<text class="tx" x="566" y="124">· flint-s3-csi — the node DaemonSet, the workers namespace</text>
+<text class="tx" x="566" y="142">  and its admission policy</text>
+<text class="tx" x="566" y="160">· flint-s3-broker — one per cluster, because TokenReview runs</text>
+<text class="tx" x="566" y="176">  against the LOCAL API server</text>
+<text class="tx" x="566" y="194">· flint-lean — the CRD plus a thin controller (claim stamping,</text>
+<text class="tx" x="566" y="210">  bucket posture, the MPU sweep)</text>
+
+<rect x="548" y="240" width="504" height="122" rx="8" class="bx-ok"/>
+<text class="th c-green" x="566" y="264">and no cluster depends on any other</text>
+<text class="tx" x="566" y="286">The clusters never talk. They meet in the bucket, and the</text>
+<text class="tx" x="566" y="302">arbitration that keeps them honest lives there too — a CAS</text>
+<text class="tx" x="566" y="318">on the subtree lease, which no cluster can route around.</text>
+<text class="tsb c-green" x="566" y="342">So the single-writer rule holds ACROSS clusters, which is</text>
+<text class="tsb c-green" x="566" y="358">the one guarantee flint-lite's admission check cannot make.</text>
+
+<rect x="548" y="374" width="504" height="120" rx="8" class="bx-slate"/>
+<text class="th" x="566" y="398">what it costs you</text>
+<text class="tx" x="566" y="420">A per-cluster install that must be kept in version step, and</text>
+<text class="tx" x="566" y="436">a broker per cluster to configure and watch.</text>
+<text class="tx" x="566" y="458">A lean volume still mounts with its controller absent — the</text>
+<text class="tx" x="566" y="474">syncer claims the lease itself — so the controller is an</text>
+<text class="tx" x="566" y="490">operability component, not a data-path one.</text>
+
+<rect x="1072" y="78" width="504" height="150" rx="8" class="bx-ochre"/>
+<text class="th c-ochre" x="1090" y="102">EVERY cluster — install two things</text>
+<text class="tx" x="1090" y="124">· flint-s3-csi — the same node DaemonSet and broker as lean;</text>
+<text class="tx" x="1090" y="142">  one install serves both front ends</text>
+<text class="tx" x="1090" y="160">· flint-passthrough — the CRD, and nothing else. There is no</text>
+<text class="tx" x="1090" y="176">  workload in that chart and no controller behind the CR.</text>
+<text class="tsb" x="1090" y="202">Nothing about a passthrough mount converges, so there is</text>
+<text class="tsb" x="1090" y="220">nothing to reconcile and no status to read.</text>
+
+<rect x="1072" y="240" width="504" height="122" rx="8" class="bx-ok"/>
+<text class="th c-green" x="1090" y="264">the fleet story is: there isn't one</text>
+<text class="tx" x="1090" y="286">Pods in twenty clusters can mount one prefix and none of</text>
+<text class="tx" x="1090" y="302">them coordinates, because none of them has anything to</text>
+<text class="tx" x="1090" y="318">coordinate. S3 is already a multi-cluster service.</text>
+<text class="tsb c-green" x="1090" y="342">Scaling out is free precisely because nothing is shared</text>
+<text class="tsb c-green" x="1090" y="358">except the objects themselves.</text>
+
+<rect x="1072" y="374" width="504" height="120" rx="8" class="bx-slate"/>
+<text class="th" x="1090" y="398">what it costs you</text>
+<text class="tx" x="1090" y="420">Everything the other two provide. No POSIX, no rename, no</text>
+<text class="tx" x="1090" y="436">boundary, no manifest, no single-writer rule.</text>
+<text class="tx" x="1090" y="458">Two pods writing one key race, and the loser's write is</text>
+<text class="tx" x="1090" y="474">simply gone — with no cell anywhere recording that it</text>
+<text class="tx" x="1090" y="490">happened, because there is no control namespace.</text>
+
+<line class="ln-ochre" x1="276" y1="494" x2="276" y2="530" marker-end="url(#d7-ao)"/>
+<line class="ln-ochre" x1="800" y1="494" x2="800" y2="530" marker-end="url(#d7-ao)"/>
+<line class="ln-ochre" x1="1324" y1="494" x2="1324" y2="530" marker-end="url(#d7-ao)"/>
+
+<rect x="24" y="534" width="1552" height="52" rx="8" class="bx-ochre"/>
+<text class="tt c-ochre" x="46" y="566">S3 — the one thing every cluster, every front end and every fleet shape has in common. It is where the data lives; everything above is a way of reaching it.</text>
+
+<rect x="24" y="602" width="1552" height="288" rx="10" class="band"/>
+<text class="tt" x="46" y="632">Blast radius — an attacker owns one agent pod. What do they now have?</text>
+<text class="ts" x="46" y="652">Assume the agent container is fully compromised and holds the user's token. This is the question the token cannot answer, because storage never sees it.</text>
+
+<rect x="46" y="666" width="498" height="218" rx="8" class="bx-warn"/>
+<text class="th c-red" x="64" y="690">flint-lite — the whole share</text>
+<text class="tx" x="64" y="712">The pod already has the mount. AUTH_SYS means it asserts its</text>
+<text class="tx" x="64" y="728">own uid, and the default POSIX check LOGS rather than refuses —</text>
+<text class="tx" x="64" y="744">so it reads and writes every file in the share, as anyone.</text>
+<text class="tx" x="64" y="766">It cannot reach the BUCKET: the hub holds that credential and</text>
+<text class="tx" x="64" y="782">the pod has none. That much is genuinely contained.</text>
+<text class="tx" x="64" y="804">It can reach any other hub its network can route to, and the</text>
+<text class="tx" x="64" y="820">next hub cannot tell it apart from a legitimate client.</text>
+<text class="tsb c-red" x="64" y="846">Containment = one hub per project + a real network boundary.</text>
+<text class="tx" x="64" y="866">Everything sharing a hub shares a fate. Size hubs accordingly.</text>
+
+<rect x="558" y="666" width="498" height="218" rx="8" class="bx"/>
+<text class="th c-violet" x="576" y="690">flint-lean — the workspace, not the bucket</text>
+<text class="tx" x="576" y="712">The pod has the tree it was already working in. It holds no S3</text>
+<text class="tx" x="576" y="728">credential — the worker does, in another namespace, behind a</text>
+<text class="tx" x="576" y="744">loopback door the agent container cannot reach.</text>
+<text class="tx" x="576" y="766">So the attacker gets the files, and gets them published under</text>
+<text class="tx" x="576" y="782">the workspace's own prefix. They do not get the bucket, other</text>
+<text class="tx" x="576" y="798">workspaces, or a credential that outlives the pod.</text>
+<text class="tsb" x="576" y="824">The honest ceiling: writes are refused at the CONTROL plane,</text>
+<text class="tsb" x="576" y="840">not fenced on the data plane. A deposed syncer's writes land</text>
+<text class="tx" x="576" y="858">as UNCITED versions — no coherent reader resolves them, but a</text>
+<text class="tx" x="576" y="874">raw-key reader can still see them. A chosen ceiling, not a gap.</text>
+
+<rect x="1070" y="666" width="506" height="218" rx="8" class="bx"/>
+<text class="th c-ochre" x="1088" y="690">flint-passthrough — the prefix, as mounted</text>
+<text class="tx" x="1088" y="712">The pod has the mount, so it has whatever the mount has: the</text>
+<text class="tx" x="1088" y="728">prefix in the CR, at the CR's readOnly setting. Nothing more —</text>
+<text class="tx" x="1088" y="744">the keys are short-lived, scoped, and never in the pod's env.</text>
+<text class="tx" x="1088" y="766">This is the tightest of the three, and it is tight for a dull</text>
+<text class="tx" x="1088" y="782">reason: there is nothing else there to take.</text>
+<text class="tsb" x="1088" y="808">Scope the CR, and you have scoped the breach. `readOnly: true`</text>
+<text class="tsb" x="1088" y="824">is a real control here, not advice — the mount cannot write.</text>
+<text class="tx" x="1088" y="848">The residual risk is the one uid: every process in the pod</text>
+<text class="tx" x="1088" y="864">shares the mount, so pod-level isolation is user-level isolation.</text>
+</svg>

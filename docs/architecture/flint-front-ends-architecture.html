@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>flint front ends — lite, lean and passthrough</title>
+<style>
+  @page { size: A3 landscape; margin: 8mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  body {
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: #0f172a;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .page { break-after: page; page-break-after: always; }
+  .page:last-child { break-after: auto; page-break-after: auto; }
+  .ph { border-bottom: 2px solid #0f172a; padding-bottom: 5px; margin-bottom: 9px; display: flex; align-items: baseline; justify-content: space-between; }
+  .ph h1 { font-size: 19px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .ph .kicker { font-size: 10.5px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #64748b; }
+  .dek { font-size: 11px; line-height: 1.42; color: #475569; margin: 0 0 7px; }
+  figure { margin: 0; }
+  /* The figure is capped so a long caption can never push it onto a second
+     page: the SVG letterboxes inside the box rather than growing past it.
+     build.sh fails loudly if a section ever spills, so this is checked. */
+  figure img { width: 100%; height: auto; max-height: 203mm; object-fit: contain; display: block; }
+  figcaption { font-size: 10px; line-height: 1.45; color: #475569; margin-top: 7px; border-top: 1px solid #e2e8f0; padding-top: 6px; }
+  figcaption b { color: #0f172a; font-weight: 600; }
+  figcaption p { margin: 0 0 4px; }
+  figcaption p:last-child { margin-bottom: 0; }
+  code { font-family: Menlo, "SF Mono", Consolas, monospace; font-size: 10px; color: #0f172a; }
+  .cover { padding: 40mm 0 0 0; }
+  .cover h1 { font-size: 46px; font-weight: 600; margin: 0 0 10px; letter-spacing: -0.02em; }
+  .cover .sub { font-size: 17px; color: #475569; margin: 0 0 34px; max-width: 300mm; line-height: 1.5; }
+  .cover .meta { font-size: 11.5px; color: #64748b; border-top: 1px solid #e2e8f0; padding-top: 14px; max-width: 300mm; }
+  .cover .meta b { color: #0f172a; }
+  .toc { margin-top: 26px; font-size: 12px; color: #475569; column-count: 2; column-gap: 30mm; max-width: 300mm; }
+  .toc div { margin-bottom: 7px; break-inside: avoid; }
+  .toc b { color: #0f172a; }
+  /* Docs-only content: native tables and portrait figures for the Google
+     Docs / Word rendition. build.sh emits these INSTEAD of the A3 plate.
+     Never printed, so the canonical PDF is unaffected. */
+  .docs { display: none; }
+</style>
+</head>
+<body>
+
+<!-- ============================================================ COVER -->
+<section class="page cover">
+  <h1>flint front ends</h1>
+  <p class="sub">Three ways to put an S3 bucket in front of a workload — <b>flint-lite</b>, <b>flint-lean</b> and <b>flint-passthrough</b> — with the multi-cluster and security consequences of each, and the one durable store they all share.</p>
+  <div class="meta">
+    <p><b>Scope.</b> The architecture of the three front ends as built, the fleet shape each implies when one user launches agents across several Kubernetes clusters, what identity is actually enforced on the data path, and where S3 sits in all three. Every claim here is drawn from the repository at the revision noted below; where a guarantee has a stated ceiling, the ceiling is stated rather than rounded up.</p>
+    <p style="margin-top:10px"><b>Sources of record.</b> <code>docs/plans/csi-node-mount-design.md</code> (the CSI delivery), <code>docs/plans/flint-lean-plan.md</code>, <code>docs/flint-lite-architecture.html</code>, <code>docs/flint-lean-architecture.html</code>, the three charts, and the code under <code>spdk-csi-driver/src/{s3csi,passthrough,tier,lite_operator,lean_operator}</code> and <code>lean/sidecar/src</code>.</p>
+    <p style="margin-top:10px"><b>Regenerating.</b> <code>docs/architecture/build.sh</code>. The diagrams are standalone SVG files under <code>diagrams/</code>, referenced rather than inlined, so they can be reused in any other format; the build also emits a Markdown rendition for conversion.</p>
+  </div>
+  <div class="toc">
+    <div><b>1 · Three front ends, one bucket</b> — the shape of the choice, and what is common underneath it.</div>
+    <div><b>2 · flint-lite — the hub</b> — one pod as the coherence authority, a PVC as cache, S3 as the copy.</div>
+    <div><b>3 · flint-lite across clusters</b> — one hub, many clusters, and the three things the fleet must supply.</div>
+    <div><b>4 · flint-lean — checkout and publish</b> — plain local files, one writer, a boundary the agent declares.</div>
+    <div><b>5 · flint-passthrough — the CSI mount</b> — a prefix mounted as-is, and where the privilege went.</div>
+    <div><b>6 · Where a user's token can and cannot go</b> — what each front end actually authenticates.</div>
+    <div><b>7 · Fleet shape and blast radius</b> — what you install per cluster, and what one compromised pod reaches.</div>
+    <div><b>8 · S3 — the durable store</b> — the live view, the published view, and the recovery point of each.</div>
+    <div><b>9 · Choosing</b> — ten dimensions, three columns, one decision.</div>
+  </div>
+</section>
+
+<!-- ============================================================ PAGE 1 -->
+<section class="page">
+  <header class="ph">
+    <h1>Three front ends, one bucket</h1>
+    <span class="kicker">1 / 9 · overview</span>
+  </header>
+  <p class="dek">flint puts a bucket in front of a workload three different ways. They are not three configurations of one thing and not three tiers of the same product: they are three different bargains, each coherent with itself, over one common bucket format. What varies is how much the workload gets and how much machinery has to exist for it to get that.</p>
+  <figure>
+    <img src="diagrams/01-three-front-ends.svg" alt="Three front ends over one flint bucket: flint-lite serves live shared POSIX from a hub pod over NFSv4.2; flint-lean materializes plain local files and publishes boundaries with a worker; flint-passthrough mounts an S3 prefix directly with Mountpoint for S3.">
+    <figcaption>
+      <p><b>Read the columns as an escalation ladder, cheapest first.</b> <b>Passthrough</b> asks nothing of the workload — nine lines of pod spec — and gives it nothing back beyond the objects: no POSIX, no coordination, no boundary. <b>Lean</b> gives a real local filesystem at disk speed to one writer, and a durable point that writer can name. <b>The hub</b> is the only one of the three where several pods, in several clusters, can share one live tree with locks that mean something.</p>
+      <p><b>The common floor is the bucket format, and it is what makes the choice reversible.</b> All three write whole-file objects; what differs is the <code>.flint/</code> control namespace beside them, which exists to answer questions the object listing cannot — who holds the write lease, what the last coherent boundary contained, what the whole tree is for a restore. Passthrough writes no control namespace at all, which is exactly why it can be pointed at a prefix somebody else's tooling already owns. Because the formats are common and mutually convertible, a volume that outgrows one front end can move to another rather than being re-plumbed.</p>
+    </figcaption>
+  </figure>
+  <div class="docs"><img src="diagrams/portrait/p1-three-front-ends.svg" alt="Three front ends stacked over one S3 bucket: flint-lite serves a shared live tree over NFS, flint-lean checks a workspace out to local disk and publishes boundaries, flint-passthrough mounts a prefix as-is."></div>
+</section>
+
+<!-- ============================================================ PAGE 2 -->
+<section class="page">
+  <header class="ph">
+    <h1>flint-lite — the hub</h1>
+    <span class="kicker">2 / 9 · architecture</span>
+  </header>
+  <p class="dek">One pod serves real POSIX over NFSv4.2 to any number of pods in any number of clusters. The PVC beside it is a working set; an S3 prefix is the durable copy. A second listener exposes the same filesystem over HTTP for callers that cannot mount. One hub serves exactly one prefix — a project that needs several volumes runs several hubs.</p>
+  <figure>
+    <img src="diagrams/02-lite-hub.svg" alt="Consumer pods mount a PVC whose PV points at the hub Service on port 2049; the node kernel NFS client carries the bytes; one hub pod serves NFSv4.2 from a PVC holding the working set; the S3 prefix holds the durable copy.">
+    <figcaption>
+      <p><b>The hub's value and its constraint are the same fact.</b> One process holds every lease, lock and open, so N pods across N clusters see one coherent tree — and that is why it is one pod, one replica, <code>Recreate</code>, behind an exclusive flock. Two hubs on one prefix would be split-brain, which the store-side epoch cell fences and the operator refuses up front. Consumers install nothing: the data path is the node's own kernel NFS client, one mount per node, shared by every pod on it along with its page cache.</p>
+      <p><b>The disk is a cache; the bucket is the copy.</b> The hub flushes the working set to S3 on a cadence, so the recovery point is that cadence and losing the PVC is a rebuild rather than a loss. A cold read hydrates on demand and both doors say so rather than hanging — NFS parks the caller with <code>NFS4ERR_DELAY</code>, HTTP answers <code>503 + Retry-After</code>. <b>The two doors are secured differently, and only one of them has a credential.</b> Port 2049 is AUTH_SYS, so the client asserts its own uid and reachability is the real boundary; port 8080 can rewrite every file in the share, so it stays ClusterIP-only, never joins the Service, and mounts no routes at all without a bearer token — <code>404</code>, not <code>401</code>. That token is per-share, not per-user, which page 6 takes up.</p>
+    </figcaption>
+  </figure>
+  <div class="docs"><img src="diagrams/portrait/p2-lite-hub.svg" alt="flint-lite topology: consumer pods share one node kernel NFS client reaching the hub on port 2049; the hub holds coherence state and a PVC working set and publishes to the S3 prefix that holds the durable copy."></div>
+</section>
+
+<!-- ============================================================ PAGE 3 -->
+<section class="page">
+  <header class="ph">
+    <h1>flint-lite across clusters</h1>
+    <span class="kicker">3 / 9 · multi-cluster</span>
+  </header>
+  <p class="dek">One hub can serve agents in several clusters at once. The wire is ordinary NFSv4.2 and the hub does not know, or care, how many clusters are on it — which is precisely the problem. Three things the protocol and the chart cannot supply become the fleet's responsibility, and every one of them fails silently if it is missed.</p>
+  <figure>
+    <img src="diagrams/03-lite-multicluster.svg" alt="One flint-lite hub serving agents in three clusters at once, with the three requirements the fleet must supply: a unique client name per node, a reachability boundary drawn outside networkPolicy, and a keepalive.">
+    <figcaption>
+      <p><b>A hub does not count clusters — it sees clients, and a client is a name.</b> The NFSv4 client identity is the hostname and nothing else, so two clusters that share a node name are one client to the hub, and RFC 8881 §18.35.5 requires the server to read the second as the first rebooting: the incumbent's locks and opens go, silently, correctly, on a false premise. Six defects in v1.37.0 traced to this one cause. Fix it with <code>hostname = &lt;cluster&gt;-&lt;node&gt;</code>, or the client-side kernel parameter <code>nfs.nfs4_unique_id</code>, which survives a rename.</p>
+      <p><b>The reachability boundary cannot be drawn where you would expect to draw it.</b> kube-proxy SNATs a NodePort or LoadBalancer client to an address in the hub's own cluster before the packet arrives: measured on a three-cluster rig, 1486 of 1486 connections from two remote clusters arrived as the hub cluster's gateway, none as either remote node. Listing remote CIDRs in <code>networkPolicy</code> is an outage; listing the local one admits everyone. Use peering, security groups, or a gateway. <b>And a partitioned cluster's busy agents look exactly like idle ones</b> — <code>suspendWithSessions</code> defaults to suspending anyway, and even when set it only narrows the window, because leases expire. Drive <code>POST /wake</code> from the thing that actually knows whether work is happening.</p>
+    </figcaption>
+  </figure>
+  <div class="docs"><img src="diagrams/portrait/p3-lite-multicluster.svg" alt="Three clusters mounting one flint-lite hub, which sees only client names, plus the three requirements the fleet must supply."></div>
+</section>
+
+<!-- ============================================================ PAGE 4 -->
+<section class="page">
+  <header class="ph">
+    <h1>flint-lean — checkout and publish</h1>
+    <span class="kicker">4 / 9 · architecture</span>
+  </header>
+  <p class="dek">If the workspace fits on disk, no interception is needed at all. Materialize plain files before the agent's first line runs, publish changed files at cadence or at a boundary the agent declares, and keep the write authority out of the pod. Most of a FUSE front end's value at a fraction of its risk surface — same bucket, same engine, no kernel path.</p>
+  <figure>
+    <img src="diagrams/04-lean-workspace.svg" alt="The CSI node plugin owns a tree, checks it out from S3 before the agent container starts, hostPaths it into an unprivileged flint-sync worker and bind-mounts it into the agent pod as plain local files. The agent declares a boundary by writing a file.">
+    <figcaption>
+      <p><b>The ordering is the architecture.</b> kubelet blocks every container in the pod on <code>NodePublishVolume</code>, so the checkout completes before the agent's first line runs — no init container, no readiness dance — and calls <code>NodeUnpublishVolume</code> only after every container has exited, which is where the final barrier goes. In between, the app touches plain files on real local disk with zero interception, so git, sqlite, hard links and index locks simply work. The app container holds no S3 credential; the unprivileged worker does, in a system namespace, behind a loopback door the app cannot reach.</p>
+      <p><b>The boundary verbs are files, because the workspace is the interface.</b> An agent that can write a file can declare a coherent point — <code>echo &gt; .flint/publish</code> — and learn when its bytes are durable, from <code>.flint/publish.ack</code>: <code>ok</code> means the bytes are in S3, <code>refused-fenced</code> means this syncer lost the lease and is saying so rather than leaving the agent waiting forever. No client library, no credential, no network path. <b>Gated mode answers a different question from cadence:</b> cadence asks how stale a reader may be, gated asks whether a reader may see half a logical change — and answers no, by uploading every changed file as a new version immediately (durable, and invisible) and installing the whole pending set with one CAS. Gated is refused without a lag bound, so unbounded staleness is impossible by construction rather than by convention.</p>
+    </figcaption>
+  </figure>
+  <div class="docs"><img src="diagrams/portrait/p4-lean-workspace.svg" alt="flint-lean: the CSI node plugin owns a tree bind-mounted into the agent pod as plain local files and hostPathed into an unprivileged flint-sync worker that checks out from and publishes to S3."></div>
+</section>
+
+<!-- ============================================================ PAGE 5 -->
+<section class="page">
+  <header class="ph">
+    <h1>flint-passthrough — the CSI mount</h1>
+    <span class="kicker">5 / 9 · architecture</span>
+  </header>
+  <p class="dek">An S3 prefix, mounted into a pod as-is by Mountpoint for S3, with no flint semantics layered over it. There is no controller and no status, because nothing about a passthrough mount converges. What there is, is a careful answer to the question of who holds privilege — and the answer is: not the tenant.</p>
+  <figure>
+    <img src="diagrams/05-passthrough-csi.svg" alt="A tenant pod declares a CSI inline volume naming a FlintPassthroughMount in its own namespace; the privileged node plugin resolves the CR, authorizes the pod's ServiceAccount, calls mount(2) itself and passes the FUSE fd to an unprivileged worker running mount-s3.">
+    <figcaption>
+      <p><b>The trick is that the mount happens before the mounter runs.</b> The node plugin opens <code>/dev/fuse</code> and calls <code>mount(2)</code> itself — the one act that genuinely needs privilege, done once, per node — then hands the file descriptor to an unprivileged worker pod over <code>SCM_RIGHTS</code>, where an unchanged <code>mount-s3</code> serves it needing no privilege at all. The tenant pod is given nothing: no sidecar, no label, no webhook, no credential, no privileged container. It declares a <code>csi:</code> volume naming a CR in its own namespace and stays admissible under PodSecurity <code>restricted</code>.</p>
+      <p><b>Privilege did not disappear; it was concentrated.</b> It lands in exactly three places, none of them a tenant namespace: the node plugin (privileged, one per node, holding no S3 credential and no Secrets RBAC), the worker pods (non-root, all capabilities dropped, read-only rootfs, no ServiceAccount token), and the broker (the only standing credential, and every issuance is TokenReview-verified and audit-logged). <b>What a passthrough mount is not</b> is worth stating as plainly as what it is: not POSIX — no rename, no append, no in-place modification at any setting; not coordinated — two pods on one prefix do not see each other; not per-user — the mount presents one uid, because <code>NodePublish</code> never sees the pod's <code>securityContext</code>; and not self-healing — if the mounter dies, running containers are stranded on <code>ENOTCONN</code> and the pod must be recreated. A workload that needs any of those wants flint-lean.</p>
+    </figcaption>
+  </figure>
+  <div class="docs"><img src="diagrams/portrait/p5-passthrough-csi.svg" alt="flint-passthrough: the privileged node plugin resolves the CR, authorizes the pod's ServiceAccount, calls mount(2) itself and hands the FUSE descriptor to an unprivileged worker running mount-s3."></div>
+</section>
+
+<!-- ============================================================ PAGE 6 -->
+<section class="page">
+  <header class="ph">
+    <h1>Where a user's token can and cannot go</h1>
+    <span class="kicker">6 / 9 · identity and security</span>
+  </header>
+  <p class="dek">One human launches agents across clusters A, B and C. Each agent holds that user's token — short-lived, from an IdP, and possibly a different token in each cluster. This page answers the only question that matters for isolating one user's work from another's: what does storage actually check, and where could that token be presented if you wanted it to be?</p>
+  <figure>
+    <img src="diagrams/06-multicluster-identity.svg" alt="Where an end user's token can and cannot go, per front end. For flint-lite the NFS wire has no field for it and the hub authenticates nobody; for flint-lean and flint-passthrough the enforced identity is the pod's kubelet-asserted ServiceAccount, verified online by a broker.">
+    <figcaption>
+      <p><b>The answer, for all three, is that the user's token does not reach the data path.</b> Every front end authenticates the workload, never the human behind it — so the fact that each agent may carry a different token is invisible to flint. For lean and passthrough that is a feature: the enforced identity is the pod's ServiceAccount, kubelet-minted and pod-bound, so token churn upstream changes nothing. For lite it is a gap: <b>nothing on the NFS wire carries a user identity, and there is no field to add one to.</b></p>
+      <p><b>flint-lite authenticates nobody on port 2049.</b> AUTH_SYS means the client asserts its own uid and the server takes it, and the POSIX check is not a backstop either: <code>security.enforcePermissions</code> defaults to <code>false</code>, which evaluates the mode, logs the answer, and allows the operation anyway — and even enforced, the hub holds <code>CAP_DAC_OVERRIDE</code>. What <code>sec=sys</code> buys is identity, so <code>ls -l</code> tells the truth; it is not a boundary between tenants sharing a hub. The file API's bearer token is per-share, not per-user. So isolation must be drawn outside the hub, which the one-hub-per-project model already does: <b>one CR, one prefix, one coherence domain, and a real network boundary around it.</b></p>
+      <p><b>flint-lean and flint-passthrough share one identity chain, and it is a strong one.</b> The broker verifies the pod's token with an <i>online</i> TokenReview — a deleted pod's token dies within 60 seconds rather than at <code>exp</code> — requires a session name matching a live registration the node plugin made for that pod-uid and CR, which a pod cannot self-mint, and checks the CR's <code>consumers</code> list in the token's own namespace, never a request field, where absent means deny. One broker per cluster is required, because TokenReview runs against the local API server: clusters meet in the bucket, not at each other's brokers. The broker's <code>rest</code> backend is the one seam where a user-scoped token could be honoured — it POSTs the pod's token to the application's own JWT-enforcing API and takes back project-scoped keys — but what it carries today is the pod's identity, not the user's.</p>
+    </figcaption>
+  </figure>
+  <div class="docs"><table><thead><tr><th></th><th>flint-lite</th><th>flint-lean</th><th>flint-passthrough</th></tr></thead><tbody><tr><th>What the agent holds</th><td>The user's token, and it never sends it anywhere — there is no door on the data path that would read one. It holds no bucket credential either.</td><td>The user's token, unused for storage, and <b>no S3 credential at all</b>. The credential lives in the worker, behind a loopback door the app container cannot reach.</td><td>The user's token, unused for storage, and <b>no S3 credential at all</b>. The pod is given nothing: no sidecar, no label, no privilege, no webhook.</td></tr><tr><th>The door, and what it validates</th><td><b>Nothing.</b> Port 2049 is AUTH_SYS: the client asserts its own uid and the server takes it. <code>security.enforcePermissions</code> defaults to <code>false</code>, so the POSIX check logs and then allows; even enforced, the hub holds <code>CAP_DAC_OVERRIDE</code>.</td><td><b>flint-s3-broker.</b> Online TokenReview of the pod's ServiceAccount token (a deleted pod's token dies within 60 s, not at <code>exp</code>); a session name matching a live registration the plugin made for that pod-uid and CR, which a pod cannot self-mint; and the CR's <code>consumers</code> list in the token's own namespace.</td><td><b>flint-s3-broker</b> — the identical chain. Same TokenReview, same registration binding, same <code>consumers</code> gate, same audit line <code>(ns, sa, pod-uid, cr, expiry)</code>.</td></tr><tr><th>What storage sees</th><td>A client <b>name</b> — the hostname — and a self-declared uid. Not a user, and not a cluster: two clusters sharing a node name are one client. The file API's bearer token is per-share, not per-user.</td><td>Short-lived keys scoped to the project's prefix, minted per pod. Never the user, and never a standing key anything a tenant can reach holds.</td><td>Short-lived keys scoped to the bucket and prefix in the CR. Inside the pod the mount reports <b>one uid</b> for every file, because NodePublish never sees the pod's <code>securityContext</code>.</td></tr><tr><th>What isolates user A from user B</th><td><b>Nothing inside the hub.</b> Draw it outside: one hub per project (already the model — one CR, one prefix, one coherence domain) plus a real network boundary, since <code>networkPolicy</code> provably cannot draw it.</td><td><b>The prefix and the lease.</b> One workspace is one prefix and the keys are scoped to it; the subtree lease admits exactly one writer and lives in the <b>bucket</b>, so it holds across clusters.</td><td><b>The prefix and the CR — nothing finer than a pod.</b> <code>consumers</code> decides which ServiceAccounts may mount it. Give each user their own CR and their own pod.</td></tr></tbody></table></div>
+</section>
+
+<!-- ============================================================ PAGE 7 -->
+<section class="page">
+  <header class="ph">
+    <h1>Fleet shape and blast radius</h1>
+    <span class="kicker">7 / 9 · multi-cluster and security</span>
+  </header>
+  <p class="dek">Two practical questions for anyone running agents on more than one cluster: what do I have to install in each of them, and if one agent pod is fully compromised, what does the attacker now have? The three front ends answer both differently, and the cheapest to install is not the one with the smallest blast radius.</p>
+  <figure>
+    <img src="diagrams/07-deployment-and-blast-radius.svg" alt="What each front end requires you to install in each cluster of a fleet, and what an attacker who compromises an agent pod actually reaches.">
+    <figcaption>
+      <p><b>flint-lite has the cheapest fleet onboarding and the widest blast radius.</b> Consumer clusters install nothing at all — the data path is the node's own kernel NFS client — but the hub cluster becomes a dependency of every other one, and a compromised pod already holds the mount. With AUTH_SYS and a log-only permission check, it reads and writes every file in the share as anyone. It cannot reach the bucket, because the hub holds that credential and the pod has none; that much is genuinely contained. Everything sharing a hub shares a fate, so size hubs by the blast radius you are willing to accept, not only by capacity.</p>
+      <p><b>flint-lean and flint-passthrough cost a per-cluster install and buy a much smaller radius.</b> Each cluster runs the same CSI node driver and its own broker; no cluster depends on any other, and they meet only in the bucket — where the lean lease is a CAS no cluster can route around, which is the one guarantee lite's admission check cannot make, since it only ever sees its own cluster. A compromised lean pod gets the tree it was already working in, published under its own prefix; it does not get the bucket, other workspaces, or a credential that outlives the pod. <b>The honest ceiling is that lean refuses a deposed writer at the control plane, not on the data plane:</b> its writes land as uncited versions that no coherent reader resolves, but a raw-key reader can still see them. That is a chosen ceiling — closing it needs per-request epoch validation at a proxy, which is a component this front end exists to avoid.</p>
+      <p><b>Passthrough is the tightest, for a dull reason: there is nothing else there to take.</b> The pod gets the prefix in the CR at the CR's <code>readOnly</code> setting, with short-lived scoped keys it never sees. Scope the CR and you have scoped the breach. The residual risk is the single uid: every process in the pod shares one mount, so pod-level isolation is the finest granularity available.</p>
+    </figcaption>
+  </figure>
+  <div class="docs"><table><thead><tr><th></th><th>flint-lite</th><th>flint-lean</th><th>flint-passthrough</th></tr></thead><tbody><tr><th>Installed in the home cluster</th><td>The operator (or one chart release per hub), and the Deployment, Service, ConfigMap and PVC it renders. Optionally the hub gateway.</td><td>The CSI node DaemonSet, a broker, and the lean CRD plus a thin controller — the same list as every other cluster.</td><td>The CSI node DaemonSet and a broker, plus the CRD. There is no workload in the passthrough chart and no controller behind the CR.</td></tr><tr><th>Installed in every consumer cluster</th><td><b>Nothing.</b> The data path is the node's own kernel NFS client; at most a PV and PVC, or the stock nfs-subdir provisioner, which never carries a byte.</td><td>The same three components, in <b>every</b> cluster. The broker must be local, because TokenReview runs against the local API server.</td><td>The same CSI driver and broker, in every cluster. One CSI install serves lean and passthrough together.</td></tr><tr><th>Cross-cluster dependency</th><td>The hub cluster becomes a dependency of every other one, and holds the only copy of the live tree that is not in S3.</td><td><b>None.</b> Clusters never talk; they meet in the bucket, where a CAS on the lease keeps them honest — so single-writer holds across clusters.</td><td><b>None.</b> S3 is already a multi-cluster service, and nothing is shared except the objects.</td></tr><tr><th>Blast radius of one compromised agent pod</th><td><b>The whole share.</b> The pod has the mount, asserts its own uid, and the permission check logs rather than refuses. It cannot reach the bucket — the hub holds that credential. Everything sharing a hub shares a fate.</td><td><b>The workspace, not the bucket.</b> The attacker gets the tree it was working in, published under its own prefix. The honest ceiling: a deposed writer is refused at the control plane, not fenced on the data plane, so its writes land as uncited versions a raw-key reader can still see.</td><td><b>The prefix, as mounted</b>, at the CR's <code>readOnly</code> setting — the tightest of the three, because there is nothing else there to take. Scope the CR and you have scoped the breach.</td></tr></tbody></table></div>
+</section>
+
+<!-- ============================================================ PAGE 8 -->
+<section class="page">
+  <header class="ph">
+    <h1>S3 — the durable store</h1>
+    <span class="kicker">8 / 9 · durability</span>
+  </header>
+  <p class="dek">Underneath all three front ends there is one durable store, and it is S3. Everything above it — the hub's disk, the lean workspace, the FUSE mount — is a way of reaching bytes whose home is the bucket. Two views of those bytes exist, with different contracts, and confusing them is the most common way to get hurt here.</p>
+  <figure>
+    <img src="diagrams/08-s3-durable-store.svg" alt="S3 is the durable store for all three front ends. The live view is strongly consistent; the published view in the bucket is a set of RPO-consistent whole-file snapshots. The control namespace holds the cells that make concurrent access safe.">
+    <figcaption>
+      <p><b>The live view is strong and is never in the bucket.</b> It is a hub's port 2049 and file API, or a lean workspace's local disk: close-to-open, byte-range locks, atomic rename, no RPO lag. The published view is the bucket: RPO-consistent snapshots per subtree, made of untorn whole-file generations. A reader of the bucket never sees half a file, and may well see a file from before your last write — that is the contract, not a defect. Anything that is not a mount reads the published view as plain S3, with no flint server in the read path at all. <b>Do not write into a live subtree from the console:</b> a hand-made PUT under a prefix a hub or syncer owns is overwritten at the next flush, reported as a conflict, or silently uncited.</p>
+      <p><b>Every control cell exists to answer a question the object listing cannot.</b> Who is the hub right now, and may I become it — the epoch lease. What does the last coherent boundary contain — the manifest, which also makes disaster recovery a single GET rather than a crawl. Who owns this prefix, and did state loss change that — the claim and owner cells. The claim is checked on the data path itself: a syncer reads it before it takes the lease and refuses a prefix another project holds, so refuse-foreign does not wait on an operator's verdict. Passthrough writes none of them, which is why it can be pointed at a prefix another system already owns and leaves no trace when the pod goes away; it also gets no answer to any of those questions. <code>.flint</code> is reserved and enforced from both sides: a client file cannot shadow a control object, and a nested <code>.flint/</code> is another share's namespace, never tiered into this one.</p>
+      <p><b>The recovery point differs, and it is worth stating in the language of a hard pod kill.</b> Lite loses up to the flush cadence, and its PVC is a cache — losing the disk is a rebuild. Lean loses at most <code>floorSecs</code> (default 60 s), zero on a graceful stop, and zero-and-acknowledged if the agent declares a boundary; a stop whose drain could not finish keeps the tree on the node, under the plugin's <code>undrained/</code>, and says so on the pod. Passthrough has no recovery point at all, because nothing is buffered on flint's behalf: a completed PUT is durable and an interrupted one did not happen. That is the strongest durability story of the three, and it is strongest because flint is not in it.</p>
+    </figcaption>
+  </figure>
+  <div class="docs"><table><thead><tr><th></th><th>flint-lite</th><th>flint-lean</th><th>flint-passthrough</th></tr></thead><tbody><tr><th>Object keys</th><td><code>&lt;prefix&gt;/&lt;path&gt;</code> — the published generations, as untorn whole-file objects.</td><td><code>&lt;prefix&gt;/files/&lt;path&gt;</code> — the workspace, file for file.</td><td><code>&lt;prefix&gt;/&lt;key&gt;</code> — the objects, and nothing else.</td></tr><tr><th>Control namespace</th><td><code>.flint/epoch</code> (who is the hub now), <code>.flint/manifest</code> (the whole tree, for DR from one GET), <code>.flint/owner</code>.</td><td><code>.flint/lean/epoch</code> and <code>claim</code> (who may write this subtree), <code>manifest</code>, <code>inbox</code>, <code>conflicts/</code>.</td><td><b>None, deliberately.</b> A prefix another system already owns stays exactly as it was, and no trace is left when the pod goes away — but you get no answer to any question on the left.</td></tr><tr><th>Recovery point after a hard kill</th><td>The flush cadence. The PVC is a cache: losing it is a rebuild from the bucket, not a loss.</td><td>The last barrier — at most <code>floorSecs</code> (default 60 s), zero on a graceful stop, and zero <i>and acknowledged</i> if the agent declares a boundary.</td><td><b>None</b> — nothing is buffered on flint's behalf. A completed PUT is durable; an interrupted one did not happen.</td></tr><tr><th>What a reader of the bucket sees</th><td>RPO-consistent whole-file snapshots. The live view is port 2049, and it is never in the bucket.</td><td>The last published boundary. In gated mode a reader sees the whole change or none of it, never a mixture.</td><td>Whatever S3 currently holds, with S3's own consistency and nothing added.</td></tr></tbody></table></div>
+</section>
+
+<!-- ============================================================ PAGE 9 -->
+<section class="page">
+  <header class="ph">
+    <h1>Choosing</h1>
+    <span class="kicker">9 / 9 · decision</span>
+  </header>
+  <p class="dek">Ten dimensions, three columns. Read it down a column rather than across a row: each front end is coherent with itself, and the rows that look like weaknesses are usually the price of a strength two rows up.</p>
+  <figure>
+    <img src="diagrams/09-choosing.svg" alt="A ten-row comparison of flint-lite, flint-lean and flint-passthrough across what the pod sees, POSIX fidelity, concurrent writers, reader consistency, multi-cluster shape, enforced identity, user isolation, per-cluster install, recovery point, and when to choose each.">
+    <figcaption>
+      <p><b>The short form.</b> Choose <b>flint-lite</b> when several pods must share one live tree — shared workspaces, cross-pod locking, a dataset larger than a pod's disk, or anything needing a filesystem two pods can both see. Choose <b>flint-lean</b> when one agent owns a workspace that fits on disk and wants full POSIX at local speed with a durable point it can name; several agents then integrate through a git host rather than through the bucket. Choose <b>flint-passthrough</b> when you want the bucket rather than a filesystem — read-mostly datasets, weights, artifacts, or a prefix another system already owns that you want visible inside a pod without changing it.</p>
+      <p><b>The multi-cluster and security rows are the ones most often decided late and regretted.</b> If one user's agents must be isolated from another's, none of the three will do it for you inside the data path: the unit of isolation is the prefix, and the thing that enforces it is either a network boundary around a hub, or a broker scoping short-lived keys to a CR. Decide the prefix layout first and the front end second. <b>And because the bucket format is common and the front ends are mutually convertible, a volume can change its mind later</b> — which is the strongest argument for starting with the cheapest bargain that works rather than the most capable one.</p>
+    </figcaption>
+  </figure>
+  <div class="docs"><table><thead><tr><th>Dimension</th><th>flint-lite</th><th>flint-lean</th><th>flint-passthrough</th></tr></thead><tbody><tr><th>What the pod sees</th><td>A shared NFS mount served by one hub pod that every client reaches over the network — one tree, many pods, live.</td><td>Plain files on local disk, checked out before the first line runs and published back on a boundary — one pod's own tree.</td><td>An S3 prefix presented as files by Mountpoint for S3 — objects, with a directory-shaped view over them.</td></tr><tr><th>POSIX fidelity</th><td><b>Full, and shared.</b> Byte-range locks, atomic rename, <code>O_EXCL</code> — across pods and clusters.</td><td><b>Full, and local.</b> A real filesystem, so git, sqlite and hard links work — for one pod.</td><td><b>None to speak of.</b> No rename, no append, no in-place write, at any setting.</td></tr><tr><th>Concurrent writers per tree</th><td><b>Many, coordinated.</b> The only front end where two pods can edit one directory and both be right.</td><td><b>Exactly one, enforced.</b> A second syncer is refused, not merged; several agents integrate through a git host instead.</td><td><b>Many, uncoordinated.</b> Two writers on one key race; the loser's write is gone and nothing records it.</td></tr><tr><th>What a reader sees</th><td>The live tree, strongly — close-to-open, no RPO lag, through the coherence authority.</td><td>The last <b>published</b> boundary, never your last write; gated mode makes it all-or-nothing.</td><td>Whatever S3 currently holds, with S3's own consistency and nothing added.</td></tr><tr><th>Across clusters</th><td>ONE hub, mounted from N clusters. Works unchanged — but needs unique client names, a network boundary and a keepalive.</td><td>N independent syncers, one bucket. Clusters never talk; the lease lives in the bucket, so single-writer holds across clusters.</td><td>N independent mounts, one bucket. There is no fleet problem, because nothing is shared to get wrong.</td></tr><tr><th>Identity that is enforced (the user's token reaches none of these)</th><td><b>Nobody, on the data path.</b> AUTH_SYS: the client asserts its own uid, and the POSIX check defaults to log-only.</td><td><b>The pod's ServiceAccount</b> — kubelet-minted, pod-bound, verified online by TokenReview and checked against <code>consumers</code>.</td><td><b>The pod's ServiceAccount</b> — an identical chain to lean: same broker, same registration binding, same audit line.</td></tr><tr><th>Isolating user A from user B</th><td>Give each project its own hub and prefix, and bound reachability outside Kubernetes. Everything sharing a hub shares a fate.</td><td>Give each user their own workspace prefix. Keys are scoped to it, the lease fences it, and <code>consumers</code> says who may mount it.</td><td>Give each user their own CR and pod. The mount presents one uid, so pod-level isolation is user-level isolation.</td></tr><tr><th>Installed per consumer cluster</th><td><b>Nothing.</b> The node's own kernel NFS client is the data path; at most a PV and PVC.</td><td>The CSI driver, a broker, and the lean CRD plus thin controller — in <b>every</b> cluster (the broker must be local).</td><td>The CSI driver, a broker and the CRD, in every cluster. One CSI install serves lean and passthrough together.</td></tr><tr><th>Recovery point</th><td>The flush cadence. The PVC is a cache — losing it is a rebuild from S3, not a loss.</td><td>The last barrier: at most <code>floorSecs</code> (default 60 s), or zero and acknowledged if you declare one.</td><td><b>None — nothing is buffered.</b> A completed PUT is durable; an interrupted one did not happen.</td></tr><tr><th>Choose it when</th><td><b>Several pods must share one LIVE tree.</b> Shared workspaces, cross-pod locking, a dataset too big for a pod's disk.</td><td><b>One agent owns a workspace that fits on disk.</b> Full POSIX at local speed, durable at breakpoints, agents integrating through git.</td><td><b>You want the bucket, not a filesystem.</b> Read-mostly datasets, weights, artifacts, or a prefix another system already owns.</td></tr></tbody></table></div>
+</section>
+
+</body>
+</html>

@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 330" role="img"
+     aria-label="Three front ends stacked over one S3 bucket: flint-lite serves a shared live tree over NFS, flint-lean checks a workspace out to local disk and publishes boundaries, flint-passthrough mounts a prefix as-is. All three read and write the same bucket format.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .tt{font-size:13.5px;font-weight:600}
+  .th{font-size:12px;font-weight:600}
+  .tx{font-size:10.5px;fill:#64748b}
+  .tsb{font-size:10.5px;font-weight:600;fill:#475569}
+  .mns{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:9.5px;fill:#475569}
+  .ctr{text-anchor:middle}
+  .c-blue{fill:#1a5f9e}.c-violet{fill:#6d4aa8}.c-ochre{fill:#a06b12}
+  .bx-blue{fill:#e9f2fa;stroke:#1a5f9e;stroke-width:1.4}
+  .bx-violet{fill:#f0eafb;stroke:#6d4aa8;stroke-width:1.4}
+  .bx-ochre{fill:#fbf2de;stroke:#a06b12;stroke-width:1.4}
+  .bx-s3{fill:#fbf2de;stroke:#a06b12;stroke-width:2}
+  .bx-slate{fill:#f1f5f9;stroke:#94a3b8;stroke-width:1.2}
+  .ln-blue{stroke:#1a5f9e;stroke-width:1.8;fill:none}
+  .ln-violet{stroke:#6d4aa8;stroke-width:1.8;fill:none}
+  .ln-ochre{stroke:#a06b12;stroke-width:1.8;fill:none}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+</style>
+<defs>
+  <marker id="p1-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
+  <marker id="p1-v" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6d4aa8"/></marker>
+  <marker id="p1-o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
+</defs>
+
+<rect x="8" y="8" width="410" height="72" rx="7" class="bx-blue"/>
+<text class="tt c-blue" x="24" y="30">flint-lite — the hub</text>
+<text class="tx" x="24" y="49">One pod serves a LIVE shared tree over NFSv4.2.</text>
+<text class="tx" x="24" y="66">Many pods, many clusters, real locks.</text>
+
+<rect x="8" y="90" width="410" height="72" rx="7" class="bx-violet"/>
+<text class="tt c-violet" x="24" y="112">flint-lean — checkout / publish</text>
+<text class="tx" x="24" y="131">Plain files on local disk, checked out at start</text>
+<text class="tx" x="24" y="148">and published at a boundary. ONE writer.</text>
+
+<rect x="8" y="172" width="410" height="72" rx="7" class="bx-ochre"/>
+<text class="tt c-ochre" x="24" y="194">flint-passthrough — the mount</text>
+<text class="tx" x="24" y="213">An S3 prefix mounted as-is by Mountpoint for S3.</text>
+<text class="tx" x="24" y="230">No POSIX, no coordination, no boundary.</text>
+
+<line class="ln-blue" x1="418" y1="44" x2="448" y2="44" marker-end="url(#p1-b)"/>
+<line class="ln-violet" x1="418" y1="126" x2="448" y2="126" marker-end="url(#p1-v)"/>
+<line class="ln-ochre" x1="418" y1="208" x2="448" y2="208" marker-end="url(#p1-o)"/>
+
+<rect x="452" y="8" width="180" height="236" rx="7" class="bx-s3"/>
+<text class="tt c-ochre ctr" x="542" y="32">S3</text>
+<text class="tsb ctr" x="542" y="50">the durable store</text>
+<line class="hair" x1="468" y1="62" x2="616" y2="62"/>
+<text class="tx ctr" x="542" y="82">One bucket format:</text>
+<text class="tx ctr" x="542" y="99">whole-file objects, plus</text>
+<text class="tx ctr" x="542" y="116">a control namespace.</text>
+<text class="mns ctr" x="542" y="140">&lt;prefix&gt;/&lt;path&gt;</text>
+<text class="mns ctr" x="542" y="157">&lt;prefix&gt;/.flint/…</text>
+<line class="hair" x1="468" y1="172" x2="616" y2="172"/>
+<text class="tx ctr" x="542" y="192">The bytes are the same</text>
+<text class="tx ctr" x="542" y="209">bytes, whichever front</text>
+<text class="tx ctr" x="542" y="226">end put them there.</text>
+
+<rect x="8" y="256" width="624" height="64" rx="7" class="bx-slate"/>
+<text class="th" x="24" y="277">An escalation ladder, cheapest first — and the choice is reversible.</text>
+<text class="tx" x="24" y="296">Passthrough asks nothing of the workload and gives it nothing back. Lean gives real POSIX at local speed,</text>
+<text class="tx" x="24" y="312">to one writer. The hub is the only one where several pods can share one live tree. All three are convertible.</text>
+</svg>
