@@ -475,10 +475,32 @@ impl StateIdManager {
                     share_deny,
                     verifier,
                 });
-                let mut owners = self.opens_by_fh.entry(fh).or_insert_with(Vec::new);
+                let mut owners = self.opens_by_fh.entry(fh.clone()).or_insert_with(Vec::new);
                 if !owners.iter().any(|(c, o)| *c == client_id && *o == owner) {
                     owners.push((client_id, owner));
                 }
+                drop(owners);
+                // RE-INDEX, after the open is visible in `opens_by_fh`.
+                //
+                // The index at the top of this function covers the early
+                // returns; it does NOT survive a concurrent close. A
+                // CLOSE of the last open on this fh unindexes the
+                // identity, and it decides "last" by looking at
+                // `opens_by_fh` — which, between our `index_ident` above
+                // and the insert just made, does not yet mention us. So
+                // the interleaving
+                //
+                //   A: index_ident(fh)                 (we are indexed)
+                //   B: close → opens_by_fh empty → unindex_ident(fh)
+                //   A: insert into opens_by_fh          (we are live)
+                //
+                // leaves a LIVE write open whose fh is absent from
+                // `fhs_by_ident`, so `file_has_write_open` cannot reach
+                // it and the delegation grant's rule-5 precheck grants
+                // against it — silently. Re-indexing here closes that:
+                // any unindex racing us now sees our `opens_by_fh` entry
+                // and refuses. `index_ident` is idempotent.
+                self.index_ident(&fh, ident);
                 stateid
             }
         }
@@ -968,7 +990,23 @@ impl StateIdManager {
     }
 
     /// Drop fh from the identity indices (last open on it closed).
+    ///
+    /// Refuses if the fh has opens again: a concurrent `record_open`
+    /// may have re-populated it between the caller's removal and this
+    /// call, and dropping the identity index for a LIVE open is the
+    /// unsafe direction — the grant predicate reads `fhs_by_ident` and
+    /// would miss it. A STALE entry, by contrast, costs one wasted
+    /// lookup and can only make the predicate more conservative.
+    ///
+    /// This narrows the window rather than closing it: the durable fix
+    /// is a write-open COUNT keyed on (dev,ino), maintained by
+    /// `record_open`/`close_open`, so the predicate is one atomic read
+    /// with no multi-map interval at all. Left for the delegation
+    /// workstream, which owns this invariant.
     fn unindex_ident(&self, fh: &[u8]) {
+        if self.opens_by_fh.contains_key(fh) {
+            return;
+        }
         if let Some((_, ident)) = self.idents_by_fh.remove(fh) {
             if let Some(mut v) = self.fhs_by_ident.get_mut(&ident) {
                 v.retain(|f| f != fh);
@@ -1098,9 +1136,17 @@ impl StateIdManager {
         let (client_id, ref owner, ref fh) = *key;
         if let Some(mut owners) = self.opens_by_fh.get_mut(fh) {
             owners.retain(|(cid, own)| *cid != client_id || own != owner);
-            if owners.is_empty() {
-                drop(owners);
-                self.opens_by_fh.remove(fh);
+            let now_empty = owners.is_empty();
+            drop(owners);
+            // CHECK-THEN-ACT, and the guard is gone. `remove_if`
+            // evaluates the predicate under the shard lock, so a
+            // concurrent `record_open` that re-populated this fh in the
+            // gap WINS instead of having its entry deleted wholesale.
+            // Deleting it was a false NEGATIVE for
+            // `file_has_write_open`, which is the unsafe direction: the
+            // delegation grant predicate would miss a live write open
+            // and rule 5 would be violated with no error anywhere.
+            if now_empty && self.opens_by_fh.remove_if(fh, |_, v| v.is_empty()).is_some() {
                 self.unindex_ident(fh);
             }
         }
@@ -1200,8 +1246,7 @@ impl StateIdManager {
                 entry.retain(|(cid, _)| *cid != client_id);
                 let now_empty = entry.is_empty();
                 drop(entry);
-                if now_empty {
-                    self.opens_by_fh.remove(&fh);
+                if now_empty && self.opens_by_fh.remove_if(&fh, |_, v| v.is_empty()).is_some() {
                     self.unindex_ident(&fh);
                 }
             }
