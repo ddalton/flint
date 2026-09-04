@@ -1,9 +1,10 @@
 # flint forge — a git server with S3 behind it: design of record
 
-Status: **PHASE 1 LANDED** (`forge/syncer`, the `flint-forge` crate:
-the syncer, the `proc-receive` relay, restore, the sweep and `/status`,
-with a battery that includes real `git push` through the real hook).
-Everything else below is still design. Written 2026-09-04; **revised
+Status: **PHASES 1 AND 2 LANDED** — `forge/syncer` (the `flint-forge`
+crate: the syncer, both hooks, restore, the sweep, `/status`, the
+branch policy and the credential helper) and the door
+(`lite_gateway::git` with `Door::Git`, plus the `FlintRepo` CRD in
+`forge_operator`). Everything else below is still design. Written 2026-09-04; **revised
 the same day after a 15-agent review** (five lenses, one refuter per
 significant finding; record in §16), and §14 records what phase 1
 actually built against what it planned. Working name "flint forge" (the user's earlier
@@ -582,12 +583,38 @@ slow in ways that matter for a fleet. Phase 0 runs it as the control.
    All three were found by the end-to-end `git push` test and none by
    the 23 unit tests, which is the design's own rule about a wire
    feature having three parties.
-2. **The door and the policy.** `Door::Git` in the lite gateway:
-   Basic → cached `TokenReview`, `Consumers`, three streaming routes
-   with chunked bodies both ways (the lite upload route's
-   `content_length_limit` would 411 every push over 1 MiB),
-   `Git-Protocol` and `X-Remote-User` forwarding, the 180 s hold; the
-   credential helper; `pre-receive`; `refs/for` merges; falsifier 6.
+2. **The door and the policy.** — **BUILT.** `lite_gateway::git`
+   with a `Door::Git` arm on `resolve::decide_for`: HTTP basic whose
+   password is the pod's projected token, `TokenReview` behind a TTL
+   cache (a `Reviewer` trait, so the cache is a wrapper and a test can
+   count what reaches the apiserver), `spec.consumers`, three streaming
+   routes with no length limit, `Git-Protocol` and `X-Remote-User`
+   forwarded and `Authorization` not, a 180 s hold, and the upstream
+   URL built from the CR's endpoint plus a `&'static str` — the
+   caller's segments are a lookup key and never a path. The
+   `FlintRepo` CRD (`forge_operator::crd`) carries the branch policy,
+   which `BranchPolicy::render` converts into the `flint-forge` crate's
+   own `Policy` type, so a field either side adds and nobody maps is a
+   compile error rather than a rule that stops being enforced. Both
+   enforcers now read that one document: `pre-receive` at the edge for
+   the message, the syncer's step 2 for the guarantee — a repository
+   whose hooks are misconfigured must not become an open one, and a
+   test removes `pre-receive` and proves it does not. The credential
+   helper (`flint-forge-credential`) reads the projected token on every
+   invocation, so nothing is cached and a deleted pod loses access when
+   its token stops being renewed. Falsifier 6 runs through the wire.
+
+   Two defects the tests found. `warp`'s `or` never reached the
+   `git-receive-pack` route, because the `git-upload-pack` handler
+   checked the literal INSIDE itself and answered 404 — consuming the
+   request instead of rejecting it, so every push 404'd; the literal is
+   in the path filter now. And the branch policy's own module records
+   what it cannot express: `agentPattern` bounds the branch NAME, not
+   its owner, because the principal a pod presents is its
+   ServiceAccount and many pods share one.
+
+   **Still to do in this phase:** mounting the door in the chart, and
+   the human-auth interim (§15.13).
 3. **The operator.** `FlintRepo` CRD; lite's reconciler copied and
    trimmed (or a slim one if the trim is larger than a rewrite);
    headless Service; git-sized requests; one idle rung; claim/adopt;
@@ -597,9 +624,23 @@ slow in ways that matter for a fleet. Phase 0 runs it as the control.
    `--single-branch` in the guide, the wip sidecar, the agent-branch
    pruner; the storm leg on EC2 (falsifier 8) — provisioned only on
    the user's go, pure spot.
-6. **Later.** LFS batch API over `lfs/`; mirror jobs; the shared
-   multi-repo server behind §2's triggers; HITL commits from the
-   gateway (as `refs/for` pushes); Knox; ranged restore.
+6. **Later, and LFS is not last.** The LFS batch API over `lfs/`
+   moves up: **multi-modal agents are a named use case for forge**, and
+   an agent working on images, audio, video or model weights commits
+   blobs that git's own object model handles badly — a pack is
+   delta-compressed and fully rewritten by `repack -a`, so a repository
+   of large binaries makes every clone, every repack and every restore
+   pay for bytes that never delta. LFS puts those blobs at
+   `<prefix>/lfs/objects/<oid>` as immutable content-named objects,
+   which is the layout §3 already uses for packs and which the sweep's
+   four rules already cover; the pointer files stay in git and stay
+   small. It also changes the storm arithmetic of §8, because an LFS
+   object can be handed to the client as a presigned URL and never
+   crosses the server's NIC at all — the same lever bundle URIs give
+   for the pack, applied to the bytes that dominate a multi-modal
+   repository. Then: mirror jobs; the shared multi-repo server behind
+   §2's triggers; HITL commits from the gateway (as `refs/for`
+   pushes); Knox; ranged restore.
 
 ## 15. Decisions and open questions
 

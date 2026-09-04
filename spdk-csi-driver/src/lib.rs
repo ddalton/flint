@@ -70,6 +70,7 @@ pub mod lite_operator;  // flint-lite operator: the FlintShare CRD + its reconci
 pub mod lean_operator;  // flint-lean: FlintLeanWorkspace CRD + claim/adopt reconcile + the syncer env the CSI plugin launches with (docs/plans/flint-lean-plan.md §2.4); separate controller, shared image
 pub mod passthrough;  // flint-passthrough: the FlintPassthroughMount CR and the mount-s3 argv the CSI plugin's worker execs. No controller: a passthrough mount owns no state to converge.
 pub mod s3csi;  // s3.csi.chert.us: the CSI node driver that delivers both (docs/plans/csi-node-mount-design.md)
+pub mod forge_operator;  // flint forge: the FlintRepo CRD (docs/plans/flint-forge-design.md)
 pub mod lite_gateway;  // flint-hub-gateway: one door in front of every hub's file API (docs/flint-hub-gateway.md)
 
 /// Install the process-wide rustls crypto provider. **Call this first

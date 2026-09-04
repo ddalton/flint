@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use flint_forge::batch::Policy;
+use flint_forge::policy::Policy;
 use flint_forge::server::{run, ServerOpts};
 use flint_forge::{ForgeConfig, Syncer};
 use flint_store::memory::MemoryStore;
@@ -23,8 +23,16 @@ use flint_store::ObjectStore;
 const PREFIX: &str = "tenant/repo";
 
 fn git(dir: &Path, args: &[&str]) -> std::process::Output {
-    let out = Command::new("git")
-        .arg("-C")
+    git_as(dir, args, None)
+}
+
+/// `REMOTE_USER` is what the door sets on the upstream request, and the
+/// hooks read it from their environment. A local push inherits the
+/// pusher's environment, so setting it here is the same thing the door
+/// does — which is what lets the policy legs run without a door.
+fn git_as(dir: &Path, args: &[&str], principal: Option<&str>) -> std::process::Output {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
         .arg(dir)
         .args(args)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -32,10 +40,12 @@ fn git(dir: &Path, args: &[&str]) -> std::process::Output {
         .env("GIT_AUTHOR_NAME", "tester")
         .env("GIT_AUTHOR_EMAIL", "tester@example.invalid")
         .env("GIT_COMMITTER_NAME", "tester")
-        .env("GIT_COMMITTER_EMAIL", "tester@example.invalid")
-        .output()
-        .expect("git");
-    out
+        .env("GIT_COMMITTER_EMAIL", "tester@example.invalid");
+    match principal {
+        Some(p) => cmd.env("REMOTE_USER", p),
+        None => cmd.env_remove("REMOTE_USER"),
+    };
+    cmd.output().expect("git")
 }
 
 fn must(dir: &Path, args: &[&str]) -> String {
@@ -55,9 +65,13 @@ fn must(dir: &Path, args: &[&str]) -> String {
 fn install_hook(repo: &Path) {
     let hooks = repo.join("hooks");
     std::fs::create_dir_all(&hooks).unwrap();
-    let target = hooks.join("proc-receive");
-    let _ = std::fs::remove_file(&target);
-    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_flint-forge-hook"), &target).unwrap();
+    // Both hooks are the same binary, dispatching on the name it was
+    // invoked as — so the symlink is also the test of that dispatch.
+    for name in ["proc-receive", "pre-receive"] {
+        let target = hooks.join(name);
+        let _ = std::fs::remove_file(&target);
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_flint-forge-hook"), &target).unwrap();
+    }
 }
 
 async fn wait_for(path: &Path, what: &str) {
@@ -80,6 +94,13 @@ struct Rig {
 
 impl Rig {
     async fn start(protected: Vec<String>) -> Rig {
+        Rig::start_with(Policy { protected, ..Policy::default() }, false).await
+    }
+
+    /// `render` writes the policy document the hooks read, as the
+    /// operator would. Without it only the syncer enforces, which is
+    /// the misconfigured-hooks case worth being able to run.
+    async fn start_with(policy: Policy, render: bool) -> Rig {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo.git");
         let store = Arc::new(MemoryStore::new());
@@ -93,12 +114,20 @@ impl Rig {
         );
         // The repository must exist before the hook is installed, and
         // the serving loop creates it.
+        if render {
+            std::fs::create_dir_all(&cfg.state_dir).unwrap();
+            std::fs::write(
+                cfg.state_dir.join(flint_forge::policy::POLICY_FILE),
+                serde_json::to_vec_pretty(&policy).unwrap(),
+            )
+            .unwrap();
+        }
         let opts = ServerOpts {
             socket: socket.clone(),
             // No status listener: a fixed port would collide with the
             // other tests in this file when cargo runs them together.
             status_addr: None,
-            policy: Policy { protected, allow_non_fast_forward: vec![] },
+            policy,
         };
         tokio::spawn(async move {
             if let Err(e) = run(sc, opts).await {
@@ -123,9 +152,13 @@ impl Rig {
     }
 
     fn push(&self, args: &[&str]) -> (bool, String) {
+        self.push_as(None, args)
+    }
+
+    fn push_as(&self, principal: Option<&str>, args: &[&str]) -> (bool, String) {
         let mut argv = vec!["push"];
         argv.extend_from_slice(args);
-        let out = git(&self.client, &argv);
+        let out = git_as(&self.client, &argv, principal);
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -251,4 +284,78 @@ async fn push_options_survive_the_version_negotiation() {
     assert!(snap.refs.keys().all(|k| !k.starts_with("refs/for/")), "refs/for is never stored");
     let content = must(&rig.repo, &["show", &format!("{merged}:a.txt")]);
     assert_eq!(content, "agent side\n", "-Xtheirs takes the pushed side");
+}
+
+
+/// Falsifier 6, through the wire: an agent's push to `main` is refused
+/// by `pre-receive` naming the rule; its push to `agent/<pod>` lands;
+/// its push to `refs/for/main` merges because `mergeInto` lists it; and
+/// a principal that is not listed is refused and moves no ref.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_policy_decides_who_moves_main() {
+    let policy: Policy = serde_json::from_str(
+        r#"{
+            "protected": ["main"],
+            "pushers": { "main": ["release-bot"] },
+            "mergeInto": { "main": ["agent-runner"] },
+            "agentPattern": "agent/*"
+        }"#,
+    )
+    .unwrap();
+    let rig = Rig::start_with(policy, true).await;
+
+    // The release bot seeds main; the agent cannot.
+    rig.commit("a.txt", "base\n");
+    let (ok, text) = rig.push_as(Some("agent-runner"), &["origin", "HEAD:refs/heads/main"]);
+    assert!(!ok, "an agent must not push main directly: {text}");
+    assert!(text.contains("release-bot"), "the refusal names the rule: {text}");
+
+    let (ok, text) = rig.push_as(Some("release-bot"), &["--quiet", "origin", "HEAD:refs/heads/main"]);
+    assert!(ok, "the listed pusher moves main: {text}");
+
+    // The agent's own branch lands…
+    let (ok, text) =
+        rig.push_as(Some("agent-runner"), &["--quiet", "origin", "HEAD:refs/heads/agent/pod-7"]);
+    assert!(ok, "an agent pushes its own shape: {text}");
+
+    // …and a branch outside its shape does not.
+    let (ok, text) =
+        rig.push_as(Some("agent-runner"), &["origin", "HEAD:refs/heads/sneaky"]);
+    assert!(!ok, "agentPattern bounds what an agent creates: {text}");
+    assert!(text.contains("agent/*"), "{text}");
+
+    // A merge proposal from the listed principal lands…
+    let ahead = rig.commit("b.txt", "more\n");
+    let (ok, text) = rig.push_as(Some("agent-runner"), &["--quiet", "origin", "HEAD:refs/for/main"]);
+    assert!(ok, "the listed merger proposes into main: {text}");
+    assert_eq!(rig.snapshot().await.refs.get("refs/heads/main"), Some(&ahead));
+
+    // …and one from an unlisted principal does not, and moves no ref.
+    let after = rig.commit("c.txt", "unwanted\n");
+    let (ok, text) = rig.push_as(Some("someone-else"), &["origin", "HEAD:refs/for/main"]);
+    assert!(!ok, "an unlisted principal may not merge: {text}");
+    assert!(text.contains("agent-runner"), "the refusal names who may: {text}");
+    let refs = rig.snapshot().await.refs;
+    assert_eq!(refs.get("refs/heads/main"), Some(&ahead), "no ref moved");
+    assert!(!refs.values().any(|v| v == &after));
+}
+
+/// The hooks are not the guarantee. With `pre-receive` removed — a
+/// wrong `core.hooksPath`, a missing binary, an image rolled without it
+/// — the syncer still refuses, because it applies the same document at
+/// the writer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_pre_receive_does_not_open_the_repository() {
+    let policy: Policy = serde_json::from_str(
+        r#"{"protected": ["main"], "pushers": {"main": ["release-bot"]}}"#,
+    )
+    .unwrap();
+    let rig = Rig::start_with(policy, true).await;
+    std::fs::remove_file(rig.repo.join("hooks/pre-receive")).unwrap();
+
+    rig.commit("a.txt", "base\n");
+    let (ok, text) = rig.push_as(Some("agent-runner"), &["origin", "HEAD:refs/heads/main"]);
+    assert!(!ok, "the writer refuses what the edge no longer sees: {text}");
+    assert!(text.contains("release-bot"), "{text}");
+    assert!(rig.snapshot().await.refs.is_empty(), "nothing was published");
 }

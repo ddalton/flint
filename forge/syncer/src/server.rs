@@ -19,7 +19,8 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
-use super::batch::{self, Policy, PushReport};
+use super::batch::{self, PushReport};
+use super::policy::Policy;
 use super::status::{self, Facts, Phase};
 use super::uds::{self, HookResponse, Incoming};
 use super::{lease, restore, ForgeError, ForgeResult, Syncer};

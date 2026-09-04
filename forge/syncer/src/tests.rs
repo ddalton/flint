@@ -15,7 +15,8 @@ use std::sync::Arc;
 use flint_store::memory::MemoryStore;
 use flint_store::ObjectStore;
 
-use super::batch::{self, CommandResult, Policy, PushRequest};
+use super::batch::{self, CommandResult, PushRequest};
+use super::policy::{Policy, Verdict};
 use super::gitcmd::RefUpdate;
 use super::{lease, restore, snapshot, status, sweep, ForgeConfig, ForgeError, Syncer};
 
@@ -310,8 +311,8 @@ async fn a_non_fast_forward_is_refused_unless_the_policy_allows_it() {
     assert!(ng_reason(&reports[0].results[0]).contains("non-fast-forward"));
 
     let policy = Policy {
-        protected: vec![],
         allow_non_fast_forward: vec!["refs/heads/*".into()],
+        ..Policy::default()
     };
     let reports = batch::run_batch(&mut rig.sc, vec![push(2, vec![cmd])], &policy)
         .await
@@ -326,7 +327,7 @@ async fn a_protected_ref_refuses_a_direct_push() {
     let mut rig = Rig::new().await;
     rig.start().await;
     let base = rig.stage_commit(None, &[("a.txt", "base\n")], "base").await;
-    let policy = Policy { protected: vec!["refs/heads/main".into()], ..Policy::default() };
+    let policy = Policy { protected: vec!["main".into()], ..Policy::default() };
     let reports = batch::run_batch(
         &mut rig.sc,
         vec![push(1, vec![RefUpdate {
@@ -765,14 +766,15 @@ async fn the_bucket_carries_a_bare_repository_layout() {
 
 #[test]
 fn globs_match_the_way_a_refspec_does() {
-    assert!(batch::glob_match("refs/heads/main", "refs/heads/main"));
-    assert!(!batch::glob_match("refs/heads/main", "refs/heads/mainline"));
-    assert!(batch::glob_match("release/*", "release/1.2"));
-    assert!(batch::glob_match("refs/heads/*", "refs/heads/agent/pod-7"));
-    assert!(!batch::glob_match("refs/heads/*", "refs/tags/v1"));
-    assert!(batch::glob_match("*", "anything"));
-    assert!(batch::glob_match("refs/*/main", "refs/heads/main"));
-    assert!(!batch::glob_match("refs/*/main", "refs/heads/other"));
+    use super::policy::glob_match;
+    assert!(glob_match("refs/heads/main", "refs/heads/main"));
+    assert!(!glob_match("refs/heads/main", "refs/heads/mainline"));
+    assert!(glob_match("release/*", "release/1.2"));
+    assert!(glob_match("refs/heads/*", "refs/heads/agent/pod-7"));
+    assert!(!glob_match("refs/heads/*", "refs/tags/v1"));
+    assert!(glob_match("*", "anything"));
+    assert!(glob_match("refs/*/main", "refs/heads/main"));
+    assert!(!glob_match("refs/*/main", "refs/heads/other"));
 }
 
 #[test]
@@ -827,4 +829,135 @@ async fn a_newer_snapshot_layout_is_refused() {
         Err(ForgeError::Refused(m)) => assert!(m.contains("version"), "{m}"),
         other => panic!("expected a refusal, got {other:?}"),
     }
+}
+
+// ── the policy, as both enforcers read it ────────────────────────────
+
+fn policy_json(doc: &str) -> Policy {
+    serde_json::from_str(doc).expect("the rendered document must parse")
+}
+
+/// The document the operator renders is the CR's own spelling: bare
+/// branch names, camelCase keys. A policy that only accepted
+/// `refs/heads/main` would be a policy nobody writes correctly.
+#[test]
+fn the_rendered_document_is_the_crs_spelling() {
+    let p = policy_json(
+        r#"{
+            "protected": ["main", "release/*"],
+            "pushers": { "main": ["system:serviceaccount:team-a:release-bot"] },
+            "mergeInto": { "main": ["system:serviceaccount:team-a:agent-runner"] },
+            "agentPattern": "agent/*",
+            "allowNonFastForward": ["agent/*"]
+        }"#,
+    );
+    assert!(p.is_protected("refs/heads/main"));
+    assert!(p.is_protected("refs/heads/release/1.2"));
+    assert!(!p.is_protected("refs/heads/agent/pod-7"));
+    assert!(p.allows_non_fast_forward("refs/heads/agent/pod-7"));
+    assert!(!p.allows_non_fast_forward("refs/heads/main"));
+}
+
+#[test]
+fn an_agent_may_push_its_own_shape_and_nothing_else() {
+    let p = policy_json(
+        r#"{
+            "protected": ["main"],
+            "pushers": { "main": ["release-bot"] },
+            "mergeInto": { "main": ["agent-runner"] },
+            "agentPattern": "agent/*"
+        }"#,
+    );
+    let agent = "agent-runner";
+    assert_eq!(p.judge(agent, "refs/heads/agent/pod-7", "abc"), Verdict::Allow);
+    assert_eq!(p.judge(agent, "refs/for/main", "abc"), Verdict::Allow);
+    match p.judge(agent, "refs/heads/main", "abc") {
+        Verdict::Refuse(m) => assert!(m.contains("release-bot"), "{m}"),
+        v => panic!("an agent must not push main directly: {v:?}"),
+    }
+    match p.judge(agent, "refs/heads/sneaky", "abc") {
+        Verdict::Refuse(m) => assert!(m.contains("agent/*"), "{m}"),
+        v => panic!("agentPattern must bound what an agent creates: {v:?}"),
+    }
+    // The listed pusher may move main, and may not propose merges it
+    // was not listed for.
+    assert_eq!(p.judge("release-bot", "refs/heads/main", "abc"), Verdict::Allow);
+    assert!(matches!(p.judge("release-bot", "refs/for/main", "abc"), Verdict::Refuse(_)));
+}
+
+/// `refs/for` must not be the way around the protection it exists to
+/// serve: a protected target with no `mergeInto` entry is closed, and
+/// an unprotected one is open to anyone who could push it directly.
+#[test]
+fn a_protected_target_with_no_merge_list_is_closed_and_an_open_one_is_not() {
+    let closed = policy_json(r#"{"protected": ["main"]}"#);
+    match closed.judge("anyone", "refs/for/main", "abc") {
+        Verdict::Refuse(m) => assert!(m.contains("mergeInto"), "{m}"),
+        v => panic!("expected a refusal, got {v:?}"),
+    }
+    let open = policy_json(r#"{}"#);
+    assert_eq!(open.judge("anyone", "refs/for/topic", "abc"), Verdict::Allow);
+}
+
+/// A protected ref is moved by its pushers and deleted by nobody.
+#[test]
+fn a_protected_ref_is_never_deleted_through_the_server() {
+    let p = policy_json(r#"{"protected": ["main"], "pushers": {"main": ["*"]}}"#);
+    assert_eq!(p.judge("anyone", "refs/heads/main", "abc"), Verdict::Allow);
+    match p.judge("anyone", "refs/heads/main", &zero()) {
+        Verdict::Refuse(m) => assert!(m.contains("never deleted"), "{m}"),
+        v => panic!("expected a refusal, got {v:?}"),
+    }
+}
+
+/// An empty principal is a deployment with no door in front of it. The
+/// policy still applies and every named list fails to contain it, so a
+/// protected ref stays protected rather than becoming open.
+#[test]
+fn an_unauthenticated_push_is_not_a_privileged_one() {
+    let p = policy_json(r#"{"protected": ["main"], "pushers": {"main": ["release-bot"]}}"#);
+    assert!(matches!(p.judge("", "refs/heads/main", "abc"), Verdict::Refuse(_)));
+}
+
+/// Absent is permissive (the pre-operator posture); unreadable is an
+/// error, because a rendering bug must never read as "no policy".
+#[test]
+fn an_absent_policy_is_permissive_and_an_unparseable_one_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(Policy::load(dir.path()).unwrap(), None);
+    std::fs::write(dir.path().join(super::policy::POLICY_FILE), b"{not json").unwrap();
+    assert!(Policy::load(dir.path()).is_err());
+}
+
+/// Defence in depth, at the writer. The syncer applies the same
+/// document the hook applied, so a repository whose hooks were
+/// misconfigured — a wrong `core.hooksPath`, a missing binary, an image
+/// rolled without one — still refuses a push to a protected ref.
+#[tokio::test]
+async fn the_syncer_refuses_a_protected_push_with_no_hook_in_the_picture() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let base = rig.stage_commit(None, &[("a.txt", "base\n")], "base").await;
+    let policy = policy_json(
+        r#"{"protected": ["main"], "pushers": {"main": ["release-bot"]}, "mergeInto": {"main": ["agent-runner"]}}"#,
+    );
+    let mut agent = push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: base.clone(),
+    }]);
+    agent.principal = "agent-runner".into();
+    let reports = batch::run_batch(&mut rig.sc, vec![agent], &policy).await.expect("batch");
+    assert!(ng_reason(&reports[0].results[0]).contains("release-bot"));
+    assert!(rig.sc.git.ref_oid("refs/heads/main").await.unwrap().is_none());
+
+    let mut bot = push(2, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: base.clone(),
+    }]);
+    bot.principal = "release-bot".into();
+    let reports = batch::run_batch(&mut rig.sc, vec![bot], &policy).await.expect("batch");
+    assert!(is_ok(&reports[0].results[0]), "{:?}", reports[0].results[0]);
+    assert_eq!(rig.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(base));
 }

@@ -1,4 +1,19 @@
-//! The `proc-receive` hook: a relay, and nothing else.
+//! The two server-side hooks, in one binary that dispatches on the
+//! name it was invoked as — `pre-receive` and `proc-receive`, each a
+//! symlink to this.
+//!
+//! ## `pre-receive`: the policy, at the edge
+//!
+//! It sees every command, including the `refs/for/*` merge proposals,
+//! applies the rendered policy against `REMOTE_USER`, and refuses the
+//! whole push if any command is refused — which is git's semantics for
+//! this hook and not a choice. Its refusal is the one the pusher reads,
+//! so the message names the rule. It is not the guarantee: the syncer
+//! applies the same document again, because a repository whose hooks
+//! were misconfigured would otherwise accept a push to `main` from
+//! anyone who could reach the door (see `policy`).
+//!
+//! ## `proc-receive`: a relay, and nothing else
 //!
 //! git spawns this once per push. It negotiates the `proc-receive`
 //! version, reads the command list and the push options, hands them to
@@ -17,28 +32,107 @@
 //! degradation: a push forge cannot make durable is a push forge must
 //! not acknowledge.
 
-use std::io::{stdin, stdout, Write};
+use std::io::{stdin, stdout, BufRead, Write};
 use std::path::PathBuf;
 
 use flint_forge::gitcmd::RefUpdate;
 use flint_forge::pktline::{read_until_flush, write_flush, write_str};
+use flint_forge::policy::{Policy, Verdict};
 use flint_forge::uds::{ask, HookRequest, SOCKET_NAME};
+
+/// The syncer's state directory, as a hook sees it. `GIT_DIR` is set by
+/// `receive-pack` for every hook it runs, and is `.` with the cwd at
+/// the repository root — which is how the default resolves in the pod
+/// without anything being configured.
+fn state_dir() -> PathBuf {
+    let git_dir = std::env::var("GIT_DIR").unwrap_or_else(|_| ".".into());
+    PathBuf::from(git_dir).join("flint-forge")
+}
 
 fn socket_path() -> PathBuf {
     if let Ok(p) = std::env::var("FLINT_FORGE_SOCKET") {
         return PathBuf::from(p);
     }
-    let git_dir = std::env::var("GIT_DIR").unwrap_or_else(|_| ".".into());
-    PathBuf::from(git_dir).join("flint-forge").join(SOCKET_NAME)
+    state_dir().join(SOCKET_NAME)
+}
+
+/// Which hook this invocation is. git runs `hooks/pre-receive`, so
+/// argv[0]'s final component is the name; an explicit first argument
+/// overrides it, which is what the tests and a wrapper script use.
+fn mode() -> String {
+    if let Some(arg) = std::env::args().nth(1) {
+        return arg;
+    }
+    std::env::args()
+        .next()
+        .and_then(|a| a.rsplit('/').next().map(|s| s.to_string()))
+        .unwrap_or_default()
 }
 
 fn main() {
-    if let Err(e) = run() {
+    let mode = mode();
+    let result = match mode.as_str() {
+        "pre-receive" => pre_receive(),
+        "proc-receive" => run(),
+        other => {
+            eprintln!(
+                "flint-forge: this binary is `pre-receive` or `proc-receive`, invoked as {other:?}"
+            );
+            std::process::exit(2);
+        }
+    };
+    if let Err(e) = result {
         // stderr from a hook reaches the pushing client, prefixed by
         // git. Say what failed in terms the pusher can act on.
         eprintln!("flint-forge: {e}");
         std::process::exit(1);
     }
+}
+
+/// `pre-receive`: every command on stdin as `<old> <new> <ref>`, and an
+/// exit status that accepts or refuses ALL of them.
+fn pre_receive() -> std::io::Result<()> {
+    let policy = match Policy::load(&state_dir()) {
+        Ok(Some(p)) => p,
+        // No document is the pre-operator posture and is permissive by
+        // design; an unreadable one is not, because a rendering bug
+        // must never read as "no policy" (see `policy`).
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            eprintln!("flint-forge: {e}");
+            std::process::exit(1);
+        }
+    };
+    let principal = std::env::var("REMOTE_USER").unwrap_or_default();
+    let mut refusals = Vec::new();
+    let mut line = String::new();
+    let mut input = stdin().lock();
+    loop {
+        line.clear();
+        if input.read_line(&mut line)? == 0 {
+            break;
+        }
+        let mut parts = line.split_whitespace();
+        let (Some(_old), Some(new), Some(name)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        if let Verdict::Refuse(why) = policy.judge(&principal, name, new) {
+            refusals.push(why);
+        }
+    }
+    if refusals.is_empty() {
+        return Ok(());
+    }
+    // git prints these to the pusher verbatim. One line per rule, and
+    // the whole push is refused: `pre-receive` has no per-ref verdict.
+    for why in &refusals {
+        eprintln!("flint-forge: {why}");
+    }
+    if refusals.len() > 1 {
+        eprintln!("flint-forge: the push is refused as a whole; pre-receive has no per-ref answer");
+    }
+    std::process::exit(1);
 }
 
 fn run() -> std::io::Result<()> {

@@ -206,6 +206,12 @@ aws-sdk-s3 = { version = "1.141.0", default-features = false, features = ["rustl
 # backend); re-exported at the old path via `tier::store`. flint-lean
 # depends on the same crate WITHOUT this crate's build.
 flint-store = { path = "../crates/flint-store", features = ["s3"] }
+# The forge syncer's own crate. The operator depends on it for ONE
+# thing: `policy::Policy`, the document `pre-receive` and the syncer
+# both read. Rendering the CR into that type rather than into hand-built
+# JSON is what keeps one rule in two crates from drifting — a field
+# added on either side that nobody maps fails to compile.
+flint-forge = { path = "../forge/syncer" }
 
 # SPDK Integration - Custom bindings generated for Flint's specific needs
 # No external dependencies - bindings generated from your SPDK v25.05 installation

@@ -39,7 +39,9 @@ use futures::StreamExt;
 use kube::runtime::{reflector, watcher, WatchStreamExt};
 use kube::{Api, Client};
 use spdk_csi_driver::lite_gateway::derive::{self, Binding, Minter};
-use spdk_csi_driver::lite_gateway::{proxy, Config, Gateway};
+use spdk_csi_driver::forge_operator::crd::FlintRepo;
+use warp::Filter;
+use spdk_csi_driver::lite_gateway::{git, proxy, Config, Gateway};
 use spdk_csi_driver::lite_operator::crd::FlintShare;
 use spdk_csi_driver::pnfs::mds::fileapi::token::{self, TokenSource};
 use tracing::{error, info, warn};
@@ -82,6 +84,36 @@ struct Args {
     /// Simpler, and it gives up single-project revocation.
     #[arg(long, env = "FLINT_GATEWAY_HUB_TOKEN")]
     hub_token: Option<String>,
+
+    /// Serve flint forge's git door at `/git/<namespace>/<repo>.git`
+    /// as well as the file API (design
+    /// `docs/plans/flint-forge-design.md` §6).
+    ///
+    /// OFF by default, and off means the `FlintRepo` CRD is neither
+    /// listed nor watched — an existing gateway deployment is
+    /// unaffected by this binary growing a second door.
+    #[arg(long, env = "FLINT_GATEWAY_GIT")]
+    git: bool,
+
+    /// The audience an agent's projected token must carry for the git
+    /// door. A token minted for the apiserver's own audience is
+    /// refused: that separation is what stops any pod token in the
+    /// cluster from being a forge credential.
+    #[arg(long, env = "FLINT_GATEWAY_GIT_AUDIENCE", default_value = "forge.chert.us")]
+    git_audience: String,
+
+    /// Seconds a git request is HELD for a parked repository. Longer
+    /// than the file API's wait on purpose: git clients do not retry a
+    /// 503, and a wake after an unclean death is a lease wait plus a
+    /// restore from the bucket.
+    #[arg(long, env = "FLINT_GATEWAY_GIT_WAKE_WAIT_SECS", default_value_t = 180)]
+    git_wake_wait_secs: u64,
+
+    /// Seconds a `TokenReview` verdict is reused. Also the window in
+    /// which a deleted pod's credential still works, which is why it
+    /// is short and why it is a knob.
+    #[arg(long, env = "FLINT_GATEWAY_GIT_REVIEW_TTL_SECS", default_value_t = 60)]
+    git_review_ttl_secs: u64,
 
     /// Seconds a request waits for a parked share before answering 503.
     /// The wake is armed either way and persists, so a timeout costs a
@@ -227,9 +259,60 @@ async fn main() -> anyhow::Result<()> {
         listen = %args.listen,
         namespace = %args.namespace.clone().unwrap_or_else(|| "<all>".into()),
         read_only = args.read_only,
+        git = args.git,
         "flint-hub-gateway starting"
     );
-    warp::serve(proxy::routes(gw)).run(args.listen).await;
+
+    // The git door is a second route table on the same listener, not a
+    // second process: it shares the wake machinery, the readiness gate
+    // and the operational surface the file API already has. When it is
+    // off, nothing here touches the FlintRepo CRD at all.
+    if args.git {
+        let repos: Api<FlintRepo> = match &args.namespace {
+            Some(ns) => Api::namespaced(client.clone(), ns),
+            None => Api::all(client.clone()),
+        };
+        // Fail fast and legibly if the CRD is not served, rather than
+        // watch-erroring forever behind a Ready probe that passes.
+        repos.list(&kube::api::ListParams::default().limit(1)).await?;
+
+        let (repo_store, repo_writer) = reflector::store::<FlintRepo>();
+        let repo_ready = Arc::new(AtomicBool::new(false));
+        let door = git::GitDoor::new(
+            client.clone(),
+            repo_store.clone(),
+            proxy::upstream_client(Duration::from_secs(5))?,
+            git::GitConfig {
+                audience: args.git_audience.clone(),
+                wake_wait: Duration::from_secs(args.git_wake_wait_secs),
+                review_ttl: Duration::from_secs(args.git_review_ttl_secs),
+                upstream_timeout: Duration::from_secs(args.upstream_timeout_secs),
+                read_only: args.read_only,
+            },
+            repo_ready.clone(),
+        );
+        tokio::spawn(async move {
+            let stream = watcher(repos, watcher::Config::default())
+                .default_backoff()
+                .reflect(repo_writer)
+                .applied_objects();
+            futures::pin_mut!(stream);
+            while let Some(ev) = stream.next().await {
+                if let Err(e) = ev {
+                    warn!("repo watch: {e}");
+                }
+            }
+            error!("repo watch ended — the repository cache is now frozen");
+        });
+        tokio::spawn(async move {
+            repo_store.wait_until_ready().await.ok();
+            repo_ready.store(true, Ordering::Relaxed);
+            info!("repository cache listed — the git door is serving");
+        });
+        warp::serve(git::routes(door).or(proxy::routes(gw))).run(args.listen).await;
+    } else {
+        warp::serve(proxy::routes(gw)).run(args.listen).await;
+    }
     Ok(())
 }
 

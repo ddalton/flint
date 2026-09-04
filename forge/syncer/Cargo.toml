@@ -30,6 +30,13 @@ required-features = ["s3"]
 name = "flint-forge-hook"
 path = "src/bin/flint_forge_hook.rs"
 
+# The agent-side credential helper: reads the pod's projected token and
+# prints it as the basic password. No store, no dependencies, and it
+# ships in the AGENT image rather than the server's.
+[[bin]]
+name = "flint-forge-credential"
+path = "src/bin/flint_forge_credential.rs"
+
 [dependencies]
 flint-store = { path = "../../crates/flint-store" }
 bytes = "1.0"

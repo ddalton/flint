@@ -14,6 +14,29 @@ covered by the stability guarantee.
 
 ### Added
 
+- **flint forge, phase 2: the door and the branch policy.**
+  `lite_gateway::git` serves `/git/<namespace>/<repo>.git` with a
+  `Door::Git` arm on the gateway's existing resolve-wake-dial decision.
+  An agent authenticates with HTTP basic whose password is its own
+  projected ServiceAccount token (audience `forge.chert.us`); the door
+  reviews it, caches the verdict briefly so a thousand clones are not
+  four thousand `TokenReview`s, checks `spec.consumers`, and forwards
+  the verified principal as `X-Remote-User` while the credential itself
+  stops at the door. `Git-Protocol` is forwarded, without which every
+  clone silently degrades to protocol v0 and bundle URIs cannot work at
+  all. The three routes stream both ways with no length limit — the
+  file API's own upload route would answer 411 to a push. The upstream
+  URL is the CR's endpoint plus a `&'static str`, so the caller's path
+  segments are a lookup key and never a path. New `FlintRepo` CRD
+  (`forge_operator::crd`) carrying the identity, the consumers and the
+  branch policy; the door is off unless `flint-hub-gateway --git` is
+  set, and off means the CRD is neither listed nor watched.
+  `pre-receive` applies the rendered branch policy at the edge for the
+  message, and the syncer applies the same document at the writer for
+  the guarantee — a repository whose hooks are misconfigured must not
+  become an open one. `flint-forge-credential` is the agent-side git
+  credential helper.
+
 - **`s3.csi.chert.us`: a hardening suite on real nodes**
   (`s3csi/e2e/aws-hardening.sh`, L1-L7) for the paths the passthrough
   suite left: a lean workspace under a graceful node reboot and under a

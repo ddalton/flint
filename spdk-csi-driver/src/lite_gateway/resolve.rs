@@ -24,6 +24,7 @@
 //! polled the hub to find out whether it was idle would keep every
 //! share it ever touched awake forever. Even a 304 counts.
 
+use crate::forge_operator::crd::FlintRepo;
 use crate::lite_operator::crd::{FlintShare, Phase};
 use crate::lite_operator::idle::ANN_REQUESTED_AT;
 use kube::ResourceExt;
@@ -94,6 +95,13 @@ pub fn share_name(prefix: &str, project: &str) -> String {
 }
 
 /// Everything the decision needs, lifted out of the CR.
+///
+/// Two CR kinds project onto it: [`ShareView::of`] for a `FlintShare`
+/// and [`ShareView::of_repo`] for a `FlintRepo`. It is a projection,
+/// not a mirror — a repo leaves the file-API and NFS fields at their
+/// defaults, and a share leaves `git_endpoint` unset — and that is what
+/// lets one implementation of [`decide_for`] serve every door. A field
+/// only one kind fills is documented as such.
 #[derive(Debug, Clone, Default)]
 pub struct ShareView {
     pub namespace: String,
@@ -110,6 +118,9 @@ pub struct ShareView {
     /// operator on `Failed` and `Terminating`, which is why it is read
     /// rather than derived.
     pub address: Option<String>,
+    /// `status.gitEndpoint` — a `FlintRepo`'s git server, as an
+    /// absolute URL. Only ever set by [`ShareView::of_repo`].
+    pub git_endpoint: Option<String>,
     /// The hub's persisted NFS server identity. **A change here means
     /// every existing mount is stale**: it is stable across ordinary
     /// restarts, but a hibernate deletes the PVC, so a woken share
@@ -150,6 +161,38 @@ pub struct ShareView {
 }
 
 impl ShareView {
+    /// A `FlintRepo` (flint forge), projected onto the same view.
+    ///
+    /// The fields a repository has no analogue for stay at their
+    /// defaults rather than being faked: there is no NFS address, no
+    /// file-API condition and no derived token, because forge forwards
+    /// the caller's own identity instead of minting one. What it does
+    /// fill is exactly what the decision reads — deletion, phase, the
+    /// wake annotation, the server's observed phase, and the endpoint.
+    pub fn of_repo(repo: &FlintRepo) -> Self {
+        let st = repo.status.as_ref();
+        ShareView {
+            namespace: repo.namespace().unwrap_or_default(),
+            name: repo.name_any(),
+            deleting: repo.metadata.deletion_timestamp.is_some(),
+            phase: st.and_then(|s| s.phase).map(|p| p.as_share_phase()),
+            hub_phase: st.and_then(|s| s.server_phase.clone()),
+            git_endpoint: st.and_then(|s| s.git_endpoint.clone()),
+            server_id: st.and_then(|s| s.server_id.clone()),
+            wake_requested: repo
+                .metadata
+                .annotations
+                .as_ref()
+                .map(|a| a.contains_key(ANN_REQUESTED_AT))
+                .unwrap_or(false),
+            bucket: Some(repo.spec.bucket.clone()),
+            key_prefix: Some(repo.spec.key_prefix.clone()),
+            endpoint_s3: repo.spec.endpoint.clone().unwrap_or_default(),
+            suspend_after_secs: repo.spec.idle.as_ref().and_then(|i| i.suspend_after_secs),
+            ..Default::default()
+        }
+    }
+
     pub fn of(share: &FlintShare) -> Self {
         let st = share.status.as_ref();
         let api_condition = st.and_then(|s| {
@@ -173,6 +216,11 @@ impl ShareView {
             hub_phase: st.and_then(|s| s.hub_phase.clone()),
             api_endpoint: st.and_then(|s| s.api_endpoint.clone()),
             address: st.and_then(|s| s.address.clone()),
+            // A share has no git door. Spelled rather than defaulted,
+            // so that the field is a decision at each construction
+            // site instead of something a `..Default::default()` can
+            // quietly supply.
+            git_endpoint: None,
             server_id: st.and_then(|s| s.server_id.clone()),
             api_condition,
             conflict_with: st
@@ -312,6 +360,16 @@ pub enum Door {
     FileApi,
     /// `status.address` — `host:2049`, what a consumer mounts.
     Nfs,
+    /// `status.gitEndpoint` — a `FlintRepo`'s git server (design
+    /// `docs/plans/flint-forge-design.md` §2).
+    ///
+    /// A third door on the same decision rather than a second gateway,
+    /// because the decision is the part that is genuinely shared: a
+    /// terminating CR serves nothing, an admin-suspended one is not
+    /// woken by a request, a parked one is, and a `Failed` one stays
+    /// refused. Only the last step — which status field carries the
+    /// address, and what its absence means — differs by door.
+    Git,
 }
 
 pub fn decide_for(v: &ShareView, door: Door) -> Decision {
@@ -382,6 +440,23 @@ pub fn decide_for(v: &ShareView, door: Door) -> Decision {
                 503,
                 "NoAddress",
                 "the share is up but has published no NFS address yet",
+                5,
+            ),
+        };
+    }
+
+    if door == Door::Git {
+        // A repo publishes a HEADLESS Service name: git carries the
+        // repository in the request path, so the door routes to the pod
+        // and forge does not spend a ClusterIP per repository. An
+        // absent endpoint on a Ready repo means the Service has not
+        // been published yet, which is a wait.
+        return match v.git_endpoint.as_deref() {
+            Some(ep) if !ep.is_empty() => Decision::Dial(ep.to_string()),
+            _ => refuse_later(
+                503,
+                "NoGitEndpoint",
+                "the repository is up but has published no git endpoint yet",
                 5,
             ),
         };

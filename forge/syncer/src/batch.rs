@@ -28,6 +28,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::gitcmd::{is_zero, MergeOutcome, RefUpdate};
+use super::policy::{Policy, Verdict};
 use super::{lease, packio, snapshot, ForgeError, ForgeResult, Syncer};
 
 /// One push, as `proc-receive` handed it over.
@@ -89,57 +90,6 @@ impl CommandResult {
 pub struct PushReport {
     pub id: u64,
     pub results: Vec<CommandResult>,
-}
-
-/// What the syncer enforces because `receive-pack` no longer does.
-///
-/// The full surface — `pushers`, `mergeInto`, `agentPattern` — is
-/// rendered by the operator and enforced at `pre-receive`, where a
-/// refusal costs no pack transfer. What lives here is the part that
-/// must hold even if a hook is bypassed or misconfigured, because it
-/// is the part whose failure LOSES data rather than merely allowing a
-/// push that should have been refused.
-#[derive(Debug, Clone, Default)]
-pub struct Policy {
-    /// Refs no direct push may move. They move by `refs/for/*` or by a
-    /// principal `pre-receive` lists.
-    pub protected: Vec<String>,
-    /// Refs a non-fast-forward push may move. Default: none. An agent
-    /// rebasing its own branch is the case that wants this, and it is
-    /// the operator's to grant.
-    pub allow_non_fast_forward: Vec<String>,
-}
-
-/// `*` matches any run of characters, `/` included — the same shape as
-/// a refspec glob, which is what an operator writing `release/*` in the
-/// CR expects. A pattern with no `*` is an exact ref name.
-pub fn glob_match(pattern: &str, name: &str) -> bool {
-    let parts: Vec<&str> = pattern.split('*').collect();
-    if parts.len() == 1 {
-        return pattern == name;
-    }
-    if !name.starts_with(parts[0]) {
-        return false;
-    }
-    let mut pos = parts[0].len();
-    let last = parts.len() - 1;
-    for (i, part) in parts.iter().enumerate().skip(1) {
-        if i == last {
-            return name.len() >= pos + part.len() && name[pos..].ends_with(part);
-        }
-        if part.is_empty() {
-            continue;
-        }
-        match name[pos..].find(part) {
-            Some(idx) => pos += idx + part.len(),
-            None => return false,
-        }
-    }
-    true
-}
-
-fn matches_any(patterns: &[String], name: &str) -> bool {
-    patterns.iter().any(|p| glob_match(p, name))
 }
 
 const FOR_PREFIX: &str = "refs/for/";
@@ -339,11 +289,17 @@ async fn judge(
     eff: &BTreeMap<String, String>,
     disagreed: &BTreeSet<String>,
 ) -> ForgeResult<Judged> {
+    // Policy before mechanics, for both a direct push and a merge
+    // proposal. It is the same document `pre-receive` already applied
+    // at the edge; applying it again here is what makes it a guarantee
+    // rather than a convention (see `policy`'s module doc). It also
+    // gives the more useful message: a pusher who may not touch `main`
+    // wants to be told that, not that their old-oid is stale.
+    if let Verdict::Refuse(reason) = policy.judge(&push.principal, &cmd.name, &cmd.new_oid) {
+        return Ok(Judged::Refused { reason });
+    }
     if let Some(target) = cmd.name.strip_prefix(FOR_PREFIX) {
         return judge_merge(sc, push, cmd, target, eff, disagreed).await;
-    }
-    if !cmd.name.starts_with("refs/") {
-        return Ok(Judged::Refused { reason: format!("{} is not under refs/", cmd.name) });
     }
     if disagreed.contains(&cmd.name) {
         return Ok(Judged::Refused {
@@ -362,19 +318,10 @@ async fn judge(
             reason: "stale info: fetch first".into(),
         });
     }
-    if matches_any(&policy.protected, &cmd.name) {
-        return Ok(Judged::Refused {
-            reason: format!(
-                "{} is protected: push to refs/for/{} instead",
-                cmd.name,
-                cmd.name.trim_start_matches("refs/heads/")
-            ),
-        });
-    }
     let deleting = is_zero(&cmd.new_oid);
     if !deleting && !base.is_empty() {
         let ff = sc.git.is_ancestor(&base, &cmd.new_oid).await?;
-        if !ff && !matches_any(&policy.allow_non_fast_forward, &cmd.name) {
+        if !ff && !policy.allows_non_fast_forward(&cmd.name) {
             return Ok(Judged::Refused {
                 reason: format!("non-fast-forward update to {}", cmd.name),
             });

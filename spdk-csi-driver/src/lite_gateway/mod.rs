@@ -44,6 +44,7 @@
 //! and it belongs on the hub, not in a proxy.
 
 pub mod derive;
+pub mod git;
 pub mod proxy;
 pub mod resolve;
 pub mod route;

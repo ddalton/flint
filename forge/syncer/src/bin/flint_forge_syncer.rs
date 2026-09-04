@@ -26,7 +26,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use flint_forge::batch::Policy;
+use flint_forge::policy::Policy;
 use flint_forge::server::{self, ServerOpts};
 use flint_forge::{ForgeConfig, ForgeError, Syncer, EXIT_REFUSED};
 use flint_store::s3::S3Store;
@@ -50,6 +50,19 @@ fn env_globs(name: &str) -> Vec<String> {
             v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
         })
         .unwrap_or_default()
+}
+
+fn rendered_policy(cfg: &ForgeConfig) -> Option<Policy> {
+    match Policy::load(&cfg.state_dir) {
+        Ok(p) => p,
+        Err(e) => {
+            // A policy the enforcers cannot read must never read as
+            // "no policy": that is how a rendering bug becomes an open
+            // repository.
+            eprintln!("flint-forge-syncer: {e}");
+            std::process::exit(EXIT_REFUSED);
+        }
+    }
 }
 
 #[tokio::main]
@@ -88,10 +101,16 @@ async fn main() {
     let opts = ServerOpts {
         socket,
         status_addr,
-        policy: Policy {
+        // The rendered document beside the repository is the operator's
+        // surface; the env knobs are the pre-operator posture and the
+        // rigs'. A file, when present, wins outright rather than
+        // merging — a policy assembled from two sources is a policy
+        // nobody can read off one screen.
+        policy: rendered_policy(&cfg).unwrap_or(Policy {
             protected: env_globs("FLINT_FORGE_PROTECTED"),
             allow_non_fast_forward: env_globs("FLINT_FORGE_ALLOW_NON_FF"),
-        },
+            ..Policy::default()
+        }),
     };
 
     let holder_id = format!("forge-{}", uuid::Uuid::new_v4());

@@ -55,6 +55,7 @@ pub mod batch;
 pub mod gitcmd;
 pub mod lease;
 pub mod packio;
+pub mod policy;
 pub mod pktline;
 pub mod restore;
 pub mod server;
