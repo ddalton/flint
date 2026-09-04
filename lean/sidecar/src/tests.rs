@@ -7677,3 +7677,206 @@ async fn migrating_to_chunks_leaves_no_generation_objects_behind() {
     let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
     assert_eq!(m.manifest.entries.len(), 40, "the migration sweep broke the live manifest");
 }
+
+
+
+/// A backend whose LISTING reports every object as ancient while the
+/// objects themselves are however old they really are.
+///
+/// This is the gap between "the listing said it was old" and "it is old
+/// NOW": an adopt-rewrite landing after the reaper's listing refreshes a
+/// chunk, and a reaper that judges the grace from the listing cannot
+/// see it. Modelling the two as one value is what the implementation
+/// did; the model did not.
+struct StaleListing {
+    inner: Arc<MemoryStore>,
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for StaleListing {
+    async fn put_whole(
+        &self,
+        key: &str,
+        body: Bytes,
+        cond: &PutCondition,
+        stamps: &GenerationStamps,
+        crc: u64,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.put_whole(key, body, cond, stamps, crc).await
+    }
+    async fn compose_generation(
+        &self,
+        spec: &flint_store::ComposeSpec<'_>,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.compose_generation(spec).await
+    }
+    async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head(key).await
+    }
+    async fn get_whole(
+        &self,
+        key: &str,
+        if_match: Option<&str>,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.inner.get_whole(key, if_match).await
+    }
+    async fn get_range(
+        &self,
+        key: &str,
+        off: u64,
+        len: u64,
+        if_match: &str,
+    ) -> flint_store::StoreResult<Bytes> {
+        self.inner.get_range(key, off, len, if_match).await
+    }
+    fn min_part_size(&self) -> u64 {
+        self.inner.min_part_size()
+    }
+    fn max_parts(&self) -> usize {
+        self.inner.max_parts()
+    }
+    async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
+        let mut out = self.inner.list(prefix).await?;
+        for o in out.iter_mut() {
+            o.last_modified_unix = Some(0);
+        }
+        Ok(out)
+    }
+    async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete(key).await
+    }
+    async fn head_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head_version(key, v).await
+    }
+    async fn get_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.inner.get_version(key, v).await
+    }
+    async fn delete_version(&self, key: &str, v: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete_version(key, v).await
+    }
+    async fn list_versions(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::ListedVersion>> {
+        self.inner.list_versions(prefix).await
+    }
+    async fn list_uploads(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::PendingUpload>> {
+        self.inner.list_uploads(prefix).await
+    }
+    async fn abort_upload(&self, key: &str, id: &str) -> flint_store::StoreResult<()> {
+        self.inner.abort_upload(key, id).await
+    }
+    async fn bootstrap(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<flint_store::BootstrapReport> {
+        self.inner.bootstrap(prefix).await
+    }
+    async fn epoch_read(
+        &self,
+        key: &str,
+    ) -> flint_store::StoreResult<Option<flint_store::EpochState>> {
+        self.inner.epoch_read(key).await
+    }
+    async fn epoch_acquire(
+        &self,
+        key: &str,
+        holder: &str,
+        observed: Option<&flint_store::EpochState>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.inner.epoch_acquire(key, holder, observed).await
+    }
+    async fn epoch_renew(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+        echo: Option<&str>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.inner.epoch_renew(key, lease, echo).await
+    }
+    async fn epoch_release(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+    ) -> flint_store::StoreResult<()> {
+        self.inner.epoch_release(key, lease).await
+    }
+}
+
+/// The grace must be judged at DELETE time, not from the listing.
+///
+/// Rule 4 of the chunk-GC model works by REFRESHING an adopted chunk's
+/// age, so a reaper reading the age out of a pre-fence listing cannot
+/// see the very refresh that rule exists to produce — and deletes a
+/// chunk an in-flight publish is about to name. The model computed
+/// `Doomed` against the store's state at delete time; the first
+/// implementation read it from the listing, which is not the same rule.
+///
+/// Found by the other session's integrity audit, not by this suite,
+/// which is why the suite now carries it.
+#[tokio::test]
+async fn the_chunk_reaper_judges_the_grace_now_not_when_it_listed() {
+    let inner = Arc::new(MemoryStore::new());
+    let plain: Arc<dyn ObjectStore> = inner.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = cfg_for(dir.path());
+    cfg.chunk_target = 64;
+    cfg.chunk_min = 16;
+    cfg.chunk_max = 256;
+    // A real grace: the objects below are seconds old, so nothing may
+    // be collected unless the reaper believes the LISTING's zero.
+    cfg.orphan_grace_secs = 3600;
+
+    let m1 = manifest_of(600, 1);
+    let meta1 = manifest::cas_write_chunked(plain.as_ref(), &cfg, &m1, None, &[],
+        manifest::PublishStamps { epoch: 1, flush_uuid: "u1", boundary_source: None })
+        .await.unwrap();
+    let c1 = match manifest::load_pointer(plain.as_ref(), &cfg).await.unwrap().unwrap()
+        .pointer.entries().unwrap() {
+        super::manifest::Entries::Chunked(c) => c.to_vec(),
+        _ => panic!("not chunked"),
+    };
+    let mut m2 = m1.clone();
+    m2.seq = 2;
+    m2.entries.insert("src/f00003.txt".into(), entry_at("changed", 42));
+    let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false, prev_chunks: Vec::new() };
+    manifest::cas_write_chunked(plain.as_ref(), &cfg, &m2, Some(&h), &c1,
+        manifest::PublishStamps { epoch: 1, flush_uuid: "u2", boundary_source: None })
+        .await.unwrap();
+
+    let prefix = format!("{}/{}/chunks/", cfg.prefix, super::LEAN_DIR);
+    let before = plain.list(&prefix).await.unwrap().len();
+    // PRECONDITION: there IS an unreferenced chunk, so "collected
+    // nothing" cannot pass by there being nothing to collect.
+    let live: Vec<String> = match manifest::load_pointer(plain.as_ref(), &cfg).await.unwrap()
+        .unwrap().pointer.entries().unwrap() {
+        super::manifest::Entries::Chunked(c) => c.iter().map(|r| r.addr.clone()).collect(),
+        _ => panic!("not chunked"),
+    };
+    assert!(
+        c1.iter().any(|r| !live.contains(&r.addr)),
+        "PRECONDITION: nothing is unreferenced, so the reaper has no candidate to mis-judge"
+    );
+
+    let store: Arc<dyn ObjectStore> = Arc::new(StaleListing { inner: inner.clone() });
+    let n = manifest::sweep_chunks(store.as_ref(), &cfg).await.unwrap();
+    let after = plain.list(&prefix).await.unwrap().len();
+    assert_eq!(
+        n, 0,
+        "the reaper collected {n} chunk(s) on the LISTING's word that they were ancient — \
+         an adopt-rewrite landing after the listing is invisible to that, and rule 4 works \
+         by producing exactly such a rewrite"
+    );
+    assert_eq!(before, after, "chunks disappeared: {before} → {after}");
+}

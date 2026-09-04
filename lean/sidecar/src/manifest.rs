@@ -882,15 +882,37 @@ pub async fn sweep_chunks(store: &dyn ObjectStore, cfg: &LeanConfig) -> LeanResu
         if refs.contains(addr) {
             continue;
         }
-        // No timestamp ⇒ leave it. A store that cannot date its objects
-        // gets a leak, not a deleted live chunk — the same rule
-        // `sweep_generations` follows, and for the same reason.
+        // The age must come from a HEAD taken NOW, never from the
+        // listing above. That listing predates the fence, and rule 4
+        // (adoption REWRITES what it adopts) works by refreshing a
+        // chunk's age — so judging by the listing's timestamp makes
+        // exactly the refresh that rule exists to produce invisible,
+        // and the reaper deletes a chunk an in-flight publish is about
+        // to name. The model computed this against the store's state at
+        // DELETE time; reading it from a pre-fence snapshot was an
+        // implementation that did not match the rule it was built to.
+        //
+        // One HEAD per CANDIDATE, not per chunk: candidates are the
+        // unreferenced ones, a short list on a healthy workspace.
+        //
+        // Gone already ⇒ nothing to do. Any other HEAD failure, or no
+        // timestamp ⇒ leave it: a store that cannot date its objects
+        // gets a leak, not a deleted live chunk, the same rule
+        // `sweep_generations` follows and for the same reason.
+        let fresh = match store.head(&o.key).await {
+            Ok(m) => m.last_modified_unix,
+            Err(StoreError::NotFound(_)) => continue,
+            Err(e) => {
+                eprintln!("flint-sync: could not date orphan chunk {} ({e}); leaving it", o.key);
+                continue;
+            }
+        };
         // `>=`, not `>`: the config value is a DURATION the object must
         // have survived, so `orphan_grace_secs = 0` has to mean "no
         // grace". With `>` it would silently mean "collect nothing
         // written this second", which is most of them — a knob whose
         // zero disables the thing it configures is a trap.
-        let age = o.last_modified_unix.map(|t| now.saturating_sub(t));
+        let age = fresh.map(|t| now.saturating_sub(t));
         if !age.is_some_and(|a| a >= cfg.orphan_grace_secs) {
             continue;
         }
