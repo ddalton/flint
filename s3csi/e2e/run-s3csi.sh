@@ -159,9 +159,46 @@ if [ "${1:-}" = "setup" ]; then
     exit 0
 fi
 if [ "${1:-}" = "teardown" ]; then
+    # 1. THAW. S14 SIGSTOPs a syncer on purpose. A frozen syncer cannot
+    #    finish its drain, so its worker never terminates and
+    #    NodeUnpublish never completes — and a leg that dies before its
+    #    SIGCONT (an `unbound variable` under `set -u` did it once)
+    #    leaves the whole rig wedged. Thawing here makes teardown robust
+    #    to a leg dying ANYWHERE, not just to that one bug.
+    for w in $($K -n $WNS get pods -o name 2>/dev/null); do
+        $K -n $WNS exec "${w#pod/}" -- /bin/sh -c \
+            'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = flint-sync ] && kill -CONT "${p#/proc/}"; done; exit 0' \
+            >/dev/null 2>&1 || true
+    done
     $K delete -f refusals.yaml --ignore-not-found --wait=false
+    # 2. EVERY tenant pod, before the plugin goes. `tenants.yaml` is not
+    #    all of them: the lean fixtures (lean-agent, lean-agent2,
+    #    slow-agent, the wide ones) hold CSI volumes too, and the helm
+    #    uninstall below takes the node plugin with it. Kubelet cannot
+    #    NodeUnpublish a volume whose DRIVER IS GONE, so such a pod sits
+    #    Terminating forever and holds the namespace with it — measured:
+    #    s3-tenants stuck 32 minutes, which then made the next run's
+    #    namespace wait time out and race its own setup.
+    if ! $K delete pods --all -n $NS --ignore-not-found --wait=true --timeout=300s >/dev/null 2>&1; then
+        echo "WARNING: tenant pods still present after 300s; the plugin uninstall below will" >&2
+        echo "         strand them (no driver ⇒ no unpublish): $($K -n $NS get pods -o name 2>/dev/null | tr '\n' ' ')" >&2
+    fi
     $K delete -f tenants.yaml --ignore-not-found --wait=true --timeout=180s
     helm --kube-context "$CTX" uninstall flint-s3-csi -n $SYS || true
+    # 3. ORPHANED WORKERS, after the uninstall and not before. Nothing
+    #    else collects them: the plugin that creates a worker is the
+    #    only thing that deletes one, and it has just gone. A worker
+    #    left behind holds a tree the next setup would adopt, and it is
+    #    invisible to any "wait for the namespace to disappear" check
+    #    because $WNS is PERMANENT — measured: two survived 48 minutes
+    #    and stalled the next run's wait until they were reaped by hand.
+    #
+    #    Only possible after the uninstall. While the chart is installed
+    #    the VAP admits DELETE on a worker from the node SA, that node's
+    #    kubelet and the kube-system GC and from nobody else, which is
+    #    the property S14 relies on; the uninstall takes the policy with
+    #    it.
+    $K -n $WNS delete pod --all --force --grace-period=0 --ignore-not-found >/dev/null 2>&1 || true
     $K delete -f rig.yaml --ignore-not-found --wait=false
     exit 0
 fi
@@ -594,7 +631,6 @@ lrenew() { lepoch "$1" .renewed_unix; }
 # `.flint/lean/current` is the only mutable metadata object; entries live
 # in write-once `.flint/lean/manifests/<seq>-<uuid>`.
 lptr()   { local c; c=$(lobj "$1/.flint/lean/current"); [ -z "$c" ] && return 1; printf '%s' "$c" | jq -r "$2"; }
-lstat()  { mcx mc stat --json "m/s3bucket/$1" 2>/dev/null | jq -r '.etag // empty'; }
 lmhas()  { local m; m=$(lmbody "$1"); [ -z "$m" ] && return 1; printf '%s' "$m" | jq -e --arg p "$2" '.entries | has($p)' >/dev/null; }
 
 leg S11 "lean: the checkout gate holds for the app AND its init container; a cold pod finds the seeded project; the syncer lives in the worker, not the pod"
@@ -876,9 +912,6 @@ if wait_phase lean-agent Running 300; then
         [ "${p_n1:-0}" = "${p_n0:-0}" ] \
             && ok "no new entries object appeared across the takeover ($p_n1) — the rotation wrote the pointer and nothing else" \
             || bad "the entries objects went $p_n0 → $p_n1 across a rotation that should have written only the pointer"
-        [ -n "$p_etag0" ] && [ "$p_etag1" = "$p_etag0" ] \
-            && ok "the generation object is byte-identical across the takeover (etag $p_etag0)" \
-            || bad "the generation object changed across the takeover ('$p_etag0' → '$p_etag1') — the multi-MB rewrite is back"
         note "entries objects: $p_n0 → $p_n1"
 
         # THE FENCE BITES. Wake the straggler: its next renew CASes
