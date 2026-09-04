@@ -52,6 +52,17 @@ metadata:
   name: mc-s3
   namespace: flint-system
 spec:
+  # PINNED TO THE CONTROL PLANE. This pod is the drill's only window on
+  # the bucket, and a window that dies with the thing it watches reports
+  # "nothing" — which reads as "the object is not there". It sat on the
+  # worker a node-loss leg terminated, and six assertions failed on an
+  # empty answer while the product had done exactly the right thing
+  # (2026-09-04). The control plane is the one node these legs never
+  # reboot, fill, or destroy.
+  nodeSelector: { node-role.kubernetes.io/control-plane: "" }
+  tolerations:
+    - { key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }
+    - { key: node-role.kubernetes.io/master, operator: Exists, effect: NoSchedule }
   containers:
     - name: mc
       image: minio/mc

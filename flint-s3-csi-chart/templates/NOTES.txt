@@ -123,3 +123,37 @@ never finish terminating, and with maxUnavailable 1 no live node is
 updated. `kubectl delete node <name>` is the operator's step on such a
 cluster; the roll then proceeds. Mounts on live nodes keep serving
 throughout — a plugin roll does not unmount tenants.
+
+WHEN A DRAIN COULD NOT BE ATTESTED. If a lean syncer dies, is evicted or
+runs out of grace before its final publish completes, the node plugin
+does NOT delete the workspace — it moves the tree aside and raises a
+DrainNotAttested event on the tenant. What the tenant wrote since its
+last publish is still on that node:
+
+  <kubelet-root>/plugins/{{ include "flint-s3-csi.driverName" . }}/undrained/<volume>-<unix>
+
+That directory holds an ext4 IMAGE, not a browsable tree, so recovering
+it means mounting it read-only:
+
+  mount -o loop,ro <...>/undrained/<volume>-<unix>/tree.img /mnt/recover
+
+Nothing ever removes these, by design — losing a tenant's last writes to
+an automatic sweep would be worse than keeping them. The consequence is
+that they accumulate until an operator reviews and deletes them, and a
+node whose root filesystem fills crosses kubelet's DiskPressure
+threshold, at which point kubelet evicts pods that have nothing to do
+with the workspace that was preserved. Size the node's root filesystem
+for the workspaces it may hold (each preserved tree costs the ext4
+metadata its sizeLimitGib implies — roughly 0.5 GiB for a 20 GiB
+workspace, whatever the tree actually contains), and sweep the directory
+as part of routine operations.
+
+NODE SHUTDOWN, AND WHAT SURVIVES IT. A graceful shutdown drains: the
+syncer publishes its outstanding work on SIGTERM, so a reboot or a
+planned cloud-instance termination keeps it. A machine that simply
+stops — power cut, kernel panic, instance failure — runs no drain at
+all, and everything written since the last publish is gone; `floorSecs`
+on the workspace is what bounds that window. The ordering between a
+tenant and its worker during a shutdown is kubelet's graceful node
+shutdown, which is OFF unless `shutdownGracePeriod` is set on the
+kubelet; see workers.priorityClassName in values.yaml.

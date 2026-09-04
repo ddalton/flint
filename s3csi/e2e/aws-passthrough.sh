@@ -13,7 +13,8 @@
 #   P4  a tenant container restart keeps its mount
 #   P5  a kubelet restart mid-read leaves mounts serving; the driver re-registers
 #   P6  a REAL node reboot: the tenant comes back mounted with a fresh worker
-#   P7  node LOSS: the instance is terminated; a Deployment tenant reschedules
+#   P7  instance TERMINATION — a GRACEFUL shutdown, not a hard loss: the
+#       instance is terminated and a Deployment tenant reschedules
 #   P8  rotation soak: 30 min of reads across ≥10 key rotations, zero errors
 #   P9  ambient identity: the worker is handed nothing; the platform's own
 #       credential chain admits it (precondition: the platform can complete it)
@@ -334,8 +335,16 @@ if [ -n "${soak_pid:-}" ]; then
 fi
 ptdel pt-soak
 
-# ── P7 node LOSS (last: it costs the second worker) ───────────────────
-leg P7 "node LOSS: the instance under a Deployment-managed tenant on $NODE2 is terminated; the tenant reschedules to $NODE and mounts"
+# ── P7 instance termination (last: it costs the second worker) ────────
+# NAMED CAREFULLY. `terminate-instances` is a GRACEFUL shutdown: the
+# guest gets an ACPI power button and kubelet's graceful node shutdown
+# terminates the pods in priority order before the machine goes. So this
+# leg measures a planned instance termination — the spot-reclamation
+# shape, which carries a two-minute warning — and NOT a machine that
+# simply stops. The hard shape (sysrq power-off, no shutdown, no drain)
+# is aws-hardening.sh L2, where it matters far more: a passthrough
+# tenant has no unpublished state to lose, and a lean workspace does.
+leg P7 "instance TERMINATION (graceful: the guest is shut down, not cut off): the instance under a Deployment-managed tenant on $NODE2 is terminated; the tenant reschedules to $NODE and mounts"
 sed -e "s#__NODE__#$NODE2#g" pt-deploy.yaml.tpl | $K apply -f - >/dev/null
 i=0; p=""; while [ $i -lt 300 ] && [ -z "$p" ]; do p=$($K -n $NS get pods -l app=pt-deploy --field-selector status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); [ -z "$p" ] && { sleep 5; i=$((i + 5)); }; done
 n=$($K -n $NS get pod "$p" -o jsonpath='{.spec.nodeName}' 2>/dev/null)

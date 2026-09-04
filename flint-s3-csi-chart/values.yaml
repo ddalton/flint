@@ -186,6 +186,35 @@ workers:
   # PodDisruptionBudget for workers; see templates/workers-policy.yaml
   # for why that covered the wrong path.
   #
+  # THAT ORDERING IS KUBELET'S GRACEFUL NODE SHUTDOWN, AND IT IS OFF BY
+  # DEFAULT. `shutdownGracePeriod` is 0s on a stock kubeadm node (checked
+  # on Amazon Linux 2023, 2026-09-04), and with it at zero kubelet does
+  # not terminate pods on shutdown at all — systemd does, by signalling
+  # every remaining process at once. A lean workspace still drains
+  # then, because the syncer drains on SIGTERM whoever sends it (that
+  # much is measured: a reboot published the unpublished write 5 s
+  # later, marked boundary_source=drain). What is lost is the ORDER and
+  # the BUDGET: the tenant may still be writing while its syncer
+  # drains, and the drain has systemd's kill window rather than the
+  # terminationGracePeriodSeconds this chart sets. On a big workspace
+  # that window is the difference between a complete final publish and
+  # a truncated one. Set both of these on your kubelet if node shutdown
+  # is a path you care about:
+  #
+  #   shutdownGracePeriod: 120s
+  #   shutdownGracePeriodByPodPriority:      # ordering, by this class
+  #     - priority: 0
+  #       shutdownGracePeriodSeconds: 60
+  #     - priority: 1000000
+  #       shutdownGracePeriodSeconds: 60
+  #
+  # None of this reaches a machine that simply stops. A power cut, a
+  # kernel panic or an instance failure runs no drain at all, and
+  # everything written since the last publish is gone; `floorSecs` on
+  # the workspace is what bounds that window. A cloud instance
+  # TERMINATION is not that case — it is a graceful shutdown, and it
+  # does drain.
+  #
   # Set create: false and point priorityClassName at your own class if
   # your tenants already rank above 0 — the only requirement is that a
   # worker outranks the pods it serves. Empty ⇒ no class, priority 0,

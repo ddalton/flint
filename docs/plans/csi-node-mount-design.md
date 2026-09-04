@@ -669,6 +669,100 @@ it settled:
   nothing under Cilium's tunnel (pod traffic is forwarded, not
   host-originated), so the partition is blackhole routes.
 
+**Hardening on real nodes (2026-09-04).** A second suite
+(`s3csi/e2e/aws-hardening.sh`, L1-L7) for what the passthrough suite
+left untested, on all-spot EC2 (m6i.2xlarge, us-west-1) against a real
+versioned bucket. What it settled, and what it found:
+
+- *A graceful shutdown DRAINS; only a machine that stops loses work.*
+  Both this campaign's node-loss legs, and the passthrough suite's
+  before them, assumed an instance termination destroys unpublished
+  work. It does not. `terminate-instances` hands the guest an ACPI
+  power button and `systemctl reboot` is a shutdown, and in both cases
+  the syncer's final publish lands first: the unpublished write reached
+  the bucket 5 s after a reboot was issued and 1 s after a terminate,
+  each in a manifest generation stamped `boundary_source: drain` at the
+  holder's own epoch. The hard shape had to be produced deliberately —
+  a sysrq power-off, serviced in the kernel, which gives kubelet and the
+  syncer nothing. Under it: no drain (the manifest sat at its pre-kill
+  seq and the write never reached the bucket), the lease stayed
+  UNRELEASED, the replacement on the surviving node waited the dead
+  lease out, ROTATED the manifest, checked out the full published set,
+  and the write since the last publish was gone. That is the honest
+  cost, and `floorSecs` is what bounds it.
+- *The drain that saved it was not the mechanism the chart advertises.*
+  `shutdownGracePeriod` is `0s` on a stock kubeadm node (Amazon Linux
+  2023), so kubelet's graceful node shutdown — the feature the worker
+  PriorityClass ordering rides on — never ran. The syncer drains on
+  SIGTERM whoever sends it, and systemd signals every process on the way
+  down. So the DATA is saved on a stock node but the ORDERING is not:
+  the tenant may still be writing while its syncer drains, and the drain
+  gets systemd's kill window rather than the terminationGracePeriod this
+  chart sets. `values.yaml` now documents the dependency and the kubelet
+  configuration that satisfies it. On a big workspace this is the
+  difference between a complete final publish and a truncated one.
+- *S17 is no longer vacuous, at 100k files.* The kind rig's 200-file
+  checkout finishes inside a plugin roll's window, so the leg passed
+  without testing its claim. At 100,000 files the checkout genuinely
+  straddles the roll: no marker 20 s in, the plugin rolled, and the SAME
+  worker finished the checkout 83 s after creation (~1,200 files/s).
+  The rest at that size: publish 100 s (~1,000 objects/s), 24 chunks
+  behind a 2,040 B pointer, a five-file change writing five objects and
+  one chunk, and a successor superseding a frozen holder at +67 s and
+  rotating a 100,006-entry manifest in about a second with no entry
+  lost.
+- *One node, 120 tenants.* All Running in 71 s with one worker each, a
+  plugin roll under them serving reads throughout, restarting no worker
+  and moving no mount, admitting a new tenant afterwards and still
+  rotating keys; all reclaimed in 44 s with mounts and workers back to
+  baseline. ~28 MiB of node memory per tenant-plus-worker; the plugin's
+  own RSS 64-82 MiB.
+- *A broker outage is not a data outage — with this backend.* With the
+  broker scaled to zero past the key's expiry the tenant carries
+  `CredentialRefreshFailed`, the cached key is KEPT, and reads continue
+  on it; rotation resumes ~70 s after the broker returns and a new
+  tenant mounts again. Stated precisely because it is backend-dependent:
+  the static backend's key is still valid upstream, where an STS
+  backend's would be refused at expiry and reads WOULD fail. Also
+  measured: the broker's `issued` counter lives in the process, so an
+  outage resets it — an operator loses that observability across a
+  restart rather than carrying it.
+- *`sizeLimitGib` bounds bytes; inodes run out first.* A 1 GiB workspace
+  admitted 65,510 files and then ENOSPC with 2 MiB of 1024 used — the
+  ext4 default inode ratio, not the byte ceiling. Worth saying to anyone
+  sizing a workspace for a small-file tree.
+- **A preserved undrained tree is kept forever and nothing reclaims it.**
+  The preservation is right and deliberate (`state.rs`: never removed).
+  What is missing is any bound: no expiry, no cap, no reclaim verb, no
+  listing, and no event as they accumulate — only the `DrainNotAttested`
+  written with each. Three of them took 1.1 GiB of an 8 GB node here,
+  kubelet crossed DiskPressure, and it evicted tenants unrelated to the
+  preserved workspace. A preserved tree is also an unmounted ext4 image,
+  so recovery is a read-only loop mount rather than an `ls`. The chart's
+  notes now carry the procedure and the sizing; bounding the retention
+  is a product decision and is NOT built. It is the same shape as the
+  audit's other findings: a safety mechanism whose cost is unbounded and
+  paid by something else.
+- *Drill craft.* The bucket observer was scheduled onto the worker a
+  node-loss leg destroys, so six assertions failed on an empty answer
+  while the driver was correct throughout — it is pinned to the control
+  plane now, and the leg asserts that before it kills anything. A node
+  shell is a pod, so a kubelet restart took it away and an on-node
+  baseline came back as an empty string that later comparisons treated
+  as a number. And the probe for the inode ceiling used `:` — a POSIX
+  *special* builtin, whose redirection failure exits a non-interactive
+  shell — so the very ENOSPC the leg existed to observe destroyed the
+  observer.
+
+*Not green on a real node:* L6's containment assertion (its bound was
+set below the metadata 65k inodes legitimately cost; the measurement
+itself passed) and two of L7's (the loop-mount recovery, and that a
+second preservation does not reclaim the first). Both were corrected,
+and spot reclaimed the whole cluster — control plane included — before
+the rerun. The findings behind them stand on direct evidence: the three
+trees that accumulated, the evictions they caused, and the code that
+says an undrained tree is never removed.
+
 ## 1. The question, restated precisely
 
 The ask, verbatim: *"The flint passthrough and lean operators require

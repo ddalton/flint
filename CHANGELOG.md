@@ -14,6 +14,77 @@ covered by the stability guarantee.
 
 ### Added
 
+- **`s3.csi.chert.us`: a hardening suite on real nodes**
+  (`s3csi/e2e/aws-hardening.sh`, L1-L7) for the paths the passthrough
+  suite left: a lean workspace under a graceful node reboot and under a
+  hard power-off, a broker outage that outlives the credential, 120
+  tenants on one node through a plugin roll, a 100,000-file workspace,
+  a one-GiB workspace's real ceiling, and what a preserved undrained
+  tree costs. Measured on all-spot EC2 against a real bucket.
+
+  At 100,000 files: the tree publishes in 100 s (~1,000 objects/s)
+  behind a 2 KB pointer over 24 chunks, a cold checkout completes in
+  83 s *with a node-plugin roll landing mid-checkout*, a five-file
+  change writes five objects and one chunk rather than the whole
+  manifest, and a successor supersedes a frozen holder in 67 s and
+  rotates the 100,006-entry manifest in about one second, losing no
+  entry. The mid-checkout roll is the case the kind rig could never
+  reach: there a 200-file checkout finishes inside the roll's window,
+  so the leg passed without ever testing what it claimed.
+
+  At 120 tenants on one node: all Running in 71 s, one worker each,
+  every sampled tenant reading, the node-plugin roll under them
+  restarting no worker and unmounting nothing, a new tenant admitted
+  after it, rotation continuing, and everything reclaimed in 44 s.
+  About 28 MiB of node memory per tenant-plus-worker; the plugin's own
+  resident set stayed at 64-82 MiB.
+
+### Changed
+
+- **The chart no longer promises an ordering Kubernetes is not
+  configured to give.** `workers.priorityClassName` was documented as
+  the ordering mechanism for node shutdown — kubelet terminating by
+  priority so a worker outlives the tenant still writing into it. That
+  ordering *is* kubelet's graceful node shutdown, and it is off unless
+  `shutdownGracePeriod` is set, which it is not on a stock kubeadm node
+  (0s on Amazon Linux 2023). A lean workspace still drains on a reboot,
+  because the syncer drains on SIGTERM whoever sends it and systemd
+  signals everything on the way down — measured: the unpublished write
+  reached the bucket 5 s after `systemctl reboot`, in a generation
+  marked `boundary_source: drain`. What is lost without the kubelet
+  setting is the *ordering* and the *budget*. The values file now says
+  so, gives the kubelet configuration, and names the one case nothing
+  saves: a machine that simply stops, where everything since the last
+  publish is gone and `floorSecs` is what bounds the exposure.
+- **A cloud instance termination is a graceful shutdown, and the
+  passthrough suite no longer calls it a node loss.** `terminate-
+  instances` hands the guest an ACPI power button; the drain runs. The
+  leg is renamed to what it measures, a planned termination, and points
+  at the hardening suite's power-off leg for the hard shape.
+- **The drill's bucket observer is pinned to the control plane**
+  (`s3csi/e2e/rig-s3.yaml.tpl`). It had been scheduled onto the worker
+  a node-loss leg destroys, so six assertions failed on an empty answer
+  while the driver had behaved correctly throughout: a window that dies
+  with what it watches reports "nothing", and nothing reads as "the
+  object is not there".
+
+### Known
+
+- **A preserved undrained tree is kept forever, and nothing reclaims
+  it.** When a syncer cannot attest its drain the driver moves the tree
+  aside rather than deleting it, which is the right call and is
+  deliberate (`state.rs`: an undrained tree is never removed). There is
+  no expiry, no cap, no reclaim verb, no listing, and no event as they
+  accumulate — only the `DrainNotAttested` event written with each one.
+  On a node with a small root disk they add up: three of them took
+  1.1 GiB on an 8 GB node during this campaign, kubelet crossed its
+  DiskPressure threshold, and it evicted *unrelated* tenants. A
+  preserved tree is also an unmounted ext4 image rather than a
+  browsable directory, so recovering it means a read-only loop mount —
+  a procedure the chart now documents. Sizing guidance and that
+  procedure are in the chart's notes; bounding the retention is not
+  built.
+
 - **flint forge, phase 1: the per-repo syncer** (`forge/syncer`, the
   `flint-forge` crate; design of record
   `docs/plans/flint-forge-design.md`). A git server per repository with
