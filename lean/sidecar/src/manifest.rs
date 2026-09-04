@@ -183,6 +183,15 @@ pub struct ManifestHandle {
     /// True when the document was read from the LEGACY single-object
     /// key, i.e. this write is the migration.
     pub legacy: bool,
+    /// The chunk list this write is superseding, empty if the workspace
+    /// is not chunked yet. Carried on the handle rather than re-read at
+    /// publish time because the caller has just loaded it, and because
+    /// a publish that had to GET the pointer again to find out what it
+    /// already knew would pay a request per barrier for nothing.
+    ///
+    /// This is what makes a publish O(changed): a chunk whose address
+    /// is already here is not sent.
+    pub prev_chunks: Vec<super::chunk::ChunkRef>,
 }
 
 /// What the legacy key is overwritten with once a workspace has moved to
@@ -217,7 +226,14 @@ pub struct LoadedManifest {
 impl LoadedManifest {
     /// The handle a writer presents to CAS over this read.
     pub fn handle(&self) -> ManifestHandle {
-        ManifestHandle { etag: self.etag.clone(), legacy: self.pointer.is_none() }
+        ManifestHandle {
+            etag: self.etag.clone(),
+            legacy: self.pointer.is_none(),
+            prev_chunks: match self.pointer.as_ref().map(|p| p.entries()) {
+                Some(Ok(Entries::Chunked(c))) => c.to_vec(),
+                _ => Vec::new(),
+            },
+        }
     }
 }
 
@@ -423,6 +439,22 @@ pub async fn cas_write_stamped(
     // The manifest's own document must agree with its object stamp:
     // a reader that GETs and a reader that HEADs must never disagree
     // about how coherent the citation claims to be.
+    // The layout switch. Every publisher routes through here — the
+    // barrier, both gated lanes and the gateway's HITL CAS — so the
+    // decision lives at one site rather than four, and §6's "chunk
+    // server-side on receipt" falls out rather than needing its own
+    // path.
+    if cfg.chunked {
+        return cas_write_chunked(
+            store,
+            cfg,
+            m,
+            expected,
+            expected.map(|h| h.prev_chunks.as_slice()).unwrap_or(&[]),
+            PublishStamps { epoch, flush_uuid, boundary_source },
+        )
+        .await;
+    }
     let mut m = m.clone();
     if boundary_source.is_some() {
         m.boundary_source = boundary_source.map(|s| s.to_string());
@@ -654,7 +686,7 @@ pub async fn rotate_for_takeover(
             boundary_source: next.boundary_source.clone(),
             posix: None,
         };
-        let h = ManifestHandle { etag, legacy: false };
+        let h = ManifestHandle { etag, legacy: false, prev_chunks: Vec::new() };
         match put_pointer(store, cfg, &next, Some(&h), &stamps).await {
             Ok(meta) => {
                 // The document the caller gets back is the standing one
@@ -723,7 +755,26 @@ pub async fn sweep_generations(store: &dyn ObjectStore, cfg: &LeanConfig) -> Lea
     // (chunked design §8.1) — sweeping them by "not named by the live
     // pointer" would delete history the window exists to preserve.
     let Some(live) = lp.pointer.entries_key else {
-        return Ok(0);
+        // The workspace has MOVED to the chunk layout, so no pointer
+        // names a generation object any more and every one of them is
+        // superseded. Collect them past the grace rather than leaking
+        // the whole pre-migration history forever — a reader still
+        // resolving one revalidates and restarts (§8.2), and the grace
+        // covers the window in which it might not have noticed yet.
+        let prefix = format!("{}/{}/manifests/", cfg.prefix, super::LEAN_DIR);
+        let now = super::now_unix();
+        let mut removed = 0;
+        for o in store.list(&prefix).await? {
+            let age = o.last_modified_unix.map(|t| now.saturating_sub(t));
+            if !age.is_some_and(|a| a >= cfg.orphan_grace_secs) {
+                continue;
+            }
+            match store.delete(&o.key).await {
+                Ok(()) => removed += 1,
+                Err(e) => eprintln!("flint-sync: could not reap migrated generation {}: {e}", o.key),
+            }
+        }
+        return Ok(removed);
     };
     let prefix = format!("{}/{}/manifests/", cfg.prefix, super::LEAN_DIR);
     let mut listed = store.list(&prefix).await?;

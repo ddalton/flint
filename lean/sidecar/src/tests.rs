@@ -6258,7 +6258,7 @@ async fn superseded_generations_are_reaped_but_the_live_one_and_a_window_survive
         )
         .await
         .unwrap();
-        handle = Some(manifest::ManifestHandle { etag: meta.etag, legacy: false });
+        handle = Some(manifest::ManifestHandle { etag: meta.etag, legacy: false, prev_chunks: Vec::new() });
     }
     // Twelve publishes, no sweep yet: twelve generations.
     assert_eq!(store.list(&prefix).await.unwrap().len(), 12);
@@ -6829,7 +6829,7 @@ async fn a_three_file_publish_writes_chunks_proportional_to_the_change() {
     for i in [7usize, 1500, 3900] {
         m1.entries.insert(format!("src/f{i:05}.txt"), entry_at(&format!("f{i:05}"), 99));
     }
-    let h = super::manifest::ManifestHandle { etag: meta.etag.clone(), legacy: false };
+    let h = super::manifest::ManifestHandle { etag: meta.etag.clone(), legacy: false, prev_chunks: Vec::new() };
     inner.reset_op_counts();
     manifest::cas_write_chunked(store.as_ref(), &cfg, &m1, Some(&h), &chunks0,
         manifest::PublishStamps { epoch: 1, flush_uuid: "u2", boundary_source: None })
@@ -7170,7 +7170,7 @@ async fn a_reader_swept_mid_read_restarts_onto_the_current_generation() {
         let mut m2 = m1.clone();
         m2.seq = 2;
         m2.entries.insert("src/f00003.txt".into(), entry_at("changed", 42));
-        let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false };
+        let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false, prev_chunks: Vec::new() };
         manifest::cas_write_chunked(plain.as_ref(), &cfg, &m2, Some(&h), &c1,
             manifest::PublishStamps { epoch: 1, flush_uuid: "u2", boundary_source: None })
             .await
@@ -7267,7 +7267,7 @@ async fn the_chunk_reaper_takes_orphans_and_nothing_else() {
     let mut m2 = m1.clone();
     m2.seq = 2;
     m2.entries.insert("src/f00003.txt".into(), entry_at("changed", 42));
-    let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false };
+    let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false, prev_chunks: Vec::new() };
     manifest::cas_write_chunked(store.as_ref(), &cfg, &m2, Some(&h), &c1,
         manifest::PublishStamps { epoch: 1, flush_uuid: "u2", boundary_source: None })
         .await.unwrap();
@@ -7303,7 +7303,7 @@ async fn the_chunk_reaper_takes_orphans_and_nothing_else() {
     // with a real grace — nothing may go.
     let meta2 = {
         let lp = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap();
-        super::manifest::ManifestHandle { etag: lp.etag, legacy: false }
+        super::manifest::ManifestHandle { etag: lp.etag, legacy: false, prev_chunks: Vec::new() }
     };
     let mut m3 = m2.clone();
     m3.seq = 3;
@@ -7352,7 +7352,7 @@ async fn the_chunk_reaper_aborts_when_a_publish_lands_under_it() {
     let mut m2 = m1.clone();
     m2.seq = 2;
     m2.entries.insert("src/f00003.txt".into(), entry_at("changed", 42));
-    let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false };
+    let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false, prev_chunks: Vec::new() };
     manifest::cas_write_chunked(plain.as_ref(), &cfg, &m2, Some(&h), &c1,
         manifest::PublishStamps { epoch: 1, flush_uuid: "u2", boundary_source: None })
         .await.unwrap();
@@ -7531,4 +7531,135 @@ impl ObjectStore for PublishOnList {
     ) -> flint_store::StoreResult<()> {
         self.inner.epoch_release(key, lease).await
     }
+}
+
+/// The barrier publishing through the chunked layout, end to end, with
+/// a foreign writer racing it — the property `LeanChunkMerge.tla`
+/// checks, exercised against the real merge rather than a model of it.
+///
+/// The barrier already merges at ENTRY level and re-loads the whole
+/// document on a 412, so `cas_write_chunked` re-chunks from the merged
+/// entries and the splice the model refutes is unreachable from here.
+/// This asserts that it stays that way: a chunked publish must not lose
+/// what the other writer put in a chunk it happened to rewrite.
+#[tokio::test]
+async fn a_chunked_barrier_keeps_a_foreign_write_it_never_read() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    sc.cfg.chunked = true;
+    sc.cfg.chunk_target = 8;
+    sc.cfg.chunk_min = 2;
+    sc.cfg.chunk_max = 32;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+
+    for i in 0..60 {
+        write(dir.path(), &format!("src/f{i:03}.txt"), "v1");
+    }
+    sc.run_barrier().await.unwrap();
+
+    // PRECONDITION: it really did chunk, and into more than one chunk —
+    // a single-chunk workspace would exercise none of the seams.
+    let p = manifest::load_pointer(store.as_ref(), &sc.cfg).await.unwrap().unwrap().pointer;
+    let chunks = match p.entries().unwrap() {
+        super::manifest::Entries::Chunked(c) => c.to_vec(),
+        super::manifest::Entries::Single { .. } => {
+            panic!("the barrier published a single generation object with cfg.chunked set")
+        }
+    };
+    assert!(
+        chunks.len() >= 3,
+        "PRECONDITION: {} chunk(s) — too few for a foreign write and a local one to land in \
+         different ones, which is the case that matters",
+        chunks.len()
+    );
+
+    // A foreign write the sidecar never read, and a local edit far from
+    // it in key order, so they fall in different chunks.
+    hitl_write(&store, &sc.cfg, "src/f000.txt", "user version", "dilip").await.unwrap();
+    write(dir.path(), "src/f059.txt", "v2");
+    backdate_baseline(&sc, "src/f059.txt");
+    sc.run_barrier().await.unwrap();
+
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert_eq!(
+        m.manifest.entries.len(),
+        60,
+        "the chunked publish changed the entry count — a seam lost or duplicated a key"
+    );
+    let cited = &m.manifest.entries["src/f000.txt"];
+    let (_, body) = store.get_whole(&cited.key, Some(&cited.etag)).await.unwrap();
+    assert_eq!(
+        &body[..],
+        b"user version",
+        "the chunked publish lost the foreign write — this is the splice failure the merge \
+         model refutes, reached through the barrier"
+    );
+    let mine = &m.manifest.entries["src/f059.txt"];
+    let (_, body) = store.get_whole(&mine.key, Some(&mine.etag)).await.unwrap();
+    assert_eq!(&body[..], b"v2", "the local edit did not land");
+}
+
+/// Migrating a workspace from one generation object to a chunk list,
+/// and the pre-migration generations not leaking forever.
+///
+/// `sweep_generations` used to return 0 on a chunked pointer — correct
+/// as far as it went, since chunks need a different rule, but it left
+/// every object written before the migration uncollectable. Nothing
+/// references them once the layout moves, and a reader still resolving
+/// one revalidates (§8.2).
+#[tokio::test]
+async fn migrating_to_chunks_leaves_no_generation_objects_behind() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    sc.cfg.chunk_target = 8;
+    sc.cfg.chunk_min = 2;
+    sc.cfg.chunk_max = 32;
+    sc.cfg.orphan_grace_secs = 0;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    for i in 0..40 {
+        write(dir.path(), &format!("src/f{i:03}.txt"), "v1");
+    }
+    // Two publishes on the SINGLE layout.
+    sc.run_barrier().await.unwrap();
+    write(dir.path(), "src/f000.txt", "v2");
+    backdate_baseline(&sc, "src/f000.txt");
+    sc.run_barrier().await.unwrap();
+    let gens = format!("{}/{}/manifests/", sc.cfg.prefix, super::LEAN_DIR);
+    assert!(
+        !store.list(&gens).await.unwrap().is_empty(),
+        "PRECONDITION: no generation objects to migrate away from"
+    );
+
+    // Flip the layout and publish again.
+    sc.cfg.chunked = true;
+    write(dir.path(), "src/f001.txt", "v2");
+    backdate_baseline(&sc, "src/f001.txt");
+    sc.run_barrier().await.unwrap();
+    let p = manifest::load_pointer(store.as_ref(), &sc.cfg).await.unwrap().unwrap().pointer;
+    assert!(
+        matches!(p.entries().unwrap(), super::manifest::Entries::Chunked(_)),
+        "the workspace did not migrate to a chunk list"
+    );
+    // Everything still reads, across the layout change.
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert_eq!(m.manifest.entries.len(), 40, "entries were lost migrating to chunks");
+
+    // The end state is the claim, not who reached it: the barrier runs
+    // `sweep_generations` itself after a successful install, so with no
+    // grace the migrated-away generations are usually gone before this
+    // call — which is the behaviour wanted. Asserting a non-zero return
+    // here would have failed for the RIGHT outcome.
+    manifest::sweep_generations(store.as_ref(), &sc.cfg).await.unwrap();
+    assert!(
+        store.list(&gens).await.unwrap().is_empty(),
+        "generation objects survived the migration: {:?}",
+        store.list(&gens).await.unwrap().iter().map(|o| &o.key).collect::<Vec<_>>()
+    );
+    // And the sweep did not touch the chunks the new layout needs.
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert_eq!(m.manifest.entries.len(), 40, "the migration sweep broke the live manifest");
 }

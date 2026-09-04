@@ -774,7 +774,15 @@ async fn handle_manifest_cas(
     let handle = req
         .expected_etag
         .as_deref()
-        .map(|e| manifest::ManifestHandle { etag: e.to_string(), legacy });
+        .map(|e| manifest::ManifestHandle {
+            etag: e.to_string(),
+            legacy,
+            // The HITL path does not carry the previous chunk list, so a
+            // chunked HITL CAS re-sends every chunk. §6 chose exactly
+            // this trade: chunk server-side on receipt, because the path
+            // is rare and correctness beats throughput on it.
+            prev_chunks: Vec::new(),
+        });
     match manifest::cas_write(
         core.store.as_ref(),
         &cfg,

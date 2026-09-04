@@ -211,6 +211,17 @@ pub struct LeanConfig {
     /// adding a second level. Not surfaced on the CRD — nothing has
     /// needed to tune it per workspace yet, and a knob with no caller
     /// is a support burden.
+    /// Publish the manifest as a CHUNK LIST rather than one generation
+    /// object per citation (chunked design). Default OFF.
+    ///
+    /// Off by design, not by oversight. The migration is FAIL-CLOSED in
+    /// both directions that matter — a pointer-era binary cannot parse
+    /// a chunked pointer, which is the point — so flipping it is a
+    /// one-way format decision for a workspace, not a tuning change.
+    /// It also retires the assertions the drill's S14 makes about
+    /// `entries_key`/`entries_seq`, which read as JSON null on a
+    /// chunked pointer and would pass by comparing null to null.
+    pub chunked: bool,
     /// How long an unreferenced chunk must have sat before the reaper
     /// may take it. Config rather than a constant because the model
     /// makes it load-bearing in a workload-dependent way: it must
@@ -278,6 +289,7 @@ impl LeanConfig {
             root: root.into(),
             floor_secs: 60,
             whole_put_max: WHOLE_PUT_MAX,
+            chunked: false,
             orphan_grace_secs: manifest::ORPHAN_GRACE_SECS,
             chunk_target: chunk::CHUNK_TARGET,
             chunk_min: chunk::CHUNK_MIN,
