@@ -1,0 +1,57 @@
+# S17's fixture: the SAME project as `proj`, mounted with a fetch policy
+# that makes its checkout slow enough to catch in flight.
+#
+# Same projectId and keyPrefix on purpose — the claim cell's
+# adopt-own/refuse-foreign check is keyed on projectId, so a second CR
+# over one prefix must agree about which project it is. What differs is
+# `fanout: 1`, which serialises the checkout: 200 objects one at a time
+# instead of 32 at a time, which is the window this leg needs.
+---
+apiVersion: chert.us/v1alpha1
+kind: FlintLeanWorkspace
+metadata:
+  name: proj-slow
+  namespace: s3-tenants
+spec:
+  projectId: team-a/proj
+  bucket: s3bucket
+  keyPrefix: tenants/proj
+  endpoint: http://minio.flint-system.svc:9000
+  fanout: 1
+  floorSecs: 3600
+  expectedBytes: 8388608
+  expectedFiles: 500
+  maxFiles: 5000
+  uid: 1001
+  gid: 1001
+  consumers:
+    serviceAccounts: [trainer]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: slow-agent
+  namespace: s3-tenants
+spec:
+  serviceAccountName: trainer
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    runAsGroup: 1001
+    seccompProfile: { type: RuntimeDefault }
+  volumes:
+    - name: ws
+      csi:
+        driver: s3.csi.chert.us
+        volumeAttributes:
+          chert.us/workspace: proj-slow
+  containers:
+    - name: agent
+      image: busybox:1.36
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: ws, mountPath: /workspace }
+      command: ["/bin/sh", "-c", "ls /workspace/src | wc -l > /tmp/seen; trap 'exit 0' TERM INT; sleep 86400 & wait"]

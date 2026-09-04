@@ -74,7 +74,12 @@ done
 ok "agent's write published through the barrier"
 
 # 5. The manifest cites it (the coherent view, not just the object).
-MAN=$($K -n flint-system exec mc-assert -- mc cat m/agentws/tenants/proj1/.flint/lean/manifest 2>/dev/null)
+# Through the pointer: `current` names the write-once generation that
+# holds the entries; the single `manifest` object it replaced is gone.
+PTR=$($K -n flint-system exec mc-assert -- mc cat m/agentws/tenants/proj1/.flint/lean/current 2>/dev/null)
+GEN=$(printf '%s' "$PTR" | jq -r '.entries_key // empty')
+[ -n "$GEN" ] || fail "no .flint/lean/current for tenants/proj1 — nothing to check the citation against"
+MAN=$($K -n flint-system exec mc-assert -- mc cat "m/agentws/$GEN" 2>/dev/null)
 echo "$MAN" | grep -c '"agent.txt"' > /dev/null || fail "manifest does not cite agent.txt"
 ok "manifest cites the publish"
 

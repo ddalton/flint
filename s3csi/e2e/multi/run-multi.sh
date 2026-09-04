@@ -65,8 +65,30 @@ minio_ip() { docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}
 mcx() { docker run --rm -i --network kind -e "MC_HOST_m=http://drill:drillsecret@$(minio_ip):9000" minio/mc "$@" 2>/dev/null; }
 lobj()   { mcx cat "m/$BUCKET/$1"; }
 lcount() { mcx ls --recursive "m/$BUCKET/$1" | grep -c . ; }
-lmhas()  { local m; m=$(lobj "$1/.flint/lean/manifest"); [ -z "$m" ] && return 1; printf '%s' "$m" | jq -e --arg p "$2" '.entries | has($p)' >/dev/null; }
-lmseq()  { local m; m=$(lobj "$1/.flint/lean/manifest"); [ -z "$m" ] && { echo 0; return; }; printf '%s' "$m" | jq -r '.seq // 0'; }
+# Resolve the manifest THROUGH the pointer: `.flint/lean/current` is the
+# only mutable metadata object and it NAMES the write-once generation
+# holding the entries. The pre-pointer `.flint/lean/manifest` key is a
+# fallback for a bucket an older binary wrote, and is tried LAST — after
+# migration it holds a refusal doc with no `.entries` at all.
+#
+# Reading the legacy key first is not a stale path, it is a VACUOUS one:
+# these helpers answer 0/false for a missing object, so "seq unchanged"
+# and "entry count unchanged" pass by both sides being nothing.
+lmbody() {
+    local c k
+    c=$(lobj "$1/.flint/lean/current")
+    if [ -n "$c" ]; then
+        k=$(printf '%s' "$c" | jq -r '.entries_key // empty')
+        [ -z "$k" ] && return 1
+        lobj "$k"
+        return
+    fi
+    lobj "$1/.flint/lean/manifest"
+}
+lmhas()  { local m; m=$(lmbody "$1"); [ -z "$m" ] && return 1; printf '%s' "$m" | jq -e --arg p "$2" '.entries | has($p)' >/dev/null; }
+# The FENCING seq is the POINTER's: a takeover rotation bumps it and
+# leaves `entries_seq` alone, which is the point of the layout.
+lmseq()  { local c m; c=$(lobj "$1/.flint/lean/current"); [ -n "$c" ] && { printf '%s' "$c" | jq -r '.seq // 0'; return; }; m=$(lobj "$1/.flint/lean/manifest"); [ -z "$m" ] && { echo 0; return; }; printf '%s' "$m" | jq -r '.seq // 0'; }
 
 # ── per-cluster helpers: every one takes the CONTEXT first ───────────
 kc()      { local x=$1; shift; kubectl --context "$x" "$@"; }

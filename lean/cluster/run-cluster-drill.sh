@@ -41,6 +41,23 @@ leg() {
 
 mcx()     { $K exec mc -- "$@" 2>/dev/null; }
 objcat()  { mcx mc cat "m/$BUCKET/$1"; }
+# Resolve the manifest THROUGH the pointer: `.flint/lean/current` is the
+# only mutable metadata object and it NAMES the write-once generation
+# holding the entries. The pre-pointer `.flint/lean/manifest` key is
+# tried LAST — after migration it holds a refusal doc with no
+# `.entries`. Reading it first is not merely stale, it is VACUOUS: a
+# missing object answers 0/false, so assertions pass by reading nothing.
+mbody() {
+    local c k
+    c=$(objcat "$1/.flint/lean/current")
+    if [ -n "$c" ]; then
+        k=$(printf '%s' "$c" | jq -r '.entries_key // empty')
+        [ -z "$k" ] && return 1
+        objcat "$k"
+        return
+    fi
+    objcat "$1/.flint/lean/manifest"
+}
 objexists(){ mcx mc stat "m/$BUCKET/$1" > /dev/null 2>&1; }
 allkeys() { mcx mc ls --recursive --json "m/$BUCKET/$1/" | jq -r --arg p "$1/" 'select(.key)|$p + .key'; }
 
@@ -91,7 +108,7 @@ legB_burst() {
   # workspace, counted from a SINGLE listing.
   local keys manifests files
   keys=$(allkeys "burst")
-  manifests=$(printf '%s\n' "$keys" | grep -c '/\.flint/lean/manifest$')
+  manifests=$(printf '%s\n' "$keys" | grep -c '/\.flint/lean/current$')
   files=$(printf '%s\n' "$keys" | grep -c '/files/agent\.txt$')
   [ "$manifests" -eq "$BURST_N" ] || { bad "$manifests manifests for $BURST_N workspaces"; return 1; }
   [ "$files" -eq "$BURST_N" ] || { bad "$files published agent.txt for $BURST_N workspaces"; return 1; }
@@ -283,7 +300,7 @@ legA2_terminate() {
 
   # Coherence + the successor's view.
   local cited present missing
-  cited=$(objcat "nodeloss/ws$i/.flint/lean/manifest" | jq -r '.entries[].key' | sort)
+  cited=$(mbody "nodeloss/ws$i" | jq -r '.entries[].key' | sort)
   present=$(allkeys "nodeloss/ws$i" | sort)
   missing=$(comm -23 <(printf '%s\n' "$cited") <(printf '%s\n' "$present") | grep -c .)
   [ "$missing" -eq 0 ] || { bad "$missing dangling citations after abrupt node loss"; return 1; }

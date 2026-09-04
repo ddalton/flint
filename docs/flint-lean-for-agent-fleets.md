@@ -253,7 +253,8 @@ with the verbs off, and 20 with them on.
 aws s3 ls s3://my-bucket/tenants/proj1/ --recursive
 # tenants/proj1/.flint/lean/claim
 # tenants/proj1/.flint/lean/epoch
-# tenants/proj1/.flint/lean/manifest
+# tenants/proj1/.flint/lean/current            ← the manifest POINTER
+# tenants/proj1/.flint/lean/manifests/000…-<uuid>   ← entries, write-once
 # tenants/proj1/files/...          ← your tree lives here
 ```
 
@@ -262,10 +263,16 @@ To see which clock installed the current boundary:
 
 ```sh
 aws s3api head-object --bucket my-bucket \
-  --key tenants/proj1/.flint/lean/manifest \
+  --key tenants/proj1/.flint/lean/current \
   --query 'Metadata."flint-boundary-source"'
 # "cadence" | "sentinel" | "quiescence" | "drain" | ...
 ```
+
+`current` is a few hundred bytes and names the generation holding the
+entries, so this HEAD stays cheap however large the project grows. A
+single `.flint/lean/manifest` object was the pre-2026-09 layout; on a
+migrated workspace that key holds a refusal doc, not a manifest, so read
+`current` and follow its `entries_key`.
 
 ---
 

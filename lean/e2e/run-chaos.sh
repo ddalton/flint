@@ -140,7 +140,24 @@ objcat()   { mcx mc cat "m/$BUCKET/$1"; }
 objexists(){ mcx mc stat "m/$BUCKET/$1" > /dev/null 2>&1; }
 putobj()   { printf '%s' "$2" | $K -n flint-system exec -i mc -- mc pipe "m/$BUCKET/$1" > /dev/null 2>&1; }
 allkeys()  { mcx mc ls --recursive --json "m/$BUCKET/$1/" | jq -r --arg p "$1/" 'select(.key)|$p + .key'; }
-manif()    { objcat "$1/.flint/lean/manifest"; }
+# Resolve the manifest THROUGH the pointer: `.flint/lean/current` is the
+# only mutable metadata object and it NAMES the write-once generation
+# holding the entries. The pre-pointer `.flint/lean/manifest` key is
+# tried LAST — after migration it holds a refusal doc with no
+# `.entries`. Reading it first is not merely stale, it is VACUOUS: a
+# missing object answers 0/false, so assertions pass by reading nothing.
+mbody() {
+    local c k
+    c=$(objcat "$1/.flint/lean/current")
+    if [ -n "$c" ]; then
+        k=$(printf '%s' "$c" | jq -r '.entries_key // empty')
+        [ -z "$k" ] && return 1
+        objcat "$k"
+        return
+    fi
+    objcat "$1/.flint/lean/manifest"
+}
+manif()    { mbody "$1"; }
 
 gw_get()  { $K -n flint-system exec curl -- sh -c \
               "curl -sS -o /tmp/out -w '%{http_code}' -H 'Authorization: Bearer $TOK' '$GW$1'" 2>/dev/null; }
@@ -210,8 +227,13 @@ c1_crash_midbarrier() {
   if objexists "$P/files/f$(pad $N).txt"; then
     bad "the last upload ($N) completed before the kill — leg vacuous"; return 1
   fi
-  if objexists "$P/.flint/lean/manifest"; then
-    bad "the manifest CAS completed — the kill missed the barrier, leg vacuous"; return 1
+  # The CAS that makes a publish VISIBLE is the pointer's, so that is
+  # the object whose absence proves the kill landed mid-barrier. Testing
+  # the retired `manifest` key would find nothing under the pointer
+  # layout and pass this guard unconditionally — a vacuity check that
+  # had itself gone vacuous.
+  if objexists "$P/.flint/lean/current"; then
+    bad "the manifest pointer CAS completed — the kill missed the barrier, leg vacuous"; return 1
   fi
   ok "crash landed mid-barrier: $landed/$N objects up, no manifest (uncited orphans)"
 

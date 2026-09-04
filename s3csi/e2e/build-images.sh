@@ -22,12 +22,20 @@ echo "building for $ARCH ($TRIPLE), tag $TAG"
 
 ( cd spdk-csi-driver && cargo zigbuild --release --target "$TRIPLE" --bin flint-s3-csi-node --bin flint-s3-broker )
 ( cd crates/flint-s3-worker && cargo zigbuild --release --target "$TRIPLE" )
+# flint-sync from THIS checkout. Without it the lean worker image is
+# built FROM a pinned published flint-sync (Dockerfile.s3worker-lean's
+# SYNC_IMAGE default), so every lean leg — S11 to S14 — measures a
+# RELEASED syncer and no change to lean/sidecar is visible to the drill
+# at all. That was true until 2026-09-03 and is exactly the kind of
+# silent staleness the stage-prebuilt guard exists to prevent elsewhere.
+( cd lean/sidecar && cargo zigbuild --release --target "$TRIPLE" --features s3 --bin flint-sync )
 
 STAGE=spdk-csi-driver/docker/prebuilt/$ARCH
 mkdir -p "$STAGE"
 cp spdk-csi-driver/target/$TRIPLE/release/flint-s3-csi-node "$STAGE/"
 cp spdk-csi-driver/target/$TRIPLE/release/flint-s3-broker "$STAGE/"
 cp crates/flint-s3-worker/target/$TRIPLE/release/flint-s3-worker "$STAGE/"
+cp lean/sidecar/target/$TRIPLE/release/flint-sync "$STAGE/"
 ls -la "$STAGE"/flint-s3-*
 
 docker buildx build --platform linux/$ARCH --load \
@@ -38,12 +46,26 @@ docker buildx build --platform linux/$ARCH --load \
     -f spdk-csi-driver/docker/Dockerfile.s3worker \
     --build-arg BIN_DIR=spdk-csi-driver/docker/prebuilt \
     -t "dilipdalton/flint-s3-worker:$TAG" .
-# The lean worker: FROM the pinned flint-sync image (SYNC_IMAGE in the
-# Dockerfile), plus the same worker binary.
 docker buildx build --platform linux/$ARCH --load \
+    -f spdk-csi-driver/docker/Dockerfile.sync.prebuilt \
+    --build-arg BIN_DIR=spdk-csi-driver/docker/prebuilt \
+    -t "dilipdalton/flint-sync:$TAG" .
+# The lean worker: FROM the flint-sync image just built from THIS
+# checkout (not the Dockerfile's published default), plus the worker.
+#
+# PLAIN `docker build` ON PURPOSE, not buildx. The repo's
+# `flint-multiarch` builder uses the docker-container driver, which
+# resolves a `FROM` against the REGISTRY and cannot see an image
+# `--load`ed into the local daemon a moment earlier — it fails with a
+# bare "not found" that reads like a typo. `--builder default` is not the
+# escape hatch either: it belongs to the `default` docker CONTEXT and
+# errors out under any other one. The daemon's own builder resolves
+# against the daemon, which is where flint-sync:$TAG just landed.
+docker build --platform linux/$ARCH \
     -f spdk-csi-driver/docker/Dockerfile.s3worker-lean \
     --build-arg BIN_DIR=spdk-csi-driver/docker/prebuilt \
+    --build-arg SYNC_IMAGE="dilipdalton/flint-sync:$TAG" \
     -t "dilipdalton/flint-s3-worker-lean:$TAG" .
 
-kind load docker-image --name "$CLUSTER" "dilipdalton/flint-s3-csi:$TAG" "dilipdalton/flint-s3-worker:$TAG" "dilipdalton/flint-s3-worker-lean:$TAG"
-echo "loaded into kind cluster $CLUSTER: flint-s3-csi:$TAG flint-s3-worker:$TAG flint-s3-worker-lean:$TAG"
+kind load docker-image --name "$CLUSTER" "dilipdalton/flint-s3-csi:$TAG" "dilipdalton/flint-s3-worker:$TAG" "dilipdalton/flint-s3-worker-lean:$TAG" "dilipdalton/flint-sync:$TAG"
+echo "loaded into kind cluster $CLUSTER: flint-s3-csi:$TAG flint-s3-worker:$TAG flint-s3-worker-lean:$TAG flint-sync:$TAG"

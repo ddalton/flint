@@ -64,6 +64,20 @@ tsh_out() { local p=$1; shift; $K -n $NS exec "$p" -c agent -- /bin/sh -c "$*" 2
 mcx()    { $K -n $SYS exec mc-s3 -- "$@" 2>/dev/null; }
 onnode() { docker exec "$NODE" sh -c "$*" 2>/dev/null; }
 # The worker pod serving a tenant pod, by annotation.
+# Like `worker_of` but matches a worker in ANY phase. S17 needs it: the
+# checkout of a 200-file project finishes in under 10 s (measured on
+# this rig — a control arm with no plugin roll reached Running in 10 s),
+# so waiting for the worker to be Running spends most of the window
+# before the leg has done anything. The worker's tree hostPath is in its
+# SPEC, so it is readable the moment the object exists.
+worker_of_any() {
+    $K -n $WNS get pods -o json 2>/dev/null | python3 -c "
+import json,sys
+want='$NS/$1'
+for p in json.load(sys.stdin)['items']:
+    if p['metadata'].get('annotations',{}).get('chert.us/tenant-pod')==want and not p['metadata'].get('deletionTimestamp'):
+        print(p['metadata']['name']); break"
+}
 worker_of() {
     $K -n $WNS get pods -o json 2>/dev/null | python3 -c "
 import json,sys
@@ -109,6 +123,14 @@ mount_events() { $K -n $NS get events --field-selector involvedObject.name="$1" 
 # ── setup / teardown ─────────────────────────────────────────────────
 if [ "${1:-}" = "setup" ]; then
     set -e
+    # DELETE THE SEED JOB FIRST. MinIO's storage is ephemeral, so it
+    # loses the bucket whenever its pod is rescheduled — S16's own drain
+    # does exactly that — and a Job that already reads Complete is never
+    # re-run by `apply`. Setup then "succeeds" against a bucket that does
+    # not exist, and the failure surfaces minutes later as a lean publish
+    # that cannot write. Recreating the Job every setup is cheap and
+    # makes seeding unconditional.
+    $K -n $SYS delete job seed-bucket --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1
     $K apply -f rig.yaml
     $K apply -f "$REPO/flint-passthrough-chart/crds/flintpassthroughmounts.yaml"
     $K apply -f "$REPO/flint-lean-chart/crds/flintleanworkspaces.yaml" 2>/dev/null || true
@@ -116,6 +138,12 @@ if [ "${1:-}" = "setup" ]; then
     $K -n $SYS rollout status deploy/minio --timeout=180s
     $K -n $SYS wait --for=condition=complete job/seed-bucket --timeout=180s
     $K -n $SYS wait --for=condition=ready pod/mc-s3 --timeout=120s
+    # And VERIFY it, rather than trusting a Job's condition: the whole
+    # point of the delete above is that "Complete" can be stale.
+    if ! mcx mc ls m/s3bucket/ >/dev/null 2>&1; then
+        echo "REFUSING: MinIO has no bucket s3bucket after seeding — every lean leg would read an empty project" >&2
+        exit 1
+    fi
     echo "seeded:"; mcx mc ls --recursive m/s3bucket/
     helm --kube-context "$CTX" upgrade --install flint-s3-csi "$REPO/flint-s3-csi-chart" -n $SYS \
         --set node.image.tag="$TAG" --set workers.passthroughImage.tag="$TAG" --set workers.leanImage.tag="$TAG" \
@@ -467,10 +495,42 @@ $K -n $WNS delete pod forged-worker --ignore-not-found --wait=false >/dev/null 2
 # manifest is nested JSON.
 lobj()   { mcx mc cat "m/s3bucket/$1" 2>/dev/null; }
 lcount() { mcx mc ls --recursive "m/s3bucket/$1" 2>/dev/null | grep -c . ; }
-lmseq()  { local m; m=$(lobj "$1/.flint/lean/manifest"); [ -z "$m" ] && { echo 0; return; }; printf '%s' "$m" | jq -r '.seq // 0'; }
+# Resolve the manifest THROUGH the pointer (see `lptr` below).
+# `.flint/lean/current` is the mutable object; the entries live in the
+# write-once generation it names. These three helpers read
+# `.flint/lean/manifest` — the PRE-pointer key — only as a fallback for
+# a bucket an older binary wrote, and never first: after migration that
+# key holds a refusal doc with no `.entries` at all.
+#
+# They read the legacy key FIRST until 2026-09-03, which under the
+# pointer layout is simply absent. `lments`/`lmseq` answer 0 for a
+# missing object, so the two sides of "seq unchanged" and "entry count
+# unchanged" agreed by both being zero — a pass earned by reading
+# nothing. S14's `n0 > 0` precondition is what caught it.
+lmbody() {
+    local c k
+    c=$(lobj "$1/.flint/lean/current")
+    if [ -n "$c" ]; then
+        k=$(printf '%s' "$c" | jq -r '.entries_key // empty')
+        [ -z "$k" ] && return 1
+        lobj "$k"
+        return
+    fi
+    lobj "$1/.flint/lean/manifest"
+}
+# The FENCING seq is the pointer's, not the generation's: a takeover
+# rotation bumps the pointer and leaves `entries_seq` alone, which is
+# the entire point of the layout.
+lmseq()  {
+    local c m
+    c=$(lobj "$1/.flint/lean/current")
+    [ -n "$c" ] && { printf '%s' "$c" | jq -r '.seq // 0'; return; }
+    m=$(lobj "$1/.flint/lean/manifest"); [ -z "$m" ] && { echo 0; return; }
+    printf '%s' "$m" | jq -r '.seq // 0'
+}
 # The epoch cell is the lease: holder_id, epoch, released. `lepoch <prefix> <jq>`.
 lepoch() { local e; e=$(lobj "$1/.flint/lean/epoch"); [ -z "$e" ] && return 1; printf '%s' "$e" | jq -r "$2"; }
-lments() { local m; m=$(lobj "$1/.flint/lean/manifest"); [ -z "$m" ] && { echo 0; return; }; printf '%s' "$m" | jq -r '.entries | length'; }
+lments() { local m; m=$(lmbody "$1"); [ -z "$m" ] && { echo 0; return; }; printf '%s' "$m" | jq -r '.entries | length'; }
 # Kill the syncer INSIDE a worker without touching its pod: the container
 # restarts (workers are restartPolicy OnFailure) and relaunches from the
 # persisted launch message over the SAME tree — the self-recognition path.
@@ -481,7 +541,13 @@ kill_syncer() { sig_syncer "$1" 9; }
 # judges. Frozen holder ⇒ it stops advancing, and the cell stays
 # `released: false` because nothing ran the release.
 lrenew() { lepoch "$1" .renewed_unix; }
-lmhas()  { local m; m=$(lobj "$1/.flint/lean/manifest"); [ -z "$m" ] && return 1; printf '%s' "$m" | jq -e --arg p "$2" '.entries | has($p)' >/dev/null; }
+# The manifest pointer layout (docs/plans/flint-lean-manifest-pointer-design.md):
+# `.flint/lean/current` is the only mutable metadata object; entries live
+# in write-once `.flint/lean/manifests/<seq>-<uuid>`.
+lptr()   { local c; c=$(lobj "$1/.flint/lean/current"); [ -z "$c" ] && return 1; printf '%s' "$c" | jq -r "$2"; }
+lgens()  { mcx mc ls "m/s3bucket/$1/.flint/lean/manifests/" 2>/dev/null | grep -c . ; }
+lstat()  { mcx mc stat --json "m/s3bucket/$1" 2>/dev/null | jq -r '.etag // empty'; }
+lmhas()  { local m; m=$(lmbody "$1"); [ -z "$m" ] && return 1; printf '%s' "$m" | jq -e --arg p "$2" '.entries | has($p)' >/dev/null; }
 
 leg S11 "lean: the checkout gate holds for the app AND its init container; a cold pod finds the seeded project; the syncer lives in the worker, not the pod"
 $K -n $NS delete pod lean-agent lean-seeder lean-refused --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
@@ -705,6 +771,18 @@ if wait_phase lean-agent Running 300; then
         && ok "PRECONDITION: the frozen holder never released (released=false) — the successor faces a possibly-live straggler, which is what rotation is for" \
         || bad "PRECONDITION: the lease reads released=$rel; the successor would take a CLEAN handoff and rotate nothing"
 
+    # THE POINTER MEASUREMENT. A takeover used to be a GET and a PUT of
+    # the whole manifest — 264 MiB each way at 1M entries, per claim —
+    # because the only way to invalidate a straggler's handle was to
+    # rewrite the object it held. Under the pointer layout it must move
+    # `current` and NOTHING else.
+    p_key0=$(lptr tenants/proj .entries_key); p_seq0=$(lptr tenants/proj .seq)
+    p_eseq0=$(lptr tenants/proj .entries_seq); p_n0=$(lgens tenants/proj)
+    p_etag0=$(lstat "tenants/proj/$(printf '%s' "$p_key0" | sed 's#^.*/\.flint#.flint#')")
+    [ -n "$p_key0" ] && [ "${p_n0:-0}" -ge 1 ] \
+        && ok "PRECONDITION: the workspace is on the pointer layout — seq $p_seq0 names $(basename "$p_key0"), $p_n0 generation object(s)" \
+        || bad "PRECONDITION: no .flint/lean/current for this workspace; the takeover measurement below has nothing to measure"
+
     t0=$(date +%s)
     $K apply -f lean-agent2.yaml >/dev/null
     if wait_phase lean-agent2 Running 400; then
@@ -727,6 +805,21 @@ if wait_phase lean-agent Running 300; then
             && ok "the successor waited ${el}s to reach Running — it observed the quiet polls (6 × 10s) rather than superseding on sight" \
             || bad "the successor was Running in ${el}s, inside the quiet-poll floor: it deposed a lease it never judged dead"
         note "epoch $e1 → $e2 across the takeover"
+
+        # The measurement itself.
+        p_key1=$(lptr tenants/proj .entries_key); p_seq1=$(lptr tenants/proj .seq)
+        p_eseq1=$(lptr tenants/proj .entries_seq); p_n1=$(lgens tenants/proj)
+        p_etag1=$(lstat "tenants/proj/$(printf '%s' "$p_key1" | sed 's#^.*/\.flint#.flint#')")
+        [ "${p_seq1:-0}" -gt "${p_seq0:-0}" ] \
+            && ok "the pointer's seq moved across the takeover ($p_seq0 → $p_seq1) — a straggler's handle is stale" \
+            || bad "the pointer's seq did not move ($p_seq0 → $p_seq1): nothing invalidated the straggler's handle"
+        [ "$p_key1" = "$p_key0" ] && [ "$p_eseq1" = "$p_eseq0" ] \
+            && ok "the takeover reused the STANDING generation ($(basename "$p_key0")) — entries_seq still $p_eseq0, so a follower can skip the fetch" \
+            || bad "the takeover repointed at a new generation ($(basename "$p_key0") → $(basename "$p_key1")): it rewrote the entries it was supposed to leave alone"
+        [ -n "$p_etag0" ] && [ "$p_etag1" = "$p_etag0" ] \
+            && ok "the generation object is byte-identical across the takeover (etag $p_etag0)" \
+            || bad "the generation object changed across the takeover ('$p_etag0' → '$p_etag1') — the multi-MB rewrite is back"
+        note "generation objects: $p_n0 → $p_n1 (the reaper keeps a window of $((5 + 1)))"
 
         # THE FENCE BITES. Wake the straggler: its next renew CASes
         # against an ETag the successor overwrote, gets a 412, and must
@@ -766,6 +859,82 @@ else
     bad "lean-agent never reached Running in 300s — S14 made no observation at all"
 fi
 
+# ── S17 a plugin restart mid-checkout ────────────────────────────────
+# The syncer is a SEPARATE POD, so rolling the node plugin must not
+# restart a checkout in flight. That is the whole reason the M1
+# child-process variant was rejected: a plugin that forks the syncer
+# takes every checkout on the node down with it on every roll.
+#
+# The leg is only worth anything if the restart lands while the checkout
+# is actually running, so it asserts that as a precondition rather than
+# hoping. `fanout: 1` on the fixture is what makes the window wide
+# enough to hit.
+leg S17 "a node-plugin restart mid-checkout does not restart the checkout: the syncer is a separate pod, and its marker predates the new plugin"
+$K -n $NS delete pod slow-agent --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
+$K apply -f lean-slow.yaml >/dev/null
+# Wait for the worker to exist — the checkout is running once it does.
+# Poll fast and accept ANY phase: every second spent here is a second
+# of the window spent. `sleep 2` on a Running-only match routinely
+# missed a checkout that takes under ten seconds.
+w=""; i=0
+while [ $i -lt 480 ] && [ -z "$w" ]; do w=$(worker_of_any slow-agent); [ -z "$w" ] && { sleep 0.25; i=$((i + 1)); }; done
+if [ -n "$w" ]; then
+    wuid0=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    # THIS worker's tree, from its own hostPath — never
+    # `ls .../volumes/*/tree | head -1`. By S17 several workspaces are
+    # mounted on this node, and the first one lexically belongs to
+    # whichever volume id sorts first. Reading a NEIGHBOUR's tree made
+    # the precondition report a marker that was never slow-agent's, and
+    # made the closing mtime assertion compare the new plugin against a
+    # completed checkout it had nothing to do with — a pass earned from
+    # the wrong file.
+    tree=$($K -n $WNS get pod "$w" -o jsonpath='{.spec.volumes[*].hostPath.path}' 2>/dev/null)
+    case "$tree" in
+        /var/lib/kubelet/plugins/s3.csi.chert.us/volumes/*/tree) ;;
+        *) bad "could not resolve slow-agent's own tree from its worker (got '$tree'); every observation below would be about some other workspace"; tree="" ;;
+    esac
+    marker_present=$(onnode "test -f '$tree/.flint-sync/checkout-complete' && echo yes || echo no")
+    [ "$marker_present" = "no" ] \
+        && ok "PRECONDITION: the checkout is still running when the plugin is rolled (no marker yet under $tree)" \
+        || bad "PRECONDITION: the checkout had already finished before the roll — this leg would prove only that a completed checkout survives, which is not the claim"
+    # Roll the plugin.
+    p0=$($K -n $SYS get pods -l app.kubernetes.io/name=flint-s3-csi-node -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    $K -n $SYS delete pod "$p0" --wait=true --timeout=180s >/dev/null 2>&1
+    $K -n $SYS rollout status ds/flint-s3-csi-node --timeout=180s >/dev/null 2>&1
+    p1=$($K -n $SYS get pods -l app.kubernetes.io/name=flint-s3-csi-node -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    started=$($K -n $SYS get pod "$p1" -o jsonpath='{.status.startTime}' 2>/dev/null)
+    [ -n "$p1" ] && [ "$p1" != "$p0" ] \
+        && ok "the plugin was rolled mid-checkout ($p0 → $p1)" \
+        || bad "the plugin did not roll ($p0 → ${p1:-absent}); nothing was interrupted"
+    if wait_phase slow-agent Running 400; then
+        ok "the tenant reached Running: the checkout COMPLETED across a plugin restart"
+        seen=$(inpod slow-agent "cat /tmp/seen")
+        [ "${seen:-0}" -ge 200 ] \
+            && ok "it found all $seen seeded files — the checkout finished, it did not merely give up" \
+            || bad "the tenant sees ${seen:-?} files, not the 200 the project holds"
+        wuid1=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+        [ -n "$wuid1" ] && [ "$wuid1" = "$wuid0" ] \
+            && ok "the syncer pod is the SAME object across the plugin restart (uid unchanged) — a child-process design would have killed it" \
+            || bad "the syncer pod changed across the plugin restart ('$wuid0' → '${wuid1:-gone}'): the checkout was restarted, which is the M1 failure this design rejected"
+        # THE ATTRIBUTION. If the new plugin had re-driven the checkout,
+        # the marker would be younger than the plugin that wrote it.
+        mtime=$(onnode "stat -c %Y '$tree/.flint-sync/checkout-complete' 2>/dev/null")
+        pstart=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$started" +%s 2>/dev/null || echo "")
+        if [ -n "$mtime" ] && [ -n "$pstart" ]; then
+            [ "$mtime" -lt "$pstart" ] \
+                && ok "the checkout marker predates the new plugin ($(date -u -r "$mtime" +%H:%M:%S) < $(date -u -r "$pstart" +%H:%M:%S)) — the new plugin did not redo the work" \
+                || bad "the marker is younger than the new plugin ($mtime >= $pstart): the checkout was re-driven after the roll"
+        else
+            note "could not compare marker mtime ($mtime) with the plugin start ($started)"
+        fi
+    else
+        bad "slow-agent never reached Running in 400s after the plugin was rolled mid-checkout"
+    fi
+else
+    bad "no worker appeared for slow-agent in 120s — S17 made no observation at all"
+fi
+$K -n $NS delete pod slow-agent --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
+
 # ── S18 the tree's ceiling ───────────────────────────────────────────
 # `sizeLimitGib` was an emptyDir sizeLimit under the webhooks, where
 # kubelet enforced it. Under CSI the tree is a plugin-owned DIRECTORY on
@@ -789,6 +958,19 @@ if wait_phase quota-agent Running 300 && wait_phase noquota-agent Running 300; t
     [ -n "$nk" ] && [ "$nk" -gt "$((qk * 2))" ] \
         && ok "CONTROL: the sizeLimitGib:0 sibling sees the NODE's filesystem (${nk}K) — the opt-out still yields a plain directory" \
         || bad "CONTROL: the unbounded workspace reports ${nk:-?}K, not the node's filesystem: the control cannot distinguish a full ceiling from a full node"
+    # THE WORKSPACE IS THE FILESYSTEM ROOT, and mkfs leaves a root-owned
+    # lost+found there. The syncer walks the tree as the app's uid, so a
+    # directory it cannot enter is EACCES on every barrier and nothing is
+    # ever published — invisible to a leg that only writes INTO the
+    # workspace, which is how the first cut of this leg missed it.
+    lf=$(inpod quota-agent "ls -a /workspace | grep -c '^lost+found$' || true")
+    [ "${lf:-0}" = "0" ] \
+        && ok "the tenant's workspace has no root-owned lost+found — the tree is walkable by the uid that owns it" \
+        || bad "lost+found is present in the workspace: the syncer walks this tree as the app's uid and every barrier will die EACCES"
+    walk=$(tsh_out quota-agent "find /workspace -type d >/dev/null 2>&1 && echo WALKED || echo EACCES")
+    [ "$walk" = "WALKED" ] \
+        && ok "the whole workspace tree is walkable by the tenant's own uid" \
+        || bad "the tenant cannot walk its own workspace ('$walk') — the syncer runs as the same uid and will fail the same way"
     loop=$(onnode "grep ' /var/lib/kubelet/plugins/s3.csi.chert.us/volumes/[^ ]*/tree ' /proc/mounts | grep -c '^/dev/loop'")
     [ "${loop:-0}" -ge 1 ] \
         && ok "the ceiling is a loop-mounted image on the node ($loop tree mount(s) on /dev/loop)" \
@@ -917,7 +1099,7 @@ $K uncordon "$NODE" >/dev/null 2>&1 && note "node uncordoned"
 
 # ── roster ────────────────────────────────────────────────────────────
 echo
-for want in S1 S2 S3 S4 S5 S5c S6 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S18 S19 SU; do
+for want in S1 S2 S3 S4 S5 S5c S6 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S17 S18 S19 SU; do
     echo " $RAN_LEGS " | grep -q " $want " || bad "leg $want never ran"
 done
 echo "════════════════════════════════════════"

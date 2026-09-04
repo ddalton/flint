@@ -43,8 +43,15 @@ tested nothing, so it fails:
 ```sh
 [ "$landed" -gt 0 ] || { bad "kill landed before the first upload — leg vacuous"; return 1; }
 objexists "$P/files/f$(pad $N).txt" && { bad "the last upload completed before the kill — leg vacuous"; return 1; }
-objexists "$P/.flint/lean/manifest"  && { bad "the manifest CAS completed — the kill missed the barrier"; return 1; }
+objexists "$P/.flint/lean/current"   && { bad "the manifest pointer CAS completed — the kill missed the barrier"; return 1; }
 ```
+
+The third guard names `.flint/lean/current` because the CAS that makes a
+publish VISIBLE is the pointer's (the manifest-pointer layout). It read
+`.flint/lean/manifest` until 2026-09-03, which under that layout is
+simply absent — so the guard would have found nothing and passed
+unconditionally. A vacuity check that has itself gone vacuous is worse
+than no check: it reports the leg as protected.
 
 This mattered immediately. The first full run scored 4/10, and **four
 of the six failures were the guards refusing to let a leg pass without

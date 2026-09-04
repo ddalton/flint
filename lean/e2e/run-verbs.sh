@@ -218,8 +218,27 @@ objexists(){ mcx mc stat "m/$BUCKET/$1" > /dev/null 2>&1; }
 objstat()  { mcx mc stat --json "m/$BUCKET/$1"; }
 putobj()   { printf '%s' "$2" | $K -n flint-system exec -i mc -- mc pipe "m/$BUCKET/$1" > /dev/null 2>&1; }
 allkeys()  { mcx mc ls --recursive --json "m/$BUCKET/$1/" | jq -r --arg p "$1/" 'select(.key)|$p + .key'; }
-manif()    { objcat "$1/.flint/lean/manifest"; }
-mseq()     { local m; m=$(manif "$1"); [ -z "$m" ] && { echo 0; return; }; printf '%s' "$m" | jq -r '.seq // 0'; }
+# Resolve the manifest THROUGH the pointer: `.flint/lean/current` is the
+# only mutable metadata object and it NAMES the write-once generation
+# holding the entries. The pre-pointer `.flint/lean/manifest` key is
+# tried LAST — after migration it holds a refusal doc with no
+# `.entries`. Reading it first is not merely stale, it is VACUOUS: a
+# missing object answers 0/false, so assertions pass by reading nothing.
+mbody() {
+    local c k
+    c=$(objcat "$1/.flint/lean/current")
+    if [ -n "$c" ]; then
+        k=$(printf '%s' "$c" | jq -r '.entries_key // empty')
+        [ -z "$k" ] && return 1
+        objcat "$k"
+        return
+    fi
+    objcat "$1/.flint/lean/manifest"
+}
+manif()    { mbody "$1"; }
+# The FENCING seq is the POINTER's: a takeover rotation bumps it and
+# leaves `entries_seq` alone, which is the point of the layout.
+mseq()     { local c m; c=$(objcat "$1/.flint/lean/current"); [ -n "$c" ] && { printf '%s' "$c" | jq -r '.seq // 0'; return; }; m=$(manif "$1"); [ -z "$m" ] && { echo 0; return; }; printf '%s' "$m" | jq -r '.seq // 0'; }
 # Every version of one key: {v, latest, size}.
 #
 # `mc ls --versions --json` EMITS NO `isLatest` FIELD. Its keys are
@@ -251,7 +270,11 @@ vhas()     { vers "$1" | jq -s -e --arg v "$2" 'any(.[]; .v==$v)' > /dev/null 2>
 vnoncurrent() { vers "$1" | jq -s -e --arg v "$2" 'any(.[]; .v==$v and .latest==false)' > /dev/null 2>&1; }
 # The manifest's boundary provenance, from the OBJECT's metadata — an
 # operator has to be able to read it from the bucket alone.
-bsource()  { objstat "$1/.flint/lean/manifest" | jq -r '.metadata["X-Amz-Meta-Flint-Boundary-Source"] // .metadata["x-amz-meta-flint-boundary-source"] // empty'; }
+# The POINTER carries the stamp now: `cas_write_stamped` passes the same
+# `GenerationStamps` to the generation PUT and to the pointer CAS, so the
+# provenance is still one HEAD away — off a 191 B object rather than a
+# manifest that can run to hundreds of MiB.
+bsource()  { objstat "$1/.flint/lean/current" | jq -r '.metadata["X-Amz-Meta-Flint-Boundary-Source"] // .metadata["x-amz-meta-flint-boundary-source"] // empty'; }
 
 wait_key() { # <prefix> <relative key> <iters>
   local i

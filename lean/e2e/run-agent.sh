@@ -71,8 +71,30 @@ objcat() { mcx mc cat "m/$BUCKET/$1"; }
 objcount() { mcx mc ls --recursive "m/$BUCKET/$1" | grep -c . ; }
 # jq, not grep: the manifest is nested JSON and a text match for a
 # path would also hit it inside a conflict record or a withheld set.
-mseq() { local m; m=$(objcat "$1/.flint/lean/manifest"); [ -z "$m" ] && { echo 0; return; }; printf '%s' "$m" | jq -r '.seq // 0'; }
-mhas() { local m; m=$(objcat "$1/.flint/lean/manifest"); [ -z "$m" ] && return 1; printf '%s' "$m" | jq -e --arg p "$2" '.entries | has($p)' > /dev/null; }
+# Resolve the manifest THROUGH the pointer: `.flint/lean/current` is the
+# only mutable metadata object and it NAMES the write-once generation
+# holding the entries. The pre-pointer `.flint/lean/manifest` key is a
+# fallback for a bucket an older binary wrote, and is tried LAST — after
+# migration it holds a refusal doc with no `.entries` at all.
+#
+# Reading the legacy key first is not a stale path, it is a VACUOUS one:
+# these helpers answer 0/false for a missing object, so "seq unchanged"
+# and "entry count unchanged" pass by both sides being nothing.
+mbody() {
+    local c k
+    c=$(objcat "$1/.flint/lean/current")
+    if [ -n "$c" ]; then
+        k=$(printf '%s' "$c" | jq -r '.entries_key // empty')
+        [ -z "$k" ] && return 1
+        objcat "$k"
+        return
+    fi
+    objcat "$1/.flint/lean/manifest"
+}
+# The FENCING seq is the POINTER's: a takeover rotation bumps it and
+# leaves `entries_seq` alone, which is the point of the layout.
+mseq() { local c m; c=$(objcat "$1/.flint/lean/current"); [ -n "$c" ] && { printf '%s' "$c" | jq -r '.seq // 0'; return; }; m=$(objcat "$1/.flint/lean/manifest"); [ -z "$m" ] && { echo 0; return; }; printf '%s' "$m" | jq -r '.seq // 0'; }
+mhas() { local m; m=$(mbody "$1"); [ -z "$m" ] && return 1; printf '%s' "$m" | jq -e --arg p "$2" '.entries | has($p)' > /dev/null; }
 
 # ── gateway helpers ──────────────────────────────────────────────────
 # A durable curl pod, not a per-call `kubectl run --rm`: an image pull
