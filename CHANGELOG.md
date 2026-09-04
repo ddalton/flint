@@ -303,6 +303,37 @@ machine identifier moved off `flint.io` to `chert.us`.
   relaunched by the supervisor from its persisted launch record, and
   reported to the tenant as "checkout in progress" for as long as the
   pod lived.
+- **`s3.csi.chert.us`: a dead mounter's source mount outlived its
+  volume.** `unmount_all` tested `path.exists()` before the mount table,
+  and a dead FUSE mount answers `stat` with `ENOTCONN` — so the one mount
+  that most needed unmounting was skipped, the state file was removed,
+  the directory removal failed on the busy mount, and every kubelet retry
+  found no state and did nothing: the source stayed mounted for the life
+  of the node. Found by leg S9 + SU on a real node (EC2, 2026-09-04),
+  where the worker kill is a SIGKILL of the container's processes and the
+  mount really dies; on kind the same leg never produced a dead mount.
+  The loop now judges by the mount table alone, and a volume directory
+  with no state file (a half-removed volume) finishes its own teardown on
+  the retry instead of being skipped as "nothing of ours".
+- **Drills: the same legs on real nodes.** `run-s3csi.sh` and
+  `multi/run-multi.sh` gained the substrate knobs `STORE=minio|s3`
+  (a real bucket: `BUCKET`, `S3_REGION`, `S3_KEY_FILE`),
+  `NODE_EXEC=docker|nodesh` (`scripts/nodesh.sh` in place of `docker exec`
+  into the kind node) and `NODE` (default: the first worker, not the
+  tainted control plane); fixtures are rewritten at apply time, the
+  bucket literal is `$BUCKET`, `rig-s3.yaml.tpl` is the real-bucket rig
+  (its seed wipes every version first — a versioned bucket keeps the
+  last run's objects and the legs count), `build-images.sh PUSH=1
+  ARCH=amd64` pushes the images a real cluster pulls, and
+  `s3csi/e2e/aws-drill.sh` drives the campaign on two all-spot EC2
+  clusters from trove. Two legs learned what a real node is: the worker
+  kill is now a SIGKILL of the pod's cgroup when there is no `crictl`
+  (Amazon Linux 2023 ships `ctr` only), and the plugin pod is selected
+  by `spec.nodeName`, not list order — on a two-node cluster
+  `items[0]` was the control plane's, so S17 rolled one pod and read
+  another. `scripts/nodesh.sh` no longer lets kubectl's `pod "…" deleted`
+  line into captured output. EC2 evidence (us-west-1, m6i.large spot,
+  real S3): three single-cluster runs on s3a — 177 ok / 6 bad (every failure a kind assumption in the drill), 181 / 2 (S17's own vacuity guard, and the leaked dead mount above, found by SU), then 182 / 1 with the fix, the 1 being S17's guard exactly as on kind; and the multi-cluster drill 22 / 0 across s3a and s3b (M1–M3) once its seed count and manifest resolver matched a real bucket and the chunked layout.
 - **`s3.csi.chert.us`: four more from the same audit.** A lean worker
   that exited on its own (`Succeeded`: fenced) under a still-mounted
   tenant is relaunched on the next republish, not only a `Failed` one.

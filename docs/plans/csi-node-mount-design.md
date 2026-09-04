@@ -580,6 +580,18 @@ goes red without its fix.
   drill-testable; the invariant is "the description is never more
   durable than what it describes".
 
+**On real nodes (2026-09-04).** The same legs, unchanged, on two
+all-spot EC2 clusters from trove (m6i.large, us-west-1) against a real
+versioned bucket with a bucket-scoped IAM user — the substrate is four
+knobs in `run-s3csi.sh`/`run-multi.sh` and `aws-drill.sh` drives it. What
+kind could not show and this did: S9's kill really kills the mounter on
+a real node, and the unpublish that followed leaked the dead source mount
+for the life of the node (`unmount_all` tested `exists()` before the
+mount table; a dead FUSE mount is `ENOTCONN` to `stat`). Three drill
+assumptions were kind's, not the product's: `crictl` on the node, the
+plugin pod as `items[0]`, and kubectl's `pod deleted` line in a captured
+count. EC2 evidence, 2026-09-04: single 177/6 → 181/2 → 182/1 (the 1 is S17's vacuity guard, as on kind); multi 22/0 across s3a + s3b.
+
 Drill: S20 (the fenced worker is relaunched, waits, and its unattested
 tree is preserved at the tenant's delete), S21 (the reboot shape: launch
 re-sent, same pod), S22 (a foreign claim refuses before any checkout

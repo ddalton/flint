@@ -9,6 +9,19 @@ docs. The tree was audited at `3e1560ab`, i.e. after the pointer/chunk
 wave, the lease auth-refusal fix, the missing-bucket store fix and the
 s3csi second pass (`b148319b`).
 
+**Status 2026-09-04.** Findings 1, 2, 3, 4, 5 and 9 are FIXED in
+`78ba901c` (lean 147/0, CSI driver 62/0, every new test red without its
+fix; kind drill 182 ok / 1 bad, the one being S17's own vacuity guard,
+identical to the baseline). Leg S22, written for finding 5, found a second
+hole behind it on its first run: a refusal exiting 1 under `OnFailure` is
+a crash loop the supervisor relaunches, and the plugin reported it as
+"checkout in progress" for as long as the pod lived — see §5. Finding 10
+was fixed by its author in `cdabc10c` + `8fa07929`. NOT built, on
+purpose: 6 (legacy migration fence), 7 (lost acquire response skips
+rotation), 8 (the gated pair), 11 (`recover-staged` under CSI), and the
+model probe that deposes a writer between chunks. The same legs are being
+run on EC2 spot clusters against a real bucket next.
+
 **Method.** Five area finders (arbitration; manifest layout and reaper;
 barrier under crash and lost responses; local device and bytes; the CSI
 delivery and operator), each returning at most 8 findings with

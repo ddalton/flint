@@ -43,10 +43,31 @@ REPO=$(cd ../../.. && pwd)
 TAG=${TAG:-dev}
 C1=${C1:-flint-s3csi-m1}
 C2=${C2:-flint-s3csi-m2}
-X1="kind-$C1"; X2="kind-$C2"
+# THE SUBSTRATE (as in run-s3csi.sh). STORE=minio is the kind rig: two
+# kind clusters this script creates, one MinIO container on the docker
+# network. STORE=s3 is two EXISTING clusters (X1/X2 name their kubectl
+# contexts) and a real bucket — BUCKET, S3_REGION, S3_ENDPOINT, and a
+# key from S3_KEY_FILE or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY; the
+# images must have been PUSHED under TAG. Nothing in the legs knows
+# which: the bucket prefix is the meeting point either way.
+STORE=${STORE:-minio}
+X1=${X1:-kind-$C1}; X2=${X2:-kind-$C2}
 NS=s3-tenants; WNS=flint-workers; SYS=flint-system
 MINIO=flint-s3-minio
-BUCKET=s3bucket
+BUCKET=${BUCKET:-s3bucket}
+S3_REGION=${S3_REGION:-us-east-1}
+S3_ENDPOINT=${S3_ENDPOINT:-}
+S3_KEY=drill; S3_SECRET=drillsecret
+if [ "$STORE" = s3 ]; then
+    [ "$BUCKET" != s3bucket ] || { echo "STORE=s3 needs BUCKET" >&2; exit 2; }
+    [ -n "$S3_ENDPOINT" ] || S3_ENDPOINT="https://s3.$S3_REGION.amazonaws.com"
+    if [ -n "${S3_KEY_FILE:-}" ]; then
+        S3_KEY=$(jq -r .AccessKey.AccessKeyId "$S3_KEY_FILE"); S3_SECRET=$(jq -r .AccessKey.SecretAccessKey "$S3_KEY_FILE")
+    else
+        S3_KEY=${AWS_ACCESS_KEY_ID:-}; S3_SECRET=${AWS_SECRET_ACCESS_KEY:-}
+    fi
+    [ -n "$S3_KEY" ] && [ -n "$S3_SECRET" ] || { echo "STORE=s3 needs S3_KEY_FILE or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY" >&2; exit 2; }
+fi
 
 PASS=0; FAILED=0; RAN_LEGS=""
 bad()  { echo "  BAD: $1"; FAILED=$((FAILED + 1)); }
@@ -62,7 +83,41 @@ minio_ip() { docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}
 # a successful mount serving zero bytes, the most misleading green there
 # is (measured: shard-05.txt was empty on both clusters while the leg
 # that wrote its own file passed).
-mcx() { docker run --rm -i --network kind -e "MC_HOST_m=http://drill:drillsecret@$(minio_ip):9000" minio/mc "$@" 2>/dev/null; }
+mcx() {
+    if [ "$STORE" = s3 ]; then
+        # Through cluster 1's mc pod, with the workers' own key.
+        kubectl --context "$X1" -n $SYS exec -i mc-s3 -- mc "$@" 2>/dev/null
+    else
+        docker run --rm -i --network kind -e "MC_HOST_m=http://drill:drillsecret@$(minio_ip):9000" minio/mc "$@" 2>/dev/null
+    fi
+}
+# One cluster's fixtures, rendered for the store.
+render() { sed -e "s#__ENDPOINT__#$1#g" -e "s#__BUCKET__#$BUCKET#g" -e "s#__REGION__#$S3_REGION#g" -e "s#__KEY__#$S3_KEY#g" -e "s#__SECRET__#$S3_SECRET#g" cluster.yaml.tpl; }
+seed() {
+    for i in 00 01 02 03 04 05 06 07 08 09 10; do echo "seeded-object-$i" | mcx pipe "m/$BUCKET/datasets/imagenet/shard-$i.txt" >/dev/null; done
+    echo "deep-seeded" | mcx pipe "m/$BUCKET/datasets/imagenet/sub/deep.txt" >/dev/null
+    echo "elsewhere-only" | mcx pipe "m/$BUCKET/elsewhere/only.txt" >/dev/null
+    echo "must-not-be-visible" | mcx pipe "m/$BUCKET/private/secret.txt" >/dev/null
+    # 11 shards + sub/deep.txt = 12. The check used to say 11 — the shard
+    # count alone — and the kind rig's MinIO listing agreed with it; a
+    # real bucket lists the twelve the seed writes (EC2, 2026-09-04).
+    n=$(lcount datasets/imagenet/)
+    got=$(lobj datasets/imagenet/shard-05.txt)
+    [ "$n" = "12" ] && [ "$got" = "seeded-object-05" ] || {
+        echo "SEED FAILED: $n objects under datasets/imagenet/, shard-05.txt='$got' (expected 12 and seeded-object-05)" >&2
+        exit 2; }
+    echo "seeded and verified: $n objects under datasets/imagenet/, shard-05.txt=$got"
+}
+install_chart() { # ctx endpoint
+    kc "$1" apply -f "$REPO/flint-passthrough-chart/crds/flintpassthroughmounts.yaml" -f "$REPO/flint-lean-chart/crds/flintleanworkspaces.yaml" >/dev/null
+    render "$2" | kc "$1" apply -f - >/dev/null
+    helm --kube-context "$1" upgrade --install flint-s3-csi "$REPO/flint-s3-csi-chart" -n $SYS \
+        --set node.image.tag="$TAG" --set workers.passthroughImage.tag="$TAG" --set workers.leanImage.tag="$TAG" \
+        --set node.image.pullPolicy=IfNotPresent --set node.region="$S3_REGION" \
+        --set broker.backend=static --set broker.static.secretRef=s3-broker-static --set broker.replicas=1 >/dev/null
+    kc "$1" -n $SYS rollout status ds/flint-s3-csi-node --timeout=180s >/dev/null
+    kc "$1" -n $SYS rollout status deploy/flint-s3-broker --timeout=180s >/dev/null
+}
 lobj()   { mcx cat "m/$BUCKET/$1"; }
 lcount() { mcx ls --recursive "m/$BUCKET/$1" | grep -c . ; }
 # Resolve the manifest THROUGH the pointer: `.flint/lean/current` is the
@@ -75,9 +130,30 @@ lcount() { mcx ls --recursive "m/$BUCKET/$1" | grep -c . ; }
 # these helpers answer 0/false for a missing object, so "seq unchanged"
 # and "entry count unchanged" pass by both sides being nothing.
 lmbody() {
-    local c k
+    local c k addrs a body all
     c=$(lobj "$1/.flint/lean/current")
     if [ -n "$c" ]; then
+        # Three layouts, newest first — a CHUNK LIST (`.chunks`, the
+        # default since 2026-09-03), one generation object
+        # (`.entries_key`), the pre-pointer single key — each tested
+        # POSITIVELY. This copy knew only the middle one until the EC2
+        # run: M3's citation poll read `null` for a chunked pointer and
+        # reported late-m2.txt uncited for 120 s while the very next
+        # assertions read it, with its bytes, on the other cluster.
+        if printf '%s' "$c" | jq -e 'has("chunks")' >/dev/null 2>&1; then
+            addrs=$(printf '%s' "$c" | jq -r '.chunks[].addr')
+            all='{"entries":{}}'
+            for a in $addrs; do
+                body=$(lobj "$1/.flint/lean/chunks/$a")
+                if [ -z "$body" ]; then
+                    echo "  NOTE: pointer for $1 names chunk $a, which the bucket does not have" >&2
+                    return 1
+                fi
+                all=$(printf '%s\n%s' "$all" "$body" | jq -s '{entries: (.[0].entries + .[1].entries)}')
+            done
+            printf '%s' "$all"
+            return
+        fi
         k=$(printf '%s' "$c" | jq -r '.entries_key // empty')
         [ -z "$k" ] && return 1
         lobj "$k"
@@ -117,6 +193,29 @@ PY
 delete_pod() { kc "$1" -n $NS delete pod "$2" --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1; }
 
 # ── setup / teardown ─────────────────────────────────────────────────
+if [ "${1:-}" = "setup" ] && [ "$STORE" = s3 ]; then
+    set -e
+    for X in "$X1" "$X2"; do
+        kubectl --context "$X" get nodes >/dev/null || { echo "context $X is not reachable" >&2; exit 2; }
+        install_chart "$X" "$S3_ENDPOINT"
+        echo "cluster $X: s3.csi.chert.us installed, CRs point at $S3_ENDPOINT/$BUCKET"
+    done
+    kc "$X1" -n $SYS wait --for=condition=ready pod/mc-s3 --timeout=120s >/dev/null
+    # A versioned bucket keeps what the last run left; the legs count.
+    mcx rm --recursive --force --versions "m/$BUCKET/" >/dev/null 2>&1 || true
+    seed
+    echo "setup done"
+    exit 0
+fi
+if [ "${1:-}" = "teardown" ] && [ "$STORE" = s3 ]; then
+    for X in "$X1" "$X2"; do
+        kc "$X" -n $NS delete pods --all --ignore-not-found --wait=true --timeout=300s >/dev/null 2>&1 || true
+        render "$S3_ENDPOINT" | kc "$X" delete -f - --ignore-not-found --wait=false >/dev/null 2>&1 || true
+        helm --kube-context "$X" uninstall flint-s3-csi -n $SYS >/dev/null 2>&1 || true
+        kc "$X" -n $WNS delete pod --all --force --grace-period=0 --ignore-not-found >/dev/null 2>&1 || true
+    done
+    exit 0
+fi
 if [ "${1:-}" = "setup" ]; then
     set -e
     if ! docker inspect "$MINIO" >/dev/null 2>&1; then
@@ -126,28 +225,12 @@ if [ "${1:-}" = "setup" ]; then
     for i in $(seq 1 30); do docker exec "$MINIO" curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1 && break; sleep 1; done
     IP=$(minio_ip); echo "MinIO (outside both clusters): http://$IP:9000"
     mcx mb --ignore-existing "m/$BUCKET" >/dev/null
-    for i in 00 01 02 03 04 05 06 07 08 09 10; do echo "seeded-object-$i" | mcx pipe "m/$BUCKET/datasets/imagenet/shard-$i.txt" >/dev/null; done
-    echo "deep-seeded" | mcx pipe "m/$BUCKET/datasets/imagenet/sub/deep.txt" >/dev/null
-    echo "elsewhere-only" | mcx pipe "m/$BUCKET/elsewhere/only.txt" >/dev/null
-    echo "must-not-be-visible" | mcx pipe "m/$BUCKET/private/secret.txt" >/dev/null
-    n=$(lcount datasets/imagenet/)
-    got=$(lobj datasets/imagenet/shard-05.txt)
-    [ "$n" = "11" ] && [ "$got" = "seeded-object-05" ] || {
-        echo "SEED FAILED: $n objects under datasets/imagenet/, shard-05.txt='$got' (expected 11 and seeded-object-05)" >&2
-        exit 2; }
-    echo "seeded and verified: $n objects under datasets/imagenet/, shard-05.txt=$got"
+    seed
     for C in "$C1" "$C2"; do
         X="kind-$C"
         kind get clusters 2>/dev/null | grep -qx "$C" || kind create cluster --name "$C" --wait 120s >/dev/null
         kind load docker-image --name "$C" "dilipdalton/flint-s3-csi:$TAG" "dilipdalton/flint-s3-worker:$TAG" "dilipdalton/flint-s3-worker-lean:$TAG" >/dev/null
-        kc "$X" apply -f "$REPO/flint-passthrough-chart/crds/flintpassthroughmounts.yaml" -f "$REPO/flint-lean-chart/crds/flintleanworkspaces.yaml" >/dev/null
-        sed "s/__MINIO__/$IP/g" cluster.yaml.tpl | kc "$X" apply -f - >/dev/null
-        helm --kube-context "$X" upgrade --install flint-s3-csi "$REPO/flint-s3-csi-chart" -n $SYS \
-            --set node.image.tag="$TAG" --set workers.passthroughImage.tag="$TAG" --set workers.leanImage.tag="$TAG" \
-            --set node.image.pullPolicy=IfNotPresent \
-            --set broker.backend=static --set broker.static.secretRef=s3-broker-static --set broker.replicas=1 >/dev/null
-        kc "$X" -n $SYS rollout status ds/flint-s3-csi-node --timeout=180s >/dev/null
-        kc "$X" -n $SYS rollout status deploy/flint-s3-broker --timeout=180s >/dev/null
+        install_chart "$X" "http://$IP:9000"
         echo "cluster $C: s3.csi.chert.us installed, CRs point at http://$IP:9000"
     done
     echo "setup done"
@@ -160,9 +243,13 @@ if [ "${1:-}" = "teardown" ]; then
     exit 0
 fi
 
-IP=$(minio_ip)
-[ -n "$IP" ] || { echo "no $MINIO container — run setup"; exit 2; }
-echo "s3.csi.chert.us multi-cluster e2e — $C1 + $C2, one MinIO at $IP"
+if [ "$STORE" = s3 ]; then
+    echo "s3.csi.chert.us multi-cluster e2e — $X1 + $X2, one bucket $BUCKET at $S3_ENDPOINT"
+else
+    IP=$(minio_ip)
+    [ -n "$IP" ] || { echo "no $MINIO container — run setup"; exit 2; }
+    echo "s3.csi.chert.us multi-cluster e2e — $C1 + $C2, one MinIO at $IP"
+fi
 for X in "$X1" "$X2"; do
     kc "$X" get csidriver s3.csi.chert.us >/dev/null 2>&1 || { echo "cluster $X has no s3.csi.chert.us — run setup"; exit 2; }
 done

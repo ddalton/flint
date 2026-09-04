@@ -39,9 +39,13 @@ IMAGE=${NODESH_IMAGE:-busybox:1.36}
 POD="nodesh-$(echo "$NODE$CMD$$" | cksum | cut -d' ' -f1)"
 B64=$(printf '%s' "$CMD" | base64 | tr -d '\n')
 
-# stdinOnce+attach is what makes `kubectl run` block until the command is
-# done and stream its output; --rm reaps the pod either way.
-kubectl run "$POD" --rm --attach --restart=Never --image="$IMAGE" \
+# attach is what makes `kubectl run` block until the command is done and
+# stream its output. NOT --rm: with it, kubectl prints `pod "…" deleted`
+# on STDOUT after the command's own output, and a caller that captures
+# stdout as the answer (a drill reading `grep -c` from the host) gets
+# "0\npod … deleted" — which is how S16 on EC2 reported orphaned mounts
+# that were not there. The pod is reaped explicitly and quietly below.
+kubectl run "$POD" --attach --restart=Never --image="$IMAGE" \
   --overrides="{
     \"apiVersion\":\"v1\",
     \"spec\":{
@@ -58,3 +62,6 @@ kubectl run "$POD" --rm --attach --restart=Never --image="$IMAGE" \
       }]
     }
   }" 2>/dev/null
+rc=$?
+kubectl delete pod "$POD" --wait=false >/dev/null 2>&1
+exit $rc

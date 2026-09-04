@@ -1339,6 +1339,21 @@ impl S3Node {
             if fuse::is_mountpoint(target).unwrap_or(false) {
                 fuse::unmount(target, true).map_err(|e| Status::internal(e.to_string()))?;
             }
+            // A volume directory with no state file is a HALF-REMOVED
+            // volume: a removal that unlinked the file and then failed
+            // on a mount still stacked under `src` or `tree`, retried by
+            // kubelet after the file was gone. Finish it here, or the
+            // mount outlives the node (the shape S9 + SU found on EC2).
+            if dir.is_dir() {
+                for sub in ["src", "tree"] {
+                    let p = dir.join(sub);
+                    if let Err(e) = unmount_all(&p) {
+                        return Err(Status::unavailable(format!("half-removed volume {vid}: {e}")));
+                    }
+                }
+                remove_state_dir(&dir)?;
+                tracing::warn!(volume = %vid, "finished removing a half-removed volume directory");
+            }
             return Ok(());
         };
         if st.mode == "lean" {
@@ -1382,9 +1397,19 @@ impl S3Node {
 
 /// Unmount `path` until it is a plain directory (stacked mounts from a
 /// retried publish need one `umount2` each), bounded.
+/// Unmount `path` until it is no longer a mount point (a stack of binds
+/// is possible), judged by the MOUNT TABLE and nothing else. Not
+/// `path.exists()` first: a dead FUSE mount answers `stat` with
+/// `ENOTCONN`, so `exists()` is false for exactly the mount that most
+/// needs unmounting. With that test in front, S9's killed mounter on a
+/// real node (EC2, 2026-09-04) left its source mounted for the life of
+/// the node: the loop returned Ok, the state file was removed, the
+/// directory removal failed on the busy mount, and every kubelet retry
+/// found no state and did nothing. `is_mountpoint` reports a dead mount
+/// as a mount and a missing path as not one, which is the whole answer.
 fn unmount_all(path: &Path) -> std::io::Result<()> {
     for _ in 0..8 {
-        if !path.exists() || !fuse::is_mountpoint(path).unwrap_or(false) {
+        if !fuse::is_mountpoint(path).unwrap_or(false) {
             return Ok(());
         }
         fuse::unmount(path, true)?;

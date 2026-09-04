@@ -100,6 +100,32 @@ onnode() {
         *)      docker exec "$NODE" sh -c "$*" 2>/dev/null ;;
     esac
 }
+# THE plugin pod: the one on $NODE. A DaemonSet has one per node, and on
+# a cluster with more than one node `items[0]` is whichever sorts first —
+# the first EC2 run's S17 rolled the worker's plugin and then read the
+# CONTROL PLANE's plugin for the adoption line and the start time, so it
+# saw "neither branch" and a marker "younger than the new plugin" that
+# was S9's restart of a pod it never touched.
+plugin_pod() { $K -n $SYS get pods -l app.kubernetes.io/name=flint-s3-csi-node --field-selector spec.nodeName="$NODE" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null; }
+# Kill a worker's CONTAINER from the host, the death §6.1 fears: not an
+# API delete (the admission policy refuses it from anyone but the plugin,
+# and a graceful delete is a different death). On the kind node that is
+# `crictl stop -t 0`; a real node may carry no crictl at all (Amazon
+# Linux 2023 kubeadm nodes ship `ctr` only — the first EC2 run's S9 found
+# the stop failing and the control vacuous), so the fallback is SIGKILL
+# to every process in the pod's cgroup except the sandbox's pause — the
+# runtime sees the container die exactly as it would under crictl. The
+# pod uid appears in the cgroup path with `-` (cgroupfs driver) or `_`
+# (systemd driver); both are compared with the separators stripped.
+kill_worker() {
+    local uid u
+    uid=$($K -n $WNS get pod "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    u=$(printf '%s' "$uid" | tr -d '-')
+    [ -n "$u" ] || return 1
+    onnode "if command -v crictl >/dev/null 2>&1; then crictl --timeout 60s stop -t 0 \$(crictl ps -q --pod \$(crictl pods --name $1 -q)) >/dev/null 2>&1; fi; \
+            for p in /proc/[0-9]*; do [ \"\$(cat \$p/comm 2>/dev/null)\" = pause ] && continue; \
+              case \"\$(tr -d '_-' < \$p/cgroup 2>/dev/null)\" in *pod$u*) kill -9 \${p#/proc/} 2>/dev/null;; esac; done; true"
+}
 # The worker pod serving a tenant pod, by annotation.
 # Like `worker_of` but matches a worker in ANY phase. S17 needs it: the
 # checkout of a 200-file project finishes in under 10 s (measured on
@@ -515,7 +541,7 @@ if require_pod reader; then
     # SIGKILL the worker CONTAINER (crictl stop -t 0). crictl's own CRI
     # client deadline is 2 s and the runtime takes longer to confirm the
     # stop, so its exit status is not the verdict — the tenant's read is.
-    onnode "crictl --timeout 60s stop -t 0 \$(crictl ps -q --pod \$(crictl pods --name $w -q))" >/dev/null 2>&1 || note "crictl reported an error stopping worker $w (its CRI deadline); the read below decides"
+    kill_worker "$w" >/dev/null 2>&1 || note "kill_worker reported an error for $w; the read below decides"
     sleep 8
     if inpod reader "cat /mnt/s3/shard-01.txt" >/dev/null 2>&1; then
         bad "CONTROL: reads still succeed after the worker died — the leg above would be vacuous"
@@ -1108,10 +1134,10 @@ if [ -n "$w" ]; then
         && ok "PRECONDITION: the checkout is still running when the plugin is rolled (no marker yet under $tree)" \
         || bad "PRECONDITION: the checkout had already finished before the roll — this leg would prove only that a completed checkout survives, which is not the claim"
     # Roll the plugin.
-    p0=$($K -n $SYS get pods -l app.kubernetes.io/name=flint-s3-csi-node -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    p0=$(plugin_pod)
     $K -n $SYS delete pod "$p0" --wait=true --timeout=180s >/dev/null 2>&1
     $K -n $SYS rollout status ds/flint-s3-csi-node --timeout=180s >/dev/null 2>&1
-    p1=$($K -n $SYS get pods -l app.kubernetes.io/name=flint-s3-csi-node -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    p1=$(plugin_pod)
     started=$($K -n $SYS get pod "$p1" -o jsonpath='{.status.startTime}' 2>/dev/null)
     [ -n "$p1" ] && [ "$p1" != "$p0" ] \
         && ok "the plugin was rolled mid-checkout ($p0 → $p1)" \
@@ -1211,10 +1237,10 @@ if [ -n "$w" ]; then
     [ "$st_phase" = "checking-out" ] \
         && ok "PRECONDITION: the volume state on disk reads 'checking-out' — the phase adoption will see" \
         || bad "PRECONDITION: the volume state reads '${st_phase:-?}', not checking-out"
-    p0=$($K -n $SYS get pods -l app.kubernetes.io/name=flint-s3-csi-node -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    p0=$(plugin_pod)
     $K -n $SYS delete pod "$p0" --wait=true --timeout=180s >/dev/null 2>&1
     $K -n $SYS rollout status ds/flint-s3-csi-node --timeout=180s >/dev/null 2>&1
-    p1=$($K -n $SYS get pods -l app.kubernetes.io/name=flint-s3-csi-node -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    p1=$(plugin_pod)
     started=$($K -n $SYS get pod "$p1" -o jsonpath='{.status.startTime}' 2>/dev/null)
     [ -n "$p1" ] && [ "$p1" != "$p0" ] \
         && ok "the plugin was rolled while the checkout was frozen ($p0 → $p1)" \
