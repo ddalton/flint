@@ -7880,3 +7880,70 @@ async fn the_chunk_reaper_judges_the_grace_now_not_when_it_listed() {
     );
     assert_eq!(before, after, "chunks disappeared: {before} → {after}");
 }
+
+/// REACHABILITY: a barrier actually reaps unreferenced chunks.
+///
+/// The reaper existed, was written to four model-established rules and
+/// guarded by six mutation configs, and was called from nothing but its
+/// own tests — so with chunking on, superseded chunks accumulated
+/// forever. Every unit test passed throughout, because they all called
+/// `sweep_chunks` directly. Nothing asked whether PRODUCTION could
+/// reach it.
+///
+/// The commit that was supposed to wire it did not, and the suite
+/// stayed green: this test is what makes that impossible to repeat. It
+/// goes through `run_barrier`, never calling the reaper itself.
+#[tokio::test]
+async fn the_barrier_reaps_unreferenced_chunks_without_being_asked() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    sc.cfg.chunk_target = 8;
+    sc.cfg.chunk_min = 2;
+    sc.cfg.chunk_max = 32;
+    sc.cfg.orphan_grace_secs = 0; // no grace, so one barrier is enough
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    for i in 0..60 {
+        write(dir.path(), &format!("src/f{i:03}.txt"), "v1");
+    }
+    sc.run_barrier().await.unwrap();
+
+    let prefix = format!("{}/{}/chunks/", sc.cfg.prefix, super::LEAN_DIR);
+    let after_first = store.list(&prefix).await.unwrap().len();
+    assert!(after_first >= 3, "PRECONDITION: {after_first} chunk(s) — too few to supersede any");
+
+    // A second barrier supersedes some chunks. If the reaper is wired,
+    // the same barrier collects them; if it is not, they pile up.
+    write(dir.path(), "src/f000.txt", "v2");
+    backdate_baseline(&sc, "src/f000.txt");
+    sc.run_barrier().await.unwrap();
+
+    let live: Vec<String> = match manifest::load_pointer(store.as_ref(), &sc.cfg).await.unwrap()
+        .unwrap().pointer.entries().unwrap() {
+        super::manifest::Entries::Chunked(c) => c.iter().map(|r| r.addr.clone()).collect(),
+        _ => panic!("the barrier did not publish a chunk list"),
+    };
+    let present: Vec<String> = store
+        .list(&prefix)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|o| o.key.rsplit('/').next().map(|s| s.to_string()))
+        .collect();
+    // Everything still there must be referenced: that is the reaper
+    // having run, and having run correctly.
+    let stray: Vec<&String> = present.iter().filter(|a| !live.contains(a)).collect();
+    assert!(
+        stray.is_empty(),
+        "the barrier left {} unreferenced chunk(s) in the bucket ({stray:?}) — the reaper is \
+         not reachable from a publish, which is the whole defect",
+        stray.len()
+    );
+    // And it did not take the live ones with it.
+    for a in &live {
+        assert!(present.contains(a), "the barrier's own sweep deleted live chunk {a}");
+    }
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert_eq!(m.manifest.entries.len(), 60, "the sweep left the manifest short");
+}

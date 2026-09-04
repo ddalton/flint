@@ -820,6 +820,21 @@ impl Sidecar {
             Ok(n) => eprintln!("flint-sync: reaped {n} superseded manifest generation(s)"),
             Err(e) => eprintln!("flint-sync: generation sweep: {e}"),
         }
+        // And the CHUNK reaper, same reason, same best-effort terms.
+        // `sweep_chunks` returns 0 without a request on a workspace that
+        // is not chunked, so this costs nothing until the layout moves.
+        //
+        // It was written to four model-established rules, guarded by six
+        // mutation configs, and called from nothing but its own tests —
+        // so with chunking on, every publish left its superseded chunks
+        // in the bucket forever. The rules ran in the model and in the
+        // suite and never once in production. `the_barrier_reaps...`
+        // below is the test that asks whether this line exists at all.
+        match manifest::sweep_chunks(self.store.as_ref(), &self.cfg).await {
+            Ok(0) => {}
+            Ok(n) => eprintln!("flint-sync: reaped {n} unreferenced manifest chunk(s)"),
+            Err(e) => eprintln!("flint-sync: chunk sweep: {e}"),
+        }
         Ok(report)
     }
 
