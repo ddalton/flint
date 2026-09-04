@@ -148,6 +148,40 @@ be speculative; leaving no room for it would be the mistake.
   chunk-aware verb (faster, a protocol change). **Chunk server-side**;
   the HITL path is rare and correctness beats throughput there.
 
+**The merge must happen at ENTRY level, and the chunk list must be
+recomputed from the merged key set — never spliced.** Machine-checked by
+`lean/formal/LeanChunkMerge.tla`, and the shortcut it refutes is the one
+worth wanting: on a 412, reuse the other writer's chunk list, substitute
+only the chunks your own change touched, and the merge costs O(changed)
+too. TLC's counterexample:
+
+```
+base = {}      A adds {1}      B adds {1,2}
+Chunks(A) = {{1}}              Chunks(B) = {{1,2}}
+splice = (B's chunks A did not touch) + (A's chunks A did touch)
+       = {} + {{1}}  ->  published {1}
+whole-document merge                  ->  {1,2}
+```
+
+Key 2 is B's, and it is gone — because A's chunk and B's chunk cover the
+SAME key range under different boundaries, so substituting by range
+silently discards whatever the other writer had in it. That is the
+foreign-entry loss the whole "start from THEIRS" rule exists to prevent,
+reintroduced one level up where that rule cannot see it.
+
+Note WHY this is possible: with boundaries determined by the key alone,
+a key's chunk is a pure function of the key, splicing is safe, and there
+would be nothing to check. `MIN` breaks that — a suppressed cut makes
+membership depend on the SET — which is exactly the leak §3 admits to.
+The leak is affordable for write amplification and NOT affordable for
+merge correctness, and those are different budgets.
+
+The cost is bounded and acceptable: a merge is the 412 path, not the
+common one, and it still only needs to FETCH the chunks whose ranges the
+two writers' changes touch. What it may not do is publish a chunk list
+it assembled from two writers' lists rather than recomputed from the
+merged entries.
+
 ## 7. Migration, fail-closed — the same hazard, a third road
 
 `manifest::load` maps a missing object to `Ok(None)`, `None` means first

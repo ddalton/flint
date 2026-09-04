@@ -17,9 +17,9 @@ a library. Nothing here is wired into `scripts/check-tla.sh`.
 ./gen-cfgs.sh       # regenerate the cfg matrix
 ```
 
-Seventy-five runs, ALL required: 15 strict (must hold), 31 mutations
+Seventy-nine runs, ALL required: 16 strict (must hold), 32 mutations
 (must find their designated counterexample — a model that cannot
-rediscover its bug classes proves nothing), 29 probes (must be violated
+rediscover its bug classes proves nothing), 31 probes (must be violated
 — each names an ACTION via a ghost only that action writes; probe the
 action, never the situation). The three numbers are `grep -c "^strict_run "`,
 `grep "^mutation_run " | grep -vc Probe` and `grep "^mutation_run " |
@@ -57,6 +57,34 @@ subject of the section. The abstraction was the bug, again.
 | `Inv_LiveComplete` | every chunk the live pointer names is present | `LeanChunkGCStaleRefs` / `LeanChunkGCRefsFirst` (refs read before a CAS the delete follows), `LeanChunkGCNoGrace`, `LeanChunkGCRacyGrace` (grace shorter than the publish), `LeanChunkGCAdoptSkips` (adoption without the rewrite) |
 | `Inv_RetainedComplete` | every retained generation is still readable | the same set |
 | `Inv_NoTornRead` | a reader never finds a chunk its pointer named, absent | `LeanChunkGCSlowReader` (the reader does not revalidate). Holds at an UNCHANGED `Retain = 1`: the fix is that a reader which finds a chunk gone re-reads the POINTER, and restarts onto the current generation if it moved — a hole under an unchanged pointer is the only true corruption (§8.2). No timing assumption, no wider window |
+
+## The module: LeanChunkMerge.tla
+
+The chunked three-way merge (chunked-manifest design §6). The
+entry-level merge is LeanSubtree's and is not re-derived; this checks
+the level chunking adds. A writer that 412s must merge, and the
+tempting optimisation is to reuse the other writer's chunk list and
+substitute only the chunks its own change touched — making the merge
+O(changed) as well.
+
+It loses foreign entries. `base = {}`, A adds `{1}`, B adds `{1,2}`:
+A's chunking is `{{1}}` and B's is `{{1,2}}`, the same range under
+different boundaries, so substituting A's chunk for B's drops key 2.
+
+The property is a REFINEMENT — whatever the chunked path publishes must
+be exactly the key set the whole-document merge produces — so the
+strategy is checked against a definition rather than against a restated
+version of itself.
+
+Worth knowing WHY this can happen at all: with boundaries determined by
+the key alone, a key's chunk is a function of the key, splicing is
+trivially safe, and there is nothing to check. `MinRun` breaks that, and
+that is the entire subject. §3 calls min/max "where the pure-function
+property leaks"; this module is what that leak costs.
+
+| Invariant | Claim | Mutation that must violate it |
+| --- | --- | --- |
+| `Inv_ChunkedMergeMatches` | the chunked merge publishes exactly the whole-document merge's key set | `LeanChunkMergeSplice` (reuse theirs, substitute mine) |
 
 ## The module: LeanSubtree.tla
 

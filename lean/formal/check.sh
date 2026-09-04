@@ -233,5 +233,18 @@ mutation_run $C LeanChunkGCSlowReader.cfg "the reader does NOT revalidate: its g
 mutation_run $C LeanChunkGCProbeRestart.cfg "probe: a reader actually restarts onto a newer generation -- without it the strict run is green over a reader that never raced a sweep" \
   "Invariant Probe_Restarted is violated"
 
+# ---- the chunked MERGE (LeanChunkMerge.tla) -------------------------------
+# The entry-level merge is LeanSubtree's and is not re-derived. This checks the
+# level chunking adds: a writer that 412s must merge, and reusing the other
+# writer's chunk list to make that O(changed) too is the tempting shortcut.
+M2=LeanChunkMerge
+strict_run $M2 LeanChunkMerge.cfg "merge at ENTRY level and re-chunk: the published key set is exactly the whole-document merge's, over every base/add/delete combination"
+mutation_run $M2 LeanChunkMergeSplice.cfg "splice the chunk LISTS instead -- keep theirs where my change did not touch, substitute mine where it did: base {}, A adds {1}, B adds {1,2}; A's chunk {1} and B's chunk {1,2} cover the same range under different boundaries, so substituting drops B's key 2 entirely" \
+  "Invariant Inv_ChunkedMergeMatches is violated"
+mutation_run $M2 LeanChunkMergeProbeDiverge.cfg "probe: the two writers' chunk BOUNDARIES actually diverge -- without it the strict run is green over inputs where splicing could not have gone wrong" \
+  "Invariant Probe_BoundariesDiverged is violated"
+mutation_run $M2 LeanChunkMergeProbeBoth.cfg "probe: both writers actually wrote (a merge with one idle side proves nothing)" \
+  "Invariant Probe_BothWrote is violated"
+
 echo
-echo "lean formal gate: $PASS/75 runs green"
+echo "lean formal gate: $PASS/79 runs green"
