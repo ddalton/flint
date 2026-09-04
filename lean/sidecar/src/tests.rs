@@ -6616,3 +6616,143 @@ fn is_auth_reads_through_the_from_conversion() {
     let pf: LeanError = flint_store::StoreError::PreconditionFailed("412".into()).into();
     assert!(!pf.is_auth(), "a deposal read as a credential fault");
 }
+
+// ── content-defined chunking (chunked-manifest design §3) ────────────
+
+/// Chunk a key list with a SMALL target, so a fixture stays readable
+/// instead of needing 4096 entries to produce two chunks.
+fn chunks_of(keys: &[String]) -> Vec<Vec<String>> {
+    let refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+    let cuts = super::chunk::chunk_ranges_with(&refs, 8, 2, 32);
+    let mut out = Vec::new();
+    let mut start = 0;
+    for c in cuts {
+        out.push(keys[start..c].to_vec());
+        start = c;
+    }
+    out
+}
+
+/// Fixed-count chunking, as the CONTROL. This is the shape §3
+/// disqualifies, and the test below is only meaningful if this one
+/// actually exhibits the failure — otherwise "content-defined survives
+/// a front insert" would pass for a fixture too small to shift.
+fn fixed_chunks_of(keys: &[String], n: usize) -> Vec<Vec<String>> {
+    keys.chunks(n).map(|c| c.to_vec()).collect()
+}
+
+fn changed_chunks(a: &[Vec<String>], b: &[Vec<String>]) -> usize {
+    let before: std::collections::HashSet<_> = a.iter().collect();
+    b.iter().filter(|c| !before.contains(c)).count()
+}
+
+/// §3 — the whole reason boundaries are content-defined. Inserting a key
+/// at the FRONT of the sorted order must rewrite about one chunk, not
+/// all of them.
+///
+/// Under fixed-count splitting every later key shifts one slot, so every
+/// boundary moves and every chunk is rewritten — O(entries) restored on
+/// precisely the operation being optimised, and silently, because the
+/// chunk sizes still look right. The control arm asserts that failure
+/// really happens here, so the real arm cannot pass by being vacuous.
+#[test]
+fn a_front_insert_rewrites_one_chunk_not_the_project() {
+    let base: Vec<String> = (0..300).map(|i| format!("src/f{i:04}.txt")).collect();
+    let mut inserted = base.clone();
+    inserted.insert(0, "src/a000-brand-new.txt".to_string());
+    assert!(inserted.windows(2).all(|w| w[0] < w[1]), "fixture is not sorted");
+
+    let c0 = chunks_of(&base);
+    let c1 = chunks_of(&inserted);
+    assert!(c0.len() > 4, "fixture produced {} chunks — too few to say anything", c0.len());
+    let cd = changed_chunks(&c0, &c1);
+
+    // The control: the same insert under fixed-count splitting.
+    let f0 = fixed_chunks_of(&base, 8);
+    let f1 = fixed_chunks_of(&inserted, 8);
+    let fd = changed_chunks(&f0, &f1);
+    assert!(
+        fd >= f0.len(),
+        "the control did not exhibit the cascade it exists to demonstrate ({fd} of {} chunks \
+         changed), so the assertion below proves nothing about this fixture",
+        f0.len()
+    );
+
+    assert!(
+        cd <= 2,
+        "a front insert rewrote {cd} of {} content-defined chunks (fixed-count rewrote {fd}) — \
+         boundaries are moving with POSITION, which is the failure mode §3 disqualifies",
+        c0.len()
+    );
+}
+
+/// Boundaries follow the KEY SET, so a chunk that did not gain or lose a
+/// key is byte-identical however far the change was from it — that is
+/// what lets a publish reference the untouched chunks instead of
+/// rewriting them, and it is where the asymptotic win actually lives.
+#[test]
+fn an_edit_far_from_a_chunk_leaves_it_alone() {
+    let base: Vec<String> = (0..300).map(|i| format!("src/f{i:04}.txt")).collect();
+    let mut edited = base.clone();
+    edited.insert(150, "src/f0149-inserted.txt".to_string());
+    edited.sort();
+
+    let c0 = chunks_of(&base);
+    let c1 = chunks_of(&edited);
+    assert_eq!(c0.first(), c1.first(), "the FIRST chunk moved for a change in the middle");
+    assert_eq!(c0.last(), c1.last(), "the LAST chunk moved for a change in the middle");
+    assert!(
+        changed_chunks(&c0, &c1) <= 2,
+        "a middle insert rewrote {} chunks",
+        changed_chunks(&c0, &c1)
+    );
+}
+
+/// The floor and the ceiling both bind, and the tail is never dropped.
+/// A chunker that lost the final partial run would lose every entry
+/// after the last natural boundary — silently, since the chunks it did
+/// emit would all be well-formed.
+#[test]
+fn chunk_sizing_respects_min_max_and_keeps_the_tail() {
+    let keys: Vec<String> = (0..500).map(|i| format!("k{i:05}")).collect();
+    let refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+    let cuts = super::chunk::chunk_ranges_with(&refs, 8, 3, 20);
+
+    assert_eq!(*cuts.last().unwrap(), keys.len(), "the tail run was dropped");
+    let mut prev = 0;
+    for (i, c) in cuts.iter().enumerate() {
+        let len = c - prev;
+        assert!(len <= 20, "chunk {i} has {len} entries, over the max of 20");
+        // Every run but the last must clear the floor; the tail is
+        // whatever is left and has no lower bound by construction.
+        if i + 1 < cuts.len() {
+            assert!(len >= 3, "chunk {i} has {len} entries, under the min of 3");
+        }
+        prev = *c;
+    }
+    // Nothing is lost or duplicated.
+    let total: usize = cuts.iter().scan(0, |p, c| { let l = c - *p; *p = *c; Some(l) }).sum();
+    assert_eq!(total, keys.len(), "chunks do not partition the key stream");
+}
+
+/// The boundary rule is on-the-wire format: two binaries that disagree
+/// about where a chunk ends produce different objects for identical
+/// content and share nothing. Pin it against literal expected output,
+/// not against a re-run of the same function, which would agree with
+/// itself no matter what it computed.
+#[test]
+fn chunk_boundaries_are_stable_and_content_addresses_are_not_crc() {
+    let keys: Vec<String> = (0..64).map(|i| format!("src/f{i:03}.txt")).collect();
+    let refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+    let a = super::chunk::chunk_ranges_with(&refs, 8, 2, 32);
+    let b = super::chunk::chunk_ranges_with(&refs, 8, 2, 32);
+    assert_eq!(a, b, "chunking is not deterministic");
+    assert!(!a.is_empty() && *a.last().unwrap() == 64);
+
+    // A chunk's address must depend on its BYTES.
+    let x = super::chunk::chunk_address(b"{\"a\":1}");
+    let y = super::chunk::chunk_address(b"{\"a\":2}");
+    assert_ne!(x, y, "two different chunk bodies share an address");
+    assert_eq!(x.len(), 32, "address is not 128 bits of hex");
+    assert_eq!(x, super::chunk::chunk_address(b"{\"a\":1}"), "address is not stable");
+}

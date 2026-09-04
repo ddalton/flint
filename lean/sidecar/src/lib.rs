@@ -40,6 +40,7 @@
 
 pub mod barrier;
 pub mod checkout;
+pub mod chunk;
 pub mod control;
 pub mod gated;
 pub mod gateway;

@@ -77,6 +77,19 @@ of the on-the-wire format, not an implementation detail. `crc64_nvme` is
 already in the tree, already used for object integrity, and already
 stable; reuse it rather than introducing xxhash.
 
+**Two hashes, not one (settled at implementation, 2026-09-04).** The
+BOUNDARY rule above uses `crc64_nvme`. The chunk's content ADDRESS does
+not, and the distinction is not fussiness — the two carry different
+consequences. A boundary collision merely puts a cut somewhere
+unremarkable and costs nothing. An address collision means two
+different chunk bodies share an object key and one silently shadows the
+other: a data-loss class, and a silent one, discovered as entries that
+vanished from a manifest nobody edited. 64 bits is thin margin to take
+that on, so the address is SHA-256 truncated to 128 bits (`sha2` is
+already a `flint-store` dependency, so no new supply-chain surface).
+Boundaries stay on crc64 because they are hot, cheap, and harmless when
+they collide.
+
 ## 4. When the pointer itself becomes the bottleneck
 
 The pointer is rewritten on every publish and now carries the chunk
