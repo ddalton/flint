@@ -361,6 +361,21 @@ pub enum PutCondition {
     /// First generation of a new key: fail if ANY object exists
     /// (closes the create race with outside writers).
     IfNoneMatchAny,
+    /// No precondition: create, or overwrite whatever is there.
+    ///
+    /// Deliberately narrow. It exists for CONTENT-ADDRESSED objects,
+    /// where the rewrite is byte-identical and the POINT is to refresh
+    /// the object's age rather than to change its contents: an adopted
+    /// manifest chunk is an old object that a new publish is about to
+    /// make live, and a sweep that reads age would otherwise collect it
+    /// as the orphan it still looks like (flint-lean chunked-manifest
+    /// design §8.1, machine-checked by `LeanChunkGCAdoptSkips`).
+    ///
+    /// Never reach for this where a concurrent writer's content could
+    /// DIFFER from yours — that is what the other two variants are for,
+    /// and losing that distinction is how a last-writer-wins overwrite
+    /// gets reintroduced.
+    Unconditional,
 }
 
 // ── generation assembly ──────────────────────────────────────────────

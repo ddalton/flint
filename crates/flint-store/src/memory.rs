@@ -412,6 +412,7 @@ impl MemoryStore {
             (PutCondition::IfNoneMatchAny, Some(_)) => {
                 Err(StoreError::PreconditionFailed("If-None-Match: object exists".into()))
             }
+            (PutCondition::Unconditional, _) => Ok(()),
         }
     }
 }

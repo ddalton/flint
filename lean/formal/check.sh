@@ -207,5 +207,32 @@ mutation_run $M LeanProbeScopedGated.cfg "probe: the scoped deferral is REACHABL
 mutation_run $M LeanScopedGatedWholeBase.cfg "whole-instBase advance, with a citation lane also advancing it: the out-of-scope foreign entry is still lost forever" \
   "Invariant Inv_NoForeignLost is violated"
 
+# ---- chunk GC (LeanChunkGC.tla) -------------------------------------------
+# Chunks are SHARED between generations, which is what makes LeanSubtree's GC
+# reasoning not carry over: there, every generation object had exactly one
+# referent. Written BEFORE the reaper, and it refuted the design's own §8.1
+# ordering rule on the first run.
+C=LeanChunkGC
+strict_run $C LeanChunkGC.cfg "chunk GC is safe iff ALL FOUR arms hold: refs read AT the delete, a grace, the grace outliving the publish, and adoption REWRITING what it adopts"
+mutation_run $C LeanChunkGCStaleRefs.cfg "the reference set is carried from a snapshot taken before a CAS the delete follows -- the rule §8.1 actually named (list-before-refs) does NOT save it" \
+  "Invariant Inv_LiveComplete is violated"
+mutation_run $C LeanChunkGCRefsFirst.cfg "refs snapshotted before the listing: the other order, equally unsafe -- which is the point, the ordering was never the load-bearing property" \
+  "Invariant Inv_LiveComplete is violated"
+mutation_run $C LeanChunkGCNoGrace.cfg "no grace: a chunk written and not yet referenced is collected out from under its own publish" \
+  "Invariant Inv_LiveComplete is violated"
+mutation_run $C LeanChunkGCRacyGrace.cfg "a grace that does NOT outlive the publish: the chunk ages while its publisher is still writing" \
+  "Invariant Inv_LiveComplete is violated"
+mutation_run $C LeanChunkGCAdoptSkips.cfg "adoption SKIPS the rewrite: a crashed publish leaves an aged orphan, a later publish adopts it by content address and references it without touching it, and the sweep collects it as the orphan it still looks like" \
+  "Invariant Inv_LiveComplete is violated"
+mutation_run $C LeanChunkGCProbeCollect.cfg "probe: the reaper actually deletes something -- without it every run above is green over a GC that never fired" \
+  "Invariant Probe_Collected is violated"
+mutation_run $C LeanChunkGCProbeAdopt.cfg "probe: a publisher actually references a chunk it did not upload (adoption is REACHABLE, and only a crash makes it so)" \
+  "Invariant Probe_Adopted is violated"
+# NOT a gate run: the reader gap is real and unfixed. Kept as a cfg so the
+# bound is machine-checked rather than prose -- a reader is safe for `Retain`
+# PUBLISHES, not for a duration, and Inv_NoTornRead falls the moment its
+# pointer leaves the window. See the chunked design §8.1.
+#   LeanChunkGCSlowReader.cfg
+
 echo
-echo "lean formal gate: $PASS/65 runs green"
+echo "lean formal gate: $PASS/73 runs green"

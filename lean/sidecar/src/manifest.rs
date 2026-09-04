@@ -488,20 +488,24 @@ pub async fn cas_write_chunked(
         if have.contains(r.addr.as_str()) {
             continue;
         }
+        // UNCONDITIONAL, and that is a correctness requirement rather
+        // than laziness — `LeanChunkGCAdoptSkips` in the formal model
+        // fails without it.
+        //
+        // This chunk is not in `prev`, so nothing references it yet. It
+        // may nonetheless already EXIST: a crashed publish of ours left
+        // it, and content addressing means our retry produces the same
+        // key. Adopting it by reference alone would make an old object
+        // live without making it LOOK live, and the orphan sweep reads
+        // age — so the sweep would collect it as the orphan it still
+        // appears to be, between this call and our pointer CAS.
+        // Rewriting refreshes the age the sweep reads. The bytes are
+        // identical either way, so the write is idempotent; the cost
+        // falls only on adopted orphans, which are rare by
+        // construction, and chunks already in `prev` are skipped above.
         let key = cfg.chunk_key(&r.addr);
         let crc = crc64_nvme(body);
-        match store
-            .put_whole(&key, body.clone().into(), &PutCondition::IfNoneMatchAny, &stamps, crc)
-            .await
-        {
-            Ok(_) => {}
-            // The object is content-addressed, so an existing one at
-            // this key holds these bytes: a concurrent writer produced
-            // the same chunk, or a previous attempt of ours did. Either
-            // way it is already what we were about to write.
-            Err(StoreError::PreconditionFailed(_)) | Err(StoreError::Conflict(_)) => {}
-            Err(e) => return Err(e.into()),
-        }
+        store.put_whole(&key, body.clone().into(), &PutCondition::Unconditional, &stamps, crc).await?;
     }
 
     let pointer = Pointer {

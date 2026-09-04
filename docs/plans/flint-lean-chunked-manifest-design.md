@@ -209,12 +209,65 @@ of the intuitive one:
 3. Delete `candidates − referenced`, and only those older than
    `ORPHAN_GRACE_SECS`.
 
-Reading the pointers first and listing second is the bug: a chunk PUT
-and referenced by a pointer installed in that gap is absent from the
-reference set and present in the listing, so it is collected while
-live — destroying a chunk the current manifest cites. Listing first
-makes any newly-referenced chunk either absent from the candidate list
-(written after it) or present in the reference set (read after it).
+**REFUTED by `lean/formal/LeanChunkGC.tla`, 2026-09-04, on the first
+run.** The ordering above is not what makes this safe, and stating it as
+though it were is how the reaper would have been written wrong. TLC's
+counterexample, with the order exactly as prescribed:
+
+```
+PubWrite a1     a1 durable
+GcSnap1         cand = {a1}          (list first, as the rule says)
+GcSnap2         refs = {}            (a1 is referenced by nothing YET)
+Age a1          the grace elapses
+PubCas          live = {a1}
+GcDelete        a1 in cand \ refs, aged -> deleted; the live manifest has a hole
+```
+
+Which snapshot comes first is irrelevant. What matters is that the
+reference set was read BEFORE a CAS that the delete came AFTER. The
+corrected rule, and every clause is independently necessary — each has a
+mutation config that violates on its own:
+
+1. **The reference set is read AT the delete**, not carried from an
+   earlier snapshot (`LeanChunkGCStaleRefs`, `LeanChunkGCRefsFirst`).
+   In an implementation that cannot make the read and the delete atomic,
+   this means fencing on the pointer's generation and restarting the
+   sweep if it moved.
+2. **A grace exists at all** (`LeanChunkGCNoGrace`) — a chunk written
+   and not yet referenced is otherwise collected out from under its own
+   publish.
+3. **The grace outlives the longest publish** (`LeanChunkGCRacyGrace`),
+   not the longest *plausible* publish. This is a timing assumption and
+   it is load-bearing; it should be stated in the reaper, not implied.
+4. **Adoption REWRITES what it adopts** — see below.
+
+The whole matrix runs in the lean gate, with two probes asserting the
+reaper actually deletes and adoption actually happens, so a green run
+cannot be green over a GC that never fired.
+
+**Adoption is the second refutation, and it is the subtler one.** Above,
+content-addressing was praised because a retry "ADOPTS the orphans
+instead of duplicating them". That is true and it is also a hazard: an
+adopted chunk is by definition an AGED object that no pointer
+references, which is exactly what the orphan sweep is hunting. A
+publisher that finds the chunk present and skips writing it has made an
+old object live without making it *look* live, and the grace — an
+age-based sensor — now lies about it:
+
+```
+(a crashed publish leaves a1; a1 ages past the grace)
+PubWrite a1     present already -> SKIPPED, referenced but not touched
+GcDelete        a1 is aged and unreferenced -> collected as an orphan
+PubCas          live = {a1}, which no longer exists
+```
+
+So **a publisher that adopts a chunk must rewrite it**, refreshing the
+age the sweep reads. The cost is confined to adopted orphans, which are
+rare by construction. `LeanChunkGCAdoptSkips` is the mutation, and it
+required adding a CRASH action to the model to reach at all — the first
+version of the module reported that config as HOLDING, because without a
+crash the model could not produce an orphan, which is the entire subject
+of this section.
 
 Note that `sweep_generations` does the OPPOSITE — it loads the pointer
 and then lists — and is correct to. A generation is named by exactly one
@@ -235,9 +288,27 @@ constant can be reused as-is.
 
 Falsifier: kill a publisher between its chunk PUTs and its pointer CAS,
 run the sweep immediately, and assert the orphans SURVIVE (the grace
-holds); then re-run the same publish and assert it writes zero new chunk
-objects (adoption), and that the resulting manifest is byte-identical to
-one produced without the crash.
+holds); then re-run the same publish and assert it references the same
+chunks and that the resulting manifest is byte-identical to one produced
+without the crash. Note what the model changed here: the re-run must NOT
+be asserted to write zero new objects, because rule 4 requires it to
+rewrite what it adopts. "Zero new objects" was the assertion this
+section originally implied, and it would have locked in the bug.
+
+## 8.2 Reader lifetime is bounded by PUBLISHES, not by time
+
+`LeanChunkGCSlowReader.cfg` violates `Inv_NoTornRead`, and its trace
+says exactly how: a reader takes the live pointer, two further publishes
+push that pointer out of the `Retain` window, and the sweep then
+collects chunks the reader still intends to fetch.
+
+So a reader is safe for **`Retain` publishes**, not for a duration —
+which is the wrong unit for the risk. A full checkout of a 1M-entry
+project runs for minutes; a busy workspace publishes every floor tick.
+The retention window has to be expressed so that it bounds reader
+lifetime (a retained-by-time rule, or a reader lease the sweep honours),
+and this is NOT designed yet. It is kept as a cfg rather than a gate run
+so the bound stays machine-checked instead of becoming prose again.
 
 ## 9. The part that needs care beyond this doc
 

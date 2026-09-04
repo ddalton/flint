@@ -17,15 +17,46 @@ a library. Nothing here is wired into `scripts/check-tla.sh`.
 ./gen-cfgs.sh       # regenerate the cfg matrix
 ```
 
-Sixty-three runs, ALL required: 14 strict (must hold), 25 mutations (must
-find their designated counterexample — a model that cannot rediscover its
-bug classes proves nothing), 24 probes (must be violated — each names an
-ACTION via a ghost only that action writes; probe the action, never the
-situation). The three numbers are `grep -c "^strict_run "`,
+Seventy-three runs, ALL required: 15 strict (must hold), 30 mutations
+(must find their designated counterexample — a model that cannot
+rediscover its bug classes proves nothing), 28 probes (must be violated
+— each names an ACTION via a ghost only that action writes; probe the
+action, never the situation). The three numbers are `grep -c "^strict_run "`,
 `grep "^mutation_run " | grep -vc Probe` and `grep "^mutation_run " |
 grep -c Probe` in `check.sh` — they had drifted from the script twice,
 so they are stated as a recipe rather than a claim. `LeanSubtreeDeep.cfg` is the rich-budget breadth run — an
 opt-in overnight job, not in the gate.
+
+## The module: LeanChunkGC.tla
+
+Chunk garbage collection against a concurrent publisher and a reader
+(`docs/plans/flint-lean-chunked-manifest-design.md` §8.1). Separate from
+LeanSubtree because the manifest there is ONE object per generation, so
+every object had exactly one referent and "delete what the live pointer
+does not name" was sound. **Chunks are shared between generations**, and
+that single change is what makes the old reasoning not carry over.
+
+Written before the reaper exists, and it earned its keep immediately: it
+**refuted the design's own ordering rule on the first run**. §8.1 said
+"list candidates, then union the retained pointers"; the counterexample
+holds that order and still deletes a live chunk, because what matters is
+that the reference set was read before a CAS the delete came after. The
+corrected rule has four independently necessary clauses, one mutation
+each.
+
+The second finding was subtler: **adoption must rewrite what it adopts**.
+An adopted chunk is an aged object no pointer references — exactly what
+the orphan sweep hunts — so referencing it without touching it leaves the
+age sensor lying. Reaching that config at all required adding a CRASH
+action; the first version of the module reported it HOLDING because
+without a crash it could not produce an orphan, which is the entire
+subject of the section. The abstraction was the bug, again.
+
+| Invariant | Claim | Mutation that must violate it |
+| --- | --- | --- |
+| `Inv_LiveComplete` | every chunk the live pointer names is present | `LeanChunkGCStaleRefs` / `LeanChunkGCRefsFirst` (refs read before a CAS the delete follows), `LeanChunkGCNoGrace`, `LeanChunkGCRacyGrace` (grace shorter than the publish), `LeanChunkGCAdoptSkips` (adoption without the rewrite) |
+| `Inv_RetainedComplete` | every retained generation is still readable | the same set |
+| `Inv_NoTornRead` | a reader never finds a chunk its pointer named, absent | **not a gate run** — `LeanChunkGCSlowReader.cfg` VIOLATES it, and that is the finding: a reader is safe for `Retain` PUBLISHES, not for a duration (§8.2). Kept as a cfg so the bound stays machine-checked rather than prose |
 
 ## The module: LeanSubtree.tla
 

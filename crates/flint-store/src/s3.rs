@@ -286,6 +286,7 @@ impl ObjectStore for S3Store {
         req = match condition {
             PutCondition::IfMatch(etag) => req.if_match(etag),
             PutCondition::IfNoneMatchAny => req.if_none_match("*"),
+            PutCondition::Unconditional => req,
         };
         let resp = req.send().await.map_err(|e| map_err("put_whole", e))?;
         Ok(ObjectMeta {
@@ -1059,6 +1060,7 @@ impl S3Store {
         req = match &spec.condition {
             PutCondition::IfMatch(etag) => req.if_match(etag),
             PutCondition::IfNoneMatchAny => req.if_none_match("*"),
+            PutCondition::Unconditional => req,
         };
         let resp = req
             .send()
@@ -1120,6 +1122,7 @@ impl S3Store {
         req = match &condition {
             PutCondition::IfMatch(etag) => req.if_match(etag),
             PutCondition::IfNoneMatchAny => req.if_none_match("*"),
+            PutCondition::Unconditional => req,
         };
         let resp = req.send().await.map_err(|e| map_err("epoch_put", e))?;
         Ok(EpochLease {
