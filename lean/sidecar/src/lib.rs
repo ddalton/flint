@@ -212,15 +212,23 @@ pub struct LeanConfig {
     /// needed to tune it per workspace yet, and a knob with no caller
     /// is a support burden.
     /// Publish the manifest as a CHUNK LIST rather than one generation
-    /// object per citation (chunked design). Default OFF.
+    /// object per citation (chunked design). Default ON since
+    /// 2026-09-04.
     ///
-    /// Off by design, not by oversight. The migration is FAIL-CLOSED in
-    /// both directions that matter — a pointer-era binary cannot parse
-    /// a chunked pointer, which is the point — so flipping it is a
-    /// one-way format decision for a workspace, not a tuning change.
-    /// It also retires the assertions the drill's S14 makes about
-    /// `entries_key`/`entries_seq`, which read as JSON null on a
-    /// chunked pointer and would pass by comparing null to null.
+    /// The migration is FAIL-CLOSED and one-way per workspace: a
+    /// pointer-era binary cannot parse a chunked pointer, which is the
+    /// point — every layout change has to make an old reader REFUSE
+    /// rather than conclude the project is empty and re-seed over it.
+    ///
+    /// Small projects are not penalised, which is what made turning it
+    /// on unconditional rather than threshold-gated: under the target a
+    /// project is ONE chunk, so it costs a pointer plus one object and
+    /// two GETs to read — exactly what the single-generation layout
+    /// already cost. The indirection was paid for by step one.
+    ///
+    /// `false` is still a supported READ path forever (a workspace that
+    /// has not published since the migration) and is what the
+    /// single-layout tests set explicitly.
     pub chunked: bool,
     /// How long an unreferenced chunk must have sat before the reaper
     /// may take it. Config rather than a constant because the model
@@ -289,7 +297,7 @@ impl LeanConfig {
             root: root.into(),
             floor_secs: 60,
             whole_put_max: WHOLE_PUT_MAX,
-            chunked: false,
+            chunked: true,
             orphan_grace_secs: manifest::ORPHAN_GRACE_SECS,
             chunk_target: chunk::CHUNK_TARGET,
             chunk_min: chunk::CHUNK_MIN,

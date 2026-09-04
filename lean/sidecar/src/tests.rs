@@ -22,6 +22,19 @@ fn cfg_for(root: &std::path::Path) -> LeanConfig {
     LeanConfig::new(PREFIX, root)
 }
 
+/// A config pinned to the SINGLE-generation layout (chunking off).
+///
+/// Not legacy scaffolding: a workspace that has not published since the
+/// chunk migration is still on this layout, and reading it correctly is
+/// a permanent obligation, not a transitional one. These tests are what
+/// keeps that path honest, so they opt out explicitly rather than
+/// drifting whenever the default moves.
+fn cfg_single(root: &std::path::Path) -> LeanConfig {
+    let mut c = LeanConfig::new(PREFIX, root);
+    c.chunked = false;
+    c
+}
+
 async fn sidecar(store: &Arc<MemoryStore>, root: &std::path::Path) -> Sidecar {
     let cfg = cfg_for(root);
     let state = SidecarState::open(cfg.state_dir()).unwrap();
@@ -6068,7 +6081,7 @@ fn entry(name: &str) -> manifest::LeanEntry {
 async fn a_publish_writes_an_immutable_generation_and_a_pointer_that_names_it() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let cfg = cfg_for(dir.path());
+    let cfg = cfg_single(dir.path());
     let mut m = manifest::LeanManifest::default();
     m.seq = 1;
     m.entries.insert("a.txt".into(), entry("x"));
@@ -6096,7 +6109,7 @@ async fn a_publish_writes_an_immutable_generation_and_a_pointer_that_names_it() 
 async fn a_takeover_rotation_does_not_touch_the_entries_object() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let cfg = cfg_for(dir.path());
+    let cfg = cfg_single(dir.path());
     let mut m = manifest::LeanManifest::default();
     m.seq = 4;
     for i in 0..50 {
@@ -6185,7 +6198,7 @@ async fn migration_installs_the_pointer_and_poisons_the_legacy_key() {
 async fn a_pointer_naming_a_missing_generation_refuses_rather_than_reading_empty() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let cfg = cfg_for(dir.path());
+    let cfg = cfg_single(dir.path());
     let mut m = manifest::LeanManifest::default();
     m.seq = 2;
     m.entries.insert("a.txt".into(), entry("x"));
@@ -6240,7 +6253,7 @@ async fn a_second_writer_at_the_same_generation_is_refused() {
 async fn superseded_generations_are_reaped_but_the_live_one_and_a_window_survive() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let cfg = cfg_for(dir.path());
+    let cfg = cfg_single(dir.path());
     let prefix = format!("{PREFIX}/.flint/lean/manifests/");
 
     let mut handle = None;
@@ -6289,7 +6302,7 @@ async fn superseded_generations_are_reaped_but_the_live_one_and_a_window_survive
 async fn the_reaper_collects_an_orphan_from_a_crash_before_the_pointer_cas() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let cfg = cfg_for(dir.path());
+    let cfg = cfg_single(dir.path());
     let mut m = manifest::LeanManifest::default();
     m.seq = 1;
     m.entries.insert("a.txt".into(), entry("a.txt"));
@@ -6347,7 +6360,7 @@ async fn the_reaper_collects_an_orphan_from_a_crash_before_the_pointer_cas() {
 async fn a_rotation_reads_and_writes_no_generation_object() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let cfg = cfg_for(dir.path());
+    let cfg = cfg_single(dir.path());
     let mut m = manifest::LeanManifest::default();
     m.seq = 3;
     for i in 0..200 {
@@ -7614,6 +7627,7 @@ async fn migrating_to_chunks_leaves_no_generation_objects_behind() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
     let mut sc = sidecar(&store, dir.path()).await;
+    sc.cfg.chunked = false; // start on the layout being migrated FROM
     sc.cfg.chunk_target = 8;
     sc.cfg.chunk_min = 2;
     sc.cfg.chunk_max = 32;

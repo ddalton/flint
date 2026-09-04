@@ -507,16 +507,65 @@ lcount() { mcx mc ls --recursive "m/s3bucket/$1" 2>/dev/null | grep -c . ; }
 # missing object, so the two sides of "seq unchanged" and "entry count
 # unchanged" agreed by both being zero — a pass earned by reading
 # nothing. S14's `n0 > 0` precondition is what caught it.
+#
+# Three layouts now, tried newest first: a CHUNK LIST (`.chunks`), one
+# generation object (`.entries_key`), and the pre-pointer single key.
+# A chunked pointer answers `null` for `entries_key`, so a resolver that
+# only knew the middle form would read "null" and fail the same silent
+# way — which is why each form is tested for POSITIVELY rather than by
+# falling through on empty.
 lmbody() {
-    local c k
+    local c k addrs a body all
     c=$(lobj "$1/.flint/lean/current")
     if [ -n "$c" ]; then
+        if printf '%s' "$c" | jq -e 'has("chunks")' >/dev/null 2>&1; then
+            addrs=$(printf '%s' "$c" | jq -r '.chunks[].addr')
+            all='{"entries":{}}'
+            for a in $addrs; do
+                body=$(lobj "$1/.flint/lean/chunks/$a")
+                # A chunk the pointer names and the bucket does not
+                # have is a HOLE, not an empty manifest. Fail — and SAY
+                # SO, because the callers map a failed resolve to 0 and
+                # an assertion downstream could otherwise pass while
+                # reading a short document. S14's `n0 > 0` precondition
+                # is the structural guard; this is so the log shows why.
+                if [ -z "$body" ]; then
+                    echo "  NOTE: pointer for $1 names chunk $a, which the bucket does not have" >&2
+                    return 1
+                fi
+                all=$(printf '%s\n%s' "$all" "$body" \
+                        | jq -s '{entries: (.[0].entries + .[1].entries)}')
+            done
+            printf '%s' "$all"
+            return
+        fi
         k=$(printf '%s' "$c" | jq -r '.entries_key // empty')
         [ -z "$k" ] && return 1
         lobj "$k"
         return
     fi
     lobj "$1/.flint/lean/manifest"
+}
+# Objects under the layout's entries prefix: chunks when chunked,
+# generations when not. S14 compares this across a takeover, and
+# counting the wrong prefix would compare 0 to 0.
+lgens()  {
+    if lptr "$1" 'has("chunks")' 2>/dev/null | grep -q true; then
+        mcx mc ls "m/s3bucket/$1/.flint/lean/chunks/" 2>/dev/null | grep -c .
+    else
+        mcx mc ls "m/s3bucket/$1/.flint/lean/manifests/" 2>/dev/null | grep -c .
+    fi
+}
+# The identity of the ENTRIES a pointer names, whichever layout it is
+# on: the sorted chunk address list, or the single generation key.
+# Chunks are CONTENT-ADDRESSED, so an unchanged list is proof the bytes
+# were not rewritten — a stronger statement than the etag comparison it
+# replaces, and one that needs no extra request.
+lments_id() {
+    local c
+    c=$(lobj "$1/.flint/lean/current")
+    [ -z "$c" ] && return 1
+    printf '%s' "$c" | jq -r 'if has("chunks") then ([.chunks[].addr] | sort | join(",")) else (.entries_key // "") end'
 }
 # The FENCING seq is the pointer's, not the generation's: a takeover
 # rotation bumps the pointer and leaves `entries_seq` alone, which is
@@ -545,7 +594,6 @@ lrenew() { lepoch "$1" .renewed_unix; }
 # `.flint/lean/current` is the only mutable metadata object; entries live
 # in write-once `.flint/lean/manifests/<seq>-<uuid>`.
 lptr()   { local c; c=$(lobj "$1/.flint/lean/current"); [ -z "$c" ] && return 1; printf '%s' "$c" | jq -r "$2"; }
-lgens()  { mcx mc ls "m/s3bucket/$1/.flint/lean/manifests/" 2>/dev/null | grep -c . ; }
 lstat()  { mcx mc stat --json "m/s3bucket/$1" 2>/dev/null | jq -r '.etag // empty'; }
 lmhas()  { local m; m=$(lmbody "$1"); [ -z "$m" ] && return 1; printf '%s' "$m" | jq -e --arg p "$2" '.entries | has($p)' >/dev/null; }
 
@@ -776,12 +824,22 @@ if wait_phase lean-agent Running 300; then
     # because the only way to invalidate a straggler's handle was to
     # rewrite the object it held. Under the pointer layout it must move
     # `current` and NOTHING else.
-    p_key0=$(lptr tenants/proj .entries_key); p_seq0=$(lptr tenants/proj .seq)
-    p_eseq0=$(lptr tenants/proj .entries_seq); p_n0=$(lgens tenants/proj)
-    p_etag0=$(lstat "tenants/proj/$(printf '%s' "$p_key0" | sed 's#^.*/\.flint#.flint#')")
-    [ -n "$p_key0" ] && [ "${p_n0:-0}" -ge 1 ] \
-        && ok "PRECONDITION: the workspace is on the pointer layout — seq $p_seq0 names $(basename "$p_key0"), $p_n0 generation object(s)" \
-        || bad "PRECONDITION: no .flint/lean/current for this workspace; the takeover measurement below has nothing to measure"
+    # `lments_id` is the identity of the ENTRIES the pointer names,
+    # whichever layout it is on: the sorted CHUNK ADDRESS LIST when
+    # chunked, the generation key when not. Chunks are content-addressed,
+    # so an unchanged list is proof the bytes were not rewritten — a
+    # stronger statement than the etag comparison this replaces, and one
+    # that costs no extra request.
+    #
+    # Reading `.entries_key` here was the trap: on a chunked pointer jq
+    # answers the STRING "null", so the before/after comparison below
+    # would have compared "null" to "null" and passed while reading
+    # nothing at all.
+    p_id0=$(lments_id tenants/proj); p_seq0=$(lptr tenants/proj .seq)
+    p_n0=$(lgens tenants/proj)
+    [ -n "$p_id0" ] && [ "$p_id0" != "null" ] && [ "${p_n0:-0}" -ge 1 ] \
+        && ok "PRECONDITION: the workspace is on the pointer layout — seq $p_seq0 over $p_n0 entries object(s)" \
+        || bad "PRECONDITION: no readable entries identity for this workspace (got '$p_id0', $p_n0 object(s)); the takeover measurement below has nothing to measure"
 
     t0=$(date +%s)
     $K apply -f lean-agent2.yaml >/dev/null
@@ -807,19 +865,21 @@ if wait_phase lean-agent Running 300; then
         note "epoch $e1 → $e2 across the takeover"
 
         # The measurement itself.
-        p_key1=$(lptr tenants/proj .entries_key); p_seq1=$(lptr tenants/proj .seq)
-        p_eseq1=$(lptr tenants/proj .entries_seq); p_n1=$(lgens tenants/proj)
-        p_etag1=$(lstat "tenants/proj/$(printf '%s' "$p_key1" | sed 's#^.*/\.flint#.flint#')")
+        p_id1=$(lments_id tenants/proj); p_seq1=$(lptr tenants/proj .seq)
+        p_n1=$(lgens tenants/proj)
         [ "${p_seq1:-0}" -gt "${p_seq0:-0}" ] \
             && ok "the pointer's seq moved across the takeover ($p_seq0 → $p_seq1) — a straggler's handle is stale" \
             || bad "the pointer's seq did not move ($p_seq0 → $p_seq1): nothing invalidated the straggler's handle"
-        [ "$p_key1" = "$p_key0" ] && [ "$p_eseq1" = "$p_eseq0" ] \
-            && ok "the takeover reused the STANDING generation ($(basename "$p_key0")) — entries_seq still $p_eseq0, so a follower can skip the fetch" \
-            || bad "the takeover repointed at a new generation ($(basename "$p_key0") → $(basename "$p_key1")): it rewrote the entries it was supposed to leave alone"
+        [ -n "$p_id1" ] && [ "$p_id1" = "$p_id0" ] \
+            && ok "the takeover reused the STANDING entries — the identity it names is unchanged, and chunks are content-addressed, so that IS byte-identity without a second request" \
+            || bad "the takeover repointed at different entries ('$p_id0' → '$p_id1'): it rewrote what it was supposed to leave alone, which is the multi-MB rotation this layout removed"
+        [ "${p_n1:-0}" = "${p_n0:-0}" ] \
+            && ok "no new entries object appeared across the takeover ($p_n1) — the rotation wrote the pointer and nothing else" \
+            || bad "the entries objects went $p_n0 → $p_n1 across a rotation that should have written only the pointer"
         [ -n "$p_etag0" ] && [ "$p_etag1" = "$p_etag0" ] \
             && ok "the generation object is byte-identical across the takeover (etag $p_etag0)" \
             || bad "the generation object changed across the takeover ('$p_etag0' → '$p_etag1') — the multi-MB rewrite is back"
-        note "generation objects: $p_n0 → $p_n1 (the reaper keeps a window of $((5 + 1)))"
+        note "entries objects: $p_n0 → $p_n1"
 
         # THE FENCE BITES. Wake the straggler: its next renew CASes
         # against an ETag the successor overwrote, gets a 412, and must
