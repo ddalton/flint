@@ -127,6 +127,18 @@ fn classify(status: u16, code: &str, msg: String) -> Option<StoreError> {
         (412, _) => StoreError::PreconditionFailed(msg),
         (409, "ConditionalRequestConflict") => StoreError::Conflict(msg),
         (_, "NoSuchUpload") => StoreError::NoSuchUpload(msg),
+        // A missing BUCKET is not a missing key, and folding it into
+        // NotFound was a data-integrity trap. `NotFound` means "this
+        // object does not exist yet", which every caller reads as
+        // FIRST WRITE: `manifest::load` answers `Ok(None)`, a lean
+        // checkout writes its completion marker over an empty tree, and
+        // the agent starts work against nothing — discovering only at
+        // its first publish that there was never a bucket to write to.
+        // A missing container means the configuration is wrong or the
+        // bucket was deleted, and the only safe answer is to fail.
+        // Measured on the kind rig: MinIO restarted, lost its bucket,
+        // and every lean workspace checked out "successfully" as empty.
+        (_, "NoSuchBucket") => StoreError::Other(format!("bucket does not exist: {msg}")),
         (404, _) | (_, "NoSuchKey") => StoreError::NotFound(msg),
         // 401/403 and their named codes. These used to fall through to
         // `Other`, where the epoch heartbeat counted them as ordinary
@@ -177,6 +189,13 @@ mod classify_tests {
         // in particular routes to arbitration rather than an operator.
         assert!(matches!(classify(412, "", m()), Some(StoreError::PreconditionFailed(_))));
         assert!(matches!(classify(404, "", m()), Some(StoreError::NotFound(_))));
+        // A missing BUCKET must never read as a missing key: NotFound
+        // means "first write" to every caller, and a lean checkout would
+        // start an agent against an empty tree it can never publish.
+        assert!(
+            matches!(classify(404, "NoSuchBucket", m()), Some(StoreError::Other(_))),
+            "NoSuchBucket classified as NotFound — a missing bucket would read as an empty workspace"
+        );
         assert!(matches!(classify(409, "ConditionalRequestConflict", m()), Some(StoreError::Conflict(_))));
         assert!(matches!(classify(400, "BadDigest", m()), Some(StoreError::ChecksumMismatch(_))));
 
