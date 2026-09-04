@@ -424,14 +424,33 @@ pub async fn full_pass(
                     // admits the node SA and the kubelet, nobody else), so
                     // "in a pod on this workspace" sent operators somewhere
                     // there is nothing to run (design §3.2).
+                    // Say what was OBSERVED, which is a lease that has
+                    // stopped advancing — not "no sidecar", which is an
+                    // inference this code cannot make. A syncer whose
+                    // credentials the store is refusing (401/403) is
+                    // alive, is serving its tenant, and cannot renew:
+                    // the renewal is the request being refused, so it
+                    // has no way to say so through the bucket (design
+                    // §6.3). Telling an operator the sidecar is gone
+                    // sends them to restart something that is running
+                    // fine, and away from the credential that expired.
+                    // The operator holds no `pods` RBAC, so it cannot
+                    // check — but it can decline to guess, and name the
+                    // gauge that answers it.
                     Some(format!(
-                        "{n} durable object(s) are staged and uncited with no live sidecar: \
-                         invisible to every manifest-resolving reader, including import, DR \
-                         checkout, GitOps re-apply and cross-cluster move. Run `flint-sync \
-                         recover-staged` in the worker pod serving this workspace \
-                         (`kubectl -n flint-workers exec <worker> -- flint-sync recover-staged`) \
-                         to re-cite them as one flagged boundary; with no worker running, \
-                         start a pod that mounts this workspace and re-run it there"
+                        "{n} durable object(s) are staged and uncited and this workspace's \
+                         lease has stopped advancing: invisible to every manifest-resolving \
+                         reader, including import, DR checkout, GitOps re-apply and \
+                         cross-cluster move. The holder may be GONE, or alive and unable to \
+                         renew — a 401/403 from the store pauses a syncer without stopping \
+                         it, and it cannot report that through the bucket. Check \
+                         `flint_lean_auth_paused_since_timestamp_seconds` (non-zero = \
+                         credentials refused since then) or `flint-sync status` on the worker \
+                         before concluding the sidecar died. To re-cite the objects as one \
+                         flagged boundary run `flint-sync recover-staged` in the worker pod \
+                         serving this workspace (`kubectl -n flint-workers exec <worker> -- \
+                         flint-sync recover-staged`); with no worker running, start a pod \
+                         that mounts this workspace and re-run it there"
                     ))
                 },
                 generation,

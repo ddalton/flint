@@ -139,8 +139,20 @@ async fn reconcile(ws: Arc<FlintLeanWorkspace>, ctx: Arc<Ctx>) -> Result<Action,
             &ws,
             kube::runtime::events::EventType::Warning,
             "UncitedWorkStranded",
+            // Same correction as the condition (reconcile.rs): what was
+            // observed is a lease that stopped advancing, not an absent
+            // sidecar. A credential-paused syncer is alive and cannot
+            // renew, because the renewal is the refused request.
+            //
+            // The runs of spaces here were a lost line continuation —
+            // the event text shipped with them in it.
             &format!(
-                "{n} durable object(s) are staged and uncited with no live sidecar — invisible                  to every manifest-resolving reader. Run `flint-sync recover-staged` on this                  workspace to re-cite them as one flagged boundary"
+                "{n} durable object(s) are staged and uncited and the lease has stopped \
+                 advancing — invisible to every manifest-resolving reader. The holder may be \
+                 gone, or alive and refused by the store (401/403), which pauses a syncer \
+                 without stopping it; check flint_lean_auth_paused_since_timestamp_seconds \
+                 first. Run `flint-sync recover-staged` on this workspace to re-cite them as \
+                 one flagged boundary"
             ),
         )
         .await;
