@@ -127,19 +127,31 @@ spec:
                 uid:
                   type: integer
                   description: >-
-                    Owner uid reported for every file in the mount.
-                    Defaults to the POD's securityContext.runAsUser,
-                    because a mount owned by root is one an
-                    unprivileged workload can read and cannot write —
-                    EACCES on the first create, which looks like a
-                    bucket policy problem. Set this only to override
-                    that.
+                    Owner uid reported for every file in the mount —
+                    ONE uid for the whole mount and for every process
+                    in the pod. There is no per-process or per-user
+                    view of it.
+
+                    THERE IS NO POD-DERIVED DEFAULT under the CSI
+                    delivery: NodePublishVolume never sees the pod's
+                    securityContext, so nothing can read runAsUser at
+                    mount time. Resolution is the volume's
+                    chert.us/uid attribute if set, else this field,
+                    else 65534.
+
+                    Set one of the two to the uid the workload runs
+                    as. A mount owned by a uid the workload does not
+                    have is one it can read and cannot write — EACCES
+                    on the first create, which looks like a bucket
+                    policy problem.
                   format: int64
                 gid:
                   type: integer
                   description: >-
-                    Owner gid. Defaults to the pod's
-                    securityContext.runAsGroup, same reasoning as uid.
+                    Owner gid, resolved the same way and with the same
+                    absence of a pod-derived default: the volume's
+                    chert.us/gid attribute if set, else this field,
+                    else whatever the uid resolved to.
                   format: int64
                 mountOptions:
                   type: array

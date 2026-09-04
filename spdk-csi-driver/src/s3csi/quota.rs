@@ -89,6 +89,23 @@ mod imp {
             },
         )?;
         chown_tree(tree, uid, gid)?;
+        // mkfs.ext4 leaves a root-owned `lost+found` (mode 0700) in the
+        // filesystem root. That root IS the tenant's workspace, and the
+        // syncer walks it as the app's uid: it hits a directory it
+        // cannot enter and every barrier dies `EACCES`, so nothing is
+        // ever published. Measured on the kind rig — a plain-directory
+        // tree never had this, and a leg that only WRITES into the
+        // workspace never walks it, so the quota's own leg missed it.
+        //
+        // Removing it is safe here: fsck recreates `lost+found` if it
+        // ever needs one, and this image lives and dies with one volume.
+        // It would also be an entry in the tenant's namespace that they
+        // did not create and cannot read.
+        if let Err(e) = std::fs::remove_dir(tree.join("lost+found")) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!("remove lost+found from {}: {e}", tree.display()));
+            }
+        }
         Ok(img)
     }
 

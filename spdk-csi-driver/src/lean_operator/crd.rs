@@ -101,7 +101,15 @@ pub struct FlintLeanWorkspaceSpec {
     #[serde(default = "default_fetch_inflight_mb")]
     pub fetch_inflight_mb: u64,
 
-    /// emptyDir sizeLimit for the workspace volume, GiB. 0 = no limit.
+    /// Ceiling on the workspace tree, GiB. 0 = no limit.
+    ///
+    /// Under the CSI delivery this is a sparse ext4 image loop-mounted
+    /// at the tree, so an overrun is ENOSPC in the app's own write; it
+    /// was an emptyDir sizeLimit under the webhooks, which is where the
+    /// name comes from. Sparse: it costs what is written, not what is
+    /// declared, so the ceilings on a node may sum to more than the
+    /// node's disk. It bounds one workspace's blast radius; it is not a
+    /// reservation.
     #[serde(default = "default_size_limit_gib")]
     pub size_limit_gib: u64,
 

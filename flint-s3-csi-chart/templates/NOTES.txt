@@ -87,9 +87,13 @@ stays unhealthy until the pod is recreated. Run S3-mounted workloads
 under a controller.
 
 THE MOUNT PRESENTS AS ONE UID. NodePublish never sees the pod's
-securityContext, so ownership is CR spec.uid, else chert.us/uid, else
-65534 — with nothing declared, files no longer present as root as they
-did under the webhook.
+securityContext, so nothing can default from runAsUser. Ownership is the
+volume's chert.us/uid attribute if set, ELSE the CR's spec.uid, else
+65534 — the ATTRIBUTE WINS over the CR. gid resolves the same way and
+defaults to whatever uid resolved to. With nothing declared, files no
+longer present as root as they did under the webhook. A lean workspace
+has no default: it refuses to publish without a uid, and refuses uid 0,
+because the syncer must run as the app's uid to read what the app wrote.
 {{- if not .Values.workers.admissionPolicy.enabled }}
 
 WARNING: workers.admissionPolicy.enabled is false. Nothing but RBAC
