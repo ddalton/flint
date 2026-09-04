@@ -211,6 +211,12 @@ pub struct LeanConfig {
     /// adding a second level. Not surfaced on the CRD — nothing has
     /// needed to tune it per workspace yet, and a knob with no caller
     /// is a support burden.
+    /// How long an unreferenced chunk must have sat before the reaper
+    /// may take it. Config rather than a constant because the model
+    /// makes it load-bearing in a workload-dependent way: it must
+    /// outlive the LONGEST publish, not the longest plausible one
+    /// (`LeanChunkGCRacyGrace`).
+    pub orphan_grace_secs: u64,
     pub chunk_target: usize,
     pub chunk_min: usize,
     pub chunk_max: usize,
@@ -272,6 +278,7 @@ impl LeanConfig {
             root: root.into(),
             floor_secs: 60,
             whole_put_max: WHOLE_PUT_MAX,
+            orphan_grace_secs: manifest::ORPHAN_GRACE_SECS,
             chunk_target: chunk::CHUNK_TARGET,
             chunk_min: chunk::CHUNK_MIN,
             chunk_max: chunk::CHUNK_MAX,

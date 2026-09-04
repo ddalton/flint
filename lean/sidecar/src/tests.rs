@@ -7235,3 +7235,300 @@ async fn a_reader_swept_mid_read_restarts_onto_the_current_generation() {
         }
     }
 }
+
+/// The chunk reaper, one arm per rule `LeanChunkGC.tla` established.
+///
+/// Each arm is the others' control: the SAME sweep over the SAME store,
+/// differing only in the one thing under test. A reaper that collected
+/// nothing would pass a "does not collect the live chunks" assertion,
+/// so the collecting arm runs first and its count is asserted non-zero.
+#[tokio::test]
+async fn the_chunk_reaper_takes_orphans_and_nothing_else() {
+    let inner = Arc::new(MemoryStore::new());
+    let store: Arc<dyn ObjectStore> = inner.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = cfg_for(dir.path());
+    cfg.chunk_target = 64;
+    cfg.chunk_min = 16;
+    cfg.chunk_max = 256;
+    cfg.orphan_grace_secs = 0; // everything is instantly past the grace
+
+    // Generation 1, then generation 2 that changes one file. Chunks the
+    // change did not touch are SHARED, and must survive.
+    let m1 = manifest_of(600, 1);
+    let meta1 = manifest::cas_write_chunked(store.as_ref(), &cfg, &m1, None, &[],
+        manifest::PublishStamps { epoch: 1, flush_uuid: "u1", boundary_source: None })
+        .await.unwrap();
+    let c1 = match manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap()
+        .pointer.entries().unwrap() {
+        super::manifest::Entries::Chunked(c) => c.to_vec(),
+        _ => panic!("not chunked"),
+    };
+    let mut m2 = m1.clone();
+    m2.seq = 2;
+    m2.entries.insert("src/f00003.txt".into(), entry_at("changed", 42));
+    let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false };
+    manifest::cas_write_chunked(store.as_ref(), &cfg, &m2, Some(&h), &c1,
+        manifest::PublishStamps { epoch: 1, flush_uuid: "u2", boundary_source: None })
+        .await.unwrap();
+    let live: Vec<String> = match manifest::load_pointer(store.as_ref(), &cfg).await.unwrap()
+        .unwrap().pointer.entries().unwrap() {
+        super::manifest::Entries::Chunked(c) => c.iter().map(|r| r.addr.clone()).collect(),
+        _ => panic!("not chunked"),
+    };
+    let orphans: Vec<&super::chunk::ChunkRef> =
+        c1.iter().filter(|r| !live.contains(&r.addr)).collect();
+    assert!(!orphans.is_empty(), "generation 2 superseded no chunk — nothing to reap");
+
+    // ARM 1: past the grace, unreferenced chunks go.
+    let n = manifest::sweep_chunks(store.as_ref(), &cfg).await.unwrap();
+    assert_eq!(n, orphans.len(), "the reaper took {n} chunks, expected {}", orphans.len());
+    for r in &orphans {
+        assert!(
+            store.head(&cfg.chunk_key(&r.addr)).await.is_err(),
+            "superseded chunk {} survived the sweep",
+            r.addr
+        );
+    }
+    // ARM 2 (the control that makes arm 1 mean something): every chunk
+    // the LIVE pointer names is still there, and the manifest still
+    // reads back whole.
+    for a in &live {
+        assert!(store.head(&cfg.chunk_key(a)).await.is_ok(), "the reaper took a LIVE chunk {a}");
+    }
+    let back = manifest::load(store.as_ref(), &cfg).await.unwrap().unwrap();
+    assert_eq!(back.manifest.entries, m2.entries, "the sweep left the manifest short");
+
+    // ARM 3: the grace. Publish again to make fresh orphans, then sweep
+    // with a real grace — nothing may go.
+    let meta2 = {
+        let lp = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap();
+        super::manifest::ManifestHandle { etag: lp.etag, legacy: false }
+    };
+    let mut m3 = m2.clone();
+    m3.seq = 3;
+    m3.entries.insert("src/f00300.txt".into(), entry_at("changed3", 43));
+    let c2: Vec<super::chunk::ChunkRef> = match manifest::load_pointer(store.as_ref(), &cfg)
+        .await.unwrap().unwrap().pointer.entries().unwrap() {
+        super::manifest::Entries::Chunked(c) => c.to_vec(),
+        _ => panic!("not chunked"),
+    };
+    manifest::cas_write_chunked(store.as_ref(), &cfg, &m3, Some(&meta2), &c2,
+        manifest::PublishStamps { epoch: 1, flush_uuid: "u3", boundary_source: None })
+        .await.unwrap();
+    let before = store.list(&format!("{}/{}/chunks/", cfg.prefix, super::LEAN_DIR)).await.unwrap().len();
+    cfg.orphan_grace_secs = 3600;
+    let n = manifest::sweep_chunks(store.as_ref(), &cfg).await.unwrap();
+    let after = store.list(&format!("{}/{}/chunks/", cfg.prefix, super::LEAN_DIR)).await.unwrap().len();
+    assert_eq!(n, 0, "the reaper took {n} chunks that were inside the grace");
+    assert_eq!(before, after, "the chunk count moved despite the grace");
+}
+
+/// The FENCE. A publish that lands between the reference read and the
+/// listing must abort the pass, because the reaper no longer knows
+/// whether the new pointer references a candidate. Without it the
+/// reference set predates a CAS the delete would follow, which is
+/// exactly `LeanChunkGCStaleRefs`.
+#[tokio::test]
+async fn the_chunk_reaper_aborts_when_a_publish_lands_under_it() {
+    let inner = Arc::new(MemoryStore::new());
+    let plain: Arc<dyn ObjectStore> = inner.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = cfg_for(dir.path());
+    cfg.chunk_target = 64;
+    cfg.chunk_min = 16;
+    cfg.chunk_max = 256;
+    cfg.orphan_grace_secs = 0;
+
+    let m1 = manifest_of(600, 1);
+    let meta1 = manifest::cas_write_chunked(plain.as_ref(), &cfg, &m1, None, &[],
+        manifest::PublishStamps { epoch: 1, flush_uuid: "u1", boundary_source: None })
+        .await.unwrap();
+    let c1 = match manifest::load_pointer(plain.as_ref(), &cfg).await.unwrap().unwrap()
+        .pointer.entries().unwrap() {
+        super::manifest::Entries::Chunked(c) => c.to_vec(),
+        _ => panic!("not chunked"),
+    };
+    let mut m2 = m1.clone();
+    m2.seq = 2;
+    m2.entries.insert("src/f00003.txt".into(), entry_at("changed", 42));
+    let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false };
+    manifest::cas_write_chunked(plain.as_ref(), &cfg, &m2, Some(&h), &c1,
+        manifest::PublishStamps { epoch: 1, flush_uuid: "u2", boundary_source: None })
+        .await.unwrap();
+
+    // Stage a THIRD pointer body, and install it from inside the store
+    // the moment the reaper lists — the interleaving a test cannot
+    // produce by calling store methods in order.
+    let lp2 = manifest::load_pointer(plain.as_ref(), &cfg).await.unwrap().unwrap();
+    let mut moved = lp2.pointer.clone();
+    moved.seq = 99;
+    let moved_bytes = serde_json::to_vec(&moved).unwrap();
+
+    let store: Arc<dyn ObjectStore> = Arc::new(PublishOnList {
+        inner: inner.clone(),
+        current_key: cfg.current_key(),
+        next_pointer: moved_bytes,
+        chunks_prefix: format!("{}/{}/chunks/", cfg.prefix, super::LEAN_DIR),
+        fired: std::sync::atomic::AtomicBool::new(false),
+    });
+
+    let before = plain.list(&format!("{}/{}/chunks/", cfg.prefix, super::LEAN_DIR)).await.unwrap().len();
+    let n = manifest::sweep_chunks(store.as_ref(), &cfg).await.unwrap();
+    let after = plain.list(&format!("{}/{}/chunks/", cfg.prefix, super::LEAN_DIR)).await.unwrap().len();
+    assert_eq!(n, 0, "the reaper deleted {n} chunks after a publish landed under it");
+    assert_eq!(before, after, "chunks disappeared across an aborted pass");
+}
+
+
+/// A backend that PUBLISHES the moment the reaper lists the chunk
+/// prefix: the pointer moves between the reference read and the
+/// listing, which is the interleaving the fence exists for and which no
+/// sequence of ordinary store calls from a test can produce.
+struct PublishOnList {
+    inner: Arc<MemoryStore>,
+    current_key: String,
+    next_pointer: Vec<u8>,
+    chunks_prefix: String,
+    fired: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for PublishOnList {
+    async fn put_whole(
+        &self,
+        key: &str,
+        body: Bytes,
+        cond: &PutCondition,
+        stamps: &GenerationStamps,
+        crc: u64,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.put_whole(key, body, cond, stamps, crc).await
+    }
+    async fn compose_generation(
+        &self,
+        spec: &flint_store::ComposeSpec<'_>,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.compose_generation(spec).await
+    }
+    async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head(key).await
+    }
+    async fn get_whole(
+        &self,
+        key: &str,
+        if_match: Option<&str>,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.inner.get_whole(key, if_match).await
+    }
+    async fn get_range(
+        &self,
+        key: &str,
+        off: u64,
+        len: u64,
+        if_match: &str,
+    ) -> flint_store::StoreResult<Bytes> {
+        self.inner.get_range(key, off, len, if_match).await
+    }
+    fn min_part_size(&self) -> u64 {
+        self.inner.min_part_size()
+    }
+    fn max_parts(&self) -> usize {
+        self.inner.max_parts()
+    }
+    async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
+        let out = self.inner.list(prefix).await;
+        if prefix == self.chunks_prefix
+            && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            let stamps = GenerationStamps {
+                generation: 99,
+                epoch: 1,
+                flush_uuid: "raced".into(),
+                boundary_source: None,
+                posix: None,
+            };
+            let crc = crc64_nvme(&self.next_pointer);
+            self.inner
+                .put_whole(
+                    &self.current_key,
+                    Bytes::from(self.next_pointer.clone()),
+                    &PutCondition::Unconditional,
+                    &stamps,
+                    crc,
+                )
+                .await?;
+        }
+        out
+    }
+    async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete(key).await
+    }
+    async fn head_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head_version(key, v).await
+    }
+    async fn get_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.inner.get_version(key, v).await
+    }
+    async fn delete_version(&self, key: &str, v: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete_version(key, v).await
+    }
+    async fn list_versions(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::ListedVersion>> {
+        self.inner.list_versions(prefix).await
+    }
+    async fn list_uploads(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::PendingUpload>> {
+        self.inner.list_uploads(prefix).await
+    }
+    async fn abort_upload(&self, key: &str, id: &str) -> flint_store::StoreResult<()> {
+        self.inner.abort_upload(key, id).await
+    }
+    async fn bootstrap(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<flint_store::BootstrapReport> {
+        self.inner.bootstrap(prefix).await
+    }
+    async fn epoch_read(
+        &self,
+        key: &str,
+    ) -> flint_store::StoreResult<Option<flint_store::EpochState>> {
+        self.inner.epoch_read(key).await
+    }
+    async fn epoch_acquire(
+        &self,
+        key: &str,
+        holder: &str,
+        observed: Option<&flint_store::EpochState>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.inner.epoch_acquire(key, holder, observed).await
+    }
+    async fn epoch_renew(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+        echo: Option<&str>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.inner.epoch_renew(key, lease, echo).await
+    }
+    async fn epoch_release(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+    ) -> flint_store::StoreResult<()> {
+        self.inner.epoch_release(key, lease).await
+    }
+}

@@ -770,6 +770,87 @@ pub async fn sweep_generations(store: &dyn ObjectStore, cfg: &LeanConfig) -> Lea
     Ok(removed)
 }
 
+/// Collect chunk objects that no live pointer references.
+///
+/// Built to `lean/formal/LeanChunkGC.tla`, which refuted the ordering
+/// rule the design originally prescribed. Four things carry the safety
+/// here and each has a mutation config that breaks it alone:
+///
+/// 1. **The reference set must not predate a CAS the delete follows.**
+///    S3 cannot make the read and the delete atomic, so this fences
+///    instead: the pointer's ETag is read before the listing and again
+///    after, and the pass ABORTS if it moved. A publish landed, and we
+///    no longer know whether it references a candidate.
+/// 2. **A grace.** A chunk written and not yet referenced would
+///    otherwise be collected out from under its own publish.
+/// 3. **The grace outlives the longest publish** — a timing
+///    assumption, which is why `orphan_grace_secs` is config and why
+///    this comment names it rather than leaving it implied.
+/// 4. **Adoption rewrites what it adopts** (`cas_write_chunked`), so
+///    any chunk a concurrent publish could reference is FRESH and the
+///    grace covers it. Without that rule an adopted orphan is old, and
+///    the age this reads is a lie about whether it is in use.
+///
+/// Deliberately no history window, unlike `sweep_generations`. That
+/// window existed partly so a reader mid-resolve could finish; readers
+/// now revalidate against the pointer and restart onto the current
+/// generation (§8.2), which removes the reason. Adding one back means
+/// retaining pointer SNAPSHOTS so their chunk sets are enumerable
+/// (§9) — chunks are shared, so "what the live pointer does not name"
+/// is the only reference set available without them.
+pub async fn sweep_chunks(store: &dyn ObjectStore, cfg: &LeanConfig) -> LeanResult<usize> {
+    let Some(before) = load_pointer(store, cfg).await? else {
+        return Ok(0);
+    };
+    let refs: std::collections::HashSet<String> = match before.pointer.entries()? {
+        Entries::Chunked(c) => c.iter().map(|r| r.addr.clone()).collect(),
+        // The single-object layout has no chunks; `sweep_generations`
+        // owns it, and running both over one workspace would have each
+        // reasoning about objects the other manages.
+        Entries::Single { .. } => return Ok(0),
+    };
+
+    let prefix = format!("{}/{}/chunks/", cfg.prefix, super::LEAN_DIR);
+    let listed = store.list(&prefix).await?;
+
+    // THE FENCE (rule 1). Nothing published across the reference read
+    // and the listing, so the candidates and the references describe
+    // the same moment. A publish that lands after this still cannot
+    // lose a chunk: everything it references is either already in
+    // `refs` or was just written or rewritten, and rule 4 guarantees
+    // the latter are fresh.
+    let after = load_pointer(store, cfg).await?;
+    if after.map(|p| p.etag) != Some(before.etag) {
+        return Ok(0);
+    }
+
+    let now = super::now_unix();
+    let mut removed = 0;
+    for o in listed {
+        let Some(addr) = o.key.rsplit('/').next() else { continue };
+        if refs.contains(addr) {
+            continue;
+        }
+        // No timestamp ⇒ leave it. A store that cannot date its objects
+        // gets a leak, not a deleted live chunk — the same rule
+        // `sweep_generations` follows, and for the same reason.
+        // `>=`, not `>`: the config value is a DURATION the object must
+        // have survived, so `orphan_grace_secs = 0` has to mean "no
+        // grace". With `>` it would silently mean "collect nothing
+        // written this second", which is most of them — a knob whose
+        // zero disables the thing it configures is a trap.
+        let age = o.last_modified_unix.map(|t| now.saturating_sub(t));
+        if !age.is_some_and(|a| a >= cfg.orphan_grace_secs) {
+            continue;
+        }
+        match store.delete(&o.key).await {
+            Ok(()) => removed += 1,
+            Err(e) => eprintln!("flint-sync: could not reap orphan chunk {}: {e}", o.key),
+        }
+    }
+    Ok(removed)
+}
+
 /// The three-way merge (the model's `inst`). Starts from THEIRS so
 /// foreign entries survive by construction; applies my upserts; applies
 /// my deletes only where theirs is unchanged since my merge base.
