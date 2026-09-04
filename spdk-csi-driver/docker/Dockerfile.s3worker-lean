@@ -26,7 +26,7 @@
 # THE SYNCER PIN COMES FROM THE BASE IMAGE (Dockerfile.sync.prebuilt:
 # alpine + ca-certificates + /usr/local/bin/flint-sync). Bump flint-sync
 # there, then rebuild this.
-ARG SYNC_IMAGE=dilipdalton/flint-sync:1.41.1
+ARG SYNC_IMAGE=dilipdalton/flint-sync:1.45.0
 FROM ${SYNC_IMAGE}
 
 ARG BIN_DIR=docker/prebuilt

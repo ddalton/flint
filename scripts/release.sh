@@ -289,15 +289,18 @@ EOF
     # existed and the binary inside it did not.
     #
     # Two images must exist: the operator image the chart names, and the
-    # SIDECAR image, which is the one a workspace pod actually runs —
-    # the webhook injects it, so an unpublished sidecar is a fleet of
-    # pods that never start, with the operator itself perfectly healthy.
+    # SYNCER image, which is the one a workspace pod actually runs. Since
+    # 1.45.0 no webhook injects it — the s3.csi.chert.us worker image is
+    # FROM flint-sync:<appVersion> (gated in the s3csi section below) —
+    # so the chart's values no longer name it (`sidecarImage` is gone;
+    # reading it crashed the 1.45.0 release gate mid-run). The syncer's
+    # tag is still this chart's appVersion, and still must be published.
     lean_dir="$repo_root/flint-lean-chart"
     if [ -d "$lean_dir" ] && in_scope "all lean"; then
         lean_version=$(python3 -c "import yaml; print(yaml.safe_load(open('$lean_dir/Chart.yaml'))['version'])")
         lean_app=$(python3 -c "import yaml; print(yaml.safe_load(open('$lean_dir/Chart.yaml'))['appVersion'])")
         lean_op_img=$(python3 -c "import yaml; print(yaml.safe_load(open('$lean_dir/values.yaml'))['image']['name'])")
-        lean_sc_img=$(python3 -c "import yaml; print(yaml.safe_load(open('$lean_dir/values.yaml'))['sidecarImage']['name'])")
+        lean_sc_img=flint-sync
         for img in "$lean_op_img" "$lean_sc_img"; do
             if ! tag_exists "$img" "$lean_app"; then
                 echo "REFUSING to push flint-lean $lean_version:" \

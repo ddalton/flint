@@ -107,12 +107,22 @@ for spec in "$@"; do
     # human scrolls past — and this log is where a release is read.
     bin_arg=""
     grep -q '^ARG BIN_DIR' "$dockerfile" && bin_arg="--build-arg BIN_DIR=docker/prebuilt"
+    # The two worker images are FROM another image of ours BY TAG, and
+    # the tag must be THIS release's. The Dockerfiles carry a default
+    # for the kind rig, and the 1.45.0 release built from those defaults
+    # — a 1.41.1 syncer inside a 1.45.0 lean worker — until the chart
+    # gate refused it. The release names its own bases, always.
+    base_arg=""
+    case "$name" in
+        flint-s3-worker)      base_arg="--build-arg MOUNTER_IMAGE=dilipdalton/flint-passthrough-mounter:$ver" ;;
+        flint-s3-worker-lean) base_arg="--build-arg SYNC_IMAGE=dilipdalton/flint-sync:$ver" ;;
+    esac
 
     for arch in amd64 arm64; do
         echo "--- build $arch ---"
-        # shellcheck disable=SC2086  # bin_arg is one flag or empty
+        # shellcheck disable=SC2086  # bin_arg/base_arg are flags or empty
         run docker build --platform "linux/$arch" \
-            -f "$dockerfile" $bin_arg \
+            -f "$dockerfile" $bin_arg $base_arg \
             -t "$repo:$ver-$arch" .
         run docker push "$repo:$ver-$arch"
     done

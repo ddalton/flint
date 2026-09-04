@@ -30,7 +30,7 @@
 # the mounter there, then rebuild this; never install a second copy
 # here. The base's shell and fusermount are unused by the worker but
 # harmless — this container holds no privilege for them to spend.
-ARG MOUNTER_IMAGE=dilipdalton/flint-passthrough-mounter:1.40.0
+ARG MOUNTER_IMAGE=dilipdalton/flint-passthrough-mounter:1.45.0
 FROM ${MOUNTER_IMAGE}
 
 ARG BIN_DIR=docker/prebuilt

@@ -12,6 +12,8 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.45.0] - 2026-09-04
+
 The passthrough and lean sidecar-injection webhooks are gone. Both
 front ends are delivered by one CSI node DaemonSet, `s3.csi.chert.us`. Every
 machine identifier moved off `flint.io` to `chert.us`.
@@ -48,6 +50,26 @@ machine identifier moved off `flint.io` to `chert.us`.
   Drill captures under `tests/chaos/artifacts/` keep the old identifiers
   on purpose; they are dated evidence, not current configuration. See
   `tests/chaos/README.md`.
+- **Lean manifests are chunked, on by default, and the pointer's wire
+  format changed shape (forward-only).** `.flint/lean/current` is now a
+  tagged union: either `entries_key` + `entries_seq` (one whole-manifest
+  generation) or `chunks` (a list of content-addressed chunk refs); a
+  document carrying both or neither is refused. A publish costs
+  O(changed) — a chunk whose address is already in the pointer is not
+  sent — and a small project is one chunk, so it pays what the single
+  generation already cost. A workspace migrates on its next barrier;
+  legacy layouts stay readable forever. **A pre-1.45.0 `flint-sync` or
+  gateway cannot read a pointer a 1.45.0 writer publishes** — the
+  migration is fail-closed by design, a one-way format decision per
+  workspace, not a tuning change; roll the readers before the writers.
+  Superseded chunks are reaped after every successful install, and the
+  reaper judges a candidate's age by a HEAD immediately before the
+  delete, never from the listing it started with (an adopted chunk is
+  refreshed, and a pre-fence listing cannot see the refresh). Known and
+  deliberate, unchanged by this release: the arbitration half of design
+  §6.3, no history window for chunks (needs pointer snapshots, §9), and
+  the gateway's HITL CAS not carrying `prev_chunks`. Design of record:
+  `docs/plans/flint-lean-chunked-manifest-design.md`.
 - **Drill leg S12** closes the lean gap the CSI cutover opened: the
   in-band publish verb, driven from the tenant pod. A tenant writes a
   nonce to `.flint/publish` in its own mount and the leg holds the ack
@@ -332,7 +354,13 @@ machine identifier moved off `flint.io` to `chert.us`.
   by `spec.nodeName`, not list order — on a two-node cluster
   `items[0]` was the control plane's, so S17 rolled one pod and read
   another. `scripts/nodesh.sh` no longer lets kubectl's `pod "…" deleted`
-  line into captured output. EC2 evidence (us-west-1, m6i.large spot,
+  line into captured output. The multi-cluster drill ran end to end for
+  the first time on EC2: its seed gate had demanded 11 objects of a
+  12-object seed since the file was written and exited before any leg
+  — fail-closed, so no kind multi-cluster number was ever produced,
+  right or wrong (MinIO lists twelve as well, measured) — and its
+  manifest resolver now reads the chunked layout. The kind multi path
+  is unproven end to end until it is run there. EC2 evidence (us-west-1, m6i.large spot,
   real S3): three single-cluster runs on s3a — 177 ok / 6 bad (every failure a kind assumption in the drill), 181 / 2 (S17's own vacuity guard, and the leaked dead mount above, found by SU), then 182 / 1 with the fix, the 1 being S17's guard exactly as on kind; and the multi-cluster drill 22 / 0 across s3a and s3b (M1–M3) once its seed count and manifest resolver matched a real bucket and the chunked layout.
 - **`s3.csi.chert.us`: four more from the same audit.** A lean worker
   that exited on its own (`Succeeded`: fenced) under a still-mounted
@@ -3711,7 +3739,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.35.1...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.45.0...HEAD
+[1.45.0]: https://github.com/ddalton/flint/compare/v1.44.0...v1.45.0
 [1.44.0]: https://github.com/ddalton/flint/compare/v1.43.0...v1.44.0
 [1.43.0]: https://github.com/ddalton/flint/compare/v1.42.0...v1.43.0
 [1.42.0]: https://github.com/ddalton/flint/compare/v1.41.1...v1.42.0

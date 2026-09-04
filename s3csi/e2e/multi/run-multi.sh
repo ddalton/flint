@@ -98,9 +98,12 @@ seed() {
     echo "deep-seeded" | mcx pipe "m/$BUCKET/datasets/imagenet/sub/deep.txt" >/dev/null
     echo "elsewhere-only" | mcx pipe "m/$BUCKET/elsewhere/only.txt" >/dev/null
     echo "must-not-be-visible" | mcx pipe "m/$BUCKET/private/secret.txt" >/dev/null
-    # 11 shards + sub/deep.txt = 12. The check used to say 11 — the shard
-    # count alone — and the kind rig's MinIO listing agreed with it; a
-    # real bucket lists the twelve the seed writes (EC2, 2026-09-04).
+    # 11 shards + sub/deep.txt = 12. The check said 11 — the shard count
+    # alone — from the day the file was written, and since it exits hard
+    # before a single leg, `setup` had NEVER completed on kind: the EC2
+    # run (2026-09-04) was the first time this rig got past its own seed
+    # gate. Fail-closed, not vacuous — no kind multi-cluster number was
+    # ever produced, wrong or right. MinIO lists twelve too (measured).
     n=$(lcount datasets/imagenet/)
     got=$(lobj datasets/imagenet/shard-05.txt)
     [ "$n" = "12" ] && [ "$got" = "seeded-object-05" ] || {

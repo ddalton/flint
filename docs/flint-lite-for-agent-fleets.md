@@ -39,7 +39,7 @@ Writing through the mount also works; see
 | Kubernetes | 1.25+, `kubectl` and `helm` |
 | On every node that will mount | an NFS client (`mount.nfs4`) — see [node prerequisite](#the-one-node-prerequisite) |
 | If more than one cluster mounts one hub | **globally unique hostnames across the fleet** — see [one hub, many clusters](#one-hub-many-clusters-give-every-client-a-unique-name) |
-| Images | `1.44.0` |
+| Images | `1.45.0` |
 | Chart | `flint-lite-operator` `0.2.12` |
 
 ## 1. Install the operator and the gateway
