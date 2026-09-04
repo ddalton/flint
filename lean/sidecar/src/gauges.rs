@@ -109,6 +109,22 @@ pub struct Gauges {
     pub forced_citation_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_boundary: Option<LastBoundary>,
+    /// Unix time of the first renewal the store refused with 401/403
+    /// (`StoreError::Auth`) since the last successful one — a
+    /// credential or broker fault, never contention and never a lease
+    /// conflict. `None` once a renewal succeeds.
+    ///
+    /// This is the ONLY liveness fact a credential-paused holder can
+    /// still record. The renewal that would carry it into the lease
+    /// echo is precisely the request that is failing, so the store
+    /// cannot be told; local evidence is all there is. Without it an
+    /// operator sees a lease going stale and a pod that is plainly
+    /// Running, and nothing that connects the two — the diagnosis
+    /// `StoreError::Auth` was split out of `Other` to make possible in
+    /// the first place (`flint-store/src/lib.rs`), stopping one layer
+    /// short of the binary that needed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_paused_since_unix: Option<u64>,
     /// Refreshed on EVERY tick, news or not: an idle-but-healthy
     /// workspace must be distinguishable from a dead one (the same
     /// heartbeat rule `remote.seq` carries).
@@ -155,6 +171,30 @@ impl Sidecar {
         let mut g = self.load_gauges()?;
         g.last_durable_unix = now_unix();
         self.save_gauges(&g)
+    }
+
+    /// Record that the store refused our credentials on a renewal.
+    /// First refusal wins: the gauge answers "since when", so a second
+    /// consecutive failure must not keep resetting the clock to now.
+    pub fn note_auth_pause(&self) -> LeanResult<()> {
+        let mut g = self.load_gauges()?;
+        if g.auth_paused_since_unix.is_none() {
+            g.auth_paused_since_unix = Some(now_unix());
+            self.save_gauges(&g)?;
+        }
+        Ok(())
+    }
+
+    /// Clear the pause. Writes only on an actual transition: this runs
+    /// on every successful renewal, and the healthy path must not
+    /// rewrite the file every heartbeat for no change.
+    pub fn clear_auth_pause(&self) -> LeanResult<()> {
+        let mut g = self.load_gauges()?;
+        if g.auth_paused_since_unix.is_some() {
+            g.auth_paused_since_unix = None;
+            self.save_gauges(&g)?;
+        }
+        Ok(())
     }
 
     fn save_gauges(&self, g: &Gauges) -> LeanResult<()> {
@@ -217,6 +257,12 @@ impl Sidecar {
             last_boundary: prev.last_boundary.clone(),
             updated_unix: now,
             last_durable_unix: prev.last_durable_unix,
+            // Carried, not recomputed: `write_gauges` is store-free by
+            // construction, so it cannot observe the credential state
+            // that set this. Dropping it here would erase the pause on
+            // the very next tick — the gauge would exist and always
+            // read `None`.
+            auth_paused_since_unix: prev.auth_paused_since_unix,
         };
         self.save_gauges(&g)?;
         Ok(g)

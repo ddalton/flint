@@ -164,6 +164,17 @@ fn series(g: &Gauges) -> Vec<(&'static str, &'static str, u64)> {
             g.last_boundary.as_ref().map(|b| b.unix).unwrap_or(0),
         ),
         (
+            "flint_lean_auth_paused_since_timestamp_seconds",
+            "unix time of the first renewal the store refused with 401/403 since the last \
+             successful one; 0 = not paused. A credential, token or clock fault — never \
+             contention and never a deposal, and retrying does not fix it. It is exported \
+             as a timestamp rather than a duration because a paused holder cannot renew, \
+             and a holder that cannot renew is what a challenger reads as DEAD: alert on \
+             time() - this > the takeover threshold, which is the window in which a live \
+             writer gets deposed (design 6.3)",
+            g.auth_paused_since_unix.unwrap_or(0),
+        ),
+        (
             "flint_lean_updated_timestamp_seconds",
             "unix time these gauges were last refreshed. Refreshed on EVERY tick, news or \
              not, so an idle-but-healthy workspace is distinguishable from a dead one",
@@ -204,6 +215,7 @@ pub const COVERED_FIELDS: &[&str] = &[
     "last_boundary",
     "updated_unix",
     "last_durable_unix",
+    "auth_paused_since_unix",
 ];
 
 /// What the sidecar recorded about its own exposition attempt. Written

@@ -4859,6 +4859,7 @@ fn every_gauges_field_reaches_exactly_one_metric() {
         }),
         updated_unix: 1_756_000_100,
         last_durable_unix: 1_756_000_050,
+        auth_paused_since_unix: Some(1_756_000_010),
     };
     let json = serde_json::to_value(&g).unwrap();
     let fields: Vec<String> = json.as_object().unwrap().keys().cloned().collect();
@@ -6373,4 +6374,245 @@ async fn a_rotation_reads_and_writes_no_generation_object() {
         1,
         "a rotation wrote a new generation object — it must reuse the standing one"
     );
+}
+
+
+/// A backend whose EPOCH RENEWAL can be switched to answer 401/403 while
+/// every other call keeps working — the §6.3 shape exactly: the broker
+/// or the token is gone, the bucket is fine, and the holder is alive.
+struct AuthRefusing {
+    inner: Arc<MemoryStore>,
+    refuse: std::sync::atomic::AtomicBool,
+}
+
+impl AuthRefusing {
+    fn new(inner: Arc<MemoryStore>) -> Self {
+        Self { inner, refuse: std::sync::atomic::AtomicBool::new(false) }
+    }
+    fn set_refuse(&self, v: bool) {
+        self.refuse.store(v, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for AuthRefusing {
+    async fn put_whole(
+        &self,
+        key: &str,
+        body: Bytes,
+        cond: &PutCondition,
+        stamps: &GenerationStamps,
+        crc: u64,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.put_whole(key, body, cond, stamps, crc).await
+    }
+    async fn compose_generation(
+        &self,
+        spec: &flint_store::ComposeSpec<'_>,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.compose_generation(spec).await
+    }
+    async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head(key).await
+    }
+    async fn get_whole(
+        &self,
+        key: &str,
+        if_match: Option<&str>,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.inner.get_whole(key, if_match).await
+    }
+    async fn get_range(
+        &self,
+        key: &str,
+        off: u64,
+        len: u64,
+        if_match: &str,
+    ) -> flint_store::StoreResult<Bytes> {
+        self.inner.get_range(key, off, len, if_match).await
+    }
+    fn min_part_size(&self) -> u64 {
+        self.inner.min_part_size()
+    }
+    fn max_parts(&self) -> usize {
+        self.inner.max_parts()
+    }
+    async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
+        self.inner.list(prefix).await
+    }
+    async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete(key).await
+    }
+    async fn head_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head_version(key, v).await
+    }
+    async fn get_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.inner.get_version(key, v).await
+    }
+    async fn delete_version(&self, key: &str, v: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete_version(key, v).await
+    }
+    async fn list_versions(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::ListedVersion>> {
+        self.inner.list_versions(prefix).await
+    }
+    async fn list_uploads(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::PendingUpload>> {
+        self.inner.list_uploads(prefix).await
+    }
+    async fn abort_upload(&self, key: &str, id: &str) -> flint_store::StoreResult<()> {
+        self.inner.abort_upload(key, id).await
+    }
+    async fn bootstrap(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<flint_store::BootstrapReport> {
+        self.inner.bootstrap(prefix).await
+    }
+    async fn epoch_read(
+        &self,
+        key: &str,
+    ) -> flint_store::StoreResult<Option<flint_store::EpochState>> {
+        self.inner.epoch_read(key).await
+    }
+    async fn epoch_acquire(
+        &self,
+        key: &str,
+        holder: &str,
+        observed: Option<&flint_store::EpochState>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.inner.epoch_acquire(key, holder, observed).await
+    }
+    async fn epoch_renew(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+        echo: Option<&str>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(flint_store::StoreError::Auth(
+                "ExpiredToken: the security token included in the request is expired".into(),
+            ));
+        }
+        self.inner.epoch_renew(key, lease, echo).await
+    }
+    async fn epoch_release(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+    ) -> flint_store::StoreResult<()> {
+        self.inner.epoch_release(key, lease).await
+    }
+}
+
+/// §6.3 — a credential refusal is not a fence and not contention, and
+/// the holder must record it LOCALLY. The renewal that would carry the
+/// fact into the lease echo is the very request being refused, so the
+/// store can never learn it; without a local record an operator sees a
+/// lease going stale next to a pod that is plainly Running, and nothing
+/// that connects the two.
+///
+/// The four things that can each go wrong independently: the refusal
+/// must not fence, must not drop the lease, must not slide its own
+/// clock on a second failure, and must survive an ordinary gauge tick.
+#[tokio::test]
+async fn a_refused_credential_pauses_the_holder_without_fencing_it() {
+    let inner = Arc::new(MemoryStore::new());
+    let proxy = Arc::new(AuthRefusing::new(inner.clone()));
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_for(dir.path());
+    let state = SidecarState::open(cfg.state_dir()).unwrap();
+    let mut a = Sidecar {
+        store: proxy.clone() as Arc<dyn ObjectStore>,
+        cfg,
+        state,
+        lease: None,
+        noted_not_regular: Default::default(),
+    };
+    assert!(claim_until_held(&mut a, 3).await);
+    assert!(
+        a.load_gauges().unwrap().auth_paused_since_unix.is_none(),
+        "a healthy holder started out reading as credential-paused"
+    );
+
+    proxy.set_refuse(true);
+    let e = lease::renew(&mut a).await.unwrap_err();
+    assert!(e.is_auth(), "a 403 renewal did not classify as a credential fault: {e}");
+    assert!(
+        !matches!(e, LeanError::Fenced(_)),
+        "a credential refusal self-fenced a live writer: {e}"
+    );
+    // A paused holder is still the holder: dropping the lease here
+    // would turn the next renewal into a fresh claim.
+    assert!(a.lease.is_some(), "the refusal dropped the lease");
+    assert!(
+        a.load_gauges().unwrap().auth_paused_since_unix.is_some(),
+        "the refusal left no local evidence at all"
+    );
+
+    // First refusal wins. Planted well in the past on purpose — two
+    // renewals inside one second would agree no matter what the code
+    // did, and would test nothing.
+    let gp = a.cfg.state_dir().join("gauges.json");
+    let mut g: serde_json::Value = serde_json::from_slice(&std::fs::read(&gp).unwrap()).unwrap();
+    g["auth_paused_since_unix"] = serde_json::json!(1_000_u64);
+    std::fs::write(&gp, serde_json::to_vec(&g).unwrap()).unwrap();
+    lease::renew(&mut a).await.unwrap_err();
+    assert_eq!(
+        a.load_gauges().unwrap().auth_paused_since_unix,
+        Some(1_000),
+        "a second refusal slid the pause clock forward, so the gauge no \
+         longer answers the question it exists to answer"
+    );
+
+    // The gauge tick is store-free by construction, so it cannot
+    // observe credentials. Recomputing this field instead of carrying
+    // it would erase the pause on the very next tick — the gauge would
+    // exist and always read None.
+    a.write_gauges(false, None).unwrap();
+    assert_eq!(
+        a.load_gauges().unwrap().auth_paused_since_unix,
+        Some(1_000),
+        "an ordinary gauge tick erased the credential pause"
+    );
+
+    // The renewal is the only scheduled probe of our own credentials,
+    // so it is also the only thing that can observe recovery.
+    proxy.set_refuse(false);
+    lease::renew(&mut a).await.expect("renew after the credentials came back");
+    assert!(
+        a.load_gauges().unwrap().auth_paused_since_unix.is_none(),
+        "the pause outlived the credentials being restored"
+    );
+}
+
+/// The predicate must read THROUGH the `#[from]` wrapper — that is the
+/// entire reason it is a predicate and not a `LeanError` variant. A
+/// variant would have to be constructed by hand at every `?` in the
+/// crate, and would be missed at the one site that mattered.
+#[test]
+fn is_auth_reads_through_the_from_conversion() {
+    fn via_question_mark() -> super::LeanResult<()> {
+        Err(flint_store::StoreError::Auth("ExpiredToken".into()))?;
+        Ok(())
+    }
+    assert!(via_question_mark().unwrap_err().is_auth());
+    assert!(!LeanError::State("x".into()).is_auth());
+    assert!(!LeanError::Fenced("x".into()).is_auth());
+    let other: LeanError = flint_store::StoreError::Other("boom".into()).into();
+    assert!(!other.is_auth(), "an ordinary store error read as a credential fault");
+    let pf: LeanError = flint_store::StoreError::PreconditionFailed("412".into()).into();
+    assert!(!pf.is_auth(), "a deposal read as a credential fault");
 }

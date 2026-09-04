@@ -159,11 +159,27 @@ pub async fn renew(sc: &mut Sidecar) -> LeanResult<()> {
     match sc.store.epoch_renew(&key, &lease, echo.as_deref()).await {
         Ok(l) => {
             sc.lease = Some(l);
+            // The renewal is the only scheduled probe of our own
+            // credentials, so it is also the only place a pause can be
+            // observed to have ENDED. Best-effort: a gauge that failed
+            // to write must not fail a renewal that succeeded.
+            let _ = sc.clear_auth_pause();
             Ok(())
         }
         Err(StoreError::PreconditionFailed(e)) => {
             sc.lease = None;
             Err(LeanError::Fenced(format!("deposed at renew: {e}")))
+        }
+        // 401/403 is not contention and not a bucket fault; retrying
+        // cannot fix it. We keep serving local files and keep trying —
+        // but the renewals we are now missing are exactly what a
+        // challenger reads as a dead holder, so record when the pause
+        // began while we still can. Nothing we write to the STORE can
+        // carry this: the request that would carry it is the one being
+        // refused (design §6.3).
+        Err(e @ StoreError::Auth(_)) => {
+            let _ = sc.note_auth_pause();
+            Err(e.into())
         }
         Err(e) => Err(e.into()),
     }

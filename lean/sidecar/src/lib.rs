@@ -110,6 +110,21 @@ pub enum LeanError {
     Budget(String),
 }
 
+impl LeanError {
+    /// The store refused our credentials (401/403, `ExpiredToken`,
+    /// `RequestTimeTooSkewed`): a broker, token or clock fault.
+    ///
+    /// A predicate rather than a `LeanError` variant on purpose.
+    /// `Store` is built by `#[from]`, so every `?` in the crate
+    /// constructs it implicitly; a variant would have to be produced by
+    /// hand at each of those sites and would be missed at exactly the
+    /// one that mattered. Reading through the wrapper cannot be
+    /// bypassed by a conversion nobody remembered to special-case.
+    pub fn is_auth(&self) -> bool {
+        matches!(self, LeanError::Store(flint_store::StoreError::Auth(_)))
+    }
+}
+
 pub type LeanResult<T> = Result<T, LeanError>;
 
 /// Citation policy (boundary-verbs plan D6). `hybrid` is the default:

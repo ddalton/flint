@@ -222,7 +222,7 @@ Deployment with replicas, `minAvailable: 1`, rendered only when
 `replicas > 1` — the textbook case, and a different question.
 
 **The drills.** `s3csi/e2e/run-s3csi.sh` — one kind cluster, MinIO in
-it, 20 legs (S1-S16, S18, S19, SU) including the lean arm.
+it, 21 legs (S1-S18, S19, SU) including the lean arm.
 `s3csi/e2e/multi/run-multi.sh` — TWO kind clusters and ONE MinIO
 running outside both, for the cross-cluster question: M1 passthrough
 (bytes written on one cluster read on the other, and a second prefix
@@ -1395,22 +1395,48 @@ mount-s3 returns per-operation errors (403 → `EACCES`/`EIO`) — the mount
 stays mounted, no `ENOTCONN`; `flint-store` classifies 401/403/
 `ExpiredToken` as `StoreError::Auth` (`crates/flint-store/src/s3.rs:131-143`
 — split out so the *hub's* heartbeat would stop fencing on it) but
-`flint-sync` does not distinguish it: the lean crate never matches
-`StoreError::Auth`/`LeanError::Auth`; the heartbeat and floor arms
-special-case only `Fenced` and retry every other error as "renew failed
-(retrying)" (`sentinel.rs:1064-1088`; `flint_sync.rs:498-501`), so
-publishes and renewals pause and local files keep serving. The cost is
-lease liveness: after `LEASE_DEAD_SECS` = 120 s without a renewal the
-operator's DR signature fires (`reconcile.rs:392-431`) and a replacement
-pod would take over after 6 quiet polls (`lease.rs:66,80-86`), deposing
-the live syncer at its next successful renew (`lease.rs:164-167`);
-`lease.rs:64-66` self-recognition runs only in `claim_step` — a running
-sidecar never re-claims. **Design gap, recorded 2026-09-02**: the
-outage tolerance is therefore the remaining key lifetime alone; either
-the syncer must be taught to surface `Auth` distinctly and the
-operator's DR signature must not depose an `Auth`-paused syncer, or a
-broker outage that outlives the keys by ~120 s + 6 polls costs a
-takeover of a live writer. The SA token itself is refreshed by
+`flint-sync` retries it: the heartbeat and floor arms special-case only
+`Fenced` and retry every other error (`sentinel.rs:1064-1088`;
+`flint_sync.rs:498-501`), so publishes and renewals pause and local
+files keep serving. Retrying is the RIGHT response — a 403 must not
+self-fence a live writer — and `renew` leaves the lease in hand
+(`lease.rs`), so recovery is a renewal, not a re-claim.
+
+**Half closed 2026-09-03 (the diagnosis half).** The refusal is now
+named rather than folded into "renew failed (retrying)":
+`LeanError::is_auth()` reads *through* the `#[from]` wrapper (a
+predicate, not a variant, so no implicit `?` conversion can bypass it);
+`renew` records `gauges.auth_paused_since_unix` on the first refusal and
+clears it on the first success; the serve arms log
+`REFUSED reason=auth arm=… paused_secs=…` naming the broker, the token
+and the node's clock; and `flint_lean_auth_paused_since_timestamp_seconds`
+exports it. The local record is the whole point: **the renewal that
+would carry this into the lease echo is precisely the request being
+refused**, so the store can never be told. Without it an operator sees a
+lease going stale beside a pod that is plainly `Running` and nothing
+that connects the two.
+
+**Still open: the arbitration half.** After `LEASE_DEAD_SECS` = 120 s
+without a renewal the DR signature fires (`reconcile.rs:392-431`, a
+CONDITION only — it does not itself depose) and a challenger takes over
+after 6 quiet polls (`lease.rs:66,80-86`), deposing the live syncer at
+its next successful renew (`lease.rs:164-167`); `lease.rs:64-66`
+self-recognition runs only in `claim_step`, so a running sidecar never
+re-claims. Narrower than it first reads: during a TOTAL broker outage
+the challenger cannot claim either — `claim_step` needs a credentialled
+CAS — and on shared recovery the incumbent renews on `min(floor,30) s`
+against the challenger's 60 s quiet window, so the incumbent wins. The
+exposure is the ASYMMETRIC outage: the incumbent's keys are refused
+while a challenger's are not (each mount holds its own SigV4 keys with
+its own `Expiration`). The cost there is bounded — `settle_fence` only
+refuses pendings and marks fenced, it never discards the staged tree or
+the uncited objects, so it is a takeover plus a manual
+`flint-sync recover-staged`, not data loss. Closing it means either
+making the challenger consult something outside the store (the holder
+pod's existence — a control-plane dependency A8 deliberately excludes,
+since the store's clock is the arbiter) or making its patience exceed
+the credential lifetime. **That is a protocol decision, not a bug fix,
+and it is deliberately not taken here.** The SA token itself is refreshed by
 kubelet from its own cache, independent of Knox (`token_manager.go:39-43`).
 What the operator sees: broker metric
 `flint_s3_broker_exchange_total{result="knox_unreachable"}` climbing;
@@ -1768,7 +1794,7 @@ MinIO (`passthrough/e2e/rig.yaml`; `lean/e2e/minio.yaml`) + a stub
 | S14 **(built 2026-09-03)** | lean holder identity, in two arms that are each other's control. A syncer killed over the SAME tree self-recognises: same `holder_id`, manifest `seq` UNCHANGED (rotation is for stragglers, not restarts), epoch still +1 so a straggler cannot publish under the old one. A pod REPLACEMENT after the holder is SIGSTOPped — frozen, so `renewed_unix` stands still and it never reaches `release` — claims under a NEW holder id, rotates the manifest, preserves every entry, and takes ≥ 50 s to do it (the quiet-poll floor; a successor that walked straight in would show the same holder change and the same bump). Then SIGCONT: the straggler's renew takes a 412 and it shuts down `Succeeded`/exit 0 — a fence is a clean shutdown order, not a crash loop — without reclaiming the cell | the epoch bumps on BOTH arms, so an assertion on the epoch alone passes either way. A worker cannot be force-deleted to fake an unclean death: the VAP admits DELETE only from the node SA, that node's kubelet and the kube-system GC (§3.6), and the first cut of this leg swallowed that refusal and measured a healthy pod |
 | S15 | two projects, one node: two workers, two distinct `AccessKeyId`s, no cross-visibility either way | delete one worker ⇒ only its tenant strands; the other keeps reading |
 | S16 **(built 2026-09-03; mechanism changed — see §0)** | termination ordering, with NO PodDisruptionBudget in the workers namespace (asserted, so one cannot creep back and pass this leg for the wrong reason): the worker's PriorityClass ranks strictly above its tenant's; an eviction of a live worker is **accepted** (not refused) and sets a `deletionTimestamp`, and the tenant still reads the same md5 ten seconds later — the `preStop` hook is holding the mount open; the worker then follows its tenant out; and a real `kubectl drain --ignore-daemonsets --delete-emptydir-data --force` completes with zero workers and zero orphaned mounts on the node | the eviction must be ACCEPTED, not refused — a leg that passed on a 429 would be proving the very budget this design removed. A worker whose hook never runs fails the read-after-eviction assertion with `ENOTCONN` |
-| S17 | plugin restart mid-checkout: checkout completes; the marker's mtime predates the new plugin's start | the M1 child-process variant restarts the checkout |
+| S17 **(built 2026-09-03)** | a node-plugin restart MID-CHECKOUT: the tenant still reaches Running with all 200 files, the syncer pod is the SAME object across the roll (uid unchanged), and the checkout marker's mtime PREDATES the new plugin's start — so the new plugin did not re-drive the work. The fixture is the same project mounted with `fanout: 1`, which serialises the fetch and makes the window wide enough to hit | the leg asserts, as a PRECONDITION, that the marker does not yet exist when the plugin is rolled — otherwise it proves only that a COMPLETED checkout survives a restart, which is not the claim. The M1 child-process variant fails the uid assertion by construction: a plugin that forks the syncer takes every checkout on the node down with it |
 | S18 **(built 2026-09-03; the ceiling was NOT enforced until this)** | `sizeLimitGib` is a sparse ext4 image loop-mounted at the tree (`s3csi/quota.rs`), so the tree is its own filesystem of the declared size, a tenant's own write past it is `ENOSPC`, and the image is removed with the volume rather than leaked per publish | ENOSPC alone proves NOTHING — a node whose root disk is full answers the same way. A `sizeLimitGib: 0` sibling is the control: it sees the NODE's filesystem and still writes happily while the bounded one is full. Before this the field described nothing at all: `tree_image` was `None` at every site and the tree was a plain directory on the node's root disk |
 | S19 | RBAC: `kubectl auth can-i --as=system:serviceaccount:flint-system:flint-s3-csi-node` cannot `get secrets` in any namespace, cannot `create pods` outside `flint-workers`; a `delete` of a worker whose `spec.nodeName` is another node is refused by the VAP node-name rule (§3.6) **[graft: security]** | can `create pods` in `flint-workers`; can delete its own node's worker |
 | S20 | coexistence: a pod carrying both the label and the `csi:` volume is refused by the webhook naming both; the plugin refuses a pod already carrying `flint-sync` | label-only pod still injected; volume-only pod still mounted |
