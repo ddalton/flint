@@ -14,6 +14,29 @@ covered by the stability guarantee.
 
 ### Added
 
+- **flint forge, phase 1: the per-repo syncer** (`forge/syncer`, the
+  `flint-forge` crate; design of record
+  `docs/plans/flint-forge-design.md`). A git server per repository with
+  S3 behind it: agents are stock git clients, the server is real git,
+  and this crate is the one process that stands between the repository
+  on local disk and the bucket. Not wired into any image or chart yet.
+  `receive-pack` serialises nothing between pushes, and under
+  `receive.procReceiveRefs` git performs no old-oid check and no
+  `denyNonFastForwards` for the handed-off commands, so the hook
+  decides nothing and relays: the syncer batches the pushes that arrive
+  together, judges each command against both the local ref and the
+  last-synced snapshot AND the batch's own running view, runs
+  `refs/for/*` merges and packs the loose objects they create, renews
+  the lease once, uploads the packs, CASes the snapshot once, applies
+  one `update-ref` transaction, and only then reports. A snapshot 412
+  under the writer lock can only be a second server, so it fences —
+  reads included. The lease heartbeats on a timer, adopts its own lost
+  renew response rather than fencing on it, and a successor rotates the
+  snapshot before serving. Restore re-reads once before believing a
+  pack is missing and refuses to serve a repository it cannot `fsck`.
+  27 tests, including four that run a real `git push` through the real
+  `proc-receive` hook.
+
 - **`s3.csi.chert.us`: the passthrough suite on real nodes**
   (`s3csi/e2e/aws-passthrough.sh`, fourteen legs). On an all-spot EC2
   cluster against three real buckets (plain, SSE-KMS by bucket default,

@@ -1,8 +1,12 @@
 # flint forge — a git server with S3 behind it: design of record
 
-Status: **DESIGN — no code.** Written 2026-09-04; **revised the same day
-after a 15-agent review** (five lenses, one refuter per significant
-finding; record in §16). Working name "flint forge" (the user's earlier
+Status: **PHASE 1 LANDED** (`forge/syncer`, the `flint-forge` crate:
+the syncer, the `proc-receive` relay, restore, the sweep and `/status`,
+with a battery that includes real `git push` through the real hook).
+Everything else below is still design. Written 2026-09-04; **revised
+the same day after a 15-agent review** (five lenses, one refuter per
+significant finding; record in §16), and §14 records what phase 1
+actually built against what it planned. Working name "flint forge" (the user's earlier
 name was "flint-git"; the name is the user's call, §15). A fourth front
 end, sibling to lite, lean and passthrough, and deliberately NOT lean's
 branching design (`flint-lean-branching-design.md`), which stands as
@@ -550,11 +554,34 @@ slow in ways that matter for a fleet. Phase 0 runs it as the control.
    durability, batch size under load, restore time, on this
    repository. The product decision is made on (b) beating (a) where
    it matters.
-1. **The syncer and the server pod.** Lock, batching, the old-oid
-   check, lease heartbeat and self-fence, rotation, upload, CAS,
-   transaction-then-report, derived files, restore, repack ownership,
-   sweep, `/status`; `ForgeSync.tla` in the lean formal gate; the lean
-   suite pattern against MinIO; falsifiers 1–5, 10, 11.
+1. **The syncer and the server pod.** — **BUILT** in
+   `forge/syncer` (crate `flint-forge`), 27 tests green, clippy clean:
+   the batch of §4 in `batch.rs` (staleness against both the local ref
+   and the snapshot AND against the batch's own running view, the
+   fast-forward test git no longer performs, `refs/for/*` merges with
+   `-o strategy=`, the packing of server-created objects, one renew,
+   one CAS, one `update-ref` transaction, then the reports); the lease
+   with the heartbeat, the lost-response rule and the takeover rotation
+   (`lease.rs`, `snapshot.rs`); restore with the revalidate-once rule
+   and `fsck` (`restore.rs`); syncer-owned repack and the four-rule
+   sweep (`sweep.rs`); `/status` in `hubstatus`'s shape (`status.rs`);
+   the `proc-receive` relay and its pkt-line (`bin/flint_forge_hook.rs`,
+   `pktline.rs`). Falsifiers 1–5 and 10 are decided in the battery
+   against the memory store; 11 (S3 outage) and the cluster-scale legs
+   are not. **Still to do in this phase:** `ForgeSync.tla` in the lean
+   formal gate, and the suite against MinIO rather than the double.
+
+   Three defects the tests found, each of which the unit battery alone
+   would have missed: the git-floor check ran `git -C <repo>` before
+   the repository existed, so a fresh server exited before creating the
+   directory it complained about; a merge with no `REMOTE_USER` — a
+   deployment without a door — hit git's "empty ident name" and
+   surfaced at the client as a git internal error; and a git failure
+   while judging ONE command propagated as fatal, taking the
+   repository server down and failing every other push in the batch.
+   All three were found by the end-to-end `git push` test and none by
+   the 23 unit tests, which is the design's own rule about a wire
+   feature having three parties.
 2. **The door and the policy.** `Door::Git` in the lite gateway:
    Basic → cached `TokenReview`, `Consumers`, three streaming routes
    with chunked bodies both ways (the lite upload route's

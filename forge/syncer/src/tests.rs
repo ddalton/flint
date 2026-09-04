@@ -1,0 +1,830 @@
+//! The battery. Every test here is an instantiation of a rule the
+//! design records a measurement or a mutation for, and several of them
+//! are the falsifiers of §13 run against the memory store rather than
+//! against a cluster: the cluster legs prove the same properties at
+//! fleet scale, but the property itself is decided here, where a
+//! control can be run in a second.
+//!
+//! The fixture drives real `git` against a real bare repository. A
+//! test double for git would have been a test of the double: every
+//! defect the review found in the first draft was a fact about git's
+//! actual behaviour, not about a model of it.
+
+use std::sync::Arc;
+
+use flint_store::memory::MemoryStore;
+use flint_store::ObjectStore;
+
+use super::batch::{self, CommandResult, Policy, PushRequest};
+use super::gitcmd::RefUpdate;
+use super::{lease, restore, snapshot, status, sweep, ForgeConfig, ForgeError, Syncer};
+
+const PREFIX: &str = "tenant/repo";
+
+struct Rig {
+    _dir: tempfile::TempDir,
+    store: Arc<MemoryStore>,
+    sc: Syncer,
+}
+
+impl Rig {
+    async fn new() -> Rig {
+        Rig::with_store(Arc::new(MemoryStore::new()), "a").await
+    }
+
+    async fn with_store(store: Arc<MemoryStore>, who: &str) -> Rig {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo.git");
+        let cfg = ForgeConfig::new(PREFIX, &repo);
+        let sc = Syncer::new(
+            store.clone() as Arc<dyn ObjectStore>,
+            cfg,
+            format!("forge-test-{who}"),
+        );
+        let rig = Rig { _dir: dir, store, sc };
+        rig.sc.git.init_bare("main").await.expect("init");
+        rig
+    }
+
+    /// Claim the lease and restore, as start-up does.
+    async fn start(&mut self) {
+        for _ in 0..16 {
+            match lease::claim_step(&mut self.sc).await.expect("claim") {
+                lease::ClaimOutcome::Claimed(_) => break,
+                lease::ClaimOutcome::Waiting { .. } => continue,
+            }
+        }
+        assert!(self.sc.lease.is_some(), "the rig must hold the lease");
+        restore::restore(&mut self.sc).await.expect("restore");
+    }
+
+    async fn git(&self, args: &[&str], stdin: Option<&[u8]>) -> String {
+        self.sc.git.must(args, stdin).await.expect("git")
+    }
+
+    /// Build a commit in the bare repository and pack it, which is
+    /// what `receive-pack` leaves behind for a push
+    /// (`receive.unpackLimit = 1` makes every push a pack).
+    async fn stage_commit(
+        &self,
+        parent: Option<&str>,
+        files: &[(&str, &str)],
+        message: &str,
+    ) -> String {
+        let mut tree_spec = String::new();
+        for (name, content) in files {
+            let blob = self
+                .git(&["hash-object", "-w", "--stdin"], Some(content.as_bytes()))
+                .await
+                .trim()
+                .to_string();
+            tree_spec.push_str(&format!("100644 blob {blob}\t{name}\n"));
+        }
+        let tree = self.git(&["mktree"], Some(tree_spec.as_bytes())).await.trim().to_string();
+        let parents: Vec<String> = parent.map(|p| p.to_string()).into_iter().collect();
+        let commit = self
+            .sc
+            .git
+            .commit_tree(&tree, &parents, message, "tester")
+            .await
+            .expect("commit-tree");
+        // Pack it exactly as a push would arrive.
+        let refs = self.sc.git.refs().await.expect("refs");
+        let excludes: Vec<String> = refs.values().cloned().collect();
+        self.sc
+            .git
+            .pack_new_objects(std::slice::from_ref(&commit), &excludes)
+            .await
+            .expect("pack-objects");
+        commit
+    }
+
+    async fn run(&mut self, pushes: Vec<PushRequest>) -> Vec<batch::PushReport> {
+        batch::run_batch(&mut self.sc, pushes, &Policy::default()).await.expect("batch")
+    }
+}
+
+/// A push as a hook would hand it over. A free function, not a method
+/// on the rig, so a test can build one while the rig is borrowed for
+/// the batch it is about to run.
+fn push(id: u64, cmds: Vec<RefUpdate>) -> PushRequest {
+    PushRequest { id, principal: "tester".into(), options: vec![], commands: cmds }
+}
+
+fn zero() -> String {
+    "0".repeat(40)
+}
+
+fn is_ok(r: &CommandResult) -> bool {
+    matches!(r, CommandResult::Ok { .. })
+}
+
+fn ng_reason(r: &CommandResult) -> String {
+    match r {
+        CommandResult::Ng { reason, .. } => reason.clone(),
+        other => panic!("expected ng, got {other:?}"),
+    }
+}
+
+// ── the acknowledgement rule ─────────────────────────────────────────
+
+/// Falsifier 1, decided here: what a push acknowledges, the bucket
+/// already holds. The control is the shape the first draft would have
+/// shipped — sync after the report — and it is not reachable in this
+/// code at all, which is the point of doing the CAS before the ref
+/// transaction rather than after it.
+#[tokio::test]
+async fn an_acknowledged_push_is_in_the_bucket_before_the_ref_moves() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    let reports = rig
+        .run(vec![push(1, vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: zero(),
+            new_oid: c.clone(),
+        }])])
+        .await;
+    assert!(is_ok(&reports[0].results[0]), "{:?}", reports[0].results[0]);
+
+    let cell = snapshot::load(rig.store.as_ref(), &rig.sc.cfg).await.expect("snapshot");
+    assert_eq!(cell.snap.oid("refs/heads/main"), Some(c.as_str()));
+    assert!(!cell.snap.packs.is_empty(), "the pack must be named by the snapshot");
+    for pack in &cell.snap.packs {
+        rig.store.head(&rig.sc.cfg.pack_key(pack)).await.expect("the pack must be in the bucket");
+    }
+    assert_eq!(rig.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(c));
+}
+
+/// Falsifier 5: the bucket alone rebuilds the repository. A fresh
+/// directory, the same store, no local cache at all.
+#[tokio::test]
+async fn a_cold_restore_reproduces_the_refs_and_passes_fsck() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c1 = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: c1.clone(),
+    }])])
+    .await;
+    let c2 = rig.stage_commit(Some(&c1), &[("a.txt", "two\n")], "second").await;
+    rig.run(vec![push(2, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: c1.clone(),
+        new_oid: c2.clone(),
+    }])])
+    .await;
+
+    let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
+    restore::restore(&mut cold.sc).await.expect("cold restore");
+    assert_eq!(cold.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(c2));
+    cold.sc.git.fsck_connectivity().await.expect("a restored repository must be whole");
+}
+
+/// A snapshot naming a pack the bucket does not hold is refused, not
+/// served. Half a repository serves clones that succeed and check out
+/// nothing.
+#[tokio::test]
+async fn a_snapshot_naming_a_missing_pack_refuses_to_serve() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: c,
+    }])])
+    .await;
+    let packs = rig.sc.cell().unwrap().snap.packs.clone();
+    for p in &packs {
+        rig.store.delete(&rig.sc.cfg.pack_key(p)).await.unwrap();
+    }
+    let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
+    match restore::restore(&mut cold.sc).await {
+        Err(ForgeError::Refused(m)) => assert!(m.contains("does not hold"), "{m}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+// ── step 2: staleness, in a batch ────────────────────────────────────
+
+/// Falsifier 2. Both pushes name the same old-oid and arrive in ONE
+/// batch, which is the case a check against the collection-time view
+/// gets wrong: it would tell both clients `ok` and keep one.
+#[tokio::test]
+async fn two_pushes_to_one_ref_in_one_batch_and_exactly_one_wins() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let base = rig.stage_commit(None, &[("a.txt", "base\n")], "base").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: base.clone(),
+    }])])
+    .await;
+
+    let n1 = rig.stage_commit(Some(&base), &[("a.txt", "one\n")], "one").await;
+    let n2 = rig.stage_commit(Some(&base), &[("a.txt", "two\n")], "two").await;
+    let reports = rig
+        .run(vec![
+            push(1, vec![RefUpdate {
+                name: "refs/heads/main".into(),
+                old_oid: base.clone(),
+                new_oid: n1.clone(),
+            }]),
+            push(2, vec![RefUpdate {
+                name: "refs/heads/main".into(),
+                old_oid: base.clone(),
+                new_oid: n2.clone(),
+            }]),
+        ])
+        .await;
+    assert!(is_ok(&reports[0].results[0]), "the first push wins");
+    assert_eq!(ng_reason(&reports[1].results[0]), "stale info: fetch first");
+
+    let cell = snapshot::load(rig.store.as_ref(), &rig.sc.cfg).await.unwrap();
+    assert_eq!(cell.snap.oid("refs/heads/main"), Some(n1.as_str()));
+    assert_eq!(rig.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(n1));
+}
+
+/// The snapshot's half of the staleness test. The local ref agrees
+/// with the push and the BUCKET does not: a syncer that checked only
+/// the local ref would accept it.
+#[tokio::test]
+async fn a_push_that_matches_the_local_ref_but_not_the_bucket_is_refused() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let base = rig.stage_commit(None, &[("a.txt", "base\n")], "base").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: base.clone(),
+    }])])
+    .await;
+
+    // The bucket moved on without us — the shape a lost CAS leaves.
+    let mut cell = rig.sc.cell().unwrap().clone();
+    let other = rig.stage_commit(Some(&base), &[("a.txt", "elsewhere\n")], "elsewhere").await;
+    let mut next = cell.snap.clone();
+    next.refs.insert("refs/heads/main".into(), other);
+    let writer = rig.sc.holder_id.clone();
+    cell = snapshot::cas(rig.store.as_ref(), &rig.sc.cfg, &cell, next, 1, &writer).await.unwrap();
+    // The syncer still believes what it last read, but re-reads the
+    // snapshot's refs at batch time through its own cell — so plant
+    // the disagreement in the cell the way a restart would find it.
+    rig.sc.cell = Some(cell);
+
+    let n = rig.stage_commit(Some(&base), &[("a.txt", "mine\n")], "mine").await;
+    let reports = rig
+        .run(vec![push(9, vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: base,
+            new_oid: n,
+        }])])
+        .await;
+    let why = ng_reason(&reports[0].results[0]);
+    assert!(why.contains("differs between this server and the bucket"), "{why}");
+}
+
+#[tokio::test]
+async fn a_non_fast_forward_is_refused_unless_the_policy_allows_it() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let base = rig.stage_commit(None, &[("a.txt", "base\n")], "base").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: base.clone(),
+    }])])
+    .await;
+    let sideways = rig.stage_commit(None, &[("a.txt", "unrelated\n")], "unrelated").await;
+    let cmd = RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: base.clone(),
+        new_oid: sideways.clone(),
+    };
+
+    let reports = rig.run(vec![push(1, vec![cmd.clone()])]).await;
+    assert!(ng_reason(&reports[0].results[0]).contains("non-fast-forward"));
+
+    let policy = Policy {
+        protected: vec![],
+        allow_non_fast_forward: vec!["refs/heads/*".into()],
+    };
+    let reports = batch::run_batch(&mut rig.sc, vec![push(2, vec![cmd])], &policy)
+        .await
+        .expect("batch");
+    assert!(is_ok(&reports[0].results[0]), "{:?}", reports[0].results[0]);
+    assert_eq!(rig.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(sideways));
+}
+
+/// Falsifier 6's direct-push half.
+#[tokio::test]
+async fn a_protected_ref_refuses_a_direct_push() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let base = rig.stage_commit(None, &[("a.txt", "base\n")], "base").await;
+    let policy = Policy { protected: vec!["refs/heads/main".into()], ..Policy::default() };
+    let reports = batch::run_batch(
+        &mut rig.sc,
+        vec![push(1, vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: zero(),
+            new_oid: base,
+        }])],
+        &policy,
+    )
+    .await
+    .expect("batch");
+    assert!(ng_reason(&reports[0].results[0]).contains("protected"));
+    assert!(rig.sc.git.ref_oid("refs/heads/main").await.unwrap().is_none());
+}
+
+// ── merge is a push ──────────────────────────────────────────────────
+
+/// Falsifier 3. A `refs/for/main` push merges, the target moves, and
+/// the objects the SERVER created are in a pack the bucket holds — the
+/// control is skipping that packing, after which the cold restore
+/// cannot find the merge commit at all.
+#[tokio::test]
+async fn a_refs_for_push_merges_and_the_merge_survives_a_cold_restore() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let base = rig.stage_commit(None, &[("a.txt", "base\n"), ("b.txt", "b\n")], "base").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: base.clone(),
+    }])])
+    .await;
+    // main moves…
+    let main2 = rig.stage_commit(Some(&base), &[("a.txt", "main\n"), ("b.txt", "b\n")], "on main").await;
+    rig.run(vec![push(2, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: base.clone(),
+        new_oid: main2.clone(),
+    }])])
+    .await;
+    // …and an agent branched from the old base and touched another file.
+    let side = rig.stage_commit(Some(&base), &[("a.txt", "base\n"), ("b.txt", "side\n")], "on side").await;
+
+    let reports = rig
+        .run(vec![push(3, vec![RefUpdate {
+            name: "refs/for/main".into(),
+            old_oid: zero(),
+            new_oid: side.clone(),
+        }])])
+        .await;
+    let merged = match &reports[0].results[0] {
+        CommandResult::Ok { alt_ref, new_oid, .. } => {
+            assert_eq!(alt_ref.as_deref(), Some("refs/heads/main"));
+            new_oid.clone().expect("the merge names a commit")
+        }
+        other => panic!("expected a merge, got {other:?}"),
+    };
+    assert_ne!(merged, main2, "a real merge commit, not a fast-forward");
+    assert_eq!(rig.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(merged.clone()));
+    assert!(
+        rig.sc.git.ref_oid("refs/for/main").await.unwrap().is_none(),
+        "refs/for is a request, never a ref"
+    );
+
+    let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
+    restore::restore(&mut cold.sc).await.expect("cold restore");
+    assert_eq!(cold.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(merged));
+    cold.sc.git.fsck_connectivity().await.expect("the merge must be in the bucket");
+}
+
+#[tokio::test]
+async fn a_conflicting_merge_moves_no_ref_and_names_the_paths() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let base = rig.stage_commit(None, &[("a.txt", "base\n")], "base").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: base.clone(),
+    }])])
+    .await;
+    let main2 = rig.stage_commit(Some(&base), &[("a.txt", "main side\n")], "main").await;
+    rig.run(vec![push(2, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: base.clone(),
+        new_oid: main2.clone(),
+    }])])
+    .await;
+    let side = rig.stage_commit(Some(&base), &[("a.txt", "agent side\n")], "agent").await;
+
+    let reports = rig
+        .run(vec![push(3, vec![RefUpdate {
+            name: "refs/for/main".into(),
+            old_oid: zero(),
+            new_oid: side,
+        }])])
+        .await;
+    let why = ng_reason(&reports[0].results[0]);
+    assert!(why.starts_with("conflict:"), "{why}");
+    assert!(why.contains("a.txt"), "{why}");
+    assert_eq!(rig.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(main2));
+}
+
+#[tokio::test]
+async fn a_refs_for_push_that_fast_forwards_moves_the_target_with_no_merge_commit() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let base = rig.stage_commit(None, &[("a.txt", "base\n")], "base").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: base.clone(),
+    }])])
+    .await;
+    let ahead = rig.stage_commit(Some(&base), &[("a.txt", "ahead\n")], "ahead").await;
+    let reports = rig
+        .run(vec![push(2, vec![RefUpdate {
+            name: "refs/for/main".into(),
+            old_oid: zero(),
+            new_oid: ahead.clone(),
+        }])])
+        .await;
+    match &reports[0].results[0] {
+        CommandResult::Ok { new_oid, .. } => assert_eq!(new_oid.as_deref(), Some(ahead.as_str())),
+        other => panic!("expected a fast-forward, got {other:?}"),
+    }
+}
+
+/// `-o strategy=theirs` reaches `merge-tree -Xtheirs`, and a value the
+/// client invents does not reach git at all.
+#[tokio::test]
+async fn a_push_option_selects_the_strategy_and_an_invented_one_is_ignored() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let base = rig.stage_commit(None, &[("a.txt", "base\n")], "base").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: base.clone(),
+    }])])
+    .await;
+    let main2 = rig.stage_commit(Some(&base), &[("a.txt", "main side\n")], "main").await;
+    rig.run(vec![push(2, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: base.clone(),
+        new_oid: main2.clone(),
+    }])])
+    .await;
+    let side = rig.stage_commit(Some(&base), &[("a.txt", "agent side\n")], "agent").await;
+
+    let mut theirs = push(3, vec![RefUpdate {
+        name: "refs/for/main".into(),
+        old_oid: zero(),
+        new_oid: side.clone(),
+    }]);
+    theirs.options = vec!["strategy=theirs".into()];
+    let reports = rig.run(vec![theirs]).await;
+    let merged = match &reports[0].results[0] {
+        CommandResult::Ok { new_oid, .. } => new_oid.clone().unwrap(),
+        other => panic!("-Xtheirs must resolve this conflict, got {other:?}"),
+    };
+    let content = rig.git(&["show", &format!("{merged}:a.txt")], None).await;
+    assert_eq!(content, "agent side\n", "theirs is the pushed side");
+
+    let side2 = rig.stage_commit(Some(&base), &[("a.txt", "another agent\n")], "agent2").await;
+    let mut invented = push(4, vec![RefUpdate {
+        name: "refs/for/main".into(),
+        old_oid: zero(),
+        new_oid: side2,
+    }]);
+    invented.options = vec!["strategy=; rm -rf /".into()];
+    let reports = rig.run(vec![invented]).await;
+    // No strategy reaches git, so the conflict stands and nothing was
+    // executed on its behalf.
+    assert!(ng_reason(&reports[0].results[0]).starts_with("conflict:"));
+}
+
+// ── the fence ────────────────────────────────────────────────────────
+
+/// Under the writer lock a snapshot 412 can only mean a second server.
+/// It stops this one — reads included — rather than retrying into a
+/// repository it no longer owns.
+#[tokio::test]
+async fn a_snapshot_cas_refusal_fences_the_syncer() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c1 = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: c1.clone(),
+    }])])
+    .await;
+
+    // Someone else wrote the snapshot: the etag we hold is stale.
+    rig.store.raw_put(
+        &rig.sc.cfg.snapshot_key(),
+        bytes::Bytes::from_static(b"{}"),
+        vec![],
+    );
+
+    let c2 = rig.stage_commit(Some(&c1), &[("a.txt", "two\n")], "second").await;
+    let err = batch::run_batch(
+        &mut rig.sc,
+        vec![push(2, vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: c1.clone(),
+            new_oid: c2,
+        }])],
+        &Policy::default(),
+    )
+    .await
+    .expect_err("a stale etag must fence");
+    assert!(matches!(err, ForgeError::Fenced(_)), "{err:?}");
+    assert!(rig.sc.fenced.is_some(), "the fence is sticky");
+    assert!(rig.sc.check_fence().is_err(), "a fenced syncer serves nothing");
+    // The ref did not move: the fence happened before the transaction.
+    assert_eq!(rig.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(c1));
+}
+
+/// Falsifier 4. A successor rotates the snapshot before serving, so
+/// the straggler's next batch 412s. Without the rotation the
+/// straggler's `If-Match` is still valid and its batch would land
+/// after the successor restored (lean's `LeanNoRotate`).
+#[tokio::test]
+async fn a_successor_rotates_and_the_straggler_fences_on_its_next_batch() {
+    let mut a = Rig::new().await;
+    a.start().await;
+    let c1 = a.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    a.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: c1.clone(),
+    }])])
+    .await;
+    let seq_before = a.sc.cell().unwrap().snap.seq;
+
+    // A replacement pod: a fresh state dir, so a fresh incarnation id,
+    // so the takeover path rather than self-recognition.
+    let mut b = Rig::with_store(a.store.clone(), "b").await;
+    let mut claimed = false;
+    for _ in 0..(lease::QUIET_POLLS + 4) {
+        if let lease::ClaimOutcome::Claimed(_) = lease::claim_step(&mut b.sc).await.unwrap() {
+            claimed = true;
+            break;
+        }
+    }
+    assert!(claimed, "an unrenewed lease must be supersedable after the quiet polls");
+    assert!(
+        b.sc.cell().unwrap().snap.seq > seq_before,
+        "the successor must rotate before it serves"
+    );
+
+    let c2 = a.stage_commit(Some(&c1), &[("a.txt", "two\n")], "second").await;
+    let err = batch::run_batch(
+        &mut a.sc,
+        vec![push(2, vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: c1,
+            new_oid: c2,
+        }])],
+        &Policy::default(),
+    )
+    .await
+    .expect_err("the straggler must not land");
+    assert!(matches!(err, ForgeError::Fenced(_)), "{err:?}");
+}
+
+/// A 412 on the renew whose cell still names us at our own epoch is a
+/// lost response, not a deposal. Fencing on it once made a live lean
+/// sidecar go silent for the rest of its tenant's life.
+#[tokio::test]
+async fn a_lost_renew_response_is_adopted_rather_than_fenced() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let lease_before = rig.sc.lease().unwrap().clone();
+    // Renew once behind the syncer's back: the cell still names this
+    // holder at this epoch, but our token is now stale.
+    rig.store
+        .epoch_renew(&rig.sc.cfg.epoch_key(), &lease_before, None)
+        .await
+        .expect("renew");
+    lease::renew(&mut rig.sc).await.expect("a lost response must be adopted");
+    assert!(rig.sc.fenced.is_none());
+    assert_eq!(rig.sc.lease().unwrap().epoch, lease_before.epoch);
+    assert_ne!(rig.sc.lease().unwrap().token, lease_before.token);
+}
+
+/// A foreign project's claim cell refuses the syncer outright, and the
+/// refusal is `Refused` so the delivery treats it as final.
+#[tokio::test]
+async fn a_foreign_project_claim_refuses_the_syncer() {
+    let mut rig = Rig::new().await;
+    rig.sc.cfg.project_id = Some("mine".into());
+    rig.store.raw_put(
+        &rig.sc.cfg.claim_key(),
+        bytes::Bytes::from(r#"{"project_id":"someone-else"}"#),
+        vec![],
+    );
+    match lease::verify_claim(&rig.sc).await {
+        Err(ForgeError::Refused(m)) => assert!(m.contains("someone-else"), "{m}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+// ── the sweep ────────────────────────────────────────────────────────
+
+/// Falsifier 10: a pack the snapshot names is never deleted; an
+/// orphan past the grace is; an orphan inside the grace is not.
+#[tokio::test]
+async fn the_sweep_keeps_named_packs_and_takes_orphans_past_the_grace() {
+    let mut rig = Rig::new().await;
+    rig.sc.cfg.orphan_grace_secs = 600;
+    rig.start().await;
+    let c = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: c,
+    }])])
+    .await;
+    let live = rig.sc.cell().unwrap().snap.packs.clone();
+    assert_eq!(live.len(), 1);
+
+    // Two orphans: one old enough, one not.
+    let old_key = rig.sc.cfg.pack_key("pack-deadbeef00000000000000000000000000000000.pack");
+    let young_key = rig.sc.cfg.pack_key("pack-cafe000000000000000000000000000000000000.pack");
+    rig.store.raw_put(&old_key, bytes::Bytes::from_static(b"old"), vec![]);
+    rig.store.raw_put(&young_key, bytes::Bytes::from_static(b"young"), vec![]);
+    rig.store.backdate_epoch(&old_key, 3600);
+
+    let deleted = sweep::sweep(&mut rig.sc).await.expect("sweep");
+    assert_eq!(deleted, 1, "only the orphan past the grace");
+    assert!(rig.store.head(&old_key).await.is_err(), "the aged orphan is gone");
+    rig.store.head(&young_key).await.expect("an orphan inside the grace stays");
+    for p in &live {
+        rig.store.head(&rig.sc.cfg.pack_key(p)).await.expect("a named pack is never swept");
+    }
+}
+
+/// Rule 1: the reference set is read AFTER the listing, and a snapshot
+/// that moved aborts the pass. A sweep that judged against the older
+/// snapshot could delete a pack the newer one names.
+#[tokio::test]
+async fn the_sweep_aborts_when_the_snapshot_moved_under_it() {
+    let mut rig = Rig::new().await;
+    rig.sc.cfg.orphan_grace_secs = 0;
+    rig.start().await;
+    let c = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: c,
+    }])])
+    .await;
+    let orphan = rig.sc.cfg.pack_key("pack-deadbeef00000000000000000000000000000000.pack");
+    rig.store.raw_put(&orphan, bytes::Bytes::from_static(b"x"), vec![]);
+    rig.store.backdate_epoch(&orphan, 3600);
+
+    // Someone republished the snapshot; our etag is no longer current.
+    // The bytes must actually differ: an etag is content-derived, in
+    // the memory store and in S3 alike, so a byte-identical rewrite is
+    // not a move and must not be treated as one.
+    let mut moved = rig.sc.cell().unwrap().snap.clone();
+    moved.seq += 1;
+    rig.store.raw_put(
+        &rig.sc.cfg.snapshot_key(),
+        bytes::Bytes::from(serde_json::to_vec(&moved).unwrap()),
+        vec![],
+    );
+    let deleted = sweep::sweep(&mut rig.sc).await.expect("sweep");
+    assert_eq!(deleted, 0, "a moved reference set aborts the pass");
+    rig.store.head(&orphan).await.expect("nothing is deleted on an aborted pass");
+}
+
+/// A pack the snapshot names is re-uploaded rather than skipped when
+/// the batch runs again, so its age is refreshed — `LeanChunkGC`'s
+/// rule 4, without which a live pack looks like an orphan forever.
+#[tokio::test]
+async fn the_repack_publishes_the_new_pack_and_the_sweep_takes_the_old_ones() {
+    let mut rig = Rig::new().await;
+    rig.sc.cfg.repack_threshold = 1;
+    rig.sc.cfg.orphan_grace_secs = 0;
+    rig.start().await;
+    let mut parent: Option<String> = None;
+    for i in 0..3 {
+        let c = rig
+            .stage_commit(parent.as_deref(), &[("a.txt", &format!("{i}\n"))], &format!("c{i}"))
+            .await;
+        let old = parent.clone().unwrap_or_else(zero);
+        rig.run(vec![push(i as u64 + 1, vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: old,
+            new_oid: c.clone(),
+        }])])
+        .await;
+        parent = Some(c);
+    }
+    assert!(rig.sc.cell().unwrap().snap.packs.len() > 1);
+
+    assert!(restore::maybe_repack(&mut rig.sc).await.expect("repack"));
+    assert_eq!(rig.sc.cell().unwrap().snap.packs.len(), 1, "one pack after a repack");
+    let deleted = sweep::sweep(&mut rig.sc).await.expect("sweep");
+    assert!(deleted > 0, "the superseded packs are collected");
+
+    let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
+    restore::restore(&mut cold.sc).await.expect("cold restore after a repack");
+    assert_eq!(cold.sc.git.ref_oid("refs/heads/main").await.unwrap(), parent);
+    cold.sc.git.fsck_connectivity().await.expect("the repacked repository must be whole");
+}
+
+// ── the dumb protocol's derived files ────────────────────────────────
+
+#[tokio::test]
+async fn the_bucket_carries_a_bare_repository_layout() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: c.clone(),
+    }])])
+    .await;
+    let (_, refs) = rig.store.get_whole(&rig.sc.cfg.info_refs_key(), None).await.expect("info/refs");
+    let refs = String::from_utf8_lossy(&refs);
+    assert!(refs.contains(&c) && refs.contains("refs/heads/main"), "{refs}");
+    let (_, packs) =
+        rig.store.get_whole(&rig.sc.cfg.info_packs_key(), None).await.expect("objects/info/packs");
+    assert!(String::from_utf8_lossy(&packs).starts_with("P pack-"));
+    let (_, head) = rig.store.get_whole(&rig.sc.cfg.head_key(), None).await.expect("HEAD");
+    assert_eq!(String::from_utf8_lossy(&head).trim(), "ref: refs/heads/main");
+}
+
+// ── small surfaces ───────────────────────────────────────────────────
+
+#[test]
+fn globs_match_the_way_a_refspec_does() {
+    assert!(batch::glob_match("refs/heads/main", "refs/heads/main"));
+    assert!(!batch::glob_match("refs/heads/main", "refs/heads/mainline"));
+    assert!(batch::glob_match("release/*", "release/1.2"));
+    assert!(batch::glob_match("refs/heads/*", "refs/heads/agent/pod-7"));
+    assert!(!batch::glob_match("refs/heads/*", "refs/tags/v1"));
+    assert!(batch::glob_match("*", "anything"));
+    assert!(batch::glob_match("refs/*/main", "refs/heads/main"));
+    assert!(!batch::glob_match("refs/*/main", "refs/heads/other"));
+}
+
+#[test]
+fn pkt_lines_round_trip_and_a_flush_is_a_flush() {
+    let mut buf: Vec<u8> = Vec::new();
+    super::pktline::write_str(&mut buf, "version=1\0push-options").unwrap();
+    super::pktline::write_str(&mut buf, "old new refs/heads/main\n").unwrap();
+    super::pktline::write_flush(&mut buf).unwrap();
+    let mut cursor = std::io::Cursor::new(buf);
+    let lines = super::pktline::read_until_flush(&mut cursor).unwrap();
+    assert_eq!(lines, vec!["version=1\0push-options", "old new refs/heads/main"]);
+}
+
+/// The document the lite operator's ladder parses. The field names are
+/// the contract: `hubstatus` reads camelCase and treats an unknown
+/// phase as "not safe to act on", so a renamed field silently becomes
+/// a hub that is never suspended — or, far worse, one that is.
+#[tokio::test]
+async fn the_status_document_is_the_shape_the_ladder_reads() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let facts = status::facts(&rig.sc, status::Phase::Serving);
+    let doc = status::document(&facts, rig.sc.started_unix + 90);
+    assert_eq!(doc["phase"], "serving");
+    assert_eq!(doc["activity"]["idleSecs"], 90);
+    assert_eq!(doc["rpoClean"], true);
+    assert_eq!(doc["epoch"]["held"], true);
+    assert!(doc["fenced"].is_null());
+
+    let mut fenced = rig.sc;
+    fenced.fence("deposed");
+    let facts = status::facts(&fenced, status::Phase::Draining);
+    let doc = status::document(&facts, 0);
+    assert_eq!(doc["rpoClean"], false, "a deposed server proves nothing");
+    assert_eq!(doc["fenced"], "deposed");
+}
+
+/// A snapshot from a newer layout is refused, never parsed for what
+/// this binary happens to understand. Concluding "empty" and re-seeding
+/// is the one outcome no operator can undo.
+#[tokio::test]
+async fn a_newer_snapshot_layout_is_refused() {
+    let rig = Rig::new().await;
+    let mut snap = snapshot::Snapshot::empty();
+    snap.version = snapshot::SNAPSHOT_VERSION + 1;
+    rig.store.raw_put(
+        &rig.sc.cfg.snapshot_key(),
+        bytes::Bytes::from(serde_json::to_vec(&snap).unwrap()),
+        vec![],
+    );
+    match snapshot::load(rig.store.as_ref(), &rig.sc.cfg).await {
+        Err(ForgeError::Refused(m)) => assert!(m.contains("version"), "{m}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
