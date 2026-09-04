@@ -274,6 +274,20 @@ machine identifier moved off `flint.io` to `chert.us`.
 
 ### Fixed
 
+- **`s3.csi.chert.us`: a plugin restart no longer restarts a lean
+  checkout in progress**, a published lean workspace can no longer be
+  started over by a republish that finds its target unmounted (it is
+  rebound, or refused by name), a lean syncer lost at the pod level is
+  relaunched over the same tree from the next republish
+  (`SyncerRecreated`), the final drain exchanges for a key that covers
+  its whole budget before the SIGTERM, and an undrained tree is
+  preserved under `<plugin>/undrained/` and named in an
+  `UndrainedTreePreserved` event instead of being removed. Republish
+  liveness comes from one watch per node instead of a GET per volume,
+  its probe no longer LISTs the bucket, and a broker outage at
+  exchange time is `Unavailable` (retried) rather than
+  `PermissionDenied`.
+
 - **A published lean workspace could have its tree deleted under the
   running pod.** `is_mountpoint` compared device numbers, which cannot
   see a bind mount whose source and target share a filesystem — which

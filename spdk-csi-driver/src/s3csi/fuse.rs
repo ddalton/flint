@@ -195,15 +195,22 @@ mod imp {
     /// INIT, so this is a liveness AND readiness probe. The blocking call
     /// runs on a thread with a short timeout per attempt; the caller's
     /// deadline bounds the whole wait.
-    pub async fn wait_ready(src: &Path, deadline: Duration) -> Result<(), String> {
+    ///
+    /// `readdir` adds a bounded directory read, which proves the daemon
+    /// serves lookups (and that its credential works) at the cost of one
+    /// LIST against the store. Publish wants that proof; the periodic
+    /// republish does not — there it would be a LIST per volume per
+    /// minute, and during a store outage a blocking thread parked for
+    /// the mounter's whole timeout, once per volume per republish.
+    pub async fn wait_ready_opts(src: &Path, deadline: Duration, readdir: bool) -> Result<(), String> {
         let start = std::time::Instant::now();
         loop {
             let p = src.to_path_buf();
             let probe = tokio::task::spawn_blocking(move || -> Result<(), String> {
                 nix::sys::statfs::statfs(&p).map_err(|e| format!("statfs: {e}"))?;
-                // A bounded readdir proves the daemon serves lookups, not
-                // just INIT.
-                std::fs::read_dir(&p).map_err(|e| format!("readdir: {e}"))?.next();
+                if readdir {
+                    std::fs::read_dir(&p).map_err(|e| format!("readdir: {e}"))?.next();
+                }
                 Ok(())
             });
             match tokio::time::timeout(Duration::from_secs(3), probe).await {
@@ -268,12 +275,17 @@ mod imp {
     pub fn is_mountpoint(_: &Path) -> io::Result<bool> {
         Err(unsupported())
     }
-    pub async fn wait_ready(_: &Path, _: Duration) -> Result<(), String> {
+    pub async fn wait_ready_opts(_: &Path, _: Duration, _: bool) -> Result<(), String> {
         Err("FUSE mounting is Linux-only".into())
     }
 }
 
-pub use imp::{bind_mount, is_mountpoint, open_and_mount, unmount, wait_ready};
+pub use imp::{bind_mount, is_mountpoint, open_and_mount, unmount, wait_ready_opts};
+
+/// The publish-time probe: statfs AND a bounded readdir.
+pub async fn wait_ready(src: &Path, deadline: Duration) -> Result<(), String> {
+    wait_ready_opts(src, deadline, true).await
+}
 
 #[cfg(test)]
 mod tests {

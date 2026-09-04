@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use futures::StreamExt;
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, EmptyDirVolumeSource, EnvVar, ExecAction, HostPathVolumeSource, Lifecycle,
     LifecycleHandler, Pod, PodSecurityContext,
@@ -23,6 +24,8 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use kube::api::{Api, DeleteParams, PostParams};
+use kube::runtime::reflector::{self, ObjectRef};
+use kube::runtime::{watcher, WatchStreamExt};
 use kube::Client;
 use sha2::{Digest, Sha256};
 
@@ -386,6 +389,68 @@ pub async fn is_running(client: &Client, ns: &str, name: &str) -> Result<bool, S
     }
 }
 
+/// The pod's phase, by a GET: `None` when the object is gone. The
+/// decision to relaunch a syncer or to preserve an undrained tree rests
+/// on this, never on the cache below, so a stale cache can only delay
+/// an event and never cause an action.
+pub async fn phase(client: &Client, ns: &str, name: &str) -> Result<Option<String>, String> {
+    let api: Api<Pod> = Api::namespaced(client.clone(), ns);
+    match api.get_opt(name).await {
+        Ok(None) => Ok(None),
+        Ok(Some(p)) => Ok(Some(p.status.as_ref().and_then(|s| s.phase.clone()).unwrap_or_default())),
+        Err(e) => Err(format!("get worker {ns}/{name}: {e}")),
+    }
+}
+
+/// `Some(running)` when the cache holds the pod; `None` when it does
+/// not, which the caller must resolve with a GET — absence from a cache
+/// that may be mid-relist is not evidence of absence from the API.
+pub fn cached_running(store: &reflector::Store<Pod>, ns: &str, name: &str) -> Option<bool> {
+    store
+        .get(&ObjectRef::new(name).within(ns))
+        .map(|p| p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running"))
+}
+
+/// This node's workers, watched once. Every republish (~every 60-90 s
+/// per volume) asks whether its worker is Running; at the design's 500
+/// volumes per node that was 8 GETs a second per node against the API
+/// server. The cache answers the common case from memory; a pod the
+/// cache does not hold is looked up, so the cache can never say "gone".
+pub struct WorkerWatch {
+    store: reflector::Store<Pod>,
+    client: Client,
+    ns: String,
+}
+
+impl WorkerWatch {
+    /// Spawns the watcher on the current runtime; the store fills in the
+    /// background and `is_running` falls back to a GET until it has.
+    pub fn start(client: Client, ns: &str, node_name: &str) -> Self {
+        let api: Api<Pod> = Api::namespaced(client.clone(), ns);
+        let (store, writer) = reflector::store::<Pod>();
+        let cfg = watcher::Config::default().labels(&format!("{LABEL_NODE}={node_name},{LABEL_MANAGED_BY}={MANAGED_BY}"));
+        let label = format!("{ns} on {node_name}");
+        tokio::spawn(async move {
+            let stream = watcher(api, cfg).default_backoff().reflect(writer).applied_objects();
+            futures::pin_mut!(stream);
+            while let Some(ev) = stream.next().await {
+                if let Err(e) = ev {
+                    tracing::warn!("worker watch ({label}): {e}");
+                }
+            }
+            tracing::error!("worker watch ({label}) ended; liveness falls back to GETs");
+        });
+        Self { store, client, ns: ns.to_string() }
+    }
+
+    pub async fn is_running(&self, name: &str) -> Result<bool, String> {
+        if let Some(r) = cached_running(&self.store, &self.ns, name) {
+            return Ok(r);
+        }
+        is_running(&self.client, &self.ns, name).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,6 +589,31 @@ mod tests {
         p.status = Some(PodStatus { phase: Some("Running".into()), ..Default::default() });
         p.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
         assert!(is_dead(&p), "deletion requested wins over Running");
+    }
+
+    /// The cache answers only for pods it holds. A pod it does not
+    /// hold is `None` — never `false` — so a mid-relist cache cannot
+    /// report a live worker as gone.
+    #[test]
+    fn cached_liveness_never_answers_gone_for_an_unknown_pod() {
+        use k8s_openapi::api::core::v1::PodStatus;
+        let (store, mut writer) = reflector::store::<Pod>();
+        let mut running = Pod::default();
+        running.metadata.name = Some("s3w-live".into());
+        running.metadata.namespace = Some("flint-workers".into());
+        running.status = Some(PodStatus { phase: Some("Running".into()), ..Default::default() });
+        let mut failed = Pod::default();
+        failed.metadata.name = Some("s3w-evicted".into());
+        failed.metadata.namespace = Some("flint-workers".into());
+        failed.status = Some(PodStatus { phase: Some("Failed".into()), ..Default::default() });
+        writer.apply_watcher_event(&watcher::Event::Init);
+        writer.apply_watcher_event(&watcher::Event::InitApply(running));
+        writer.apply_watcher_event(&watcher::Event::InitApply(failed));
+        writer.apply_watcher_event(&watcher::Event::InitDone);
+        assert_eq!(cached_running(&store, "flint-workers", "s3w-live"), Some(true));
+        assert_eq!(cached_running(&store, "flint-workers", "s3w-evicted"), Some(false));
+        assert_eq!(cached_running(&store, "flint-workers", "s3w-unknown"), None, "unknown ⇒ ask the API, never 'gone'");
+        assert_eq!(cached_running(&store, "other-ns", "s3w-live"), None);
     }
 
     #[test]

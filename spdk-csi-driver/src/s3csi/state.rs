@@ -9,6 +9,8 @@
 //! Absence of the file on unpublish means "nothing to do" (idempotent):
 //! the ephemeral-marker pattern of the block driver.
 
+use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -67,6 +69,49 @@ pub struct VolumeState {
     /// so retried unpublishes can enforce the hard ceiling.
     #[serde(default)]
     pub drain_started_unix: Option<u64>,
+    /// Lean: the syncer's non-secret `FLINT_SYNC_*` list as stamped at
+    /// publish, so a worker lost at the pod level (evicted, node
+    /// pressure) can be relaunched from a republish without re-deriving
+    /// it from the CR.
+    #[serde(default)]
+    pub sync_env: Option<BTreeMap<String, String>>,
+}
+
+/// The pod-bound ServiceAccount token kubelet delivered with the latest
+/// publish, kept beside the state. `NodeUnpublishVolume` carries no
+/// token, and the final lean drain needs one to exchange for keys that
+/// outlive the drain (design §5, final-barrier row). Root only, like
+/// everything under the plugin directory; 0600 regardless.
+pub const TOKEN_FILE: &str = "token";
+
+/// Write the token if it differs from what is on disk. `Ok(true)` when
+/// it was written.
+pub fn save_token_if_changed(dir: &Path, token: &str) -> std::io::Result<bool> {
+    let p = dir.join(TOKEN_FILE);
+    if std::fs::read_to_string(&p).map(|t| t == token).unwrap_or(false) {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!("{TOKEN_FILE}.tmp"));
+    std::fs::write(&tmp, token)?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::rename(tmp, p)?;
+    Ok(true)
+}
+
+pub fn load_token(dir: &Path) -> Option<String> {
+    std::fs::read_to_string(dir.join(TOKEN_FILE))
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
+/// Where an UNDRAINED lean tree is moved at unpublish instead of being
+/// removed: `<plugin>/undrained/<volume dir>-<unix>`. Deliberately
+/// outside `volumes/`, so startup adoption never sees it and no retried
+/// unpublish touches it. The bytes in it exist nowhere else.
+pub fn undrained_dir(plugin_root: &Path, volume_id: &str, unix: u64) -> PathBuf {
+    plugin_root.join("undrained").join(format!("{}-{unix}", dir_name(volume_id)))
 }
 
 /// Volume ids are `csi-<sha256 hex>` from kubelet, but the directory
@@ -172,6 +217,7 @@ mod tests {
             grace_secs: None,
             tree_image: None,
             drain_started_unix: None,
+            sync_env: Some(BTreeMap::from([("FLINT_SYNC_ROOT".to_string(), "/workspace".to_string())])),
         };
         let d = volume_dir(root.path(), "csi-1");
         assert!(VolumeState::load(&d).unwrap().is_none());
@@ -180,5 +226,83 @@ mod tests {
         let all = VolumeState::list(root.path());
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].1.volume_id, "csi-1");
+    }
+
+    /// A state file written before `sync_env` existed still loads: the
+    /// field is optional, and a relaunch on such a volume is refused
+    /// with a message rather than a deserialization error.
+    #[test]
+    fn older_state_without_sync_env_still_loads() {
+        let root = tempfile::tempdir().unwrap();
+        let d = volume_dir(root.path(), "csi-old");
+        std::fs::create_dir_all(&d).unwrap();
+        let mut v: serde_json::Value = serde_json::json!({
+            "version": 1, "volumeId": "csi-old", "mode": "lean", "cr": "ws",
+            "tenant": {"namespace": "t", "pod": "p", "pod_uid": "u", "service_account": "s"},
+            "targetPath": "/t", "src": "/s", "workerNamespace": "flint-workers", "workerName": "s3w-x",
+            "phase": "published", "credentialMode": "broker", "nonce": "n",
+            "readOnly": false, "ownerUid": 1001, "ownerGid": 1001
+        });
+        v.as_object_mut().unwrap().remove("syncEnv");
+        std::fs::write(VolumeState::path(&d), serde_json::to_vec(&v).unwrap()).unwrap();
+        let s = VolumeState::load(&d).unwrap().unwrap();
+        assert!(s.sync_env.is_none());
+        assert_eq!(s.phase, "published");
+    }
+
+    /// The preserved-tree directory lives OUTSIDE `volumes/`: adoption
+    /// lists nothing there, so a preserved tree is never adopted,
+    /// cleaned up, or retried.
+    #[test]
+    fn undrained_trees_are_invisible_to_adoption() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = undrained_dir(root.path(), "csi-1", 1_700_000_000);
+        assert!(!dest.starts_with(root.path().join("volumes")));
+        assert_eq!(dest.file_name().unwrap().to_str().unwrap(), "csi-1-1700000000");
+        let s = VolumeState {
+            version: STATE_VERSION,
+            volume_id: "csi-1".into(),
+            mode: "lean".into(),
+            cr: "ws".into(),
+            tenant: TenantRef { namespace: "t".into(), pod: "p".into(), pod_uid: "u".into(), service_account: "s".into() },
+            target_path: "/t".into(),
+            src: "/s".into(),
+            worker_namespace: "flint-workers".into(),
+            worker_name: "s3w-x".into(),
+            worker_uid: None,
+            phase: "published".into(),
+            credential_mode: "broker".into(),
+            nonce: "n".into(),
+            creds_expiration: None,
+            token_expiration: None,
+            last_probe_ok: None,
+            published_unix: None,
+            read_only: false,
+            owner_uid: 1001,
+            owner_gid: 1001,
+            grace_secs: None,
+            tree_image: None,
+            drain_started_unix: None,
+            sync_env: None,
+        };
+        s.save(&dest).unwrap();
+        assert!(VolumeState::list(root.path()).is_empty(), "a preserved tree must not be listed for adoption");
+        // A hostile id cannot walk out of undrained/ either.
+        assert!(undrained_dir(root.path(), "../x", 1).starts_with(root.path().join("undrained")));
+    }
+
+    #[test]
+    fn token_is_written_once_at_0600_and_reloaded() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let d = volume_dir(root.path(), "csi-1");
+        assert!(load_token(&d).is_none());
+        assert!(save_token_if_changed(&d, "eyJ.a").unwrap(), "first write");
+        assert!(!save_token_if_changed(&d, "eyJ.a").unwrap(), "same token: no rewrite");
+        assert!(save_token_if_changed(&d, "eyJ.b").unwrap(), "rotated token: rewritten");
+        assert_eq!(load_token(&d).as_deref(), Some("eyJ.b"));
+        let mode = std::fs::metadata(d.join(TOKEN_FILE)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(!d.join(format!("{TOKEN_FILE}.tmp")).exists());
     }
 }

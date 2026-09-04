@@ -28,13 +28,13 @@ use crate::csi;
 use crate::csi::volume_capability::AccessType;
 
 use super::attrs::{self, PublishRequest};
-use super::creds::{self, BrokerClient, Creds, Materialized, Registration};
+use super::creds::{self, BrokerClient, Creds, ExchangeError, Materialized, Registration};
 use super::fuse::{self, Launch};
 use super::policy::CredentialMode;
 use super::quota;
 use super::resolve::{self, Refusal, Resolved};
-use super::state::{TenantRef, VolumeState, STATE_VERSION};
-use super::worker::{self, WaitOutcome, WorkerInputs};
+use super::state::{self, TenantRef, VolumeState, STATE_VERSION};
+use super::worker::{self, WaitOutcome, WorkerInputs, WorkerWatch};
 use super::DRIVER_NAME;
 
 /// Waits inside one RPC. Their sum stays under kubelet's 2-minute call
@@ -130,6 +130,9 @@ impl Config {
 pub struct S3Node {
     cfg: Arc<Config>,
     client: Client,
+    /// This node's workers, from one watch: the republish liveness
+    /// signal at zero API cost in steady state (`worker::WorkerWatch`).
+    workers: WorkerWatch,
     /// One mutating owner per volume on this node; the acquire wait is
     /// bounded below kubelet's deadline so a stuck holder surfaces as
     /// `Unavailable`, not a consumed deadline.
@@ -137,8 +140,10 @@ pub struct S3Node {
 }
 
 impl S3Node {
+    /// Must run inside the tokio runtime: the worker watch is spawned here.
     pub fn new(cfg: Config, client: Client) -> Self {
-        Self { cfg: Arc::new(cfg), client, locks: Mutex::new(HashMap::new()) }
+        let workers = WorkerWatch::start(client.clone(), &cfg.worker_namespace, &cfg.node_name);
+        Self { cfg: Arc::new(cfg), client, workers, locks: Mutex::new(HashMap::new()) }
     }
 
     async fn lock(&self, vid: &str) -> Result<tokio::sync::OwnedMutexGuard<()>, Status> {
@@ -161,10 +166,15 @@ impl S3Node {
                 volume = %st.volume_id, phase = %st.phase, worker = %st.worker_name, worker_running = alive,
                 "adopted volume state at {}", dir.display()
             );
-            if st.phase != "published" {
+            match adopt_action(&st) {
+                AdoptAction::Keep => {}
+                AdoptAction::KeepCheckingOut => tracing::info!(
+                    volume = %st.volume_id,
+                    "checkout in progress at startup: the syncer is its own pod and kubelet's retry resumes the wait"
+                ),
                 // A publish that never finished: kubelet will retry it, and
                 // the retry starts clean.
-                self.cleanup(&dir, &st, "unfinished publish found at startup").await;
+                AdoptAction::Cleanup => self.cleanup(&dir, &st, "unfinished publish found at startup").await,
             }
         }
     }
@@ -261,25 +271,39 @@ impl S3Node {
 
         // Idempotency / republish.
         if let Ok(Some(st)) = VolumeState::load(&dir) {
-            if st.phase == "published" {
-                if fuse::is_mountpoint(&target).unwrap_or(false) {
-                    return self.republish(&dir, st, &pr).await;
-                }
-                // Published once, but the target is gone (kubelet
-                // recreated the pod dir?). Rebind if the source lives.
-                if fuse::is_mountpoint(Path::new(&st.src)).unwrap_or(false) {
+            let target_mounted = fuse::is_mountpoint(&target).unwrap_or(false);
+            let src_mounted = fuse::is_mountpoint(Path::new(&st.src)).unwrap_or(false);
+            let tree_exists = Path::new(&st.src).is_dir();
+            match published_action(&st, target_mounted, src_mounted, tree_exists) {
+                PublishedAction::Republish => return self.republish(&dir, st, &pr, &req.secrets).await,
+                PublishedAction::Rebind { remount } => {
+                    // Published once, but the target is gone (kubelet
+                    // recreated the pod dir?). The source lives: bind it
+                    // again, after putting a lost loop mount back.
+                    if remount {
+                        quota::remount(&dir, Path::new(&st.src))
+                            .map_err(|e| Status::unavailable(format!("remount tree: {e}")))?;
+                    }
                     fuse::bind_mount(Path::new(&st.src), &target, st.read_only)
                         .map_err(|e| Status::unavailable(format!("rebind: {e}")))?;
                     return Ok(());
                 }
-            }
-            if st.mode == "lean" && st.phase == "checking-out" {
+                PublishedAction::RefuseLean => {
+                    // The refusal in `cleanup` guards the same tree, but
+                    // this path used to overwrite the phase before it got
+                    // there. A published workspace is never started over.
+                    return Err(Status::failed_precondition(format!(
+                        "volume {vid} is a published lean workspace ({}) whose tree {} is gone from the node; \
+                         refusing to start over, because a fresh checkout here would replace the tenant's live tree",
+                        st.cr, st.src
+                    )));
+                }
                 // The syncer is checking out between kubelet's attempts
                 // (design §3.5 step 8): do not start over, wait again.
-                return self.resume_lean(&dir, st, &target).await;
+                PublishedAction::ResumeCheckout => return self.resume_lean(&dir, st, &target).await,
+                // An unfinished publish: start over.
+                PublishedAction::StartOver => self.cleanup(&dir, &st, "retrying an unfinished publish").await,
             }
-            // An unfinished publish: start over.
-            self.cleanup(&dir, &st, "retrying an unfinished publish").await;
         }
 
         let tenant = TenantRef {
@@ -312,11 +336,18 @@ impl S3Node {
     /// the broker when a broker is in the loop.
     async fn credential(
         &self,
+        dir: &Path,
         mode: CredentialMode,
         pr: &PublishRequest,
         st: &mut VolumeState,
         secrets: &HashMap<String, String>,
     ) -> Result<Materialized, Status> {
+        if let Some(t) = &pr.token {
+            // For the unpublish path, which gets no token of its own.
+            if let Err(e) = state::save_token_if_changed(dir, &t.token) {
+                tracing::warn!(volume = %st.volume_id, "persist token: {e}");
+            }
+        }
         let mut m = self.credential_arm(mode, pr, st, secrets).await?;
         // Every arm carries a region: mount-s3 takes one on its argv, but
         // the lean syncer's SDK client reads AWS_REGION and, without it,
@@ -368,7 +399,7 @@ impl S3Node {
                 let c = broker
                     .exchange(&token.token, &role_arn, &st.nonce, self.cfg.creds_lifetime_secs)
                     .await
-                    .map_err(|e| Status::permission_denied(format!("credential exchange for {}: {e}", st.cr)))?;
+                    .map_err(|e| exchange_status(&st.cr, e))?;
                 st.creds_expiration = Some(c.expiration.clone());
                 let mut m = creds::door_arm(&st.nonce);
                 m.files.push(creds::CommFile { name: creds::CREDS_FILE.into(), bytes: creds::creds_json(&c), mode: 0o600 });
@@ -417,6 +448,7 @@ impl S3Node {
             grace_secs: None,
             tree_image: None,
             drain_started_unix: None,
+            sync_env: None,
         };
         st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
 
@@ -462,7 +494,7 @@ impl S3Node {
         }
 
         // Credential.
-        let mat = match self.credential(cred_mode, pr, &mut st, &req.secrets).await {
+        let mat = match self.credential(dir, cred_mode, pr, &mut st, &req.secrets).await {
             Ok(m) => m,
             Err(e) => return Err(self.fail(dir, &st,e).await),
         };
@@ -523,8 +555,23 @@ impl S3Node {
     }
 
     /// Target already mounted: refresh, probe, OK. Never an error.
-    async fn republish(&self, dir: &Path, mut st: VolumeState, pr: &PublishRequest) -> Result<(), Status> {
+    async fn republish(
+        &self,
+        dir: &Path,
+        mut st: VolumeState,
+        pr: &PublishRequest,
+        secrets: &HashMap<String, String>,
+    ) -> Result<(), Status> {
         let mut changed = false;
+        if let Some(token) = pr.token.as_ref() {
+            // Kept beside the state for the unpublish path, which gets
+            // no token of its own (design §5, final-barrier row).
+            match state::save_token_if_changed(dir, &token.token) {
+                Ok(true) => tracing::debug!(volume = %st.volume_id, "token rotated"),
+                Ok(false) => {}
+                Err(e) => tracing::warn!(volume = %st.volume_id, "persist token: {e}"),
+            }
+        }
         if let (Some(worker_uid), Some(token)) = (st.worker_uid.clone(), pr.token.as_ref()) {
             let comm = worker::comm_dir(&self.cfg.kubelet_root, &worker_uid);
             match CredentialMode::parse(&st.credential_mode).unwrap_or(CredentialMode::Ambient) {
@@ -555,7 +602,7 @@ impl S3Node {
                             // failure here is an outage (kept key), not a refusal.
                             let refreshed = match broker.register(&self.registration_of(&st)).await {
                                 Ok(()) => broker.exchange(&token.token, &creds::role_arn(&st.mode, &st.cr), &st.nonce, self.cfg.creds_lifetime_secs).await,
-                                Err(e) => Err(format!("re-registration before refresh: {e}")),
+                                Err(e) => Err(ExchangeError::Outage(format!("re-registration before refresh: {e}"))),
                             };
                             match refreshed {
                                 Ok(c) => {
@@ -572,7 +619,7 @@ impl S3Node {
                                     // the door answers 503, the client fails at the old
                                     // key's expiry — revocation lands within one lifetime
                                     // (design §4.6). An outage keeps the cached key.
-                                    if e.contains("refused the exchange") {
+                                    if e.is_refusal() {
                                         creds::remove_file(&comm, creds::CREDS_FILE);
                                         st.creds_expiration = None;
                                         changed = true;
@@ -589,9 +636,12 @@ impl S3Node {
         // Liveness: is the worker alive and the mount answering? The
         // source must still BE a mount: a plain directory answers statfs
         // and readdir happily, and that is what a lost mount looks like.
-        let alive = worker::is_running(&self.client, &st.worker_namespace, &st.worker_name).await.unwrap_or(true);
+        // The probe is statfs only — a readdir here is a LIST per volume
+        // per minute against the store, and a thread parked for the
+        // mounter's whole timeout whenever the store is unreachable.
+        let alive = self.workers.is_running(&st.worker_name).await.unwrap_or(true);
         let mounted = st.mode != "passthrough" || fuse::is_mountpoint(Path::new(&st.src)).unwrap_or(false);
-        let ok = alive && mounted && fuse::wait_ready(Path::new(&st.src), Duration::from_secs(3)).await.is_ok();
+        let ok = alive && mounted && fuse::wait_ready_opts(Path::new(&st.src), Duration::from_secs(3), false).await.is_ok();
         if st.last_probe_ok != Some(ok) {
             changed = true;
             st.last_probe_ok = Some(ok);
@@ -615,10 +665,81 @@ impl S3Node {
                 .await;
             }
         }
+        // A lean syncer lost at the POD level — evicted, node pressure,
+        // deleted by hand — leaves a tree nobody publishes for the rest
+        // of the tenant's life, and the tenant sees nothing but an
+        // event. The design (§6.7) has it recreated on the next
+        // republish; this is that. `OnFailure` covers container exits;
+        // this covers the pod. Decided by a GET, never by the cache.
+        if st.mode == "lean" && !alive && st.drain_started_unix.is_none() {
+            let lost = match worker::phase(&self.client, &st.worker_namespace, &st.worker_name).await {
+                Ok(None) => true,
+                Ok(Some(p)) => p == "Failed",
+                Err(_) => false,
+            };
+            if lost {
+                match self.relaunch_lean_worker(dir, &mut st, pr, secrets).await {
+                    Ok(()) => {
+                        changed = true;
+                        self.emit_event(
+                            &st.tenant,
+                            "SyncerRecreated",
+                            &format!(
+                                "{}: the syncer pod was gone (evicted, or failed at the pod level); worker {} was started \
+                                 over the same tree and self-recognises its lease",
+                                st.cr, st.worker_name
+                            ),
+                            false,
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(volume = %st.volume_id, "syncer relaunch: {}", e.message());
+                        self.emit_event(
+                            &st.tenant,
+                            "SyncerRecreateFailed",
+                            &format!(
+                                "{}: the syncer pod is gone and could not be relaunched ({}); nothing publishes this \
+                                 workspace until it is — retried every republish",
+                                st.cr,
+                                e.message()
+                            ),
+                            true,
+                        )
+                        .await;
+                    }
+                }
+            }
+        }
         if changed {
             let _ = st.save(dir);
         }
         Ok(())
+    }
+
+    /// A lean syncer lost at the pod level: start a new worker over the
+    /// SAME tree. The tree is the volume's, not the worker's, so nothing
+    /// is re-materialised; the syncer finds the checkout marker and its
+    /// incarnation id and self-recognises its lease (the S14 restart
+    /// arm). Nothing is cleaned up on failure: the volume is published.
+    async fn relaunch_lean_worker(
+        &self,
+        dir: &Path,
+        st: &mut VolumeState,
+        pr: &PublishRequest,
+        secrets: &HashMap<String, String>,
+    ) -> Result<(), Status> {
+        let Some(image) = self.cfg.lean_image.clone() else {
+            return Err(Status::failed_precondition("this node driver has no FLINT_S3CSI_LEAN_IMAGE"));
+        };
+        let Some(sync_conf) = st.sync_env.clone() else {
+            return Err(Status::failed_precondition(
+                "the volume was published by a plugin that kept no syncer environment; recreate the tenant pod",
+            ));
+        };
+        let mode = CredentialMode::parse(&st.credential_mode).map_err(Status::failed_precondition)?;
+        tracing::warn!(volume = %st.volume_id, worker = %st.worker_name, "lean syncer pod is gone; relaunching over the existing tree");
+        self.launch_lean_worker(dir, st, pr, secrets, &image, mode, &sync_conf).await
     }
 
     // ── lean (design §3.5, §5) ────────────────────────────────────────
@@ -687,6 +808,7 @@ impl S3Node {
             grace_secs: Some(grace),
             tree_image: None,
             drain_started_unix: None,
+            sync_env: None,
         };
         st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
 
@@ -733,7 +855,6 @@ impl S3Node {
             return Err(self.fail(dir, &st, Status::internal(format!("tree {}: {e}", tree.display()))).await);
         }
 
-        let (run_as, run_as_gid) = worker_owner(&st);
         // The syncer's non-secret configuration goes on the POD SPEC as
         // well as into the launch message. The child gets it either way,
         // but only the pod spec is inherited by `kubectl exec`, and
@@ -743,62 +864,86 @@ impl S3Node {
         // in the launch message alone every one of them exits 2 with
         // "FLINT_SYNC_BUCKET is required" (found by S12). Credentials are
         // NOT here: they stay in the launch message and the comm dir.
+        // The list is also kept in the volume state, so a worker lost at
+        // the pod level can be relaunched from a republish.
         let ws = crate::lean_operator::crd::FlintLeanWorkspace::new(&name, spec);
         let mut sync_conf: BTreeMap<String, String> =
             crate::lean_operator::sync_env::sync_env(&ws, SYNCER_ROOT).into_iter().collect();
         sync_conf.insert("FLINT_SYNC_NAMESPACE".into(), pr.pod_namespace.clone());
+        st.sync_env = Some(sync_conf.clone());
+        if let Err(e) = self.launch_lean_worker(dir, &mut st, pr, &req.secrets, &image, cred_mode, &sync_conf).await {
+            return Err(self.fail(dir, &st, e).await);
+        }
+        st.phase = "checking-out".into();
+        st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
+        self.resume_lean(dir, st, target).await
+    }
+
+    /// Create (or adopt) the syncer worker, wait for it, hand it its
+    /// credential and its launch. Shared by the first publish and by a
+    /// relaunch over a live tree, so it never cleans up on failure: the
+    /// caller decides what a failure means for the volume.
+    #[allow(clippy::too_many_arguments)]
+    async fn launch_lean_worker(
+        &self,
+        dir: &Path,
+        st: &mut VolumeState,
+        pr: &PublishRequest,
+        secrets: &HashMap<String, String>,
+        image: &str,
+        cred_mode: CredentialMode,
+        sync_conf: &BTreeMap<String, String>,
+    ) -> Result<(), Status> {
+        let (run_as, run_as_gid) = worker_owner(st);
         let mut pod_env = sync_conf.clone();
         pod_env.insert("FLINT_S3W_MODE".to_string(), "lean".to_string());
         let pod = worker::build_pod(&WorkerInputs {
             namespace: self.cfg.worker_namespace.clone(),
             node_name: self.cfg.node_name.clone(),
             node_uid: self.cfg.node_uid.clone(),
-            image,
+            image: image.to_string(),
             mode: "lean",
-            volume_id: vid,
-            tenant,
-            cr: &name,
+            volume_id: &st.volume_id,
+            tenant: &st.tenant,
+            cr: &st.cr,
             run_as_uid: run_as,
             run_as_gid,
             resources: self.cfg.worker_resources.clone(),
             prestop_secs: self.cfg.prestop_secs,
             env: pod_env,
             lean_tree_hostpath: Some(st.src.clone()),
-            grace_secs: Some(grace as i64),
+            grace_secs: Some(st.grace_secs.unwrap_or(30) as i64),
             priority_class: self.cfg.priority_class.clone(),
             comm_size: self.cfg.comm_size.clone(),
             scratch_size: self.cfg.scratch_size.clone(),
         });
-        if let Err(e) = worker::ensure(&self.client, &pod).await {
-            return Err(self.fail(dir, &st, Status::unavailable(e)).await);
-        }
+        worker::ensure(&self.client, &pod).await.map_err(Status::unavailable)?;
         let worker_uid = match worker::wait_running(&self.client, &st.worker_namespace, &st.worker_name, WORKER_RUNNING_WAIT).await {
             Ok(WaitOutcome::Running { uid }) => uid,
             Ok(WaitOutcome::Failed { reason, message }) => {
-                return Err(self.fail(dir, &st, Status::failed_precondition(format!("syncer pod {}: {reason} {message}", st.worker_name))).await)
+                return Err(Status::failed_precondition(format!("syncer pod {}: {reason} {message}", st.worker_name)))
             }
             Ok(WaitOutcome::Timeout { phase }) => {
-                return Err(self.fail(dir, &st, Status::unavailable(format!("syncer pod {} not Running after {}s ({phase}); retrying", st.worker_name, WORKER_RUNNING_WAIT.as_secs()))).await)
+                return Err(Status::unavailable(format!(
+                    "syncer pod {} not Running after {}s ({phase}); retrying",
+                    st.worker_name,
+                    WORKER_RUNNING_WAIT.as_secs()
+                )))
             }
-            Err(e) => return Err(self.fail(dir, &st, Status::unavailable(e)).await),
+            Err(e) => return Err(Status::unavailable(e)),
         };
         st.worker_uid = Some(worker_uid.clone());
         let comm = worker::comm_dir(&self.cfg.kubelet_root, &worker_uid);
         if !comm.is_dir() {
-            return Err(self.fail(dir, &st, Status::unavailable(format!("syncer comm dir {} not visible on the node yet", comm.display()))).await);
+            return Err(Status::unavailable(format!("syncer comm dir {} not visible on the node yet", comm.display())));
         }
-        let mat = match self.credential(cred_mode, pr, &mut st, &req.secrets).await {
-            Ok(m) => m,
-            Err(e) => return Err(self.fail(dir, &st, e).await),
-        };
-        if let Err(e) = creds::write_files(&comm, &mat.files, worker_owner(&st)) {
-            return Err(self.fail(dir, &st, Status::internal(format!("write comm files: {e}"))).await);
-        }
+        let mat = self.credential(dir, cred_mode, pr, st, secrets).await?;
+        creds::write_files(&comm, &mat.files, worker_owner(st)).map_err(|e| Status::internal(format!("write comm files: {e}")))?;
 
         // The syncer's environment: the same fixed list the webhook
         // stamped, with the tenant namespace as a LITERAL (design §5),
         // plus the credentials, which live only here and never on the pod.
-        let mut env = sync_conf;
+        let mut env = sync_conf.clone();
         env.extend(mat.env);
         let launch = Launch { mode: "lean".into(), args: vec!["run".into()], env };
         let sock = comm.join("mount.sock");
@@ -808,13 +953,12 @@ impl S3Node {
         };
         match reply {
             Ok(Ok(r)) if r.ok => {}
-            Ok(Ok(r)) => return Err(self.fail(dir, &st, Status::unavailable(format!("syncer refused the launch: {}", r.error.unwrap_or_default()))).await),
-            Ok(Err(e)) => return Err(self.fail(dir, &st, Status::unavailable(format!("launch over {}: {e}", sock.display()))).await),
-            Err(e) => return Err(self.fail(dir, &st, Status::internal(format!("launch task: {e}"))).await),
+            Ok(Ok(r)) => return Err(Status::unavailable(format!("syncer refused the launch: {}", r.error.unwrap_or_default()))),
+            Ok(Err(e)) => return Err(Status::unavailable(format!("launch over {}: {e}", sock.display()))),
+            Err(e) => return Err(Status::internal(format!("launch task: {e}"))),
         }
-        st.phase = "checking-out".into();
         st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
-        self.resume_lean(dir, st, target).await
+        Ok(())
     }
 
     /// Tell a worker its volume is released, so its preStop hook stops
@@ -884,23 +1028,133 @@ impl S3Node {
         Ok(())
     }
 
+    /// Keys for the WHOLE drain, exchanged while the pod object still
+    /// exists. `NodeUnpublishVolume` carries no token; the one kept at
+    /// the last republish serves. Under a normal delete it is valid
+    /// until delete time + the tenant's grace + 60 s, and this runs
+    /// inside the tenant's grace, so it succeeds. Under `--force` it is
+    /// already dead, the drain runs on the remaining key life, and the
+    /// caller's event says so. Before this the drain ran on whatever
+    /// the last republish left, 270-900 s, and a hybrid workspace with
+    /// a long floor could outlive its key mid-drain.
+    async fn refresh_for_drain(&self, dir: &Path, st: &mut VolumeState, grace: u64) -> Result<(), String> {
+        if CredentialMode::parse(&st.credential_mode).ok() != Some(CredentialMode::Broker) {
+            return Ok(());
+        }
+        let Some(broker) = &self.cfg.broker else { return Ok(()) };
+        let Some(token) = state::load_token(dir) else {
+            return Err("no token kept beside the volume state (published by an earlier plugin version?)".into());
+        };
+        let Some(uid) = st.worker_uid.clone() else { return Err("the volume state names no worker".into()) };
+        let lifetime = creds::drain_key_lifetime_secs(grace, self.cfg.creds_lifetime_secs);
+        broker.register(&self.registration_of(st)).await.map_err(|e| format!("re-registration: {e}"))?;
+        let c = broker
+            .exchange(&token, &creds::role_arn(&st.mode, &st.cr), &st.nonce, lifetime)
+            .await
+            .map_err(|e| e.to_string())?;
+        let comm = worker::comm_dir(&self.cfg.kubelet_root, &uid);
+        let f = creds::CommFile { name: creds::CREDS_FILE.into(), bytes: creds::creds_json(&c), mode: 0o600 };
+        creds::write_files(&comm, &[f], worker_owner(st)).map_err(|e| format!("write creds: {e}"))?;
+        st.creds_expiration = Some(c.expiration.clone());
+        tracing::info!(volume = %st.volume_id, asked = lifetime, exp = %c.expiration, "drain-length credential in place");
+        Ok(())
+    }
+
+    /// An UNDRAINED tree is never removed: whatever the tenant wrote
+    /// since the last boundary exists nowhere else. The volume directory
+    /// is moved out of `volumes/` (adoption and retries ignore it), the
+    /// quota image kept, and the tenant told where it is. Before this
+    /// the same paths deleted the tree seconds after an event that
+    /// promised `recover-staged`, which can only re-cite objects that
+    /// were uploaded.
+    async fn preserve_undrained(&self, dir: &Path, st: &VolumeState, target: &Path, why: &str) -> Result<(), Status> {
+        unmount_all(target).map_err(|e| Status::internal(format!("unmount target: {e}")))?;
+        if st.tree_image.is_some() {
+            quota::unmount_tree(Path::new(&st.src)).map_err(|e| Status::unavailable(format!("unmount tree: {e}; retrying")))?;
+        }
+        // The pod-bound token has no use in a preserved tree (its pod is
+        // gone, and TokenReview refuses it within the minute); the tree,
+        // the image and the state are what an operator needs.
+        let _ = std::fs::remove_file(dir.join(state::TOKEN_FILE));
+        let dest = state::undrained_dir(&self.cfg.plugin_root, &st.volume_id, chrono::Utc::now().timestamp() as u64);
+        if let Some(p) = dest.parent() {
+            std::fs::create_dir_all(p).map_err(|e| Status::internal(format!("{}: {e}", p.display())))?;
+        }
+        match std::fs::rename(dir, &dest) {
+            Ok(()) => {}
+            Err(e) if e.raw_os_error() == Some(libc::EBUSY) => {
+                return Err(Status::unavailable(format!("preserve {}: {e} — a mount is still under it; retrying", dir.display())))
+            }
+            Err(e) => return Err(Status::internal(format!("preserve {} at {}: {e}", dir.display(), dest.display()))),
+        }
+        if let Some(b) = &self.cfg.broker {
+            let _ = b.deregister(&st.volume_id).await;
+        }
+        let shape = if st.tree_image.is_some() { "an ext4 image, tree.img: mount it loop to read" } else { "the tree/ directory" };
+        tracing::error!(volume = %st.volume_id, preserved = %dest.display(), "undrained lean tree preserved: the syncer {why}");
+        self.emit_event(
+            &st.tenant,
+            "UndrainedTreePreserved",
+            &format!(
+                "{}: the syncer {why}. Nothing written since the last boundary was published. The tree is preserved on \
+                 node {} at {} ({}); copy out what matters, then remove that directory. Objects that did upload \
+                 before the failure can be re-cited with recover-staged.",
+                st.cr,
+                self.cfg.node_name,
+                dest.display(),
+                shape
+            ),
+            true,
+        )
+        .await;
+        Ok(())
+    }
+
     /// The final drain (design §3.5): delete the syncer with the derived
     /// grace so its SIGTERM arm runs over a tree every tenant container
-    /// has already left, wait, then unmount and remove the tree.
+    /// has already left, wait, then unmount and remove the tree. A tree
+    /// that was NOT drained — syncer gone or exited before we asked, or
+    /// killed at the ceiling — is preserved, never removed.
     async fn unpublish_lean(&self, dir: &Path, mut st: VolumeState, target: &Path) -> Result<(), Status> {
         let grace = st.grace_secs.unwrap_or(30);
         let now = chrono::Utc::now().timestamp() as u64;
         let started = match st.drain_started_unix {
             Some(t) => t,
             None => {
-                if worker::is_gone(&self.client, &st.worker_namespace, &st.worker_name).await.map_err(Status::unavailable)? {
-                    tracing::warn!(volume = %st.volume_id, "syncer was already gone at unpublish — nothing drained; recover-staged applies");
-                    self.emit_event(&st.tenant, "SyncerGoneAtUnpublish", &format!("{}: the syncer was not running when the pod's volume was unpublished, so no final drain ran; run recover-staged on the workspace", st.cr), true).await;
-                } else {
-                    self.release_worker(&st);
-                    worker::delete(&self.client, &st.worker_namespace, &st.worker_name, Some(grace as u32)).await.map_err(Status::unavailable)?;
-                    tracing::info!(volume = %st.volume_id, grace, "draining: syncer deleted with the derived grace");
+                match worker::phase(&self.client, &st.worker_namespace, &st.worker_name).await.map_err(Status::unavailable)? {
+                    None => {
+                        tracing::warn!(volume = %st.volume_id, "syncer was already gone at unpublish — nothing drained");
+                        self.emit_event(&st.tenant, "SyncerGoneAtUnpublish", &format!("{}: the syncer was not running when the pod's volume was unpublished, so no final drain ran; its tree is preserved (see UndrainedTreePreserved)", st.cr), true).await;
+                        return self
+                            .preserve_undrained(dir, &st, target, "was not running when the volume was unpublished (evicted, or removed), so no final drain ran")
+                            .await;
+                    }
+                    Some(p) if p == "Succeeded" || p == "Failed" => {
+                        // Exited on its own before anyone asked it to
+                        // drain: fenced, refused, or evicted with the
+                        // object left behind. Whatever it did not
+                        // publish is still in the tree.
+                        self.release_worker(&st);
+                        let _ = worker::delete(&self.client, &st.worker_namespace, &st.worker_name, Some(0)).await;
+                        return self
+                            .preserve_undrained(dir, &st, target, &format!("had already exited ({p}) when the volume was unpublished, so no final drain ran"))
+                            .await;
+                    }
+                    Some(_) => {}
                 }
+                if let Err(e) = self.refresh_for_drain(dir, &mut st, grace).await {
+                    tracing::warn!(volume = %st.volume_id, "drain credential refresh: {e}");
+                    self.emit_event(
+                        &st.tenant,
+                        "DrainCredentialRefreshFailed",
+                        &format!("{}: could not exchange for a drain-length key ({e}); the drain runs on the current key's remaining life", st.cr),
+                        true,
+                    )
+                    .await;
+                }
+                self.release_worker(&st);
+                worker::delete(&self.client, &st.worker_namespace, &st.worker_name, Some(grace as u32)).await.map_err(Status::unavailable)?;
+                tracing::info!(volume = %st.volume_id, grace, "draining: syncer deleted with the derived grace");
                 st.drain_started_unix = Some(now);
                 let _ = st.save(dir);
                 now
@@ -916,8 +1170,10 @@ impl S3Node {
                 tracing::warn!(volume = %st.volume_id, elapsed, "drain past its ceiling; killing the syncer");
                 self.release_worker(&st);
                 worker::delete(&self.client, &st.worker_namespace, &st.worker_name, Some(0)).await.map_err(Status::unavailable)?;
-                self.emit_event(&st.tenant, "DrainCeilingHit", &format!("{}: the syncer did not finish its drain within {}s; it was killed and staged work may need recover-staged", st.cr, grace + 30), true).await;
-                break;
+                self.emit_event(&st.tenant, "DrainCeilingHit", &format!("{}: the syncer did not finish its drain within {}s; it was killed and its tree is preserved (see UndrainedTreePreserved)", st.cr, grace + 30), true).await;
+                return self
+                    .preserve_undrained(dir, &st, target, &format!("did not finish its drain within {}s and was killed", grace + 30))
+                    .await;
             }
             if start.elapsed() > DRAIN_WAIT {
                 return Err(Status::unavailable(format!("draining {} ({}s of {}s); retrying", st.cr, elapsed, grace)));
@@ -1036,6 +1292,85 @@ fn worker_owner(st: &VolumeState) -> (u32, u32) {
     )
 }
 
+/// A refusal is the tenant's to fix; an outage is kubelet's to retry.
+fn exchange_status(cr: &str, e: ExchangeError) -> Status {
+    match e {
+        ExchangeError::Refused(m) => Status::permission_denied(format!("credential exchange for {cr} refused: {m}")),
+        ExchangeError::Outage(m) => Status::unavailable(format!("credential exchange for {cr}: {m}; retrying")),
+    }
+}
+
+/// What startup adoption does with a volume it finds on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdoptAction {
+    /// Published: the binds are in the host mount table, the worker is
+    /// its own pod; nothing to redo.
+    Keep,
+    /// A lean checkout in progress: the syncer is its own pod and keeps
+    /// going; kubelet's next retry waits on the marker (§3.5 step 8).
+    /// Cleaning this up killed the checkout on every plugin roll.
+    KeepCheckingOut,
+    /// A publish that never finished: kubelet retries it from clean.
+    Cleanup,
+}
+
+pub fn adopt_action(st: &VolumeState) -> AdoptAction {
+    if st.phase == "published" {
+        return AdoptAction::Keep;
+    }
+    if st.mode == "lean" && st.phase == "checking-out" {
+        return AdoptAction::KeepCheckingOut;
+    }
+    AdoptAction::Cleanup
+}
+
+/// What a `NodePublishVolume` does with a volume that already has state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishedAction {
+    /// The target is mounted: refresh and probe.
+    Republish,
+    /// The target is gone but the source lives: bind it again. `remount`
+    /// puts a lost quota loop mount back first.
+    Rebind { remount: bool },
+    /// A published lean workspace with no tree to bind: refuse. Never
+    /// start over — that would replace the tenant's live tree.
+    RefuseLean,
+    /// A lean checkout between kubelet's attempts: keep waiting.
+    ResumeCheckout,
+    /// An unfinished publish: clean up and start over.
+    StartOver,
+}
+
+pub fn published_action(st: &VolumeState, target_mounted: bool, src_mounted: bool, tree_exists: bool) -> PublishedAction {
+    let lean = st.mode == "lean";
+    if st.phase == "published" {
+        if target_mounted {
+            return PublishedAction::Republish;
+        }
+        if lean {
+            if src_mounted {
+                return PublishedAction::Rebind { remount: false };
+            }
+            if st.tree_image.is_some() {
+                // The image holds the tree; its mount is what is missing.
+                return PublishedAction::Rebind { remount: true };
+            }
+            if tree_exists {
+                // A quota-off tree is a plain directory: it fails the
+                // mount-point test and IS the live tree.
+                return PublishedAction::Rebind { remount: false };
+            }
+            return PublishedAction::RefuseLean;
+        }
+        // Passthrough: a source that is not a mount is a dead mount.
+        return if src_mounted { PublishedAction::Rebind { remount: false } } else { PublishedAction::StartOver };
+    }
+    if lean && st.phase == "checking-out" {
+        return PublishedAction::ResumeCheckout;
+    }
+    PublishedAction::StartOver
+}
+
 fn refusal_status(r: Refusal) -> Status {
     match r {
         Refusal::NotFound(m) => Status::not_found(m),
@@ -1152,5 +1487,94 @@ mod tests {
         assert!(c.broker.is_none());
         std::env::remove_var("FLINT_S3CSI_NODE_NAME");
         std::env::remove_var("FLINT_S3CSI_PASSTHROUGH_IMAGE");
+    }
+
+    fn st(mode: &str, phase: &str, tree_image: Option<&str>) -> VolumeState {
+        VolumeState {
+            version: STATE_VERSION,
+            volume_id: "csi-1".into(),
+            mode: mode.into(),
+            cr: "ws".into(),
+            tenant: TenantRef { namespace: "t".into(), pod: "p".into(), pod_uid: "u".into(), service_account: "s".into() },
+            target_path: "/t".into(),
+            src: "/s".into(),
+            worker_namespace: "flint-workers".into(),
+            worker_name: "s3w-x".into(),
+            worker_uid: None,
+            phase: phase.into(),
+            credential_mode: "broker".into(),
+            nonce: "n".into(),
+            creds_expiration: None,
+            token_expiration: None,
+            last_probe_ok: None,
+            published_unix: None,
+            read_only: false,
+            owner_uid: 1001,
+            owner_gid: 1001,
+            grace_secs: None,
+            tree_image: tree_image.map(|s| s.to_string()),
+            drain_started_unix: None,
+            sync_env: None,
+        }
+    }
+
+    /// A plugin roll mid-checkout must not restart the checkout (§6.4,
+    /// S17): the syncer is its own pod. Everything else unfinished is
+    /// cleaned up for kubelet's retry; everything published is kept.
+    #[test]
+    fn adoption_keeps_a_checkout_in_progress_and_cleans_the_rest() {
+        assert_eq!(adopt_action(&st("lean", "checking-out", None)), AdoptAction::KeepCheckingOut);
+        assert_eq!(adopt_action(&st("lean", "published", None)), AdoptAction::Keep);
+        assert_eq!(adopt_action(&st("passthrough", "published", None)), AdoptAction::Keep);
+        assert_eq!(adopt_action(&st("lean", "publishing", None)), AdoptAction::Cleanup);
+        assert_eq!(adopt_action(&st("passthrough", "publishing", None)), AdoptAction::Cleanup);
+    }
+
+    /// A published lean workspace is NEVER started over. The old code
+    /// fell through to cleanup when neither the target nor the source
+    /// was a mount point — which a quota-off tree, a plain directory,
+    /// always fails — and then overwrote the phase that cleanup's own
+    /// refusal keyed on.
+    #[test]
+    fn a_published_lean_volume_is_rebound_or_refused_never_started_over() {
+        let quota_off = st("lean", "published", None);
+        assert_eq!(published_action(&quota_off, true, false, true), PublishedAction::Republish);
+        assert_eq!(published_action(&quota_off, false, false, true), PublishedAction::Rebind { remount: false }, "a plain-directory tree IS the live tree");
+        assert_eq!(published_action(&quota_off, false, false, false), PublishedAction::RefuseLean);
+        let quota_on = st("lean", "published", Some("/v/tree.img"));
+        assert_eq!(published_action(&quota_on, false, true, true), PublishedAction::Rebind { remount: false });
+        assert_eq!(published_action(&quota_on, false, false, true), PublishedAction::Rebind { remount: true }, "the image holds the tree; put its mount back");
+        assert_eq!(published_action(&quota_on, false, false, false), PublishedAction::Rebind { remount: true });
+        for tm in [true, false] {
+            for sm in [true, false] {
+                for te in [true, false] {
+                    let a = published_action(&st("lean", "published", None), tm, sm, te);
+                    assert_ne!(a, PublishedAction::StartOver, "lean published ({tm},{sm},{te}) reached StartOver");
+                }
+            }
+        }
+    }
+
+    /// Passthrough keeps its shape: a dead source is a dead mount, and a
+    /// fresh publish is the right answer.
+    #[test]
+    fn passthrough_and_unfinished_volumes_keep_their_paths() {
+        let p = st("passthrough", "published", None);
+        assert_eq!(published_action(&p, true, true, true), PublishedAction::Republish);
+        assert_eq!(published_action(&p, false, true, true), PublishedAction::Rebind { remount: false });
+        assert_eq!(published_action(&p, false, false, true), PublishedAction::StartOver);
+        assert_eq!(published_action(&st("lean", "checking-out", None), false, false, true), PublishedAction::ResumeCheckout);
+        assert_eq!(published_action(&st("lean", "publishing", None), false, false, true), PublishedAction::StartOver);
+        assert_eq!(published_action(&st("passthrough", "publishing", None), false, false, false), PublishedAction::StartOver);
+    }
+
+    /// A broker that is down is an outage kubelet retries, not a
+    /// refusal the tenant reads as "not allowed".
+    #[test]
+    fn exchange_outages_are_unavailable_and_refusals_are_denied() {
+        assert_eq!(exchange_status("ws", ExchangeError::Outage("transport: connection refused".into())).code(), tonic::Code::Unavailable);
+        let s = exchange_status("ws", ExchangeError::Refused("403: AccessDenied: bob is not a consumer".into()));
+        assert_eq!(s.code(), tonic::Code::PermissionDenied);
+        assert!(s.message().contains("bob"), "{}", s.message());
     }
 }

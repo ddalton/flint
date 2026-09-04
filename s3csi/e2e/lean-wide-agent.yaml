@@ -1,0 +1,31 @@
+# S17's tenant, over the wide project. Same pod name as the drill's
+# `slow-agent` so the S17 block runs unchanged.
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: slow-agent
+  namespace: s3-tenants
+spec:
+  serviceAccountName: trainer
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    runAsGroup: 1001
+    seccompProfile: { type: RuntimeDefault }
+  volumes:
+    - name: ws
+      csi:
+        driver: s3.csi.chert.us
+        volumeAttributes:
+          chert.us/workspace: proj-wide
+  containers:
+    - name: agent
+      image: busybox:1.36
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: ws, mountPath: /workspace }
+      command: ["/bin/sh", "-c", "ls /workspace/src | wc -l > /tmp/seen; trap 'exit 0' TERM INT; sleep 86400 & wait"]

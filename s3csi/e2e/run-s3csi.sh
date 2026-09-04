@@ -906,6 +906,22 @@ if [ -n "$w" ]; then
     [ -n "$p1" ] && [ "$p1" != "$p0" ] \
         && ok "the plugin was rolled mid-checkout ($p0 → $p1)" \
         || bad "the plugin did not roll ($p0 → ${p1:-absent}); nothing was interrupted"
+    # THE ANTI-VACUITY ARM. The roll proves nothing unless the NEW plugin
+    # found the checkout still running when it adopted the node's
+    # volumes. A checkout that finished in the seconds between the
+    # precondition above and the new plugin's start is adopted as
+    # `published`, and every assertion below passes without the path
+    # under test ever being taken — which is how this leg went green
+    # over an adoption that CLEANED UP a checkout in progress. The
+    # plugin logs which branch adoption took; ask it.
+    adopt_log=$($K -n $SYS logs "$p1" -c node 2>/dev/null || true)
+    if printf '%s' "$adopt_log" | grep -q "checkout in progress at startup"; then
+        ok "the NEW plugin adopted the volume mid-checkout (logged 'checkout in progress at startup'): the path under test was taken"
+    elif printf '%s' "$adopt_log" | grep -q "unfinished publish found at startup"; then
+        bad "the new plugin CLEANED UP the checkout at startup ('unfinished publish found at startup'): the syncer and its tree were destroyed and the checkout restarted"
+    else
+        bad "the new plugin logged neither adoption branch: the checkout had finished before it started, so this run tests nothing (widen the window: more files, fanout 1)"
+    fi
     if wait_phase slow-agent Running 400; then
         ok "the tenant reached Running: the checkout COMPLETED across a plugin restart"
         seen=$(inpod slow-agent "cat /tmp/seen")
@@ -934,6 +950,114 @@ else
     bad "no worker appeared for slow-agent in 120s — S17 made no observation at all"
 fi
 $K -n $NS delete pod slow-agent --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
+
+# ── S17f: the window S17 cannot open, made by hand ───────────────────
+# A wide project of its own (never `proj`, whose entry count S11/S13/S14
+# assert), seeded through a lean seeder and its drain. 4000 files at
+# fanout 1 still check out in ~15 s against local MinIO — less than a
+# plugin roll — so the leg below does not rely on timing at all.
+leg S17f-seed "seed a 4000-file project (proj-wide) through a lean seeder and its drain"
+$K -n $NS delete pod slow-agent wide-seeder --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
+$K apply -f lean-wide.yaml >/dev/null
+if wait_phase wide-seeder Succeeded 300; then
+    ok "the seeder wrote its files and exited"
+    $K -n $NS delete pod wide-seeder --wait=true --timeout=300s >/dev/null 2>&1
+    i=0; while [ $i -lt 300 ] && [ "$(lments tenants/proj-wide)" -lt 4000 ]; do sleep 3; i=$((i + 3)); done
+    n=$(lments tenants/proj-wide)
+    [ "${n:-0}" -ge 4000 ] && ok "the drain published the wide project: $n entries cited (${i}s)" || bad "the wide project has only ${n:-0} entries cited after ${i}s"
+else
+    bad "the wide seeder did not reach Succeeded"
+fi
+# ── S17f: adoption keeps a FROZEN checkout ─────────────────────────────
+# The timing form of S17 cannot open its window on this rig: a plugin
+# roll takes ~30 s and even a 4000-file fanout-1 checkout finishes in
+# ~15 s against local MinIO. So the window is made by hand: the syncer
+# is SIGSTOPped mid-checkout, the plugin is rolled while the volume
+# state reads `checking-out`, and the new plugin's adoption is observed
+# directly — its log line, the worker's uid and deletionTimestamp, the
+# tree — before the syncer is thawed and the checkout completes.
+leg S17f "adoption keeps a checkout in progress: syncer frozen mid-checkout, plugin rolled, volume kept, checkout completes after the thaw"
+$K -n $NS delete pod slow-agent --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
+$K apply -f lean-wide-agent.yaml >/dev/null
+w=""; i=0
+while [ $i -lt 480 ] && [ -z "$w" ]; do w=$(worker_of_any slow-agent); [ -z "$w" ] && { sleep 0.25; i=$((i + 1)); }; done
+if [ -n "$w" ]; then
+    wuid0=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    tree=$($K -n $WNS get pod "$w" -o jsonpath='{.spec.volumes[*].hostPath.path}' 2>/dev/null)
+    voldir=$(dirname "$tree")
+    # Freeze the syncer the moment it exists (the worker's PID 1 spawns
+    # it a few seconds after the pod appears).
+    frozen=""; i=0
+    while [ $i -lt 240 ] && [ -z "$frozen" ]; do
+        frozen=$($K -n $WNS exec "$w" -- /bin/sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = flint-sync ] && { kill -STOP "${p#/proc/}" && echo "${p#/proc/}"; }; done; exit 0' 2>/dev/null)
+        [ -z "$frozen" ] && { sleep 0.5; i=$((i + 1)); }
+    done
+    [ -n "$frozen" ] && ok "the syncer (pid $frozen in $w) is FROZEN" || bad "could not freeze the syncer in $w"
+    marker_present=$(onnode "test -f '$tree/.flint-sync/checkout-complete' && echo yes || echo no")
+    [ "$marker_present" = "no" ] \
+        && ok "PRECONDITION: no checkout marker while frozen — the checkout is genuinely in progress" \
+        || bad "PRECONDITION: the marker already exists under $tree — frozen too late; this run proves nothing"
+    st_phase=$(onnode "cat '$voldir/state.json'" | jq -r '.phase' 2>/dev/null)
+    [ "$st_phase" = "checking-out" ] \
+        && ok "PRECONDITION: the volume state on disk reads 'checking-out' — the phase adoption will see" \
+        || bad "PRECONDITION: the volume state reads '${st_phase:-?}', not checking-out"
+    p0=$($K -n $SYS get pods -l app.kubernetes.io/name=flint-s3-csi-node -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    $K -n $SYS delete pod "$p0" --wait=true --timeout=180s >/dev/null 2>&1
+    $K -n $SYS rollout status ds/flint-s3-csi-node --timeout=180s >/dev/null 2>&1
+    p1=$($K -n $SYS get pods -l app.kubernetes.io/name=flint-s3-csi-node -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    started=$($K -n $SYS get pod "$p1" -o jsonpath='{.status.startTime}' 2>/dev/null)
+    [ -n "$p1" ] && [ "$p1" != "$p0" ] \
+        && ok "the plugin was rolled while the checkout was frozen ($p0 → $p1)" \
+        || bad "the plugin did not roll ($p0 → ${p1:-absent})"
+    sleep 3
+    adopt_log=$($K -n $SYS logs "$p1" -c node 2>/dev/null || true)
+    if printf '%s' "$adopt_log" | grep -q "checkout in progress at startup"; then
+        ok "the NEW plugin took the keep-checking-out branch ('checkout in progress at startup')"
+    elif printf '%s' "$adopt_log" | grep -q "unfinished publish found at startup"; then
+        bad "the new plugin CLEANED UP the checkout at startup — the pre-fix behaviour"
+    else
+        bad "the new plugin logged neither adoption branch"
+    fi
+    wuid1=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    dts=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null)
+    [ -n "$wuid1" ] && [ "$wuid1" = "$wuid0" ] && [ -z "$dts" ] \
+        && ok "the frozen syncer's pod survived adoption untouched (uid unchanged, no deletionTimestamp)" \
+        || bad "the worker did not survive adoption (uid '$wuid0' → '${wuid1:-gone}', deletionTimestamp '${dts:-none}')"
+    tree_there=$(onnode "test -d '$tree' && test -f '$voldir/state.json' && echo yes || echo no")
+    [ "$tree_there" = "yes" ] && ok "the tree and the volume state are still on the node" || bad "the tree or its state is gone from the node"
+    still=$(onnode "cat '$voldir/state.json'" | jq -r '.phase' 2>/dev/null)
+    [ "$still" = "checking-out" ] && ok "the state still reads checking-out after adoption (nothing was rewritten)" || bad "the state now reads '${still:-?}'"
+    # Thaw, and the checkout must finish under the NEW plugin.
+    $K -n $WNS exec "$w" -- /bin/sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = flint-sync ] && kill -CONT "${p#/proc/}"; done; exit 0' >/dev/null 2>&1
+    if wait_phase slow-agent Running 400; then
+        ok "the tenant reached Running after the thaw: the checkout COMPLETED under the new plugin"
+        seen=$(inpod slow-agent "cat /tmp/seen")
+        [ "${seen:-0}" -ge 4000 ] \
+            && ok "it found all $seen seeded files" \
+            || bad "the tenant sees ${seen:-?} files, not the 4000 the project holds"
+        wuid2=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+        [ -n "$wuid2" ] && [ "$wuid2" = "$wuid0" ] \
+            && ok "the syncer pod is the SAME object end to end (uid unchanged)" \
+            || bad "the syncer pod changed ('$wuid0' → '${wuid2:-gone}')"
+        mtime=$(onnode "stat -c %Y '$tree/.flint-sync/checkout-complete' 2>/dev/null")
+        pstart=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$started" +%s 2>/dev/null || echo "")
+        if [ -n "$mtime" ] && [ -n "$pstart" ]; then
+            [ "$mtime" -ge "$pstart" ] \
+                && ok "the marker is YOUNGER than the new plugin ($(date -u -r "$mtime" +%H:%M:%S) >= $(date -u -r "$pstart" +%H:%M:%S)): the checkout finished under it, and it was the SAME syncer that finished it" \
+                || bad "the marker predates the new plugin: the checkout was not actually in progress across the roll"
+        else
+            note "could not compare marker mtime ($mtime) with the plugin start ($started)"
+        fi
+    else
+        bad "slow-agent never reached Running in 400s after the thaw"
+    fi
+else
+    bad "no worker appeared for slow-agent in 120s — S17f made no observation at all"
+fi
+# The wide project leaves the rig before S18.
+$K -n $NS delete pod slow-agent --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
+$K delete -f lean-wide.yaml --ignore-not-found --wait=false >/dev/null 2>&1
+mcx mc rm --recursive --force m/s3bucket/tenants/proj-wide >/dev/null 2>&1 || true
 
 # ── S18 the tree's ceiling ───────────────────────────────────────────
 # `sizeLimitGib` was an emptyDir sizeLimit under the webhooks, where
@@ -1099,7 +1223,7 @@ $K uncordon "$NODE" >/dev/null 2>&1 && note "node uncordoned"
 
 # ── roster ────────────────────────────────────────────────────────────
 echo
-for want in S1 S2 S3 S4 S5 S5c S6 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S17 S18 S19 SU; do
+for want in S1 S2 S3 S4 S5 S5c S6 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S17 S17f S18 S19 SU; do
     echo " $RAN_LEGS " | grep -q " $want " || bad "leg $want never ran"
 done
 echo "════════════════════════════════════════"

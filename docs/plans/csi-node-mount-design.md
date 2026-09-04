@@ -412,6 +412,108 @@ record in §11.1.
   nothing to talk to. Read §3.2's recipe as requiring `udsDoor: true`;
   the drill's fixture sets it and S12 asserts the socket and its inode.
 
+**Second pass over the node plugin (2026-09-03, evening).** A read of
+`s3csi/` against §3.5, §6.4, §6.7 and S17 found six places where the
+code and this document disagreed. All six are closed in code; the
+drill legs that cover them are named. None changes the bucket protocol
+or the model.
+
+- *Startup adoption killed a checkout in progress.* `adopt_existing`
+  cleaned up every volume whose phase was not `published`, and a lean
+  volume sits in `checking-out` for the whole checkout — so a plugin
+  roll deleted the syncer, unmounted the tree, removed the image and
+  the state, and kubelet's retry started the checkout from zero. That
+  is the opposite of §6.4 and of what S17 asserts, and S17 was recorded
+  green (6/0) with that code in the binary; the discrepancy is not
+  explained by history and the leg is re-run against the fix below. The
+  adoption decision is now the pure `adopt_action`: published ⇒ keep;
+  lean `checking-out` ⇒ keep, the syncer is its own pod and the retry
+  resumes the wait; anything else ⇒ clean up. Unit-tested.
+- *The tree guard sat in the wrong function.* `cleanup` refuses to
+  touch a published lean volume — but `publish()` reached it only after
+  deciding to start over, then `publish_lean` overwrote the phase the
+  refusal keyed on, so any later failure deleted the tree. The path
+  needed a target that is not a mount AND a source that is not a mount,
+  which a quota-off tree (a plain directory) always fails. The decision
+  is now the pure `published_action`: target mounted ⇒ republish; lean
+  with the source mounted, or an image on disk (remounted first), or a
+  plain-directory tree ⇒ rebind; lean with nothing to bind ⇒ REFUSE,
+  naming the tree; passthrough with a dead source ⇒ start over as
+  before. A published lean volume cannot reach `StartOver` from any
+  input; the test enumerates all eight. `cleanup`'s refusal stays as
+  the second layer.
+- *An evicted syncer was never recreated.* §6.7 said "recreated on the
+  next republish"; nothing did it. Republish now relaunches a lean
+  worker whose pod is gone or `Failed` (eviction, node pressure, a
+  manual delete — `OnFailure` covers container exits, this covers the
+  pod): the syncer's non-secret environment is kept in the volume state
+  (`sync_env`), the worker is rebuilt over the SAME tree, and the syncer
+  self-recognises its lease (the S14 restart arm). Decided by a GET,
+  never by the cache below. Events `SyncerRecreated` /
+  `SyncerRecreateFailed`; retried every republish.
+- *Drain keys could expire mid-drain, and the tree was then deleted.*
+  The plugin wrote `creds.json` only on republish, which stops when the
+  tenant terminates, so a drain ran on 270-900 s of key; a hybrid
+  workspace with a long floor could outlive it, and `DrainCeilingHit`
+  then removed the tree seconds after promising `recover-staged`. Now:
+  the pod-bound token is kept beside the state on every publish and
+  republish (`NodeUnpublishVolume` carries none); `unpublish_lean`
+  re-registers and exchanges for `drain_key_lifetime_secs(grace)` BEFORE
+  the SIGTERM, which under a normal delete always succeeds (the token
+  is valid until delete time + the tenant's grace + 60 s) and under
+  `--force` fails legibly (`DrainCredentialRefreshFailed`, the drain
+  runs on the remaining key life). And an UNDRAINED tree is never
+  removed: syncer gone, syncer exited before it was asked, or killed at
+  the ceiling ⇒ the volume directory is moved to
+  `<plugin>/undrained/<vid>-<unix>` with its image, outside `volumes/`
+  so adoption and retries ignore it, and `UndrainedTreePreserved` on
+  the tenant pod names the path. §3.5 step 4's one-shot `flint-sync
+  drain` over such a tree is still the real fix and still unbuilt; the
+  preserved directory is what makes it possible later.
+- *Republish cost.* Every republish did one API GET per volume for the
+  worker's liveness (8/s per node at 500 volumes) and a readdir on the
+  mount — a LIST per volume per minute, and during a store outage a
+  blocking thread parked for the mounter's timeout. Liveness now comes
+  from one watch over this node's workers (`worker::WorkerWatch`; a pod
+  the cache does not hold is looked up, so the cache can never say
+  "gone"), and the republish probe is statfs only; publish keeps the
+  readdir, where it proves the credential works.
+- *A broker outage read as a refusal.* The exchange error was one
+  string, mapped to `PermissionDenied`. `creds::ExchangeError` sorts an
+  STS 4xx (refused: this identity) from everything else (outage:
+  transport, 5xx, unparseable) — `PermissionDenied` vs `Unavailable` at
+  publish, and the refresh path keys on the type rather than on the
+  string it used to grep.
+
+**What ran (2026-09-03, evening).** The s3csi unit suite: 53/53, ten
+of them new (the adoption and published-volume decisions enumerated,
+the exchange classification, the drain key, the preserved-tree
+layout, the cache's "never says gone"). The full kind drill against
+the rebuilt plugin: 146 ok, 1 bad — the 1 is a NEW assertion added to
+S17 (below). S8's broker-down control now reads "broker exchange
+outage … Connection refused" on the tenant pod with the cached key
+kept; S9's `MounterDead` landed within 20 s from the watch cache;
+S13's drain asked the broker for a 3951 s key (3621 s grace + ceiling
++ margin) and got its 1-hour maximum, where the rig's ordinary key is
+120 s; S14's fenced straggler exited `Succeeded` and, at the tenant's
+delete, its tree was preserved at
+`undrained/csi-…-1788493195/{tree.img,tree,state.json}` with the
+`UndrainedTreePreserved` event naming that path.
+
+**S17 was vacuous, and now says so.** The leg checks "no marker yet"
+BEFORE the roll, and a plugin roll takes ~30 s on this rig while the
+200-file fanout-1 checkout finishes in ~10-15 s (measured: marker at
+03:39:59, replacement plugin started 03:40:29; with a 4000-file
+project the same, 03:45:15 vs 03:45:43). So the old plugin always
+flipped the volume to `published` before it died, the new plugin
+adopted a finished checkout, and the uid and mtime assertions held for
+a reason unrelated to the claim — which is how the leg was green over
+an adoption that destroyed a checkout in progress. S17 now asks the
+new plugin's log which adoption branch it took and fails when it took
+neither; on this rig that assertion fails until the fixture's checkout
+outlives a roll (a project of tens of thousands of objects, or a
+first-byte stall). Because no fixture on this rig can open the window by timing, a deterministic leg was added beside it, **S17f**: the syncer is SIGSTOPped mid-checkout (the S14 technique), the plugin is rolled while the on-disk state reads `checking-out`, and adoption is observed directly — the new plugin's log line, the worker's uid and absent `deletionTimestamp`, the tree and state still present, the state still `checking-out`; then the syncer is thawed and the checkout must complete under the new plugin with the same worker and a marker YOUNGER than that plugin. Run against the rebuilt plugin over a 4000-file project: 14/0. Against the previous binary the second assertion reads 'the new plugin CLEANED UP the checkout at startup', by construction of `adopt_existing` as it was.
+
 ## 1. The question, restated precisely
 
 The ask, verbatim: *"The flint passthrough and lean operators require

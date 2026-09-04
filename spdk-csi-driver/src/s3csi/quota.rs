@@ -118,10 +118,11 @@ mod imp {
             .map_err(|e| format!("own {}: {e}", tree.display()))
     }
 
-    /// Unmount the ceiling and reclaim its blocks. Best effort by
-    /// design: this runs on the teardown path, where a partially built
-    /// volume is normal and a missing image is not a failure.
-    pub fn teardown(tree: &Path, img: &Path) -> Result<(), String> {
+    /// Unmount the ceiling, keeping the image: the tree's bytes stay
+    /// where they are. This is the half `preserve_undrained` uses, and
+    /// what lets the volume directory be renamed (a directory with a
+    /// mount under it cannot be).
+    pub fn unmount_tree(tree: &Path) -> Result<(), String> {
         for _ in 0..8 {
             if !super::super::fuse::is_mountpoint(tree).unwrap_or(false) {
                 break;
@@ -131,6 +132,30 @@ mod imp {
         if super::super::fuse::is_mountpoint(tree).unwrap_or(false) {
             return Err(format!("{} is still a mount point after 8 unmounts", tree.display()));
         }
+        Ok(())
+    }
+
+    /// Mount an EXISTING image back at its tree, with no mkfs and no
+    /// chown: the recovery for a published volume whose loop mount is
+    /// gone (a target lost under a live pod). A missing image is an
+    /// error, never something to create here.
+    pub fn remount(dir: &Path, tree: &Path) -> Result<(), String> {
+        let img = image_path(dir);
+        if !img.is_file() {
+            return Err(format!("{} does not exist; nothing to remount", img.display()));
+        }
+        if super::super::fuse::is_mountpoint(tree).unwrap_or(false) {
+            return Ok(());
+        }
+        std::fs::create_dir_all(tree).map_err(|e| format!("tree {}: {e}", tree.display()))?;
+        run("mount -o loop", Command::new("mount").args(["-o", "loop,noatime"]).arg(&img).arg(tree))
+    }
+
+    /// Unmount the ceiling and reclaim its blocks. Best effort by
+    /// design: this runs on the teardown path, where a partially built
+    /// volume is normal and a missing image is not a failure.
+    pub fn teardown(tree: &Path, img: &Path) -> Result<(), String> {
+        unmount_tree(tree)?;
         match std::fs::remove_file(img) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -151,12 +176,18 @@ mod imp {
     pub fn chown_tree(_: &Path, _: u32, _: u32) -> Result<(), String> {
         unsupported("chown_tree")
     }
+    pub fn unmount_tree(_: &Path) -> Result<(), String> {
+        unsupported("unmount_tree")
+    }
+    pub fn remount(_: &Path, _: &Path) -> Result<(), String> {
+        unsupported("remount")
+    }
     pub fn teardown(_: &Path, _: &Path) -> Result<(), String> {
         unsupported("teardown")
     }
 }
 
-pub use imp::{chown_tree, ensure, teardown};
+pub use imp::{chown_tree, ensure, remount, teardown, unmount_tree};
 
 #[cfg(test)]
 mod tests {

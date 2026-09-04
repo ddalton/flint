@@ -213,6 +213,58 @@ pub fn remove_file(comm_dir: &Path, name: &str) {
     let _ = std::fs::remove_file(comm_dir.join(name));
 }
 
+/// Why an exchange yielded no keys. `Refused` is the broker's verdict
+/// on THIS identity — an STS 4xx: not a token, not a consumer, no live
+/// registration — and is the tenant's to fix. `Outage` is everything
+/// else — transport, a 5xx from the broker or its backend, an
+/// unparseable body — and is kubelet's to retry; a cached key is kept
+/// through it. The two were one string before, and a broker that was
+/// merely unreachable reported to the tenant as `PermissionDenied`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExchangeError {
+    Refused(String),
+    Outage(String),
+}
+
+impl ExchangeError {
+    pub fn is_refusal(&self) -> bool {
+        matches!(self, ExchangeError::Refused(_))
+    }
+}
+
+impl std::fmt::Display for ExchangeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExchangeError::Refused(m) => write!(f, "broker refused the exchange: {m}"),
+            ExchangeError::Outage(m) => write!(f, "broker exchange outage: {m}"),
+        }
+    }
+}
+
+/// An STS-shaped answer, sorted: 4xx is a refusal, anything else an
+/// outage. The broker answers `InvalidIdentityToken` and
+/// `InvalidParameterValue` with 400 and `AccessDenied` with 403 (all
+/// final for this identity), `ServiceUnavailable` with 503 and
+/// `IDPCommunicationError` with 502 (both transient).
+pub fn classify_exchange(status: u16, detail: String) -> ExchangeError {
+    if (400..500).contains(&status) {
+        ExchangeError::Refused(format!("{status}: {detail}"))
+    } else {
+        ExchangeError::Outage(format!("{status}: {detail}"))
+    }
+}
+
+/// Slack on top of the drain ceiling for the key exchanged at unpublish.
+pub const DRAIN_KEY_MARGIN_SECS: u64 = 300;
+
+/// The lifetime asked for the final drain's key: the derived grace plus
+/// the plugin's 30 s kill ceiling plus a margin, never shorter than the
+/// ordinary lifetime. The broker clamps to its own maximum; a drain
+/// longer than that still runs on what it gets, and the event says so.
+pub fn drain_key_lifetime_secs(grace_secs: u64, ordinary_secs: u64) -> u64 {
+    ordinary_secs.max(grace_secs + 30 + DRAIN_KEY_MARGIN_SECS)
+}
+
 // ── the broker client ────────────────────────────────────────────────
 
 /// One publish, registered at the broker (design §4.2): the binding a
@@ -310,7 +362,7 @@ impl BrokerClient {
         role_arn: &str,
         session_name: &str,
         duration_secs: u64,
-    ) -> Result<Creds, String> {
+    ) -> Result<Creds, ExchangeError> {
         let form = [
             ("Action", "AssumeRoleWithWebIdentity"),
             ("Version", "2011-06-15"),
@@ -325,16 +377,16 @@ impl BrokerClient {
             .form(&form)
             .send()
             .await
-            .map_err(|e| format!("broker exchange: {e}"))?;
+            .map_err(|e| ExchangeError::Outage(format!("transport: {e}")))?;
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(format!(
-                "broker refused the exchange ({status}): {}",
-                sts_error_message(&body).unwrap_or_else(|| body.chars().take(300).collect())
+            return Err(classify_exchange(
+                status.as_u16(),
+                sts_error_message(&body).unwrap_or_else(|| body.chars().take(300).collect()),
             ));
         }
-        parse_sts_xml(&body)
+        parse_sts_xml(&body).map_err(ExchangeError::Outage)
     }
 }
 
@@ -463,6 +515,32 @@ mod tests {
         assert_eq!(c.secs_left(now), 900);
         let later = chrono::DateTime::parse_from_rfc3339("2026-09-02T01:00:00Z").unwrap().with_timezone(&chrono::Utc);
         assert_eq!(c.secs_left(later), 0);
+    }
+
+    /// The tenant's event must say "refused" only when the broker
+    /// refused THIS identity. A broker that is down, or whose backend
+    /// is, is an outage: kubelet retries it and a cached key survives it.
+    #[test]
+    fn exchange_errors_sort_refusals_from_outages() {
+        assert!(classify_exchange(403, "AccessDenied: bob is not a consumer".into()).is_refusal());
+        assert!(classify_exchange(400, "InvalidIdentityToken: pod is gone".into()).is_refusal());
+        assert!(!classify_exchange(502, "IDPCommunicationError".into()).is_refusal());
+        assert!(!classify_exchange(503, "ServiceUnavailable".into()).is_refusal());
+        assert!(!classify_exchange(500, "".into()).is_refusal());
+        let e = ExchangeError::Outage("transport: connection refused".into());
+        assert!(e.to_string().contains("outage"), "{e}");
+        assert!(!e.to_string().contains("refused the exchange"), "{e}");
+        let r = classify_exchange(403, "AccessDenied".into());
+        assert!(r.to_string().contains("refused the exchange"), "{r}");
+    }
+
+    /// The drain key covers the ceiling the plugin enforces, and is
+    /// never shorter than the ordinary key.
+    #[test]
+    fn drain_key_covers_the_ceiling_and_never_shrinks() {
+        assert_eq!(drain_key_lifetime_secs(120, 900), 900, "a gated drain fits inside the ordinary key");
+        assert_eq!(drain_key_lifetime_secs(3621, 900), 3621 + 30 + DRAIN_KEY_MARGIN_SECS, "a 1-hour floor asks for more");
+        assert!(drain_key_lifetime_secs(0, 900) >= 900);
     }
 
     #[test]
