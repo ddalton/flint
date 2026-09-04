@@ -100,12 +100,31 @@ pub struct Pointer {
     /// citation AND by a takeover rotation, which is why it is not the
     /// same number as `entries_seq`.
     pub seq: u64,
-    /// The immutable object holding the entries of this generation.
-    pub entries_key: String,
+    /// The single immutable object holding every entry of this
+    /// generation — the step-one layout. `None` on a CHUNKED pointer.
+    ///
+    /// Optional here and REQUIRED in the step-one binary's schema, and
+    /// that asymmetry is the migration: a step-one reader handed a
+    /// chunked pointer fails to parse it and refuses, rather than
+    /// decoding a pointer it half-understands. `manifest::load` maps a
+    /// missing object to `Ok(None)`, `None` means FIRST WRITE, and a
+    /// barrier answers that with `If-None-Match: *` — so every layout
+    /// change has to make an old reader refuse rather than conclude the
+    /// project is empty. **Do not give this field a serde default in a
+    /// released binary; that is what makes the refusal work.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entries_key: Option<String>,
     /// The `seq` the entries object was written under. A rotation
     /// leaves this ALONE while bumping `seq`, which is exactly what
     /// lets a follower skip the entries GET after a takeover.
-    pub entries_seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entries_seq: Option<u64>,
+    /// The chunk list — the step-two layout. `Some(vec![])` is a
+    /// legitimately EMPTY project and is distinguishable from absence,
+    /// which is why this is an Option around a Vec rather than a bare
+    /// Vec with a default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunks: Option<Vec<super::chunk::ChunkRef>>,
     #[serde(default)]
     pub pinned_reads: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -113,6 +132,44 @@ pub struct Pointer {
     /// The epoch that installed this pointer. Diagnostic; the fence is
     /// the CAS, not this field.
     pub epoch: u64,
+}
+
+/// Where a pointer's entries actually live.
+#[derive(Debug)]
+pub enum Entries<'a> {
+    /// One generation object (step one).
+    Single { key: &'a str, seq: u64 },
+    /// A chunk list (step two). Empty = an empty project.
+    Chunked(&'a [super::chunk::ChunkRef]),
+}
+
+impl Pointer {
+    /// Resolve the layout, refusing anything ambiguous.
+    ///
+    /// BOTH forms present, or NEITHER, is malformed and must fail —
+    /// never pick one. A pointer carrying both would let two readers
+    /// that broke the tie differently disagree about the contents of
+    /// the same seq, which is the one thing a single visible object was
+    /// supposed to make impossible.
+    pub fn entries(&self) -> LeanResult<Entries<'_>> {
+        match (&self.entries_key, &self.chunks) {
+            (Some(k), None) => {
+                Ok(Entries::Single { key: k, seq: self.entries_seq.unwrap_or(self.seq) })
+            }
+            (None, Some(c)) => Ok(Entries::Chunked(c)),
+            (Some(_), Some(_)) => Err(super::LeanError::State(format!(
+                "manifest pointer at seq {} names BOTH a generation object and a chunk list; \
+                 refusing to guess which describes this manifest",
+                self.seq
+            ))),
+            (None, None) => Err(super::LeanError::State(format!(
+                "manifest pointer at seq {} names no entries at all — neither a generation \
+                 object nor a chunk list; an empty project is an empty chunk LIST, not a \
+                 missing one",
+                self.seq
+            ))),
+        }
+    }
 }
 
 /// What a writer must present to CAS. Carries the LAYOUT as well as the
@@ -200,22 +257,61 @@ pub async fn load(
     if let Some(LoadedPointer { pointer: p, etag, last_modified_unix: pointer_lm }) =
         load_pointer(store, cfg).await?
     {
-        let (meta, bytes) = match store.get_whole(&p.entries_key, None).await {
-            Ok(v) => v,
-            // A pointer naming an object that is not there is not an
-            // empty workspace — it is a broken one, and answering
-            // `None` would invite a re-seed over a live project.
-            Err(StoreError::NotFound(_)) => {
-                return Err(super::LeanError::State(format!(
-                    "manifest pointer at seq {} names {}, which does not exist — refusing to treat a broken \
-                     pointer as an empty workspace",
-                    p.seq, p.entries_key
-                )))
+        // A pointer naming an object that is not there is not an empty
+        // workspace — it is a broken one, and answering `None` would
+        // invite a re-seed over a live project. That rule holds one
+        // level deeper for chunks: a chunk list with a hole is a
+        // manifest missing entries, and a missing entry reads to every
+        // consumer as a file the agent deleted.
+        let (mut manifest, meta_lm) = match p.entries()? {
+            Entries::Single { key, .. } => {
+                let (meta, bytes) = match store.get_whole(key, None).await {
+                    Ok(v) => v,
+                    Err(StoreError::NotFound(_)) => {
+                        return Err(super::LeanError::State(format!(
+                            "manifest pointer at seq {} names {key}, which does not exist — \
+                             refusing to treat a broken pointer as an empty workspace",
+                            p.seq
+                        )))
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                let m = LeanManifest::parse(&bytes)
+                    .map_err(|e| super::LeanError::State(format!("manifest parse: {e}")))?;
+                (m, meta.last_modified_unix)
             }
-            Err(e) => return Err(e.into()),
+            Entries::Chunked(refs) => {
+                // Sequential on purpose for now: a chunk fetch is
+                // ordinary and the interesting property is that a hole
+                // FAILS rather than silently shortening the manifest.
+                let mut bodies = Vec::with_capacity(refs.len());
+                for r in refs {
+                    let key = cfg.chunk_key(&r.addr);
+                    match store.get_whole(&key, None).await {
+                        Ok((_, b)) => bodies.push(b.to_vec()),
+                        Err(StoreError::NotFound(_)) => {
+                            return Err(super::LeanError::State(format!(
+                                "manifest pointer at seq {} names chunk {} (first key {:?}), \
+                                 which does not exist — refusing to serve a manifest with a \
+                                 hole in it as though those entries had been deleted",
+                                p.seq, r.addr, r.first
+                            )))
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+                let entries = super::chunk::assemble(refs, &bodies)?;
+                (
+                    LeanManifest {
+                        seq: p.seq,
+                        entries,
+                        pinned_reads: p.pinned_reads,
+                        boundary_source: p.boundary_source.clone(),
+                    },
+                    None,
+                )
+            }
         };
-        let mut manifest = LeanManifest::parse(&bytes)
-            .map_err(|e| super::LeanError::State(format!("manifest parse: {e}")))?;
         // The pointer is the authority for the fields it carries: a
         // rotation moves `seq` without rewriting the entries object, so
         // the generation's own copy is stale by construction.
@@ -228,7 +324,7 @@ pub async fn load(
             // The CITATION's clock is when the pointer moved, not when
             // the entries object happened to be written: a rotation
             // republishes the same entries under a new generation.
-            last_modified_unix: pointer_lm.or(meta.last_modified_unix),
+            last_modified_unix: pointer_lm.or(meta_lm),
             pointer: Some(p),
         }));
     }
@@ -327,8 +423,92 @@ pub async fn cas_write_stamped(
     //    that nobody reads and the sweep collects.
     let pointer = Pointer {
         seq: m.seq,
-        entries_key: entries_key.clone(),
-        entries_seq: m.seq,
+        entries_key: Some(entries_key.clone()),
+        entries_seq: Some(m.seq),
+        // The step-one layout. `cas_write_chunked` is what produces a
+        // chunk list; this path stays byte-for-byte what it was.
+        chunks: None,
+        pinned_reads: m.pinned_reads,
+        boundary_source: m.boundary_source.clone(),
+        epoch,
+    };
+    put_pointer(store, cfg, &pointer, expected, &stamps).await
+}
+
+/// Who is publishing, and under what coherence claim. Grouped because
+/// they travel together through every publish path and are meaningless
+/// apart — and because a positional list of three scalars is how an
+/// epoch ends up where a flush uuid was meant to go.
+pub struct PublishStamps<'a> {
+    pub epoch: u64,
+    pub flush_uuid: &'a str,
+    pub boundary_source: Option<&'a str>,
+}
+
+/// Publish a manifest as a CHUNK LIST (chunked design §2).
+///
+/// The ordering is the atomicity story and is not negotiable: every
+/// chunk is durable BEFORE the pointer CAS, and the pointer is the only
+/// thing that ever becomes visible. A crash between the two leaves
+/// orphan chunks nobody references and no reader can observe — never a
+/// half-written manifest.
+///
+/// `prev` is the chunk list this publish is replacing. Chunks whose
+/// address is already in it are skipped ENTIRELY — not uploaded and
+/// re-conditioned, but never sent. That is where O(changed) actually
+/// comes from: without it, a one-file publish still ships every chunk's
+/// bytes over the wire and only the store's 412 saves the storage.
+pub async fn cas_write_chunked(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    m: &LeanManifest,
+    expected: Option<&ManifestHandle>,
+    prev: &[super::chunk::ChunkRef],
+    pub_stamps: PublishStamps<'_>,
+) -> LeanResult<ObjectMeta> {
+    let PublishStamps { epoch, flush_uuid, boundary_source } = pub_stamps;
+    let mut m = m.clone();
+    if boundary_source.is_some() {
+        m.boundary_source = boundary_source.map(|s| s.to_string());
+    }
+    let m = &m;
+    let split =
+        super::chunk::split_with(&m.entries, cfg.chunk_target, cfg.chunk_min, cfg.chunk_max)?;
+    let have: std::collections::HashSet<&str> = prev.iter().map(|r| r.addr.as_str()).collect();
+
+    let stamps = GenerationStamps {
+        generation: m.seq,
+        epoch,
+        flush_uuid: flush_uuid.to_string(),
+        boundary_source: m.boundary_source.clone(),
+        posix: None,
+    };
+
+    for (r, body) in &split {
+        if have.contains(r.addr.as_str()) {
+            continue;
+        }
+        let key = cfg.chunk_key(&r.addr);
+        let crc = crc64_nvme(body);
+        match store
+            .put_whole(&key, body.clone().into(), &PutCondition::IfNoneMatchAny, &stamps, crc)
+            .await
+        {
+            Ok(_) => {}
+            // The object is content-addressed, so an existing one at
+            // this key holds these bytes: a concurrent writer produced
+            // the same chunk, or a previous attempt of ours did. Either
+            // way it is already what we were about to write.
+            Err(StoreError::PreconditionFailed(_)) | Err(StoreError::Conflict(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    let pointer = Pointer {
+        seq: m.seq,
+        entries_key: None,
+        entries_seq: None,
+        chunks: Some(split.into_iter().map(|(r, _)| r).collect()),
         pinned_reads: m.pinned_reads,
         boundary_source: m.boundary_source.clone(),
         epoch,
@@ -485,7 +665,14 @@ pub async fn sweep_generations(store: &dyn ObjectStore, cfg: &LeanConfig) -> Lea
     let Some(lp) = load_pointer(store, cfg).await? else {
         return Ok(0);
     };
-    let live = lp.pointer.entries_key;
+    // A chunked pointer names no generation object at all, so there is
+    // nothing here to keep a window of. Chunks are shared across
+    // generations and are collected by a different rule entirely
+    // (chunked design §8.1) — sweeping them by "not named by the live
+    // pointer" would delete history the window exists to preserve.
+    let Some(live) = lp.pointer.entries_key else {
+        return Ok(0);
+    };
     let prefix = format!("{}/{}/manifests/", cfg.prefix, super::LEAN_DIR);
     let mut listed = store.list(&prefix).await?;
     // The key is `<seq:020>-<uuid>`, so lexical order IS generation

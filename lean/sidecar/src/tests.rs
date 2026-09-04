@@ -6076,10 +6076,10 @@ async fn a_publish_writes_an_immutable_generation_and_a_pointer_that_names_it() 
 
     let lp = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap();
     assert_eq!(lp.pointer.seq, 1);
-    assert_eq!(lp.pointer.entries_seq, 1);
+    assert_eq!(lp.pointer.entries_seq, Some(1));
     assert_eq!(lp.pointer.entries_key, lp.pointer.entries_key.clone());
     // The generation object exists and the pointer names it.
-    assert!(store.head(&lp.pointer.entries_key.clone()).await.is_ok());
+    assert!(store.head(lp.pointer.entries_key.as_deref().unwrap()).await.is_ok());
     // The legacy key is NOT written by a fresh workspace.
     assert!(store.head(&cfg.manifest_key()).await.is_err());
 
@@ -6103,7 +6103,7 @@ async fn a_takeover_rotation_does_not_touch_the_entries_object() {
         m.entries.insert(format!("f{i:03}.txt"), entry("x"));
     }
     manifest::cas_write(store.as_ref(), &cfg, &m, None, 1, "seed").await.unwrap();
-    let gen4 = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap().pointer.entries_key;
+    let gen4 = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap().pointer.entries_key.unwrap();
     let before = store.head(&gen4).await.unwrap();
 
     let (rotated, _) = manifest::rotate_for_takeover(store.as_ref(), &cfg, 2).await.unwrap().unwrap();
@@ -6113,8 +6113,8 @@ async fn a_takeover_rotation_does_not_touch_the_entries_object() {
     assert_eq!(before.etag, after.etag, "the entries object was rewritten by a rotation");
     let lp = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap();
     assert_eq!(lp.pointer.seq, 5);
-    assert_eq!(lp.pointer.entries_seq, 4, "entries_seq must NOT move — a follower reads it to skip the GET");
-    assert_eq!(lp.pointer.entries_key, gen4);
+    assert_eq!(lp.pointer.entries_seq, Some(4), "entries_seq must NOT move — a follower reads it to skip the GET");
+    assert_eq!(lp.pointer.entries_key.as_deref(), Some(gen4.as_str()));
     // And the document still has every entry: rotation bumps, it does
     // not truncate.
     let loaded = manifest::load(store.as_ref(), &cfg).await.unwrap().unwrap();
@@ -6190,7 +6190,7 @@ async fn a_pointer_naming_a_missing_generation_refuses_rather_than_reading_empty
     m.seq = 2;
     m.entries.insert("a.txt".into(), entry("x"));
     manifest::cas_write(store.as_ref(), &cfg, &m, None, 1, "seed").await.unwrap();
-    let gen2 = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap().pointer.entries_key;
+    let gen2 = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap().pointer.entries_key.unwrap();
     store.delete(&gen2).await.unwrap();
 
     match manifest::load(store.as_ref(), &cfg).await {
@@ -6273,7 +6273,7 @@ async fn superseded_generations_are_reaped_but_the_live_one_and_a_window_survive
     // The live one is still there, and the workspace still reads.
     let lp = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap();
     assert!(
-        left.iter().any(|o| o.key == lp.pointer.entries_key),
+        left.iter().any(|o| Some(&o.key) == lp.pointer.entries_key.as_ref()),
         "the reaper deleted the generation the pointer names"
     );
     let loaded = manifest::load(store.as_ref(), &cfg).await.unwrap().unwrap();
@@ -6294,7 +6294,7 @@ async fn the_reaper_collects_an_orphan_from_a_crash_before_the_pointer_cas() {
     m.seq = 1;
     m.entries.insert("a.txt".into(), entry("a.txt"));
     manifest::cas_write(store.as_ref(), &cfg, &m, None, 1, "live").await.unwrap();
-    let live = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap().pointer.entries_key;
+    let live = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap().pointer.entries_key.unwrap();
 
     // The orphan: a generation object at a HIGHER seq that no pointer
     // names, exactly as an interrupted publish leaves behind.
@@ -6354,7 +6354,7 @@ async fn a_rotation_reads_and_writes_no_generation_object() {
         m.entries.insert(format!("f{i:04}.txt"), entry("f"));
     }
     manifest::cas_write(store.as_ref(), &cfg, &m, None, 1, "seed").await.unwrap();
-    let gen = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap().pointer.entries_key;
+    let gen = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap().pointer.entries_key.unwrap();
     let before = store.head(&gen).await.unwrap();
 
     store.reset_op_counts();
@@ -6755,4 +6755,216 @@ fn chunk_boundaries_are_stable_and_content_addresses_are_not_crc() {
     assert_ne!(x, y, "two different chunk bodies share an address");
     assert_eq!(x.len(), 32, "address is not 128 bits of hex");
     assert_eq!(x, super::chunk::chunk_address(b"{\"a\":1}"), "address is not stable");
+}
+
+// ── the chunked wire format ─────────────────────────────────────────
+
+fn entry_at(k: &str, seq: u64) -> super::manifest::LeanEntry {
+    super::manifest::LeanEntry {
+        key: format!("files/{k}"),
+        etag: format!("e-{k}-{seq}"),
+        crc64_b64: None,
+        size: 10,
+        mode: 0o644,
+        mtime_unix: 1_700_000_000,
+        generation: seq,
+        epoch: 1,
+        version_id: None,
+    }
+}
+
+fn manifest_of(n: usize, seq: u64) -> super::manifest::LeanManifest {
+    super::manifest::LeanManifest {
+        seq,
+        entries: (0..n).map(|i| (format!("src/f{i:05}.txt"), entry_at(&format!("f{i:05}"), seq))).collect(),
+        pinned_reads: false,
+        boundary_source: None,
+    }
+}
+
+/// THE HEADLINE, measured rather than argued: a publish that changes
+/// three files out of a large project must write bytes proportional to
+/// those three files, not to the project.
+///
+/// Counted at the store, not inferred from the code. The control is the
+/// FIRST publish, which necessarily writes every chunk — without it a
+/// "few puts" assertion would pass just as well on a fixture that
+/// happened to produce one chunk.
+#[tokio::test]
+async fn a_three_file_publish_writes_chunks_proportional_to_the_change() {
+    let inner = Arc::new(MemoryStore::new());
+    let store: Arc<dyn ObjectStore> = inner.clone();
+    let dir = tempfile::tempdir().unwrap();
+    // Small chunks so a readable fixture produces several of them. The
+    // sizing is config precisely so this does not need a 20k-entry
+    // manifest to exercise a multi-chunk publish.
+    let mut cfg = cfg_for(dir.path());
+    cfg.chunk_target = 64;
+    cfg.chunk_min = 16;
+    cfg.chunk_max = 256;
+
+    let m0 = manifest_of(4000, 1);
+    inner.reset_op_counts();
+    let meta = manifest::cas_write_chunked(store.as_ref(), &cfg, &m0, None, &[],
+        manifest::PublishStamps { epoch: 1, flush_uuid: "u1", boundary_source: None })
+        .await
+        .expect("first chunked publish");
+    let first_puts = *inner.op_counts().get("put_whole").unwrap_or(&0);
+    let p0 = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap().pointer;
+    let chunks0 = match p0.entries().unwrap() {
+        super::manifest::Entries::Chunked(c) => c.to_vec(),
+        _ => panic!("the pointer is not chunked"),
+    };
+    assert!(chunks0.len() >= 4, "fixture made {} chunks — too few to measure", chunks0.len());
+    assert!(
+        first_puts as usize >= chunks0.len(),
+        "the first publish wrote {first_puts} objects for {} chunks — it cannot have written \
+         them all, so the comparison below is against nothing",
+        chunks0.len()
+    );
+
+    // Change three files, spread across the key space.
+    let mut m1 = m0.clone();
+    m1.seq = 2;
+    for i in [7usize, 1500, 3900] {
+        m1.entries.insert(format!("src/f{i:05}.txt"), entry_at(&format!("f{i:05}"), 99));
+    }
+    let h = super::manifest::ManifestHandle { etag: meta.etag.clone(), legacy: false };
+    inner.reset_op_counts();
+    manifest::cas_write_chunked(store.as_ref(), &cfg, &m1, Some(&h), &chunks0,
+        manifest::PublishStamps { epoch: 1, flush_uuid: "u2", boundary_source: None })
+        .await
+        .expect("incremental chunked publish");
+    let puts = *inner.op_counts().get("put_whole").unwrap_or(&0);
+
+    eprintln!(
+        "chunked publish: {} chunks; full publish {first_puts} objects, 3-file publish {puts}",
+        chunks0.len()
+    );
+    // The claim is a RATIO — proportional to the change, not to the
+    // project — so assert it as one. An absolute bound would drift with
+    // the fixture and stop meaning anything.
+    assert!(
+        puts * 5 < first_puts,
+        "a three-file publish wrote {puts} objects against the full publish's {first_puts} \
+         over {} chunks — untouched chunks are being rewritten, which is O(entries) again",
+        chunks0.len()
+    );
+    // 3 changed chunks + the pointer, with slack for a boundary split.
+    assert!(puts <= 6, "a three-file publish wrote {puts} objects");
+
+    // And it is still the same manifest.
+    let back = manifest::load(store.as_ref(), &cfg).await.unwrap().unwrap();
+    assert_eq!(back.manifest.entries.len(), 4000, "entries were lost across the chunked publish");
+    assert_eq!(back.manifest.entries, m1.entries, "the assembled manifest is not what was published");
+}
+
+/// A chunk list with a hole must FAIL, never come back as a shorter
+/// manifest. `manifest::load` maps a missing object to `Ok(None)` and
+/// `None` means first write, so a silently-short manifest is how a
+/// project gets re-seeded over — the same hazard the pointer layout
+/// closed one level up, restated for chunks.
+#[tokio::test]
+async fn a_missing_chunk_refuses_rather_than_shortening_the_manifest() {
+    let inner = Arc::new(MemoryStore::new());
+    let store: Arc<dyn ObjectStore> = inner.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = cfg_for(dir.path());
+    cfg.chunk_target = 64;
+    cfg.chunk_min = 16;
+    cfg.chunk_max = 256;
+
+    let m = manifest_of(2000, 1);
+    manifest::cas_write_chunked(store.as_ref(), &cfg, &m, None, &[],
+        manifest::PublishStamps { epoch: 1, flush_uuid: "u1", boundary_source: None }).await.unwrap();
+    let p = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap().pointer;
+    let chunks = match p.entries().unwrap() {
+        super::manifest::Entries::Chunked(c) => c.to_vec(),
+        _ => panic!("not chunked"),
+    };
+    assert!(chunks.len() >= 2);
+    // Delete a chunk in the MIDDLE: the failure must not depend on it
+    // being the first or last thing read.
+    store.delete(&cfg.chunk_key(&chunks[chunks.len() / 2].addr)).await.unwrap();
+
+    let msg = match manifest::load(store.as_ref(), &cfg).await {
+        Err(e) => e.to_string(),
+        Ok(m) => panic!(
+            "a manifest with a missing chunk LOADED, with {} entries",
+            m.map(|l| l.manifest.entries.len()).unwrap_or(0)
+        ),
+    };
+    assert!(
+        msg.contains("hole"),
+        "a manifest with a missing chunk did not refuse; it said: {msg}"
+    );
+}
+
+/// The pointer must never carry both layouts, and must never carry
+/// neither. Both are malformed, and PICKING one would let two readers
+/// that broke the tie differently disagree about the contents of the
+/// same seq — the one thing a single visible object made impossible.
+#[test]
+fn a_pointer_naming_both_layouts_or_neither_is_refused() {
+    let mut p = super::manifest::Pointer {
+        seq: 3,
+        entries_key: Some("k".into()),
+        entries_seq: Some(3),
+        chunks: Some(vec![]),
+        pinned_reads: false,
+        boundary_source: None,
+        epoch: 1,
+    };
+    assert!(p.entries().unwrap_err().to_string().contains("BOTH"));
+    p.entries_key = None;
+    p.chunks = None;
+    assert!(p.entries().unwrap_err().to_string().contains("no entries at all"));
+    // An EMPTY project is an empty chunk list, and must resolve.
+    p.chunks = Some(vec![]);
+    assert!(matches!(p.entries().unwrap(), super::manifest::Entries::Chunked(c) if c.is_empty()));
+}
+
+/// Every partition invariant `assemble` checks, each violated on its
+/// own. These are the silent ones: a wrong chunk list yields a
+/// well-formed manifest that is quietly missing or duplicating entries,
+/// and a missing entry reads to every consumer as a deleted file.
+#[test]
+fn assemble_refuses_every_way_a_chunk_list_can_lie() {
+    let entries: std::collections::BTreeMap<String, super::manifest::LeanEntry> =
+        (0..40).map(|i| (format!("k{i:03}"), entry_at(&format!("k{i:03}"), 1))).collect();
+    let split = super::chunk::split_with(&entries, 4, 2, 8).unwrap();
+    assert!(split.len() >= 3, "fixture made {} chunks", split.len());
+    let refs: Vec<_> = split.iter().map(|(r, _)| r.clone()).collect();
+    let bodies: Vec<Vec<u8>> = split.iter().map(|(_, b)| b.clone()).collect();
+
+    // The control: unmolested, it assembles back to exactly the input.
+    let ok = super::chunk::assemble(&refs, &bodies).unwrap();
+    assert_eq!(ok, entries, "assemble does not round-trip its own split");
+
+    let must_fail = |r: Vec<super::chunk::ChunkRef>, b: Vec<Vec<u8>>, why: &str| {
+        assert!(
+            super::chunk::assemble(&r, &b).is_err(),
+            "assemble accepted a chunk list that {why}"
+        );
+    };
+    // A count the body does not match.
+    let mut r = refs.clone();
+    r[1].n += 1;
+    must_fail(r, bodies.clone(), "claims more entries than its body holds");
+    // A body swapped for another chunk's (address no longer matches).
+    let mut b = bodies.clone();
+    b[1] = bodies[2].clone();
+    must_fail(refs.clone(), b, "returns a body that is not the addressed one");
+    // Out of order.
+    let mut r = refs.clone();
+    let mut b = bodies.clone();
+    r.swap(0, 1);
+    b.swap(0, 1);
+    must_fail(r, b, "is not in increasing key order");
+    // A dropped chunk, with its ref left behind.
+    must_fail(refs.clone(), bodies[..bodies.len() - 1].to_vec(), "names more chunks than were fetched");
+    // A first key that disagrees with the body.
+    let mut r = refs.clone();
+    r[1].first = "zzz".into();
+    must_fail(r, bodies.clone(), "disagrees with its body about the first key");
 }

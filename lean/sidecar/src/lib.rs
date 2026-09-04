@@ -203,6 +203,17 @@ pub struct LeanConfig {
     pub floor_secs: u64,
     /// Whole-object ceiling; larger files use multipart compose.
     pub whole_put_max: u64,
+    /// Entries per manifest chunk, in expectation, and the floor and
+    /// ceiling around it (chunked design §3). Config rather than
+    /// constants because §4 already anticipates this moving: the
+    /// pointer body is O(entries / target), and past ~10M entries the
+    /// target is one of the two things that can be changed instead of
+    /// adding a second level. Not surfaced on the CRD — nothing has
+    /// needed to tune it per workspace yet, and a knob with no caller
+    /// is a support burden.
+    pub chunk_target: usize,
+    pub chunk_min: usize,
+    pub chunk_max: usize,
     /// Checkout refusal budgets (0 = unlimited).
     pub max_bytes: u64,
     pub max_files: u64,
@@ -261,6 +272,9 @@ impl LeanConfig {
             root: root.into(),
             floor_secs: 60,
             whole_put_max: WHOLE_PUT_MAX,
+            chunk_target: chunk::CHUNK_TARGET,
+            chunk_min: chunk::CHUNK_MIN,
+            chunk_max: chunk::CHUNK_MAX,
             max_bytes: 0,
             max_files: 0,
             window_slack_secs: 180,
@@ -308,6 +322,15 @@ impl LeanConfig {
     /// a write-once key it never meant to collide with.
     pub fn generation_key(&self, seq: u64, flush_uuid: &str) -> String {
         format!("{}/{}/manifests/{seq:020}-{flush_uuid}", self.prefix, LEAN_DIR)
+    }
+
+    /// A chunk object, addressed by CONTENT rather than by generation.
+    /// Two generations that share a chunk share the object, which is
+    /// where the O(changed) publish actually comes from — naming chunks
+    /// by seq would rewrite every one of them on every publish even
+    /// when their contents were identical.
+    pub fn chunk_key(&self, addr: &str) -> String {
+        format!("{}/{}/chunks/{addr}", self.prefix, LEAN_DIR)
     }
     pub fn inbox_key(&self) -> String {
         format!("{}/{}/inbox", self.prefix, LEAN_DIR)
