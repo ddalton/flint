@@ -200,6 +200,25 @@ workers:
   # out of it, so a lean syncer's final publish keeps its full budget.
   # It never blocks a shutdown: the hook exits 0 when the budget runs out.
   prestopSecs: 60
+
+  # Enforce a lean workspace's `sizeLimitGib` (FLINT_S3CSI_QUOTA). The
+  # tree is a plugin-owned directory on the NODE's root filesystem, so
+  # without this the CR's declared ceiling is enforced by nothing and one
+  # runaway agent can fill the disk the kubelet is running on. With it,
+  # the tree is a sparse ext4 image loop-mounted at that path and an
+  # overrun is ENOSPC in the tenant's own write.
+  #
+  # Sparse: the image costs what is written, not what is declared, so the
+  # ceilings on a node may sum to more than the node's disk — the same
+  # bargain emptyDir sizeLimit made. It bounds one tenant's blast radius;
+  # it is not a reservation.
+  #
+  # false ⇒ back to a plain directory and an unenforced field. A
+  # workspace that genuinely wants no ceiling should set sizeLimitGib: 0
+  # on its own CR instead, which is per-workspace and visible in the CR.
+  # Needs mkfs.ext4 and loop devices on the node; a workspace whose
+  # ceiling cannot be built is REFUSED rather than published unbounded.
+  quota: true
   priorityClass:
     create: true
     name: flint-s3-worker

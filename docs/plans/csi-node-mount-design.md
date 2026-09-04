@@ -222,7 +222,7 @@ Deployment with replicas, `minAvailable: 1`, rendered only when
 `replicas > 1` — the textbook case, and a different question.
 
 **The drills.** `s3csi/e2e/run-s3csi.sh` — one kind cluster, MinIO in
-it, 18 legs (S1-S13, S15, S16, S19, SU) including the lean arm.
+it, 20 legs (S1-S16, S18, S19, SU) including the lean arm.
 `s3csi/e2e/multi/run-multi.sh` — TWO kind clusters and ONE MinIO
 running outside both, for the cross-cluster question: M1 passthrough
 (bytes written on one cluster read on the other, and a second prefix
@@ -1167,17 +1167,21 @@ Why this shape (the spine's, with security-first's discipline grafted in):
   CA for the broker's TLS is **ASSUMPTION** — the mounter image carries
   `ca-certificates` (`Dockerfile.passthrough:17-41`); the broker's
   serving cert must chain to a CA installed in that bundle (§9 E6).
-- **The fallback delivery is the loopback container-credentials door**
-  **[graft: minimal + security]**: the worker's PID 1 serves
+- **The delivery is the loopback container-credentials door** — written
+  here as the *fallback*, shipped as the **default and only proven arm**
+  (§0, §7): the worker's PID 1 serves
   `http://127.0.0.1:9911/v1/creds` in the worker's own network namespace
   from a `creds.json` the node plugin writes host-side after doing the
   exchange itself, gated by a per-volume random
   `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`. VERIFIED consumable by both
   the CRT and the Rust SDK (§4.1). It needs no TLS trust in the worker
   image and works for a P-CRED-only proxy, at the cost of the node plugin
-  holding S3 keys in memory per volume. The `CredentialSource` trait with
-  arms `webIdentity | broker-door | static | ambient` is the seam
-  (`s3csi/creds.rs`, §9.4) **[graft: minimal]**.
+  holding S3 keys in memory per volume. The seam shipped as the
+  `CredentialMode` enum (`broker` | `webIdentity` | `static` | `ambient`,
+  `s3csi/policy.rs:51-68`) selecting one of four arm constructors in
+  `s3csi/creds.rs`, not as the `CredentialSource` *trait* this line
+  proposed — there is one implementation per arm and nothing to
+  polymorphise **[graft: minimal]**.
 - **Why the broker is STS-shaped**: if the customer's proxy is MinIO or
   Ceph RGW with an STS endpoint, the broker *is* that STS and the cluster
   is registered as its OIDC provider (`config_url` = the cluster's
@@ -1509,7 +1513,7 @@ housekeeping period (`kubelet_volumes.go:194-201`).
 | **Node plugin calls Knox directly with the pod's SA token (no broker)** | no broker | the endgame's Knox capabilities are unverified; `TokenReview` + `consumers` need a home. **Lost for v1**; the endgame keeps the broker credential-less. |
 | **Bearer to the proxy on S3 requests (P-BEARER)** | no exchange | mount-s3 and flint-store cannot emit a bearer ([web-knox-jwt §6.1]); a bearer-injecting shim per mount (`--no-sign-request` toward the shim) costs a hop per byte and a Knox JWT resident on the node. **Refused unless the proxy team forces it**, and then inside the worker pod, renewed by the broker **[graft: security]**. |
 | **Knox as OIDC issuer → STS at MinIO/RGW/AWS (P-STS) in v1** | zero broker code | Knox 2.1.0 has no discovery doc (KNOX-3141 Open), `iss=KNOXSSO`; AWS needs `iss` == provider URL; RGW wants `x5c` ([web-knox-jwt §5]). **Endgame, not v1.** |
-| **Loopback container-credentials door vs web-identity delivery** | door: no TLS trust needed, verified for both clients; web-identity: node plugin holds no S3 keys, zero exchange code in the plugin | **Web-identity is primary** (smaller concentration, the AWS v2 shape); **the door is the fallback arm** (P-CRED-only proxies, TLS-trust trouble). Both ship behind `CredentialSource`. |
+| **Loopback container-credentials door vs web-identity delivery** | door: no TLS trust needed, verified for both clients; web-identity: node plugin holds no S3 keys, zero exchange code in the plugin | **REVERSED BY THE BUILD (§0).** The **door is primary and the default** — `identity.mode: broker`, which is also what the empty string parses to (`policy.rs:61`): the node plugin does the exchange host-side and drops `creds.json` into the worker's `comm` dir, which the CRT reads via `AWS_CONTAINER_CREDENTIALS_FULL_URI` (`creds.rs:134-143`). Web-identity could not be primary because the CRT's web-identity provider is **HTTPS-only** and refuses a plain-http broker, which is the shape a cluster-internal broker Service has; it survives as an opt-in arm (`identity.mode: webIdentity`, `creds::web_identity_arm`) for a proxy that speaks `AssumeRoleWithWebIdentity` over TLS. The selector shipped as `CredentialMode` (`broker` \| `webIdentity` \| `static` \| `ambient`, `policy.rs:51-68`); the `CredentialSource` this row named was never built. |
 | **`credential_process` / shared-credentials file** | fewer moving parts | `credential_process` REPORTED historically flaky in Mountpoint (#389, #927); whether the profile provider re-reads a rewritten file is unverified. **Lost.** |
 | **In-plugin JWT verification (`jsonwebtoken`)** | offline, fast | `TokenReview` gives bound-claim freshness offline verification cannot ([web-k8s-csi-mechanics §7]); zero new crypto deps. **Lost for v1.** |
 | **Lean: keep the sidecar permanently** | smaller change | a credential in the tenant pod; the webhook stays on the critical path. **Lost**; the L1 bridge only. |
@@ -1665,7 +1669,7 @@ and `inject::mounter_args` (`spec.rs:39-165`; `inject.rs:251-299`);
 | `s3csi/resolve.rs` | 150 | CR GET in `pod.namespace` via an informer (kube 3.0.0 is a dep), `consumers`, attribute allow-list, `validate` reuse |
 | `s3csi/fuse.rs` | 180 | `open("/dev/fuse")`, `nix::mount::mount` with `fd=`, `sendmsg` + `ScmRights` (nix 0.27 is a dep, `spdk-csi-driver/Cargo.toml:173`, with features `fs`, `user` only — add the `mount` and `socket` features, which `nix::mount` and `ControlMessage::ScmRights` need), bind, `umount2` |
 | `s3csi/worker.rs` | 260 | build/create/adopt/wait/delete worker pods; comm socket path under `/var/lib/kubelet/pods/<uid>/volumes/kubernetes.io~empty-dir/comm/`; startup reconcile; the lean spec reuses the env builder and grace arithmetic |
-| `s3csi/creds.rs` | 300 | `CredentialSource` trait: `webIdentity` (token-file writer), `door` (per-volume cache + exchange + `creds.json`), `static` (`nodePublishSecretRef` → profile), `ambient`; the publish registration + per-volume nonce (`POST /v1/volumes`, §4.2) |
+| `s3csi/creds.rs` | 300 | four arm constructors selected by `CredentialMode` (the `CredentialSource` *trait* was not built): `webIdentity` (token-file writer), `door` (per-volume cache + exchange + `creds.json`), `static` (`nodePublishSecretRef` → profile), `ambient`; the publish registration + per-volume nonce (`POST /v1/volumes`, §4.2) |
 | `s3csi/tokens.rs` | 60 | parse `serviceAccount.tokens` from `volume_context` or `secrets`; expiry tracking; never logged |
 | `bin/flint_s3_worker.rs` | 200 | PID 1 of every worker: passthrough — `recvmsg` fd, `exec mount-s3 … /dev/fd/3`; lean — spawn `flint-sync run`, forward SIGTERM, propagate exit; optional loopback creds door |
 | `bin/flint_s3_broker.rs` + `s3csi/broker/` | 700 | STS façade (XML), `TokenReview`, CR entitlement, Knox step (K1/K2/K3), proxy step (P-CRED/P-STS), audit, metrics |
@@ -1761,11 +1765,11 @@ MinIO (`passthrough/e2e/rig.yaml`; `lean/e2e/minio.yaml`) + a stub
 | S11 | lean: a pod created after the seeder is gone finds all 200 files with correct bytes before its first instruction, **and its init container sees them too** (a NEW leg — lean A2, `run-agent.sh:187-200`, asserts nothing about init containers, and today's appended sidecar never gates them, §2.2) | a workspace with a forced-wedged checkout (proxy first-byte stall) stays `ContainerCreating`, the marker is never written, the event names the budget (C12) |
 | S12 **(built 2026-09-03; scope corrected — see §0)** | lean: `.flint/publish` written by the TENANT is acked `ok` within 90 s carrying that request's own nonce, the manifest advances and cites the new file (A5), and §3.2's replacement for the lost in-pod exec surface holds — the control socket is a socket in the tenant's own view of the tree, on the same inode the worker bound, and `flint-sync ctl status` / `status` answer in the worker | the ack must not pre-exist and the file must be uncited before the request (the 1-hour floor is the fixture, so any manifest advance is the sentinel's); a stale ack fails the nonce check |
 | S13 | lean drain: `kubectl delete pod` ⇒ bucket carries a `source=drain` boundary, owed ack settled, lease released, the Pod object disappears only after (B11a); **`--grace-period=0 --force` also drains — with the delete timed so the drain starts after the worker's keys would have needed a refresh** (proves the long-key rule of §5, not just the happy case) | SIGKILL the syncer then delete ⇒ `orphans.json`, `recover-staged` re-cites (B11b); today's mechanism under `--force` drains nothing |
-| S14 | pod replacement ⇒ new volume id, takeover rotation observed (6 quiet polls, `seq++`) | container restart in the tenant pod ⇒ same worker, same holder id, no rotation |
+| S14 **(built 2026-09-03)** | lean holder identity, in two arms that are each other's control. A syncer killed over the SAME tree self-recognises: same `holder_id`, manifest `seq` UNCHANGED (rotation is for stragglers, not restarts), epoch still +1 so a straggler cannot publish under the old one. A pod REPLACEMENT after the holder is SIGSTOPped — frozen, so `renewed_unix` stands still and it never reaches `release` — claims under a NEW holder id, rotates the manifest, preserves every entry, and takes ≥ 50 s to do it (the quiet-poll floor; a successor that walked straight in would show the same holder change and the same bump). Then SIGCONT: the straggler's renew takes a 412 and it shuts down `Succeeded`/exit 0 — a fence is a clean shutdown order, not a crash loop — without reclaiming the cell | the epoch bumps on BOTH arms, so an assertion on the epoch alone passes either way. A worker cannot be force-deleted to fake an unclean death: the VAP admits DELETE only from the node SA, that node's kubelet and the kube-system GC (§3.6), and the first cut of this leg swallowed that refusal and measured a healthy pod |
 | S15 | two projects, one node: two workers, two distinct `AccessKeyId`s, no cross-visibility either way | delete one worker ⇒ only its tenant strands; the other keeps reading |
 | S16 **(built 2026-09-03; mechanism changed — see §0)** | termination ordering, with NO PodDisruptionBudget in the workers namespace (asserted, so one cannot creep back and pass this leg for the wrong reason): the worker's PriorityClass ranks strictly above its tenant's; an eviction of a live worker is **accepted** (not refused) and sets a `deletionTimestamp`, and the tenant still reads the same md5 ten seconds later — the `preStop` hook is holding the mount open; the worker then follows its tenant out; and a real `kubectl drain --ignore-daemonsets --delete-emptydir-data --force` completes with zero workers and zero orphaned mounts on the node | the eviction must be ACCEPTED, not refused — a leg that passed on a 429 would be proving the very budget this design removed. A worker whose hook never runs fails the read-after-eviction assertion with `ENOTCONN` |
 | S17 | plugin restart mid-checkout: checkout completes; the marker's mtime predates the new plugin's start | the M1 child-process variant restarts the checkout |
-| S18 | quota: fill the workspace to `sizeLimitGib` ⇒ `ENOSPC`; node root disk free space unchanged (±1 %); over-budget `expectedFiles > maxFiles` ⇒ final refusal naming `maxFiles` with zero GETs under the prefix in MinIO's access log | plain-directory mode grows past the limit; an in-budget sibling checks out |
+| S18 **(built 2026-09-03; the ceiling was NOT enforced until this)** | `sizeLimitGib` is a sparse ext4 image loop-mounted at the tree (`s3csi/quota.rs`), so the tree is its own filesystem of the declared size, a tenant's own write past it is `ENOSPC`, and the image is removed with the volume rather than leaked per publish | ENOSPC alone proves NOTHING — a node whose root disk is full answers the same way. A `sizeLimitGib: 0` sibling is the control: it sees the NODE's filesystem and still writes happily while the bounded one is full. Before this the field described nothing at all: `tree_image` was `None` at every site and the tree was a plain directory on the node's root disk |
 | S19 | RBAC: `kubectl auth can-i --as=system:serviceaccount:flint-system:flint-s3-csi-node` cannot `get secrets` in any namespace, cannot `create pods` outside `flint-workers`; a `delete` of a worker whose `spec.nodeName` is another node is refused by the VAP node-name rule (§3.6) **[graft: security]** | can `create pods` in `flint-workers`; can delete its own node's worker |
 | S20 | coexistence: a pod carrying both the label and the `csi:` volume is refused by the webhook naming both; the plugin refuses a pod already carrying `flint-sync` | label-only pod still injected; volume-only pod still mounted |
 | S21 (Knox, real Knox only) | K1 or K2 mints; a project principal revoked at Knox is refused at the next exchange and the mount goes read-refused at key expiry | a never-authorized SA is refused by Knox, not by flint; the live principal keeps refreshing |

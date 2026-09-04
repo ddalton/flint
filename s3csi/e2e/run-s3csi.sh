@@ -468,6 +468,19 @@ $K -n $WNS delete pod forged-worker --ignore-not-found --wait=false >/dev/null 2
 lobj()   { mcx mc cat "m/s3bucket/$1" 2>/dev/null; }
 lcount() { mcx mc ls --recursive "m/s3bucket/$1" 2>/dev/null | grep -c . ; }
 lmseq()  { local m; m=$(lobj "$1/.flint/lean/manifest"); [ -z "$m" ] && { echo 0; return; }; printf '%s' "$m" | jq -r '.seq // 0'; }
+# The epoch cell is the lease: holder_id, epoch, released. `lepoch <prefix> <jq>`.
+lepoch() { local e; e=$(lobj "$1/.flint/lean/epoch"); [ -z "$e" ] && return 1; printf '%s' "$e" | jq -r "$2"; }
+lments() { local m; m=$(lobj "$1/.flint/lean/manifest"); [ -z "$m" ] && { echo 0; return; }; printf '%s' "$m" | jq -r '.entries | length'; }
+# Kill the syncer INSIDE a worker without touching its pod: the container
+# restarts (workers are restartPolicy OnFailure) and relaunches from the
+# persisted launch message over the SAME tree — the self-recognition path.
+# /proc + kill only; PID 1 cannot be signalled from inside its own namespace.
+sig_syncer() { $K -n $WNS exec "$1" -- /bin/sh -c "for p in /proc/[0-9]*; do [ \"\$(cat \$p/comm 2>/dev/null)\" = flint-sync ] && kill -$2 \"\${p#/proc/}\"; done; exit 0" >/dev/null 2>&1; }
+kill_syncer() { sig_syncer "$1" 9; }
+# The epoch cell's renewed_unix is the liveness signal a successor
+# judges. Frozen holder ⇒ it stops advancing, and the cell stays
+# `released: false` because nothing ran the release.
+lrenew() { lepoch "$1" .renewed_unix; }
 lmhas()  { local m; m=$(lobj "$1/.flint/lean/manifest"); [ -z "$m" ] && return 1; printf '%s' "$m" | jq -e --arg p "$2" '.entries | has($p)' >/dev/null; }
 
 leg S11 "lean: the checkout gate holds for the app AND its init container; a cold pod finds the seeded project; the syncer lives in the worker, not the pod"
@@ -608,6 +621,221 @@ if require_pod lean-agent; then
 fi
 $K -n $NS delete pod lean-refused --ignore-not-found --wait=false >/dev/null 2>&1
 
+# ── S14 holder identity: self-recognition vs takeover ────────────────
+# The tree is keyed on the VOLUME ID = f(podUID, volumeName), never on
+# the CR name. That choice is the whole leg. Key on the CR name instead
+# and a replacement pod would self-RECOGNISE a dead pod's lease: no
+# rotation, no quiet-poll wait, and a straggler mid-barrier would never
+# be fenced (design §5 "Holder identity"; lease.rs:64-93).
+#
+# The two paths differ in three observables and agree on the fourth, so
+# each is checked against the other rather than against a bare "it
+# changed":
+#
+#   path                 holder_id   manifest seq   claim latency   epoch
+#   container restart    SAME        SAME           immediate       +1
+#   pod replacement      NEW         +1 (rotation)  >= quiet polls  +1
+#
+# Epoch bumps on BOTH — even self-recognition supersedes, to fence a
+# straggler — so an assertion on the epoch alone would pass either way.
+leg S14 "lean holder identity: a syncer restart over the same tree self-recognises; a pod REPLACEMENT after an unclean death waits out the lease and rotates the manifest"
+# An `apply` against a still-terminating object is a silent no-op (the
+# S1 lesson), and every observation below would then be made against the
+# PREVIOUS pod. Refuse to start rather than measure the wrong thing.
+$K -n $NS delete pod lean-agent --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+$K get -n $NS pod lean-agent >/dev/null 2>&1 && bad "PRECONDITION: lean-agent still exists before S14 applies it — the apply would be a no-op against a terminating object"
+$K apply -f lean-agent.yaml >/dev/null
+if wait_phase lean-agent Running 300; then
+    h0=$(lepoch tenants/proj .holder_id); e0=$(lepoch tenants/proj .epoch)
+    s0=$(lmseq tenants/proj); n0=$(lments tenants/proj)
+    [ -n "$h0" ] && [ "${n0:-0}" -gt 0 ] \
+        && ok "PRECONDITION: the workspace has a holder ($h0) at epoch $e0, manifest seq $s0 with $n0 entries" \
+        || bad "PRECONDITION: no readable epoch cell or an empty manifest — every comparison below would be against nothing"
+
+    # ── self-recognition: same tree, same holder, no rotation ────────
+    w=$(worker_of lean-agent)
+    r0=$($K -n $WNS get pod "$w" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)
+    kill_syncer "$w"
+    i=0; while [ $i -lt 60 ]; do
+        r1=$($K -n $WNS get pod "$w" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)
+        [ "${r1:-0}" -gt "${r0:-0}" ] && break
+        sleep 3; i=$((i + 3))
+    done
+    [ "${r1:-0}" -gt "${r0:-0}" ] \
+        && ok "the syncer died and its container restarted in place (restartCount ${r0:-?} → ${r1:-?} in ${i}s) — the same pod, the same tree" \
+        || bad "the worker did not restart after its syncer was killed (restartCount stuck at ${r0:-?}) — the self-recognition arm never ran"
+    i=0; while [ $i -lt 60 ] && [ "$(lepoch tenants/proj .epoch)" = "$e0" ]; do sleep 3; i=$((i + 3)); done
+    h1=$(lepoch tenants/proj .holder_id); e1=$(lepoch tenants/proj .epoch); s1=$(lmseq tenants/proj)
+    [ "$h1" = "$h0" ] \
+        && ok "self-recognition: the holder id survived the restart ($h1) — the incarnation lives in the tree, not in the container" \
+        || bad "the holder id changed across a mere container restart ($h0 → $h1): a restart is being treated as a takeover"
+    [ "$s1" = "$s0" ] \
+        && ok "self-recognition did NOT rotate the manifest (seq still $s1) — rotation is for stragglers, not for restarts" \
+        || bad "a container restart rotated the manifest ($s0 → $s1): pure churn, and at 100k entries a multi-MB GET+PUT per restart"
+    [ "${e1:-0}" -gt "${e0:-0}" ] \
+        && ok "the epoch still bumped ($e0 → $e1): even self-recognition supersedes, so a straggler cannot publish under the old epoch" \
+        || bad "the epoch did not move across the restart ($e0 → $e1) — a straggler mid-barrier would still be holding a live lease"
+
+    # ── takeover: a FROZEN straggler, then a successor ───────────────
+    # Rotation exists for a holder that is still alive and might still be
+    # mid-barrier, not for one that has tidily gone. So the straggler is
+    # SIGSTOPped rather than killed: it stops renewing, it never reaches
+    # `release`, and it can wake up at any moment — which is the case the
+    # successor's rotation has to survive.
+    #
+    # It is also the only shape available. A worker cannot be deleted
+    # from here: the workers' admission policy admits DELETE only from
+    # the node ServiceAccount, that node's own kubelet, and the
+    # kube-system GC (§3.6), so `--grace-period=0 --force` is REFUSED —
+    # the first cut of this leg swallowed that refusal and then measured
+    # a perfectly healthy pod. And deleting the TENANT would drain the
+    # syncer cleanly (released: true ⇒ immediate handoff, no rotation),
+    # besides waiting out a grace derived from floorSecs — an hour, on
+    # this fixture.
+    w=$(worker_of lean-agent)
+    [ -n "$w" ] || bad "PRECONDITION: no worker for lean-agent — nothing to freeze, and the successor below would face a live lease"
+    r0=$(lrenew tenants/proj)
+    sig_syncer "$w" STOP
+    sleep 40
+    r1=$(lrenew tenants/proj); rel=$(lepoch tenants/proj .released)
+    [ -n "$r0" ] && [ "$r1" = "$r0" ] \
+        && ok "PRECONDITION: the holder is FROZEN — renewed_unix stood still at $r1 across 40s, so its lease reads dead to anyone watching" \
+        || bad "PRECONDITION: the holder kept renewing across the freeze ($r0 → $r1); the successor would never judge this lease dead and the arm proves nothing"
+    [ "$rel" = "false" ] \
+        && ok "PRECONDITION: the frozen holder never released (released=false) — the successor faces a possibly-live straggler, which is what rotation is for" \
+        || bad "PRECONDITION: the lease reads released=$rel; the successor would take a CLEAN handoff and rotate nothing"
+
+    t0=$(date +%s)
+    $K apply -f lean-agent2.yaml >/dev/null
+    if wait_phase lean-agent2 Running 400; then
+        el=$(( $(date +%s) - t0 ))
+        h2=$(lepoch tenants/proj .holder_id); e2=$(lepoch tenants/proj .epoch)
+        s2=$(lmseq tenants/proj); n2=$(lments tenants/proj)
+        [ "$h2" != "$h1" ] && [ -n "$h2" ] \
+            && ok "the successor claimed under a NEW holder id ($h2), not the straggler's — the tree is keyed on the volume id, never on the CR name" \
+            || bad "the successor claimed under the STRAGGLER's holder id ($h2): something a second pod shares is being used as the incarnation — the CR name is the trap §5 names"
+        [ "${s2:-0}" -gt "${s1:-0}" ] \
+            && ok "the takeover ROTATED the manifest ($s1 → $s2): if the straggler wakes mid-barrier its CAS is already stale" \
+            || bad "the takeover did not rotate the manifest (seq still $s2) — a straggler that wakes up can publish over the successor"
+        [ "${n2:-0}" = "${n0:-0}" ] \
+            && ok "rotation preserved every entry ($n2) — it bumps the seq, it does not truncate the project" \
+            || bad "the manifest lost entries across the rotation ($n0 → $n2)"
+        # THE ANTI-VACUITY CONTROL. A successor that skipped the wait
+        # would show a new holder and a bumped seq too; only the latency
+        # separates "judged dead across six quiet polls" from "walked in".
+        [ "$el" -ge 50 ] \
+            && ok "the successor waited ${el}s to reach Running — it observed the quiet polls (6 × 10s) rather than superseding on sight" \
+            || bad "the successor was Running in ${el}s, inside the quiet-poll floor: it deposed a lease it never judged dead"
+        note "epoch $e1 → $e2 across the takeover"
+
+        # THE FENCE BITES. Wake the straggler: its next renew CASes
+        # against an ETag the successor overwrote, gets a 412, and must
+        # fail closed. Watch the PHASE, not restartCount: a fence exits
+        # ZERO on purpose ("a clean shutdown order, not a crash loop",
+        # flint_sync.rs:209-211), so `restartPolicy: OnFailure` leaves it
+        # down and the count never moves. Measured: the pod is Succeeded
+        # within 15 s, its log naming `deposed at renew: 412`.
+        sig_syncer "$w" CONT
+        i=0; ph=""
+        while [ $i -lt 120 ]; do
+            ph=$($K -n $WNS get pod "$w" -o jsonpath='{.status.phase}' 2>/dev/null)
+            [ -n "$ph" ] && [ "$ph" != "Running" ] && break
+            sleep 5; i=$((i + 5))
+        done
+        xc=$($K -n $WNS get pod "$w" -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null)
+        if [ "$ph" = "Succeeded" ] && [ "${xc:-1}" = "0" ]; then
+            ok "the woken straggler FENCED itself and shut down cleanly (${ph}, exit ${xc}, ${i}s after SIGCONT) — it did not resume publishing under a superseded epoch"
+        elif [ "$ph" = "Running" ] || [ -z "$ph" ]; then
+            bad "the woken straggler is STILL RUNNING ${i}s after SIGCONT: it never noticed it had been deposed, and rotation is the only thing standing between it and the successor's manifest"
+        else
+            bad "the woken straggler ended as ${ph} exit ${xc:-?}, not Succeeded/0: a fence is being treated as a crash, so OnFailure will restart it into a loop against a lease it can never hold"
+        fi
+        h3=$(lepoch tenants/proj .holder_id)
+        [ "$h3" = "$h2" ] \
+            && ok "the cell still names the successor ($h3) after the straggler woke — a fenced holder does not take its lease back" \
+            || bad "the woken straggler RECLAIMED the lease ($h2 → $h3): two writers, and the rotation bought nothing"
+    else
+        bad "lean-agent2 never reached Running in 400s — the takeover arm made no observation at all"
+    fi
+    # Leave the workspace to one live pod: S16 drains this node, and a
+    # lean worker's grace is derived from floorSecs (3681 s here), so a
+    # wedged syncer left behind would outlast the drain's timeout.
+    sig_syncer "$w" CONT
+    $K -n $NS delete pod lean-agent2 lean-agent --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
+else
+    bad "lean-agent never reached Running in 300s — S14 made no observation at all"
+fi
+
+# ── S18 the tree's ceiling ───────────────────────────────────────────
+# `sizeLimitGib` was an emptyDir sizeLimit under the webhooks, where
+# kubelet enforced it. Under CSI the tree is a plugin-owned DIRECTORY on
+# the node's root filesystem, so until the loop-image quota shipped the
+# field described nothing and one runaway agent could fill the disk the
+# kubelet runs on. The ceiling is now a sparse ext4 image mounted at the
+# tree, and an overrun is ENOSPC in the tenant's own write.
+#
+# ENOSPC on its own proves NOTHING: a node whose root disk is full says
+# exactly the same thing to exactly the same write. The unbounded
+# workspace beside it is the control — if the node were what ran out,
+# its df would show no space either.
+leg S18 "lean quota: sizeLimitGib is a filesystem, so a workspace fills at its ceiling instead of filling the node — and an unbounded sibling proves the node did not"
+$K apply -f quota-tenants.yaml >/dev/null
+if wait_phase quota-agent Running 300 && wait_phase noquota-agent Running 300; then
+    qk=$(inpod quota-agent "df -P /workspace | tail -1 | awk '{print \$2}'")
+    nk=$(inpod noquota-agent "df -P /workspace | tail -1 | awk '{print \$2}'")
+    [ -n "$qk" ] && [ "$qk" -gt 700000 ] && [ "$qk" -lt 1200000 ] \
+        && ok "the quota'd tree is its own filesystem of ${qk}K — sizeLimitGib 1 is a real 1 GiB, not a label" \
+        || bad "the quota'd tree reports ${qk:-?}K, not about 1 GiB: the ceiling is not the filesystem the tenant is writing to"
+    [ -n "$nk" ] && [ "$nk" -gt "$((qk * 2))" ] \
+        && ok "CONTROL: the sizeLimitGib:0 sibling sees the NODE's filesystem (${nk}K) — the opt-out still yields a plain directory" \
+        || bad "CONTROL: the unbounded workspace reports ${nk:-?}K, not the node's filesystem: the control cannot distinguish a full ceiling from a full node"
+    loop=$(onnode "grep ' /var/lib/kubelet/plugins/s3.csi.chert.us/volumes/[^ ]*/tree ' /proc/mounts | grep -c '^/dev/loop'")
+    [ "${loop:-0}" -ge 1 ] \
+        && ok "the ceiling is a loop-mounted image on the node ($loop tree mount(s) on /dev/loop)" \
+        || bad "no lean tree is a loop mount on the node — the tree is a plain directory and sizeLimitGib is enforced by nothing"
+
+    free0=$(onnode "df -P / | tail -1 | awk '{print \$4}'")
+    # Fill past the ceiling. busybox dd reports the refusal on stderr and
+    # stops; what must be true is that it stopped THERE and not at the
+    # node's disk.
+    # Keep ALL of dd's output: busybox prints the refusal FIRST and then
+    # its records/throughput summary, so a `tail -2` reads the summary
+    # and throws the verdict away — which is what the first run did.
+    out=$(tsh_out quota-agent "dd if=/dev/zero of=/workspace/fill bs=1M count=1500 2>&1 | tr '\n' ' '")
+    case "$out" in
+        *"No space left"*|*ENOSPC*) ok "the tenant's own write hit the ceiling: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)" ;;
+        *) bad "1500 MiB went into a 1 GiB workspace without ENOSPC — the ceiling did not hold: '$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)'" ;;
+    esac
+    wrote=$(inpod quota-agent "wc -c < /workspace/fill 2>/dev/null || echo 0")
+    [ -n "$wrote" ] && [ "$wrote" -lt 1288490188 ] \
+        && ok "it stopped at $((wrote / 1048576)) MiB — inside the 1 GiB it declared, not somewhere past it" \
+        || bad "the workspace holds ${wrote:-?} bytes, past its 1 GiB ceiling"
+    # THE CONTROL THAT MATTERS. If the NODE had run out, this write would
+    # fail too — and the whole leg would be measuring a full disk.
+    tsh noquota-agent "dd if=/dev/zero of=/workspace/probe bs=1M count=32 2>/dev/null" \
+        && ok "CONTROL: the unbounded sibling still writes 32 MiB happily — the ENOSPC above was the CEILING, not the node" \
+        || bad "CONTROL: the unbounded sibling cannot write either: the node's disk is what ran out and this leg proves nothing about sizeLimitGib"
+    free1=$(onnode "df -P / | tail -1 | awk '{print \$4}'")
+    note "node root free: ${free0}K → ${free1}K while a 1 GiB ceiling filled"
+
+    # RECLAIM. A ceiling that is not given back is a slow leak of exactly
+    # sizeLimitGib per volume ever published on the node.
+    $K -n $NS delete pod quota-agent noquota-agent --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
+    imgs=$(onnode "ls /var/lib/kubelet/plugins/s3.csi.chert.us/volumes/*/tree.img 2>/dev/null | wc -l")
+    [ "${imgs:-0}" = "0" ] \
+        && ok "the image is gone with its volume — the ceiling is reclaimed at unpublish, not leaked per publish" \
+        || bad "$imgs tree image(s) remain under the plugin dir after their pods were deleted"
+    loop2=$(onnode "grep -c ' /var/lib/kubelet/plugins/s3.csi.chert.us/volumes/[^ ]*/tree ' /proc/mounts")
+    [ "${loop2:-0}" = "0" ] \
+        && ok "no tree mount is left on the node" \
+        || bad "$loop2 tree mount(s) still on the node after unpublish — a loop device is pinned and its blocks are not free"
+    free2=$(onnode "df -P / | tail -1 | awk '{print \$4}'")
+    note "node root free after reclaim: ${free2}K"
+else
+    bad "the quota fixtures never reached Running — S18 made no observation at all"
+    $K -n $NS delete pod quota-agent noquota-agent --ignore-not-found --wait=false >/dev/null 2>&1
+fi
+
 leg SU "deleting the tenant pod removes its worker, its state, and its mounts on the node"
 if require_pod reader-elsewhere; then
     w=$(worker_of reader-elsewhere)
@@ -689,7 +917,7 @@ $K uncordon "$NODE" >/dev/null 2>&1 && note "node uncordoned"
 
 # ── roster ────────────────────────────────────────────────────────────
 echo
-for want in S1 S2 S3 S4 S5 S5c S6 S7 S8 S9 S10 S11 S12 S13 S15 S16 S19 SU; do
+for want in S1 S2 S3 S4 S5 S5c S6 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S18 S19 SU; do
     echo " $RAN_LEGS " | grep -q " $want " || bad "leg $want never ran"
 done
 echo "════════════════════════════════════════"

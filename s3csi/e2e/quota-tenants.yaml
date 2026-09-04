@@ -1,0 +1,114 @@
+# S18's two workspaces: one with a ceiling, one deliberately without.
+#
+# The pair is the whole point. `sizeLimitGib` is enforced by a sparse
+# ext4 image loop-mounted at the tree, so a full workspace is ENOSPC in
+# the tenant's own write — but "ENOSPC" alone proves nothing, because a
+# node whose root disk is full says exactly the same thing. The
+# unbounded workspace is the control: if the node were the thing that
+# ran out, ITS df would show no space either.
+---
+apiVersion: chert.us/v1alpha1
+kind: FlintLeanWorkspace
+metadata:
+  name: proj-quota
+  namespace: s3-tenants
+spec:
+  projectId: team-a/proj-quota
+  bucket: s3bucket
+  keyPrefix: tenants/proj-quota
+  endpoint: http://minio.flint-system.svc:9000
+  # 1 GiB is the smallest ceiling the CRD can express, and the leg has
+  # to fill it: keep it there so a drill run costs one GiB of node disk
+  # and gets it back at unpublish.
+  sizeLimitGib: 1
+  # An hour, as elsewhere in this rig: nothing here may publish on
+  # cadence, or a leg cannot attribute what it sees.
+  floorSecs: 3600
+  expectedBytes: 1048576
+  expectedFiles: 10
+  maxFiles: 5000
+  uid: 1001
+  gid: 1001
+  consumers:
+    serviceAccounts: [trainer]
+---
+apiVersion: chert.us/v1alpha1
+kind: FlintLeanWorkspace
+metadata:
+  name: proj-noquota
+  namespace: s3-tenants
+spec:
+  projectId: team-a/proj-noquota
+  bucket: s3bucket
+  keyPrefix: tenants/proj-noquota
+  endpoint: http://minio.flint-system.svc:9000
+  # 0 = no ceiling, the documented opt-out. Its tree is a plain
+  # directory on the node's root filesystem — which is what EVERY lean
+  # workspace got before the quota shipped, and is why this leg exists.
+  sizeLimitGib: 0
+  floorSecs: 3600
+  expectedBytes: 1048576
+  expectedFiles: 10
+  maxFiles: 5000
+  uid: 1001
+  gid: 1001
+  consumers:
+    serviceAccounts: [trainer]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: quota-agent
+  namespace: s3-tenants
+spec:
+  serviceAccountName: trainer
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    runAsGroup: 1001
+    seccompProfile: { type: RuntimeDefault }
+  volumes:
+    - name: ws
+      csi:
+        driver: s3.csi.chert.us
+        volumeAttributes:
+          chert.us/workspace: proj-quota
+  containers:
+    - name: agent
+      image: busybox:1.36
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: ws, mountPath: /workspace }
+      command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; sleep 86400 & wait"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: noquota-agent
+  namespace: s3-tenants
+spec:
+  serviceAccountName: trainer
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    runAsGroup: 1001
+    seccompProfile: { type: RuntimeDefault }
+  volumes:
+    - name: ws
+      csi:
+        driver: s3.csi.chert.us
+        volumeAttributes:
+          chert.us/workspace: proj-noquota
+  containers:
+    - name: agent
+      image: busybox:1.36
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: ws, mountPath: /workspace }
+      command: ["/bin/sh", "-c", "trap 'exit 0' TERM INT; sleep 86400 & wait"]

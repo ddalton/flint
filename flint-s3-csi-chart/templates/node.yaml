@@ -67,6 +67,7 @@ spec:
             - { name: FLINT_S3CSI_WORKER_NAMESPACE, value: {{ .Values.workers.namespace | quote }} }
             - { name: FLINT_S3CSI_WORKER_RESOURCES, value: {{ .Values.workers.resources | toJson | quote }} }
             - { name: FLINT_S3CSI_PRESTOP_SECS, value: {{ .Values.workers.prestopSecs | quote }} }
+            - { name: FLINT_S3CSI_QUOTA, value: {{ .Values.workers.quota | quote }} }
 {{- if .Values.workers.priorityClassName }}
             - { name: FLINT_S3CSI_WORKER_PRIORITY_CLASS, value: {{ .Values.workers.priorityClassName | quote }} }
 {{- end }}

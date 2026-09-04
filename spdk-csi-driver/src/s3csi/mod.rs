@@ -32,6 +32,7 @@ pub mod creds;
 pub mod fuse;
 pub mod node;
 pub mod policy;
+pub mod quota;
 pub mod resolve;
 pub mod state;
 pub mod worker;

@@ -31,6 +31,7 @@ use super::attrs::{self, PublishRequest};
 use super::creds::{self, BrokerClient, Creds, Materialized, Registration};
 use super::fuse::{self, Launch};
 use super::policy::CredentialMode;
+use super::quota;
 use super::resolve::{self, Refusal, Resolved};
 use super::state::{TenantRef, VolumeState, STATE_VERSION};
 use super::worker::{self, WaitOutcome, WorkerInputs};
@@ -64,6 +65,12 @@ pub struct Config {
     /// ordering mechanism for drain and node shutdown; there is no
     /// PodDisruptionBudget for workers.
     pub prestop_secs: Option<i64>,
+    /// Enforce `sizeLimitGib` on a lean tree with a loop-mounted image
+    /// (FLINT_S3CSI_QUOTA, default on). Off ⇒ the tree is a plain
+    /// directory on the node's root filesystem and the CR's declared
+    /// ceiling is not enforced by anything — which is what shipped
+    /// before this, and why S18 exists.
+    pub quota: bool,
     pub broker: Option<BrokerClient>,
     /// Lifetime asked of the broker per exchange.
     pub creds_lifetime_secs: u64,
@@ -108,6 +115,7 @@ impl Config {
             worker_resources,
             priority_class: opt("FLINT_S3CSI_WORKER_PRIORITY_CLASS"),
             prestop_secs: opt("FLINT_S3CSI_PRESTOP_SECS").and_then(|v| v.parse().ok()),
+            quota: opt("FLINT_S3CSI_QUOTA").map(|v| v != "false").unwrap_or(true),
             broker: BrokerClient::from_env()?,
             creds_lifetime_secs: opt("FLINT_S3CSI_CREDS_LIFETIME_SECS").and_then(|v| v.parse().ok()).unwrap_or(900),
             region: opt("FLINT_S3CSI_REGION").unwrap_or_else(|| "us-east-1".into()),
@@ -185,6 +193,14 @@ impl S3Node {
         tracing::warn!(volume = %st.volume_id, "cleaning up: {why}");
         let _ = fuse::unmount(Path::new(&st.target_path), true);
         let _ = fuse::unmount(Path::new(&st.src), true);
+        // A tree image left mounted holds the state dir busy, so the
+        // remove below would fail and the volume would never be retried
+        // cleanly.
+        if let Some(img) = &st.tree_image {
+            if let Err(e) = quota::teardown(Path::new(&st.src), Path::new(img)) {
+                tracing::warn!(volume = %st.volume_id, "tree quota teardown during cleanup: {e}");
+            }
+        }
         let _ = worker::delete(&self.client, &st.worker_namespace, &st.worker_name, Some(5)).await;
         if let Some(b) = &self.cfg.broker {
             let _ = b.deregister(&st.volume_id).await;
@@ -676,10 +692,42 @@ impl S3Node {
 
         // The tree: plugin-owned, owned by the syncer's uid, world-writable
         // with the sticky bit so an app uid the CR does not name can still
-        // create files (design §3.5 step 6). A loop-image quota is a
-        // follow-up; today the CR's byte budget is the syncer's refusal.
-        if let Err(e) = std::fs::create_dir_all(&tree)
-            .and_then(|_| std::os::unix::fs::chown(&tree, Some(owner_uid), Some(owner_gid)))
+        // create files (design §3.5 step 6).
+        if let Err(e) = std::fs::create_dir_all(&tree) {
+            return Err(self.fail(dir, &st, Status::internal(format!("tree {}: {e}", tree.display()))).await);
+        }
+        // The CEILING. `sizeLimitGib` was an emptyDir sizeLimit under the
+        // webhooks, where kubelet enforced it; here the tree is a
+        // directory on the node's root filesystem, so the limit is a
+        // loop-mounted ext4 image and an overrun is ENOSPC in the
+        // tenant's own write. Refusing to publish when the ceiling cannot
+        // be built is deliberate: silently serving an UNBOUNDED tree to a
+        // workspace that asked for a bound is how a single agent fills a
+        // node's disk and takes the kubelet with it.
+        let quota_gib = if self.cfg.quota { spec.size_limit_gib } else { 0 };
+        if quota_gib > 0 {
+            match quota::ensure(dir, &tree, quota_gib, owner_uid, owner_gid) {
+                Ok(img) => {
+                    st.tree_image = Some(img.to_string_lossy().into_owned());
+                    st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
+                }
+                Err(e) => {
+                    return Err(self
+                        .fail(
+                            dir,
+                            &st,
+                            Status::internal(format!(
+                                "FlintLeanWorkspace {}/{name} asks for sizeLimitGib {quota_gib} and the ceiling could \
+                                 not be built: {e}. Publishing without it would hand the workspace the node's whole \
+                                 root filesystem. Set sizeLimitGib: 0 to accept an unbounded tree, or install the \
+                                 chart with workers.quota=false",
+                                pr.pod_namespace
+                            )),
+                        )
+                        .await);
+                }
+            }
+        } else if let Err(e) = std::os::unix::fs::chown(&tree, Some(owner_uid), Some(owner_gid))
             .and_then(|_| std::fs::set_permissions(&tree, std::os::unix::fs::PermissionsExt::from_mode(0o1777)))
         {
             return Err(self.fail(dir, &st, Status::internal(format!("tree {}: {e}", tree.display()))).await);
@@ -877,6 +925,15 @@ impl S3Node {
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
         unmount_all(target).map_err(|e| Status::internal(format!("unmount target: {e}")))?;
+        // The ceiling comes down AFTER the drain and after the tenant's
+        // bind is gone: it is the filesystem the tree lives on, so
+        // unmounting it earlier would pull the floor out from under a
+        // syncer still publishing.
+        if let Some(img) = st.tree_image.clone() {
+            if let Err(e) = quota::teardown(Path::new(&st.src), Path::new(&img)) {
+                return Err(Status::unavailable(format!("tree quota teardown: {e}; retrying")));
+            }
+        }
         if let Some(b) = &self.cfg.broker {
             if let Err(e) = b.deregister(&st.volume_id).await {
                 tracing::warn!(volume = %st.volume_id, "deregister: {e}");

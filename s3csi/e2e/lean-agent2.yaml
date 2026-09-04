@@ -1,0 +1,41 @@
+# The SECOND agent on the SAME workspace, for S14's takeover arm.
+#
+# It exists because a takeover needs a live STRAGGLER, not a corpse: the
+# first agent's syncer is SIGSTOPped, so it stops renewing the lease and
+# never releases it, and this pod is the successor that must judge that
+# lease dead across the quiet polls before it may publish. Deleting the
+# first agent instead would drain it cleanly — released: true, an
+# immediate handoff, and no rotation to observe. A worker also cannot be
+# deleted out from under it: the workers' admission policy admits DELETE
+# only from the node ServiceAccount, its own kubelet and the kube-system
+# GC, which is the point of the policy.
+#
+# No init container: S11 owns the checkout gate, this leg owns identity.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lean-agent2
+  namespace: s3-tenants
+spec:
+  serviceAccountName: trainer
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    runAsGroup: 1001
+    seccompProfile: { type: RuntimeDefault }
+  volumes:
+    - name: ws
+      csi:
+        driver: s3.csi.chert.us
+        volumeAttributes:
+          chert.us/workspace: proj
+  containers:
+    - name: agent
+      image: busybox:1.36
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: ws, mountPath: /workspace }
+      command: ["/bin/sh", "-c", "ls /workspace/src | wc -l > /tmp/seen-count; trap 'exit 0' TERM INT; sleep 86400 & wait"]

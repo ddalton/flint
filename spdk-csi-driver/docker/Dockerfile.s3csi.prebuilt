@@ -43,6 +43,11 @@ ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
     util-linux \
     mount \
+    # e2fsprogs: mkfs.ext4 builds a lean workspace's sizeLimitGib ceiling
+    # (s3csi/quota.rs). It is present in ubuntu:24.04 already — named here
+    # so a base-image change cannot take it away silently, which would
+    # turn every quota'd lean publish into a refusal at the node.
+    e2fsprogs \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

@@ -59,6 +59,51 @@ machine identifier moved off `flint.io` to `chert.us`.
   leg proves the control socket is a socket in the tenant's own view of
   the tree, on the SAME inode the worker bound, and that
   `flint-sync ctl status` and `flint-sync status` answer in the worker.
+- **A lean workspace's `sizeLimitGib` is now enforced by a filesystem —
+  before this it was enforced by nothing.** Under the webhook delivery
+  the workspace tree was an `emptyDir`, so kubelet's own accounting
+  evicted a pod that overran its `sizeLimitGib`. Under the CSI delivery
+  the tree is a plugin-owned DIRECTORY on the node's root filesystem,
+  and the field described nothing at all: `VolumeState::tree_image` —
+  *"the loop image backing the tree, if quota mode is on"* — was `None`
+  at every site that constructed it. A runaway workspace's only limit
+  was the node's disk, which it shares with the kubelet, the container
+  runtime and every other pod on the machine.
+
+  The ceiling is now a sparse ext4 image, one per volume, loop-mounted
+  at the tree (`s3csi/quota.rs`), so overrunning it is `ENOSPC` inside
+  the tenant's own `write(2)` and the bound holds by construction. The
+  image is formatted only when the plugin created it — reformatting one
+  that survived a plugin restart would erase a live workspace — and the
+  tree's ownership is applied after the mount, since a `chown` before it
+  lands on the directory the mount then hides. It is torn down at
+  unpublish and during publish cleanup, or the mount holds the state
+  directory busy and the volume can never be retried.
+
+  Sparse, so an image costs what is written rather than what is
+  declared: the ceilings on a node may sum to more than the node's disk,
+  exactly as `emptyDir` sizeLimit did. It bounds one tenant's blast
+  radius; it is not a reservation. A workspace whose ceiling cannot be
+  built is **refused**, not published unbounded — `workers.quota=false`
+  on the chart, or `sizeLimitGib: 0` on the CR, are the ways to ask for
+  an unbounded tree on purpose. `e2fsprogs` is now named explicitly in
+  the node image, where `mkfs.ext4` had been arriving as an implicit
+  dependency of the base.
+- **Drill legs S14 and S18.** S14 is lean holder identity in two arms
+  that control each other: a syncer killed over the same tree
+  self-recognises (same holder id, `seq` unchanged, epoch still bumped),
+  while a pod replacement after the holder is SIGSTOPped — frozen, so it
+  stops renewing and never releases — claims under a new holder id,
+  rotates the manifest, keeps every entry, and takes at least the
+  quiet-poll floor to do it. Waking the straggler then requires it to
+  fence itself on the 412 and exit `Succeeded`/0 without reclaiming the
+  cell. The epoch bumps on both arms, so an assertion on the epoch alone
+  would pass either way; and a worker cannot be force-deleted to fake an
+  unclean death, because the admission policy admits DELETE only from
+  the node ServiceAccount, that node's kubelet and the kube-system GC.
+  S18 is the quota above, with a `sizeLimitGib: 0` sibling as the
+  control — ENOSPC alone proves nothing, since a node with a full root
+  disk answers a write the same way.
 - **Worker termination is ordered by a PriorityClass and a `preStop`
   hook — there is no PodDisruptionBudget.** A budget over the workers
   (`minAvailable`, the "never voluntarily evict" idiom for bare pods)
