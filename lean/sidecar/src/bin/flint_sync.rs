@@ -69,6 +69,37 @@ fn flint_lean_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// One retry log line, with a credential refusal called by its name.
+///
+/// Every serve arm retries a non-fence error, which is right. But
+/// "failed (retrying)" describes a 401/403 exactly as it describes a
+/// flaky bucket, and only one of the two is fixed by waiting — the
+/// diagnosis `StoreError::Auth` exists to make (design §6.3). The
+/// consequence is worth spelling out on the line itself: a paused
+/// holder stops renewing, and a stopped renewal is precisely what a
+/// challenger reads as a dead holder.
+fn log_retry(sc: &Sidecar, e: &LeanError, fallback: &str) {
+    if !e.is_auth() {
+        eprintln!("flint-sync: {fallback}: {e}");
+        return;
+    }
+    let paused = sc
+        .load_gauges()
+        .ok()
+        .and_then(|g| g.auth_paused_since_unix)
+        .map(|t| flint_lean_now().saturating_sub(t))
+        .unwrap_or(0);
+    eprintln!(
+        "flint-sync: REFUSED reason=auth arm={fallback} paused_secs={paused}: {e} \
+         — the store rejected our credentials. Not contention, not a lease \
+         conflict; retrying does not fix it. Local files keep serving and \
+         staged work is intact. Check the credential broker and the projected \
+         token (and this node's clock — a skewed one answers 403 too). \
+         Renewals have STOPPED: a challenger that can still reach the store \
+         may depose this live writer."
+    );
+}
+
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
@@ -497,7 +528,7 @@ async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
                 // Sidecar::heartbeat_tick for why that cannot live here.
                 if let Err(e) = sc.heartbeat_tick().await {
                     if matches!(e, LeanError::Fenced(_)) { return Err(e); }
-                    eprintln!("flint-sync: renew failed (retrying): {e}");
+                    log_retry(&sc, &e, "renew failed (retrying)");
                 }
             }
             _ = floor_iv.tick() => {
@@ -519,7 +550,7 @@ async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
                     ),
                     Ok(_) => {}
                     Err(e @ LeanError::Fenced(_)) => return Err(e),
-                    Err(e) => eprintln!("flint-sync: barrier failed (retrying next floor): {e}"),
+                    Err(e) => log_retry(&sc, &e, "barrier failed (retrying next floor)"),
                 }
             }
             _ = poll_iv.tick() => {
@@ -532,7 +563,7 @@ async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
                         );
                     },
                     Err(e @ LeanError::Fenced(_)) => return Err(e),
-                    Err(e) => eprintln!("flint-sync: sentinel honor failed (retrying): {e}"),
+                    Err(e) => log_retry(&sc, &e, "sentinel honor failed (retrying)"),
                 }
             }
             // The socket's requests are served by the ONE task that
