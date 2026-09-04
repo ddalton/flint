@@ -228,11 +228,10 @@ mutation_run $C LeanChunkGCProbeCollect.cfg "probe: the reaper actually deletes 
   "Invariant Probe_Collected is violated"
 mutation_run $C LeanChunkGCProbeAdopt.cfg "probe: a publisher actually references a chunk it did not upload (adoption is REACHABLE, and only a crash makes it so)" \
   "Invariant Probe_Adopted is violated"
-# NOT a gate run: the reader gap is real and unfixed. Kept as a cfg so the
-# bound is machine-checked rather than prose -- a reader is safe for `Retain`
-# PUBLISHES, not for a duration, and Inv_NoTornRead falls the moment its
-# pointer leaves the window. See the chunked design §8.1.
-#   LeanChunkGCSlowReader.cfg
+mutation_run $C LeanChunkGCSlowReader.cfg "the reader does NOT revalidate: its generation is swept out from under it and it reads a hole -- a reader safe for `Retain` PUBLISHES rather than for a duration, which is the wrong unit when a checkout runs minutes and the floor is seconds" \
+  "Invariant Inv_NoTornRead is violated"
+mutation_run $C LeanChunkGCProbeRestart.cfg "probe: a reader actually restarts onto a newer generation -- without it the strict run is green over a reader that never raced a sweep" \
+  "Invariant Probe_Restarted is violated"
 
 echo
-echo "lean formal gate: $PASS/73 runs green"
+echo "lean formal gate: $PASS/75 runs green"

@@ -295,20 +295,46 @@ be asserted to write zero new objects, because rule 4 requires it to
 rewrite what it adopts. "Zero new objects" was the assertion this
 section originally implied, and it would have locked in the bug.
 
-## 8.2 Reader lifetime is bounded by PUBLISHES, not by time
+## 8.2 Reader lifetime — bounded by PUBLISHES, until the reader revalidates
 
 `LeanChunkGCSlowReader.cfg` violates `Inv_NoTornRead`, and its trace
 says exactly how: a reader takes the live pointer, two further publishes
 push that pointer out of the `Retain` window, and the sweep then
 collects chunks the reader still intends to fetch.
 
-So a reader is safe for **`Retain` publishes**, not for a duration —
-which is the wrong unit for the risk. A full checkout of a 1M-entry
-project runs for minutes; a busy workspace publishes every floor tick.
-The retention window has to be expressed so that it bounds reader
-lifetime (a retained-by-time rule, or a reader lease the sweep honours),
-and this is NOT designed yet. It is kept as a cfg rather than a gate run
-so the bound stays machine-checked instead of becoming prose again.
+That made a reader safe for **`Retain` publishes**, not for a duration —
+the wrong unit for the risk, since a full checkout of a 1M-entry project
+runs for minutes while a busy workspace publishes every floor tick.
+
+**CLOSED 2026-09-04, and not by widening the window.** The obvious fixes
+were to retain by time or to have the sweep honour reader leases. Both
+buy safety with a timing assumption or with new machinery, and the
+window would still be a number someone has to tune against a workload
+nobody has measured.
+
+The reader can settle it locally instead, because a missing chunk is
+already two different events and the POINTER tells them apart:
+
+- **the pointer MOVED** ⇒ a sweep collected a generation this reader was
+  still reading. The current generation is a complete, coherent snapshot,
+  so start over against it. Newer, not torn.
+- **the pointer is UNCHANGED** ⇒ the live manifest genuinely has a hole,
+  and there is nothing newer to restart onto. Refuse — and never as
+  `Ok(None)`, which every caller reads as FIRST WRITE.
+
+`manifest::load` does this, bounded by `LOAD_ATTEMPTS`. `Inv_NoTornRead`
+now holds in the strict run at an UNCHANGED window of `Retain = 1`, and
+`LeanChunkGCSlowReader` (revalidation off) is the mutation that proves
+the revalidation is what closes it rather than something else.
+`LeanChunkGCProbeRestart` asserts a reader actually restarts, so the
+strict run cannot be green over a reader that never raced a sweep.
+
+The residual is liveness, not safety: a reader can in principle restart
+until it exhausts `LOAD_ATTEMPTS` on a workspace publishing faster than
+it can finish. It then refuses rather than serving a short manifest,
+which is the correct end of that trade — and chunk sharing makes it
+unlikely in practice, since consecutive generations differ only in what
+changed.
 
 ## 9. The part that needs care beyond this doc
 

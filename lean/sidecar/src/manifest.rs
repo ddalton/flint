@@ -250,10 +250,18 @@ pub async fn load_pointer(
 /// The whole document: pointer, then the generation it names. Falls
 /// back to the legacy single-object key for a workspace that has not
 /// been migrated — which every existing workspace is, exactly once.
+/// How many times `load` will restart onto a newer generation before
+/// giving up. A restart happens only when a chunk we needed was swept
+/// AND the pointer moved under us, so it is bounded by publish rate,
+/// not by anything we control — three is generous for a workspace whose
+/// floor is measured in seconds.
+const LOAD_ATTEMPTS: u32 = 3;
+
 pub async fn load(
     store: &dyn ObjectStore,
     cfg: &LeanConfig,
 ) -> LeanResult<Option<LoadedManifest>> {
+  for attempt in 0..LOAD_ATTEMPTS {
     if let Some(LoadedPointer { pointer: p, etag, last_modified_unix: pointer_lm }) =
         load_pointer(store, cfg).await?
     {
@@ -285,20 +293,51 @@ pub async fn load(
                 // ordinary and the interesting property is that a hole
                 // FAILS rather than silently shortening the manifest.
                 let mut bodies = Vec::with_capacity(refs.len());
+                let mut raced = false;
                 for r in refs {
                     let key = cfg.chunk_key(&r.addr);
                     match store.get_whole(&key, None).await {
                         Ok((_, b)) => bodies.push(b.to_vec()),
                         Err(StoreError::NotFound(_)) => {
+                            // A chunk we need is gone. Which of two very
+                            // different things happened is decided by
+                            // the POINTER, not by the chunk:
+                            //
+                            // - the pointer MOVED ⇒ we raced a sweep
+                            //   that collected a generation we were
+                            //   still reading. The current generation is
+                            //   a complete snapshot, so start over
+                            //   against it: coherent, just newer. This
+                            //   is what makes a reader safe for a
+                            //   DURATION rather than for `Retain`
+                            //   publishes (chunked design §8.2,
+                            //   machine-checked by
+                            //   `LeanChunkGCSlowReader`).
+                            // - the pointer is UNCHANGED ⇒ the live
+                            //   manifest genuinely has a hole, and there
+                            //   is nothing newer to restart onto. Fail,
+                            //   and never as `Ok(None)`, which every
+                            //   caller reads as FIRST WRITE.
+                            let moved = match load_pointer(store, cfg).await? {
+                                Some(now) => now.etag != etag,
+                                None => true,
+                            };
+                            if moved && attempt + 1 < LOAD_ATTEMPTS {
+                                raced = true;
+                                break;
+                            }
                             return Err(super::LeanError::State(format!(
                                 "manifest pointer at seq {} names chunk {} (first key {:?}), \
                                  which does not exist — refusing to serve a manifest with a \
                                  hole in it as though those entries had been deleted",
                                 p.seq, r.addr, r.first
-                            )))
+                            )));
                         }
                         Err(e) => return Err(e.into()),
                     }
+                }
+                if raced {
+                    continue;
                 }
                 let entries = super::chunk::assemble(refs, &bodies)?;
                 (
@@ -328,7 +367,9 @@ pub async fn load(
             pointer: Some(p),
         }));
     }
-    match store.get_whole(&cfg.manifest_key(), None).await {
+    // No pointer: the pre-migration layout, which has no chunks and so
+    // nothing to race a sweep over. Answer it and leave the loop.
+    return match store.get_whole(&cfg.manifest_key(), None).await {
         Ok((meta, bytes)) => {
             let manifest = LeanManifest::parse(&bytes)
                 .map_err(|e| super::LeanError::State(format!("manifest parse: {e}")))?;
@@ -341,7 +382,14 @@ pub async fn load(
         }
         Err(StoreError::NotFound(_)) => Ok(None),
         Err(e) => Err(e.into()),
-    }
+    };
+  }
+  // Every attempt raced a sweep. Refusing is right: the alternative is
+  // to serve a manifest we know is short, and short reads as deleted.
+  Err(super::LeanError::State(format!(
+      "manifest load restarted {LOAD_ATTEMPTS} times without settling — a sweep is \
+       collecting generations faster than this reader can finish one"
+  )))
 }
 
 /// CAS-write the manifest document. `expected`: None ⇒ first write

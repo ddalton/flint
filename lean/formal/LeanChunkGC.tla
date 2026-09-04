@@ -34,6 +34,13 @@ CONSTANTS
   ListBeforeRefs,   \* TRUE: list candidates, THEN union the retained refs
   AgeGrace,         \* TRUE: only chunks past the grace are collectable
   AdoptRewrites,    \* TRUE: a publisher finding a chunk present REWRITES it
+  ReaderRevalidates, \* TRUE: a reader that finds a chunk missing re-reads
+                     \* the pointer, and RESTARTS if it moved. A hole under
+                     \* an UNCHANGED pointer is the only true corruption;
+                     \* under a moved one it is a sweep we raced, and the
+                     \* newer generation is a complete snapshot to restart
+                     \* against. Closes the reader gap with NO timing
+                     \* assumption, unlike widening the retention window.
   RefsAtDelete,     \* TRUE: the reference set is re-read AT the delete, not
                     \* carried from an earlier snapshot. The strict run
                     \* refuted the list-before-refs rule §8.1 named: what
@@ -55,9 +62,11 @@ VARIABLES
   torn,       \* ghost: a reader found a chunk its pointer named, absent
   collected,  \* ghost: how many chunks the reaper deleted
   adopted,    \* ghost: a publisher referenced a chunk it did not upload
+  restarts,   \* ghost: a reader restarted onto a newer generation
   npubs
 
-vars == <<store, live, retained, pub, rdr, gc, torn, collected, adopted, npubs>>
+vars == <<store, live, retained, pub, rdr, gc, torn, collected, adopted,
+          restarts, npubs>>
 
 NonEmpty == {S \in SUBSET Addrs : S # {}}
 
@@ -73,11 +82,12 @@ Init ==
   /\ live = [seq |-> 0, chunks |-> {}]
   /\ retained = {}
   /\ pub = [phase |-> "idle", target |-> {}, done |-> {}]
-  /\ rdr = [phase |-> "idle", target |-> {}, got |-> {}]
+  /\ rdr = [phase |-> "idle", target |-> {}, got |-> {}, seq |-> 0]
   /\ gc  = [phase |-> "idle", cand |-> {}, refs |-> {}]
   /\ torn = FALSE
   /\ collected = 0
   /\ adopted = 0
+  /\ restarts = 0
   /\ npubs = 0
 
 (* ---- publisher ------------------------------------------------------- *)
@@ -87,7 +97,7 @@ PubStart ==
   /\ npubs < MaxPubs
   /\ \E T \in NonEmpty :
        pub' = [phase |-> "writing", target |-> T, done |-> {}]
-  /\ UNCHANGED <<store, live, retained, rdr, gc, torn, collected, adopted, npubs>>
+  /\ UNCHANGED <<store, live, retained, rdr, gc, torn, collected, adopted, restarts, npubs>>
 
 (* One chunk of the publish. The interesting arm is the ELSE: the object  *)
 (* is already there (our own crashed attempt, or a concurrent writer that *)
@@ -105,7 +115,7 @@ PubWrite ==
                       ELSE store' = store
                  /\ adopted' = adopted + 1
        /\ pub' = [pub EXCEPT !.done = pub.done \union {a}]
-  /\ UNCHANGED <<live, retained, rdr, gc, torn, collected, npubs>>
+  /\ UNCHANGED <<live, retained, rdr, gc, torn, collected, restarts, npubs>>
 
 PubCas ==
   /\ pub.phase = "writing"
@@ -114,7 +124,7 @@ PubCas ==
   /\ retained' = Trim(retained \union {live})
   /\ pub' = [phase |-> "idle", target |-> {}, done |-> {}]
   /\ npubs' = npubs + 1
-  /\ UNCHANGED <<store, rdr, gc, torn, collected, adopted>>
+  /\ UNCHANGED <<store, rdr, gc, torn, collected, adopted, restarts>>
 
 (* The crash §8.1 exists for: chunks are durable, the pointer CAS never   *)
 (* happens, and what is left is an aged object no pointer references.     *)
@@ -125,31 +135,41 @@ PubCrash ==
   /\ pub.phase = "writing"
   /\ pub' = [phase |-> "idle", target |-> {}, done |-> {}]
   /\ npubs' = npubs + 1
-  /\ UNCHANGED <<store, live, retained, rdr, gc, torn, collected, adopted>>
+  /\ UNCHANGED <<store, live, retained, rdr, gc, torn, collected, adopted, restarts>>
 
 (* ---- reader ---------------------------------------------------------- *)
 
 RdrStart ==
   /\ rdr.phase = "idle"
   /\ live.chunks # {}
-  /\ rdr' = [phase |-> "reading", target |-> live.chunks, got |-> {}]
-  /\ UNCHANGED <<store, live, retained, pub, gc, torn, collected, adopted, npubs>>
+  /\ rdr' = [phase |-> "reading", target |-> live.chunks, got |-> {}, seq |-> live.seq]
+  /\ UNCHANGED <<store, live, retained, pub, gc, torn, collected, adopted, restarts, npubs>>
 
 RdrFetch ==
   /\ rdr.phase = "reading"
   /\ \E a \in rdr.target \ rdr.got :
-       IF store[a] = "absent"
-         THEN /\ torn' = TRUE
-              /\ UNCHANGED rdr
-         ELSE /\ rdr' = [rdr EXCEPT !.got = rdr.got \union {a}]
-              /\ UNCHANGED torn
+       IF store[a] # "absent"
+         THEN /\ rdr' = [rdr EXCEPT !.got = rdr.got \union {a}]
+              /\ UNCHANGED <<torn, restarts>>
+         \* The chunk is gone. If the pointer has MOVED, this is a sweep
+         \* we raced and the current generation is a complete snapshot
+         \* to start over against -- coherent, just newer. If it has
+         \* NOT moved, the live manifest genuinely has a hole and there
+         \* is nothing to restart onto.
+         ELSE IF ReaderRevalidates /\ live.seq # rdr.seq
+                THEN /\ rdr' = [phase |-> "reading", target |-> live.chunks,
+                                got |-> {}, seq |-> live.seq]
+                     /\ restarts' = restarts + 1
+                     /\ UNCHANGED torn
+                ELSE /\ torn' = TRUE
+                     /\ UNCHANGED <<rdr, restarts>>
   /\ UNCHANGED <<store, live, retained, pub, gc, collected, adopted, npubs>>
 
 RdrDone ==
   /\ rdr.phase = "reading"
   /\ rdr.got = rdr.target
-  /\ rdr' = [phase |-> "idle", target |-> {}, got |-> {}]
-  /\ UNCHANGED <<store, live, retained, pub, gc, torn, collected, adopted, npubs>>
+  /\ rdr' = [phase |-> "idle", target |-> {}, got |-> {}, seq |-> 0]
+  /\ UNCHANGED <<store, live, retained, pub, gc, torn, collected, adopted, npubs, restarts>>
 
 (* ---- the reaper ------------------------------------------------------ *)
 (* Two snapshots taken at two instants, and §8.1 claims the ORDER decides *)
@@ -161,7 +181,7 @@ GcSnap1 ==
        THEN gc' = [phase |-> "one", cand |-> {a \in Addrs : store[a] # "absent"},
                    refs |-> {}]
        ELSE gc' = [phase |-> "one", cand |-> {}, refs |-> AllRefs]
-  /\ UNCHANGED <<store, live, retained, pub, rdr, torn, collected, adopted, npubs>>
+  /\ UNCHANGED <<store, live, retained, pub, rdr, torn, collected, adopted, restarts, npubs>>
 
 GcSnap2 ==
   /\ gc.phase = "one"
@@ -169,7 +189,7 @@ GcSnap2 ==
        THEN gc' = [gc EXCEPT !.phase = "two", !.refs = AllRefs]
        ELSE gc' = [gc EXCEPT !.phase = "two",
                              !.cand = {a \in Addrs : store[a] # "absent"}]
-  /\ UNCHANGED <<store, live, retained, pub, rdr, torn, collected, adopted, npubs>>
+  /\ UNCHANGED <<store, live, retained, pub, rdr, torn, collected, adopted, restarts, npubs>>
 
 EffectiveRefs == IF RefsAtDelete THEN AllRefs ELSE gc.refs
 
@@ -181,7 +201,7 @@ GcDelete ==
   /\ store' = [a \in Addrs |-> IF a \in Doomed THEN "absent" ELSE store[a]]
   /\ collected' = collected + Cardinality(Doomed)
   /\ gc' = [phase |-> "idle", cand |-> {}, refs |-> {}]
-  /\ UNCHANGED <<live, retained, pub, rdr, torn, adopted, npubs>>
+  /\ UNCHANGED <<live, retained, pub, rdr, torn, adopted, restarts, npubs>>
 
 (* Time passing: a chunk written a while ago stops being protected by the *)
 (* grace. This is the age SENSOR, and the adoption arm is what makes it   *)
@@ -191,7 +211,7 @@ Age ==
        /\ store[a] = "fresh"
        /\ ~(GraceCoversPublish /\ pub.phase = "writing" /\ a \in pub.done)
        /\ store' = [store EXCEPT ![a] = "aged"]
-  /\ UNCHANGED <<live, retained, pub, rdr, gc, torn, collected, adopted, npubs>>
+  /\ UNCHANGED <<live, retained, pub, rdr, gc, torn, collected, adopted, restarts, npubs>>
 
 Next ==
   \/ PubStart \/ PubWrite \/ PubCas \/ PubCrash
@@ -224,4 +244,5 @@ Inv_NoTornRead == torn = FALSE
 (* ---- probes: each must be VIOLATED, or the run proved nothing -------- *)
 Probe_Collected == collected = 0
 Probe_Adopted == adopted = 0
+Probe_Restarted == restarts = 0
 ================================================================================

@@ -17,9 +17,9 @@ a library. Nothing here is wired into `scripts/check-tla.sh`.
 ./gen-cfgs.sh       # regenerate the cfg matrix
 ```
 
-Seventy-three runs, ALL required: 15 strict (must hold), 30 mutations
+Seventy-five runs, ALL required: 15 strict (must hold), 31 mutations
 (must find their designated counterexample — a model that cannot
-rediscover its bug classes proves nothing), 28 probes (must be violated
+rediscover its bug classes proves nothing), 29 probes (must be violated
 — each names an ACTION via a ghost only that action writes; probe the
 action, never the situation). The three numbers are `grep -c "^strict_run "`,
 `grep "^mutation_run " | grep -vc Probe` and `grep "^mutation_run " |
@@ -56,7 +56,7 @@ subject of the section. The abstraction was the bug, again.
 | --- | --- | --- |
 | `Inv_LiveComplete` | every chunk the live pointer names is present | `LeanChunkGCStaleRefs` / `LeanChunkGCRefsFirst` (refs read before a CAS the delete follows), `LeanChunkGCNoGrace`, `LeanChunkGCRacyGrace` (grace shorter than the publish), `LeanChunkGCAdoptSkips` (adoption without the rewrite) |
 | `Inv_RetainedComplete` | every retained generation is still readable | the same set |
-| `Inv_NoTornRead` | a reader never finds a chunk its pointer named, absent | **not a gate run** — `LeanChunkGCSlowReader.cfg` VIOLATES it, and that is the finding: a reader is safe for `Retain` PUBLISHES, not for a duration (§8.2). Kept as a cfg so the bound stays machine-checked rather than prose |
+| `Inv_NoTornRead` | a reader never finds a chunk its pointer named, absent | `LeanChunkGCSlowReader` (the reader does not revalidate). Holds at an UNCHANGED `Retain = 1`: the fix is that a reader which finds a chunk gone re-reads the POINTER, and restarts onto the current generation if it moved — a hole under an unchanged pointer is the only true corruption (§8.2). No timing assumption, no wider window |
 
 ## The module: LeanSubtree.tla
 

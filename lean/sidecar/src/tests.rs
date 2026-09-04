@@ -6968,3 +6968,270 @@ fn assemble_refuses_every_way_a_chunk_list_can_lie() {
     r[1].first = "zzz".into();
     must_fail(r, bodies.clone(), "disagrees with its body about the first key");
 }
+
+
+/// A backend that runs a SWEEP in the middle of a read: the first time
+/// the named chunk is fetched, it installs a newer pointer and collects
+/// that chunk, then answers 404. This is the §8.2 race — a reader whose
+/// generation is swept out from under it — and it cannot be produced by
+/// calling the store's methods in sequence from a test, which is why it
+/// lives in the backend.
+struct SweepMidRead {
+    inner: Arc<MemoryStore>,
+    current_key: String,
+    doomed_key: String,
+    next_pointer: Vec<u8>,
+    /// FALSE leaves the pointer alone: the chunk vanishes with no newer
+    /// generation to restart onto, which must FAIL rather than restart.
+    move_pointer: bool,
+    fired: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for SweepMidRead {
+    async fn put_whole(
+        &self,
+        key: &str,
+        body: Bytes,
+        cond: &PutCondition,
+        stamps: &GenerationStamps,
+        crc: u64,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.put_whole(key, body, cond, stamps, crc).await
+    }
+    async fn compose_generation(
+        &self,
+        spec: &flint_store::ComposeSpec<'_>,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.compose_generation(spec).await
+    }
+    async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head(key).await
+    }
+    async fn get_whole(
+        &self,
+        key: &str,
+        if_match: Option<&str>,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        if key == self.doomed_key
+            && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            if self.move_pointer {
+                let stamps = GenerationStamps {
+                    generation: 9,
+                    epoch: 1,
+                    flush_uuid: "sweep".into(),
+                    boundary_source: None,
+                    posix: None,
+                };
+                let crc = crc64_nvme(&self.next_pointer);
+                self.inner
+                    .put_whole(
+                        &self.current_key,
+                        Bytes::from(self.next_pointer.clone()),
+                        &PutCondition::Unconditional,
+                        &stamps,
+                        crc,
+                    )
+                    .await?;
+            }
+            self.inner.delete(&self.doomed_key).await?;
+            return Err(flint_store::StoreError::NotFound(format!("swept: {key}")));
+        }
+        self.inner.get_whole(key, if_match).await
+    }
+    async fn get_range(
+        &self,
+        key: &str,
+        off: u64,
+        len: u64,
+        if_match: &str,
+    ) -> flint_store::StoreResult<Bytes> {
+        self.inner.get_range(key, off, len, if_match).await
+    }
+    fn min_part_size(&self) -> u64 {
+        self.inner.min_part_size()
+    }
+    fn max_parts(&self) -> usize {
+        self.inner.max_parts()
+    }
+    async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
+        self.inner.list(prefix).await
+    }
+    async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete(key).await
+    }
+    async fn head_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head_version(key, v).await
+    }
+    async fn get_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.inner.get_version(key, v).await
+    }
+    async fn delete_version(&self, key: &str, v: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete_version(key, v).await
+    }
+    async fn list_versions(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::ListedVersion>> {
+        self.inner.list_versions(prefix).await
+    }
+    async fn list_uploads(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::PendingUpload>> {
+        self.inner.list_uploads(prefix).await
+    }
+    async fn abort_upload(&self, key: &str, id: &str) -> flint_store::StoreResult<()> {
+        self.inner.abort_upload(key, id).await
+    }
+    async fn bootstrap(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<flint_store::BootstrapReport> {
+        self.inner.bootstrap(prefix).await
+    }
+    async fn epoch_read(
+        &self,
+        key: &str,
+    ) -> flint_store::StoreResult<Option<flint_store::EpochState>> {
+        self.inner.epoch_read(key).await
+    }
+    async fn epoch_acquire(
+        &self,
+        key: &str,
+        holder: &str,
+        observed: Option<&flint_store::EpochState>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.inner.epoch_acquire(key, holder, observed).await
+    }
+    async fn epoch_renew(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+        echo: Option<&str>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.inner.epoch_renew(key, lease, echo).await
+    }
+    async fn epoch_release(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+    ) -> flint_store::StoreResult<()> {
+        self.inner.epoch_release(key, lease).await
+    }
+}
+
+/// §8.2 — a reader whose generation is swept out from under it RESTARTS
+/// onto the current one instead of tearing.
+///
+/// Before this, a reader was safe for `Retain` PUBLISHES, not for a
+/// duration — which is the wrong unit, since a full checkout runs for
+/// minutes while a busy workspace publishes every floor tick.
+/// `LeanChunkGCSlowReader.cfg` violates `Inv_NoTornRead` without the
+/// revalidation and holds with it, at an unchanged window size.
+///
+/// The two halves are each other's control. Same sweep, same missing
+/// chunk; the only difference is whether the POINTER moved, and that is
+/// what decides "raced a sweep" from "the live manifest has a hole".
+#[tokio::test]
+async fn a_reader_swept_mid_read_restarts_onto_the_current_generation() {
+    for move_pointer in [true, false] {
+        let inner = Arc::new(MemoryStore::new());
+        let plain: Arc<dyn ObjectStore> = inner.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = cfg_for(dir.path());
+        cfg.chunk_target = 64;
+        cfg.chunk_min = 16;
+        cfg.chunk_max = 256;
+
+        // Generation 1, then generation 2 over the same project. Both
+        // sets of chunks are durable; only the pointer distinguishes
+        // them, which is the layout working as designed.
+        let m1 = manifest_of(600, 1);
+        let meta1 =
+            manifest::cas_write_chunked(plain.as_ref(), &cfg, &m1, None, &[],
+                manifest::PublishStamps { epoch: 1, flush_uuid: "u1", boundary_source: None })
+                .await
+                .unwrap();
+        let p1 = manifest::load_pointer(plain.as_ref(), &cfg).await.unwrap().unwrap().pointer;
+        let c1 = match p1.entries().unwrap() {
+            super::manifest::Entries::Chunked(c) => c.to_vec(),
+            _ => panic!("not chunked"),
+        };
+        let mut m2 = m1.clone();
+        m2.seq = 2;
+        m2.entries.insert("src/f00003.txt".into(), entry_at("changed", 42));
+        let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false };
+        manifest::cas_write_chunked(plain.as_ref(), &cfg, &m2, Some(&h), &c1,
+            manifest::PublishStamps { epoch: 1, flush_uuid: "u2", boundary_source: None })
+            .await
+            .unwrap();
+        let lp2 = manifest::load_pointer(plain.as_ref(), &cfg).await.unwrap().unwrap();
+        let ptr2_bytes = serde_json::to_vec(&lp2.pointer).unwrap();
+
+        // Put generation 1 back as the live pointer, so a reader starts
+        // on the generation the sweep is about to collect.
+        let stamps = GenerationStamps {
+            generation: 1,
+            epoch: 1,
+            flush_uuid: "rewind".into(),
+            boundary_source: None,
+            posix: None,
+        };
+        let p1_bytes = serde_json::to_vec(&p1).unwrap();
+        let crc = crc64_nvme(&p1_bytes);
+        plain
+            .put_whole(&cfg.current_key(), Bytes::from(p1_bytes), &PutCondition::Unconditional, &stamps, crc)
+            .await
+            .unwrap();
+
+        // A chunk only generation 1 references — the one a sweep would
+        // legitimately take once generation 1 leaves the window.
+        let c2: Vec<String> = match lp2.pointer.entries().unwrap() {
+            super::manifest::Entries::Chunked(c) => c.iter().map(|r| r.addr.clone()).collect(),
+            _ => panic!("not chunked"),
+        };
+        let doomed = c1
+            .iter()
+            .find(|r| !c2.contains(&r.addr))
+            .expect("generation 2 shares every chunk with generation 1 — nothing to sweep");
+
+        let store: Arc<dyn ObjectStore> = Arc::new(SweepMidRead {
+            inner: inner.clone(),
+            current_key: cfg.current_key(),
+            doomed_key: cfg.chunk_key(&doomed.addr),
+            next_pointer: ptr2_bytes.clone(),
+            move_pointer,
+            fired: std::sync::atomic::AtomicBool::new(false),
+        });
+
+        let got = manifest::load(store.as_ref(), &cfg).await;
+        if move_pointer {
+            let loaded = got.expect("a reader swept mid-read did not restart").unwrap();
+            assert_eq!(
+                loaded.manifest.entries, m2.entries,
+                "the restart did not land on the CURRENT generation — a reader that mixes \
+                 generations is worse than one that fails"
+            );
+            assert_eq!(loaded.manifest.seq, 2);
+        } else {
+            let msg = match got {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!(
+                    "a chunk vanished under an UNCHANGED pointer and the load succeeded — \
+                     that is a hole in the live manifest, not a race"
+                ),
+            };
+            assert!(msg.contains("hole"), "wrong refusal: {msg}");
+        }
+    }
+}
