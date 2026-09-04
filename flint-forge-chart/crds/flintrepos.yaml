@@ -1,0 +1,334 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: flintrepos.chert.us
+spec:
+  group: chert.us
+  names:
+    categories: []
+    kind: FlintRepo
+    plural: flintrepos
+    shortNames:
+    - fr
+    singular: flintrepo
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - jsonPath: .spec.bucket
+      name: BUCKET
+      type: string
+    - jsonPath: .spec.keyPrefix
+      name: PREFIX
+      type: string
+    - jsonPath: .status.repo.refs
+      name: REFS
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: A git repository served by one flint-forge server, with S3 as its only durable state
+        properties:
+          spec:
+            properties:
+              branches:
+                description: Who may move which ref, once through the door.
+                nullable: true
+                properties:
+                  agentPattern:
+                    description: |-
+                      The shape of ref an otherwise unlisted principal may create and
+                      push, e.g. `agent/*`.
+
+                      It bounds the NAME, not the owner. The principal a pod presents
+                      is its ServiceAccount and many pods share one, so nothing here
+                      stops one agent pushing another's branch; that needs a per-pod
+                      principal, which the door does not mint.
+                    nullable: true
+                    type: string
+                  allowNonFastForward:
+                    description: |-
+                      Refs a non-fast-forward push may move. Default: none. An agent
+                      rebasing its own branch is the case that wants it.
+                    items:
+                      type: string
+                    type: array
+                  mergeInto:
+                    additionalProperties:
+                      items:
+                        type: string
+                      type: array
+                    description: |-
+                      Merge target -> principals allowed to push `refs/for/<target>`.
+                      A protected target with no entry is CLOSED: otherwise
+                      `refs/for/` would be the way around the protection it exists to
+                      serve.
+                    type: object
+                  protected:
+                    description: |-
+                      Refs no push moves directly unless `pushers` names the
+                      principal, and that no push DELETES at all. Bare branch names
+                      (`main`, `release/*`); `*` matches any run of characters.
+                    items:
+                      type: string
+                    type: array
+                  pushers:
+                    additionalProperties:
+                      items:
+                        type: string
+                      type: array
+                    description: |-
+                      Ref pattern -> principals allowed to push it directly, as
+                      `system:serviceaccount:<ns>:<sa>`. `*` in the list means anyone
+                      the door let through.
+                    type: object
+                type: object
+              bucket:
+                type: string
+              consumers:
+                description: |-
+                  Which ServiceAccounts the door will let through at all. Empty or
+                  absent = nobody, which is the safe direction for a surface whose
+                  whole point is that a pod's own token is the credential.
+                nullable: true
+                properties:
+                  serviceAccounts:
+                    default: []
+                    items:
+                      type: string
+                    type: array
+                type: object
+              credentialsSecretRef:
+                description: Secret with the SYNCER's S3 credentials, keys `AWS_*` verbatim.
+                nullable: true
+                type: string
+              defaultBranch:
+                description: '`HEAD` in a repository nobody has pushed to. Default `main`.'
+                nullable: true
+                type: string
+              endpoint:
+                description: S3 endpoint override (a deployment proxy, or a MinIO rig).
+                nullable: true
+                type: string
+              export:
+                description: |-
+                  The legible export (design §9): `git archive` of a ref,
+                  published as a lean workspace by the shipped `flint-sync`.
+                nullable: true
+                properties:
+                  everySecs:
+                    description: |-
+                      A floor, not a schedule: the export runs after a batch that
+                      moved an exported ref, no more often than this.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  prefix:
+                    description: |-
+                      Where the exported workspace lives. A separate prefix from the
+                      repository's own — it is a lean workspace with lean's control
+                      objects, not a second directory in the bare repo.
+                    type: string
+                  refs:
+                    description: Refs whose trees are published, e.g. `["main"]`.
+                    items:
+                      type: string
+                    type: array
+                required:
+                - prefix
+                type: object
+              idle:
+                nullable: true
+                properties:
+                  suspendAfterSecs:
+                    description: |-
+                      Scale the server to zero after this many seconds with no git
+                      traffic. The door wakes it on the next request and holds that
+                      request while it restores.
+
+                      ONE rung, not lite's ladder: the cache is an `emptyDir`, so
+                      there is no PVC to delete and `Hibernated` would name the state
+                      this one already is.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                type: object
+              keyPrefix:
+                description: |-
+                  Everything this repository owns lives under it: `git/` is the
+                  bare repository, and `git/snapshot` is its pointer.
+                type: string
+              lifecycle:
+                description: |-
+                  An admin scale-down. A wake request does NOT override it — the
+                  door would otherwise be quietly reversing an operator.
+                enum:
+                - Running
+                - Suspended
+                - null
+                nullable: true
+                type: string
+              logLevel:
+                description: '`RUST_LOG` for the server pod.'
+                nullable: true
+                type: string
+              projectId:
+                description: |-
+                  The durable, user-declared identity the claim cell carries —
+                  stable across CR delete/recreate, and NEVER the CR UID. A
+                  standing claim naming another project is refused on the DATA
+                  plane by the syncer, not merely by the operator.
+                type: string
+              wipSnapshots:
+                description: An RPO on the working tree, which git itself does not offer.
+                nullable: true
+                properties:
+                  everySecs:
+                    description: |-
+                      Commit the agent's working tree to `refs/wip/<pod>` this often.
+                      Plumbing only — it never moves the agent's own branch or HEAD.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                type: object
+            required:
+            - bucket
+            - keyPrefix
+            - projectId
+            type: object
+            x-kubernetes-validations:
+            - message: spec.projectId is immutable — create a new FlintRepo instead
+              rule: self.projectId == oldSelf.projectId
+            - message: spec.bucket is immutable — create a new FlintRepo instead
+              rule: self.bucket == oldSelf.bucket
+            - message: spec.keyPrefix is immutable — create a new FlintRepo instead
+              rule: self.keyPrefix == oldSelf.keyPrefix
+            - message: spec.keyPrefix must end with '/' — a prefix without it also matches sibling names
+              rule: self.keyPrefix.endsWith('/')
+            - message: spec.keyPrefix must not start with '/'
+              rule: '!self.keyPrefix.startsWith(''/'')'
+            - message: spec.export.prefix must differ from spec.keyPrefix — the export is a separate lean workspace
+              rule: '!has(self.export) || self.export.prefix != self.keyPrefix'
+          status:
+            nullable: true
+            properties:
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    reason:
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - reason
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              gitEndpoint:
+                description: |-
+                  Where the repository's git server answers, as an absolute URL.
+
+                  **This says WHERE. `phase` says WHETHER — read it first.** A
+                  parked repo has no pod, so the name does not resolve; the field
+                  is a stable formula, not a liveness signal. It is an in-cluster
+                  headless Service name, deliberately: git carries the repository
+                  in the request path, so the door routes to the pod and forge
+                  does not spend a ClusterIP per repository (design §2).
+                nullable: true
+                type: string
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                description: |-
+                  Forge's lifecycle phases — its own, because it has no PVC and
+                  therefore no `Hibernated` and no `Reprovisioning`.
+                enum:
+                - Terminating
+                - Pending
+                - Starting
+                - Ready
+                - IdleSuspended
+                - Suspended
+                - Failed
+                nullable: true
+                type: string
+              refused:
+                description: |-
+                  Set ⇒ the server refused to serve and no restart will change it
+                  (a foreign claim, a snapshot naming a pack the bucket lacks, a
+                  git below the floor). The operator reads the syncer's exit code
+                  rather than guessing from a crash loop.
+                nullable: true
+                type: string
+              repo:
+                nullable: true
+                properties:
+                  lastPushUnix:
+                    description: Unix seconds of the last acknowledged push.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  packs:
+                    default: 0
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  refs:
+                    default: 0
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  snapshotSeq:
+                    default: 0
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                type: object
+              serverId:
+                description: |-
+                  The syncer's holder id, as last observed. A change means a new
+                  server took the repository over — every in-flight push against
+                  the old one failed, which is what a client already saw.
+                nullable: true
+                type: string
+              serverPhase:
+                description: |-
+                  The SYNCER's own phase, as the operator's last `/status` poll
+                  saw it — the Debug spelling of the parsed value, so `Serving`
+                  and `Sweeping` rather than the wire's camelCase, which is what
+                  `lite_gateway::resolve::hub_phase_blocks` compares against.
+
+                  `None` is "not observed this pass", NEVER "not serving": a
+                  missed poll must not take a live repository out of rotation.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: FlintRepo
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

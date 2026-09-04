@@ -20,6 +20,10 @@
 //!   FLINT_FORGE_REPACK_THRESHOLD packs before a repack (default 24)
 //!   FLINT_FORGE_ORPHAN_GRACE_SECS  sweep grace (default 3600)
 //!   FLINT_FORGE_DEFAULT_BRANCH   HEAD for an empty repository (main)
+//!   FLINT_FORGE_HOOKS_PATH       core.hooksPath (the hooks ship in the
+//!                                git image, not in the repository)
+//!   FLINT_FORGE_POLICY_DIR       where the rendered branch policy is
+//!                                re-read from between batches
 //!   FLINT_FORGE_PROTECTED        comma-separated globs, no direct push
 //!   FLINT_FORGE_ALLOW_NON_FF     comma-separated globs, force allowed
 
@@ -52,8 +56,8 @@ fn env_globs(name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn rendered_policy(cfg: &ForgeConfig) -> Option<Policy> {
-    match Policy::load(&cfg.state_dir) {
+fn rendered_policy(dir: &std::path::Path) -> Option<Policy> {
+    match Policy::load(dir) {
         Ok(p) => p,
         Err(e) => {
             // A policy the enforcers cannot read must never read as
@@ -89,7 +93,11 @@ async fn main() {
     cfg.project_id = std::env::var("FLINT_FORGE_PROJECT_ID").ok().filter(|p| !p.is_empty());
     cfg.default_branch =
         std::env::var("FLINT_FORGE_DEFAULT_BRANCH").unwrap_or_else(|_| "main".into());
+    cfg.hooks_path = std::env::var("FLINT_FORGE_HOOKS_PATH").ok().filter(|p| !p.is_empty());
 
+    let policy_dir = std::env::var("FLINT_FORGE_POLICY_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| cfg.state_dir.clone());
     let socket = std::env::var("FLINT_FORGE_SOCKET")
         .map(PathBuf::from)
         .unwrap_or_else(|_| cfg.state_dir.join(flint_forge::uds::SOCKET_NAME));
@@ -106,7 +114,8 @@ async fn main() {
         // rigs'. A file, when present, wins outright rather than
         // merging — a policy assembled from two sources is a policy
         // nobody can read off one screen.
-        policy: rendered_policy(&cfg).unwrap_or(Policy {
+        policy_dir: Some(policy_dir.clone()),
+        policy: rendered_policy(&policy_dir).unwrap_or(Policy {
             protected: env_globs("FLINT_FORGE_PROTECTED"),
             allow_non_fast_forward: env_globs("FLINT_FORGE_ALLOW_NON_FF"),
             ..Policy::default()

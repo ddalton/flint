@@ -43,7 +43,7 @@ impl Rig {
             format!("forge-test-{who}"),
         );
         let rig = Rig { _dir: dir, store, sc };
-        rig.sc.git.init_bare("main").await.expect("init");
+        rig.sc.git.init_bare("main", None).await.expect("init");
         rig
     }
 

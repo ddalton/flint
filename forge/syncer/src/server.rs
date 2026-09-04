@@ -27,6 +27,16 @@ use super::{lease, restore, ForgeError, ForgeResult, Syncer};
 
 pub struct ServerOpts {
     pub socket: PathBuf,
+    /// Where the rendered branch policy is re-read from between
+    /// batches. `None` = the policy passed in is fixed for the life of
+    /// the process, which is the rigs' posture.
+    ///
+    /// It exists because the operator cannot write into the
+    /// repository's `emptyDir`: the document arrives on a read-only
+    /// ConfigMap mount, and a mount updates in place. Re-reading is
+    /// what makes a branch-policy edit take effect without rolling the
+    /// server and dropping every clone in flight.
+    pub policy_dir: Option<PathBuf>,
     /// `host:port` for the status listener the operator polls. `None`
     /// disables it — which also disables the idle ladder, since a poll
     /// that cannot be made Holds.
@@ -98,9 +108,26 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
     // The first tick fires immediately; the claim just renewed for us.
     heartbeat.tick().await;
 
+    // A clean release on SIGTERM: a successor claims at once instead of
+    // waiting out six quiet polls, which is the difference between a
+    // roll that costs one request and one that costs a minute of them.
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(ForgeError::Io)?;
+    let mut policy = opts.policy.clone();
     let mut next_id: u64 = 0;
     loop {
         tokio::select! {
+            _ = term.recv() => {
+                publish(&shared, &sc, Phase::Draining);
+                match lease::release(&mut sc).await {
+                    Ok(()) => eprintln!("flint-forge: lease released; a successor may claim at once"),
+                    // Not fatal: the successor waits out the quiet
+                    // polls instead, which is slower and still correct.
+                    Err(e) => eprintln!("flint-forge: could not release the lease cleanly: {e}"),
+                }
+                publish(&shared, &sc, Phase::Released);
+                return Ok(());
+            }
             // The heartbeat runs whether or not pushes arrive. A
             // server that renewed only inside a push would let a quiet
             // repository's lease lapse and leave a straggler unfenced.
@@ -124,7 +151,22 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                     return Err(ForgeError::State("the hook socket closed".into()));
                 };
                 let waiting = collect(&mut rx, first, &sc, &mut next_id).await;
-                run_and_report(&mut sc, waiting, &opts.policy, &shared).await?;
+                // Re-read before judging, so a policy edit is in force
+                // for the very next push. A document that has become
+                // unreadable keeps the last GOOD one and says so: the
+                // operator renders this from a typed struct, so an
+                // unparseable file is a hand edit, and refusing every
+                // push over one would turn a typo into an outage.
+                if let Some(dir) = opts.policy_dir.as_deref() {
+                    match Policy::load(dir) {
+                        Ok(Some(p)) => policy = p,
+                        Ok(None) => {}
+                        Err(e) => eprintln!(
+                            "flint-forge: {e}; keeping the policy this server started with"
+                        ),
+                    }
+                }
+                run_and_report(&mut sc, waiting, &policy, &shared).await?;
             }
         }
     }

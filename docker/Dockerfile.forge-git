@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1
+# flint-forge-git — nginx + fcgiwrap + `git http-backend`, plus the
+# `proc-receive` and `pre-receive` hooks.
+#
+# The web half of a forge server pod. It shares the repository
+# `emptyDir` with the syncer beside it and talks to that syncer over a
+# Unix socket inside the repository's own state directory.
+#
+#   for T in x86_64 aarch64; do
+#     (cd ../forge/syncer && cargo zigbuild --release \
+#       --target $T-unknown-linux-musl --bin flint-forge-hook); done
+#   # stage: docker/prebuilt/{amd64,arm64}/flint-forge-hook
+#   docker build --platform linux/$A -f docker/Dockerfile.forge-git \
+#     --build-arg BIN_DIR=docker/prebuilt -t <repo>/flint-forge-git:<tag>-$A .
+#
+# The git FLOOR is 2.43 (`merge-tree -X`), which the syncer asserts at
+# start rather than discovering inside a merge. alpine:3.20 ships 2.45.
+FROM alpine:3.20
+
+ARG BIN_DIR=docker/prebuilt
+ARG TARGETARCH
+
+RUN apk add --no-cache git git-daemon nginx fcgiwrap spawn-fcgi \
+    && mkdir -p /repo /run/nginx
+
+COPY docker/forge/nginx.conf /etc/nginx/nginx.conf
+COPY docker/forge/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY ${BIN_DIR}/${TARGETARCH}/flint-forge-hook /usr/local/bin/flint-forge-hook
+
+# One binary, two hooks, dispatching on the name it was invoked as.
+# `core.hooksPath` points every repository at this directory, so a
+# repository created by the syncer needs no per-repo hook install.
+RUN mkdir -p /usr/local/share/flint-forge/hooks \
+    && ln -s /usr/local/bin/flint-forge-hook /usr/local/share/flint-forge/hooks/pre-receive \
+    && ln -s /usr/local/bin/flint-forge-hook /usr/local/share/flint-forge/hooks/proc-receive
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

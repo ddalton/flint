@@ -172,11 +172,63 @@ pub fn wake_warm_fill(share: &FlintShare) -> Option<bool> {
     }
 }
 
-fn parse_time(s: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
+pub fn parse_time(s: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
     let s = s?;
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|t| t.with_timezone(&chrono::Utc))
+}
+
+/// The two clock rules, on annotations alone.
+///
+/// Extracted from the `FlintShare`-typed helpers below so that a second
+/// front end — flint forge's `FlintRepo` — enforces the SAME rule
+/// rather than a copy of it. The rule is the part worth sharing: a
+/// future stamp is clamped to "wanted right now", because the front
+/// door's clock and the operator's need not agree, and a stamp further
+/// ahead than one full threshold is discarded rather than clamped,
+/// because a door running an hour fast would otherwise pin a share
+/// awake for an hour and look exactly like real demand.
+pub mod clock {
+    use std::collections::BTreeMap;
+
+    use super::{parse_time, ANN_REQUESTED_AT};
+
+    pub fn requested_at(
+        anns: &BTreeMap<String, String>,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        parse_time(anns.get(ANN_REQUESTED_AT).map(|s| s.as_str()))
+    }
+
+    /// Seconds since the door last said it wanted this. A future stamp
+    /// clamps to 0; `None` = no request was ever recorded.
+    pub fn requested_age_secs(
+        anns: &BTreeMap<String, String>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<u64> {
+        let at = requested_at(anns)?;
+        Some((now - at).num_seconds().max(0) as u64)
+    }
+
+    /// How far in the FUTURE the stamp is, if it is.
+    pub fn request_skew_secs(
+        anns: &BTreeMap<String, String>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<u64> {
+        let at = requested_at(anns)?;
+        let ahead = (at - now).num_seconds();
+        (ahead > 0).then_some(ahead as u64)
+    }
+
+    /// A stamp too far ahead to be skew, given this threshold.
+    pub fn implausible_request(
+        suspend_after_secs: Option<u64>,
+        anns: &BTreeMap<String, String>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<u64> {
+        let after = suspend_after_secs?;
+        request_skew_secs(anns, now).filter(|ahead| *ahead > after)
+    }
 }
 
 /// Seconds since the front door last said it wanted this share.
@@ -189,8 +241,7 @@ pub fn requested_age_secs(
     share: &FlintShare,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<u64> {
-    let at = requested_at(share)?;
-    Some((now - at).num_seconds().max(0) as u64)
+    clock::requested_age_secs(share.annotations(), now)
 }
 
 /// How far in the FUTURE the request stamp is, if it is.
@@ -206,9 +257,7 @@ pub fn request_skew_secs(
     share: &FlintShare,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<u64> {
-    let at = requested_at(share)?;
-    let ahead = (at - now).num_seconds();
-    (ahead > 0).then_some(ahead as u64)
+    clock::request_skew_secs(share.annotations(), now)
 }
 
 /// A request stamp too far ahead to be skew, given this share's own
@@ -224,8 +273,11 @@ pub fn implausible_request(
     share: &FlintShare,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<u64> {
-    let after = cfg.and_then(|c| c.suspend_after_secs)?;
-    request_skew_secs(share, now).filter(|ahead| *ahead > after)
+    clock::implausible_request(
+        cfg.and_then(|c| c.suspend_after_secs),
+        share.annotations(),
+        now,
+    )
 }
 
 /// What the reconciler should do about the ladder this pass.

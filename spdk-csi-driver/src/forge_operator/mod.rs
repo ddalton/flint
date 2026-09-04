@@ -6,3 +6,6 @@
 //! outside this one.
 
 pub mod crd;
+pub mod idle;
+pub mod reconcile;
+pub mod render;

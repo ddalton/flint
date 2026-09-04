@@ -1,0 +1,61 @@
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "flint-forge.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flint-forge.labels" . | nindent 4 }}
+{{- end }}
+{{- if .Values.rbac.create }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "flint-forge.name" . }}
+  labels: {{- include "flint-forge.labels" . | nindent 4 }}
+rules:
+  # The operator applies its own compiled-in CRD at startup; the crds/
+  # copy is install-time bootstrap only (helm never upgrades it).
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["create", "get", "patch"]
+  - apiGroups: ["chert.us"]
+    resources: ["flintrepos"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["chert.us"]
+    resources: ["flintrepos/status"]
+    verbs: ["get", "patch", "update"]
+  # The three children of a FlintRepo, plus the pods it must find an
+  # address for to poll /status. No `secrets` verb anywhere: the
+  # repository's S3 credentials are named by the CR and mounted by the
+  # kubelet, and the operator never reads them.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "flint-forge.name" . }}
+  labels: {{- include "flint-forge.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "flint-forge.name" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flint-forge.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flint-forge.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "flint-forge.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "flint-forge.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "flint-forge.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "flint-forge.serviceAccountName" . }}
+      containers:
+        - name: operator
+          image: {{ include "flint-forge.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The image is an alias of flint-lite-operator; the binary is
+          # named explicitly rather than relying on its ENTRYPOINT.
+          command: ["/usr/local/bin/flint-forge-operator"]
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.server.logLevel | quote }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- if .Values.namespace }}
+            - name: FLINT_FORGE_OP_NAMESPACE
+              value: {{ .Values.namespace | quote }}
+            {{- end }}
+            - name: FLINT_FORGE_SYNCER_IMAGE
+              value: {{ .Values.server.syncerImage | quote }}
+            - name: FLINT_FORGE_GIT_IMAGE
+              value: {{ .Values.server.gitImage | quote }}
+            - name: FLINT_FORGE_LOG_LEVEL
+              value: {{ .Values.server.logLevel | quote }}
+            {{- if .Values.door.namespace }}
+            - name: FLINT_FORGE_DOOR_NAMESPACE
+              value: {{ .Values.door.namespace | quote }}
+            - name: FLINT_FORGE_DOOR_POD_LABEL
+              value: {{ .Values.door.podLabel | quote }}
+            {{- end }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

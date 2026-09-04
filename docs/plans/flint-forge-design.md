@@ -1,10 +1,13 @@
 # flint forge — a git server with S3 behind it: design of record
 
-Status: **PHASES 1 AND 2 LANDED** — `forge/syncer` (the `flint-forge`
-crate: the syncer, both hooks, restore, the sweep, `/status`, the
-branch policy and the credential helper) and the door
-(`lite_gateway::git` with `Door::Git`, plus the `FlintRepo` CRD in
-`forge_operator`). Everything else below is still design. Written 2026-09-04; **revised
+Status: **PHASES 1, 2 AND 3 LANDED** — `forge/syncer` (the
+`flint-forge` crate: the syncer, both hooks, restore, the sweep,
+`/status`, the branch policy and the credential helper), the door
+(`lite_gateway::git` with `Door::Git`), and the operator
+(`forge_operator`: the `FlintRepo` CRD, the renderer, the one-rung
+ladder, the reconciler and `flint-forge-operator`), with the chart and
+the two server images. What remains is phase 0's measurement, the
+export, the fleet levers and the cluster drills. Written 2026-09-04; **revised
 the same day after a 15-agent review** (five lenses, one refuter per
 significant finding; record in §16), and §14 records what phase 1
 actually built against what it planned. Working name "flint forge" (the user's earlier
@@ -323,6 +326,25 @@ system:serviceaccount:<ns>:<sa>`. Agents never hold an S3 credential.
 **Humans.** The gateway's bearer today; Knox JWT via the CSI identity
 chain when that lands; an operator-issued per-CR token is the interim.
 
+**The `X-Remote-User` boundary, stated.** `REMOTE_USER` is what
+`pre-receive` and the syncer read as the principal, and it arrives as
+the door's `X-Remote-User` — which the door sets from a verified
+`TokenReview`, and which no caller can smuggle past it because the
+door builds its upstream headers from an allowlist. But anything that
+can reach the server pod's git port directly can set that header
+itself, and both enforcers would believe it. Three things stand in the
+way: the port is on a headless Service with no external address, the
+repository is in its tenant's namespace, and the operator renders a
+NetworkPolicy admitting only the gateway's pods — rendered only when
+the operator is told where the door runs (`door.namespace` in the
+chart). Where it is not rendered, **reaching the port is the
+authorization**, which is a defensible posture on a single-tenant
+cluster and is not one on a shared cluster. A per-repository shared
+secret derived from the gateway's HMAC root (`lite_gateway::derive`'s
+`Minter`, which already solves exactly this for the file API) is the
+upgrade when a CNI that cannot enforce NetworkPolicy has to be
+supported; it is not built.
+
 **Policy**, rendered by the operator, read by `pre-receive` and by the
 syncer's step 2:
 
@@ -615,10 +637,47 @@ slow in ways that matter for a fleet. Phase 0 runs it as the control.
 
    **Still to do in this phase:** mounting the door in the chart, and
    the human-auth interim (§15.13).
-3. **The operator.** `FlintRepo` CRD; lite's reconciler copied and
-   trimmed (or a slim one if the trim is larger than a rewrite);
-   headless Service; git-sized requests; one idle rung; claim/adopt;
-   chart; falsifier 7.
+3. **The operator.** — **BUILT**, as a slim controller rather than a
+   trim: lite's `reconcile.rs` is 4,000 lines because a share has a PVC
+   to create, expand, verify and delete, a hibernate that must prove a
+   clean flush first, a reprovision path and four Service types. A
+   repository has an `emptyDir`, one rung and one port, so what was
+   COPIED is the shape — label sets, ownership, the checksum-annotation
+   trick and its deliberate absence — and what is shared is the code
+   that carries a lesson: `lite_operator::idle::clock` (extracted, so
+   both front ends enforce one skew rule) and `hubstatus::suspendable`
+   (reused outright, which is why forge's `/status` was written in that
+   shape).
+
+   `forge_operator::render` produces a ConfigMap, a headless Service, a
+   Deployment of one pod (syncer + nginx/fcgiwrap/`http-backend`,
+   25m/32Mi each, `Recreate`, `emptyDir`) and — when the operator is
+   told where the door runs — a NetworkPolicy. `idle` is the one rung.
+   `reconcile` arbitrates the bucket subtree, applies the children,
+   polls the server's own `/status`, computes the phase and moves the
+   ladder. `flint-forge-operator` is the controller; `crdgen -- forge`
+   emits the CRD; `flint-forge-chart` installs it;
+   `docker/Dockerfile.forge-git` and `.forge-syncer.prebuilt` build the
+   two server images.
+
+   Four things worth recording. **The policy ConfigMap is deliberately
+   not in the pod's checksum annotation** — a mount updates in place and
+   both enforcers re-read the document, so rolling the server to change
+   who may push would drop every clone in flight for nothing; the
+   syncer re-reads between batches and a test proves an edit is in force
+   for the very next push. **`preStop` was removed**: it runs BEFORE
+   SIGTERM, so a sleep there only delays the signal — the clean lease
+   release is on SIGTERM inside the syncer, and
+   `terminationGracePeriodSeconds` is its budget. **Nesting is not a
+   collision**, because everything a repository owns is under
+   `<prefix>/git/`; only an exact prefix match is two servers over one
+   subtree, and an EXPORT prefix is a claim too, which the CRD's own CEL
+   rule cannot see because it can only compare a CR against itself.
+   **The `X-Remote-User` trust boundary is a NetworkPolicy**, and it is
+   opt-in: see §6.
+
+   **Still to do in this phase:** falsifier 7 on a cluster, and the
+   images published.
 4. **Export** via `flint-sync barrier`; falsifier 9.
 5. **Fleet levers.** Bitmap upload, bundle URIs with client opt-in,
    `--single-branch` in the guide, the wip sidecar, the agent-branch

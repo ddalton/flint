@@ -1,0 +1,71 @@
+# flint-forge — a git server per repository, with S3 behind it.
+#
+#   helm install flint-forge ./flint-forge-chart -n flint-system --create-namespace
+#
+# Then a repository is one `kubectl apply` of a FlintRepo, and an agent
+# clones it through the door with its own ServiceAccount token as the
+# password.
+#
+# Design of record: docs/plans/flint-forge-design.md
+
+# The operator image. Composed as {repository}/{name}:{tag|appVersion}.
+# It is an ALIAS of the flint-lite-operator image — same crate, same
+# build, one manifest digest, three names. The chart execs
+# /usr/local/bin/flint-forge-operator, never the image's own ENTRYPOINT.
+image:
+  repository: dilipdalton
+  name: flint-forge-operator
+  tag: ""
+  ref: ""
+  pullPolicy: IfNotPresent
+
+# The two images a SERVER pod runs. The operator renders them into every
+# repository's Deployment, so changing them here and rolling the
+# operator re-renders the fleet.
+server:
+  # nginx + fcgiwrap + git http-backend + the two hooks.
+  gitImage: dilipdalton/flint-forge-git:1.45.0
+  # The one writer of the repository's S3 state; the pod's main
+  # container, so its exit restarts the pod.
+  syncerImage: dilipdalton/flint-forge-syncer:1.45.0
+  logLevel: info
+
+# One replica. The reconcile is idempotent and the arbitration is a
+# pure function of the CR set, so N replicas are safe; they duplicate
+# apiserver work for no gain.
+replicaCount: 1
+
+# Restrict the watch to one namespace. Empty = every namespace.
+namespace: ""
+
+# WHERE THE DOOR RUNS.
+#
+# Set this and every repository gets a NetworkPolicy admitting only the
+# gateway's pods to its git port. That policy is what makes
+# `X-Remote-User` mean anything: the door sets it from a verified
+# TokenReview, but anything that can reach the port directly can set it
+# too, and both `pre-receive` and the syncer would believe it.
+#
+# Leave `namespace` empty and no policy is rendered — a real posture for
+# a single-tenant cluster or one whose CNI does not enforce
+# NetworkPolicy, but then REACHING THE PORT IS THE AUTHORIZATION.
+door:
+  namespace: ""
+  podLabel: "app.kubernetes.io/name=flint-hub-gateway"
+
+serviceAccount:
+  create: true
+  name: ""
+
+rbac:
+  create: true
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 96Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}

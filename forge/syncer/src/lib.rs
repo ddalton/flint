@@ -147,6 +147,15 @@ pub struct ForgeConfig {
     pub project_id: Option<String>,
     /// Bounded concurrency for pack uploads and restore fetches.
     pub fanout: usize,
+    /// `core.hooksPath` for the repository, when the hooks live
+    /// somewhere other than `<repo>/hooks`.
+    ///
+    /// They do in the pod: the hook binary ships in the git image and
+    /// the repository lives on a shared `emptyDir`, so the path is
+    /// resolved inside whichever container runs git and the repository
+    /// itself carries no binaries. `None` = git's default, which is
+    /// what the rigs and the local spike use.
+    pub hooks_path: Option<String>,
     /// What `HEAD` points at in a repository nobody has pushed to.
     ///
     /// Passed to `git init --initial-branch` rather than left to git's
@@ -173,6 +182,7 @@ impl ForgeConfig {
             project_id: None,
             fanout: 16,
             default_branch: "main".into(),
+            hooks_path: None,
         }
     }
 

@@ -828,6 +828,8 @@ mod tests {
                 idle: None,
                 export: None,
                 wip_snapshots: None,
+                log_level: None,
+                lifecycle: None,
             },
         );
         r.metadata.namespace = Some("tenant".into());

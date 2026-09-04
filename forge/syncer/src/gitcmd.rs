@@ -121,7 +121,11 @@ impl Git {
     /// longer checks old-oid or `denyNonFastForwards` for those
     /// commands — the syncer's step 2 is not an extra check, it is the
     /// only one.
-    pub async fn init_bare(&self, default_branch: &str) -> ForgeResult<()> {
+    pub async fn init_bare(
+        &self,
+        default_branch: &str,
+        hooks_path: Option<&str>,
+    ) -> ForgeResult<()> {
         std::fs::create_dir_all(&self.repo)?;
         let repo = self.repo.clone();
         let out = self.run_in(&repo, &["rev-parse", "--git-dir"], None).await?;
@@ -167,6 +171,9 @@ impl Git {
             ("core.logAllRefUpdates", "true"),
         ] {
             self.must(&["config", k, v], None).await?;
+        }
+        if let Some(path) = hooks_path.filter(|p| !p.is_empty()) {
+            self.must(&["config", "core.hooksPath", path], None).await?;
         }
         Ok(())
     }

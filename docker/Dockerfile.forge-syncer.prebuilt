@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1
+# flint-forge-syncer — the one writer of a repository's S3 state, and
+# the main container of a forge server pod: its exit restarts the pod,
+# which is what makes a fence recoverable.
+#
+#   for T in x86_64 aarch64; do
+#     (cd ../forge/syncer && cargo zigbuild --release --features s3 \
+#       --target $T-unknown-linux-musl --bin flint-forge-syncer); done
+#   # stage: docker/prebuilt/{amd64,arm64}/flint-forge-syncer
+#
+# It needs `git` — every object-database operation is a subprocess, by
+# design, so that flint writes no git internals — and CA certificates,
+# because flint-store builds the AWS SDK against the SYSTEM trust store
+# and without a bundle every HTTPS endpoint fails at the handshake. A
+# scratch base fails both, and the second failure appears only on a real
+# bucket: a MinIO rig is plain HTTP and never sees it.
+FROM alpine:3.20
+
+ARG BIN_DIR=docker/prebuilt
+ARG TARGETARCH
+
+RUN apk add --no-cache ca-certificates git && update-ca-certificates
+
+COPY ${BIN_DIR}/${TARGETARCH}/flint-forge-syncer /usr/local/bin/flint-forge-syncer
+
+ENTRYPOINT ["/usr/local/bin/flint-forge-syncer"]

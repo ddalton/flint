@@ -14,6 +14,27 @@ covered by the stability guarantee.
 
 ### Added
 
+- **flint forge, phase 3: the operator** (`forge_operator`,
+  `flint-forge-operator`, `flint-forge-chart`, and the two server
+  images). A `FlintRepo` becomes a ConfigMap carrying its branch
+  policy, a headless Service, and a Deployment of one pod — the syncer
+  plus nginx/fcgiwrap/`git http-backend`, 25m/32Mi each, `Recreate`,
+  an `emptyDir` cache and no PVC anywhere. A slim controller rather
+  than a trim of lite's, which is 4,000 lines of PVC, hibernate,
+  reprovision and expand; what is shared is the code that carries a
+  lesson — the wake-stamp skew rules, extracted so both front ends
+  enforce one of them, and `hubstatus::suspendable`, which forge's
+  `/status` was written in the shape of. One idle rung, because an
+  `emptyDir` cache makes `Suspended` and `Hibernated` the same state.
+  The operator arbitrates the bucket subtree (earliest CR wins, ties on
+  uid so every replica agrees; an export prefix is a claim too, which
+  the CRD's CEL rule cannot see), polls the server's own `/status`, and
+  never treats a failed poll as idle. The syncer now releases its lease
+  on SIGTERM, so a successor claims at once instead of waiting out six
+  quiet polls, and re-reads its branch policy between batches, so a
+  policy edit takes effect on the next push without rolling the server
+  and dropping every clone in flight. `crdgen -- forge` emits the CRD.
+
 - **flint forge, phase 2: the door and the branch policy.**
   `lite_gateway::git` serves `/git/<namespace>/<repo>.git` with a
   `Door::Git` arm on the gateway's existing resolve-wake-dial decision.

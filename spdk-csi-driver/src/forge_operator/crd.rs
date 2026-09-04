@@ -126,6 +126,29 @@ pub struct FlintRepoSpec {
     /// An RPO on the working tree, which git itself does not offer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wip_snapshots: Option<WipSnapshots>,
+
+    /// `RUST_LOG` for the server pod.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_level: Option<String>,
+
+    /// An admin scale-down. A wake request does NOT override it — the
+    /// door would otherwise be quietly reversing an operator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<RepoLifecycle>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "PascalCase")]
+pub enum RepoLifecycle {
+    #[default]
+    Running,
+    Suspended,
+}
+
+impl FlintRepoSpec {
+    pub fn log_level_or(&self, default: &str) -> String {
+        self.log_level.clone().filter(|l| !l.is_empty()).unwrap_or_else(|| default.to_string())
+    }
 }
 
 /// Who may move what. Rendered into the repository's state directory
@@ -301,6 +324,15 @@ pub struct RepoCondition {
     pub last_transition_time: Option<String>,
 }
 
+/// The CRD object, for `crdgen` and for the operator's own apply at
+/// startup. One artifact, so the chart's bootstrap copy and the
+/// compiled-in one cannot drift.
+pub fn crd() -> k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition
+{
+    use kube::CustomResourceExt;
+    FlintRepo::crd()
+}
+
 /// Forge's lifecycle phases — its own, because it has no PVC and
 /// therefore no `Hibernated` and no `Reprovisioning`.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
@@ -345,5 +377,116 @@ impl RepoPhase {
             RepoPhase::Failed => SharePhase::Failed,
             RepoPhase::Terminating => SharePhase::Terminating,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn schema() -> Value {
+        let crd = crd();
+        serde_json::to_value(&crd).expect("the CRD serializes")["spec"]["versions"][0]["schema"]
+            ["openAPIV3Schema"]
+            .clone()
+    }
+
+    /// The check a cluster would otherwise make at install time, with
+    /// an error about junctors — and it takes the WHOLE CRD down, not
+    /// the offending field, so every knob would vanish together.
+    /// schemars emits `anyOf: [<typed branch>, {null}]` for an
+    /// `Option<T>` whose `T` carries its own doc comment, and this CRD
+    /// has five such fields.
+    #[test]
+    fn the_schema_carries_no_junctors() {
+        fn walk(v: &Value, path: &str, found: &mut Vec<String>) {
+            match v {
+                Value::Object(m) => {
+                    for k in ["anyOf", "oneOf", "allOf", "not"] {
+                        if m.contains_key(k) {
+                            found.push(format!("{path}.{k}"));
+                        }
+                    }
+                    for (k, val) in m {
+                        walk(val, &format!("{path}.{k}"), found);
+                    }
+                }
+                Value::Array(a) => {
+                    for (i, val) in a.iter().enumerate() {
+                        walk(val, &format!("{path}[{i}]"), found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        walk(&schema(), "schema", &mut found);
+        assert!(
+            found.is_empty(),
+            "Kubernetes refuses a structural schema with these, and refuses the WHOLE CRD: {found:?}"
+        );
+    }
+
+    /// Identity immutability is what stops a repository re-pointing its
+    /// prefix into another's subtree — two servers over one prefix is a
+    /// state the snapshot CAS cannot arbitrate, because they were never
+    /// supposed to meet. Admission is the only place that can refuse it
+    /// before any bytes move.
+    #[test]
+    fn identity_is_immutable_at_admission() {
+        let rules = serde_json::to_value(crd()).expect("serializes")["spec"]["versions"][0]
+            ["schema"]["openAPIV3Schema"]["properties"]["spec"]["x-kubernetes-validations"]
+            .clone();
+        let text = rules.to_string();
+        for field in ["self.projectId == oldSelf.projectId", "self.bucket == oldSelf.bucket", "self.keyPrefix == oldSelf.keyPrefix"] {
+            assert!(text.contains(field), "missing the immutability rule {field}: {text}");
+        }
+        // A prefix without a trailing slash also matches its siblings:
+        // "tenant-a" matches "tenant-agency/".
+        assert!(text.contains("endsWith('/')"), "{text}");
+        // An export is a lean workspace of its own, never a second
+        // writer inside the repository's prefix.
+        assert!(text.contains("self.export.prefix != self.keyPrefix"), "{text}");
+    }
+
+    /// Every phase this CRD can publish must project onto a share phase
+    /// whose DECISION is the same, because the door runs ONE
+    /// implementation of that decision. A phase added without a
+    /// projection would be a repository the door cannot judge.
+    #[test]
+    fn every_phase_projects_onto_the_doors_decision() {
+        use crate::lite_operator::crd::Phase as S;
+        for (repo, want) in [
+            (RepoPhase::Pending, S::Pending),
+            (RepoPhase::Starting, S::Starting),
+            (RepoPhase::Ready, S::Ready),
+            (RepoPhase::IdleSuspended, S::IdleSuspended),
+            (RepoPhase::Suspended, S::Suspended),
+            (RepoPhase::Failed, S::Failed),
+            (RepoPhase::Terminating, S::Terminating),
+        ] {
+            assert_eq!(repo.as_share_phase(), want, "{repo:?}");
+        }
+    }
+
+    /// The branch policy is one rule in two crates. The conversion is
+    /// field by field so a field either side grows and nobody maps
+    /// fails to compile — this pins that every field actually carries.
+    #[test]
+    fn the_branch_policy_renders_every_field() {
+        let p = BranchPolicy {
+            protected: vec!["main".into()],
+            pushers: BTreeMap::from([("main".into(), vec!["bot".into()])]),
+            merge_into: BTreeMap::from([("main".into(), vec!["agent".into()])]),
+            agent_pattern: Some("agent/*".into()),
+            allow_non_fast_forward: vec!["agent/*".into()],
+        };
+        let r = p.render();
+        assert_eq!(r.protected, p.protected);
+        assert_eq!(r.pushers, p.pushers);
+        assert_eq!(r.merge_into, p.merge_into);
+        assert_eq!(r.agent_pattern, p.agent_pattern);
+        assert_eq!(r.allow_non_fast_forward, p.allow_non_fast_forward);
     }
 }

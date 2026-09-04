@@ -124,6 +124,10 @@ impl Rig {
         }
         let opts = ServerOpts {
             socket: socket.clone(),
+            // The rendered document lives in the state directory here;
+            // in the pod it is a ConfigMap mount, and the re-read is
+            // what makes an edit take effect without a roll.
+            policy_dir: render.then(|| cfg.state_dir.clone()),
             // No status listener: a fixed port would collide with the
             // other tests in this file when cargo runs them together.
             status_addr: None,
@@ -358,4 +362,38 @@ async fn a_missing_pre_receive_does_not_open_the_repository() {
     assert!(!ok, "the writer refuses what the edge no longer sees: {text}");
     assert!(text.contains("release-bot"), "{text}");
     assert!(rig.snapshot().await.refs.is_empty(), "nothing was published");
+}
+
+/// A branch-policy edit takes effect on the next push, with no restart
+/// and no roll. In the pod the document arrives on a ConfigMap mount
+/// that updates in place; rolling the server to change who may push
+/// would drop every clone in flight.
+///
+/// `pre-receive` is removed first, so what is measured is the SYNCER's
+/// re-read rather than the hook's per-push read.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_policy_edit_takes_effect_without_a_restart() {
+    let rig = Rig::start_with(Policy::default(), true).await;
+    std::fs::remove_file(rig.repo.join("hooks/pre-receive")).unwrap();
+
+    rig.commit("a.txt", "one\n");
+    let (ok, text) = rig.push_as(Some("agent-runner"), &["--quiet", "origin", "HEAD:refs/heads/main"]);
+    assert!(ok, "the permissive policy admits this: {text}");
+
+    // The operator re-renders the ConfigMap; the mount updates in place.
+    let tightened: Policy = serde_json::from_str(
+        r#"{"protected": ["main"], "pushers": {"main": ["release-bot"]}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        rig.repo.join("flint-forge").join(flint_forge::policy::POLICY_FILE),
+        serde_json::to_vec_pretty(&tightened).unwrap(),
+    )
+    .unwrap();
+
+    let ahead = rig.commit("a.txt", "two\n");
+    let (ok, text) = rig.push_as(Some("agent-runner"), &["origin", "HEAD:refs/heads/main"]);
+    assert!(!ok, "the edited policy must be in force for the very next push: {text}");
+    assert!(text.contains("release-bot"), "{text}");
+    assert_ne!(rig.snapshot().await.refs.get("refs/heads/main"), Some(&ahead));
 }

@@ -1,0 +1,46 @@
+flint-forge is installed.
+
+A repository:
+
+  kubectl apply -f - <<'EOF'
+  apiVersion: chert.us/v1alpha1
+  kind: FlintRepo
+  metadata:
+    name: proj
+    namespace: team-a
+  spec:
+    projectId: proj
+    bucket: my-bucket
+    keyPrefix: team-a/proj/
+    credentialsSecretRef: forge-s3
+    consumers:
+      serviceAccounts: [agent-runner]
+    branches:
+      protected: [main]
+      mergeInto:
+        main: [system:serviceaccount:team-a:agent-runner]
+      agentPattern: "agent/*"
+  EOF
+
+An agent clones it through the door with its own token:
+
+  git clone --single-branch -b main \
+    https://<gateway>/git/team-a/proj.git
+
+with, in the agent image:
+
+  git config --global credential.https://<gateway>.helper \
+      /usr/local/bin/flint-forge-credential
+
+The door is the shared flint-hub-gateway with `--git` (or
+FLINT_GATEWAY_GIT=true). It is OFF by default, and off means this
+chart's CRD is neither listed nor watched by it.
+
+{{- if not .Values.door.namespace }}
+
+  ⚠  door.namespace is unset, so NO NetworkPolicy is rendered. The
+     door sets X-Remote-User from a verified TokenReview, but anything
+     that can reach a repository's git port directly can set that
+     header too, and both pre-receive and the syncer will believe it.
+     On a multi-tenant cluster, set door.namespace.
+{{- end }}

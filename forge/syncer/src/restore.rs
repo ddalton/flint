@@ -41,7 +41,8 @@ pub async fn check_git_floor(sc: &Syncer) -> ForgeResult<()> {
 pub async fn restore(sc: &mut Syncer) -> ForgeResult<()> {
     sc.check_fence()?;
     let branch = sc.cfg.default_branch.clone();
-    sc.git.init_bare(&branch).await?;
+    let hooks = sc.cfg.hooks_path.clone();
+    sc.git.init_bare(&branch, hooks.as_deref()).await?;
 
     let mut cell = match sc.cell.clone() {
         // A takeover rotation already loaded (and rewrote) it.

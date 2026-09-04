@@ -366,6 +366,22 @@ fn describe_rpo(r: &Rpo) -> String {
 /// queue. A timeout is an error, and an error is "unknown", never
 /// "idle".
 pub async fn poll(pod_ip: &str, port: i32, timeout: Duration) -> Result<HubSnapshot, String> {
+    let (body, url) = poll_raw(pod_ip, port, timeout).await?;
+    serde_json::from_str(&body).map_err(|e| format!("parsing {url}: {e}"))
+}
+
+/// The document as text, plus the URL it came from.
+///
+/// Split out so a second front end can parse the SAME body into its own
+/// type as well as this one — flint forge's `/status` carries a `repo`
+/// block this snapshot has no business knowing about, and the
+/// alternative was either polluting this type with another product's
+/// fields or paying a second round trip for the same document.
+pub async fn poll_raw(
+    pod_ip: &str,
+    port: i32,
+    timeout: Duration,
+) -> Result<(String, String), String> {
     let url = if pod_ip.contains(':') {
         // IPv6 literals need brackets.
         format!("http://[{pod_ip}]:{port}/status")
@@ -381,7 +397,7 @@ pub async fn poll(pod_ip: &str, port: i32, timeout: Duration) -> Result<HubSnaps
         return Err(format!("GET {url}: HTTP {}", res.status()));
     }
     let body = res.text().await.map_err(|e| format!("body of {url}: {e}"))?;
-    serde_json::from_str(&body).map_err(|e| format!("parsing {url}: {e}"))
+    Ok((body, url))
 }
 
 #[cfg(test)]
