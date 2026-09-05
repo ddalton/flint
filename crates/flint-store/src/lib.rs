@@ -34,6 +34,7 @@
 //! test loops that only need the memory double never build the AWS
 //! SDK.
 
+pub mod layout;
 pub mod memory;
 pub mod probe;
 #[cfg(feature = "s3")]

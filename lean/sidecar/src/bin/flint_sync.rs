@@ -295,6 +295,7 @@ enum Step {
 async fn claim(sc: &mut Sidecar) -> Result<(), LeanError> {
     // Before the first claim step: is this prefix ours to claim at all?
     lease::verify_claim(sc).await?;
+    lease::warn_if_prefix_is_shared(sc).await;
     let mut answered_owed = false;
     loop {
         match lease::claim_step(sc).await? {

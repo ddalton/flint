@@ -20,6 +20,14 @@
 # fence, no log line — which is why it needs a drill rather than a
 # reading.
 #
+# WHAT CHANGED, AND WHAT DID NOT. Nothing here prevents the collision
+# — prevention belongs to whatever assigns prefixes, and enforcing it
+# in-band is a design decision nobody has taken. What both products now
+# do is SAY SO: each probes the other's lease cell at claim time (one
+# exact-key read, `flint_store::layout`) and prints what it found. The
+# legs below still FAIL, because the rule is still not enforced; the
+# new legs assert that the condition is at least audible.
+#
 # ANTI-VACUITY. A drill that only shows "both started fine" proves
 # nothing: it cannot tell disjoint cells apart from a rig too blunt to
 # observe contention at all. So two controls run FIRST and must both
@@ -111,11 +119,72 @@ else
   ok "only one lease cell exists under the prefix"
 fi
 
-# forge must be unharmed and unaware either way
+# forge must be unharmed either way — it is still not fenced, because
+# the two never contend. What is new is that it is no longer UNAWARE.
 forge_log x | grep -qi "fenced\|deposed" \
   && bad "forge was fenced by the foreign writer" \
-  || ok "forge was never fenced (it cannot see the other product at all)"
+  || ok "forge was never fenced (the products still do not contend)"
+
+head_ "C1c — is the shared prefix at least AUDIBLE?"
+# lean ran second, so it saw forge's standing cell.
+if grep -q "PREFIX SHARED WITH ANOTHER PRODUCT" "$WORK/leanx.log"; then
+  ok "lean reported the shared prefix"
+  grep -o "Its lease cell is [^ ]*" "$WORK/leanx.log" | head -1 | sed 's/^/  ....  /'
+else
+  bad "lean said nothing about sharing a prefix with forge"
+fi
+
+# And forge must see it on ITS next start, with lean's cell now standing.
 forge_down x
+forge_up x2 "$WORK/x.git" "c1/shared"
+sleep 6
+if forge_log x2 | grep -q "PREFIX SHARED WITH ANOTHER PRODUCT"; then
+  ok "forge reported the shared prefix on its next start"
+  forge_log x2 | grep -o "holder [^,]*" | head -1 | sed 's/^/  ....  /'
+else
+  bad "forge said nothing about sharing a prefix with lean"
+fi
+# The report must be usable: it has to name the cell, not just complain.
+forge_log x2 | grep -q "c1/shared/.flint/lean/epoch" \
+  && ok "forge named the foreign cell" \
+  || bad "forge complained without naming the cell"
+forge_down x2
+
+# The control that stops this becoming a false alarm on every healthy
+# deployment: a repository ALONE on its prefix must say nothing.
+head_ "C1d — a writer alone on its prefix must stay quiet"
+new_bare_repo "$WORK/solo.git"
+forge_up solo "$WORK/solo.git" "c1/solo"
+sleep 6
+forge_log solo | grep -q "PREFIX SHARED" \
+  && bad "a repository alone on its prefix reported a collision" \
+  || ok "a repository alone on its prefix says nothing"
+forge_down solo
+
+# ── C1e: the export prefix is covered by the PUBLISHER, once ────────
+# The spawned `flint-sync` skips its own probe when it publishes a
+# mirror — a per-export read whose warning forge's line filter would
+# discard anyway. That is only sound if the coverage moved rather than
+# vanished, so this asserts the publisher does it at startup.
+head_ "C1e — a foreign repository rooted on the EXPORT prefix"
+new_bare_repo "$WORK/e.git"
+# A forge repository squatting where our export publishes.
+cat > "$WORK/squat.json" <<'JSON'
+{"holder_id":"forge-squatter","epoch":1,"renewed_unix":1788600000,"salt":"s","released":false}
+JSON
+s3_put "c1/exp/git/epoch" "$WORK/squat.json"
+forge_up e "$WORK/e.git" "c1/erepo" \
+  "FLINT_FORGE_EXPORT_REF=refs/heads/main" \
+  "FLINT_FORGE_EXPORT_PREFIX=c1/exp" \
+  "FLINT_FORGE_EXPORT_EVERY_SECS=0"
+sleep 6
+if forge_log e | grep -q "on the export prefix"; then
+  ok "the publisher reported a foreign writer on its export prefix"
+  forge_log e | grep -o "holder [^,]*" | head -1 | sed 's/^/  ....  /'
+else
+  bad "nobody reported a foreign writer on the export prefix"
+fi
+forge_down e
 
 # ── C1b: is the self-collision guard containment or string equality? ─
 head_ "C1b — export prefix NESTED under the repository's own prefix"

@@ -32,6 +32,51 @@ pub enum ClaimOutcome {
     Waiting { quiet_polls: u32 },
 }
 
+/// Say so, loudly, if another product also writes this prefix.
+///
+/// Detection, deliberately NOT enforcement — see the forge twin. A
+/// lean workspace and a forge repository on one prefix arbitrate on
+/// different cells and will never fence each other, so without this
+/// nothing anywhere reports the condition.
+///
+/// Note what is NOT a finding: forge's legible export IS a lean
+/// workspace, published by forge rather than by an agent's sidecar, so
+/// a sidecar reading an export prefix finds only its own kind of cell.
+/// And an export nested under a repository's prefix puts this cell at
+/// `<prefix>/inner/.flint/lean/epoch`, which is not the key forge
+/// probes — the exact-key probe is what keeps that from reading as a
+/// collision.
+pub async fn warn_if_prefix_is_shared(sc: &Sidecar) {
+    // A published mirror does not probe. Two reasons, and the second is
+    // the load-bearing one:
+    //
+    // Forge spawns a barrier per export, so this would be a recurring
+    // read for a condition that cannot change between two barriers of
+    // the same publisher. And forge echoes only the child lines
+    // containing "barrier" (export.rs:389), so a warning raised here
+    // would be read by nobody — a check whose output is discarded is
+    // worse than no check, because it looks like coverage.
+    //
+    // The prefix is still probed, ONCE, by the publisher at startup:
+    // see `warn_if_export_prefix_is_shared` in forge's twin. Moved, not
+    // dropped — an export prefix is a prefix two products both write
+    // legitimately, which makes it likelier than most to have a third
+    // pointed at it.
+    if sc.cfg.sole_writer {
+        return;
+    }
+    let found = flint_store::layout::neighbours(
+        sc.store.as_ref(),
+        &sc.cfg.prefix,
+        flint_store::layout::Writer::LeanWorkspace,
+    )
+    .await
+    .unwrap_or_default();
+    for f in found {
+        eprintln!("flint-sync: {}", f.report());
+    }
+}
+
 /// One claim step. The caller loops on `Waiting` at its poll cadence;
 /// each call performs at most one read + one acquire.
 pub async fn claim_step(sc: &mut Sidecar) -> LeanResult<ClaimOutcome> {

@@ -72,6 +72,12 @@ type Shared = Arc<Mutex<Facts>>;
 pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
     restore::check_git_floor(&sc).await?;
     lease::verify_claim(&sc).await?;
+    // Diagnostic, never a gate: prevention belongs to whatever assigns
+    // prefixes, and this only makes a failure of it audible.
+    lease::warn_if_prefix_is_shared(&sc).await;
+    if let Some(ex) = opts.export.as_ref() {
+        lease::warn_if_export_prefix_is_shared(&sc, &ex.prefix).await;
+    }
 
     let shared: Shared = Arc::new(Mutex::new(status::facts(&sc, Phase::Starting)));
     if let Some(addr) = opts.status_addr.clone() {

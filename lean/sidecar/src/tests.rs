@@ -298,6 +298,41 @@ async fn the_published_flag_survives_the_pointer_round_trip() {
     assert!(m2.manifest.sole_writer, "the second publish dropped the flag");
 }
 
+/// The neighbour probe is skipped on a published mirror, and run
+/// everywhere else.
+///
+/// Forge spawns a barrier per export, so probing there would be a
+/// recurring read whose warning `run_barrier`'s line filter discards
+/// anyway. The prefix is still covered — the publisher probes it once
+/// at startup — so this asserts the SKIP, not an absence of coverage.
+#[tokio::test]
+async fn a_published_mirror_does_not_probe_for_neighbours() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+
+    // A forge repository is squatting on this workspace's prefix.
+    store
+        .epoch_acquire(&format!("{PREFIX}/git/epoch"), "forge-1", None)
+        .await
+        .unwrap();
+
+    // An ordinary workspace finds it...
+    let seen = flint_store::layout::neighbours(
+        store.as_ref(),
+        &sc.cfg.prefix,
+        flint_store::layout::Writer::LeanWorkspace,
+    )
+    .await
+    .unwrap();
+    assert_eq!(seen.len(), 1, "the condition is there to be found");
+
+    // ...and the gate is what decides whether we go looking.
+    assert!(!sc.cfg.sole_writer, "an ordinary workspace probes");
+    sc.cfg.sole_writer = true;
+    assert!(sc.cfg.sole_writer, "a published mirror does not");
+}
+
 /// UI edit + agent edit of ONE path: both versions recoverable, a
 /// conflict surfaced, never a silent winner (the drill leg pinned in
 /// plan Phase 6).

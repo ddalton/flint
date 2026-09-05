@@ -228,6 +228,56 @@ pub async fn release(sc: &mut Syncer) -> ForgeResult<()> {
     }
 }
 
+/// Say so, loudly, if another product also writes this prefix.
+///
+/// Detection, deliberately NOT enforcement. Prevention belongs to
+/// whatever assigns prefixes — an admission policy, a GitOps path — and
+/// refusing here would turn a diagnostic into an outage the first time
+/// a stale cell outlived the workspace that wrote it. What this buys is
+/// that the condition stops being SILENT: today a forge server and a
+/// lean sidecar on one prefix both acquire, both are right that they
+/// hold their own cell, and neither logs a line (drill C1).
+///
+/// Never fatal, and never fatal by accident: a probe that cannot read
+/// the store returns nothing rather than an error.
+pub async fn warn_if_prefix_is_shared(sc: &Syncer) {
+    let found = flint_store::layout::neighbours(
+        sc.store.as_ref(),
+        &sc.cfg.prefix,
+        flint_store::layout::Writer::ForgeRepository,
+    )
+    .await
+    .unwrap_or_default();
+    for f in found {
+        eprintln!("flint-forge: {}", f.report());
+    }
+}
+
+/// The same probe, aimed at the prefix this repository EXPORTS to.
+///
+/// The export is a lean workspace that forge publishes, so what would
+/// be foreign there is a forge repository rooted on it — somebody
+/// else's `keyPrefix` pointed at our mirror. The operator refuses that
+/// when both sides are CRs it can see; it cannot see a repository in
+/// another cluster, and the bucket is not cluster-scoped.
+///
+/// Called once at startup rather than by the barrier itself: the
+/// spawned `flint-sync` skips its own probe when it is publishing a
+/// mirror, because a per-export read would be recurring and its
+/// warning would be swallowed by the line filter in `run_barrier`.
+pub async fn warn_if_export_prefix_is_shared(sc: &Syncer, export_prefix: &str) {
+    let found = flint_store::layout::neighbours(
+        sc.store.as_ref(),
+        export_prefix,
+        flint_store::layout::Writer::LeanWorkspace,
+    )
+    .await
+    .unwrap_or_default();
+    for f in found {
+        eprintln!("flint-forge: on the export prefix — {}", f.report());
+    }
+}
+
 /// The claim precondition, on the data plane: with a project id
 /// stamped, refuse to serve a prefix whose claim cell names another
 /// project. The operator's refuse-foreign is advisory here — a CR it

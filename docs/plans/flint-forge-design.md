@@ -1085,7 +1085,8 @@ future reader knows the evidence was reproduced, not trusted.
 Drills: `forge/e2e/composition/`. Local rig, real binaries, MinIO
 (`export::run_barrier` execs the shipped `flint-sync`, so the second
 party cannot be an in-process double). First run **30 passed, 12
-failed**; after the C2 and C4 fixes below, **40 passed, 8 failed**. Every
+failed**; after the C2 and C4 fixes and the C1 detection below, **45
+passed, 8 failed**. Every
 control and precondition is green, so the failures are findings rather
 than rig noise.
 
@@ -1110,6 +1111,46 @@ on this same rig, so the absence is the products' and not the rig's.
 
 Nothing above them closes it either: `arbitrate` reasons over
 `&[FlintRepo]` (`reconcile.rs:124`), so it cannot see a lean CR at all.
+
+**Detection added** (drill now 16/4; the four failures are unchanged,
+because nothing here enforces anything). Each product probes the
+other's lease cell at claim time — `flint_store::layout::neighbours`,
+one exact-key read — and prints what it found: the neighbour's kind,
+its cell, its holder, whether it is holding or merely released, and
+which field would move it.
+
+This is deliberately NOT enforcement. Prevention belongs to whatever
+assigns prefixes; refusing here would turn a diagnostic into an outage
+the first time a stale cell outlived the workspace that wrote it.
+What it buys is that the condition stops being silent, which is the
+property an external control needs in order to be safe to rely on: the
+control still does the preventing, and you find out when it did not.
+
+Four things the drill pins:
+
+- **An exact-key probe, not a listing.** One request instead of a
+  paginated scan, it finds a WRITER rather than the litter one leaves,
+  and it cannot be confused by nesting — a repository at `t/a`
+  exporting to `t/a/inner` puts lean's cell at
+  `t/a/inner/.flint/lean/epoch`, which is not the key `t/a` probes.
+- **A writer alone on its prefix says nothing.** Drilled, because a
+  check that cries wolf on every healthy deployment is a check somebody
+  switches off.
+- **A released cell is still reported**, worded differently: the
+  objects are still there and the holder takes the prefix back when it
+  restarts.
+- **A published mirror does not probe, and its publisher does instead.**
+  Forge spawns a barrier per export, so probing there would be a
+  recurring read — and `run_barrier` echoes only child lines containing
+  "barrier" (`export.rs:389`), so the warning would have been
+  discarded. A check whose output is thrown away is worse than no
+  check, because it reads as coverage. The export prefix is instead
+  probed once by forge at startup, which is the right frequency: a
+  prefix two products both write legitimately is likelier than most to
+  have a third pointed at it.
+
+What is still true: nothing prevents the collision, and the four legs
+that fail here are the same four.
 
 **C1b, minor:** the syncer's self-collision guard is
 `prefix == cfg.prefix` (`flint_forge_syncer.rs:133`) — exact string

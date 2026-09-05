@@ -18,8 +18,8 @@ covered by the stability guarantee.
   (`forge/e2e/composition/`, MinIO + the real binaries). Everything
   else in `forge/e2e/` tests forge against itself; these test forge
   meeting lean, and forge meeting a read-write passthrough mount.
-  First run 30 passed / 12 failed; after the C2 and C4 fixes, 40 passed
-  / 8 failed. Every control and precondition green, so the failures are
+  First run 30 passed / 12 failed; after the C2 and C4 fixes and the C1
+  detection, 45 passed / 8 failed. Every control and precondition green, so the failures are
   findings. Recorded in the design doc, section 17.
 
 ### Known — what the composition drills found (no code changed yet)
@@ -39,6 +39,26 @@ covered by the stability guarantee.
 - **A foreign delete is refused loudly but never restored.** The
   asymmetry is the point: the overwrite, which looks milder, is the one
   that propagates silently.
+
+### Added — a shared prefix between two products is no longer silent
+
+- **Each product now probes the other's lease cell at claim time**
+  (`flint_store::layout`), and says what it found: the neighbour's kind,
+  its cell, its holder, whether it is holding or released, and which
+  field would move it. One exact-key read — not a listing, so it finds
+  a writer rather than the litter one leaves, and a nested export is not
+  mistaken for a collision. Detection, deliberately not enforcement:
+  prevention belongs to whatever assigns prefixes, and refusing here
+  would turn a diagnostic into an outage the first time a stale cell
+  outlived its workspace. What it buys is the property an external
+  control needs to be safe to rely on — the control still prevents, and
+  you find out when it did not. A writer alone on its prefix stays
+  quiet, which is drilled, because a check that cries wolf gets switched
+  off. A published mirror skips the probe and its publisher does it once
+  at startup instead: forge spawns a barrier per export, and
+  `run_barrier` echoes only child lines containing "barrier", so a
+  warning raised there would have been discarded — a check whose output
+  is thrown away is worse than none, because it reads as coverage.
 
 ### Fixed — flint lean, a reader adopted a foreign write into a published mirror
 
