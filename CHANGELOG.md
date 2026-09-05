@@ -12,6 +12,35 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added — flint forge, a large-repository leg
+
+- **`forge/e2e/largerepo/`** — the size regime the suite could not
+  reach. Every other forge drill runs under 12 MiB against a 64 MiB
+  whole-put ceiling, which is why three shipped defects were invisible:
+  the multipart upload had never been executed by any test or leg, the
+  restore held every pack twice, and a restore slow enough to outlast
+  the takeover window loses the repository. L1 proves the composed
+  upload from the outside, by the `-<partcount>` ETag suffix S3 and
+  MinIO give a multipart object and never give a whole PUT. L2 holds
+  peak memory under the pack size, and also fscks the restored
+  repository — a cheap restore that produces the wrong bytes is worse
+  than an expensive one.
+- **Run against the pre-fix binary as a control**, which is the only
+  reason the leg is worth anything: L2 reads 38.9 MiB for a 96 MiB pack
+  on the shipped code and **202.5 MiB (2.11x)** with the whole-object
+  read put back — independently reproducing the 2.05x measured in
+  §5 by a different instrument.
+- **A staleness precondition, because this bit for real.**
+  `cargo build --bins` SILENTLY SKIPS `flint-forge-syncer`: it carries
+  `required-features = ["s3"]`, so a plain build leaves the previous
+  binary at exactly the path the rig uses, and the drill reports green
+  about code that is not in the tree. The leg refuses to run when any
+  source under `forge/syncer` or `crates/flint-store` is newer than the
+  binary, and names the rebuild.
+- **`INCONCLUSIVE` is not `PASS`.** A leg that could not measure what it
+  exists to measure exits 2 rather than being folded into "0 failed"
+  (the rule `tests/k8s/oci-ab` earned).
+
 ### Fixed — flint forge, a restore held every pack twice
 
 - **The restore read whole objects and needed ~2x the repository in
