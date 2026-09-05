@@ -12,6 +12,87 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed — flint forge, the chart could not install itself
+
+- **`helm install ./flint-forge-chart --set door.deploy=true` failed for
+  everyone.** The chart's `door.yaml` passes `--git-only`;
+  `values.yaml` pinned `1.46.0-forge.1`; and that is the one published
+  tag whose `flint-hub-gateway` predates the `--git` → `--git-only`
+  rename. The door crashlooped on `error: unexpected argument
+  '--git-only' found`, `helm --wait` timed out with "timed out waiting
+  for the condition" and named nothing. The chart's template moved
+  forward with the source and the image tag it pins did not, so the
+  chart was internally inconsistent — **found by installing it, which
+  nothing did.**
+- **The tag is five revisions behind.** `1.46.0-forge.6` has been
+  published since 2026-09-05; the chart pinned `forge.1` from
+  2026-09-04, which predates the restore fan-out (`7557d3c1`), the
+  restore that held every pack twice (`827c5f90`), the lease renewer
+  and orphan-MPU sweep (`2a213b01`) and the S3 transfer fixes
+  (`62775105`). This is the second instance of the tag-provenance drift
+  already recorded as open, and the first to be caught by a leg rather
+  than by hand.
+
+### Added — flint forge, a drill on the PUBLISHED artifact
+
+- **`forge/e2e/published/`** — the path a user takes, which no other
+  forge drill takes. Every existing leg runs `drill-<sha7>` images
+  built from the checkout, deliberately and correctly; twelve
+  falsifiers are green against those. A user gets whatever tag
+  `values.yaml` names, pulled from Docker Hub, and until now that
+  artifact had never been drilled at all. This leg overrides no image:
+  it installs the chart as shipped, forces a real pull, and asks the
+  release to clone, push durably, move a protected branch, lose its pod
+  and serve a clone restored from S3 alone.
+- **A tag bump is the whole fix**, established rather than assumed:
+  `OVERRIDE_TAG=1.46.0-forge.6` runs every leg against a named tag and
+  returns 17 passed, 0 failed, 2 pending. It turns P1 PENDING while it
+  does, because a run that was TOLD its images is not evidence about
+  which images the chart chooses.
+- **Two traps, each of which produced a confident wrong answer first.**
+  `docker run <image> <binary> --flags` does not run `<binary>` — those
+  become args to the image's ENTRYPOINT, here the operator, which fails
+  on kubeconfig before parsing a flag; read as "the flag is accepted",
+  it exonerated a broken image across two tags until the pod's own log
+  contradicted it. And the registry-digest check first ran immediately
+  after `helm --wait`, found two operator digests and called them "all
+  images": the syncer and git images live in the repository's
+  namespace, whose pod does not exist until the operator has
+  reconciled. It now runs after the repository is Ready, across both
+  namespaces, and requires all three images to have appeared rather
+  than judging whatever turned up.
+
+### Added — flint forge, `git propose`
+
+- **A protected branch moves only by a push to `refs/for/<target>`**,
+  which is Gerrit's plumbing by way of Gitea's AGit flow and which
+  nobody — a person or a model writing git commands — emits from
+  memory. The refusal already names the remedy, but git prints it as
+  `! [remote rejected]` on a non-zero exit, and a harness that treats
+  that as fatal without surfacing stderr hides the one sentence that
+  says what to do instead. The forge-git image now carries
+  `git-propose` on `PATH`, which git's own subcommand dispatch turns
+  into `git propose` — no alias, no config, and it works in a clone
+  made before the image existed. It is a convenience and never an
+  authority: it pushes the same refspec by hand, and the merge is
+  authorised on the server, twice, from the rendered policy.
+- `docs/flint-forge-for-agents.md` now leads with the fact that **none
+  of this is required to use forge**: a repository with no `branches`
+  block is stock git, and `refs/for` is the price of protecting a
+  branch, not of using the product.
+
+### Fixed — flint forge, a doc comment describing a defect that was fixed
+
+- **`export::ExportConfig::timeout_secs`** still explained itself in
+  terms of the pre-`2a213b01` world, where the heartbeat was a timer
+  arm of the serving loop's `select!` and a blocked export therefore
+  stopped renewing the lease — a 300 s default timeout against a 60 s
+  takeover threshold. The renewer has been its own task since, and it
+  beats through an export because `Phase::Serving` is not a phase that
+  must progress. What a blocked export costs today is pushes, bounded
+  by the timeout and then by `backoff_secs`. The comment would have
+  sent the next reader chasing a bug that no longer exists.
+
 ### Added — flint forge, the repack amplification, measured
 
 - **`forge/e2e/repack/`** — how many bytes reach S3 per byte pushed.

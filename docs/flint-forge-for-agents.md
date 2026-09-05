@@ -104,18 +104,57 @@ git clone --single-branch -b main https://forge.example.com/git/team-a/proj.git
 git switch -c agent/$POD_NAME
 … work …
 git commit -am "…" && git push -u origin agent/$POD_NAME   # durable when this returns
-git push origin HEAD:refs/for/main                          # propose a merge
+git propose                                                 # propose a merge into main
 ```
 
 **`--single-branch` is not a nicety.** A full clone of a repository
 with a thousand one-commit agent branches costs the server 0.54 CPU-s
 instead of 0.13, and puts a 74 KB ref advertisement on every request.
 
-A push to `refs/for/<target>` is how a protected branch moves: the
-server merges with `merge-tree`, and the client is told which ref
-actually moved. On a conflict it answers `ng` with the conflicted
-paths and moves nothing. `-o strategy=ours|theirs` picks a resolution;
-anything else is ignored rather than passed to git.
+## Moving a protected branch: `git propose`
+
+**Nothing here is required to use forge.** A repository with no
+`branches` block in its `FlintRepo` is stock git: clone it, commit,
+`git push origin main`. Everything below is the price of asking forge
+to *protect* a branch, and it is paid only on that branch.
+
+A protected branch moves by a push to `refs/for/<target>`, which the
+server merges with `merge-tree` and reports back — the client is told
+which ref actually moved. On a conflict it answers `ng` with the
+conflicted paths and moves nothing. `-o strategy=ours|theirs` picks a
+resolution; anything else is ignored rather than passed to git.
+`refs/for/` is a request, never a ref: nothing is stored under it.
+
+That refspec is Gerrit's plumbing, adopted by Gitea and Gitee as the
+AGit flow, and **no one writes it from memory — a model writing git
+commands least of all.** So the agent image carries it as a verb:
+
+```
+git propose                        # HEAD → the remote's default branch
+git propose release/2.1            # → a named branch
+git propose -o strategy=theirs     # tell the server how to resolve a conflict
+```
+
+It is installed as `git-propose` on `PATH`, which git's own subcommand
+dispatch turns into `git propose` — so it needs no alias, no config,
+and works in a clone made before the image existed. It is a
+convenience and never an authority: it pushes the same refspec by
+hand, and whether the merge is allowed is decided on the server, twice,
+from the policy the operator rendered.
+
+**If you are not running the forge image**, the long form is the whole
+of it:
+
+```
+git push origin HEAD:refs/for/main
+```
+
+**Read the refusal.** A direct push to a protected branch is refused
+by name and the message states the remedy —
+`refs/heads/main is protected: push to refs/for/main to propose a
+merge`. git prints it as `! [remote rejected]` and exits non-zero, so
+a harness that treats a non-zero exit as fatal without surfacing
+stderr will hide the one sentence that says what to do instead.
 
 **A push is durable when it returns.** That is forge's one strong
 guarantee, and it is the whole reason the syncer exists: the bucket

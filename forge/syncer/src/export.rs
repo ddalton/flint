@@ -79,13 +79,23 @@ pub struct ExportConfig {
     /// WHY THIS EXISTS AT ALL. `flint-sync`'s claim loop does not give
     /// up: a foreign holder on the export prefix leaves it sleeping and
     /// retrying forever. This call is awaited INLINE in the serving
-    /// loop, whose `select!` also carries the lease heartbeat — so
-    /// waiting on that child stops pushes AND stops renewing the
-    /// repository's own lease on a DIFFERENT prefix. A composition
-    /// drill measured exactly that: a read-write lean workspace
-    /// mounted over the export prefix took the repository down, with
-    /// nothing in the log, while the status listener went on answering
-    /// Ready (design §17, C2).
+    /// loop, so waiting on that child stops PUSHES for as long as it
+    /// waits. A composition drill measured that: a read-write lean
+    /// workspace mounted over the export prefix took the repository
+    /// down, with nothing in the log, while the status listener went on
+    /// answering Ready (design §17, C2).
+    ///
+    /// **It no longer costs the LEASE, and it used to.** When this
+    /// comment was first written the heartbeat was a timer arm of that
+    /// same `select!`, so a barrier blocked past the takeover threshold
+    /// let the token go quiet and a challenger deposed a working pod —
+    /// a 300 s default timeout against a 60 s threshold, five times
+    /// over. The renewer is its own task now (`lease::spawn_renewer`,
+    /// and see the `select!`'s own comment in `server.rs`), and it
+    /// renews through an export because `Phase::Serving` is not a phase
+    /// that must progress. What a blocked export costs today is pushes,
+    /// bounded by this timeout and then by `backoff_secs`; reads keep
+    /// serving and the repository stays claimed.
     ///
     /// The default is the export floor's default. An export that
     /// cannot finish within the interval between exports can never

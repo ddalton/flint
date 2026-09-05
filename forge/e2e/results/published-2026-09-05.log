@@ -1,0 +1,32 @@
+published-artifact drill — context kind-forge-pub, chart /Users/ddalton/github/flint/flint-forge-chart
+  ..  chart names: dilipdalton/flint-forge-git:1.46.0-forge.1
+  ..               dilipdalton/flint-forge-syncer:1.46.0-forge.1
+  ..               dilipdalton/flint-forge-operator:1.46.0-forge.1
+
+── P0 — every image the chart names is actually published
+  ok: dilipdalton/flint-forge-operator:1.46.0-forge.1 is on the registry
+  ok: dilipdalton/flint-forge-git:1.46.0-forge.1 is on the registry
+  ok: dilipdalton/flint-forge-syncer:1.46.0-forge.1 is on the registry
+
+── P1 — the chart names the newest published tag, not an older one
+  BAD: the chart pins 1.46.0-forge.1 but 1.46.0-forge.6 is published — a 'helm install' installs the older binaries
+  ..  everything below therefore measures 1.46.0-forge.1, which is what a user would get
+
+── P2 — the images are PULLED from the registry, not found in the node cache
+  ..  cleared 3 cached image(s) from 1 node(s)
+  ok: the node cache was cleared before install (the pull below cannot be satisfied locally)
+
+── P3 — helm install the chart as shipped — no --set of any image
+  ok: the store is up and the bucket exists
+  BAD: helm install failed (rc=1)
+        Release "flint-forge" does not exist. Installing it now.
+        W0905 14:21:40.304805   43010 warnings.go:70] unrecognized format "uint64"
+        Error: timed out waiting for the condition
+        ── pod/flint-forge-door-57c65cdd44-2qcmn is not ready:
+           error: unexpected argument '--git-only' found
+             tip: a similar argument exists: '--git'
+           Usage: flint-hub-gateway --listen <LISTEN> --git
+           For more information, try '--help'.
+
+══ published artifact: 5 passed, 2 failed, 0 pending ══
+   FAILED

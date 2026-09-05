@@ -32,6 +32,14 @@ COPY docker/forge/nginx.conf /etc/nginx/nginx.conf
 COPY docker/forge/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY ${BIN_DIR}/${TARGETARCH}/flint-forge-hook /usr/local/bin/flint-forge-hook
 
+# `git propose` for the agent half of this image. git dispatches an
+# unknown subcommand to `git-<name>` on PATH, so this is a subcommand
+# with no alias and no config — it works in a clone made before the
+# image existed. A protected branch moves only by a push to
+# `refs/for/<target>` (design §6), which nobody writes from memory.
+COPY docker/forge/git-propose.sh /usr/local/bin/git-propose
+RUN chmod +x /usr/local/bin/git-propose
+
 # One binary, two hooks, dispatching on the name it was invoked as.
 # `core.hooksPath` points every repository at this directory, so a
 # repository created by the syncer needs no per-repo hook install.
