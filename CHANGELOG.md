@@ -12,6 +12,46 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added — flint forge, composition drills (C1-C5)
+
+- **A local drill suite for two products on one bucket**
+  (`forge/e2e/composition/`, MinIO + the real binaries). Everything
+  else in `forge/e2e/` tests forge against itself; these test forge
+  meeting lean, and forge meeting a read-write passthrough mount.
+  30 passed, 12 failed — every control and precondition green, so the
+  failures are findings. Recorded in the design doc, section 17.
+
+### Known — what the composition drills found (no code changed yet)
+
+- **"One prefix, one writer" is not enforced across products.** forge
+  arbitrates on `<prefix>/git/epoch`, lean on
+  `<prefix>/.flint/lean/epoch`. Pointed at one prefix both acquire at
+  epoch 1 with no 412, no fence and no log line, while the drill's
+  forge-vs-forge and lean-vs-lean controls both contend on the same
+  rig. `arbitrate` reasons over `&[FlintRepo]` and cannot see a lean CR.
+- **A second writer on the export prefix wedges the repository.**
+  `flint-sync`'s claim never gives up, `run_barrier` awaits it with no
+  timeout, and `maybe_run` is awaited inline in the serving loop whose
+  `select!` also carries the lease heartbeat. Measured: forge's lease
+  on prefix A stopped being renewed and pushes went from a 0 s ack to a
+  30 s timeout, because of a misconfiguration on prefix B. It is silent
+  — the child's stderr is read only after it exits — and the status
+  listener is a separate task, so the operator still sees Ready.
+- **A foreign write into the export prefix is never repaired.** The
+  claim at `export.rs:27` that "a foreign write into its prefix is
+  overwritten by the next export" is false: the barrier diffs a local
+  scan against a local baseline and consults only the manifest pointer
+  remotely, so an object changed behind it is not in the diff. Measured
+  across two further exports that each republished what git changed.
+- **Every reader of a diverged export takes the foreign bytes,
+  including lean.** The etag-pinned refusal in `checkout` is guarded by
+  `if pinned` and fires only under a gated citation; the default arm
+  is an explicit S3-wins adopt. lean copies the foreign bytes into an
+  agent's workspace, from where they can be committed back into git.
+- **A foreign delete is refused loudly but never restored.** The
+  asymmetry is the point: the overwrite, which looks milder, is the one
+  that propagates silently.
+
 ### Fixed — flint forge, the remaining falsifiers
 
 - **The legible export froze permanently after the first restart.**

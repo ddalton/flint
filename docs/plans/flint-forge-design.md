@@ -1079,3 +1079,130 @@ Refuted or narrowed: nothing the refuters examined was refuted; two
 reviewer-cited scripts were missing from the scratchpad and the
 refuters rebuilt the experiments, which then agreed — recorded so a
 future reader knows the evidence was reproduced, not trusted.
+
+## 17. Composition — two products on one bucket (drills C1–C5, RUN 2026-09-04)
+
+Drills: `forge/e2e/composition/`. Local rig, real binaries, MinIO
+(`export::run_barrier` execs the shipped `flint-sync`, so the second
+party cannot be an in-process double). Suite result **30 passed, 12
+failed**; every control and precondition green, so all twelve failures
+are findings rather than rig noise.
+
+The rule under test is the one the whole design rests on: *one prefix
+has exactly one writer, arbitrated by an epoch lease and a conditional
+PUT against one pointer.* It holds **within** a product. Across
+products it is a convention, not a mechanism.
+
+### C1 — forge and lean on one prefix do not contend
+
+The lease keys are derived independently and disagree:
+
+| product | epoch cell | claim cell |
+| --- | --- | --- |
+| forge | `<prefix>/git/epoch` (`lib.rs:210`) | `<prefix>/git/claim` |
+| lean | `<prefix>/.flint/lean/epoch` (`lib.rs:389`) | `<prefix>/.flint/lean/claim` |
+
+Pointed at one prefix, both acquire at epoch 1 under different holder
+ids. No 412, no fence, no log line on either side. The drill's two
+controls — forge against forge, and lean against lean — both contend
+on this same rig, so the absence is the products' and not the rig's.
+
+Nothing above them closes it either: `arbitrate` reasons over
+`&[FlintRepo]` (`reconcile.rs:124`), so it cannot see a lean CR at all.
+
+**C1b, minor:** the syncer's self-collision guard is
+`prefix == cfg.prefix` (`flint_forge_syncer.rs:133`) — exact string
+equality on a normalised prefix. A *nested* export prefix
+(`tenant/A` exporting to `tenant/A/inner`) is accepted. Blast radius is
+small: forge's sweep lists only `git/objects/pack/` and `git/bundles/`,
+so nothing is destroyed. It is a guard asymmetry, not a defect.
+
+### C2 — a second writer on the EXPORT prefix wedges the REPOSITORY
+
+Here the violation *is* arbitrated — forge's export runs the real
+`flint-sync`, so both parties contend on `<B>/.flint/lean/epoch`. What
+the drill measures is the cost of catching it. Three shipped facts
+compose:
+
+1. `flint-sync`'s claim loop never gives up — `Waiting` sleeps 10 s and
+   retries forever (`bin/flint_sync.rs:290-317`).
+2. `export::run_barrier` awaits that child with no timeout
+   (`export.rs:254`).
+3. `export::maybe_run` is awaited **inline** in the serving loop
+   (`server.rs:288`), and the lease heartbeat is a timer on that same
+   `select!` (`server.rs:158-199`).
+
+Measured, with both observables shown live first: forge's lease on
+prefix A froze at an unchanged `renewed_unix`, and the next push timed
+out at 30 s having been accepted at 0 s minutes earlier. **A
+misconfiguration on B takes down A.**
+
+Two properties make it quiet. `run_barrier` reads the child's stderr
+only after it exits, so the child's "waiting on the standing lease"
+lines sit in an unread pipe and forge logs nothing. And the status
+listener is a separate task (`server.rs:90`) still answering from the
+last published phase, so the operator's readiness check — which needs
+"the server's own word" — is satisfied by a wedged process.
+
+### C3 — a foreign write into the export prefix is never repaired
+
+`export.rs:27` states: *"A foreign write into its prefix is overwritten
+by the next export, and the CRD says so."* **That is false.**
+
+The barrier computes uploads and deletes from a LOCAL scan diffed
+against a LOCAL baseline (`barrier.rs:469-475`); the only remote thing
+it consults is the manifest pointer's etag. A foreign write moves no
+pointer and changes no local file, so it is not in the diff.
+
+Measured: object overwritten (etag confirmed moved), then two further
+commits exported — each republishing the file git changed, proving the
+export ran — and the foreign bytes stood throughout. Meanwhile the
+snapshot's `exported_commit` continues to name a commit whose content
+the prefix does not hold.
+
+### C4 — every reader of a diverged export takes the foreign bytes
+
+The prediction from reading was that lean would fail closed, because
+`checkout` fetches each object at the etag the manifest cites
+(`checkout.rs:257`). **The drill refuted that.** The loud refusal is
+guarded by `if pinned` (`checkout.rs:258`) and fires only under a gated
+citation; for the cadence/hybrid manifests the export actually writes,
+the next arm takes over and is explicit:
+
+> `// S3-wins: the object moved past the manifest (a HITL write not yet`
+> `// re-cited). Adopt the CURRENT version` — `checkout.rs:279-291`
+
+Correct for lean's own workspace, where that means a human wrote newer
+bytes. On an export prefix, where forge is the sole legitimate writer,
+it means someone wrote who should not have — and lean copies the
+foreign bytes into an agent's workspace, where they can be committed
+back into git as real content. Measured: manifest-less reader served
+them silently; lean adopted them (rc=0); only a `git clone`, which
+never touches the export, was unaffected.
+
+### C5 — a foreign DELETE is refused, and never restored
+
+The very next match arm refuses a missing cited object
+(`checkout.rs:292-298`, *"refusing a silent hole (mixed-writer
+bucket?)"*). Measured: lean refused (rc=1) and invented nothing. But no
+later export restores the object — the export uploads what changed
+locally, and a deletion behind its back changed nothing — so the hole
+is permanent.
+
+The asymmetry is the useful result: **overwrite is adopted silently,
+delete is refused loudly.** The safer-looking operation is the
+dangerous one.
+
+### What follows
+
+- The one-writer rule needs a mechanism across products, not only
+  within one. The cheapest candidate is a single well-known claim cell
+  per prefix that every product writes and reads, rather than each
+  product owning a private one under its own directory.
+- The export's mirror claim should either be made true (reconcile
+  against the bucket, not only against the local baseline) or the
+  sentence at `export.rs:27` withdrawn and the CRD's guidance changed
+  to say a read-write mount over an export prefix is unsupported.
+- C2's wedge wants a timeout on the export subprocess regardless of the
+  rest: an inline, unbounded child in the same `select!` as the
+  heartbeat is a liveness hazard independent of who else holds the lease.
