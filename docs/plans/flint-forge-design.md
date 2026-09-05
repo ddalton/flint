@@ -527,6 +527,38 @@ packages can use S3), so there is no per-push S3 durability, no
 idle-to-zero, no pod identity, no legible export, and git over NFS is
 slow in ways that matter for a fleet. Phase 0 runs it as the control.
 
+**RUN 2026-09-04 on EC2.** Gitea 1.22, the same 40 MiB corpus at the
+same commit, the same storm clients and the same NIC-counter oracle:
+
+| | server egress, 100 clones | wall |
+|---|---|---|
+| forge, bundle advertised + client opt-in | **0.5 MiB** | 27 s |
+| forge, opt-in off | 4,041 MiB | 58 s |
+| forge, not advertised | 4,042 MiB | 56 s |
+| **Gitea (the buy option)** | **4,019 MiB** | 66 s |
+
+The bought forge lands on top of forge's CONTROL arms, within 0.5%.
+That is the honest statement of what is being bought and given up: a
+full UI and zero code to maintain, against every clone coming off one
+pod's NIC because there is no bundle-URI mechanism to move it to the
+object store. At fleet scale that is the ~8,000x.
+
+It also says something about the earlier measurement: a real bought
+forge behaves the same as forge with its lever off, which is what
+those controls were claiming to simulate.
+
+**What this run could NOT test, stated plainly.** It ran on a LOCAL
+volume, not a flint POSIX one, so the "git over NFS is slow" half is
+unmeasured — the flint NFS hub on this cluster refuses with
+`F30 REFUSAL (exit 57): export "/mnt/volume" has neither identity
+marker nor flint state` and the pNFS pods sit Pending, because trove's
+manual blobstore disk-init was never run here. That is a trove
+provisioning gap, not a finding about either forge. The remaining
+differences — no per-push S3 durability, no idle-to-zero, no pod
+identity, no legible export — are architectural and follow from the
+repository root having to be a local path; they are not measurable and
+do not need to be.
+
 ## 13. Falsifiers
 
 1. **Acknowledged means durable.** Kill the syncer between step 4 and
