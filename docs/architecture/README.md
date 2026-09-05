@@ -20,6 +20,7 @@ Start with **`flint-front-ends-architecture.pdf`** (13 pages, A3 landscape).
 | `flint-front-ends-architecture.pdf` | built — the canonical deck |
 | `flint-front-ends-architecture.md` | built — the A3 rendition |
 | `flint-front-ends-architecture.docs.md` | built — the Google Docs / Word rendition |
+| `flint-front-ends-architecture.docs.pdf` | built — that rendition printed at Letter portrait: real tables, portrait figures; the read-only twin of the Google Doc |
 | `diagrams/png/**.png` | built — rasters, because Docs cannot place SVG |
 
 Edit the HTML or `diagrams.py`, then run `./build.sh`. Do not edit an SVG, the `.md`
@@ -84,6 +85,11 @@ pandoc flint-front-ends-architecture.docs.md -o deck.docx --resource-path=.
 Upload `deck.docx` to Drive and open it with Google Docs — the `.docx` embeds the
 images, so they come across and the tables arrive as native tables. Keep the page
 at Letter portrait; the Docs rendition is built for it.
+
+`flint-front-ends-architecture.docs.pdf` is that same rendition already printed at
+Letter portrait, by the build, without pandoc: the read-only copy for a phone, a
+mailbox, or anyone who will not be commenting. The A3 deck is still the canonical
+PDF; this one exists because the deck's plates are unreadable on a portrait page.
 
 Importing the `.md` directly also works (Drive converts Markdown), but relative
 image paths do not resolve, so you would insert the five PNGs by hand.

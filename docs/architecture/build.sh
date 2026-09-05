@@ -23,6 +23,9 @@
 #   flint-front-ends-architecture.md       the A3 rendition, referencing the SVGs
 #   flint-front-ends-architecture.docs.md  the Docs/Word rendition: native tables
 #                                          + portrait figures, referencing PNGs
+#   flint-front-ends-architecture.docs.pdf that rendition printed at Letter
+#                                          portrait — the read-only twin of the
+#                                          Google Doc, for a phone or a mailbox
 #   diagrams/png/**.png                    rasters, because Docs cannot place SVG
 #
 # WHY TWO RENDITIONS AND ONE SOURCE
@@ -47,6 +50,7 @@ html="$here/flint-front-ends-architecture.html"
 pdf="$here/flint-front-ends-architecture.pdf"
 md="$here/flint-front-ends-architecture.md"
 docsmd="$here/flint-front-ends-architecture.docs.md"
+docspdf="$here/flint-front-ends-architecture.docs.pdf"
 
 mode=${1:---build}
 case "$mode" in --build|--check|--geometry) ;; *)
@@ -384,5 +388,139 @@ if command -v pdftotext >/dev/null; then
     esac
 fi
 
+# ── 6. the Docs rendition, printed ─────────────────────────────────────────
+# The Docs Markdown is the editable handoff; this is its read-only twin: the
+# same native tables and portrait figures, printed at Letter portrait, which
+# the rendition was sized for. pandoc is not assumed — the Markdown here is the
+# small subset step 3 emits (headings, one blockquote, paragraphs, bullets,
+# pipe tables, images, and **bold** / *italic* / `code` inline), so the
+# converter is a page of Python rather than a dependency. Images are resolved
+# to absolute paths because the intermediate HTML lives in a temp dir, never
+# next to the sources.
+echo "==> rendering the Docs rendition as PDF"
+tmpd=$(mktemp -d)
+trap 'rm -rf "$tmpd"' EXIT
+python3 - "$docsmd" "$tmpd/docs.html" "$here" <<'PYEOF'
+import html as H, os, re, sys
+
+src, out, here = sys.argv[1], sys.argv[2], sys.argv[3]
+lines = open(src, encoding="utf-8").read().splitlines()
+
+def inline(s):
+    """Escape first, then mark up: a literal < or & in the prose must never
+    become a tag, and the markup delimiters survive escaping untouched.
+    Code spans are lifted out before bold/italic so a `*` inside one (agent/*)
+    cannot open an emphasis run."""
+    s = H.escape(s.replace(r"\|", "|"), quote=False)
+    codes = []
+    def lift(m):
+        codes.append(m.group(1)); return f"\x00{len(codes)-1}\x00"
+    s = re.sub(r"`([^`]*)`", lift, s)
+    s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
+    s = re.sub(r"(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)", r"<i>\1</i>", s)
+    return re.sub(r"\x00(\d+)\x00", lambda m: f"<code>{codes[int(m.group(1))]}</code>", s)
+
+body, i, n_h2, n_tables, n_figs = [], 0, 0, 0, 0
+while i < len(lines):
+    ln = lines[i]
+    if not ln.strip():
+        i += 1; continue
+    if ln.startswith("# "):
+        body.append(f"<h1>{inline(ln[2:])}</h1>")
+    elif ln.startswith("## "):
+        n_h2 += 1
+        cls = ' class="sec"' if n_h2 > 1 else ""      # the first h2 is Contents
+        body.append(f"<h2{cls}>{inline(ln[3:])}</h2>")
+    elif ln.startswith("> "):
+        body.append(f'<p class="sub">{inline(ln[2:])}</p>')
+    elif ln.startswith("- "):
+        items = []
+        while i < len(lines) and lines[i].startswith("- "):
+            items.append(f"<li>{inline(lines[i][2:])}</li>"); i += 1
+        body.append("<ul>" + "".join(items) + "</ul>"); continue
+    elif ln.startswith("|"):
+        rows = []
+        while i < len(lines) and lines[i].startswith("|"):
+            if not re.match(r"^\|[-|\s]+\|$", lines[i]):
+                rows.append([c.strip() for c in re.split(r"(?<!\\)\|", lines[i].strip())[1:-1]])
+            i += 1
+        head, rest = rows[0], rows[1:]
+        n_tables += 1
+        body.append("<table><thead><tr>" + "".join(f"<th>{inline(c)}</th>" for c in head) +
+                    "</tr></thead><tbody>" +
+                    "".join("<tr><th>" + inline(r[0]) + "</th>" +
+                            "".join(f"<td>{inline(c)}</td>" for c in r[1:]) + "</tr>" for r in rest) +
+                    "</tbody></table>")
+        continue
+    elif ln.startswith("!["):
+        m = re.match(r"!\[([^\]]*)\]\(([^)]+)\)", ln)
+        path = os.path.join(here, m.group(2))
+        if not os.path.exists(path):
+            sys.exit(f"  FAIL: the Docs rendition references a missing {m.group(2)}")
+        n_figs += 1
+        body.append(f'<figure><img src="file://{path}" alt="{H.escape(m.group(1))}"></figure>')
+    elif ln.startswith("*") and ln.endswith("*") and not ln.startswith("**"):
+        body.append(f'<p class="kicker">{inline(ln[1:-1])}</p>')
+    else:
+        body.append(f"<p>{inline(ln)}</p>")
+    i += 1
+
+css = """
+@page { size: 8.5in 11in; margin: 0.65in 0.6in; }
+* { box-sizing: border-box; }
+body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 10pt;
+       line-height: 1.42; color: #0b0b0b; margin: 0; }
+h1 { font-size: 21pt; margin: 0 0 0.35em; letter-spacing: -0.01em; }
+h2 { font-size: 15pt; margin: 0 0 0.45em; letter-spacing: -0.01em; }
+h2.sec { page-break-before: always; }
+p { margin: 0 0 0.6em; }
+p.sub { color: #52514e; font-style: italic; }
+p.kicker { color: #898781; font-size: 8.5pt; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.4em; }
+h2 + p.kicker + p { font-size: 11pt; }
+ul { margin: 0 0 0.6em 1.2em; padding: 0; }
+li { margin: 0 0 0.2em; }
+code { font-family: ui-monospace, Menlo, monospace; font-size: 0.92em; }
+table { border-collapse: collapse; width: 100%; font-size: 7.6pt; line-height: 1.32; margin: 0.4em 0 0.9em; }
+thead { display: table-header-group; }
+th, td { border: 1px solid #c9c8c0; padding: 4px 5px; vertical-align: top; text-align: left; }
+thead th { background: #eeede8; font-weight: 600; }
+tbody th { font-weight: 600; width: 12%; background: #f7f7f4; }
+tr { page-break-inside: avoid; }
+figure { margin: 0.5em 0 0.8em; }
+img { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+"""
+doc = ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+       f"<title>Flint front ends — Docs rendition</title><style>{css}</style></head><body>"
+       + "\n".join(body) + "</body></html>")
+open(out, "w", encoding="utf-8").write(doc)
+print(f"  {n_h2 - 1} sections, {n_tables} tables, {n_figs} figures -> Letter portrait")
+PYEOF
+"$chrome" --headless --disable-gpu --no-pdf-header-footer \
+    --print-to-pdf="$docspdf" "file://$tmpd/docs.html" 2>/dev/null
+[ -s "$docspdf" ] || { echo "chrome wrote no Docs PDF" >&2; exit 1; }
+if command -v pdfinfo >/dev/null; then
+    echo "  $(pdfinfo "$docspdf" | awk '/^Pages:/{print $2}') pages"
+fi
+if command -v pdftotext >/dev/null; then
+    # Single tokens only. pdftotext reads a table ROW line by line across
+    # every cell, so a phrase that wraps inside the narrow label column comes
+    # out interleaved with its neighbours ("Isolating user Give each project
+    # its"): the first run of this step reported the docs-only tables missing
+    # when they were on page 8. A token that fits on one line survives that.
+    dtxt=$(pdftotext "$docspdf" - 2>/dev/null || true)
+    for probe in "flint-lite" "flint-lean" "flint-passthrough" "flint-forge" "TokenReview" "X-Remote-User"; do
+        case "$dtxt" in
+            *"$probe"*) ;;
+            *) echo "  WARN: '$probe' is in the source but not in the Docs PDF" >&2 ;;
+        esac
+    done
+    # The inverse of the deck's check: the docs-only tables MUST be here.
+    # "Isolating" opens a row label that exists only in the identity table.
+    case "$dtxt" in
+        *"Isolating"*) ;;
+        *) echo "  WARN: the docs-only tables did not reach the Docs PDF" >&2 ;;
+    esac
+fi
+
 echo "==> done"
-ls -la "$pdf" "$md" "$docsmd"
+ls -la "$pdf" "$docspdf" "$md" "$docsmd"
