@@ -38,14 +38,52 @@ export AWS_DEFAULT_REGION=$AWS_REGION
 export AWS_EC2_METADATA_DISABLED=true
 export AWS_ENDPOINT_URL=$ENDPOINT
 
-PASS=0; FAIL=0
+PASS=0; FAIL=0; KNOWN=0
 say()  { printf '%s\n' "$*"; }
 head_() { printf '\n== %s ==\n' "$*"; }
 ok()   { PASS=$((PASS+1)); printf '  PASS  %s\n' "$*"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL  %s\n' "$*"; }
 note() { printf '  ....  %s\n' "$*"; }
+
+# ── accepted conditions ──────────────────────────────────────────────
+# These drills found four things the rule forbids and the system
+# permits. Three of them were judged not worth fixing (2026-09-05, the
+# owner's call; design doc section 17 records it), and the fourth
+# cannot be fixed where it is observed.
+#
+# WHY THEY ARE NOT JUST LEFT RED. A suite that always reports eight
+# failures is a suite nobody reads, and a real regression would sit
+# unnoticed among the eight. So an accepted outcome is reported, named
+# and counted — but it is not a failure, and the suite exits green when
+# only accepted conditions are outstanding.
+#
+#   A1  forge and lean on one prefix do not arbitrate (C1)
+#   A2  a nested export prefix is admitted (C1b)
+#   A3  the export can neither see nor repair a foreign change (C3, C5)
+#   A4  a reader with no manifest cannot be protected (C4)
+KNOWN_IDS=""
+accepted() {  # accepted <id> <what was observed>
+  KNOWN=$((KNOWN+1)); KNOWN_IDS="$KNOWN_IDS $1"
+  printf '  KNOWN %s  %s\n' "$1" "$2"
+}
+
+# The counterpart, and the reason this is not merely muting. An
+# accepted condition that stops reproducing means the RECORD is wrong —
+# somebody fixed it, or the leg stopped testing it. Either way a human
+# has to look, so it counts as a failure.
+stale() {  # stale <id> <what was expected>
+  FAIL=$((FAIL+1))
+  printf '  STALE %s  %s — this accepted condition no longer reproduces; update section 17\n' \
+    "$1" "$2"
+}
+
 verdict() {
-  printf '\n%s: %d passed, %d failed\n' "${1:-drill}" "$PASS" "$FAIL"
+  if [ "$KNOWN" -gt 0 ]; then
+    printf '\n%s: %d passed, %d failed, %d accepted (%s )\n' \
+      "${1:-drill}" "$PASS" "$FAIL" "$KNOWN" "$KNOWN_IDS"
+  else
+    printf '\n%s: %d passed, %d failed\n' "${1:-drill}" "$PASS" "$FAIL"
+  fi
   [ "$FAIL" -eq 0 ]
 }
 

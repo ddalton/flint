@@ -18,8 +18,7 @@ covered by the stability guarantee.
   (`forge/e2e/composition/`, MinIO + the real binaries). Everything
   else in `forge/e2e/` tests forge against itself; these test forge
   meeting lean, and forge meeting a read-write passthrough mount.
-  First run 30 passed / 12 failed; after the C2 and C4 fixes and the C1
-  detection, 45 passed / 8 failed. Every control and precondition green, so the failures are
+  First run 30 passed / 12 failed; now 45 passed, 0 failed, 8 accepted. Every control and precondition green, so the failures are
   findings. Recorded in the design doc, section 17.
 
 ### Known — what the composition drills found (no code changed yet)
@@ -39,6 +38,19 @@ covered by the stability guarantee.
 - **A foreign delete is refused loudly but never restored.** The
   asymmetry is the point: the overwrite, which looks milder, is the one
   that propagates silently.
+
+### Changed — the composition suite records accepted conditions instead of standing red
+
+- **Four conditions the drills found are not being fixed**, three by
+  decision and one because it cannot be fixed where it is observed
+  (design doc section 17 carries the table and the reasoning). The
+  suite now reports those eight legs as `KNOWN <id>` rather than
+  `FAIL`, totals them separately, and exits green while only accepted
+  conditions are outstanding — a suite that is permanently eight-red is
+  one nobody reads, and a real regression would hide among them.
+  A leg whose accepted condition stops reproducing reports `STALE` and
+  fails, because a record that has quietly become wrong also needs a
+  human. Suite: 45 passed, 0 failed, 8 accepted.
 
 ### Added — a shared prefix between two products is no longer silent
 

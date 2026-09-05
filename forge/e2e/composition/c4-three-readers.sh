@@ -87,10 +87,11 @@ sleep 2
 head_ "reader 1 — by key, no manifest (passthrough / lite)"
 got=$(s3_cat "$B/files/README.md")
 if [ "$got" = "the real readme" ]; then
-  ok "the key holds the committed bytes"
+  stale A4 "the key holds the committed bytes"
 else
-  bad "a manifest-less reader is served bytes from no commit, with no error"
+  accepted A4 "a manifest-less reader is served bytes from no commit, with no error"
   note "it read: $got"
+  note "not fixable at the reader: there is no manifest to check against"
 fi
 
 # ── reader 2: lean, which reads the manifest ─────────────────────────

@@ -84,9 +84,9 @@ git_c "$WORK/wc" commit -qam two
 push "$WORK/wc" HEAD:refs/heads/main >/dev/null 2>&1
 sleep 15
 if s3_has "$B/files/src/main.rs"; then
-  ok "a later export restored the deleted object"
+  stale A3 "a later export restored the deleted object"
 else
-  bad "the deleted object is NOT restored — the export only uploads what changed LOCALLY"
+  accepted A3 "the deleted object is not restored — the export uploads only what changed locally"
 fi
 forge_down A2
 verdict "C5"

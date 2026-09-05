@@ -1086,7 +1086,9 @@ Drills: `forge/e2e/composition/`. Local rig, real binaries, MinIO
 (`export::run_barrier` execs the shipped `flint-sync`, so the second
 party cannot be an in-process double). First run **30 passed, 12
 failed**; after the C2 and C4 fixes and the C1 detection below, **45
-passed, 8 failed**. Every
+passed, 0 failed, 8 accepted** — the eight are the conditions recorded
+at the end of this section, and the suite is green while only those are
+outstanding. Every
 control and precondition is green, so the failures are findings rather
 than rig noise.
 
@@ -1296,20 +1298,31 @@ The asymmetry is the useful result: **overwrite is adopted silently,
 delete is refused loudly.** The safer-looking operation is the
 dangerous one.
 
-### What follows
+### Accepted conditions — the decision of record, 2026-09-05
 
-- The one-writer rule needs a mechanism across products, not only
-  within one. The cheapest candidate is a single well-known claim cell
-  per prefix that every product writes and reads, rather than each
-  product owning a private one under its own directory.
-- The `export.rs` mirror sentence is now withdrawn and replaced with
-  what was measured. What remains open is C3 itself: the export still
-  cannot see a foreign write, so the divergence is detectable by
-  manifest readers and repaired by nobody. Reconciling against a LIST
-  of the prefix — one request per 1000 objects, etags included — would
-  close it for every reader, including the ones that cannot verify.
-- C2 is fixed above, but its residual stands: an export awaited inline
-  in the same `select!` as the heartbeat is a liveness hazard even when
-  bounded. Moving it to its own task — with the snapshot CAS still
-  carrying the published commit, so the ordering rule in section 9 is
-  untouched — would remove the stall rather than cap it.
+Two of the five drills were fixed (C2, C4). The rest stand, **by
+decision rather than by omission**, and the drills encode that: each
+of the eight outstanding legs reports `KNOWN <id>` instead of `FAIL`,
+the suite exits green while only accepted conditions are outstanding,
+and a leg whose accepted condition stops reproducing reports `STALE`
+and fails — because a record that has quietly become wrong is also
+something a human has to look at. A suite that is permanently eight-red
+is a suite nobody reads, and a real regression would have hidden in it.
+
+| id | condition | judgement |
+| --- | --- | --- |
+| **A1** | forge and lean on one prefix do not arbitrate: disjoint cells, both acquire, neither fences (C1, three legs) | **Not fixed.** Prevention belongs to whatever assigns prefixes. Enforcement would mean unifying the claim cell key and adding owner identity — and a migration, since the operator writes today's key. Detection shipped instead (`flint_store::layout`), so the condition is audible. |
+| **A2** | a nested export prefix is admitted; the guard is string equality, not containment (C1b) | **Not fixed, and small.** The blast radius was checked: forge's sweep lists only `git/objects/pack/` and `git/bundles/`, so nothing is destroyed. Untidy, not corrupting. |
+| **A3** | the export can neither see nor repair a foreign change — an overwrite stands, a delete is never restored (C3 ×2, C5) | **Not worth fixing** (owner's call). It requires a second writer on the export prefix, which is a misconfiguration, and the readers that can be protected now are. A LIST-based reconcile would close it; the cost was judged not to earn it. |
+| **A4** | a reader with no manifest is served the foreign bytes with no error (C4) | **Not fixable where it is observed.** A passthrough or lite mount is a key and a GET; there is nothing to check against. It closes only if A3 closes, and A3 is declined. |
+
+The one-writer rule therefore remains a mechanism within a product and
+a convention across them, deliberately. What changed is that breaking
+it is no longer silent.
+
+**C2's residual still stands**, and is not on this list because nobody
+has judged it: an export awaited inline in the same `select!` as the
+heartbeat is a liveness hazard even when bounded. Moving it to its own
+task — with the snapshot CAS still carrying the published commit, so
+the ordering rule in section 9 is untouched — would remove the stall
+rather than cap it.

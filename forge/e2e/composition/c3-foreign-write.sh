@@ -94,9 +94,9 @@ head_ "C3 — did the export overwrite the foreign write?"
 now=$(s3_cat "$B/files/README.md")
 note "README.md in the export now reads: $now"
 if [ "$now" = "the real readme" ]; then
-  ok "the export overwrote the foreign write, as export.rs:27 claims"
+  stale A3 "the export overwrote the foreign write"
 else
-  bad "the export did NOT overwrite the foreign write — the mirror is serving bytes from no commit"
+  accepted A3 "the export did not overwrite the foreign write — the mirror serves bytes from no commit"
 fi
 
 # And is it self-healing on a later pass, or permanent?
@@ -107,9 +107,9 @@ push "$WORK/wc" HEAD:refs/heads/main >/dev/null 2>&1
 sleep 12
 now2=$(s3_cat "$B/files/README.md")
 if [ "$now2" = "the real readme" ]; then
-  ok "a later export repaired it"
+  stale A3 "a later export repaired it"
 else
-  bad "still diverged after a further export — nothing in the export path ever repairs it"
+  accepted A3 "still diverged after a further export — nothing in the export path repairs it"
 fi
 
 # The manifest still attests to the commit, which is what makes it quiet.

@@ -97,13 +97,13 @@ wait_key c1/shared/git/epoch 30 && ok "forge took its lease on c1/shared" \
 lean barrier c1/shared "$WORK/wx" > "$WORK/leanx.log" 2>&1
 rc=$?
 if [ $rc -eq 0 ]; then
-  bad "lean published into forge's live prefix and was NOT refused (rc=0)"
+  accepted A1 "lean published into forge's live prefix and was not refused (rc=0)"
 else
-  ok "lean was refused on forge's prefix (rc=$rc)"
+  stale A1 "lean was refused on forge's prefix (rc=$rc)"
 fi
 grep -q "waiting on the standing lease" "$WORK/leanx.log" \
-  && ok "lean saw forge's lease" \
-  || bad "lean never saw forge's lease"
+  && stale A1 "lean contended for forge's lease" \
+  || accepted A1 "lean never contended for forge's lease"
 
 # The decisive observation: what is actually IN the bucket.
 head_ "C1 — the arbitration cells"
@@ -112,11 +112,11 @@ le=$(s3_has c1/shared/.flint/lean/epoch && echo yes || echo no)
 note "c1/shared/git/epoch         = $fe"
 note "c1/shared/.flint/lean/epoch = $le"
 if [ "$fe" = yes ] && [ "$le" = yes ]; then
-  bad "TWO live lease cells under one prefix — the products cannot see each other"
+  accepted A1 "two live lease cells under one prefix — the products do not arbitrate"
   note "forge holder: $(s3_cat c1/shared/git/epoch | head -c 200)"
   note "lean  holder: $(s3_cat c1/shared/.flint/lean/epoch | head -c 200)"
 else
-  ok "only one lease cell exists under the prefix"
+  stale A1 "only one lease cell exists under the prefix"
 fi
 
 # forge must be unharmed either way — it is still not fenced, because
@@ -195,10 +195,10 @@ forge_up n "$WORK/n.git" "c1/nest" \
   "FLINT_FORGE_EXPORT_EVERY_SECS=0"
 sleep 5
 if forge_log n | grep -q "would be a second writer"; then
-  ok "a nested export prefix is refused"
+  stale A2 "a nested export prefix is refused"
 else
-  bad "a nested export prefix is ACCEPTED — the guard is string equality, not containment"
-  note "$(forge_log n | head -3)"
+  accepted A2 "a nested export prefix is admitted — the guard is equality, not containment"
+  note "blast radius checked: forge's sweep lists only git/objects/pack/ and git/bundles/"
 fi
 forge_down n
 
