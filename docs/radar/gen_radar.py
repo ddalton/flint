@@ -548,24 +548,41 @@ def main():
     data = json.load(open(os.path.join(here, "radar_data.json")))
     lk_path = os.path.join(here, "lakefs_data.json")
     lk = json.load(open(lk_path)) if os.path.exists(lk_path) else {}
-    cards = "".join(card(ch, data, lk, 2 + i) for i, ch in enumerate(data["charts"]))
     ch = data["charts"]
+    # A chart's rationales take one page unless the data says otherwise
+    # ("rationalePages": 2). Security grew a seventh axis on 2026-09-05
+    # with 53 px and 14 px free in its two columns; the fix stays on the
+    # page-count axis, as rat_section's history says, not the type-size
+    # axis. Page numbers are derived from the same list so the chart
+    # cards and the navigation sentence cannot drift from it.
+    n_pages = [int(c.get("rationalePages", 1)) for c in ch]
+    first_page = {}
+    p = 2
+    for c, n in zip(ch, n_pages):
+        first_page[c["title"]] = p
+        p += n
+    cards = "".join(card(c, data, lk, first_page[c["title"]]) for c in ch)
     rat_pages = ""
-    for c in ch:
+    for c, n in zip(ch, n_pages):
         n_ax = len(c["axes"])
-        half = (n_ax + 1) // 2
-        cols = (rat_section(c, 0, half, True, data, lk) +
-                rat_section(c, half, n_ax, False, data, lk))
-        rat_pages += (f'<div class="page"><h1>Why these numbers — {c["title"]}</h1>'
-                      f'<p class="lede">{resolve_refs(c["note"], data, lk)}</p>'
-                      f'<div class="ratrow">{cols}</div></div>')
+        per_page = -(-n_ax // n)
+        for k in range(n):
+            lo, hi = k * per_page, min(n_ax, (k + 1) * per_page)
+            half = lo + (hi - lo + 1) // 2
+            cols = (rat_section(c, lo, half, True, data, lk) +
+                    rat_section(c, half, hi, False, data, lk))
+            cont = " (continued)" if k else ""
+            lede = (f'<p class="lede">{resolve_refs(c["note"], data, lk)}</p>'
+                    if k == 0 else "")
+            rat_pages += (f'<div class="page"><h1>Why these numbers — {c["title"]}{cont}</h1>'
+                          f'{lede}<div class="ratrow">{cols}</div></div>')
     lakefs_pg = p5_page(data, lk) if lk else ""
     # Derived, not counted by hand: the rationale section grew from two
     # pages to one per chart, and a navigation sentence that names page
     # numbers is the same hand-copied cross-reference resolve_refs exists
     # to kill.
     p_rat_first = 2
-    p_rat_last = 1 + len(data["charts"])
+    p_rat_last = p - 1
     p_avail = p_rat_last + 1
     p_beyond = p_avail + 1
     p_lake = p_beyond + 1 if lk else None
@@ -663,7 +680,7 @@ def main():
   <div class="page">
   <h1>Flint front ends — consistency, performance, security, Day-2 operations</h1>
   <p class="deck">Four ways to put one S3 bucket behind agent workloads, compared on four dimensions —
-  six factors each (Performance carries a seventh, the workload envelope), scored 0 (weakest) – 5 (strongest) from the architecture docs and the code, adversarially verified
+  six factors each (Performance and Security carry a seventh: the workload envelope, and whether one project can hold a read-only and a read-write session at once), scored 0 (weakest) – 5 (strongest) from the architecture docs and the code, adversarially verified
   per approach. {rat_ref} give each chart&rsquo;s reading and the reason behind every number; page {p_avail} maps availability; page {p_beyond} places the columns among industry implementations and records the method and maturity behind the scores{lake_ref}; page {p_mc} states the multicluster-to-one-bucket contract. NFS-over-S3 is charted in both flavors
   (sec=sys dashed).</p>
   {INTRO}

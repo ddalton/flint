@@ -28,7 +28,8 @@
    2.5,
    1.5,
    2,
-   2.5
+   2.5,
+   1
   ],
   "Day-2 operations": [
    3,
@@ -42,7 +43,7 @@
  "notes": {
   "Consistency": "lakeFS replaced the filesystem with a KV-CAS commit store: acked writes are already in S3 + KV before the app sees success ({{cmpL:Consistency/Ack survives}}, graveler staging), API readers see staged writes immediately, and branch/merge machinery arbitrates with per-key conflict refusal (graveler.go:2289). The filesystem axes invert — no locks, no rename anywhere in the API, no shared sqlite/git — and foreign S3 writes are the mirror of Lean&rsquo;s inbox: hidden, served corrupt under a stale ETag, or GC-deleted ({{cmp:Consistency/Conflicts}}). CAS raised 3.5&rarr;4 by the critic: refusal-grade KV insert-if-absent outweighs the missing object-level If-Match.",
   "Performance": "An envelope of two postures no single workload gets at once: hot-loop 5 and cold start belong to lakectl-local checkouts (plain files, nothing on the I/O path), while metadata-heavy work pays 2&ndash;3 HTTPS round-trips per file ({{cmpL:Performance/Small files}}). Streaming rides presigned-direct to S3; scale-out is stateless replicas until the KV store binds (4). Envelope 2.5: every POSIX workload needs a full local copy the repo&rsquo;s own CLI warns is non-scalable.",
-  "Security": "The score rests on SigV4 per-request signing at the gateway plus presigned URLs keeping bucket credentials server-side — OIDC/SAML/RBAC are enterprise (pkg/auth/build.go Fatals non-basic modes), so shipped OSS is effectively one superAdmin: tenancy 1.5 is where the split bites. Misconfig lowered 3&rarr;2.5 by the verifier: blockstore.signing.secret_key defaults to a publicly-known constant in ALL modes (config/defaults.go:107). Default-on hooks put writer-authored webhooks on the server&rsquo;s network position.",
+  "Security": "The score rests on SigV4 per-request signing at the gateway plus presigned URLs keeping bucket credentials server-side — OIDC/SAML/RBAC are enterprise (pkg/auth/build.go Fatals non-basic modes), so shipped OSS is effectively one superAdmin: tenancy 1.5 is where the split bites. Misconfig lowered 3&rarr;2.5 by the verifier: blockstore.signing.secret_key defaults to a publicly-known constant in ALL modes (config/defaults.go:107). Default-on hooks put writer-authored webhooks on the server&rsquo;s network position. Rights 1: OSS is one superAdmin; per-user RBAC is enterprise.",
   "Day-2 operations": "Cheapest fleet citizen per share: a parked repo is KV rows plus bytes (idle 4.5), consumers need only a CLI/SDK (4.5), rolls are stateless restarts. Failure shape lowered 4&rarr;3 on review: server/KV death stops the whole data plane for every API/gateway consumer fleet-wide — only lakectl-local working files ride it out — where Lean&rsquo;s running pods keep serving. And the axes don&rsquo;t price the structural contrast: Lean operates ZERO databases (the bucket is the DR story); lakeFS carries an operated KV (refs + all uncommitted staging) plus an external Spark GC job. Observability 2.5: no per-repo metrics dimension; /_health checks neither KV nor blockstore."
  },
  "headlines": [
