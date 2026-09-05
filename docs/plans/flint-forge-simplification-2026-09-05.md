@@ -370,9 +370,9 @@ exist. Do not delete either. What can be simpler:
 |---|---|---|---|
 | X1 | `local_packs` listed every `pack-*.pack`; git migrates quarantine as `.keep`, `.pack`, `.rev`, `.idx` (`tmp-objdir.c`, `pack_copy_priority`, confirmed in v2.43.0), so a concurrent push's pack is visible before its index; a batch in step 4 uploads and names it, never uploads the index (a named pack is skipped for good), and a restore installs refs into objects git cannot see: `Refused`, exit 78, unrecoverable | data loss at restore | **fixed**: the listing requires the `.idx`; test `a_pack_without_its_index_is_neither_uploaded_nor_named`, which fails against the old listing |
 | X2 | a pack refused at `proc-receive` is still uploaded and named when any other push in the batch is accepted (`batch.rs:197-202`); the design's "deleted locally once the `.keep` drops" (§4) has no code | cost, not integrity | open |
-| X3 | nginx `client_body_timeout` and `send_timeout` unset (60 s defaults) | a 60 s stall mid-pack is a 408 | open; goes away under A3, pin meanwhile |
+| X3 | nginx `client_body_timeout` and `send_timeout` unset (60 s defaults) | a 60 s stall mid-pack is a 408 | **pinned** to 3600 s beside the backend bounds; goes away under A3 |
 | X4 | `FCGIWRAP_CHILDREN=4` | the fifth concurrent request queues until the door cuts it | open; goes away under A3 |
-| X5 | `receive.keepAlive` not set explicitly | the guarantee rests on git's default | open, one line |
+| X5 | `receive.keepAlive` not set explicitly | the guarantee rests on git's default | **pinned** explicitly at 5 s in the receive config |
 | X6 | `terminationGracePeriodSeconds: 30` versus batches of minutes; SIGTERM seen only between batches | any rollout mid-push fails that push | open: decide whether a roll waits for the batch |
 | X7 | a failed `/status` poll with a Ready pod yields `Starting`, and the door waits on it | a live repository leaves rotation on a blind poll | open |
 | X8 | push-only activity clock; `requested-at` stamped only on wake | clone-only repositories are suspended and rewoken | open |
@@ -381,7 +381,7 @@ exist. Do not delete either. What can be simpler:
 
 ## 8. Order
 
-1. X1 (done), X5, X3, X10: lines, not designs.
+1. X1, X3, X5 (done), X10: lines, not designs.
 2. D4 the CRC in the compose, measured.
 3. D1 the multi-call hook and one tag.
 4. A3 the runner, with the keepalive-gap probe as its acceptance and

@@ -194,6 +194,15 @@ impl Git {
             // A malformed object must be refused at the door, not
             // uploaded and discovered at restore.
             ("receive.fsckObjects", "true"),
+            // While the hooks wait for the bucket, receive-pack sends
+            // an empty sideband packet whenever the hooks have been
+            // quiet this long, and that packet is what keeps every
+            // party between here and the client from reading the wait
+            // as a dead connection (the scale drill's 40 GiB push
+            // waited 8 minutes in proc-receive). git's default is the
+            // same 5 s; it is set here so the guarantee does not rest
+            // on a default.
+            ("receive.keepAlive", "5"),
             ("core.logAllRefUpdates", "true"),
         ] {
             self.must(&["config", k, v], None).await?;
