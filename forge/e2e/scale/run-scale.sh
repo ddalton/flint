@@ -80,6 +80,12 @@ BIG_MB=${BIG_MB:-}          # set by S1; give it explicitly to skip S1
 #   SWEEP=claim           the successor aborts orphans after its claim:
 #                         S4 must see them at the kill and none once it serves
 EXPECT=${EXPECT:-window-open}; SWEEP=${SWEEP:-none}
+# The digest the build pushed (the `docker push` line of
+# build-forge-images.sh, with or without the repository in front).
+# The chart pins 1.46.0-forge.1 and deploy.sh defaults to forge.2, both
+# older than the fixes the inverted oracles test, so a deploy that fell
+# back to a default would fail S2/S3/S4 looking like a broken fix.
+DIGEST=${DIGEST:-}; DIGEST=${DIGEST##*@}
 case "$EXPECT" in window-open|window-closed) ;; *) echo "EXPECT must be window-open or window-closed (got '$EXPECT')" >&2; exit 2;; esac
 case "$SWEEP" in none|claim) ;; *) echo "SWEEP must be none or claim (got '$SWEEP')" >&2; exit 2;; esac
 
@@ -234,15 +240,42 @@ leg_S0() {
   [ -n "$p" ] || { inconc "no pod for $BIG — deploy first"; return; }
   img=$(K -n "$NS" get pod "$p" -o jsonpath='{.status.containerStatuses[?(@.name=="syncer")].imageID}')
   note "syncer image: $img"
+  if [ -n "$DIGEST" ]; then
+    case "$img" in
+      *"@$DIGEST") ok "the syncer pod runs the digest this run pushed ($DIGEST)" ;;
+      *) bad "the syncer pod runs $img, not the pushed $DIGEST: the deploy fell back to another tag (the chart pins 1.46.0-forge.1, deploy.sh defaults to forge.2 — both older than the fixes)" ;;
+    esac
+  else
+    note "DIGEST unset: the image is judged by content only (DIGEST=sha256:… from the build's push line pins it)"
+  fi
   # The binary is read OUT and split here: busybox grep matches a line
   # as a C string, so everything past the first NUL byte of a line is
   # invisible to it — `grep -a -c` inside the pod said 0 for a string
   # that is there (runbw, 2026-09-05).
-  m=$(K -n "$NS" exec "$p" -c syncer -- cat /usr/local/bin/flint-forge-syncer 2>/dev/null \
-      | LC_ALL=C tr -c '[:print:]' '\n' | grep -c 'earlier chunks keep their progress' | tr -d '[:space:]')
+  K -n "$NS" exec "$p" -c syncer -- cat /usr/local/bin/flint-forge-syncer 2>/dev/null \
+      | LC_ALL=C tr -c '[:print:]' '\n' > "$WORK/syncer-strings"
+  m=$(grep -c 'earlier chunks keep their progress' "$WORK/syncer-strings" | tr -d '[:space:]')
   [ "${m:-0}" -ge 1 ] \
     && ok "the syncer carries the ranged restore (marker string ×$m, 827c5f90) — this is the tree under test, judged by content" \
     || bad "the syncer binary lacks the ranged-restore marker: this image is NOT the tree under test"
+  # The fixes the knobs name are judged the same way, so a knob that
+  # disagrees with the image fails HERE as "wrong image" and never in
+  # S2/S3/S4 as "the fix does not work" (or, worse, passes window-open
+  # against a tree that closed it).
+  m=$(grep -c 'moved nothing since the last renewal' "$WORK/syncer-strings" | tr -d '[:space:]')
+  case "$EXPECT:${m:-0}" in
+    window-closed:0) bad "EXPECT=window-closed but the syncer lacks the renewer's gate string (2a213b01): this image predates the fix under test" ;;
+    window-closed:*) ok "the syncer carries the progress-gated renewer (marker ×$m, 2a213b01): the window-closed oracle has its subject" ;;
+    window-open:0)   ok "the syncer has no renewer task (pre-2a213b01), as EXPECT=window-open assumes" ;;
+    window-open:*)   bad "EXPECT=window-open but the syncer carries the renewer (marker ×$m, 2a213b01): the oracle would fail for the wrong reason — run with EXPECT=window-closed" ;;
+  esac
+  m=$(grep -c 'aborted a multipart upload left in flight' "$WORK/syncer-strings" | tr -d '[:space:]')
+  case "$SWEEP:${m:-0}" in
+    claim:0) bad "SWEEP=claim but the syncer lacks the sweep's abort string (2a213b01): this image predates the fix under test" ;;
+    claim:*) ok "the syncer carries the claim-time orphan sweep (marker ×$m, 2a213b01)" ;;
+    none:0)  ok "the syncer has no orphan sweep (pre-2a213b01), as SWEEP=none assumes" ;;
+    none:*)  bad "SWEEP=none but the syncer carries the orphan sweep (marker ×$m, 2a213b01): S4 would measure a leak this image closes — run with SWEEP=claim" ;;
+  esac
   for r in "$BIG" "$SMALL"; do
     p=$(repo_pod "$r"); ph=$(phase "$p")
     [ "$ph" = serving ] && ok "$r is serving ($p)" || bad "$r is '$ph' ($p)"

@@ -50,6 +50,18 @@ wrong reason. So:
 | `EXPECT` | `window-closed` (a renewer task holds the lease from before the restore) | silence ≤ 30 s (half the window: above a healthy heartbeat's 13 s plus a pod start, below anything a challenger could count) | the challenger NEVER claims across a restore longer than the window; the holder is never fenced, claims once, and serves with the challenger present | — |
 | `SWEEP` | `none` (default) | — | — | orphans present after a mid-upload kill and still present once the successor serves; their size is the leak |
 | `SWEEP` | `claim` (the successor aborts orphans under its prefix after its claim) | — | — | orphans present at the kill (sample one, taken before the successor can have claimed) and NONE once it serves (sample two) — the sweep is observed, not inferred from a zero |
+| `DIGEST` | unset (default) or the `sha256:…` the build pushed | — | — | — |
+
+S0 refuses a knob its image cannot satisfy: `EXPECT=window-closed` needs
+the renewer's gate string in the syncer binary and `SWEEP=claim` the
+sweep's abort string (both `2a213b01`), and each default needs its
+string ABSENT — so an old image fails S0 as "wrong image", never S2–S4
+as "the fix does not work", and a fixed image cannot pass the old
+oracles. `DIGEST`, when given, must be the syncer pod's `imageID`. Both
+exist because the chart pins `1.46.0-forge.1` and `deploy.sh` defaults
+to `forge.2`, both older than the fixes: a deploy that falls back to a
+default measures the wrong tree, and a tag cannot say which tree it
+carries (a `1.41.1` syncer once shipped inside a `1.45.0` worker).
 
 Both samples are printed for every iteration in either mode. A kill
 that leaves no orphan did not land inside the upload and is said so;
