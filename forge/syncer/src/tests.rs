@@ -133,6 +133,64 @@ fn ng_reason(r: &CommandResult) -> String {
 
 // ── the acknowledgement rule ─────────────────────────────────────────
 
+/// git migrates a push's quarantine in the order `.keep`, `.pack`,
+/// `.rev`, `.idx` (`tmp-objdir.c`, `pack_copy_priority`), so for a
+/// moment a neighbour's pack is on disk without its index. A batch
+/// that lists it in that moment must not name it: the snapshot would
+/// carry a pack with no index, the index would never be uploaded
+/// (a named pack is skipped for good), and a restore of that snapshot
+/// would install refs into objects git cannot see — a refusal, and
+/// unrecoverable. The control is the listing before this rule, which
+/// named every `pack-*.pack` it saw.
+#[tokio::test]
+async fn a_pack_without_its_index_is_neither_uploaded_nor_named() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+
+    // The neighbour, mid-migration: `.keep` and `.pack` have landed,
+    // `.idx` has not.
+    let stem = "pack-0000000000000000000000000000000000000001";
+    let dir = rig.sc.cfg.repo.join("objects/pack");
+    std::fs::write(dir.join(format!("{stem}.keep")), b"receive-pack 1 on host\n").unwrap();
+    std::fs::write(dir.join(format!("{stem}.pack")), b"PACK").unwrap();
+
+    let reports = rig
+        .run(vec![push(1, vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: zero(),
+            new_oid: c.clone(),
+        }])])
+        .await;
+    assert!(is_ok(&reports[0].results[0]), "{:?}", reports[0].results[0]);
+
+    let cell = snapshot::load(rig.store.as_ref(), &rig.sc.cfg).await.expect("snapshot");
+    assert_eq!(cell.snap.packs.len(), 1, "only the complete pack is named: {:?}", cell.snap.packs);
+    assert!(!cell.snap.packs[0].starts_with(stem));
+    let uploaded = rig.store.list(&rig.sc.cfg.pack_prefix()).await.expect("list");
+    assert!(
+        uploaded.iter().all(|o| !o.key.contains(stem)),
+        "nothing of the index-less pack reaches the bucket: {:?}",
+        uploaded.iter().map(|o| o.key.clone()).collect::<Vec<_>>()
+    );
+
+    // Once the index lands the pack is complete, and the next batch
+    // uploads and names it.
+    std::fs::write(dir.join(format!("{stem}.idx")), b"IDX").unwrap();
+    let c2 = rig.stage_commit(Some(&c), &[("b.txt", "two\n")], "second").await;
+    let reports = rig
+        .run(vec![push(2, vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: c.clone(),
+            new_oid: c2,
+        }])])
+        .await;
+    assert!(is_ok(&reports[0].results[0]), "{:?}", reports[0].results[0]);
+    let cell = snapshot::load(rig.store.as_ref(), &rig.sc.cfg).await.expect("snapshot");
+    assert!(cell.snap.packs.iter().any(|p| p == &format!("{stem}.pack")), "{:?}", cell.snap.packs);
+    rig.store.head(&rig.sc.cfg.pack_key(&format!("{stem}.idx"))).await.expect("its index is in the bucket");
+}
+
 /// Falsifier 1, decided here: what a push acknowledges, the bucket
 /// already holds. The control is the shape the first draft would have
 /// shipped — sync after the report — and it is not reachable in this

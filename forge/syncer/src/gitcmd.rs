@@ -270,7 +270,20 @@ impl Git {
         Ok(out.ok())
     }
 
-    /// Pack names present locally, e.g. `pack-<sha>.pack`.
+    /// Pack names present locally, e.g. `pack-<sha>.pack` — only those
+    /// whose index is there too.
+    ///
+    /// A pack without its `.idx` is invisible to git and must be
+    /// invisible here. `receive-pack` migrates a push's quarantine in
+    /// the order `.keep`, `.pack`, `.rev`, `.idx` (git's `tmp-objdir.c`,
+    /// `pack_copy_priority`), so while one push's batch is in step 4 a
+    /// concurrent push's pack can be on disk with its index a rename
+    /// away. Listing it then would upload and name a pack with no
+    /// index; the index is never uploaded later, because a pack the
+    /// snapshot already names is skipped; and a restore of that
+    /// snapshot installs refs into objects git cannot see, which is a
+    /// refusal and unrecoverable. The index is the last file to land,
+    /// so its presence is the proof the pack is complete.
     pub fn local_packs(&self) -> ForgeResult<Vec<String>> {
         let dir = self.repo.join("objects/pack");
         let mut out = Vec::new();
@@ -282,9 +295,14 @@ impl Git {
         for entry in rd {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with("pack-") && name.ends_with(".pack") {
-                out.push(name);
+            if !(name.starts_with("pack-") && name.ends_with(".pack")) {
+                continue;
             }
+            let idx = format!("{}.idx", name.trim_end_matches(".pack"));
+            if !dir.join(&idx).exists() {
+                continue;
+            }
+            out.push(name);
         }
         out.sort();
         Ok(out)
