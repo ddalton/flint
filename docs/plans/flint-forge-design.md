@@ -1084,9 +1084,10 @@ future reader knows the evidence was reproduced, not trusted.
 
 Drills: `forge/e2e/composition/`. Local rig, real binaries, MinIO
 (`export::run_barrier` execs the shipped `flint-sync`, so the second
-party cannot be an in-process double). Suite result **30 passed, 12
-failed**; every control and precondition green, so all twelve failures
-are findings rather than rig noise.
+party cannot be an in-process double). First run **30 passed, 12
+failed**; after the C2 fix below, **36 passed, 10 failed**. Every
+control and precondition is green, so the failures are findings rather
+than rig noise.
 
 The rule under test is the one the whole design rests on: *one prefix
 has exactly one writer, arbitrated by an epoch lease and a conditional
@@ -1136,6 +1137,38 @@ Measured, with both observables shown live first: forge's lease on
 prefix A froze at an unchanged `renewed_unix`, and the next push timed
 out at 30 s having been accepted at 0 s minutes earlier. **A
 misconfiguration on B takes down A.**
+
+**FIXED** (drill now 11/0). `run_barrier` spawns with `kill_on_drop`
+and waits under `FLINT_FORGE_EXPORT_TIMEOUT_SECS` — default 300 s, the
+export floor's own default, on the reasoning that an export which
+cannot finish within the interval between exports can never keep up
+anyway. On elapse the child is killed and the error is
+`ForgeError::ExportBlocked`, which names the prefix and sends the
+operator to `<B>/.flint/lean/epoch` rather than to the export.
+
+Two things the drill forced that a timeout alone would have missed:
+
+- **A hold-off, and a growing one.** With no backoff the serving loop
+  re-enters the doomed barrier on the next batch and spends the whole
+  timeout again: the same outage, paced. A FLAT hold-off of one timeout
+  is not enough either — the blocker is a misconfiguration that stands
+  until a human clears it, so forge would be blocked one timeout in
+  every two. `backoff_secs` doubles per consecutive failure, capped at
+  an hour, and any export that publishes resets it.
+- **The hold-off must be stamped when the barrier is ABANDONED.** The
+  first version used the `now` handed to `maybe_run`, which is read
+  before the barrier starts — so the timeout consumed the entire
+  hold-off and the backoff was always already expired. The drill
+  reported "no backoff" against code that had one; the bug was real and
+  in a different place than the failing assertion pointed.
+
+**Residual, and it is not small.** The loop is still blocked for up to
+one timeout, so pushes still stall for that long and the heartbeat
+still cannot tick — with the default 300 s and `QUIET_POLLS` at 60 s, a
+competing server could depose this one during a single blocked export.
+The bound is now finite and the cause is now logged, which is the
+difference between an outage and a mystery, but the structural fix is
+to move the export off the serving loop entirely.
 
 Two properties make it quiet. `run_barrier` reads the child's stderr
 only after it exits, so the child's "waiting on the standing lease"
@@ -1203,6 +1236,8 @@ dangerous one.
   against the bucket, not only against the local baseline) or the
   sentence at `export.rs:27` withdrawn and the CRD's guidance changed
   to say a read-write mount over an export prefix is unsupported.
-- C2's wedge wants a timeout on the export subprocess regardless of the
-  rest: an inline, unbounded child in the same `select!` as the
-  heartbeat is a liveness hazard independent of who else holds the lease.
+- C2 is fixed above, but its residual stands: an export awaited inline
+  in the same `select!` as the heartbeat is a liveness hazard even when
+  bounded. Moving it to its own task — with the snapshot CAS still
+  carrying the published commit, so the ordering rule in section 9 is
+  untouched — would remove the stall rather than cap it.

@@ -29,6 +29,11 @@
 //!   FLINT_FORGE_EXPORT_REF       the ref whose tree is exported
 //!   FLINT_FORGE_EXPORT_PREFIX    the lean workspace prefix it goes to
 //!   FLINT_FORGE_EXPORT_EVERY_SECS  floor between exports (default 300)
+//!   FLINT_FORGE_EXPORT_TIMEOUT_SECS  how long one export barrier may
+//!                                run before it is killed (default 300).
+//!                                It is inline in the serving loop, so
+//!                                this also bounds how long a blocked
+//!                                export can stop pushes (design §17).
 //!   FLINT_FORGE_SYNC_BIN         flint-sync (default /usr/local/bin/flint-sync)
 //!   FLINT_FORGE_BUNDLES          "true" arms clone bundles (§8)
 //!   FLINT_FORGE_BUNDLE_EVERY_SECS   floor between cuts (default 3600)
@@ -142,6 +147,7 @@ async fn main() {
                 reference,
                 prefix,
                 every_secs: env_u64("FLINT_FORGE_EXPORT_EVERY_SECS", 300),
+                timeout_secs: env_u64("FLINT_FORGE_EXPORT_TIMEOUT_SECS", 300).max(1),
                 bucket: bucket_name.clone(),
                 endpoint: endpoint.clone(),
                 sync_bin: PathBuf::from(

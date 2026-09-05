@@ -1026,6 +1026,7 @@ fn export_cfg(dir: &std::path::Path) -> super::export::ExportConfig {
         bucket: "bkt".into(),
         endpoint: None,
         sync_bin: "/usr/local/bin/flint-sync".into(),
+        timeout_secs: 300,
         root: dir.join("export/tree"),
         index: dir.join("export/index"),
         project_id: Some("proj".into()),
@@ -1172,7 +1173,8 @@ fn the_export_runs_on_a_floor_and_never_twice_for_one_commit() {
         "a repository that has never exported exports"
     );
 
-    let done = Record { commit: Some("abc".into()), unix: 900 };
+    let done =
+        Record { commit: Some("abc".into()), unix: 900, blocked_unix: 0, blocked_streak: 0 };
     assert!(matches!(plan(&cfg, Some("abc"), &done, 5000), Plan::Skip(_)), "same commit");
     assert!(
         matches!(plan(&cfg, Some("def"), &done, 1000), Plan::Skip(_)),
@@ -1184,6 +1186,112 @@ fn the_export_runs_on_a_floor_and_never_twice_for_one_commit() {
         "past the floor it runs, and it knows which tree it is coming from"
     );
     assert!(matches!(plan(&cfg, None, &never, 1000), Plan::Skip(_)), "an absent ref");
+}
+
+/// The backoff after an abandoned barrier.
+///
+/// Without it the timeout only changes the SHAPE of the outage that
+/// composition drill C2 measured: the serving loop would re-enter the
+/// doomed barrier on the next batch and spend the whole timeout again,
+/// which is the same repository-down, one batch at a time.
+#[test]
+fn an_abandoned_barrier_waits_out_a_floor_before_it_is_retried() {
+    use super::export::{plan, Plan, Record};
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = export_cfg(dir.path());
+    cfg.every_secs = 0; // the operator asked for "export as often as you can"
+    cfg.timeout_secs = 60;
+
+    // Even with NO cadence floor, a barrier abandoned at t=1000 is not
+    // retried at t=1030.
+    let blocked =
+        Record { commit: None, unix: 0, blocked_unix: 1000, blocked_streak: 1 };
+    assert!(
+        matches!(plan(&cfg, Some("abc"), &blocked, 1030), Plan::Skip(_)),
+        "a blocked export must not be re-entered on the very next batch"
+    );
+    assert_eq!(
+        plan(&cfg, Some("abc"), &blocked, 1061),
+        Plan::Run { from: None, to: "abc".into() },
+        "past its own floor it tries again — the blocker may have gone"
+    );
+
+    // The ladder. A flat hold-off of one timeout would leave forge
+    // blocked one timeout in every two for as long as the
+    // misconfiguration stands, which is a 50% outage with better
+    // manners. Doubling makes the standing fault nearly free.
+    use super::export::backoff_secs;
+    assert_eq!(backoff_secs(&cfg, 0), 60, "before any failure, one timeout");
+    assert_eq!(backoff_secs(&cfg, 1), 60);
+    assert_eq!(backoff_secs(&cfg, 2), 120);
+    assert_eq!(backoff_secs(&cfg, 3), 240);
+    assert_eq!(backoff_secs(&cfg, 30), 3600, "capped, and it does not overflow");
+    let mut deep = blocked.clone();
+    deep.blocked_streak = 4;
+    assert!(
+        matches!(plan(&cfg, Some("abc"), &deep, 1400), Plan::Skip(_)),
+        "the fourth failure in a row holds off longer than the first"
+    );
+}
+
+/// A record written before `blocked_unix` existed must still parse. If
+/// it did not, an upgrade would read every export as "never ran" and
+/// re-export the whole tree from scratch.
+#[test]
+fn an_export_record_from_before_the_timeout_still_parses() {
+    let r: super::export::Record =
+        serde_json::from_str(r#"{"commit":"abc","unix":900}"#).expect("old record parses");
+    assert_eq!(r.commit.as_deref(), Some("abc"));
+    assert_eq!(r.unix, 900);
+    assert_eq!(r.blocked_unix, 0, "an old record is not treated as blocked");
+}
+
+/// The timeout itself, against a real child that never returns.
+///
+/// Two things are asserted, and the second is the one that matters:
+/// the call comes back, AND the child is dead. An abandoned barrier
+/// left running would hold whatever it claimed and be joined by a
+/// fresh one on the next attempt.
+#[tokio::test]
+async fn a_barrier_that_never_returns_is_killed_and_named() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = export_cfg(dir.path());
+    let marker = dir.path().join("the-child-outlived-the-timeout");
+    let script = dir.path().join("hang.sh");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\nsleep 4\ntouch '{}'\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    cfg.sync_bin = script;
+    cfg.timeout_secs = 1;
+
+    let t = std::time::Instant::now();
+    let err = super::export::run_barrier(&cfg).await.expect_err("it must not hang");
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(3),
+        "it returned on the timeout, not on the child ({:?})",
+        t.elapsed()
+    );
+    match &err {
+        super::ForgeError::ExportBlocked(m) => {
+            assert!(
+                m.contains("tenant/export"),
+                "the message sends the operator to the prefix: {m}"
+            );
+            assert!(m.contains("SECOND WRITER"), "it names the usual cause: {m}");
+        }
+        other => panic!("a timeout must be ExportBlocked, not {other:?}"),
+    }
+
+    // The child must be DEAD, not merely abandoned.
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    assert!(
+        !marker.exists(),
+        "the abandoned barrier kept running past the timeout"
+    );
 }
 
 /// Everything load-bearing about the export is in this environment. A
@@ -1401,6 +1509,7 @@ async fn the_export_baseline_survives_a_pod_that_does_not() {
         bucket: "b".into(),
         endpoint: None,
         sync_bin: std::path::PathBuf::from("/bin/true"),
+        timeout_secs: 300,
         root: dir.path().join("tree"),
         index: dir.path().join("index"),
         project_id: None,

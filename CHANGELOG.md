@@ -18,8 +18,9 @@ covered by the stability guarantee.
   (`forge/e2e/composition/`, MinIO + the real binaries). Everything
   else in `forge/e2e/` tests forge against itself; these test forge
   meeting lean, and forge meeting a read-write passthrough mount.
-  30 passed, 12 failed — every control and precondition green, so the
-  failures are findings. Recorded in the design doc, section 17.
+  First run 30 passed / 12 failed; after the C2 fix, 36 passed / 10
+  failed. Every control and precondition green, so the failures are
+  findings. Recorded in the design doc, section 17.
 
 ### Known — what the composition drills found (no code changed yet)
 
@@ -29,14 +30,6 @@ covered by the stability guarantee.
   epoch 1 with no 412, no fence and no log line, while the drill's
   forge-vs-forge and lean-vs-lean controls both contend on the same
   rig. `arbitrate` reasons over `&[FlintRepo]` and cannot see a lean CR.
-- **A second writer on the export prefix wedges the repository.**
-  `flint-sync`'s claim never gives up, `run_barrier` awaits it with no
-  timeout, and `maybe_run` is awaited inline in the serving loop whose
-  `select!` also carries the lease heartbeat. Measured: forge's lease
-  on prefix A stopped being renewed and pushes went from a 0 s ack to a
-  30 s timeout, because of a misconfiguration on prefix B. It is silent
-  — the child's stderr is read only after it exits — and the status
-  listener is a separate task, so the operator still sees Ready.
 - **A foreign write into the export prefix is never repaired.** The
   claim at `export.rs:27` that "a foreign write into its prefix is
   overwritten by the next export" is false: the barrier diffs a local
@@ -51,6 +44,27 @@ covered by the stability guarantee.
 - **A foreign delete is refused loudly but never restored.** The
   asymmetry is the point: the overwrite, which looks milder, is the one
   that propagates silently.
+
+### Fixed — flint forge, a blocked export took the repository with it
+
+- **A second writer on the export prefix wedged the whole repository.**
+  `flint-sync`'s claim loop never gives up, `run_barrier` awaited it
+  with no timeout, and `maybe_run` is awaited inline in the serving
+  loop whose `select!` also carries the lease heartbeat. A read-write
+  lean workspace mounted over the export prefix therefore stopped
+  forge's pushes *and* its lease renewal on a **different** prefix —
+  silently, because the child's stderr is only read after it exits, and
+  with the status listener still answering Ready from its own task.
+  `run_barrier` now spawns with `kill_on_drop` and waits under
+  `FLINT_FORGE_EXPORT_TIMEOUT_SECS` (default 300, the export floor's
+  default); on elapse the child is killed and `ExportBlocked` names the
+  prefix and points at `<export>/.flint/lean/epoch`. A blocked export
+  then holds off, doubling per consecutive failure and capped at an
+  hour, because the blocker is a misconfiguration that stands until
+  someone clears it — without that the loop re-enters the doomed
+  barrier every batch and rebuilds the same outage. Residual: the loop
+  still stalls for up to one timeout, so the structural fix is to move
+  the export off the serving loop.
 
 ### Fixed — flint forge, the remaining falsifiers
 

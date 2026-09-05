@@ -106,6 +106,13 @@ pub enum ForgeError {
     /// floor. Exits `EXIT_REFUSED`.
     #[error("refused: {0}")]
     Refused(String),
+    /// The export's `flint-sync` child outlived its timeout and was
+    /// killed. Distinct from `State` because the caller BACKS OFF on
+    /// it: whatever blocked the child does not clear in the time one
+    /// batch takes, and re-entering it every batch would rebuild the
+    /// outage the timeout exists to bound.
+    #[error("export blocked: {0}")]
+    ExportBlocked(String),
 }
 
 pub type ForgeResult<T> = Result<T, ForgeError>;

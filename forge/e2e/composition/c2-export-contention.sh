@@ -9,19 +9,35 @@
 # both parties contend on the SAME cell, <B>/.flint/lean/epoch.
 #
 # SO THE QUESTION IS NOT "IS IT CAUGHT" BUT "WHAT DOES CATCHING IT
-# COST". Three facts about the shipped code compose:
+# COST". When this drill was first written the answer was: everything.
+# Three shipped facts composed —
 #
 #   1. `flint-sync`'s claim loop never gives up: `Waiting` sleeps 10s
 #      and retries forever (bin/flint_sync.rs:290-317).
-#   2. `export::run_barrier` awaits that subprocess with no timeout
-#      (export.rs:254).
+#   2. `export::run_barrier` awaited that subprocess with NO timeout.
 #   3. `export::maybe_run` is awaited INLINE in the serving loop
 #      (server.rs:288), and the lease heartbeat is a timer on that same
 #      `select!` (server.rs:6,158-199).
 #
-# If those compose as read, a second writer on B does not merely lose:
-# it stops forge's heartbeat, and the casualty is the repository's
-# lease on prefix A — a different prefix from the one misconfigured.
+# — so a second writer on B did not merely lose. It stopped forge's
+# heartbeat and its pushes, and the casualty was the repository's lease
+# on prefix A, a DIFFERENT prefix from the one misconfigured. Measured
+# on this rig: the lease froze at an unchanged timestamp and a push
+# that had been acked in 0s timed out at 30s.
+#
+# THE FIX, WHICH THIS DRILL NOW GUARDS. `run_barrier` spawns the child
+# with `kill_on_drop` and waits under `FLINT_FORGE_EXPORT_TIMEOUT_SECS`
+# (default 300, the export floor's default); on elapse the child is
+# killed and the error is `ExportBlocked`, which names the prefix and
+# the likely cause. `plan` then holds the export off for one timeout
+# before retrying — without that the loop would re-enter the doomed
+# barrier on the next batch and rebuild the same outage one batch at a
+# time.
+#
+# So the drill now asserts RECOVERY, not just the wedge: the lease
+# resumes, pushes resume, and the log says why. The violation is still
+# a misconfiguration and the export still does not run — what changed
+# is that it no longer takes the repository with it.
 #
 # ANTI-VACUITY. "The lease stopped advancing" is only evidence if it
 # was advancing before, and "the push hung" is only evidence if pushes
@@ -38,6 +54,7 @@ rig_init || { echo "rig_init failed"; exit 1; }
 rig_purge c2/
 
 A=c2/A; B=c2/B
+TMO=${TMO:-20}   # export barrier timeout for this drill; default is 300
 renewed() { s3_cat "$A/git/epoch" | sed 's/.*"renewed_unix":\([0-9]*\).*/\1/'; }
 
 head_ "setup — forge on $A exporting to $B"
@@ -45,7 +62,8 @@ new_bare_repo "$WORK/A.git"
 forge_up A "$WORK/A.git" "$A" \
   "FLINT_FORGE_EXPORT_REF=refs/heads/main" \
   "FLINT_FORGE_EXPORT_PREFIX=$B" \
-  "FLINT_FORGE_EXPORT_EVERY_SECS=0"
+  "FLINT_FORGE_EXPORT_EVERY_SECS=0" \
+  "FLINT_FORGE_EXPORT_TIMEOUT_SECS=$TMO"
 wait_key "$A/git/epoch" 30 && ok "forge holds its lease on $A" || bad "no lease on $A"
 
 new_clone "$WORK/A.git" "$WORK/wc"
@@ -94,40 +112,63 @@ timeout 40 bash -c "cd '$WORK/wc' && REMOTE_USER=driller FLINT_FORGE_SOCKET=/tmp
 [ $? -eq 0 ] && note "the push that triggers the blocked export was itself acked" \
              || note "the push that triggers the blocked export was NOT acked"
 
-head_ "the blast radius"
-sleep 8
-if grep -q "waiting on the standing lease" "$WORK/forge-A.log" 2>/dev/null || \
-   forge_log A | grep -q "waiting on the standing lease"; then
-  ok "forge's export is blocked waiting on the foreign holder"
-else
-  note "no wait line yet in forge's log"
-fi
+head_ "the blast radius — bounded by the timeout, not unbounded"
+note "waiting out the ${TMO}s export timeout"
+sleep $((TMO + 6))
 
-# Observable 1: does forge still renew the lease on A?
-r3=$(renewed); sleep 20; r4=$(renewed)
-if [ -n "$r3" ] && [ -n "$r4" ] && [ "$r4" -gt "$r3" ]; then
-  ok "forge keeps renewing its lease on $A while the export is blocked"
-else
-  bad "forge STOPPED renewing its lease on $A ($r3 -> $r4) — a second writer on B froze A"
-fi
-
-# Observable 2: can the repository still take a push?
+# Observable 1 — the BACKOFF, measured inside its own window. This has
+# to come first: the hold-off after one failure is one timeout long, so
+# a drill that spends that window on other checks would find it expired
+# and call a working backoff broken. (It did, once. The bug it found
+# was real but different: the hold-off was being stamped with a clock
+# read BEFORE the barrier ran, so the timeout consumed all of it.)
 printf 'four\n' >> "$WORK/wc/README.md"
 git_c "$WORK/wc" commit -qam four
+timeout 60 bash -c "cd '$WORK/wc' && REMOTE_USER=driller FLINT_FORGE_SOCKET=/tmp/fc-A.sock git push -q origin HEAD:refs/heads/main" >/dev/null 2>&1
+printf 'five\n' >> "$WORK/wc/README.md"
+git_c "$WORK/wc" commit -qam five
 t0=$(date +%s)
-timeout 30 bash -c "cd '$WORK/wc' && REMOTE_USER=driller FLINT_FORGE_SOCKET=/tmp/fc-A.sock git push -q origin HEAD:refs/heads/main" >/dev/null 2>&1
+timeout 60 bash -c "cd '$WORK/wc' && REMOTE_USER=driller FLINT_FORGE_SOCKET=/tmp/fc-A.sock git push -q origin HEAD:refs/heads/main" >/dev/null 2>&1
 prc=$?; t1=$(date +%s)
-if [ $prc -eq 0 ]; then
-  ok "the repository still accepts pushes ($((t1-t0))s)"
+if [ $prc -eq 0 ] && [ $((t1-t0)) -lt $TMO ]; then
+  ok "a push behind a held-off export does not pay the timeout again ($((t1-t0))s < ${TMO}s)"
 else
-  bad "the repository no longer accepts pushes (rc=$prc after $((t1-t0))s) — misconfiguring B took down A"
+  bad "the export was re-entered immediately (rc=$prc, $((t1-t0))s) — the outage is merely paced"
+fi
+forge_log A | grep -q "holding off" \
+  && ok "the export says it is holding off" \
+  || bad "nothing in the log says the export is holding off"
+
+# Observable 2 — is forge renewing its lease on A again?
+r3=$(renewed); sleep 12; r4=$(renewed)
+if [ -n "$r3" ] && [ -n "$r4" ] && [ "$r4" -gt "$r3" ]; then
+  ok "forge is renewing its lease on $A again ($r3 -> $r4)"
+else
+  bad "forge is NOT renewing its lease on $A ($r3 -> $r4) — a second writer on B froze A"
 fi
 
-# Observable 3: is the wedge self-limiting?
-if forge_log A | grep -qi "fenced\|deposed\|superseded"; then
-  bad "forge was deposed while blocked on the export"
+# Observable 3 — does the repository still take a push?
+printf 'six\n' >> "$WORK/wc/README.md"
+git_c "$WORK/wc" commit -qam six
+t0=$(date +%s)
+timeout 60 bash -c "cd '$WORK/wc' && REMOTE_USER=driller FLINT_FORGE_SOCKET=/tmp/fc-A.sock git push -q origin HEAD:refs/heads/main" >/dev/null 2>&1
+prc=$?; t1=$(date +%s)
+[ $prc -eq 0 ] && ok "the repository still accepts pushes ($((t1-t0))s)" \
+               || bad "the repository no longer accepts pushes (rc=$prc after $((t1-t0))s)"
+
+# Observable 4 — the operator is told why, and sent to the right object.
+if forge_log A | grep -q "export blocked"; then
+  ok "forge logged the blocked export"
+  forge_log A | grep -o "check who holds [^ ]*" | head -1 | sed 's/^/  ....  /'
 else
-  note "forge was not deposed within this window"
+  bad "the blocked export was silent — nothing in forge's log names the cause"
+fi
+
+# Observable 5 — forge must not have been deposed while blocked.
+if forge_log A | grep -qi "fenced\|deposed\|superseded"; then
+  bad "forge was deposed while the export was blocked"
+else
+  ok "forge was not deposed"
 fi
 
 kill $LEANB 2>/dev/null; wait $LEANB 2>/dev/null

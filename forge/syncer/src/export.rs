@@ -55,6 +55,24 @@ pub struct ExportConfig {
     pub endpoint: Option<String>,
     /// The `flint-sync` binary. It ships in the syncer's image.
     pub sync_bin: PathBuf,
+    /// How long one barrier may run before it is killed.
+    ///
+    /// WHY THIS EXISTS AT ALL. `flint-sync`'s claim loop does not give
+    /// up: a foreign holder on the export prefix leaves it sleeping and
+    /// retrying forever. This call is awaited INLINE in the serving
+    /// loop, whose `select!` also carries the lease heartbeat — so
+    /// waiting on that child stops pushes AND stops renewing the
+    /// repository's own lease on a DIFFERENT prefix. A composition
+    /// drill measured exactly that: a read-write lean workspace
+    /// mounted over the export prefix took the repository down, with
+    /// nothing in the log, while the status listener went on answering
+    /// Ready (design §17, C2).
+    ///
+    /// The default is the export floor's default. An export that
+    /// cannot finish within the interval between exports can never
+    /// keep up regardless, so that is the point past which waiting
+    /// buys nothing.
+    pub timeout_secs: u64,
     /// The materialised tree, and the index that makes updating it
     /// incremental.
     pub root: PathBuf,
@@ -71,6 +89,32 @@ pub struct ExportConfig {
 pub struct Record {
     pub commit: Option<String>,
     pub unix: u64,
+    /// When a barrier was last abandoned on the timeout, or 0. Read by
+    /// `plan` as a floor of its own. `#[serde(default)]` so a record
+    /// written before this field parses rather than resetting the
+    /// export to "never ran".
+    #[serde(default)]
+    pub blocked_unix: u64,
+    /// Consecutive abandoned barriers. Drives the hold-off ladder, and
+    /// is reset by any export that publishes.
+    #[serde(default)]
+    pub blocked_streak: u32,
+}
+
+/// How long to hold the export off after `streak` consecutive
+/// abandoned barriers.
+///
+/// A FLAT hold-off of one timeout is not enough, and the drill that
+/// found the wedge measured why: the blocker is a misconfiguration
+/// that stands until somebody fixes it, so forge would spend one
+/// timeout blocked out of every two — a 50% outage, politely paced.
+/// Doubling makes the first failure cost one timeout and every later
+/// one cost almost nothing, which is the right shape for a fault that
+/// only a human can clear.
+pub fn backoff_secs(cfg: &ExportConfig, streak: u32) -> u64 {
+    const CAP_SECS: u64 = 3600;
+    let shift = streak.saturating_sub(1).min(6);
+    cfg.timeout_secs.saturating_mul(1u64 << shift).min(CAP_SECS)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +138,21 @@ pub fn plan(cfg: &ExportConfig, head: Option<&str>, last: &Record, now: u64) -> 
     };
     if last.commit.as_deref() == Some(head) {
         return Plan::Skip(format!("{head} is already exported"));
+    }
+    // A barrier abandoned on the timeout waits out a floor of its own
+    // before it is tried again. Without this the timeout only changes
+    // the shape of the outage: the serving loop would re-enter the
+    // doomed barrier on the very next batch and spend the whole
+    // timeout again, and again, for as long as the blocker stands.
+    let hold = backoff_secs(cfg, last.blocked_streak);
+    if last.blocked_unix > 0 && now.saturating_sub(last.blocked_unix) < hold {
+        return Plan::Skip(format!(
+            "the last barrier was abandoned on the {}s timeout {}s ago ({} in a row); \
+             holding off for {hold}s",
+            cfg.timeout_secs,
+            now.saturating_sub(last.blocked_unix),
+            last.blocked_streak
+        ));
     }
     if last.unix > 0 && now.saturating_sub(last.unix) < cfg.every_secs {
         return Plan::Skip(format!(
@@ -254,13 +313,43 @@ pub fn barrier_command(cfg: &ExportConfig) -> (PathBuf, Vec<String>, Vec<(String
 pub async fn run_barrier(cfg: &ExportConfig) -> ForgeResult<()> {
     let (bin, args, env) = barrier_command(cfg);
     let mut cmd = tokio::process::Command::new(&bin);
-    cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // Load-bearing with the timeout below. The timeout drops the
+        // future that owns the child; without this the abandoned
+        // barrier would keep running, keep holding whatever it managed
+        // to claim, and be joined by a fresh one on the next attempt.
+        .kill_on_drop(true);
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let out = cmd.output().await.map_err(|e| {
+    let child = cmd.spawn().map_err(|e| {
         ForgeError::State(format!("cannot exec {} barrier: {e}", bin.display()))
     })?;
+    let out = match tokio::time::timeout(
+        std::time::Duration::from_secs(cfg.timeout_secs),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(r) => r.map_err(|e| {
+            ForgeError::State(format!("{} barrier: {e}", bin.display()))
+        })?,
+        Err(_) => {
+            // Named rather than generic: this is the one failure whose
+            // cause is almost always a second writer, and the operator
+            // needs to be sent to the cell rather than to the export.
+            return Err(ForgeError::ExportBlocked(format!(
+                "the barrier over {} did not finish within {}s and was killed. The usual \
+                 cause is a SECOND WRITER standing on the export prefix — `flint-sync` \
+                 waits for a foreign lease forever — so check who holds \
+                 {}/.flint/lean/epoch. Nothing was published; the export backs off and \
+                 retries.",
+                cfg.prefix, cfg.timeout_secs, cfg.prefix
+            )));
+        }
+    };
     if !out.status.success() {
         return Err(ForgeError::State(format!(
             "flint-sync barrier exited {}: {}",
@@ -365,8 +454,37 @@ pub async fn maybe_run(git: &Git, cfg: &ExportConfig, now: u64) -> ForgeResult<O
         }
         Plan::Run { from, to } => {
             materialize(git, cfg, from.as_deref(), &to).await?;
-            run_barrier(cfg).await?;
-            save_record(cfg, &Record { commit: Some(to.clone()), unix: now })?;
+            if let Err(e) = run_barrier(cfg).await {
+                if matches!(e, ForgeError::ExportBlocked(_)) {
+                    // Stamped with the time the barrier was ABANDONED,
+                    // not the `now` this call was given: that one was
+                    // read before the barrier started, so a hold-off
+                    // measured from it is consumed by the very timeout
+                    // it is supposed to follow. The first version of
+                    // this fix made exactly that mistake and the drill
+                    // caught it — the hold-off existed and was already
+                    // expired every time it was read.
+                    //
+                    // Failing to write the record only costs an earlier
+                    // retry, so it is logged rather than raised over
+                    // the error the caller actually needs to see.
+                    let mut r = last.clone();
+                    r.blocked_unix = super::now_unix();
+                    r.blocked_streak = last.blocked_streak.saturating_add(1);
+                    if let Err(e2) = save_record(cfg, &r) {
+                        eprintln!("flint-forge: export backoff not recorded: {e2}");
+                    }
+                }
+                return Err(e);
+            }
+            // A published export clears the backoff: the blocker is
+            // demonstrably gone.
+            save_record(cfg, &Record {
+                commit: Some(to.clone()),
+                unix: now,
+                blocked_unix: 0,
+                blocked_streak: 0,
+            })?;
             Ok(Some(to))
         }
     }
