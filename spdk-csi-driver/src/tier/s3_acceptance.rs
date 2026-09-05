@@ -115,7 +115,7 @@ mod tests {
             base_etag: Some(gen1.etag.clone()),
             condition: PutCondition::IfMatch(gen1.etag.clone()),
             stamps: stamps2.clone(),
-            crc64: gen2_crc,
+            crc64: Some(gen2_crc),
         };
         let gen2 = store.compose_generation(&spec).await.unwrap();
         println!("gen2 composed: etag={} crc={:?}", gen2.etag, gen2.crc64_b64);

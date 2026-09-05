@@ -1037,6 +1037,19 @@ impl S3Store {
     ) -> StoreResult<ObjectMeta> {
         let mut completed: Vec<CompletedPart> = Vec::with_capacity(spec.parts.len());
         let mut expect = 0u64;
+        // The full-object checksum, accumulated from the parts as they
+        // are read when the caller did not bring one. Each part is
+        // hashed on a blocking thread while that part's PUT is in
+        // flight, so the hashing costs the upload nothing on the wire.
+        let mut acc: Option<Crc64Nvme> = match spec.crc64 {
+            Some(_) => None,
+            None => Some(Crc64Nvme::new()),
+        };
+        if acc.is_some() && spec.parts.iter().any(|p| matches!(p, PartSource::BaseCopy { .. })) {
+            return Err(StoreError::Other(
+                "compose: the checksum cannot be accumulated over a copied part; supply crc64".into(),
+            ));
+        }
         for (i, p) in spec.parts.iter().enumerate() {
             let part_number = (i + 1) as i32;
             let (off, len) = match p {
@@ -1054,6 +1067,13 @@ impl S3Store {
             match p {
                 PartSource::Local { offset, len } => {
                     let bytes = read_local(spec.local_path, *offset, *len).await?;
+                    let hashing = acc.take().map(|mut c| {
+                        let b = bytes.clone();
+                        tokio::task::spawn_blocking(move || {
+                            c.update(&b);
+                            c
+                        })
+                    });
                     let resp = self
                         .client
                         .upload_part()
@@ -1075,6 +1095,11 @@ impl S3Store {
                             )
                             .build(),
                     );
+                    if let Some(h) = hashing {
+                        acc = Some(h.await.map_err(|e| {
+                            StoreError::Other(format!("compose: checksum did not join: {e}"))
+                        })?);
+                    }
                 }
                 PartSource::BaseCopy { offset, len } => {
                     let base_etag = spec.base_etag.as_deref().ok_or_else(|| {
@@ -1109,7 +1134,14 @@ impl S3Store {
             spec.note_progress(len);
         }
 
-        let crc_b64 = crc64_to_b64(spec.crc64);
+        let crc = match (spec.crc64, acc) {
+            (Some(c), _) => c,
+            (None, Some(a)) => a.finalize(),
+            (None, None) => {
+                return Err(StoreError::Other("compose: no checksum to complete with".into()))
+            }
+        };
+        let crc_b64 = crc64_to_b64(crc);
         let mut req = self
             .client
             .complete_multipart_upload()

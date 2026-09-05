@@ -123,7 +123,7 @@ mod tests {
             base_etag: Some(base.etag.clone()),
             condition: PutCondition::IfMatch(base.etag.clone()),
             stamps: stamps(2, "u-2"),
-            crc64: crc64_nvme(content),
+            crc64: Some(crc64_nvme(content)),
         };
 
         store.inject_torn_complete();
@@ -173,7 +173,7 @@ mod tests {
             base_etag: Some(base.etag.clone()),
             condition: PutCondition::IfMatch(base.etag.clone()),
             stamps: stamps(2, "u-9"),
-            crc64: crc64_nvme(content),
+            crc64: Some(crc64_nvme(content)),
         };
         store.inject_crash_before_complete();
         store.compose_generation(&spec).await.unwrap_err();

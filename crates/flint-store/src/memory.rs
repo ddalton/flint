@@ -968,6 +968,15 @@ impl MemoryStore {
         upload_id: &str,
     ) -> StoreResult<ObjectMeta> {
         self.bump("compose_inner");
+        // The real store cannot hash a copied part it never reads; the
+        // double refuses the same spec so a caller learns it here.
+        if spec.crc64.is_none()
+            && spec.parts.iter().any(|p| matches!(p, PartSource::BaseCopy { .. }))
+        {
+            return Err(StoreError::Other(
+                "compose: the checksum cannot be accumulated over a copied part; supply crc64".into(),
+            ));
+        }
         // Parts must be contiguous from 0 and respect granularity —
         // catching a flusher part-grid bug here beats catching it on
         // real S3.
@@ -1058,11 +1067,13 @@ impl MemoryStore {
         // untested, and a wrong CRC would first be seen by a real
         // bucket.
         let actual = crc64_nvme(&assembled);
-        if actual != spec.crc64 {
-            return Err(StoreError::ChecksumMismatch(format!(
-                "compose {}: claimed {:#x}, content is {:#x}",
-                spec.key, spec.crc64, actual
-            )));
+        if let Some(claimed) = spec.crc64 {
+            if actual != claimed {
+                return Err(StoreError::ChecksumMismatch(format!(
+                    "compose {}: claimed {:#x}, content is {:#x}",
+                    spec.key, claimed, actual
+                )));
+            }
         }
 
         match self.inject.swap(INJECT_NONE, Ordering::SeqCst) {
@@ -1092,11 +1103,13 @@ impl MemoryStore {
         assembled: Vec<u8>,
     ) -> StoreResult<ObjectMeta> {
         let actual = crc64_nvme(&assembled);
-        if actual != spec.crc64 {
-            return Err(StoreError::ChecksumMismatch(format!(
-                "compose {}: claimed {:#x}, assembled is {:#x}",
-                spec.key, spec.crc64, actual
-            )));
+        if let Some(claimed) = spec.crc64 {
+            if actual != claimed {
+                return Err(StoreError::ChecksumMismatch(format!(
+                    "compose {}: claimed {:#x}, assembled is {:#x}",
+                    spec.key, claimed, actual
+                )));
+            }
         }
         let mut inner = self.inner.lock().unwrap();
         if inner.uploads.remove(upload_id).is_none() {
@@ -1108,7 +1121,7 @@ impl MemoryStore {
         let bytes = Bytes::from(assembled);
         let obj = StoredObject {
             etag: mpu_etag(&bytes, parts),
-            crc64: spec.crc64,
+            crc64: actual,
             meta: spec.stamps.to_meta().into_iter().collect(),
             last_modified_unix: now_unix(),
             bytes,
@@ -1261,7 +1274,7 @@ mod tests {
             base_etag: Some(base.etag.clone()),
             condition: PutCondition::IfMatch(base.etag.clone()),
             stamps: stamps(2),
-            crc64: crc64_nvme(b"XXXXBBBB"),
+            crc64: Some(crc64_nvme(b"XXXXBBBB")),
         };
         let m2 = s.compose_generation(&spec).await.unwrap();
         let (_, bytes) = s.get_whole("f", Some(&m2.etag)).await.unwrap();
@@ -1277,5 +1290,63 @@ mod tests {
             s.list_uploads("f").await.unwrap().is_empty(),
             "a failed compose must abort its MPU (A9)"
         );
+    }
+    /// `crc64: None` — the checksum comes from the parts the store
+    /// reads, and the published metadata carries the object's true
+    /// CRC. A copied part cannot be hashed that way and is refused
+    /// before anything moves, with no upload left pending.
+    #[tokio::test]
+    async fn compose_without_a_claimed_checksum_publishes_the_content_crc() {
+        let s = MemoryStore::new();
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("g.local");
+        let content: Vec<u8> = (0..24u8).collect();
+        std::fs::write(&local, &content).unwrap();
+        let spec = ComposeSpec {
+            progress: None,
+            key: "g",
+            local_path: &local,
+            parts: vec![
+                PartSource::Local { offset: 0, len: 8 },
+                PartSource::Local { offset: 8, len: 8 },
+                PartSource::Local { offset: 16, len: 8 },
+            ],
+            base_key: None,
+            base_etag: None,
+            condition: PutCondition::IfNoneMatchAny,
+            stamps: stamps(1),
+            crc64: None,
+        };
+        let m = s.compose_generation(&spec).await.unwrap();
+        assert_eq!(m.crc64_b64.as_deref(), Some(crc64_to_b64(crc64_nvme(&content)).as_str()));
+        let (h, bytes) = s.get_whole("g", None).await.unwrap();
+        assert_eq!(&bytes[..], &content[..]);
+        assert_eq!(h.crc64_b64, m.crc64_b64);
+
+        let base_body = Bytes::from_static(b"AAAABBBB");
+        let base = s
+            .put_whole("h", base_body.clone(), &PutCondition::IfNoneMatchAny, &stamps(1), crc64_nvme(&base_body))
+            .await
+            .unwrap();
+        std::fs::write(&local, b"XXXXBBBB").unwrap();
+        let err = s
+            .compose_generation(&ComposeSpec {
+                progress: None,
+                key: "h",
+                local_path: &local,
+                parts: vec![
+                    PartSource::Local { offset: 0, len: 4 },
+                    PartSource::BaseCopy { offset: 4, len: 4 },
+                ],
+                base_key: None,
+                base_etag: Some(base.etag.clone()),
+                condition: PutCondition::IfMatch(base.etag.clone()),
+                stamps: stamps(2),
+                crc64: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Other(ref m) if m.contains("copied part")), "{err:?}");
+        assert!(s.list_uploads("h").await.unwrap().is_empty(), "nothing pending after a refusal");
     }
 }

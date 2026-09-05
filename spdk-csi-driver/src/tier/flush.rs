@@ -1303,7 +1303,7 @@ impl FlushOrchestrator {
                             base_etag: base.as_ref().map(|b| b.etag.clone()),
                             condition: condition.clone(),
                             stamps: stamps.clone(),
-                            crc64: crc,
+                            crc64: Some(crc),
                         };
                         let r = self.store.compose_generation(&spec).await;
                         if r.is_ok() {

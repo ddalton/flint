@@ -417,7 +417,15 @@ pub struct ComposeSpec<'a> {
     /// Full-object CRC-64/NVME of the composed content, from local
     /// truth. Backends hand it to the store for SERVER-SIDE validation
     /// at publish: a mismatch fails the publish, never warns.
-    pub crc64: u64,
+    ///
+    /// `None` asks the store to accumulate it from the `Local` parts
+    /// as it reads them for upload. Parts go up in order, one at a
+    /// time, so a streaming CRC over them in that loop IS the CRC of
+    /// the object — the same local truth, without a second pass over
+    /// the file (a 40 GiB pack's pre-pass was ~70 s on forge's push
+    /// path, 2026-09-05). A `BaseCopy` part is never read locally, so
+    /// a spec with one and `None` is refused before any part moves.
+    pub crc64: Option<u64>,
     /// Bytes landed so far, for a caller that has to prove LIVENESS
     /// while a long compose runs: forge's lease renewer renews a push
     /// only while this advances, so a wedged upload lets the token go

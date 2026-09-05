@@ -7,13 +7,12 @@
 //! is what the sweep reads (`LeanChunkGC` rule 4). A retried upload
 //! must therefore never be skipped as "already there".
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use flint_store::{
-    ComposeSpec, Crc64Nvme, GenerationStamps, ObjectStore, PartSource, PutCondition,
+    ComposeSpec, GenerationStamps, ObjectStore, PartSource, PutCondition,
 };
 
 use super::{ForgeError, ForgeResult};
@@ -22,31 +21,6 @@ use super::{ForgeError, ForgeResult};
 /// `put_whole` holds the whole object in RAM; a repacked repository is
 /// one pack, and one pack is the largest object forge ever writes.
 pub const WHOLE_PUT_MAX: u64 = 64 * 1024 * 1024;
-
-/// The streaming checksum of a pack above the whole-PUT ceiling.
-///
-/// `progress` is advanced by the bytes hashed. This pass took ~70 s
-/// over a 40 GiB pack on runbx (2026-09-05) and ticked nothing, so the
-/// progress-gated renewer let the token go quiet for six heartbeats —
-/// a whole takeover window — in the middle of a live push, before the
-/// first part had even been created. Hashing IS the batch moving; a
-/// read that stalls still stalls the count, which is the gate's point.
-fn crc_of(path: &Path, progress: Option<&Arc<std::sync::atomic::AtomicU64>>) -> ForgeResult<u64> {
-    let mut crc = Crc64Nvme::new();
-    let mut f = std::fs::File::open(path)?;
-    let mut buf = vec![0u8; 4 << 20];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        crc.update(&buf[..n]);
-        if let Some(p) = progress {
-            p.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-    Ok(crc.finalize())
-}
 
 /// The part grid for a composed upload: contiguous from zero, covering
 /// `size` exactly, at most `max_parts` parts, and — the rule S3
@@ -122,13 +96,13 @@ pub async fn upload_file(
         }
         return Ok(());
     }
-    // Above the ceiling the object is never held whole, so the
-    // checksum streams.
-    let p = path.to_path_buf();
-    let hashed = progress.clone();
-    let crc = tokio::task::spawn_blocking(move || crc_of(&p, hashed.as_ref()))
-        .await
-        .map_err(|e| ForgeError::State(format!("pack checksum did not join: {e}")))??;
+    // Above the ceiling the object is never held whole. The checksum
+    // is accumulated by the store from the parts as it reads them for
+    // upload (`ComposeSpec::crc64: None`): one pass over the pack, not
+    // two. The pre-pass this replaces read a 40 GiB pack in ~70 s on
+    // runbx (2026-09-05) before the first part existed — and in its
+    // first shape ticked no progress, so the gated renewer let the
+    // token go quiet for a whole takeover window mid-push.
     let parts = part_grid(size, store.min_part_size(), store.max_parts());
     let spec = ComposeSpec {
         key,
@@ -138,7 +112,7 @@ pub async fn upload_file(
         base_etag: None,
         condition: PutCondition::Unconditional,
         stamps,
-        crc64: crc,
+        crc64: None,
         progress,
     };
     store.compose_generation(&spec).await?;

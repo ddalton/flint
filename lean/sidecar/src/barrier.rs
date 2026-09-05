@@ -948,7 +948,7 @@ impl Sidecar {
             base_etag: None,
             condition,
             stamps: stamps.clone(),
-            crc64: crc,
+            crc64: Some(crc),
         };
         match self.store.compose_generation(&spec).await {
             Ok(meta) => {

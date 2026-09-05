@@ -38,7 +38,7 @@ pinning.
 | D1 hook = a role of the syncer binary, one tag for both images | **do** | one staged binary, the tag-drift class | ~50 lines + a render test |
 | D2 syncer as receive-pack (gix/git2) | **reject** | 4 forks, the hook | a second pack/ref implementation on the durable path; gitoxide has no server side |
 | D3 keep git, drop the hook | no | — | proc-receive *is* the interposition point; without it refs move before the CAS |
-| D4 CRC inside the compose's part reads | **do** | the second full read of every large pack (~70 s at 40 GiB) | none: CRC64NVME composes across parts |
+| D4 CRC inside the compose's part reads | **done** | the second full read of every large pack (~70 s at 40 GiB) | none: the parts go up in order, so a streaming CRC over them in the upload loop is the object's; proven against S3 |
 | E drill rig | keep the controls; stamp provenance; auto-size | N marker checks | — |
 
 ## 1. The path today, and who must cooperate for a long push
@@ -382,7 +382,7 @@ exist. Do not delete either. What can be simpler:
 ## 8. Order
 
 1. X1, X3, X5 (done), X10: lines, not designs.
-2. D4 the CRC in the compose, measured.
+2. D4 the CRC in the compose (done: `ComposeSpec::crc64: None`, hashed per part on a blocking thread beside its PUT; the memory double adopts the content's CRC, S3 validates ours; the gated `s3_compose` test passed against a real bucket, 4 parts, checksums equal).
 3. D1 the multi-call hook and one tag.
 4. A3 the runner, with the keepalive-gap probe as its acceptance and
    the party-table legs added to the rig first, so the runner is
