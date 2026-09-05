@@ -280,6 +280,13 @@ pub struct Syncer {
     /// carries it, because there is exactly one writer of that object
     /// and it is the batch.
     pub pending_bundle: Option<String>,
+    /// The `HEAD` target this syncer has already published, so the
+    /// derived write is skipped while it is unchanged. §3 calls HEAD
+    /// "derived, once"; before this it went up on EVERY batch, a fifth
+    /// of the fixed per-push S3 cost spent restating `ref:
+    /// refs/heads/main`. Cleared on restart and after a takeover, so a
+    /// new server republishes once rather than trusting a predecessor.
+    pub published_head: Option<String>,
     pub started_unix: u64,
 }
 
@@ -297,6 +304,7 @@ impl Syncer {
             last_push_unix: 0,
             pending_exported_commit: None,
             pending_bundle: None,
+            published_head: None,
             started_unix: now_unix(),
         }
     }

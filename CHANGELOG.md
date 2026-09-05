@@ -12,6 +12,48 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added — flint forge, the git↔S3 transfer path
+
+- **`packio` has coverage.** The module that moves every byte between
+  the repository and the bucket had none. Seven tests now cover the
+  part grid, both upload paths and the fetch. Four were run against a
+  deliberately broken variant to prove they can fail: three on the grid
+  arithmetic, and one proving the store really does enforce the part
+  minimum rather than accepting a grid S3 would reject.
+- **The multipart path is exercised for the first time.** The ceiling
+  is 64 MiB; the largest payload anywhere in the suite was 12 MiB, so
+  every composed upload — the ordinary case for a repacked repository —
+  shipped untested. A 65 MiB pack now round trips byte-identical, and
+  the grid is checked at sizes up to S3's 5 TiB maximum without
+  materialising them.
+- **The per-push S3 protocol is pinned.** Three tests hold a batch to
+  the cost section 4 documents, so a regression that adds a round trip
+  to every push is visible here rather than on a request bill.
+
+### Fixed — flint forge, S3 request cost and transfer I/O
+
+- **`HEAD` was re-uploaded on every push.** Section 3 calls it
+  "derived, once"; the code restated `ref: refs/heads/main` in every
+  batch, a fifth of the fixed per-push cost. Published on change only.
+  Fixed cost per batch 5 → 4 requests; steady state 8 → 7 per push.
+- **Pack siblings were uploaded in series.** They are independent,
+  immutable, content-named keys written unconditionally, so nothing
+  orders them; each one added an S3 round trip to the batch's
+  dependent chain. Now uploaded with bounded concurrency (4 — the
+  bound is RAM, since `put_whole` holds the whole body).
+- **Every pack under the ceiling was read from disk twice**, once to
+  checksum and once for the body. One read now serves both. Both reads
+  also moved off the async runtime, which carries the lease heartbeat.
+
+### Fixed — flint-store, a test double weaker than the backend
+
+- **`MemoryStore` accepted any checksum on a composed upload.** Real S3
+  validates the full-object CRC64-NVME at CompleteMultipartUpload; the
+  double never looked at `spec.crc64`, so every multipart upload in the
+  tree — forge's large packs, lean's chunks — had its checksum accepted
+  untested and a wrong CRC would first have been seen by a real bucket.
+  The double now validates, and no existing test needed changing.
+
 ### Added — flint forge, composition drills (C1-C5)
 
 - **A local drill suite for two products on one bucket**

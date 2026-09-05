@@ -256,6 +256,25 @@ and pushes per batch grow with load, so the syncer gets faster per
 push as the fleet gets busier. S3 requests per batch: one renew, two
 to four per new pack, one CAS, two derived; not seven per push.
 
+**MEASURED 2026-09-05, and the code did not match this paragraph.**
+Counted against the memory store's op counter, a batch cost FIVE fixed
+requests, not four: `HEAD` — "derived, once" in §3 — was re-PUT on
+every batch, restating `ref: refs/heads/main` forever. It is now
+published on change only, and the fixed cost is the four this
+paragraph claims. Steady state fell from 8 requests per push to 7.
+
+The "two-round-trip chain" was also optimistic in a second way: pack
+siblings were uploaded one `await` at a time, so a batch's dependent
+chain was two round trips PLUS one per sibling, in series. Siblings
+are independent, immutable, content-named keys written unconditionally
+and are now uploaded with bounded concurrency (4), which is what makes
+the chain the length this paragraph says it is. The bound exists
+because `put_whole` holds the body in RAM.
+
+Three tests hold this shape — the fixed cost, the HEAD rule, and the
+per-pack term — so a regression that adds a round trip to every push
+is caught here rather than on a bucket's request bill.
+
 No path acknowledges a push the bucket does not hold. A syncer crash
 between steps 5 and 6 restarts the pod, which restores from the
 snapshot (§5) and so cannot serve stale refs; the client saw a failed

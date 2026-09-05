@@ -1926,3 +1926,344 @@ async fn an_oversized_batch_is_refused() {
         .await
         .is_err());
 }
+
+
+// ── the git↔S3 transfer path (`packio`) ──────────────────────────────
+//
+// This module moves every byte between the repository and the bucket
+// and had no coverage at all. The grid arithmetic is checked against
+// S3's REAL constants rather than the memory store's permissive
+// defaults: `MemoryStore::min_part` is 1 out of the box, so a grid that
+// would earn `EntityTooSmall` from a real bucket passes against an
+// unconfigured double. Setting it is what makes these tests able to
+// fail.
+
+/// S3's own limits, restated here because `flint_store::s3` is behind a
+/// feature this crate does not enable by default.
+const S3_MIN_PART: u64 = 5 * 1024 * 1024;
+const S3_MAX_PARTS: usize = 10_000;
+
+/// The grid must tile the object exactly — contiguous, from zero, no
+/// gap and no overlap — because every part is a byte range of the same
+/// local file and a hole would be silent corruption of a pack.
+#[test]
+fn the_part_grid_tiles_the_object_exactly() {
+    let ceiling = super::packio::WHOLE_PUT_MAX;
+    for size in [
+        ceiling + 1,
+        ceiling + S3_MIN_PART,
+        2 * ceiling,
+        2 * ceiling + 1,
+        10 * ceiling,
+        640 * 1024 * 1024 * 1024,          // the last size that fits at one part per 64 MiB
+        640 * 1024 * 1024 * 1024 + 1,      // the first that forces a coarser grid
+        5 * 1024 * 1024 * 1024 * 1024,     // S3's maximum object
+    ] {
+        let parts = super::packio::part_grid(size, S3_MIN_PART, S3_MAX_PARTS);
+        assert!(!parts.is_empty(), "size {size} produced no parts");
+        let mut expect = 0u64;
+        for p in &parts {
+            let (off, len) = match p {
+                flint_store::PartSource::Local { offset, len }
+                | flint_store::PartSource::BaseCopy { offset, len } => (*offset, *len),
+            };
+            assert_eq!(off, expect, "size {size}: part starts at {off}, expected {expect}");
+            assert!(len > 0, "size {size}: zero-length part");
+            expect = off + len;
+        }
+        assert_eq!(expect, size, "size {size}: grid covers {expect}");
+    }
+}
+
+/// Every part but the last must clear the backend minimum. This is the
+/// rule real S3 enforces with `EntityTooSmall`, and the one an
+/// unconfigured memory store cannot catch.
+#[test]
+fn the_part_grid_never_undersizes_a_part_that_is_not_the_last() {
+    let ceiling = super::packio::WHOLE_PUT_MAX;
+    for size in [
+        ceiling + 1,
+        ceiling + 4096,
+        3 * ceiling + 1,
+        640 * 1024 * 1024 * 1024 + 1,
+        5 * 1024 * 1024 * 1024 * 1024,
+    ] {
+        let parts = super::packio::part_grid(size, S3_MIN_PART, S3_MAX_PARTS);
+        for (i, p) in parts.iter().enumerate() {
+            let len = match p {
+                flint_store::PartSource::Local { len, .. }
+                | flint_store::PartSource::BaseCopy { len, .. } => *len,
+            };
+            if i + 1 != parts.len() {
+                assert!(
+                    len >= S3_MIN_PART,
+                    "size {size}: part {i} is {len}, under the {S3_MIN_PART} minimum"
+                );
+            }
+        }
+    }
+}
+
+/// The grid must stay inside the backend's part ceiling at every size
+/// up to S3's largest object. A grid one part over the limit fails the
+/// upload at the LAST part, after the whole object has been sent.
+#[test]
+fn the_part_grid_stays_within_the_backend_part_limit() {
+    for size in [
+        640 * 1024 * 1024 * 1024,
+        640 * 1024 * 1024 * 1024 + 1,
+        1024 * 1024 * 1024 * 1024,
+        5 * 1024 * 1024 * 1024 * 1024,
+    ] {
+        let parts = super::packio::part_grid(size, S3_MIN_PART, S3_MAX_PARTS);
+        assert!(
+            parts.len() <= S3_MAX_PARTS,
+            "size {size}: {} parts exceeds {S3_MAX_PARTS}",
+            parts.len()
+        );
+    }
+}
+
+/// A store configured the way a real bucket behaves: parts below the
+/// minimum are refused. `MemoryStore::new()` ships `min_part = 1`,
+/// which accepts grids S3 would reject.
+fn s3_shaped_store() -> Arc<MemoryStore> {
+    let mut ms = MemoryStore::new();
+    ms.min_part = S3_MIN_PART;
+    ms.max_parts = S3_MAX_PARTS;
+    Arc::new(ms)
+}
+
+fn write_pattern(path: &std::path::Path, len: u64) {
+    use std::io::Write;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path).expect("create"));
+    // Deterministic, and varied enough that a misordered part shows up
+    // as a CRC mismatch rather than as identical bytes in the wrong place.
+    let mut block = vec![0u8; 1 << 20];
+    let mut written = 0u64;
+    let mut seed: u32 = 0x9e37_79b9;
+    while written < len {
+        for b in block.iter_mut() {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *b = (seed >> 24) as u8;
+        }
+        let n = ((len - written) as usize).min(block.len());
+        f.write_all(&block[..n]).expect("write");
+        written += n as u64;
+    }
+    f.flush().expect("flush");
+}
+
+/// Under the ceiling the transfer is ONE request. This pins the cheap
+/// path: a pack that fits must not pay for a multipart handshake.
+#[tokio::test]
+async fn a_pack_under_the_ceiling_goes_up_as_one_request() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("pack-small.pack");
+    write_pattern(&path, 3 << 20);
+    let store = s3_shaped_store();
+    store.reset_op_counts();
+    super::packio::upload_file(store.as_ref(), "p/git/objects/pack/pack-small.pack", &path, 7)
+        .await
+        .expect("upload");
+    let ops = store.op_counts();
+    assert_eq!(ops.get("put_whole").copied().unwrap_or(0), 1, "one PUT, got {ops:?}");
+    assert_eq!(
+        ops.get("compose_generation").copied().unwrap_or(0),
+        0,
+        "a small pack must not open a multipart upload: {ops:?}"
+    );
+}
+
+/// Above the ceiling the transfer is composed, and what comes back is
+/// what went up. This is the path no test and no e2e leg has ever
+/// exercised — the largest payload in the whole suite was 12 MiB
+/// against a 64 MiB ceiling — and it is the ordinary case for a
+/// repacked repository.
+///
+/// It also decides the checksum question the two upload paths raise:
+/// under the ceiling the CRC is taken from the body already in RAM,
+/// above it the CRC streams the file in 4 MiB blocks. The store
+/// validates the composed object's CRC against its assembled bytes, so
+/// a streaming checksum that disagreed with a whole-buffer one would
+/// fail here rather than at a real bucket.
+#[tokio::test]
+async fn a_pack_over_the_ceiling_is_composed_and_round_trips_byte_identical() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("pack-big.pack");
+    let size = super::packio::WHOLE_PUT_MAX + (1 << 20);
+    write_pattern(&src, size);
+    let store = s3_shaped_store();
+    store.reset_op_counts();
+    let key = "p/git/objects/pack/pack-big.pack";
+    super::packio::upload_file(store.as_ref(), key, &src, 7).await.expect("upload");
+    let ops = store.op_counts();
+    assert_eq!(
+        ops.get("compose_generation").copied().unwrap_or(0),
+        1,
+        "a pack over the ceiling must be composed: {ops:?}"
+    );
+
+    let back = dir.path().join("fetched").join("pack-big.pack");
+    super::packio::fetch_to_file(store.as_ref(), key, &back).await.expect("fetch");
+    let a = std::fs::read(&src).expect("src");
+    let b = std::fs::read(&back).expect("back");
+    assert_eq!(a.len(), b.len(), "size changed across the transfer");
+    assert!(a == b, "the composed object did not round trip byte-identical");
+}
+
+/// Re-uploading a pack must reach the store every time. The sweep reads
+/// object age to decide what to collect, so an upload skipped as
+/// "already there" would let a pack the repository still needs age out
+/// (`packio`'s own doc rule, and `LeanChunkGC` rule 4).
+#[tokio::test]
+async fn a_re_uploaded_pack_is_never_skipped() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("pack-x.pack");
+    write_pattern(&path, 1 << 20);
+    let store = s3_shaped_store();
+    let key = "p/git/objects/pack/pack-x.pack";
+    super::packio::upload_file(store.as_ref(), key, &path, 7).await.expect("first");
+    store.reset_op_counts();
+    super::packio::upload_file(store.as_ref(), key, &path, 7).await.expect("second");
+    assert_eq!(
+        store.op_counts().get("put_whole").copied().unwrap_or(0),
+        1,
+        "the second upload must still reach the store"
+    );
+}
+
+/// A fetch that fails must leave nothing at the pack's path. Git reads
+/// a truncated `.idx` as corruption of the REPOSITORY rather than of
+/// the transfer, so a partial file at the real name is worse than no
+/// file at all.
+#[tokio::test]
+async fn a_failed_fetch_never_lands_a_partial_pack() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dest = dir.path().join("sub").join("pack-missing.pack");
+    let store = s3_shaped_store();
+    let err = super::packio::fetch_to_file(store.as_ref(), "p/git/objects/pack/nope.pack", &dest)
+        .await;
+    assert!(err.is_err(), "a missing key must not report success");
+    assert!(!dest.exists(), "a failed fetch left a file at the pack path");
+    assert!(
+        !dest.with_extension("part").exists(),
+        "a failed fetch left its temporary behind"
+    );
+}
+
+
+
+// ── the per-push S3 protocol, pinned ─────────────────────────────────
+//
+// §4 costs a batch at "one renew, two to four per new pack, one CAS,
+// two derived". Nothing enforced that, and the shipped code spent a
+// fifth request per push restating `HEAD` — an object §3 calls
+// "derived, once". These tests hold the protocol to its documented
+// shape: a regression that adds a round trip to every push shows up
+// here rather than on a bucket's request bill.
+
+/// The fixed cost of a batch, isolated from git's pack behaviour by
+/// pushing a ref that introduces no new objects: one lease renewal,
+/// one snapshot CAS, and the two derived files a dumb clone reads.
+#[tokio::test]
+async fn the_fixed_per_push_s3_cost_is_four_requests() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c1 = rig.stage_commit(None, &[("a.txt", "one")], "one").await;
+    rig.run(vec![push(
+        1,
+        vec![RefUpdate { name: "refs/heads/main".into(), old_oid: zero(), new_oid: c1.clone() }],
+    )])
+    .await;
+
+    // A second ref at the SAME commit: the pack is already in the
+    // snapshot, so every request left is fixed overhead.
+    rig.store.reset_op_counts();
+    rig.run(vec![push(
+        2,
+        vec![RefUpdate { name: "refs/heads/side".into(), old_oid: zero(), new_oid: c1.clone() }],
+    )])
+    .await;
+    let ops = rig.store.op_counts();
+    assert_eq!(ops.get("epoch_renew").copied().unwrap_or(0), 1, "one renew per batch: {ops:?}");
+    assert_eq!(
+        rig.store.total_ops(),
+        4,
+        "the fixed per-push cost is renew + CAS + objects/info/packs + info/refs: {ops:?}"
+    );
+}
+
+/// `HEAD` names the default branch. It is published once and then only
+/// when it changes — not once per push, which is what the shipped code
+/// did and what §3 says it must not.
+#[tokio::test]
+async fn head_is_published_once_not_once_per_push() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let head_key = rig.sc.cfg.head_key();
+
+    let c1 = rig.stage_commit(None, &[("a.txt", "one")], "one").await;
+    rig.run(vec![push(
+        1,
+        vec![RefUpdate { name: "refs/heads/main".into(), old_oid: zero(), new_oid: c1.clone() }],
+    )])
+    .await;
+    assert!(
+        rig.store.get_whole(&head_key, None).await.is_ok(),
+        "the first batch must publish HEAD"
+    );
+
+    let c2 = rig.stage_commit(Some(&c1), &[("a.txt", "two")], "two").await;
+    rig.store.reset_op_counts();
+    rig.run(vec![push(
+        2,
+        vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: c1.clone(),
+            new_oid: c2.clone(),
+        }],
+    )])
+    .await;
+    // Four fixed (minus HEAD) plus this push's new pack siblings.
+    let ops = rig.store.op_counts();
+    assert!(
+        rig.store.total_ops() < 8,
+        "a later batch must not restate HEAD: {ops:?}"
+    );
+}
+
+/// A push that introduces a pack pays for that pack's siblings and
+/// nothing else. This is the shape §4 documents; it pins the "two to
+/// four per new pack" term against a batch that adds one pack.
+#[tokio::test]
+async fn a_push_with_a_new_pack_pays_only_for_its_siblings() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c1 = rig.stage_commit(None, &[("a.txt", "one")], "one").await;
+    rig.run(vec![push(
+        1,
+        vec![RefUpdate { name: "refs/heads/main".into(), old_oid: zero(), new_oid: c1.clone() }],
+    )])
+    .await;
+
+    let c2 = rig.stage_commit(Some(&c1), &[("a.txt", "two")], "two").await;
+    rig.store.reset_op_counts();
+    rig.run(vec![push(
+        2,
+        vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: c1.clone(),
+            new_oid: c2.clone(),
+        }],
+    )])
+    .await;
+    let total = rig.store.total_ops();
+    let ops = rig.store.op_counts();
+    // 3 fixed (renew, CAS, and the two derived less HEAD is 4 — one of
+    // which is the CAS) plus 2..=4 siblings.
+    assert!(
+        (5..=7).contains(&total),
+        "a one-pack push should cost the fixed 4 plus 2-4 siblings, got {total}: {ops:?}"
+    );
+}

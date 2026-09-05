@@ -216,13 +216,38 @@ pub async fn run_batch(
     let local_packs = sc.git.local_packs()?;
     let known: BTreeSet<&String> = cell.snap.packs.iter().collect();
     let epoch = sc.lease()?.epoch;
+    // Pack siblings are independent, immutable, content-named keys
+    // written unconditionally: nothing orders them against each other,
+    // and the snapshot that names them is not CAS'd until step 5. One
+    // await at a time made every push pay an S3 round trip per sibling
+    // in SERIES — the dependent chain §4 costs at two round trips was
+    // in fact two plus one per sibling.
+    //
+    // Concurrency is bounded because `put_whole` holds the whole body
+    // in RAM: peak is WHOLE_PUT_MAX per upload in flight. An error
+    // drops the set and aborts what is still running, which is safe
+    // precisely because these keys are content-named — a half-uploaded
+    // generation is named by no snapshot and the next batch re-uploads.
+    const UPLOAD_CONCURRENCY: usize = 4;
+    let mut pending: Vec<(String, std::path::PathBuf)> = Vec::new();
     for pack in &local_packs {
         if known.contains(pack) {
             continue;
         }
         for file in sc.git.pack_siblings(pack) {
-            let path = sc.git.pack_path(&file);
-            packio::upload_file(sc.store.as_ref(), &sc.cfg.pack_key(&file), &path, epoch).await?;
+            pending.push((sc.cfg.pack_key(&file), sc.git.pack_path(&file)));
+        }
+    }
+    for group in pending.chunks(UPLOAD_CONCURRENCY) {
+        let mut set = tokio::task::JoinSet::new();
+        for (key, path) in group {
+            let store = sc.store.clone();
+            let key = key.clone();
+            let path = path.clone();
+            set.spawn(async move { packio::upload_file(store.as_ref(), &key, &path, epoch).await });
+        }
+        while let Some(joined) = set.join_next().await {
+            joined.map_err(|e| ForgeError::State(format!("pack upload did not join: {e}")))??;
         }
     }
 
@@ -487,13 +512,22 @@ async fn publish_derived(sc: &mut Syncer) -> ForgeResult<()> {
             packio::put_small(sc.store.as_ref(), &key, body, epoch).await?;
         }
     }
+    // HEAD is "derived, once" (§3): it names the default branch, which
+    // changes when someone changes it and not once per push. Restating
+    // it every batch was a fifth of the fixed per-push S3 cost. The
+    // memo is per-process, so a fresh pod — or one that has just taken
+    // the repository over — republishes once rather than trusting what
+    // a predecessor left.
     let head = sc.git.head_target().await?;
-    packio::put_small(
-        sc.store.as_ref(),
-        &sc.cfg.head_key(),
-        format!("ref: {head}\n").into_bytes(),
-        epoch,
-    )
-    .await?;
+    if sc.published_head.as_deref() != Some(head.as_str()) {
+        packio::put_small(
+            sc.store.as_ref(),
+            &sc.cfg.head_key(),
+            format!("ref: {head}\n").into_bytes(),
+            epoch,
+        )
+        .await?;
+        sc.published_head = Some(head);
+    }
     Ok(())
 }

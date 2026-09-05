@@ -36,35 +36,23 @@ fn crc_of(path: &Path) -> ForgeResult<u64> {
     Ok(crc.finalize())
 }
 
-/// Upload one local file to `key`, whole or composed by size.
-pub async fn upload_file(
-    store: &dyn ObjectStore,
-    key: &str,
-    path: &Path,
-    epoch: u64,
-) -> ForgeResult<()> {
-    let size = std::fs::metadata(path)?.len();
-    let crc = crc_of(path)?;
-    let stamps = GenerationStamps {
-        generation: 0,
-        epoch,
-        flush_uuid: uuid::Uuid::new_v4().to_string(),
-        boundary_source: None,
-        posix: None,
-    };
-    if size <= WHOLE_PUT_MAX {
-        let body = std::fs::read(path)?;
-        store
-            .put_whole(key, Bytes::from(body), &PutCondition::Unconditional, &stamps, crc)
-            .await?;
-        return Ok(());
-    }
-    // Part grid: within [min_part_size, …], at most max_parts,
-    // contiguous from zero.
-    let min_part = store.min_part_size().max(1);
-    let max_parts = store.max_parts().max(1) as u64;
+/// The part grid for a composed upload: contiguous from zero, covering
+/// `size` exactly, at most `max_parts` parts, and — the rule S3
+/// enforces and the memory store mirrors — every part but the last at
+/// least `min_part` bytes.
+///
+/// Extracted from `upload_file` because it is the one piece of
+/// arithmetic here that has to be right for objects nobody wants to
+/// materialise in a test: a grid that is wrong only above 640 GiB is
+/// still wrong, and `EntityTooSmall` from a real bucket is a poor
+/// place to discover it.
+pub fn part_grid(size: u64, min_part: u64, max_parts: usize) -> Vec<PartSource> {
+    let min_part = min_part.max(1);
+    let max_parts = (max_parts.max(1)) as u64;
     let mut chunk = WHOLE_PUT_MAX.max(min_part);
     if size.div_ceil(chunk) > max_parts {
+        // Round the per-part size UP to a multiple of `min_part` so the
+        // division cannot leave a final grid one part over the limit.
         chunk = size.div_ceil(max_parts).div_ceil(min_part) * min_part;
     }
     let mut parts = Vec::new();
@@ -74,6 +62,53 @@ pub async fn upload_file(
         parts.push(PartSource::Local { offset: off, len });
         off += len;
     }
+    parts
+}
+
+/// Upload one local file to `key`, whole or composed by size.
+pub async fn upload_file(
+    store: &dyn ObjectStore,
+    key: &str,
+    path: &Path,
+    epoch: u64,
+) -> ForgeResult<()> {
+    let size = std::fs::metadata(path)?.len();
+    let stamps = GenerationStamps {
+        generation: 0,
+        epoch,
+        flush_uuid: uuid::Uuid::new_v4().to_string(),
+        boundary_source: None,
+        posix: None,
+    };
+    // Under the ceiling the body is already in RAM, so the checksum
+    // comes from the buffer rather than from a second pass over the
+    // file. The previous shape read every pack TWICE — once to
+    // checksum, once for the body.
+    //
+    // Both reads happen on a blocking thread. The syncer's runtime also
+    // carries the lease heartbeat, and a pack read from cold disk is
+    // long enough to matter to it (§4).
+    if size <= WHOLE_PUT_MAX {
+        let p = path.to_path_buf();
+        let (body, crc) = tokio::task::spawn_blocking(move || {
+            let body = std::fs::read(&p)?;
+            let crc = flint_store::crc64_nvme(&body);
+            Ok::<(Vec<u8>, u64), std::io::Error>((body, crc))
+        })
+        .await
+        .map_err(|e| ForgeError::State(format!("pack read did not join: {e}")))??;
+        store
+            .put_whole(key, Bytes::from(body), &PutCondition::Unconditional, &stamps, crc)
+            .await?;
+        return Ok(());
+    }
+    // Above the ceiling the object is never held whole, so the
+    // checksum streams.
+    let p = path.to_path_buf();
+    let crc = tokio::task::spawn_blocking(move || crc_of(&p))
+        .await
+        .map_err(|e| ForgeError::State(format!("pack checksum did not join: {e}")))??;
+    let parts = part_grid(size, store.min_part_size(), store.max_parts());
     let spec = ComposeSpec {
         key,
         local_path: path,

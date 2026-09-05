@@ -999,6 +999,23 @@ impl MemoryStore {
             assembled.extend_from_slice(&bytes);
         }
 
+        // S3 validates the full-object CRC64-NVME at
+        // CompleteMultipartUpload, so a composed upload whose checksum
+        // does not match its bytes fails there and not on the next
+        // read. Without this the double was WEAKER than the backend on
+        // the one path that carries the largest objects: every
+        // multipart upload in the tree — forge's packs above the
+        // whole-put ceiling, lean's chunks — had its checksum accepted
+        // untested, and a wrong CRC would first be seen by a real
+        // bucket.
+        let actual = crc64_nvme(&assembled);
+        if actual != spec.crc64 {
+            return Err(StoreError::ChecksumMismatch(format!(
+                "compose {}: claimed {:#x}, content is {:#x}",
+                spec.key, spec.crc64, actual
+            )));
+        }
+
         match self.inject.swap(INJECT_NONE, Ordering::SeqCst) {
             INJECT_CRASH_BEFORE_COMPLETE => {
                 // Died before Complete: the MPU stays pending — the
