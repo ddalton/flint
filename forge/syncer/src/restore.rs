@@ -90,9 +90,13 @@ pub async fn restore(sc: &mut Syncer) -> ForgeResult<()> {
     // Fetch every file that belongs to a named pack: the pack itself,
     // its index, and the bitmap and reverse index when they exist. The
     // bitmap is what makes the restored repository clone-ready without
-    // a local `repack -b` (§8).
+    // a local `repack -b` (§8). All of it goes through one fan-out
+    // bounded by `fanout`, across files and chunks alike: one file at a
+    // time paid a round trip per sibling in series, and one chunk at a
+    // time made a repacked repository's single pack a single stream.
     let pack_dir = sc.cfg.repo.join("objects/pack");
     std::fs::create_dir_all(&pack_dir)?;
+    let mut units = Vec::new();
     for pack in &cell.snap.packs {
         let stem = pack.trim_end_matches(".pack");
         for (name, obj) in listed.iter() {
@@ -101,17 +105,16 @@ pub async fn restore(sc: &mut Syncer) -> ForgeResult<()> {
                 if dest.exists() {
                     continue;
                 }
-                packio::fetch_pinned(
-                    sc.store.as_ref(),
-                    &obj.key,
-                    &dest,
-                    obj.size,
-                    &obj.etag,
-                )
-                .await?;
+                units.push(packio::FetchUnit {
+                    key: obj.key.clone(),
+                    dest,
+                    size: obj.size,
+                    etag: obj.etag.clone(),
+                });
             }
         }
     }
+    packio::fetch_all(sc.store.clone(), units, sc.cfg.fanout).await?;
 
     // Refs: the snapshot's set, exactly. `update-ref --stdin` verifies
     // each object exists, so this is also the first proof that the

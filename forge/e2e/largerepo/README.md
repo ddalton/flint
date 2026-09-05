@@ -37,9 +37,13 @@ it does not collide with the composition rig) and the binaries built
   the only externally visible evidence of *which* upload path ran.
 - **L2 — a restore does not need as much memory as the repository is
   big.** The invariant is deliberately crude, because the defect was
-  crude: peak memory must be under the pack size. The shipped code
-  reads ~39 MiB for a 96 MiB pack; the pre-fix code read 202 MiB, which
-  is the 2.05x measured independently in `flint-forge-design.md` §5.
+  crude: peak memory must be under the pack size. The pre-fix code read
+  202 MiB for a 96 MiB pack — the 2.05x measured independently in
+  `flint-forge-design.md` §5. The shipped code's peak is a FLOOR, not a
+  ratio: ~24 MiB + 20 MiB per chunk in flight, measured 43 MiB at
+  `FANOUT=1` and 104 MiB at the default fanout 4 on a 160 MiB pack. So
+  the pack must sit above that floor with margin; the leg refuses
+  (INCONCLUSIVE) a `REPO_MB` that does not.
 - The restore is also checked for **correctness**, not just cost:
   `git fsck --strict` and the tip matching what was pushed. A cheap
   restore that produces the wrong bytes is worse than an expensive one.
@@ -72,3 +76,8 @@ The takeover-during-restore window (design §5) needs a restore lasting
 tens of seconds. On loopback MinIO a 96 MiB restore returns in about a
 second, so this rig cannot reach it honestly; it would need injected
 latency or a real backend. Deliberately absent rather than faked.
+
+The round-trip cost of a push and a restore is the neighbouring
+`../latency/` leg, which injects latency with toxiproxy: it measures the
+sibling fan-out and the restore fan-out against a fanout-1 control. Its
+slowest restore here is 8.7 s, still nowhere near the 60 s window.

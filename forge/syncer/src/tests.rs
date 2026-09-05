@@ -2034,6 +2034,11 @@ fn s3_shaped_store() -> Arc<MemoryStore> {
     Arc::new(ms)
 }
 
+/// The fetch path spawns tasks and so takes the store as an `Arc`.
+fn dynstore(s: &Arc<MemoryStore>) -> Arc<dyn ObjectStore> {
+    s.clone()
+}
+
 fn write_pattern(path: &std::path::Path, len: u64) {
     use std::io::Write;
     let mut f = std::io::BufWriter::new(std::fs::File::create(path).expect("create"));
@@ -2105,7 +2110,7 @@ async fn a_pack_over_the_ceiling_is_composed_and_round_trips_byte_identical() {
     );
 
     let back = dir.path().join("fetched").join("pack-big.pack");
-    super::packio::fetch_to_file(store.as_ref(), key, &back).await.expect("fetch");
+    super::packio::fetch_to_file(dynstore(&store), key, &back, 4).await.expect("fetch");
     let a = std::fs::read(&src).expect("src");
     let b = std::fs::read(&back).expect("back");
     assert_eq!(a.len(), b.len(), "size changed across the transfer");
@@ -2142,12 +2147,13 @@ async fn a_failed_fetch_never_lands_a_partial_pack() {
     let dir = tempfile::tempdir().expect("tempdir");
     let dest = dir.path().join("sub").join("pack-missing.pack");
     let store = s3_shaped_store();
-    let err = super::packio::fetch_to_file(store.as_ref(), "p/git/objects/pack/nope.pack", &dest)
-        .await;
+    let err =
+        super::packio::fetch_to_file(dynstore(&store), "p/git/objects/pack/nope.pack", &dest, 4)
+            .await;
     assert!(err.is_err(), "a missing key must not report success");
     assert!(!dest.exists(), "a failed fetch left a file at the pack path");
     assert!(
-        !dest.with_extension("part").exists(),
+        !super::packio::part_of(&dest).exists(),
         "a failed fetch left its temporary behind"
     );
 }
@@ -2288,7 +2294,7 @@ async fn a_pack_is_fetched_in_ranges_not_as_one_object() {
 
     let dest = dir.path().join("out").join("pack-r.pack");
     store.reset_op_counts();
-    super::packio::fetch_to_file(store.as_ref(), key, &dest).await.expect("fetch");
+    super::packio::fetch_to_file(dynstore(&store), key, &dest, 4).await.expect("fetch");
     let ops = store.op_counts();
 
     let want = size.div_ceil(super::packio::FETCH_CHUNK);
@@ -2323,11 +2329,12 @@ async fn a_pack_that_moved_under_the_restore_is_refused_not_adopted() {
 
     let dest = dir.path().join("out").join("pack-m.pack");
     let err = super::packio::fetch_pinned(
-        store.as_ref(),
+        dynstore(&store),
         key,
         &dest,
         12 << 20,
         "\"an-etag-this-object-never-had\"",
+        4,
     )
     .await
     .expect_err("a moved etag must not be adopted");
@@ -2336,7 +2343,7 @@ async fn a_pack_that_moved_under_the_restore_is_refused_not_adopted() {
         "expected a refusal, got {err:?}"
     );
     assert!(!dest.exists(), "a refused fetch left a pack behind");
-    assert!(!dest.with_extension("part").exists(), "a refused fetch left its temporary");
+    assert!(!super::packio::part_of(&dest).exists(), "a refused fetch left its temporary");
 }
 
 /// A transport failure retries the CHUNK. The budget is per chunk, so a
@@ -2356,7 +2363,7 @@ async fn a_cut_connection_retries_the_chunk_and_keeps_earlier_progress() {
     let dest = dir.path().join("out").join("pack-t.pack");
     store.reset_op_counts();
     store.inject_get_range_failures(2);
-    super::packio::fetch_to_file(store.as_ref(), key, &dest).await.expect("fetch");
+    super::packio::fetch_to_file(dynstore(&store), key, &dest, 4).await.expect("fetch");
 
     let chunks = size.div_ceil(super::packio::FETCH_CHUNK);
     let ops = store.op_counts();
@@ -2383,8 +2390,106 @@ async fn a_fetch_past_its_retry_budget_leaves_no_pack_behind() {
 
     let dest = dir.path().join("out").join("pack-b.pack");
     store.inject_get_range_failures(64);
-    let err = super::packio::fetch_to_file(store.as_ref(), key, &dest).await;
+    let err = super::packio::fetch_to_file(dynstore(&store), key, &dest, 4).await;
     assert!(err.is_err(), "an exhausted budget must not report success");
     assert!(!dest.exists(), "a failed fetch left a pack at the real name");
-    assert!(!dest.with_extension("part").exists(), "a failed fetch left its temporary");
+    assert!(!super::packio::part_of(&dest).exists(), "a failed fetch left its temporary");
+}
+
+// ── the restore's fan-out, bounded from both sides ───────────────────
+//
+// `fanout` was declared in the config and read nowhere: uploads ran at
+// a hard-coded bound and the restore fetched one file at a time, one
+// chunk at a time. These hold the restore to the bound it now has —
+// exactly `fanout` ranged GETs in flight when there is work for them,
+// and never more.
+
+/// Two siblings of one pack, two chunks each, fetched under a per-GET
+/// delay long enough that overlapping calls are in flight together.
+/// The peak is read from the STORE, so it counts what the store saw,
+/// not what a scheduler happened to interleave. The control is fanout
+/// 1: the same fetch against the same store, and a peak of exactly one.
+///
+/// The two units share a stem on purpose. Under the old temporary name
+/// (`with_extension("part")`) they shared one `.part` as well, and this
+/// test fails there on the second rename.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_restore_fan_out_is_exactly_the_configured_bound() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = s3_shaped_store();
+    let two_chunks = 2 * super::packio::FETCH_CHUNK;
+    let mut srcs: Vec<(&str, String, std::path::PathBuf, String)> = Vec::new();
+    for name in ["pack-f.pack", "pack-f.idx"] {
+        let src = dir.path().join("src").join(name);
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        write_pattern(&src, two_chunks);
+        let key = format!("p/git/objects/pack/{name}");
+        super::packio::upload_file(store.as_ref(), &key, &src, 7).await.expect("upload");
+        let etag = store.head(&key).await.expect("head").etag;
+        srcs.push((name, key, src, etag));
+    }
+    store.inject_get_range_delay_ms(40);
+
+    for fanout in [1usize, 2, 4] {
+        let out = dir.path().join(format!("out-{fanout}"));
+        let units: Vec<super::packio::FetchUnit> = srcs
+            .iter()
+            .map(|(name, key, _, etag)| super::packio::FetchUnit {
+                key: key.clone(),
+                dest: out.join(name),
+                size: two_chunks,
+                etag: etag.clone(),
+            })
+            .collect();
+        store.reset_peak_get_range_in_flight();
+        super::packio::fetch_all(dynstore(&store), units, fanout).await.expect("fetch");
+        assert_eq!(
+            store.peak_get_range_in_flight(),
+            fanout as u64,
+            "four chunks to fetch: the peak in flight must be exactly the bound {fanout}"
+        );
+        for (name, _, src, _) in &srcs {
+            let a = std::fs::read(src).unwrap();
+            let b = std::fs::read(out.join(name)).unwrap();
+            assert!(a == b, "{name} did not round trip at fanout {fanout}");
+            assert!(
+                !super::packio::part_of(&out.join(name)).exists(),
+                "{name} left its temporary behind at fanout {fanout}"
+            );
+        }
+    }
+}
+
+/// A failure in ONE chunk of ONE sibling lands none of the set: no
+/// `.part` of either and no file at either real name. The set is what
+/// the snapshot names, and a restore that left the `.pack` complete
+/// beside a missing `.idx` would hand git a pack it cannot open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_chunk_lands_none_of_the_set() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = s3_shaped_store();
+    let size = 12u64 << 20;
+    let mut units = Vec::new();
+    for name in ["pack-g.pack", "pack-g.idx"] {
+        let src = dir.path().join("src").join(name);
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        write_pattern(&src, size);
+        let key = format!("p/git/objects/pack/{name}");
+        super::packio::upload_file(store.as_ref(), &key, &src, 7).await.expect("upload");
+        let etag = store.head(&key).await.expect("head").etag;
+        units.push(super::packio::FetchUnit {
+            key,
+            dest: dir.path().join("out").join(name),
+            size,
+            etag,
+        });
+    }
+    let dests: Vec<std::path::PathBuf> = units.iter().map(|u| u.dest.clone()).collect();
+    store.inject_get_range_failures(64);
+    let err = super::packio::fetch_all(dynstore(&store), units, 4).await;
+    assert!(err.is_err(), "an exhausted budget must not report success");
+    for d in &dests {
+        assert!(!d.exists(), "{} landed although a sibling failed", d.display());
+        assert!(!super::packio::part_of(d).exists(), "{} left its temporary", d.display());
+    }
 }

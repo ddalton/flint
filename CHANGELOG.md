@@ -12,6 +12,57 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed — flint forge, the restore ran in series twice over
+
+- **The restore now fans out across files and chunks together**
+  (`packio::fetch_all`): one bounded set of ranged GETs, `fanout` ×
+  `FETCH_CHUNK` in flight, all-or-nothing, every temporary renamed only
+  after every chunk of every file has landed. Before this the ranged
+  fetch (`827c5f90`) ran its chunks one at a time and the restore ran
+  its files one at a time — at the design's 10 GB envelope, 1,280 round
+  trips in a single stream, at every pod start. Measured with injected
+  latency: a 33-file restore costs **14.3 round trips** at fanout 4
+  against **38.6** serial (2.3 s vs 4.9 s at RTT 100 ms). The price is
+  memory: ~20 MiB per chunk in flight, so the restore's flat floor is
+  43 MiB at fanout 1 and 104 MiB at the default 4 (the large-repo leg,
+  160 MiB pack), still independent of the pack.
+- **`ForgeConfig::fanout` is now read.** It was declared at 16,
+  documented as bounding "pack uploads and restore fetches", and used by
+  nothing: the batch had a hard-coded 4 and the restore had no bound at
+  all. It now bounds both, defaults to 4 (the RAM-motivated value the
+  batch already used), and is `FLINT_FORGE_FANOUT` on the syncer.
+- **Sibling temporaries no longer collide.** The fetch's temporary was
+  `dest.with_extension("part")`, which maps `pack-X.pack` and
+  `pack-X.idx` to the SAME `pack-X.part`. Harmless while files were
+  fetched in series; a corrupted index the moment two siblings were in
+  flight together. The temporary is now the destination name with
+  `.part` appended.
+- **The memory double counts get_range calls in flight** and can delay
+  every one of them, so a fan-out's bound is testable from both sides:
+  the new tests read a peak of exactly 1, 2 and 4 for fanouts 1, 2 and 4,
+  and a failed chunk in one sibling lands none of the set.
+
+### Added — flint forge, a latency leg
+
+- **`forge/e2e/latency/`** — the round trips a push and a restore cost,
+  measured rather than counted. Every other forge drill runs on loopback
+  MinIO, where a round trip is a millisecond and only the request COUNT
+  is visible; the concurrent sibling upload (`62775105`) shipped with
+  its win "structural rather than measured". This leg puts toxiproxy in
+  front of the same MinIO with a latency toxic each way and runs the
+  same binary at `FLINT_FORGE_FANOUT=4` against `=1` — what the code did
+  before — with arms interleaved and the position changing, a null leg
+  at RTT 0, and a fit across RTTs that must scale. A push costs **5.1
+  round trips** with the fan-out and **7.1** without: exactly the
+  request count, nothing hidden.
+- **Run against the pre-fix binary as a control** (`cda4b21e`, no knob,
+  sequential restore): both nulls pass and both measured legs FAIL,
+  which is what makes the green run worth anything. Both logs are under
+  `forge/e2e/results/`.
+- **The shared rig now owns the tri-state verdict** (`inconc`, exit 2
+  on any inconclusive leg) and the binary-freshness precondition, moved
+  out of the large-repo leg so both use one copy.
+
 ### Added — flint forge, a large-repository leg
 
 - **`forge/e2e/largerepo/`** — the size regime the suite could not

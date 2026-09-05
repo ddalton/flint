@@ -271,6 +271,17 @@ and are now uploaded with bounded concurrency (4), which is what makes
 the chain the length this paragraph says it is. The bound exists
 because `put_whole` holds the body in RAM.
 
+**MEASURED IN ROUND TRIPS 2026-09-05** (`forge/e2e/latency/`, toxiproxy
+in front of MinIO, the same binary with `FLINT_FORGE_FANOUT=1` as the
+control, arms interleaved, nulls at RTT 0). Fitted over RTT 50/100/200:
+a push costs **5.1 round trips + 225 ms** with the fan-out and **7.1 +
+235 ms** without — exactly the request count, nothing hidden, and the
+intercept is git's own work. The saving is (siblings − 1) round trips
+and scales linearly with the RTT (120 → 426 ms from 50 → 200 ms). The
+pre-fix binary run as a control shows no difference between arms. The
+bound is `ForgeConfig::fanout`, which this design named and which no
+code read until that day.
+
 Three tests hold this shape — the fixed cost, the HEAD rule, and the
 per-pack term — so a regression that adds a round trip to every push
 is caught here rather than on a bucket's request bill.
@@ -327,7 +338,29 @@ symptom is a pod that will not start.
 
 The shipped ranged fetch holds **38-40 MiB flat** from 512 MiB to
 2 GiB — 27x lower at 512 MiB, 53x at 1 GiB — and reproduces the object
-byte-identically (same SHA-256).
+byte-identically (same SHA-256). (That is the one-chunk-in-flight
+figure; the fan-out below costs ~20 MiB per chunk in flight, 104 MiB at
+the default fanout 4, still flat in the pack.)
+
+**PHASE 1 RAN 2026-09-05, and the restore was serial twice over.** The
+ranged fetch above ran its chunks one at a time, and the restore ran its
+files one at a time: at this envelope that is 1,280 round trips in one
+stream, on the path that runs at every pod start. `fanout` — declared
+here, defaulted to 16, documented as bounding "pack uploads and restore
+fetches" — was read by nothing. The restore now runs one bounded fan-out
+across files and chunks together (`packio::fetch_all`, `fanout` chunks
+in flight at ~20 MiB each — measured 43 MiB at fanout 1 and 104 MiB at
+fanout 4 on a 160 MiB pack — all-or-nothing, temporaries renamed only
+after every chunk of every file has landed). Measured with injected latency
+(`forge/e2e/latency/`): a 33-file restore costs **14.3 round trips**
+at fanout 4 against **38.6** serial — 2.3 s vs 4.9 s at RTT 100, 3.7 s
+vs 8.7 s at RTT 200 — and the pre-fix binary shows no difference between
+arms. Two things the concurrent path forced into the open: the
+temporary name `with_extension("part")` gave a pack's `.pack` and `.idx`
+ONE temporary between them (harmless in series, a corrupted index in
+parallel — it now appends `.part`); and `fanout`'s default is now 4, the
+RAM-motivated bound the batch had hard-coded, rather than the 16 nothing
+ever used.
 
 **Measure `peak memory footprint`, not RSS.** The first pass used peak
 RSS and read 1.05 GB for a 2 GiB fetch, *plateauing* at 1 GB: macOS

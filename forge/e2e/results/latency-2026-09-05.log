@@ -1,0 +1,71 @@
+forge latency leg — 2026-09-05, this Mac (arm64), MinIO in Docker, toxiproxy 2.12 on the host
+binary: forge/syncer at the commit that adds this leg (restore fan-out + FLINT_FORGE_FANOUT)
+command: KEEP=1 ./run-latency.sh   (defaults: PUSH_RTTS="0 50 100 200" PUSHES=10 RESTORE_RTTS="0 100 200" RESTORES=5 SEED_PUSHES=10)
+
+
+== rig gate: the store's conditional PUT is real ==
+  PASS  If-None-Match:* admits a fresh key
+  PASS  If-None-Match:* refuses an existing key
+  PASS  If-Match refuses a wrong etag
+  PASS  If-Match admits the right etag
+  PASS  the refused PUTs left the bytes alone
+
+== precondition: FORGE_BIN is newer than the sources it claims to be ==
+  PASS  FORGE_BIN is not older than any source under forge/syncer or flint-store
+
+== P0 — the proxy injects the round trip the legs assume ==
+  ....  GET / direct 2 ms; via proxy at RTT 0 2 ms; via proxy at RTT 200 204 ms
+  PASS  RTT 200 adds 202 ms to one request-response
+  PASS  at RTT 0 the proxy itself costs 0 ms — the null leg is a null
+
+== P1 @ RTT 0 ms — 10 pushes per arm, fanout 4 (A) vs fanout 1 (B) ==
+  PASS  every push left one pack of 3 siblings in both arms (11 packs each)
+
+== P1 @ RTT 50 ms — 10 pushes per arm, fanout 4 (A) vs fanout 1 (B) ==
+  PASS  every push left one pack of 3 siblings in both arms (11 packs each)
+
+== P1 @ RTT 100 ms — 10 pushes per arm, fanout 4 (A) vs fanout 1 (B) ==
+  PASS  every push left one pack of 3 siblings in both arms (11 packs each)
+
+== P1 @ RTT 200 ms — 10 pushes per arm, fanout 4 (A) vs fanout 1 (B) ==
+  PASS  every push left one pack of 3 siblings in both arms (11 packs each)
+
+== P1 verdict — predicted saving 2 round trips per push (3 siblings, fanout 4) ==
+  ....  RTT   0 ms: fanout A     181 ms   fanout 1     192 ms   delta     +11 ms   fanout 1 slower in 7/10   IQR 11/8 ms
+  PASS  at RTT 0 the arms are indistinguishable (delta +11 ms): the knob alone moves nothing
+  ....  RTT  50 ms: fanout A     476 ms   fanout 1     596 ms   delta    +120 ms   fanout 1 slower in 10/10   IQR 12/26 ms
+  PASS  at RTT 50 ms the fan-out saves 120 ms per push (predicted 100 = 2 round trips)
+  ....  RTT 100 ms: fanout A     735 ms   fanout 1     941 ms   delta    +206 ms   fanout 1 slower in 10/10   IQR 43/32 ms
+  PASS  at RTT 100 ms the fan-out saves 206 ms per push (predicted 200 = 2 round trips)
+  ....  RTT 200 ms: fanout A    1236 ms   fanout 1    1662 ms   delta    +426 ms   fanout 1 slower in 10/10   IQR 20/16 ms
+  PASS  at RTT 200 ms the fan-out saves 426 ms per push (predicted 400 = 2 round trips)
+  ....  fitted over RTT [50, 100, 200] ms: fanout A = 5.1 round trips + 225 ms, fanout 1 = 7.1 round trips + 235 ms; saved 2.1 (predicted 2)
+  PASS  the saving scales with the round trip (120 ms at 50 -> 426 ms at 200, x3.6 for x4): it is latency, not CPU
+
+== P2 seed — a repository of 11 packs to restore ==
+  PASS  seeded 11 packs, 33 files, tip bbff2e5c86d895c9ea182b7182f79759be0f0b4f
+
+== P2 @ RTT 0 ms — 5 restores of 33 files per arm, fanout 4 (A) vs fanout 1 (B) ==
+  ....  recorded 5 pairs at RTT 0 ms
+
+== P2 @ RTT 100 ms — 5 restores of 33 files per arm, fanout 4 (A) vs fanout 1 (B) ==
+  ....  recorded 5 pairs at RTT 100 ms
+
+== P2 @ RTT 200 ms — 5 restores of 33 files per arm, fanout 4 (A) vs fanout 1 (B) ==
+  ....  recorded 5 pairs at RTT 200 ms
+
+== P2 verdict — predicted saving 24 round trips per restore (33 files, fanout 4) ==
+  ....  RTT   0 ms: fanout A     541 ms   fanout 1     540 ms   delta      -1 ms   fanout 1 slower in 2/5   IQR 4/107 ms
+  PASS  at RTT 0 the arms are indistinguishable (delta -1 ms): the knob alone moves nothing
+  ....  RTT 100 ms: fanout A    2267 ms   fanout 1    4872 ms   delta   +2605 ms   fanout 1 slower in 5/5   IQR 187/84 ms
+  PASS  at RTT 100 ms the fan-out saves 2605 ms per restore (predicted 2400 = 24 round trips)
+  ....  RTT 200 ms: fanout A    3702 ms   fanout 1    8735 ms   delta   +5033 ms   fanout 1 slower in 5/5   IQR 15/37 ms
+  PASS  at RTT 200 ms the fan-out saves 5033 ms per restore (predicted 4800 = 24 round trips)
+  ....  fitted over RTT [100, 200] ms: fanout A = 14.3 round trips + 832 ms, fanout 1 = 38.6 round trips + 1009 ms; saved 24.3 (predicted 24)
+  PASS  the saving scales with the round trip (2605 ms at 100 -> 5033 ms at 200, x1.9 for x2): it is latency, not CPU
+  PASS  arm A's last restore passes fsck --strict and is at the seeded tip
+  PASS  arm B's last restore passes fsck --strict and is at the seeded tip
+
+CSVs: /var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/tmp.8M9JrraTUT/pushes.csv /var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/tmp.8M9JrraTUT/restores.csv (KEEP=1 to retain)
+
+latency: 24 passed, 0 failed

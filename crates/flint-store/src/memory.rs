@@ -177,6 +177,14 @@ pub struct MemoryStore {
     /// Counted HEAD failures — the sweep's transient-throttle drill.
     fail_head_count: AtomicU64,
     stall_next_get_range_ms: AtomicU64,
+    /// A latency every get_range pays, in ms: the double's stand-in for
+    /// a network round trip, so a test can observe whether fetches
+    /// OVERLAP rather than time them.
+    get_range_delay_ms: AtomicU64,
+    /// get_range calls in flight, and the most there have ever been at
+    /// once: a fan-out's bound, observed from both sides.
+    inflight_get_range: AtomicU64,
+    peak_get_range: AtomicU64,
     /// Model a project-scoped proxy that STRIPS `x-amz-version-id`:
     /// every write still succeeds and reports no version. This is D8's
     /// silent-degradation hazard, and the only way to test that the
@@ -192,6 +200,15 @@ pub struct MemoryStore {
     ops: Mutex<std::collections::BTreeMap<&'static str, u64>>,
     pub min_part: u64,
     pub max_parts: usize,
+}
+
+/// Leaves the in-flight count on drop, so an early `return` still
+/// leaves.
+struct InFlight<'a>(&'a AtomicU64);
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Default for MemoryStore {
@@ -229,6 +246,9 @@ impl MemoryStore {
             fail_get_range_count: AtomicU64::new(0),
             fail_head_count: AtomicU64::new(0),
             stall_next_get_range_ms: AtomicU64::new(0),
+            get_range_delay_ms: AtomicU64::new(0),
+            inflight_get_range: AtomicU64::new(0),
+            peak_get_range: AtomicU64::new(0),
             strip_version_ids: AtomicBool::new(false),
             fail_lifecycle_writes: AtomicBool::new(false),
             // Tiny granularity by default so tests compose small
@@ -269,6 +289,25 @@ impl MemoryStore {
     /// exceed the chunk-retry budget to force the truncate-back path.
     pub fn inject_get_range_failures(&self, n: u64) {
         self.fail_get_range_count.store(n, Ordering::SeqCst);
+    }
+
+    /// Every get_range from now on sleeps `ms` first. Unlike the
+    /// one-shot stall this is persistent, and it is what makes a
+    /// fan-out OBSERVABLE: calls that overlap are in flight together
+    /// for the whole delay, so `peak_get_range_in_flight` reads the
+    /// caller's bound rather than the scheduler's luck.
+    pub fn inject_get_range_delay_ms(&self, ms: u64) {
+        self.get_range_delay_ms.store(ms, Ordering::SeqCst);
+    }
+
+    /// The most get_range calls ever in flight at once since the last
+    /// reset. A fan-out bounded at N reads exactly N here when there is
+    /// work for N — and exactly 1 when it is not a fan-out at all.
+    pub fn peak_get_range_in_flight(&self) -> u64 {
+        self.peak_get_range.load(Ordering::SeqCst)
+    }
+    pub fn reset_peak_get_range_in_flight(&self) {
+        self.peak_get_range.store(0, Ordering::SeqCst);
     }
 
     /// The next `n` HEAD calls fail with a transport error.
@@ -599,6 +638,11 @@ impl ObjectStore for MemoryStore {
         if_match: &str,
     ) -> StoreResult<Bytes> {
         self.bump("get_range");
+        let _in_flight = {
+            let now = self.inflight_get_range.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak_get_range.fetch_max(now, Ordering::SeqCst);
+            InFlight(&self.inflight_get_range)
+        };
         // Counted injections for the step-11 drills.
         if self
             .fail_get_range_count
@@ -610,6 +654,10 @@ impl ObjectStore for MemoryStore {
         let stall = self.stall_next_get_range_ms.swap(0, Ordering::SeqCst);
         if stall > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(stall)).await;
+        }
+        let delay = self.get_range_delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         }
         let inner = self.inner.lock().unwrap();
         let o = inner

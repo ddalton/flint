@@ -19,6 +19,7 @@
 //!   FLINT_FORGE_BATCH_MAX        pushes per batch (default 64)
 //!   FLINT_FORGE_REPACK_THRESHOLD packs before a repack (default 24)
 //!   FLINT_FORGE_ORPHAN_GRACE_SECS  sweep grace (default 3600)
+//!   FLINT_FORGE_FANOUT           pack PUTs / ranged GETs in flight (default 4)
 //!   FLINT_FORGE_DEFAULT_BRANCH   HEAD for an empty repository (main)
 //!   FLINT_FORGE_HOOKS_PATH       core.hooksPath (the hooks ship in the
 //!                                git image, not in the repository)
@@ -110,6 +111,7 @@ async fn main() {
     cfg.batch_max = env_u64("FLINT_FORGE_BATCH_MAX", 64).max(1) as usize;
     cfg.repack_threshold = env_u64("FLINT_FORGE_REPACK_THRESHOLD", 24) as usize;
     cfg.orphan_grace_secs = env_u64("FLINT_FORGE_ORPHAN_GRACE_SECS", 3600);
+    cfg.fanout = env_u64("FLINT_FORGE_FANOUT", 4).max(1) as usize;
     cfg.project_id = std::env::var("FLINT_FORGE_PROJECT_ID").ok().filter(|p| !p.is_empty());
     cfg.default_branch =
         std::env::var("FLINT_FORGE_DEFAULT_BRANCH").unwrap_or_else(|_| "main".into());

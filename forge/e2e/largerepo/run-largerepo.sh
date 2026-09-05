@@ -29,45 +29,19 @@ MINIO_PORT=${MINIO_PORT:-9101}
 . "$HERE/../composition/rig.sh"
 
 REPO_MB=${REPO_MB:-160}
+FANOUT=${FANOUT:-4}               # the syncer's default; FANOUT=1 measures the serial floor
 CEILING=$((64 * 1024 * 1024))     # packio::WHOLE_PUT_MAX
-INCONC=0
-inconc() { INCONC=$((INCONC+1)); printf '  INCONCLUSIVE  %s\n' "$*"; }
-
-# An inconclusive leg is NOT a pass. The rig's own verdict counts only
-# PASS and FAIL, so a leg that could not measure what it exists to
-# measure would report "0 failed" and read as green — the exact way a
-# measurement rig lies (tests/k8s/oci-ab: "INCONCLUSIVE is not PASS").
-lr_verdict() {
-  verdict "large-repo"
-  local rc=$?
-  if [ "$INCONC" -gt 0 ]; then
-    printf 'INCONCLUSIVE: %d leg(s) could not be decided — this run is NOT green.\n' "$INCONC"
-    return 2
-  fi
-  return $rc
-}
-
-# ── precondition: the binary under test is the tree under test ───────
-#
-# `cargo build --bins` SILENTLY SKIPS flint-forge-syncer: it carries
-# `required-features = ["s3"]`, so a plain build leaves whatever binary
-# was there before at exactly the path FORGE_BIN points to. A drill run
-# after one reports green about code that is not in the tree. Caught
-# once for real while writing this leg.
-binary_is_fresh() {
-  head_ "precondition: FORGE_BIN is newer than the sources it claims to be"
-  local newest
-  newest=$(find "$REPO_ROOT/forge/syncer/src" "$REPO_ROOT/crates/flint-store/src" \
-             -name '*.rs' -newer "$FORGE_BIN" 2>/dev/null | head -3)
-  if [ -n "$newest" ]; then
-    bad "FORGE_BIN is older than $(echo "$newest" | wc -l | tr -d ' ')+ source file(s):"
-    echo "$newest" | sed 's/^/          /'
-    say "        rebuild with:  cargo build --bins --features s3"
-    return 1
-  fi
-  ok "FORGE_BIN is not older than any source under forge/syncer or flint-store"
-  return 0
-}
+# The restore's memory FLOOR is ~24 MiB + fanout x 20 MiB: each 8 MiB
+# chunk in flight is held about two and a half times (the SDK's
+# aggregation buffer, the Bytes it returns, the write's copy), `fanout`
+# at a time. MEASURED 2026-09-05 on a 160 MiB pack: 43.3 MiB at fanout 1,
+# 103.5 MiB at fanout 4. L2 compares the peak against the PACK, so the
+# pack has to sit above that floor with margin, or the leg fails a
+# restore that is doing exactly what it should.
+MIN_REPO_MB=$(( (24 + FANOUT * 20) * 5 / 4 ))
+# `inconc`, the tri-state `verdict` and `binary_is_fresh` live in the
+# shared rig: this leg is where they were first needed, and the latency
+# leg needed the same three.
 
 # Peak memory of a process, in bytes. macOS's `peak memory footprint`
 # counts compressed pages; its RSS does NOT, and reading RSS here
@@ -103,20 +77,20 @@ build_big_repo() {  # build_big_repo <clone-dir> <mib>
 main() {
   rig_init || { say "rig_init failed"; return 1; }
   rig_gate || true
-  binary_is_fresh || { lr_verdict; return 1; }
+  binary_is_fresh || { verdict "large-repo"; return 1; }
 
   local prefix="lr/A" bare="$WORK/bare.git" clone="$WORK/clone"
   # rig_purge takes PREFIXES. Passing the bucket name purges
   # s3://<bucket>/<bucket>, which is nothing, and the next run then
   # reads the previous run's snapshot and is refused "stale info".
   rig_purge "$prefix" 2>/dev/null || true
-  new_bare_repo "$bare" || { bad "could not init the bare repo"; lr_verdict; return 1; }
+  new_bare_repo "$bare" || { bad "could not init the bare repo"; verdict "large-repo"; return 1; }
   new_clone "$bare" "$clone" >/dev/null 2>&1
   git -C "$clone" config user.name driller; git -C "$clone" config user.email driller@invalid
 
   head_ "seeding a ${REPO_MB} MiB repository (incompressible)"
   local tip; tip=$(build_big_repo "$clone" "$REPO_MB")
-  [ -n "$tip" ] && ok "seeded, tip $tip" || { bad "seed failed"; lr_verdict; return 1; }
+  [ -n "$tip" ] && ok "seeded, tip $tip" || { bad "seed failed"; verdict "large-repo"; return 1; }
 
   # ── L1: the pack crosses the ceiling and is composed ───────────────
   head_ "L1 — a pack above the whole-put ceiling is uploaded multipart"
@@ -152,7 +126,11 @@ main() {
   forge_down L
 
   # ── L2: the restore's memory does not scale with the repository ────
-  head_ "L2 — a restore does not need as much memory as the repository is big"
+  head_ "L2 — a restore does not need as much memory as the repository is big (fanout ${FANOUT})"
+  if [ "$REPO_MB" -lt "$MIN_REPO_MB" ]; then
+    inconc "REPO_MB=${REPO_MB} is under the ${MIN_REPO_MB} MiB this leg needs at fanout ${FANOUT}: the restore's floor would be read as scaling"
+    verdict "large-repo"; return 2
+  fi
   local fresh="$WORK/restored.git"
   new_bare_repo "$fresh" || bad "could not init the restore target"
   # There is no exit-after-restore knob and inventing one would be a
@@ -168,6 +146,7 @@ main() {
            FLINT_FORGE_SOCKET="$sock" \
            FLINT_FORGE_STATUS_ADDR="127.0.0.1:$((9848 + RANDOM % 900))" \
            FLINT_FORGE_HEARTBEAT_SECS=2 FLINT_FORGE_BATCH_WINDOW_MS=200 \
+           FLINT_FORGE_FANOUT="$FANOUT" \
            FLINT_FORGE_SYNC_BIN="$SYNC_BIN"
     exec /usr/bin/time -l "$FORGE_BIN" ) > "$WORK/restore.log" 2> "$tf" &
   local tpid=$!
@@ -207,7 +186,7 @@ main() {
     fi
   fi
 
-  lr_verdict
+  verdict "large-repo"
 }
 
 trap 'rig_clean' EXIT

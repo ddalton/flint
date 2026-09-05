@@ -1,0 +1,52 @@
+forge latency leg — CONTROL: the same leg against the PRE-FIX binary built from cda4b21e (no FLINT_FORGE_FANOUT, sequential restore)
+expected: P0 and both RTT-0 nulls PASS; P1 and P2 at RTT 100 FAIL — the leg must be able to see the code it exists to catch
+command: FORGE_BIN=<cda4b21e build> PUSH_RTTS="0 100" PUSHES=5 RESTORE_RTTS="0 100" RESTORES=3 SEED_PUSHES=5 ./run-latency.sh
+
+
+== rig gate: the store's conditional PUT is real ==
+  PASS  If-None-Match:* admits a fresh key
+  PASS  If-None-Match:* refuses an existing key
+  PASS  If-Match refuses a wrong etag
+  PASS  If-Match admits the right etag
+  PASS  the refused PUTs left the bytes alone
+
+== precondition: FORGE_BIN is newer than the sources it claims to be ==
+  PASS  FORGE_BIN is not older than any source under forge/syncer or flint-store
+
+== P0 — the proxy injects the round trip the legs assume ==
+  ....  GET / direct 2 ms; via proxy at RTT 0 2 ms; via proxy at RTT 200 204 ms
+  PASS  RTT 200 adds 202 ms to one request-response
+  PASS  at RTT 0 the proxy itself costs 0 ms — the null leg is a null
+
+== P1 @ RTT 0 ms — 5 pushes per arm, fanout 4 (A) vs fanout 1 (B) ==
+  PASS  every push left one pack of 3 siblings in both arms (6 packs each)
+
+== P1 @ RTT 100 ms — 5 pushes per arm, fanout 4 (A) vs fanout 1 (B) ==
+  PASS  every push left one pack of 3 siblings in both arms (6 packs each)
+
+== P1 verdict — predicted saving 2 round trips per push (3 siblings, fanout 4) ==
+  ....  RTT   0 ms: fanout A     177 ms   fanout 1     179 ms   delta      +2 ms   fanout 1 slower in 3/5   IQR 28/22 ms
+  PASS  at RTT 0 the arms are indistinguishable (delta +2 ms): the knob alone moves nothing
+  ....  RTT 100 ms: fanout A     735 ms   fanout 1     755 ms   delta     +20 ms   fanout 1 slower in 3/5   IQR 17/30 ms
+  FAIL  at RTT 100 ms the fan-out is not faster: delta +20 ms, fanout 1 slower in only 3/5 (predicted 200)
+
+== P2 seed — a repository of 6 packs to restore ==
+  PASS  seeded 6 packs, 18 files, tip f1a66ed43d9db6f6d5f83abed35c4801cf641be2
+
+== P2 @ RTT 0 ms — 3 restores of 18 files per arm, fanout 4 (A) vs fanout 1 (B) ==
+  ....  recorded 3 pairs at RTT 0 ms
+
+== P2 @ RTT 100 ms — 3 restores of 18 files per arm, fanout 4 (A) vs fanout 1 (B) ==
+  ....  recorded 3 pairs at RTT 100 ms
+
+== P2 verdict — predicted saving 13 round trips per restore (18 files, fanout 4) ==
+  ....  RTT   0 ms: fanout A     537 ms   fanout 1     538 ms   delta      +1 ms   fanout 1 slower in 2/3   IQR 5/0 ms
+  PASS  at RTT 0 the arms are indistinguishable (delta +1 ms): the knob alone moves nothing
+  ....  RTT 100 ms: fanout A    3149 ms   fanout 1    3178 ms   delta     +29 ms   fanout 1 slower in 1/3   IQR 52/44 ms
+  FAIL  at RTT 100 ms the fan-out is not faster: delta +29 ms, fanout 1 slower in only 1/3 (predicted 1300)
+  PASS  arm A's last restore passes fsck --strict and is at the seeded tip
+  PASS  arm B's last restore passes fsck --strict and is at the seeded tip
+
+CSVs: /var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/tmp.otoFC4RgMu/pushes.csv /var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/tmp.otoFC4RgMu/restores.csv (KEEP=1 to retain)
+
+latency: 15 passed, 2 failed

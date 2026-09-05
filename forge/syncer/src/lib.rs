@@ -156,7 +156,13 @@ pub struct ForgeConfig {
     /// and a foreign project is `Refused` (lean's finding 5, on the
     /// data plane).
     pub project_id: Option<String>,
-    /// Bounded concurrency for pack uploads and restore fetches.
+    /// Bounded concurrency for pack uploads and restore fetches
+    /// (`FLINT_FORGE_FANOUT`). It is a RAM bound as much as a request
+    /// bound: an upload in flight holds up to `packio::WHOLE_PUT_MAX`
+    /// and a fetch in flight `packio::FETCH_CHUNK`, so the default is
+    /// sized to the pod's memory request, not to the bucket's request
+    /// rate. Declared at 16 and read nowhere until 2026-09-05: uploads
+    /// ran at a hard-coded bound and the restore one file at a time.
     pub fanout: usize,
     /// `core.hooksPath` for the repository, when the hooks live
     /// somewhere other than `<repo>/hooks`.
@@ -191,7 +197,7 @@ impl ForgeConfig {
             repack_threshold: 24,
             orphan_grace_secs: 3600,
             project_id: None,
-            fanout: 16,
+            fanout: 4,
             default_branch: "main".into(),
             hooks_path: None,
         }

@@ -38,12 +38,19 @@ export AWS_DEFAULT_REGION=$AWS_REGION
 export AWS_EC2_METADATA_DISABLED=true
 export AWS_ENDPOINT_URL=$ENDPOINT
 
-PASS=0; FAIL=0; KNOWN=0
+PASS=0; FAIL=0; KNOWN=0; INCONC=0
 say()  { printf '%s\n' "$*"; }
 head_() { printf '\n== %s ==\n' "$*"; }
 ok()   { PASS=$((PASS+1)); printf '  PASS  %s\n' "$*"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL  %s\n' "$*"; }
 note() { printf '  ....  %s\n' "$*"; }
+# A leg that could not measure what it exists to measure. NOT a pass:
+# a verdict that counted only PASS and FAIL would report "0 failed"
+# about a rig that never injected the latency, never reached the size
+# regime, never had a peak-memory figure — the exact way a measurement
+# rig lies (tests/k8s/oci-ab: "INCONCLUSIVE is not PASS"). `verdict`
+# exits 2 on any of these.
+inconc() { INCONC=$((INCONC+1)); printf '  INCONCLUSIVE  %s\n' "$*"; }
 
 # ── accepted conditions ──────────────────────────────────────────────
 # These drills found four things the rule forbids and the system
@@ -84,7 +91,34 @@ verdict() {
   else
     printf '\n%s: %d passed, %d failed\n' "${1:-drill}" "$PASS" "$FAIL"
   fi
+  if [ "$INCONC" -gt 0 ]; then
+    printf 'INCONCLUSIVE: %d leg(s) could not be decided — this run is NOT green.\n' "$INCONC"
+    return 2
+  fi
   [ "$FAIL" -eq 0 ]
+}
+
+# ── preconditions ────────────────────────────────────────────────────
+# The binary under test is the tree under test.
+#
+# `cargo build --bins` SILENTLY SKIPS flint-forge-syncer: it carries
+# `required-features = ["s3"]`, so a plain build leaves whatever binary
+# was there before at exactly the path FORGE_BIN points to. A drill run
+# after one reports green about code that is not in the tree. Caught
+# once for real while writing the large-repo leg.
+binary_is_fresh() {
+  head_ "precondition: FORGE_BIN is newer than the sources it claims to be"
+  local newest
+  newest=$(find "$REPO_ROOT/forge/syncer/src" "$REPO_ROOT/crates/flint-store/src" \
+             -name '*.rs' -newer "$FORGE_BIN" 2>/dev/null | head -3)
+  if [ -n "$newest" ]; then
+    bad "FORGE_BIN is older than $(echo "$newest" | wc -l | tr -d ' ')+ source file(s):"
+    echo "$newest" | sed 's/^/          /'
+    say "        rebuild with:  cargo build --bins --features s3"
+    return 1
+  fi
+  ok "FORGE_BIN is not older than any source under forge/syncer or flint-store"
+  return 0
 }
 
 # ── infrastructure ───────────────────────────────────────────────────

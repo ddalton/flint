@@ -223,12 +223,13 @@ pub async fn run_batch(
     // in SERIES — the dependent chain §4 costs at two round trips was
     // in fact two plus one per sibling.
     //
-    // Concurrency is bounded because `put_whole` holds the whole body
-    // in RAM: peak is WHOLE_PUT_MAX per upload in flight. An error
+    // Concurrency is bounded (`fanout`, FLINT_FORGE_FANOUT) because
+    // `put_whole` holds the whole body in RAM: peak is WHOLE_PUT_MAX
+    // per upload in flight. An error
     // drops the set and aborts what is still running, which is safe
     // precisely because these keys are content-named — a half-uploaded
     // generation is named by no snapshot and the next batch re-uploads.
-    const UPLOAD_CONCURRENCY: usize = 4;
+    let fanout = sc.cfg.fanout.max(1);
     let mut pending: Vec<(String, std::path::PathBuf)> = Vec::new();
     for pack in &local_packs {
         if known.contains(pack) {
@@ -238,7 +239,7 @@ pub async fn run_batch(
             pending.push((sc.cfg.pack_key(&file), sc.git.pack_path(&file)));
         }
     }
-    for group in pending.chunks(UPLOAD_CONCURRENCY) {
+    for group in pending.chunks(fanout) {
         let mut set = tokio::task::JoinSet::new();
         for (key, path) in group {
             let store = sc.store.clone();
