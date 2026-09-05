@@ -23,7 +23,15 @@ use super::{ForgeError, ForgeResult};
 /// one pack, and one pack is the largest object forge ever writes.
 pub const WHOLE_PUT_MAX: u64 = 64 * 1024 * 1024;
 
-fn crc_of(path: &Path) -> ForgeResult<u64> {
+/// The streaming checksum of a pack above the whole-PUT ceiling.
+///
+/// `progress` is advanced by the bytes hashed. This pass took ~70 s
+/// over a 40 GiB pack on runbx (2026-09-05) and ticked nothing, so the
+/// progress-gated renewer let the token go quiet for six heartbeats —
+/// a whole takeover window — in the middle of a live push, before the
+/// first part had even been created. Hashing IS the batch moving; a
+/// read that stalls still stalls the count, which is the gate's point.
+fn crc_of(path: &Path, progress: Option<&Arc<std::sync::atomic::AtomicU64>>) -> ForgeResult<u64> {
     let mut crc = Crc64Nvme::new();
     let mut f = std::fs::File::open(path)?;
     let mut buf = vec![0u8; 4 << 20];
@@ -33,6 +41,9 @@ fn crc_of(path: &Path) -> ForgeResult<u64> {
             break;
         }
         crc.update(&buf[..n]);
+        if let Some(p) = progress {
+            p.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+        }
     }
     Ok(crc.finalize())
 }
@@ -114,7 +125,8 @@ pub async fn upload_file(
     // Above the ceiling the object is never held whole, so the
     // checksum streams.
     let p = path.to_path_buf();
-    let crc = tokio::task::spawn_blocking(move || crc_of(&p))
+    let hashed = progress.clone();
+    let crc = tokio::task::spawn_blocking(move || crc_of(&p, hashed.as_ref()))
         .await
         .map_err(|e| ForgeError::State(format!("pack checksum did not join: {e}")))??;
     let parts = part_grid(size, store.min_part_size(), store.max_parts());
