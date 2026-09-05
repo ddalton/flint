@@ -42,6 +42,10 @@ pub struct ServerOpts {
     /// that cannot be made Holds.
     pub status_addr: Option<String>,
     pub policy: Policy,
+    /// The legible export (§9). `None` = off, which is the default: a
+    /// repository that nobody mounts as a workspace pays nothing for
+    /// the option.
+    pub export: Option<super::export::ExportConfig>,
 }
 
 /// Shared with the status listener. A `Mutex` over facts, not over the
@@ -167,6 +171,20 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                     }
                 }
                 run_and_report(&mut sc, waiting, &policy, &shared).await?;
+                // AFTER the report, and never before it. The export is
+                // derived data: a push is acknowledged on the strength
+                // of the pack and the snapshot, and nothing about
+                // republishing a tree may delay or fail that. A failure
+                // here is logged and retried on the next batch.
+                if let Some(ex) = opts.export.as_ref() {
+                    match super::export::maybe_run(&sc.git, ex, super::now_unix()).await {
+                        // Stashed, not written: the NEXT batch's single
+                        // CAS carries it (see `Syncer::pending_exported_commit`).
+                        Ok(Some(commit)) => sc.pending_exported_commit = Some(commit),
+                        Ok(None) => {}
+                        Err(e) => eprintln!("flint-forge: export deferred: {e}"),
+                    }
+                }
             }
         }
     }

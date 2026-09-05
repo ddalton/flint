@@ -23,4 +23,12 @@ RUN apk add --no-cache ca-certificates git && update-ca-certificates
 
 COPY ${BIN_DIR}/${TARGETARCH}/flint-forge-syncer /usr/local/bin/flint-forge-syncer
 
+# The legible export (design §9) runs `flint-sync barrier` over a tree
+# forge materialises. It is the SHIPPED lean binary, unmodified: forge
+# writes no manifest, so the ordering that a crash makes load-bearing —
+# upload, CAS, deletes LAST — is lean's, machine-checked by lean's own
+# model rather than re-derived here. Build it from lean/sidecar with
+# --features s3 alongside the syncer.
+COPY ${BIN_DIR}/${TARGETARCH}/flint-sync /usr/local/bin/flint-sync
+
 ENTRYPOINT ["/usr/local/bin/flint-forge-syncer"]

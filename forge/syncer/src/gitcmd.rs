@@ -97,6 +97,32 @@ impl Git {
         self.run_in(&repo, args, stdin).await
     }
 
+    /// Run in the repository with extra environment. `GIT_INDEX_FILE`
+    /// is the one that matters: the export keeps its own index beside
+    /// its scratch tree, so materialising a ref never touches the bare
+    /// repository's own index or its HEAD.
+    pub async fn run_env(&self, args: &[&str], env: &[(&str, &str)]) -> ForgeResult<Output> {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
+            .arg(&self.repo)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("HOME", "/nonexistent")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().await?;
+        Ok(Output {
+            status: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
     /// Run and require success — for the invocations where a non-zero
     /// status genuinely is a failure.
     pub async fn must(&self, args: &[&str], stdin: Option<&[u8]>) -> ForgeResult<String> {

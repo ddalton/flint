@@ -81,6 +81,12 @@ use crate::s3csi::policy::Consumers;
 // servers publishing one workspace.
 #[x_kube(validation = Rule::new("!has(self.export) || self.export.prefix != self.keyPrefix")
     .message("spec.export.prefix must differ from spec.keyPrefix — the export is a separate lean workspace"))]
+// ONE ref per export prefix. A lean workspace is one tree, so two refs
+// published into one prefix would be two writers of one manifest, each
+// deleting what the other just wrote. Refused at admission rather than
+// discovered as a workspace that flickers between two histories.
+#[x_kube(validation = Rule::new("!has(self.export) || size(self.export.refs) == 1")
+    .message("spec.export.refs must name exactly one ref — a lean workspace is one tree, and two refs in one prefix would be two writers of one manifest"))]
 pub struct FlintRepoSpec {
     /// The durable, user-declared identity the claim cell carries —
     /// stable across CR delete/recreate, and NEVER the CR UID. A

@@ -23,6 +23,7 @@ use super::{lease, restore, snapshot, status, sweep, ForgeConfig, ForgeError, Sy
 const PREFIX: &str = "tenant/repo";
 
 struct Rig {
+    #[allow(dead_code)]
     _dir: tempfile::TempDir,
     store: Arc<MemoryStore>,
     sc: Syncer,
@@ -960,4 +961,238 @@ async fn the_syncer_refuses_a_protected_push_with_no_hook_in_the_picture() {
     let reports = batch::run_batch(&mut rig.sc, vec![bot], &policy).await.expect("batch");
     assert!(is_ok(&reports[0].results[0]), "{:?}", reports[0].results[0]);
     assert_eq!(rig.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(base));
+}
+
+// ── the legible export (§9) ──────────────────────────────────────────
+
+fn export_cfg(dir: &std::path::Path) -> super::export::ExportConfig {
+    super::export::ExportConfig {
+        reference: "refs/heads/main".into(),
+        prefix: "tenant/export".into(),
+        every_secs: 300,
+        bucket: "bkt".into(),
+        endpoint: None,
+        sync_bin: "/usr/local/bin/flint-sync".into(),
+        root: dir.join("export/tree"),
+        index: dir.join("export/index"),
+        project_id: Some("proj".into()),
+    }
+}
+
+/// Falsifier 9's first half, decided locally: every file in the
+/// exported tree is byte-identical to `git show <ref>:<path>`. The
+/// bucket half needs a real barrier and a real store; what a unit test
+/// can decide is that the TREE forge hands to lean is the ref's tree.
+#[tokio::test]
+async fn the_exported_tree_is_the_refs_tree() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let files = [("a.txt", "alpha\n"), ("b.txt", "beta\n"), ("c.txt", "gamma\n")];
+    let c = rig.stage_commit(None, &files, "first").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: c.clone(),
+    }])])
+    .await;
+
+    let cfg = export_cfg(rig._dir.path());
+    super::export::materialize(&rig.sc.git, &cfg, None, &c).await.expect("materialize");
+    for (name, content) in files {
+        let on_disk = std::fs::read_to_string(cfg.root.join(name)).expect(name);
+        assert_eq!(on_disk, content, "{name}");
+        let from_git = rig.git(&["show", &format!("{c}:{name}")], None).await;
+        assert_eq!(on_disk, from_git, "{name} must be byte-identical to what git holds");
+    }
+}
+
+/// The half of falsifier 9 that the design's own first draft got
+/// wrong. `git archive | tar -x` rewrites every file and leaves deleted
+/// paths behind; the two-tree update touches exactly what changed AND
+/// removes what the new tree no longer has. A stale file left behind is
+/// a file the export publishes forever.
+#[tokio::test]
+async fn an_incremental_export_touches_only_what_changed_and_removes_what_is_gone() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let first = rig
+        .stage_commit(
+            None,
+            &[("keep.txt", "same\n"), ("edit.txt", "before\n"), ("gone.txt", "doomed\n")],
+            "first",
+        )
+        .await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: first.clone(),
+    }])])
+    .await;
+    let cfg = export_cfg(rig._dir.path());
+    super::export::materialize(&rig.sc.git, &cfg, None, &first).await.expect("first");
+
+    // Mark the file that must not be rewritten. If the update touches
+    // it, the marker's mtime moves — and lean's next scan would read
+    // the whole tree as changed and re-upload it.
+    let keep = cfg.root.join("keep.txt");
+    let before = std::fs::metadata(&keep).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
+    let second = rig
+        .stage_commit(
+            Some(&first),
+            &[("keep.txt", "same\n"), ("edit.txt", "after\n"), ("new.txt", "fresh\n")],
+            "second",
+        )
+        .await;
+    rig.run(vec![push(2, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: first.clone(),
+        new_oid: second.clone(),
+    }])])
+    .await;
+    super::export::materialize(&rig.sc.git, &cfg, Some(&first), &second)
+        .await
+        .expect("incremental");
+
+    assert_eq!(std::fs::read_to_string(cfg.root.join("edit.txt")).unwrap(), "after\n");
+    assert_eq!(std::fs::read_to_string(cfg.root.join("new.txt")).unwrap(), "fresh\n");
+    assert!(
+        !cfg.root.join("gone.txt").exists(),
+        "a path the new tree does not have must be REMOVED, not left to be published forever"
+    );
+    assert_eq!(
+        std::fs::metadata(&keep).unwrap().modified().unwrap(),
+        before,
+        "an unchanged file must not be rewritten, or the next barrier re-uploads the whole tree"
+    );
+}
+
+/// Lean's own state directory lives inside the exported tree and is its
+/// baseline. Clearing the tree for a full re-materialise must not take
+/// it: losing it costs one full re-upload, and losing it on every
+/// export would make the export O(everything) forever.
+#[tokio::test]
+async fn a_full_rematerialise_keeps_leans_baseline_and_drops_stale_files() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let first = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: first.clone(),
+    }])])
+    .await;
+    let cfg = export_cfg(rig._dir.path());
+    super::export::materialize(&rig.sc.git, &cfg, None, &first).await.expect("first");
+
+    std::fs::create_dir_all(cfg.root.join(".flint-sync")).unwrap();
+    std::fs::write(cfg.root.join(".flint-sync/baseline"), b"lean's own").unwrap();
+    std::fs::write(cfg.root.join("stale.txt"), b"left over").unwrap();
+
+    // No index and no `from` — the shape a pod restart leaves.
+    std::fs::remove_file(&cfg.index).ok();
+    let second = rig.stage_commit(Some(&first), &[("a.txt", "two\n")], "second").await;
+    super::export::materialize(&rig.sc.git, &cfg, None, &second).await.expect("full");
+
+    assert_eq!(std::fs::read_to_string(cfg.root.join("a.txt")).unwrap(), "two\n");
+    assert!(!cfg.root.join("stale.txt").exists(), "the clear must take a stale file");
+    assert_eq!(
+        std::fs::read_to_string(cfg.root.join(".flint-sync/baseline")).unwrap(),
+        "lean's own",
+        "lean's baseline is not ours to delete"
+    );
+}
+
+/// The cadence floor and the already-exported check, which together
+/// decide whether a push pays for an export at all.
+#[test]
+fn the_export_runs_on_a_floor_and_never_twice_for_one_commit() {
+    use super::export::{plan, Plan, Record};
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = export_cfg(dir.path());
+
+    let never = Record::default();
+    assert_eq!(
+        plan(&cfg, Some("abc"), &never, 1000),
+        Plan::Run { from: None, to: "abc".into() },
+        "a repository that has never exported exports"
+    );
+
+    let done = Record { commit: Some("abc".into()), unix: 900 };
+    assert!(matches!(plan(&cfg, Some("abc"), &done, 5000), Plan::Skip(_)), "same commit");
+    assert!(
+        matches!(plan(&cfg, Some("def"), &done, 1000), Plan::Skip(_)),
+        "a new commit inside the floor waits for the next batch"
+    );
+    assert_eq!(
+        plan(&cfg, Some("def"), &done, 1300),
+        Plan::Run { from: Some("abc".into()), to: "def".into() },
+        "past the floor it runs, and it knows which tree it is coming from"
+    );
+    assert!(matches!(plan(&cfg, None, &never, 1000), Plan::Skip(_)), "an absent ref");
+}
+
+/// Everything load-bearing about the export is in this environment. A
+/// missing variable is a workspace published to the wrong prefix, or a
+/// project's tree overwritten because the claim check never ran.
+#[test]
+fn the_barrier_command_carries_the_workspace_it_publishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = export_cfg(dir.path());
+    cfg.endpoint = Some("http://minio:9000".into());
+    let (bin, args, env) = super::export::barrier_command(&cfg);
+    assert!(bin.ends_with("flint-sync"));
+    assert_eq!(args, vec!["barrier".to_string()]);
+    let map: std::collections::BTreeMap<_, _> = env.into_iter().collect();
+    assert_eq!(map["FLINT_SYNC_BUCKET"], "bkt");
+    assert_eq!(map["FLINT_SYNC_PREFIX"], "tenant/export");
+    assert_eq!(map["FLINT_SYNC_ROOT"], cfg.root.to_string_lossy());
+    assert_eq!(map["FLINT_SYNC_ENDPOINT"], "http://minio:9000");
+    assert_eq!(
+        map["FLINT_SYNC_PROJECT_ID"], "proj",
+        "without it an export would overwrite another project's workspace"
+    );
+    // The credentials are INHERITED, never rebuilt here: one place for
+    // them to be wrong instead of two.
+    assert!(!map.contains_key("AWS_ACCESS_KEY_ID"));
+}
+
+/// The export never writes the snapshot. It stashes its commit and the
+/// NEXT batch's single CAS carries it — a second writer of the one
+/// object the design says has exactly one is the whole thing this
+/// avoids.
+#[tokio::test]
+async fn the_exported_commit_rides_the_next_batch_rather_than_a_cas_of_its_own() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c1 = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: c1.clone(),
+    }])])
+    .await;
+    let seq_after_push = rig.sc.cell().unwrap().snap.seq;
+    assert_eq!(rig.sc.cell().unwrap().snap.exported_commit, None);
+
+    // An export happened.
+    rig.sc.pending_exported_commit = Some(c1.clone());
+    assert_eq!(
+        snapshot::load(rig.store.as_ref(), &rig.sc.cfg).await.unwrap().snap.seq,
+        seq_after_push,
+        "stashing an exported commit must not write the snapshot"
+    );
+
+    let c2 = rig.stage_commit(Some(&c1), &[("a.txt", "two\n")], "second").await;
+    rig.run(vec![push(2, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: c1.clone(),
+        new_oid: c2,
+    }])])
+    .await;
+    let cell = snapshot::load(rig.store.as_ref(), &rig.sc.cfg).await.unwrap();
+    assert_eq!(cell.snap.exported_commit.as_deref(), Some(c1.as_str()));
+    assert_eq!(cell.snap.seq, seq_after_push + 1, "one CAS, not two");
+    assert!(rig.sc.pending_exported_commit.is_none(), "taken, not re-written every batch");
 }

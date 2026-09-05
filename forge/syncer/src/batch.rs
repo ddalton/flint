@@ -236,6 +236,10 @@ pub async fn run_batch(
         }
     }
     next.packs = local_packs;
+    // The export's commit rides this CAS rather than one of its own.
+    if let Some(c) = sc.pending_exported_commit.take() {
+        next.exported_commit = Some(c);
+    }
     let writer = sc.holder_id.clone();
     let new_cell =
         match snapshot::cas(sc.store.as_ref(), &sc.cfg, &cell, next, epoch, &writer).await {

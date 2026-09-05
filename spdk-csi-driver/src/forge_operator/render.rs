@@ -355,6 +355,29 @@ pub fn deployment(repo: &FlintRepo, d: &RenderDefaults, replicas: i32) -> Deploy
             ..Default::default()
         });
     }
+    // The legible export (§9). Both halves or neither: the syncer
+    // refuses half a configuration rather than defaulting a prefix,
+    // because the only plausible default — the repository's own — is
+    // the one value that must never be used.
+    if let Some(ex) = s.export.as_ref().filter(|e| !e.refs.is_empty() && !e.prefix.is_empty()) {
+        env.push(EnvVar {
+            name: "FLINT_FORGE_EXPORT_REF".into(),
+            value: Some(ex.refs[0].clone()),
+            ..Default::default()
+        });
+        env.push(EnvVar {
+            name: "FLINT_FORGE_EXPORT_PREFIX".into(),
+            value: Some(ex.prefix.trim_end_matches('/').to_string()),
+            ..Default::default()
+        });
+        if let Some(secs) = ex.every_secs {
+            env.push(EnvVar {
+                name: "FLINT_FORGE_EXPORT_EVERY_SECS".into(),
+                value: Some(secs.to_string()),
+                ..Default::default()
+            });
+        }
+    }
 
     let syncer = Container {
         name: "syncer".to_string(),
@@ -747,6 +770,45 @@ mod tests {
             .and_then(|e| e.value.clone())
             .expect("the hooks path");
         assert_eq!(hooks, HOOKS_PATH);
+    }
+
+    /// The export reaches the syncer as a pair or not at all, and the
+    /// prefix loses its trailing slash on the way — the CRD requires
+    /// one and `ForgeConfig` trims one, and this is where the two
+    /// conventions meet.
+    #[test]
+    fn the_export_reaches_the_syncer_as_a_pair() {
+        let plain = deployment(&repo(), &RenderDefaults::default(), 1);
+        let env_of = |d: &Deployment| -> BTreeMap<String, String> {
+            d.spec
+                .clone()
+                .unwrap()
+                .template
+                .spec
+                .unwrap()
+                .containers
+                .iter()
+                .find(|c| c.name == "syncer")
+                .unwrap()
+                .env
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|e| (e.name.clone(), e.value.clone().unwrap_or_default()))
+                .collect()
+        };
+        assert!(!env_of(&plain).contains_key("FLINT_FORGE_EXPORT_REF"), "off by default");
+
+        let mut r = repo();
+        r.spec.export = Some(ExportSpec {
+            refs: vec!["main".into()],
+            prefix: "tenant/proj-export/".into(),
+            every_secs: Some(120),
+        });
+        let env = env_of(&deployment(&r, &RenderDefaults::default(), 1));
+        assert_eq!(env["FLINT_FORGE_EXPORT_REF"], "main");
+        assert_eq!(env["FLINT_FORGE_EXPORT_PREFIX"], "tenant/proj-export");
+        assert_eq!(env["FLINT_FORGE_EXPORT_EVERY_SECS"], "120");
     }
 
     /// An export claims a second subtree, and the arbitration has to

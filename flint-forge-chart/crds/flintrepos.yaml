@@ -217,6 +217,8 @@ spec:
               rule: '!self.keyPrefix.startsWith(''/'')'
             - message: spec.export.prefix must differ from spec.keyPrefix — the export is a separate lean workspace
               rule: '!has(self.export) || self.export.prefix != self.keyPrefix'
+            - message: spec.export.refs must name exactly one ref — a lean workspace is one tree, and two refs in one prefix would be two writers of one manifest
+              rule: '!has(self.export) || size(self.export.refs) == 1'
           status:
             nullable: true
             properties:

@@ -1,13 +1,13 @@
 # flint forge — a git server with S3 behind it: design of record
 
-Status: **PHASES 1, 2 AND 3 LANDED** — `forge/syncer` (the
-`flint-forge` crate: the syncer, both hooks, restore, the sweep,
-`/status`, the branch policy and the credential helper), the door
+Status: **PHASES 1-4 LANDED** — `forge/syncer` (the `flint-forge`
+crate: the syncer, both hooks, restore, the sweep, `/status`, the
+branch policy, the credential helper and the legible export), the door
 (`lite_gateway::git` with `Door::Git`), and the operator
 (`forge_operator`: the `FlintRepo` CRD, the renderer, the one-rung
 ladder, the reconciler and `flint-forge-operator`), with the chart and
-the two server images. What remains is phase 0's measurement, the
-export, the fleet levers and the cluster drills. Written 2026-09-04; **revised
+the two server images. What remains is phase 0's measurement, the fleet
+levers of phase 5, and the cluster drills. Written 2026-09-04; **revised
 the same day after a 15-agent review** (five lenses, one refuter per
 significant finding; record in §16), and §14 records what phase 1
 actually built against what it planned. Working name "flint forge" (the user's earlier
@@ -678,7 +678,41 @@ slow in ways that matter for a fleet. Phase 0 runs it as the control.
 
    **Still to do in this phase:** falsifier 7 on a cluster, and the
    images published.
-4. **Export** via `flint-sync barrier`; falsifier 9.
+4. **Export** via `flint-sync barrier`. — **BUILT**
+   (`forge/syncer/src/export.rs`). Forge writes no manifest: it
+   materialises the ref's tree and runs the shipped `flint-sync
+   barrier` over it, so lean's ordering — upload, CAS, deletes LAST —
+   is inherited rather than re-derived, and `LeanDanglingOrder` is not
+   reachable from here.
+
+   **`git archive | tar -x`, which §9 first described, is not what it
+   does**, and the substitution is the interesting part. That pipeline
+   rewrites every file, so lean's next scan reads the whole tree as
+   touched and re-uploads it; and it leaves a deleted path behind, so
+   the export publishes a file the ref no longer contains, forever.
+   What runs instead is a two-tree `read-tree -m -u <exported> <new>`
+   against an index kept beside the scratch tree — the only form that
+   touches exactly what changed AND removes what is gone. The full
+   path (a first export, or a restart that lost the index) clears the
+   tree first, keeping lean's own `.flint-sync/` baseline.
+
+   The defect a test found: `checkout-index` without `-u` records
+   content but not stat data, so the NEXT two-tree update refuses with
+   "not uptodate" and falls back to the full path. Every export would
+   have re-materialised the whole tree and made lean re-upload all of
+   it — O(everything) forever, with one log line to say so.
+
+   Two ordering rules of forge's own hold: the export runs AFTER the
+   report, because it is derived data and nothing about it may delay a
+   push; and it never CASes the snapshot — it stashes the commit and
+   the NEXT batch's single CAS carries it, so the export is never a
+   second writer of the one object that has exactly one.
+
+   `spec.export.refs` is refused at admission unless it names exactly
+   ONE ref: a lean workspace is one tree, and two refs in one prefix
+   would be two writers of one manifest. **Still to do:** falsifier 9's
+   bucket half — a lean mount of the exported `main`, and the
+   O(changed) object count — which needs a real store.
 5. **Fleet levers.** Bitmap upload, bundle URIs with client opt-in,
    `--single-branch` in the guide, the wip sidecar, the agent-branch
    pruner; the storm leg on EC2 (falsifier 8) — provisioned only on

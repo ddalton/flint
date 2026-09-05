@@ -26,10 +26,15 @@
 //!                                re-read from between batches
 //!   FLINT_FORGE_PROTECTED        comma-separated globs, no direct push
 //!   FLINT_FORGE_ALLOW_NON_FF     comma-separated globs, force allowed
+//!   FLINT_FORGE_EXPORT_REF       the ref whose tree is exported
+//!   FLINT_FORGE_EXPORT_PREFIX    the lean workspace prefix it goes to
+//!   FLINT_FORGE_EXPORT_EVERY_SECS  floor between exports (default 300)
+//!   FLINT_FORGE_SYNC_BIN         flint-sync (default /usr/local/bin/flint-sync)
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use flint_forge::export::ExportConfig;
 use flint_forge::policy::Policy;
 use flint_forge::server::{self, ServerOpts};
 use flint_forge::{ForgeConfig, ForgeError, Syncer, EXIT_REFUSED};
@@ -71,12 +76,12 @@ fn rendered_policy(dir: &std::path::Path) -> Option<Policy> {
 
 #[tokio::main]
 async fn main() {
-    let bucket = env_req("FLINT_FORGE_BUCKET");
+    let bucket_name = env_req("FLINT_FORGE_BUCKET");
     let prefix = env_req("FLINT_FORGE_PREFIX");
     let repo = PathBuf::from(env_req("FLINT_FORGE_REPO"));
     let endpoint = std::env::var("FLINT_FORGE_ENDPOINT").ok();
 
-    let store = match S3Store::connect(bucket, endpoint).await {
+    let store = match S3Store::connect(bucket_name.clone(), endpoint.clone()).await {
         Ok(s) => Arc::new(s) as Arc<dyn ObjectStore>,
         Err(e) => {
             eprintln!("flint-forge-syncer: store connect: {e}");
@@ -105,6 +110,47 @@ async fn main() {
         .ok()
         .filter(|a| !a.is_empty() && a != "off")
         .or_else(|| Some("127.0.0.1:9848".to_string()));
+
+    // The export is off unless a ref AND a prefix are both named. Half
+    // a configuration is a configuration error, not a default: an
+    // export with no prefix would publish into the repository's own.
+    let export = match (
+        std::env::var("FLINT_FORGE_EXPORT_REF").ok().filter(|r| !r.is_empty()),
+        std::env::var("FLINT_FORGE_EXPORT_PREFIX").ok().filter(|p| !p.is_empty()),
+    ) {
+        (Some(r), Some(p)) => {
+            let reference = if r.starts_with("refs/") { r } else { format!("refs/heads/{r}") };
+            let prefix = p.trim_end_matches('/').to_string();
+            if prefix == cfg.prefix {
+                eprintln!(
+                    "flint-forge-syncer: FLINT_FORGE_EXPORT_PREFIX is this repository's own                      prefix; the export is a separate lean workspace and would be a second                      writer under git/"
+                );
+                std::process::exit(EXIT_REFUSED);
+            }
+            let base = cfg.state_dir.join("export");
+            Some(ExportConfig {
+                reference,
+                prefix,
+                every_secs: env_u64("FLINT_FORGE_EXPORT_EVERY_SECS", 300),
+                bucket: bucket_name.clone(),
+                endpoint: endpoint.clone(),
+                sync_bin: PathBuf::from(
+                    std::env::var("FLINT_FORGE_SYNC_BIN")
+                        .unwrap_or_else(|_| "/usr/local/bin/flint-sync".into()),
+                ),
+                root: base.join("tree"),
+                index: base.join("index"),
+                project_id: cfg.project_id.clone(),
+            })
+        }
+        (None, None) => None,
+        _ => {
+            eprintln!(
+                "flint-forge-syncer: the export needs BOTH FLINT_FORGE_EXPORT_REF and                  FLINT_FORGE_EXPORT_PREFIX"
+            );
+            std::process::exit(EXIT_REFUSED);
+        }
+    };
 
     let opts = ServerOpts {
         socket,

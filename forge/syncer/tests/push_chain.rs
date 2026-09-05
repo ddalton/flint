@@ -132,6 +132,10 @@ impl Rig {
             // other tests in this file when cargo runs them together.
             status_addr: None,
             policy,
+            // The chain tests drive pushes, not the export; §9's own
+            // legs run in the unit battery against a real git and a
+            // real tree.
+            export: None,
         };
         tokio::spawn(async move {
             if let Err(e) = run(sc, opts).await {

@@ -52,6 +52,7 @@
 //!   with "chunk" read as "pack".
 
 pub mod batch;
+pub mod export;
 pub mod gitcmd;
 pub mod lease;
 pub mod packio;
@@ -248,6 +249,11 @@ pub struct Syncer {
     pub fenced: Option<String>,
     /// Unix seconds of the last acknowledged push, for `/status`.
     pub last_push_unix: u64,
+    /// A commit the export published that the snapshot does not name
+    /// yet. The NEXT batch's single CAS carries it — the export must
+    /// never write the snapshot itself, or it becomes a second writer
+    /// racing pushes for the one object that has exactly one.
+    pub pending_exported_commit: Option<String>,
     pub started_unix: u64,
 }
 
@@ -263,6 +269,7 @@ impl Syncer {
             holder_id,
             fenced: None,
             last_push_unix: 0,
+            pending_exported_commit: None,
             started_unix: now_unix(),
         }
     }

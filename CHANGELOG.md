@@ -14,6 +14,22 @@ covered by the stability guarantee.
 
 ### Added
 
+- **flint forge, phase 4: the legible export.** A `FlintRepo` with
+  `spec.export` publishes a chosen ref's tree as a lean workspace, so
+  lite, lean and passthrough readers can mount what forge holds with no
+  forge code in them. Forge writes no manifest: it materialises the tree
+  and runs the shipped `flint-sync barrier` over it, inheriting lean's
+  ordering — upload, CAS, deletes LAST — rather than re-deriving the one
+  thing a crash makes load-bearing. The tree is updated by a two-tree
+  `read-tree -m -u` against an index kept beside it, not by `git archive
+  | tar -x`: that pipeline rewrites every file, so the next scan
+  re-uploads the whole tree, and it leaves deleted paths behind, so the
+  export would publish files the ref no longer has. The export runs
+  after the push is acknowledged and never CASes the snapshot — it
+  stashes its commit and the next batch's single CAS carries it.
+  `spec.export.refs` must name exactly one ref, refused at admission,
+  because a lean workspace is one tree.
+
 - **flint forge, phase 3: the operator** (`forge_operator`,
   `flint-forge-operator`, `flint-forge-chart`, and the two server
   images). A `FlintRepo` becomes a ConfigMap carrying its branch
