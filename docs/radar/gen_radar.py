@@ -123,7 +123,7 @@ INTRO = """<div class="intro">
     the publish/sync verbs. The agent container holds no bucket credentials. The three file-shaped approaches share one bucket format and are mutually convertible.</p>
   </div>
   <div class="ib">
-    <h3><span class="sw" style="background:#b03060"></span>Forge &nbsp;<span class="ibt">flint forge</span><span class="badge">built &middot; battery-tested &middot; no cluster drill</span></h3>
+    <h3><span class="sw" style="background:#b03060"></span>Forge &nbsp;<span class="ibt">flint forge</span><span class="badge">built &middot; drilled on EC2 &middot; numbers verified</span></h3>
     <p>A <b>git server per repository</b> with S3 as its only durable state. Agent pods are stock git
     clients; a stateless <b>door</b> (the lite gateway with a git arm) turns the pod&rsquo;s own ServiceAccount
     token into a principal and routes to the repository&rsquo;s server pod, where real git (nginx +
