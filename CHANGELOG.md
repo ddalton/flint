@@ -14,6 +14,26 @@ covered by the stability guarantee.
 
 ### Added
 
+- **`s3.csi.chert.us`: the two identity modes nothing had exercised**
+  (`s3csi/e2e/aws-identity.sh`, A1-A3), on EC2 against a real bucket.
+  `ambient` on a LEAN workspace WORKS: the syncer is handed nothing, its
+  own credential chain checks out the workspace and publishes, and the
+  worker carries no key, no token and no brokered credential. Like the
+  passthrough leg before it, A1 GATES on the platform rather than
+  judging it — a pod with nothing injected must first obtain an identity
+  from the default chain, or the leg is recorded as skipped.
+
+  The suite carries the control that separates an exchange from a
+  fallback: the broker logs one line per issue, and a workspace that
+  mounts while the broker issued NOTHING for it did not do a
+  web-identity exchange — it fell through its default chain to another
+  identity, which on a node whose instance role can reach the bucket
+  looks exactly like success. Without that control this suite reported
+  a pass it had not earned.
+
+### Fixed
+
+
 - **flint forge: git LFS**, for the multi-modal case. A pack is
   delta-compressed and rewritten whole by `repack -a`, so weights,
   video and audio committed as ordinary blobs make every clone, repack
@@ -49,7 +69,7 @@ covered by the stability guarantee.
   are swept by the same four rules as packs. Both levers are off unless
   asked for.
 - **`spec.wipSnapshots` is gone from `FlintRepo`**, replaced by
-  `docker/forge/wip-snapshot.sh` and a section in the guide. Forge owns
+  `spdk-csi-driver/docker/forge/wip-snapshot.sh` and a section in the guide. Forge owns
   repository servers, not agent pods, and injects nothing into them, so
   a field asking for a sidecar was a field the operator would silently
   ignore. The script is plumbing — `write-tree`, `commit-tree`, `push`
@@ -179,6 +199,22 @@ covered by the stability guarantee.
   object is not there".
 
 ### Known
+
+- **`identity.mode: webIdentity` works on a lean workspace and does NOT
+  work on a passthrough mount.** On lean the syncer completes the
+  exchange against the broker's STS facade and the broker's own log
+  records the issue. On passthrough the mounter dies and the tenant is
+  told only that credentials are unavailable. Measured out of band with
+  mount-s3 1.24.0: given a real projected token it fails in about a
+  millisecond and sends nothing to the endpoint — identically for
+  flint's synthetic role ARN and for a valid AWS one, and over both http
+  and https — so the client is not attempting the exchange, and no
+  wiring on this side changes that. The one combination left untested is
+  a real token with no endpoint override at all, so "the mount client
+  ignores these variables entirely" is strongly indicated rather than
+  established. Either way the CR advertises the mode on both front ends
+  while only one can honour it; refusing it on a passthrough CR, with
+  the reason named, is the smallest correct fix and is NOT built here.
 
 - **A preserved undrained tree is kept forever, and nothing reclaims
   it.** When a syncer cannot attest its drain the driver moves the tree

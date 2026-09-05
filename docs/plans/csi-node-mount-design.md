@@ -773,6 +773,42 @@ All seven legs are green on real nodes. L6 and L7 were closed on a
 second cluster after spot reclaimed the first mid-run (control plane
 included, which is the standing risk of an all-spot cluster).
 
+**The identity modes, on real nodes (2026-09-05).** `broker` and
+`static` had run in every drill; `ambient` had run for passthrough only;
+`webIdentity` had never run anywhere. `s3csi/e2e/aws-identity.sh` closes
+both gaps.
+
+- *LEAN `ambient` works.* Nothing is injected, the syncer's own chain
+  checks out the workspace and publishes, and the worker holds no key,
+  no token file and no brokered credential. Gated on the platform the
+  same way passthrough's P9 is.
+- *`webIdentity` works on LEAN and not on PASSTHROUGH.* The arm is
+  shared code and materialises identically for both: the projected
+  token lands in the comm dir at 0600, no `creds.json` is written, and
+  the launched process is given `AWS_ENDPOINT_URL_STS` (the broker's own
+  Service), `AWS_ROLE_ARN` (the synthetic `arn:flint:iam::<mode>:role/<cr>`)
+  and `AWS_WEB_IDENTITY_TOKEN_FILE`. The syncer's Rust SDK then completes
+  the exchange — the broker logs the issue — and the workspace checks
+  out over plain http, which the design had assumed impossible.
+  mount-s3's CRT does not: with a real projected token it fails in about
+  a millisecond having sent nothing, the same for a valid AWS role ARN
+  as for flint's synthetic one, and the same over https. It is not the
+  transport and not the ARN; the client is not attempting the exchange.
+  The combination left untested — real token, no endpoint override — is
+  what would turn that from strongly indicated into established. The
+  smallest correct fix is to refuse the mode on a passthrough CR and say
+  why, rather than let a tenant meet a mounter that dies with
+  "No signing credentials available"; it is not built.
+- *The control that made this readable.* A workspace whose client falls
+  back to the node's own identity mounts and publishes and looks
+  correct — on a node whose instance role can reach the bucket, which is
+  exactly the node the ambient leg requires. The oracle is therefore not
+  "did it mount" but "did the BROKER issue for this CR", which its log
+  records. An earlier pass of this suite reported success on a fallback,
+  and a broker pod replaced by an unrelated upgrade then truncated the
+  log I checked it against, which produced a confident wrong diagnosis
+  in the other direction. Read the pod's age before reading its log.
+
 ## 1. The question, restated precisely
 
 The ask, verbatim: *"The flint passthrough and lean operators require
