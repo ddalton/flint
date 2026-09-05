@@ -67,6 +67,21 @@ STATUS_PORT=9848
 WHOLE_PUT_MAX=$((64 * 1024 * 1024))
 LEGS=${LEGS:-S0 S1 S2 S3 S4}
 BIG_MB=${BIG_MB:-}          # set by S1; give it explicitly to skip S1
+# What the tree under test is EXPECTED to do. The oracles INVERT with
+# the fixes — a drill that encodes one behaviour as PASS confirms
+# nothing about the other — so the expectation is named, never guessed:
+#   EXPECT=window-open    before the renewer: the token is silent through
+#                         the push's upload and the whole restore, and a
+#                         challenger claims a live pod (design §5)
+#   EXPECT=window-closed  a renewer task keeps the token moving: silence
+#                         stays under WINDOW/2 during both, and the
+#                         challenger never claims against a live restore
+#   SWEEP=none            forge leaves an interrupted upload orphaned
+#   SWEEP=claim           the successor aborts orphans after its claim:
+#                         S4 must see them at the kill and none once it serves
+EXPECT=${EXPECT:-window-open}; SWEEP=${SWEEP:-none}
+case "$EXPECT" in window-open|window-closed) ;; *) echo "EXPECT must be window-open or window-closed (got '$EXPECT')" >&2; exit 2;; esac
+case "$SWEEP" in none|claim) ;; *) echo "SWEEP must be none or claim (got '$SWEEP')" >&2; exit 2;; esac
 
 RUN=$(date +%Y%m%d-%H%M%S)
 RESULTS=${RESULTS:-$HERE/results}
@@ -367,19 +382,39 @@ leg_S1() {
 # ── S2 ───────────────────────────────────────────────────────────────
 leg_S2() {
   [ -n "$BIG_MB" ] || { leg S2 "the large repository"; inconc "BIG_MB unknown: run S1 or set BIG_MB"; return; }
-  leg S2 "the large repository: ${BIG_MB} MiB composed on S3, restored ranged, and the lease silent for longer than the ${WINDOW}s window"
+  case "$EXPECT" in
+    window-open)   leg S2 "the large repository: ${BIG_MB} MiB composed on S3, restored ranged, and the lease silent for longer than the ${WINDOW}s window" ;;
+    window-closed) leg S2 "the large repository: ${BIG_MB} MiB composed on S3, restored ranged, and the lease RENEWED throughout (silence under $((WINDOW / 2))s)" ;;
+  esac
   push_and_restore "$BIG" big "$BIG_MB" big || return
   BIG_PACK_SIZE=$PACK_SIZE; BIG_R_SECS=$R_SECS
-  if [ "${P_SILENCE:-0}" -gt "$WINDOW" ]; then
-    ok "PUSH: the token was silent ${P_SILENCE}s > ${WINDOW}s — the batch renews once, then uploads $(mib "$PACK_SIZE") MiB in serial 64 MiB parts with no heartbeat; a challenger present then would count six quiet polls"
-  else
-    note "PUSH: the token was silent ${P_SILENCE:-?}s ≤ ${WINDOW}s; the upload of this pack fits inside the window"
-  fi
-  if [ "${R_SILENCE:-0}" -gt "$WINDOW" ]; then
-    ok "RESTORE: the token was silent ${R_SILENCE}s > ${WINDOW}s — the takeover window is OPEN for the whole restore of this repository (design §5 'still open', on the wire)"
-  else
-    inconc "RESTORE: the token was silent only ${R_SILENCE:-?}s ≤ ${WINDOW}s — the repository is not large enough for S3 to open the window; raise MAX_MB or TARGET_RESTORE_SECS"
-  fi
+  # A healthy token is seen to change about every HEARTBEAT (13 s at a
+  # 2 s poll, S1 on runbw); the restore's figure also carries the gap
+  # from the old holder's last renewal to the successor's claim
+  # (≤ HEARTBEAT + a pod start). WINDOW/2 sits above both and at half
+  # of what a challenger needs, so a fixed tree cannot pass by luck and
+  # the unfixed one (125 s / 141 s at 10 GiB) cannot pass at all.
+  local bound=$((WINDOW / 2))
+  case "$EXPECT" in
+    window-open)
+      if [ "${P_SILENCE:-0}" -gt "$WINDOW" ]; then
+        ok "PUSH: the token was silent ${P_SILENCE}s > ${WINDOW}s — the batch renews once, then uploads $(mib "$PACK_SIZE") MiB in serial 64 MiB parts with no heartbeat; a challenger present then would count six quiet polls"
+      else
+        note "PUSH: the token was silent ${P_SILENCE:-?}s ≤ ${WINDOW}s; the upload of this pack fits inside the window"
+      fi
+      if [ "${R_SILENCE:-0}" -gt "$WINDOW" ]; then
+        ok "RESTORE: the token was silent ${R_SILENCE}s > ${WINDOW}s — the takeover window is OPEN for the whole restore of this repository (design §5 'still open', on the wire)"
+      else
+        inconc "RESTORE: the token was silent only ${R_SILENCE:-?}s ≤ ${WINDOW}s — the repository is not large enough for S3 to open the window; raise MAX_MB or TARGET_RESTORE_SECS"
+      fi ;;
+    window-closed)
+      [ "${P_SILENCE:-999}" -le "$bound" ] \
+        && ok "PUSH: the token was silent at most ${P_SILENCE}s ≤ ${bound}s while $(mib "$PACK_SIZE") MiB uploaded in $P_SECS s — renewal covers the upload" \
+        || bad "PUSH: the token was silent ${P_SILENCE:-?}s > ${bound}s during the upload: the renewer is NOT covering the batch (EXPECT=window-closed)"
+      [ "${R_SILENCE:-999}" -le "$bound" ] \
+        && ok "RESTORE: the token was silent at most ${R_SILENCE}s ≤ ${bound}s across a ${R_SECS_CT:-?} s restore — renewal covers the restore" \
+        || bad "RESTORE: the token was silent ${R_SILENCE:-?}s > ${bound}s during a ${R_SECS_CT:-?} s restore: the renewer is NOT running before the restore (EXPECT=window-closed)" ;;
+  esac
 }
 
 # ── S3 ───────────────────────────────────────────────────────────────
@@ -391,7 +426,7 @@ render_challenger() { # repo — the operator's own pod template, minus the labe
 
 takeover_arm() { # repo arm(hold|seize) obs_secs
   local repo=$1 arm=$2 obs=$3 ch="challenger-$1" old new t0 t1 tstart ph i p cp tl lc lh
-  local ch_claims h_claims deposed first fts fphase epochs acks naks lost gap conv snapref
+  local ch_claims h_claims deposed first fts fphase epochs acks naks lost gap conv snapref serve_at
   K -n "$NS" delete pod "$ch" --ignore-not-found --wait=true >/dev/null 2>&1
   wait_serving "$repo" 600 || { inconc "$repo is not serving before the $arm arm"; return; }
   old=$(repo_pod "$repo")
@@ -438,21 +473,40 @@ takeover_arm() { # repo arm(hold|seize) obs_secs
     [ "$res" = ACK ] || continue
     gitq "$repo" merge-base --is-ancestor "$oid" "$snapref" >/dev/null 2>&1 || lost=$((lost + 1))
   done < "$WORK/chaos-$arm"
+  # when the SUCCESSOR first served, from the timeline (the old pod was serving before the delete)
+  serve_at=$(awk -v t="$t0" -v h="holder=$new" '$1>t && $2==h && $3=="phase=serving"{print $1; exit}' "$WORK/tl-$arm" 2>/dev/null)
+  [ -n "$serve_at" ] && note "the successor first served $((serve_at - t0)) s after the delete (the challenger arrived at +$((tstart - t0)) s, left at +$((tstart - t0 + obs)) s)" \
+    || note "the successor never reached serving while the challenger was present"
   case "$arm" in
     hold)
       [ "$ch_claims" = 0 ] && ok "CONTROL: a challenger beside a HEALTHY holder never claimed in $obs s (the holder's heartbeats kept the token moving)" \
         || bad "CONTROL: the challenger deposed a healthy holder ($ch_claims claims) — the takeover rule itself is broken, and the seize arm proves nothing" ;;
     seize)
-      if [ "$ch_claims" -gt 0 ] && [ "$fphase" = importing ]; then
-        ok "REPRODUCED: the challenger claimed the repository while its pod was alive and mid-restore ('$fphase'), $((fts - tstart)) s after arriving — the window §5 records, on the wire"
-      elif [ "$ch_claims" -gt 0 ]; then
-        bad "the challenger claimed while the holder was '$fphase', not importing — a different hazard than the one recorded"
-      else
-        bad "the recorded hazard did not reproduce: the challenger never claimed in $obs s against a restore of ${BIG_R_SECS:-?} s — either §5 is wrong or this leg is"
-      fi
-      [ "$deposed" -gt 0 ] && ok "the deposed holder fenced itself at its next heartbeat and exited (no second writer kept serving)" \
-        || note "no 'deposed' line from the holder within the observation"
-      [ "$h_claims" -gt 1 ] && note "PING-PONG: the operator's pod claimed $h_claims times (epochs ${epochs}) — each side seizes the other mid-restore until a restore finishes inside the window" ;;
+      case "$EXPECT" in
+        window-open)
+          if [ "$ch_claims" -gt 0 ] && [ "$fphase" = importing ]; then
+            ok "REPRODUCED: the challenger claimed the repository while its pod was alive and mid-restore ('$fphase'), $((fts - tstart)) s after arriving — the window §5 records, on the wire"
+          elif [ "$ch_claims" -gt 0 ]; then
+            bad "the challenger claimed while the holder was '$fphase', not importing — a different hazard than the one recorded"
+          else
+            bad "the recorded hazard did not reproduce: the challenger never claimed in $obs s against a restore of ${BIG_R_SECS:-?} s — either §5 is wrong or this leg is"
+          fi
+          [ "$deposed" -gt 0 ] && ok "the deposed holder fenced itself at its next heartbeat and exited (no second writer kept serving)" \
+            || note "no 'deposed' line from the holder within the observation"
+          [ "$h_claims" -gt 1 ] && note "PING-PONG: the operator's pod claimed $h_claims times (epochs ${epochs}) — each side seizes the other mid-restore until a restore finishes inside the window" ;;
+        window-closed)
+          # the control's oracle, now against a restore longer than the window
+          if [ "$ch_claims" = 0 ]; then
+            ok "CLOSED: the challenger never claimed in $obs s against a live restore of ${BIG_R_SECS:-?} s — the lease was renewed while the holder imported"
+          else
+            bad "the challenger claimed $((fts - tstart)) s after arriving while the holder was '$fphase': renewal does not cover the restore (EXPECT=window-closed)"
+          fi
+          [ "$deposed" = 0 ] && ok "the holder was never fenced" \
+            || bad "the holder was fenced $deposed time(s) although nothing should have claimed over it"
+          [ "$h_claims" -le 1 ] || bad "PING-PONG: the operator's pod claimed $h_claims times (epochs ${epochs}) — the two servers alternated, which a renewed lease forbids"
+          [ -n "$serve_at" ] && ok "the successor served $((serve_at - t0)) s after the delete WITH the challenger present — no outage beyond its own restore" \
+            || bad "the successor never served during the $obs s observation although the challenger never claimed" ;;
+      esac ;;
   esac
   [ "$conv" = 1 ] && ok "the operator's pod was serving again $((t1 - t0)) s after the delete (the challenger removed at +$obs s)" \
     || bad "the operator's pod never returned to serving within 20 min after the challenger was removed"
@@ -493,6 +547,7 @@ EOF
 leg_S4() {
   leg S4 "acknowledged means durable at multipart size ($DUR_MB MiB pushes to $SMALL): kills INSIDE the upload, seen not timed; and the orphans counted"
   local pp before_n i n name ref tip before after res uid keyu t0 t_seen d pod pusher o acked=0 naked=0 retry
+  local o_iter o_kill o_after swept=0 leaked=0
   pp=$(key "$SMALL" objects/pack/)
   before_n=$(mpu_count "$pp")
   note "incomplete multipart uploads under $pp before the leg: $before_n"
@@ -509,7 +564,7 @@ leg_S4() {
     # present before the push began are excluded, or the poll answers
     # in 0 s with the stale one and the kill lands during the git
     # transfer, 30 s before any upload (runbw run 2, iterations 2-3).
-    stale=$(mpu_list "$pp" | awk '{print $1}')
+    stale=$(mpu_list "$pp" | awk '{print $1}'); o_iter=$(printf '%s\n' "$stale" | grep -c .)
     uid=""; keyu=""; t0=$(now)
     while [ $(( $(now) - t0 )) -lt 600 ]; do
       set -- $(aws s3api list-multipart-uploads --bucket "$BUCKET" --prefix "$pp" --query 'Uploads[?ends_with(Key, `.pack`)].[UploadId,Key]' --output text 2>/dev/null \
@@ -534,8 +589,15 @@ leg_S4() {
     K -n "$NS" delete pod "$pod" --force --grace-period=0 >/dev/null 2>&1
     wait "$pusher" 2>/dev/null
     res=$(inpod "cat /work/res-$i" 2>/dev/null | tr -d '[:space:]')
+    # Sample ONE: right after the kill, before any successor can have
+    # claimed (a force-deleted holder released nothing, so the successor
+    # waits out the quiet polls first). This is what the kill left.
+    o_kill=$(mpu_count "$pp")
     K -n "$NS" wait --for=condition=Available "deploy/forge-$SMALL" --timeout=600s >/dev/null 2>&1
     wait_serving "$SMALL" 900
+    # Sample TWO: once the successor serves. With a sweep at the claim
+    # this is where the orphans go away; without one it equals sample one.
+    o_after=$(mpu_count "$pp")
     after=$(snap_ref "$SMALL" "$ref")
     case "$res" in
       ACK) acked=$((acked + 1))
@@ -554,27 +616,48 @@ leg_S4() {
              bad "iter $i: TOLD FAILED AND THE BUCKET HOLDS SOMETHING ELSE ($before -> $after)"
            fi ;;
     esac
-    o=$(mpu_count "$pp")
-    note "iter $i: incomplete uploads now $o, holding $(mpu_bytes "$pp") MiB of parts"
+    note "iter $i: incomplete uploads $o_iter before the push, $o_kill at the kill, $o_after after the successor served (holding $(mpu_bytes "$pp") MiB of parts now)"
+    if [ "$o_kill" -gt "$o_iter" ]; then
+      leaked=$((leaked + 1))
+      case "$SWEEP" in
+        claim) [ "$o_after" -le "$o_iter" ] \
+                 && { swept=$((swept + 1)); ok "iter $i: SWEPT — $((o_kill - o_iter)) upload(s) orphaned by the kill, none left once the successor served"; } \
+                 || bad "iter $i: the successor served with $((o_after - o_iter)) orphaned upload(s) still held: no sweep ran at its claim (SWEEP=claim)" ;;
+        none)  [ "$o_after" -ge "$o_kill" ] || note "iter $i: $((o_kill - o_after)) upload(s) vanished between the kill and the successor serving although no sweep is expected" ;;
+      esac
+    elif [ "$i" -le "$DUR_ITER" ]; then
+      note "iter $i: the kill left no orphan — it did not land inside the upload"
+    fi
   done
   gitq "$SMALL" fsck --strict --no-progress >/dev/null 2>&1 && ok "fsck --strict clean after $n crashes" || bad "fsck failed after the crash series"
   note "$acked acknowledged, $naked refused"
   [ "$acked" -gt 0 ] && [ "$naked" -gt 0 ] && ok "the kills landed on both sides of the window" \
     || note "every iteration landed the same way ($acked ack, $naked nak): the CAS-side kill and the mid-upload kills did not both occur"
-  # the leak, measured
+  # the leak, measured — from the per-iteration samples, not a final count
   o=$(mpu_count "$pp")
-  if [ "$o" -gt "$before_n" ]; then
-    ok "MEASURED: $((o - before_n)) orphaned multipart upload(s) holding $(mpu_bytes "$pp") MiB of parts after $DUR_ITER mid-upload kills — forge never aborts one (no list_uploads/abort_upload under forge/), so they are billed until a lifecycle rule or a hand abort"
-    note "aborting them now so the bucket can be emptied"
-    mpu_list "$pp" | while read -r uid k; do [ -n "$uid" ] && aws s3api abort-multipart-upload --bucket "$BUCKET" --key "$k" --upload-id "$uid" >/dev/null 2>&1; done
-    note "incomplete uploads after the abort: $(mpu_count "$pp")"
-  else
-    inconc "no orphaned upload was left behind ($o before and after): the mid-upload kills did not land inside an upload, so the leak's magnitude was not measured"
-  fi
+  case "$SWEEP" in
+    none)
+      if [ "$leaked" -gt 0 ] && [ "$o" -gt "$before_n" ]; then
+        ok "MEASURED: $((o - before_n)) orphaned multipart upload(s) holding $(mpu_bytes "$pp") MiB of parts after $leaked kill(s) that landed inside an upload — forge never aborts one (no list_uploads/abort_upload under forge/), so they are billed until a lifecycle rule or a hand abort"
+        note "aborting them now so the bucket can be emptied"
+        mpu_list "$pp" | while read -r uid k; do [ -n "$uid" ] && aws s3api abort-multipart-upload --bucket "$BUCKET" --key "$k" --upload-id "$uid" >/dev/null 2>&1; done
+        note "incomplete uploads after the abort: $(mpu_count "$pp")"
+      else
+        inconc "no kill landed inside an upload ($o incomplete before and after): the leak's magnitude was not measured — raise DUR_MB"
+      fi ;;
+    claim)
+      if [ "$leaked" = 0 ]; then
+        inconc "no kill landed inside an upload, so there was nothing for the sweep to remove — raise DUR_MB"
+      elif [ "$swept" = "$leaked" ] && [ "$o" -le "$before_n" ]; then
+        ok "SWEPT: every kill that orphaned an upload ($leaked) was followed by a successor that served with none left; $o incomplete upload(s) remain under the prefix"
+      else
+        bad "orphans survived the successor's claim ($swept of $leaked kills swept; $o incomplete upload(s) remain): the sweep is not doing its job"
+      fi ;;
+  esac
 }
 
 # ── run ──────────────────────────────────────────────────────────────
-echo "forge at scale — bucket $BUCKET, prefix $PREFIX, namespace $NS, run $RUN"
+echo "forge at scale — bucket $BUCKET, prefix $PREFIX, namespace $NS, run $RUN; EXPECT=$EXPECT SWEEP=$SWEEP"
 echo "log: $LOG"
 K -n "$NS" get pod "$AGENT" >/dev/null 2>&1 || { echo "agent pod $AGENT absent; run deploy.sh"; exit 2; }
 install_agent_scripts

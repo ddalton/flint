@@ -34,10 +34,26 @@ BUCKET=... PREFIX=... KEYFILE=... forge/e2e/scale/run-scale.sh
 
 Knobs: `PROBE_MB` (1024) calibrates the restore rate; the large
 repository is sized from it to restore for `TARGET_RESTORE_SECS` (150),
-clamped to `[MIN_BIG_MB, MAX_MB]` (2048, 10240). `DUR_MB` (320) and
+clamped to `[MIN_BIG_MB, MAX_MB]` (2048, 10240). `DUR_MB` (2048) and
 `DUR_ITER` (3) shape the durability leg. `LEGS` selects legs.
 Results land in `results/scale-<stamp>.log` with the raw timelines in
 `results/work-<stamp>/`.
+
+**The expectation is named, because the oracles invert with the fixes.**
+A drill that encodes today's behaviour as PASS confirms nothing about
+the fixed tree, and one that encodes the fix would fail today for the
+wrong reason. So:
+
+| knob | value | S2 asserts | S3 seize arm asserts | S4 asserts |
+|---|---|---|---|---|
+| `EXPECT` | `window-open` (default; every tree up to and including `cda4b21e`) | token silent > 60 s during the push AND the restore | the challenger claims a live, `importing` pod; the holder fences; ping-pong is noted | — |
+| `EXPECT` | `window-closed` (a renewer task holds the lease from before the restore) | silence ≤ 30 s (half the window: above a healthy heartbeat's 13 s plus a pod start, below anything a challenger could count) | the challenger NEVER claims across a restore longer than the window; the holder is never fenced, claims once, and serves with the challenger present | — |
+| `SWEEP` | `none` (default) | — | — | orphans present after a mid-upload kill and still present once the successor serves; their size is the leak |
+| `SWEEP` | `claim` (the successor aborts orphans under its prefix after its claim) | — | — | orphans present at the kill (sample one, taken before the successor can have claimed) and NONE once it serves (sample two) — the sweep is observed, not inferred from a zero |
+
+Both samples are printed for every iteration in either mode. A kill
+that leaves no orphan did not land inside the upload and is said so;
+it counts for the durability invariant but not for the leak.
 
 ## Results — 2026-09-05, cluster runbw (3 × i4i.xlarge all-spot, S3 us-west-1, image `drill-cda4b21e` = HEAD `cda4b21e`)
 
