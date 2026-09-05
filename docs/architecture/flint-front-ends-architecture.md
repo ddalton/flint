@@ -19,7 +19,7 @@
 - **7 · Where a user's token can and cannot go** — what each front end actually authenticates.
 - **8 · Fleet shape and blast radius** — what you install per cluster, and what one compromised pod reaches.
 - **9 · S3 — the durable store** — the live view, the published view, and the recovery point of each.
-- **10 · Security posture** — six questions, four columns, and where each boundary is actually drawn.
+- **10 · Security posture** — seven questions, four columns, and where each boundary is actually drawn.
 - **11 · Composition** — one pod, several doors, one bucket, one writer per prefix — and what the drills found.
 - **12 · Choosing** — ten dimensions, four columns, one door per data class.
 
@@ -143,11 +143,13 @@ Underneath all four front ends there is one durable store, and it is S3. Everyth
 
 *10 / 12 · security*
 
-Six questions, asked of each front end in turn: how a writer proves who it is, what protects the wire, what a merely-reachable peer can do, what keeps tenants apart, what an attacker who owns an agent pod gains, and whether the posture fails closed under operator error. Every cell is a claim the pages before this one already made, or a verified cell of the approach radar; none is a score.
+Seven questions, asked of each front end in turn: how a writer proves who it is, what protects the wire, what a merely-reachable peer can do, what keeps tenants apart, whether two sessions on one project can hold different rights, what an attacker who owns an agent pod gains, and whether the posture fails closed under operator error. Every cell is a claim the pages before this one already made, or a verified cell of the approach radar; none is a score.
 
-![The security posture of the four front ends across six questions: identity proof, wire protection, what a credential-less peer can do, tenancy, blast radius and whether the posture fails closed.](diagrams/10-security-posture.svg)
+![The security posture of the four front ends across seven questions: identity proof, wire protection, what a credential-less peer can do, tenancy, whether two sessions on one project can hold different rights, blast radius and whether the posture fails closed.](diagrams/10-security-posture.svg)
 
 **Read it down a column.** The chain lean and passthrough share is the strongest thing on the page: the pod's ServiceAccount, kubelet-minted and pod-bound, verified *online* by a broker that also demands a registration the pod cannot self-mint and a `consumers` entry in the token's own namespace, exchanged for short-lived keys scoped to one prefix that the agent container never holds. Forge borrows the first half of that shape at its door — the same TokenReview, cached at most 60 s — and then differs in what happens next: the principal is carried to the server as a header, which makes the network between door and server a trust boundary, and nothing in-tree terminates TLS, so the token itself rides both hops in the clear. The hub's is the weakest: port 2049 proves nothing, the permission check logs by default, and the boundary has to be drawn with the network, which `networkPolicy` cannot do for remote clusters.
+
+**None of the four knows the human.** A user's read-only role becomes a read-only session only when whatever launches the pod picks the ServiceAccount, or sets the mount flag, from that role. Kubernetes lets anyone who can create pods in a namespace use any ServiceAccount in it, so the reader and the writer need separate namespaces or an admission policy that binds user to ServiceAccount; flint never sees that decision. Given it, the row above holds: two sessions with different rights on one project work on forge and on passthrough, are a mount flag the server cannot back on lite, and on lean are a composition with a passthrough reader.
 
 **Two defaults are worth knowing before the first install.** On lite, `security.enforcePermissions` is `false`, and a stock mount negotiates `sec=sys`; that is identity, not enforcement. On forge, a chart with no `door.namespace` renders no NetworkPolicy, so the `X-Remote-User` boundary is silently absent, and a repository with no `branches` block is permissive, so any listed consumer may move `main`. Both are documented; neither refuses. Lean and passthrough fail closed where it counts — a syncer that lost its lease answers `refused-fenced` rather than publishing, an absent `consumers` list means deny, and the workers namespace is fenced by an admission policy rather than a label — and forge does too on its hooks: an unparseable policy refuses, a missing `pre-receive` does not open the repository, and a snapshot naming a pack the bucket lacks refuses to serve.
 

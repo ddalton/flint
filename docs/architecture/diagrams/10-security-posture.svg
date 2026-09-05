@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 904" role="img"
-     aria-label="The security posture of the four front ends across six questions: how a writer proves who it is, what protects the wire, what a credential-less peer can do, what keeps tenants apart, what an attacker who owns an agent pod gains, and whether the posture fails closed under operator error. flint-lite's port 2049 authenticates nobody and its boundary is the network; flint-lean and flint-passthrough prove the pod's ServiceAccount to a broker and hand out short-lived scoped keys; flint-forge proves the same ServiceAccount at a door and rides two cleartext hops inside the cluster.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1050" role="img"
+     aria-label="The security posture of the four front ends across seven questions: how a writer proves who it is, what protects the wire, what a credential-less peer can do, what keeps tenants apart, whether two sessions on one project can hold different rights, what an attacker who owns an agent pod gains, and whether the posture fails closed under operator error. flint-lite's port 2049 authenticates nobody and its boundary is the network; flint-lean and flint-passthrough prove the pod's ServiceAccount to a broker and hand out short-lived scoped keys; flint-forge proves the same ServiceAccount at a door and rides two cleartext hops inside the cluster.">
 <style>
   text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
   .t1{font-size:17.0px;font-weight:600}
@@ -155,76 +155,110 @@
 <text class="t4b c-red" x="1254" y="522">NetworkPolicy: opt-in, and only where the CNI enforces</text>
 <text class="t4b c-red" x="1254" y="537">it.</text>
 <line class="hair" x1="24" y1="556" x2="1576" y2="556"/>
-<rect x="24" y="556" width="220" height="131" rx="0" class="lbl"/>
-<text class="t2" x="38" y="578">What an owned agent pod gains</text>
-<text class="t4" x="38" y="596">and how fast the gain is revoked</text>
-<text class="t4b c-red" x="258" y="578">The whole share, as anyone.</text>
-<text class="t4" x="258" y="593">It has the mount, asserts any uid, and the permission check</text>
-<text class="t4" x="258" y="608">logs by default. Not the bucket — the hub holds that</text>
-<text class="t4" x="258" y="623">credential. Nothing per-client to revoke; containment is the</text>
-<text class="t4" x="258" y="638">network boundary.</text>
-<text class="t4b" x="590" y="578">Its own workspace, and nothing that outlives it.</text>
-<text class="t4" x="590" y="593">No S3 credential in the agent container in either</text>
-<text class="t4" x="590" y="608">deployment mode; the sidecar holds it, unprivileged.</text>
-<text class="t4" x="590" y="623">Revocation is killing the token or the pod. Ceiling: a</text>
-<text class="t4" x="590" y="638">deposed writer's uncited versions remain readable by a</text>
-<text class="t4" x="590" y="653">raw key.</text>
-<text class="t4b" x="922" y="578">The prefix, as mounted.</text>
-<text class="t4" x="922" y="593">Short-lived scoped keys it never sees, at the CR's readOnly</text>
-<text class="t4" x="922" y="608">setting; no sidecar, no privilege. Scope the CR and you</text>
-<text class="t4" x="922" y="623">have scoped the breach; the residual is the single uid.</text>
-<text class="t4b" x="1254" y="578">Its ServiceAccount's push rights.</text>
-<text class="t4" x="1254" y="593">No bucket credential — they land on the syncer container</text>
-<text class="t4" x="1254" y="608">only — and no privilege. It can push as that SA to</text>
-<text class="t4" x="1254" y="623">repositories listing it, within policy; revoked by pod deletion</text>
-<text class="t4" x="1254" y="638">or SA rotation within the review cache. Ceiling: a shared SA</text>
-<text class="t4" x="1254" y="653">reaches every sibling's agent/* branch, and the server runs</text>
-<text class="t4" x="1254" y="668">as root.</text>
-<line class="hair" x1="24" y1="687" x2="1576" y2="687"/>
-<rect x="24" y="687" width="220" height="131" rx="0" class="lbl"/>
-<rect x="244" y="687" width="1332" height="131" rx="0" class="rowb"/>
-<text class="t2" x="38" y="709">Does it fail closed?</text>
-<text class="t4" x="38" y="727">secure defaults, refusal over silent</text>
-<text class="t4" x="38" y="742">degradation</text>
-<text class="t4b c-red" x="258" y="709">No, by default.</text>
-<text class="t4" x="258" y="724">security.enforcePermissions is false — evaluate, log, allow</text>
-<text class="t4" x="258" y="739">— and even enforced the hub holds CAP_DAC_OVERRIDE.</text>
-<text class="t4" x="258" y="754">SECINFO now advertises AUTH_SYS first and</text>
-<text class="t4" x="258" y="769">AUTH_NONE last, pinned by a test, so a stock mount</text>
-<text class="t4" x="258" y="784">negotiates sec=sys.</text>
-<text class="t4b" x="590" y="709">Detection becomes refusal.</text>
-<text class="t4" x="590" y="724">A syncer that lost its lease answers refused-fenced rather</text>
-<text class="t4" x="590" y="739">than publishing; the plugin refuses to clean up a published</text>
-<text class="t4" x="590" y="754">tree; the chart refuses to render on credential misconfig;</text>
-<text class="t4" x="590" y="769">gated mode is refused without a lag bound.</text>
-<text class="t4b" x="922" y="709">Deny is the default.</text>
-<text class="t4" x="922" y="724">consumers absent means deny; the</text>
-<text class="t4" x="922" y="739">ValidatingAdmissionPolicy — not the namespace label —</text>
-<text class="t4" x="922" y="754">fences the workers namespace to the plugin's own node; a</text>
-<text class="t4" x="922" y="769">dead mounter strands the pod on ENOTCONN rather than</text>
-<text class="t4" x="922" y="784">serving stale bytes.</text>
-<text class="t4b" x="1254" y="709">Closed where it counts, open on two defaults.</text>
-<text class="t4" x="1254" y="724">An unparseable policy refuses; a MISSING pre-receive does</text>
-<text class="t4" x="1254" y="739">not open the repository; a snapshot naming a missing pack</text>
-<text class="t4" x="1254" y="754">refuses to serve.</text>
-<text class="t4b c-red" x="1254" y="769">No door.namespace renders no NetworkPolicy, and an</text>
-<text class="t4b c-red" x="1254" y="784">absent branches block is permissive: both documented,</text>
-<text class="t4b c-red" x="1254" y="799">neither refuses.</text>
-<line class="hair" x1="24" y1="818" x2="1576" y2="818"/>
-<rect x="24" y="62" width="1552" height="756" rx="0" class="frame"/>
-<line class="hair" x1="576" y1="62" x2="576" y2="818"/>
-<line class="hair" x1="908" y1="62" x2="908" y2="818"/>
-<line class="hair" x1="1240" y1="62" x2="1240" y2="818"/>
-<text class="t4" x="24" y="844">Read it down a column. The identity chain lean and passthrough share is the strongest thing on the page, and forge borrows its shape at the door; the hub's is the weakest, and its boundary is drawn with the network. Every cell is the deck's own claim, made on the pages before this one, or the approach</text>
-<text class="t4" x="24" y="859">radar's verified Security cell.</text>
-<rect x="28" y="877" width="14" height="14" rx="3" class="f-lite"/>
-<text class="t4" x="48" y="888">flint-lite</text>
-<rect x="110" y="877" width="14" height="14" rx="3" class="f-lean"/>
-<text class="t4" x="130" y="888">flint-lean</text>
-<rect x="197" y="877" width="14" height="14" rx="3" class="f-pass"/>
-<text class="t4" x="217" y="888">flint-passthrough</text>
-<rect x="324" y="877" width="14" height="14" rx="3" class="f-forge"/>
-<text class="t4" x="344" y="888">flint-forge</text>
-<rect x="416" y="877" width="5" height="14" rx="2" class="f-red"/>
-<text class="t4" x="428" y="888">hazard / trust boundary</text>
+<rect x="24" y="556" width="220" height="146" rx="0" class="lbl"/>
+<text class="t2" x="38" y="578">Can two sessions differ?</text>
+<text class="t4" x="38" y="596">in rights: one project, one reader, one</text>
+<text class="t4" x="38" y="611">writer</text>
+<text class="t4b c-red" x="258" y="578">No — only a client-side ro mount.</text>
+<text class="t4" x="258" y="593">A read-only claim gets ro, and the CSI publish forces it</text>
+<text class="t4" x="258" y="608">over operator options; but the server authenticates nobody,</text>
+<text class="t4" x="258" y="623">so any pod that reaches 2049 mounts rw and asserts uid 0.</text>
+<text class="t4" x="258" y="638">enforcePermissions checks a claimed uid: defence against</text>
+<text class="t4" x="258" y="653">accident, not against a session that wants to write.</text>
+<text class="t4b c-red" x="590" y="578">No.</text>
+<text class="t4" x="590" y="593">A workspace is one writer: the publish path hardcodes</text>
+<text class="t4" x="590" y="608">read-write, the CRD has no readOnly, and the credential is</text>
+<text class="t4" x="590" y="623">one key per project. A second lean pod on the same prefix</text>
+<text class="t4" x="590" y="638">does not become a reader — it waits to become the writer.</text>
+<text class="t4" x="590" y="653">The read-only session is a passthrough mount of files/,</text>
+<text class="t4" x="590" y="668">readOnly (page 11).</text>
+<text class="t4b" x="922" y="578">Yes, per pod.</text>
+<text class="t4" x="922" y="593">Two pods on one CR, one declared readOnly: --read-only on</text>
+<text class="t4" x="922" y="608">mount-s3 plus a read-only bind mount, and the pod never</text>
+<text class="t4" x="922" y="623">holds the key. The broker gates by consumers and hands</text>
+<text class="t4" x="922" y="638">both pods the SAME scope — one static key or one role</text>
+<text class="t4" x="922" y="653">ARN. The REST backend is told the ServiceAccount, so an</text>
+<text class="t4" x="922" y="668">external service can scope the key per principal; nothing</text>
+<text class="t4" x="922" y="683">in-tree does.</text>
+<text class="t4b" x="1254" y="578">Yes, per ServiceAccount.</text>
+<text class="t4" x="1254" y="593">consumers grants read; the branch policy decides writes</text>
+<text class="t4" x="1254" y="608">per principal, in pre-receive and again in the syncer. A</text>
+<text class="t4" x="1254" y="623">reader is listed in consumers with every ref protected and</text>
+<text class="t4" x="1254" y="638">only the writer's SA in pushers; refs/for stays closed</text>
+<text class="t4" x="1254" y="653">without mergeInto.</text>
+<text class="t4b c-red" x="1254" y="668">Until a branches block exists, every consumer may</text>
+<text class="t4b c-red" x="1254" y="683">push.</text>
+<line class="hair" x1="24" y1="702" x2="1576" y2="702"/>
+<rect x="24" y="702" width="220" height="131" rx="0" class="lbl"/>
+<rect x="244" y="702" width="1332" height="131" rx="0" class="rowb"/>
+<text class="t2" x="38" y="724">What an owned agent pod gains</text>
+<text class="t4" x="38" y="742">and how fast the gain is revoked</text>
+<text class="t4b c-red" x="258" y="724">The whole share, as anyone.</text>
+<text class="t4" x="258" y="739">It has the mount, asserts any uid, and the permission check</text>
+<text class="t4" x="258" y="754">logs by default. Not the bucket — the hub holds that</text>
+<text class="t4" x="258" y="769">credential. Nothing per-client to revoke; containment is the</text>
+<text class="t4" x="258" y="784">network boundary.</text>
+<text class="t4b" x="590" y="724">Its own workspace, and nothing that outlives it.</text>
+<text class="t4" x="590" y="739">No S3 credential in the agent container in either</text>
+<text class="t4" x="590" y="754">deployment mode; the sidecar holds it, unprivileged.</text>
+<text class="t4" x="590" y="769">Revocation is killing the token or the pod. Ceiling: a</text>
+<text class="t4" x="590" y="784">deposed writer's uncited versions remain readable by a</text>
+<text class="t4" x="590" y="799">raw key.</text>
+<text class="t4b" x="922" y="724">The prefix, as mounted.</text>
+<text class="t4" x="922" y="739">Short-lived scoped keys it never sees, at the CR's readOnly</text>
+<text class="t4" x="922" y="754">setting; no sidecar, no privilege. Scope the CR and you</text>
+<text class="t4" x="922" y="769">have scoped the breach; the residual is the single uid.</text>
+<text class="t4b" x="1254" y="724">Its ServiceAccount's push rights.</text>
+<text class="t4" x="1254" y="739">No bucket credential — they land on the syncer container</text>
+<text class="t4" x="1254" y="754">only — and no privilege. It can push as that SA to</text>
+<text class="t4" x="1254" y="769">repositories listing it, within policy; revoked by pod deletion</text>
+<text class="t4" x="1254" y="784">or SA rotation within the review cache. Ceiling: a shared SA</text>
+<text class="t4" x="1254" y="799">reaches every sibling's agent/* branch, and the server runs</text>
+<text class="t4" x="1254" y="814">as root.</text>
+<line class="hair" x1="24" y1="833" x2="1576" y2="833"/>
+<rect x="24" y="833" width="220" height="131" rx="0" class="lbl"/>
+<text class="t2" x="38" y="855">Does it fail closed?</text>
+<text class="t4" x="38" y="873">secure defaults, refusal over silent</text>
+<text class="t4" x="38" y="888">degradation</text>
+<text class="t4b c-red" x="258" y="855">No, by default.</text>
+<text class="t4" x="258" y="870">security.enforcePermissions is false — evaluate, log, allow</text>
+<text class="t4" x="258" y="885">— and even enforced the hub holds CAP_DAC_OVERRIDE.</text>
+<text class="t4" x="258" y="900">SECINFO now advertises AUTH_SYS first and</text>
+<text class="t4" x="258" y="915">AUTH_NONE last, pinned by a test, so a stock mount</text>
+<text class="t4" x="258" y="930">negotiates sec=sys.</text>
+<text class="t4b" x="590" y="855">Detection becomes refusal.</text>
+<text class="t4" x="590" y="870">A syncer that lost its lease answers refused-fenced rather</text>
+<text class="t4" x="590" y="885">than publishing; the plugin refuses to clean up a published</text>
+<text class="t4" x="590" y="900">tree; the chart refuses to render on credential misconfig;</text>
+<text class="t4" x="590" y="915">gated mode is refused without a lag bound.</text>
+<text class="t4b" x="922" y="855">Deny is the default.</text>
+<text class="t4" x="922" y="870">consumers absent means deny; the</text>
+<text class="t4" x="922" y="885">ValidatingAdmissionPolicy — not the namespace label —</text>
+<text class="t4" x="922" y="900">fences the workers namespace to the plugin's own node; a</text>
+<text class="t4" x="922" y="915">dead mounter strands the pod on ENOTCONN rather than</text>
+<text class="t4" x="922" y="930">serving stale bytes.</text>
+<text class="t4b" x="1254" y="855">Closed where it counts, open on two defaults.</text>
+<text class="t4" x="1254" y="870">An unparseable policy refuses; a MISSING pre-receive does</text>
+<text class="t4" x="1254" y="885">not open the repository; a snapshot naming a missing pack</text>
+<text class="t4" x="1254" y="900">refuses to serve.</text>
+<text class="t4b c-red" x="1254" y="915">No door.namespace renders no NetworkPolicy, and an</text>
+<text class="t4b c-red" x="1254" y="930">absent branches block is permissive: both documented,</text>
+<text class="t4b c-red" x="1254" y="945">neither refuses.</text>
+<line class="hair" x1="24" y1="964" x2="1576" y2="964"/>
+<rect x="24" y="62" width="1552" height="902" rx="0" class="frame"/>
+<line class="hair" x1="576" y1="62" x2="576" y2="964"/>
+<line class="hair" x1="908" y1="62" x2="908" y2="964"/>
+<line class="hair" x1="1240" y1="62" x2="1240" y2="964"/>
+<text class="t4" x="24" y="990">Read it down a column. The identity chain lean and passthrough share is the strongest thing on the page, and forge borrows its shape at the door; the hub's is the weakest, and its boundary is drawn with the network. Every cell is the deck's own claim, made on the pages before this one, or the approach</text>
+<text class="t4" x="24" y="1005">radar's verified Security cell.</text>
+<rect x="28" y="1023" width="14" height="14" rx="3" class="f-lite"/>
+<text class="t4" x="48" y="1034">flint-lite</text>
+<rect x="110" y="1023" width="14" height="14" rx="3" class="f-lean"/>
+<text class="t4" x="130" y="1034">flint-lean</text>
+<rect x="197" y="1023" width="14" height="14" rx="3" class="f-pass"/>
+<text class="t4" x="217" y="1034">flint-passthrough</text>
+<rect x="324" y="1023" width="14" height="14" rx="3" class="f-forge"/>
+<text class="t4" x="344" y="1034">flint-forge</text>
+<rect x="416" y="1023" width="5" height="14" rx="2" class="f-red"/>
+<text class="t4" x="428" y="1034">hazard / trust boundary</text>
 </svg>

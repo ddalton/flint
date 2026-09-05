@@ -1035,8 +1035,9 @@ def plate_09():
 
 
 def plate_10():
-    s = SVG(W, H, "The security posture of the four front ends across six questions: how a writer proves who it is, what "
-                  "protects the wire, what a credential-less peer can do, what keeps tenants apart, what an attacker who owns an "
+    s = SVG(W, H, "The security posture of the four front ends across seven questions: how a writer proves who it is, what "
+                  "protects the wire, what a credential-less peer can do, what keeps tenants apart, whether two sessions on one "
+                  "project can hold different rights, what an attacker who owns an "
                   "agent pod gains, and whether the posture fails closed under operator error. flint-lite's port 2049 authenticates "
                   "nobody and its boundary is the network; flint-lean and flint-passthrough prove the pod's ServiceAccount to a broker "
                   "and hand out short-lived scoped keys; flint-forge proves the same ServiceAccount at a door and rides two cleartext "
@@ -1064,6 +1065,11 @@ def plate_10():
           [("b", "The prefix, its claim and its lease."), "Keys are scoped to the workspace prefix; the claim refuses a foreign project on a reused prefix; the lease admits one writer and lives in the bucket, so it holds across clusters; consumers absent means deny."],
           [("b", "The prefix and the CR."), "consumers decides which ServiceAccounts may mount it, keys are scoped to the bucket and prefix in the CR, and the CR lives in the pod's own namespace. Nothing finer than a pod: one uid per mount."],
           [("b", "The repository."), "Its own pod, its prefix with a claim that refuses a foreign projectId, arbitration of overlapping prefixes at the operator — export prefixes included — consumers at the door, and a per-principal branch policy read by two enforcers.", ("r", "X-Remote-User is the boundary, and it is a NetworkPolicy: opt-in, and only where the CNI enforces it.")]]),
+        ("Can two sessions differ?", "in rights: one project, one reader, one writer",
+         [[("r", "No — only a client-side ro mount."), "A read-only claim gets ro, and the CSI publish forces it over operator options; but the server authenticates nobody, so any pod that reaches 2049 mounts rw and asserts uid 0. enforcePermissions checks a claimed uid: defence against accident, not against a session that wants to write."],
+          [("r", "No."), "A workspace is one writer: the publish path hardcodes read-write, the CRD has no readOnly, and the credential is one key per project. A second lean pod on the same prefix does not become a reader — it waits to become the writer. The read-only session is a passthrough mount of files/, readOnly (page 11)."],
+          [("b", "Yes, per pod."), "Two pods on one CR, one declared readOnly: --read-only on mount-s3 plus a read-only bind mount, and the pod never holds the key. The broker gates by consumers and hands both pods the SAME scope — one static key or one role ARN. The REST backend is told the ServiceAccount, so an external service can scope the key per principal; nothing in-tree does."],
+          [("b", "Yes, per ServiceAccount."), "consumers grants read; the branch policy decides writes per principal, in pre-receive and again in the syncer. A reader is listed in consumers with every ref protected and only the writer's SA in pushers; refs/for stays closed without mergeInto.", ("r", "Until a branches block exists, every consumer may push.")]]),
         ("What an owned agent pod gains", "and how fast the gain is revoked",
          [[("r", "The whole share, as anyone."), "It has the mount, asserts any uid, and the permission check logs by default. Not the bucket — the hub holds that credential. Nothing per-client to revoke; containment is the network boundary."],
           [("b", "Its own workspace, and nothing that outlives it."), "No S3 credential in the agent container in either deployment mode; the sidecar holds it, unprivileged. Revocation is killing the token or the pod. Ceiling: a deposed writer's uncited versions remain readable by a raw key."],
