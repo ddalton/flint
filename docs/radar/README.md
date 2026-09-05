@@ -6,8 +6,16 @@ HTML, or the next regeneration silently reverts you.
 
 ```sh
 python3 gen_radar.py     # radar_data.json + lakefs_data.json -> ../flint-approach-radar.html
+python3 measure.py       # headless Chrome: does every page, column and card FIT? (exit 1 if not)
 ./build-pdf.sh           # that HTML -> ../flint-approach-radar.pdf  (needs Chrome)
 ```
+
+Run `measure.py` every time. A `.page` is a fixed block with no overflow
+warning, and a card's overflow is painted over by the next card, so text
+that does not fit simply vanishes from the PDF — it has happened three
+times (rationale cells, then every chart note on page 1, then a table
+header). `pdftotext` cannot see it; the DOM can. Chart notes therefore
+live as the lede of each chart's "Why these numbers" page, not on page 1.
 
 ## Why this directory exists
 

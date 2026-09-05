@@ -24,6 +24,10 @@ SERIES_STYLE = {           # short -> (display label, color, dash)
     "FUSE":  ("FUSE",     "#eb6834", ""),
     "Lean":  ("Lean",     "#1baf7a", ""),
     "lakeFS": ("lakeFS",  "#4a3aa7", ""),   # slot-7 violet; pair vs aqua validated (CVD dE 31.1)
+    # Wine: validated --pairs all against the four flint series (worst CVD
+    # dE 9.2 is the pre-existing green/orange pair; normal-vision floor 19.0
+    # vs orange) and against lakeFS violet for the page-5 table (22.9).
+    "Forge": ("Forge",    "#b03060", ""),
 }
 
 RMAX = 5
@@ -116,7 +120,19 @@ INTRO = """<div class="intro">
     <p>No server and no interception: the app works on <b>plain local files</b>. An ordinary, unprivileged
     sidecar (flint-sync) checks the workspace out of S3 at pod start and re-publishes changed files on a
     cadence, writing to the bucket directly; a small <b>gateway</b> carries human-in-the-loop writes and
-    the publish/sync verbs. The agent container holds no bucket credentials. All three approaches share one bucket format and are mutually convertible.</p>
+    the publish/sync verbs. The agent container holds no bucket credentials. The three file-shaped approaches share one bucket format and are mutually convertible.</p>
+  </div>
+  <div class="ib">
+    <h3><span class="sw" style="background:#b03060"></span>Forge &nbsp;<span class="ibt">flint forge</span><span class="badge">built &middot; battery-tested &middot; no cluster drill</span></h3>
+    <p>A <b>git server per repository</b> with S3 as its only durable state. Agent pods are stock git
+    clients; a stateless <b>door</b> (the lite gateway with a git arm) turns the pod&rsquo;s own ServiceAccount
+    token into a principal and routes to the repository&rsquo;s server pod, where real git (nginx +
+    <code>http-backend</code>) serves from a local disk that is a cache and one <b>syncer</b> owns every write
+    to the bucket &mdash; a push is acknowledged only once its pack and one CAS&rsquo;d snapshot are in S3.
+    Idles to zero; the bucket is a bare repository, clonable with the server down. The durable unit is a
+    commit: untracked and uncommitted work is not forge&rsquo;s. Numbers checked by four verifiers and
+    eight refuters (none moved); the prose is single-pass.
+    <i class="arch">Archetype: in-cluster git server over object storage (AWS CodeCommit, closed to new customers 2024).</i></p>
   </div>
 </div>"""
 
@@ -179,7 +195,19 @@ def resolve_refs(text, data, lk):
                 "lake": lake}[kind]
     return CMP_RE.sub(one, text)
 
-def card(ch, data, lk):
+def card(ch, data, lk, page):
+    """One page-1 card: radar + score table + a pointer to the chart's page.
+
+    The chart's note used to sit under the table. It never fit: measured
+    in headless Chrome, every card on the committed page 1 was 233px
+    tall with 284-351px of content, so the Consistency and Performance
+    notes were cut mid-sentence by the card below and the Security and
+    Day-2 notes ran into the foot. Nothing warned -- .card has no
+    overflow rule and the next card's opaque background hid the tail.
+    The note is now the lede of the chart's own rationale page (the
+    page-count axis, as with the rationale columns), and the card keeps
+    what fits: the picture and the numbers.
+    """
     shorts = ch["series"]
     legend = "".join(
         f'<span class="lg"><span class="sw" style="background:{SERIES_STYLE[s][1]}"></span>'
@@ -211,12 +239,12 @@ def card(ch, data, lk):
         <thead><tr>{head}</tr></thead>
         <tbody>{rows}</tbody>
       </table>
-      <p class="note">{resolve_refs(ch["note"], data, lk)}</p>
+      <p class="note">The reading of this chart, and the reason behind every number: page {page}.</p>
     </div>
   </div>
 </div>'''
 
-def rat_section(ch, lo, hi, head):
+def rat_section(ch, lo, hi, head, data, lk):
     """One rationale column: axes [lo, hi) of `ch`.
 
     A chart's rationales used to be ONE column, two charts to a page. All
@@ -234,7 +262,7 @@ def rat_section(ch, lo, hi, head):
     for i, ax in list(enumerate(ch["axes"]))[lo:hi]:
         rows = "".join(
             f'<p class="rr"><span class="sw" style="background:{SERIES_STYLE[s][1]}"></span>'
-            f'<b>{s} {fmt(ch["scores"][s][i])}</b> — {ch["rationales"][s][i]}</p>'
+            f'<b>{s} {fmt(ch["scores"][s][i])}</b> — {resolve_refs(ch["rationales"][s][i], data, lk)}</p>'
             for s in shorts)
         defn = ax.get("definition", "")
         blocks.append(f'<div class="axb"><p class="axt"><b>{ax["name"]}</b>'
@@ -247,12 +275,13 @@ def rat_section(ch, lo, hi, head):
 S_GOOD, S_WARN, S_SER, S_CRIT = "#0ca30c", "#fab219", "#ec835a", "#d03b3b"
 
 AVAIL_COLS = [("NFS-over-S3 (hub — both flavors)", "#184f95"),
-              ("FUSE", "#eb6834"), ("Lean", "#1baf7a")]
+              ("FUSE", "#eb6834"), ("Lean", "#1baf7a"), ("Forge", "#b03060")]
 
 AVAIL_DEPS = [
     "The hub pod, its PVC, and the network path to :2049 — for every read and every write.",
     "The in-pod FUSE daemon for every I/O; S3 for non-resident reads and all publishes.",
     "Nothing standing — the app reads and writes plain local files; S3 / gateway are needed only at checkout and publish.",
+    "The door and the repository&rsquo;s server pod for every clone, fetch and push; S3 on every push (the ack) and at restore. The working tree is plain local files.",
 ]
 
 AVAIL_ROWS = [
@@ -260,31 +289,37 @@ AVAIL_ROWS = [
         (S_WARN, "Brief stall", "restart + epoch re-claim &asymp; 13 s; clients park and resume — nothing durable at risk (PVC)."),
         (S_SER, "Visible errors", "ENOTCONN — an error apps can see; restart-in-place recovers the emptyDir dirty set; open fds stay severed, apps reopen."),
         (S_GOOD, "App unaffected", "plain files — the app never notices; the restarted sidecar reloads its baseline, rescans, self-recognizes its lease; publishes pause one beat."),
+        (S_WARN, "Pushes in flight fail", "the syncer is the pod&rsquo;s main container: every push in the batch fails at the client, none acknowledged; the pod restarts and restores from the snapshot (sub-second on loopback); clones during it fail fast; the agent&rsquo;s tree is untouched."),
     ]),
     ("Node hosting it dies (or spot-reclaims uncleanly)", [
         (S_CRIT, "Share-wide hang", "every client hard-hangs in D-state (SIGKILL cannot touch it); Recreate + RWO &asymp; 6 min force-detach; F29&rsquo;s manual arm. Acked data is safe on the PVC."),
         (S_SER, "Per-pod loss", "that pod&rsquo;s unflushed set is gone (hot files: unbounded) plus a 60–110 s subtree write-lockout for the successor; every other pod unaffected."),
         (S_SER, "Per-pod loss", "a hard crash drains nothing — loss = RPO exactly; the successor waits out the same lease lockout; every other pod unaffected."),
+        (S_WARN, "Restore elsewhere", "no volume to detach: a replacement waits out the lease&rsquo;s quiet polls (&asymp;60 s after an unclean death), rotates the snapshot, restores from S3, serves. Nothing acknowledged is lost; unpushed work on the dead node is gone — git&rsquo;s contract."),
     ]),
     ("S3 outage or throttle", [
         (S_WARN, "Serving unaffected", "reads and writes continue from the PVC; the RPO grows; one coordinated retry queue drains the backlog."),
         (S_SER, "Degraded + compound risk", "non-resident reads fail; N uncoordinated engines re-fetch N&times;; outage + spot reclaim compound — that pod&rsquo;s dirty set is gone."),
         (S_WARN, "Running pods unaffected", "local files keep serving and publishes pause — but new pods cannot check out until S3 returns."),
+        (S_SER, "Read-only, then fenced", "pushes get <code>ng</code> — the syncer refuses to acknowledge what it cannot store; clones and fetches keep working until the lease TTL, then the server self-fences and exits rather than serve refs it cannot prove it holds."),
     ]),
     ("Control plane down (operator / webhook / gateway + proxy)", [
         (S_WARN, "Serving unaffected", "running hubs keep serving; wake and reconcile are blocked — a suspended share cannot wake while no operator reconciles."),
         (S_SER, "New pods blocked", "failurePolicy: Fail — every matched pod CREATE blocks while the webhook is down; running pods unaffected (Ignore would be worse: a silent data black hole)."),
         (S_SER, "Four wedges — at the proxy", "proxy unreachable: publishes pause AND checkouts/restarts wedge AND sync is unavailable AND HITL writes fail loudly (chaos leg C12). Gateway down alone: barriers continue — the shipped sidecar writes its cells straight to the store (C8); running pods keep serving throughout."),
+        (S_SER, "Door down = no git", "the door is in the path of every verb (N stateless replicas). Operator down: live servers keep serving, but a parked repository cannot wake — the door arms the annotation, only the operator scales — and the held request fails after 180 s."),
     ]),
     ("KDC / Kerberos infrastructure down — krb5p flavor only", [
         (S_SER, "New mounts fail", "new GSS contexts and credential renewals fail; established tickets ride out their lifetime; sec=sys is untouched — it carries no GSS context at all."),
         (None, "n/a", "no NFS wire."),
         (None, "n/a", "no NFS wire."),
+        (None, "n/a", "no Kerberos. The analogue is the apiserver: a TokenReview outage refuses NEW sessions once the &le; 60 s cache expires; sessions in flight finish."),
     ]),
     ("Share idle / parked, then accessed", [
         (S_WARN, "Wake required", "an NFS mount against a scaled-to-zero hub hangs until something writes the wake annotation — the data path cannot; the file API answers 503 fast; wake &asymp; 41 s suspended, and 17 s hibernated once the epoch cell was released &mdash; ~80 s when it was not."),
         (S_GOOD, "Nothing to wake", "idle = Hibernated structurally; the price moves to every pod start being a cold start — hydration on touch."),
         (S_GOOD, "Nothing to wake", "idle = S3-only structurally; the price is a full checkout at pod start, budgeted by derived probes."),
+        (S_WARN, "Wake required — held", "replicas 0 after <code>suspendAfterSecs</code>; the next request at the door arms the wake and is HELD up to 180 s (git does not retry a 503); restore = one pack at single-stream rate (4–8 s/GB at EC2 rates) plus &asymp;60 s of lease wait if the last death was unclean."),
     ]),
 ]
 
@@ -304,7 +339,7 @@ def p5_card(ch, lscores, lnote):
         vals = [ch["scores"][s][i] for s in ch["series"]] + [lscores[i]]
         rows += (f'<tr><td>{ax["short"]}</td>' +
                  "".join(f'<td>{fmt(v)}</td>' for v in vals) + "</tr>")
-    return f"""<div class="card">
+    return f"""<div class="card p5">
   <div class="cardhead">
     <h2>{ch["title"]}</h2>
     <div class="legend">{legend}</div>
@@ -358,6 +393,14 @@ def mc_page():
   a birth check, not a live lease; past it, each install&rsquo;s uncommitted GC treats the other&rsquo;s staged
   objects as garbage. In one line: the hub makes multicluster a <i>network-identity</i> problem, the direct
   modes an <i>allocation</i> problem, lakeFS a <i>database-topology</i> problem — share one KV or don&rsquo;t.</p>
+  <p><b>Forge:</b> HTTP plus a projected token, so the NFS identity class does not exist here either — but the
+  token is proven by THIS cluster&rsquo;s apiserver (<code>TokenReview</code>), and a pod in another cluster carries
+  nothing the door can verify: cross-cluster agents fall back to the human bearer until the Knox chain lands.
+  The bucket is a rendezvous for READERS only — a dumb-protocol clone works with the server down — never for a
+  second server: one lease, one prefix, one syncer, and the fence turns a foreign cluster&rsquo;s server into a
+  straggler that exits. Every clone leaves the server&rsquo;s NIC across the cluster boundary, so the storm lever
+  (bundle URIs, served from S3) is the cross-cluster lever too. In one line: forge makes multicluster an
+  <i>identity-provider</i> problem.</p>
   </div>
   """
     return f'''<div class="page">
@@ -390,11 +433,18 @@ def mc_page():
       <tr><td class="ae">Day-2 &middot; Idle lifecycle &amp; wake</td><td class="ac">hub (both)</td>
         <td class="ac">2.5 &rarr; 2</td>
         <td class="ac">idle-suspend kills a live remote mount (suspendWithSessions defaults to suspending anyway), and nothing in a remote cluster can write the wake annotation.</td></tr>
+      <tr><td class="ae">Security &middot; Auth</td><td class="ac">Forge</td>
+        <td class="ac">{{score:Security/Auth/Forge}} &rarr; 2</td>
+        <td class="ac">TokenReview proves only this cluster&rsquo;s ServiceAccount tokens; a remote cluster&rsquo;s pods hold no credential the door accepts, so cross-cluster access is the static human bearer until Knox.</td></tr>
+      <tr><td class="ae">Performance &middot; Cold start, Scale-out</td><td class="ac">Forge</td>
+        <td class="ac">{{score:Performance/Cold start/Forge}}/{{score:Performance/Scale-out/Forge}} &rarr; 3.5/2.5</td>
+        <td class="ac">every clone crosses the cluster boundary from one pod&rsquo;s NIC, often an inter-AZ/region billing path; bundle URIs (client opt-in) move those bytes to S3.</td></tr>
     </tbody>
   </table>
   <p class="atake"><b>Unchanged by design:</b> every Consistency cell (the hub&rsquo;s coherence is identical
   for remote clients; the direct modes&rsquo; contract is already per-subtree snapshots wherever pods run);
-  every FUSE and Lean cell (cross-cluster is cross-pod — the bucket is the rendezvous); krb5p&rsquo;s auth
+  every FUSE and Lean cell (cross-cluster is cross-pod — the bucket is the rendezvous); every Forge
+  Consistency cell (the server arbitrates wherever the client is); krb5p&rsquo;s auth
   and wire cells (per-user identity survives any network — this is its selling point). And note the
   <b>sec=sys security cells are already scored at the multicluster boundary</b>: their evidence came from
   the cross-cluster drills (the 1486/1486 SNAT measurement, &ldquo;nfsClientCIDRs cannot express a client
@@ -438,8 +488,26 @@ def avail_page():
   loss-shaped events — &ldquo;durability becomes an operational statistic — interruption handlers, grace
   periods, dirty-set caps — instead of an architecture property.&rdquo; Lean&rsquo;s refinement over FUSE is
   taking the app out of the sidecar&rsquo;s blast radius entirely; its residual concentration point is the
-  gateway/proxy pair.</p>
-  <h2 class="rath" style="margin-top:0.18in">Beyond flint — the same archetypes in the industry</h2>
+  gateway/proxy pair. Forge concentrates like the hub — one server per repository, in the path of every
+  git verb — but fails like Lean: errors, never hangs, and a restore in place of a recovery.</p>
+  <p class="foot">Sources: fuse-architecture p4 (failure matrix) &middot; lean plan §2.2/§7 (gateway outage) &middot; flint-lite-architecture p4 + fleets guide (idle/suspend) &middot; pnfs-operator-runbook (Kerberos) &middot; flint-forge-design §5, §11 (the syncer, the lease, the wake).</p>
+</div>'''
+
+def beyond_page(data, lk, p_lake):
+    """Industry analogues, then the method and maturity record.
+
+    Both used to live on page 1's foot and page 6's lower half. The foot
+    was 9-12 lines of 7.5px grey text on the front page and the notes
+    ran into it; page 6 overflowed by 86px once the availability matrix
+    grew a fourth column. A page of their own costs nothing and lets the
+    maturity record be read as paragraphs instead of one 2,300-character
+    line.
+    """
+    foot = resolve_refs(data["foot"], data, lk)
+    parts = re.split(r" (?:·|&middot;) ", foot.replace("shown separately: ", "shown separately. · "))
+    method = "".join(f"<p>{x}</p>" for x in parts)
+    return f'''<div class="page">
+  <h1>Beyond flint — the same archetypes in the industry</h1>
   <div class="beyond">
   <p>These pages are grounded in flint, but the columns model archetypes, and most orderings are
   structural — set by where arbitration, bytes, and credentials live — so they survive across
@@ -469,9 +537,10 @@ def avail_page():
   mounts resolve <i>source-wins</i> — a silent winner. Against that, its server-side arbitration —
   atomic branch commits, first-class merge conflicts, per-user RBAC, clients holding no bucket
   credentials — is roughly lean&rsquo;s designed endgame already shipped, at the price flint-lean
-  refuses to pay: an operated KV store (Postgres/DynamoDB) standing beside the bucket.</p>
+  refuses to pay: an operated KV store (Postgres/DynamoDB) standing beside the bucket. Page {p_lake} scores it from source.</p>
   </div>
-  <p class="foot">Sources: fuse-architecture p4 (failure matrix) &middot; lean plan §2.2/§7 (gateway outage) &middot; flint-lite-architecture p4 + fleets guide (idle/suspend) &middot; pnfs-operator-runbook (Kerberos).</p>
+  <h2 class="rath" style="margin-top:0.2in">How these numbers were made — method, evidence, maturity</h2>
+  <div class="beyond">{method}</div>
 </div>'''
 
 def main():
@@ -479,14 +548,16 @@ def main():
     data = json.load(open(os.path.join(here, "radar_data.json")))
     lk_path = os.path.join(here, "lakefs_data.json")
     lk = json.load(open(lk_path)) if os.path.exists(lk_path) else {}
-    cards = "".join(card(ch, data, lk) for ch in data["charts"])
+    cards = "".join(card(ch, data, lk, 2 + i) for i, ch in enumerate(data["charts"]))
     ch = data["charts"]
     rat_pages = ""
     for c in ch:
         n_ax = len(c["axes"])
         half = (n_ax + 1) // 2
-        cols = rat_section(c, 0, half, True) + rat_section(c, half, n_ax, False)
+        cols = (rat_section(c, 0, half, True, data, lk) +
+                rat_section(c, half, n_ax, False, data, lk))
         rat_pages += (f'<div class="page"><h1>Why these numbers — {c["title"]}</h1>'
+                      f'<p class="lede">{resolve_refs(c["note"], data, lk)}</p>'
                       f'<div class="ratrow">{cols}</div></div>')
     lakefs_pg = p5_page(data, lk) if lk else ""
     # Derived, not counted by hand: the rationale section grew from two
@@ -496,8 +567,12 @@ def main():
     p_rat_first = 2
     p_rat_last = 1 + len(data["charts"])
     p_avail = p_rat_last + 1
+    p_beyond = p_avail + 1
+    p_lake = p_beyond + 1 if lk else None
+    p_mc = (p_lake or p_beyond) + 1
     rat_ref = (f"Pages {p_rat_first}&ndash;{p_rat_last}"
                if p_rat_last > p_rat_first else f"Page {p_rat_first}")
+    lake_ref = f"; page {p_lake} scores lakeFS from its source" if lk else ""
     html = f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Flint front ends — radar comparison</title>
@@ -516,6 +591,7 @@ def main():
   }}
   .page:last-child {{ page-break-after: auto; }}
   .ratrow {{ display: flex; gap: 0.3in; margin-top: 0.08in; flex: 1; min-height: 0; }}
+  .lede {{ font-size: 7.6px; color: {INK2}; line-height: 1.38; margin-top: 4px; }}
   .ratcol {{ flex: 1; min-width: 0; }}
   .rath {{ font-size: 12.5px; font-weight: 650; border-bottom: 1px solid {GRID};
           padding-bottom: 2px; margin-bottom: 4px; }}
@@ -526,7 +602,7 @@ def main():
   .deck {{ font-size: 10px; color: {INK2}; margin-top: 1px; }}
   .intro {{ display: flex; gap: 0.18in; margin-top: 0.08in; }}
   .ib h3 {{ font-size: 9.5px; font-weight: 650; margin-bottom: 1.5px; }}
-  .ib .ibt {{ font-weight: 400; color: {MUTED}; font-size: 8px; }}
+  .ib .ibt {{ font-weight: 400; color: {MUTED}; font-size: 8px; white-space: nowrap; }}
   .ib p {{ font-size: 7.9px; color: {INK2}; line-height: 1.42; }}
   .arch {{ color: {MUTED}; }}
   .ib {{ flex: 1; min-width: 0; }}
@@ -549,7 +625,14 @@ def main():
         margin-right: 3px; vertical-align: -0.5px; }}
   .cardbody {{ display: flex; gap: 10px; align-items: flex-start; flex: 1; min-height: 0; }}
   .cardbody svg {{ align-self: center; }}
-  .cardbody svg {{ width: 47%; flex: none; }}
+  /* 45%, not 47%: with Forge the page-1 tables are six columns of nowrap
+     headers and at 47% three of them overran the side by 1-7px. */
+  .cardbody svg {{ width: 45%; flex: none; }}
+  /* The lakeFS page's tables carry every column — seven with Forge — and a
+     nowrap header cannot shrink: at 47% the Security card clipped its
+     last header. Measured, not assumed (measure.py). */
+  .p5 .cardbody svg {{ width: 42%; }}
+  .p5 th .sw {{ display: none; }}
   .side {{ flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }}
   table {{ width: 100%; border-collapse: collapse; font-size: 8.2px; color: {INK2}; }}
   th {{ font-weight: 600; color: {MUTED}; text-align: right; padding: 1.5px 3px;
@@ -579,18 +662,19 @@ def main():
 <body>
   <div class="page">
   <h1>Flint front ends — consistency, performance, security, Day-2 operations</h1>
-  <p class="deck">Three ways to put one S3 bucket behind agent workloads, compared on four dimensions —
-  six factors each (Performance carries a seventh, the workload envelope), scored 0 (weakest) – 5 (strongest) from the architecture docs, adversarially verified
-  per approach. {rat_ref} give the reason behind every number; page {p_avail} maps availability, the multicluster-to-one-bucket contract, and where other industry implementations would shift the numbers. NFS-over-S3 is charted in both flavors
+  <p class="deck">Four ways to put one S3 bucket behind agent workloads, compared on four dimensions —
+  six factors each (Performance carries a seventh, the workload envelope), scored 0 (weakest) – 5 (strongest) from the architecture docs and the code, adversarially verified
+  per approach. {rat_ref} give each chart&rsquo;s reading and the reason behind every number; page {p_avail} maps availability; page {p_beyond} places the columns among industry implementations and records the method and maturity behind the scores{lake_ref}; page {p_mc} states the multicluster-to-one-bucket contract. NFS-over-S3 is charted in both flavors
   (sec=sys dashed).</p>
   {INTRO}
   <div class="grid">{cards}</div>
-  <p class="foot">{resolve_refs(data["foot"], data, lk)}</p>
+  <p class="foot">Scores 0 (weakest) – 5 (strongest), as designed, with maturity kept out of the number: one proposer per dimension and one adversarial verifier per column for every column but Forge, whose numbers were scored in a single pass on 2026-09-04 and then checked by one verifier per chart and two refuters per proposed change (four proposed, none survived); its prose remains single-pass. The full method, evidence and maturity record: page {p_beyond}.</p>
   </div>
   {rat_pages}
   {avail_page()}
+  {beyond_page(data, lk, p_lake)}
   {lakefs_pg}
-  {mc_page()}
+  {resolve_refs(mc_page(), data, lk)}
 </body></html>'''
     # Repo-relative: this script lives at docs/radar/ and writes the
     # committed page one level up. It was an absolute path to somebody's
