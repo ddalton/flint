@@ -232,6 +232,26 @@ spec:
                   Everything this repository owns lives under it: `git/` is the
                   bare repository, and `git/snapshot` is its pointer.
                 type: string
+              lfs:
+                description: |-
+                  Git LFS: large binaries at `<keyPrefix>/lfs/objects/<oid>`,
+                  with the pointer files staying small in git.
+                nullable: true
+                properties:
+                  enabled:
+                    default: false
+                    type: boolean
+                  ttlSecs:
+                    description: |-
+                      How long a transfer URL is good for. Long enough for a
+                      multi-gigabyte object on a slow link; short enough that a leaked
+                      one is not a standing grant, because it is a bearer token for
+                      that object.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                type: object
               lifecycle:
                 description: |-
                   An admin scale-down. A wake request does NOT override it — the

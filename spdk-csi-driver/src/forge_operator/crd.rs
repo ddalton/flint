@@ -133,6 +133,11 @@ pub struct FlintRepoSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fleet: Option<FleetSpec>,
 
+    /// Git LFS: large binaries at `<keyPrefix>/lfs/objects/<oid>`,
+    /// with the pointer files staying small in git.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lfs: Option<LfsSpec>,
+
     /// `RUST_LOG` for the server pod.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_level: Option<String>,
@@ -379,6 +384,33 @@ pub struct RepoCondition {
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_transition_time: Option<String>,
+}
+
+/// Git LFS — the multi-modal case.
+///
+/// A pack is delta-compressed and rewritten WHOLE by `repack -a`, so
+/// images, audio, video and model weights committed as ordinary blobs
+/// make every clone, every repack and every restore pay for them
+/// again. With LFS on, the bytes live beside the packs as immutable
+/// content-named objects and the client transfers them straight to and
+/// from the object store — they never cross the repository server.
+///
+/// **Nothing collects them.** An LFS object is referenced by a pointer
+/// file inside some tree of some commit, and deciding one is
+/// unreferenced means walking every reachable tree; an unreferenced
+/// object costs storage and nothing else, so forge leaves it rather
+/// than shipping a reaper that is right most of the time.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LfsSpec {
+    #[serde(default)]
+    pub enabled: bool,
+    /// How long a transfer URL is good for. Long enough for a
+    /// multi-gigabyte object on a slow link; short enough that a leaked
+    /// one is not a standing grant, because it is a bearer token for
+    /// that object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_secs: Option<u64>,
 }
 
 /// The CRD object, for `crdgen` and for the operator's own apply at

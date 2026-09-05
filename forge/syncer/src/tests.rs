@@ -1416,3 +1416,222 @@ async fn a_prune_is_a_push_and_the_bucket_learns_about_it() {
     assert!(cell.snap.refs.contains_key("refs/heads/main"));
     assert!(rig.sc.git.ref_oid("refs/heads/agent/old").await.unwrap().is_none());
 }
+
+// ── git LFS (§14 phase 6) ────────────────────────────────────────────
+
+fn lfs_oid(n: u8) -> String {
+    format!("{:02x}", n).repeat(32)
+}
+
+fn batch_req(op: &str, objects: &[(&str, u64)]) -> super::lfs::BatchRequest {
+    serde_json::from_value(serde_json::json!({
+        "operation": op,
+        "transfers": ["basic"],
+        "hash_algo": "sha256",
+        "objects": objects
+            .iter()
+            .map(|(oid, size)| serde_json::json!({"oid": oid, "size": size}))
+            .collect::<Vec<_>>(),
+    }))
+    .expect("a batch request git-lfs would send")
+}
+
+/// The download path: an object the bucket holds is handed back as a
+/// presigned URL, and one it does not is a 404 ON THAT OBJECT rather
+/// than a failure of the whole batch — which is what lets a client
+/// fetch nine of ten and be told precisely which one is missing.
+#[tokio::test]
+async fn a_download_batch_presigns_what_is_there_and_404s_what_is_not() {
+    let rig = Rig::new().await;
+    let here = lfs_oid(0xab);
+    let gone = lfs_oid(0xcd);
+    rig.store.raw_put(
+        &super::lfs::object_key(&rig.sc.cfg.prefix, &here),
+        bytes::Bytes::from_static(b"weights"),
+        vec![],
+    );
+
+    let res = super::lfs::batch(
+        rig.store.as_ref(),
+        &rig.sc.cfg.prefix,
+        &batch_req("download", &[(&here, 7), (&gone, 99)]),
+        600,
+    )
+    .await
+    .expect("the batch itself succeeds");
+    assert_eq!(res.transfer, "basic");
+
+    let ok = &res.objects[0];
+    assert!(ok.error.is_none());
+    let href = &ok.actions["download"].href;
+    assert!(href.contains(&here), "the URL must name the object: {href}");
+    assert_eq!(ok.actions["download"].expires_in, 600);
+    assert!(ok.authenticated, "the client already authenticated at the door");
+
+    let missing = &res.objects[1];
+    assert!(missing.actions.is_empty());
+    assert_eq!(missing.error.as_ref().unwrap().code, 404);
+}
+
+/// The dedupe that makes LFS cheap: an object already in the bucket
+/// gets NO actions, which is how the protocol says "you already have
+/// this". A rebased branch re-pushing the same checkpoint uploads
+/// nothing.
+#[tokio::test]
+async fn an_upload_batch_offers_a_url_only_for_what_is_missing() {
+    let rig = Rig::new().await;
+    let have = lfs_oid(0x11);
+    let want = lfs_oid(0x22);
+    rig.store.raw_put(
+        &super::lfs::object_key(&rig.sc.cfg.prefix, &have),
+        bytes::Bytes::from_static(b"already"),
+        vec![],
+    );
+
+    let res = super::lfs::batch(
+        rig.store.as_ref(),
+        &rig.sc.cfg.prefix,
+        &batch_req("upload", &[(&have, 7), (&want, 4096)]),
+        600,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        res.objects[0].actions.is_empty(),
+        "an object already in the bucket must be offered no upload at all"
+    );
+    assert!(res.objects[0].error.is_none());
+
+    let fresh = &res.objects[1];
+    assert!(fresh.actions.contains_key("upload"), "{:?}", fresh.actions);
+    assert!(fresh.actions["upload"].href.contains(&want));
+    assert!(
+        fresh.actions.contains_key("verify"),
+        "without verify a failed PUT is silently accepted — the bytes never came past us"
+    );
+}
+
+/// The oid becomes an S3 KEY, so this is the boundary that stops a
+/// traversal or a newline from reaching one. Nothing but 64 lower-case
+/// hex characters is an oid.
+#[test]
+fn only_a_sha256_in_lower_case_hex_is_an_oid() {
+    use super::lfs::{object_key, valid_oid};
+    assert!(valid_oid(&lfs_oid(0xab)));
+    assert!(!valid_oid(""), "empty");
+    assert!(!valid_oid(&"a".repeat(63)), "short");
+    assert!(!valid_oid(&"A".repeat(64)), "upper case would be a second key for one object");
+    assert!(!valid_oid("../../etc/passwd"), "traversal");
+    assert!(!valid_oid(&format!("{}\n", "a".repeat(63))), "newline");
+    assert_eq!(
+        object_key("tenant/repo/", &lfs_oid(0x0f)),
+        format!("tenant/repo/lfs/objects/{}", lfs_oid(0x0f))
+    );
+}
+
+/// A bad oid is refused per object, not per batch, and the refusal
+/// never reaches the store.
+#[tokio::test]
+async fn a_malformed_oid_is_refused_without_touching_the_store() {
+    let rig = Rig::new().await;
+    rig.store.reset_op_counts();
+    let res = super::lfs::batch(
+        rig.store.as_ref(),
+        &rig.sc.cfg.prefix,
+        &batch_req("download", &[("../../etc/passwd", 1)]),
+        600,
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.objects[0].error.as_ref().unwrap().code, 422);
+    assert_eq!(rig.store.total_ops(), 0, "a malformed oid must never become a key");
+}
+
+/// The whole request is refused when the client asks for something
+/// this server does not do — a different hash algorithm, a transfer
+/// that presigned URLs cannot serve, or an operation that is neither.
+#[tokio::test]
+async fn a_batch_this_server_cannot_serve_is_refused_whole() {
+    let rig = Rig::new().await;
+    let mut sha1 = batch_req("download", &[(&lfs_oid(1), 1)]);
+    sha1.hash_algo = Some("sha1".into());
+    assert!(super::lfs::batch(rig.store.as_ref(), "p", &sha1, 600).await.is_err());
+
+    let mut exotic = batch_req("download", &[(&lfs_oid(1), 1)]);
+    exotic.transfers = vec!["tus".into(), "multipart".into()];
+    assert!(super::lfs::batch(rig.store.as_ref(), "p", &exotic, 600).await.is_err());
+
+    let mut nonsense = batch_req("download", &[(&lfs_oid(1), 1)]);
+    nonsense.operation = "delete".into();
+    assert!(super::lfs::batch(rig.store.as_ref(), "p", &nonsense, 600).await.is_err());
+
+    // A client that offers nothing is a client that will take `basic`.
+    let mut silent = batch_req("download", &[(&lfs_oid(1), 1)]);
+    silent.transfers = vec![];
+    assert!(super::lfs::batch(rig.store.as_ref(), "p", &silent, 600).await.is_ok());
+}
+
+/// A presigned PUT is a grant to write at a key, and nothing about it
+/// proves the write happened or finished. `verify` is where the server
+/// finds out, and it is the only place it can — the bytes never came
+/// through here to be counted.
+#[tokio::test]
+async fn verify_catches_an_upload_that_did_not_land_or_did_not_finish() {
+    let rig = Rig::new().await;
+    let oid = lfs_oid(0x33);
+    let spec = super::lfs::ObjectSpec { oid: oid.clone(), size: 7 };
+
+    match super::lfs::verify(rig.store.as_ref(), &rig.sc.cfg.prefix, &spec).await {
+        Err((404, why)) => assert!(why.contains("did not complete"), "{why}"),
+        other => panic!("an absent object must not verify: {other:?}"),
+    }
+
+    // Truncated: the PUT landed and stopped early.
+    rig.store.raw_put(
+        &super::lfs::object_key(&rig.sc.cfg.prefix, &oid),
+        bytes::Bytes::from_static(b"abc"),
+        vec![],
+    );
+    match super::lfs::verify(rig.store.as_ref(), &rig.sc.cfg.prefix, &spec).await {
+        Err((422, why)) => assert!(why.contains("3 bytes"), "{why}"),
+        other => panic!("a short object must not verify: {other:?}"),
+    }
+
+    rig.store.raw_put(
+        &super::lfs::object_key(&rig.sc.cfg.prefix, &oid),
+        bytes::Bytes::from_static(b"weights"),
+        vec![],
+    );
+    super::lfs::verify(rig.store.as_ref(), &rig.sc.cfg.prefix, &spec).await.expect("verifies");
+}
+
+/// A store that is having a moment must not be reported as "the object
+/// is not there": that would make a client re-upload bytes that are
+/// already in the bucket.
+#[tokio::test]
+async fn an_unreachable_store_is_not_reported_as_a_missing_object() {
+    let rig = Rig::new().await;
+    rig.store.inject_head_failures(1);
+    let res = super::lfs::batch(
+        rig.store.as_ref(),
+        &rig.sc.cfg.prefix,
+        &batch_req("download", &[(&lfs_oid(0x44), 1)]),
+        600,
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.objects[0].error.as_ref().unwrap().code, 503);
+}
+
+/// A batch larger than the protocol expects would mean an unbounded
+/// number of HEADs behind one request.
+#[tokio::test]
+async fn an_oversized_batch_is_refused() {
+    let rig = Rig::new().await;
+    let oids: Vec<String> = (0..super::lfs::MAX_BATCH + 1).map(|i| lfs_oid((i % 251) as u8)).collect();
+    let pairs: Vec<(&str, u64)> = oids.iter().map(|o| (o.as_str(), 1u64)).collect();
+    assert!(super::lfs::batch(rig.store.as_ref(), "p", &batch_req("download", &pairs), 600)
+        .await
+        .is_err());
+}

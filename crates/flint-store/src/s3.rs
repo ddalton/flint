@@ -29,6 +29,8 @@ pub const S3_MAX_PARTS: usize = 10_000;
 
 pub struct S3Store {
     client: aws_sdk_s3::Client,
+    /// Used only by [`ObjectStore::presign_put`]; see `connect`.
+    presign_client: aws_sdk_s3::Client,
     bucket: String,
 }
 
@@ -63,14 +65,41 @@ impl S3Store {
                 .read_timeout(std::time::Duration::from_secs(10))
                 .build(),
         );
+        let endpoint_for_presign = endpoint.clone();
         if let Some(ep) = endpoint {
             // Custom endpoints (MinIO/localstack) need path-style —
             // virtual-hosted addressing would resolve the bucket as a
             // DNS label of the rig host.
             b = b.endpoint_url(ep).force_path_style(true);
         }
+        // A SECOND client, for presigning writes only.
+        //
+        // Since SDK 1.66 the default is `WhenSupported`, which adds an
+        // `x-amz-checksum-crc32` header to PutObject — and a presigned
+        // URL signs the headers it was built with. A git-lfs client
+        // handed such a URL does not send that header, so the
+        // signature does not match and S3 answers 403 with nothing in
+        // it about checksums. `WhenRequired` leaves it off, and it is
+        // scoped to this client rather than set globally because every
+        // other write in flint passes its CRC-64 EXPLICITLY and must
+        // keep doing so.
+        let mut pb = aws_sdk_s3::config::Builder::from(&base);
+        pb = pb.timeout_config(
+            aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+                .connect_timeout(std::time::Duration::from_secs(3))
+                .read_timeout(std::time::Duration::from_secs(10))
+                .build(),
+        );
+        if let Some(ep) = endpoint_for_presign {
+            pb = pb.endpoint_url(ep).force_path_style(true);
+        }
+        pb = pb.request_checksum_calculation(
+            aws_sdk_s3::config::RequestChecksumCalculation::WhenRequired,
+        );
+        let presign_client = aws_sdk_s3::Client::from_conf(pb.build());
+
         let client = aws_sdk_s3::Client::from_conf(b.build());
-        Ok(S3Store { client, bucket })
+        Ok(S3Store { client, presign_client, bucket })
     }
 
     pub fn bucket(&self) -> &str {
@@ -390,6 +419,22 @@ impl ObjectStore for S3Store {
             .presigned(cfg)
             .await
             .map_err(|e| map_err("presign_get", e))?;
+        Ok(req.uri().to_string())
+    }
+
+    async fn presign_put(&self, key: &str, ttl_secs: u64) -> StoreResult<String> {
+        let cfg = aws_sdk_s3::presigning::PresigningConfig::expires_in(
+            std::time::Duration::from_secs(ttl_secs),
+        )
+        .map_err(|e| StoreError::Other(format!("presign config: {e}")))?;
+        let req = self
+            .presign_client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .presigned(cfg)
+            .await
+            .map_err(|e| map_err("presign_put", e))?;
         Ok(req.uri().to_string())
     }
 

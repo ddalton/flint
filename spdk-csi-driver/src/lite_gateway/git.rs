@@ -84,6 +84,13 @@ pub enum GitVerb {
     UploadPack,
     /// `POST .../git-receive-pack` — a push.
     ReceivePack,
+    /// `POST .../info/lfs/objects/batch` — git LFS (design §14).
+    /// Answered by the syncer, which has the bucket credentials the
+    /// door deliberately has not; the objects themselves never pass
+    /// through either, because the response is presigned URLs.
+    LfsBatch,
+    /// `POST .../info/lfs/objects/verify` — did the upload land?
+    LfsVerify,
 }
 
 impl GitVerb {
@@ -94,19 +101,29 @@ impl GitVerb {
             GitVerb::InfoRefs => "/info/refs",
             GitVerb::UploadPack => "/git-upload-pack",
             GitVerb::ReceivePack => "/git-receive-pack",
+            GitVerb::LfsBatch => "/info/lfs/objects/batch",
+            GitVerb::LfsVerify => "/info/lfs/objects/verify",
         }
     }
 
     pub fn method(self) -> reqwest::Method {
         match self {
             GitVerb::InfoRefs => reqwest::Method::GET,
-            GitVerb::UploadPack | GitVerb::ReceivePack => reqwest::Method::POST,
+            GitVerb::UploadPack
+            | GitVerb::ReceivePack
+            | GitVerb::LfsBatch
+            | GitVerb::LfsVerify => reqwest::Method::POST,
         }
     }
 
     /// Does this change the repository? Only a push does — a fetch is
     /// a read however large it is, which is what makes `--read-only`
     /// meaningful for a mirror or a browse deployment.
+    ///
+    /// An LFS batch is NOT decided here, because the same route serves
+    /// both directions: the request body says `download` or `upload`,
+    /// and a read-only door reads it (see `lfs_operation`). Marking the
+    /// route a mutation would refuse every LFS FETCH on a mirror.
     pub fn is_mutation(self) -> bool {
         matches!(self, GitVerb::ReceivePack)
     }
@@ -123,8 +140,18 @@ impl GitVerb {
 /// which the door sets and which no caller can smuggle in, because
 /// this list is an allowlist and the header map is built from nothing
 /// else.
-pub const GIT_REQUEST_HEADERS: &[&str] =
-    &["content-type", "content-encoding", "accept", "accept-encoding", "git-protocol"];
+pub const GIT_REQUEST_HEADERS: &[&str] = &[
+    "content-type",
+    "content-encoding",
+    "accept",
+    "accept-encoding",
+    "git-protocol",
+    // Set by the door itself on an LFS batch, never taken from the
+    // caller: it is in this allowlist because the door writes it into
+    // the same header map, and a caller-supplied one is overwritten
+    // before it is read.
+    "x-forge-lfs-verify",
+];
 
 /// Response headers relayed back.
 ///
@@ -539,7 +566,9 @@ pub fn routes(
             })
     };
 
-    let receive = warp::path!("git" / String / String / "git-receive-pack")
+    let receive = {
+        let door = door.clone();
+        warp::path!("git" / String / String / "git-receive-pack")
         .and(warp::post())
         // NO `content_length_limit`. A push is a streamed pack of
         // unknown length; the file API's own upload route answers 411
@@ -564,9 +593,120 @@ pub fn routes(
                     .await,
                 )
             }
-        });
+        })
+    };
 
-    info_refs.or(upload).unify().or(receive).unify()
+    let lfs_batch = lfs_route(door.clone(), "batch", GitVerb::LfsBatch);
+    let lfs_verify = lfs_route(door, "verify", GitVerb::LfsVerify);
+
+    info_refs
+        .or(upload)
+        .unify()
+        .or(receive)
+        .unify()
+        .or(lfs_batch)
+        .unify()
+        .or(lfs_verify)
+        .unify()
+}
+
+/// The `operation` an LFS batch names, without parsing the rest.
+///
+/// A read-only door has to know, because the SAME route serves both
+/// directions: refusing the route outright would break every LFS fetch
+/// on a mirror, and allowing it blindly would let a mirror be written
+/// to. An unparseable body is treated as an upload — the safe
+/// direction, and the syncer will reject it with a better message.
+pub fn lfs_operation(body: &[u8]) -> &'static str {
+    #[derive(serde::Deserialize)]
+    struct Op {
+        operation: String,
+    }
+    match serde_json::from_slice::<Op>(body) {
+        Ok(op) if op.operation == "download" => "download",
+        _ => "upload",
+    }
+}
+
+/// The two LFS routes. Their bodies are BUFFERED rather than streamed:
+/// a batch is a few kilobytes of JSON describing at most a thousand
+/// objects, the door has to read `operation` out of it, and the bytes
+/// of the objects themselves never come near this path at all — they
+/// go straight from the client to the object store.
+fn lfs_route(
+    door: Arc<GitDoor>,
+    leaf: &'static str,
+    verb: GitVerb,
+) -> impl Filter<Extract = (Response,), Error = Rejection> + Clone {
+    warp::path!("git" / String / String / "info" / "lfs" / "objects" / String)
+        .and(warp::post())
+        .and(warp::body::content_length_limit(4 << 20))
+        .and(warp::body::bytes())
+        .and(warp::header::optional::<String>("authorization"))
+        .and(warp::header::optional::<String>("host"))
+        .and(warp::header::headers_cloned())
+        .and_then(
+            move |ns: String,
+                  repo: String,
+                  tail: String,
+                  body: bytes::Bytes,
+                  auth,
+                  host: Option<String>,
+                  mut hdrs: warp::http::HeaderMap| {
+                let door = door.clone();
+                async move {
+                    if tail != leaf {
+                        return Ok::<_, Rejection>(json_err(
+                            StatusCode::NOT_FOUND,
+                            "NoSuchRoute",
+                            "this door serves the LFS batch and verify routes",
+                            None,
+                        ));
+                    }
+                    if door.cfg.read_only && verb == GitVerb::LfsBatch
+                        && lfs_operation(&body) == "upload"
+                    {
+                        return Ok(json_err(
+                            StatusCode::FORBIDDEN,
+                            "ReadOnly",
+                            "this door is read-only; LFS uploads are refused",
+                            None,
+                        ));
+                    }
+                    // Where `verify` lives, in the client's own terms.
+                    // Only the door knows the URL the client reached;
+                    // a pod-local address would send it somewhere it
+                    // cannot go, and the syncer drops the action
+                    // entirely rather than guess.
+                    if verb == GitVerb::LfsBatch {
+                        if let Some(h) = host.as_deref().filter(|h| !h.is_empty()) {
+                            let scheme = hdrs
+                                .get("x-forwarded-proto")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("https")
+                                .to_string();
+                            let url = format!(
+                                "{scheme}://{h}/git/{ns}/{repo}/info/lfs/objects/verify"
+                            );
+                            if let Ok(v) = warp::http::HeaderValue::from_str(&url) {
+                                hdrs.insert("x-forge-lfs-verify", v);
+                            }
+                        }
+                    }
+                    Ok(proxy(
+                        door,
+                        ns,
+                        repo,
+                        verb,
+                        None,
+                        auth,
+                        hdrs,
+                        Some(reqwest::Body::from(body.to_vec())),
+                    )
+                    .await)
+                }
+            },
+        )
 }
 
 /// Adapt warp's request-body stream into a reqwest streaming body.
@@ -758,6 +898,7 @@ mod tests {
     use super::*;
     use crate::forge_operator::crd::RepoPhase;
     use bytes::Bytes;
+    use flint_forge::lfs::LFS_MEDIA_TYPE;
     use kube::runtime::{reflector, watcher};
     use std::sync::atomic::AtomicU64;
     use warp::http::HeaderMap;
@@ -828,6 +969,7 @@ mod tests {
                 idle: None,
                 export: None,
                 fleet: None,
+                lfs: None,
                 log_level: None,
                 lifecycle: None,
             },
@@ -1289,6 +1431,92 @@ mod tests {
         assert!(log.lock().unwrap().is_empty());
     }
 
+    /// The LFS batch reaches the server with the verified principal
+    /// and with the URL the client itself used — which only the door
+    /// knows, and which the syncer refuses to guess.
+    #[tokio::test]
+    async fn an_lfs_batch_carries_the_principal_and_the_clients_own_verify_url() {
+        let log: Log = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = fake_git_server(log.clone()).await;
+        let door = door_with(
+            vec![repo(Some(&endpoint), vec!["agent-runner"], RepoPhase::Ready)],
+            Arc::new(CountingReviewer {
+                calls: Arc::new(AtomicU64::new(0)),
+                verdict: Ok(identity("tenant", "agent-runner")),
+            }),
+            false,
+        );
+        let res = warp::test::request()
+            .method("POST")
+            .path("/git/tenant/proj.git/info/lfs/objects/batch")
+            .header("authorization", basic("tok"))
+            .header("host", "forge.example.com")
+            .header("content-type", LFS_MEDIA_TYPE)
+            .body(r#"{"operation":"download","objects":[]}"#)
+            .reply(&routes(door))
+            .await;
+        assert_eq!(res.status(), 200);
+
+        let seen = log.lock().unwrap()[0].clone();
+        assert_eq!(seen.path, "/tenant/proj.git/info/lfs/objects/batch");
+        assert_eq!(
+            seen.headers.get("x-remote-user").map(|v| v.to_str().unwrap()),
+            Some("system:serviceaccount:tenant:agent-runner")
+        );
+        assert_eq!(
+            seen.headers.get("x-forge-lfs-verify").map(|v| v.to_str().unwrap()),
+            Some("https://forge.example.com/git/tenant/proj.git/info/lfs/objects/verify"),
+            "a pod-local address would send the client somewhere it cannot go"
+        );
+    }
+
+    /// The SAME route serves both directions, so a read-only door reads
+    /// the operation out of the body. Refusing the route outright would
+    /// break every LFS fetch on a mirror.
+    #[tokio::test]
+    async fn a_read_only_door_refuses_an_lfs_upload_and_serves_an_lfs_fetch() {
+        let log: Log = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = fake_git_server(log.clone()).await;
+        let door = door_with(
+            vec![repo(Some(&endpoint), vec!["agent-runner"], RepoPhase::Ready)],
+            Arc::new(CountingReviewer {
+                calls: Arc::new(AtomicU64::new(0)),
+                verdict: Ok(identity("tenant", "agent-runner")),
+            }),
+            true,
+        );
+        let routes = routes(door);
+        let res = warp::test::request()
+            .method("POST")
+            .path("/git/tenant/proj.git/info/lfs/objects/batch")
+            .header("authorization", basic("tok"))
+            .body(r#"{"operation":"upload","objects":[]}"#)
+            .reply(&routes)
+            .await;
+        assert_eq!(res.status(), 403);
+        assert!(log.lock().unwrap().is_empty(), "the server was not dialled");
+
+        let res = warp::test::request()
+            .method("POST")
+            .path("/git/tenant/proj.git/info/lfs/objects/batch")
+            .header("authorization", basic("tok"))
+            .body(r#"{"operation":"download","objects":[]}"#)
+            .reply(&routes)
+            .await;
+        assert_eq!(res.status(), 200, "a fetch is a read on a read-only door");
+        assert_eq!(log.lock().unwrap().len(), 1);
+    }
+
+    /// An unparseable body reads as an upload: the safe direction on a
+    /// read-only door, and the syncer answers it with a better message.
+    #[test]
+    fn an_unreadable_lfs_body_is_treated_as_a_write() {
+        assert_eq!(lfs_operation(br#"{"operation":"download"}"#), "download");
+        assert_eq!(lfs_operation(br#"{"operation":"upload"}"#), "upload");
+        assert_eq!(lfs_operation(b"not json at all"), "upload");
+        assert_eq!(lfs_operation(b"{}"), "upload");
+    }
+
     #[test]
     fn the_basic_password_is_the_token_and_the_username_is_ignored() {
         assert_eq!(basic_password(Some(&basic("abc"))).as_deref(), Some("abc"));
@@ -1314,7 +1542,13 @@ mod tests {
     /// byte can ever appear in it.
     #[test]
     fn every_upstream_suffix_is_static() {
-        for v in [GitVerb::InfoRefs, GitVerb::UploadPack, GitVerb::ReceivePack] {
+        for v in [
+            GitVerb::InfoRefs,
+            GitVerb::UploadPack,
+            GitVerb::ReceivePack,
+            GitVerb::LfsBatch,
+            GitVerb::LfsVerify,
+        ] {
             let s: &'static str = v.suffix();
             assert!(s.starts_with('/'), "{s}");
             assert!(!s.contains(".."), "{s}");

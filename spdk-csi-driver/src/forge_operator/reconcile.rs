@@ -441,6 +441,7 @@ mod tests {
                 idle: None,
                 export: None,
                 fleet: None,
+                lfs: None,
                 log_level: None,
                 lifecycle: None,
             },

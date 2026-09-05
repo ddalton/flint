@@ -191,6 +191,7 @@ mod tests {
                 idle: after.map(|a| RepoIdle { suspend_after_secs: Some(a) }),
                 export: None,
                 fleet: None,
+                lfs: None,
                 log_level: None,
                 lifecycle: None,
             },

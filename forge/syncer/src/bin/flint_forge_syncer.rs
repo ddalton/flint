@@ -36,6 +36,8 @@
 //!   FLINT_FORGE_PRUNE_PATTERN    refs eligible for pruning, e.g. agent/*
 //!   FLINT_FORGE_PRUNE_AFTER_SECS how long a MERGED branch must be quiet
 //!   FLINT_FORGE_PRUNE_EVERY_SECS how often the pass runs (default 86400)
+//!   FLINT_FORGE_LFS              "true" arms the git-LFS batch API
+//!   FLINT_FORGE_LFS_TTL_SECS     transfer URL lifetime (default 3600)
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,7 +46,7 @@ use flint_forge::bundle::BundleConfig;
 use flint_forge::export::ExportConfig;
 use flint_forge::prune::PruneConfig;
 use flint_forge::policy::Policy;
-use flint_forge::server::{self, ServerOpts};
+use flint_forge::server::{self, LfsOpts, ServerOpts};
 use flint_forge::{ForgeConfig, ForgeError, Syncer, EXIT_REFUSED};
 use flint_store::s3::S3Store;
 use flint_store::ObjectStore;
@@ -197,6 +199,17 @@ async fn main() {
             std::process::exit(EXIT_REFUSED);
         }
     };
+
+    // Git LFS: off unless armed. The bytes never come through this
+    // process — the batch response hands the client a presigned URL —
+    // but the API lives here because this is where the bucket
+    // credentials are.
+    let lfs = std::env::var("FLINT_FORGE_LFS")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+        .then(|| LfsOpts {
+            ttl_secs: env_u64("FLINT_FORGE_LFS_TTL_SECS", flint_forge::lfs::DEFAULT_TTL_SECS),
+        });
 
     let opts = ServerOpts {
         socket,

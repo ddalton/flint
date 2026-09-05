@@ -14,6 +14,24 @@ covered by the stability guarantee.
 
 ### Added
 
+- **flint forge: git LFS**, for the multi-modal case. A pack is
+  delta-compressed and rewritten whole by `repack -a`, so weights,
+  video and audio committed as ordinary blobs make every clone, repack
+  and restore pay for them again; with `spec.lfs.enabled` the bytes
+  live at `<keyPrefix>/lfs/objects/<oid>` — immutable, content-named,
+  the layout the packs already use — and the pointers stay small in
+  git. The batch API is served by the syncer, because it needs the
+  bucket credentials the door deliberately has none of, and **the
+  objects never cross the server**: the response hands the client a
+  presigned URL, so a 4 GB checkpoint goes straight to the object store.
+  `flint-store` grows `presign_put` behind a presigning client that
+  sets `RequestChecksumCalculation::WhenRequired` — the SDK's default
+  adds a checksum header to PutObject, a presigned URL signs the
+  headers it was built with, and a git-lfs client does not send it, so
+  S3 answers 403 with nothing in it about checksums. An object already
+  in the bucket is offered no upload action, which is the dedupe that
+  makes LFS cheap. Nothing collects LFS objects, deliberately.
+
 - **flint forge, phase 5: the fleet levers.** Clone bundles, the
   agent-branch pruner, and `docs/flint-forge-for-agents.md`. The syncer
   cuts a bundle on a floor, uploads it beside the packs, advertises a

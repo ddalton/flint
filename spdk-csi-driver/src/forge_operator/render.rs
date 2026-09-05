@@ -423,6 +423,21 @@ pub fn deployment(repo: &FlintRepo, d: &RenderDefaults, replicas: i32) -> Deploy
         }
     }
 
+    if let Some(l) = s.lfs.as_ref().filter(|l| l.enabled) {
+        env.push(EnvVar {
+            name: "FLINT_FORGE_LFS".into(),
+            value: Some("true".into()),
+            ..Default::default()
+        });
+        if let Some(v) = l.ttl_secs {
+            env.push(EnvVar {
+                name: "FLINT_FORGE_LFS_TTL_SECS".into(),
+                value: Some(v.to_string()),
+                ..Default::default()
+            });
+        }
+    }
+
     let syncer = Container {
         name: "syncer".to_string(),
         image: Some(d.syncer_image.clone()),
@@ -586,6 +601,7 @@ mod tests {
                 idle: None,
                 export: None,
                 fleet: None,
+                lfs: None,
                 log_level: None,
                 lifecycle: None,
             },

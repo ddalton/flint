@@ -1,6 +1,6 @@
 # flint forge — a git server with S3 behind it: design of record
 
-Status: **PHASES 1-5 LANDED** — `forge/syncer` (the `flint-forge`
+Status: **PHASES 1-5 LANDED, AND LFS** — `forge/syncer` (the `flint-forge`
 crate: the syncer, both hooks, restore, the sweep, `/status`, the
 branch policy, the credential helper and the legible export), the door
 (`lite_gateway::git` with `Door::Git`), and the operator
@@ -754,23 +754,43 @@ slow in ways that matter for a fleet. Phase 0 runs it as the control.
    **Still to do:** the storm leg on EC2 (falsifier 8), whose control
    is the client opt-in switched off — provisioned only on the user's
    go, pure spot.
-6. **Later, and LFS is not last.** The LFS batch API over `lfs/`
-   moves up: **multi-modal agents are a named use case for forge**, and
-   an agent working on images, audio, video or model weights commits
-   blobs that git's own object model handles badly — a pack is
-   delta-compressed and fully rewritten by `repack -a`, so a repository
-   of large binaries makes every clone, every repack and every restore
-   pay for bytes that never delta. LFS puts those blobs at
-   `<prefix>/lfs/objects/<oid>` as immutable content-named objects,
-   which is the layout §3 already uses for packs and which the sweep's
-   four rules already cover; the pointer files stay in git and stay
-   small. It also changes the storm arithmetic of §8, because an LFS
-   object can be handed to the client as a presigned URL and never
-   crosses the server's NIC at all — the same lever bundle URIs give
-   for the pack, applied to the bytes that dominate a multi-modal
-   repository. Then: mirror jobs; the shared multi-repo server behind
-   §2's triggers; HITL commits from the gateway (as `refs/for`
-   pushes); Knox; ranged restore.
+6. **LFS — BUILT** (`forge/syncer/src/lfs.rs`, `spec.lfs`). The batch
+   API lives in the SYNCER, not the door: it needs the bucket
+   credentials, which the door deliberately has none of, and the
+   objects never pass through either — the response is presigned URLs,
+   so a 4 GB checkpoint goes client-to-store and the pod sees a few
+   hundred bytes of JSON. nginx routes `/info/lfs/objects/{batch,verify}`
+   to the syncer; the door gains two static suffixes and keeps §1's
+   path invariant.
+
+   `flint-store` gained `presign_put`, and with it a trap worth
+   recording: since SDK 1.66 the default `WhenSupported` adds an
+   `x-amz-checksum-crc32` header to PutObject, and a presigned URL
+   signs the headers it was built with — a git-lfs client does not send
+   that header, so S3 answers 403 with nothing in it about checksums.
+   The presigning client sets `WhenRequired`, scoped to itself because
+   every other write in flint passes its CRC-64 explicitly.
+
+   Rules the tests pin: an object already in the bucket is offered NO
+   upload action, which is the dedupe that makes LFS cheap; a missing
+   object is a 404 on THAT object, not a failure of the batch; a store
+   that cannot be reached is a 503 and never "absent", which would make
+   a client re-upload what is already there; an oid is 64 lower-case
+   hex characters and nothing else, because it becomes an S3 key; and
+   `verify` exists because a presigned PUT is a grant to write, not
+   evidence that the write happened — its href comes from the DOOR,
+   which is the only party that knows the URL the client reached.
+
+   **Nothing sweeps LFS objects, deliberately.** An object is
+   referenced by a pointer file inside some tree of some commit, so
+   deciding one is unreferenced means walking every reachable tree —
+   and lean's own `sweep_chunks`, safe against one reference set and
+   unsafe the moment a second appeared, is the cautionary tale. An
+   unreferenced object costs storage and nothing else.
+
+7. **Later.** Mirror jobs; the shared multi-repo server behind §2's
+   triggers; HITL commits from the gateway (as `refs/for` pushes);
+   Knox; ranged restore.
 
 ## 15. Decisions and open questions
 

@@ -649,6 +649,24 @@ pub trait ObjectStore: Send + Sync {
         Err(StoreError::Other("this backend cannot presign a URL".into()))
     }
 
+    /// A time-limited URL that PUTs `key` with no credential of the
+    /// caller's own.
+    ///
+    /// The counterpart of [`ObjectStore::presign_get`], and it exists
+    /// for the same consumer: flint forge's LFS batch API hands a git
+    /// client one of these so a multi-gigabyte checkpoint travels
+    /// straight to the object store and never crosses the repository
+    /// server's network interface.
+    ///
+    /// **The URL carries no content check.** Whoever holds it may put
+    /// anything at that key until it expires, so the caller must issue
+    /// it only for a key whose NAME already constrains the content —
+    /// a content-addressed one — and must verify after the fact.
+    async fn presign_put(&self, key: &str, ttl_secs: u64) -> StoreResult<String> {
+        let _ = (key, ttl_secs);
+        Err(StoreError::Other("this backend cannot presign a URL".into()))
+    }
+
     /// Every lifecycle rule on the bucket, reduced to [`LifecycleView`].
     ///
     /// Defaulted to a refusal rather than to an empty list: "no rules"

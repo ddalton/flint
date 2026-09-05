@@ -138,6 +138,7 @@ impl Rig {
             export: None,
             bundle: None,
             prune: None,
+            lfs: None,
         };
         tokio::spawn(async move {
             if let Err(e) = run(sc, opts).await {

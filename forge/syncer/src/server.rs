@@ -53,6 +53,16 @@ pub struct ServerOpts {
     /// off is the default: a branch is somebody's work until it is
     /// contained in the integration branch.
     pub prune: Option<super::prune::PruneConfig>,
+    /// Git LFS. `None` = the batch API answers 404, which is what a
+    /// repository with no large binaries wants: a client that never
+    /// asks pays nothing, and one that does is told plainly.
+    pub lfs: Option<LfsOpts>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LfsOpts {
+    /// How long a transfer URL is good for.
+    pub ttl_secs: u64,
 }
 
 /// Shared with the status listener. A `Mutex` over facts, not over the
@@ -66,8 +76,19 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
     let shared: Shared = Arc::new(Mutex::new(status::facts(&sc, Phase::Starting)));
     if let Some(addr) = opts.status_addr.clone() {
         let shared = shared.clone();
+        // The LFS batch API answers on the same listener, because it
+        // needs exactly what this process has and the door does not:
+        // the bucket credentials. The bytes themselves never come here
+        // — the response hands the client a presigned URL.
+        let lfs = opts.lfs.as_ref().map(|l| {
+            Arc::new(LfsCtx {
+                store: sc.store.clone(),
+                prefix: sc.cfg.prefix.clone(),
+                ttl_secs: l.ttl_secs,
+            })
+        });
         tokio::spawn(async move {
-            if let Err(e) = serve_status(&addr, shared).await {
+            if let Err(e) = serve_http(&addr, shared, lfs).await {
                 // Not fatal, and deliberately loud: without it the
                 // ladder holds this repository awake forever, which is
                 // a cost rather than a fault.
@@ -383,51 +404,179 @@ fn publish(shared: &Shared, sc: &Syncer, phase: Phase) {
     }
 }
 
-/// The smallest HTTP server that answers the ladder's poll.
+/// The smallest HTTP server that answers the ladder's poll — and, when
+/// LFS is on, the batch API.
 ///
 /// A dependency-free listener rather than a web framework: the surface
-/// is one route, it is reachable only on the pod network, and the
-/// operator's client sends `GET /status HTTP/1.1` with a `Host` header
-/// and reads a body it length-checks.
-async fn serve_status(addr: &str, shared: Shared) -> ForgeResult<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+/// is four routes, it is reachable only on the pod network, and the
+/// clients are the operator's poll and nginx forwarding one JSON POST.
+async fn serve_http(addr: &str, shared: Shared, lfs: Option<Arc<LfsCtx>>) -> ForgeResult<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
     let listener = tokio::net::TcpListener::bind(addr).await?;
     loop {
         let (stream, _) = listener.accept().await?;
         let shared = shared.clone();
+        let lfs = lfs.clone();
         tokio::spawn(async move {
             let (r, mut w) = stream.into_split();
-            let mut lines = BufReader::new(r).lines();
-            let Ok(Some(request)) = lines.next_line().await else { return };
-            let mut parts = request.split_whitespace();
-            let method = parts.next().unwrap_or("");
-            let path = parts.next().unwrap_or("");
-            let (code, body) = if method != "GET" {
-                (405, b"method not allowed\n".to_vec())
-            } else if path == "/status" || path.starts_with("/status?") {
+            let mut reader = BufReader::new(r);
+            let Some((method, path, headers)) = read_head(&mut reader).await else { return };
+
+            let (code, ctype, body) = if method == "GET" && (path == "/status" || path.starts_with("/status?")) {
                 let facts = shared.lock().map(|g| g.clone());
                 match facts {
                     Ok(f) => (
                         200,
-                        serde_json::to_vec(&status::document(&f, super::now_unix()))
-                            .unwrap_or_default(),
+                        "application/json",
+                        serde_json::to_vec(&status::document(&f, super::now_unix())).unwrap_or_default(),
                     ),
-                    Err(_) => (500, b"status unavailable\n".to_vec()),
+                    Err(_) => (500, "text/plain", b"status unavailable\n".to_vec()),
                 }
-            } else if path == "/healthz" {
-                (200, b"ok\n".to_vec())
+            } else if method == "GET" && path == "/healthz" {
+                // "Am I serving", not "am I alive": a headless Service
+                // publishes DNS only for READY pods, so a restoring
+                // server is simply not resolvable and the door holds.
+                let serving = shared
+                    .lock()
+                    .map(|f| f.phase == Phase::Serving && f.fenced.is_none())
+                    .unwrap_or(false);
+                if serving {
+                    (200, "text/plain", b"ok\n".to_vec())
+                } else {
+                    (503, "text/plain", b"not serving\n".to_vec())
+                }
+            } else if method == "POST" && path.starts_with("/lfs/objects/") {
+                let len = headers
+                    .get("content-length")
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(0);
+                // A batch is JSON describing at most a thousand
+                // objects. Anything larger is not a batch.
+                if len > 4 << 20 {
+                    (413, super::lfs::LFS_MEDIA_TYPE, lfs_error("the batch request is too large"))
+                } else {
+                    let mut buf = vec![0u8; len];
+                    if reader.read_exact(&mut buf).await.is_err() {
+                        return;
+                    }
+                    match lfs.as_ref() {
+                        None => (
+                            404,
+                            super::lfs::LFS_MEDIA_TYPE,
+                            lfs_error("git LFS is not enabled for this repository"),
+                        ),
+                        Some(ctx) => {
+                            let verify_url = headers.get("x-forge-lfs-verify").cloned();
+                            handle_lfs(ctx, &path, &buf, verify_url.as_deref()).await
+                        }
+                    }
+                }
             } else {
-                (404, b"not found\n".to_vec())
+                (404, "text/plain", b"not found\n".to_vec())
             };
+
             let head = format!(
-                "HTTP/1.1 {code} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                "HTTP/1.1 {code} {}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n\
                  Connection: close\r\n\r\n",
-                if code == 200 { "OK" } else { "Error" },
+                if code < 400 { "OK" } else { "Error" },
                 body.len()
             );
             let _ = w.write_all(head.as_bytes()).await;
             let _ = w.write_all(&body).await;
             let _ = w.flush().await;
         });
+    }
+}
+
+/// What the LFS handler needs, and it is exactly what the door has not
+/// got: a store handle for this repository's bucket.
+struct LfsCtx {
+    store: Arc<dyn flint_store::ObjectStore>,
+    prefix: String,
+    ttl_secs: u64,
+}
+
+fn lfs_error(message: &str) -> Vec<u8> {
+    serde_json::to_vec(&super::lfs::BatchError { message: message.to_string() }).unwrap_or_default()
+}
+
+/// The request line and headers, lower-cased by name.
+async fn read_head(
+    reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+) -> Option<(String, String, std::collections::HashMap<String, String>)> {
+    use tokio::io::AsyncBufReadExt;
+    let mut line = String::new();
+    reader.read_line(&mut line).await.ok()?;
+    let mut parts = line.split_whitespace();
+    let method = parts.next()?.to_string();
+    let path = parts.next()?.to_string();
+    let mut headers = std::collections::HashMap::new();
+    loop {
+        let mut h = String::new();
+        if reader.read_line(&mut h).await.ok()? == 0 {
+            break;
+        }
+        let h = h.trim_end();
+        if h.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = h.split_once(':') {
+            headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+        }
+    }
+    Some((method, path, headers))
+}
+
+async fn handle_lfs(
+    ctx: &LfsCtx,
+    path: &str,
+    body: &[u8],
+    verify_url: Option<&str>,
+) -> (u16, &'static str, Vec<u8>) {
+    use super::lfs;
+    if path.starts_with("/lfs/objects/batch") {
+        let req: lfs::BatchRequest = match serde_json::from_slice(body) {
+            Ok(r) => r,
+            Err(e) => {
+                return (400, lfs::LFS_MEDIA_TYPE, lfs_error(&format!("unparseable batch: {e}")))
+            }
+        };
+        match lfs::batch(ctx.store.as_ref(), &ctx.prefix, &req, ctx.ttl_secs).await {
+            Ok(mut res) => {
+                // The verify href is the door's to supply: only the
+                // door knows the URL the client actually reached, and
+                // handing back one built from a pod's own address
+                // would send the client somewhere it cannot go. With
+                // no door in front, the action is dropped rather than
+                // guessed.
+                for obj in res.objects.iter_mut() {
+                    match verify_url {
+                        Some(u) => {
+                            if let Some(a) = obj.actions.get_mut("verify") {
+                                a.href = u.to_string();
+                            }
+                        }
+                        None => {
+                            obj.actions.remove("verify");
+                        }
+                    }
+                }
+                (200, lfs::LFS_MEDIA_TYPE, serde_json::to_vec(&res).unwrap_or_default())
+            }
+            Err(e) => (422, lfs::LFS_MEDIA_TYPE, serde_json::to_vec(&e).unwrap_or_default()),
+        }
+    } else if path.starts_with("/lfs/objects/verify") {
+        let spec: lfs::ObjectSpec = match serde_json::from_slice(body) {
+            Ok(s) => s,
+            Err(e) => {
+                return (400, lfs::LFS_MEDIA_TYPE, lfs_error(&format!("unparseable verify: {e}")))
+            }
+        };
+        match lfs::verify(ctx.store.as_ref(), &ctx.prefix, &spec).await {
+            Ok(()) => (200, lfs::LFS_MEDIA_TYPE, b"{}".to_vec()),
+            Err((code, message)) => (code, lfs::LFS_MEDIA_TYPE, lfs_error(&message)),
+        }
+    } else {
+        (404, lfs::LFS_MEDIA_TYPE, lfs_error("no such LFS route"))
     }
 }

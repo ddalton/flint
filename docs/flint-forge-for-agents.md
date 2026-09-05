@@ -171,6 +171,48 @@ clone itself is cheap — 2.8 MB, 0.02 CPU-s — but the first checkout
 fetches every blob at 2.8x the CPU of a bitmapped full clone. It is for
 agents with a genuinely sparse working set.
 
+## Large binaries: git LFS
+
+The multi-modal case, and the reason it is not an afterthought. A pack
+is delta-compressed and rewritten WHOLE by `repack -a`, so images,
+audio, video and model weights committed as ordinary blobs make every
+clone, every repack and every restore pay for them again.
+
+```yaml
+spec:
+  lfs: { enabled: true, ttlSecs: 3600 }
+```
+
+The bytes live at `<keyPrefix>/lfs/objects/<oid>` — immutable and
+content-named, the same layout the packs use — and the pointer files
+stay small in git. **The objects never cross the repository server**:
+the batch API hands the client a presigned URL, so an agent uploading a
+4 GB checkpoint talks to the object store directly and the pod sees a
+few hundred bytes of JSON. It is the same lever bundle URIs give for
+the pack, applied to the bytes that dominate a multi-modal repository.
+
+In the agent image, nothing special:
+
+```
+git lfs install
+git lfs track "*.safetensors" "*.mp4" "*.wav"
+git add .gitattributes && git commit -m "track large media with LFS"
+```
+
+An object already in the bucket is offered no upload at all, so a
+rebased branch re-pushing the same checkpoint transfers nothing.
+
+Two things to know:
+
+- **Nothing collects LFS objects.** An object is referenced by a
+  pointer file inside some tree of some commit, so deciding one is
+  unreferenced means walking every reachable tree — and being wrong
+  once deletes a checkpoint. An unreferenced object costs storage and
+  nothing else, so forge leaves it. Reclaim with a bucket lifecycle
+  rule if you must, and only against a prefix you are certain about.
+- **A transfer URL is a bearer token for that object** until it
+  expires. `ttlSecs` is the window; it is not a permission.
+
 ## Pruning agent branches
 
 ```yaml

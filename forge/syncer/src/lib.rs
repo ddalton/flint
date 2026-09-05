@@ -56,6 +56,7 @@ pub mod bundle;
 pub mod export;
 pub mod gitcmd;
 pub mod lease;
+pub mod lfs;
 pub mod packio;
 pub mod policy;
 pub mod prune;

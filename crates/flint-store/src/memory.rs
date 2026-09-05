@@ -561,6 +561,15 @@ impl ObjectStore for MemoryStore {
         Ok(format!("memory://presigned/{key}?ttl={ttl_secs}"))
     }
 
+    /// A stand-in URL for a write. Unlike the read side it does NOT
+    /// require the object to exist — that is the whole point of an
+    /// upload — so what a test can assert is the key, and that an
+    /// object already present was not offered one.
+    async fn presign_put(&self, key: &str, ttl_secs: u64) -> StoreResult<String> {
+        self.bump("presign_put");
+        Ok(format!("memory://presigned-put/{key}?ttl={ttl_secs}"))
+    }
+
     async fn get_whole(
         &self,
         key: &str,
