@@ -14,8 +14,9 @@
 #
 # Idempotent: re-running upgrades the chart and re-applies the rig. The
 # PREFIX defaults to a fresh timestamp so a re-run never reads a
-# previous run's snapshot; it is printed at the end because run-scale.sh
-# needs it.
+# previous run's snapshot (a repository at an old prefix is recreated,
+# since the prefix is immutable); it is printed at the end because
+# run-scale.sh needs it.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
@@ -50,6 +51,18 @@ helm upgrade --install flint-forge "$root/flint-forge-chart" \
     --set door.namespace="$NS_SYS" \
     --wait --timeout 5m
 
+# spec.keyPrefix is immutable (the CRD refuses the patch: "create a new
+# FlintRepo instead"), so a repository already at another prefix is
+# deleted and recreated — a fresh prefix means a fresh repository, which
+# is what a re-run wants. The bucket keeps the old prefix's objects.
+for r in big small; do
+    cur=$(kubectl -n "$NS_AGENTS" get flintrepo "$r" -o jsonpath='{.spec.keyPrefix}' 2>/dev/null || true)
+    if [ -n "$cur" ] && [ "$cur" != "$PREFIX/$r/" ]; then
+        echo "── $r is at $cur, not $PREFIX/$r/: deleting it so the apply creates a new one ──"
+        kubectl -n "$NS_AGENTS" delete flintrepo "$r" --wait=true --timeout=3m
+        kubectl -n "$NS_AGENTS" wait --for=delete "deploy/forge-$r" --timeout=3m 2>/dev/null || true
+    fi
+done
 BUCKET="$BUCKET" PREFIX="$PREFIX" TAG="$TAG" \
     envsubst '$BUCKET $PREFIX $TAG' < "$here/rig.yaml.tpl" | kubectl apply -f -
 

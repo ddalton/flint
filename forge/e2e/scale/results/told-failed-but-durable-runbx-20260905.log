@@ -1,0 +1,26 @@
+# runbx run 3 (scale-20260905-151107): the 40 GiB push whose client was cut by the door's 300 s inactivity bound
+# during the hook wait (15:19:27 -> 15:33:59, 'the remote end hung up unexpectedly'). The syncer never learned the
+# client had left: it finished the batch — 640-part multipart complete, snapshot CAS, local ref — and the bucket
+# holds the ref the client was told had failed. Snapshot read at 15:39:50:
+{
+  "seq": 3,
+  "epoch": 23,
+  "writer": "forge-d3e130bd-a9b4-4525-815c-5c610ccdb480",
+  "refs": {
+    "refs/heads/agent/big": "7ae9f2bb2747e2d0aaca004f046ff50da0f10fe9",
+    "refs/heads/agent/keepalive-q": "70fa87776de8a1bae664ea7832a0246c47bed141",
+    "refs/heads/agent/keepalive-v": "70fa87776de8a1bae664ea7832a0246c47bed141"
+  },
+  "packs": [
+    "pack-51c8540fc89a2bbdd6f4e1cda0612ab13694741f.pack",
+    "pack-9961689bd98dd6b3312607d32b72d9c8e782c8fe.pack"
+  ]
+}
+# pack objects under the prefix:
+#   46724 pack-51c8540fc89a2bbdd6f4e1cda0612ab13694741f.idx
+#   42953011646 pack-51c8540fc89a2bbdd6f4e1cda0612ab13694741f.pack
+#   5184 pack-51c8540fc89a2bbdd6f4e1cda0612ab13694741f.rev
+#   1128 pack-9961689bd98dd6b3312607d32b72d9c8e782c8fe.idx
+#   259 pack-9961689bd98dd6b3312607d32b72d9c8e782c8fe.pack
+#   60 pack-9961689bd98dd6b3312607d32b72d9c8e782c8fe.rev
+# incomplete multipart uploads left: 0

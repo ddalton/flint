@@ -1,0 +1,13 @@
+# traced 40 GiB push through the door at drill-22807f9b (upstreamTimeoutSecs 300), runbx 2026-09-05
+# GIT_TRACE=1 GIT_CURL_VERBOSE=1 GIT_TRACE_CURL_NO_DATA=1 git push -v <door>/git/agents/big.git HEAD:refs/heads/agent/traced; agent tx 63-67 MiB/s throughout
+start 1788645708
+22:01:48.400868 http.c:802              <= Recv header: HTTP/1.1 200 OK
+22:01:48.400883 http.c:802              <= Recv header: content-type: application/x-git-receive-pack-advertisement
+22:01:48.517410 http.c:802              => Send header: POST /git/agents/big.git/git-receive-pack HTTP/1.1
+22:01:48.521094 http.c:802              <= Recv header: HTTP/1.1 200 OK
+22:01:48.521110 http.c:802              <= Recv header: content-type: application/x-git-receive-pack-result
+22:01:48.521500 http.c:802              => Send header: POST /git/agents/big.git/git-receive-pack HTTP/1.1
+22:06:48.524370 http.c:802              <= Recv header: HTTP/1.1 502 Bad Gateway
+22:06:48.524390 http.c:802              <= Recv header: content-type: application/json
+22:06:48.524435 http.c:843              == Info: HTTP error before end of send, stop sending
+error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502

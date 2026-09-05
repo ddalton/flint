@@ -1,0 +1,46 @@
+forge at scale — bucket flint-forge-scale-runbx, prefix scale-202609051647, namespace agents, run 20260905-164749; EXPECT=window-closed SWEEP=claim
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-164749.log
+
+══ S0 — provenance and the rig: the syncer in the pod is the tree under test, both repositories serve, the disks are big enough ══
+  ....  syncer image: docker.io/dilipdalton/flint-forge-syncer@sha256:4d1ac9959a0d75c74694d8006e38efcc18fc8c6b3fef920d0d82099108311144
+  PASS  the syncer pod runs the digest this run pushed (sha256:4d1ac9959a0d75c74694d8006e38efcc18fc8c6b3fef920d0d82099108311144)
+  PASS  the syncer carries the ranged restore (marker string ×1, 827c5f90) — this is the tree under test, judged by content
+  PASS  the syncer carries the progress-gated renewer (marker ×1, 2a213b01): the window-closed oracle has its subject
+  PASS  the syncer carries the claim-time orphan sweep (marker ×1, 2a213b01)
+  PASS  big is serving (forge-big-785b64db8c-hfpx6)
+  PASS  small is serving (forge-small-9c84645bc-mvhrt)
+  PASS  big has no snapshot yet (fresh prefix)
+  ....  takeover window = QUIET_POLLS 6 × heartbeat 10s = 60s
+  ....  free: agent /work 712829 MiB, repository cache 712763 MiB; this run may need ~100352 MiB on each
+  PASS  the agent's emptyDir has room
+  PASS  the repository cache has room
+
+══ S2 — the large repository: 10240 MiB composed on S3, restored ranged, and the lease RENEWED throughout (silence under 30s) ══
+  ....  building big: 10240 MiB of /dev/urandom in the agent's emptyDir
+  PASS  built big (10240 MiB) in 106 s, tip d9b879db6c08
+./forge/e2e/scale/run-scale.sh: line 137: 87915 Terminated: 15          sleep 2
+  PASS  push of big acknowledged in 259 s
+  ....  lease token silent for 11 s during the push (window 60s); the watcher's longest blind spot 0 s
+  ....  pack pack-3872937ec67391fa3cdfb4a0f4e0b25f82c08e37.pack: 10240.8 MiB, ETag "073b02beb959ff981aee18d37be2b965-161"
+  PASS  the pack is above the 64.0 MiB whole-put ceiling
+  PASS  ETag carries part count 161 = ceil(size / 64 MiB): composed by the part grid, not whole-PUT
+  PASS  S3 holds a FULL_OBJECT CRC64NVME (dyhgQtJyCCE=): the checksum forge streamed over the file was accepted at CompleteMultipartUpload
+  PASS  S3 reports 161 parts
+  PASS  the snapshot names agent/big at the tip
+  ....  cold restore of big
+  ....  deleting forge-big-785b64db8c-hfpx6
+./forge/e2e/scale/run-scale.sh: line 150: 88639 Terminated: 15          sleep 3
+  ....  big restored by forge-big-785b64db8c-w2chn: 35 s from the delete (34 s from the syncer's start); anon RSS max 22.1 MiB; lease token silent 11 s (watcher blind at most 0 s)
+  PASS  restored refs are exactly the snapshot's
+  PASS  fsck --strict clean on the restored 10240.8 MiB repository (79 s): the composed bytes came back intact
+  PASS  the door advertises agent/big at the tip after the restore
+  PASS  the restore's anon RSS peaked at 22.1 MiB for a 10240.8 MiB pack: memory does not scale with the repository
+  ....  …and under 256 MiB, consistent with the 38-40 MiB flat loopback figure (working set 286.9 MiB includes page cache)
+  ....  restore rate 301.2 MiB/s from the syncer's start (sequential 8 MiB ranged GETs, one in flight)
+  PASS  PUSH: the token was silent at most 11s ≤ 30s while 10240.8 MiB uploaded in 259 s (> 60s window) — renewal covers the upload (progress-gate lines: 0; watcher blind at most 0s)
+  INCONCLUSIVE  RESTORE: the restore took only 34 s from the syncer's start, ≤ the 60s window — a token silent throughout could not have been counted, so renewal across a restore was not exercised and S3's seize arm cannot open the window; raise BIG_MB (rate 301.2 MiB/s)
+
+
+══ 21 passed, 0 failed, 1 inconclusive ══
+INCONCLUSIVE legs could not measure what they exist for: this run is NOT green.
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-164749.log  (raw timelines: /Users/ddalton/github/flint/forge/e2e/scale/results/work-20260905-164749)

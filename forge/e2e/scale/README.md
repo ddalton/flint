@@ -34,7 +34,9 @@ BUCKET=... PREFIX=... KEYFILE=... forge/e2e/scale/run-scale.sh
 
 Knobs: `PROBE_MB` (1024) calibrates the restore rate; the large
 repository is sized from it to restore for `TARGET_RESTORE_SECS` (150),
-clamped to `[MIN_BIG_MB, MAX_MB]` (2048, 10240). `DUR_MB` (2048) and
+clamped to `[MIN_BIG_MB, MAX_MB]` (2048, 40960 — it was 10240 until the
+restore fan-out made an i4i.xlarge restore at ~340 MiB/s, at which
+10 GiB comes back in 30 s, inside the window). `DUR_MB` (2048) and
 `DUR_ITER` (3) shape the durability leg. `LEGS` selects legs.
 Results land in `results/scale-<stamp>.log` with the raw timelines in
 `results/work-<stamp>/`.
@@ -62,6 +64,15 @@ exist because the chart pins `1.46.0-forge.1` and `deploy.sh` defaults
 to `forge.2`, both older than the fixes: a deploy that falls back to a
 default measures the wrong tree, and a tag cannot say which tree it
 carries (a `1.41.1` syncer once shipped inside a `1.45.0` worker).
+
+Under `window-closed`, S2 and S3 first check that the transfer they
+judge OUTLASTED the window (the push's wall time, the restore's time
+from the syncer's start, and the seize arm's own time-to-serve): inside
+the window a token silent throughout is never counted and an unfixed
+tree is never claimed either, so "silence under the bound" and "never
+claimed" would pass on any tree. A transfer inside the window is
+INCONCLUSIVE with the size to raise, not a pass — which is what the
+first run on the fixed tree produced at 10 GiB before the guard existed.
 
 Both samples are printed for every iteration in either mode. A kill
 that leaves no orphan did not land inside the upload and is said so;
@@ -118,3 +129,149 @@ binary out and splits it locally; and the API server's pod proxy to
 kind's CNI enforces no policy, which is why it worked on every local
 rig. `prep-nodes.sh`'s `kubectl wait -A` sat 12 minutes past its own
 timeout once the pods it watched were deleted; it polls the live set now.
+The second run (runbx) added two: `deploy.sh`'s "idempotent re-run"
+could not move a repository to a fresh prefix, because `spec.keyPrefix`
+is immutable on the CRD — it now deletes and recreates a repository
+whose prefix changed; and the `window-closed` oracles had no
+precondition, so the fixed tree PASSED S2's restore verdict at 10 GiB
+with a 30 s restore that no challenger could have counted (see the
+guard above). Run 4 added a fourth, in the observer itself: the token
+watcher is `aws s3api head-object` every 2 s, and the CLI's own
+connect and read timeouts default to 60 s — one HEAD hung, the sampler
+was blind for 64 s, and the call that finally returned reported the
+token it had seen at its START, which `longest_silence` then read as
+66 s of a quiet renewer and the leg marked FAIL. The sampler now fails
+a call at 5 s and records the sample as `blind`; silence is counted
+only across contiguous observations; the longest blind spot is
+reported beside it, and a blind spot longer than the bound makes the
+verdict inconclusive rather than a pass or a fail. An observation that
+can lie is a state variable (`feedback_model_the_observation`), in the
+rig as much as in the product.
+
+## Results — 2026-09-05, cluster runbx (3 × i4i.xlarge all-spot, S3 us-west-1), the confirmation campaign
+
+The fixed tree — `2a213b01`'s renewer and orphan sweep, `7557d3c1`'s
+restore fan-out — as `drill-22807f9b` (syncer digest `sha256:75f171b0…`),
+run with `EXPECT=window-closed SWEEP=claim DIGEST=…`; the oracles are the
+inverses of runbw's. Three runs, because the first two each found a
+defect in something other than the syncer.
+
+**Run 1** (`scale-20260905-142037`, stopped by hand in S2). S0 10/10:
+the pod runs the pushed digest and the binary carries all three markers.
+S1: a 1 GiB push acknowledged in 27 s with the token silent 10 s (runbw:
+silent for the whole upload); the cold restore came back in 3 s from
+the syncer's start — **341 MiB/s, 4.5× runbw's 76 MiB/s: the fan-out on
+the wire**. Which sized the large repository at the 10 GiB clamp, and
+10 GiB now restores in 30 s, inside the 60 s window: under the inverted
+oracles a restore the window cannot even see would have PASSED S2 and
+S3 on any tree. Stopped; the precondition guard above was added; the
+clamp raised to 40 GiB.
+
+**Run 2** (`scale-20260905-142728`, 40 GiB, 24 passed / 1 failed / 1
+inconclusive). S0 10/10 again at a fresh prefix. **S2 FAILED at the
+push: "the remote end hung up unexpectedly" 488 s in, the pack never
+reaching the repository** — not the syncer: the door answered `502`
+exactly 300.003 s after the POST began while the client was still
+sending at 64 MiB/s (`results/door-timeout-trace-runbx-20260905.log`,
+a traced push through the same door after the run). The door's
+`upstreamTimeoutSecs` (300) was applied by reqwest to the WHOLE
+exchange, body included, although its comment promised a headers-only
+bound; runbw's 10 GiB push had passed at 262 s by luck. Fixed in
+`ecb7c974` (an inactivity bound over both directions; see the door's
+tests). S3's seize arm was inconclusive for want of the large
+repository; **its control arm passed: a challenger beside a healthy
+holder never claimed in 150 s, 16/16 pushes acknowledged under it are
+in the bucket, longest gap 11 s**. **S4 4/4 and SWEPT 3/3**: three kills
+inside a 2 GiB upload (seen 35–36 s after the push began) were refused
+with the bucket unchanged; each left one orphaned upload at the kill
+and NONE once the successor served; the kill around the snapshot CAS
+was acknowledged and is in the bucket; fsck --strict clean after four
+crashes; 0 incomplete uploads remain. The leak runbw measured is
+closed, observed rather than inferred.
+
+**Run 3** (`scale-20260905-151107`, `drill-ecb7c974` = the door fix,
+40 GiB, 14 passed / 1 failed / 1 inconclusive). The push went THROUGH
+the fixed door — 872 s, 40 GiB in the repository cache, a 640-part
+multipart under way — and failed anyway, later, and the pieces of that
+failure are three findings on the fixed tree:
+
+1. **The syncer's own renewer went quiet for six heartbeats mid-push.**
+   Between the sibling uploads and the first part, `packio::crc_of`
+   streams the full-object CRC64 over the pack — ~70 s at 40 GiB — and
+   ticked no progress, so the progress-gated renewer logged "moved
+   nothing since the last renewal" and let the token sit for a whole
+   takeover window inside a live push. A challenger present then would
+   have deposed a healthy holder. Fixed in `4d66c48a` (the pass ticks
+   the bytes it hashes). This is exactly the class the `window-closed`
+   S2 verdict names: silence past the bound WITH gate lines is a stall
+   of the sensor, not of the transfer.
+2. **The client was cut 311 s after the hook phase began** — the door's
+   new inactivity bound, firing because nothing crossed it during the
+   hook wait. `receive-pack` does send an empty sideband keepalive every
+   5 s while its hooks run (measured over the local transport on the
+   same pod: +5 s, +10 s, report); through nginx + fcgiwrap the same two
+   keepalives arrived in ONE burst with the report, 14 s after the pack
+   ended. fcgiwrap holds the CGI's output until the request ends unless
+   `NO_BUFFERING` is among its request parameters (Alpine's patch).
+   nginx.conf now passes it, verified live on the pod before the image
+   was rebuilt; the Dockerfile refuses an fcgiwrap without the switch.
+   Fixed in `0734a2f9`.
+3. **Told failed, but durable.** The syncer never learned the client had
+   left: it completed the multipart, CAS'd the snapshot and moved the
+   local ref, and the bucket names `agent/big` at the pushed tip while
+   the client saw "the remote end hung up unexpectedly"
+   (`results/told-failed-but-durable-runbx-20260905.log`). Not a loss
+   and not a corruption — a retry finds the ref already there — but it
+   is a transition the "acknowledged means durable" argument has to
+   carry in the other direction, and the formal model of this path
+   must include it.
+
+S3's control arm passed a third time (challenger never claimed in
+150 s beside a healthy holder; 16/16 pushes durable under it, longest
+gap 11 s); its seize arm was inconclusive for want of the large
+repository.
+
+**Run 4** (`scale-20260905-155851`, `drill-0734a2f9` = all three fixes,
+syncer `sha256:4d1ac995…311144`, 40 GiB, 30 passed / 1 failed / 0
+inconclusive). The confirmation the campaign was for:
+
+- **The push went through end to end: 40 GiB acknowledged in 1113 s.**
+  641 parts by the grid, S3's FULL_OBJECT CRC64 accepted at Complete,
+  the snapshot at the tip. The hook wait was over 8 minutes, so the
+  keepalives crossed fcgiwrap AND the door's inactivity bound held
+  across them — runs 2 and 3's two front-layer defects, closed on the
+  wire in one push.
+- **The restore: 139 s from the delete for 40963 MiB (297 MiB/s), refs
+  exactly the snapshot's, `fsck --strict` clean in 414 s, anon RSS
+  25.3 MiB.** Token silent 11 s across it.
+- **S3 seize arm, CLOSED on the wire.** A challenger beside a live
+  40 GiB restore for 398 s never claimed; the successor served 135 s
+  after the delete WITH the challenger present; the holder was never
+  fenced; 24/24 pushes acknowledged under the contention are in the
+  bucket. This is the strongest observation of the campaign, because
+  here the oracle is a real challenger counting quiet polls with the
+  syncer's own client, not a sampler. The control arm passed a fourth
+  time (150 s, 16/16 durable).
+- **The one FAIL is the sampler's, not the renewer's** (rig defect
+  four, above). Re-read with the corrected `longest_silence`, the push's
+  token was silent 11 s where the watcher could see and the watcher was
+  blind for 64 s once; the syncer's log for the window has neither a
+  "moved nothing" line nor a heartbeat error, so the progress gate
+  never held the token and no renew failed. What the 64 s hid is
+  unobserved: under the corrected rig this verdict is INCONCLUSIVE, and
+  run 5 below is its rerun with an unblinking sampler.
+
+**Run 5** (`scale-20260905-164749`, same digest, `LEGS="S0 S2"` at
+10 GiB with the corrected sampler, 21 passed / 0 failed / 1
+inconclusive). The push: 10240 MiB acknowledged in 259 s (> 60 s
+window), 161 parts, CRC accepted, token silent at most 11 s, **watcher
+blind 0 s** — the push-side renewal verdict PASSES on an observer that
+could not have hidden a silence. The restore (35 s, 301 MiB/s, fsck
+clean, RSS 22 MiB) is inconclusive by the precondition, as 10 GiB must
+be: run 4's 40 GiB restore and its seize arm carry that claim.
+
+Campaign total on `drill-0734a2f9`: every product oracle green on the
+wire — push and restore renewal, keepalives through the front, the
+takeover window closed against a real challenger, orphan sweep, and
+told-ok ⇒ durable under contention (40/40 pushes across both arms).
+

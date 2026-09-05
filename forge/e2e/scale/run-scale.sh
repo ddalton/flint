@@ -58,7 +58,7 @@ NS=${NS:-agents}; AGENT=${AGENT:-agent1}
 DOOR=${DOOR:-http://flint-forge-door.forge-system.svc}
 BIG=${BIG:-big}; SMALL=${SMALL:-small}
 PROBE_MB=${PROBE_MB:-1024}
-MIN_BIG_MB=${MIN_BIG_MB:-2048}; MAX_MB=${MAX_MB:-10240}
+MIN_BIG_MB=${MIN_BIG_MB:-2048}; MAX_MB=${MAX_MB:-40960}   # 40960: with the restore fan-out (7557d3c1) an i4i.xlarge restores at ~340 MiB/s, and 10 GiB came back in 30 s — inside the 60 s window (runbx)
 TARGET_RESTORE_SECS=${TARGET_RESTORE_SECS:-150}
 SMALL_MB=${SMALL_MB:-16}
 DUR_MB=${DUR_MB:-2048}; DUR_ITER=${DUR_ITER:-3}   # 2048: a 320 MiB upload finished inside the kill's 0.5-3.5 s jitter on real S3 (runbw), so no kill landed mid-upload
@@ -137,7 +137,14 @@ wait_serving() { # repo secs
 tok_watch() { # repo outfile
   local k; k=$(key "$1" epoch)
   ( while [ ! -e "$2.stop" ]; do
-      printf '%s %s\n' "$(now)" "$(aws s3api head-object --bucket "$BUCKET" --key "$k" --query ETag --output text 2>/dev/null || echo none)" >> "$2"
+      # The CLI's own timeouts default to 60 s: one hung HEAD in run 4
+      # made a 2 s sampler blind for 64 s and reported the token it
+      # had seen at the START of the call, which `longest_silence`
+      # then read as 66 s of a quiet renewer. A sample that does not
+      # come back in 5 s is recorded as `blind`, and a blind spot is
+      # reported as what it is, never as silence.
+      printf '%s %s\n' "$(now)" "$(aws s3api head-object --bucket "$BUCKET" --key "$k" --query ETag --output text \
+        --cli-connect-timeout 5 --cli-read-timeout 5 2>/dev/null || echo blind)" >> "$2"
       sleep 2; done ) & disown
 }
 rss_watch() { # pod outfile — cAdvisor's rssBytes is ANON memory; page cache (the packs being written) is excluded
@@ -158,8 +165,26 @@ timeline() { # repo challenger outfile
       sleep 2; done ) & disown
 }
 stop_watch() { touch "$1.stop"; pkill -P "$2" 2>/dev/null; kill "$2" 2>/dev/null; wait "$2" 2>/dev/null; }
-longest_silence() { # longest run of one unchanged token, seconds
-  awk 'NR==1{t0=$1;last=$2;max=0;next} $2!=last{g=$1-t0; if(g>max)max=g; t0=$1; last=$2} END{g=$1-t0; if(g>max)max=g; print max+0}' "$1" 2>/dev/null
+# Longest run of one unchanged token, in seconds, counted ONLY across
+# contiguous observations: a `blind` sample, or a gap of more than 8 s
+# between two samples of a 2 s sampler, ends the run without extending
+# it. What the watcher did not see is not silence — it is a blind
+# spot, which `longest_blind` reports separately and the verdicts
+# treat as inconclusive when it is long enough to have hidden one.
+longest_silence() {
+  awk 'BEGIN{max=0;have=0}
+       $2=="blind"{have=0; next}
+       !have{t0=$1;last=$2;prev=$1;have=1;next}
+       { if($1-prev>8){t0=$1;last=$2;prev=$1;next}
+         if($2!=last){g=$1-t0; if(g>max)max=g; t0=$1; last=$2}
+         prev=$1 }
+       END{ if(have){g=prev-t0; if(g>max)max=g}; print max+0}' "$1" 2>/dev/null
+}
+longest_blind() { # longest span the watcher could not see, seconds
+  awk 'BEGIN{max=0;lastgood=-1}
+       $2=="blind"{next}
+       { if(lastgood>=0){g=$1-lastgood; if(g>8 && g>max)max=g}; lastgood=$1 }
+       END{print max+0}' "$1" 2>/dev/null
 }
 max_col() { awk -v c="$2" 'BEGIN{m=0}{if($c+0>m)m=$c+0}END{print m}' "$1" 2>/dev/null; }
 
@@ -276,6 +301,9 @@ leg_S0() {
     none:0)  ok "the syncer has no orphan sweep (pre-2a213b01), as SWEEP=none assumes" ;;
     none:*)  bad "SWEEP=none but the syncer carries the orphan sweep (marker ×$m, 2a213b01): S4 would measure a leak this image closes — run with SWEEP=claim" ;;
   esac
+  # The dump is the whole binary as text (17 MiB) and is derived from
+  # the digest S0 already recorded; it does not belong in the results.
+  rm -f "$WORK/syncer-strings"
   for r in "$BIG" "$SMALL"; do
     p=$(repo_pod "$r"); ph=$(phase "$p")
     [ "$ph" = serving ] && ok "$r is serving ($p)" || bad "$r is '$ph' ($p)"
@@ -312,11 +340,11 @@ push_and_restore() { # repo name mb tag
   tok_watch "$repo" "$WORK/tok-push-$tag"; tw=$!
   t0=$(now); out=$(inpod "DOOR=$DOOR NS=$NS /work/push.sh $name $repo agent/$tag"); rc=$?; t1=$(now)
   sleep $((HEARTBEAT + 5)); stop_watch "$WORK/tok-push-$tag" "$tw"
-  P_SECS=$((t1 - t0)); P_SILENCE=$(longest_silence "$WORK/tok-push-$tag")
+  P_SECS=$((t1 - t0)); P_SILENCE=$(longest_silence "$WORK/tok-push-$tag"); P_BLIND=$(longest_blind "$WORK/tok-push-$tag")
   K -n "$NS" logs "$(repo_pod "$repo")" -c syncer --timestamps --since="$((P_SECS + HEARTBEAT + 30))s" > "$WORK/log-push-$tag" 2>/dev/null
   if [ "$rc" = 0 ]; then ok "push of $name acknowledged in $P_SECS s"
   else bad "push of $name failed (rc=$rc): $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; return 1; fi
-  note "lease token silent for ${P_SILENCE:-?} s during the push (window ${WINDOW}s)"
+  note "lease token silent for ${P_SILENCE:-?} s during the push (window ${WINDOW}s); the watcher's longest blind spot ${P_BLIND:-0} s"
 
   set -- $(newest_pack "$repo"); PACK_KEY=${1:-}; PACK_SIZE=${2:-0}; PACK_ETAG=${3:-}
   [ -n "$PACK_KEY" ] && [ "$PACK_KEY" != None ] || { bad "no pack object under $(key "$repo" objects/pack/)"; return 1; }
@@ -398,9 +426,9 @@ cold_restore() { # repo tag
   [ "$R_SECS_CT" -gt 0 ] || R_SECS_CT=$R_SECS
   R_RSS=$(max_col "$WORK/rss-$tag" 1); R_RSS=${R_RSS:-0}
   R_WS=$(max_col "$WORK/rss-$tag" 2);  R_WS=${R_WS:-0}
-  R_SILENCE=$(longest_silence "$WORK/tok-$tag"); R_SILENCE=${R_SILENCE:-0}
+  R_SILENCE=$(longest_silence "$WORK/tok-$tag"); R_SILENCE=${R_SILENCE:-0}; R_BLIND=$(longest_blind "$WORK/tok-$tag"); R_BLIND=${R_BLIND:-0}
   K -n "$NS" logs "$new" -c syncer --timestamps > "$WORK/log-restore-$tag" 2>/dev/null
-  note "$repo restored by $new: $R_SECS s from the delete ($R_SECS_CT s from the syncer's start); anon RSS max $(mib "$R_RSS") MiB; lease token silent $R_SILENCE s"
+  note "$repo restored by $new: $R_SECS s from the delete ($R_SECS_CT s from the syncer's start); anon RSS max $(mib "$R_RSS") MiB; lease token silent $R_SILENCE s (watcher blind at most $R_BLIND s)"
   [ "$seen" = 1 ] || note "the poll never caught phase=importing (a fast restore)"
   return 0
 }
@@ -422,7 +450,7 @@ leg_S2() {
     window-closed) leg S2 "the large repository: ${BIG_MB} MiB composed on S3, restored ranged, and the lease RENEWED throughout (silence under $((WINDOW / 2))s)" ;;
   esac
   push_and_restore "$BIG" big "$BIG_MB" big || return
-  BIG_PACK_SIZE=$PACK_SIZE; BIG_R_SECS=$R_SECS
+  BIG_PACK_SIZE=$PACK_SIZE; BIG_R_SECS=$R_SECS; BIG_R_SECS_CT=$R_SECS_CT
   # A healthy token is seen to change about every HEARTBEAT (13 s at a
   # 2 s poll, S1 on runbw); the restore's figure also carries the gap
   # from the old holder's last renewal to the successor's claim
@@ -452,15 +480,28 @@ leg_S2() {
       local gp gr
       gp=$(grep -c 'moved nothing since the last renewal' "$WORK/log-push-big" 2>/dev/null); gp=${gp:-0}
       gr=$(grep -c 'moved nothing since the last renewal' "$WORK/log-restore-big" 2>/dev/null); gr=${gr:-0}
-      if [ "${P_SILENCE:-999}" -le "$bound" ]; then
-        ok "PUSH: the token was silent at most ${P_SILENCE}s ≤ ${bound}s while $(mib "$PACK_SIZE") MiB uploaded in $P_SECS s — renewal covers the upload (progress-gate lines: $gp)"
+      # Either transfer must itself outlast the window: a token silent for
+      # the whole of a 30 s restore is never counted by anyone, so
+      # "silence ≤ bound" over it would pass on the unfixed tree too —
+      # which is what 10 GiB became once the restore fan-out landed
+      # (341 MiB/s on runbx: restored in 30 s).
+      if [ "${P_SECS:-0}" -le "$WINDOW" ]; then
+        inconc "PUSH: the whole push took ${P_SECS:-?} s ≤ the ${WINDOW}s window — a token silent throughout could not have been counted, so renewal across an upload was not exercised; raise BIG_MB"
+      elif [ "${P_SILENCE:-999}" -le "$bound" ] && [ "${P_BLIND:-0}" -gt "$bound" ]; then
+        inconc "PUSH: the token was silent at most ${P_SILENCE}s ≤ ${bound}s where the watcher could see, but the watcher was blind for ${P_BLIND}s > ${bound}s (a HEAD hung): a silence that long could have hidden inside it — rerun"
+      elif [ "${P_SILENCE:-999}" -le "$bound" ]; then
+        ok "PUSH: the token was silent at most ${P_SILENCE}s ≤ ${bound}s while $(mib "$PACK_SIZE") MiB uploaded in $P_SECS s (> ${WINDOW}s window) — renewal covers the upload (progress-gate lines: $gp; watcher blind at most ${P_BLIND:-0}s)"
       elif [ "$gp" -gt 0 ]; then
         inconc "PUSH: the token was silent ${P_SILENCE}s > ${bound}s, and the syncer logged $gp 'moved nothing' line(s): the transfer STALLED and the progress gate held the token quiet by design — renewal across a moving upload was not exercised; rerun"
       else
         bad "PUSH: the token was silent ${P_SILENCE:-?}s > ${bound}s during the upload with no stall reported: the renewer is NOT covering the batch (EXPECT=window-closed)"
       fi
-      if [ "${R_SILENCE:-999}" -le "$bound" ]; then
-        ok "RESTORE: the token was silent at most ${R_SILENCE}s ≤ ${bound}s across a ${R_SECS_CT:-?} s restore — renewal covers the restore (progress-gate lines: $gr)"
+      if [ "${R_SECS_CT:-0}" -le "$WINDOW" ]; then
+        inconc "RESTORE: the restore took only ${R_SECS_CT:-?} s from the syncer's start, ≤ the ${WINDOW}s window — a token silent throughout could not have been counted, so renewal across a restore was not exercised and S3's seize arm cannot open the window; raise BIG_MB (rate ${RATE:-?} MiB/s)"
+      elif [ "${R_SILENCE:-999}" -le "$bound" ] && [ "${R_BLIND:-0}" -gt "$bound" ]; then
+        inconc "RESTORE: the token was silent at most ${R_SILENCE}s ≤ ${bound}s where the watcher could see, but the watcher was blind for ${R_BLIND}s > ${bound}s (a HEAD hung) — rerun"
+      elif [ "${R_SILENCE:-999}" -le "$bound" ]; then
+        ok "RESTORE: the token was silent at most ${R_SILENCE}s ≤ ${bound}s across a ${R_SECS_CT:-?} s restore (> ${WINDOW}s window) — renewal covers the restore (progress-gate lines: $gr; watcher blind at most ${R_BLIND:-0}s)"
       elif [ "$gr" -gt 0 ]; then
         inconc "RESTORE: the token was silent ${R_SILENCE}s > ${bound}s, and the syncer logged $gr 'moved nothing' line(s): the restore STALLED and the progress gate held the token quiet by design — renewal across a moving restore was not exercised; rerun"
       else
@@ -547,9 +588,15 @@ takeover_arm() { # repo arm(hold|seize) obs_secs
             || note "no 'deposed' line from the holder within the observation"
           [ "$h_claims" -gt 1 ] && note "PING-PONG: the operator's pod claimed $h_claims times (epochs ${epochs}) — each side seizes the other mid-restore until a restore finishes inside the window" ;;
         window-closed)
-          # the control's oracle, now against a restore longer than the window
-          if [ "$ch_claims" = 0 ]; then
-            ok "CLOSED: the challenger never claimed in $obs s against a live restore of ${BIG_R_SECS:-?} s — the lease was renewed while the holder imported"
+          # The control's oracle, now against a restore longer than the
+          # window — and that length is checked on THIS arm's restore,
+          # not assumed from S2: inside the window an unfixed tree is
+          # never claimed either, and "never claimed" proves nothing.
+          local arm_restore=-1; [ -n "$serve_at" ] && arm_restore=$((serve_at - t0))
+          if [ -n "$serve_at" ] && [ "$arm_restore" -le "$WINDOW" ]; then
+            inconc "the seize arm's successor served ${arm_restore} s after the delete, inside the ${WINDOW}s window: an UNFIXED tree is never claimed here either, so the arm is vacuous — raise BIG_MB (S2's restore took ${BIG_R_SECS_CT:-?} s)"
+          elif [ "$ch_claims" = 0 ]; then
+            ok "CLOSED: the challenger never claimed in $obs s against a live restore that served ${arm_restore} s after the delete (> ${WINDOW}s window) — the lease was renewed while the holder imported"
           else
             bad "the challenger claimed $((fts - tstart)) s after arriving while the holder was '$fphase': renewal does not cover the restore (EXPECT=window-closed)"
           fi

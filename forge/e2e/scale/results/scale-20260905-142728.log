@@ -1,0 +1,62 @@
+forge at scale — bucket flint-forge-scale-runbx, prefix scale-202609051426, namespace agents, run 20260905-142728; EXPECT=window-closed SWEEP=claim
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-142728.log
+
+══ S0 — provenance and the rig: the syncer in the pod is the tree under test, both repositories serve, the disks are big enough ══
+  ....  syncer image: docker.io/dilipdalton/flint-forge-syncer@sha256:75f171b02d39682d700514143b089973d7d1d821945f2b0122482c8149f73e61
+  PASS  the syncer pod runs the digest this run pushed (sha256:75f171b02d39682d700514143b089973d7d1d821945f2b0122482c8149f73e61)
+  PASS  the syncer carries the ranged restore (marker string ×1, 827c5f90) — this is the tree under test, judged by content
+  PASS  the syncer carries the progress-gated renewer (marker ×1, 2a213b01): the window-closed oracle has its subject
+  PASS  the syncer carries the claim-time orphan sweep (marker ×1, 2a213b01)
+  PASS  big is serving (forge-big-54956b7f56-2qs2z)
+  PASS  small is serving (forge-small-7959b6c9f6-t8bbw)
+  PASS  big has no snapshot yet (fresh prefix)
+  ....  takeover window = QUIET_POLLS 6 × heartbeat 10s = 60s
+  ....  free: agent /work 833769 MiB, repository cache 833769 MiB; this run may need ~100352 MiB on each
+  PASS  the agent's emptyDir has room
+  PASS  the repository cache has room
+
+══ S2 — the large repository: 40960 MiB composed on S3, restored ranged, and the lease RENEWED throughout (silence under 30s) ══
+  ....  building big: 40960 MiB of /dev/urandom in the agent's emptyDir
+  PASS  built big (40960 MiB) in 519 s, tip 1d325ecb4de1
+./forge/e2e/scale/run-scale.sh: line 137: 49716 Terminated: 15          sleep 2
+  FAIL  push of big failed (rc=1): fatal: the remote end hung up unexpectedly command terminated with exit code 1
+
+══ S3 — the takeover during a restore, with its control: the same challenger against a small repository (restore of seconds) and the large one (restore of ? s) ══
+  PASS  the control repository holds 16 MiB at 39c1ec59edfc
+  ....  deleting forge-small-7959b6c9f6-t8bbw; the successor restores and the challenger arrives while it does
+  ....  successor forge-small-7959b6c9f6-cf872 is 'importing' 1s after the delete; starting the challenger (150 s of observation)
+./forge/e2e/scale/run-scale.sh: line 153: 52207 Terminated: 15          sleep 2
+  ....  hold arm: challenger claims=0, holder claims=1, holder fenced=0, epoch sequence: 2 ; holder restarts=0; time from the delete to a serving operator pod: 155 s
+  ....  pushes during the arm: 16 acknowledged, 0 refused or timed out; longest gap between acknowledgements 11 s
+  ....  the successor first served 2 s after the delete (the challenger arrived at +1 s, left at +151 s)
+  PASS  CONTROL: a challenger beside a HEALTHY holder never claimed in 150 s (the holder's heartbeats kept the token moving)
+  PASS  the operator's pod was serving again 155 s after the delete (the challenger removed at +150 s)
+  PASS  every acknowledged push (16) is in the bucket's agent/chaos-hold-20260905-142728: told ok ⇒ durable held under contention
+  INCONCLUSIVE  the large repository's restore time is unknown (S2 did not run); the seize arm needs it
+
+══ S4 — acknowledged means durable at multipart size (2048 MiB pushes to small): kills INSIDE the upload, seen not timed; and the orphans counted ══
+  ....  incomplete multipart uploads under scale-202609051426/small/git/objects/pack/ before the leg: 0
+  ....  iter 1: upload 3BPt4NOQgDqm… on pack-55b14ce183412bef79d70ac89ce4a6d7b07bf25d.pack seen 36s after the push began; killing 2.0s later, INSIDE the upload
+  PASS  iter 1: told failed, and the bucket is unchanged (<absent>)
+  ....  iter 1: incomplete uploads 0 before the push, 1 at the kill, 0 after the successor served (holding 0.0 MiB of parts now)
+  PASS  iter 1: SWEPT — 1 upload(s) orphaned by the kill, none left once the successor served
+  ....  iter 2: upload Ly1MtYTEe2Jx… on pack-312ff34e7a87b55efbe57a150dbb8b80bf24aea6.pack seen 36s after the push began; killing 3.5s later, INSIDE the upload
+  PASS  iter 2: told failed, and the bucket is unchanged (<absent>)
+  ....  iter 2: incomplete uploads 0 before the push, 1 at the kill, 0 after the successor served (holding 0.0 MiB of parts now)
+  PASS  iter 2: SWEPT — 1 upload(s) orphaned by the kill, none left once the successor served
+  ....  iter 3: upload 6v_IRLgDZjaD… on pack-85dbce2a0c8fab8da679e6b123295ccfec578a34.pack seen 35s after the push began; killing 2.0s later, INSIDE the upload
+  PASS  iter 3: told failed, and the bucket is unchanged (<absent>)
+  ....  iter 3: incomplete uploads 0 before the push, 1 at the kill, 0 after the successor served (holding 0.0 MiB of parts now)
+  PASS  iter 3: SWEPT — 1 upload(s) orphaned by the kill, none left once the successor served
+  ....  iter 4: the pack object now exists (upload complete); killing NOW, around the snapshot CAS and the report
+  PASS  iter 4: told ok, and the bucket holds it
+  ....  iter 4: incomplete uploads 0 before the push, 0 at the kill, 0 after the successor served (holding 0.0 MiB of parts now)
+  PASS  fsck --strict clean after 4 crashes
+  ....  1 acknowledged, 3 refused
+  PASS  the kills landed on both sides of the window
+  PASS  SWEPT: every kill that orphaned an upload (3) was followed by a successor that served with none left; 0 incomplete upload(s) remain under the prefix
+
+
+══ 24 passed, 1 failed, 1 inconclusive ══
+INCONCLUSIVE legs could not measure what they exist for: this run is NOT green.
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-142728.log  (raw timelines: /Users/ddalton/github/flint/forge/e2e/scale/results/work-20260905-142728)

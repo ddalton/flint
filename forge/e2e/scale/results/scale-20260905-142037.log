@@ -1,0 +1,43 @@
+forge at scale — bucket flint-forge-scale-runbx, prefix scale-202609051420, namespace agents, run 20260905-142037; EXPECT=window-closed SWEEP=claim
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-142037.log
+
+══ S0 — provenance and the rig: the syncer in the pod is the tree under test, both repositories serve, the disks are big enough ══
+  ....  syncer image: docker.io/dilipdalton/flint-forge-syncer@sha256:75f171b02d39682d700514143b089973d7d1d821945f2b0122482c8149f73e61
+  PASS  the syncer pod runs the digest this run pushed (sha256:75f171b02d39682d700514143b089973d7d1d821945f2b0122482c8149f73e61)
+  PASS  the syncer carries the ranged restore (marker string ×1, 827c5f90) — this is the tree under test, judged by content
+  PASS  the syncer carries the progress-gated renewer (marker ×1, 2a213b01): the window-closed oracle has its subject
+  PASS  the syncer carries the claim-time orphan sweep (marker ×1, 2a213b01)
+  PASS  big is serving (forge-big-85c5dbd974-zkghk)
+  PASS  small is serving (forge-small-7b9bc5858b-xkc9v)
+  PASS  big has no snapshot yet (fresh prefix)
+  ....  takeover window = QUIET_POLLS 6 × heartbeat 10s = 60s
+  ....  free: agent /work 833769 MiB, repository cache 833769 MiB; this run may need ~38912 MiB on each
+  PASS  the agent's emptyDir has room
+  PASS  the repository cache has room
+
+══ S1 — calibrate: a 1024 MiB repository through the whole path, and its restore rate sizes the large one ══
+  ....  building probe: 1024 MiB of /dev/urandom in the agent's emptyDir
+  PASS  built probe (1024 MiB) in 11 s, tip bf3b96577610
+  PASS  push of probe acknowledged in 27 s
+  ....  lease token silent for 10 s during the push (window 60s)
+  ....  pack pack-9f5abaf77c9d547eb0f041ea41f8feaf885c0a19.pack: 1024.1 MiB, ETag "b6e7fc25979fd2f629df6750ced9f8cd-17"
+  PASS  the pack is above the 64.0 MiB whole-put ceiling
+  PASS  ETag carries part count 17 = ceil(size / 64 MiB): composed by the part grid, not whole-PUT
+  PASS  S3 holds a FULL_OBJECT CRC64NVME (bomqjyfD+mo=): the checksum forge streamed over the file was accepted at CompleteMultipartUpload
+  PASS  S3 reports 17 parts
+  PASS  the snapshot names agent/probe at the tip
+  ....  cold restore of big
+  ....  deleting forge-big-85c5dbd974-zkghk
+./forge/e2e/scale/run-scale.sh: line 143: 43283 Terminated: 15          sleep 3
+  ....  big restored by forge-big-85c5dbd974-vmbdf: 6 s from the delete (3 s from the syncer's start); anon RSS max 7.3 MiB; lease token silent 10 s
+  PASS  restored refs are exactly the snapshot's
+  PASS  fsck --strict clean on the restored 1024.1 MiB repository (8 s): the composed bytes came back intact
+  PASS  the door advertises agent/probe at the tip after the restore
+  PASS  the restore's anon RSS peaked at 7.3 MiB for a 1024.1 MiB pack: memory does not scale with the repository
+  ....  …and under 256 MiB, consistent with the 38-40 MiB flat loopback figure (working set 34.2 MiB includes page cache)
+  ....  restore rate 341.4 MiB/s from the syncer's start (sequential 8 MiB ranged GETs, one in flight)
+  ....  restore rate 341.4 MiB/s ⇒ a 150s restore needs ~51210 MiB; BIG_MB=10240 (clamped to [2048, 10240])
+  PASS  the large repository will be 10240 MiB, larger than the probe
+
+══ S2 — the large repository: 10240 MiB composed on S3, restored ranged, and the lease RENEWED throughout (silence under 30s) ══
+  ....  building big: 10240 MiB of /dev/urandom in the agent's emptyDir

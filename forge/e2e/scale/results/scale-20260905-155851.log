@@ -1,0 +1,68 @@
+forge at scale — bucket flint-forge-scale-runbx, prefix scale-202609051556, namespace agents, run 20260905-155851; EXPECT=window-closed SWEEP=claim
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-155851.log
+
+══ S0 — provenance and the rig: the syncer in the pod is the tree under test, both repositories serve, the disks are big enough ══
+  ....  syncer image: docker.io/dilipdalton/flint-forge-syncer@sha256:4d1ac9959a0d75c74694d8006e38efcc18fc8c6b3fef920d0d82099108311144
+  PASS  the syncer pod runs the digest this run pushed (sha256:4d1ac9959a0d75c74694d8006e38efcc18fc8c6b3fef920d0d82099108311144)
+  PASS  the syncer carries the ranged restore (marker string ×1, 827c5f90) — this is the tree under test, judged by content
+  PASS  the syncer carries the progress-gated renewer (marker ×1, 2a213b01): the window-closed oracle has its subject
+  PASS  the syncer carries the claim-time orphan sweep (marker ×1, 2a213b01)
+  PASS  big is serving (forge-big-f8897c796-rdnhk)
+  PASS  small is serving (forge-small-86855665f6-wjs8g)
+  PASS  big has no snapshot yet (fresh prefix)
+  ....  takeover window = QUIET_POLLS 6 × heartbeat 10s = 60s
+  ....  free: agent /work 776377 MiB, repository cache 776377 MiB; this run may need ~100352 MiB on each
+  PASS  the agent's emptyDir has room
+  PASS  the repository cache has room
+
+══ S2 — the large repository: 40960 MiB composed on S3, restored ranged, and the lease RENEWED throughout (silence under 30s) ══
+  ....  building big: 40960 MiB of /dev/urandom in the agent's emptyDir
+  PASS  built big (40960 MiB) in 466 s, tip da6f213e9e8e
+./forge/e2e/scale/run-scale.sh: line 137: 31199 Terminated: 15          sleep 2
+  PASS  push of big acknowledged in 1113 s
+  ....  lease token silent for 66 s during the push (window 60s)
+  ....  pack pack-d3749f26fd713d28401f5651667d88cbcb0672b2.pack: 40963.2 MiB, ETag "f6a3d7097f51b397e5391671cc4458f5-641"
+  PASS  the pack is above the 64.0 MiB whole-put ceiling
+  PASS  ETag carries part count 641 = ceil(size / 64 MiB): composed by the part grid, not whole-PUT
+  PASS  S3 holds a FULL_OBJECT CRC64NVME (jdtw8qzeyxg=): the checksum forge streamed over the file was accepted at CompleteMultipartUpload
+  PASS  S3 reports 641 parts
+  PASS  the snapshot names agent/big at the tip
+  ....  cold restore of big
+  ....  deleting forge-big-f8897c796-rdnhk
+./forge/e2e/scale/run-scale.sh: line 137: 32981 Terminated: 15          sleep 2
+./forge/e2e/scale/run-scale.sh: line 143: 32985 Terminated: 15          sleep 3
+  ....  big restored by forge-big-f8897c796-vwrb8: 139 s from the delete (138 s from the syncer's start); anon RSS max 25.3 MiB; lease token silent 11 s
+  PASS  restored refs are exactly the snapshot's
+  PASS  fsck --strict clean on the restored 40963.2 MiB repository (414 s): the composed bytes came back intact
+  PASS  the door advertises agent/big at the tip after the restore
+  PASS  the restore's anon RSS peaked at 25.3 MiB for a 40963.2 MiB pack: memory does not scale with the repository
+  ....  …and under 256 MiB, consistent with the 38-40 MiB flat loopback figure (working set 580.0 MiB includes page cache)
+  ....  restore rate 296.8 MiB/s from the syncer's start (sequential 8 MiB ranged GETs, one in flight)
+  FAIL  PUSH: the token was silent 66s > 30s during the upload with no stall reported: the renewer is NOT covering the batch (EXPECT=window-closed)
+  PASS  RESTORE: the token was silent at most 11s ≤ 30s across a 138 s restore (> 60s window) — renewal covers the restore (progress-gate lines: 0)
+
+══ S3 — the takeover during a restore, with its control: the same challenger against a small repository (restore of seconds) and the large one (restore of 139 s) ══
+  PASS  the control repository holds 16 MiB at 0d656c7bba7c
+  ....  deleting forge-small-86855665f6-wjs8g; the successor restores and the challenger arrives while it does
+  ....  successor forge-small-86855665f6-fshhx is 'serving' 2s after the delete; starting the challenger (150 s of observation)
+./forge/e2e/scale/run-scale.sh: line 153: 35538 Terminated: 15          sleep 2
+  ....  hold arm: challenger claims=0, holder claims=1, holder fenced=0, epoch sequence: 13 ; holder restarts=0; time from the delete to a serving operator pod: 156 s
+  ....  pushes during the arm: 16 acknowledged, 0 refused or timed out; longest gap between acknowledgements 11 s
+  ....  the successor first served 3 s after the delete (the challenger arrived at +2 s, left at +152 s)
+  PASS  CONTROL: a challenger beside a HEALTHY holder never claimed in 150 s (the holder's heartbeats kept the token moving)
+  PASS  the operator's pod was serving again 156 s after the delete (the challenger removed at +150 s)
+  PASS  every acknowledged push (16) is in the bucket's agent/chaos-hold-20260905-155851: told ok ⇒ durable held under contention
+  ....  deleting forge-big-f8897c796-vwrb8; the successor restores and the challenger arrives while it does
+  ....  successor forge-big-f8897c796-2qz5d is 'importing' 1s after the delete; starting the challenger (398 s of observation)
+  ....  seize arm: challenger claims=0, holder claims=1, holder fenced=0, epoch sequence: 3 ; holder restarts=0; time from the delete to a serving operator pod: 472 s
+  ....  pushes during the arm: 24 acknowledged, 2 refused or timed out; longest gap between acknowledgements 142 s
+  ....  the successor first served 135 s after the delete (the challenger arrived at +2 s, left at +400 s)
+  PASS  CLOSED: the challenger never claimed in 398 s against a live restore that served 135 s after the delete (> 60s window) — the lease was renewed while the holder imported
+  PASS  the holder was never fenced
+  PASS  the successor served 135 s after the delete WITH the challenger present — no outage beyond its own restore
+  PASS  the operator's pod was serving again 472 s after the delete (the challenger removed at +398 s)
+  PASS  every acknowledged push (24) is in the bucket's agent/chaos-seize-20260905-155851: told ok ⇒ durable held under contention
+
+
+══ 30 passed, 1 failed, 0 inconclusive ══
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-155851.log  (raw timelines: /Users/ddalton/github/flint/forge/e2e/scale/results/work-20260905-155851)
