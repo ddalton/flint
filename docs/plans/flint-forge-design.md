@@ -613,6 +613,42 @@ slow in ways that matter for a fleet. Phase 0 runs it as the control.
    bundle URIs off — the server's NIC saturates; the client opt-in
    off — identical to bundle URIs off, proving the advertisement alone
    does nothing.
+
+   **RUN 2026-09-04 on EC2 — GREEN, all three arms.** 1,000 clones of a
+   40 MiB repository per arm, 3,000 in total, zero failures, 256 in
+   flight. The oracle is the server pod's own NIC counter, not
+   wall-clock: a storm that is slower but off the server's NIC still
+   passes.
+
+   | arm | server egress | wall |
+   |---|---|---|
+   | advertised + `transfer.bundleURI=true` | **5.7 MiB** | 129 s |
+   | advertised, client opt-in OFF | 40,409 MiB | 460 s |
+   | not advertised | 40,417 MiB | 467 s |
+
+   A **7,000x** reduction, and 3.6x faster wall-clock as a side
+   effect. The controls land within 0.9% of the predicted 40,052 MiB
+   (1,000 x 40 MiB), which is what says the counter is measuring the
+   right thing. **The two controls differ by 0.02%** — that is the
+   second control earning its place: the advertisement alone does
+   nothing at all, and since `transfer.bundleURI` defaults to false,
+   the do-nothing configuration is the one a fleet gets by accident.
+
+   Two traps, each of which produced a confident wrong answer first:
+
+   - **A global `http.extraHeader` breaks the bundle fetch.** git sends
+     it to EVERY host, including the presigned S3 URL, and S3 refuses a
+     presigned request that also carries an `Authorization` header. git
+     reports `failed to download bundle` only under `GIT_TRACE2` and
+     silently falls back to a full fetch — so the lever looks inert for
+     a reason that has nothing to do with forge. The first measurement
+     read 40.24 MiB treatment against 40.46 MiB control and looked like
+     a clean refutation of the design. Scope the credential to the
+     door's URL, which is what the shipped `flint-forge-credential`
+     helper does anyway.
+   - **A restore came back advertising nothing** (§8, fixed by
+     `bundle::readvertise`). Until that fix every arm run after a wake
+     was measuring an unadvertised repository.
 9. **Export.** lean mounts the exported `main` read-only and every
    file is byte-identical to `git show main:<path>`; a push changing
    three files rewrites one or two chunks and three objects; a reader
