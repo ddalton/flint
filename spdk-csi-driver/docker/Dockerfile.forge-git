@@ -27,6 +27,16 @@ ARG TARGETARCH
 # exactly what the first cluster run found.
 RUN apk add --no-cache git git-lfs git-daemon nginx fcgiwrap spawn-fcgi \
     && mkdir -p /repo /run/nginx
+# nginx.conf passes NO_BUFFERING so that fcgiwrap flushes the CGI's
+# output as it comes (Alpine's no-buffering.patch). A base image whose
+# fcgiwrap lacks that patch would buffer `receive-pack`'s keepalives
+# again and every long push would be cut at the door — silently, on
+# real repositories only. So the build refuses it. The binary is split
+# on NUL first: busybox grep matches a line as a C string, so a string
+# past the first NUL of a line is invisible to it — and busybox tr does
+# not know the [:print:] class that the drill's check leans on.
+RUN tr '\0' '\n' < /usr/bin/fcgiwrap | grep -q NO_BUFFERING \
+    || { echo "fcgiwrap lacks the NO_BUFFERING switch: keepalives would buffer" >&2; exit 1; }
 
 COPY docker/forge/nginx.conf /etc/nginx/nginx.conf
 COPY docker/forge/entrypoint.sh /usr/local/bin/entrypoint.sh
