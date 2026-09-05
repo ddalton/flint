@@ -42,13 +42,16 @@
 //! those bytes are ever concatenated into it.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use bytes::Buf;
-use futures::TryStreamExt;
+use futures::{Stream, TryStreamExt};
 use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewSpec};
 use kube::api::{Api, Patch, PatchParams, PostParams};
 use kube::runtime::reflector::{ObjectRef, Store};
@@ -174,10 +177,13 @@ pub struct GitConfig {
     /// which a deleted pod's token still works, which is why it is
     /// short and why it is configuration.
     pub review_ttl: Duration,
-    /// How long to wait for the server's RESPONSE HEADERS. The body
-    /// streams untimed after that — a clone of a large repository is a
-    /// legitimate request that must not meet a request-scoped
-    /// deadline.
+    /// For the advertisement and the LFS calls: the deadline on the
+    /// whole exchange. For a push or a fetch: the longest SILENCE
+    /// allowed, judged over both directions at once — the transfer
+    /// itself is unbounded, because its length is the repository's.
+    /// (It used to be a request-scoped deadline for those too, whatever
+    /// its comment said: reqwest's per-request timeout covers the body,
+    /// and a 40 GiB push died at exactly this many seconds on runbx.)
     pub upstream_timeout: Duration,
     /// Refuse `git-receive-pack`. A mirror or a read-only deployment
     /// needs no push, and this is the difference between a compromised
@@ -587,7 +593,7 @@ pub fn routes(
                             None,
                             auth,
                             hdrs,
-                            Some(stream_body(body)),
+                            Some(Payload::Streamed(stream_body(body))),
                         )
                         .await,
                     )
@@ -617,7 +623,7 @@ pub fn routes(
                         None,
                         auth,
                         hdrs,
-                        Some(stream_body(body)),
+                        Some(Payload::Streamed(stream_body(body))),
                     )
                     .await,
                 )
@@ -730,7 +736,7 @@ fn lfs_route(
                         None,
                         auth,
                         hdrs,
-                        Some(reqwest::Body::from(body.to_vec())),
+                        Some(Payload::Whole(reqwest::Body::from(body.to_vec()))),
                     )
                     .await)
                 }
@@ -744,15 +750,101 @@ fn lfs_route(
 /// unbounded size and buffering one per concurrent writer is how a
 /// door with a small memory limit is killed by two agents pushing at
 /// once.
-fn stream_body<S, B>(body: S) -> reqwest::Body
+fn stream_body<S, B>(body: S) -> ByteStream
 where
-    S: futures::Stream<Item = Result<B, warp::Error>> + Send + 'static,
+    S: Stream<Item = Result<B, warp::Error>> + Send + 'static,
     B: Buf,
 {
-    reqwest::Body::wrap_stream(
+    Box::pin(
         body.map_ok(|mut b| b.copy_to_bytes(b.remaining()))
             .map_err(|e| std::io::Error::other(e.to_string())),
     )
+}
+
+type ByteStream = Pin<Box<dyn Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send>>;
+
+/// A request body on its way to the server: whole (an LFS call, a few
+/// KiB at most) or streamed (a pack, as long as the repository).
+enum Payload {
+    Whole(reqwest::Body),
+    Streamed(ByteStream),
+}
+
+/// When bytes last moved in EITHER direction of one proxied exchange —
+/// shared by its request stream, its response stream and the wait for
+/// the response headers, so that any of them moving keeps all of them
+/// alive. A push is silent downstream while the pack streams up, and
+/// silent upstream while the server's hook works and `receive.keepAlive`
+/// ticks back every 5 s; judged one direction at a time, each of those
+/// would look like a stall.
+#[derive(Clone)]
+struct Activity(Arc<Mutex<tokio::time::Instant>>);
+
+impl Activity {
+    fn new() -> Self {
+        Activity(Arc::new(Mutex::new(tokio::time::Instant::now())))
+    }
+    fn touch(&self) {
+        *self.0.lock().unwrap() = tokio::time::Instant::now();
+    }
+    fn deadline(&self, idle: Duration) -> tokio::time::Instant {
+        *self.0.lock().unwrap() + idle
+    }
+}
+
+/// A byte stream that ends with an error once nothing has moved on it,
+/// or on the stream sharing its [`Activity`], for `idle`. A chunk
+/// arriving resets the clock for both.
+struct Idle {
+    inner: ByteStream,
+    activity: Activity,
+    idle: Duration,
+    sleep: Pin<Box<tokio::time::Sleep>>,
+}
+
+impl Idle {
+    fn new(inner: ByteStream, activity: Activity, idle: Duration) -> Self {
+        let sleep = Box::pin(tokio::time::sleep_until(activity.deadline(idle)));
+        Idle {
+            inner,
+            activity,
+            idle,
+            sleep,
+        }
+    }
+    fn timed_out(&self) -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("no bytes moved in either direction for {:?}", self.idle),
+        )
+    }
+}
+
+impl Stream for Idle {
+    type Item = Result<bytes::Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(chunk))) => {
+                self.activity.touch();
+                Poll::Ready(Some(Ok(chunk)))
+            }
+            Poll::Ready(other) => Poll::Ready(other),
+            Poll::Pending => {
+                // Re-arm against the SHARED clock every time: the other
+                // stream may have moved it since this one last looked.
+                let deadline = self.activity.deadline(self.idle);
+                if tokio::time::Instant::now() >= deadline {
+                    return Poll::Ready(Some(Err(self.timed_out())));
+                }
+                self.sleep.as_mut().reset(deadline);
+                match self.sleep.as_mut().poll(cx) {
+                    Poll::Ready(()) => Poll::Ready(Some(Err(self.timed_out()))),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -764,7 +856,7 @@ async fn proxy(
     service: Option<String>,
     auth: Option<String>,
     headers: warp::http::HeaderMap,
-    payload: Option<reqwest::Body>,
+    payload: Option<Payload>,
 ) -> Response {
     if !door.ready.load(Ordering::Relaxed) {
         return json_err(
@@ -864,7 +956,24 @@ async fn proxy(
         url.push_str(s);
     }
 
-    let mut req = door.http.request(verb.method(), &url).timeout(door.cfg.upstream_timeout);
+    // A push or a fetch is a transfer of unknown length one way and a
+    // silence the other way until it lands: the pack streams up while
+    // the server says nothing, then the server's report waits on the
+    // hook — an S3 upload as long as the pack, with `receive.keepAlive`
+    // ticking back every 5 s meanwhile. No request-scoped deadline fits
+    // that, and the door had one: reqwest's per-request timeout bounds
+    // the WHOLE exchange, body included, whatever the comment beside it
+    // said. A 40 GiB push died at 300 s on runbx (2026-09-05); a 10 GiB
+    // one had passed at 262 s. The streamed verbs now get an INACTIVITY
+    // bound judged over both directions at once — while bytes move
+    // somewhere, the exchange lives. The small verbs keep the deadline.
+    let streamed = matches!(verb, GitVerb::UploadPack | GitVerb::ReceivePack);
+    let idle = door.cfg.upstream_timeout;
+    let activity = Activity::new();
+    let mut req = door.http.request(verb.method(), &url);
+    if !streamed {
+        req = req.timeout(idle);
+    }
     for name in GIT_REQUEST_HEADERS {
         if let Some(v) = headers.get(*name) {
             req = req.header(*name, v.as_bytes());
@@ -875,12 +984,45 @@ async fn proxy(
     // because the request's headers are built from the allowlist above
     // and this line.
     req = req.header("x-remote-user", identity.username.as_str());
-    if let Some(body) = payload {
-        req = req.body(body);
+    match payload {
+        Some(Payload::Whole(body)) => req = req.body(body),
+        Some(Payload::Streamed(pack)) => {
+            req = req.body(reqwest::Body::wrap_stream(Idle::new(
+                pack,
+                activity.clone(),
+                idle,
+            )))
+        }
+        None => {}
     }
 
-    match req.send().await {
-        Ok(res) => relay(res),
+    let sent = if streamed {
+        // The wait for the response headers, on the same clock: while
+        // the request body is still moving the deadline keeps receding,
+        // and a server that takes the whole pack and then says nothing
+        // for `idle` is the failure this names.
+        let mut send = std::pin::pin!(req.send());
+        loop {
+            match tokio::time::timeout_at(activity.deadline(idle), &mut send).await {
+                Ok(r) => break r,
+                Err(_) if activity.deadline(idle) > tokio::time::Instant::now() => continue,
+                Err(_) => {
+                    return json_err(
+                        StatusCode::GATEWAY_TIMEOUT,
+                        "UpstreamIdle",
+                        &format!(
+                            "nothing moved between the client and the repository server for {idle:?}"
+                        ),
+                        Some(5),
+                    )
+                }
+            }
+        }
+    } else {
+        req.send().await
+    };
+    match sent {
+        Ok(res) => relay(res, streamed.then(|| (activity, idle))),
         Err(e) => json_err(
             StatusCode::BAD_GATEWAY,
             "UpstreamUnreachable",
@@ -890,7 +1032,7 @@ async fn proxy(
     }
 }
 
-fn relay(res: reqwest::Response) -> Response {
+fn relay(res: reqwest::Response, idle: Option<(Activity, Duration)>) -> Response {
     let status = StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut headers = warp::http::HeaderMap::new();
     for name in GIT_RESPONSE_HEADERS {
@@ -903,8 +1045,17 @@ fn relay(res: reqwest::Response) -> Response {
             }
         }
     }
-    // Streamed, not buffered: a clone is as large as the repository.
-    let body = warp::hyper::Body::wrap_stream(res.bytes_stream());
+    // Streamed, not buffered: a clone is as large as the repository —
+    // and, for the streamed verbs, on the exchange's inactivity clock.
+    let stream = res
+        .bytes_stream()
+        .map_err(|e| std::io::Error::other(e.to_string()));
+    let body = match idle {
+        Some((activity, idle)) => {
+            warp::hyper::Body::wrap_stream(Idle::new(Box::pin(stream), activity, idle))
+        }
+        None => warp::hyper::Body::wrap_stream(stream),
+    };
     let mut out = Response::new(body);
     *out.status_mut() = status;
     *out.headers_mut() = headers;
@@ -1052,6 +1203,15 @@ mod tests {
         reviewer: Arc<dyn Reviewer>,
         read_only: bool,
     ) -> Arc<GitDoor> {
+        door_with_idle(repos, reviewer, read_only, Duration::from_secs(5))
+    }
+
+    fn door_with_idle(
+        repos: Vec<FlintRepo>,
+        reviewer: Arc<dyn Reviewer>,
+        read_only: bool,
+        upstream_timeout: Duration,
+    ) -> Arc<GitDoor> {
         crate::install_crypto_provider();
         // Never dialled: the reviewer is a double and the wake PATCH is
         // best effort, which one test asserts explicitly.
@@ -1065,7 +1225,7 @@ mod tests {
             http: reqwest::Client::builder().build().expect("http"),
             cfg: GitConfig {
                 wake_wait: Duration::from_millis(200),
-                upstream_timeout: Duration::from_secs(5),
+                upstream_timeout,
                 read_only,
                 ..GitConfig::default()
             },
@@ -1377,6 +1537,104 @@ mod tests {
             seen.headers.get("content-type").map(|v| v.to_str().unwrap()),
             Some("application/x-git-receive-pack-request")
         );
+    }
+
+    /// A server that takes the whole request, answers its headers
+    /// after `first`, then sends one chunk every `every`, `chunks`
+    /// times. What a push looks like from the door once the pack is in:
+    /// a report that arrives at the hook's pace.
+    async fn trickling_git_server(first: Duration, every: Duration, chunks: usize) -> String {
+        let route = warp::any().and(warp::body::bytes()).and_then(move |_b: Bytes| async move {
+            tokio::time::sleep(first).await;
+            let stream = futures::stream::unfold(0usize, move |i| async move {
+                if i >= chunks {
+                    return None;
+                }
+                tokio::time::sleep(every).await;
+                Some((Ok::<_, std::io::Error>(Bytes::from_static(b"0008\x01x")), i + 1))
+            });
+            let mut res = Response::new(warp::hyper::Body::wrap_stream(stream));
+            res.headers_mut().insert(
+                "content-type",
+                warp::http::HeaderValue::from_static("application/x-git-receive-pack-result"),
+            );
+            Ok::<_, Rejection>(res)
+        });
+        let (addr, srv) = warp::serve(route).bind_ephemeral(([127, 0, 0, 1], 0));
+        tokio::spawn(srv);
+        format!("http://{addr}/tenant/proj.git")
+    }
+
+    /// A push whose exchange outlasts the upstream timeout SUCCEEDS as
+    /// long as bytes keep moving: the bound is inactivity, not the
+    /// request. Under the request-scoped timeout this shipped with, the
+    /// same exchange is cut at 1 s — the shape of runbx's 40 GiB push
+    /// dying at 300 s through a door whose comment promised otherwise.
+    #[tokio::test]
+    async fn a_slow_but_moving_push_is_never_cut() {
+        let endpoint =
+            trickling_git_server(Duration::from_millis(200), Duration::from_millis(300), 8).await;
+        let door = door_with_idle(
+            vec![repo(Some(&endpoint), vec!["agent-runner"], RepoPhase::Ready)],
+            Arc::new(CountingReviewer {
+                calls: Arc::new(AtomicU64::new(0)),
+                verdict: Ok(identity("tenant", "agent-runner")),
+            }),
+            false,
+            Duration::from_secs(1),
+        );
+        let t0 = Instant::now();
+        let res = warp::test::request()
+            .method("POST")
+            .path("/git/tenant/proj.git/git-receive-pack")
+            .header("authorization", basic("tok"))
+            .header("content-type", "application/x-git-receive-pack-request")
+            .body(vec![b'x'; 1024])
+            .reply(&routes(door))
+            .await;
+        assert_eq!(res.status(), 200);
+        assert!(
+            t0.elapsed() > Duration::from_secs(2),
+            "the exchange must have outlasted the 1 s bound for this test to mean anything"
+        );
+        assert_eq!(
+            res.body().len(),
+            8 * b"0008\x01x".len(),
+            "every chunk of the report arrived: the exchange was not cut at the timeout"
+        );
+    }
+
+    /// …and a server that takes the pack and then says nothing for
+    /// longer than the bound is the failure the bound names, answered
+    /// at the bound rather than at the server's own pace.
+    #[tokio::test]
+    async fn a_silent_server_is_cut_at_the_idle_bound() {
+        let endpoint =
+            trickling_git_server(Duration::from_secs(4), Duration::from_millis(10), 1).await;
+        let door = door_with_idle(
+            vec![repo(Some(&endpoint), vec!["agent-runner"], RepoPhase::Ready)],
+            Arc::new(CountingReviewer {
+                calls: Arc::new(AtomicU64::new(0)),
+                verdict: Ok(identity("tenant", "agent-runner")),
+            }),
+            false,
+            Duration::from_secs(1),
+        );
+        let t0 = Instant::now();
+        let res = warp::test::request()
+            .method("POST")
+            .path("/git/tenant/proj.git/git-receive-pack")
+            .header("authorization", basic("tok"))
+            .body(vec![b'x'; 1024])
+            .reply(&routes(door))
+            .await;
+        assert_eq!(res.status(), 504);
+        assert!(
+            t0.elapsed() < Duration::from_millis(2500),
+            "cut at the 1 s bound, not after the server's 4 s silence"
+        );
+        let body: serde_json::Value = serde_json::from_slice(res.body()).expect("json");
+        assert_eq!(body["reason"], "UpstreamIdle");
     }
 
     /// A repository nobody registered is a 404 that says so, and a

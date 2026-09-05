@@ -80,6 +80,10 @@ door:
   wakeWaitSecs: 180
   reviewTtlSecs: 60
   readOnly: false
+  # For a push or a fetch this is the longest SILENCE allowed in either
+  # direction, never a bound on the transfer: a pack is as large as the
+  # repository, and the hook that must acknowledge it uploads the whole
+  # pack to the bucket first (git keeps the connection alive meanwhile).
   upstreamTimeoutSecs: 300
   logLevel: ""
   service:

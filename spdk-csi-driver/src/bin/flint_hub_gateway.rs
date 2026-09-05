@@ -148,8 +148,10 @@ struct Args {
     #[arg(long, env = "FLINT_GATEWAY_MAX_UPLOAD_BYTES", default_value_t = 5 * 1024 * 1024 * 1024)]
     max_upload_bytes: u64,
 
-    /// How long to wait for a hub's response HEADERS. The body streams
-    /// untimed after that, so this does not cap a large download.
+    /// For the file API, the advertisement and the LFS calls: how long
+    /// to wait for a hub's response. For a git push or fetch: the
+    /// longest silence allowed in either direction — the transfer
+    /// itself is as long as the repository and is not bounded.
     #[arg(long, env = "FLINT_GATEWAY_UPSTREAM_TIMEOUT_SECS", default_value_t = 30)]
     upstream_timeout_secs: u64,
 
