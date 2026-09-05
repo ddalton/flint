@@ -30,11 +30,19 @@
 //!   FLINT_FORGE_EXPORT_PREFIX    the lean workspace prefix it goes to
 //!   FLINT_FORGE_EXPORT_EVERY_SECS  floor between exports (default 300)
 //!   FLINT_FORGE_SYNC_BIN         flint-sync (default /usr/local/bin/flint-sync)
+//!   FLINT_FORGE_BUNDLES          "true" arms clone bundles (§8)
+//!   FLINT_FORGE_BUNDLE_EVERY_SECS   floor between cuts (default 3600)
+//!   FLINT_FORGE_BUNDLE_URL_TTL_SECS presigned URL lifetime (default 21600)
+//!   FLINT_FORGE_PRUNE_PATTERN    refs eligible for pruning, e.g. agent/*
+//!   FLINT_FORGE_PRUNE_AFTER_SECS how long a MERGED branch must be quiet
+//!   FLINT_FORGE_PRUNE_EVERY_SECS how often the pass runs (default 86400)
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use flint_forge::bundle::BundleConfig;
 use flint_forge::export::ExportConfig;
+use flint_forge::prune::PruneConfig;
 use flint_forge::policy::Policy;
 use flint_forge::server::{self, ServerOpts};
 use flint_forge::{ForgeConfig, ForgeError, Syncer, EXIT_REFUSED};
@@ -147,6 +155,44 @@ async fn main() {
         _ => {
             eprintln!(
                 "flint-forge-syncer: the export needs BOTH FLINT_FORGE_EXPORT_REF and                  FLINT_FORGE_EXPORT_PREFIX"
+            );
+            std::process::exit(EXIT_REFUSED);
+        }
+    };
+
+    // Clone bundles: off unless armed. They cost a full copy of the
+    // repository per cut, and they are inert unless the agent image
+    // also sets `transfer.bundleURI=true` — which is why the guide
+    // says so and why this is opt-in rather than a default.
+    let bundle = std::env::var("FLINT_FORGE_BUNDLES")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+        .then(|| BundleConfig {
+            every_secs: env_u64("FLINT_FORGE_BUNDLE_EVERY_SECS", 3600),
+            url_ttl_secs: env_u64("FLINT_FORGE_BUNDLE_URL_TTL_SECS", 6 * 3600),
+        });
+
+    // Pruning: off unless BOTH a pattern and a TTL are given. A default
+    // TTL would be a clock deleting branches nobody asked it to.
+    let prune = match (
+        std::env::var("FLINT_FORGE_PRUNE_PATTERN").ok().filter(|p| !p.is_empty()),
+        std::env::var("FLINT_FORGE_PRUNE_AFTER_SECS").ok().and_then(|v| v.parse::<u64>().ok()),
+    ) {
+        (Some(pattern), Some(after_secs)) => Some(PruneConfig {
+            pattern: if pattern.starts_with("refs/") {
+                pattern
+            } else {
+                format!("refs/heads/{pattern}")
+            },
+            after_secs,
+            into: format!("refs/heads/{}", cfg.default_branch.trim_start_matches("refs/heads/")),
+            every_secs: env_u64("FLINT_FORGE_PRUNE_EVERY_SECS", 86_400),
+        }),
+        (None, None) => None,
+        _ => {
+            eprintln!(
+                "flint-forge-syncer: pruning needs BOTH FLINT_FORGE_PRUNE_PATTERN and \
+                 FLINT_FORGE_PRUNE_AFTER_SECS"
             );
             std::process::exit(EXIT_REFUSED);
         }

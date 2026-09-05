@@ -379,6 +379,50 @@ pub fn deployment(repo: &FlintRepo, d: &RenderDefaults, replicas: i32) -> Deploy
         }
     }
 
+    // The fleet levers (§8), both opt-in and both off by default.
+    if let Some(f) = s.fleet.as_ref() {
+        if let Some(b) = f.bundles.as_ref().filter(|b| b.enabled) {
+            env.push(EnvVar {
+                name: "FLINT_FORGE_BUNDLES".into(),
+                value: Some("true".into()),
+                ..Default::default()
+            });
+            if let Some(v) = b.every_secs {
+                env.push(EnvVar {
+                    name: "FLINT_FORGE_BUNDLE_EVERY_SECS".into(),
+                    value: Some(v.to_string()),
+                    ..Default::default()
+                });
+            }
+            if let Some(v) = b.url_ttl_secs {
+                env.push(EnvVar {
+                    name: "FLINT_FORGE_BUNDLE_URL_TTL_SECS".into(),
+                    value: Some(v.to_string()),
+                    ..Default::default()
+                });
+            }
+        }
+        if let Some(p) = f.prune_agent_branches.as_ref().filter(|p| !p.pattern.is_empty()) {
+            env.push(EnvVar {
+                name: "FLINT_FORGE_PRUNE_PATTERN".into(),
+                value: Some(p.pattern.clone()),
+                ..Default::default()
+            });
+            env.push(EnvVar {
+                name: "FLINT_FORGE_PRUNE_AFTER_SECS".into(),
+                value: Some(p.after_secs.to_string()),
+                ..Default::default()
+            });
+            if let Some(v) = p.every_secs {
+                env.push(EnvVar {
+                    name: "FLINT_FORGE_PRUNE_EVERY_SECS".into(),
+                    value: Some(v.to_string()),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
     let syncer = Container {
         name: "syncer".to_string(),
         image: Some(d.syncer_image.clone()),
@@ -541,7 +585,7 @@ mod tests {
                 branches: None,
                 idle: None,
                 export: None,
-                wip_snapshots: None,
+                fleet: None,
                 log_level: None,
                 lifecycle: None,
             },
@@ -809,6 +853,66 @@ mod tests {
         assert_eq!(env["FLINT_FORGE_EXPORT_REF"], "main");
         assert_eq!(env["FLINT_FORGE_EXPORT_PREFIX"], "tenant/proj-export");
         assert_eq!(env["FLINT_FORGE_EXPORT_EVERY_SECS"], "120");
+    }
+
+    /// Both fleet levers are off unless asked for, and both reach the
+    /// syncer whole. A bundle spec with `enabled: false` must render
+    /// NOTHING — arming it costs a full copy of the repository per cut.
+    #[test]
+    fn the_fleet_levers_are_off_unless_asked_for() {
+        use crate::forge_operator::crd::{BundleSpec, FleetSpec, PruneSpec};
+        let env_of = |r: &FlintRepo| -> BTreeMap<String, String> {
+            deployment(r, &RenderDefaults::default(), 1)
+                .spec
+                .unwrap()
+                .template
+                .spec
+                .unwrap()
+                .containers
+                .iter()
+                .find(|c| c.name == "syncer")
+                .unwrap()
+                .env
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|e| (e.name.clone(), e.value.clone().unwrap_or_default()))
+                .collect()
+        };
+        assert!(!env_of(&repo()).contains_key("FLINT_FORGE_BUNDLES"), "off by default");
+
+        let mut off = repo();
+        off.spec.fleet = Some(FleetSpec {
+            bundles: Some(BundleSpec { enabled: false, every_secs: Some(60), url_ttl_secs: None }),
+            prune_agent_branches: None,
+        });
+        assert!(
+            !env_of(&off).contains_key("FLINT_FORGE_BUNDLES"),
+            "enabled:false must render nothing, cadence or no cadence"
+        );
+
+        let mut on = repo();
+        on.spec.fleet = Some(FleetSpec {
+            bundles: Some(BundleSpec {
+                enabled: true,
+                every_secs: Some(1800),
+                url_ttl_secs: Some(7200),
+            }),
+            prune_agent_branches: Some(PruneSpec {
+                pattern: "agent/*".into(),
+                after_secs: 604_800,
+                every_secs: None,
+            }),
+        });
+        let env = env_of(&on);
+        assert_eq!(env["FLINT_FORGE_BUNDLES"], "true");
+        assert_eq!(env["FLINT_FORGE_BUNDLE_EVERY_SECS"], "1800");
+        assert_eq!(env["FLINT_FORGE_BUNDLE_URL_TTL_SECS"], "7200");
+        assert_eq!(env["FLINT_FORGE_PRUNE_PATTERN"], "agent/*");
+        assert_eq!(
+            env["FLINT_FORGE_PRUNE_AFTER_SECS"], "604800",
+            "the pattern and the TTL travel together; the syncer refuses half of them"
+        );
     }
 
     /// An export claims a second subtree, and the arbitration has to

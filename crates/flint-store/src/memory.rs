@@ -546,6 +546,21 @@ impl ObjectStore for MemoryStore {
             .ok_or_else(|| StoreError::NotFound(key.into()))
     }
 
+    /// A stand-in URL: deterministic, unmistakably not real, and
+    /// refused for a key that does not exist. A test can assert that
+    /// the right key was signed and that a missing object is not
+    /// advertised; whether a git client can actually fetch it is a
+    /// question only a real store answers, and forge's storm leg is
+    /// where that is asked.
+    async fn presign_get(&self, key: &str, ttl_secs: u64) -> StoreResult<String> {
+        self.bump("presign_get");
+        let inner = self.inner.lock().unwrap();
+        if inner.current(key).is_none() {
+            return Err(StoreError::NotFound(key.into()));
+        }
+        Ok(format!("memory://presigned/{key}?ttl={ttl_secs}"))
+    }
+
     async fn get_whole(
         &self,
         key: &str,

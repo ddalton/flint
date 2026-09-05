@@ -143,6 +143,73 @@ spec:
                 required:
                 - prefix
                 type: object
+              fleet:
+                description: 'Fleet levers: clone bundles, and pruning merged agent branches.'
+                nullable: true
+                properties:
+                  bundles:
+                    description: |-
+                      Clone bundles: the storm lever. **Inert unless the AGENT image also
+                      sets `transfer.bundleURI=true`** — the client default is false, so a
+                      stock git ignores the advertisement entirely.
+                    nullable: true
+                    properties:
+                      enabled:
+                        default: false
+                        type: boolean
+                      everySecs:
+                        description: |-
+                          A floor between cuts. A bundle is a full copy of the
+                          repository, so cutting one per push spends more than the storm
+                          it saves.
+                        format: uint64
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
+                      urlTtlSecs:
+                        description: |-
+                          How long a presigned URL is good for. It is a bearer token for
+                          that object, handed to every agent that asks for a clone, so it
+                          is short and re-signed rather than S3's seven-day maximum.
+                        format: uint64
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
+                    type: object
+                  pruneAgentBranches:
+                    description: |-
+                      Pruning agent branches, which every clone pays for: a thousand
+                      one-commit branches cost 0.54 CPU-s per clone instead of 0.13, and
+                      a 74 KB advertisement on every request.
+
+                      **Age alone is never the rule.** A branch is taken only when it is
+                      already contained in the default branch — so nothing is lost that
+                      `main` does not have — AND it has been quiet longer than
+                      `afterSecs`, so a merge that just landed does not delete the branch
+                      out from under the agent still pushing to it.
+                    nullable: true
+                    properties:
+                      afterSecs:
+                        description: How long a MERGED branch must have been quiet.
+                        format: uint64
+                        minimum: 0.0
+                        type: integer
+                      everySecs:
+                        description: How often the pass runs (default daily).
+                        format: uint64
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
+                      pattern:
+                        description: |-
+                          Which refs are eligible, e.g. `agent/*`. Nothing outside it is
+                          ever considered.
+                        type: string
+                    required:
+                    - afterSecs
+                    - pattern
+                    type: object
+                type: object
               idle:
                 nullable: true
                 properties:
@@ -186,19 +253,6 @@ spec:
                   standing claim naming another project is refused on the DATA
                   plane by the syncer, not merely by the operator.
                 type: string
-              wipSnapshots:
-                description: An RPO on the working tree, which git itself does not offer.
-                nullable: true
-                properties:
-                  everySecs:
-                    description: |-
-                      Commit the agent's working tree to `refs/wip/<pod>` this often.
-                      Plumbing only — it never moves the agent's own branch or HEAD.
-                    format: uint64
-                    minimum: 0.0
-                    nullable: true
-                    type: integer
-                type: object
             required:
             - bucket
             - keyPrefix

@@ -1196,3 +1196,223 @@ async fn the_exported_commit_rides_the_next_batch_rather_than_a_cas_of_its_own()
     assert_eq!(cell.snap.seq, seq_after_push + 1, "one CAS, not two");
     assert!(rig.sc.pending_exported_commit.is_none(), "taken, not re-written every batch");
 }
+
+// ── the fleet levers (§8) ────────────────────────────────────────────
+
+/// A bundle is cut, uploaded, advertised, and named by the NEXT
+/// snapshot — never by a CAS of its own. The advertisement is the part
+/// a stock client ignores unless it opted in, so what is asserted here
+/// is that the server's half is complete and correct.
+#[tokio::test]
+async fn a_bundle_is_cut_uploaded_and_advertised() {
+    use super::bundle::{self, BundleConfig};
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: c.clone(),
+    }])])
+    .await;
+    let seq_after_push = rig.sc.cell().unwrap().snap.seq;
+
+    let cfg = BundleConfig { every_secs: 3600, url_ttl_secs: 600 };
+    let name = bundle::maybe_run(&mut rig.sc, &cfg, 1_000_000)
+        .await
+        .expect("bundle")
+        .expect("one was due");
+    assert_eq!(name, format!("{c}.bundle"), "named by the tip it carries");
+    rig.store
+        .head(&rig.sc.cfg.bundle_key(&name))
+        .await
+        .expect("the bundle must be in the bucket before it is advertised");
+
+    // The advertisement upload-pack reads.
+    let cfg_get = |k: &str| {
+        let git = rig.sc.git.clone();
+        let k = k.to_string();
+        async move { git.must(&["config", "--get", &k], None).await.unwrap().trim().to_string() }
+    };
+    assert_eq!(cfg_get("uploadpack.advertiseBundleURIs").await, "true");
+    assert_eq!(cfg_get("bundle.version").await, "1");
+    assert_eq!(cfg_get("bundle.mode").await, "all");
+    let uri = cfg_get(&format!("bundle.{}.uri", bundle::BUNDLE_ID)).await;
+    assert!(uri.contains(&name), "the advertised URL must name the bundle: {uri}");
+
+    // Not written to the snapshot yet…
+    assert_eq!(
+        snapshot::load(rig.store.as_ref(), &rig.sc.cfg).await.unwrap().snap.seq,
+        seq_after_push,
+        "cutting a bundle must not spend a CAS"
+    );
+    rig.sc.pending_bundle = Some(name.clone());
+    let c2 = rig.stage_commit(Some(&c), &[("a.txt", "two\n")], "second").await;
+    rig.run(vec![push(2, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: c.clone(),
+        new_oid: c2,
+    }])])
+    .await;
+    // …and named by the next one.
+    let cell = snapshot::load(rig.store.as_ref(), &rig.sc.cfg).await.unwrap();
+    assert_eq!(cell.snap.bundles, vec![name]);
+    assert_eq!(cell.snap.seq, seq_after_push + 1, "one CAS, not two");
+}
+
+/// The floor, the already-cut check, and the re-sign clock. A bundle is
+/// a full copy of the repository, so cutting one per push would spend
+/// more than the storm it saves.
+#[test]
+fn a_bundle_is_cut_on_a_floor_and_re_signed_on_half_its_ttl() {
+    use super::bundle::{needs_resign, plan, BundleConfig, Plan, Record};
+    let cfg = BundleConfig { every_secs: 3600, url_ttl_secs: 600 };
+    let never = Record::default();
+    assert_eq!(plan(&cfg, Some("abc"), &never, 100), Plan::Cut { tip: "abc".into() });
+    assert!(matches!(plan(&cfg, None, &never, 100), Plan::Skip(_)), "no default branch");
+
+    let cut = Record {
+        tip: Some("abc".into()),
+        name: Some("abc.bundle".into()),
+        cut_unix: 1000,
+        signed_unix: 1000,
+    };
+    assert!(matches!(plan(&cfg, Some("abc"), &cut, 9000), Plan::Skip(_)), "same tip");
+    assert!(matches!(plan(&cfg, Some("def"), &cut, 2000), Plan::Skip(_)), "inside the floor");
+    assert_eq!(plan(&cfg, Some("def"), &cut, 5000), Plan::Cut { tip: "def".into() });
+
+    // Re-signed at half the TTL, so a client that takes the
+    // advertisement and then takes its time still has a live URL.
+    assert!(!needs_resign(&cfg, &cut, 1200));
+    assert!(needs_resign(&cfg, &cut, 1300));
+    assert!(!needs_resign(&cfg, &Record::default(), 999_999), "nothing to re-sign");
+}
+
+/// A swept bundle must not stay advertised: a client handed a URL that
+/// 404s pays a failed fetch before falling back to the server.
+#[tokio::test]
+async fn the_sweep_keeps_the_advertised_bundle_and_takes_the_old_ones() {
+    use super::bundle::{self, BundleConfig};
+    let mut rig = Rig::new().await;
+    rig.sc.cfg.orphan_grace_secs = 600;
+    rig.start().await;
+    let c = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: c.clone(),
+    }])])
+    .await;
+    let cfg = BundleConfig { every_secs: 0, url_ttl_secs: 600 };
+    let live = bundle::maybe_run(&mut rig.sc, &cfg, 1_000).await.unwrap().unwrap();
+    rig.sc.pending_bundle = Some(live.clone());
+    let c2 = rig.stage_commit(Some(&c), &[("a.txt", "two\n")], "second").await;
+    rig.run(vec![push(2, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: c.clone(),
+        new_oid: c2,
+    }])])
+    .await;
+
+    // An older bundle, past the grace.
+    let stale = rig.sc.cfg.bundle_key("deadbeef.bundle");
+    rig.store.raw_put(&stale, bytes::Bytes::from_static(b"old"), vec![]);
+    rig.store.backdate_epoch(&stale, 3600);
+
+    let deleted = sweep::sweep(&mut rig.sc).await.expect("sweep");
+    assert_eq!(deleted, 1);
+    assert!(rig.store.head(&stale).await.is_err(), "the aged bundle is collected");
+    rig.store
+        .head(&rig.sc.cfg.bundle_key(&live))
+        .await
+        .expect("the bundle the snapshot names is never swept");
+}
+
+/// The pruner's rule, and the half of it that matters: a branch that is
+/// NOT contained in the integration branch is somebody's unfinished
+/// work, and no clock may take it.
+#[tokio::test]
+async fn pruning_takes_merged_quiet_branches_and_never_unmerged_ones() {
+    use super::prune::{candidates, PruneConfig};
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let base = rig.stage_commit(None, &[("a.txt", "base\n")], "base").await;
+    let merged = rig.stage_commit(Some(&base), &[("a.txt", "merged\n")], "merged").await;
+    let orphan = rig.stage_commit(Some(&base), &[("b.txt", "unfinished\n")], "orphan").await;
+    rig.run(vec![push(1, vec![
+        RefUpdate { name: "refs/heads/main".into(), old_oid: zero(), new_oid: merged.clone() },
+        RefUpdate {
+            name: "refs/heads/agent/done".into(),
+            old_oid: zero(),
+            new_oid: merged.clone(),
+        },
+        RefUpdate {
+            name: "refs/heads/agent/busy".into(),
+            old_oid: zero(),
+            new_oid: orphan.clone(),
+        },
+        RefUpdate { name: "refs/heads/keepme".into(), old_oid: zero(), new_oid: merged.clone() },
+    ])])
+    .await;
+
+    let cfg = PruneConfig {
+        pattern: "refs/heads/agent/*".into(),
+        after_secs: 0,
+        into: "refs/heads/main".into(),
+        every_secs: 86_400,
+    };
+    let dead = candidates(&rig.sc, &cfg, super::now_unix() + 10_000).await.expect("candidates");
+    let names: Vec<&str> = dead.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(names, vec!["refs/heads/agent/done"], "merged and quiet, and only that");
+    assert!(dead[0].new_oid.bytes().all(|b| b == b'0'), "a prune is a delete");
+
+    // Inside the TTL, nothing is taken even though it is merged: a
+    // merge that just landed must not delete the branch out from under
+    // the agent still pushing to it.
+    let fresh = PruneConfig { after_secs: 86_400, ..cfg.clone() };
+    assert!(candidates(&rig.sc, &fresh, super::now_unix()).await.unwrap().is_empty());
+
+    // And with no integration branch there is nothing to be contained
+    // in, so nothing is prunable at all.
+    let nowhere = PruneConfig { into: "refs/heads/nosuch".into(), ..cfg };
+    assert!(candidates(&rig.sc, &nowhere, super::now_unix() + 10_000).await.unwrap().is_empty());
+}
+
+/// The prune's deletions travel the ordinary batch: the same staleness
+/// check, the same CAS, the same transaction. A ref this process moved
+/// outside that path would be a ref the bucket does not know about.
+#[tokio::test]
+async fn a_prune_is_a_push_and_the_bucket_learns_about_it() {
+    use super::prune::{candidates, PruneConfig};
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    rig.run(vec![push(1, vec![
+        RefUpdate { name: "refs/heads/main".into(), old_oid: zero(), new_oid: c.clone() },
+        RefUpdate { name: "refs/heads/agent/old".into(), old_oid: zero(), new_oid: c.clone() },
+    ])])
+    .await;
+    assert!(snapshot::load(rig.store.as_ref(), &rig.sc.cfg)
+        .await
+        .unwrap()
+        .snap
+        .refs
+        .contains_key("refs/heads/agent/old"));
+
+    let cfg = PruneConfig {
+        pattern: "refs/heads/agent/*".into(),
+        after_secs: 0,
+        into: "refs/heads/main".into(),
+        every_secs: 86_400,
+    };
+    let dead = candidates(&rig.sc, &cfg, super::now_unix() + 10_000).await.unwrap();
+    let mut p = push(9, dead);
+    p.principal = "system:flint-forge".into();
+    let reports = rig.run(vec![p]).await;
+    assert!(is_ok(&reports[0].results[0]), "{:?}", reports[0].results[0]);
+
+    let cell = snapshot::load(rig.store.as_ref(), &rig.sc.cfg).await.unwrap();
+    assert!(!cell.snap.refs.contains_key("refs/heads/agent/old"), "the bucket learns of the delete");
+    assert!(cell.snap.refs.contains_key("refs/heads/main"));
+    assert!(rig.sc.git.ref_oid("refs/heads/agent/old").await.unwrap().is_none());
+}

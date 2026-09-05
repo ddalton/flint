@@ -46,6 +46,13 @@ pub struct ServerOpts {
     /// repository that nobody mounts as a workspace pays nothing for
     /// the option.
     pub export: Option<super::export::ExportConfig>,
+    /// Clone bundles (§8). `None` = off; a repository nobody clones in
+    /// a storm pays nothing for the option.
+    pub bundle: Option<super::bundle::BundleConfig>,
+    /// Pruning merged, quiet agent branches (§7). `None` = off, and
+    /// off is the default: a branch is somebody's work until it is
+    /// contained in the integration branch.
+    pub prune: Option<super::prune::PruneConfig>,
 }
 
 /// Shared with the status listener. A `Mutex` over facts, not over the
@@ -106,6 +113,14 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
         });
     }
 
+    // Housekeeping — bundles and the branch pruner — runs on its own
+    // slower timer. Both are cheap to decline, but declining them at
+    // the heartbeat's rate would put a subprocess and a log line every
+    // ten seconds behind a repository nobody is using.
+    let mut maintenance = tokio::time::interval(std::time::Duration::from_secs(60));
+    maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    maintenance.tick().await;
+
     let mut heartbeat =
         tokio::time::interval(std::time::Duration::from_secs(sc.cfg.heartbeat_secs));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -118,6 +133,7 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(ForgeError::Io)?;
     let mut policy = opts.policy.clone();
+    let mut last_prune: u64 = 0;
     let mut next_id: u64 = 0;
     loop {
         tokio::select! {
@@ -147,6 +163,54 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                         // keep serving reads, keep trying. The lease is
                         // still ours until it is not.
                         eprintln!("flint-forge: heartbeat: {e}");
+                    }
+                }
+            }
+            _ = maintenance.tick() => {
+                if let Some(bcfg) = opts.bundle.as_ref() {
+                    match super::bundle::maybe_run(&mut sc, bcfg, super::now_unix()).await {
+                        // Stashed for the next batch's CAS, never one
+                        // of its own.
+                        Ok(Some(name)) => sc.pending_bundle = Some(name),
+                        Ok(None) => {}
+                        Err(e @ ForgeError::Fenced(_)) => return Err(e),
+                        Err(e) => eprintln!("flint-forge: bundle deferred: {e}"),
+                    }
+                }
+                if let Some(pcfg) = opts.prune.as_ref() {
+                    if prune_due(&mut last_prune, pcfg, super::now_unix()) {
+                        match super::prune::candidates(&sc, pcfg, super::now_unix()).await {
+                            Ok(dead) if !dead.is_empty() => {
+                                eprintln!(
+                                    "flint-forge: pruning {} merged agent branch(es) quiet for \
+                                     more than {}s",
+                                    dead.len(),
+                                    pcfg.after_secs
+                                );
+                                // Through the ordinary batch: one CAS,
+                                // one transaction. A ref this process
+                                // moved outside that path would be a
+                                // ref the bucket does not know about.
+                                let push = batch::PushRequest {
+                                    id: 0,
+                                    principal: "system:flint-forge".into(),
+                                    options: vec![],
+                                    commands: dead,
+                                };
+                                if let Err(e) =
+                                    batch::run_batch(&mut sc, vec![push], &policy).await
+                                {
+                                    if matches!(e, ForgeError::Fenced(_)) {
+                                        return Err(e);
+                                    }
+                                    eprintln!("flint-forge: prune deferred: {e}");
+                                } else {
+                                    publish(&shared, &sc, Phase::Serving);
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(e) => eprintln!("flint-forge: prune deferred: {e}"),
+                        }
                     }
                 }
             }
@@ -188,6 +252,17 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
             }
         }
     }
+}
+
+/// The pruner's own interval, tracked separately from the maintenance
+/// tick so that turning the pass down to daily does not also turn the
+/// bundle cadence down.
+fn prune_due(last: &mut u64, cfg: &super::prune::PruneConfig, now: u64) -> bool {
+    if *last > 0 && now.saturating_sub(*last) < cfg.every_secs {
+        return false;
+    }
+    *last = now;
+    true
 }
 
 /// One waiting hook: its push and the channel its report goes back on.

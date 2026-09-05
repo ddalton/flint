@@ -136,6 +136,8 @@ impl Rig {
             // legs run in the unit battery against a real git and a
             // real tree.
             export: None,
+            bundle: None,
+            prune: None,
         };
         tokio::spawn(async move {
             if let Err(e) = run(sc, opts).await {

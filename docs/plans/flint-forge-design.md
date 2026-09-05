@@ -1,13 +1,14 @@
 # flint forge — a git server with S3 behind it: design of record
 
-Status: **PHASES 1-4 LANDED** — `forge/syncer` (the `flint-forge`
+Status: **PHASES 1-5 LANDED** — `forge/syncer` (the `flint-forge`
 crate: the syncer, both hooks, restore, the sweep, `/status`, the
 branch policy, the credential helper and the legible export), the door
 (`lite_gateway::git` with `Door::Git`), and the operator
 (`forge_operator`: the `FlintRepo` CRD, the renderer, the one-rung
 ladder, the reconciler and `flint-forge-operator`), with the chart and
-the two server images. What remains is phase 0's measurement, the fleet
-levers of phase 5, and the cluster drills. Written 2026-09-04; **revised
+the two server images, the fleet levers and the agent guide. What
+remains is phase 0's measurement and the cluster drills — falsifiers 7,
+8 and 9's bucket half, all of which need a cluster. Written 2026-09-04; **revised
 the same day after a 15-agent review** (five lenses, one refuter per
 significant finding; record in §16), and §14 records what phase 1
 actually built against what it planned. Working name "flint forge" (the user's earlier
@@ -393,13 +394,20 @@ per request (measured). A nightly job prunes branches whose pod is
 gone. Partial clone (`--filter=blob:none`) is for agents with a sparse
 working set, not a storm lever (§8).
 
-**Uncommitted work has no RPO**, git's contract. Optional
-`wipSnapshots: {everySecs: 60}` runs, in a sidecar, `tree=$(GIT_INDEX_
-FILE=/tmp/wip git write-tree)`, `c=$(git commit-tree $tree -p HEAD -m
-wip)`, `git push -q origin $c:refs/wip/$POD` — plumbing, because `git
-commit` against a throwaway index still moves HEAD (the first draft
-said "never touching the agent's branch" over a command that did).
-`.gitignore` is honoured; the CRD says so.
+**Uncommitted work has no RPO**, git's contract, and forge keeps it.
+A harness that wants one anyway runs `docker/forge/wip-snapshot.sh` in
+its OWN pod: `GIT_INDEX_FILE=<tmp> git add -A`, `write-tree`,
+`commit-tree -p HEAD`, `push --force <c>:refs/wip/<pod>` — plumbing,
+because `git commit` against a throwaway index still moves HEAD (the
+first draft said "never touching the agent's branch" over a command
+that did).
+
+**It is NOT a CRD field**, and the correction is worth recording:
+`spec.wipSnapshots` was in the phase-3 CRD and is gone. Forge owns
+repository servers, not agent pods, and injects nothing into them —
+lean's webhook was removed for the same reason — so a spec field asking
+for a sidecar would have been a field the operator silently ignores,
+which is worse than no field at all.
 
 ## 8. Clone storms — corrected
 
@@ -713,10 +721,39 @@ slow in ways that matter for a fleet. Phase 0 runs it as the control.
    would be two writers of one manifest. **Still to do:** falsifier 9's
    bucket half — a lean mount of the exported `main`, and the
    O(changed) object count — which needs a real store.
-5. **Fleet levers.** Bitmap upload, bundle URIs with client opt-in,
-   `--single-branch` in the guide, the wip sidecar, the agent-branch
-   pruner; the storm leg on EC2 (falsifier 8) — provisioned only on
-   the user's go, pure spot.
+5. **Fleet levers.** — **BUILT.** Bitmap upload landed in phase 1
+   (`pack_siblings`). Clone bundles are `forge/syncer/src/bundle.rs`:
+   cut on a floor, uploaded beside the packs, advertised through
+   `uploadpack.advertiseBundleURIs` and the `bundle.*` section, and
+   **re-signed at half the URL's TTL** — signing is local computation,
+   so being early costs a config write and being late costs a client a
+   dead URL. The presigned GET is new in `flint-store` (`presign_get`,
+   defaulted to a refusal so a backend that cannot sign says so rather
+   than advertising a URL that will not resolve). Bundles are swept by
+   the same four rules as packs, from the same reference set.
+
+   The pruner is `prune.rs`, and its rule is deliberately not a clock:
+   a branch is taken only when it is ALREADY CONTAINED in the default
+   branch — so nothing is lost that `main` does not have — AND has been
+   quiet longer than the TTL, so a merge that just landed does not
+   delete the branch out from under the agent still pushing to it. Its
+   deletions travel the ordinary batch, one CAS and one transaction,
+   because a ref the syncer moves outside that path is a ref the bucket
+   does not know about.
+
+   Like the export, neither a bundle nor a prune ever CASes the
+   snapshot: the bundle is stashed and the next batch's single CAS
+   names it.
+
+   `docs/flint-forge-for-agents.md` is the guide — `--single-branch`,
+   the credential helper and its audience, the `refs/for` flow, the wip
+   script, and the three conditions bundle URIs need, the first of
+   which is on the agent image (`transfer.bundleURI=true`, whose
+   default is false).
+
+   **Still to do:** the storm leg on EC2 (falsifier 8), whose control
+   is the client opt-in switched off — provisioned only on the user's
+   go, pure spot.
 6. **Later, and LFS is not last.** The LFS batch API over `lfs/`
    moves up: **multi-modal agents are a named use case for forge**, and
    an agent working on images, audio, video or model weights commits

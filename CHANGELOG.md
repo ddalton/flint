@@ -14,6 +14,29 @@ covered by the stability guarantee.
 
 ### Added
 
+- **flint forge, phase 5: the fleet levers.** Clone bundles, the
+  agent-branch pruner, and `docs/flint-forge-for-agents.md`. The syncer
+  cuts a bundle on a floor, uploads it beside the packs, advertises a
+  presigned URL through `uploadpack.advertiseBundleURIs`, and re-signs
+  at half the URL's TTL — so a thousand agents cloning at once pull the
+  bytes from the object store instead of through one pod's NIC, which
+  is what binds first. `flint-store` grows `presign_get`, defaulted to
+  a refusal so a backend that cannot sign says so rather than
+  advertising a URL that will not resolve. The pruner takes an agent
+  branch only when it is already contained in the default branch AND
+  has been quiet past a TTL: age alone would delete somebody's
+  unfinished work, and a merge that just landed must not take the
+  branch out from under the agent still pushing to it. Its deletions go
+  through the ordinary batch — one CAS, one ref transaction. Bundles
+  are swept by the same four rules as packs. Both levers are off unless
+  asked for.
+- **`spec.wipSnapshots` is gone from `FlintRepo`**, replaced by
+  `docker/forge/wip-snapshot.sh` and a section in the guide. Forge owns
+  repository servers, not agent pods, and injects nothing into them, so
+  a field asking for a sidecar was a field the operator would silently
+  ignore. The script is plumbing — `write-tree`, `commit-tree`, `push`
+  — because `git commit` against a throwaway index still moves HEAD.
+
 - **flint forge, phase 4: the legible export.** A `FlintRepo` with
   `spec.export` publishes a chosen ref's tree as a lean workspace, so
   lite, lean and passthrough readers can mount what forge holds with no

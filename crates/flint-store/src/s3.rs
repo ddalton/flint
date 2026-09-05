@@ -371,6 +371,28 @@ impl ObjectStore for S3Store {
         })
     }
 
+    /// SigV4 query-string signing. The credential the URL carries is
+    /// the SYNCER's, scoped to one GET of one key for the TTL — which
+    /// is why the TTL is short and re-signed rather than set to S3's
+    /// seven-day maximum: the URL is handed to every agent that asks
+    /// for a clone, and it is a bearer token for that object until it
+    /// expires.
+    async fn presign_get(&self, key: &str, ttl_secs: u64) -> StoreResult<String> {
+        let cfg = aws_sdk_s3::presigning::PresigningConfig::expires_in(
+            std::time::Duration::from_secs(ttl_secs),
+        )
+        .map_err(|e| StoreError::Other(format!("presign config: {e}")))?;
+        let req = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .presigned(cfg)
+            .await
+            .map_err(|e| map_err("presign_get", e))?;
+        Ok(req.uri().to_string())
+    }
+
     async fn get_whole(
         &self,
         key: &str,

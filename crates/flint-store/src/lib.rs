@@ -627,6 +627,28 @@ pub trait ObjectStore: Send + Sync {
         Err(StoreError::Other("this backend cannot list object versions".into()))
     }
 
+    /// A time-limited URL that GETs `key` with no credential of the
+    /// caller's own.
+    ///
+    /// One consumer, and it is worth naming because it is what makes
+    /// the URL's lifetime a design constraint rather than a parameter:
+    /// flint forge advertises a clone BUNDLE this way, so that a
+    /// thousand agents cloning at once pull the bytes from the object
+    /// store instead of through one pod's NIC (forge design §8). The
+    /// URL is handed to a git client, which may hold it for the length
+    /// of a clone, and S3 caps a SigV4 presigned URL at seven days —
+    /// so the caller must re-sign on a schedule shorter than the TTL it
+    /// asked for, and this returns the URL rather than storing it
+    /// anywhere.
+    ///
+    /// Defaulted to a refusal: a backend that cannot presign must say
+    /// so, and the caller must fall back to serving the bytes itself
+    /// rather than advertising a URL that will not resolve.
+    async fn presign_get(&self, key: &str, ttl_secs: u64) -> StoreResult<String> {
+        let _ = (key, ttl_secs);
+        Err(StoreError::Other("this backend cannot presign a URL".into()))
+    }
+
     /// Every lifecycle rule on the bucket, reduced to [`LifecycleView`].
     ///
     /// Defaulted to a refusal rather than to an empty list: "no rules"

@@ -129,9 +129,9 @@ pub struct FlintRepoSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export: Option<ExportSpec>,
 
-    /// An RPO on the working tree, which git itself does not offer.
+    /// Fleet levers: clone bundles, and pruning merged agent branches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wip_snapshots: Option<WipSnapshots>,
+    pub fleet: Option<FleetSpec>,
 
     /// `RUST_LOG` for the server pod.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -245,11 +245,62 @@ pub struct ExportSpec {
     pub every_secs: Option<u64>,
 }
 
+/// The levers that decide what a thousand agents cost (design §8).
+///
+/// There is deliberately NO `wipSnapshots` here. An RPO on the agent's
+/// working tree is a real want — git's contract is that uncommitted
+/// work is not durable — but forge does not own agent pods and injects
+/// nothing into them, so a spec field asking for it would be a field
+/// the operator silently ignores. It ships as a script the agent's own
+/// pod runs (`docker/forge/wip-snapshot.sh`), documented in
+/// `docs/flint-forge-for-agents.md`.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct WipSnapshots {
-    /// Commit the agent's working tree to `refs/wip/<pod>` this often.
-    /// Plumbing only — it never moves the agent's own branch or HEAD.
+pub struct FleetSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundles: Option<BundleSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prune_agent_branches: Option<PruneSpec>,
+}
+
+/// Clone bundles: the storm lever. **Inert unless the AGENT image also
+/// sets `transfer.bundleURI=true`** — the client default is false, so a
+/// stock git ignores the advertisement entirely.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleSpec {
+    #[serde(default)]
+    pub enabled: bool,
+    /// A floor between cuts. A bundle is a full copy of the
+    /// repository, so cutting one per push spends more than the storm
+    /// it saves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub every_secs: Option<u64>,
+    /// How long a presigned URL is good for. It is a bearer token for
+    /// that object, handed to every agent that asks for a clone, so it
+    /// is short and re-signed rather than S3's seven-day maximum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_ttl_secs: Option<u64>,
+}
+
+/// Pruning agent branches, which every clone pays for: a thousand
+/// one-commit branches cost 0.54 CPU-s per clone instead of 0.13, and
+/// a 74 KB advertisement on every request.
+///
+/// **Age alone is never the rule.** A branch is taken only when it is
+/// already contained in the default branch — so nothing is lost that
+/// `main` does not have — AND it has been quiet longer than
+/// `afterSecs`, so a merge that just landed does not delete the branch
+/// out from under the agent still pushing to it.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PruneSpec {
+    /// Which refs are eligible, e.g. `agent/*`. Nothing outside it is
+    /// ever considered.
+    pub pattern: String,
+    /// How long a MERGED branch must have been quiet.
+    pub after_secs: u64,
+    /// How often the pass runs (default daily).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub every_secs: Option<u64>,
 }

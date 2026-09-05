@@ -827,7 +827,7 @@ mod tests {
                 branches: None,
                 idle: None,
                 export: None,
-                wip_snapshots: None,
+                fleet: None,
                 log_level: None,
                 lifecycle: None,
             },

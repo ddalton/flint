@@ -52,11 +52,13 @@
 //!   with "chunk" read as "pack".
 
 pub mod batch;
+pub mod bundle;
 pub mod export;
 pub mod gitcmd;
 pub mod lease;
 pub mod packio;
 pub mod policy;
+pub mod prune;
 pub mod pktline;
 pub mod restore;
 pub mod server;
@@ -224,6 +226,9 @@ impl ForgeConfig {
     pub fn bundle_key(&self, name: &str) -> String {
         format!("{}/git/bundles/{name}", self.prefix)
     }
+    pub fn bundle_prefix(&self) -> String {
+        format!("{}/git/bundles/", self.prefix)
+    }
 }
 
 /// The syncer's live state: the store, the config, the repository, the
@@ -254,6 +259,11 @@ pub struct Syncer {
     /// never write the snapshot itself, or it becomes a second writer
     /// racing pushes for the one object that has exactly one.
     pub pending_exported_commit: Option<String>,
+    /// A clone bundle the bucket holds that the snapshot does not name
+    /// yet. Same rule as the export: the NEXT batch's single CAS
+    /// carries it, because there is exactly one writer of that object
+    /// and it is the batch.
+    pub pending_bundle: Option<String>,
     pub started_unix: u64,
 }
 
@@ -270,6 +280,7 @@ impl Syncer {
             fenced: None,
             last_push_unix: 0,
             pending_exported_commit: None,
+            pending_bundle: None,
             started_unix: now_unix(),
         }
     }

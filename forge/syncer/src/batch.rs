@@ -240,6 +240,12 @@ pub async fn run_batch(
     if let Some(c) = sc.pending_exported_commit.take() {
         next.exported_commit = Some(c);
     }
+    // Only the newest bundle is advertised, so only the newest is
+    // named. The sweep collects the rest past the grace, which
+    // comfortably outlives a clone that is already holding a URL.
+    if let Some(b) = sc.pending_bundle.take() {
+        next.bundles = vec![b];
+    }
     let writer = sc.holder_id.clone();
     let new_cell =
         match snapshot::cas(sc.store.as_ref(), &sc.cfg, &cell, next, epoch, &writer).await {

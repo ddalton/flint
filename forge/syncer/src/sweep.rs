@@ -24,6 +24,9 @@
 //! content-derived but differ across clients' delta settings, so two
 //! packs holding the same objects have different names and neither is
 //! evidence about the other.
+//!
+//! It sweeps clone bundles too, from the same reference set and under
+//! the same rules.
 
 use super::{restore, snapshot, ForgeResult, Syncer};
 
@@ -57,8 +60,25 @@ pub async fn sweep(sc: &mut Syncer) -> ForgeResult<usize> {
     let grace = sc.cfg.orphan_grace_secs;
     let mut deleted = 0usize;
 
-    for (name, key) in listed.iter() {
+    // Bundles are swept by the same four rules and from the same
+    // reference set. The grace matters more here than for a pack: a
+    // client may be holding a presigned URL for one it was advertised
+    // a moment ago, and deleting it under that client turns a clone
+    // into a failed fetch and a fallback to the server — which is
+    // correct but is exactly the load the bundle existed to avoid.
+    let mut candidates = listed.clone();
+    for obj in sc.store.list(&sc.cfg.bundle_prefix()).await? {
+        if let Some(name) = obj.key.rsplit('/').next() {
+            candidates.insert(name.to_string(), obj.key.clone());
+        }
+    }
+    let live_bundles = fresh.snap.bundles.clone();
+
+    for (name, key) in candidates.iter() {
         if stems.iter().any(|s| name.starts_with(s.as_str())) {
+            continue;
+        }
+        if live_bundles.iter().any(|b| b == name) {
             continue;
         }
         // Rule 2: the age is read at the delete, from the store's own
@@ -85,7 +105,7 @@ pub async fn sweep(sc: &mut Syncer) -> ForgeResult<usize> {
         deleted += 1;
     }
     if deleted > 0 {
-        eprintln!("flint-forge: swept {deleted} pack file(s) past the {grace}s grace");
+        eprintln!("flint-forge: swept {deleted} object(s) past the {grace}s grace");
     }
     Ok(deleted)
 }
