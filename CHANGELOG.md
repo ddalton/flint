@@ -12,6 +12,26 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed — flint forge, the remaining falsifiers
+
+- **The legible export froze permanently after the first restart.**
+  lean makes every upload conditional and PARKS a file whose etag it
+  did not last write — right for lean, whose baseline lives on the
+  volume with the workspace. Forge's export has no volume: the baseline
+  sat on the pod's `emptyDir`, so the first restart destroyed it, every
+  object then looked foreign, and every file parked. Permanently,
+  because nothing rebuilds a baseline — the published workspace froze
+  while `main` moved on. The cluster run found `README.md` still holding
+  the first seed commit's text, 164 files parked, `up=0`. The baseline
+  is now preserved to the bucket after each successful barrier and
+  rehydrated at startup. It prevents the loss; it does not repair a
+  prefix already stuck, which still needs the export prefix cleared.
+- **The agent image could not use the LFS the server offers.**
+  `flint-forge-git` is what agent pods run and it shipped no `git-lfs`
+  client, so the batch API answered correctly and no agent could reach
+  it — with multi-modal agents being the reason forge carries LFS at
+  all. Added to the image.
+
 ### Fixed — flint forge, the clone storm
 
 - **A restore came back with no bundle advertisement.** `advertise`

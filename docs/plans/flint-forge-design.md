@@ -534,6 +534,23 @@ slow in ways that matter for a fleet. Phase 0 runs it as the control.
    holds the previous snapshot; the restart restores; retries succeed;
    `git fsck` is clean. Control: sync moved after the report — the
    push is acknowledged and the restore lacks the commit.
+
+   **RUN 2026-09-04 on EC2 — GREEN, 8 kills mid-push.** No
+   fault-injection hook exists, so this is the black-box form: push a
+   12 MiB payload, kill the pod at a random moment inside the window,
+   check the invariant. Both sides were sampled (2 acknowledged, 6
+   refused) and `fsck --strict` was clean after all 8.
+
+   **The relation is an implication, not an equivalence, and the first
+   run asserted the equivalence and "failed" twice.** Kill the pod after
+   the CAS but before the response reaches the client and the client
+   sees a broken connection while the bucket holds the commit. No system
+   whose acknowledgement can be lost in flight can do better, and git
+   push carries no idempotency token to reconcile against. What is
+   checked instead is that the indeterminate outcome is BENIGN: the
+   agent's natural retry returns `Everything up-to-date` with the ref
+   already at its commit. Told-ok-but-absent — the direction that
+   silently loses work — never occurred.
 2. **Concurrent pushes to one ref.** Two clients push `L→N1` and
    `L→N2` concurrently: exactly one gets `ok`, the other `ng stale`;
    the bucket and the local ref agree. Control: with step 2's
@@ -568,15 +585,52 @@ slow in ways that matter for a fleet. Phase 0 runs it as the control.
 3. **Loose objects never leak.** A `refs/for/main` merge is
    acknowledged, the pod is killed, the restore passes `fsck`.
    Control: skip the `pack-objects` in step 2 — the restore fails.
+
+   **RUN 2026-09-04 on EC2 — GREEN.** A `refs/for/main` merge with two
+   parents was acknowledged, the snapshot already named the merge
+   commit, and the pod was deleted — taking the loose objects with the
+   emptyDir. After the restore: `fsck --strict` clean, `main` still at
+   the merge commit, **zero loose objects**, and the merge commit
+   readable from the restored packs.
 4. **The fence.** Two server pods for one repo: the straggler's next
    heartbeat 412s and it exits within the heartbeat interval; a push
    routed to it fails. Control: without the rotation, a straggler's
    batch lands after the successor restored.
+
+   **RUN 2026-09-04 on EC2 — GREEN.** A second server pod for one
+   repository WAITS rather than serving — `another server holds
+   drill/git (0/6 quiet polls)` — and never becomes ready. Partitioning
+   the incumbent from S3 (its heartbeat logging `epoch_put: dispatch
+   failure`) let the newcomer count 0→5 and take over. On healing, the
+   incumbent's very next renew produced `fenced: deposed at renew:
+   epoch_put: 412 PreconditionFailed` and it exited, within one
+   heartbeat interval.
+
+   The "a push routed to it fails" half turns out stronger than
+   expected: a deposed pod is not ready, and a headless Service
+   publishes only READY pods, so it has no endpoint at all. The door
+   cannot route to it even by accident.
 5. **Restore fidelity and DR.** Cold restore from S3 alone: refs equal
    the snapshot, `fsck --connectivity-only` passes, a clone is
    byte-identical; with the server scaled to zero, `git clone` over
    the dumb protocol from the bucket succeeds — this leg also settles
    the two UNVERIFIED S3 behaviours of §3.
+
+   **RUN 2026-09-04 on EC2 — GREEN, 8 legs.** Deleting the pod destroys
+   the emptyDir, so the replacement has nothing but the bucket. Restored
+   refs were EXACTLY the snapshot's and equal to what preceded the kill;
+   `fsck --strict` clean; a clone byte-identical (`40eea7e35cf13978…`).
+
+   **The DR half needs the right transport, and the first attempt used
+   the wrong one.** The bucket carries `info/refs` and
+   `objects/info/packs` — the DUMB HTTP layout, exactly as §3 claims. A
+   LOCAL clone reads neither; it reads `refs/` and `packed-refs`,
+   neither of which is in the bucket, so `git clone <synced-dir>` fails
+   for a reason that says nothing about the bucket. Served over HTTP,
+   stock git clones it with no forge anywhere in the path and the result
+   passes `fsck --strict` with identical content. For an offline
+   runbook, two steps open the synced prefix directly:
+   `mkdir refs && cp info/refs packed-refs`.
 6. **Protected main.** An agent's push to `main` is refused by
    `pre-receive` naming the rule; its push to `agent/<pod>` lands; its
    push to `refs/for/main` merges for a listed principal and returns
@@ -653,12 +707,71 @@ slow in ways that matter for a fleet. Phase 0 runs it as the control.
    file is byte-identical to `git show main:<path>`; a push changing
    three files rewrites one or two chunks and three objects; a reader
    resolving the manifest mid-export never finds a cited object gone.
+
+   **RUN 2026-09-04 on EC2 — GREEN, 6 legs, after finding a defect that
+   made the export freeze permanently.** All 164 files byte-identical to
+   `git show main:<path>`, nothing in the export the tree does not have,
+   and a three-file push rewrote **3 of 164** objects.
+
+   **THE DEFECT. lean protects a workspace by making every upload
+   conditional: an etag it did not last write means PARK, not
+   overwrite.** That is right for lean, whose baseline lives on the
+   volume with the workspace. Forge's export has no volume — the
+   baseline sat in the export tree on the pod's `emptyDir` — so the
+   first restart destroyed it, every object then looked foreign, and
+   every file parked. Permanently, because nothing rebuilds a baseline:
+   the published workspace froze while `main` moved on. The cluster run
+   found `README.md` still holding the first seed's text with 164 files
+   parked and `up=0`. The baseline is now preserved to the bucket after
+   each successful barrier and rehydrated at startup
+   (`export::preserve_baseline` / `rehydrate_baseline`).
+
+   Residual, stated plainly: this prevents the loss, it does not repair
+   a prefix already stuck — that still needs the export prefix cleared
+   so it can republish. And a restart costs one full re-upload
+   (`up=164`), because the materialised tree died with the pod and
+   `materialize` falls back to its full path; the barrier after it was
+   `up=3`.
+
+   Two oracle bugs in the drill, both of which read as product
+   failures: the snapshot's `exported_commit` LAGS BY DESIGN (an export
+   never spends a CAS of its own; the next batch carries it), so the
+   last push of a drill can never see it there — ask the server's own
+   record instead. And `comm` compares whole lines, so listing objects
+   with `sort -k2` reported 59 changed of which 58 carried the OLD
+   timestamp.
 10. **The sweep.** After a repack, old packs are deleted past the
     grace; a pack in the snapshot is never deleted; the probe asserts
+
     the sweep fired.
+
+    **RUN 2026-09-04 on EC2 — GREEN, 5 legs.** 26 pushes drove the
+    snapshot's pack count from 5 to a peak of **25**, past the threshold
+    of 24, after which it collapsed to 10 — a repack, observed directly.
+    Every pack the snapshot names was present; a cold restore after the
+    repack passed `fsck --strict`.
+
+    A repack writes NO log line, so it cannot be found after the fact:
+    by the time the pushes finish the consolidation has happened and the
+    count has climbed again. The first version polled afterwards, saw 5,
+    and reported "no repack" while one had run. Sample DURING.
+
+    The sweep's oracle also had to change. Demanding a log line marks
+    correct behaviour as failure — a run whose orphans are all younger
+    than the grace sweeps nothing, correctly. The invariant is what
+    holds: every pack object in the bucket is either named by the
+    snapshot or younger than the grace. 231 orphans, all within it.
 11. **S3 outage.** Pushes fail with a clear message; clones and fetches
     succeed until the lease TTL; the server then exits rather than
     serving what it cannot prove it still holds.
+
+    **RUN 2026-09-04 on EC2 — GREEN, 4 legs.** With egress to S3 denied
+    (in-cluster traffic and DNS left intact, so the failure is an S3
+    outage and not a DNS one): clones kept serving from local packs; a
+    push was refused with `the repository server is not accepting writes
+    (the syncer closed the connection without a report)`; the server
+    stopped being ready ~20 s later rather than holding a lease it could
+    not renew; and it recovered when S3 returned.
 
 ## 14. Phases
 

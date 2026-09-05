@@ -227,6 +227,14 @@ impl ForgeConfig {
     pub fn bundle_key(&self, name: &str) -> String {
         format!("{}/git/bundles/{name}", self.prefix)
     }
+    /// Where the EXPORT's `flint-sync` baseline is kept.
+    ///
+    /// It lives under the repository's own control prefix rather than
+    /// the export's, because it is forge's state about the export and
+    /// not part of the workspace a reader sees.
+    pub fn export_baseline_key(&self) -> String {
+        format!("{}/git/export-baseline.json", self.prefix)
+    }
     pub fn bundle_prefix(&self) -> String {
         format!("{}/git/bundles/", self.prefix)
     }

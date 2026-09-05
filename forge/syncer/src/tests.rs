@@ -1381,6 +1381,63 @@ async fn a_restore_re_advertises_the_bundle_the_snapshot_names() {
     );
 }
 
+/// THE EXPORT'S BASELINE MUST OUTLIVE THE POD.
+///
+/// lean parks a file rather than overwriting bytes whose etag it did
+/// not last write. With the baseline on the pod's emptyDir, the first
+/// restart made every object in the export prefix foreign — so every
+/// upload 412'd, every file parked, and the published workspace froze
+/// for good while main moved on. The cluster run found README.md still
+/// holding the first seed's text, 164 files parked, `up=0`.
+#[tokio::test]
+async fn the_export_baseline_survives_a_pod_that_does_not() {
+    use super::export::{preserve_baseline, rehydrate_baseline, ExportConfig};
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().expect("tmp");
+    let cfg = ExportConfig {
+        reference: "refs/heads/main".into(),
+        prefix: "p/export".into(),
+        every_secs: 30,
+        bucket: "b".into(),
+        endpoint: None,
+        sync_bin: std::path::PathBuf::from("/bin/true"),
+        root: dir.path().join("tree"),
+        index: dir.path().join("index"),
+        project_id: None,
+    };
+    let key = "p/git/export-baseline.json";
+    let bp = cfg.root.join(".flint-sync").join("baseline.json");
+
+    // Nothing saved yet: rehydrate is a no-op, not an error.
+    assert!(!rehydrate_baseline(store.as_ref(), key, &cfg).await.unwrap());
+
+    std::fs::create_dir_all(bp.parent().unwrap()).unwrap();
+    std::fs::write(&bp, br#"{"files":{"a.txt":"etag-1"}}"#).unwrap();
+    preserve_baseline(store.as_ref(), key, &cfg, 7).await.expect("preserve");
+
+    // A live pod keeps its own: rehydrate must not clobber it.
+    std::fs::write(&bp, br#"{"files":{"a.txt":"etag-2"}}"#).unwrap();
+    assert!(
+        !rehydrate_baseline(store.as_ref(), key, &cfg).await.unwrap(),
+        "a baseline that is already present must never be overwritten from the bucket"
+    );
+    assert!(std::fs::read_to_string(&bp).unwrap().contains("etag-2"));
+
+    // A barrier succeeds, so the newer baseline is saved too.
+    preserve_baseline(store.as_ref(), key, &cfg, 8).await.expect("preserve again");
+
+    // The pod dies: the emptyDir goes with it.
+    std::fs::remove_dir_all(cfg.root.join(".flint-sync")).unwrap();
+    assert!(
+        rehydrate_baseline(store.as_ref(), key, &cfg).await.unwrap(),
+        "a fresh pod must get its baseline back, or every file parks forever"
+    );
+    assert!(
+        std::fs::read_to_string(&bp).unwrap().contains("etag-2"),
+        "the LAST preserved baseline must come back, not an older one"
+    );
+}
+
 /// The floor, the already-cut check, and the re-sign clock. A bundle is
 /// a full copy of the repository, so cutting one per push would spend
 /// more than the storm it saves.

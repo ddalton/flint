@@ -279,6 +279,79 @@ pub async fn run_barrier(cfg: &ExportConfig) -> ForgeResult<()> {
 
 /// One export, if one is due. Returns the commit published, which the
 /// caller stashes for the NEXT snapshot CAS.
+/// `flint-sync`'s baseline — the etag it last published for each file.
+///
+/// WHY THIS HAS TO BE IN THE BUCKET. lean protects a workspace from a
+/// second writer by making every upload conditional: if the object's
+/// etag is not the one it last wrote, it PARKS the file rather than
+/// overwriting a stranger's bytes. That is exactly right for lean,
+/// where the workspace lives on a volume and the baseline survives with
+/// it.
+///
+/// Forge's export has no volume. The baseline sat in the export tree on
+/// the pod's `emptyDir`, so the FIRST restart destroyed it — and then
+/// every object in the bucket looked foreign, every upload 412'd, and
+/// the export parked all of them. Permanently: nothing rebuilds a
+/// baseline, so the published workspace froze at whatever it held
+/// before that restart while `main` moved on. The first cluster run
+/// found `README.md` still holding the very first seed commit's text
+/// with 164 files parked and `up=0`.
+///
+/// So the baseline goes where every other durable thing forge owns
+/// goes.
+fn baseline_path(cfg: &ExportConfig) -> PathBuf {
+    cfg.root.join(".flint-sync").join("baseline.json")
+}
+
+/// Put the saved baseline back before the first barrier of a new pod.
+/// Absent locally and present in the bucket is exactly the restart case.
+pub async fn rehydrate_baseline(
+    store: &dyn flint_store::ObjectStore,
+    key: &str,
+    cfg: &ExportConfig,
+) -> ForgeResult<bool> {
+    let path = baseline_path(cfg);
+    if path.exists() {
+        return Ok(false);
+    }
+    match store.get_whole(key, None).await {
+        Ok((_, body)) => {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&path, &body)?;
+            eprintln!(
+                "flint-forge: export baseline rehydrated from the bucket ({} bytes)",
+                body.len()
+            );
+            Ok(true)
+        }
+        Err(flint_store::StoreError::NotFound(_)) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Save it again after a barrier that succeeded.
+///
+/// Ordering is deliberate: the baseline is written only AFTER the
+/// barrier reports success, so a saved baseline never claims to have
+/// published something that was not. The reverse — dying between the
+/// barrier and this write — leaves a baseline one generation stale,
+/// and those files park once and are re-adopted on the pass after.
+pub async fn preserve_baseline(
+    store: &dyn flint_store::ObjectStore,
+    key: &str,
+    cfg: &ExportConfig,
+    epoch: u64,
+) -> ForgeResult<()> {
+    let path = baseline_path(cfg);
+    if !path.exists() {
+        return Ok(());
+    }
+    let body = std::fs::read(&path)?;
+    super::packio::put_small(store, key, body, epoch).await
+}
+
 pub async fn maybe_run(git: &Git, cfg: &ExportConfig, now: u64) -> ForgeResult<Option<String>> {
     let head = git.ref_oid(&cfg.reference).await?;
     let last = load_record(cfg);

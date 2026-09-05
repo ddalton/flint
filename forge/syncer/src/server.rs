@@ -275,10 +275,33 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                 // republishing a tree may delay or fail that. A failure
                 // here is logged and retried on the next batch.
                 if let Some(ex) = opts.export.as_ref() {
+                    // A fresh pod has no `flint-sync` baseline, and
+                    // without one every object in the export prefix
+                    // looks like a stranger's: lean parks all of them
+                    // and the published workspace freezes for good.
+                    let bkey = sc.cfg.export_baseline_key();
+                    if let Err(e) =
+                        super::export::rehydrate_baseline(sc.store.as_ref(), &bkey, ex).await
+                    {
+                        eprintln!("flint-forge: export baseline not rehydrated: {e}");
+                    }
                     match super::export::maybe_run(&sc.git, ex, super::now_unix()).await {
                         // Stashed, not written: the NEXT batch's single
                         // CAS carries it (see `Syncer::pending_exported_commit`).
-                        Ok(Some(commit)) => sc.pending_exported_commit = Some(commit),
+                        Ok(Some(commit)) => {
+                            let ep = sc.lease().map(|l| l.epoch).unwrap_or(0);
+                            if let Err(e) = super::export::preserve_baseline(
+                                sc.store.as_ref(),
+                                &bkey,
+                                ex,
+                                ep,
+                            )
+                            .await
+                            {
+                                eprintln!("flint-forge: export baseline not preserved: {e}");
+                            }
+                            sc.pending_exported_commit = Some(commit)
+                        }
                         Ok(None) => {}
                         Err(e) => eprintln!("flint-forge: export deferred: {e}"),
                     }

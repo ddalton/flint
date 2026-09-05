@@ -20,7 +20,12 @@ FROM alpine:3.20
 ARG BIN_DIR=docker/prebuilt
 ARG TARGETARCH
 
-RUN apk add --no-cache git git-daemon nginx fcgiwrap spawn-fcgi \
+# git-lfs is here for the CLIENT side, not the server: this image is
+# what agent pods run, and multi-modal agents are the reason forge
+# carries an LFS batch API at all. Without it the server answers the
+# batch endpoint correctly and the agent cannot use it — which is
+# exactly what the first cluster run found.
+RUN apk add --no-cache git git-lfs git-daemon nginx fcgiwrap spawn-fcgi \
     && mkdir -p /repo /run/nginx
 
 COPY docker/forge/nginx.conf /etc/nginx/nginx.conf
