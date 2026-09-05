@@ -790,15 +790,22 @@ both gaps.
   and `AWS_WEB_IDENTITY_TOKEN_FILE`. The syncer's Rust SDK then completes
   the exchange — the broker logs the issue — and the workspace checks
   out over plain http, which the design had assumed impossible.
-  mount-s3's CRT does not: with a real projected token it fails in about
-  a millisecond having sent nothing, the same for a valid AWS role ARN
-  as for flint's synthetic one, and the same over https. It is not the
-  transport and not the ARN; the client is not attempting the exchange.
-  The combination left untested — real token, no endpoint override — is
-  what would turn that from strongly indicated into established. The
-  smallest correct fix is to refuse the mode on a passthrough CR and say
-  why, rather than let a tenant meet a mounter that dies with
-  "No signing credentials available"; it is not built.
+  mount-s3 does not, and the reason is the client: Mountpoint has no
+  web-identity credential provider at all. Its configuration guide lists
+  instance profiles, ECS task roles, `~/.aws` profiles, static keys and
+  `--no-sign-request`, and neither `AWS_WEB_IDENTITY_TOKEN_FILE` nor a
+  custom STS endpoint. Measured against 1.24.0 with an STS endpoint
+  pointing at a listener we control: mount-s3 sends it NOTHING while
+  `curl` from the same container reaches it, for a valid `arn:aws:` ARN
+  as much as for this driver's synthetic one. Two earlier readings of
+  this were wrong and are recorded because the errors are instructive —
+  first that the plain-http transport was to blame (it is not; the lean
+  client completes over http), then that the synthetic `arn:flint:`
+  partition was (it is not; aws-c-auth does not validate ARN format, and
+  the timing difference that suggested it did not reproduce). Timing is
+  not evidence of a network call; a listener is. The driver now REFUSES
+  the mode on a passthrough CR and names why.
+
 - *The control that made this readable.* A workspace whose client falls
   back to the node's own identity mounts and publishes and looks
   correct — on a node whose instance role can reach the bucket, which is

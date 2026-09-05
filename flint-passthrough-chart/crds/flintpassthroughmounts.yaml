@@ -188,8 +188,11 @@ spec:
                     CSI delivery: how the worker obtains its credential.
                     broker (default) — the node plugin exchanges the
                     pod-bound ServiceAccount token at flint-s3-broker for
-                    short-lived proxy keys; webIdentity — the worker calls
-                    the broker's STS facade itself; static — the pod's
+                    short-lived proxy keys; webIdentity — REFUSED on this
+                    kind (the mounter has no web-identity provider, so
+                    the exchange is never attempted; it is honoured on a
+                    FlintLeanWorkspace, whose syncer does implement it);
+                    static — the pod's
                     nodePublishSecretRef (AWS_* keys verbatim, the
                     interim arm); ambient — the worker's own AWS chain.
                   properties:

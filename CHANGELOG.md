@@ -171,6 +171,25 @@ covered by the stability guarantee.
 
 ### Changed
 
+- **`identity.mode: webIdentity` is now REFUSED on a
+  `FlintPassthroughMount`, by name.** It is honoured on a
+  `FlintLeanWorkspace` and cannot be on a passthrough mount: Mountpoint
+  for Amazon S3 has no web-identity credential provider. Its
+  configuration guide lists instance profiles, ECS task roles, `~/.aws`
+  profiles, static keys and `--no-sign-request`, and neither
+  `AWS_WEB_IDENTITY_TOKEN_FILE` nor a custom STS endpoint. Measured
+  against mount-s3 1.24.0: given a JWT token file, a valid `arn:aws:`
+  role ARN and an STS endpoint pointing at a listener under our control,
+  it sends that listener nothing while `curl` from the same container
+  reaches it — the exchange is never attempted. Previously the CR
+  accepted the mode and the tenant met a mounter that died with "No
+  signing credentials available", which names nothing it can act on.
+  The refusal names the reason and the mode to use instead. The lean
+  syncer's client is the Rust AWS SDK, which does implement the
+  provider and does honour the endpoint override, so it completes the
+  exchange against the broker's facade over plain http — which the
+  design had assumed impossible.
+
 - **The chart no longer promises an ordering Kubernetes is not
   configured to give.** `workers.priorityClassName` was documented as
   the ordering mechanism for node shutdown — kubelet terminating by
@@ -199,22 +218,6 @@ covered by the stability guarantee.
   object is not there".
 
 ### Known
-
-- **`identity.mode: webIdentity` works on a lean workspace and does NOT
-  work on a passthrough mount.** On lean the syncer completes the
-  exchange against the broker's STS facade and the broker's own log
-  records the issue. On passthrough the mounter dies and the tenant is
-  told only that credentials are unavailable. Measured out of band with
-  mount-s3 1.24.0: given a real projected token it fails in about a
-  millisecond and sends nothing to the endpoint — identically for
-  flint's synthetic role ARN and for a valid AWS one, and over both http
-  and https — so the client is not attempting the exchange, and no
-  wiring on this side changes that. The one combination left untested is
-  a real token with no endpoint override at all, so "the mount client
-  ignores these variables entirely" is strongly indicated rather than
-  established. Either way the CR advertises the mode on both front ends
-  while only one can honour it; refusing it on a passthrough CR, with
-  the reason named, is the smallest correct fix and is NOT built here.
 
 - **A preserved undrained tree is kept forever, and nothing reclaims
   it.** When a syncer cannot attest its drain the driver moves the tree

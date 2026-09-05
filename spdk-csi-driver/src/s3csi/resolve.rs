@@ -53,6 +53,42 @@ impl Resolved {
         };
         let mode = identity.map(|i| i.mode).unwrap_or_default();
         let credential_mode = CredentialMode::parse(&mode).map_err(Refusal::Invalid)?;
+        // `webIdentity` cannot be honoured on a passthrough mount, so it
+        // is refused by name instead of being accepted and then failing
+        // as a mounter that dies with "No signing credentials
+        // available" — an error no tenant can act on.
+        //
+        // WHY: the mounter does not do web identity at all. Mountpoint
+        // for Amazon S3 takes credentials from instance profiles, ECS
+        // task roles, `~/.aws` profiles (including `role_arn` +
+        // `source_profile`), static keys and `--no-sign-request`; its
+        // configuration guide lists no `AWS_WEB_IDENTITY_TOKEN_FILE`
+        // and no custom STS endpoint. Measured against mount-s3 1.24.0
+        // (2026-09-05): given a JWT token file, a valid `arn:aws:` role
+        // ARN and `AWS_ENDPOINT_URL_STS` pointing at a listener under
+        // our control, it sends that listener NOTHING, while `curl`
+        // from the same container reaches it — so no exchange is ever
+        // attempted. It is the client, not the transport and not the
+        // ARN: an earlier reading blamed this driver's synthetic
+        // `arn:flint:` partition on a timing difference that did not
+        // reproduce, and aws-c-auth does not validate ARN format.
+        //
+        // The lean syncer is unaffected: its client is the Rust AWS
+        // SDK, which does implement the provider and does honour the
+        // endpoint override, so the exchange completes against the
+        // broker's facade and the broker records the issue (drill leg
+        // A2). Hence the refusal is scoped to passthrough. Lifting it
+        // needs the plugin to perform the exchange itself and hand the
+        // worker keys — which is what mode `broker` already is.
+        if credential_mode == CredentialMode::WebIdentity && matches!(self, Resolved::Passthrough { .. }) {
+            return Err(Refusal::Invalid(
+                "identity.mode webIdentity is not supported on a FlintPassthroughMount: the mounter has no \
+                 web-identity credential provider, so the token exchange is never attempted and the mount \
+                 would fail with an error the tenant cannot act on. Use mode broker (the default) here; \
+                 webIdentity is honoured on a FlintLeanWorkspace, whose syncer does implement it"
+                    .into(),
+            ));
+        }
         Ok(Policy { consumers: consumers.unwrap_or_default(), credential_mode })
     }
 
@@ -186,6 +222,38 @@ mod tests {
         authorize(&p, "alice", "team-a", "FlintPassthroughMount", "d").unwrap();
         let e = authorize(&p, "bob", "team-a", "FlintPassthroughMount", "d").unwrap_err();
         assert!(e.message().contains("team-a/bob"), "{e:?}");
+    }
+
+    #[test]
+    fn web_identity_is_refused_on_a_passthrough_mount_by_name() {
+        // Accepting it would publish a mount whose mounter dies with
+        // "No signing credentials available": mount-s3 has no
+        // web-identity provider and never attempts the exchange
+        // (measured against 1.24.0 with a listener that saw nothing).
+        let r = decide_passthrough(
+            Some(pt(json!({ "bucket": "b", "consumers": { "serviceAccounts": ["*"] }, "identity": { "mode": "webIdentity" } }))),
+            "team-a",
+            "d",
+        )
+        .unwrap();
+        let e = r.policy().unwrap_err();
+        assert!(matches!(e, Refusal::Invalid(_)), "{e:?}");
+        assert!(e.message().contains("webIdentity"), "{e:?}");
+        assert!(e.message().contains("broker"), "the refusal must name the mode to use instead: {e:?}");
+    }
+
+    #[test]
+    fn the_other_modes_still_pass_on_a_passthrough_mount() {
+        // The control: the refusal is scoped to ONE mode.
+        for (m, want) in [("broker", CredentialMode::Broker), ("static", CredentialMode::Static), ("ambient", CredentialMode::Ambient)] {
+            let r = decide_passthrough(
+                Some(pt(json!({ "bucket": "b", "consumers": { "serviceAccounts": ["*"] }, "identity": { "mode": m } }))),
+                "team-a",
+                "d",
+            )
+            .unwrap();
+            assert_eq!(r.policy().expect(m).credential_mode, want, "mode {m}");
+        }
     }
 
     #[test]
