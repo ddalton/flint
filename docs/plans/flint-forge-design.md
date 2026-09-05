@@ -310,7 +310,39 @@ objects, not within one). Measured on this repository: one 42.5 MB
 pack, `fsck --connectivity-only` 0.11 s, sub-second on loopback. At
 the EC2 rates of record (130–256 MiB/s), 1 GB is 4–8 s and 10 GB is
 40–80 s; ranged parallel GET is the lever if phase 0 finds the tail
-matters (`flint-store` has no ranged GET today). Uploading `.bitmap`
+matters (`flint-store` has no ranged GET today).
+
+**PHASE 0 RAN 2026-09-05, and the tail matters — decision 9 is now
+TAKEN (§15).** Two corrections to this paragraph. `flint-store` has had
+a ranged GET all along (`ObjectStore::get_range`, etag-pinned); the
+restore simply did not use it. And the cost was not throughput but
+MEMORY: the whole-object read held each pack TWICE — the SDK's
+aggregation buffer plus the contiguous `Bytes` it returns — measured at
+a flat **2.05x of object size** across 256 MiB, 512 MiB, 1 GiB and
+2 GiB, three reps each, arms interleaved. At the 10 GB envelope above
+that is **~20.5 GB to restore a repository**, on a path that runs at
+every pod start: under a memory limit that is not a slow restore but an
+OOMKill, a restart, and another OOMKill — a crash loop whose only
+symptom is a pod that will not start.
+
+The shipped ranged fetch holds **38-40 MiB flat** from 512 MiB to
+2 GiB — 27x lower at 512 MiB, 53x at 1 GiB — and reproduces the object
+byte-identically (same SHA-256).
+
+**Measure `peak memory footprint`, not RSS.** The first pass used peak
+RSS and read 1.05 GB for a 2 GiB fetch, *plateauing* at 1 GB: macOS
+compresses inactive pages and RSS does not count them. The same run's
+footprint was 4.09 GB. RSS alone would have reported this defect as
+benign.
+
+**Still open, and adjacent.** The lease is NOT renewed during restore
+(`restore.rs` reads the epoch and never calls `lease::renew`), and the
+heartbeat's `select!` does not start until after restore returns
+(`server.rs:127` vs `164`). Takeover is `QUIET_POLLS` (6) x
+`heartbeat_secs` (10) = **60 s** of a non-rotating token — inside the
+40-80 s this paragraph gives for a 10 GB restore. A repository large
+enough can therefore be taken over by a challenger while its own pod is
+alive and mid-restore. Not fixed here; recorded. Uploading `.bitmap`
 with the pack is what makes the restored repo clone-ready without a
 `repack -b` (42 s / 125 CPU-s on a 1 GiB corpus).
 
@@ -1092,7 +1124,10 @@ do not need to be.
 8. **Export is `git archive` + `flint-sync barrier` — DECIDED** (§9).
 9. **`emptyDir` cache with restore-on-start — RECOMMENDED**; PVC if
    phase 0 measures restores as too slow; ranged GET if the 10 GB tail
-   matters.
+   matters. **RANGED GET TAKEN 2026-09-05** — phase 0 measured the
+   whole-object read at a flat 2.05x of object size (~20.5 GB for the
+   10 GB envelope, at every pod start); the ranged fetch is 38-40 MiB
+   flat. See §5. The condition this decision was waiting on is met.
 10. **Forgejo-on-lite as the phase-0 control — RECOMMENDED.**
 11. **Git floors: server ≥ 2.43** (`merge-tree -X`); **client ≥ 2.40
     with `transfer.bundleURI=true`** for the storm lever, any version

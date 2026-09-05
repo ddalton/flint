@@ -95,13 +95,20 @@ pub async fn restore(sc: &mut Syncer) -> ForgeResult<()> {
     std::fs::create_dir_all(&pack_dir)?;
     for pack in &cell.snap.packs {
         let stem = pack.trim_end_matches(".pack");
-        for (name, key) in listed.iter() {
+        for (name, obj) in listed.iter() {
             if name.starts_with(stem) {
                 let dest = pack_dir.join(name);
                 if dest.exists() {
                     continue;
                 }
-                packio::fetch_to_file(sc.store.as_ref(), key, &dest).await?;
+                packio::fetch_pinned(
+                    sc.store.as_ref(),
+                    &obj.key,
+                    &dest,
+                    obj.size,
+                    &obj.etag,
+                )
+                .await?;
             }
         }
     }
@@ -156,15 +163,30 @@ pub async fn restore(sc: &mut Syncer) -> ForgeResult<()> {
 /// Every object under the repository's pack prefix, by file name. One
 /// LIST serves both the restore's fetch plan and the sweep's candidate
 /// set.
-pub async fn list_pack_files(sc: &Syncer) -> ForgeResult<BTreeMap<String, String>> {
+pub async fn list_pack_files(sc: &Syncer) -> ForgeResult<BTreeMap<String, PackObject>> {
     let prefix = sc.cfg.pack_prefix();
     let mut out = BTreeMap::new();
     for obj in sc.store.list(&prefix).await? {
         if let Some(name) = obj.key.rsplit('/').next() {
-            out.insert(name.to_string(), obj.key.clone());
+            out.insert(
+                name.to_string(),
+                PackObject { key: obj.key.clone(), size: obj.size, etag: obj.etag.clone() },
+            );
         }
     }
     Ok(out)
+}
+
+/// What `list` already told us about a pack file. The size and etag
+/// were previously discarded and then not available to the fetch, which
+/// is why it read whole objects; carrying them costs nothing (they ride
+/// the same LIST) and is what lets the restore fetch ranges pinned to
+/// one generation without a HEAD per file.
+#[derive(Debug, Clone)]
+pub struct PackObject {
+    pub key: String,
+    pub size: u64,
+    pub etag: String,
 }
 
 /// Repack when the pack count passes the threshold, then publish the

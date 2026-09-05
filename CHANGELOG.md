@@ -12,6 +12,42 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed — flint forge, a restore held every pack twice
+
+- **The restore read whole objects and needed ~2x the repository in
+  memory.** `fetch_to_file` called `get_whole`, which holds the SDK's
+  aggregation buffer and the contiguous `Bytes` it returns at the same
+  time: measured at a flat **2.05x of object size** across 256 MiB to
+  2 GiB. At the 10 GB envelope §5 sizes, ~20.5 GB — on a path that runs
+  at **every pod start**, so under a memory limit it is not a slow
+  restore but an OOMKill and a crash loop with no other symptom. The
+  fetch is now ranged and etag-pinned: **38-40 MiB flat** from 512 MiB
+  to 2 GiB (27x lower at 512 MiB, 53x at 1 GiB), byte-identical output.
+  This takes design decision 9, which had been waiting on exactly this
+  measurement.
+- **A cut connection no longer restarts the file.** The retry budget is
+  per chunk, so a transport failure partway through a multi-GiB pack
+  costs one range, not everything already written.
+- **A pack that moves under a restore is refused, not adopted.** The
+  deliberate divergence from `tier::hydrate`, which adopts on a 412
+  because a tier's object legitimately moves. A forge pack is immutable
+  and content-named, so a moved etag means something wrote a pack file
+  that is not the pack it is named for.
+- **`list_pack_files` no longer discards the size and etag** the LIST
+  already returned, so the restore fetches pinned ranges without a HEAD
+  per file. The sweep's own HEAD is untouched: it reads age at the
+  delete on purpose, never from a listing that is by then as old as the
+  sweep.
+
+### Known — flint forge, not fixed here
+
+- **The lease is not renewed during restore.** `restore.rs` never calls
+  `lease::renew`, and the heartbeat does not start until restore
+  returns. Takeover is `QUIET_POLLS` x `heartbeat_secs` = 60 s of a
+  non-rotating token, inside the 40-80 s §5 gives for a 10 GB restore,
+  so a large repository can be taken over while its pod is alive and
+  mid-restore. Same shape as the export/heartbeat item recorded in §17.
+
 ### Added — flint forge, the git↔S3 transfer path
 
 - **`packio` has coverage.** The module that moves every byte between

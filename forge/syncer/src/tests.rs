@@ -2267,3 +2267,124 @@ async fn a_push_with_a_new_pack_pays_only_for_its_siblings() {
         "a one-pack push should cost the fixed 4 plus 2-4 siblings, got {total}: {ops:?}"
     );
 }
+
+// ── the restore transfer is ranged, pinned, and retried per chunk ────
+
+/// The memory bound, pinned as a request shape. A whole-object read is
+/// one request and holds the object twice — measured at a flat 2.05x of
+/// object size from 256 MiB to 2 GiB, which at section 5's 10 GB
+/// envelope is ~20.5 GB to restore, at every pod start. A ranged fetch
+/// is one request per chunk and holds one chunk, and the count is what
+/// a test can see.
+#[tokio::test]
+async fn a_pack_is_fetched_in_ranges_not_as_one_object() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("pack-r.pack");
+    let size = 20u64 << 20;
+    write_pattern(&src, size);
+    let store = s3_shaped_store();
+    let key = "p/git/objects/pack/pack-r.pack";
+    super::packio::upload_file(store.as_ref(), key, &src, 7).await.expect("upload");
+
+    let dest = dir.path().join("out").join("pack-r.pack");
+    store.reset_op_counts();
+    super::packio::fetch_to_file(store.as_ref(), key, &dest).await.expect("fetch");
+    let ops = store.op_counts();
+
+    let want = size.div_ceil(super::packio::FETCH_CHUNK);
+    assert_eq!(
+        ops.get("get_range").copied().unwrap_or(0),
+        want,
+        "a {size}-byte object should take {want} ranged reads: {ops:?}"
+    );
+    assert_eq!(
+        ops.get("get_whole").copied().unwrap_or(0),
+        0,
+        "the restore must never read a pack whole: {ops:?}"
+    );
+    let a = std::fs::read(&src).expect("src");
+    let b = std::fs::read(&dest).expect("dest");
+    assert!(a == b, "the ranged fetch did not reproduce the pack");
+}
+
+/// A pack whose etag moved under the restore is REFUSED, not adopted.
+/// This is the deliberate divergence from `tier::hydrate`, which adopts
+/// on a 412 because a tier's object legitimately moves. A pack is
+/// immutable and content-named: a moved etag means something wrote a
+/// pack file that is not the pack it is named for.
+#[tokio::test]
+async fn a_pack_that_moved_under_the_restore_is_refused_not_adopted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("pack-m.pack");
+    write_pattern(&src, 12 << 20);
+    let store = s3_shaped_store();
+    let key = "p/git/objects/pack/pack-m.pack";
+    super::packio::upload_file(store.as_ref(), key, &src, 7).await.expect("upload");
+
+    let dest = dir.path().join("out").join("pack-m.pack");
+    let err = super::packio::fetch_pinned(
+        store.as_ref(),
+        key,
+        &dest,
+        12 << 20,
+        "\"an-etag-this-object-never-had\"",
+    )
+    .await
+    .expect_err("a moved etag must not be adopted");
+    assert!(
+        matches!(err, ForgeError::Refused(_)),
+        "expected a refusal, got {err:?}"
+    );
+    assert!(!dest.exists(), "a refused fetch left a pack behind");
+    assert!(!dest.with_extension("part").exists(), "a refused fetch left its temporary");
+}
+
+/// A transport failure retries the CHUNK. The budget is per chunk, so a
+/// cut connection partway through a multi-GiB pack does not discard the
+/// chunks already written — the whole reason the fetch is chunked at
+/// all rather than merely bounded.
+#[tokio::test]
+async fn a_cut_connection_retries_the_chunk_and_keeps_earlier_progress() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("pack-t.pack");
+    let size = 20u64 << 20;
+    write_pattern(&src, size);
+    let store = s3_shaped_store();
+    let key = "p/git/objects/pack/pack-t.pack";
+    super::packio::upload_file(store.as_ref(), key, &src, 7).await.expect("upload");
+
+    let dest = dir.path().join("out").join("pack-t.pack");
+    store.reset_op_counts();
+    store.inject_get_range_failures(2);
+    super::packio::fetch_to_file(store.as_ref(), key, &dest).await.expect("fetch");
+
+    let chunks = size.div_ceil(super::packio::FETCH_CHUNK);
+    let ops = store.op_counts();
+    assert_eq!(
+        ops.get("get_range").copied().unwrap_or(0),
+        chunks + 2,
+        "two failures should cost two extra RANGES, not a restarted file: {ops:?}"
+    );
+    let a = std::fs::read(&src).expect("src");
+    let b = std::fs::read(&dest).expect("dest");
+    assert!(a == b, "the retried fetch did not reproduce the pack");
+}
+
+/// Past the budget it fails, and leaves nothing a later pass could
+/// mistake for a complete pack.
+#[tokio::test]
+async fn a_fetch_past_its_retry_budget_leaves_no_pack_behind() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("pack-b.pack");
+    write_pattern(&src, 12 << 20);
+    let store = s3_shaped_store();
+    let key = "p/git/objects/pack/pack-b.pack";
+    super::packio::upload_file(store.as_ref(), key, &src, 7).await.expect("upload");
+
+    let dest = dir.path().join("out").join("pack-b.pack");
+    store.inject_get_range_failures(64);
+    let err = super::packio::fetch_to_file(store.as_ref(), key, &dest).await;
+    assert!(err.is_err(), "an exhausted budget must not report success");
+    assert!(!dest.exists(), "a failed fetch left a pack at the real name");
+    assert!(!dest.with_extension("part").exists(), "a failed fetch left its temporary");
+}

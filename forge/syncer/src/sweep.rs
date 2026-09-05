@@ -69,12 +69,19 @@ pub async fn sweep(sc: &mut Syncer) -> ForgeResult<usize> {
     let mut candidates = listed.clone();
     for obj in sc.store.list(&sc.cfg.bundle_prefix()).await? {
         if let Some(name) = obj.key.rsplit('/').next() {
-            candidates.insert(name.to_string(), obj.key.clone());
+            candidates.insert(
+                name.to_string(),
+                super::restore::PackObject {
+                    key: obj.key.clone(),
+                    size: obj.size,
+                    etag: obj.etag.clone(),
+                },
+            );
         }
     }
     let live_bundles = fresh.snap.bundles.clone();
 
-    for (name, key) in candidates.iter() {
+    for (name, obj) in candidates.iter() {
         if stems.iter().any(|s| name.starts_with(s.as_str())) {
             continue;
         }
@@ -84,7 +91,7 @@ pub async fn sweep(sc: &mut Syncer) -> ForgeResult<usize> {
         // Rule 2: the age is read at the delete, from the store's own
         // clock — never from ours, and never from the listing, which
         // is by then as old as the sweep.
-        let meta = match sc.store.head(key).await {
+        let meta = match sc.store.head(&obj.key).await {
             Ok(m) => m,
             // Gone already: another pass, or a retry that lost its
             // response. Nothing to do and nothing to report.
@@ -101,7 +108,7 @@ pub async fn sweep(sc: &mut Syncer) -> ForgeResult<usize> {
         if !age_ok {
             continue;
         }
-        sc.store.delete(key).await?;
+        sc.store.delete(&obj.key).await?;
         deleted += 1;
     }
     if deleted > 0 {
