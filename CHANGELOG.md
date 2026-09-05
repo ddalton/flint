@@ -45,10 +45,23 @@ covered by the stability guarantee.
   release to clone, push durably, move a protected branch, lose its pod
   and serve a clone restored from S3 alone.
 - **A tag bump is the whole fix**, established rather than assumed:
-  `OVERRIDE_TAG=1.46.0-forge.6` runs every leg against a named tag and
-  returns 17 passed, 0 failed, 2 pending. It turns P1 PENDING while it
-  does, because a run that was TOLD its images is not evidence about
-  which images the chart chooses.
+  `OVERRIDE_TAG=1.46.0-forge.6` runs every leg against a named tag, and
+  turns P1 PENDING while it does, because a run that was TOLD its
+  images is not evidence about which images the chart chooses.
+  `values.yaml` now pins `1.46.0-forge.6` on the strength of it.
+- **The leg's own first green depended on the cluster it ran on**, and
+  finding that is worth more than the finding it was reporting. The
+  `FlintRepo` CRD ships in the chart's `crds/`, so it does not exist
+  until helm has installed; the rig was applied BEFORE helm with its
+  output discarded, so the repository's apply failed silently. On a
+  cluster where an earlier run had installed the chart the CRD was
+  still present — **`helm uninstall` does not remove a CRD, and
+  deleting namespaces cannot, because CRDs are cluster-scoped** — so it
+  passed. On a genuinely fresh cluster there was no repository at all
+  and the leg blamed the product. The rig is applied twice now, the
+  second apply's status is checked, and the CRD is asserted as a
+  precondition of P4 so a rig failure can never be reported as a
+  product failure.
 - **Two traps, each of which produced a confident wrong answer first.**
   `docker run <image> <binary> --flags` does not run `<binary>` — those
   become args to the image's ENTRYPOINT, here the operator, which fails

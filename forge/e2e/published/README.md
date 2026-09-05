@@ -52,13 +52,36 @@ forge.2 through forge.6 accept it.** The chart pins precisely the one
 broken image.
 
 **A tag bump is sufficient.** Re-run with `OVERRIDE_TAG=1.46.0-forge.6`
-— 17 passed, 0 failed, 2 pending. There is no second failure behind the
-first: clone, durable push judged against the bucket, protected-main
+— clone, durable push judged against the bucket, protected-main
 refusal, `refs/for` merge, and a pod destroyed with a fresh clone
 restored from S3 alone passing `fsck --strict`, all green on a
-published artifact.
+published artifact. `values.yaml` was bumped to forge.6 on the strength
+of it.
 
-## Two traps, both of which produced a confident wrong answer first
+## The defect this leg had in ITSELF, which is the more useful lesson
+
+That `OVERRIDE_TAG` run reported **17 passed, 0 failed** — and it was
+green partly because of the cluster it ran on.
+
+The `FlintRepo` CRD ships in the chart's `crds/` directory, so it does
+not exist until helm has installed. The rig was applied BEFORE helm,
+with its output discarded, so the `FlintRepo` apply failed silently.
+On a cluster where an earlier run had already installed the chart the
+CRD was still there — **`helm uninstall` does not remove a CRD** — so
+the repository was created and everything passed. On a genuinely fresh
+cluster there was no repository at all, and the leg reported
+`agents/proj never reached Ready`, which reads as a product defect and
+was a rig defect.
+
+**A green that depends on the leftovers of an earlier run is not a
+green**, and deleting namespaces between runs is not enough to find it
+because CRDs are cluster-scoped. The rig is now applied twice — once
+before helm for the namespaces and the store, once after for the
+repository — the second apply's exit status is checked, and the CRD's
+presence is asserted as a precondition of P4 so that a rig failure can
+never again be reported as a product failure.
+
+## Three traps, each of which produced a confident wrong answer first
 
 **`docker run <image> <binary> --flags` does not run `<binary>`.**
 Those become ARGS to the image's ENTRYPOINT — here the operator, which

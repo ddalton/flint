@@ -195,6 +195,19 @@ main() {
   # ── P3 — install the chart with NO image overrides ──────────────────
   leg P3 "helm install the chart as shipped — no --set of any image"
   $K delete ns "$NS_SYS" "$NS_AGENTS" --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+  # The FlintRepo CRD is shipped in the chart's `crds/` directory, so it
+  # does not exist until helm has installed. This first apply therefore
+  # lands the namespaces, the store and the agent — and the FlintRepo
+  # FAILS, which is expected and why the rig is applied AGAIN after
+  # helm below.
+  #
+  # It used to be applied only here, with its output discarded, and that
+  # made the drill pass or fail on CLUSTER STATE rather than on the
+  # chart: `helm uninstall` does not remove a CRD, so a rerun on the
+  # same cluster found the CRD left by the previous install and worked,
+  # while the first run on a fresh cluster silently had no repository at
+  # all. A green that depends on the leftovers of an earlier run is not
+  # a green.
   sed "s#__TAG__#$git_tag#g" "$HERE/rig.yaml.tpl" | $K apply -f - >/dev/null 2>&1
   $K -n "$NS_SYS" rollout status deploy/minio --timeout=180s >/dev/null 2>&1
   $K -n "$NS_SYS" wait --for=condition=complete job/seed-bucket --timeout=180s >/dev/null 2>&1
@@ -248,6 +261,27 @@ main() {
 
   # ── P4 — the repository serves ──────────────────────────────────────
   leg P4 "a FlintRepo becomes a serving repository"
+  # The CRD arrives WITH the chart, so the repository can only be
+  # created now. Assert the CRD is really there first: without this the
+  # apply below fails and P4 reports "never reached Ready", which reads
+  # as a product defect and is a rig defect.
+  if $K get crd flintrepos.chert.us >/dev/null 2>&1; then
+    ok "the chart installed the FlintRepo CRD"
+  else
+    bad "the chart did not install the FlintRepo CRD — no repository can exist"
+    verdict; return 1
+  fi
+  local arc
+  sed "s#__TAG__#$git_tag#g" "$HERE/rig.yaml.tpl" | $K apply -f - > /tmp/forge-pub-apply-$RUN.log 2>&1
+  arc=$?
+  if [ $arc -eq 0 ] && $K -n "$NS_AGENTS" get flintrepo proj >/dev/null 2>&1; then
+    ok "the FlintRepo was accepted by the apiserver"
+  else
+    bad "the FlintRepo could not be created (rc=$arc)"
+    tail -5 /tmp/forge-pub-apply-$RUN.log | sed 's/^/        /'
+    verdict; return 1
+  fi
+
   local waited=0 phase=""
   while [ $waited -lt 300 ]; do
     phase=$($K -n "$NS_AGENTS" get flintrepo proj -o jsonpath='{.status.phase}' 2>/dev/null)

@@ -17,7 +17,7 @@
 image:
   repository: dilipdalton
   name: flint-forge-operator
-  tag: "1.46.0-forge.1"
+  tag: "1.46.0-forge.6"
   ref: ""
   pullPolicy: IfNotPresent
 
@@ -26,11 +26,11 @@ image:
 # operator re-renders the fleet.
 server:
   # nginx + fcgiwrap + git http-backend + the two hooks.
-  gitImage: dilipdalton/flint-forge-git:1.46.0-forge.1
+  gitImage: dilipdalton/flint-forge-git:1.46.0-forge.6
   # The one writer of the repository's S3 state; the pod's main
   # container, so its exit restarts the pod. It also carries flint-sync,
   # because the legible export runs the shipped lean binary.
-  syncerImage: dilipdalton/flint-forge-syncer:1.46.0-forge.1
+  syncerImage: dilipdalton/flint-forge-syncer:1.46.0-forge.6
   logLevel: info
 
 # One replica. The reconcile is idempotent and the arbitration is a

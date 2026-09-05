@@ -1,32 +1,55 @@
 published-artifact drill — context kind-forge-pub, chart /Users/ddalton/github/flint/flint-forge-chart
-  ..  chart names: dilipdalton/flint-forge-git:1.46.0-forge.1
-  ..               dilipdalton/flint-forge-syncer:1.46.0-forge.1
-  ..               dilipdalton/flint-forge-operator:1.46.0-forge.1
+  ..  chart names: dilipdalton/flint-forge-git:1.46.0-forge.6
+  ..               dilipdalton/flint-forge-syncer:1.46.0-forge.6
+  ..               dilipdalton/flint-forge-operator:1.46.0-forge.6
 
 ── P0 — every image the chart names is actually published
-  ok: dilipdalton/flint-forge-operator:1.46.0-forge.1 is on the registry
-  ok: dilipdalton/flint-forge-git:1.46.0-forge.1 is on the registry
-  ok: dilipdalton/flint-forge-syncer:1.46.0-forge.1 is on the registry
+  ok: dilipdalton/flint-forge-operator:1.46.0-forge.6 is on the registry
+  ok: dilipdalton/flint-forge-git:1.46.0-forge.6 is on the registry
+  ok: dilipdalton/flint-forge-syncer:1.46.0-forge.6 is on the registry
 
 ── P1 — the chart names the newest published tag, not an older one
-  BAD: the chart pins 1.46.0-forge.1 but 1.46.0-forge.6 is published — a 'helm install' installs the older binaries
-  ..  everything below therefore measures 1.46.0-forge.1, which is what a user would get
+  ok: the chart is current at 1.46.0-forge.6
 
 ── P2 — the images are PULLED from the registry, not found in the node cache
-  ..  cleared 3 cached image(s) from 1 node(s)
+  ..  cleared 0 cached image(s) from 1 node(s)
   ok: the node cache was cleared before install (the pull below cannot be satisfied locally)
 
 ── P3 — helm install the chart as shipped — no --set of any image
   ok: the store is up and the bucket exists
-  BAD: helm install failed (rc=1)
-        Release "flint-forge" does not exist. Installing it now.
-        W0905 14:21:40.304805   43010 warnings.go:70] unrecognized format "uint64"
-        Error: timed out waiting for the condition
-        ── pod/flint-forge-door-57c65cdd44-2qcmn is not ready:
-           error: unexpected argument '--git-only' found
-             tip: a similar argument exists: '--git'
-           Usage: flint-hub-gateway --listen <LISTEN> --git
-           For more information, try '--help'.
+  ok: the chart installed with its own image defaults
 
-══ published artifact: 5 passed, 2 failed, 0 pending ══
-   FAILED
+── P4 — a FlintRepo becomes a serving repository
+  ok: the chart installed the FlintRepo CRD
+  ok: the FlintRepo was accepted by the apiserver
+  ok: agents/proj reached Ready in 10s
+  ok: the agent pod is running the published forge-git image
+  ok: all 3 distinct flint image(s) carry a registry digest — operator, git and syncer all came from Docker Hub
+        · docker.io/dilipdalton/flint-forge-git@sha256:5c77de8f21986064a34bd1d60fda19533b9022ceb2dd0245b273a45978051f19
+        · docker.io/dilipdalton/flint-forge-operator@sha256:a8f800027bc6eb1579f59d87539937899e7e5da471702b746671db979e36d668
+        · docker.io/dilipdalton/flint-forge-syncer@sha256:ebb30e750176aab4fbf3a7a3f89417f762d821c03734c458824a281b19c0bab8
+
+── P5 — clone, commit and push — and the BUCKET names the ref before the client is told ok
+  ok: the writer seeds main via refs/for/main
+  ok: an agent branch push is accepted
+  ok: the bucket's snapshot names agent/pub-1788644848
+  ..  agent branch tip dbdb32c5fd5de1f3ac80aa75997f225fd07a4c66
+
+── P6 — main is protected, and the refusal names the remedy
+  ok: a direct push to protected main (refused)
+        ·  ! [remote rejected] main -> main (refs/heads/main is protected: push to refs/for/main to propose a merge)
+  ok: the same change proposed through refs/for/main merges
+  ok: main now carries it
+
+── P7 — the published forge-git image carries the 'git propose' verb
+command terminated with exit code 127
+  PENDING: git-propose is not in dilipdalton/flint-forge-git:1.46.0-forge.6 — expected until a release after the commit that adds it
+  ..  the long form it wraps IS covered by P6: push origin HEAD:refs/for/main
+
+── P8 — the pod is destroyed and the published image restores from the bucket alone
+  ..  server pod deleted — the emptyDir went with it, so the bucket is all that is left
+  ok: main is at the same commit after the restore (07b7b42bce46c83e88ef41af00c81ed3314270d5)
+  ok: a FRESH clone from the restored repository passes git fsck --strict
+
+══ published artifact: 20 passed, 0 failed, 1 pending ══
+   GREEN, with 1 leg(s) awaiting a release
