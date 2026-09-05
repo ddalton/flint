@@ -379,6 +379,25 @@ alive and mid-restore. Not fixed here; recorded. Uploading `.bitmap`
 with the pack is what makes the restored repo clone-ready without a
 `repack -b` (42 s / 125 CPU-s on a 1 GiB corpus).
 
+**Measured on the wire (2026-09-05; `forge/e2e/scale/`, cluster runbw: 3 x
+i4i.xlarge all-spot, S3 us-west-1, syncer image cda4b21e).** A 10240 MiB
+pack composed as 161 parts with the full-object CRC64NVME accepted at
+`CompleteMultipartUpload`; push acknowledged in 262 s. The epoch token was
+silent for **125 s during the push** (the batch renews once, then uploads
+161 serial 64 MiB parts on the heartbeat's own task) and **141 s during the
+cold restore** (135 s at 75.9 MiB/s, one 8 MiB ranged GET in flight; anon
+RSS peaked at 9.8 MiB). A challenger started beside the restoring pod
+claimed the repository **62 s after arriving**, while the pod was
+`importing`; the holder fenced at its next heartbeat and restarted, then the
+two seized each other mid-restore (epochs 4, 5, 6) until the challenger was
+removed at +392 s; the operator's pod served again 405 s after the delete.
+Every push acknowledged during the fight (21 of 23) was in the bucket: the
+fence holds, durability holds, and the cost is availability — a repository
+this large is unreachable for as long as two servers alternate. The
+control, the same challenger beside a 16 MiB repository, never claimed in
+150 s. A second syncer is not something the Deployment (`Recreate`) makes on
+its own; it takes a roll against a wedged pod, or a hand.
+
 **Idle.** Lite's ladder, ONE rung: no git traffic for
 `suspendAfterSecs` ⇒ replicas 0 and `chert.us/idle-state`. The ladder
 suspends only on a polled `/status` document (`hubstatus.rs`'s shape:

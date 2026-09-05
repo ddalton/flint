@@ -1,0 +1,108 @@
+forge at scale — bucket flint-forge-scale-runbw, prefix scale-202609051141, namespace agents, run 20260905-114635
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-114635.log
+
+══ S0 — provenance and the rig: the syncer in the pod is the tree under test, both repositories serve, the disks are big enough ══
+  ....  syncer image: docker.io/dilipdalton/flint-forge-syncer@sha256:b90abc6e68b1016e2fe07a8f484538d620ef0b2e33af4d57c98a6c7113132eab
+  PASS  the syncer carries the ranged restore (marker string ×1, 827c5f90) — this is the tree under test, judged by content
+  PASS  big is serving (forge-big-877894679-tlmvp)
+  PASS  small is serving (forge-small-968bc8f59-z5mtz)
+  PASS  big has no snapshot yet (fresh prefix)
+  ....  takeover window = QUIET_POLLS 6 × heartbeat 10s = 60s
+  ....  free: agent /work 833769 MiB, repository cache 833769 MiB; this run may need ~25088 MiB on each
+  PASS  the agent's emptyDir has room
+  PASS  the repository cache has room
+
+══ S1 — calibrate: a 1024 MiB repository through the whole path, and its restore rate sizes the large one ══
+  ....  building probe: 1024 MiB of /dev/urandom in the agent's emptyDir
+  PASS  built probe (1024 MiB) in 11 s, tip 1287711b3b85
+  PASS  push of probe acknowledged in 29 s
+  ....  lease token silent for 13 s during the push (window 60s)
+  ....  pack pack-eefe98ecfe17808a3e0301668fd3cba3538d6a0e.pack: 1024.1 MiB, ETag "e493aa3e705ba573f674dceb1e9faa5d-17"
+  PASS  the pack is above the 64.0 MiB whole-put ceiling
+  PASS  ETag carries part count 17 = ceil(size / 64 MiB): composed by the part grid, not whole-PUT
+  PASS  S3 holds a FULL_OBJECT CRC64NVME (FrmJZiwBbxw=): the checksum forge streamed over the file was accepted at CompleteMultipartUpload
+  PASS  S3 reports 17 parts
+  PASS  the snapshot names agent/probe at the tip
+  ....  cold restore of big
+  ....  deleting forge-big-877894679-tlmvp
+./forge/e2e/scale/run-scale.sh: line 122: 91285 Terminated: 15          sleep 3
+  ....  big restored by forge-big-877894679-jsrpj: 13 s from the delete (13 s from the syncer's start); anon RSS max 4.7 MiB; lease token silent 21 s
+  PASS  restored refs are exactly the snapshot's
+  PASS  fsck --strict clean on the restored 1024.1 MiB repository (9 s): the composed bytes came back intact
+  PASS  the door advertises agent/probe at the tip after the restore
+  PASS  the restore's anon RSS peaked at 4.7 MiB for a 1024.1 MiB pack: memory does not scale with the repository
+  ....  …and under 256 MiB, consistent with the 38-40 MiB flat loopback figure (working set 33.1 MiB includes page cache)
+  ....  restore rate 78.8 MiB/s from the syncer's start (sequential 8 MiB ranged GETs, one in flight)
+  ....  restore rate 78.8 MiB/s ⇒ a 150s restore needs ~11820 MiB; BIG_MB=10240 (clamped to [2048, 10240])
+  PASS  the large repository will be 10240 MiB, larger than the probe
+
+══ S2 — the large repository: 10240 MiB composed on S3, restored ranged, and the lease silent for longer than the 60s window ══
+  ....  building big: 10240 MiB of /dev/urandom in the agent's emptyDir
+  PASS  built big (10240 MiB) in 103 s, tip bdc07df485d0
+./forge/e2e/scale/run-scale.sh: line 116: 12605 Terminated: 15          sleep 2
+  PASS  push of big acknowledged in 262 s
+  ....  lease token silent for 125 s during the push (window 60s)
+  ....  pack pack-ae3106b87629db3b72478ba98cf5bb0de0e92c69.pack: 10240.8 MiB, ETag "f79bbe70f15be070b43a4844980bf1e1-161"
+  PASS  the pack is above the 64.0 MiB whole-put ceiling
+  PASS  ETag carries part count 161 = ceil(size / 64 MiB): composed by the part grid, not whole-PUT
+  PASS  S3 holds a FULL_OBJECT CRC64NVME (LU6bTq/T0O8=): the checksum forge streamed over the file was accepted at CompleteMultipartUpload
+  PASS  S3 reports 161 parts
+  PASS  the snapshot names agent/big at the tip
+  ....  cold restore of big
+  ....  deleting forge-big-877894679-jsrpj
+./forge/e2e/scale/run-scale.sh: line 116: 14935 Terminated: 15          sleep 2
+./forge/e2e/scale/run-scale.sh: line 122: 14933 Terminated: 15          sleep 3
+  ....  big restored by forge-big-877894679-j7kgw: 136 s from the delete (135 s from the syncer's start); anon RSS max 9.8 MiB; lease token silent 141 s
+  PASS  restored refs are exactly the snapshot's
+  PASS  fsck --strict clean on the restored 10240.8 MiB repository (84 s): the composed bytes came back intact
+  PASS  the door advertises agent/big at the tip after the restore
+  PASS  the restore's anon RSS peaked at 9.8 MiB for a 10240.8 MiB pack: memory does not scale with the repository
+  ....  …and under 256 MiB, consistent with the 38-40 MiB flat loopback figure (working set 307.8 MiB includes page cache)
+  ....  restore rate 75.9 MiB/s from the syncer's start (sequential 8 MiB ranged GETs, one in flight)
+  PASS  PUSH: the token was silent 125s > 60s — the batch renews once, then uploads 10240.8 MiB in serial 64 MiB parts with no heartbeat; a challenger present then would count six quiet polls
+  PASS  RESTORE: the token was silent 141s > 60s — the takeover window is OPEN for the whole restore of this repository (design §5 'still open', on the wire)
+
+══ S3 — the takeover during a restore, with its control: the same challenger against a small repository (restore of seconds) and the large one (restore of 136 s) ══
+  PASS  the control repository holds 16 MiB at e3365e61458b
+  ....  deleting forge-small-968bc8f59-z5mtz; the successor restores and the challenger arrives while it does
+  ....  successor forge-small-968bc8f59-mgkww is 'importing' 2s after the delete; starting the challenger (150 s of observation)
+./forge/e2e/scale/run-scale.sh: line 132: 18070 Terminated: 15          sleep 2
+  ....  hold arm: challenger claims=0, holder claims=1, holder fenced=0, epoch sequence: 2 ; holder restarts=0; time from the delete to a serving operator pod: 156 s
+  ....  pushes during the arm: 16 acknowledged, 0 refused or timed out; longest gap between acknowledgements 11 s
+  PASS  CONTROL: a challenger beside a HEALTHY holder never claimed in 150 s (the holder's heartbeats kept the token moving)
+  PASS  the operator's pod was serving again 156 s after the delete (the challenger removed at +150 s)
+  PASS  every acknowledged push (16) is in the bucket's agent/chaos-hold-20260905-114635: told ok ⇒ durable held under contention
+  ....  deleting forge-big-877894679-j7kgw; the successor restores and the challenger arrives while it does
+  ....  successor forge-big-877894679-lkrj4 is 'importing' 1s after the delete; starting the challenger (392 s of observation)
+  ....  seize arm: challenger claims=1, holder claims=2, holder fenced=1, epoch sequence: 4 5 6 ; holder restarts=1; time from the delete to a serving operator pod: 405 s
+  ....  the challenger's first claim came 62 s after it started, while the holder was 'importing'
+  ....  pushes during the arm: 21 acknowledged, 2 refused or timed out; longest gap between acknowledgements 207 s
+  PASS  REPRODUCED: the challenger claimed the repository while its pod was alive and mid-restore ('importing'), 62 s after arriving — the window §5 records, on the wire
+  PASS  the deposed holder fenced itself at its next heartbeat and exited (no second writer kept serving)
+  ....  PING-PONG: the operator's pod claimed 2 times (epochs 4 5 6 ) — each side seizes the other mid-restore until a restore finishes inside the window
+  PASS  the operator's pod was serving again 405 s after the delete (the challenger removed at +392 s)
+  PASS  every acknowledged push (21) is in the bucket's agent/chaos-seize-20260905-114635: told ok ⇒ durable held under contention
+
+══ S4 — acknowledged means durable at multipart size (320 MiB pushes to small): kills INSIDE the upload, seen not timed; and the orphans counted ══
+  ....  incomplete multipart uploads under scale-202609051141/small/git/objects/pack/ before the leg: 0
+  ....  iter 1: upload NI.ajjrtAi4q… on pack-1c39c207506c4dca86bd289c7becf7ae59c33cc6.pack seen 6s after the push began; killing 2.0s later, INSIDE the upload
+  PASS  iter 1: indeterminate (the ack was lost after the CAS); the agent's retry is a clean no-op
+  ....  iter 1: incomplete uploads now 0, holding 0.0 MiB of parts
+  ....  iter 2: upload YjLYp1u6rCwz… on pack-2e79544ba727dceb4291eb9f6ca338f3bccba166.pack seen 6s after the push began; killing 3.5s later, INSIDE the upload
+  PASS  iter 2: indeterminate (the ack was lost after the CAS); the agent's retry is a clean no-op
+  ....  iter 2: incomplete uploads now 0, holding 0.0 MiB of parts
+  ....  iter 3: upload tIro3elR192x… on pack-c6f69789d2465818dcc87bc6f52c8322b860546d.pack seen 6s after the push began; killing 2.0s later, INSIDE the upload
+  PASS  iter 3: indeterminate (the ack was lost after the CAS); the agent's retry is a clean no-op
+  ....  iter 3: incomplete uploads now 0, holding 0.0 MiB of parts
+  ....  iter 4: the pack object now exists (upload complete); killing NOW, around the snapshot CAS and the report
+  PASS  iter 4: told ok, and the bucket holds it
+  ....  iter 4: incomplete uploads now 0, holding 0.0 MiB of parts
+  PASS  fsck --strict clean after 4 crashes
+  ....  1 acknowledged, 3 refused
+  PASS  the kills landed on both sides of the window
+  INCONCLUSIVE  no orphaned upload was left behind (0 before and after): the mid-upload kills did not land inside an upload, so the leak's magnitude was not measured
+
+
+══ 45 passed, 0 failed, 1 inconclusive ══
+INCONCLUSIVE legs could not measure what they exist for: this run is NOT green.
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-114635.log  (raw timelines: /Users/ddalton/github/flint/forge/e2e/scale/results/work-20260905-114635)

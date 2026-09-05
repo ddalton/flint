@@ -1,0 +1,9 @@
+2026-09-05T19:01:59.508661514Z flint-forge: holding scale-202609051141/big at epoch 4
+2026-09-05T19:04:17.102831500Z flint-forge-syncer: fenced: deposed at renew: epoch_put: 412 PreconditionFailed
+2026-09-05T19:04:17.872581649Z flint-forge: another server holds scale-202609051141/big (0/6 quiet polls)
+2026-09-05T19:04:27.909397671Z flint-forge: another server holds scale-202609051141/big (1/6 quiet polls)
+2026-09-05T19:04:37.938209556Z flint-forge: another server holds scale-202609051141/big (2/6 quiet polls)
+2026-09-05T19:04:47.965400577Z flint-forge: another server holds scale-202609051141/big (3/6 quiet polls)
+2026-09-05T19:04:57.998646046Z flint-forge: another server holds scale-202609051141/big (4/6 quiet polls)
+2026-09-05T19:05:08.030286677Z flint-forge: another server holds scale-202609051141/big (5/6 quiet polls)
+2026-09-05T19:05:18.145647941Z flint-forge: holding scale-202609051141/big at epoch 6

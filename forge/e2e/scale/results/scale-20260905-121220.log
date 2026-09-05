@@ -1,0 +1,27 @@
+forge at scale — bucket flint-forge-scale-runbw, prefix scale-202609051141, namespace agents, run 20260905-121220
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-121220.log
+
+══ S4 — acknowledged means durable at multipart size (2048 MiB pushes to small): kills INSIDE the upload, seen not timed; and the orphans counted ══
+  ....  incomplete multipart uploads under scale-202609051141/small/git/objects/pack/ before the leg: 0
+  ....  iter 1: upload rLNhtdUNATof… on pack-7630157e02af223fa41058474377ed91df44aa8d.pack seen 30s after the push began; killing 2.0s later, INSIDE the upload
+  PASS  iter 1: told failed, and the bucket is unchanged (<absent>)
+  ....  iter 1: incomplete uploads now 1, holding 384.0 MiB of parts
+  ....  iter 2: upload rLNhtdUNATof… on pack-7630157e02af223fa41058474377ed91df44aa8d.pack seen 0s after the push began; killing 3.5s later, INSIDE the upload
+  PASS  iter 2: told failed, and the bucket is unchanged (<absent>)
+  ....  iter 2: incomplete uploads now 1, holding 384.0 MiB of parts
+  ....  iter 3: upload rLNhtdUNATof… on pack-7630157e02af223fa41058474377ed91df44aa8d.pack seen 0s after the push began; killing 2.0s later, INSIDE the upload
+  PASS  iter 3: told failed, and the bucket is unchanged (<absent>)
+  ....  iter 3: incomplete uploads now 1, holding 384.0 MiB of parts
+  ....  iter 4: the pack object now exists (upload complete); killing NOW, around the snapshot CAS and the report
+  PASS  iter 4: told ok, and the bucket holds it
+  ....  iter 4: incomplete uploads now 1, holding 384.0 MiB of parts
+  PASS  fsck --strict clean after 4 crashes
+  ....  1 acknowledged, 3 refused
+  PASS  the kills landed on both sides of the window
+  PASS  MEASURED: 1 orphaned multipart upload(s) holding 384.0 MiB of parts after 3 mid-upload kills — forge never aborts one (no list_uploads/abort_upload under forge/), so they are billed until a lifecycle rule or a hand abort
+  ....  aborting them now so the bucket can be emptied
+  ....  incomplete uploads after the abort: 0
+
+
+══ 7 passed, 0 failed, 0 inconclusive ══
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-121220.log  (raw timelines: /Users/ddalton/github/flint/forge/e2e/scale/results/work-20260905-121220)

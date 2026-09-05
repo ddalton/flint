@@ -1,0 +1,44 @@
+forge per-principal rights — context kind-flint-s3csi, repo agents/proj
+
+── F1 — consumers grants read to BOTH; the writer creates main via refs/for/main and both clone and read it
+  ok: writer seeds main
+  ok: main exists after the seed
+  ok: reader clones proj and reads main (read is granted by consumers)
+
+── F2 — the reader pushes agent/* (agentPattern) but is REFUSED a direct push to protected main
+  ok: reader pushes agent/reader-1788625136
+  ok: reader's direct push to main (refused)
+        ·  ! [remote rejected] main -> main (refs/heads/main is protected: push to refs/for/main to propose a merge)
+
+── F3 — refs/for/main: the reader is refused (not in mergeInto), the writer merges
+  ok: reader's merge request to refs/for/main (refused)
+        ·  ! [remote rejected] HEAD -> refs/for/main (only system:serviceaccount:agents:forge-writer may propose merges into refs/heads/main)
+  ok: writer's merge request to refs/for/main lands
+  ok: main now carries the writer's change
+  ok: the reader can pull the writer's merged result (read is shared)
+
+── F4 — the door OVERRIDES a forged X-Remote-User: the reader claiming to be the writer is still refused
+  ok: reader sends X-Remote-User: writer to the DOOR, pushes refs/for/main (refused)
+        ·  ! [remote rejected] HEAD -> refs/for/main (only system:serviceaccount:agents:forge-writer may propose merges into refs/heads/main)
+
+── F5 — the NetworkPolicy refuses a direct TCP connection to the repo pod's git port; the door is reachable
+command terminated with exit code 1
+  ok: reader cannot open forge-proj:8080 directly (nc rc=1)
+  ok: CONTROL: reader CAN open the door:80 — the block is peer-scoped, not a dead cluster
+
+── F6 — with the NetworkPolicy removed, the forged direct push LANDS — proving F5's block is real, not a dead port
+  ok: with no policy the port is now reachable (nc rc=0)
+  ok: forged X-Remote-User=writer, pushed straight to 8080, MERGED into main — the header is trusted with no NetworkPolicy
+command terminated with exit code 1
+  ok: the operator recreated the NetworkPolicy and the port is blocked again (nc rc=1)
+
+── F7 — the red hazard: with NO branches block, the reader pushes straight to main on 'open'
+  ok: reader seeds+pushes main on 'open' directly (no policy exists to refuse it)
+  ok: and it moved main on 'open'
+
+
+══ 17 ok, 0 bad ══
+
+# rerun (main already seeded): 17 ok, 0 bad
+# cluster: kind flint-s3csi, CNI Cilium 1.20.1 (NetworkPolicy enforced); images flint-forge-{operator,syncer,git}:dev cross-built from the working tree (HEAD 62775105 + peer's uncommitted packio/tests), loaded via forge/e2e/build-forge-images.sh
+# store: in-cluster MinIO (the s3csi rig), bucket s3bucket, prefix forge-drill/
