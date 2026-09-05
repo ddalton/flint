@@ -257,7 +257,7 @@ pub struct ExportSpec {
 /// work is not durable — but forge does not own agent pods and injects
 /// nothing into them, so a spec field asking for it would be a field
 /// the operator silently ignores. It ships as a script the agent's own
-/// pod runs (`docker/forge/wip-snapshot.sh`), documented in
+/// pod runs (`spdk-csi-driver/docker/forge/wip-snapshot.sh`), documented in
 /// `docs/flint-forge-for-agents.md`.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, JsonSchema)]
 #[serde(rename_all = "camelCase")]

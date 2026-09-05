@@ -19,7 +19,7 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-ver=${1:?usage: publish-images.sh <version> [all|lean|s3csi] [--dry-run]}
+ver=${1:?usage: publish-images.sh <version> [all|lean|s3csi|forge] [--dry-run]}
 # Scope, matching stage-prebuilt.sh. A lean-scoped release publishes the
 # operator image (which carries the lean binaries) and the sidecar, then
 # aliases the operator to its lean name — it does not republish the CSI
@@ -40,6 +40,7 @@ for a in "$@"; do
     case "$a" in
         lean)        SCOPE=lean ;;
         s3csi|passthrough) SCOPE=s3csi ;;
+        forge)       SCOPE=forge ;;
         all)         SCOPE=all ;;
         --dry-run)   dry=--dry-run ;;
     esac
@@ -91,6 +92,18 @@ if [ "$SCOPE" = s3csi ]; then
         "flint-s3-csi:docker/Dockerfile.s3csi.prebuilt" \
         "flint-s3-worker:docker/Dockerfile.s3worker" \
         "flint-s3-worker-lean:docker/Dockerfile.s3worker-lean"
+fi
+
+# The forge scope publishes three images of its own and republishes
+# nothing else. The git image is NOT `.prebuilt` by name but is by
+# nature — it stages the hook binary the same way — and it installs
+# nginx, fcgiwrap and git from the distribution, which is why it is the
+# one forge image with a package manager in it.
+if [ "$SCOPE" = forge ]; then
+    set -- \
+        "flint-forge-operator:docker/Dockerfile.forge-operator.prebuilt" \
+        "flint-forge-syncer:docker/Dockerfile.forge-syncer.prebuilt" \
+        "flint-forge-git:docker/Dockerfile.forge-git"
 fi
 
 minor=${ver%.*}      # 1.31.0 -> 1.31
@@ -157,6 +170,14 @@ done
 # `docker pull` and `helm pull` disagree about what a tag means.
 set -- "flint-lite-operator:flint-lean-operator"
 
+# …except in a forge-scoped release, which builds no operator image at
+# this version. Aliasing would then copy the PREVIOUS release's digest
+# under this version's tag — the provenance drift the alias exists to
+# prevent, produced by the alias itself.
+if [ "$SCOPE" = forge ]; then
+    set --
+fi
+
 for spec in "$@"; do
     from=${spec%%:*}
     to=${spec#*:}
@@ -170,4 +191,6 @@ done
 
 echo
 echo "published $ver (+ $minor, $major, latest) for scope=$SCOPE"
-echo "aliased   flint-lite-operator -> flint-lean-operator at the same digest"
+if [ "$SCOPE" != forge ]; then
+    echo "aliased   flint-lite-operator -> flint-lean-operator at the same digest"
+fi

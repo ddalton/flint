@@ -64,7 +64,15 @@ case "$SCOPE" in
     lean) BINS="flint-lite-operator flint-hub-gateway flint-lean-operator" ;;
     s3csi|passthrough)
           SCOPE=s3csi; BINS="flint-s3-csi-node flint-s3-broker" ;;
-    *)    echo "usage: stage-prebuilt.sh [all|lean|s3csi]" >&2; exit 2 ;;
+    # A FORGE-scoped release publishes three images of its own and
+    # touches none of the others: the controller and the door
+    # (Dockerfile.forge-operator.prebuilt), the syncer
+    # (Dockerfile.forge-syncer.prebuilt, which also carries flint-sync
+    # for the legible export), and the git server
+    # (Dockerfile.forge-git, which carries the hook). Its binaries come
+    # from THREE crates, which is why it has its own clock below.
+    forge) BINS="flint-forge-operator flint-hub-gateway" ;;
+    *)    echo "usage: stage-prebuilt.sh [all|lean|s3csi|forge]" >&2; exit 2 ;;
 esac
 
 # Binaries from the LEAN crate (lean/sidecar) — a separate crate with a
@@ -80,12 +88,27 @@ LEAN_BINS="flint-sync flint-lean-gateway"
 if [ "$SCOPE" = s3csi ]; then
     LEAN_BINS=""
 fi
+# A forge release stages `flint-sync` and nothing else from the lean
+# crate: the syncer image COPYs it, because the legible export runs the
+# SHIPPED lean binary rather than reimplementing lean's publish
+# ordering. Omitting it does not produce an export-less image — it
+# produces no image at all, at "COPY failed".
+if [ "$SCOPE" = forge ]; then
+    LEAN_BINS="flint-sync"
+fi
+
+# Binaries from the FORGE crate (forge/syncer). Only a forge-scoped
+# release stages them.
+FORGE_BINS=""
+if [ "$SCOPE" = forge ] || [ "$SCOPE" = all ]; then
+    FORGE_BINS="flint-forge-syncer flint-forge-hook"
+fi
 
 # Binaries from the WORKER crate (crates/flint-s3-worker): PID 1 of
 # every worker pod the s3.csi.chert.us plugin creates, and the payload both
 # worker images COPY (Dockerfile.s3worker, Dockerfile.s3worker-lean).
 WORKER_BINS="flint-s3-worker"
-if [ "$SCOPE" = lean ]; then
+if [ "$SCOPE" = lean ] || [ "$SCOPE" = forge ]; then
     WORKER_BINS=""
 fi
 
@@ -131,6 +154,25 @@ echo "newest lean source: $(date -r "$lean_mtime" '+%Y-%m-%d %H:%M:%S')  ${lean_
 # The worker crate (crates/flint-s3-worker) has its own clock too. It
 # links nothing of ours, so its own sources and lockfile are the whole
 # of it.
+# The forge crate has the same shape as the lean one: it links
+# crates/flint-store, so a store edit changes its binaries with no
+# forge/syncer/src file touched at all.
+forge_crate=$(cd "$here/../forge/syncer" && pwd)
+if [ -n "$FORGE_BINS" ]; then
+    newest_forge=$(find "$forge_crate/src" "$forge_crate/Cargo.toml" "$forge_crate/Cargo.lock" \
+                        "$store_crate/src" "$store_crate/Cargo.toml" \
+                        -type f -print0 \
+                   | xargs -0 stat -f '%m %N' | sort -rn | head -1)
+    forge_mtime=${newest_forge%% *}
+    forge_name=${newest_forge#* }
+    case "$forge_mtime" in
+        ''|*[!0-9]*)
+            echo "cannot determine the newest FORGE source mtime — refusing to stage blind" >&2
+            exit 2 ;;
+    esac
+    echo "newest forge source: $(date -r "$forge_mtime" '+%Y-%m-%d %H:%M:%S')  ${forge_name#$here/../}"
+fi
+
 worker_crate=$(cd "$here/../crates/flint-s3-worker" && pwd)
 newest_worker=$(find "$worker_crate/src" "$worker_crate/Cargo.toml" "$worker_crate/Cargo.lock" \
                      -type f -print0 \
@@ -158,6 +200,22 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
         m=$(stat -f '%m' "$src")
         if [ "$m" -lt "$src_mtime" ]; then
             echo "  ✗ STALE   $arch/$b built $(date -r "$m" '+%m-%d %H:%M') — older than the source" >&2
+            stale=1; continue
+        fi
+        cp "$src" "$dest/$arch/$b"
+        echo "  ✓ staged  $arch/$b  ($(date -r "$m" '+%m-%d %H:%M'), $(( $(stat -f '%z' "$src") / 1048576 )) MiB)"
+    done
+    for b in $FORGE_BINS; do
+        src="$forge_crate/target/$triple/release/$b"
+        if [ ! -f "$src" ]; then
+            echo "  ✗ MISSING $arch/$b — build it before staging" >&2
+            echo "            (cd forge/syncer && cargo zigbuild --release --features s3 \\" >&2
+            echo "               --target $triple)" >&2
+            stale=1; continue
+        fi
+        m=$(stat -f '%m' "$src")
+        if [ "$m" -lt "$forge_mtime" ]; then
+            echo "  ✗ STALE   $arch/$b built $(date -r "$m" '+%m-%d %H:%M') — older than the forge source" >&2
             stale=1; continue
         fi
         cp "$src" "$dest/$arch/$b"

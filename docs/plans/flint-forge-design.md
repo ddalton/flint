@@ -395,7 +395,7 @@ gone. Partial clone (`--filter=blob:none`) is for agents with a sparse
 working set, not a storm lever (§8).
 
 **Uncommitted work has no RPO**, git's contract, and forge keeps it.
-A harness that wants one anyway runs `docker/forge/wip-snapshot.sh` in
+A harness that wants one anyway runs `spdk-csi-driver/docker/forge/wip-snapshot.sh` in
 its OWN pod: `GIT_INDEX_FILE=<tmp> git add -A`, `write-tree`,
 `commit-tree -p HEAD`, `push --force <c>:refs/wip/<pod>` — plumbing,
 because `git commit` against a throwaway index still moves HEAD (the
@@ -665,7 +665,7 @@ slow in ways that matter for a fleet. Phase 0 runs it as the control.
    polls the server's own `/status`, computes the phase and moves the
    ladder. `flint-forge-operator` is the controller; `crdgen -- forge`
    emits the CRD; `flint-forge-chart` installs it;
-   `docker/Dockerfile.forge-git` and `.forge-syncer.prebuilt` build the
+   `spdk-csi-driver/docker/Dockerfile.forge-git` and `.forge-syncer.prebuilt` build the
    two server images.
 
    Four things worth recording. **The policy ConfigMap is deliberately

@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1
+# flint-forge-operator — the FlintRepo controller and the git door, in a
+# runtime-only image for HOST-CROSS-COMPILED binaries.
+#
+#   for T in x86_64 aarch64; do
+#     cargo zigbuild --release --target $T-unknown-linux-musl \
+#       --bin flint-forge-operator --bin flint-hub-gateway; done
+#   # stage: docker/prebuilt/{amd64,arm64}/{flint-forge-operator,flint-hub-gateway}
+#   for A in amd64 arm64; do
+#     docker build --platform linux/$A -f docker/Dockerfile.forge-operator.prebuilt \
+#       --build-arg BIN_DIR=docker/prebuilt \
+#       -t dilipdalton/flint-forge-operator:<tag>-$A . && \
+#     docker push dilipdalton/flint-forge-operator:<tag>-$A; done
+#
+# ## Why this is not the flint-lite-operator image
+#
+# It would have been the cheaper packaging, and `Dockerfile.operator.
+# prebuilt` already carries four binaries for exactly that reason. But
+# that image COPYs each binary unconditionally, so adding one to it
+# makes EVERY scope stage it or fail the release at "COPY failed" — the
+# hazard its own comments record about `flint-lean-gateway`. Forge is
+# pre-release; making a released image's build depend on it would be
+# spending the lite and lean releases' reliability on it.
+#
+# `flint-hub-gateway` rides here too, and that IS the same argument in
+# reverse: the door is the same binary the lite chart runs, but a forge
+# deployment needs one built from a tree that HAS the `Door::Git` arm.
+# Publishing it here lets forge stand up its own door without touching
+# the gateway a lite fleet is already running.
+FROM ubuntu:24.04
+
+ARG BIN_DIR=docker/prebuilt
+ARG TARGETARCH
+
+# ca-certificates only. In-cluster the API server is verified with the
+# service account's mounted CA; an out-of-cluster kubeconfig needs the
+# system store.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY ${BIN_DIR}/${TARGETARCH}/flint-forge-operator /usr/local/bin/flint-forge-operator
+COPY ${BIN_DIR}/${TARGETARCH}/flint-hub-gateway /usr/local/bin/flint-hub-gateway
+
+# The operator talks to the API server and writes nothing to disk, so
+# the chart runs it non-root with a read-only root filesystem.
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/flint-forge-operator"]

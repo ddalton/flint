@@ -8,14 +8,16 @@
 #
 # Design of record: docs/plans/flint-forge-design.md
 
-# The operator image. Composed as {repository}/{name}:{tag|appVersion}.
-# It is an ALIAS of the flint-lite-operator image — same crate, same
-# build, one manifest digest, three names. The chart execs
-# /usr/local/bin/flint-forge-operator, never the image's own ENTRYPOINT.
+# The operator image, which carries the FlintRepo controller AND the
+# git door (flint-hub-gateway built from a tree that has the Door::Git
+# arm). It is its OWN image rather than another name for
+# flint-lite-operator: that one COPYs each binary unconditionally, so
+# adding forge's would make every lite and lean release depend on a
+# pre-release component.
 image:
   repository: dilipdalton
   name: flint-forge-operator
-  tag: ""
+  tag: "1.46.0-forge.1"
   ref: ""
   pullPolicy: IfNotPresent
 
@@ -24,10 +26,11 @@ image:
 # operator re-renders the fleet.
 server:
   # nginx + fcgiwrap + git http-backend + the two hooks.
-  gitImage: dilipdalton/flint-forge-git:1.45.0
+  gitImage: dilipdalton/flint-forge-git:1.46.0-forge.1
   # The one writer of the repository's S3 state; the pod's main
-  # container, so its exit restarts the pod.
-  syncerImage: dilipdalton/flint-forge-syncer:1.45.0
+  # container, so its exit restarts the pod. It also carries flint-sync,
+  # because the legible export runs the shipped lean binary.
+  syncerImage: dilipdalton/flint-forge-syncer:1.46.0-forge.1
   logLevel: info
 
 # One replica. The reconcile is idempotent and the arbitration is a

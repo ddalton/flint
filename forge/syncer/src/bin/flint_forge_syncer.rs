@@ -225,6 +225,10 @@ async fn main() {
             allow_non_fast_forward: env_globs("FLINT_FORGE_ALLOW_NON_FF"),
             ..Policy::default()
         }),
+        export,
+        bundle,
+        prune,
+        lfs,
     };
 
     let holder_id = format!("forge-{}", uuid::Uuid::new_v4());

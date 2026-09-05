@@ -126,7 +126,7 @@ holds the pack and names the ref before the client is told `ok`.
 It has no RPO. That is git's contract, and forge keeps it.
 
 For a harness that would rather not lose an hour of edits to a spot
-reclamation, `docker/forge/wip-snapshot.sh` pushes the working tree to
+reclamation, `spdk-csi-driver/docker/forge/wip-snapshot.sh` pushes the working tree to
 `refs/wip/<pod>` on a timer. Run it in the agent's own pod — forge owns
 repository servers, not agent pods, and injects nothing.
 

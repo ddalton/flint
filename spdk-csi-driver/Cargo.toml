@@ -40,6 +40,16 @@ path = "src/bin/flint_lite_operator.rs"
 name = "flint-hub-gateway"
 path = "src/bin/flint_hub_gateway.rs"
 
+# flint-forge-operator: the FlintRepo controller. Named explicitly, like
+# every other binary here, because a file-stem-derived target is
+# `flint_forge_operator` with underscores — and the staging script, the
+# Dockerfile and the chart's `command:` all spell it with hyphens. The
+# mismatch is invisible until a release tries to stage a binary that was
+# never built under that name.
+[[bin]]
+name = "flint-forge-operator"
+path = "src/bin/flint_forge_operator.rs"
+
 # Prints the FlintShare CRD YAML (the chart's crds/ bootstrap copy).
 # The operator applies its own compiled-in copy at startup regardless.
 [[bin]]
