@@ -136,6 +136,42 @@ pub async fn advertise(git: &Git, url: &str) -> ForgeResult<()> {
     Ok(())
 }
 
+/// Re-advertise the snapshot's bundle after a restore.
+///
+/// THE ADVERTISEMENT IS NOT DURABLE AND THE BUNDLE IS. `advertise`
+/// writes into the repository's LOCAL git config, and both that config
+/// and this module's own record live on the pod's `emptyDir`; the
+/// bundle object and the snapshot that names it live in the bucket. So
+/// every restart came back serving a repository whose bundle existed,
+/// was paid for, and was advertised to nobody — until `every_secs`
+/// elapsed and a new one was cut.
+///
+/// That window is not an edge case for forge. A repository that idles
+/// to zero and wakes on a clone storm restores at exactly the moment
+/// the storm arrives, which is exactly when the lever is supposed to
+/// be pulled. The first cluster run found the config empty after a
+/// wake while the snapshot still named `d3e4591….bundle`.
+///
+/// Re-signing rather than re-cutting is the point: the object is
+/// already there, and a fresh presigned URL costs one signature and no
+/// bytes.
+pub async fn readvertise(sc: &mut Syncer, cfg: &BundleConfig, now: u64) -> ForgeResult<()> {
+    let Some(name) = sc.cell.as_ref().and_then(|c| c.snap.bundles.first()).cloned() else {
+        return Ok(());
+    };
+    let url = sc.store.presign_get(&sc.cfg.bundle_key(&name), cfg.url_ttl_secs).await?;
+    advertise(&sc.git, &url).await?;
+    // Keep the local record in step so the resign timer does not fire
+    // immediately, and so a later sweep sees the name this server is
+    // actually handing out.
+    save_record(
+        sc,
+        &Record { tip: None, name: Some(name.clone()), cut_unix: 0, signed_unix: now },
+    )?;
+    eprintln!("flint-forge: bundle re-advertised from the snapshot ({name})");
+    Ok(())
+}
+
 /// Stop advertising. Used when the bundle the config names has been
 /// swept, so a client is never handed a URL that 404s.
 pub async fn withdraw(git: &Git) -> ForgeResult<()> {

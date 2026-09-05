@@ -12,6 +12,20 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed — flint forge, the clone storm
+
+- **A restore came back with no bundle advertisement.** `advertise`
+  writes into the repository's LOCAL git config, and both that config
+  and the bundle module's own record live on the pod's `emptyDir`,
+  while the bundle object and the snapshot naming it live in the
+  bucket. So every restart served a repository whose bundle existed,
+  was paid for, and was advertised to nobody — until `every_secs`
+  elapsed and a new one was cut. For forge that window is not an edge
+  case: a repository that idles to zero restores at the moment a clone
+  storm wakes it, which is exactly when the lever should be pulled.
+  `bundle::readvertise` now re-signs the snapshot's bundle during
+  startup, before the server reports Serving.
+
 ### Fixed — flint forge, first cluster run
 
 Three defects that only a real cluster could find. All three were in

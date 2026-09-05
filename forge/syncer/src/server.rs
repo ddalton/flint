@@ -23,7 +23,7 @@ use super::batch::{self, PushReport};
 use super::policy::Policy;
 use super::status::{self, Facts, Phase};
 use super::uds::{self, HookResponse, Incoming};
-use super::{lease, restore, ForgeError, ForgeResult, Syncer};
+use super::{bundle, lease, restore, ForgeError, ForgeResult, Syncer};
 
 pub struct ServerOpts {
     pub socket: PathBuf,
@@ -121,6 +121,19 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
     restore::restore(&mut sc).await?;
     let branch = sc.cfg.default_branch.clone();
     restore::set_default_branch(&sc, &branch).await?;
+    // The bundle advertisement lives in the repository's local config,
+    // which the restore just recreated empty. Put it back BEFORE
+    // serving: a wake from idle-to-zero is exactly the moment a storm
+    // arrives, and an unadvertised bundle makes the storm lever inert
+    // precisely when it is needed.
+    if let Some(bcfg) = opts.bundle.as_ref() {
+        if let Err(e) = bundle::readvertise(&mut sc, bcfg, super::now_unix()).await {
+            // Not fatal: a repository that serves without an
+            // advertisement is slow under a storm, not wrong.
+            eprintln!("flint-forge: could not re-advertise the bundle ({e}); clones will come \
+                       from this server until the next cut");
+        }
+    }
     publish(&shared, &sc, Phase::Serving);
 
     // ── serve ────────────────────────────────────────────────────────

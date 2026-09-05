@@ -1313,6 +1313,74 @@ async fn a_bundle_is_cut_uploaded_and_advertised() {
     assert_eq!(cell.snap.seq, seq_after_push + 1, "one CAS, not two");
 }
 
+/// THE DEFECT THE FIRST CLUSTER RUN FOUND. The advertisement lives in
+/// the repository's LOCAL git config and the bundle lives in the
+/// bucket, so a restore came back serving a repository whose bundle
+/// existed, was paid for, and was advertised to nobody — until
+/// `every_secs` elapsed and a new one was cut.
+///
+/// For forge that window is not an edge case: a repository that idles
+/// to zero restores at the moment a clone storm wakes it, which is
+/// exactly when the lever is meant to be pulled. On the cluster the
+/// config came back empty while the snapshot still named the bundle.
+#[tokio::test]
+async fn a_restore_re_advertises_the_bundle_the_snapshot_names() {
+    use super::bundle::{self, BundleConfig};
+    let store = Arc::new(MemoryStore::new());
+    let cfg = BundleConfig { every_secs: 3600, url_ttl_secs: 600 };
+    let name = {
+        let mut rig = Rig::with_store(store.clone(), "a").await;
+        rig.start().await;
+        let c = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+        rig.run(vec![push(1, vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: zero(),
+            new_oid: c.clone(),
+        }])])
+        .await;
+        let name = bundle::maybe_run(&mut rig.sc, &cfg, 1_000_000)
+            .await
+            .expect("bundle")
+            .expect("one was due");
+        // Carry it into the snapshot, as the next batch's CAS does.
+        rig.sc.pending_bundle = Some(name.clone());
+        let c2 = rig.stage_commit(Some(&c), &[("a.txt", "two\n")], "second").await;
+        rig.run(vec![push(2, vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: c,
+            new_oid: c2,
+        }])])
+        .await;
+        name
+    };
+
+    // A NEW server on a NEW empty disk — a wake from idle-to-zero.
+    let mut cold = Rig::with_store(store.clone(), "b").await;
+    cold.start().await;
+    assert_eq!(
+        cold.sc.cell().unwrap().snap.bundles,
+        vec![name.clone()],
+        "the snapshot is the durable record and must still name it"
+    );
+
+    // `Rig::start` restores but is not the server's startup path, so
+    // drive the same call the server makes.
+    bundle::readvertise(&mut cold.sc, &cfg, 2_000_000).await.expect("re-advertise");
+
+    let git = cold.sc.git.clone();
+    let get = |k: &str| {
+        let git = git.clone();
+        let k = k.to_string();
+        async move { git.run(&["config", "--get", &k], None).await.unwrap() }
+    };
+    assert_eq!(get("uploadpack.advertiseBundleURIs").await.stdout.trim(), "true");
+    let uri = get(&format!("bundle.{}.uri", bundle::BUNDLE_ID)).await.stdout;
+    assert!(
+        uri.contains(&name),
+        "a restored server must hand out the bundle the snapshot names, not nothing: {uri:?}"
+    );
+}
+
 /// The floor, the already-cut check, and the re-sign clock. A bundle is
 /// a full copy of the repository, so cutting one per push would spend
 /// more than the storm it saves.
