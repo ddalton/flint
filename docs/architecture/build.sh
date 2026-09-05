@@ -12,10 +12,13 @@
 # Source, edited by hand:
 #   flint-front-ends-architecture.html   layout, ALL prose, and the docs-only
 #                                        tables/figures (div.docs, never printed)
-#   diagrams/*.svg                       nine A3-landscape plates (the PDF)
-#   diagrams/portrait/*.svg              five portrait figures (the Docs version)
+#   diagrams.py                          every diagram: twelve A3 plates and
+#                                        seven portrait figures, one grammar
 #
-# Built, never edited by hand:
+# Built, never edited by hand (the SVGs are committed so the HTML and any
+# converter can reference them, but diagrams.py is their source):
+#   diagrams/*.svg                         the A3-landscape plates (the PDF)
+#   diagrams/portrait/*.svg                the portrait figures (the Docs version)
 #   flint-front-ends-architecture.pdf      the canonical deck, 1 page per section
 #   flint-front-ends-architecture.md       the A3 rendition, referencing the SVGs
 #   flint-front-ends-architecture.docs.md  the Docs/Word rendition: native tables
@@ -24,7 +27,7 @@
 #
 # WHY TWO RENDITIONS AND ONE SOURCE
 #
-# The PDF is a fixed-page deck: nine dense A3 plates. Google Docs is a flowing
+# The PDF is a fixed-page deck: twelve dense A3 plates. Google Docs is a flowing
 # document people comment and edit in, it cannot place SVG at all, and at its
 # default Letter portrait an A3 plate renders at 19% scale — measured, and
 # unreadable. So four of the pages ship as NATIVE TABLES (searchable and
@@ -51,6 +54,12 @@ case "$mode" in --build|--check|--geometry) ;; *)
 esac
 
 command -v python3 >/dev/null || { echo "python3 not found" >&2; exit 2; }
+
+# ── 0. the diagrams are generated, and the generator checks its own fit ───
+# Every card asserts that its wrapped text fits its box (an estimate; step
+# 1b measures the truth in Chrome). A hand edit to an SVG is lost here.
+echo "==> generating diagrams"
+python3 "$here/diagrams.py" >/dev/null
 
 # ── 1. every diagram is well-formed, and every reference resolves ───────────
 echo "==> validating diagrams and references"
@@ -96,6 +105,8 @@ for p in svgs:
     # shows it. Compare every text baseline against every box it falls in.
     boxes = []
     for r in doc.getElementsByTagName("rect"):
+        if r.getAttribute("class") == "halo":   # the white mat behind an arrow label, not a box
+            continue
         try:
             boxes.append((float(r.getAttribute("x")), float(r.getAttribute("y")),
                           float(r.getAttribute("width")), float(r.getAttribute("height")),
@@ -177,7 +188,7 @@ window.addEventListener('load', function () {
     return { x:+r.getAttribute('x'), y:+r.getAttribute('y'),
              w:+r.getAttribute('width'), h:+r.getAttribute('height'),
              cls:r.getAttribute('class') || '' };
-  }).filter(function (b) { return !isNaN(b.x) && !isNaN(b.w); });
+  }).filter(function (b) { return !isNaN(b.x) && !isNaN(b.w) && b.cls !== 'halo'; });
   Array.from(svg.querySelectorAll('text')).forEach(function (t) {
     var x = +t.getAttribute('x'), y = +t.getAttribute('y');
     if (isNaN(x) || isNaN(y)) return;
@@ -361,7 +372,7 @@ if command -v pdfinfo >/dev/null; then
 fi
 if command -v pdftotext >/dev/null; then
     txt=$(pdftotext "$pdf" - 2>/dev/null || true)
-    for probe in "flint-lite" "flint-lean" "flint-passthrough" "AUTH_SYS" "TokenReview"; do
+    for probe in "flint-lite" "flint-lean" "flint-passthrough" "flint-forge" "AUTH_SYS" "TokenReview" "X-Remote-User"; do
         case "$txt" in
             *"$probe"*) ;;
             *) echo "  WARN: '$probe' is in the source but not in the rendered text" >&2 ;;

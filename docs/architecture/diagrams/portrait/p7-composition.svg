@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 470" role="img"
+     aria-label="Composition: one agent pod holds a forge clone, a lean workspace, a passthrough mount and a hub share, each in its own prefix of one bucket; forge exports main into a further prefix as a real lean workspace that readers mount. One writer per prefix is a mechanism within a product and a convention across them; an export is never repaired.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .t1{font-size:14.96px;font-weight:600}
+  .t2{font-size:11.44px;font-weight:600}
+  .t3{font-size:10.56px}
+  .t3b{font-size:10.56px;font-weight:600;fill:#334155}
+  .t4{font-size:9.68px;fill:#64748b}
+  .t4b{font-size:9.68px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:9.24px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:8.36px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:9.68px;font-weight:600;fill:#ffffff}
+  .on{font-size:11.44px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:9.68px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
+</style>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<rect x="8" y="8" width="346" height="300" rx="10" class="grp"/>
+<text class="cap" x="24" y="30">ONE AGENT POD</text>
+<rect x="24" y="40" width="180" height="52" rx="7" class="b-forge"/>
+<text class="t2 c-forge" x="40" y="64">/src — git clone</text>
+<line class="l-forge" x1="204" y1="66" x2="240" y2="66" marker-end="url(#a-forge)"/>
+<rect x="244" y="46" width="100" height="40" rx="7" class="bx"/>
+<path class="f-forge" d="M251,46 H337 A7,7 0 0 1 344,53 V51 H244 V53 A7,7 0 0 1 251,46 Z"/>
+<text class="mono" x="252" y="70" xml:space="preserve">A  repo/</text>
+<rect x="24" y="104" width="180" height="52" rx="7" class="b-lean"/>
+<text class="t2 c-lean" x="40" y="128">/workspace — lean</text>
+<line class="l-lean" x1="204" y1="130" x2="240" y2="130" marker-end="url(#a-lean)"/>
+<rect x="244" y="110" width="100" height="40" rx="7" class="bx"/>
+<path class="f-lean" d="M251,110 H337 A7,7 0 0 1 344,117 V115 H244 V117 A7,7 0 0 1 251,110 Z"/>
+<text class="mono" x="252" y="134" xml:space="preserve">C  ws/&lt;agent&gt;/</text>
+<rect x="24" y="168" width="180" height="52" rx="7" class="b-pass"/>
+<text class="t2 c-pass" x="40" y="192">/data — passthrough</text>
+<line class="l-pass" x1="204" y1="194" x2="240" y2="194" marker-end="url(#a-pass)"/>
+<rect x="244" y="174" width="100" height="40" rx="7" class="bx"/>
+<path class="f-pass" d="M251,174 H337 A7,7 0 0 1 344,181 V179 H244 V181 A7,7 0 0 1 251,174 Z"/>
+<text class="mono" x="252" y="198" xml:space="preserve">D  datasets/</text>
+<rect x="24" y="232" width="180" height="52" rx="7" class="b-lite"/>
+<text class="t2 c-lite" x="40" y="256">/shared — hub share</text>
+<line class="l-lite" x1="204" y1="258" x2="240" y2="258" marker-end="url(#a-lite)"/>
+<rect x="244" y="238" width="100" height="40" rx="7" class="bx"/>
+<path class="f-lite" d="M251,238 H337 A7,7 0 0 1 344,245 V243 H244 V245 A7,7 0 0 1 251,238 Z"/>
+<text class="mono" x="252" y="262" xml:space="preserve">E  shared/</text>
+<rect x="366" y="8" width="266" height="300" rx="7" class="s3"/>
+<text class="t2" x="382" y="32">one bucket, one writer per prefix</text>
+<line class="hair" x1="382" y1="44" x2="616" y2="44"/>
+<text class="t4" x="382" y="64">A repo/ — the bare repository, its lease, LFS objects.</text>
+<text class="t4" x="382" y="77">Writer: the syncer.</text>
+<text class="t4" x="382" y="96">B repo-main/ — forge's export of main, a REAL lean</text>
+<text class="t4" x="382" y="110">workspace (files/, .flint/lean/). Writer: the syncer;</text>
+<text class="t4" x="382" y="123">readers: lean, passthrough. The only bridge.</text>
+<text class="t4" x="382" y="142">C ws/&lt;agent&gt;/ — one lean workspace. Writer: lean.</text>
+<text class="t4" x="382" y="161">D datasets/ — objects as-is. E shared/ — the hub's.</text>
+<text class="t4b" x="382" y="182">Composition is in the reading, never the writing.</text>
+<rect x="8" y="320" width="306" height="140" rx="7" class="bx"/>
+<text class="t2" x="24" y="344">The rule: mechanism within, convention across</text>
+<text class="t4" x="24" y="364">forge arbitrates on git/epoch, lean on .flint/lean/epoch:</text>
+<text class="t4" x="24" y="377">pointed at one prefix they never meet — no 412, no fence, no</text>
+<text class="t4" x="24" y="390">log line (C1). The operator sees FlintRepos only. A read-write</text>
+<text class="t4" x="24" y="403">lean sidecar on the export prefix does contend, and used to</text>
+<text class="t4" x="24" y="416">wedge the repository (C2, now bounded).</text>
+<rect x="326" y="320" width="306" height="140" rx="7" class="bx"/>
+<path class="f-red" d="M326,327 A7,7 0 0 1 333,320 H331 V460 H333 A7,7 0 0 1 326,453 Z"/>
+<text class="t2 c-red" x="342" y="344">An export is a mirror that is never repaired</text>
+<text class="t4" x="342" y="364">a foreign overwrite is not noticed by the next export (C3) and</text>
+<text class="t4" x="342" y="377">every reader adopts it — lean copies the bytes into a</text>
+<text class="t4" x="342" y="390">workspace (C4); a foreign delete is refused loudly and never</text>
+<text class="t4" x="342" y="403">restored (C5). A read-write mount over an export prefix is</text>
+<text class="t4" x="342" y="416">unsupported.</text>
+</svg>

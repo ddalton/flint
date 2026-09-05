@@ -1,0 +1,218 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 836" role="img"
+     aria-label="A ten-row comparison of flint-lite, flint-lean, flint-passthrough and flint-forge across what the pod sees, POSIX fidelity, concurrent writers, reader consistency, multi-cluster shape, enforced identity, user isolation, per-cluster install, recovery point, and the data class each is for.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .t1{font-size:17.0px;font-weight:600}
+  .t2{font-size:13.0px;font-weight:600}
+  .t3{font-size:12.0px}
+  .t3b{font-size:12.0px;font-weight:600;fill:#334155}
+  .t4{font-size:11.0px;fill:#64748b}
+  .t4b{font-size:11.0px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:9.5px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:11.0px;font-weight:600;fill:#ffffff}
+  .on{font-size:13.0px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:11.0px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
+</style>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<rect x="24" y="18" width="220" height="38" rx="6" class="hd-lbl"/>
+<text class="on" x="38" y="42">dimension</text>
+<rect x="250" y="18" width="326" height="38" rx="6" class="hd-lite"/>
+<text class="on" x="413" y="42" style="text-anchor:middle">flint-lite</text>
+<rect x="582" y="18" width="326" height="38" rx="6" class="hd-lean"/>
+<text class="on" x="745" y="42" style="text-anchor:middle">flint-lean</text>
+<rect x="914" y="18" width="326" height="38" rx="6" class="hd-pass"/>
+<text class="on" x="1077" y="42" style="text-anchor:middle">flint-passthrough</text>
+<rect x="1246" y="18" width="330" height="38" rx="6" class="hd-forge"/>
+<text class="on" x="1411" y="42" style="text-anchor:middle">flint-forge</text>
+<rect x="24" y="62" width="220" height="71" rx="0" class="lbl"/>
+<text class="t2" x="38" y="84">What the pod sees</text>
+<text class="t4" x="38" y="102">the shape of the thing</text>
+<text class="t4" x="258" y="84">a shared NFS mount served by one hub pod that every</text>
+<text class="t4" x="258" y="99">client reaches over the network — one tree, many pods, live</text>
+<text class="t4" x="590" y="84">plain files on local disk, checked out before the first line</text>
+<text class="t4" x="590" y="99">runs and published back on a boundary — one pod's own</text>
+<text class="t4" x="590" y="114">tree</text>
+<text class="t4" x="922" y="84">an S3 prefix presented as files by Mountpoint for S3 —</text>
+<text class="t4" x="922" y="99">objects, with a directory-shaped view over them</text>
+<text class="t4" x="1254" y="84">a git remote. The working tree is a local clone the pod</text>
+<text class="t4" x="1254" y="99">owns; history, branches and a merge policy live at the</text>
+<text class="t4" x="1254" y="114">server</text>
+<line class="hair" x1="24" y1="133" x2="1576" y2="133"/>
+<rect x="24" y="133" width="220" height="71" rx="0" class="lbl"/>
+<rect x="244" y="133" width="1332" height="71" rx="0" class="rowb"/>
+<text class="t2" x="38" y="155">POSIX fidelity</text>
+<text class="t4" x="38" y="173">what actually works</text>
+<text class="t4b" x="258" y="155">Full, and shared.</text>
+<text class="t4" x="258" y="170">byte-range locks, atomic rename, O_EXCL — across pods</text>
+<text class="t4" x="258" y="185">and clusters</text>
+<text class="t4b" x="590" y="155">Full, and local.</text>
+<text class="t4" x="590" y="170">a real filesystem, so git, sqlite and hard links work — for</text>
+<text class="t4" x="590" y="185">one pod</text>
+<text class="t4b c-red" x="922" y="155">None to speak of.</text>
+<text class="t4" x="922" y="170">no rename, no append, no in-place write — at any setting,</text>
+<text class="t4" x="922" y="185">deliberately</text>
+<text class="t4b" x="1254" y="155">Full, and local — for tracked files.</text>
+<text class="t4" x="1254" y="170">the clone is a real disk; what is durable is what is</text>
+<text class="t4" x="1254" y="185">committed</text>
+<line class="hair" x1="24" y1="204" x2="1576" y2="204"/>
+<rect x="24" y="204" width="220" height="71" rx="0" class="lbl"/>
+<text class="t2" x="38" y="226">Concurrent writers</text>
+<text class="t4" x="38" y="244">per tree</text>
+<text class="t4b" x="258" y="226">Many, coordinated.</text>
+<text class="t4" x="258" y="241">the only front end where two pods can edit one directory</text>
+<text class="t4" x="258" y="256">and both be right</text>
+<text class="t4b" x="590" y="226">Exactly one, enforced.</text>
+<text class="t4" x="590" y="241">a second syncer is REFUSED, not merged — several agents</text>
+<text class="t4" x="590" y="256">integrate through git instead</text>
+<text class="t4b c-red" x="922" y="226">Many, uncoordinated.</text>
+<text class="t4" x="922" y="241">two writers on one key race; the loser's write is gone and</text>
+<text class="t4" x="922" y="256">nothing records it</text>
+<text class="t4b" x="1254" y="226">Many, serialised by the server.</text>
+<text class="t4" x="1254" y="241">one syncer per repository; a stale push is refused by name;</text>
+<text class="t4" x="1254" y="256">a merge is a push to refs/for/&lt;target&gt;</text>
+<line class="hair" x1="24" y1="275" x2="1576" y2="275"/>
+<rect x="24" y="275" width="220" height="71" rx="0" class="lbl"/>
+<rect x="244" y="275" width="1332" height="71" rx="0" class="rowb"/>
+<text class="t2" x="38" y="297">What a reader sees</text>
+<text class="t4" x="38" y="315">the consistency contract</text>
+<text class="t4" x="258" y="297">the live tree, strongly — close-to-open, no RPO lag, through</text>
+<text class="t4" x="258" y="312">the coherence authority</text>
+<text class="t4" x="590" y="297">the last PUBLISHED boundary, never your last write; gated</text>
+<text class="t4" x="590" y="312">mode makes it all-or-nothing</text>
+<text class="t4" x="922" y="297">whatever S3 currently holds, with S3's own consistency</text>
+<text class="t4" x="922" y="312">and nothing added</text>
+<text class="t4" x="1254" y="297">on fetch, every acknowledged push — served by the write</text>
+<text class="t4" x="1254" y="312">authority, never stale, never from S3; between fetches, a</text>
+<text class="t4" x="1254" y="327">snapshot with no signal</text>
+<line class="hair" x1="24" y1="346" x2="1576" y2="346"/>
+<rect x="24" y="346" width="220" height="71" rx="0" class="lbl"/>
+<text class="t2" x="38" y="368">Across clusters</text>
+<text class="t4" x="38" y="386">the fleet shape</text>
+<text class="t4" x="258" y="368">ONE hub, mounted from N clusters. Works unchanged — but</text>
+<text class="t4" x="258" y="383">needs unique client names, a network boundary and a</text>
+<text class="t4" x="258" y="398">keepalive</text>
+<text class="t4" x="590" y="368">N independent syncers, one bucket. Clusters never talk; the</text>
+<text class="t4" x="590" y="383">lease lives in the bucket, so single-writer holds ACROSS</text>
+<text class="t4" x="590" y="398">clusters</text>
+<text class="t4" x="922" y="368">N independent mounts, one bucket. There is no fleet</text>
+<text class="t4" x="922" y="383">problem, because nothing is shared to get wrong</text>
+<text class="t4" x="1254" y="368">one server per repository; the door proves tokens to ITS</text>
+<text class="t4" x="1254" y="383">apiserver, so remote agents need the human bearer path.</text>
+<text class="t4" x="1254" y="398">The bucket is a rendezvous for readers only — undrilled</text>
+<line class="hair" x1="24" y1="417" x2="1576" y2="417"/>
+<rect x="24" y="417" width="220" height="71" rx="0" class="lbl"/>
+<rect x="244" y="417" width="1332" height="71" rx="0" class="rowb"/>
+<text class="t2" x="38" y="439">Identity that is enforced</text>
+<text class="t4" x="38" y="457">the user's token reaches NONE of</text>
+<text class="t4" x="38" y="472">these</text>
+<text class="t4b c-red" x="258" y="439">Nobody, on the data path.</text>
+<text class="t4" x="258" y="454">AUTH_SYS: the client asserts its own uid, and the POSIX</text>
+<text class="t4" x="258" y="469">check defaults to log-only</text>
+<text class="t4b" x="590" y="439">The POD's ServiceAccount.</text>
+<text class="t4" x="590" y="454">kubelet-minted, pod-bound, verified ONLINE by</text>
+<text class="t4" x="590" y="469">TokenReview, checked against consumers</text>
+<text class="t4b" x="922" y="439">The POD's ServiceAccount.</text>
+<text class="t4" x="922" y="454">an identical chain to lean — same broker, same registration</text>
+<text class="t4" x="922" y="469">binding, same audit line</text>
+<text class="t4b" x="1254" y="439">The POD's ServiceAccount, at the door.</text>
+<text class="t4" x="1254" y="454">TokenReview per session, consumers per repository, then</text>
+<text class="t4" x="1254" y="469">X-Remote-User to two enforcers of one policy</text>
+<line class="hair" x1="24" y1="488" x2="1576" y2="488"/>
+<rect x="24" y="488" width="220" height="71" rx="0" class="lbl"/>
+<text class="t2" x="38" y="510">Isolating user A from B</text>
+<text class="t4" x="38" y="528">when both launch agents on several</text>
+<text class="t4" x="38" y="543">clusters</text>
+<text class="t4" x="258" y="510">Give each project its own hub and prefix, and bound</text>
+<text class="t4" x="258" y="525">reachability outside Kubernetes.</text>
+<text class="t4b c-red" x="258" y="540">Everything sharing a hub shares a fate.</text>
+<text class="t4" x="590" y="510">Give each user their own workspace prefix. Keys are</text>
+<text class="t4" x="590" y="525">scoped to it, the lease fences it, and consumers says who</text>
+<text class="t4" x="590" y="540">may mount it</text>
+<text class="t4" x="922" y="510">Give each user their own CR and pod. The mount presents</text>
+<text class="t4" x="922" y="525">ONE uid, so pod-level isolation IS user-level isolation</text>
+<text class="t4" x="1254" y="510">Give each project its own repository and each agent its own</text>
+<text class="t4" x="1254" y="525">branch pattern; a shared ServiceAccount reaches every</text>
+<text class="t4" x="1254" y="540">sibling's agent/* branch</text>
+<line class="hair" x1="24" y1="559" x2="1576" y2="559"/>
+<rect x="24" y="559" width="220" height="71" rx="0" class="lbl"/>
+<rect x="244" y="559" width="1332" height="71" rx="0" class="rowb"/>
+<text class="t2" x="38" y="581">Installed per cluster</text>
+<text class="t4" x="38" y="599">in a consumer cluster</text>
+<text class="t4b" x="258" y="581">Nothing.</text>
+<text class="t4" x="258" y="596">the node's own kernel NFS client is the data path; at most</text>
+<text class="t4" x="258" y="611">a PV and PVC</text>
+<text class="t4" x="590" y="581">the s3.csi.chert.us driver, a broker and the lean CRD + thin</text>
+<text class="t4" x="590" y="596">controller — in EVERY cluster; the broker must be local</text>
+<text class="t4" x="922" y="581">the same driver and broker, and the CRD — in every cluster.</text>
+<text class="t4" x="922" y="596">One CSI install serves lean and passthrough together</text>
+<text class="t4b" x="1254" y="581">Nothing in the data path.</text>
+<text class="t4" x="1254" y="596">stock git plus two lines of pod spec; the door and the</text>
+<text class="t4" x="1254" y="611">servers live in the home cluster</text>
+<line class="hair" x1="24" y1="630" x2="1576" y2="630"/>
+<rect x="24" y="630" width="220" height="71" rx="0" class="lbl"/>
+<text class="t2" x="38" y="652">Recovery point</text>
+<text class="t4" x="38" y="670">what a hard kill costs</text>
+<text class="t4" x="258" y="652">the flush cadence. The PVC is a cache — losing it is a</text>
+<text class="t4" x="258" y="667">rebuild from S3, not a loss</text>
+<text class="t4" x="590" y="652">the last barrier: ≤ floorSecs (default 60 s), or zero and</text>
+<text class="t4" x="590" y="667">acknowledged if you declare one</text>
+<text class="t4b" x="922" y="652">None — nothing is buffered.</text>
+<text class="t4" x="922" y="667">a completed PUT is durable; an interrupted one did not</text>
+<text class="t4" x="922" y="682">happen</text>
+<text class="t4" x="1254" y="652">the last acknowledged push — ok means the pack and the</text>
+<text class="t4" x="1254" y="667">snapshot are in S3. Uncommitted work: none, by git's</text>
+<text class="t4" x="1254" y="682">contract</text>
+<line class="hair" x1="24" y1="701" x2="1576" y2="701"/>
+<rect x="24" y="701" width="220" height="71" rx="0" class="lbl"/>
+<rect x="244" y="701" width="1332" height="71" rx="0" class="rowb"/>
+<text class="t2" x="38" y="723">Choose it for</text>
+<text class="t4" x="38" y="741">a data class, not a team</text>
+<text class="t4b" x="258" y="723">What several pods must edit LIVE.</text>
+<text class="t4" x="258" y="738">shared workspaces, cross-pod locking, sqlite, a dataset too</text>
+<text class="t4" x="258" y="753">big for a pod's disk</text>
+<text class="t4b" x="590" y="723">One agent's hot working set.</text>
+<text class="t4" x="590" y="738">a repo-sized tree, full POSIX at local speed, durable at</text>
+<text class="t4" x="590" y="753">breakpoints</text>
+<text class="t4b" x="922" y="723">The bucket, not a filesystem.</text>
+<text class="t4" x="922" y="738">read-mostly datasets, weights, artifacts, or a prefix another</text>
+<text class="t4" x="922" y="753">system already owns</text>
+<text class="t4b" x="1254" y="723">Code, with history.</text>
+<text class="t4" x="1254" y="738">durable on push, a merge policy the server enforces, many</text>
+<text class="t4" x="1254" y="753">agents proposing to one main; large binaries in LFS</text>
+<line class="hair" x1="24" y1="772" x2="1576" y2="772"/>
+<rect x="24" y="62" width="1552" height="710" rx="0" class="frame"/>
+<line class="hair" x1="576" y1="62" x2="576" y2="772"/>
+<line class="hair" x1="908" y1="62" x2="908" y2="772"/>
+<line class="hair" x1="1240" y1="62" x2="1240" y2="772"/>
+<text class="t4b" x="24" y="800">Read the table down a column, not across a row: each front end is coherent with itself, and a row that looks like a weakness is usually the price of a strength two rows up.</text>
+<text class="t4" x="24" y="818">Then read the composition page: one workload usually has several of these data classes, and each has a best door. Because the file-shaped formats are common and forge exports one, a volume can change its mind later.</text>
+</svg>

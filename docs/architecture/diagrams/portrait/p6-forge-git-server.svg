@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 440" role="img"
+     aria-label="flint-forge: a stock git client presents the pod's projected ServiceAccount token to the door, which verifies it by TokenReview and routes to one server pod per repository; the syncer uploads packs, CASes one snapshot and only then acknowledges the push. S3 holds a bare repository, a lease, bundles, LFS objects and an optional lean export.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .t1{font-size:14.96px;font-weight:600}
+  .t2{font-size:11.44px;font-weight:600}
+  .t3{font-size:10.56px}
+  .t3b{font-size:10.56px;font-weight:600;fill:#334155}
+  .t4{font-size:9.68px;fill:#64748b}
+  .t4b{font-size:9.68px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:9.24px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:8.36px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:9.68px;font-weight:600;fill:#ffffff}
+  .on{font-size:11.44px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:9.68px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
+</style>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<rect x="8" y="8" width="150" height="120" rx="7" class="bx"/>
+<path class="f-forge" d="M15,8 H151 A7,7 0 0 1 158,15 V13 H8 V15 A7,7 0 0 1 15,8 Z"/>
+<text class="t2 c-forge" x="18" y="32">the agent pod</text>
+<text class="t4" x="18" y="52">stock git; the working tree is</text>
+<text class="t4" x="18" y="65">local</text>
+<text class="mono" x="18" y="78" xml:space="preserve">helper: SA token as</text>
+<text class="mono" x="18" y="91" xml:space="preserve">the Basic password</text>
+<text class="t4" x="18" y="104">no bucket credential</text>
+<line class="l-forge" x1="158" y1="60" x2="186" y2="60" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="190" y="8" width="150" height="120" rx="7" class="bx"/>
+<path class="f-forge" d="M197,8 H333 A7,7 0 0 1 340,15 V13 H190 V15 A7,7 0 0 1 197,8 Z"/>
+<text class="t2 c-forge" x="200" y="32">the door</text>
+<text class="t4" x="200" y="52">the lite gateway's git arm:</text>
+<text class="t4" x="200" y="65">TokenReview (cached ≤ 60</text>
+<text class="t4" x="200" y="78">s), consumers, 401 before</text>
+<text class="t4" x="200" y="91">any wake, X-Remote-User</text>
+<text class="t4" x="200" y="104">onward</text>
+<line class="l-forge" x1="340" y1="60" x2="368" y2="60" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="372" y="8" width="130" height="120" rx="7" class="b-forge"/>
+<text class="t2 c-forge" x="382" y="32">server, 1 per repo</text>
+<text class="t4" x="382" y="52">nginx + http-backend;</text>
+<text class="t4" x="382" y="65">hooks → the syncer: the</text>
+<text class="t4" x="382" y="78">only writer of the</text>
+<text class="t4" x="382" y="91">bucket; emptyDir cache;</text>
+<text class="t4" x="382" y="104">idles to zero</text>
+<line class="l-forge" x1="502" y1="60" x2="530" y2="60" marker-end="url(#a-forge)"/>
+<rect x="534" y="8" width="98" height="120" rx="7" class="s3"/>
+<text class="t2" x="542" y="32">S3</text>
+<text class="mono" x="542" y="52" xml:space="preserve">git/pack/*</text>
+<text class="mono" x="542" y="65" xml:space="preserve">git/snapshot</text>
+<text class="mono" x="542" y="78" xml:space="preserve">git/epoch</text>
+<text class="mono" x="542" y="91" xml:space="preserve">lfs/ · files/</text>
+<rect x="8" y="144" width="624" height="132" rx="7" class="panel"/>
+<text class="t2" x="24" y="168">The push — acknowledged means durable</text>
+<text class="t4" x="24" y="190">1 · the hook hands the commands to the syncer; a stale one is refused by name</text>
+<text class="t4" x="24" y="205">2 · policy is enforced twice: pre-receive names the rule, the syncer enforces the same document</text>
+<text class="t4" x="24" y="220">3 · renew the lease — a foreign holder fences this server</text>
+<text class="t4" x="24" y="236">4 · upload packs (immutable) · 5 · ONE snapshot CAS · 6 · the ref transaction, THEN ok</text>
+<text class="t4b" x="24" y="257">A crash before step 6 fails every push in the batch at the client; the restart restores from the snapshot.</text>
+<rect x="8" y="292" width="306" height="136" rx="7" class="bx"/>
+<path class="f-forge" d="M15,292 H307 A7,7 0 0 1 314,299 V297 H8 V299 A7,7 0 0 1 15,292 Z"/>
+<text class="t2 c-forge" x="24" y="316">Idle, storm, export</text>
+<text class="t4" x="24" y="336">one idle rung to replicas 0; the door holds a wake up to 180</text>
+<text class="t4" x="24" y="349">s. Clone bundles and LFS are presigned, client-to-store. The</text>
+<text class="t4" x="24" y="362">export publishes main as a lean workspace that lean and</text>
+<text class="t4" x="24" y="375">passthrough readers mount with no git.</text>
+<rect x="326" y="292" width="306" height="136" rx="7" class="bx"/>
+<path class="f-red" d="M326,299 A7,7 0 0 1 333,292 H331 V428 H333 A7,7 0 0 1 326,421 Z"/>
+<text class="t2 c-red" x="342" y="316">Honest edges</text>
+<text class="t4" x="342" y="336">nothing in-tree terminates TLS: the token rides two cleartext</text>
+<text class="t4" x="342" y="349">hops; the X-Remote-User boundary is an opt-in</text>
+<text class="t4" x="342" y="362">NetworkPolicy; the built idle clock counts pushes only; the</text>
+<text class="t4" x="342" y="375">server runs as root. All eleven falsifiers ran on EC2 and went</text>
+<text class="t4" x="342" y="388">green; agents in another cluster are not drilled.</text>
+</svg>

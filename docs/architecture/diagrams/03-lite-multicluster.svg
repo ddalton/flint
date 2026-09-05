@@ -1,182 +1,177 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img"
-     aria-label="One flint-lite hub serving agents in three clusters at once. The wire is identical from each, and the hub sees only client names, not clusters. Three things the fleet must supply that the protocol and the chart cannot: a unique client name per node, a reachability boundary drawn outside nfsClientCIDRs, and a keepalive so a partitioned cluster is not mistaken for an idle one.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
+     aria-label="One flint-lite hub serving agents in three clusters at once. The wire is identical from each and the hub sees only client names, not clusters. Three things the fleet must supply that the protocol and the chart cannot: a unique client name per node, a reachability boundary drawn outside networkPolicy, and a keepalive so a partitioned cluster is not mistaken for an idle one.">
 <style>
   text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
-  .tt{font-size:17px;font-weight:600}
-  .th{font-size:13.5px;font-weight:600}
-  .tl{font-size:12.5px}
-  .ts{font-size:11.5px;fill:#64748b}
-  .tsb{font-size:11.5px;font-weight:600;fill:#475569}
-  .tx{font-size:11px;fill:#64748b}
-  .mns{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#475569}
-  .ctr{text-anchor:middle}
-  .c-blue{fill:#1a5f9e}.c-ochre{fill:#a06b12}.c-red{fill:#b4232a}
-  .bx{fill:#fff;stroke:#cbd5e1;stroke-width:1.4}
-  .bx-slate{fill:#f1f5f9;stroke:#94a3b8;stroke-width:1.4}
-  .bx-blue{fill:#e9f2fa;stroke:#1a5f9e;stroke-width:1.6}
-  .bx-hub{fill:#f7fbfe;stroke:#1a5f9e;stroke-width:2}
-  .bx-ochre{fill:#fbf2de;stroke:#a06b12;stroke-width:1.6}
-  .bx-warn{fill:#fdf2f2;stroke:#b4232a;stroke-width:1.6}
-  .grp{fill:none;stroke:#94a3b8;stroke-width:1.4;stroke-dasharray:6 5}
-  .band{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
-  .ln-blue{stroke:#1a5f9e;stroke-width:2.4;fill:none}
-  .ln-ochre{stroke:#a06b12;stroke-width:2.2;fill:none}
-  .dash{stroke-dasharray:5 4}
+  .t1{font-size:17.0px;font-weight:600}
+  .t2{font-size:13.0px;font-weight:600}
+  .t3{font-size:12.0px}
+  .t3b{font-size:12.0px;font-weight:600;fill:#334155}
+  .t4{font-size:11.0px;fill:#64748b}
+  .t4b{font-size:11.0px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:9.5px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:11.0px;font-weight:600;fill:#ffffff}
+  .on{font-size:13.0px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:11.0px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
   .hair{stroke:#e2e8f0;stroke-width:1}
-  .num{fill:#b4232a}
-  .numt{font-size:12px;font-weight:600;fill:#ffffff}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
 </style>
-<defs>
-  <marker id="d3-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
-  <marker id="d3-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
-</defs>
-
-<!-- ===== three consumer clusters ===== -->
-<text class="tt" x="30" y="34">Consumer clusters — identical bytes on the wire from each</text>
-<text class="ts" x="30" y="54">the hub does not know, and cannot ask, how many clusters are on it</text>
-
-<rect x="24" y="68" width="360" height="182" rx="10" class="grp"/>
-<text class="th" x="44" y="94">Cluster A — eu-west</text>
-<rect x="44" y="108" width="320" height="60" rx="6" class="bx"/>
-<text class="tl" x="62" y="130">agent pods · the user's tokens</text>
-<text class="tx" x="62" y="150">each agent may carry a different short-lived token</text>
-<rect x="44" y="178" width="320" height="56" rx="6" class="bx-blue"/>
-<text class="tl" x="62" y="200">kernel NFS client</text>
-<text class="mns" x="62" y="220">identity: hostname "agent-7"</text>
-
-<rect x="24" y="266" width="360" height="182" rx="10" class="grp"/>
-<text class="th" x="44" y="292">Cluster B — us-east</text>
-<rect x="44" y="306" width="320" height="60" rx="6" class="bx"/>
-<text class="tl" x="62" y="328">agent pods · the user's tokens</text>
-<text class="tx" x="62" y="348">same human, different cluster, different token</text>
-<rect x="44" y="376" width="320" height="56" rx="6" class="bx-warn"/>
-<text class="tl c-red" x="62" y="398">kernel NFS client</text>
-<text class="mns" x="62" y="418">identity: hostname "agent-7"  ← COLLIDES</text>
-
-<rect x="24" y="464" width="360" height="182" rx="10" class="grp"/>
-<text class="th" x="44" y="490">Cluster C — the hub's own cluster</text>
-<rect x="44" y="504" width="320" height="60" rx="6" class="bx"/>
-<text class="tl" x="62" y="526">agent pods · the user's tokens</text>
-<text class="tx" x="62" y="546">in-cluster mounts arrive from the NODE ip</text>
-<rect x="44" y="574" width="320" height="56" rx="6" class="bx-blue"/>
-<text class="tl" x="62" y="596">kernel NFS client</text>
-<text class="mns" x="62" y="616">identity: hostname "builder-2"</text>
-
-<!-- ===== wires ===== -->
-<path class="ln-blue" d="M384 206 L470 206 L470 400" marker-end="url(#d3-ab)"/>
-<path class="ln-blue" d="M384 404 L470 404" marker-end="url(#d3-ab)"/>
-<path class="ln-blue" d="M384 602 L470 602 L470 412" marker-end="url(#d3-ab)"/>
-<text class="tsb ctr c-blue" x="470" y="180">NFSv4.2</text>
-<text class="tx ctr" x="470" y="640">one wire, three</text>
-<text class="tx ctr" x="470" y="656">clusters, no</text>
-<text class="tx ctr" x="470" y="672">difference at all</text>
-
-<!-- ===== the hub ===== -->
-<rect x="500" y="240" width="440" height="344" rx="10" class="bx-hub"/>
-<text class="tt c-blue" x="520" y="270">ONE hub — one project, one prefix</text>
-<text class="ts" x="520" y="290">unchanged image, unchanged chart, unchanged mode</text>
-<line class="hair" x1="520" y1="302" x2="920" y2="302"/>
-
-<rect x="520" y="314" width="400" height="70" rx="6" class="bx-blue"/>
-<text class="tl" x="538" y="336">Service :2049</text>
-<text class="mns" x="538" y="356">spec.service.advertiseAddress</text>
-<text class="tx" x="538" y="374">an address only the hub cluster can route is not an address</text>
-
-<rect x="520" y="396" width="400" height="76" rx="6" class="bx"/>
-<text class="tl" x="538" y="418">leases · locks · close-to-open · delegations</text>
-<text class="tx" x="538" y="440">the coherence authority for the whole tree, wherever</text>
-<text class="tx" x="538" y="456">the client happens to be running</text>
-
-<rect x="520" y="484" width="400" height="84" rx="6" class="bx-slate"/>
-<text class="tsb" x="538" y="506">A hub does not count clusters. It sees CLIENTS,</text>
-<text class="tsb" x="538" y="524">and a client is a NAME.</text>
-<text class="tx" x="538" y="544">Nothing in the protocol, the CRD or the chart makes a</text>
-<text class="tx" x="538" y="558">second cluster visible as a second cluster.</text>
-
-<line class="ln-ochre" x1="940" y1="390" x2="1010" y2="390" marker-end="url(#d3-ao)"/>
-<line class="ln-ochre dash" x1="1010" y1="420" x2="940" y2="420" marker-end="url(#d3-ao)"/>
-<text class="tsb ctr c-ochre" x="975" y="380">publish</text>
-<text class="tsb ctr c-ochre" x="975" y="444">hydrate</text>
-
-<rect x="1014" y="300" width="230" height="210" rx="8" class="bx-ochre"/>
-<text class="th c-ochre" x="1032" y="326">S3 — the durable copy</text>
-<text class="tx" x="1032" y="348">one prefix, one hub, one</text>
-<text class="tx" x="1032" y="364">coherence authority</text>
-<line class="hair" x1="1032" y1="378" x2="1226" y2="378"/>
-<text class="mns" x="1032" y="400">.flint/epoch</text>
-<text class="tx" x="1032" y="420">fences a second hub — but only</text>
-<text class="tx" x="1032" y="436">when the prefixes are EQUAL:</text>
-<text class="mns" x="1032" y="456">tenant-a/  vs  tenant-a/sub/</text>
-<text class="tx" x="1032" y="476">mint different cells and never</text>
-<text class="tx" x="1032" y="492">contend. Own prefix allocation.</text>
-
-<!-- ===== the three requirements ===== -->
-<rect x="1268" y="68" width="306" height="578" rx="10" class="band"/>
-<text class="tt" x="1288" y="98">What the FLEET must supply</text>
-<text class="ts" x="1288" y="118">three things neither the protocol nor</text>
-<text class="ts" x="1288" y="134">the chart can do for you</text>
-
-<circle cx="1300" cy="164" r="12" class="num"/>
-<text class="numt ctr" x="1300" y="169">1</text>
-<text class="th" x="1322" y="169">A unique name per client</text>
-<text class="tx" x="1288" y="192">The identity is the hostname and nothing</text>
-<text class="tx" x="1288" y="208">else. Two clusters sharing a node name are</text>
-<text class="tx" x="1288" y="224">ONE client to the hub, and RFC 8881 says</text>
-<text class="tx" x="1288" y="240">the server MUST read the second as the</text>
-<text class="tx" x="1288" y="256">first REBOOTING — so the incumbent's locks</text>
-<text class="tx" x="1288" y="272">and opens are dropped, silently, correctly,</text>
-<text class="tx" x="1288" y="288">on a false premise.</text>
-<text class="mns" x="1288" y="310">hostname = &lt;cluster&gt;-&lt;node&gt;</text>
-<text class="mns" x="1288" y="328">nfs.nfs4_unique_id=&lt;cluster&gt;</text>
-
-<circle cx="1300" cy="360" r="12" class="num"/>
-<text class="numt ctr" x="1300" y="365">2</text>
-<text class="th" x="1322" y="365">A boundary at the network layer</text>
-<text class="tx" x="1288" y="388">Port 2049 is AUTH_SYS, so reachability IS</text>
-<text class="tx" x="1288" y="404">the boundary — and networkPolicy cannot</text>
-<text class="tx" x="1288" y="420">draw it. kube-proxy SNATs a NodePort or LB</text>
-<text class="tx" x="1288" y="436">client to an address in the HUB's cluster</text>
-<text class="tx" x="1288" y="452">before the packet arrives.</text>
-<text class="tsb c-red" x="1288" y="474">Measured: 1486 of 1486 connections from</text>
-<text class="tsb c-red" x="1288" y="490">two remote clusters arrived as the hub</text>
-<text class="tsb c-red" x="1288" y="506">cluster's gateway — none as a remote node.</text>
-<text class="tx" x="1288" y="528">Use peering, security groups or a gateway.</text>
-
-<circle cx="1300" cy="558" r="12" class="num"/>
-<text class="numt ctr" x="1300" y="563">3</text>
-<text class="th" x="1322" y="563">A keepalive per remote mount</text>
-<text class="tx" x="1288" y="586">The idle ladder suspends a quiet share, and</text>
-<text class="tx" x="1288" y="602">a partitioned cluster's busy agents look</text>
-<text class="tx" x="1288" y="618">exactly like quiet ones. Drive POST /wake.</text>
-<text class="tx" x="1288" y="636">suspendWithSessions DEFAULTS to suspending anyway.</text>
-
-<!-- ===== footer ===== -->
-<rect x="24" y="666" width="1550" height="212" rx="10" class="band"/>
-<text class="tt" x="46" y="696">The image is unchanged. The operating contract is not.</text>
-
-<rect x="46" y="712" width="498" height="150" rx="8" class="bx"/>
-<text class="th" x="64" y="736">Admission uniqueness stops at the cluster edge</text>
-<text class="tx" x="64" y="758">The operator refuses a second share on one prefix from its</text>
-<text class="tx" x="64" y="774">own cache — Kubernetes cannot express that rule in CEL,</text>
-<text class="tx" x="64" y="790">because both CEL and a policy see one object at a time.</text>
-<text class="tx" x="64" y="812">Two clusters each admit a share on one prefix and neither</text>
-<text class="tx" x="64" y="828">sees the other. The store-side epoch is the only backstop,</text>
-<text class="tx" x="64" y="844">and it only catches EXACTLY equal prefixes.</text>
-
-<rect x="558" y="712" width="498" height="150" rx="8" class="bx"/>
-<text class="th" x="576" y="736">Addresses are not arbitrated either</text>
-<text class="tx" x="576" y="758">Two shares may advertise the same address and both report</text>
-<text class="mns" x="576" y="778">Conflict=False (Unique)</text>
-<text class="tx" x="576" y="798">— that condition covers bucket-prefix overlap. It is a true</text>
-<text class="tx" x="576" y="814">statement about STORAGE and says nothing about addresses.</text>
-<text class="tsb" x="576" y="840">Read conditions for what they assert, not what they suggest.</text>
-
-<rect x="1070" y="712" width="504" height="150" rx="8" class="bx-warn"/>
-<text class="th c-red" x="1088" y="736">The failure mode is silent by construction</text>
-<text class="tx" x="1088" y="758">A colliding client gets NO error. The protocol says it is the</text>
-<text class="tx" x="1088" y="774">same client returning, so the server does exactly the right</text>
-<text class="tx" x="1088" y="790">thing with a false premise, and the loser's state is simply</text>
-<text class="tx" x="1088" y="806">gone. Nothing logs an anomaly, because to the hub none</text>
-<text class="tx" x="1088" y="822">occurred.</text>
-<text class="tsb c-red" x="1088" y="848">Six defects in v1.37.0 traced to this one cause.</text>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<text class="cap" x="30" y="34">consumer clusters — identical bytes on the wire from each</text>
+<text class="t4" x="30" y="54">the hub does not know, and cannot ask, how many clusters are on it</text>
+<rect x="24" y="68" width="360" height="180" rx="10" class="grp"/>
+<text class="cap" x="40" y="90">CLUSTER A — EU-WEST</text>
+<rect x="44" y="102" width="320" height="58" rx="7" class="bx"/>
+<text class="t2" x="60" y="126">agent pods · the user's tokens</text>
+<text class="t4" x="60" y="146">each agent may carry a different short-lived token</text>
+<rect x="44" y="170" width="320" height="60" rx="7" class="b-lite"/>
+<text class="t2 c-lite" x="60" y="194">kernel NFS client</text>
+<text class="mono" x="60" y="214" xml:space="preserve">identity: hostname "agent-7"</text>
+<rect x="24" y="264" width="360" height="180" rx="10" class="grp"/>
+<text class="cap" x="40" y="286">CLUSTER B — US-EAST</text>
+<rect x="44" y="298" width="320" height="58" rx="7" class="bx"/>
+<text class="t2" x="60" y="322">agent pods · the user's tokens</text>
+<text class="t4" x="60" y="342">same human, different cluster, different token</text>
+<rect x="44" y="366" width="320" height="60" rx="7" class="bx"/>
+<path class="f-red" d="M44,373 A7,7 0 0 1 51,366 H49 V426 H51 A7,7 0 0 1 44,419 Z"/>
+<text class="t2 c-red" x="60" y="390">kernel NFS client</text>
+<text class="mono" x="60" y="410" xml:space="preserve">identity: hostname "agent-7"   ← COLLIDES</text>
+<rect x="24" y="460" width="360" height="180" rx="10" class="grp"/>
+<text class="cap" x="40" y="482">CLUSTER C — THE HUB'S OWN CLUSTER</text>
+<rect x="44" y="494" width="320" height="58" rx="7" class="bx"/>
+<text class="t2" x="60" y="518">agent pods · the user's tokens</text>
+<text class="t4" x="60" y="538">in-cluster mounts arrive from the NODE ip</text>
+<rect x="44" y="562" width="320" height="60" rx="7" class="b-lite"/>
+<text class="t2 c-lite" x="60" y="586">kernel NFS client</text>
+<text class="mono" x="60" y="606" xml:space="preserve">identity: hostname "builder-2"</text>
+<path class="l-lite" d="M384 206 L470 206 L470 396" marker-end="url(#a-lite)"/>
+<path class="l-lite" d="M384 402 L470 402" marker-end="url(#a-lite)"/>
+<path class="l-lite" d="M384 598 L470 598 L470 408" marker-end="url(#a-lite)"/>
+<rect x="441" y="171" width="57" height="15" rx="3" class="halo"/>
+<text class="t4b c-lite" x="470" y="182" style="text-anchor:middle">NFSv4.2</text>
+<text class="t4" x="470" y="640" style="text-anchor:middle">one wire, three clusters,</text>
+<text class="t4" x="470" y="656" style="text-anchor:middle">no difference at all</text>
+<rect x="500" y="240" width="440" height="344" rx="7" class="bx"/>
+<path class="f-lite" d="M507,240 H933 A7,7 0 0 1 940,247 V245 H500 V247 A7,7 0 0 1 507,240 Z"/>
+<text class="t2 c-lite" x="520" y="268">ONE hub — one project, one prefix</text>
+<text class="t4" x="520" y="288">unchanged image, unchanged chart, unchanged mode</text>
+<line class="hair" x1="520" y1="300" x2="920" y2="300"/>
+<rect x="520" y="312" width="400" height="70" rx="7" class="b-lite"/>
+<text class="t2 c-lite" x="536" y="336">Service :2049</text>
+<text class="mono" x="536" y="356" xml:space="preserve">spec.service.advertiseAddress</text>
+<text class="t4" x="536" y="371">an address only the hub cluster can route is not an address</text>
+<rect x="520" y="394" width="400" height="76" rx="7" class="bx"/>
+<text class="t2" x="536" y="418">leases · locks · close-to-open · delegations</text>
+<text class="t4" x="536" y="438">the coherence authority for the whole tree, wherever the client happens</text>
+<text class="t4" x="536" y="453">to be running</text>
+<rect x="520" y="482" width="400" height="86" rx="7" class="panel"/>
+<text class="t2" x="536" y="506">A hub does not count clusters.</text>
+<text class="t4b" x="536" y="526">It sees CLIENTS, and a client is a NAME.</text>
+<text class="t4" x="536" y="541">Nothing in the protocol, the CRD or the chart makes a second cluster</text>
+<text class="t4" x="536" y="556">visible as a second cluster.</text>
+<line class="l-lite" x1="940" y1="390" x2="1010" y2="390" marker-end="url(#a-lite)"/>
+<line class="l-lite" x1="1010" y1="420" x2="940" y2="420" stroke-dasharray="6 5" marker-end="url(#a-lite)"/>
+<rect x="950" y="367" width="49" height="15" rx="3" class="halo"/>
+<text class="t4b c-lite" x="975" y="378" style="text-anchor:middle">publish</text>
+<rect x="950" y="435" width="50" height="15" rx="3" class="halo"/>
+<text class="t4b c-lite" x="975" y="446" style="text-anchor:middle">hydrate</text>
+<rect x="1014" y="300" width="230" height="226" rx="7" class="s3"/>
+<text class="t2" x="1030" y="324">S3 — the durable copy</text>
+<text class="t4" x="1030" y="344">one prefix, one hub, one coherence</text>
+<text class="t4" x="1030" y="359">authority</text>
+<text class="mono" x="1030" y="374" xml:space="preserve">.flint/epoch</text>
+<text class="t4" x="1030" y="389">fences a second hub — but only when</text>
+<text class="t4" x="1030" y="404">the prefixes are EQUAL:</text>
+<text class="mono" x="1030" y="419" xml:space="preserve">tenant-a/  vs  tenant-a/sub/</text>
+<text class="t4" x="1030" y="434">mint different cells and never contend.</text>
+<text class="t4" x="1030" y="449">Own prefix allocation.</text>
+<rect x="1268" y="68" width="306" height="578" rx="7" class="panel"/>
+<text class="t1" x="1288" y="96">What the FLEET must supply</text>
+<text class="t4" x="1288" y="116">three things neither the protocol nor the chart can do</text>
+<text class="t4" x="1288" y="131">for you</text>
+<circle cx="1300" cy="154" r="11" class="f-ink"/>
+<text class="num" x="1300" y="158" style="text-anchor:middle">1</text>
+<text class="t2" x="1322" y="158">A unique name per client</text>
+<text class="t4" x="1288" y="180">The identity is the hostname and nothing else. Two</text>
+<text class="t4" x="1288" y="195">clusters sharing a node name are ONE client, and</text>
+<text class="t4" x="1288" y="210">RFC 8881 says the server MUST read the second as</text>
+<text class="t4" x="1288" y="225">the first REBOOTING — so the incumbent's locks and</text>
+<text class="t4" x="1288" y="240">opens are dropped, silently, correctly, on a false</text>
+<text class="t4" x="1288" y="255">premise.</text>
+<text class="mono" x="1288" y="274" xml:space="preserve">hostname = &lt;cluster&gt;-&lt;node&gt;</text>
+<text class="mono" x="1288" y="290" xml:space="preserve">nfs.nfs4_unique_id=&lt;cluster&gt;</text>
+<circle cx="1300" cy="318" r="11" class="f-ink"/>
+<text class="num" x="1300" y="322" style="text-anchor:middle">2</text>
+<text class="t2" x="1322" y="322">A boundary at the network layer</text>
+<text class="t4" x="1288" y="344">Port 2049 is AUTH_SYS, so reachability IS the</text>
+<text class="t4" x="1288" y="359">boundary — and networkPolicy cannot draw it:</text>
+<text class="t4" x="1288" y="374">kube-proxy SNATs a NodePort or LB client to an</text>
+<text class="t4" x="1288" y="389">address in the HUB's cluster before the packet</text>
+<text class="t4" x="1288" y="404">arrives.</text>
+<text class="t4b c-red" x="1288" y="421">Measured: 1486 of 1486 connections from two</text>
+<text class="t4b c-red" x="1288" y="436">remote clusters arrived as the hub cluster's</text>
+<text class="t4b c-red" x="1288" y="451">gateway — none as a remote node.</text>
+<text class="t4" x="1288" y="468">Use peering, security groups or a gateway.</text>
+<circle cx="1300" cy="491" r="11" class="f-ink"/>
+<text class="num" x="1300" y="496" style="text-anchor:middle">3</text>
+<text class="t2" x="1322" y="495">A keepalive per remote mount</text>
+<text class="t4" x="1288" y="517">The idle ladder suspends a quiet share, and a</text>
+<text class="t4" x="1288" y="532">partitioned cluster's busy agents look exactly like</text>
+<text class="t4" x="1288" y="547">quiet ones. Drive POST /wake from the thing that</text>
+<text class="t4" x="1288" y="562">knows whether work is happening.</text>
+<text class="t4b" x="1288" y="579">suspendWithSessions DEFAULTS to suspending</text>
+<text class="t4b" x="1288" y="594">anyway.</text>
+<rect x="24" y="664" width="1552" height="192" rx="7" class="panel"/>
+<text class="t1" x="46" y="692">The image is unchanged. The operating contract is not.</text>
+<rect x="46" y="708" width="491" height="134" rx="7" class="bx"/>
+<text class="t2" x="62" y="732">Admission uniqueness stops at the cluster edge</text>
+<text class="t4" x="62" y="752">The operator refuses a second share on one prefix from its own cache — CEL and policy</text>
+<text class="t4" x="62" y="767">see one object at a time. Two clusters each admit a share on one prefix and neither sees</text>
+<text class="t4" x="62" y="782">the other; the store-side epoch is the only backstop, and it catches EXACTLY equal</text>
+<text class="t4" x="62" y="797">prefixes.</text>
+<rect x="555" y="708" width="491" height="134" rx="7" class="bx"/>
+<text class="t2" x="571" y="732">Addresses are not arbitrated either</text>
+<text class="t4" x="571" y="752">Two shares may advertise the same address and both report</text>
+<text class="mono" x="571" y="767" xml:space="preserve">Conflict=False (Unique)</text>
+<text class="t4" x="571" y="782">— that condition covers bucket-prefix overlap. A true statement about STORAGE that says</text>
+<text class="t4" x="571" y="797">nothing about addresses.</text>
+<rect x="1063" y="708" width="491" height="134" rx="7" class="bx"/>
+<path class="f-red" d="M1063,715 A7,7 0 0 1 1070,708 H1068 V842 H1070 A7,7 0 0 1 1063,835 Z"/>
+<text class="t2 c-red" x="1079" y="732">The failure mode is silent by construction</text>
+<text class="t4" x="1079" y="752">A colliding client gets NO error. The protocol says it is the same client returning, so the</text>
+<text class="t4" x="1079" y="767">server does exactly the right thing with a false premise, and the loser's state is simply</text>
+<text class="t4" x="1079" y="782">gone.</text>
+<text class="t4b c-red" x="1079" y="797">Six defects in v1.37.0 traced to this one cause.</text>
+<line class="l-ink" x1="28" y1="868" x2="54" y2="868"/>
+<text class="t4" x="60" y="872">data path</text>
+<line class="l-ctl" x1="127.98" y1="868" x2="153.98000000000002" y2="868" stroke-dasharray="6 5"/>
+<text class="t4" x="160" y="872">control</text>
+<rect x="217" y="861" width="5" height="14" rx="2" class="f-red"/>
+<text class="t4" x="229" y="872">hazard / trust boundary</text>
 </svg>

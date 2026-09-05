@@ -1,0 +1,197 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
+     aria-label="Four front ends over one bucket. flint-lite serves live shared POSIX from a hub pod over NFSv4.2; flint-lean materialises plain local files and publishes boundaries with a worker; flint-passthrough mounts an S3 prefix directly with Mountpoint for S3; flint-forge serves real git from a per-repository pod whose every push is acknowledged only once it is in S3. All four read and write one bucket, in which each front end has its own layout and control namespace.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .t1{font-size:17.0px;font-weight:600}
+  .t2{font-size:13.0px;font-weight:600}
+  .t3{font-size:12.0px}
+  .t3b{font-size:12.0px;font-weight:600;fill:#334155}
+  .t4{font-size:11.0px;fill:#64748b}
+  .t4b{font-size:11.0px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:9.5px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:11.0px;font-weight:600;fill:#ffffff}
+  .on{font-size:13.0px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:11.0px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
+</style>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<rect x="24" y="16" width="374" height="46" rx="7" class="hd-lite"/>
+<text class="on" x="211" y="38" style="text-anchor:middle">flint-lite — the hub</text>
+<text class="onsub" x="211" y="54" style="text-anchor:middle">live shared POSIX · many readers and writers</text>
+<rect x="24" y="74" width="374" height="128" rx="7" class="bx"/>
+<path class="f-lite" d="M31,74 H391 A7,7 0 0 1 398,81 V79 H24 V81 A7,7 0 0 1 31,74 Z"/>
+<text class="t2 c-lite" x="40" y="98">the consumer pod — any cluster</text>
+<text class="t4" x="40" y="118">nothing from flint is installed in it</text>
+<text class="mono" x="40" y="133" xml:space="preserve">/data  (an ordinary PVC)</text>
+<text class="t4" x="40" y="148">the node's kernel NFS client carries every byte — one mount per</text>
+<text class="t4" x="40" y="163">node, shared with its page cache</text>
+<text class="t4b" x="40" y="178">full POSIX: byte-range locks, atomic rename, O_EXCL</text>
+<rect x="24" y="214" width="374" height="152" rx="7" class="b-lite"/>
+<text class="t2 c-lite" x="40" y="238">the hub — ONE pod per volume</text>
+<text class="mono" x="40" y="258" xml:space="preserve">flint-pnfs-mds · mode: standalone</text>
+<text class="mono" x="40" y="273" xml:space="preserve">:2049  NFSv4.2 — the data plane</text>
+<text class="mono" x="40" y="288" xml:space="preserve">:8080  status + file API — ClusterIP only</text>
+<text class="t4" x="40" y="303">the PVC is the working set and a CACHE of the bucket, never the</text>
+<text class="t4" x="40" y="318">only copy</text>
+<text class="t4b" x="40" y="333">single replica · Recreate · exclusive flock</text>
+<rect x="24" y="378" width="374" height="96" rx="7" class="panel"/>
+<text class="t2" x="40" y="402">coordination — the hub IS the authority</text>
+<text class="t4" x="40" y="422">leases, locks and close-to-open are enforced in one process, so</text>
+<text class="t4" x="40" y="437">every client sees one coherent tree; a second hub on the prefix is</text>
+<text class="t4" x="40" y="452">fenced by the epoch cell</text>
+<line class="l-lite" x1="211" y1="474" x2="211" y2="528" marker-end="url(#a-lite)"/>
+<rect x="144" y="485" width="134" height="30" rx="3" class="halo"/>
+<text class="t4b c-lite" x="211" y="496" style="text-anchor:middle">publish · hydrate</text>
+<text class="t4" x="211" y="511" style="text-anchor:middle">RPO = the flush cadence</text>
+<rect x="416" y="16" width="374" height="46" rx="7" class="hd-lean"/>
+<text class="on" x="603" y="38" style="text-anchor:middle">flint-lean — checkout / publish</text>
+<text class="onsub" x="603" y="54" style="text-anchor:middle">one agent, one workspace, one writer</text>
+<rect x="416" y="74" width="374" height="128" rx="7" class="bx"/>
+<path class="f-lean" d="M423,74 H783 A7,7 0 0 1 790,81 V79 H416 V81 A7,7 0 0 1 423,74 Z"/>
+<text class="t2 c-lean" x="432" y="98">the agent pod</text>
+<text class="t4" x="432" y="118">the app image is unchanged and holds no S3 credential</text>
+<text class="mono" x="432" y="133" xml:space="preserve">/workspace  (local disk — an emptyDir)</text>
+<text class="t4" x="432" y="148">plain files with no interception anywhere in the read or write path</text>
+<text class="t4b" x="432" y="163">git, sqlite and build caches work, at disk speed</text>
+<rect x="416" y="214" width="374" height="152" rx="7" class="b-lean"/>
+<text class="t2 c-lean" x="432" y="238">flint-sync — an unprivileged worker</text>
+<text class="mono" x="432" y="258" xml:space="preserve">delivered by the s3.csi.chert.us driver</text>
+<text class="t4" x="432" y="273">checkout at start, before the agent's first line; a barrier at cadence</text>
+<text class="t4" x="432" y="288">from an mtime/size scan</text>
+<text class="mono" x="432" y="303" xml:space="preserve">.flint/publish  →  .flint/publish.ack</text>
+<text class="t4b" x="432" y="318">preStop drains — a graceful stop loses nothing</text>
+<rect x="416" y="378" width="374" height="96" rx="7" class="panel"/>
+<text class="t2" x="432" y="402">coordination — a lease in the BUCKET</text>
+<text class="t4" x="432" y="422">one writer per subtree, admitted by a CAS on the epoch cell; a</text>
+<text class="t4" x="432" y="437">second syncer is REFUSED, never merged; readers see the last</text>
+<text class="t4" x="432" y="452">published boundary</text>
+<line class="l-lean" x1="603" y1="474" x2="603" y2="528" marker-end="url(#a-lean)"/>
+<rect x="543" y="485" width="119" height="30" rx="3" class="halo"/>
+<text class="t4b c-lean" x="603" y="496" style="text-anchor:middle">checkout · publish</text>
+<text class="t4" x="603" y="511" style="text-anchor:middle">RPO = the last barrier</text>
+<rect x="808" y="16" width="374" height="46" rx="7" class="hd-pass"/>
+<text class="on" x="995" y="38" style="text-anchor:middle">flint-passthrough — the mount</text>
+<text class="onsub" x="995" y="54" style="text-anchor:middle">an S3 prefix mounted as-is · no flint semantics</text>
+<rect x="808" y="74" width="374" height="128" rx="7" class="bx"/>
+<path class="f-pass" d="M815,74 H1175 A7,7 0 0 1 1182,81 V79 H808 V81 A7,7 0 0 1 815,74 Z"/>
+<text class="t2 c-pass" x="824" y="98">the tenant pod</text>
+<text class="t4" x="824" y="118">no sidecar, no label, no credential, no privilege — admissible under</text>
+<text class="t4" x="824" y="133">PodSecurity restricted</text>
+<text class="mono" x="824" y="148" xml:space="preserve">/mnt/s3  (a csi: volume naming a CR)</text>
+<text class="t4" x="824" y="163">objects appear as files, served by Mountpoint for S3</text>
+<text class="t4b" x="824" y="178">NOT POSIX: no rename, no append, no in-place write</text>
+<rect x="808" y="214" width="374" height="152" rx="7" class="b-pass"/>
+<text class="t2 c-pass" x="824" y="238">s3.csi.chert.us — a CSI node DaemonSet</text>
+<text class="t4" x="824" y="258">one privileged process per NODE, not per pod: it opens /dev/fuse</text>
+<text class="t4" x="824" y="273">and calls mount(2) itself, then hands the fd to an unprivileged</text>
+<text class="t4" x="824" y="288">worker running an unchanged mount-s3</text>
+<text class="t4b" x="824" y="303">the plugin holds no S3 credential — a broker mints them</text>
+<rect x="808" y="378" width="374" height="96" rx="7" class="panel"/>
+<text class="t2" x="824" y="402">coordination — NONE, by design</text>
+<text class="t4" x="824" y="422">no cache, no manifest, no publish boundary, no coordination</text>
+<text class="t4" x="824" y="437">between pods sharing a prefix; S3's own consistency is the entire</text>
+<text class="t4" x="824" y="452">contract</text>
+<line class="l-pass" x1="995" y1="474" x2="995" y2="528" marker-end="url(#a-pass)"/>
+<rect x="918" y="485" width="155" height="30" rx="3" class="halo"/>
+<text class="t4b c-pass" x="995" y="496" style="text-anchor:middle">GET · PUT</text>
+<text class="t4" x="995" y="511" style="text-anchor:middle">no RPO — nothing is buffered</text>
+<rect x="1200" y="16" width="374" height="46" rx="7" class="hd-forge"/>
+<text class="on" x="1387" y="38" style="text-anchor:middle">flint-forge — the git server</text>
+<text class="onsub" x="1387" y="54" style="text-anchor:middle">a git remote per repository · S3 behind it</text>
+<rect x="1200" y="74" width="374" height="128" rx="7" class="bx"/>
+<path class="f-forge" d="M1207,74 H1567 A7,7 0 0 1 1574,81 V79 H1200 V81 A7,7 0 0 1 1207,74 Z"/>
+<text class="t2 c-forge" x="1216" y="98">the agent pod</text>
+<text class="t4" x="1216" y="118">a stock git client; the working tree is local disk</text>
+<text class="mono" x="1216" y="133" xml:space="preserve">credential.helper = flint-forge-credential</text>
+<text class="t4" x="1216" y="148">the pod's projected ServiceAccount token, audience forge.chert.us,</text>
+<text class="t4" x="1216" y="163">is the Basic password</text>
+<text class="t4b" x="1216" y="178">the durable unit is a commit — a push</text>
+<rect x="1200" y="214" width="374" height="152" rx="7" class="b-forge"/>
+<text class="t2 c-forge" x="1216" y="238">the door, and one server pod per repository</text>
+<text class="t4" x="1216" y="258">the door is lite's gateway with a git arm: TokenReview,</text>
+<text class="t4" x="1216" y="273">consumers, routing, wake</text>
+<text class="mono" x="1216" y="288" xml:space="preserve">nginx + git-http-backend + one syncer</text>
+<text class="t4" x="1216" y="303">the local repository is an emptyDir CACHE; the pod idles to zero</text>
+<text class="t4b" x="1216" y="318">one syncer owns every write to the bucket</text>
+<rect x="1200" y="378" width="374" height="96" rx="7" class="panel"/>
+<text class="t2" x="1216" y="402">coordination — one CAS per batch</text>
+<text class="t4" x="1216" y="422">a push is acknowledged only after its pack and ONE CAS'd</text>
+<text class="t4" x="1216" y="437">snapshot are in S3; a stale push is refused by name; a merge is a</text>
+<text class="t4" x="1216" y="452">push to refs/for/&lt;target&gt;</text>
+<line class="l-forge" x1="1387" y1="474" x2="1387" y2="528" marker-end="url(#a-forge)"/>
+<rect x="1294" y="485" width="186" height="30" rx="3" class="halo"/>
+<text class="t4b c-forge" x="1387" y="496" style="text-anchor:middle">push · restore</text>
+<text class="t4" x="1387" y="511" style="text-anchor:middle">RPO = the last acknowledged push</text>
+<rect x="24" y="536" width="1552" height="250" rx="7" class="s3"/>
+<text class="t1" x="44" y="564">One bucket. Four layouts — and a volume can move between the file-shaped three.</text>
+<text class="t4" x="44" y="584">Whole-file objects plus a per-front-end control namespace; for forge, a bare git repository that git can clone read-only with the server down.</text>
+<rect x="44" y="600" width="364" height="120" rx="7" class="bx"/>
+<path class="f-lite" d="M51,600 H402 A7,7 0 0 1 408,607 V605 H44 V607 A7,7 0 0 1 51,600 Z"/>
+<text class="t2 c-lite" x="60" y="624">flint-lite writes</text>
+<text class="mono" x="60" y="644" xml:space="preserve">&lt;prefix&gt;/&lt;path&gt;</text>
+<text class="mono mute" x="60" y="659" xml:space="preserve">&lt;prefix&gt;/.flint/epoch · manifest · owner</text>
+<rect x="426" y="600" width="364" height="120" rx="7" class="bx"/>
+<path class="f-lean" d="M434,600 H784 A7,7 0 0 1 791,607 V605 H426 V607 A7,7 0 0 1 434,600 Z"/>
+<text class="t2 c-lean" x="442" y="624">flint-lean writes</text>
+<text class="mono" x="442" y="644" xml:space="preserve">&lt;prefix&gt;/files/&lt;path&gt;</text>
+<text class="mono mute" x="442" y="659" xml:space="preserve">&lt;prefix&gt;/.flint/lean/epoch · claim</text>
+<text class="mono mute" x="442" y="674" xml:space="preserve">&lt;prefix&gt;/.flint/lean/current · inbox</text>
+<rect x="809" y="600" width="364" height="120" rx="7" class="bx"/>
+<path class="f-pass" d="M816,600 H1166 A7,7 0 0 1 1174,607 V605 H809 V607 A7,7 0 0 1 816,600 Z"/>
+<text class="t2 c-pass" x="825" y="624">flint-passthrough writes</text>
+<text class="mono" x="825" y="644" xml:space="preserve">&lt;prefix&gt;/&lt;key&gt;</text>
+<text class="t4" x="825" y="659">and nothing else — no control namespace, because there is no</text>
+<text class="t4" x="825" y="674">state to keep</text>
+<rect x="1192" y="600" width="364" height="120" rx="7" class="bx"/>
+<path class="f-forge" d="M1198,600 H1549 A7,7 0 0 1 1556,607 V605 H1192 V607 A7,7 0 0 1 1198,600 Z"/>
+<text class="t2 c-forge" x="1208" y="624">flint-forge writes</text>
+<text class="mono" x="1208" y="644" xml:space="preserve">&lt;prefix&gt;/git/objects/pack/*</text>
+<text class="mono mute" x="1208" y="659" xml:space="preserve">&lt;prefix&gt;/git/snapshot (CAS) · epoch · claim</text>
+<text class="mono mute" x="1208" y="674" xml:space="preserve">&lt;prefix&gt;/lfs/objects/&lt;oid&gt;</text>
+<text class="mono mute" x="1208" y="689" xml:space="preserve">&lt;prefix&gt;/files/&lt;path&gt;  — the export</text>
+<text class="t4" x="44" y="752">Read the columns as an escalation ladder, cheapest first: passthrough asks nothing of the workload and gives it nothing back; lean gives real POSIX at local speed to one writer; the hub is the only one where several pods share one live tree; forge adds history, a merge policy and an</text>
+<text class="t4" x="44" y="767">acknowledgement that means durable — for code.</text>
+<rect x="28" y="815" width="14" height="14" rx="3" class="f-lite"/>
+<text class="t4" x="48" y="826">flint-lite</text>
+<rect x="110" y="815" width="14" height="14" rx="3" class="f-lean"/>
+<text class="t4" x="130" y="826">flint-lean</text>
+<rect x="197" y="815" width="14" height="14" rx="3" class="f-pass"/>
+<text class="t4" x="217" y="826">flint-passthrough</text>
+<rect x="324" y="815" width="14" height="14" rx="3" class="f-forge"/>
+<text class="t4" x="344" y="826">flint-forge</text>
+<line class="l-ink" x1="416.0" y1="822" x2="442.0" y2="822"/>
+<text class="t4" x="448" y="826">data path</text>
+<line class="l-ctl" x1="515.98" y1="822" x2="541.98" y2="822" stroke-dasharray="6 5"/>
+<text class="t4" x="548" y="826">control</text>
+<rect x="605" y="815" width="5" height="14" rx="2" class="f-red"/>
+<text class="t4" x="617" y="826">hazard / trust boundary</text>
+<text class="t4" x="28" y="856">A box wears its front end as the strip on its top edge. S3 and Kubernetes are neutral: they belong to nobody.</text>
+</svg>

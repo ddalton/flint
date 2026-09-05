@@ -1,0 +1,198 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
+     aria-label="The four front ends compose by prefix, and the composition is in the reading, never the writing. One agent pod holds a forge clone for its code, a lean workspace for its hot working set, a passthrough mount for datasets and a hub share for what several pods edit live; forge exports main into its own prefix as a real lean workspace that lean and passthrough readers mount. One prefix has one writer — a mechanism within each product, a convention across them, because forge and lean arbitrate on different cells and never meet — and an export is a mirror that is never repaired: a foreign overwrite is adopted by every reader, a foreign delete is refused and never restored.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .t1{font-size:17.0px;font-weight:600}
+  .t2{font-size:13.0px;font-weight:600}
+  .t3{font-size:12.0px}
+  .t3b{font-size:12.0px;font-weight:600;fill:#334155}
+  .t4{font-size:11.0px;fill:#64748b}
+  .t4b{font-size:11.0px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:9.5px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:11.0px;font-weight:600;fill:#ffffff}
+  .on{font-size:13.0px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:11.0px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
+</style>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<rect x="24" y="22" width="560" height="470" rx="10" class="grp"/>
+<text class="cap" x="40" y="44">ONE AGENT POD</text>
+<text class="t4" x="142" y="44">four attachments; a stock image with no flint code in it</text>
+<rect x="44" y="56" width="372" height="96" rx="7" class="b-forge"/>
+<text class="t2 c-forge" x="60" y="80">/src — a git clone</text>
+<text class="t4" x="60" y="100">code and history; a push is durable; a merge is a push to refs/for</text>
+<text class="t4b" x="60" y="114">the door → the repository pod</text>
+<line class="l-forge" x1="416" y1="104" x2="470" y2="104" marker-end="url(#a-forge)"/>
+<rect x="474" y="72" width="102" height="64" rx="7" class="bx"/>
+<path class="f-forge" d="M481,72 H569 A7,7 0 0 1 576,79 V77 H474 V79 A7,7 0 0 1 481,72 Z"/>
+<text class="t4b" x="486" y="96">A</text>
+<text class="mono" x="486" y="111" xml:space="preserve">repo/</text>
+<rect x="44" y="164" width="372" height="96" rx="7" class="b-lean"/>
+<text class="t2 c-lean" x="60" y="188">/workspace — a lean mount</text>
+<text class="t4" x="60" y="208">the hot working set: plain local files, one writer, a boundary it can</text>
+<text class="t4" x="60" y="222">name</text>
+<text class="t4b" x="60" y="236">flint-sync → the bucket</text>
+<line class="l-lean" x1="416" y1="212" x2="470" y2="212" marker-end="url(#a-lean)"/>
+<rect x="474" y="180" width="102" height="64" rx="7" class="bx"/>
+<path class="f-lean" d="M481,180 H569 A7,7 0 0 1 576,187 V185 H474 V187 A7,7 0 0 1 481,180 Z"/>
+<text class="t4b" x="486" y="204">C</text>
+<text class="mono" x="486" y="219" xml:space="preserve">ws/&lt;agent&gt;/</text>
+<rect x="44" y="272" width="372" height="96" rx="7" class="b-pass"/>
+<text class="t2 c-pass" x="60" y="296">/data — a passthrough mount</text>
+<text class="t4" x="60" y="316">read-mostly datasets, weights, artifacts — the bucket as-is,</text>
+<text class="t4" x="60" y="330">readOnly</text>
+<text class="t4b" x="60" y="344">mount-s3 → the bucket</text>
+<line class="l-pass" x1="416" y1="320" x2="470" y2="320" marker-end="url(#a-pass)"/>
+<rect x="474" y="288" width="102" height="64" rx="7" class="bx"/>
+<path class="f-pass" d="M481,288 H569 A7,7 0 0 1 576,295 V293 H474 V295 A7,7 0 0 1 481,288 Z"/>
+<text class="t4b" x="486" y="312">D</text>
+<text class="mono" x="486" y="327" xml:space="preserve">datasets/</text>
+<rect x="44" y="380" width="372" height="96" rx="7" class="b-lite"/>
+<text class="t2 c-lite" x="60" y="404">/shared — a hub share</text>
+<text class="t4" x="60" y="424">what several pods must edit LIVE: coordination files, sqlite,</text>
+<text class="t4" x="60" y="438">cross-pod locks</text>
+<text class="t4b" x="60" y="452">the kernel NFS client → the hub</text>
+<line class="l-lite" x1="416" y1="428" x2="470" y2="428" marker-end="url(#a-lite)"/>
+<rect x="474" y="396" width="102" height="64" rx="7" class="bx"/>
+<path class="f-lite" d="M481,396 H569 A7,7 0 0 1 576,403 V401 H474 V403 A7,7 0 0 1 481,396 Z"/>
+<text class="t4b" x="486" y="420">E</text>
+<text class="mono" x="486" y="435" xml:space="preserve">shared/</text>
+<rect x="24" y="506" width="560" height="84" rx="7" class="bx"/>
+<path class="f-pass" d="M31,506 H577 A7,7 0 0 1 584,513 V511 H24 V513 A7,7 0 0 1 31,506 Z"/>
+<text class="t2 c-pass" x="40" y="530">a build-farm pod, elsewhere</text>
+<text class="t4" x="40" y="550">mounts B — forge's export of main — read-only through lean or passthrough and never runs git. That is</text>
+<text class="t4" x="40" y="564">the composition: several readers of one writer's prefix.</text>
+<text class="t4b" x="40" y="578">It writes nothing there. See the hazard on the right.</text>
+<rect x="608" y="22" width="470" height="562" rx="7" class="s3"/>
+<text class="t1" x="628" y="50">one bucket, five prefixes, one writer each</text>
+<text class="t4" x="628" y="70">letters match the attachments on the left; the arrow is the only bridge</text>
+<line class="hair" x1="628" y1="82" x2="1058" y2="82"/>
+<rect x="628" y="96" width="430" height="76" rx="7" class="bx"/>
+<path class="f-forge" d="M635,96 H1051 A7,7 0 0 1 1058,103 V101 H628 V103 A7,7 0 0 1 635,96 Z"/>
+<text class="t2 c-forge" x="644" y="120">A  repo/ — writer: the syncer</text>
+<text class="mono" x="644" y="140" xml:space="preserve">git/objects/pack/*  git/snapshot</text>
+<text class="mono" x="644" y="155" xml:space="preserve">git/epoch · git/claim  lfs/objects/</text>
+<rect x="628" y="182" width="430" height="76" rx="7" class="bx"/>
+<path class="f-forge" d="M635,182 H1051 A7,7 0 0 1 1058,189 V187 H628 V189 A7,7 0 0 1 635,182 Z"/>
+<text class="t2 c-forge" x="644" y="206">B  repo-main/ — writer: the syncer, via the shipped flint-sync</text>
+<text class="mono" x="644" y="226" xml:space="preserve">files/&lt;path&gt;  .flint/lean/{epoch,current,chunks/}</text>
+<text class="t4b" x="644" y="241">a REAL lean workspace; readers: lean, passthrough</text>
+<rect x="628" y="268" width="430" height="61" rx="7" class="bx"/>
+<path class="f-lean" d="M635,268 H1051 A7,7 0 0 1 1058,275 V273 H628 V275 A7,7 0 0 1 635,268 Z"/>
+<text class="t2 c-lean" x="644" y="292">C  ws/&lt;agent&gt;/ — writer: the lean sidecar</text>
+<text class="mono" x="644" y="312" xml:space="preserve">files/&lt;path&gt;  .flint/lean/{epoch,claim,current}</text>
+<rect x="628" y="339" width="430" height="61" rx="7" class="bx"/>
+<path class="f-pass" d="M635,339 H1051 A7,7 0 0 1 1058,346 V344 H628 V346 A7,7 0 0 1 635,339 Z"/>
+<text class="t2 c-pass" x="644" y="363">D  datasets/ — writer: whoever owns them</text>
+<text class="mono" x="644" y="383" xml:space="preserve">&lt;key&gt;  — objects and nothing else; passthrough reads</text>
+<rect x="628" y="410" width="430" height="61" rx="7" class="bx"/>
+<path class="f-lite" d="M635,410 H1051 A7,7 0 0 1 1058,417 V415 H628 V417 A7,7 0 0 1 635,410 Z"/>
+<text class="t2 c-lite" x="644" y="434">E  shared/ — writer: the hub</text>
+<text class="mono" x="644" y="454" xml:space="preserve">&lt;path&gt;  .flint/epoch · manifest · owner</text>
+<path class="l-forge" d="M1058 134.0 C 1090 134.0, 1090 220.0, 1058 220.0" marker-end="url(#a-forge)"/>
+<text class="t4" x="1076" y="181"></text>
+<text class="t4" x="628" y="493">A → B is the export: after a push moves main, the syncer materialises the tree and runs</text>
+<text class="t4" x="628" y="508">flint-sync barrier over it. Nothing else crosses a prefix boundary, in either direction.</text>
+<rect x="1102" y="22" width="474" height="270" rx="7" class="bx"/>
+<text class="t2" x="1118" y="46">One writer per prefix — where it is a mechanism, and where it is not</text>
+<text class="t4b" x="1118" y="66">Within a product, a mechanism:</text>
+<text class="t4" x="1118" y="80">an epoch lease plus one CAS'd pointer — forge's on git/epoch, lean's on</text>
+<text class="t4" x="1118" y="94">.flint/lean/epoch. A second writer of the same product 412s, fences and exits; drilled</text>
+<text class="t4" x="1118" y="108">both ways.</text>
+<text class="t4b c-red" x="1118" y="122">Across products, a convention: the cells are disjoint.</text>
+<text class="t4" x="1118" y="136">Point forge and lean at ONE prefix and they never meet — both acquire epoch 1 under</text>
+<text class="t4" x="1118" y="150">different holders; no 412, no fence, no log line (drill C1). The operator's arbitration</text>
+<text class="t4" x="1118" y="164">reasons over FlintRepos only: it refuses an export aimed at another repository and</text>
+<text class="t4" x="1118" y="178">sees nothing involving a lean CR.</text>
+<text class="t4" x="1118" y="192">The one arbitrated direction: a read-write lean sidecar on the EXPORT prefix contends</text>
+<text class="t4" x="1118" y="206">on the same cell — and until today that wedged the repository, because the syncer</text>
+<text class="t4" x="1118" y="220">awaited the blocked export inline with its own heartbeat (C2; now bounded by a</text>
+<text class="t4" x="1118" y="234">timeout with backoff — pushes still stall for that long).</text>
+<rect x="1102" y="306" width="474" height="278" rx="7" class="bx"/>
+<path class="f-red" d="M1102,313 A7,7 0 0 1 1109,306 H1107 V584 H1109 A7,7 0 0 1 1102,577 Z"/>
+<text class="t2 c-red" x="1118" y="330">An export is a mirror that is never repaired</text>
+<text class="t4" x="1118" y="350">The barrier computes uploads and deletes from a LOCAL scan against a LOCAL</text>
+<text class="t4" x="1118" y="364">baseline; the only remote thing it reads is the pointer's etag. A foreign write into B</text>
+<text class="t4" x="1118" y="378">moves no pointer and changes no local file, so no later export notices it (C3).</text>
+<text class="t4b c-red" x="1118" y="392">Every reader then takes the foreign bytes (C4):</text>
+<text class="t4" x="1118" y="406">a plain reader serves them; lean's checkout adopts them — the etag-pinned refusal fires</text>
+<text class="t4" x="1118" y="420">only under a gated citation — and copies them into an agent's workspace, where they</text>
+<text class="t4" x="1118" y="434">can be committed back into git as real content. Only git clone, which never touches the</text>
+<text class="t4" x="1118" y="448">export, is unaffected.</text>
+<text class="t4b" x="1118" y="462">A foreign DELETE is refused loudly by lean and never restored (C5).</text>
+<text class="t4" x="1118" y="476">Overwrite is adopted silently; delete is refused loudly: the milder-looking operation is</text>
+<text class="t4" x="1118" y="490">the dangerous one.</text>
+<text class="t4b c-red" x="1118" y="504">So a read-write mount over an export prefix is unsupported, and readers of an</text>
+<text class="t4b c-red" x="1118" y="518">export are readers.</text>
+<rect x="24" y="600" width="1552" height="256" rx="7" class="panel"/>
+<text class="t1" x="46" y="628">Pick one per data class, not one front end per team</text>
+<text class="t4" x="46" y="646">The choosing page scores each column as if it stood alone. In practice a workload has several kinds of data, each with a best door — and each in its own prefix.</text>
+<rect x="46" y="660" width="491" height="86" rx="7" class="bx"/>
+<path class="f-forge" d="M53,660 H530 A7,7 0 0 1 537,667 V665 H46 V667 A7,7 0 0 1 53,660 Z"/>
+<text class="t2 c-forge" x="62" y="684">code, with history</text>
+<text class="t4" x="62" y="704">durable on push, reviewed by policy, merged by the server; many agents proposing to one</text>
+<text class="t4" x="62" y="718">main</text>
+<rect x="555" y="660" width="491" height="86" rx="7" class="bx"/>
+<path class="f-lean" d="M562,660 H1038 A7,7 0 0 1 1045,667 V665 H555 V667 A7,7 0 0 1 562,660 Z"/>
+<text class="t2 c-lean" x="571" y="684">the hot working set</text>
+<text class="t4" x="571" y="704">a repo-sized tree at disk speed, for one writer, with a boundary it can name; the cheapest</text>
+<text class="t4" x="571" y="718">thing that works</text>
+<rect x="1063" y="660" width="491" height="86" rx="7" class="bx"/>
+<path class="f-pass" d="M1070,660 H1547 A7,7 0 0 1 1554,667 V665 H1063 V667 A7,7 0 0 1 1070,660 Z"/>
+<text class="t2 c-pass" x="1079" y="684">datasets, weights, artifacts</text>
+<text class="t4" x="1079" y="704">read-mostly, large, or owned by another system; the bucket as-is, and nothing to keep in</text>
+<text class="t4" x="1079" y="718">step</text>
+<rect x="46" y="756" width="491" height="86" rx="7" class="bx"/>
+<path class="f-forge" d="M53,756 H530 A7,7 0 0 1 537,763 V761 H46 V763 A7,7 0 0 1 53,756 Z"/>
+<text class="t2 c-forge" x="62" y="780">checkpoints and large binaries</text>
+<text class="t4" x="62" y="800">LFS, client-to-store — or a passthrough prefix, if nothing needs them in history</text>
+<rect x="555" y="756" width="491" height="86" rx="7" class="bx"/>
+<path class="f-lite" d="M562,756 H1038 A7,7 0 0 1 1045,763 V761 H555 V763 A7,7 0 0 1 562,756 Z"/>
+<text class="t2 c-lite" x="571" y="780">coordination, sqlite, live RWX</text>
+<text class="t4" x="571" y="800">the only place several pods edit one tree with locks that mean something; size the hub by</text>
+<text class="t4" x="571" y="814">its blast radius</text>
+<rect x="1063" y="756" width="491" height="86" rx="7" class="bx"/>
+<path class="f-pass" d="M1070,756 H1547 A7,7 0 0 1 1554,763 V761 H1063 V763 A7,7 0 0 1 1070,756 Z"/>
+<text class="t2 c-pass" x="1079" y="780">a legible copy of main</text>
+<text class="t4" x="1079" y="800">the export: read it through lean or passthrough with no git in the pod — and never write to it</text>
+<rect x="28" y="861" width="14" height="14" rx="3" class="f-lite"/>
+<text class="t4" x="48" y="872">flint-lite</text>
+<rect x="110" y="861" width="14" height="14" rx="3" class="f-lean"/>
+<text class="t4" x="130" y="872">flint-lean</text>
+<rect x="197" y="861" width="14" height="14" rx="3" class="f-pass"/>
+<text class="t4" x="217" y="872">flint-passthrough</text>
+<rect x="324" y="861" width="14" height="14" rx="3" class="f-forge"/>
+<text class="t4" x="344" y="872">flint-forge</text>
+<line class="l-ink" x1="416.0" y1="868" x2="442.0" y2="868"/>
+<text class="t4" x="448" y="872">data path</text>
+<rect x="516" y="861" width="5" height="14" rx="2" class="f-red"/>
+<text class="t4" x="528" y="872">hazard / trust boundary</text>
+</svg>

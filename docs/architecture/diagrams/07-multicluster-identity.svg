@@ -1,0 +1,247 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
+     aria-label="Where an end user's token can and cannot go, per front end. One user launches agents on several clusters, each agent holding a short-lived token that may differ per agent. For flint-lite the NFS wire has no field for it and the hub authenticates nobody. For flint-lean and flint-passthrough the enforced identity is the pod's kubelet-asserted ServiceAccount, verified online by a broker. For flint-forge it is the same ServiceAccount, verified by the door's TokenReview and carried to the server as X-Remote-User. The user's token reaches storage in no case.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .t1{font-size:17.0px;font-weight:600}
+  .t2{font-size:13.0px;font-weight:600}
+  .t3{font-size:12.0px}
+  .t3b{font-size:12.0px;font-weight:600;fill:#334155}
+  .t4{font-size:11.0px;fill:#64748b}
+  .t4b{font-size:11.0px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:9.5px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:11.0px;font-weight:600;fill:#ffffff}
+  .on{font-size:13.0px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:11.0px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
+</style>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<rect x="24" y="16" width="1552" height="78" rx="7" class="panel"/>
+<text class="t1" x="46" y="42">The premise — one human, many clusters, many tokens</text>
+<text class="t4" x="46" y="62">One end user launches agents on clusters A, B and C; each agent holds THAT user's token, short-lived, from an IdP, and they may all differ. Where does it go, and what does storage actually check?</text>
+<text class="t4b c-red" x="46" y="80">The answer, for all four: it does not reach the data path. Every front end authenticates the WORKLOAD, never the human behind it.</text>
+<rect x="24" y="104" width="1552" height="184" rx="10" class="bx"/>
+<path class="f-lite" d="M34,104 H1566 A10,10 0 0 1 1576,114 V109 H24 V114 A10,10 0 0 1 34,104 Z"/>
+<text class="t2 c-lite" x="42" y="134">flint-lite</text>
+<text class="t4" x="42" y="152">ONE hub, reached from every cluster</text>
+<line class="hair" x1="42" y1="162" x2="242" y2="162"/>
+<text class="t4b c-red" x="42" y="182">Nothing on the wire carries a user</text>
+<text class="t4b c-red" x="42" y="197">identity.</text>
+<text class="t4" x="42" y="214">NFS has no field for a bearer token and</text>
+<text class="t4" x="42" y="229">no place to add one. krb5 exists in the</text>
+<text class="t4" x="42" y="244">server, is not surfaced by the chart,</text>
+<text class="t4" x="42" y="259">and is not an IdP token anyway.</text>
+<rect x="260" y="118" width="286" height="156" rx="7" class="bx"/>
+<text class="t2" x="274" y="142">what the agent holds</text>
+<text class="t4" x="274" y="162">the user's token — and it never sends it anywhere,</text>
+<text class="t4" x="274" y="176">because no door on the data path would read it</text>
+<text class="t4b" x="274" y="190">The pod is not even the client. The NODE is:</text>
+<text class="t4" x="274" y="204">one mount and one identity per node, asserting its</text>
+<text class="t4" x="274" y="218">own uid and hostname</text>
+<line class="l-lite" x1="546" y1="174" x2="572" y2="174" marker-end="url(#a-lite)"/>
+<rect x="572" y="118" width="336" height="156" rx="7" class="bx"/>
+<path class="f-red" d="M572,125 A7,7 0 0 1 579,118 H577 V274 H579 A7,7 0 0 1 572,267 Z"/>
+<text class="t2 c-red" x="586" y="142">the door — :2049, AUTH_SYS</text>
+<text class="t4" x="586" y="162">The client asserts its own uid and the server takes it. No</text>
+<text class="t4" x="586" y="176">token is validated because none is presented.</text>
+<text class="mono" x="586" y="190" xml:space="preserve">security.enforcePermissions: false</text>
+<text class="t4" x="586" y="204">is the default — the mode is evaluated, LOGGED, and the</text>
+<text class="t4" x="586" y="218">operation allowed anyway; even enforced, the hub holds</text>
+<text class="t4" x="586" y="232">CAP_DAC_OVERRIDE.</text>
+<text class="t4b c-red" x="586" y="246">sec=sys buys IDENTITY, not ENFORCEMENT.</text>
+<line class="l-lite" x1="908" y1="174" x2="934" y2="174" marker-end="url(#a-lite)"/>
+<rect x="934" y="118" width="300" height="156" rx="7" class="bx"/>
+<text class="t2" x="948" y="142">what the hub sees</text>
+<text class="t4" x="948" y="162">a client NAME — the hostname — and a self-declared</text>
+<text class="t4" x="948" y="176">uid. Not a user, not a cluster: two clusters sharing a</text>
+<text class="t4" x="948" y="190">node name are ONE client, and the protocol drops the</text>
+<text class="t4" x="948" y="204">incumbent's locks silently.</text>
+<text class="t4" x="948" y="218">The file API's bearer is per-SHARE, not per-user.</text>
+<rect x="1246" y="118" width="300" height="156" rx="7" class="panel"/>
+<text class="t2" x="1260" y="142">what isolates user A from user B</text>
+<text class="t4b c-red" x="1260" y="162">Nothing inside the hub.</text>
+<text class="t4" x="1260" y="176">Draw the boundary outside it: one hub per project —</text>
+<text class="t4" x="1260" y="190">one CR, one prefix, one coherence domain — and</text>
+<text class="t4" x="1260" y="204">network reachability by peering, SGs or a gateway.</text>
+<text class="t4" x="1260" y="218">networkPolicy cannot draw it.</text>
+<rect x="24" y="292" width="1552" height="184" rx="10" class="bx"/>
+<path class="f-lean" d="M34,292 H1566 A10,10 0 0 1 1576,302 V297 H24 V302 A10,10 0 0 1 34,292 Z"/>
+<text class="t2 c-lean" x="42" y="322">flint-lean</text>
+<text class="t4" x="42" y="340">one syncer per workspace, in every cluster</text>
+<line class="hair" x1="42" y1="350" x2="242" y2="350"/>
+<text class="t4b" x="42" y="370">The identity IS checked — it is just</text>
+<text class="t4b" x="42" y="385">not the user's.</text>
+<text class="t4" x="42" y="402">One CSI driver and one broker PER</text>
+<text class="t4" x="42" y="417">CLUSTER, because TokenReview runs</text>
+<text class="t4" x="42" y="432">against the LOCAL API server.</text>
+<text class="t4" x="42" y="447">Clusters meet in the bucket, not at</text>
+<text class="t4" x="42" y="462">each other's brokers.</text>
+<rect x="260" y="306" width="286" height="156" rx="7" class="bx"/>
+<text class="t2" x="274" y="330">what the agent holds</text>
+<text class="t4" x="274" y="350">the user's token — unused for storage —</text>
+<text class="t4b" x="274" y="364">and NO S3 credential at all.</text>
+<text class="t4" x="274" y="378">The credential lives in the worker, in a system</text>
+<text class="t4" x="274" y="392">namespace, on a loopback door the agent</text>
+<text class="t4" x="274" y="406">container cannot reach. A compromised agent gets</text>
+<text class="t4" x="274" y="420">the tree it already had — not the bucket.</text>
+<line class="l-lean" x1="546" y1="362" x2="572" y2="362" marker-end="url(#a-lean)"/>
+<rect x="572" y="306" width="336" height="156" rx="7" class="bx"/>
+<text class="t2" x="586" y="330">the door — flint-s3-broker</text>
+<text class="t4" x="586" y="350">validates the POD's ServiceAccount token: kubelet-minted,</text>
+<text class="t4" x="586" y="364">pod-bound, audience s3.csi.chert.us</text>
+<text class="t4" x="586" y="378">1 · TokenReview, ONLINE — a deleted pod's token dies</text>
+<text class="t4" x="586" y="392">within 60 s, not at exp</text>
+<text class="t4" x="586" y="406">2 · a session name matching a LIVE registration the plugin</text>
+<text class="t4" x="586" y="420">made for this pod-uid + CR — a pod cannot self-mint it</text>
+<text class="t4" x="586" y="434">3 · the CR lists the SA in consumers, in the TOKEN's</text>
+<text class="t4" x="586" y="448">namespace</text>
+<line class="l-lean" x1="908" y1="362" x2="934" y2="362" marker-end="url(#a-lean)"/>
+<rect x="934" y="306" width="300" height="156" rx="7" class="bx"/>
+<text class="t2" x="948" y="330">what S3 sees</text>
+<text class="t4" x="948" y="350">short-lived keys scoped to the project's prefix,</text>
+<text class="t4" x="948" y="364">minted per pod.</text>
+<text class="t4b" x="948" y="378">Never the user. Never a standing key held by</text>
+<text class="t4b" x="948" y="392">anything a tenant can reach.</text>
+<text class="t4" x="948" y="406">The broker's rest backend is the ONE seam where a</text>
+<text class="t4" x="948" y="420">user-scoped token could be honoured — it carries the</text>
+<text class="t4" x="948" y="434">pod's identity today.</text>
+<rect x="1246" y="306" width="300" height="156" rx="7" class="panel"/>
+<text class="t2" x="1260" y="330">what isolates user A from user B</text>
+<text class="t4b" x="1260" y="350">The prefix, and the lease.</text>
+<text class="t4" x="1260" y="364">one workspace = one prefix and the keys are scoped</text>
+<text class="t4" x="1260" y="378">to it; the subtree lease admits exactly ONE writer and</text>
+<text class="t4" x="1260" y="392">lives in the BUCKET, so it holds across clusters;</text>
+<text class="t4" x="1260" y="406">consumers lists who may mount it — absent means</text>
+<text class="t4" x="1260" y="420">DENY</text>
+<rect x="24" y="480" width="1552" height="184" rx="10" class="bx"/>
+<path class="f-pass" d="M34,480 H1566 A10,10 0 0 1 1576,490 V485 H24 V490 A10,10 0 0 1 34,480 Z"/>
+<text class="t2 c-pass" x="42" y="510">flint-passthrough</text>
+<text class="t4" x="42" y="528">the same identity chain as flint-lean</text>
+<line class="hair" x1="42" y1="538" x2="242" y2="538"/>
+<text class="t4b" x="42" y="558">Same broker, same TokenReview,</text>
+<text class="t4b" x="42" y="573">same consumers gate.</text>
+<text class="t4" x="42" y="590">The two front ends differ in what the</text>
+<text class="t4" x="42" y="605">worker RUNS, not in who is trusted.</text>
+<text class="t4" x="42" y="620">What differs is what happens INSIDE</text>
+<text class="t4" x="42" y="635">the pod.</text>
+<rect x="260" y="494" width="286" height="156" rx="7" class="bx"/>
+<text class="t2" x="274" y="518">what the agent holds</text>
+<text class="t4" x="274" y="538">the user's token — unused for storage —</text>
+<text class="t4b" x="274" y="552">and NO S3 credential at all.</text>
+<text class="t4" x="274" y="566">The pod is given nothing: no sidecar, no label, no</text>
+<text class="t4" x="274" y="580">privilege, no webhook — just a csi: volume naming</text>
+<text class="t4" x="274" y="594">a CR. The smallest blast radius of the four, and</text>
+<text class="t4" x="274" y="608">the least it can promise.</text>
+<line class="l-pass" x1="546" y1="550" x2="572" y2="550" marker-end="url(#a-pass)"/>
+<rect x="572" y="494" width="336" height="156" rx="7" class="bx"/>
+<text class="t2" x="586" y="518">the door — flint-s3-broker</text>
+<text class="t4" x="586" y="538">identical to the lean lane: online TokenReview, a</text>
+<text class="t4" x="586" y="552">registration binding the pod cannot self-mint, and the CR's</text>
+<text class="t4" x="586" y="566">consumer list.</text>
+<text class="t4" x="586" y="580">Every issuance leaves an audit line:</text>
+<text class="mono" x="586" y="594" xml:space="preserve">(ns, sa, pod-uid, cr, expiry)</text>
+<text class="t4" x="586" y="608">One broker per cluster, again — every cluster's broker points</text>
+<text class="t4" x="586" y="622">at the same store, so the bucket still trusts one principal.</text>
+<line class="l-pass" x1="908" y1="550" x2="934" y2="550" marker-end="url(#a-pass)"/>
+<rect x="934" y="494" width="300" height="156" rx="7" class="bx"/>
+<text class="t2" x="948" y="518">what S3 sees</text>
+<text class="t4" x="948" y="538">short-lived keys scoped to the bucket and prefix in</text>
+<text class="t4" x="948" y="552">the CR.</text>
+<text class="t4b c-red" x="948" y="566">And inside the pod: ONE uid.</text>
+<text class="t4" x="948" y="580">The mount reports a single owner for every file,</text>
+<text class="t4" x="948" y="594">because NodePublish never sees the pod's</text>
+<text class="t4" x="948" y="608">securityContext — two processes, or two users, are</text>
+<text class="t4" x="948" y="622">indistinguishable at the mount.</text>
+<rect x="1246" y="494" width="300" height="156" rx="7" class="panel"/>
+<text class="t2" x="1260" y="518">what isolates user A from user B</text>
+<text class="t4b" x="1260" y="538">The prefix and the CR — nothing finer than a POD.</text>
+<text class="t4" x="1260" y="552">consumers decides which ServiceAccounts may</text>
+<text class="t4" x="1260" y="566">mount it; the keys are scoped to the prefix; there is</text>
+<text class="t4" x="1260" y="580">no per-user view, so give each user their own CR and</text>
+<text class="t4" x="1260" y="594">their own pod</text>
+<rect x="24" y="668" width="1552" height="184" rx="10" class="bx"/>
+<path class="f-forge" d="M34,668 H1566 A10,10 0 0 1 1576,678 V673 H24 V678 A10,10 0 0 1 34,668 Z"/>
+<text class="t2 c-forge" x="42" y="698">flint-forge</text>
+<text class="t4" x="42" y="716">one door, one server pod per repository</text>
+<line class="hair" x1="42" y1="726" x2="242" y2="726"/>
+<text class="t4b" x="42" y="746">The pod's identity, proven to the</text>
+<text class="t4b" x="42" y="761">CLUSTER rather than to the store.</text>
+<text class="t4" x="42" y="778">TokenReview at the door — so a pod in</text>
+<text class="t4" x="42" y="793">another cluster carries nothing this</text>
+<text class="t4" x="42" y="808">door can verify. Cross-cluster agents</text>
+<text class="t4" x="42" y="823">fall back to the human bearer path.</text>
+<rect x="260" y="682" width="286" height="156" rx="7" class="bx"/>
+<text class="t2" x="274" y="706">what the agent holds</text>
+<text class="t4" x="274" y="726">the user's token — unused —</text>
+<text class="t4b" x="274" y="740">and a projected ServiceAccount token,</text>
+<text class="t4b" x="274" y="754">audience forge.chert.us,</text>
+<text class="t4" x="274" y="768">presented as the Basic password by a helper that</text>
+<text class="t4" x="274" y="782">re-reads it on every call. No bucket credential of</text>
+<text class="t4" x="274" y="796">any kind: those land on the syncer container of the</text>
+<text class="t4" x="274" y="810">server pod, only.</text>
+<line class="l-forge" x1="546" y1="738" x2="572" y2="738" marker-end="url(#a-forge)"/>
+<rect x="572" y="682" width="336" height="156" rx="7" class="bx"/>
+<text class="t2" x="586" y="706">the door — flint-hub-gateway, Door::Git</text>
+<text class="t4" x="586" y="726">TokenReview per session, cached ≤ 60 s by token hash;</text>
+<text class="t4" x="586" y="740">refusals cached, transport failures not.</text>
+<text class="t4" x="586" y="754">spec.consumers must list the ServiceAccount; a</text>
+<text class="t4" x="586" y="768">credential-less peer is answered 401 before any wake.</text>
+<text class="mono" x="586" y="782" xml:space="preserve">X-Remote-User: &lt;sa&gt;  →  REMOTE_USER</text>
+<text class="t4" x="586" y="796">read by pre-receive and by the syncer: the same principal,</text>
+<text class="t4" x="586" y="810">two enforcers, one policy document.</text>
+<line class="l-forge" x1="908" y1="738" x2="934" y2="738" marker-end="url(#a-forge)"/>
+<rect x="934" y="682" width="300" height="156" rx="7" class="bx"/>
+<text class="t2" x="948" y="706">what the server sees</text>
+<text class="t4" x="948" y="726">a ServiceAccount — which many pods share.</text>
+<text class="t4b" x="948" y="740">agentPattern bounds a branch NAME, not its</text>
+<text class="t4b" x="948" y="754">owner:</text>
+<text class="t4" x="948" y="768">one pod can push over a sibling's agent/* branch.</text>
+<text class="t4" x="948" y="782">Protected refs, refs/for proposals and</text>
+<text class="t4" x="948" y="796">non-fast-forward refusal bind per principal; the server</text>
+<text class="t4" x="948" y="810">never sees the bucket credential the agent never had.</text>
+<rect x="1246" y="682" width="300" height="156" rx="7" class="panel"/>
+<text class="t2" x="1260" y="706">what isolates user A from user B</text>
+<text class="t4b" x="1260" y="726">The repository: its pod, its prefix and claim, its</text>
+<text class="t4b" x="1260" y="740">consumers, its branch policy.</text>
+<text class="t4b c-red" x="1260" y="754">The X-Remote-User boundary is a NetworkPolicy</text>
+<text class="t4b c-red" x="1260" y="768">admitting only the door — opt-in (door.namespace),</text>
+<text class="t4b c-red" x="1260" y="782">and only where the CNI enforces it.</text>
+<text class="t4" x="1260" y="796">Otherwise reaching the port is the authorisation.</text>
+<rect x="28" y="861" width="14" height="14" rx="3" class="f-lite"/>
+<text class="t4" x="48" y="872">flint-lite</text>
+<rect x="110" y="861" width="14" height="14" rx="3" class="f-lean"/>
+<text class="t4" x="130" y="872">flint-lean</text>
+<rect x="197" y="861" width="14" height="14" rx="3" class="f-pass"/>
+<text class="t4" x="217" y="872">flint-passthrough</text>
+<rect x="324" y="861" width="14" height="14" rx="3" class="f-forge"/>
+<text class="t4" x="344" y="872">flint-forge</text>
+<rect x="416" y="861" width="5" height="14" rx="2" class="f-red"/>
+<text class="t4" x="428" y="872">hazard / trust boundary</text>
+</svg>

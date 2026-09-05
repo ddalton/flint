@@ -1,95 +1,98 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 410" role="img"
-     aria-label="flint-lean: the CSI node plugin owns a tree that is bind-mounted into the agent pod as plain local files and hostPathed into an unprivileged flint-sync worker, which checks out from and publishes to S3. Below, the four-step loop from pod start to a durable acknowledged boundary.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 420" role="img"
+     aria-label="flint-lean: the CSI node plugin owns a tree bind-mounted into the agent pod as plain local files and hostPathed into an unprivileged flint-sync worker that checks out from and publishes to S3.">
 <style>
   text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
-  .tt{font-size:13px;font-weight:600}
-  .th{font-size:11.5px;font-weight:600}
-  .tx{font-size:10.5px;fill:#64748b}
-  .tsb{font-size:10.5px;font-weight:600;fill:#475569}
-  .mns{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:9.5px;fill:#475569}
-  .mn{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px}
-  .ctr{text-anchor:middle}
-  .c-violet{fill:#6d4aa8}.c-ochre{fill:#a06b12}
-  .bx{fill:#fff;stroke:#cbd5e1;stroke-width:1.2}
-  .bx-violet{fill:#f0eafb;stroke:#6d4aa8;stroke-width:1.4}
-  .bx-pod{fill:#fcfaff;stroke:#6d4aa8;stroke-width:2}
-  .bx-ochre{fill:#fbf2de;stroke:#a06b12;stroke-width:1.6}
-  .bx-slate{fill:#f1f5f9;stroke:#94a3b8;stroke-width:1.2}
-  .ln-violet{stroke:#6d4aa8;stroke-width:1.8;fill:none}
-  .ln-ochre{stroke:#a06b12;stroke-width:1.8;fill:none}
-  .dash{stroke-dasharray:4 3}
+  .t1{font-size:14.96px;font-weight:600}
+  .t2{font-size:11.44px;font-weight:600}
+  .t3{font-size:10.56px}
+  .t3b{font-size:10.56px;font-weight:600;fill:#334155}
+  .t4{font-size:9.68px;fill:#64748b}
+  .t4b{font-size:9.68px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:9.24px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:8.36px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:9.68px;font-weight:600;fill:#ffffff}
+  .on{font-size:11.44px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:9.68px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
   .hair{stroke:#e2e8f0;stroke-width:1}
-  .num{fill:#6d4aa8}
-  .numt{font-size:10px;font-weight:600;fill:#ffffff}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
 </style>
-<defs>
-  <marker id="p4-v" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6d4aa8"/></marker>
-  <marker id="p4-o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
-</defs>
-
-<rect x="8" y="6" width="200" height="96" rx="7" class="bx-pod"/>
-<text class="tt c-violet" x="22" y="27">the agent pod</text>
-<text class="mns" x="22" y="46">/workspace</text>
-<text class="tx" x="22" y="63">PLAIN FILES on local disk.</text>
-<text class="tx" x="22" y="79">Full POSIX, zero interception.</text>
-<text class="tsb" x="22" y="95">It holds NO S3 credential.</text>
-
-<line class="ln-violet" x1="208" y1="54" x2="238" y2="54" marker-end="url(#p4-v)"/>
-<text class="tx ctr" x="223" y="44">bind</text>
-
-<rect x="242" y="6" width="150" height="96" rx="7" class="bx-violet"/>
-<text class="th c-violet ctr" x="317" y="27">the plugin-owned tree</text>
-<text class="mns ctr" x="317" y="47">volumes/&lt;vid&gt;/tree</text>
-<line class="hair" x1="256" y1="58" x2="378" y2="58"/>
-<text class="tx ctr" x="317" y="76">ONE tree, two views —</text>
-<text class="tx ctr" x="317" y="92">the pod's and the worker's</text>
-
-<line class="ln-violet" x1="392" y1="54" x2="422" y2="54" marker-end="url(#p4-v)"/>
-<text class="tx ctr" x="407" y="44">hostPath</text>
-
-<rect x="426" y="6" width="206" height="96" rx="7" class="bx-violet"/>
-<text class="th c-violet" x="440" y="27">flint-sync — the worker pod</text>
-<text class="tx" x="440" y="45">unprivileged, non-root, in a</text>
-<text class="tx" x="440" y="61">SYSTEM namespace</text>
-<text class="tsb" x="440" y="80">It holds the credential the</text>
-<text class="tsb" x="440" y="96">agent must not.</text>
-
-<line class="ln-ochre" x1="529" y1="102" x2="529" y2="132" marker-end="url(#p4-o)"/>
-<text class="tsb c-ochre" x="537" y="122">publish / checkout</text>
-
-<rect x="426" y="136" width="206" height="106" rx="7" class="bx-ochre"/>
-<text class="tt c-ochre" x="440" y="158">S3 — the durable copy</text>
-<line class="hair" x1="440" y1="168" x2="618" y2="168"/>
-<text class="mns" x="440" y="186">&lt;prefix&gt;/files/&lt;path&gt;</text>
-<text class="mns" x="440" y="203">.flint/lean/epoch · claim</text>
-<text class="mns" x="440" y="220">.flint/lean/current</text>
-<text class="tsb" x="440" y="238">The lease lives HERE, so it</text>
-
-<rect x="8" y="112" width="404" height="130" rx="7" class="bx-slate"/>
-<text class="tt" x="22" y="133">The loop — one agent, start to durable</text>
-<circle cx="34" cy="155" r="9" class="num"/><text class="numt ctr" x="34" y="159">1</text>
-<text class="th" x="50" y="159">pod starts</text>
-<text class="tx" x="130" y="159">checkout completes BEFORE the agent's first line</text>
-<circle cx="34" cy="181" r="9" class="num"/><text class="numt ctr" x="34" y="185">2</text>
-<text class="th" x="50" y="185">the agent works</text>
-<text class="tx" x="160" y="185">local files at local speed; git and sqlite work</text>
-<circle cx="34" cy="207" r="9" class="num"/><text class="numt ctr" x="34" y="211">3</text>
-<text class="th" x="50" y="211">it declares a boundary</text>
-<text class="mn" x="192" y="211">echo &gt; .flint/publish</text>
-<circle cx="34" cy="233" r="9" class="num"/><text class="numt ctr" x="34" y="237">4</text>
-<text class="th" x="50" y="237">the sidecar answers</text>
-<text class="mn" x="172" y="237">.flint/publish.ack</text>
-<text class="tx" x="290" y="237">— ok = it is in S3</text>
-
-<rect x="8" y="254" width="624" height="66" rx="7" class="bx-slate"/>
-<text class="th" x="22" y="275">The ordering is the architecture.</text>
-<text class="tx" x="200" y="275">kubelet blocks every container on NodePublishVolume, so the checkout</text>
-<text class="tx" x="22" y="292">finishes before the agent runs — no init container, no readiness dance — and calls NodeUnpublish only after</text>
-<text class="tx" x="22" y="308">every container has exited, which is where the final barrier goes. That ordering is why lean needs no FUSE.</text>
-
-<rect x="8" y="330" width="624" height="72" rx="7" class="bx-violet"/>
-<text class="th c-violet" x="22" y="351">Gated mode — durability and visibility become separate events</text>
-<text class="tx" x="22" y="369">The upload lane runs continuously: every changed file becomes a new object version, durable immediately and</text>
-<text class="tx" x="22" y="385">INVISIBLE. One CAS then installs the whole pending set, so a reader sees the entire change or none of it.</text>
-<text class="tx" x="22" y="398">Gated is REFUSED without a lag bound — unbounded staleness is impossible by construction, not by convention.</text>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<rect x="8" y="8" width="420" height="250" rx="10" class="grp"/>
+<text class="cap" x="24" y="30">ONE NODE</text>
+<rect x="24" y="38" width="180" height="110" rx="7" class="bx"/>
+<text class="t2" x="40" y="62">the agent pod</text>
+<text class="mono" x="40" y="82" xml:space="preserve">/workspace</text>
+<text class="t4" x="40" y="95">plain local files, full POSIX, zero</text>
+<text class="t4" x="40" y="108">interception; no S3 credential</text>
+<line class="l-lean" x1="204" y1="92" x2="232" y2="92" marker-end="url(#a-lean)"/>
+<rect x="236" y="60" width="80" height="64" rx="7" class="b-lean"/>
+<text class="mono" x="244" y="84" xml:space="preserve">the tree</text>
+<text class="t4" x="244" y="97">one tree, two</text>
+<text class="t4" x="244" y="110">views</text>
+<line class="l-lean" x1="316" y1="92" x2="344" y2="92" marker-end="url(#a-lean)"/>
+<rect x="348" y="38" width="64" height="110" rx="7" class="bx"/>
+<path class="f-lean" d="M355,38 H405 A7,7 0 0 1 412,45 V43 H348 V45 A7,7 0 0 1 355,38 Z"/>
+<text class="t4b" x="356" y="62">flint-sync</text>
+<text class="t4" x="356" y="75">the</text>
+<text class="t4" x="356" y="88">worker;</text>
+<text class="t4" x="356" y="101">holds the</text>
+<text class="t4" x="356" y="114">credential</text>
+<rect x="24" y="160" width="388" height="84" rx="7" class="panel"/>
+<text class="t2" x="40" y="184">s3.csi.chert.us — the node DaemonSet</text>
+<text class="t4" x="40" y="204">kubelet blocks the pod on NodePublishVolume, so the checkout completes</text>
+<text class="t4" x="40" y="217">BEFORE the agent's first line; the final barrier runs on NodeUnpublish.</text>
+<line class="l-lean" x1="428" y1="110" x2="468" y2="110" marker-start="url(#a-lean)" marker-end="url(#a-lean)"/>
+<rect x="400" y="87" width="97" height="15" rx="3" class="halo"/>
+<text class="t4b c-lean" x="448" y="98" style="text-anchor:middle">checkout · publish</text>
+<rect x="472" y="8" width="160" height="250" rx="7" class="s3"/>
+<text class="t2" x="482" y="32">S3</text>
+<text class="mono" x="482" y="52" xml:space="preserve">files/&lt;path&gt;</text>
+<text class="mono" x="482" y="65" xml:space="preserve">.flint/lean/epoch</text>
+<text class="mono" x="482" y="78" xml:space="preserve">  claim · manifest</text>
+<text class="mono" x="482" y="91" xml:space="preserve">  inbox · conflicts/</text>
+<text class="t4" x="482" y="104">the lease lives in the BUCKET,</text>
+<text class="t4" x="482" y="117">so one writer holds across</text>
+<text class="t4" x="482" y="130">clusters</text>
+<rect x="8" y="272" width="306" height="138" rx="7" class="bx"/>
+<path class="f-lean" d="M15,272 H307 A7,7 0 0 1 314,279 V277 H8 V279 A7,7 0 0 1 15,272 Z"/>
+<text class="t2 c-lean" x="24" y="296">The loop</text>
+<text class="t4" x="24" y="316">1 · pod starts: checkout first</text>
+<text class="t4" x="24" y="329">2 · the agent works at disk speed</text>
+<text class="mono" x="24" y="342" xml:space="preserve">3 · echo &gt; .flint/publish</text>
+<text class="mono" x="24" y="355" xml:space="preserve">4 · .flint/publish.ack = ok</text>
+<text class="t4" x="24" y="368">ok means the bytes are in S3. RPO = the last barrier, ≤</text>
+<text class="t4" x="24" y="381">floorSecs on a hard kill.</text>
+<rect x="326" y="272" width="306" height="138" rx="7" class="bx"/>
+<path class="f-lean" d="M333,272 H625 A7,7 0 0 1 632,279 V277 H326 V279 A7,7 0 0 1 333,272 Z"/>
+<text class="t2 c-lean" x="342" y="296">Gated mode</text>
+<text class="t4" x="342" y="316">every changed file is uploaded as a new version at once —</text>
+<text class="t4" x="342" y="329">durable and INVISIBLE — and one CAS cites the whole</text>
+<text class="t4" x="342" y="342">pending set. A reader sees all of a change or none of it; gated</text>
+<text class="t4" x="342" y="355">is refused without a lag bound.</text>
 </svg>

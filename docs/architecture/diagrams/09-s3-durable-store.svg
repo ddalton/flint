@@ -1,0 +1,178 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 800" role="img"
+     aria-label="S3 is the durable store for all four front ends. Two views exist: the live view — a hub's port 2049, a lean workspace's local disk, a forge clone's working tree — which is strongly consistent, and the published view in the bucket, which is a set of RPO-consistent whole-file snapshots or, for forge, a bare git repository. The control namespace holds the cells that make concurrent access safe, and the recovery point differs per front end.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .t1{font-size:17.0px;font-weight:600}
+  .t2{font-size:13.0px;font-weight:600}
+  .t3{font-size:12.0px}
+  .t3b{font-size:12.0px;font-weight:600;fill:#334155}
+  .t4{font-size:11.0px;fill:#64748b}
+  .t4b{font-size:11.0px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:9.5px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:11.0px;font-weight:600;fill:#ffffff}
+  .on{font-size:13.0px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:11.0px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
+</style>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<rect x="24" y="18" width="767" height="190" rx="7" class="bx"/>
+<text class="t2" x="40" y="42">The LIVE view — strong, and never in the bucket</text>
+<text class="t4" x="40" y="62">a hub's port 2049 and its file API · a lean workspace's local disk · a forge clone's working tree, and the server's local repository</text>
+<text class="t4b" x="40" y="77">close-to-open · byte-range locks · atomic rename · no RPO lag</text>
+<text class="t4" x="40" y="92">Reads and writes land on the working set, through whatever holds coherence for it — the hub process, the agent's own kernel, or git.</text>
+<text class="t4" x="40" y="107">Who reads it: front doors, editors, agents — anything touching a tree that is being changed right now. The hub's live view offers one thing no real</text>
+<text class="t4" x="40" y="122">S3 can: assembly under a temp name completed by an ATOMIC RENAME under a deny-both OPEN. A lean or forge live tree is visible to exactly</text>
+<text class="t4" x="40" y="137">one pod.</text>
+<rect x="809" y="18" width="767" height="190" rx="7" class="bx"/>
+<path class="f-red" d="M809,25 A7,7 0 0 1 816,18 H814 V208 H816 A7,7 0 0 1 809,201 Z"/>
+<text class="t2 c-red" x="825" y="42">The PUBLISHED view — the bucket, and the durable copy</text>
+<text class="t4" x="825" y="62">RPO-consistent snapshots per subtree, made of untorn whole-file generations — or, for forge, a bare repository whose refs move as ONE CAS'd</text>
+<text class="t4" x="825" y="77">object.</text>
+<text class="t4b" x="825" y="92">whole objects · versioned or content-named · read-only against a live subtree</text>
+<text class="t4" x="825" y="107">A reader never sees half a file or half a batch. It may well see a file from before your last write — that is the contract, not a defect. Anything that</text>
+<text class="t4" x="825" y="122">is not a mount reads this view as plain S3, with no flint server in the read path at all.</text>
+<text class="t4b c-red" x="825" y="137">Do not write into a live subtree from the console: a hand-made PUT under a prefix a hub, syncer or server owns is overwritten at the</text>
+<text class="t4b c-red" x="825" y="152">next flush, reported as a conflict, or silently uncited.</text>
+<rect x="24" y="224" width="1552" height="272" rx="7" class="s3"/>
+<text class="t1" x="46" y="252">Inside the prefix — the bytes, and the cells that make concurrency safe</text>
+<text class="t4" x="46" y="272">Every cell below exists to answer one question that cannot be answered from the object listing alone.</text>
+<rect x="46" y="286" width="287" height="196" rx="7" class="bx"/>
+<path class="f-lite" d="M53,286 H326 A7,7 0 0 1 333,293 V291 H46 V293 A7,7 0 0 1 53,286 Z"/>
+<text class="t2 c-lite" x="62" y="310">flint-lite writes</text>
+<text class="mono" x="62" y="330" xml:space="preserve">&lt;prefix&gt;/&lt;path&gt;</text>
+<text class="t4" x="62" y="344">the published generations</text>
+<text class="mono" x="62" y="358" xml:space="preserve">.flint/epoch</text>
+<text class="t4" x="62" y="372">who is the hub right now? — a lease</text>
+<text class="mono" x="62" y="386" xml:space="preserve">.flint/manifest</text>
+<text class="t4" x="62" y="400">what is the whole tree? — DR from one GET</text>
+<text class="mono" x="62" y="414" xml:space="preserve">.flint/owner</text>
+<rect x="351" y="286" width="287" height="196" rx="7" class="bx"/>
+<path class="f-lean" d="M358,286 H631 A7,7 0 0 1 638,293 V291 H351 V293 A7,7 0 0 1 358,286 Z"/>
+<text class="t2 c-lean" x="367" y="310">flint-lean writes</text>
+<text class="mono" x="367" y="330" xml:space="preserve">&lt;prefix&gt;/files/&lt;path&gt;</text>
+<text class="t4" x="367" y="344">the workspace, file for file</text>
+<text class="mono" x="367" y="358" xml:space="preserve">.flint/lean/epoch · claim</text>
+<text class="t4" x="367" y="372">who may write this subtree? — one holder, by</text>
+<text class="t4" x="367" y="386">CAS, across every cluster</text>
+<text class="mono" x="367" y="400" xml:space="preserve">.flint/lean/current</text>
+<text class="t4" x="367" y="414">what does the last boundary contain?</text>
+<text class="mono" x="367" y="428" xml:space="preserve">.flint/lean/inbox · conflicts/</text>
+<rect x="656" y="286" width="287" height="196" rx="7" class="bx"/>
+<path class="f-pass" d="M663,286 H937 A7,7 0 0 1 944,293 V291 H656 V293 A7,7 0 0 1 663,286 Z"/>
+<text class="t2 c-pass" x="672" y="310">flint-passthrough writes</text>
+<text class="mono" x="672" y="330" xml:space="preserve">&lt;prefix&gt;/&lt;key&gt;</text>
+<text class="mono mute" x="672" y="344" xml:space="preserve">the objects, and nothing else</text>
+<text class="t4b" x="672" y="358">There is no control namespace here, and that</text>
+<text class="t4b" x="672" y="372">is the entire feature.</text>
+<text class="t4" x="672" y="386">A prefix owned by somebody else's tooling stays</text>
+<text class="t4" x="672" y="400">exactly as it was; flint claims no lease and leaves</text>
+<text class="t4" x="672" y="414">no trace. You also get no answer to any question</text>
+<text class="t4" x="672" y="428">on the left.</text>
+<rect x="962" y="286" width="287" height="196" rx="7" class="bx"/>
+<path class="f-forge" d="M969,286 H1242 A7,7 0 0 1 1249,293 V291 H962 V293 A7,7 0 0 1 969,286 Z"/>
+<text class="t2 c-forge" x="978" y="310">flint-forge writes</text>
+<text class="mono" x="978" y="330" xml:space="preserve">git/objects/pack/*</text>
+<text class="t4" x="978" y="344">immutable, content-named — never overwritten</text>
+<text class="mono" x="978" y="358" xml:space="preserve">git/snapshot</text>
+<text class="t4" x="978" y="372">the refs, packs, bundles and exported commit —</text>
+<text class="t4" x="978" y="386">ONE CAS'd pointer</text>
+<text class="mono" x="978" y="400" xml:space="preserve">git/epoch · git/claim</text>
+<text class="t4" x="978" y="414">who is the server? whose prefix?</text>
+<text class="mono" x="978" y="428" xml:space="preserve">lfs/objects/&lt;oid&gt;</text>
+<text class="t4" x="978" y="442">and, under its OWN prefix, the export</text>
+<rect x="1267" y="286" width="287" height="196" rx="7" class="panel"/>
+<text class="t2" x="1283" y="310">Reserved, and enforced</text>
+<text class="t4" x="1283" y="330">.flint is control state: a client file under it can</text>
+<text class="t4" x="1283" y="344">never shadow a control object, and a NESTED</text>
+<text class="t4" x="1283" y="358">.flint/ is another share's namespace — never tiered</text>
+<text class="t4" x="1283" y="372">into this one. Both are tested, because both were</text>
+<text class="t4" x="1283" y="386">once a way to overwrite a live share's lease.</text>
+<text class="t4b" x="1283" y="400">The file-shaped formats are mutually</text>
+<text class="t4b" x="1283" y="414">convertible, and forge's export is one of them:</text>
+<text class="t4b" x="1283" y="428">choosing today does not strand data.</text>
+<rect x="24" y="512" width="1552" height="268" rx="7" class="panel"/>
+<text class="t1" x="46" y="540">What “durable” actually means here — the recovery point, per front end, in the language of a hard pod kill</text>
+<rect x="46" y="556" width="364" height="212" rx="7" class="bx"/>
+<path class="f-lite" d="M53,556 H402 A7,7 0 0 1 410,563 V561 H46 V563 A7,7 0 0 1 53,556 Z"/>
+<text class="t2 c-lite" x="62" y="580">flint-lite — RPO is the flush cadence</text>
+<text class="t4" x="62" y="600">The PVC is a working set the hub flushes on a timer; losing the</text>
+<text class="t4" x="62" y="614">disk is a REBUILD from the bucket, not a loss. A cold read</text>
+<text class="t4" x="62" y="628">hydrates on demand and both doors say so: NFS4ERR_DELAY,</text>
+<text class="t4" x="62" y="642">or 503.</text>
+<text class="t4b" x="62" y="656">Hibernation deletes the PVC, so it is VERIFIED, never</text>
+<text class="t4b" x="62" y="670">assumed:</text>
+<text class="t4" x="62" y="684">the operator scales back to one, polls until the hub reports</text>
+<text class="t4" x="62" y="698">rpoClean, and only then deletes. A share with no bucket reports</text>
+<text class="t4" x="62" y="712">rpoClean: null — a refusal, not a pass.</text>
+<rect x="428" y="556" width="364" height="212" rx="7" class="bx"/>
+<path class="f-lean" d="M434,556 H784 A7,7 0 0 1 791,563 V561 H428 V563 A7,7 0 0 1 434,556 Z"/>
+<text class="t2 c-lean" x="444" y="580">flint-lean — RPO is the last barrier</text>
+<text class="t4" x="444" y="600">A hard kill loses at most floorSecs (default 60 s); a graceful stop</text>
+<text class="t4" x="444" y="614">loses nothing, because preStop runs a final barrier. A restart over</text>
+<text class="t4" x="444" y="628">a live tree RESUMES from its baseline.</text>
+<text class="t4b" x="444" y="642">Publish at a breakpoint and the RPO becomes zero,</text>
+<text class="t4b" x="444" y="656">knowably:</text>
+<text class="mono" x="444" y="670" xml:space="preserve">echo &gt; .flint/publish → publish.ack = ok</text>
+<text class="t4" x="444" y="684">means the bytes are in S3 — the difference between “probably</text>
+<text class="t4" x="444" y="698">durable” and “durable, and I was told so”.</text>
+<rect x="809" y="556" width="364" height="212" rx="7" class="bx"/>
+<path class="f-pass" d="M816,556 H1166 A7,7 0 0 1 1172,563 V561 H809 V563 A7,7 0 0 1 816,556 Z"/>
+<text class="t2 c-pass" x="825" y="580">flint-passthrough — there is no RPO</text>
+<text class="t4" x="825" y="600">Nothing is buffered on flint's behalf, so nothing can be lost by</text>
+<text class="t4" x="825" y="614">flint. A completed PUT is durable the instant S3 says so; an</text>
+<text class="t4" x="825" y="628">interrupted one did not happen.</text>
+<text class="t4b" x="825" y="642">The strongest durability story of the four — and strongest</text>
+<text class="t4b" x="825" y="656">because flint is not in it.</text>
+<text class="t4" x="825" y="670">The trade: a write is a whole new object, there is no rename to</text>
+<text class="t4" x="825" y="684">make it atomic against a reader, and two writers racing one key</text>
+<text class="t4" x="825" y="698">resolve as S3 resolves them — last writer wins, unrecorded.</text>
+<rect x="1190" y="556" width="364" height="212" rx="7" class="bx"/>
+<path class="f-forge" d="M1198,556 H1547 A7,7 0 0 1 1554,563 V561 H1190 V563 A7,7 0 0 1 1198,556 Z"/>
+<text class="t2 c-forge" x="1206" y="580">flint-forge — RPO is the last acknowledged push</text>
+<text class="t4" x="1206" y="600">No path acknowledges a push the bucket does not hold: the pack</text>
+<text class="t4" x="1206" y="614">is uploaded, the snapshot CAS lands, the ref transaction applies,</text>
+<text class="t4" x="1206" y="628">and only THEN is ok reported. A crash between the CAS and the</text>
+<text class="t4" x="1206" y="642">report fails the push at the client; the restart restores from the</text>
+<text class="t4" x="1206" y="656">snapshot and passes fsck.</text>
+<text class="t4b" x="1206" y="670">The unit is a push. Uncommitted work has no RPO —</text>
+<text class="t4" x="1206" y="684">git's contract, which forge keeps; a harness that wants one runs</text>
+<text class="t4" x="1206" y="698">a snapshot script in its own pod, force-pushing refs/wip/&lt;pod&gt;.</text>
+<rect x="28" y="783" width="14" height="14" rx="3" class="f-lite"/>
+<text class="t4" x="48" y="794">flint-lite</text>
+<rect x="110" y="783" width="14" height="14" rx="3" class="f-lean"/>
+<text class="t4" x="130" y="794">flint-lean</text>
+<rect x="197" y="783" width="14" height="14" rx="3" class="f-pass"/>
+<text class="t4" x="217" y="794">flint-passthrough</text>
+<rect x="324" y="783" width="14" height="14" rx="3" class="f-forge"/>
+<text class="t4" x="344" y="794">flint-forge</text>
+<rect x="416" y="783" width="5" height="14" rx="2" class="f-red"/>
+<text class="t4" x="428" y="794">hazard / trust boundary</text>
+</svg>

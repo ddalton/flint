@@ -1,73 +1,90 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 420" role="img"
-     aria-label="flint-lite topology, top to bottom: consumer pods in any cluster share one node kernel NFS client, which reaches the hub Service on port 2049; the hub pod holds the coherence state and a PVC working set, and publishes to and hydrates from the S3 prefix that holds the durable copy.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 430" role="img"
+     aria-label="flint-lite topology: consumer pods share one node kernel NFS client reaching the hub on port 2049; the hub holds coherence state and a PVC working set and publishes to the S3 prefix that holds the durable copy.">
 <style>
   text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
-  .tt{font-size:13px;font-weight:600}
-  .th{font-size:11.5px;font-weight:600}
-  .tx{font-size:10.5px;fill:#64748b}
-  .tsb{font-size:10.5px;font-weight:600;fill:#475569}
-  .mns{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:9.5px;fill:#475569}
-  .ctr{text-anchor:middle}
-  .c-blue{fill:#1a5f9e}.c-ochre{fill:#a06b12}
-  .bx{fill:#fff;stroke:#cbd5e1;stroke-width:1.2}
-  .bx-blue{fill:#e9f2fa;stroke:#1a5f9e;stroke-width:1.4}
-  .bx-hub{fill:#f7fbfe;stroke:#1a5f9e;stroke-width:2}
-  .bx-ochre{fill:#fbf2de;stroke:#a06b12;stroke-width:1.6}
-  .bx-slate{fill:#f1f5f9;stroke:#94a3b8;stroke-width:1.2}
-  .grp{fill:none;stroke:#94a3b8;stroke-width:1.2;stroke-dasharray:5 4}
-  .ln-blue{stroke:#1a5f9e;stroke-width:2;fill:none}
-  .ln-ochre{stroke:#a06b12;stroke-width:1.8;fill:none}
-  .dash{stroke-dasharray:4 3}
+  .t1{font-size:14.96px;font-weight:600}
+  .t2{font-size:11.44px;font-weight:600}
+  .t3{font-size:10.56px}
+  .t3b{font-size:10.56px;font-weight:600;fill:#334155}
+  .t4{font-size:9.68px;fill:#64748b}
+  .t4b{font-size:9.68px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:9.24px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:8.36px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:9.68px;font-weight:600;fill:#ffffff}
+  .on{font-size:11.44px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:9.68px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
   .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
 </style>
-<defs>
-  <marker id="p2-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
-  <marker id="p2-o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
-</defs>
-
-<rect x="8" y="6" width="380" height="108" rx="7" class="grp"/>
-<text class="th" x="24" y="26">Consumer cluster — nothing from flint installed</text>
-<rect x="24" y="36" width="106" height="30" rx="5" class="bx"/><text class="tx ctr" x="77" y="56">pod</text>
-<rect x="140" y="36" width="106" height="30" rx="5" class="bx"/><text class="tx ctr" x="193" y="56">pod</text>
-<rect x="256" y="36" width="116" height="30" rx="5" class="bx"/><text class="tx ctr" x="314" y="56">pod</text>
-<rect x="24" y="74" width="348" height="30" rx="5" class="bx-blue"/>
-<text class="tx ctr" x="198" y="93">kernel NFS client — ONE mount per node, shared by every pod</text>
-
-<line class="ln-blue" x1="198" y1="114" x2="198" y2="142" marker-end="url(#p2-b)"/>
-<text class="tsb" x="208" y="132">NFSv4.2 · TCP :2049 · nconnect ≥ 2</text>
-
-<rect x="8" y="146" width="380" height="150" rx="7" class="bx-hub"/>
-<text class="tt c-blue" x="24" y="168">flint-lite hub — ONE pod, one prefix</text>
-<text class="tx" x="24" y="186">single replica · Recreate · exclusive flock</text>
-<rect x="24" y="196" width="172" height="42" rx="5" class="bx-blue"/>
-<text class="tx ctr" x="110" y="213">:2049 NFSv4.2</text>
-<text class="tx ctr" x="110" y="229">locks · rename · O_EXCL</text>
-<rect x="204" y="196" width="168" height="42" rx="5" class="bx-ochre"/>
-<text class="tx ctr" x="288" y="213">:8080 status + files</text>
-<text class="tx ctr" x="288" y="229">ClusterIP only · bearer</text>
-<rect x="24" y="246" width="348" height="38" rx="5" class="bx-slate"/>
-<text class="tsb" x="36" y="263">PVC — the working set. A CACHE, not the copy.</text>
-<text class="tx" x="36" y="278">Losing it is a rebuild from the bucket, not a loss of data.</text>
-
-<line class="ln-ochre" x1="398" y1="200" x2="446" y2="200" marker-end="url(#p2-o)"/>
-<line class="ln-ochre dash" x1="446" y1="224" x2="398" y2="224" marker-end="url(#p2-o)"/>
-<text class="tsb c-ochre" x="404" y="194">publish</text>
-<text class="tsb c-ochre" x="404" y="240">hydrate</text>
-
-<rect x="450" y="146" width="182" height="150" rx="7" class="bx-ochre"/>
-<text class="tt c-ochre" x="466" y="168">S3 — the durable copy</text>
-<line class="hair" x1="466" y1="178" x2="616" y2="178"/>
-<text class="mns" x="466" y="196">&lt;prefix&gt;/&lt;path&gt;</text>
-<text class="tx" x="466" y="212">untorn whole-file objects</text>
-<text class="mns" x="466" y="234">.flint/epoch</text>
-<text class="mns" x="466" y="250">.flint/manifest</text>
-<text class="mns" x="466" y="266">.flint/owner</text>
-<text class="tx" x="466" y="285">RPO = the flush cadence</text>
-
-<rect x="8" y="308" width="624" height="104" rx="7" class="bx-slate"/>
-<text class="th" x="24" y="329">The hub's value and its constraint are the same fact.</text>
-<text class="tx" x="24" y="347">One process holds every lease, lock and open — which is why N pods across N clusters see one coherent tree,</text>
-<text class="tx" x="24" y="363">and why it is one pod. A second hub on the prefix is split-brain, fenced by the epoch cell.</text>
-<text class="th" x="24" y="385">The two doors are secured differently, and only one has a credential.</text>
-<text class="tx" x="24" y="403">:2049 is AUTH_SYS — reachability is the boundary. :8080 can rewrite any file, so it never joins the Service.</text>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<rect x="8" y="8" width="300" height="250" rx="10" class="grp"/>
+<text class="cap" x="24" y="30">CONSUMER CLUSTER</text>
+<text class="t4" x="141" y="30">installs nothing</text>
+<rect x="24" y="38" width="84" height="40" rx="7" class="bx"/>
+<text class="t4" x="66" y="62" style="text-anchor:middle">agent pod</text>
+<line class="l-ctl" x1="66" y1="78" x2="66" y2="100" marker-end="url(#a-ctl)"/>
+<rect x="116" y="38" width="84" height="40" rx="7" class="bx"/>
+<text class="t4" x="158" y="62" style="text-anchor:middle">agent pod</text>
+<line class="l-ctl" x1="158" y1="78" x2="158" y2="100" marker-end="url(#a-ctl)"/>
+<rect x="208" y="38" width="84" height="40" rx="7" class="bx"/>
+<text class="t4" x="250" y="62" style="text-anchor:middle">agent pod</text>
+<line class="l-ctl" x1="250" y1="78" x2="250" y2="100" marker-end="url(#a-ctl)"/>
+<rect x="24" y="104" width="268" height="70" rx="7" class="b-lite"/>
+<text class="t2 c-lite" x="40" y="128">kernel NFS client — one per node</text>
+<text class="t4" x="40" y="148">shared by every pod on it, with its page cache; full</text>
+<text class="t4" x="40" y="161">POSIX</text>
+<text class="t4" x="24" y="190">The node is the client: one mount, one identity, asserting its</text>
+<text class="t4" x="24" y="203">own uid (AUTH_SYS).</text>
+<line class="l-lite" x1="308" y1="134" x2="356" y2="134" marker-start="url(#a-lite)" marker-end="url(#a-lite)"/>
+<rect x="291" y="111" width="82" height="15" rx="3" class="halo"/>
+<text class="t4b c-lite" x="332" y="122" style="text-anchor:middle">NFSv4.2 :2049</text>
+<rect x="360" y="8" width="272" height="250" rx="10" class="grp"/>
+<text class="cap" x="376" y="30">HUB CLUSTER</text>
+<rect x="376" y="38" width="240" height="100" rx="7" class="bx"/>
+<path class="f-lite" d="M383,38 H609 A7,7 0 0 1 616,45 V43 H376 V45 A7,7 0 0 1 383,38 Z"/>
+<text class="t2 c-lite" x="392" y="62">the hub — ONE pod</text>
+<text class="t4" x="392" y="82">leases, locks, close-to-open in one process:</text>
+<text class="t4" x="392" y="95">the coherence authority</text>
+<text class="t4" x="392" y="108">:8080 file API — ClusterIP only, one bearer per</text>
+<text class="t4" x="392" y="121">share</text>
+<line class="l-lite" x1="496" y1="138" x2="496" y2="160" marker-end="url(#a-lite)"/>
+<rect x="376" y="164" width="240" height="74" rx="7" class="panel"/>
+<text class="t2" x="392" y="188">PVC — the working set</text>
+<text class="t4" x="392" y="208">a CACHE of the bucket, flushed on a cadence;</text>
+<text class="t4" x="392" y="221">losing it is a rebuild</text>
+<line class="l-lite" x1="496" y1="258" x2="496" y2="284" marker-start="url(#a-lite)" marker-end="url(#a-lite)"/>
+<rect x="515" y="265" width="89" height="15" rx="3" class="halo"/>
+<text class="t4b c-lite" x="560" y="276" style="text-anchor:middle">publish · hydrate</text>
+<rect x="8" y="288" width="624" height="130" rx="7" class="s3"/>
+<text class="t2" x="24" y="312">S3 — the durable copy</text>
+<text class="mono" x="24" y="332" xml:space="preserve">&lt;prefix&gt;/&lt;path&gt;   published generations, untorn</text>
+<text class="mono" x="24" y="345" xml:space="preserve">&lt;prefix&gt;/.flint/epoch · manifest · owner</text>
+<text class="t4" x="24" y="358">Consumers never hold bucket credentials: the bucket trusts one principal, the hub. RPO = the flush cadence. Both doors say “not</text>
+<text class="t4" x="24" y="371">yet” on a cold read — NFS4ERR_DELAY, 503 — rather than hanging.</text>
 </svg>

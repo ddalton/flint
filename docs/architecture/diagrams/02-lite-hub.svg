@@ -1,181 +1,175 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img"
-     aria-label="flint-lite: consumer pods in any cluster mount a PVC whose PV points at the hub Service on port 2049; the node kernel NFS client carries the bytes; one hub pod serves NFSv4.2 from a PVC that holds the working set; the S3 prefix holds the durable copy, published and hydrated by the hub, with a control namespace holding the epoch, manifest and owner cells.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 852" role="img"
+     aria-label="flint-lite: consumer pods in any cluster mount a PVC whose PV points at the hub Service on port 2049; the node's kernel NFS client carries the bytes; one hub pod serves NFSv4.2 from a PVC that holds the working set; the S3 prefix holds the durable copy, published and hydrated by the hub, with a control namespace holding the epoch, manifest and owner cells.">
 <style>
   text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
-  .tt{font-size:17px;font-weight:600}
-  .th{font-size:13.5px;font-weight:600}
-  .tl{font-size:12.5px}
-  .ts{font-size:11.5px;fill:#64748b}
-  .tsb{font-size:11.5px;font-weight:600;fill:#475569}
-  .tx{font-size:11px;fill:#64748b}
-  .mns{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#475569}
-  .mn{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:11.5px}
-  .ctr{text-anchor:middle}
-  .c-blue{fill:#1a5f9e}.c-ochre{fill:#a06b12}.c-violet{fill:#6d4aa8}
-  .bx{fill:#fff;stroke:#cbd5e1;stroke-width:1.4}
-  .bx-slate{fill:#f1f5f9;stroke:#94a3b8;stroke-width:1.4}
-  .bx-blue{fill:#e9f2fa;stroke:#1a5f9e;stroke-width:1.6}
-  .bx-hub{fill:#f7fbfe;stroke:#1a5f9e;stroke-width:2}
-  .bx-ochre{fill:#fbf2de;stroke:#a06b12;stroke-width:1.6}
-  .grp{fill:none;stroke:#94a3b8;stroke-width:1.4;stroke-dasharray:6 5}
-  .band{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
-  .ln{stroke:#475569;stroke-width:1.5;fill:none}
-  .ln-blue{stroke:#1a5f9e;stroke-width:2.6;fill:none}
-  .ln-ochre{stroke:#a06b12;stroke-width:2.2;fill:none}
-  .dash{stroke-dasharray:5 4}
+  .t1{font-size:17.0px;font-weight:600}
+  .t2{font-size:13.0px;font-weight:600}
+  .t3{font-size:12.0px}
+  .t3b{font-size:12.0px;font-weight:600;fill:#334155}
+  .t4{font-size:11.0px;fill:#64748b}
+  .t4b{font-size:11.0px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:9.5px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:11.0px;font-weight:600;fill:#ffffff}
+  .on{font-size:13.0px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:11.0px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
   .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
 </style>
-<defs>
-  <marker id="d2-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
-  <marker id="d2-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
-  <marker id="d2-ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
-</defs>
-
-<!-- ===== consumer cluster ===== -->
-<rect x="24" y="30" width="470" height="560" rx="10" class="grp"/>
-<text class="tt" x="44" y="58">Consumer cluster</text>
-<text class="ts" x="44" y="78">nothing from flint is installed here</text>
-
-<rect x="44" y="94" width="430" height="86" rx="8" class="bx"/>
-<text class="th" x="62" y="118">PersistentVolumeClaim</text>
-<text class="mns" x="62" y="140">accessModes: [ReadWriteMany]</text>
-<text class="tx" x="62" y="164">minted by hand, or by the stock nfs-subdir provisioner</text>
-
-<line class="ln dash" x1="259" y1="180" x2="259" y2="204" marker-end="url(#d2-ag)"/>
-<text class="tx ctr" x="259" y="197">bound</text>
-
-<rect x="44" y="208" width="430" height="92" rx="8" class="bx"/>
-<text class="th" x="62" y="232">PersistentVolume</text>
-<text class="mns" x="62" y="254">nfs: { server: &lt;hub&gt;, path: / }</text>
-<text class="mns" x="62" y="272">nfsvers=4.1 · hard · nconnect=4</text>
-<text class="tx" x="62" y="292">nconnect ≥ 2 or the kernel silently refuses every trunk</text>
-
-<rect x="44" y="320" width="430" height="246" rx="8" class="bx-slate"/>
-<text class="th" x="62" y="344">Node</text>
-<text class="tx" x="62" y="364">kubelet mounts ONCE per node — pods share it</text>
-
-<rect x="64" y="380" width="118" height="62" rx="6" class="bx"/>
-<text class="tl ctr" x="123" y="416">pod</text>
-<rect x="196" y="380" width="118" height="62" rx="6" class="bx"/>
-<text class="tl ctr" x="255" y="416">pod</text>
-<rect x="328" y="380" width="118" height="62" rx="6" class="bx"/>
-<text class="tl ctr" x="387" y="416">pod</text>
-
-<line class="ln" x1="123" y1="442" x2="123" y2="470" marker-end="url(#d2-ag)"/>
-<line class="ln" x1="255" y1="442" x2="255" y2="470" marker-end="url(#d2-ag)"/>
-<line class="ln" x1="387" y1="442" x2="387" y2="470" marker-end="url(#d2-ag)"/>
-
-<rect x="64" y="474" width="382" height="76" rx="6" class="bx-blue"/>
-<text class="tl ctr c-blue" x="255" y="498">kernel NFS client</text>
-<text class="tx ctr" x="255" y="518">one mount, one page cache, shared by every pod on</text>
-<text class="tx ctr" x="255" y="534">the node — cross-node coherence is the HUB's job</text>
-
-<!-- ===== the wire ===== -->
-<line class="ln-blue" x1="494" y1="512" x2="612" y2="512" marker-end="url(#d2-ab)"/>
-<text class="tsb ctr c-blue" x="553" y="494">NFSv4.2</text>
-<text class="tx ctr" x="553" y="536">TCP :2049</text>
-
-<!-- ===== hub cluster ===== -->
-<rect x="616" y="30" width="520" height="560" rx="10" class="grp"/>
-<text class="tt" x="636" y="58">Hub cluster</text>
-<text class="ts" x="636" y="78">one FlintShare per volume — a project may own several</text>
-
-<rect x="636" y="94" width="480" height="66" rx="8" class="bx"/>
-<text class="th" x="654" y="118">Service :2049</text>
-<text class="tx" x="654" y="140">ClusterIP, NodePort or LoadBalancer — remote clusters</text>
-<text class="tx" x="654" y="152">mount spec.service.advertiseAddress verbatim</text>
-
-<line class="ln-blue" x1="876" y1="160" x2="876" y2="186" marker-end="url(#d2-ab)"/>
-
-<rect x="636" y="190" width="480" height="252" rx="8" class="bx-hub"/>
-<text class="th c-blue" x="654" y="216">flint-lite hub — ONE pod</text>
-<text class="mns" x="654" y="236">flint-pnfs-mds · mode: standalone</text>
-<line class="hair" x1="654" y1="250" x2="1098" y2="250"/>
-
-<rect x="654" y="262" width="212" height="74" rx="6" class="bx-blue"/>
-<text class="tl ctr" x="760" y="286">:2049  NFSv4.2</text>
-<text class="tx ctr" x="760" y="306">byte-range locks · close-to-open</text>
-<text class="tx ctr" x="760" y="322">atomic rename · O_EXCL · delegations</text>
-
-<rect x="886" y="262" width="212" height="74" rx="6" class="bx-ochre"/>
-<text class="tl ctr" x="992" y="286">:8080  status + files</text>
-<text class="tx ctr" x="992" y="306">ClusterIP ONLY — never on the</text>
-<text class="tx ctr" x="992" y="322">Service. One bearer token per share.</text>
-
-<text class="tx" x="654" y="360">Every HTTP call is dispatched as an NFS compound IN-PROCESS,</text>
-<text class="tx" x="654" y="376">so the two doors cannot disagree about the tree.</text>
-<text class="tsb" x="654" y="400">single replica · strategy: Recreate · exclusive flock</text>
-<text class="tx" x="654" y="420">config is parsed once at boot — changing it rolls the pod</text>
-
-<line class="ln-blue" x1="876" y1="442" x2="876" y2="470" marker-end="url(#d2-ab)"/>
-
-<rect x="636" y="474" width="480" height="92" rx="8" class="bx-slate"/>
-<text class="th" x="654" y="498">PVC  &lt;share&gt;-data · RWO</text>
-<text class="mns" x="654" y="520">the working set + .flint-nfs/state.db</text>
-<text class="tx" x="654" y="544">This is a CACHE, not the copy. Losing it is a rebuild</text>
-<text class="tx" x="654" y="558">from the bucket — not a loss of data.</text>
-
-<!-- ===== S3 ===== -->
-<line class="ln-ochre" x1="1136" y1="500" x2="1214" y2="500" marker-end="url(#d2-ao)"/>
-<line class="ln-ochre dash" x1="1214" y1="530" x2="1136" y2="530" marker-end="url(#d2-ao)"/>
-<text class="tsb ctr c-ochre" x="1175" y="490">publish</text>
-<text class="tsb ctr c-ochre" x="1175" y="556">hydrate</text>
-
-<rect x="1218" y="150" width="356" height="416" rx="10" class="bx-ochre"/>
-<text class="tt c-ochre" x="1238" y="180">S3 — the durable copy</text>
-<text class="mns" x="1238" y="202">s3://my-team-flint/tenant-a/</text>
-<line class="hair" x1="1238" y1="216" x2="1554" y2="216"/>
-
-<rect x="1238" y="230" width="316" height="96" rx="6" class="bx"/>
-<text class="th" x="1256" y="252">published generations</text>
-<text class="mns" x="1256" y="274">&lt;prefix&gt;/&lt;path&gt;</text>
-<text class="tx" x="1256" y="296">whole-file objects, untorn — a reader never</text>
-<text class="tx" x="1256" y="312">sees half of a file that is being written</text>
-
-<rect x="1238" y="338" width="316" height="112" rx="6" class="bx"/>
-<text class="th" x="1256" y="360">.flint/ — the control namespace</text>
-<text class="mns" x="1256" y="382">.flint/epoch     one hub per prefix</text>
-<text class="mns" x="1256" y="400">.flint/manifest  the DR document</text>
-<text class="mns" x="1256" y="418">.flint/owner     survives state loss</text>
-<text class="tx" x="1256" y="440">reserved: a client file here can never shadow it</text>
-
-<rect x="1238" y="462" width="316" height="88" rx="6" class="bx-slate"/>
-<text class="tsb" x="1256" y="484">Consumers never hold bucket credentials.</text>
-<text class="tx" x="1256" y="506">The bucket trusts exactly one principal — the hub.</text>
-<text class="tx" x="1256" y="522">Everyone else reaches the bytes through :2049,</text>
-<text class="tx" x="1256" y="538">which has no bucket credential to leak.</text>
-
-<!-- ===== bottom band ===== -->
-<rect x="24" y="614" width="1550" height="256" rx="10" class="band"/>
-<text class="tt" x="46" y="644">What the hub is for, and what it costs</text>
-
-<rect x="46" y="662" width="498" height="190" rx="8" class="bx"/>
-<text class="th c-blue" x="64" y="686">It is the coherence authority</text>
-<text class="tx" x="64" y="710">One process holds every lease, lock and open, so N pods</text>
-<text class="tx" x="64" y="726">across N clusters see ONE tree. This is the only front end</text>
-<text class="tx" x="64" y="742">of the three where two writers can share a directory live.</text>
-<text class="tx" x="64" y="766">That authority is also the constraint: one pod, one replica,</text>
-<text class="tx" x="64" y="782">Recreate. A second hub on the prefix would be split-brain,</text>
-<text class="tx" x="64" y="798">which the epoch cell fences and the operator refuses up front.</text>
-<text class="tsb" x="64" y="826">One hub serves one prefix. Several volumes ⇒ several hubs.</text>
-
-<rect x="558" y="662" width="498" height="190" rx="8" class="bx"/>
-<text class="th c-ochre" x="576" y="686">S3 is the durability, and the RPO is the cadence</text>
-<text class="tx" x="576" y="710">The PVC is a working set the hub flushes to the bucket on a</text>
-<text class="tx" x="576" y="726">timer. Everything durable is in S3; everything fast is on disk.</text>
-<text class="tx" x="576" y="750">A cold read hydrates from the bucket first, and both doors say</text>
-<text class="tx" x="576" y="766">so rather than blocking forever: NFS parks the caller with</text>
-<text class="mns" x="576" y="786">NFS4ERR_DELAY, HTTP answers 503 + Retry-After.</text>
-<text class="tsb" x="576" y="812">Losing the PVC is a rebuild. Losing the bucket is a loss.</text>
-<text class="tx" x="576" y="836">Only one of those two is backed up, and it is not the disk.</text>
-
-<rect x="1070" y="662" width="504" height="190" rx="8" class="bx"/>
-<text class="th" x="1088" y="686">The two doors are secured differently</text>
-<text class="tx" x="1088" y="710">:2049 is AUTH_SYS. The client asserts its own uid and the</text>
-<text class="tx" x="1088" y="726">server takes it, so POSIX modes are evaluated against a</text>
-<text class="tx" x="1088" y="742">SELF-DECLARED identity. Reachability is the real boundary.</text>
-<text class="tx" x="1088" y="766">:8080 can rewrite every file in the share, so it stays</text>
-<text class="tx" x="1088" y="782">ClusterIP-only, never joins the Service, and mounts no routes</text>
-<text class="tx" x="1088" y="798">at all without a bearer token — 404, not 401.</text>
-<text class="tsb" x="1088" y="826">That token is per-SHARE, not per-user. See the identity page.</text>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<rect x="24" y="22" width="470" height="566" rx="10" class="grp"/>
+<text class="cap" x="40" y="44">CONSUMER CLUSTER</text>
+<text class="t4" x="172" y="44">nothing from flint is installed here</text>
+<rect x="44" y="52" width="430" height="78" rx="7" class="bx"/>
+<text class="t2" x="60" y="76">PersistentVolumeClaim</text>
+<text class="mono" x="60" y="96" xml:space="preserve">accessModes: [ReadWriteMany]</text>
+<text class="t4" x="60" y="111">minted by hand, or by the stock nfs-subdir provisioner</text>
+<line class="l-ctl" x1="259" y1="130" x2="259" y2="156" stroke-dasharray="6 5" marker-end="url(#a-ctl)"/>
+<text class="t4" x="272" y="148">bound</text>
+<rect x="44" y="160" width="430" height="92" rx="7" class="bx"/>
+<text class="t2" x="60" y="184">PersistentVolume</text>
+<text class="mono" x="60" y="204" xml:space="preserve">nfs: { server: &lt;hub&gt;, path: / }</text>
+<text class="mono" x="60" y="219" xml:space="preserve">nfsvers=4.1 · hard · nconnect=4</text>
+<text class="t4" x="60" y="234">nconnect ≥ 2, or the kernel silently refuses every trunk</text>
+<rect x="44" y="270" width="430" height="300" rx="7" class="panel"/>
+<text class="cap" x="62" y="294">node</text>
+<text class="t4" x="110" y="294">kubelet mounts ONCE per node — pods share it</text>
+<rect x="64" y="312" width="118" height="56" rx="7" class="bx"/>
+<text class="t3" x="123" y="345" style="text-anchor:middle">agent pod</text>
+<line class="l-ctl" x1="123" y1="368" x2="123" y2="398" marker-end="url(#a-ctl)"/>
+<rect x="196" y="312" width="118" height="56" rx="7" class="bx"/>
+<text class="t3" x="255" y="345" style="text-anchor:middle">agent pod</text>
+<line class="l-ctl" x1="255" y1="368" x2="255" y2="398" marker-end="url(#a-ctl)"/>
+<rect x="328" y="312" width="118" height="56" rx="7" class="bx"/>
+<text class="t3" x="387" y="345" style="text-anchor:middle">agent pod</text>
+<line class="l-ctl" x1="387" y1="368" x2="387" y2="398" marker-end="url(#a-ctl)"/>
+<rect x="64" y="402" width="382" height="76" rx="7" class="b-lite"/>
+<text class="t2 c-lite" x="80" y="426">kernel NFS client</text>
+<text class="t4" x="80" y="446">one mount, one page cache, shared by every pod on the node —</text>
+<text class="t4" x="80" y="461">cross-node coherence is the hub's job</text>
+<text class="t4b" x="62" y="506">The pod is not the client. The node is: every pod on it shares one mount</text>
+<text class="t4b" x="62" y="521">and one identity.</text>
+<text class="t4" x="62" y="538">Full POSIX: byte-range locks, atomic rename, O_EXCL — across pods and</text>
+<text class="t4" x="62" y="553">clusters.</text>
+<line class="l-lite" x1="494" y1="440" x2="612" y2="440" marker-start="url(#a-lite)" marker-end="url(#a-lite)"/>
+<rect x="524" y="413" width="57" height="15" rx="3" class="halo"/>
+<text class="t4b c-lite" x="553" y="424" style="text-anchor:middle">NFSv4.2</text>
+<text class="mono" x="553" y="462" style="text-anchor:middle" xml:space="preserve">TCP :2049</text>
+<rect x="616" y="22" width="520" height="566" rx="10" class="grp"/>
+<text class="cap" x="632" y="44">HUB CLUSTER</text>
+<text class="t4" x="723" y="44">one FlintShare per volume — a project may own several</text>
+<rect x="636" y="52" width="480" height="72" rx="7" class="bx"/>
+<text class="t2" x="652" y="76">Service :2049</text>
+<text class="t4" x="652" y="96">ClusterIP, NodePort or LoadBalancer — remote clusters mount</text>
+<text class="t4" x="652" y="111">spec.service.advertiseAddress verbatim</text>
+<line class="l-lite" x1="876" y1="124" x2="876" y2="148" marker-end="url(#a-lite)"/>
+<rect x="636" y="150" width="480" height="262" rx="7" class="bx"/>
+<path class="f-lite" d="M643,150 H1109 A7,7 0 0 1 1116,157 V155 H636 V157 A7,7 0 0 1 643,150 Z"/>
+<text class="t2 c-lite" x="654" y="176">flint-lite hub — ONE pod</text>
+<text class="mono" x="654" y="194" xml:space="preserve">flint-pnfs-mds · mode: standalone</text>
+<line class="hair" x1="654" y1="204" x2="1098" y2="204"/>
+<rect x="654" y="214" width="212" height="86" rx="7" class="b-lite"/>
+<text class="t2 c-lite" x="670" y="238">:2049  NFSv4.2</text>
+<text class="t4" x="670" y="258">byte-range locks · close-to-open ·</text>
+<text class="t4" x="670" y="273">atomic rename · O_EXCL ·</text>
+<text class="t4" x="670" y="288">delegations</text>
+<rect x="886" y="214" width="212" height="86" rx="7" class="bx"/>
+<path class="f-red" d="M886,221 A7,7 0 0 1 893,214 H891 V300 H893 A7,7 0 0 1 886,293 Z"/>
+<text class="t2 c-red" x="902" y="238">:8080  status + files</text>
+<text class="t4" x="902" y="258">ClusterIP ONLY — never on the</text>
+<text class="t4" x="902" y="273">Service. One bearer token per</text>
+<text class="t4" x="902" y="288">share.</text>
+<text class="t4" x="654" y="318">Every HTTP call is dispatched as an NFS compound in-process,</text>
+<text class="t4" x="654" y="334">so the two doors cannot disagree about the tree.</text>
+<text class="t4b" x="654" y="360">single replica · strategy: Recreate · exclusive flock</text>
+<text class="t4" x="654" y="380">config is parsed once at boot — changing it rolls the pod</text>
+<line class="l-lite" x1="876" y1="412" x2="876" y2="440" marker-end="url(#a-lite)"/>
+<rect x="636" y="444" width="480" height="96" rx="7" class="panel"/>
+<text class="t2" x="652" y="468">PVC  &lt;share&gt;-data · RWO</text>
+<text class="mono" x="652" y="488" xml:space="preserve">the working set + .flint-nfs/state.db</text>
+<text class="t4" x="652" y="503">This is a CACHE, not the copy. Losing it is a rebuild from the bucket — not a loss of</text>
+<text class="t4" x="652" y="518">data.</text>
+<line class="l-lite" x1="1136" y1="482" x2="1214" y2="482" marker-end="url(#a-lite)"/>
+<line class="l-lite" x1="1214" y1="512" x2="1136" y2="512" stroke-dasharray="6 5" marker-end="url(#a-lite)"/>
+<rect x="1150" y="459" width="49" height="15" rx="3" class="halo"/>
+<text class="t4b c-lite" x="1175" y="470" style="text-anchor:middle">publish</text>
+<rect x="1150" y="529" width="50" height="15" rx="3" class="halo"/>
+<text class="t4b c-lite" x="1175" y="540" style="text-anchor:middle">hydrate</text>
+<rect x="1218" y="150" width="356" height="390" rx="7" class="s3"/>
+<text class="t1" x="1238" y="178">S3 — the durable copy</text>
+<text class="mono" x="1238" y="198" xml:space="preserve">s3://my-team-flint/tenant-a/</text>
+<line class="hair" x1="1238" y1="210" x2="1554" y2="210"/>
+<rect x="1238" y="222" width="316" height="92" rx="7" class="bx"/>
+<text class="t2" x="1254" y="246">published generations</text>
+<text class="mono" x="1254" y="266" xml:space="preserve">&lt;prefix&gt;/&lt;path&gt;</text>
+<text class="t4" x="1254" y="281">whole-file objects, untorn — a reader never sees half of</text>
+<text class="t4" x="1254" y="296">a file that is being written</text>
+<rect x="1238" y="326" width="316" height="108" rx="7" class="bx"/>
+<text class="t2" x="1254" y="350">.flint/ — the control namespace</text>
+<text class="mono" x="1254" y="370" xml:space="preserve">epoch     one hub per prefix</text>
+<text class="mono" x="1254" y="385" xml:space="preserve">manifest  the DR document</text>
+<text class="mono" x="1254" y="400" xml:space="preserve">owner     survives state loss</text>
+<text class="t4" x="1254" y="415">reserved: a client file can never shadow it</text>
+<rect x="1238" y="446" width="316" height="80" rx="7" class="panel"/>
+<text class="t2" x="1254" y="470">Consumers never hold bucket credentials.</text>
+<text class="t4" x="1254" y="490">The bucket trusts exactly one principal — the hub.</text>
+<text class="t4" x="1254" y="505">Everyone else reaches the bytes through :2049.</text>
+<rect x="24" y="604" width="1552" height="212" rx="7" class="panel"/>
+<text class="t1" x="46" y="632">What the hub is for, and what it costs</text>
+<rect x="46" y="648" width="491" height="152" rx="7" class="bx"/>
+<path class="f-lite" d="M53,648 H530 A7,7 0 0 1 537,655 V653 H46 V655 A7,7 0 0 1 53,648 Z"/>
+<text class="t2 c-lite" x="62" y="672">It is the coherence authority</text>
+<text class="t4" x="62" y="692">One process holds every lease, lock and open, so N pods across N clusters see ONE tree —</text>
+<text class="t4" x="62" y="707">the only front end where two writers share a directory live.</text>
+<text class="t4" x="62" y="722">That authority is the constraint: one pod, one replica, Recreate. A second hub on the prefix</text>
+<text class="t4" x="62" y="737">would be split-brain, which the epoch cell fences and the operator refuses up front.</text>
+<text class="t4b" x="62" y="752">One hub serves one prefix. Several volumes ⇒ several hubs.</text>
+<rect x="555" y="648" width="491" height="152" rx="7" class="bx"/>
+<path class="f-lite" d="M562,648 H1038 A7,7 0 0 1 1045,655 V653 H555 V655 A7,7 0 0 1 562,648 Z"/>
+<text class="t2 c-lite" x="571" y="672">S3 is the durability; the RPO is the cadence</text>
+<text class="t4" x="571" y="692">The PVC is a working set the hub flushes to the bucket on a timer. Everything durable is</text>
+<text class="t4" x="571" y="707">in S3; everything fast is on disk.</text>
+<text class="t4" x="571" y="722">A cold read hydrates first and both doors say so rather than blocking: NFS parks the caller</text>
+<text class="t4" x="571" y="737">with NFS4ERR_DELAY, HTTP answers 503 + Retry-After.</text>
+<text class="t4b" x="571" y="752">Losing the PVC is a rebuild. Losing the bucket is a loss.</text>
+<rect x="1063" y="648" width="491" height="152" rx="7" class="bx"/>
+<path class="f-red" d="M1063,655 A7,7 0 0 1 1070,648 H1068 V800 H1070 A7,7 0 0 1 1063,793 Z"/>
+<text class="t2 c-red" x="1079" y="672">The two doors are secured differently</text>
+<text class="t4" x="1079" y="692">:2049 is AUTH_SYS — the client asserts its own uid and the server takes it, so</text>
+<text class="t4" x="1079" y="707">reachability is the real boundary.</text>
+<text class="t4" x="1079" y="722">:8080 can rewrite every file in the share, so it stays ClusterIP-only, never joins the</text>
+<text class="t4" x="1079" y="737">Service, and mounts no routes at all without a bearer token — 404, not 401.</text>
+<text class="t4b c-red" x="1079" y="752">That token is per-SHARE, not per-user. See the identity page.</text>
+<line class="l-ink" x1="28" y1="836" x2="54" y2="836"/>
+<text class="t4" x="60" y="840">data path</text>
+<line class="l-ctl" x1="127.98" y1="836" x2="153.98000000000002" y2="836" stroke-dasharray="6 5"/>
+<text class="t4" x="160" y="840">control</text>
+<rect x="217" y="829" width="5" height="14" rx="2" class="f-red"/>
+<text class="t4" x="229" y="840">hazard / trust boundary</text>
 </svg>

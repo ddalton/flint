@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" role="img"
-     aria-label="Three clusters mounting one flint-lite hub, which sees only client names, plus the three requirements the fleet must supply: a unique client name per node, a network-layer boundary, and a keepalive.">
+     aria-label="Four front ends over one S3 bucket: flint-lite serves a shared live tree over NFS, flint-lean checks a workspace out to local disk and publishes boundaries, flint-passthrough mounts a prefix as-is, flint-forge serves git from a per-repository pod with every push acknowledged only once it is in S3.">
 <style>
   text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
   .t1{font-size:14.96px;font-weight:600}
@@ -43,46 +43,41 @@
   .cap.on{fill:#ffffff}
 </style>
 <defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
-<rect x="8" y="8" width="250" height="60" rx="7" class="b-lite"/>
-<text class="t2 c-lite" x="24" y="32">Cluster A</text>
-<text class="mono" x="24" y="52" xml:space="preserve">hostname "agent-7"</text>
-<path class="l-lite" d="M258 38 L300 38 L300 110"/>
-<rect x="8" y="78" width="250" height="60" rx="7" class="bx"/>
-<path class="f-red" d="M8,85 A7,7 0 0 1 15,78 H13 V138 H15 A7,7 0 0 1 8,131 Z"/>
-<path class="f-lite" d="M15,78 H251 A7,7 0 0 1 258,85 V83 H8 V85 A7,7 0 0 1 15,78 Z"/>
-<text class="t2 c-red" x="24" y="102">Cluster B</text>
-<text class="mono" x="24" y="122" xml:space="preserve">hostname "agent-7"  ← COLLIDES</text>
-<path class="l-lite" d="M258 108 L300 108 L300 110" marker-end="url(#a-lite)"/>
-<rect x="8" y="148" width="250" height="60" rx="7" class="b-lite"/>
-<text class="t2 c-lite" x="24" y="172">Cluster C</text>
-<text class="mono" x="24" y="192" xml:space="preserve">hostname "builder-2"</text>
-<path class="l-lite" d="M258 178 L300 178 L300 110"/>
-<rect x="304" y="60" width="150" height="100" rx="7" class="bx"/>
-<path class="f-lite" d="M311,60 H447 A7,7 0 0 1 454,67 V65 H304 V67 A7,7 0 0 1 311,60 Z"/>
-<text class="t2 c-lite" x="320" y="84">ONE hub</text>
-<text class="t4" x="320" y="104">it sees CLIENTS, and a</text>
-<text class="t4" x="320" y="117">client is a NAME — never</text>
-<text class="t4" x="320" y="130">a cluster</text>
-<line class="l-lite" x1="454" y1="110" x2="484" y2="110" marker-start="url(#a-lite)" marker-end="url(#a-lite)"/>
-<rect x="488" y="60" width="144" height="100" rx="7" class="s3"/>
-<text class="t2" x="504" y="84">S3</text>
-<text class="t4" x="504" y="104">.flint/epoch fences a</text>
-<text class="t4" x="504" y="117">second hub on an</text>
-<text class="t4" x="504" y="130">EQUAL prefix</text>
-<rect x="8" y="226" width="624" height="166" rx="7" class="panel"/>
-<text class="t2" x="24" y="250">What the fleet must supply</text>
-<circle cx="34" cy="268" r="11" class="f-lite"/>
-<text class="num" x="34" y="272" style="text-anchor:middle">1</text>
-<text class="t3b" x="52" y="272">A unique name per client</text>
-<text class="t4" x="52" y="287">two clusters sharing a node name are ONE client; RFC 8881 reads the second as the first rebooting and drops its locks</text>
-<text class="t4" x="52" y="300">silently. hostname = &lt;cluster&gt;-&lt;node&gt;.</text>
-<circle cx="34" cy="315" r="11" class="f-lite"/>
-<text class="num" x="34" y="320" style="text-anchor:middle">2</text>
-<text class="t3b" x="52" y="319">A boundary at the network layer</text>
-<text class="t4" x="52" y="334">port 2049 is AUTH_SYS; networkPolicy cannot draw it because kube-proxy SNATs remote clients — 1486 of 1486 arrived as</text>
-<text class="t4" x="52" y="348">the hub cluster's gateway.</text>
-<circle cx="34" cy="363" r="11" class="f-lite"/>
-<text class="num" x="34" y="367" style="text-anchor:middle">3</text>
-<text class="t3b" x="52" y="367">A keepalive per remote mount</text>
-<text class="t4" x="52" y="382">a partitioned cluster's busy agents look idle; drive POST /wake. suspendWithSessions defaults to suspending anyway.</text>
+<rect x="8" y="8" width="410" height="70" rx="7" class="b-lite"/>
+<text class="t2 c-lite" x="24" y="32">flint-lite — the hub</text>
+<text class="t4" x="24" y="52">One pod serves a LIVE shared tree over NFSv4.2. Many pods, many clusters, real</text>
+<text class="t4" x="24" y="65">locks.</text>
+<line class="l-lite" x1="418" y1="43" x2="448" y2="43" marker-end="url(#a-lite)"/>
+<rect x="8" y="86" width="410" height="70" rx="7" class="b-lean"/>
+<text class="t2 c-lean" x="24" y="110">flint-lean — checkout / publish</text>
+<text class="t4" x="24" y="130">Plain files on local disk, checked out at start and published at a boundary. ONE</text>
+<text class="t4" x="24" y="143">writer.</text>
+<line class="l-lean" x1="418" y1="121" x2="448" y2="121" marker-end="url(#a-lean)"/>
+<rect x="8" y="164" width="410" height="70" rx="7" class="b-pass"/>
+<text class="t2 c-pass" x="24" y="188">flint-passthrough — the mount</text>
+<text class="t4" x="24" y="208">An S3 prefix mounted as-is by Mountpoint for S3. No POSIX, no coordination, no</text>
+<text class="t4" x="24" y="221">boundary.</text>
+<line class="l-pass" x1="418" y1="199" x2="448" y2="199" marker-end="url(#a-pass)"/>
+<rect x="8" y="242" width="410" height="70" rx="7" class="b-forge"/>
+<text class="t2 c-forge" x="24" y="266">flint-forge — the git server</text>
+<text class="t4" x="24" y="286">Stock git against one server pod per repository; a push is acknowledged once it is in</text>
+<text class="t4" x="24" y="299">S3.</text>
+<line class="l-forge" x1="418" y1="277" x2="448" y2="277" marker-end="url(#a-forge)"/>
+<rect x="452" y="8" width="180" height="304" rx="7" class="s3"/>
+<text class="t1" x="542" y="32" style="text-anchor:middle">S3</text>
+<text class="t4b" x="542" y="50" style="text-anchor:middle">the durable store</text>
+<line class="hair" x1="468" y1="62" x2="616" y2="62"/>
+<text class="t4" x="468" y="82">One bucket. Whole-file objects</text>
+<text class="t4" x="468" y="95">plus a control namespace per</text>
+<text class="t4" x="468" y="108">front end; a bare git repository</text>
+<text class="t4" x="468" y="122">for forge.</text>
+<text class="mono" x="468" y="141" xml:space="preserve">&lt;prefix&gt;/&lt;path&gt;</text>
+<text class="mono" x="468" y="157" xml:space="preserve">&lt;prefix&gt;/.flint/…</text>
+<text class="mono" x="468" y="173" xml:space="preserve">&lt;prefix&gt;/git/…</text>
+<text class="t4" x="468" y="197">Each front end owns its prefix;</text>
+<text class="t4" x="468" y="210">the bytes are the same bytes.</text>
+<rect x="8" y="324" width="624" height="68" rx="7" class="panel"/>
+<text class="t2" x="24" y="348">An escalation ladder, cheapest first — and the file-shaped choice is reversible.</text>
+<text class="t4" x="24" y="368">Passthrough asks nothing and gives nothing back. Lean gives real POSIX at local speed to one writer. The hub is the only one where</text>
+<text class="t4" x="24" y="381">several pods share one live tree. Forge adds history and a merge policy, for code.</text>
 </svg>
