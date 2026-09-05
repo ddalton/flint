@@ -77,3 +77,44 @@ spec:
   uid: 1001
   gid: 1001
   consumers: { serviceAccounts: [trainer] }
+---
+# L7's own workspace. floorSecs is SHORT here, unlike every other
+# workspace in this file: the worker's terminationGracePeriodSeconds is
+# derived from it (an hour's floor produced a 3681 s grace, and the
+# plugin waits that out before it gives up on a drain and preserves), so
+# a leg that wants to observe a preservation needs a short one. Nothing
+# publishes on the cadence during the leg regardless: the syncer is
+# frozen within seconds of the write.
+apiVersion: chert.us/v1alpha1
+kind: FlintLeanWorkspace
+metadata: { name: proj-keep, namespace: s3-tenants }
+spec:
+  projectId: team-a/proj-keep
+  bucket: __B__
+  keyPrefix: tenants/keep
+  endpoint: __ENDPOINT__
+  floorSecs: 30
+  sizeLimitGib: 1
+  expectedBytes: 1048576
+  expectedFiles: 100
+  maxFiles: 250000
+  uid: 1001
+  gid: 1001
+  consumers: { serviceAccounts: [trainer] }
+---
+apiVersion: chert.us/v1alpha1
+kind: FlintLeanWorkspace
+metadata: { name: proj-keep2, namespace: s3-tenants }
+spec:
+  projectId: team-a/proj-keep2
+  bucket: __B__
+  keyPrefix: tenants/keep2
+  endpoint: __ENDPOINT__
+  floorSecs: 30
+  sizeLimitGib: 1
+  expectedBytes: 1048576
+  expectedFiles: 100
+  maxFiles: 250000
+  uid: 1001
+  gid: 1001
+  consumers: { serviceAccounts: [trainer] }

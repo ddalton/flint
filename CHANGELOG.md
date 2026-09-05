@@ -64,7 +64,16 @@ covered by the stability guarantee.
   hard power-off, a broker outage that outlives the credential, 120
   tenants on one node through a plugin roll, a 100,000-file workspace,
   a one-GiB workspace's real ceiling, and what a preserved undrained
-  tree costs. Measured on all-spot EC2 against a real bucket.
+  tree costs. Measured on all-spot EC2 against a real bucket; all seven
+  legs green.
+
+  Three properties the suite had to establish to test the preservation
+  path at all, each worth knowing: a killed syncer is relaunched and
+  drains normally (so killing one costs nothing), a worker's termination
+  grace is derived from its workspace's `floorSecs` (an hour's floor
+  gives a 3681 s grace, and an unpublish waits that budget out before
+  giving up on a drain), and a workspace filled to its own ceiling
+  cannot attest a drain because the attestation is itself a file.
 
   At 100,000 files: the tree publishes in 100 s (~1,000 objects/s)
   behind a 2 KB pointer over 24 chunks, a cold checkout completes in

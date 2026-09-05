@@ -738,9 +738,10 @@ versioned bucket. What it settled, and what it found:
   written with each. Three of them took 1.1 GiB of an 8 GB node here,
   kubelet crossed DiskPressure, and it evicted tenants unrelated to the
   preserved workspace. A preserved tree is also an unmounted ext4 image,
-  so recovery is a read-only loop mount rather than an `ls`. The chart's
-  notes now carry the procedure and the sizing; bounding the retention
-  is a product decision and is NOT built. It is the same shape as the
+  so recovery is a read-only loop mount rather than an `ls` — verified
+  on the node: the preserved image mounts and gives back the tenant's
+  unpublished write. The chart's notes carry the procedure and the
+  sizing; bounding the retention is a product decision and is NOT built. It is the same shape as the
   audit's other findings: a safety mechanism whose cost is unbounded and
   paid by something else.
 - *Drill craft.* The bucket observer was scheduled onto the worker a
@@ -754,14 +755,23 @@ versioned bucket. What it settled, and what it found:
   shell — so the very ENOSPC the leg existed to observe destroyed the
   observer.
 
-*Not green on a real node:* L6's containment assertion (its bound was
-set below the metadata 65k inodes legitimately cost; the measurement
-itself passed) and two of L7's (the loop-mount recovery, and that a
-second preservation does not reclaim the first). Both were corrected,
-and spot reclaimed the whole cluster — control plane included — before
-the rerun. The findings behind them stand on direct evidence: the three
-trees that accumulated, the evictions they caused, and the code that
-says an undrained tree is never removed.
+*Three things the preservation leg had to learn to produce its own
+shape, each a fact about the driver worth stating:* a KILLED syncer is
+relaunched by its worker and drains normally at the delete, so killing
+one costs nothing and does NOT make an unattested tree — the shape needs
+a syncer that is alive and cannot act (frozen, or fenced as S20 does on
+kind). The worker's `terminationGracePeriodSeconds` is DERIVED FROM the
+workspace's `floorSecs` — an hour's floor produced a 3681 s grace — and
+the plugin waits that budget out before it gives up on a drain and
+preserves, so an unpublish on a long-floor workspace is correspondingly
+slow. And a workspace filled to its own ceiling cannot attest a drain at
+all, because the attestation is a file and the filesystem is full: L6's
+tiny workspace produced a preserved tree for exactly that reason, which
+is how the quota ceiling and the preservation store interact.
+
+All seven legs are green on real nodes. L6 and L7 were closed on a
+second cluster after spot reclaimed the first mid-run (control plane
+included, which is the standing risk of an all-spot cluster).
 
 ## 1. The question, restated precisely
 

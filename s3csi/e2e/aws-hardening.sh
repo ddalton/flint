@@ -105,8 +105,8 @@ $K get csidriver s3.csi.chert.us >/dev/null 2>&1 || { echo "no s3.csi.chert.us �
 # on workspaces that were never created (spec.region does not exist on
 # this CRD). A leg whose fixture is missing tests nothing.
 if hdcrs | $K apply -f - >/dev/null 2>"$PWD/.hd-apply.err"; then
-    n=$($K -n $NS get flintleanworkspaces proj-reboot proj-loss proj-big proj-tiny --no-headers 2>/dev/null | wc -l | tr -d ' ')
-    [ "$n" = "4" ] && echo "  ok: PRECONDITION: 4 lean workspaces applied" || { echo "  BAD: only $n of 4 lean workspaces exist after the apply"; exit 2; }
+    n=$($K -n $NS get flintleanworkspaces proj-reboot proj-loss proj-big proj-tiny proj-keep proj-keep2 --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    [ "$n" = "6" ] && echo "  ok: PRECONDITION: 6 lean workspaces applied" || { echo "  BAD: only $n of 6 lean workspaces exist after the apply"; exit 2; }
 else
     echo "  BAD: the lean workspaces were REFUSED: $(tr '\n' ' ' < "$PWD/.hd-apply.err" | cut -c1-300)"; rm -f "$PWD/.hd-apply.err"; exit 2
 fi
@@ -376,49 +376,70 @@ poddel tiny-agent
 # ── L7 what preservation costs, and who pays it ───────────────────────
 leg L7 "an undrained tree is preserved forever: a second preservation does not reclaim the first, nothing else does either, and the node's own disk is the budget"
 poddel keep-agent keep-agent2
-mcx mc rm --recursive --force "m/$BUCKET/tenants/tiny/" >/dev/null 2>&1
+# BOTH prefixes this leg seeds. A prefix left seeded by an earlier run
+# is checked out by the new pod, which then reports SEED PRESENT and
+# never publishes — the leg waits for a publish that will not come.
+mcx mc rm --recursive --force "m/$BUCKET/tenants/keep/" >/dev/null 2>&1
+mcx mc rm --recursive --force "m/$BUCKET/tenants/keep2/" >/dev/null 2>&1
 und() { local v; v=$(onnode "du -xsk /var/lib/kubelet/plugins/s3.csi.chert.us/undrained 2>/dev/null | awk '{print \$1}'"); printf '%s' "${v:-0}"; }
 undn() { onnode "ls /var/lib/kubelet/plugins/s3.csi.chert.us/undrained 2>/dev/null | wc -l"; }
-k0=$(und); n0=$(undn)
+undls() { onnode "ls /var/lib/kubelet/plugins/s3.csi.chert.us/undrained 2>/dev/null"; }
+k0=$(und); n0=$(undn); before=$(undls)
 [ -n "$k0" ] && ok "PRECONDITION: the node's undrained store holds ${n0} tree(s), $(( ${k0:-0} / 1024 )) MiB" || bad "PRECONDITION: cannot read the undrained store"
-leanpod keep-agent proj-tiny "$NODE" 50 keep-1
+leanpod keep-agent proj-keep "$NODE" 50 keep-1
 if wait_phase keep-agent Running 400 && wait_seedlog keep-agent PUBLISHED 300; then
     tsh keep-agent "echo unattested > /workspace/src/unattested.txt"
     # No drain can attest: the syncer is killed outright, which is the
     # eviction/OOM shape S20 covers on kind. What is NOT covered
     # anywhere is what the preserved tree then costs.
-    w=$(worker_of keep-agent); kill_syncer "$w"; sleep 5
+    # FREEZE, do not kill. A killed syncer is relaunched by its worker
+    # and drains normally at the delete — the product working, and the
+    # reason this leg saw no preservation when it used a kill. The
+    # unattested shape needs a syncer that is alive and cannot act, so
+    # the drain runs out its budget and the plugin preserves.
+    w=$(worker_of keep-agent); sig_syncer "$w" STOP; sleep 5
     poddel keep-agent
-    i=0; while [ $i -lt 300 ] && [ "$(undn)" = "$n0" ]; do sleep 5; i=$((i + 5)); done
+    # The plugin waits the drain budget out (grace + 30 s) before it
+    # preserves, so this wait must outlast it.
+    i=0; while [ $i -lt 600 ] && [ "$(undn)" = "$n0" ]; do sleep 5; i=$((i + 5)); done
     onnode_ready "$NODE" 120 || bad "the node shell stopped answering mid-leg — every count below would be an empty string, not a zero"
     n1=$(undn); k1=$(und)
     [ "${n1:-0}" -gt "${n0:-0}" ] \
         && ok "the unattested tree was PRESERVED rather than deleted (${n0} → ${n1} trees, $(( ${k0:-0} / 1024 )) → $(( ${k1:-0} / 1024 )) MiB): the tenant's last writes are still on the node, which is the point" \
         || bad "no tree was preserved (${n0} → ${n1}) — the unattested path did not run and this leg measures nothing"
+    # THIS leg's tree, by set difference: a bare count credits any
+    # preservation, and L6's full workspace produces one of its own (a
+    # drain cannot write its attestation to a filesystem that is out of
+    # space). The first run counted that tree and would have passed on
+    # it, had the content check below not been there.
+    mine=$(comm -13 <(printf '%s\n' "$before" | sort) <(undls | sort) | head -1)
+    [ -n "$mine" ] && ok "the preserved tree this leg produced is $mine" || bad "no NEW undrained directory appeared for this leg (before: $(printf '%s' "$before" | tr '\n' ' '))"
     # What is preserved is an UNMOUNTED ext4 image, not a directory: an
     # operator cannot `ls` it, and the recovery is a read-only loop
     # mount. Assert that recovery, because a preserved tree nobody can
-    # open is not a preserved tree.
-    img=$(onnode "ls -d /var/lib/kubelet/plugins/s3.csi.chert.us/undrained/*/tree.img 2>/dev/null | head -1")
-    rec=$(onnode "mkdir -p /tmp/undr-check; mount -o loop,ro $img /tmp/undr-check 2>/dev/null && grep -rl unattested /tmp/undr-check 2>/dev/null | head -1; umount /tmp/undr-check 2>/dev/null; rmdir /tmp/undr-check 2>/dev/null; true")
-    [ -n "$rec" ] \
-        && ok "the preserved image loop-mounts read-only and still holds the unpublished write ($rec) — the recovery an operator would perform, and the reason preserving beats deleting" \
-        || bad "the preserved image at '$img' could not be mounted read-only, or does not contain the unpublished write — a preserved tree nobody can open is not preservation"
-    # And now the finding: nothing takes it away again.
+    # open is not a preserved tree. One simple command per call: a
+    # compound command through the node shell came back empty, and an
+    # empty answer read as "the image will not mount".
+    onnode "mkdir -p /tmp/undr-check" >/dev/null 2>&1
+    onnode "mount -o loop,ro /var/lib/kubelet/plugins/s3.csi.chert.us/undrained/$mine/tree.img /tmp/undr-check" >/dev/null 2>&1
+    rec=$(onnode "cat /tmp/undr-check/src/unattested.txt")
+    [ "$rec" = "unattested" ] \
+        && ok "the preserved image loop-mounts read-only and still holds the unpublished write — the recovery an operator would perform, and the reason preserving beats deleting" \
+        || bad "the preserved image did not give back the unpublished write (read '$rec')"
+    onnode "umount /tmp/undr-check" >/dev/null 2>&1
     # A DIFFERENT workspace: the first one's lease is still held by the
     # syncer this leg killed, so a fresh pod on it would sit out the
     # quiet polls before it could even start — and this leg is about
     # what happens to the PRESERVED tree, not about takeover timing.
     poddel keep-agent2
-    mcx mc rm --recursive --force "m/$BUCKET/tenants/loss/" >/dev/null 2>&1
-    leanpod keep-agent2 proj-loss "$NODE" 50 keep-2
+    leanpod keep-agent2 proj-keep2 "$NODE" 50 keep-2
     if wait_phase keep-agent2 Running 400; then
-        w=$(worker_of keep-agent2); [ -n "$w" ] && kill_syncer "$w" && sleep 5
+        w=$(worker_of keep-agent2); [ -n "$w" ] && sig_syncer "$w" STOP && sleep 5
     else
         bad "keep-agent2 never reached Running: $(mount_events keep-agent2 | tail -1 | cut -c1-200)"
     fi
     poddel keep-agent2
-    i=0; while [ $i -lt 300 ] && [ "$(undn)" = "$n1" ]; do sleep 5; i=$((i + 5)); done
+    i=0; while [ $i -lt 600 ] && [ "$(undn)" = "$n1" ]; do sleep 5; i=$((i + 5)); done
     onnode_ready "$NODE" 120 || bad "the node shell stopped answering mid-leg"
     n2=$(undn); k2=$(und)
     [ "${n2:-0}" -gt "${n1:-0}" ] \
