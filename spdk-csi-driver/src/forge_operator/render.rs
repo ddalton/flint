@@ -64,6 +64,10 @@ pub struct RenderDefaults {
     /// `None` renders no policy — see [`network_policy`], which is
     /// where the consequence of that is written down.
     pub door: Option<DoorSelector>,
+    /// Where THIS operator runs. Rendered into the same policy so its
+    /// `/status` poll is not denied by the policy it just created.
+    /// `None` and every guarded repository goes dark to its operator.
+    pub operator: Option<PodPeer>,
     /// Seconds the pod is given to release its lease on the way out. A
     /// clean release lets a successor claim at once instead of waiting
     /// out six quiet polls.
@@ -77,6 +81,7 @@ impl Default for RenderDefaults {
             git_image: "ghcr.io/chert-us/flint-forge-git:latest".into(),
             log_level: "info".into(),
             door: None,
+            operator: None,
             termination_grace_secs: 30,
         }
     }
@@ -84,10 +89,14 @@ impl Default for RenderDefaults {
 
 /// Where the gateway's pods are, as a NetworkPolicy peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DoorSelector {
+pub struct PodPeer {
     pub namespace: String,
     pub pod_labels: BTreeMap<String, String>,
 }
+
+/// The door, as a NetworkPolicy peer. It was the only peer once, which
+/// is why the type was named for it.
+pub type DoorSelector = PodPeer;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Names {
@@ -792,7 +801,7 @@ mod tests {
                 "flint-hub-gateway".into(),
             )]),
         };
-        let np = network_policy(&repo(), &door);
+        let np = network_policy(&repo(), &door, None);
         let spec = np.spec.unwrap();
         assert_eq!(spec.policy_types.as_deref(), Some(&["Ingress".to_string()][..]));
         assert_eq!(
@@ -802,7 +811,7 @@ mod tests {
         );
         let rule = &spec.ingress.unwrap()[0];
         let ports = rule.ports.as_ref().unwrap();
-        assert_eq!(ports.len(), 1, "the git port only");
+        assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].port, Some(IntOrString::Int(GIT_PORT)));
         let peer = &rule.from.as_ref().unwrap()[0];
         assert_eq!(
@@ -811,6 +820,71 @@ mod tests {
             "flint-system"
         );
         assert!(peer.pod_selector.is_some(), "a namespace alone admits every pod in it");
+    }
+
+    /// THE DEFECT THIS PINS, found on a real cluster and not by any
+    /// test: a NetworkPolicy that selects a pod is default-deny for
+    /// every port it does not name. Naming only the git port denied the
+    /// operator's own `/status` poll, so the repository sat in
+    /// `Starting` forever — with the pod 2/2 Ready, the syncer
+    /// reporting `serving`, and nothing logging an error anywhere.
+    ///
+    /// The test that was here asserted `ports.len() == 1, "the git port
+    /// only"`. It passed. It was ENCODING the bug, which is why this
+    /// one asserts on the operator's port being reachable rather than
+    /// on how many rules there are.
+    #[test]
+    fn the_policy_does_not_blind_the_operator_that_wrote_it() {
+        let door = DoorSelector {
+            namespace: "flint-system".into(),
+            pod_labels: BTreeMap::from([(
+                "app.kubernetes.io/name".into(),
+                "flint-forge-door".into(),
+            )]),
+        };
+        let operator = PodPeer {
+            namespace: "flint-system".into(),
+            pod_labels: BTreeMap::from([(
+                "app.kubernetes.io/name".into(),
+                "flint-forge".into(),
+            )]),
+        };
+        let np = network_policy(&repo(), &door, Some(&operator));
+        let ingress = np.spec.unwrap().ingress.unwrap();
+
+        let admits = |port: i32, label: &str| {
+            ingress.iter().any(|r| {
+                let port_ok = r
+                    .ports
+                    .as_ref()
+                    .is_some_and(|ps| ps.iter().any(|p| p.port == Some(IntOrString::Int(port))));
+                let peer_ok = r.from.as_ref().is_some_and(|fs| {
+                    fs.iter().any(|f| {
+                        f.pod_selector
+                            .as_ref()
+                            .and_then(|s| s.match_labels.as_ref())
+                            .is_some_and(|m| m.values().any(|v| v == label))
+                    })
+                });
+                port_ok && peer_ok
+            })
+        };
+
+        assert!(
+            admits(STATUS_PORT, "flint-forge"),
+            "the operator must reach /status through the policy it wrote, or it goes blind \
+             and every repository stays in Starting"
+        );
+        assert!(admits(GIT_PORT, "flint-forge-door"), "the door must still reach git");
+        assert!(
+            !admits(GIT_PORT, "flint-forge"),
+            "admitting the operator to the STATUS port must not also admit it to git"
+        );
+        assert!(
+            !admits(STATUS_PORT, "flint-forge-door"),
+            "the door has no business on the status port — /status is exactly what the \
+             gateway design refuses to proxy"
+        );
     }
 
     /// The hooks ship in the git image, and the repository — a shared
@@ -969,27 +1043,54 @@ mod tests {
 /// own namespace being the one the chart names.
 pub fn network_policy(
     repo: &FlintRepo,
-    door: &DoorSelector,
+    door: &PodPeer,
+    operator: Option<&PodPeer>,
 ) -> k8s_openapi::api::networking::v1::NetworkPolicy {
     use k8s_openapi::api::networking::v1::{
         NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort,
         NetworkPolicySpec,
     };
     let n = names(repo);
-    let peer = NetworkPolicyPeer {
+    let as_peer = |p: &PodPeer| NetworkPolicyPeer {
         namespace_selector: Some(LabelSelector {
             match_labels: Some(BTreeMap::from([(
                 "kubernetes.io/metadata.name".to_string(),
-                door.namespace.clone(),
+                p.namespace.clone(),
             )])),
             ..Default::default()
         }),
         pod_selector: Some(LabelSelector {
-            match_labels: Some(door.pod_labels.clone()),
+            match_labels: Some(p.pod_labels.clone()),
             ..Default::default()
         }),
         ..Default::default()
     };
+    let rule = |peer: NetworkPolicyPeer, port: i32| NetworkPolicyIngressRule {
+        from: Some(vec![peer]),
+        ports: Some(vec![NetworkPolicyPort {
+            port: Some(IntOrString::Int(port)),
+            protocol: Some("TCP".to_string()),
+            end_port: None,
+        }]),
+    };
+
+    let mut ingress = vec![rule(as_peer(door), GIT_PORT)];
+
+    // THE STATUS PORT IS NOT OPTIONAL, and leaving it out is how this
+    // policy shipped broken. A NetworkPolicy that selects a pod is
+    // default-deny for every port it does not name, so admitting only
+    // the git port silently blocked the operator's own `/status` poll
+    // — and that document is the sole input to the phase and to the
+    // idle ladder. The repository stayed `Starting` forever, nothing
+    // logged an error, and the pod was 2/2 Ready the whole time.
+    //
+    // So: whenever a policy is rendered at all, the operator must be
+    // admitted to the status port, or the operator loses sight of
+    // every repository the moment it starts guarding them.
+    if let Some(op) = operator {
+        ingress.push(rule(as_peer(op), STATUS_PORT));
+    }
+
     NetworkPolicy {
         metadata: meta(repo, n.network_policy),
         spec: Some(NetworkPolicySpec {
@@ -998,14 +1099,7 @@ pub fn network_policy(
                 ..Default::default()
             }),
             policy_types: Some(vec!["Ingress".to_string()]),
-            ingress: Some(vec![NetworkPolicyIngressRule {
-                from: Some(vec![peer]),
-                ports: Some(vec![NetworkPolicyPort {
-                    port: Some(IntOrString::Int(GIT_PORT)),
-                    protocol: Some("TCP".to_string()),
-                    end_port: None,
-                }]),
-            }]),
+            ingress: Some(ingress),
             egress: None,
         }),
     }

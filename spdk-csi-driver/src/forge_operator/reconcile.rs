@@ -309,7 +309,7 @@ pub async fn full_pass(
             apply(
                 &nps,
                 &n.network_policy,
-                &render::network_policy(repo, door),
+                &render::network_policy(repo, door, d.render.operator.as_ref()),
                 &d.manager,
             )
             .await?;

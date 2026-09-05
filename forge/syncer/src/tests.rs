@@ -457,6 +457,59 @@ async fn a_refs_for_push_that_fast_forwards_moves_the_target_with_no_merge_commi
     }
 }
 
+/// BOOTSTRAP, found on a real cluster. A new repository has no default
+/// branch, and both ways to make one refused: a direct push because
+/// `main` is protected, and a merge request because there was nothing
+/// to merge into. Between them `main` could never be created and the
+/// repository was unusable from birth.
+///
+/// Every merge test above seeds `main` by direct push first, which is
+/// why none of them could see this.
+#[tokio::test]
+async fn a_merge_request_creates_the_default_branch_when_it_does_not_exist() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let first = rig.stage_commit(None, &[("a.txt", "first\n")], "first").await;
+    let reports = rig
+        .run(vec![push(1, vec![RefUpdate {
+            name: "refs/for/main".into(),
+            old_oid: zero(),
+            new_oid: first.clone(),
+        }])])
+        .await;
+    match &reports[0].results[0] {
+        CommandResult::Ok { new_oid, .. } => {
+            assert_eq!(new_oid.as_deref(), Some(first.as_str()), "the proposal IS the branch")
+        }
+        other => panic!("a merge request must be able to create the default branch: {other:?}"),
+    }
+    assert_eq!(rig.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(first));
+}
+
+/// …but only the DEFAULT branch, so a merge request cannot be used to
+/// conjure arbitrary refs. Without this the bootstrap fix would be a
+/// general "create any ref you name" hole.
+#[tokio::test]
+async fn a_merge_request_into_a_missing_non_default_branch_is_still_refused() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c = rig.stage_commit(None, &[("a.txt", "x\n")], "c").await;
+    let reports = rig
+        .run(vec![push(1, vec![RefUpdate {
+            name: "refs/for/release".into(),
+            old_oid: zero(),
+            new_oid: c,
+        }])])
+        .await;
+    match &reports[0].results[0] {
+        CommandResult::Ng { reason, .. } => {
+            assert!(reason.contains("no such merge target"), "{reason}")
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(rig.sc.git.ref_oid("refs/heads/release").await.unwrap().is_none());
+}
+
 /// `-o strategy=theirs` reaches `merge-tree -Xtheirs`, and a value the
 /// client invents does not reach git at all.
 #[tokio::test]

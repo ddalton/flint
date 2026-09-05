@@ -1,0 +1,159 @@
+{{- if .Values.door.deploy }}
+{{- /*
+THE DOOR — flint-hub-gateway with `--git-only`.
+
+WHY IT IS HERE AND NOT IN THE LITE CHART. The design says the door is
+"the shared flint-hub-gateway with --git", and on a cluster that runs
+both lite and forge that is still the right deployment: one gateway,
+two route tables, one image. But a forge-only cluster has no hubs, no
+root key and no inbound token, and the lite chart's gateway REQUIRES
+all three — so `door.deploy` renders the forge-only posture, and the
+lite chart stays the way to run the combined one.
+
+WHAT `--git-only` BUYS. Both file-API credentials are built before the
+git door is wired and both refuse to start without a value, so without
+this flag the process could not start here at all. It also drops the
+`FlintShare` list and watch, which is why this ClusterRole mentions no
+such resource: a forge cluster installs no CRD it has no use for.
+
+THE SERVICE IS MEANT TO BE REACHABLE. That is the same deliberate
+inversion the lite gateway carries: the operator refuses to render a
+routable Service per repository, so exposure is concentrated on one
+object that can actually be guarded.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "flint-forge.doorName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-forge.doorLabels" . | nindent 4 }}
+{{- if .Values.rbac.create }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "flint-forge.doorName" . }}
+  labels:
+    {{- include "flint-forge.doorLabels" . | nindent 4 }}
+rules:
+  # Read the fleet, and touch one annotation. `patch` is the wake, and
+  # it cannot rewrite a spec wholesale. No `create`, no `delete`.
+  - apiGroups: ["chert.us"]
+    resources: ["flintrepos"]
+    verbs: ["get", "list", "watch", "patch"]
+  # THE AGENT'S CREDENTIAL IS ITS OWN ServiceAccount TOKEN, and this is
+  # what turns that token into an identity. Without it every clone is
+  # refused — and no other RBAC in this chart implies it, which is why
+  # a door running under the lite gateway's role could never have
+  # worked.
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "flint-forge.doorName" . }}
+  labels:
+    {{- include "flint-forge.doorLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "flint-forge.doorName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flint-forge.doorName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "flint-forge.doorName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-forge.doorLabels" . | nindent 4 }}
+  {{- with .Values.door.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.door.service.type }}
+  selector:
+    {{- include "flint-forge.doorSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.door.service.port }}
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flint-forge.doorName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-forge.doorLabels" . | nindent 4 }}
+spec:
+  replicas: {{ int .Values.door.replicas }}
+  selector:
+    matchLabels:
+      {{- include "flint-forge.doorSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "flint-forge.doorSelectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "flint-forge.doorName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: door
+          image: {{ include "flint-forge.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The same image as the operator, a different binary in it.
+          command: ["/usr/local/bin/flint-hub-gateway"]
+          args:
+            - --listen=0.0.0.0:8090
+            - --git-only
+            {{- with .Values.namespace }}
+            - --namespace={{ . }}
+            {{- end }}
+            - --git-audience={{ .Values.door.audience }}
+            - --git-wake-wait-secs={{ .Values.door.wakeWaitSecs }}
+            - --git-review-ttl-secs={{ .Values.door.reviewTtlSecs }}
+            - --read-only={{ .Values.door.readOnly }}
+            - --upstream-timeout-secs={{ .Values.door.upstreamTimeoutSecs }}
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.door.logLevel | default .Values.server.logLevel | default "info" | quote }}
+          ports:
+            - name: http
+              containerPort: 8090
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            # False until the repository cache has listed. Before that
+            # every repository 404s — read by a git client as "no such
+            # repository" rather than "ask again" — so this keeps a cold
+            # door out of the Service.
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          {{- with .Values.door.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

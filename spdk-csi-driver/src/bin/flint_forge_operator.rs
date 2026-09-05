@@ -34,7 +34,7 @@ use tracing::{info, warn};
 
 use spdk_csi_driver::forge_operator::crd::FlintRepo;
 use spdk_csi_driver::forge_operator::reconcile::{full_pass, Defaults};
-use spdk_csi_driver::forge_operator::render::{DoorSelector, RenderDefaults};
+use spdk_csi_driver::forge_operator::render::{DoorSelector, PodPeer, RenderDefaults};
 
 struct Ctx {
     client: Client,
@@ -136,7 +136,35 @@ async fn main() -> anyhow::Result<()> {
             namespace: ns,
             pod_labels: std::collections::BTreeMap::from([(k.to_string(), v.to_string())]),
         });
-        info!("rendering a NetworkPolicy admitting only the door to each repository");
+
+        // AND THIS OPERATOR, or the policy it just wrote denies its own
+        // `/status` poll: a NetworkPolicy is default-deny for every port
+        // it does not name, and the git port is not the status port.
+        // Without this the repository never leaves `Starting`, the idle
+        // ladder never gets an input, and nothing anywhere logs an
+        // error — the pod is Ready and the operator is simply blind.
+        match (
+            std::env::var("FLINT_FORGE_OPERATOR_NAMESPACE"),
+            std::env::var("FLINT_FORGE_OPERATOR_POD_LABEL"),
+        ) {
+            (Ok(op_ns), Ok(op_label)) if !op_ns.is_empty() && !op_label.is_empty() => {
+                let (ok, ov) = op_label
+                    .split_once('=')
+                    .unwrap_or(("app.kubernetes.io/name", op_label.as_str()));
+                render.operator = Some(PodPeer {
+                    namespace: op_ns,
+                    pod_labels: std::collections::BTreeMap::from([
+                        (ok.to_string(), ov.to_string()),
+                    ]),
+                });
+            }
+            _ => warn!(
+                "a NetworkPolicy will be rendered but FLINT_FORGE_OPERATOR_NAMESPACE / \
+                 FLINT_FORGE_OPERATOR_POD_LABEL are not both set, so this operator's own \
+                 /status poll will be DENIED by it and every repository will sit in Starting"
+            ),
+        }
+        info!("rendering a NetworkPolicy admitting the door and this operator");
     } else {
         warn!(
             "FLINT_FORGE_DOOR_NAMESPACE is unset: no NetworkPolicy is rendered, so anything that \

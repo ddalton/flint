@@ -115,6 +115,23 @@ struct Args {
     #[arg(long, env = "FLINT_GATEWAY_GIT_REVIEW_TTL_SECS", default_value_t = 60)]
     git_review_ttl_secs: u64,
 
+    /// Serve ONLY the git door: no file API, and nothing about
+    /// `FlintShare` is touched.
+    ///
+    /// This exists because the file API's two credentials are built
+    /// BEFORE the git door is wired, and both refuse to start without
+    /// one — so a forge-only cluster, which has no hubs, no root key
+    /// and no inbound token, could not run this binary at all. The
+    /// chart's own NOTES described that deployment before this flag
+    /// made it possible.
+    ///
+    /// It also removes a real coupling rather than only an
+    /// inconvenience: without it the process lists and watches
+    /// `FlintShare`, so a forge cluster had to install a CRD it has no
+    /// use for and grant RBAC over it.
+    #[arg(long, env = "FLINT_GATEWAY_GIT_ONLY")]
+    git_only: bool,
+
     /// Seconds a request waits for a parked share before answering 503.
     /// The wake is armed either way and persists, so a timeout costs a
     /// retry rather than the wake. 0 = never wait.
@@ -176,10 +193,26 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
 
-    let minter = build_minter(&args)?;
+    // `--git-only` is the forge posture: the git door is the only door.
+    let git_door = args.git || args.git_only;
+
+    if args.git_only && (args.derive_token.is_some() || args.derive_for.is_some()) {
+        anyhow::bail!(
+            "--derive-token and --derive-for mint FILE API credentials; --git-only serves \
+             no file API, so there is nothing for them to derive from"
+        );
+    }
+
+    // Neither file-API credential is built in git-only mode, and that
+    // is the whole point: both of these refuse to start without a
+    // value, so before this a forge-only cluster — which has no hubs,
+    // no root key and no inbound token — could not run this binary at
+    // all, even though the git door needs none of it.
+    let minter = if args.git_only { None } else { Some(build_minter(&args)?) };
 
     if let Some(spec) = args.derive_token.as_deref() {
-        println!("{}", derive_one(&minter, spec)?);
+        let m = minter.as_ref().expect("git-only rejects --derive-token above");
+        println!("{}", derive_one(m, spec)?);
         return Ok(());
     }
 
@@ -189,77 +222,96 @@ async fn main() -> anyhow::Result<()> {
     spdk_csi_driver::install_crypto_provider();
 
     if let Some(r#ref) = args.derive_for.as_deref() {
-        println!("{}", derive_for(&minter, r#ref).await?);
+        let m = minter.as_ref().expect("git-only rejects --derive-for above");
+        println!("{}", derive_for(m, r#ref).await?);
         return Ok(());
     }
 
-    let inbound = build_inbound(&args)?;
-    reject_shared_credential(&inbound, &minter)?;
-    let _refresher = token::spawn_refresher(inbound.clone());
+    let inbound = match &minter {
+        Some(m) => {
+            let i = build_inbound(&args)?;
+            reject_shared_credential(&i, m)?;
+            Some(i)
+        }
+        None => None,
+    };
+    let _refresher = inbound.as_ref().map(|i| token::spawn_refresher(i.clone()));
 
     let client = Client::try_default().await?;
-    let shares: Api<FlintShare> = match &args.namespace {
-        Some(ns) => Api::namespaced(client.clone(), ns),
-        None => Api::all(client.clone()),
-    };
-    // Fail fast and legibly if the CRD is not served, rather than
-    // watch-erroring forever behind a Ready probe that passes.
-    shares.list(&kube::api::ListParams::default().limit(1)).await?;
 
-    let (store, writer) = reflector::store::<FlintShare>();
-    let ready = Arc::new(AtomicBool::new(false));
+    // The file API, and everything it needs. In git-only mode NOTHING
+    // in here runs: no `FlintShare` list, no watch, no cache — so a
+    // forge cluster neither installs that CRD nor grants RBAC over it.
+    let gw = match (minter, inbound) {
+        (Some(minter), Some(inbound)) => {
+            let shares: Api<FlintShare> = match &args.namespace {
+                Some(ns) => Api::namespaced(client.clone(), ns),
+                None => Api::all(client.clone()),
+            };
+            // Fail fast and legibly if the CRD is not served, rather than
+            // watch-erroring forever behind a Ready probe that passes.
+            shares.list(&kube::api::ListParams::default().limit(1)).await?;
 
-    let gw = Arc::new(Gateway {
-        client: client.clone(),
-        store: store.clone(),
-        cfg: Config {
-            namespace: args.namespace.clone(),
-            share_name_prefix: args.share_prefix.clone(),
-            wake_wait: Duration::from_secs(args.wake_wait_secs),
-            read_only: args.read_only,
-            max_upload_bytes: args.max_upload_bytes,
-            upstream_timeout: Duration::from_secs(args.upstream_timeout_secs),
-        },
-        minter,
-        inbound,
-        http: proxy::upstream_client(Duration::from_secs(5))?,
-        ready: ready.clone(),
-    });
+            let (store, writer) = reflector::store::<FlintShare>();
+            let ready = Arc::new(AtomicBool::new(false));
 
-    // The reflector is the ONLY thing that reads shares. Every request
-    // is answered from this cache, so a burst of UI traffic costs the
-    // API server nothing — and the gateway keeps answering through an
-    // API server blip on whatever it last saw, which for a read is the
-    // right failure direction.
-    tokio::spawn(async move {
-        let stream = watcher(shares, watcher::Config::default())
-            .default_backoff()
-            .reflect(writer)
-            .applied_objects();
-        futures::pin_mut!(stream);
-        while let Some(ev) = stream.next().await {
-            if let Err(e) = ev {
-                warn!("share watch: {e}");
+            let gw = Arc::new(Gateway {
+                client: client.clone(),
+                store: store.clone(),
+                cfg: Config {
+                    namespace: args.namespace.clone(),
+                    share_name_prefix: args.share_prefix.clone(),
+                    wake_wait: Duration::from_secs(args.wake_wait_secs),
+                    read_only: args.read_only,
+                    max_upload_bytes: args.max_upload_bytes,
+                    upstream_timeout: Duration::from_secs(args.upstream_timeout_secs),
+                },
+                minter,
+                inbound,
+                http: proxy::upstream_client(Duration::from_secs(5))?,
+                ready: ready.clone(),
+            });
+
+            // The reflector is the ONLY thing that reads shares. Every request
+            // is answered from this cache, so a burst of UI traffic costs the
+            // API server nothing — and the gateway keeps answering through an
+            // API server blip on whatever it last saw, which for a read is the
+            // right failure direction.
+            tokio::spawn(async move {
+                let stream = watcher(shares, watcher::Config::default())
+                    .default_backoff()
+                    .reflect(writer)
+                    .applied_objects();
+                futures::pin_mut!(stream);
+                while let Some(ev) = stream.next().await {
+                    if let Err(e) = ev {
+                        warn!("share watch: {e}");
+                    }
+                }
+                error!("share watch ended — the cache is now frozen");
+            });
+
+            {
+                let store = store.clone();
+                let ready = ready.clone();
+                tokio::spawn(async move {
+                    store.wait_until_ready().await.ok();
+                    ready.store(true, Ordering::Relaxed);
+                    info!("share cache listed — serving");
+                });
             }
+            Some(gw)
         }
-        error!("share watch ended — the cache is now frozen");
-    });
-
-    {
-        let store = store.clone();
-        let ready = ready.clone();
-        tokio::spawn(async move {
-            store.wait_until_ready().await.ok();
-            ready.store(true, Ordering::Relaxed);
-            info!("share cache listed — serving");
-        });
-    }
+        // Both are built together or not at all.
+        _ => None,
+    };
 
     info!(
         listen = %args.listen,
         namespace = %args.namespace.clone().unwrap_or_else(|| "<all>".into()),
         read_only = args.read_only,
-        git = args.git,
+        git = git_door,
+        file_api = gw.is_some(),
         "flint-hub-gateway starting"
     );
 
@@ -267,7 +319,7 @@ async fn main() -> anyhow::Result<()> {
     // second process: it shares the wake machinery, the readiness gate
     // and the operational surface the file API already has. When it is
     // off, nothing here touches the FlintRepo CRD at all.
-    if args.git {
+    if git_door {
         let repos: Api<FlintRepo> = match &args.namespace {
             Some(ns) => Api::namespaced(client.clone(), ns),
             None => Api::all(client.clone()),
@@ -309,8 +361,29 @@ async fn main() -> anyhow::Result<()> {
             repo_ready.store(true, Ordering::Relaxed);
             info!("repository cache listed — the git door is serving");
         });
-        warp::serve(git::routes(door).or(proxy::routes(gw))).run(args.listen).await;
+        // Two doors on one listener, or the git door alone. The
+        // combined filter's TYPE differs from the git-only one, so
+        // these cannot collapse into one `warp::serve` call.
+        match gw {
+            Some(gw) => {
+                warp::serve(git::routes(door).or(proxy::routes(gw))).run(args.listen).await
+            }
+            // Alone, the git door must carry its OWN probes: the file
+            // API's /healthz and /readyz live in `proxy::routes`, which
+            // is not mounted here, so without this every probe 404s and
+            // a correctly serving pod crash-loops.
+            None => {
+                let health = git::health_routes(door.ready.clone());
+                warp::serve(git::routes(door).or(health)).run(args.listen).await
+            }
+        }
     } else {
+        let gw = gw.ok_or_else(|| {
+            anyhow::anyhow!(
+                "no door to serve: the file API needs a credential (--token-file plus \
+                 --root-key-file or --hub-token) and --git-only was not passed"
+            )
+        })?;
         warp::serve(proxy::routes(gw)).run(args.listen).await;
     }
     Ok(())

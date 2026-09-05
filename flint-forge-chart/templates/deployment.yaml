@@ -44,7 +44,27 @@ spec:
             - name: FLINT_FORGE_DOOR_NAMESPACE
               value: {{ .Values.door.namespace | quote }}
             - name: FLINT_FORGE_DOOR_POD_LABEL
+              {{- /*
+              When this chart renders the door itself, the label is
+              THIS door's, not the lite gateway's. Taking the value's
+              default here would name a pod that does not exist and
+              deny every clone.
+              */}}
+              {{- if .Values.door.deploy }}
+              value: "app.kubernetes.io/name={{ include "flint-forge.doorName" . }}"
+              {{- else }}
               value: {{ .Values.door.podLabel | quote }}
+              {{- end }}
+            {{- /*
+            And this operator's own identity. The policy is default-deny
+            for every port it does not name, so without these the poll
+            it makes to /status is denied by the policy it just wrote,
+            and every repository sits in Starting with nothing logged.
+            */}}
+            - name: FLINT_FORGE_OPERATOR_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: FLINT_FORGE_OPERATOR_POD_LABEL
+              value: "app.kubernetes.io/name={{ include "flint-forge.name" . }}"
             {{- end }}
           resources: {{- toYaml .Values.resources | nindent 12 }}
       {{- with .Values.nodeSelector }}

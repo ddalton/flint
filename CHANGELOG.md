@@ -12,6 +12,47 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed — flint forge, first cluster run
+
+Three defects that only a real cluster could find. All three were in
+code whose unit tests were green.
+
+- **A `--git-only` gateway.** The file API's two credentials are built
+  before the git door is wired and both refuse to start without a
+  value, so a forge-only cluster — no hubs, no root key, no inbound
+  token — could not run `flint-hub-gateway` at all. The chart's own
+  NOTES described a deployment that could not exist. `--git-only` now
+  serves the git door alone and touches nothing about `FlintShare`, so
+  a forge cluster installs no CRD it has no use for.
+- **A git-only door had no probes.** `/healthz` and `/readyz` live in
+  `proxy::routes`, which `--git-only` does not mount, so both 404'd and
+  kubelet killed a door that was serving correctly. `git::health_routes`
+  now carries them, with the same split: liveness up immediately,
+  readiness False until the repository cache has listed.
+- **The NetworkPolicy blinded the operator that wrote it.** A policy
+  selecting a pod is default-deny for every port it does not name, and
+  it named only the git port — so the operator's own `/status` poll was
+  denied, and every guarded repository sat in `Starting` forever with
+  the pod 2/2 Ready, the syncer reporting `serving`, and nothing
+  logging an error. The policy now admits the operator to the status
+  port. The unit test that was there asserted `ports.len() == 1, "the
+  git port only"`: it passed, because it was encoding the bug.
+
+- **A new repository could never create its default branch.** A direct
+  push to `main` was refused because it is protected; a `refs/for/main`
+  merge request was refused with `no such merge target` because `main`
+  did not exist yet. Between them a fresh repository was unusable from
+  birth. A merge request into the DEFAULT branch now creates it — which
+  is within the authority `mergeInto` already checked — while a merge
+  request into any other missing ref is still refused, so this cannot
+  be used to conjure arbitrary refs. Every merge test seeded `main` by
+  direct push first, which is why none of them could see it.
+
+Also: `flint-forge-chart` can now render the door itself
+(`door.deploy`), with the RBAC it actually needs — `flintrepos` and
+`tokenreviews`, neither of which the lite chart's gateway role grants.
+
+
 ### Added
 
 - **`s3.csi.chert.us`: the two identity modes nothing had exercised**

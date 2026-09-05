@@ -27,7 +27,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::gitcmd::{is_zero, MergeOutcome, RefUpdate};
+use super::gitcmd::{is_zero, zero_oid, MergeOutcome, RefUpdate};
 use super::policy::{Policy, Verdict};
 use super::{lease, packio, snapshot, ForgeError, ForgeResult, Syncer};
 
@@ -380,12 +380,43 @@ async fn judge_merge(
         });
     }
     let base = eff.get(&target_ref).cloned().unwrap_or_default();
-    if base.is_empty() {
-        return Ok(Judged::Refused { reason: format!("no such merge target: {target_ref}") });
-    }
     let head = cmd.new_oid.clone();
     if is_zero(&head) {
         return Ok(Judged::Refused { reason: "a merge request must name a commit".into() });
+    }
+    if base.is_empty() {
+        // BOOTSTRAP. A new repository has no default branch, and the
+        // two ways to make one both refuse: a direct push because the
+        // branch is protected, and a merge request because there is
+        // nothing to merge into. Between them, main could never be
+        // created and the repository was unusable from birth — which
+        // is exactly what the first cluster run found.
+        //
+        // Creating it here is within the authority already checked:
+        // `mergeInto` named this principal as one who may move this
+        // ref, and moving it from nothing is the smallest such move.
+        // Narrow on purpose — only the DEFAULT branch, so a merge
+        // request cannot be used to conjure arbitrary refs.
+        let default_ref = format!("refs/heads/{}", sc.cfg.default_branch);
+        if target_ref != default_ref {
+            return Ok(Judged::Refused {
+                reason: format!("no such merge target: {target_ref}"),
+            });
+        }
+        if !sc.git.has_object(&head).await? {
+            return Ok(Judged::Refused { reason: format!("{head} is not in this repository") });
+        }
+        return Ok(Judged::Accepted {
+            update: RefUpdate {
+                name: target_ref.clone(),
+                // A creation, which `update_refs` spells with a zero
+                // old oid — NOT the empty string `eff` uses for absent.
+                old_oid: zero_oid(head.len()),
+                new_oid: head,
+            },
+            alt_ref: Some(target_ref),
+            created: None,
+        });
     }
     if !sc.git.has_object(&head).await? {
         return Ok(Judged::Refused { reason: format!("{head} is not in this repository") });

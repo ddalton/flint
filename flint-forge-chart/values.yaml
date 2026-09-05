@@ -56,6 +56,41 @@ door:
   namespace: ""
   podLabel: "app.kubernetes.io/name=flint-hub-gateway"
 
+  # RENDER THE DOOR ITSELF (flint-hub-gateway with `--git-only`).
+  #
+  # Off by default, because on a cluster that already runs flint-lite
+  # the right door is the shared gateway from that chart — one process
+  # serving both route tables. Turn this on for a forge-only cluster,
+  # which has no hubs, no root key and no inbound token and therefore
+  # cannot run the lite chart's gateway at all.
+  #
+  # When you enable this, set `namespace` (above) to this release's
+  # namespace as well, so every repository gets the NetworkPolicy that
+  # makes `X-Remote-User` mean something.
+  deploy: false
+  replicas: 1
+  # The audience an agent's projected token must carry. A token minted
+  # for the apiserver's own audience is refused, and that separation is
+  # the whole reason any pod token in the cluster is not a forge
+  # credential. Must match the agent's `serviceAccountToken.audience`.
+  audience: "forge.chert.us"
+  # How long a git request is HELD for a parked repository. Long,
+  # deliberately: git clients do not retry a 503, and a wake after an
+  # unclean death is a lease wait plus a restore from the bucket.
+  wakeWaitSecs: 180
+  reviewTtlSecs: 60
+  readOnly: false
+  upstreamTimeoutSecs: 300
+  logLevel: ""
+  service:
+    type: ClusterIP
+    port: 80
+    annotations: {}
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
 serviceAccount:
   create: true
   name: ""

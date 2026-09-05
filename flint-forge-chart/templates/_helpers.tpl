@@ -30,3 +30,20 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s/%s:%s" .Values.image.repository .Values.image.name (default .Chart.AppVersion .Values.image.tag) -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "flint-forge.doorName" -}}
+{{- printf "%s-door" (include "flint-forge.name" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "flint-forge.doorLabels" -}}
+app.kubernetes.io/name: {{ include "flint-forge.doorName" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
+{{- end -}}
+
+{{- define "flint-forge.doorSelectorLabels" -}}
+app.kubernetes.io/name: {{ include "flint-forge.doorName" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end -}}

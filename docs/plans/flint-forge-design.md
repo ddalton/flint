@@ -537,8 +537,34 @@ slow in ways that matter for a fleet. Phase 0 runs it as the control.
 2. **Concurrent pushes to one ref.** Two clients push `L→N1` and
    `L→N2` concurrently: exactly one gets `ok`, the other `ng stale`;
    the bucket and the local ref agree. Control: with step 2's
-   snapshot-side check removed, both get `ok` and the bucket holds an
-   oid no client was told about.
+   snapshot-side check removed, the bucket holds an oid no client was
+   told about.
+
+   **RUN 2026-09-04, both arms, on EC2** (`forge/e2e/f2-concurrent.sh`).
+   Treatment green in both timings: same-batch (two pushes inside the
+   400 ms window) gives one `ok` and one `ng stale info: fetch first`;
+   cross-batch (staggered past the window) gives one `ok` and one
+   client-side `fetch first`. In both, the bucket snapshot, the
+   server's own ref and the winner's oid agree, and the loser's commit
+   is on no ref.
+
+   The control — the shipped tree with ONE line removed, the
+   `eff.insert` after each accepted command — fails, and how it fails
+   corrects this paragraph. Both clients are told `ng`, not `ok`:
+   `update-ref --stdin` refuses a transaction carrying two updates for
+   one ref, the batch goes fatal and the syncer restarts. But **the
+   bucket ends up holding one of the two commits anyway**, because
+   step 5 CASes the snapshot BEFORE step 6 touches a local ref, and
+   step 5 folds `accepted` into a map where the last write wins. The
+   restart then restores from that bucket. So a client was told its
+   push was rejected while its commit became the branch.
+
+   The lesson is about which check is load-bearing. git's own
+   transaction refusal looks like a second line of defence and is not
+   one: it fires after the snapshot is already durable. **The step-2
+   overlay update is the only thing standing between two racing
+   pushes and a bucket that disagrees with what every client was
+   told.**
 3. **Loose objects never leak.** A `refs/for/main` merge is
    acknowledged, the pod is killed, the restore passes `fsck`.
    Control: skip the `pack-objects` in step 2 — the restore fails.
@@ -555,9 +581,31 @@ slow in ways that matter for a fleet. Phase 0 runs it as the control.
    `pre-receive` naming the rule; its push to `agent/<pod>` lands; its
    push to `refs/for/main` merges for a listed principal and returns
    `ng` with the conflicted paths otherwise, moving no ref.
+
+   **RUN 2026-09-04 on EC2 — GREEN, after it found a bootstrap
+   defect.** The direct push is refused with `refs/heads/main is
+   protected: push to refs/for/main to propose a merge`; the
+   `agent/agent1` push lands. The third leg failed: on a NEW
+   repository `refs/for/main` was refused with `no such merge target`,
+   because `main` did not exist yet — so between the protection rule
+   and the missing target, **`main` could never be created and a fresh
+   repository was unusable from birth**. Every merge unit test seeded
+   `main` by direct push first, which is why none of them could see
+   it. A merge request into the DEFAULT branch now creates it, which
+   is within the authority `mergeInto` already checked; into any other
+   missing ref it is still refused, so this cannot conjure arbitrary
+   refs.
 7. **Idle-to-zero.** Replicas 0 after `suspendAfterSecs`; a clone
    during suspension succeeds after a wake of up to the hold; the
    restore time is reported.
+
+   **RUN 2026-09-04 on EC2 — GREEN.** With `suspendAfterSecs: 120`,
+   the repository reached `IdleSuspended` at 0 replicas with no pods.
+   A `git clone` through the door then completed in **11 s**, and the
+   repository came back at `Ready`, 1/1, on a pod created BY the
+   request. The door held the request for the wake rather than
+   answering 503 — which is the whole point, since git clients do not
+   retry.
 8. **The storm, on EC2 only** (kind measures its host's loopback, not
    NIC egress or S3 fan-out): 1,000 concurrent clones with bitmaps and
    a bundle URI advertised AND `transfer.bundleURI=true` on the

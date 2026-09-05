@@ -499,6 +499,35 @@ fn repo_name(segment: &str) -> String {
     segment.strip_suffix(".git").unwrap_or(segment).to_string()
 }
 
+/// Liveness and readiness for a door serving git ALONE.
+///
+/// The file API carries its own `/healthz` and `/readyz` inside
+/// [`super::proxy::routes`], and for as long as the git door could only
+/// ever be mounted BESIDE it, it inherited them. `--git-only` broke
+/// that inheritance: the probes would have 404'd and the pod would have
+/// crash-looped with a door that was in fact serving correctly. So this
+/// is mounted only when the git door is the only door.
+///
+/// The split follows the file API's: `/healthz` is up as soon as the
+/// process is, so a cold cache cannot get the pod restarted, while
+/// `/readyz` stays False until the repository cache has listed — which
+/// keeps a door that would 404 every repository out of the Service.
+pub fn health_routes(
+    ready: Arc<AtomicBool>,
+) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
+    let healthz = warp::path!("healthz")
+        .and(warp::get())
+        .map(|| warp::reply::with_status("ok", StatusCode::OK));
+    let readyz = warp::path!("readyz").and(warp::get()).map(move || {
+        if ready.load(Ordering::Relaxed) {
+            warp::reply::with_status("ready", StatusCode::OK)
+        } else {
+            warp::reply::with_status("repository cache is cold", StatusCode::SERVICE_UNAVAILABLE)
+        }
+    });
+    healthz.or(readyz).unify()
+}
+
 /// The three routes.
 ///
 /// Mounted under `/git/` so that a repository named `v1` cannot
@@ -1556,5 +1585,43 @@ mod tests {
         assert!(GitVerb::ReceivePack.is_mutation());
         assert!(!GitVerb::UploadPack.is_mutation(), "a fetch is a read however large it is");
         assert!(!GitVerb::InfoRefs.is_mutation());
+    }
+
+    /// The defect this exists for: `--git-only` does not mount
+    /// `proxy::routes`, so before `health_routes` BOTH probes 404'd and
+    /// kubelet killed a door that was serving git perfectly. Asserting
+    /// on the status code rather than on "some response came back" is
+    /// the whole point — a 404 IS a response.
+    #[tokio::test]
+    async fn a_git_only_door_answers_its_own_probes() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let r = health_routes(ready.clone());
+
+        let live = warp::test::request().method("GET").path("/healthz").reply(&r).await;
+        assert_eq!(
+            live.status(),
+            StatusCode::OK,
+            "liveness must be up before the cache is, or a cold start is a restart loop"
+        );
+
+        let cold = warp::test::request().method("GET").path("/readyz").reply(&r).await;
+        assert_eq!(
+            cold.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a cold repository cache 404s every repo — that pod must stay out of the Service"
+        );
+
+        ready.store(true, Ordering::Relaxed);
+        let warm = warp::test::request().method("GET").path("/readyz").reply(&r).await;
+        assert_eq!(warm.status(), StatusCode::OK);
+    }
+
+    /// The probes must not answer for a path that is not a probe —
+    /// otherwise a typo'd probe path would pass and prove nothing.
+    #[tokio::test]
+    async fn the_probe_filter_claims_nothing_else() {
+        let r = health_routes(Arc::new(AtomicBool::new(true)));
+        let res = warp::test::request().method("GET").path("/git/ns/repo.git/info/refs").reply(&r).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 }

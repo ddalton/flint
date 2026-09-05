@@ -32,9 +32,19 @@ with, in the agent image:
   git config --global credential.https://<gateway>.helper \
       /usr/local/bin/flint-forge-credential
 
-The door is the shared flint-hub-gateway with `--git` (or
-FLINT_GATEWAY_GIT=true). It is OFF by default, and off means this
-chart's CRD is neither listed nor watched by it.
+The door is the flint-hub-gateway. There are two ways to run it:
+
+  * On a cluster that ALSO runs flint-lite, use that chart's gateway
+    with `--git` — one process, two route tables, one image.
+  * On a forge-only cluster, set `door.deploy=true` here. That runs the
+    same binary with `--git-only`: no file API, and nothing about
+    FlintShare is touched. It exists because both of the file API's
+    credentials are built before the git door is wired and BOTH refuse
+    to start without a value, so a cluster with no hubs, no root key
+    and no inbound token could not run the gateway at all.
+
+Either way it is OFF by default, and off means this chart's CRD is
+neither listed nor watched by it.
 
 {{- if not .Values.door.namespace }}
 
