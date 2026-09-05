@@ -1,0 +1,39 @@
+forge repack amplification — 2026-09-05, this Mac, MinIO in Docker
+binary: forge/syncer at 2a213b01; 30 pushes per arm, repack threshold 24 (the shipped default)
+command: KEEP=1 ./run-repack.sh
+
+
+== precondition: FORGE_BIN is newer than the sources it claims to be ==
+  PASS  FORGE_BIN is not older than any source under forge/syncer or flint-store
+
+== source — 30 pushes of a source-shaped repository, repack threshold 24 ==
+  ....  seed: the import uploaded 3.5 MiB
+  ....  source: the import uploaded 3.5 MiB — excluded from the ratio, since a first import uploads the repository once whatever the repack policy is
+  ....  source: 30 pushes added 0.1 MiB and uploaded 3.8 MiB — amplification 67.2x
+  ....  source: 1 push(es) uploaded more than 10x what they added; the largest was push 24 at 3.6 MiB for 0.002 MiB of content
+  ....  source: 1 repack upload(s) observed, ~1 expected at threshold 24
+
+== blob — 30 pushes of a blob-shaped repository, repack threshold 24 ==
+  ....  seed: the import uploaded 96.0 MiB
+  ....  blob: the import uploaded 96.0 MiB — excluded from the ratio, since a first import uploads the repository once whatever the repack policy is
+  ....  blob: 30 pushes added 60.0 MiB and uploaded 204.2 MiB — amplification 3.4x
+  ....  blob: 1 push(es) uploaded more than 10x what they added; the largest was push 25 at 146.1 MiB for 2.000 MiB of content
+  ....  blob: 1 repack upload(s) observed, ~1 expected at threshold 24
+
+== control — 30 pushes of a source-shaped repository, repack threshold 100000 ==
+  ....  seed: the import uploaded 3.5 MiB
+  ....  control: the import uploaded 3.5 MiB — excluded from the ratio, since a first import uploads the repository once whatever the repack policy is
+  ....  control: 30 pushes added 0.1 MiB and uploaded 0.3 MiB — amplification 5.1x
+  PASS  control: with the repack out of reach NO push uploads more than 10x what it adds; the 5.1x floor is git rewriting trees, not the repack
+
+== G — what a geometric repack would rewrite instead, on the source repository ==
+  ....  source: from 7 packs — full rewrites 3.1 MiB into 1 pack, geometric rewrites 0.0 MiB into 2
+  PASS  on the source shape geometric rewrites 0.0 MiB where the full repack rewrites 3.1 MiB
+
+== G — what a geometric repack would rewrite instead, on the blob repository ==
+  ....  blob: from 7 packs — full rewrites 156.1 MiB into 1 pack, geometric rewrites 12.0 MiB into 2
+  PASS  on the blob shape geometric rewrites 12.0 MiB where the full repack rewrites 156.1 MiB
+
+per-push CSVs (push, content bytes, uploaded bytes): /var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/tmp.vVmkJeHKgB/*.csv (KEEP=1 to retain)
+
+repack: 4 passed, 0 failed

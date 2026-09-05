@@ -64,3 +64,4 @@ spdk-csi-driver/docker/prebuilt/
 # baseline (tests/lima/perf-baseline.json) is committed.
 tests/lima/perf-*.json
 !tests/lima/perf-baseline.json
+__pycache__/

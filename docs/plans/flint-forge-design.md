@@ -626,6 +626,36 @@ derived but differ across clients' delta settings, so the reference
 predicate is "named by the snapshot whose etag is the If-Match",
 never "same objects". `ForgeSync.tla` instantiates the module.
 
+**MEASURED 2026-09-05: every 24 pushes, a repository re-uploads all
+of itself** (`forge/e2e/repack/`, 30 pushes per arm at the shipped
+threshold, against a control with the repack out of reach). `repack -a
+-d -b` collapses the repository to one pack and `maybe_repack` uploads
+every pack the snapshot does not name — which is that one. On a
+source-shaped repository the steady-state amplification is **67x** (a
+3.6 MiB re-upload for 2 KiB of content); on a blob-shaped one **3.4x**
+(146 MiB for 2 MiB). The ratio misleads in both directions and the
+absolute statement is the useful one: the cost of a repack is the
+repository, and at the 10 GB envelope the scale drill timed that
+upload at 262 s with the serving loop inside it.
+
+**`repack --geometric` is the lever, and it is not a drop-in.** On the
+same repositories, measured with pure git: where the full repack
+rewrites 3.1 MiB (source) and 156.1 MiB (blob), a geometric repack
+rewrites **0.0 MiB and 12.0 MiB** — it rolls up the increments and
+leaves the big pack alone. Two conditions, both found by measuring
+rather than by reading. Geometric REFUSES on a repository with
+`pack.writeBitmaps` on ("Incremental repacks are incompatible with
+bitmap indexes"), which forge has on for §8's clone path, so the
+bitmap would have to become a multi-pack one. And `--write-midx`
+leaves `objects/pack/multi-pack-index` — a MUTABLE file at a FIXED
+key, in a directory whose every rule here assumes immutable
+content-named objects. The cheap resolution is not to upload it: the
+MIDX and its bitmap are derived, and a restore can rebuild them with
+`git multi-pack-index write --bitmap` once the packs are down. NOT
+BUILT; the measurement is the decision input, and the part fan-out
+(§15 decision 9's neighbour) treats the same 262 s by making the
+re-upload 4x faster rather than by not doing it.
+
 **In-flight multipart uploads are swept too, and with no grace**
 (added 2026-09-05). A push killed inside its upload leaves parts that
 no `Complete` will ever claim and that are billed as storage until

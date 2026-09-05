@@ -12,6 +12,37 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added — flint forge, the repack amplification, measured
+
+- **`forge/e2e/repack/`** — how many bytes reach S3 per byte pushed.
+  `maybe_repack` uploads every pack the snapshot does not name, and
+  after `repack -a -d -b` that is one pack containing the whole
+  repository, so **every 24 pushes a repository re-uploads all of
+  itself**. Measured end to end against the shipped binary: **67x**
+  steady-state amplification on a source-shaped repository (a 3.6 MiB
+  re-upload for 2 KiB of content) and **3.4x** on a blob-shaped one
+  (146 MiB for 2 MiB). The ratio misleads in both directions; the
+  absolute statement is that a repack costs the repository, which the
+  scale drill timed at 262 s for 10 GiB on real S3.
+- **A control with the repack put out of reach** returns no spike at
+  all, which is what makes the two numbers above attributable to the
+  repack rather than to git. Its 5.1x floor is git rewriting the tree
+  of the directory each push touches — present in both arms, and not
+  something a repack policy could remove.
+- **What `--geometric` would cost instead**, measured with pure git on
+  the same repositories: 0.0 MiB against the full repack's 3.1 MiB
+  (source) and 12.0 MiB against 156.1 MiB (blob). Two conditions found
+  by measuring: geometric REFUSES on a repository with
+  `pack.writeBitmaps` on, and `--write-midx` leaves a MUTABLE
+  `multi-pack-index` at a fixed key in a directory whose every rule
+  assumes immutable content-named objects. Recorded in the design, not
+  built.
+- **The probe's own first version reported a false win.** It sent
+  git's fatal to `/dev/null` and read the command not running as
+  "geometric rewrites 0.0 MiB". It now fails the leg instead — and the
+  progression turned out to be over object counts rather than bytes,
+  which is why both repository shapes are measured.
+
 ### Fixed — flint forge, the lease went quiet while the server worked
 
 - **The heartbeat is its own task** (`lease::spawn_renewer`), running
