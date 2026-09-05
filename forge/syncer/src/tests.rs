@@ -1314,6 +1314,10 @@ fn the_barrier_command_carries_the_workspace_it_publishes() {
         map["FLINT_SYNC_PROJECT_ID"], "proj",
         "without it an export would overwrite another project's workspace"
     );
+    assert_eq!(
+        map["FLINT_SYNC_SOLE_WRITER"], "true",
+        "the export is a mirror; without this a reader adopts a foreign write (C4)"
+    );
     // The credentials are INHERITED, never rebuilt here: one place for
     // them to be wrong instead of two.
     assert!(!map.contains_key("AWS_ACCESS_KEY_ID"));

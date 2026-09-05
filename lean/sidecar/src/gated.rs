@@ -1091,6 +1091,11 @@ impl Sidecar {
             // D13: this citation's readers resolve by version, never by
             // S3-wins adoption of the current version.
             merged.pinned_reads = true;
+            // Independent of D13 and cleared by `merge`, so it is
+            // restated here for the same reason the cadence barrier
+            // restates it: it describes the deployment, not the
+            // citation.
+            merged.sole_writer = self.cfg.sole_writer;
             // The mixed-manifest cell, where D7's entry schema and D13
             // collide. Stamping `pinned_reads` over an entry a pre-D7
             // writer cited leaves it addressable only by etag — and the

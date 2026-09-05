@@ -1085,7 +1085,7 @@ future reader knows the evidence was reproduced, not trusted.
 Drills: `forge/e2e/composition/`. Local rig, real binaries, MinIO
 (`export::run_barrier` execs the shipped `flint-sync`, so the second
 party cannot be an in-process double). First run **30 passed, 12
-failed**; after the C2 fix below, **36 passed, 10 failed**. Every
+failed**; after the C2 and C4 fixes below, **40 passed, 8 failed**. Every
 control and precondition is green, so the failures are findings rather
 than rig noise.
 
@@ -1207,11 +1207,40 @@ the next arm takes over and is explicit:
 
 Correct for lean's own workspace, where that means a human wrote newer
 bytes. On an export prefix, where forge is the sole legitimate writer,
-it means someone wrote who should not have — and lean copies the
-foreign bytes into an agent's workspace, where they can be committed
-back into git as real content. Measured: manifest-less reader served
-them silently; lean adopted them (rc=0); only a `git clone`, which
-never touches the export, was unaffected.
+it means someone wrote who should not have. Measured: manifest-less
+reader served them silently; lean adopted them (rc=0) and materialised
+them into the reader's tree; only a `git clone`, which never touches
+the export, was unaffected.
+
+**FIXED** (drill now 7/1). A manifest carries `sole_writer`, set by the
+installing pass from config; forge's export sets it via
+`FLINT_SYNC_SOLE_WRITER` in `barrier_command`. A reader that finds an
+object off its citation in such a workspace refuses instead of
+adopting, with a message that names the cause and — deliberately — does
+NOT give the gated lane's `recover-staged` advice, since nothing was
+staged and the thing to find is the second writer.
+
+Three properties worth keeping:
+
+- **The flag lives in the manifest, not the reader's config.** A reader
+  that must be configured to be careful is one that will eventually be
+  deployed without it. The drill's reader runs a default config and
+  refuses anyway, because the workspace tells it to.
+- **It is cleared by `merge` and restated by the installing pass**, the
+  same discipline `pinned_reads` follows. Inheriting it would let a
+  workspace keep refusing forever after one mirrored publish; not
+  restating it would let a mirror quietly stop being one.
+- **Ordinary workspaces are untouched.** The S3-wins arm is still what
+  an agent's workspace uses, guarded by its own test: with the flag
+  unset, bytes past the citation are still adopted.
+
+**What the fix does not reach, and cannot.** A reader with no manifest
+— a key and a GET, which is what a passthrough or lite mount is — has
+nothing to check the bytes against and still takes the foreign write.
+That leg still fails, honestly. It is the argument for repairing the
+divergence at the source (C3), not for more reader code. And the flag
+only protects a manifest published with it: an export written before
+this change stays adoptable until it publishes again.
 
 ### C5 — a foreign DELETE is refused, and never restored
 
@@ -1232,10 +1261,12 @@ dangerous one.
   within one. The cheapest candidate is a single well-known claim cell
   per prefix that every product writes and reads, rather than each
   product owning a private one under its own directory.
-- The export's mirror claim should either be made true (reconcile
-  against the bucket, not only against the local baseline) or the
-  sentence at `export.rs:27` withdrawn and the CRD's guidance changed
-  to say a read-write mount over an export prefix is unsupported.
+- The `export.rs` mirror sentence is now withdrawn and replaced with
+  what was measured. What remains open is C3 itself: the export still
+  cannot see a foreign write, so the divergence is detectable by
+  manifest readers and repaired by nobody. Reconciling against a LIST
+  of the prefix — one request per 1000 objects, etags included — would
+  close it for every reader, including the ones that cannot verify.
 - C2 is fixed above, but its residual stands: an export awaited inline
   in the same `select!` as the heartbeat is a liveness hazard even when
   bounded. Moving it to its own task — with the snapshot CAS still

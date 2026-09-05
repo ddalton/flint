@@ -139,6 +139,11 @@ impl Sidecar {
             use futures::stream::{self, StreamExt};
             let this: &super::Sidecar = &*self;
             let pinned = m.pinned_reads;
+            // A mirror's publisher is the only party entitled to write
+            // it, so an object off its citation was moved by a
+            // stranger. Adopting it would copy bytes no manifest cites
+            // into this tree, silently — drill C4.
+            let sole_writer = m.sole_writer;
             stream::iter(admission.into_iter().map(|(path, entry)| {
                 let store = this.store.clone();
                 let root = this.cfg.root.clone();
@@ -256,6 +261,24 @@ impl Sidecar {
                         },
                         _ => match store.get_whole(&entry.key, Some(&entry.etag)).await {
                             Ok(ok) => ok,
+                            Err(StoreError::PreconditionFailed(_)) if sole_writer => {
+                                // Deliberately NOT the `recover-staged`
+                                // advice below: nothing was staged
+                                // here, the citation is intact, and the
+                                // thing to go and find is the second
+                                // writer.
+                                return Err(LeanError::State(format!(
+                                    "manifest cites {} at an etag the object no longer \
+                                     carries, and this workspace is published by a SOLE \
+                                     WRITER — so something other than its publisher wrote \
+                                     that object. Refusing to adopt bytes no manifest \
+                                     cites. If this is forge's legible export, look for a \
+                                     read-write mount over its prefix; the export \
+                                     republishes only what git changed and will not repair \
+                                     this on its own",
+                                    entry.key
+                                )));
+                            }
                             Err(StoreError::PreconditionFailed(_)) if pinned => {
                                 // The mixed-manifest cell: a pinned
                                 // boundary carrying an entry the

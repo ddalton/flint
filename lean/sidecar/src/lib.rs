@@ -217,6 +217,13 @@ pub struct LeanConfig {
     pub root: PathBuf,
     /// Publish cadence floor, seconds (the durability contract).
     pub floor_secs: u64,
+    /// Stamp `sole_writer` on every manifest this sidecar installs.
+    ///
+    /// Set for a workspace that is PUBLISHED rather than worked in —
+    /// forge's legible export is the shipped case. It tells every later
+    /// reader that an object off its citation was moved by a stranger,
+    /// so the reader refuses instead of adopting.
+    pub sole_writer: bool,
     /// Whole-object ceiling; larger files use multipart compose.
     pub whole_put_max: u64,
     /// Entries per manifest chunk, in expectation, and the floor and
@@ -319,6 +326,10 @@ impl LeanConfig {
             prefix: prefix.trim_end_matches('/').to_string(),
             root: root.into(),
             floor_secs: 60,
+            // Off by default: a workspace an agent WORKS IN wants the
+            // S3-wins arm, where an object past its citation is a human
+            // whose bytes should win. Only a published mirror sets it.
+            sole_writer: false,
             whole_put_max: WHOLE_PUT_MAX,
             chunked: true,
             orphan_grace_secs: manifest::ORPHAN_GRACE_SECS,

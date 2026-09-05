@@ -187,6 +187,117 @@ async fn hitl_upload_survives_two_barriers_without_sync() {
     assert_eq!(read(dir2.path(), "docs/upload.pdf").unwrap(), "user bytes");
 }
 
+/// A write into the bucket by something that is NOT this workspace's
+/// writer, and with no inbox entry to make it legitimate. This is what
+/// a read-write passthrough mount over a published prefix does.
+async fn foreign_overwrite(store: &Arc<MemoryStore>, cfg: &LeanConfig, path: &str, content: &str) {
+    let key = cfg.file_key(path);
+    let body = Bytes::from(content.to_string());
+    let crc = crc64_nvme(&body);
+    let stamps = GenerationStamps {
+        generation: 0,
+        epoch: 0,
+        flush_uuid: "a-stranger".to_string(),
+        boundary_source: None,
+        posix: None,
+    };
+    store
+        .put_whole(&key, body, &PutCondition::Unconditional, &stamps, crc)
+        .await
+        .expect("the foreign write lands");
+}
+
+/// Composition drill C4, decided locally.
+///
+/// A workspace that is PUBLISHED — forge's legible export is the
+/// shipped case — has exactly one party entitled to write it, so an
+/// object that has moved off its citation was moved by a stranger.
+/// Adopting it copies bytes no manifest cites into the reader's tree
+/// and reports success, which is how a foreign write reaches an agent.
+///
+/// Note what the reader is NOT told: `sc2` runs an ordinary default
+/// config. The refusal has to come from the MANIFEST, because a reader
+/// that had to be configured to be careful is a reader that will
+/// eventually be deployed without it.
+#[tokio::test]
+async fn a_published_workspace_refuses_a_foreign_write_instead_of_adopting_it() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    sc.cfg.sole_writer = true;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "README.md", "the real readme");
+    sc.run_barrier().await.unwrap();
+
+    foreign_overwrite(&store, &sc.cfg, "README.md", "FOREIGN BYTES").await;
+
+    let dir2 = tempfile::tempdir().unwrap();
+    let mut sc2 = sidecar(&store, dir2.path()).await;
+    let err = sc2.checkout().await.expect_err("a published workspace must refuse");
+    let msg = format!("{err}");
+    assert!(msg.contains("SOLE WRITER"), "the refusal must say why: {msg}");
+    assert!(
+        !msg.contains("recover-staged"),
+        "that is the gated lane's advice; nothing was staged here: {msg}"
+    );
+    assert!(
+        read(dir2.path(), "README.md").is_none(),
+        "it materialized the foreign bytes anyway"
+    );
+}
+
+/// The control for the leg above, and the guard on the shipped
+/// behaviour it must not disturb.
+///
+/// With the flag unset — every workspace an agent actually works in —
+/// an object past its citation is a human whose bytes should win, and
+/// the S3-wins arm still adopts it. If this ever fails, the fix for C4
+/// has leaked out of published mirrors and into ordinary workspaces.
+#[tokio::test]
+async fn an_ordinary_workspace_still_adopts_bytes_that_moved_past_the_manifest() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    assert!(!sc.cfg.sole_writer, "the default is an ordinary workspace");
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "README.md", "the real readme");
+    sc.run_barrier().await.unwrap();
+
+    foreign_overwrite(&store, &sc.cfg, "README.md", "newer human bytes").await;
+
+    let dir2 = tempfile::tempdir().unwrap();
+    let mut sc2 = sidecar(&store, dir2.path()).await;
+    sc2.checkout().await.expect("an ordinary workspace adopts");
+    assert_eq!(read(dir2.path(), "README.md").unwrap(), "newer human bytes");
+}
+
+/// The flag has to survive the pointer, because that is what a reader
+/// reconstructs the manifest from. A publish that dropped it would
+/// leave a mirror looking ordinary to the very next reader.
+#[tokio::test]
+async fn the_published_flag_survives_the_pointer_round_trip() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    sc.cfg.sole_writer = true;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "a.txt", "alpha");
+    sc.run_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert!(m.manifest.sole_writer, "the pointer lost the flag");
+
+    // And a second barrier does not quietly drop it: `merge` clears the
+    // field on purpose, so the installing pass has to restate it every
+    // time.
+    write(dir.path(), "b.txt", "beta");
+    sc.run_barrier().await.unwrap();
+    let m2 = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert!(m2.manifest.sole_writer, "the second publish dropped the flag");
+}
+
 /// UI edit + agent edit of ONE path: both versions recoverable, a
 /// conflict surfaced, never a silent winner (the drill leg pinned in
 /// plan Phase 6).
@@ -6791,6 +6902,7 @@ fn manifest_of(n: usize, seq: u64) -> super::manifest::LeanManifest {
         seq,
         entries: (0..n).map(|i| (format!("src/f{i:05}.txt"), entry_at(&format!("f{i:05}"), seq))).collect(),
         pinned_reads: false,
+        sole_writer: false,
         boundary_source: None,
     }
 }
@@ -6925,6 +7037,7 @@ fn a_pointer_naming_both_layouts_or_neither_is_refused() {
         entries_seq: Some(3),
         chunks: Some(vec![]),
         pinned_reads: false,
+        sole_writer: false,
         boundary_source: None,
         epoch: 1,
     };

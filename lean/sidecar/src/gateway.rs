@@ -421,12 +421,13 @@ async fn handle_files_get(
     // fails its precondition and the human read path goes dark for the
     // whole withholding window. Gated mode withholds VISIBILITY of new
     // bytes; it never withholds the cited ones.
-    let (cited, pinned) = match manifest::load(core.store.as_ref(), &cfg).await {
+    let (cited, pinned, sole_writer) = match manifest::load(core.store.as_ref(), &cfg).await {
         Ok(Some(l)) => (
             l.manifest.entries.get(&path).map(|e| (e.etag.clone(), e.version_id.clone())),
             l.manifest.pinned_reads,
+            l.manifest.sole_writer,
         ),
-        Ok(None) => (None, false),
+        Ok(None) => (None, false, false),
         Err(e) => return err_reply(StatusCode::BAD_GATEWAY, "store", e.to_string()),
     };
     let pinned_version = match (pinned, cited.as_ref()) {
@@ -480,6 +481,18 @@ async fn handle_files_get(
         // never come back — and adopting the current version is exactly
         // the uncited, possibly mid-logical-change bytes gating
         // withholds. Say which it is, so a UI does not retry forever.
+        // A sole-writer workspace (forge's export) never has a second
+        // legitimate writer, so "retry" below is wrong: the cited etag
+        // is not coming back on its own.
+        Err(StoreError::PreconditionFailed(_)) if sole_writer => err_reply(
+            StatusCode::GONE,
+            "foreign-write",
+            format!(
+                "the manifest cites {path} at an etag the object no longer carries, and this \
+                 workspace is published by a sole writer — something other than its publisher \
+                 wrote that object"
+            ),
+        ),
         Err(StoreError::PreconditionFailed(_)) if pinned => err_reply(
             StatusCode::GONE,
             "uncited-bytes",

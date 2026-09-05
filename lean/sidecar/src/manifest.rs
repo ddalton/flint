@@ -65,6 +65,29 @@ pub struct LeanManifest {
     /// keep the shipped 412/S3-wins arm byte-for-byte.
     #[serde(default)]
     pub pinned_reads: bool,
+    /// This workspace is published by exactly ONE writer, so an object
+    /// that has moved off its citation was moved by something that is
+    /// not the publisher.
+    ///
+    /// It exists because the default arm below `pinned_reads` is an
+    /// explicit S3-wins adopt — right for a lean workspace, where an
+    /// object past its citation means a human wrote newer bytes that
+    /// ought to win. On a MIRROR that reading is exactly inverted: the
+    /// publisher is the only party entitled to write, so "past the
+    /// citation" means a stranger did, and adopting copies bytes no
+    /// manifest cites into a reader's tree with no error and no
+    /// conflict record. Composition drill C4 measured that against
+    /// forge's legible export.
+    ///
+    /// Distinct from `pinned_reads` on purpose. That flag is the GATED
+    /// lane's, it drives version-addressed resolution, and its refusal
+    /// tells the operator to run `recover-staged` — advice that is
+    /// wrong here, where nothing was staged and the answer is to find
+    /// the second writer.
+    ///
+    /// Set by the installing pass from config, never inherited.
+    #[serde(default)]
+    pub sole_writer: bool,
     /// Which citation source installed this manifest (§2.4.1). Also
     /// stamped on the object's metadata so it is readable by HEAD.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,6 +150,12 @@ pub struct Pointer {
     pub chunks: Option<Vec<super::chunk::ChunkRef>>,
     #[serde(default)]
     pub pinned_reads: bool,
+    /// Carried here as well as on the manifest because the pointer is
+    /// the authority for the fields it carries, and a reader that
+    /// reconstructs a manifest from it must not lose the flag that
+    /// decides whether it may adopt.
+    #[serde(default)]
+    pub sole_writer: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boundary_source: Option<String>,
     /// The epoch that installed this pointer. Diagnostic; the fence is
@@ -361,6 +390,7 @@ pub async fn load(
                         seq: p.seq,
                         entries,
                         pinned_reads: p.pinned_reads,
+                        sole_writer: p.sole_writer,
                         boundary_source: p.boundary_source.clone(),
                     },
                     None,
@@ -372,6 +402,7 @@ pub async fn load(
         // the generation's own copy is stale by construction.
         manifest.seq = p.seq;
         manifest.pinned_reads = p.pinned_reads;
+        manifest.sole_writer = p.sole_writer;
         manifest.boundary_source = p.boundary_source.clone();
         return Ok(Some(LoadedManifest {
             manifest,
@@ -509,6 +540,7 @@ pub async fn cas_write_stamped(
         // chunk list; this path stays byte-for-byte what it was.
         chunks: None,
         pinned_reads: m.pinned_reads,
+        sole_writer: m.sole_writer,
         boundary_source: m.boundary_source.clone(),
         epoch,
     };
@@ -594,6 +626,7 @@ pub async fn cas_write_chunked(
         entries_seq: None,
         chunks: Some(split.into_iter().map(|(r, _)| r).collect()),
         pinned_reads: m.pinned_reads,
+        sole_writer: m.sole_writer,
         boundary_source: m.boundary_source.clone(),
         epoch,
     };
@@ -695,6 +728,7 @@ pub async fn rotate_for_takeover(
                 let mut m = LeanManifest::default();
                 m.seq = next.seq;
                 m.pinned_reads = next.pinned_reads;
+                m.sole_writer = next.sole_writer;
                 m.boundary_source = next.boundary_source.clone();
                 return Ok(Some((m, meta.etag)));
             }
@@ -951,6 +985,12 @@ pub fn merge(
     // whoever wrote last (a cadence barrier must not inherit a gated
     // predecessor's `pinned_reads`, and vice versa).
     merged.pinned_reads = false;
+    // Same discipline, and for a sharper reason: inheriting it would
+    // let a workspace that once published as a mirror keep refusing
+    // adopts forever, and NOT inheriting it would let a mirror silently
+    // stop being one the first time anything else wrote a manifest.
+    // The installing pass sets it from its own config.
+    merged.sole_writer = false;
     merged.boundary_source = None;
 
     let mut foreign: Vec<(String, LeanEntry)> = vec![];

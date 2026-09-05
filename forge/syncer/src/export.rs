@@ -22,9 +22,28 @@
 //!   is acknowledged on the strength of the pack and the snapshot, and
 //!   nothing about the export may delay or fail that.
 //!
-//! The export is a MIRROR, never a source of truth. A foreign write
-//! into its prefix is overwritten by the next export, and the CRD says
-//! so.
+//! The export is a MIRROR, never a source of truth.
+//!
+//! This comment used to go on: "a foreign write into its prefix is
+//! overwritten by the next export, and the CRD says so." **That was
+//! false**, and composition drill C3 measured it. The barrier computes
+//! what to upload and delete from a LOCAL scan diffed against a LOCAL
+//! baseline, consulting only the manifest pointer remotely — so an
+//! object changed behind its back is in no diff, and no later export
+//! repairs it. Two further commits were exported over a foreign write,
+//! each republishing the file git had changed, and the foreign bytes
+//! stood.
+//!
+//! What is true is narrower and worth stating exactly. The export
+//! marks its manifests `sole_writer`, so a reader that verifies
+//! against the manifest REFUSES an object that has moved off its
+//! citation rather than adopting it (drill C4). A reader that does not
+//! verify — a key and a GET — still takes the foreign bytes, because
+//! there is nothing for it to check them against.
+//!
+//! So: a read-write mount over an export prefix is unsupported, and
+//! the divergence it causes is detectable by manifest readers but not
+//! self-healing.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -296,6 +315,13 @@ pub fn barrier_command(cfg: &ExportConfig) -> (PathBuf, Vec<String>, Vec<(String
     if let Some(e) = cfg.endpoint.as_deref().filter(|e| !e.is_empty()) {
         env.push(("FLINT_SYNC_ENDPOINT".to_string(), e.to_string()));
     }
+    // The export IS a mirror: forge is the only party entitled to
+    // write this prefix, and everything in it is derived from a commit.
+    // Saying so in the manifest is what lets a later reader tell a
+    // foreign write apart from a legitimate one — without it, lean's
+    // default arm adopts the stranger's bytes into the reader's tree
+    // and reports success (drill C4).
+    env.push(("FLINT_SYNC_SOLE_WRITER".to_string(), "true".to_string()));
     if let Some(p) = cfg.project_id.as_deref().filter(|p| !p.is_empty()) {
         // The same refuse-foreign rule the syncer takes on its own
         // prefix: an export must not overwrite another project's

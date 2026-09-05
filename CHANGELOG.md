@@ -18,8 +18,8 @@ covered by the stability guarantee.
   (`forge/e2e/composition/`, MinIO + the real binaries). Everything
   else in `forge/e2e/` tests forge against itself; these test forge
   meeting lean, and forge meeting a read-write passthrough mount.
-  First run 30 passed / 12 failed; after the C2 fix, 36 passed / 10
-  failed. Every control and precondition green, so the failures are
+  First run 30 passed / 12 failed; after the C2 and C4 fixes, 40 passed
+  / 8 failed. Every control and precondition green, so the failures are
   findings. Recorded in the design doc, section 17.
 
 ### Known — what the composition drills found (no code changed yet)
@@ -36,14 +36,33 @@ covered by the stability guarantee.
   scan against a local baseline and consults only the manifest pointer
   remotely, so an object changed behind it is not in the diff. Measured
   across two further exports that each republished what git changed.
-- **Every reader of a diverged export takes the foreign bytes,
-  including lean.** The etag-pinned refusal in `checkout` is guarded by
-  `if pinned` and fires only under a gated citation; the default arm
-  is an explicit S3-wins adopt. lean copies the foreign bytes into an
-  agent's workspace, from where they can be committed back into git.
 - **A foreign delete is refused loudly but never restored.** The
   asymmetry is the point: the overwrite, which looks milder, is the one
   that propagates silently.
+
+### Fixed — flint lean, a reader adopted a foreign write into a published mirror
+
+- **A workspace published by one writer is now marked as such, and its
+  readers refuse rather than adopt.** `checkout`'s etag-pinned refusal
+  was guarded by `if pinned`, so it fired only under a gated citation;
+  for the cadence/hybrid manifests forge's export writes, the next arm
+  took over and did an explicit S3-wins adopt — right for a workspace an
+  agent works in, where an object past its citation means a human wrote
+  newer bytes, and exactly inverted on a mirror, where it means a
+  stranger did. A reader therefore copied bytes no manifest cites into
+  its tree and reported success (composition drill C4). `LeanManifest`
+  and `Pointer` now carry `sole_writer`, set by the installing pass from
+  `FLINT_SYNC_SOLE_WRITER`; forge's export sets it. The flag is in the
+  manifest rather than in the reader's configuration on purpose — a
+  reader that must be configured to be careful will be deployed without
+  it. Ordinary workspaces keep the S3-wins arm, guarded by its own test.
+  Not reached, and not reachable at the reader: a manifest-less reader
+  (a passthrough or lite mount) has nothing to check against and still
+  takes the foreign bytes.
+- **`export.rs`'s claim that a foreign write "is overwritten by the next
+  export" is withdrawn.** It was false — the barrier diffs a local scan
+  against a local baseline — and the comment now records what C3
+  measured instead.
 
 ### Fixed — flint forge, a blocked export took the repository with it
 

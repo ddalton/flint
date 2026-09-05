@@ -754,8 +754,13 @@ impl Sidecar {
                 } else {
                     &baseline.inst_base
                 };
-            let (merged, foreign) =
+            let (mut merged, foreign) =
                 manifest::merge(base, &theirs, &upserts, &classified.deletes, &parked);
+            // `merge` clears it; the installing pass owns it. A mirror
+            // is a property of how this workspace is DEPLOYED, so it
+            // comes from config on every publish rather than being
+            // inherited from whatever wrote last.
+            merged.sole_writer = self.cfg.sole_writer;
             match manifest::cas_write_stamped(
                 self.store.as_ref(),
                 &self.cfg,

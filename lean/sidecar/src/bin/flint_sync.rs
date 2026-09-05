@@ -30,6 +30,12 @@
 //!   FLINT_SYNC_MAX_BYTES/_FILES   checkout budgets (0 = unlimited)
 //!   FLINT_SYNC_FANOUT             concurrent fetches/uploads (default 32)
 //!   FLINT_SYNC_FETCH_INFLIGHT_MB  checkout bytes in flight (default 512)
+//!   FLINT_SYNC_SOLE_WRITER        "true" marks every manifest this
+//!                                 sidecar installs as a PUBLISHED
+//!                                 mirror: readers then refuse an
+//!                                 object that has moved off its
+//!                                 citation instead of adopting it.
+//!                                 Set by forge's legible export.
 //!   FLINT_SYNC_BOUNDARY_MODE      cadence|hybrid|gated (default hybrid)
 //!   FLINT_SYNC_SENTINELS          auto|off|force (default auto)
 //!   FLINT_SYNC_SENTINEL_MIN_INTERVAL_SECS  (default 5)
@@ -121,6 +127,9 @@ async fn main() {
     };
     let mut cfg = LeanConfig::new(&prefix, &root);
     cfg.floor_secs = env_u64("FLINT_SYNC_FLOOR_SECS", 60);
+    cfg.sole_writer = std::env::var("FLINT_SYNC_SOLE_WRITER")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     cfg.max_bytes = env_u64("FLINT_SYNC_MAX_BYTES", 0);
     cfg.max_files = env_u64("FLINT_SYNC_MAX_FILES", 0);
     cfg.fanout = env_u64("FLINT_SYNC_FANOUT", 32).max(1) as usize;

@@ -11,23 +11,35 @@
 # (checkout.rs:257), so it looked certain to fail closed where a
 # manifest-less reader would not.
 #
-# THAT PREDICTION IS WRONG, AND THE DRILL IS WHAT SHOWED IT. The loud
-# refusal on a changed object is guarded by `if pinned`
-# (checkout.rs:258) — it fires only under a GATED citation. For the
-# cadence/hybrid/legacy manifests the export actually writes, the next
-# arm takes over (checkout.rs:279-291) and is explicit about what it
-# does: "S3-wins: the object moved past the manifest ... Adopt the
-# CURRENT version." That is right for lean's own workspace, where the
-# object moving past the manifest means a human wrote newer bytes. On
-# an export prefix, where forge is the only legitimate writer, the
-# same sentence means somebody wrote who should not have — and the
-# reader adopts it.
+# THAT PREDICTION WAS WRONG, AND THE DRILL IS WHAT SHOWED IT. The loud
+# refusal on a changed object was guarded by `if pinned` — it fired
+# only under a GATED citation. For the cadence/hybrid manifests the
+# export actually writes, the next arm took over and was explicit about
+# what it did: "S3-wins: the object moved past the manifest ... Adopt
+# the CURRENT version." Right for a lean workspace, where that means a
+# human wrote newer bytes. On an export prefix, where forge is the only
+# legitimate writer, it means somebody wrote who should not have — and
+# lean copied the foreign bytes into an agent's workspace and reported
+# success.
 #
-# So the interesting result is not a split but its absence: on an
-# OVERWRITE every reader is fooled, and lean is fooled hardest, because
-# it copies the foreign bytes into an agent's workspace where they can
-# be committed back into git as though they were real. (C5 covers the
-# other half: a DELETE is refused loudly, by the very next match arm.)
+# THE FIX. A manifest now carries `sole_writer`, set by the installing
+# pass from config, and forge's export sets it (`FLINT_SYNC_SOLE_WRITER`
+# in `barrier_command`). A reader that finds an object off its citation
+# in such a workspace REFUSES instead of adopting. The flag lives in
+# the manifest rather than in the reader's config on purpose: a reader
+# that has to be configured to be careful is one that will eventually
+# be deployed without it.
+#
+# WHAT THE FIX DOES NOT REACH, and cannot. Reader 1 below has no
+# manifest — it is a key and a GET. There is nothing to check the bytes
+# against, so it still takes the foreign write, and that leg still
+# FAILS. That is the honest boundary of a mirror: readers that verify
+# can be told, readers that do not verify cannot. It is an argument for
+# C3 (repair the divergence at the source), not for more reader code.
+#
+# Note also that the flag only protects a manifest PUBLISHED with it: an
+# export written before this change stays adoptable until it publishes
+# again.
 #
 # WHAT THIS DRILL SUBSTITUTES. The passthrough/lite reader is a plain
 # S3 GET. Mountpoint does not run on this host, and what is under test
@@ -87,7 +99,12 @@ mkdir -p "$WORK/reader"
 out=$(lean checkout "$B" "$WORK/reader"); rc=$?
 if [ $rc -ne 0 ]; then
   ok "the lean reader REFUSED the diverged prefix (rc=$rc)"
-  note "$(printf '%s' "$out" | grep -i 'etag\|cites' | head -2)"
+  printf '%s' "$out" | grep -o 'SOLE WRITER' >/dev/null \
+    && ok "the refusal says the workspace has one writer" \
+    || bad "it refused, but not for this reason"
+  printf '%s' "$out" | grep -q 'recover-staged' \
+    && bad "it gave the gated lane's advice; nothing was staged here" \
+    || ok "it did not give the wrong remedy"
 else
   bad "the lean reader accepted the diverged prefix (rc=0)"
 fi
@@ -111,6 +128,6 @@ else
 fi
 
 head_ "C4 — the split"
-note "one corrupt prefix: git intact; every reader of the export takes the foreign bytes"
-note "lean adopts them into a workspace (checkout.rs:279-291, the unpinned S3-wins arm)"
+note "git intact; lean now refuses; a manifest-less reader still takes the bytes"
+note "the last one is not fixable at the reader — it is the argument for repairing C3 at the source"
 verdict "C4"
