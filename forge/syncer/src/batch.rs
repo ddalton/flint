@@ -150,6 +150,7 @@ pub async fn run_batch(
         let mut results = Vec::new();
         for cmd in &push.commands {
             let outcome = judge(sc, push, cmd, policy, &eff, &disagreed).await;
+            sc.hold.tick(1);
             match outcome {
                 // A git failure while JUDGING one command refuses that
                 // command and nothing else. Only the steps after this
@@ -207,6 +208,7 @@ pub async fn run_batch(
         // to the objects the merge actually introduced.
         excludes.extend(cell.snap.refs.values().cloned());
         sc.git.pack_new_objects(&merge_tips, &excludes).await?;
+        sc.hold.tick(1);
     }
 
     // ── step 3: one lease renewal for the batch ──────────────────────
@@ -245,10 +247,14 @@ pub async fn run_batch(
             let store = sc.store.clone();
             let key = key.clone();
             let path = path.clone();
-            set.spawn(async move { packio::upload_file(store.as_ref(), &key, &path, epoch).await });
+            let progress = sc.hold.progress_handle();
+            set.spawn(async move {
+                packio::upload_file(store.as_ref(), &key, &path, epoch, Some(progress)).await
+            });
         }
         while let Some(joined) = set.join_next().await {
             joined.map_err(|e| ForgeError::State(format!("pack upload did not join: {e}")))??;
+            sc.hold.tick(1);
         }
     }
 
@@ -285,6 +291,7 @@ pub async fn run_batch(
             Err(e) => return Err(e),
         };
     sc.cell = Some(new_cell);
+    sc.hold.tick(1);
 
     // ── step 6: ONE ref transaction, THEN the reports ────────────────
     //
@@ -294,6 +301,7 @@ pub async fn run_batch(
     // acknowledge a snapshot the repository does not match. Both are
     // closed by doing all of it before any of it is said.
     sc.git.update_refs(&accepted).await?;
+    sc.hold.tick(1);
     sc.last_push_unix = super::now_unix();
 
     // ── step 7: derived files, best effort, after the report path ────

@@ -58,6 +58,11 @@ pub async fn restore(sc: &mut Syncer) -> ForgeResult<()> {
     }
 
     let mut listed = list_pack_files(sc).await?;
+    // The preamble counts as movement too: at a real round trip the
+    // snapshot, the listing and the sweep are a dozen requests before
+    // the first chunk lands, and the renewer must not read that as a
+    // wedge.
+    sc.hold.tick(1);
     let mut revalidated = false;
     loop {
         let missing: Vec<String> = cell
@@ -114,7 +119,8 @@ pub async fn restore(sc: &mut Syncer) -> ForgeResult<()> {
             }
         }
     }
-    packio::fetch_all(sc.store.clone(), units, sc.cfg.fanout).await?;
+    packio::fetch_all(sc.store.clone(), units, sc.cfg.fanout, Some(sc.hold.progress_handle()))
+        .await?;
 
     // Refs: the snapshot's set, exactly. `update-ref --stdin` verifies
     // each object exists, so this is also the first proof that the
@@ -216,7 +222,14 @@ pub async fn maybe_repack(sc: &mut Syncer) -> ForgeResult<bool> {
         }
         for file in sc.git.pack_siblings(pack) {
             let path = sc.git.pack_path(&file);
-            packio::upload_file(sc.store.as_ref(), &sc.cfg.pack_key(&file), &path, epoch).await?;
+            packio::upload_file(
+                sc.store.as_ref(),
+                &sc.cfg.pack_key(&file),
+                &path,
+                epoch,
+                Some(sc.hold.progress_handle()),
+            )
+            .await?;
         }
     }
     let mut next = cell.snap.clone();

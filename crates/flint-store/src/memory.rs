@@ -1036,6 +1036,7 @@ impl MemoryStore {
             {
                 return Err(StoreError::Other(format!("compose: part {} short read", i)));
             }
+            spec.note_progress(bytes.len() as u64);
             self.inner
                 .lock()
                 .unwrap()
@@ -1249,6 +1250,7 @@ mod tests {
         std::fs::write(&local, b"XXXXBBBB").unwrap();
 
         let spec = ComposeSpec {
+            progress: None,
             key: "f",
             local_path: &local,
             parts: vec![

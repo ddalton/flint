@@ -21,9 +21,12 @@
 //! first once made a live lean sidecar fence itself into silence for
 //! the rest of its tenant's life (audit 2026-09-03, finding 2).
 
-use flint_store::{EpochLease, StoreError};
+use std::sync::Arc;
 
-use super::{snapshot, ForgeError, ForgeResult, Syncer};
+use flint_store::{EpochLease, ObjectStore, StoreError};
+
+use super::status::{Facts, Phase, Shared};
+use super::{snapshot, ForgeError, ForgeResult, Hold, Syncer};
 
 /// Quiet polls required before superseding a foreign holder: its token
 /// must not advance across this many observations.
@@ -95,7 +98,7 @@ pub async fn claim_step(sc: &mut Syncer) -> ForgeResult<ClaimOutcome> {
                 inc.last_token = None;
                 inc.quiet_polls = 0;
                 save_incarnation(sc, &inc)?;
-                sc.lease = Some(lease.clone());
+                sc.hold.set_lease(lease.clone());
                 Ok(ClaimOutcome::Claimed(lease))
             }
             Err(StoreError::PreconditionFailed(_)) | Err(StoreError::Conflict(_)) => {
@@ -129,7 +132,7 @@ pub async fn claim_step(sc: &mut Syncer) -> ForgeResult<ClaimOutcome> {
                         inc.last_token = None;
                         inc.quiet_polls = 0;
                         save_incarnation(sc, &inc)?;
-                        sc.lease = Some(lease.clone());
+                        sc.hold.set_lease(lease.clone());
                         Ok(ClaimOutcome::Claimed(lease))
                     }
                     Err(StoreError::PreconditionFailed(_)) | Err(StoreError::Conflict(_)) => {
@@ -155,31 +158,47 @@ pub async fn claim_step(sc: &mut Syncer) -> ForgeResult<ClaimOutcome> {
 /// What this syncer is observed to be doing, for the lease cell — the
 /// operator's only evidence of what the binary in that pod is actually
 /// running, on a request that is already being paid for every 10 s.
-fn observed_echo(sc: &Syncer) -> Option<String> {
+fn observed_echo(f: &Facts) -> Option<String> {
     serde_json::to_string(&serde_json::json!({
         "syncer_version": super::SYNCER_VERSION,
-        "snapshot_seq": sc.cell.as_ref().map(|c| c.snap.seq).unwrap_or(0),
-        "refs": sc.cell.as_ref().map(|c| c.snap.refs.len()).unwrap_or(0),
-        "packs": sc.cell.as_ref().map(|c| c.snap.packs.len()).unwrap_or(0),
-        "last_push_unix": sc.last_push_unix,
+        "snapshot_seq": f.snapshot_seq,
+        "refs": f.refs,
+        "packs": f.packs,
+        "last_push_unix": f.last_push_unix,
     }))
     .ok()
 }
 
+/// The batch's own renewal (design §4 step 3): one per batch, before
+/// anything is uploaded, so a deposed server learns it before it pays
+/// for the upload. Goes through the same serialised path as the
+/// renewer task.
+pub async fn renew(sc: &mut Syncer) -> ForgeResult<()> {
+    let echo = observed_echo(&super::status::facts(sc, Phase::Pushing));
+    renew_shared(sc.store.as_ref(), &sc.cfg.epoch_key(), &sc.hold, echo).await
+}
+
 /// Renew the held lease. A 412 that is not our own lost response is
 /// the fence, and a fence stops READS as well as writes.
-pub async fn renew(sc: &mut Syncer) -> ForgeResult<()> {
-    sc.check_fence()?;
-    let key = sc.cfg.epoch_key();
-    let lease = sc.lease()?.clone();
-    let echo = observed_echo(sc);
-    match sc.store.epoch_renew(&key, &lease, echo.as_deref()).await {
+///
+/// Serialised on the hold's gate: the renewer task and the batch may
+/// both ask, and two renews in flight would 412 each other.
+pub async fn renew_shared(
+    store: &dyn ObjectStore,
+    key: &str,
+    hold: &Hold,
+    echo: Option<String>,
+) -> ForgeResult<()> {
+    hold.check_fence()?;
+    let _serial = hold.gate().await;
+    let lease = hold.lease().ok_or_else(|| ForgeError::State("no lease held".into()))?;
+    match store.epoch_renew(key, &lease, echo.as_deref()).await {
         Ok(l) => {
-            sc.lease = Some(l);
+            hold.set_lease(l);
             Ok(())
         }
         Err(StoreError::PreconditionFailed(e)) => {
-            match sc.store.epoch_read(&key).await {
+            match store.epoch_read(key).await {
                 Ok(Some(state))
                     if state.holder_id == lease.holder_id
                         && state.epoch == lease.epoch
@@ -190,14 +209,14 @@ pub async fn renew(sc: &mut Syncer) -> ForgeResult<()> {
                          renew response — adopting its token, not fencing",
                         state.epoch
                     );
-                    sc.lease = Some(EpochLease {
+                    hold.set_lease(EpochLease {
                         holder_id: state.holder_id,
                         epoch: state.epoch,
                         token: state.token,
                     });
                     Ok(())
                 }
-                _ => Err(sc.fence(format!("deposed at renew: {e}"))),
+                _ => Err(hold.fence(format!("deposed at renew: {e}"))),
             }
         }
         // 401/403 is not contention and no retry fixes it, but it is
@@ -213,11 +232,76 @@ pub async fn renew(sc: &mut Syncer) -> ForgeResult<()> {
     }
 }
 
+/// The heartbeat, on its own task, from the claim until a fence or a
+/// release. The rule it applies is `Hold`'s: unconditional while
+/// serving, progress-gated while a phase that must move is reported.
+///
+/// Returns the task handle. A clean release marks the hold released,
+/// which stops the task at its next tick; aborting the handle after
+/// the release just makes that immediate.
+pub fn spawn_renewer(
+    store: Arc<dyn ObjectStore>,
+    key: String,
+    hold: Arc<Hold>,
+    shared: Shared,
+    heartbeat: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(heartbeat);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first tick fires immediately; the claim just renewed for us.
+        ticker.tick().await;
+        let mut last_seen = hold.progress();
+        let mut quiet_ticks: u32 = 0;
+        loop {
+            ticker.tick().await;
+            if hold.fenced().is_some() || hold.is_released() {
+                return;
+            }
+            let facts = shared.lock().ok().map(|g| g.clone());
+            let phase = facts.as_ref().map(|f| f.phase).unwrap_or(Phase::Serving);
+            let seen = hold.progress();
+            if phase.must_progress() && seen == last_seen {
+                // Nothing moved since the last renewal. Letting the
+                // token go quiet is the point: the quiet polls a
+                // challenger counts are the only takeover a wedged
+                // server can get, and renewing for it would keep the
+                // repository unavailable for as long as the pod lived.
+                quiet_ticks += 1;
+                if quiet_ticks == 1 || quiet_ticks.is_multiple_of(QUIET_POLLS) {
+                    eprintln!(
+                        "flint-forge: {} has moved nothing since the last renewal \
+                         ({quiet_ticks} heartbeat(s)); the token stays quiet so a challenger can \
+                         take over a wedged server",
+                        phase.as_str()
+                    );
+                }
+                continue;
+            }
+            quiet_ticks = 0;
+            last_seen = seen;
+            let echo = facts.as_ref().and_then(observed_echo);
+            match renew_shared(store.as_ref(), &key, &hold, echo).await {
+                Ok(()) => {}
+                // The hold is fenced; the serving loop wakes on it.
+                Err(ForgeError::Fenced(_)) => return,
+                // An auth pause or a transient store fault: keep
+                // serving reads, keep trying. The lease is still ours
+                // until it is not.
+                Err(e) => eprintln!("flint-forge: heartbeat: {e}"),
+            }
+        }
+    })
+}
+
 /// Clean release (the `preStop` path): a successor supersedes at once
-/// instead of waiting out six quiet polls.
+/// instead of waiting out six quiet polls. Marks the hold released
+/// under the gate, so the renewer cannot renew into a released cell.
 pub async fn release(sc: &mut Syncer) -> ForgeResult<()> {
     let key = sc.cfg.epoch_key();
-    if let Some(lease) = sc.lease.take() {
+    let _serial = sc.hold.gate().await;
+    sc.hold.mark_released();
+    if let Some(lease) = sc.hold.take_lease() {
         match sc.store.epoch_release(&key, &lease).await {
             Ok(()) => Ok(()),
             Err(StoreError::PreconditionFailed(_)) => Ok(()), // already deposed

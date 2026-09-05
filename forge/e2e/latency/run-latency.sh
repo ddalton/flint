@@ -56,6 +56,10 @@ RESTORES=${RESTORES:-5}              # restores per arm per RTT
 SEED_PUSHES=${SEED_PUSHES:-10}       # packs in the restored repository, minus one
 FANOUT_A=${FANOUT_A:-4}              # arm A: the shipped default
 FANOUT_B=1                           # arm B: the control — what the code did before
+LEGS=${LEGS:-"p1 p2 p3 p4"}          # which legs to run
+PUSH_KBPS=${PUSH_KBPS:-20000}        # P3b/P4: the upload's bandwidth through the proxy
+BIG_MB=${BIG_MB:-160}                # P3b/P4: the pack, in MiB — three 64 MiB parts
+has_leg() { case " $LEGS " in *" $1 "*) return 0;; esac; return 1; }
 
 # Constant across arms. The batch window is 0 so a push's clock does
 # not carry 200 ms of deliberate waiting; the heartbeat is slow so a
@@ -157,6 +161,81 @@ tally() {  # tally <file of PASS/FAIL/INCONCLUSIVE/NOTE lines>
       *) note "$rest" ;;
     esac
   done < "$1"
+}
+
+# ── the token, watched from the bucket ───────────────────────────────
+# The epoch object's ETag changes on every renewal, so its silence is
+# the takeover window a challenger would see — the same probe the
+# scale drill used on real S3. curl with SigV4 HEADs it in ~5 ms, so
+# the poller resolves a 1 s heartbeat comfortably; `aws s3api` would
+# not (~350 ms per call).
+epoch_etag() {  # epoch_etag <prefix>
+  curl -sI --aws-sigv4 "aws:amz:${AWS_REGION}:s3" \
+    --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" \
+    "$ENDPOINT/$BUCKET/$1/git/epoch" -o /dev/null -w '%header{etag}' 2>/dev/null
+}
+# watch_epoch <prefix> <outfile>: "<ms> <etag>" lines every 200 ms
+# until <outfile>.stop exists. Runs in the background; the caller
+# stops it with stop_watch.
+watch_epoch() {
+  local prefix=$1 out=$2
+  rm -f "$out" "$out.stop"
+  ( while [ ! -f "$out.stop" ]; do
+      printf '%s %s\n' "$(now_ms)" "$(epoch_etag "$prefix")" >> "$out"
+      sleep 0.2
+    done ) &
+  echo $! > "$out.pid"
+}
+stop_watch() {  # stop_watch <outfile>
+  touch "$1.stop"; wait "$(cat "$1.pid" 2>/dev/null)" 2>/dev/null; rm -f "$1.pid"
+}
+# silence <outfile> [from_ms] [to_ms]: the longest gap in ms between
+# etag CHANGES inside the window (default: the whole file), and the
+# number of changes, as "longest changes".
+silence() {
+  python3 - "$@" <<'PY'
+import sys
+path = sys.argv[1]; lo = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+hi = int(sys.argv[3]) if len(sys.argv) > 3 else 1 << 62
+rows = []
+for line in open(path):
+    parts = line.split()
+    if len(parts) == 2 and parts[1]:
+        t = int(parts[0])
+        if lo <= t <= hi: rows.append((t, parts[1]))
+if not rows: print("0 0"); sys.exit()
+last_change, longest, changes, prev = rows[0][0], 0, 0, rows[0][1]
+for t, e in rows[1:]:
+    if e != prev:
+        changes += 1; longest = max(longest, t - last_change); last_change = t; prev = e
+longest = max(longest, rows[-1][0] - last_change)
+print(longest, changes)
+PY
+}
+
+# A big, incompressible repository for the multipart legs.
+build_big_clone() {  # build_big_clone <bare> <clone> <mib> -> tip on stdout
+  local bare=$1 clone=$2 mb=$3 i=0
+  new_bare_repo "$bare" || return 1
+  new_clone "$bare" "$clone"
+  mkdir -p "$clone/blobs"
+  while [ $i -lt "$mb" ]; do
+    dd if=/dev/urandom of="$clone/blobs/b$i" bs=1048576 count=1 status=none; i=$((i+1))
+  done
+  git_c "$clone" add -A >/dev/null 2>&1
+  git_c "$clone" commit -q -m "a repository of $mb MiB" >/dev/null 2>&1
+  git_c "$clone" rev-parse HEAD
+}
+# Pending multipart uploads whose key starts with <prefix>, counted
+# CLIENT-SIDE from an unprefixed listing. MinIO lists an upload only
+# under no prefix or its exact key — a directory prefix returns nothing
+# (probed 2026-09-05, RELEASE.2025-09-07) — while S3 honours prefixes.
+# The store's own `list_uploads` lists bucket-wide and filters in code
+# for exactly this reason (s3.rs), so the syncer's sweep is not blind
+# here; this oracle just does the same.
+mpu_count() {  # mpu_count <prefix>
+  aws s3api list-multipart-uploads --bucket "$BUCKET" \
+    --query "length(Uploads[?starts_with(Key, '$1/git/')] || \`[]\`)" --output text 2>/dev/null || echo 0
 }
 
 # ── P1: the push ─────────────────────────────────────────────────────
@@ -274,6 +353,164 @@ restore_leg() {  # restore_leg <rtt-ms>
   note "recorded ${RESTORES} pairs at RTT ${r} ms"
 }
 
+# ── P3: the lease beats through the work — and only through work ─────
+#
+# Design §5's window, measured on real S3 at 10 GiB: the token silent
+# 125 s during a push and 141 s during a restore against a 60 s
+# takeover threshold, because the heartbeat was a timer arm of the
+# same select! that awaited both. The renewer is now its own task,
+# gated on progress. Three claims, each with a way to be wrong:
+#   P3a  a restore renews while chunks land (silence <= ~2 heartbeats);
+#   P3b  a multipart push renews as parts land (silence <= one part);
+#   P3c  a restore whose data STOPS lets the token go quiet, and picks
+#        up again when the data does — the half the peer warned about:
+#        a renewer that beat for a wedged pod would trade a 60 s
+#        takeover of a live pod for no takeover of a dead one.
+# The control is the pre-fix binary: silence == the whole operation.
+token_legs() {
+  local hb=1
+  head_ "P3a — the token keeps rotating through a ${SEED_FILES}-file restore at RTT 200, fanout 1, heartbeat ${hb}s"
+  set_rtt 200
+  local bare="$WORK/p3a.git" sock=/tmp/fc-P3A.sock watch="$WORK/p3a.watch"
+  rm -rf "$bare"; new_bare_repo "$bare"; rm -f "$sock"
+  watch_epoch "$SEED_PREFIX" "$watch"
+  local t0; t0=$(now_ms)
+  # shellcheck disable=SC2086
+  forge_up P3A "$bare" "$SEED_PREFIX" $COMMON FLINT_FORGE_HEARTBEAT_SECS=$hb FLINT_FORGE_FANOUT=1
+  if wait_sock "$sock" 120; then
+    local t1; t1=$(now_ms); stop_watch "$watch"; stop_forge P3A
+    read -r longest changes <<< "$(silence "$watch" $((t0 + 1500)) "$t1")"
+    note "restore took $((t1 - t0)) ms; token changed ${changes}x, longest silence ${longest} ms"
+    if [ "$longest" -le $((hb * 2500)) ] && [ "$changes" -ge 3 ]; then
+      ok "the token never fell silent for more than 2.5 heartbeats during the restore"
+    else
+      bad "the token fell silent for ${longest} ms during a $((t1 - t0)) ms restore — the window is open"
+    fi
+  else
+    stop_watch "$watch"; stop_forge P3A; inconc "the P3a restore never opened its socket"
+  fi
+
+  head_ "P3b — the token keeps rotating through a ${BIG_MB} MiB multipart push at ${PUSH_KBPS} KB/s, heartbeat ${hb}s"
+  set_rtt 0
+  local prefix="lat/p3b" bbare="$WORK/p3b.git" bclone="$WORK/p3b" bsock=/tmp/fc-P3B.sock bwatch="$WORK/p3b.watch"
+  rig_purge "$prefix"
+  BIG_TIP=$(build_big_clone "$bbare" "$bclone" "$BIG_MB") || { bad "could not build the big repository"; return 1; }
+  # shellcheck disable=SC2086
+  forge_up P3B "$bbare" "$prefix" $COMMON FLINT_FORGE_HEARTBEAT_SECS=$hb
+  wait_sock "$bsock" 60 || { inconc "the P3b syncer never opened its socket"; stop_forge P3B; return 1; }
+  toxiproxy-cli -h "$TOXI" toxic add -t bandwidth -n slow --upstream -a rate="$PUSH_KBPS" minio >/dev/null
+  watch_epoch "$prefix" "$bwatch"
+  local p0 p1 rc; p0=$(now_ms)
+  FORGE_SOCKET="$bsock" push "$bclone" "HEAD:refs/heads/main" > "$WORK/p3b.push" 2>&1; rc=$?
+  p1=$(now_ms); stop_watch "$bwatch"
+  toxiproxy-cli -h "$TOXI" toxic remove -n slow minio >/dev/null
+  stop_forge P3B
+  local etag; etag=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$prefix/git/objects/pack/" \
+      --query 'Contents[?ends_with(Key,`.pack`)]|[0].ETag' --output text 2>/dev/null)
+  if [ $rc -ne 0 ]; then bad "the push failed (rc=$rc)"; sed 's/^/        /' "$WORK/p3b.push" | head -5
+  else
+    case "$etag" in *-[0-9]*) ok "the push landed as a multipart object ($etag) in $((p1 - p0)) ms" ;;
+      *) inconc "the pack was not composed ($etag) — this leg did not exercise the part loop" ;; esac
+    read -r longest changes <<< "$(silence "$bwatch" "$p0" "$p1")"
+    # One 64 MiB part is the progress granularity, at the rate the
+    # push ACTUALLY ran (the bandwidth toxic is approximate: a nominal
+    # 20 MB/s ran at 9 MiB/s here), so the part time is taken from the
+    # measured push, not from the knob.
+    local part_ms=$(( (p1 - p0) * 64 / BIG_MB ))
+    note "push took $((p1 - p0)) ms; token changed ${changes}x, longest silence ${longest} ms (one part took ~${part_ms} ms)"
+    if [ "$longest" -le $((part_ms + hb * 1500)) ] && [ "$changes" -ge 2 ]; then
+      ok "the token never fell silent for longer than one part plus a heartbeat during the push"
+    else
+      bad "the token fell silent for ${longest} ms during a $((p1 - p0)) ms push — the window is open"
+    fi
+  fi
+
+  head_ "P3c — a restore whose data stops lets the token go quiet, then resumes"
+  set_rtt 200
+  local cbare="$WORK/p3c.git" csock=/tmp/fc-P3C.sock cwatch="$WORK/p3c.watch"
+  rm -rf "$cbare"; new_bare_repo "$cbare"; rm -f "$csock"
+  watch_epoch "$SEED_PREFIX" "$cwatch"
+  local c0; c0=$(now_ms)
+  # shellcheck disable=SC2086
+  forge_up P3C "$cbare" "$SEED_PREFIX" $COMMON FLINT_FORGE_HEARTBEAT_SECS=$hb FLINT_FORGE_FANOUT=1
+  # Five seconds in: past the claim and the restore's preamble (at RTT
+  # 200 those are a dozen round trips before the first chunk lands),
+  # so the pre-stall window holds heartbeats that had progress to see.
+  sleep 5
+  # Stall every byte from the store for 4 s — under the SDK's 5 s
+  # stalled-stream grace, so no request fails: the data simply stops,
+  # which is what a wedge looks like from the renewer's chair.
+  local s0; s0=$(now_ms)
+  toxiproxy-cli -h "$TOXI" toxic add -t timeout -n stall --downstream -a timeout=0 minio >/dev/null
+  sleep 4
+  toxiproxy-cli -h "$TOXI" toxic remove -n stall minio >/dev/null
+  local s1; s1=$(now_ms)
+  if wait_sock "$csock" 120; then
+    local c1; c1=$(now_ms); stop_watch "$cwatch"; stop_forge P3C
+    read -r before_l before_c <<< "$(silence "$cwatch" $((c0 + 1500)) "$s0")"
+    read -r stall_l stall_c <<< "$(silence "$cwatch" $((s0 + 1200)) "$s1")"
+    read -r after_l after_c <<< "$(silence "$cwatch" "$s1" "$c1")"
+    note "before the stall: ${before_c} changes; during (${s1}-${s0}=$((s1 - s0)) ms): ${stall_c}; after: ${after_c}; restore $((c1 - c0)) ms"
+    [ "$before_c" -ge 1 ] && ok "the token rotated while the restore was moving" \
+      || bad "the token did not rotate before the stall — the renewer is not beating through the restore"
+    [ "$stall_c" -eq 0 ] && ok "the token went quiet while no data moved" \
+      || bad "the token rotated ${stall_c}x while nothing moved — a wedged server would keep its lease"
+    [ "$after_c" -ge 1 ] && ok "the token resumed when the data did" \
+      || bad "the token did not resume after the stall"
+  else
+    stop_watch "$cwatch"; stop_forge P3C; inconc "the P3c restore never completed after the stall"
+  fi
+}
+
+# ── P4: an interrupted upload is aborted by the successor ────────────
+#
+# The scale drill's S4: one kill inside a 2 GiB push left 384 MiB of
+# parts in an upload nothing would ever complete or abort. Observed via
+# list-multipart-uploads before the kill, never a guessed sleep; and
+# both samples — pending after the kill, gone once the successor
+# serves — so a sweep is observed rather than inferred from a zero.
+orphan_leg() {
+  head_ "P4 — a push killed inside its multipart upload leaves parts; the restart aborts them"
+  set_rtt 0
+  local prefix="lat/p4" bare="$WORK/p4.git" clone="$WORK/p4" sock=/tmp/fc-P4.sock
+  rig_purge "$prefix"
+  local tip; tip=$(build_big_clone "$bare" "$clone" "$BIG_MB") || { bad "could not build the big repository"; return 1; }
+  # shellcheck disable=SC2086
+  forge_up P4 "$bare" "$prefix" $COMMON
+  wait_sock "$sock" 60 || { inconc "the P4 syncer never opened its socket"; stop_forge P4; return 1; }
+  toxiproxy-cli -h "$TOXI" toxic add -t bandwidth -n slow --upstream -a rate="$PUSH_KBPS" minio >/dev/null
+  ( FORGE_SOCKET="$sock" push "$clone" "HEAD:refs/heads/main" > "$WORK/p4.push" 2>&1 ) &
+  local pusher=$! n=0 pending=0
+  while [ $n -lt 60 ]; do pending=$(mpu_count "$prefix"); [ "$pending" -ge 1 ] && break; sleep 0.2; n=$((n+1)); done
+  if [ "$pending" -lt 1 ]; then
+    toxiproxy-cli -h "$TOXI" toxic remove -n slow minio >/dev/null
+    wait $pusher 2>/dev/null; stop_forge P4
+    inconc "no multipart upload was ever listed during the push — the kill could not be placed inside it"; return 1
+  fi
+  sleep 1
+  kill -9 "$(cat "$WORK/forge-P4.pid")" 2>/dev/null; rm -f "$WORK/forge-P4.pid"
+  wait $pusher 2>/dev/null
+  toxiproxy-cli -h "$TOXI" toxic remove -n slow minio >/dev/null
+  pending=$(mpu_count "$prefix")
+  [ "$pending" -ge 1 ] && ok "the kill left ${pending} upload(s) pending (its parts are billed until aborted)" \
+    || { inconc "nothing was pending after the kill — it landed outside the upload"; return 1; }
+  # The same pod, restarted: same repository dir, same state dir, so
+  # self-recognition rather than a takeover.
+  rm -f "$sock"
+  # shellcheck disable=SC2086
+  forge_up P4 "$bare" "$prefix" $COMMON
+  wait_sock "$sock" 120 || { inconc "the restarted syncer never opened its socket"; stop_forge P4; return 1; }
+  pending=$(mpu_count "$prefix")
+  [ "$pending" -eq 0 ] && ok "the restart aborted every pending upload before serving" \
+    || bad "${pending} upload(s) still pending after the restart — the leak is open"
+  # And the repository recovers: the same push lands.
+  local rc; FORGE_SOCKET="$sock" push "$clone" "HEAD:refs/heads/main" > "$WORK/p4.push2" 2>&1; rc=$?
+  [ $rc -eq 0 ] && ok "the interrupted push, retried, is accepted" || { bad "the retried push failed (rc=$rc)"; sed 's/^/        /' "$WORK/p4.push2" | head -4; }
+  [ "$(mpu_count "$prefix")" -eq 0 ] && ok "and leaves nothing pending" || bad "the retried push left an upload pending"
+  stop_forge P4
+  [ -n "$tip" ] || true
+}
+
 main() {
   rig_init || { say "rig_init failed"; return 1; }
   rig_gate || true
@@ -285,7 +522,7 @@ main() {
 
   : > "$WORK/pushes.csv"; : > "$WORK/restores.csv"
   local r
-  for r in $PUSH_RTTS; do push_leg "$r" || break; done
+  if has_leg p1; then for r in $PUSH_RTTS; do push_leg "$r" || break; done; fi
   if [ -s "$WORK/pushes.csv" ] && [ -n "$SIBLINGS" ]; then
     head_ "P1 verdict — predicted saving $((SIBLINGS - $(ceil_div "$SIBLINGS" "$FANOUT_A"))) round trips per push (${SIBLINGS} siblings, fanout ${FANOUT_A})"
     python3 "$HERE/analyze.py" --what push --csv "$WORK/pushes.csv" \
@@ -293,7 +530,9 @@ main() {
     tally "$WORK/push-verdict.txt"
   fi
 
-  if seed_restore_repo; then
+  local seeded=0
+  if has_leg p2 || has_leg p3; then seed_restore_repo && seeded=1; fi
+  if has_leg p2 && [ $seeded -eq 1 ]; then
     for r in $RESTORE_RTTS; do restore_leg "$r"; done
     local saved=$((SEED_FILES - $(ceil_div "$SEED_FILES" "$FANOUT_A")))
     [ -s "$WORK/restores.csv" ] || { inconc "no restore was timed"; verdict "latency"; return 2; }
@@ -313,6 +552,9 @@ main() {
       fi
     done
   fi
+
+  if has_leg p3 && [ $seeded -eq 1 ]; then token_legs; fi
+  if has_leg p4; then orphan_leg; fi
 
   say ""; say "CSVs: $WORK/pushes.csv $WORK/restores.csv (KEEP=1 to retain)"
   verdict "latency"

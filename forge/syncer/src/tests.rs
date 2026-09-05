@@ -18,6 +18,7 @@ use flint_store::ObjectStore;
 use super::batch::{self, CommandResult, PushRequest};
 use super::policy::{Policy, Verdict};
 use super::gitcmd::RefUpdate;
+use super::status::Phase;
 use super::{lease, restore, snapshot, status, sweep, ForgeConfig, ForgeError, Syncer};
 
 const PREFIX: &str = "tenant/repo";
@@ -56,7 +57,9 @@ impl Rig {
                 lease::ClaimOutcome::Waiting { .. } => continue,
             }
         }
-        assert!(self.sc.lease.is_some(), "the rig must hold the lease");
+        assert!(self.sc.lease().is_ok(), "the rig must hold the lease");
+        // As `server::run` does between the claim and the restore.
+        sweep::abort_orphaned_uploads(&self.sc).await.expect("startup sweep");
         restore::restore(&mut self.sc).await.expect("restore");
     }
 
@@ -596,7 +599,7 @@ async fn a_snapshot_cas_refusal_fences_the_syncer() {
     .await
     .expect_err("a stale etag must fence");
     assert!(matches!(err, ForgeError::Fenced(_)), "{err:?}");
-    assert!(rig.sc.fenced.is_some(), "the fence is sticky");
+    assert!(rig.sc.fenced().is_some(), "the fence is sticky");
     assert!(rig.sc.check_fence().is_err(), "a fenced syncer serves nothing");
     // The ref did not move: the fence happened before the transaction.
     assert_eq!(rig.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(c1));
@@ -657,7 +660,7 @@ async fn a_successor_rotates_and_the_straggler_fences_on_its_next_batch() {
 async fn a_lost_renew_response_is_adopted_rather_than_fenced() {
     let mut rig = Rig::new().await;
     rig.start().await;
-    let lease_before = rig.sc.lease().unwrap().clone();
+    let lease_before = rig.sc.lease().unwrap();
     // Renew once behind the syncer's back: the cell still names this
     // holder at this epoch, but our token is now stale.
     rig.store
@@ -665,7 +668,7 @@ async fn a_lost_renew_response_is_adopted_rather_than_fenced() {
         .await
         .expect("renew");
     lease::renew(&mut rig.sc).await.expect("a lost response must be adopted");
-    assert!(rig.sc.fenced.is_none());
+    assert!(rig.sc.fenced().is_none());
     assert_eq!(rig.sc.lease().unwrap().epoch, lease_before.epoch);
     assert_ne!(rig.sc.lease().unwrap().token, lease_before.token);
 }
@@ -2068,7 +2071,7 @@ async fn a_pack_under_the_ceiling_goes_up_as_one_request() {
     write_pattern(&path, 3 << 20);
     let store = s3_shaped_store();
     store.reset_op_counts();
-    super::packio::upload_file(store.as_ref(), "p/git/objects/pack/pack-small.pack", &path, 7)
+    super::packio::upload_file(store.as_ref(), "p/git/objects/pack/pack-small.pack", &path, 7, None)
         .await
         .expect("upload");
     let ops = store.op_counts();
@@ -2101,7 +2104,7 @@ async fn a_pack_over_the_ceiling_is_composed_and_round_trips_byte_identical() {
     let store = s3_shaped_store();
     store.reset_op_counts();
     let key = "p/git/objects/pack/pack-big.pack";
-    super::packio::upload_file(store.as_ref(), key, &src, 7).await.expect("upload");
+    super::packio::upload_file(store.as_ref(), key, &src, 7, None).await.expect("upload");
     let ops = store.op_counts();
     assert_eq!(
         ops.get("compose_generation").copied().unwrap_or(0),
@@ -2128,9 +2131,9 @@ async fn a_re_uploaded_pack_is_never_skipped() {
     write_pattern(&path, 1 << 20);
     let store = s3_shaped_store();
     let key = "p/git/objects/pack/pack-x.pack";
-    super::packio::upload_file(store.as_ref(), key, &path, 7).await.expect("first");
+    super::packio::upload_file(store.as_ref(), key, &path, 7, None).await.expect("first");
     store.reset_op_counts();
-    super::packio::upload_file(store.as_ref(), key, &path, 7).await.expect("second");
+    super::packio::upload_file(store.as_ref(), key, &path, 7, None).await.expect("second");
     assert_eq!(
         store.op_counts().get("put_whole").copied().unwrap_or(0),
         1,
@@ -2290,7 +2293,7 @@ async fn a_pack_is_fetched_in_ranges_not_as_one_object() {
     write_pattern(&src, size);
     let store = s3_shaped_store();
     let key = "p/git/objects/pack/pack-r.pack";
-    super::packio::upload_file(store.as_ref(), key, &src, 7).await.expect("upload");
+    super::packio::upload_file(store.as_ref(), key, &src, 7, None).await.expect("upload");
 
     let dest = dir.path().join("out").join("pack-r.pack");
     store.reset_op_counts();
@@ -2325,7 +2328,7 @@ async fn a_pack_that_moved_under_the_restore_is_refused_not_adopted() {
     write_pattern(&src, 12 << 20);
     let store = s3_shaped_store();
     let key = "p/git/objects/pack/pack-m.pack";
-    super::packio::upload_file(store.as_ref(), key, &src, 7).await.expect("upload");
+    super::packio::upload_file(store.as_ref(), key, &src, 7, None).await.expect("upload");
 
     let dest = dir.path().join("out").join("pack-m.pack");
     let err = super::packio::fetch_pinned(
@@ -2358,7 +2361,7 @@ async fn a_cut_connection_retries_the_chunk_and_keeps_earlier_progress() {
     write_pattern(&src, size);
     let store = s3_shaped_store();
     let key = "p/git/objects/pack/pack-t.pack";
-    super::packio::upload_file(store.as_ref(), key, &src, 7).await.expect("upload");
+    super::packio::upload_file(store.as_ref(), key, &src, 7, None).await.expect("upload");
 
     let dest = dir.path().join("out").join("pack-t.pack");
     store.reset_op_counts();
@@ -2386,7 +2389,7 @@ async fn a_fetch_past_its_retry_budget_leaves_no_pack_behind() {
     write_pattern(&src, 12 << 20);
     let store = s3_shaped_store();
     let key = "p/git/objects/pack/pack-b.pack";
-    super::packio::upload_file(store.as_ref(), key, &src, 7).await.expect("upload");
+    super::packio::upload_file(store.as_ref(), key, &src, 7, None).await.expect("upload");
 
     let dest = dir.path().join("out").join("pack-b.pack");
     store.inject_get_range_failures(64);
@@ -2424,7 +2427,7 @@ async fn the_restore_fan_out_is_exactly_the_configured_bound() {
         std::fs::create_dir_all(src.parent().unwrap()).unwrap();
         write_pattern(&src, two_chunks);
         let key = format!("p/git/objects/pack/{name}");
-        super::packio::upload_file(store.as_ref(), &key, &src, 7).await.expect("upload");
+        super::packio::upload_file(store.as_ref(), &key, &src, 7, None).await.expect("upload");
         let etag = store.head(&key).await.expect("head").etag;
         srcs.push((name, key, src, etag));
     }
@@ -2442,7 +2445,7 @@ async fn the_restore_fan_out_is_exactly_the_configured_bound() {
             })
             .collect();
         store.reset_peak_get_range_in_flight();
-        super::packio::fetch_all(dynstore(&store), units, fanout).await.expect("fetch");
+        super::packio::fetch_all(dynstore(&store), units, fanout, None).await.expect("fetch");
         assert_eq!(
             store.peak_get_range_in_flight(),
             fanout as u64,
@@ -2475,7 +2478,7 @@ async fn a_failed_chunk_lands_none_of_the_set() {
         std::fs::create_dir_all(src.parent().unwrap()).unwrap();
         write_pattern(&src, size);
         let key = format!("p/git/objects/pack/{name}");
-        super::packio::upload_file(store.as_ref(), &key, &src, 7).await.expect("upload");
+        super::packio::upload_file(store.as_ref(), &key, &src, 7, None).await.expect("upload");
         let etag = store.head(&key).await.expect("head").etag;
         units.push(super::packio::FetchUnit {
             key,
@@ -2486,10 +2489,249 @@ async fn a_failed_chunk_lands_none_of_the_set() {
     }
     let dests: Vec<std::path::PathBuf> = units.iter().map(|u| u.dest.clone()).collect();
     store.inject_get_range_failures(64);
-    let err = super::packio::fetch_all(dynstore(&store), units, 4).await;
+    let err = super::packio::fetch_all(dynstore(&store), units, 4, None).await;
     assert!(err.is_err(), "an exhausted budget must not report success");
     for d in &dests {
         assert!(!d.exists(), "{} landed although a sibling failed", d.display());
         assert!(!super::packio::part_of(d).exists(), "{} left its temporary", d.display());
     }
+}
+
+// ── the lease, off the loop ──────────────────────────────────────────
+//
+// The heartbeat was a timer arm of the serving loop's select!, so it
+// could not fire while the loop was inside a batch, a restore or an
+// export. At 10 GiB the token was measured silent for 125 s during a
+// push and 141 s during a restore against a 60 s takeover window. The
+// renewer is now its own task — and it is gated on progress, so the
+// fix does not trade "a live pod loses its repository" for "a wedged
+// one keeps it".
+
+fn shared_for(rig: &Rig, phase: Phase) -> status::Shared {
+    Arc::new(std::sync::Mutex::new(status::facts(&rig.sc, phase)))
+}
+
+fn renews(rig: &Rig) -> u64 {
+    rig.store.op_counts().get("epoch_renew").copied().unwrap_or(0)
+}
+
+/// Serving idle: one renewal per heartbeat. A push that moves: the
+/// same. A push that has stopped moving: the token goes quiet. Virtual
+/// time, so the counts are exact rather than approximate.
+#[tokio::test(start_paused = true)]
+async fn the_renewer_renews_a_moving_push_and_lets_a_stalled_one_go_quiet() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let shared = shared_for(&rig, Phase::Serving);
+    let task = lease::spawn_renewer(
+        rig.store.clone() as Arc<dyn ObjectStore>,
+        rig.sc.cfg.epoch_key(),
+        rig.sc.hold.clone(),
+        shared.clone(),
+        std::time::Duration::from_millis(100),
+    );
+    let tick = std::time::Duration::from_millis(100);
+
+    // Idle serving renews on every heartbeat, moving or not.
+    rig.store.reset_op_counts();
+    tokio::time::sleep(tick * 6 + std::time::Duration::from_millis(50)).await;
+    let idle = renews(&rig);
+    assert!((5..=7).contains(&idle), "serving idle: one renew per heartbeat, got {idle}");
+
+    // A push that moves: progress advances between heartbeats.
+    shared.lock().unwrap().phase = Phase::Pushing;
+    rig.store.reset_op_counts();
+    for _ in 0..20 {
+        rig.sc.hold.tick(1);
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    }
+    let moving = renews(&rig);
+    assert!(moving >= 4, "a moving push must keep renewing, got {moving}");
+
+    // The same push, wedged: nothing advances. At most the one renewal
+    // that credits the progress made before the stall.
+    rig.store.reset_op_counts();
+    tokio::time::sleep(tick * 6).await;
+    let stalled = renews(&rig);
+    assert!(stalled <= 1, "a stalled push must let the token go quiet, got {stalled} renewals");
+
+    // Back to serving: renews again without any progress at all.
+    shared.lock().unwrap().phase = Phase::Serving;
+    rig.store.reset_op_counts();
+    tokio::time::sleep(tick * 6).await;
+    let again = renews(&rig);
+    assert!(again >= 4, "serving idle must renew again, got {again}");
+    task.abort();
+}
+
+/// A restore is judged the same way as a push: it renews while chunks
+/// land and goes quiet when they stop.
+#[tokio::test(start_paused = true)]
+async fn the_renewer_judges_a_restore_by_its_chunks() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let shared = shared_for(&rig, Phase::Importing);
+    let task = lease::spawn_renewer(
+        rig.store.clone() as Arc<dyn ObjectStore>,
+        rig.sc.cfg.epoch_key(),
+        rig.sc.hold.clone(),
+        shared,
+        std::time::Duration::from_millis(100),
+    );
+    rig.store.reset_op_counts();
+    tokio::time::sleep(std::time::Duration::from_millis(650)).await;
+    assert!(renews(&rig) <= 1, "an importing server that lands nothing must go quiet");
+    let progress = rig.sc.hold.progress_handle();
+    rig.store.reset_op_counts();
+    for _ in 0..12 {
+        progress.fetch_add(8 << 20, std::sync::atomic::Ordering::Relaxed);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(renews(&rig) >= 4, "a restore landing chunks must keep its lease");
+    task.abort();
+}
+
+/// Deposed while the loop is busy: the renewer fences the hold and the
+/// loop's watch wakes. Nothing after that touches the store.
+#[tokio::test(start_paused = true)]
+async fn a_renewer_that_is_deposed_fences_the_syncer_and_wakes_the_loop() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let shared = shared_for(&rig, Phase::Serving);
+    let mut fenced_rx = rig.sc.hold.subscribe();
+    let task = lease::spawn_renewer(
+        rig.store.clone() as Arc<dyn ObjectStore>,
+        rig.sc.cfg.epoch_key(),
+        rig.sc.hold.clone(),
+        shared,
+        std::time::Duration::from_millis(100),
+    );
+    // A successor takes the cell.
+    let key = rig.sc.cfg.epoch_key();
+    let state = rig.store.epoch_read(&key).await.unwrap().expect("cell");
+    rig.store.epoch_acquire(&key, "successor", Some(&state)).await.expect("supersede");
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), fenced_rx.changed())
+        .await
+        .expect("the loop must be woken by the fence")
+        .expect("the hold outlives the loop");
+    let why = rig.sc.fenced().expect("fenced");
+    assert!(why.contains("deposed at renew"), "{why}");
+    assert!(matches!(rig.sc.check_fence(), Err(ForgeError::Fenced(_))));
+    assert!(rig.sc.lease().is_err(), "a fenced hold has no lease");
+
+    rig.store.reset_op_counts();
+    let c1 = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    let err = batch::run_batch(
+        &mut rig.sc,
+        vec![push(1, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: zero(), new_oid: c1 }])],
+        &Policy::default(),
+    )
+    .await
+    .expect_err("a fenced syncer must refuse the batch");
+    assert!(matches!(err, ForgeError::Fenced(_)), "{err:?}");
+    assert_eq!(rig.store.total_ops(), 0, "a fenced batch must not touch the store");
+    task.abort();
+}
+
+/// A clean release stops the renewer: no renewal lands on a released
+/// cell, which would un-release it under a successor's claim.
+#[tokio::test(start_paused = true)]
+async fn a_release_stops_the_renewer() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let shared = shared_for(&rig, Phase::Serving);
+    let task = lease::spawn_renewer(
+        rig.store.clone() as Arc<dyn ObjectStore>,
+        rig.sc.cfg.epoch_key(),
+        rig.sc.hold.clone(),
+        shared,
+        std::time::Duration::from_millis(100),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    lease::release(&mut rig.sc).await.expect("release");
+    rig.store.reset_op_counts();
+    tokio::time::sleep(std::time::Duration::from_millis(650)).await;
+    assert_eq!(renews(&rig), 0, "no renewal may follow a release");
+    let state = rig.store.epoch_read(&rig.sc.cfg.epoch_key()).await.unwrap().expect("cell");
+    assert!(state.released, "the cell must stay released");
+    assert!(task.is_finished(), "the renewer must have exited on its own");
+}
+
+// ── orphaned uploads ─────────────────────────────────────────────────
+//
+// The scale drill's S4: one kill inside a 2 GiB push left 384 MiB of
+// parts in an upload nothing would ever complete or abort, billed
+// until a hand abort. Forge had no sweep; lean and the tier both do.
+
+/// What a crashed predecessor left in flight is aborted by the next
+/// start, before the restore — the moment nothing of ours can be in
+/// flight.
+#[tokio::test]
+async fn a_start_aborts_the_uploads_a_predecessor_left_in_flight() {
+    let mut rig = Rig::new().await;
+    let prefix = format!("{}/", rig.sc.cfg.git_prefix());
+    rig.store.raw_begin_upload(&rig.sc.cfg.pack_key("pack-crashed.pack"));
+    rig.store.raw_begin_upload(&rig.sc.cfg.bundle_key("clone-crashed.bundle"));
+    // Not ours: a neighbouring prefix's upload is left alone.
+    rig.store.raw_begin_upload("elsewhere/git/objects/pack/pack-theirs.pack");
+    assert_eq!(rig.store.list_uploads(&prefix).await.unwrap().len(), 2);
+    rig.start().await;
+    assert!(
+        rig.store.list_uploads(&prefix).await.unwrap().is_empty(),
+        "the start must abort every upload pending under the repository"
+    );
+    assert_eq!(
+        rig.store.list_uploads("elsewhere/").await.unwrap().len(),
+        1,
+        "another prefix's upload is not this server's to abort"
+    );
+}
+
+/// Between batches the sweep does the same, so an orphan that outlives
+/// a start (a listing that failed then) is still collected.
+#[tokio::test]
+async fn the_sweep_between_batches_aborts_a_pending_upload() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c1 = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    rig.run(vec![push(1, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: zero(), new_oid: c1 }])])
+        .await;
+    let prefix = format!("{}/", rig.sc.cfg.git_prefix());
+    rig.store.raw_begin_upload(&rig.sc.cfg.pack_key("pack-stale.pack"));
+    assert_eq!(rig.store.list_uploads(&prefix).await.unwrap().len(), 1);
+    sweep::sweep(&mut rig.sc).await.expect("sweep");
+    assert!(rig.store.list_uploads(&prefix).await.unwrap().is_empty());
+}
+
+/// Transfers report what they landed, in bytes, on the counter the
+/// renewer reads — a whole PUT once, a ranged fetch per chunk.
+#[tokio::test]
+async fn transfers_report_their_progress_in_bytes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("pack-p.pack");
+    let size = 12u64 << 20;
+    write_pattern(&src, size);
+    let store = s3_shaped_store();
+    let key = "p/git/objects/pack/pack-p.pack";
+    let progress = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    super::packio::upload_file(store.as_ref(), key, &src, 7, Some(progress.clone()))
+        .await
+        .expect("upload");
+    assert_eq!(progress.load(std::sync::atomic::Ordering::Relaxed), size, "the upload's bytes");
+    let etag = store.head(key).await.expect("head").etag;
+    let unit = super::packio::FetchUnit {
+        key: key.into(),
+        dest: dir.path().join("out").join("pack-p.pack"),
+        size,
+        etag,
+    };
+    super::packio::fetch_all(dynstore(&store), vec![unit], 4, Some(progress.clone()))
+        .await
+        .expect("fetch");
+    assert_eq!(
+        progress.load(std::sync::atomic::Ordering::Relaxed),
+        2 * size,
+        "the fetch's bytes on top"
+    );
 }

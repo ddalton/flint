@@ -67,11 +67,16 @@ pub fn part_grid(size: u64, min_part: u64, max_parts: usize) -> Vec<PartSource> 
 }
 
 /// Upload one local file to `key`, whole or composed by size.
+///
+/// `progress` is advanced by the bytes landed — once for a whole PUT,
+/// per part for a compose — so the lease renewer can tell a push that
+/// is moving from one that is wedged (`Hold`).
 pub async fn upload_file(
     store: &dyn ObjectStore,
     key: &str,
     path: &Path,
     epoch: u64,
+    progress: Option<Arc<std::sync::atomic::AtomicU64>>,
 ) -> ForgeResult<()> {
     let size = std::fs::metadata(path)?.len();
     let stamps = GenerationStamps {
@@ -101,6 +106,9 @@ pub async fn upload_file(
         store
             .put_whole(key, Bytes::from(body), &PutCondition::Unconditional, &stamps, crc)
             .await?;
+        if let Some(p) = &progress {
+            p.fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+        }
         return Ok(());
     }
     // Above the ceiling the object is never held whole, so the
@@ -119,6 +127,7 @@ pub async fn upload_file(
         condition: PutCondition::Unconditional,
         stamps,
         crc64: crc,
+        progress,
     };
     store.compose_generation(&spec).await?;
     Ok(())
@@ -178,7 +187,7 @@ pub async fn fetch_pinned(
     fanout: usize,
 ) -> ForgeResult<()> {
     let unit = FetchUnit { key: key.into(), dest: path.into(), size, etag: etag.into() };
-    fetch_all(store, vec![unit], fanout).await
+    fetch_all(store, vec![unit], fanout, None).await
 }
 
 /// Where a unit is written before it is renamed into place.
@@ -226,12 +235,16 @@ pub fn part_of(dest: &Path) -> PathBuf {
 /// anywhere drops the whole set: what was already renamed is complete
 /// and stays, what was not is removed, and nothing a later pass could
 /// mistake for a finished pack is left behind.
+///
+/// `progress` is advanced by every chunk landed, so the lease renewer
+/// can tell a restore that is moving from one that is wedged (`Hold`).
 pub async fn fetch_all(
     store: Arc<dyn ObjectStore>,
     units: Vec<FetchUnit>,
     fanout: usize,
+    progress: Option<Arc<std::sync::atomic::AtomicU64>>,
 ) -> ForgeResult<()> {
-    let out = fetch_all_inner(store, &units, fanout).await;
+    let out = fetch_all_inner(store, &units, fanout, progress).await;
     if out.is_err() {
         // A partial `.part` outlives the process that wrote it and
         // would be adopted by the next attempt's rename.
@@ -246,6 +259,7 @@ async fn fetch_all_inner(
     store: Arc<dyn ObjectStore>,
     units: &[FetchUnit],
     fanout: usize,
+    progress: Option<Arc<std::sync::atomic::AtomicU64>>,
 ) -> ForgeResult<()> {
     // Every temporary is opened and pre-sized up front, so a chunk can
     // be written at its offset the moment it arrives.
@@ -267,6 +281,7 @@ async fn fetch_all_inner(
             let len = FETCH_CHUNK.min(u.size - off);
             let (store, permits, file) = (store.clone(), permits.clone(), files[i].clone());
             let (key, etag) = (u.key.clone(), u.etag.clone());
+            let progress = progress.clone();
             set.spawn(async move {
                 let _permit = permits
                     .acquire_owned()
@@ -288,6 +303,9 @@ async fn fetch_all_inner(
                 })
                 .await
                 .map_err(|e| ForgeError::State(format!("chunk write did not join: {e}")))??;
+                if let Some(p) = &progress {
+                    p.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
+                }
                 Ok(())
             });
             off += len;

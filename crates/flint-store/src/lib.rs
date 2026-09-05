@@ -418,6 +418,22 @@ pub struct ComposeSpec<'a> {
     /// truth. Backends hand it to the store for SERVER-SIDE validation
     /// at publish: a mismatch fails the publish, never warns.
     pub crc64: u64,
+    /// Bytes landed so far, for a caller that has to prove LIVENESS
+    /// while a long compose runs: forge's lease renewer renews a push
+    /// only while this advances, so a wedged upload lets the token go
+    /// quiet and a challenger take over — which is the one takeover a
+    /// wedged holder can get. Advanced by `len` after every part,
+    /// `Local` and `BaseCopy` alike. `None` = nobody is watching.
+    pub progress: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+}
+
+impl ComposeSpec<'_> {
+    /// Record `bytes` more of the object as landed.
+    pub fn note_progress(&self, bytes: u64) {
+        if let Some(p) = &self.progress {
+            p.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 // ── errors ───────────────────────────────────────────────────────────

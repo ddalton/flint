@@ -104,6 +104,7 @@ mod tests {
         let gen2_crc = crc64_nvme(&gen2_content);
         let stamps2 = GenerationStamps { generation: 2, epoch: 1, flush_uuid: "uuid-g2".into(), boundary_source: None, posix: None };
         let spec = ComposeSpec {
+            progress: None,
             key: &key,
             local_path: &local,
             parts: vec![
@@ -156,6 +157,7 @@ mod tests {
             .await
             .expect("raw foreign put");
         let err = store.compose_generation(&ComposeSpec {
+            progress: None,
             condition: PutCondition::IfMatch(gen2.etag.clone()),
             base_etag: Some(gen2.etag.clone()),
             stamps: GenerationStamps { generation: 3, epoch: 1, flush_uuid: "uuid-g3".into(), boundary_source: None, posix: None },

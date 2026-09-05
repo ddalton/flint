@@ -940,6 +940,7 @@ impl Sidecar {
         }
 
         let spec = flint_store::ComposeSpec {
+            progress: None,
             key,
             local_path,
             parts,

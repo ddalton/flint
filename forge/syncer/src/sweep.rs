@@ -30,8 +30,35 @@
 
 use super::{restore, snapshot, ForgeResult, Syncer};
 
+/// Abort every multipart upload still pending under the repository.
+///
+/// Called after the claim and between batches — the two moments this
+/// process can have nothing of its own in flight, which is why there
+/// is no grace: anything pending is a predecessor's (a crash left it;
+/// the scale drill measured 384 MiB of parts per interrupted 2 GiB
+/// push, billed until aborted, and forge had no sweep at all) or a
+/// deposed straggler's, whose Complete now fails `NoSuchUpload` and
+/// whose CAS would have 412'd regardless. The tier's claim-time sweep
+/// is the shape (`tier::epoch::takeover_sweep`).
+pub async fn abort_orphaned_uploads(sc: &Syncer) -> ForgeResult<usize> {
+    sc.check_fence()?;
+    let prefix = format!("{}/", sc.cfg.git_prefix());
+    let pending = sc.store.list_uploads(&prefix).await?;
+    for u in &pending {
+        sc.store.abort_upload(&u.key, &u.upload_id).await?;
+        eprintln!(
+            "flint-forge: aborted a multipart upload left in flight on {} ({})",
+            u.key, u.upload_id
+        );
+    }
+    Ok(pending.len())
+}
+
 pub async fn sweep(sc: &mut Syncer) -> ForgeResult<usize> {
     sc.check_fence()?;
+    // In-flight uploads first: between batches nothing of ours is in
+    // flight, so every one of them is an orphan.
+    abort_orphaned_uploads(sc).await?;
     // Rule 1: candidates first…
     let listed = restore::list_pack_files(sc).await?;
 

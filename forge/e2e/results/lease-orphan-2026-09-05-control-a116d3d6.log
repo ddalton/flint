@@ -1,0 +1,48 @@
+forge latency P3/P4 — CONTROL: the same legs against a116d3d6 (heartbeat on the serving loop's select!, no orphan sweep)
+expected: P3a/P3b/P3c FAIL (the token is silent for the whole operation) and P4's abort half FAIL (the leak is open)
+NOTE: P3c's 'went quiet while no data moved' passes VACUOUSLY here — a binary that never renews is quiet by accident, not by rule.
+command: FORGE_BIN=<a116d3d6 build> CONTROL_COMMIT=a116d3d6 LEGS="p3 p4" ./run-latency.sh
+
+
+== rig gate: the store's conditional PUT is real ==
+  PASS  If-None-Match:* admits a fresh key
+  PASS  If-None-Match:* refuses an existing key
+  PASS  If-Match refuses a wrong etag
+  PASS  If-Match admits the right etag
+  PASS  the refused PUTs left the bytes alone
+
+== precondition: FORGE_BIN is newer than the sources it claims to be ==
+  ....  control run: FORGE_BIN is deliberately a116d3d6, not the tree — the freshness check does not apply
+
+== P0 — the proxy injects the round trip the legs assume ==
+  ....  GET / direct 1 ms; via proxy at RTT 0 1 ms; via proxy at RTT 200 205 ms
+  PASS  RTT 200 adds 204 ms to one request-response
+  PASS  at RTT 0 the proxy itself costs 0 ms — the null leg is a null
+
+== P2 seed — a repository of 11 packs to restore ==
+  PASS  seeded 11 packs, 33 files, tip 83b92fa8ea5f9fdf8b142ddcdd6eaafc1cfba17f
+
+== P3a — the token keeps rotating through a 33-file restore at RTT 200, fanout 1, heartbeat 1s ==
+  ....  restore took 8737 ms; token changed 0x, longest silence 7013 ms
+  FAIL  the token fell silent for 7013 ms during a 8737 ms restore — the window is open
+
+== P3b — the token keeps rotating through a 160 MiB multipart push at 20000 KB/s, heartbeat 1s ==
+  PASS  the push landed as a multipart object ("20f8c06d6109481fd008e5845c7de835-3") in 19893 ms
+  ....  push took 19893 ms; token changed 8x, longest silence 11710 ms (one part took ~7957 ms)
+  FAIL  the token fell silent for 11710 ms during a 19893 ms push — the window is open
+
+== P3c — a restore whose data stops lets the token go quiet, then resumes ==
+  ....  before the stall: 0 changes; during (1788638627877-1788638623832=4045 ms): 0; after: 0; restore 12864 ms
+  FAIL  the token did not rotate before the stall — the renewer is not beating through the restore
+  PASS  the token went quiet while no data moved
+  FAIL  the token did not resume after the stall
+
+== P4 — a push killed inside its multipart upload leaves parts; the restart aborts them ==
+  PASS  the kill left 1 upload(s) pending (its parts are billed until aborted)
+  FAIL  1 upload(s) still pending after the restart — the leak is open
+  PASS  the interrupted push, retried, is accepted
+  FAIL  the retried push left an upload pending
+
+CSVs: /var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/tmp.1w2bXrQMBw/pushes.csv /var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/tmp.1w2bXrQMBw/restores.csv (KEEP=1 to retain)
+
+latency: 12 passed, 6 failed

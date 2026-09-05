@@ -1106,6 +1106,7 @@ impl S3Store {
                     );
                 }
             }
+            spec.note_progress(len);
         }
 
         let crc_b64 = crc64_to_b64(spec.crc64);

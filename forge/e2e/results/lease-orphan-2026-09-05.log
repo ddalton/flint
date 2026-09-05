@@ -1,0 +1,51 @@
+forge latency P3/P4 — the lease off the loop, and the orphan sweep — 2026-09-05, this Mac
+binary: forge/syncer at the commit that adds the renewer task + abort_orphaned_uploads
+command: LEGS="p3 p4" ./run-latency.sh
+
+
+== rig gate: the store's conditional PUT is real ==
+  PASS  If-None-Match:* admits a fresh key
+  PASS  If-None-Match:* refuses an existing key
+  PASS  If-Match refuses a wrong etag
+  PASS  If-Match admits the right etag
+  PASS  the refused PUTs left the bytes alone
+
+== precondition: FORGE_BIN is newer than the sources it claims to be ==
+  PASS  FORGE_BIN is not older than any source under forge/syncer or flint-store
+
+== P0 — the proxy injects the round trip the legs assume ==
+  ....  GET / direct 2 ms; via proxy at RTT 0 2 ms; via proxy at RTT 200 204 ms
+  PASS  RTT 200 adds 202 ms to one request-response
+  PASS  at RTT 0 the proxy itself costs 0 ms — the null leg is a null
+
+== P2 seed — a repository of 11 packs to restore ==
+  PASS  seeded 11 packs, 33 files, tip 70b033d489a9a85c30a8fbacc14f7b39f4fdda2c
+
+== P3a — the token keeps rotating through a 33-file restore at RTT 200, fanout 1, heartbeat 1s ==
+  ....  restore took 8793 ms; token changed 7x, longest silence 1200 ms
+  PASS  the token never fell silent for more than 2.5 heartbeats during the restore
+
+== P3b — the token keeps rotating through a 160 MiB multipart push at 20000 KB/s, heartbeat 1s ==
+  PASS  the push landed as a multipart object ("aed694be3df4705cdbd35848d2f9c1f1-3") in 18299 ms
+  ....  push took 18299 ms; token changed 10x, longest silence 5127 ms (one part took ~7319 ms)
+  PASS  the token never fell silent for longer than one part plus a heartbeat during the push
+
+== P3c — a restore whose data stops lets the token go quiet, then resumes ==
+  ....  before the stall: 4 changes; during (1788638478223-1788638474166=4057 ms): 0; after: 3; restore 13689 ms
+  PASS  the token rotated while the restore was moving
+  PASS  the token went quiet while no data moved
+  PASS  the token resumed when the data did
+
+== P4 — a push killed inside its multipart upload leaves parts; the restart aborts them ==
+./run-latency.sh: line 472: 72419 Killed: 9               ( export FLINT_FORGE_BUCKET="$BUCKET" FLINT_FORGE_PREFIX="$prefix" FLINT_FORGE_REPO="$repo" FLINT_FORGE_ENDPOINT="$ENDPOINT" FLINT_FORGE_HOOKS_PATH="$repo/hooks-flint" FLINT_FORGE_SOCKET="/tmp/fc-$tag.sock" FLINT_FORGE_STATUS_ADDR="127.0.0.1:$((9848 + RANDOM % 900))" FLINT_FORGE_HEARTBEAT_SECS=2 FLINT_FORGE_BATCH_WINDOW_MS=200 FLINT_FORGE_SYNC_BIN="$SYNC_BIN"; for kv in "$@";
+do
+    export "$kv";
+done; exec "$FORGE_BIN" ) > "$log" 2>&1
+  PASS  the kill left 1 upload(s) pending (its parts are billed until aborted)
+  PASS  the restart aborted every pending upload before serving
+  PASS  the interrupted push, retried, is accepted
+  PASS  and leaves nothing pending
+
+CSVs: /var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/tmp.FNaxxa3zdh/pushes.csv /var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/tmp.FNaxxa3zdh/restores.csv (KEEP=1 to retain)
+
+latency: 19 passed, 0 failed

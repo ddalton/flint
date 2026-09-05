@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 
 use super::batch::{self, PushReport};
 use super::policy::Policy;
-use super::status::{self, Facts, Phase};
+use super::status::{self, Phase, Shared};
 use super::uds::{self, HookResponse, Incoming};
 use super::{bundle, lease, restore, ForgeError, ForgeResult, Syncer};
 
@@ -64,10 +64,6 @@ pub struct LfsOpts {
     /// How long a transfer URL is good for.
     pub ttl_secs: u64,
 }
-
-/// Shared with the status listener. A `Mutex` over facts, not over the
-/// syncer: the status path must never be able to block a batch.
-type Shared = Arc<Mutex<Facts>>;
 
 pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
     restore::check_git_floor(&sc).await?;
@@ -122,6 +118,35 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
         }
     }
 
+    // ── the heartbeat, before anything long runs ─────────────────────
+    // On its own task, so the restore below, every batch and every
+    // export beat through — the loop's own timer arm never could, and
+    // the token was measured silent for 125 s during a 10 GiB push.
+    // Progress-gated during a restore or a push (`Hold`).
+    let renewer = lease::spawn_renewer(
+        sc.store.clone(),
+        sc.cfg.epoch_key(),
+        sc.hold.clone(),
+        shared.clone(),
+        std::time::Duration::from_secs(sc.cfg.heartbeat_secs),
+    );
+
+    // ── what a predecessor left in flight ────────────────────────────
+    // Parts a crashed or deposed server uploaded and never completed
+    // are billed until aborted, and nothing of OURS is in flight yet.
+    match super::sweep::abort_orphaned_uploads(&sc).await {
+        Ok(0) => {}
+        Ok(n) => eprintln!(
+            "flint-forge: aborted {n} multipart upload(s) a previous server left in flight"
+        ),
+        // Hygiene, not a gate: a listing permission the pod lacks must
+        // not become a crash loop. The between-batches sweep retries.
+        Err(e) => eprintln!(
+            "flint-forge: could not sweep in-flight uploads ({e}); they stay billed until a \
+             sweep succeeds"
+        ),
+    }
+
     // ── restore ──────────────────────────────────────────────────────
     publish(&shared, &sc, Phase::Importing);
     restore::restore(&mut sc).await?;
@@ -161,11 +186,9 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
     maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     maintenance.tick().await;
 
-    let mut heartbeat =
-        tokio::time::interval(std::time::Duration::from_secs(sc.cfg.heartbeat_secs));
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // The first tick fires immediately; the claim just renewed for us.
-    heartbeat.tick().await;
+    // The renewer deposed is this loop's exit; it wakes on the fence
+    // from whatever it is awaiting.
+    let mut fenced_rx = sc.hold.subscribe();
 
     // A clean release on SIGTERM: a successor claims at once instead of
     // waiting out six quiet polls, which is the difference between a
@@ -185,26 +208,22 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                     // polls instead, which is slower and still correct.
                     Err(e) => eprintln!("flint-forge: could not release the lease cleanly: {e}"),
                 }
+                renewer.abort();
                 publish(&shared, &sc, Phase::Released);
                 return Ok(());
             }
-            // The heartbeat runs whether or not pushes arrive. A
-            // server that renewed only inside a push would let a quiet
-            // repository's lease lapse and leave a straggler unfenced.
-            _ = heartbeat.tick() => {
-                match lease::renew(&mut sc).await {
-                    Ok(()) => publish(&shared, &sc, Phase::Serving),
-                    Err(e @ ForgeError::Fenced(_)) => {
-                        publish(&shared, &sc, Phase::Draining);
-                        return Err(e);
-                    }
-                    Err(e) => {
-                        // An auth pause or a transient store fault:
-                        // keep serving reads, keep trying. The lease is
-                        // still ours until it is not.
-                        eprintln!("flint-forge: heartbeat: {e}");
-                    }
-                }
+            // The heartbeat is the renewer task's (`lease::spawn_renewer`),
+            // not this loop's: it beats through a batch, a restore and
+            // an export, which a timer arm here never could. What this
+            // loop owns is the consequence — the renewer deposed is the
+            // fence, and a fenced server stops serving reads too.
+            res = fenced_rx.changed() => {
+                let why = match res {
+                    Ok(()) => fenced_rx.borrow().clone().unwrap_or_else(|| "fenced".into()),
+                    Err(_) => "the lease cell went away".into(),
+                };
+                publish(&shared, &sc, Phase::Draining);
+                return Err(ForgeError::Fenced(why));
             }
             _ = maintenance.tick() => {
                 if let Some(bcfg) = opts.bundle.as_ref() {
@@ -381,6 +400,9 @@ async fn run_and_report(
     shared: &Shared,
 ) -> ForgeResult<()> {
     let pushes: Vec<batch::PushRequest> = waiting.iter().map(|w| w.push.clone()).collect();
+    // A phase that must move: the renewer renews it only while the
+    // batch's progress counter advances.
+    publish(shared, sc, Phase::Pushing);
     let outcome = batch::run_batch(sc, pushes, policy).await;
     match outcome {
         Ok(reports) => {

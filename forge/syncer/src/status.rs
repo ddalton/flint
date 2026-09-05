@@ -28,6 +28,11 @@ pub enum Phase {
     /// Fetching packs and installing refs from the snapshot.
     Importing,
     Serving,
+    /// A batch in flight: judging, uploading, the CAS. Deliberately
+    /// OUTSIDE the operator's set — its `Unknown` arm reads "not safe
+    /// to act on", which is exactly right for a push, and `rpoClean`
+    /// is false until the batch has landed.
+    Pushing,
     Sweeping,
     Draining,
     Released,
@@ -40,12 +45,28 @@ impl Phase {
             Phase::ClaimingEpoch => "claimingEpoch",
             Phase::Importing => "importing",
             Phase::Serving => "serving",
+            Phase::Pushing => "pushing",
             Phase::Sweeping => "sweeping",
             Phase::Draining => "draining",
             Phase::Released => "released",
         }
     }
 }
+
+impl Phase {
+    /// A phase that must MOVE to deserve its lease. The renewer renews
+    /// these only while `Hold::progress` advances, so a wedged restore
+    /// or upload lets the token go quiet and a challenger take over —
+    /// the one takeover a wedged holder can get. Serving idle is not
+    /// wedged: a quiet repository keeps its lease (design §5).
+    pub fn must_progress(self) -> bool {
+        matches!(self, Phase::Importing | Phase::Pushing)
+    }
+}
+
+/// Shared with the status listener and the renewer. A `Mutex` over
+/// facts, not over the syncer: neither path may ever block a batch.
+pub type Shared = std::sync::Arc<std::sync::Mutex<Facts>>;
 
 /// A copy of everything `/status` reports, taken at a moment the
 /// serving loop chooses.
@@ -66,6 +87,8 @@ pub struct Facts {
     pub packs: usize,
     pub snapshot_seq: u64,
     pub fenced: Option<String>,
+    pub last_renew_unix: u64,
+    pub progress: u64,
 }
 
 pub fn facts(sc: &Syncer, phase: Phase) -> Facts {
@@ -74,12 +97,14 @@ pub fn facts(sc: &Syncer, phase: Phase) -> Facts {
         holder_id: sc.holder_id.clone(),
         started_unix: sc.started_unix,
         last_push_unix: sc.last_push_unix,
-        lease_epoch: sc.lease.as_ref().map(|l| l.epoch),
+        lease_epoch: sc.hold.lease().map(|l| l.epoch),
         cell_loaded: sc.cell.is_some(),
         refs: sc.cell.as_ref().map(|c| c.snap.refs.len()).unwrap_or(0),
         packs: sc.cell.as_ref().map(|c| c.snap.packs.len()).unwrap_or(0),
         snapshot_seq: sc.cell.as_ref().map(|c| c.snap.seq).unwrap_or(0),
-        fenced: sc.fenced.clone(),
+        fenced: sc.hold.fenced(),
+        last_renew_unix: sc.hold.last_renew_unix(),
+        progress: sc.hold.progress(),
     }
 }
 
@@ -93,11 +118,14 @@ pub fn document(f: &Facts, now: u64) -> serde_json::Value {
         "activity": {
             "lastActivityUnix": last,
             "idleSecs": now.saturating_sub(last),
+            // Units the operation in flight has landed; what the
+            // renewer judges a restore or a push by.
+            "progress": f.progress,
         },
         // True by construction while serving: acknowledged means
         // durable. False until the repository is claimed and proved.
         "rpoClean": held && f.cell_loaded && f.phase == Phase::Serving,
-        "epoch": { "held": held, "number": f.lease_epoch.unwrap_or(0) },
+        "epoch": { "held": held, "number": f.lease_epoch.unwrap_or(0), "lastRenewUnix": f.last_renew_unix },
         "repo": { "refs": f.refs, "packs": f.packs, "snapshotSeq": f.snapshot_seq },
         "syncerVersion": super::SYNCER_VERSION,
         // Set ⇒ this server has been deposed and serves nothing. The

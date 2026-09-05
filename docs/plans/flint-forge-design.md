@@ -368,6 +368,24 @@ compresses inactive pages and RSS does not count them. The same run's
 footprint was 4.09 GB. RSS alone would have reported this defect as
 benign.
 
+**FIXED 2026-09-05 — the heartbeat is its own task.** What follows is
+the defect as it stood; the renewer (`lease::spawn_renewer`) now runs
+from the moment the claim lands, so the restore, every batch and every
+export beat through. It is NOT unconditional: while a phase that must
+move is reported (`status::Phase::must_progress` — importing or
+pushing), it renews only if the operation's byte counter advanced since
+its last renewal, so a WEDGED restore or upload lets the token go quiet
+and a challenger take over. Renewing for a wedged pod would have traded
+"a live pod loses its repository" for "a dead one keeps it forever",
+which is the case `QUIET_POLLS` exists for. The lease and the fence
+live in `Hold`, shared with the loop through a watch channel: the
+renewer deposed is the loop's exit. Measured under injected latency
+(`forge/e2e/latency/` P3a-c): through an 8.8 s restore the token
+rotates 7 times, longest silence 1.2 s, against 0 rotations and 7.0 s
+of silence on the pre-fix binary; through an 18.3 s multipart push, 10
+rotations against 11.7 s of silence. The paragraph below stands as the
+record of what was measured on the wire first.
+
 **Still open, and adjacent.** The lease is NOT renewed during restore
 (`restore.rs` reads the epoch and never calls `lease::renew`), and the
 heartbeat's `select!` does not start until after restore returns
@@ -608,6 +626,23 @@ derived but differ across clients' delta settings, so the reference
 predicate is "named by the snapshot whose etag is the If-Match",
 never "same objects". `ForgeSync.tla` instantiates the module.
 
+**In-flight multipart uploads are swept too, and with no grace**
+(added 2026-09-05). A push killed inside its upload leaves parts that
+no `Complete` will ever claim and that are billed as storage until
+aborted — the scale drill measured 384 MiB from ONE interrupted 2 GiB
+push, and forge had no sweep at all, while lean and the tier both do
+(`tier::epoch::takeover_sweep`, A9). `sweep::abort_orphaned_uploads`
+runs after the claim and between batches: the two moments this process
+can have nothing of its own in flight, which is what makes the absent
+grace correct rather than reckless. Anything pending then is a
+predecessor's, or a deposed straggler's whose `Complete` now fails
+`NoSuchUpload` and whose CAS would have 412'd regardless. It is
+hygiene, not a gate: a listing the pod's credential cannot make is
+logged and retried, never a crash loop. Note that MinIO does not
+answer a directory-prefixed `ListMultipartUploads`; `list_uploads`
+lists bucket-wide and filters in code, which is correct on either
+store.
+
 ## 11. Failure model
 
 | failure | effect | why |
@@ -619,6 +654,8 @@ never "same objects". `ForgeSync.tla` instantiates the module.
 | two servers for one repo | the straggler 412s at its next heartbeat or batch and exits; the successor rotated first | the single-writer fence, lean's models |
 | snapshot names a pack that is gone | re-read the snapshot once; if still gone, refuse to start and name it | fail-closed, lean's `load` rule |
 | a repack races the sweep | the sweep aborts on the moved etag and reruns | rule 1 |
+| a push killed inside its multipart upload | the parts stay pending and billed until the next start or sweep aborts them | §10; nothing of ours is in flight at either moment |
+| a restore or upload that WEDGES | the token goes quiet, the challenger takes over after the quiet polls, the wedged pod fences at its next renew | the renewer is gated on progress (§5) |
 | a stale push (old-oid ≠ current) | `ng stale, fetch first` from the syncer's step 2 | receive-pack does not check it under proc-receive |
 
 ## 12. Prior art, and the warning it carries

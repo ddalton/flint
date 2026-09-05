@@ -12,6 +12,52 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed — flint forge, the lease went quiet while the server worked
+
+- **The heartbeat is its own task** (`lease::spawn_renewer`), running
+  from the claim, so a restore, a batch and an export all beat through.
+  It was a timer arm of the serving loop's `select!`, which could not
+  fire while that loop was inside any of them: the scale drill measured
+  the token silent for **125 s during a 10 GiB push and 141 s during
+  the restore**, against a 60 s takeover threshold. A live pod,
+  mid-work, could lose its repository to a challenger — design §5's
+  window, on the wire.
+- **The renewer is gated on PROGRESS, not on a timer.** While a phase
+  that must move is reported, it renews only if the operation's byte
+  counter advanced since the last renewal, so a wedged restore or
+  upload lets the token go quiet and a challenger take over. An
+  unconditional renewer would have traded "a live pod loses its
+  repository" for "a dead one keeps it forever", which is the case the
+  quiet polls exist for. `ComposeSpec` carries the counter, so the
+  store's part loop reports through it.
+- The lease and the fence now live in one `Hold`, shared with the loop
+  through a watch channel: the renewer being deposed IS the loop's
+  exit, from whatever it was awaiting. `/status` reports the renewer's
+  last renewal and the progress counter.
+- **Measured under injected latency** (`forge/e2e/latency/` P3a-c):
+  through an 8.8 s restore the token rotates 7 times, longest silence
+  1.2 s, against **0 rotations and 7.0 s of silence** on the pre-fix
+  binary; through an 18.3 s multipart push, 10 rotations against
+  **11.7 s of silence**; and a restore stalled mid-flight goes quiet
+  and resumes, where the pre-fix binary never rotates at all.
+
+### Fixed — flint forge, an interrupted push left its parts billed
+
+- **`sweep::abort_orphaned_uploads`**, after the claim and between
+  batches. A push killed inside its multipart upload left parts no
+  `Complete` would ever claim, billed as storage until a hand abort —
+  the scale drill measured **384 MiB from one interrupted 2 GiB push**.
+  Forge had no sweep; lean and the tier have had one since A9. There is
+  no grace because there need not be: at both moments nothing of this
+  process's own is in flight, so anything pending is a predecessor's or
+  a deposed straggler's. Hygiene, not a gate — a listing the credential
+  cannot make is logged and retried, never a crash loop.
+- **P4 takes both samples**, pending after the kill and zero after the
+  restart, with the kill placed inside the upload by observing
+  `list-multipart-uploads` rather than a guessed sleep: a sweep
+  inferred from a zero is not observed. On the pre-fix binary the parts
+  survive every restart.
+
 ### Fixed — flint forge, the restore ran in series twice over
 
 - **The restore now fans out across files and chunks together**

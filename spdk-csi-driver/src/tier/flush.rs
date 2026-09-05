@@ -1295,6 +1295,7 @@ impl FlushOrchestrator {
                 match file_crc(&path).await {
                     Ok(crc) => {
                         let spec = ComposeSpec {
+                            progress: None,
                             key: &key,
                             local_path: &path,
                             parts: parts.clone(),

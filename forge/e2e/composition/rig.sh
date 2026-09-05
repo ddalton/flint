@@ -108,6 +108,14 @@ verdict() {
 # once for real while writing the large-repo leg.
 binary_is_fresh() {
   head_ "precondition: FORGE_BIN is newer than the sources it claims to be"
+  # A deliberate control run measures an OLD binary on purpose. Naming
+  # the commit is the price of skipping the check: it goes in the log,
+  # so a reader can tell a control run from a stale one — which is the
+  # failure this precondition exists to catch.
+  if [ -n "${CONTROL_COMMIT:-}" ]; then
+    note "control run: FORGE_BIN is deliberately ${CONTROL_COMMIT}, not the tree — the freshness check does not apply"
+    return 0
+  fi
   local newest
   newest=$(find "$REPO_ROOT/forge/syncer/src" "$REPO_ROOT/crates/flint-store/src" \
              -name '*.rs' -newer "$FORGE_BIN" 2>/dev/null | head -3)

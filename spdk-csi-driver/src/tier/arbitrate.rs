@@ -115,6 +115,7 @@ mod tests {
         let content = b"generation-2 bytes!";
         let local = write_local(dir.path(), content);
         let spec = ComposeSpec {
+            progress: None,
             key: "v/f",
             local_path: &local,
             parts: vec![PartSource::Local { offset: 0, len: content.len() as u64 }],
@@ -164,6 +165,7 @@ mod tests {
         let content = b"generation-2 bytes!";
         let local = write_local(dir.path(), content);
         let spec = ComposeSpec {
+            progress: None,
             key: "v/g",
             local_path: &local,
             parts: vec![PartSource::Local { offset: 0, len: content.len() as u64 }],

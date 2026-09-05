@@ -229,7 +229,14 @@ pub async fn maybe_run(
                 return Err(ForgeError::Git(format!("bundle create: {}", out.stderr.trim())));
             }
             let epoch = sc.lease()?.epoch;
-            packio::upload_file(sc.store.as_ref(), &sc.cfg.bundle_key(&name), &path, epoch).await?;
+            packio::upload_file(
+                sc.store.as_ref(),
+                &sc.cfg.bundle_key(&name),
+                &path,
+                epoch,
+                Some(sc.hold.progress_handle()),
+            )
+            .await?;
             // The local copy has served its purpose; the bucket holds
             // it and the clients fetch it from there.
             let _ = std::fs::remove_file(&path);

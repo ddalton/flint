@@ -253,14 +253,128 @@ impl ForgeConfig {
     }
 }
 
+/// The lease, held jointly by the serving loop and the renewer task.
+///
+/// Before this the lease was a field on `Syncer`, renewed by a timer
+/// arm of the serving loop's `select!` — so nothing renewed it while
+/// that loop was inside a batch, a restore or an export. At 10 GiB the
+/// token was measured silent for 125 s during a push and 141 s during
+/// a restore, against a 60 s takeover window (design §5): a live pod,
+/// mid-work, could lose its repository to a challenger.
+///
+/// The renewer (`lease::spawn_renewer`) runs on its own task from the
+/// moment the claim lands, but it is NOT unconditional. While the loop
+/// reports a phase that must move (`Phase::must_progress`), it renews
+/// only if `progress` advanced since its last renewal. A wedged restore
+/// or a wedged upload therefore lets the token go quiet, and the quiet
+/// polls a challenger counts are exactly the takeover a wedged holder
+/// is supposed to get. Renewing for a wedged pod would have traded "a
+/// live pod loses its repository" for "a dead one keeps it".
+pub struct Hold {
+    state: std::sync::Mutex<HoldState>,
+    /// Serialises every renew and release against the store, whichever
+    /// task issues it: two renews in flight would 412 each other and
+    /// take the lost-response path for nothing.
+    gate: tokio::sync::Mutex<()>,
+    /// Units of work landed by the operation in flight — bytes of a
+    /// transfer, commands judged — shared with `packio` and, through
+    /// `ComposeSpec::progress`, with the store's part loop.
+    progress: Arc<std::sync::atomic::AtomicU64>,
+    last_renew_unix: std::sync::atomic::AtomicU64,
+    /// Set the moment this syncer is deposed, and never cleared. Every
+    /// path checks it before touching the store, and the server stops
+    /// answering reads too: a deposed server that kept serving
+    /// `upload-pack` would serve stale refs indefinitely. A `watch`, so
+    /// the serving loop wakes on it from whatever it is awaiting.
+    fenced: tokio::sync::watch::Sender<Option<String>>,
+}
+
+#[derive(Default)]
+struct HoldState {
+    lease: Option<EpochLease>,
+    released: bool,
+}
+
+impl Default for Hold {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Hold {
+    pub fn new() -> Self {
+        let (fenced, _) = tokio::sync::watch::channel(None);
+        Hold {
+            state: std::sync::Mutex::new(HoldState::default()),
+            gate: tokio::sync::Mutex::new(()),
+            progress: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_renew_unix: std::sync::atomic::AtomicU64::new(0),
+            fenced,
+        }
+    }
+    pub fn lease(&self) -> Option<EpochLease> {
+        self.state.lock().unwrap().lease.clone()
+    }
+    /// A claim or a renewal landed.
+    pub fn set_lease(&self, lease: EpochLease) {
+        self.state.lock().unwrap().lease = Some(lease);
+        self.last_renew_unix.store(now_unix(), std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn take_lease(&self) -> Option<EpochLease> {
+        self.state.lock().unwrap().lease.take()
+    }
+    /// A clean release is under way or done: the renewer stops.
+    pub fn mark_released(&self) {
+        self.state.lock().unwrap().released = true;
+    }
+    pub fn is_released(&self) -> bool {
+        self.state.lock().unwrap().released
+    }
+    /// Terminal for the process: nothing clears it.
+    pub fn fence(&self, why: impl Into<String>) -> ForgeError {
+        let why = why.into();
+        self.state.lock().unwrap().lease = None;
+        self.fenced.send_replace(Some(why.clone()));
+        ForgeError::Fenced(why)
+    }
+    pub fn fenced(&self) -> Option<String> {
+        self.fenced.borrow().clone()
+    }
+    pub fn check_fence(&self) -> ForgeResult<()> {
+        match self.fenced() {
+            Some(why) => Err(ForgeError::Fenced(why)),
+            None => Ok(()),
+        }
+    }
+    /// Resolves (`changed`) the moment the fence is set.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.fenced.subscribe()
+    }
+    pub fn progress_handle(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        self.progress.clone()
+    }
+    pub fn progress(&self) -> u64 {
+        self.progress.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub fn tick(&self, units: u64) {
+        self.progress.fetch_add(units, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn last_renew_unix(&self) -> u64 {
+        self.last_renew_unix.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub(crate) async fn gate(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.gate.lock().await
+    }
+}
+
 /// The syncer's live state: the store, the config, the repository, the
 /// lease, and the snapshot cell it is entitled to CAS.
 pub struct Syncer {
     pub store: Arc<dyn ObjectStore>,
     pub cfg: ForgeConfig,
     pub git: gitcmd::Git,
-    /// `None` before the claim, and again the moment we are fenced.
-    pub lease: Option<EpochLease>,
+    /// The lease and the fence, shared with the renewer task.
+    pub hold: Arc<Hold>,
     /// The snapshot this syncer last read or wrote, with the etag its
     /// next CAS must match. `None` means "not loaded yet" — a state in
     /// which no batch may run.
@@ -269,11 +383,6 @@ pub struct Syncer {
     /// state file), which is what makes self-recognition of our own
     /// lease safe and a replacement pod's takeover slow.
     pub holder_id: String,
-    /// Set the moment this syncer is deposed. Every path checks it
-    /// before touching the store, and the server stops answering reads
-    /// too: a deposed server that kept serving `upload-pack` would
-    /// serve stale refs indefinitely.
-    pub fenced: Option<String>,
     /// Unix seconds of the last acknowledged push, for `/status`.
     pub last_push_unix: u64,
     /// A commit the export published that the snapshot does not name
@@ -303,10 +412,9 @@ impl Syncer {
             store,
             cfg,
             git,
-            lease: None,
+            hold: Arc::new(Hold::new()),
             cell: None,
             holder_id,
-            fenced: None,
             last_push_unix: 0,
             pending_exported_commit: None,
             pending_bundle: None,
@@ -318,21 +426,19 @@ impl Syncer {
     /// The one gate every store-touching path takes first. A fence is
     /// terminal for the process: nothing clears it.
     pub fn check_fence(&self) -> ForgeResult<()> {
-        match &self.fenced {
-            Some(why) => Err(ForgeError::Fenced(why.clone())),
-            None => Ok(()),
-        }
+        self.hold.check_fence()
     }
 
     pub fn fence(&mut self, why: impl Into<String>) -> ForgeError {
-        let why = why.into();
-        self.lease = None;
-        self.fenced = Some(why.clone());
-        ForgeError::Fenced(why)
+        self.hold.fence(why)
     }
 
-    pub fn lease(&self) -> ForgeResult<&EpochLease> {
-        self.lease.as_ref().ok_or_else(|| ForgeError::State("no lease held".into()))
+    pub fn fenced(&self) -> Option<String> {
+        self.hold.fenced()
+    }
+
+    pub fn lease(&self) -> ForgeResult<EpochLease> {
+        self.hold.lease().ok_or_else(|| ForgeError::State("no lease held".into()))
     }
 
     pub fn cell(&self) -> ForgeResult<&snapshot::Cell> {
