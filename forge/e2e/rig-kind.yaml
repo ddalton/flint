@@ -1,0 +1,114 @@
+# The forge RIGHTS rig on kind: two principals on one repository, and a
+# second repository with no branch policy at all (the red-hazard
+# control). Applied by run-rights.sh; the store is the in-cluster MinIO
+# the s3csi rig already stands up (bucket s3bucket, root creds
+# drill/drillsecret), so `run-s3csi.sh setup` must have run first.
+apiVersion: v1
+kind: Namespace
+metadata: { name: agents }
+---
+# The syncer reads these through envFrom, so the KEYS ARE THE ENV VAR
+# NAMES: AWS_* verbatim. These are the in-cluster MinIO's root creds.
+apiVersion: v1
+kind: Secret
+metadata: { name: forge-creds, namespace: agents }
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: drill
+  AWS_SECRET_ACCESS_KEY: drillsecret
+  AWS_REGION: us-east-1
+---
+# The READER: listed in consumers, named in no push or merge list.
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: forge-reader, namespace: agents }
+---
+# The WRITER: listed in consumers AND the sole principal allowed to
+# merge into main.
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: forge-writer, namespace: agents }
+---
+# The guarded repository. consumers grants BOTH read; the branch policy
+# separates them: main is protected (no direct push), and only the
+# writer may merge into it via refs/for/main.
+apiVersion: chert.us/v1alpha1
+kind: FlintRepo
+metadata: { name: proj, namespace: agents }
+spec:
+  projectId: proj
+  bucket: s3bucket
+  keyPrefix: forge-drill/proj/
+  endpoint: http://minio.flint-system.svc:9000
+  credentialsSecretRef: forge-creds
+  defaultBranch: main
+  consumers:
+    serviceAccounts: [forge-reader, forge-writer]
+  branches:
+    protected: [main]
+    mergeInto:
+      main: ["system:serviceaccount:agents:forge-writer"]
+    agentPattern: "agent/*"
+---
+# The red-hazard control: same consumers, NO branches block. The plate
+# says "until a branches block exists, every consumer may push" — this
+# repository is where that is put to the test.
+apiVersion: chert.us/v1alpha1
+kind: FlintRepo
+metadata: { name: open, namespace: agents }
+spec:
+  projectId: open
+  bucket: s3bucket
+  keyPrefix: forge-drill/open/
+  endpoint: http://minio.flint-system.svc:9000
+  credentialsSecretRef: forge-creds
+  defaultBranch: main
+  consumers:
+    serviceAccounts: [forge-reader, forge-writer]
+---
+# The two agent pods. Each holds ONE projected token, audience
+# forge.chert.us, and nothing else — its whole authority. The image
+# carries git, which the drill execs.
+apiVersion: v1
+kind: Pod
+metadata: { name: reader, namespace: agents, labels: { role: forge-agent } }
+spec:
+  serviceAccountName: forge-reader
+  restartPolicy: Never
+  containers:
+    - name: agent
+      image: dilipdalton/flint-forge-git:dev
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - { name: forge-token, mountPath: /var/run/secrets/forge, readOnly: true }
+  volumes:
+    - name: forge-token
+      projected:
+        sources:
+          - serviceAccountToken:
+              path: token
+              audience: forge.chert.us
+              expirationSeconds: 3600
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: writer, namespace: agents, labels: { role: forge-agent } }
+spec:
+  serviceAccountName: forge-writer
+  restartPolicy: Never
+  containers:
+    - name: agent
+      image: dilipdalton/flint-forge-git:dev
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - { name: forge-token, mountPath: /var/run/secrets/forge, readOnly: true }
+  volumes:
+    - name: forge-token
+      projected:
+        sources:
+          - serviceAccountToken:
+              path: token
+              audience: forge.chert.us
+              expirationSeconds: 3600

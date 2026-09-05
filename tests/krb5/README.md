@@ -36,6 +36,7 @@ cross-build with
 | `run-secfloor.sh` | `FLINT_NFS_MIN_SEC` actually refuses | 12 ok, 0 bad |
 | `run-pynfs-gss.sh` | the conformance suite over GSS; takes test codes (EID9, CSID1) or `all` | 175/23/68 on every flavor — `results/` |
 | `run-gssneg.sh` | **the negative legs** — wrong service key, unknown context handle, wire replay, stale MIC, and whether a keyless peer can move the replay window | 27 ok, 0 bad — `results/gssneg-2026-08-28.log` |
+| `run-authz-gss.sh` | **does a Kerberos identity carry any rights?** — ENFORCE mode, one uid, two mounts differing only in `sec=`: sys is denied, krb5p is not | 14 ok, 0 bad, **CONFIRMED** — `results/authz-gss-2026-09-05.log` |
 
 ## Traps, each of which cost a run
 
@@ -175,3 +176,43 @@ exactly why `sec=sys` testing could never see it.
 **The realm is disposable.** `FLINT.TEST` keys authenticate nothing; the
 committed `src/nfs/krb/testdata/interop.keytab` belongs to a KDC that no
 longer exists. Rebuild with `setup-kdc.sh`, never reuse.
+
+## Identity without rights: the permission drill over GSS
+
+`run-authz-gss.sh` (2026-09-05) asks a question the drills above never
+put: once krb5p has proven WHO is calling, does the server derive any
+rights from it? The code says no — a GSS COMPOUND carries no unix
+credential (`compound.rs`, `unix_cred: None` under AUTH_NONE/GSS), so
+`authz::check` returns Ok having evaluated nothing, whatever
+`FLINT_NFS_ENFORCE_PERMISSIONS` says. That was scored into the security
+plate of the architecture deck and the radar's Rights axis from a single
+reading, so this drill exists to put it on the wire.
+
+The shape is a differential: one server in ENFORCE mode, one caller
+(uid 503, holding a real TGT), three files owned by uid 1001, and two
+mounts that differ only in `sec=`. The sys arm is the control and must
+be DENIED, or Enforce is not live and the krb5p arm proves nothing.
+
+| arm | 0644 read | 0600 read | write, not owner | created file's owner | server DENIED |
+|---|---|---|---|---|---|
+| sys | ok | **denied** | **denied** | 503 (the caller) | 2 |
+| krb5p | ok | **ok** | **landed** | **0** | 0 |
+
+Confirmed. Under krb5p the same uid the sys arm refused reads the 0600
+file and writes the file it does not own, and the server logs nothing,
+because nothing was evaluated. Two things the reading did not predict:
+
+- **A file created over krb5p is owned by root on the server.** With no
+  unix credential to stamp, OPEN(create) leaves the backing object owned
+  by the server process. A Kerberos user's files are therefore root's,
+  which a later `sec=sys` client in Enforce mode cannot write either.
+- **The server does not log its enforcement mode at start.** The drill
+  prints `(no line names it)`; the only evidence Enforce is on is a
+  denial.
+
+One rig trap: the owner-reads-its-own-file control was red on the first
+run because `sudo -u "#1001"` is refused by this sudo for a uid with no
+passwd entry (`unknown user #1001`). The leg uses `setpriv` now. A red
+control in an otherwise green drill is still a red drill until it is
+explained.
+

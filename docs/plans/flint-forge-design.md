@@ -390,6 +390,24 @@ sees `ok` with `option refname refs/heads/main` and the new oid.
 `refs/for/` is never stored. Verified end-to-end on 2.50.1 in a
 46-line hook. One path to S3, structurally, rather than by convention.
 
+**Per-principal, on the wire (2026-09-05).** `forge/e2e/run-rights.sh`
+(with `rig-kind.yaml`) puts two ServiceAccounts through one repository
+on a kind cluster whose CNI is Cilium — because kind's default CNI does
+not enforce a NetworkPolicy, and the boundary below is the whole point.
+A reader listed only in `consumers` is refused a direct push to `main`
+(`is protected: push to refs/for/main`) and a `refs/for/main` merge
+(`only system:serviceaccount:agents:forge-writer may propose merges`),
+while the writer named in `mergeInto` merges and both read the result.
+A forged `X-Remote-User` sent to the DOOR is overridden — the door sets
+it from the verified token — but sent straight to the repo pod's git
+port it is believed: with the rendered NetworkPolicy in place the
+reader cannot open 8080 at all (the door can, the control), and with it
+deleted the same forged header pushed to 8080 MERGES into `main`. That
+pair is the evidence that `X-Remote-User` means something ONLY behind
+the policy. The `open` repo, carrying no `branches` block, lets the
+reader push straight to `main`: the permissive default, confirmed.
+17 legs, green, twice.
+
 ## 7. The agent's workflow, and the RPO question
 
 ```
@@ -823,6 +841,22 @@ do not need to be.
     (the syncer closed the connection without a report)`; the server
     stopped being ready ~20 s later rather than holding a lease it could
     not renew; and it recovered when S3 returned.
+12. **Per-principal authorization and the header boundary.** On one
+    repository, a reader (in `consumers`, in no push or merge list) and
+    a writer (named in `mergeInto`) — the reader refused `main` and
+    `refs/for/main`, the writer merged, both read. A forged
+    `X-Remote-User` to the door is overridden; the same header sent
+    directly to the repo pod's git port is trusted, so the boundary is
+    the NetworkPolicy the operator renders.
+
+    **RUN 2026-09-05 on kind + Cilium — GREEN, 17 legs (rerun 17).**
+    `forge/e2e/run-rights.sh`. The vacuity-breaker: with the
+    NetworkPolicy deleted (operator scaled to 0) the reader's forged
+    `X-Remote-User: …forge-writer`, pushed straight to `:8080`, merged
+    into `main`; the operator then re-rendered the policy and the port
+    was blocked again. A NetworkPolicy is inert under kind's default
+    CNI, which is why this runs on Cilium.
+
 
 ## 14. Phases
 

@@ -1,0 +1,61 @@
+server: /var/tmp/flint-nfs-server-authz
+caller: uid 503 (ddalton); file owner: uid 1001; port 20497
+export:
+    total 16
+    drwxrwxrwx 2    0    0 4096 Sep  5 08:39 open
+    -rw-r--r-- 1 1001 1001    8 Sep  5 08:39 scratch.txt
+    -rw------- 1 1001 1001    7 Sep  5 08:39 secret.txt
+    -rw-r--r-- 1 1001 1001    6 Sep  5 08:39 world.txt
+  ok   rpc.gssd is running
+  ok   flint-nfs-server is listening on 20497 with FLINT_NFS_ENFORCE_PERMISSIONS=enforce
+  ..   server on the mode: (no line names it)
+  ok   uid 503 holds a TGT for testuser in FILE:/tmp/krb5cc_503
+
+──── arm sec=sys: uid 503 against files owned by 1001 ────
+  ok   [sys] mounted
+  ok   [sys] /proc/mounts really says sec=sys
+  ok   [sys] CONTROL: the 0644 file reads (ok) — the mount and, under GSS, the uid's context work
+  ..   [sys] read of the 0600 file owned by 1001: denied
+  ..   [sys] write to the 0644 file owned by 1001: denied
+  ..   [sys] a file created in the 0777 directory is owned on the server by uid 503 (caller is 503)
+  ok   [sys] CONTROL: the OWNER (uid 1001) reads the 0600 file — the denial is about identity, not the file
+  ..   [sys] server DENIED lines during this arm: 2
+
+──── arm sec=krb5p: uid 503 against files owned by 1001 ────
+  ok   [krb5p] mounted
+  ok   [krb5p] /proc/mounts really says sec=krb5p
+  ok   [krb5p] CONTROL: the 0644 file reads (ok) — the mount and, under GSS, the uid's context work
+  ..   [krb5p] read of the 0600 file owned by 1001: ok
+  ..   [krb5p] write to the 0644 file owned by 1001: landed
+  ..   [krb5p] a file created in the 0777 directory is owned on the server by uid 0 (caller is 503)
+  ..   [krb5p] server DENIED lines during this arm: 0
+
+  ok   [sys] CONTROL: uid 503 is DENIED the 0600 file (Enforce is live)
+  ok   [sys] CONTROL: uid 503 is DENIED the write to a 0644 file it does not own
+  ok   [sys] CONTROL: the server logged the denials (2 lines)
+  ok   [sys] CONTROL: a file created under sys is stamped with the caller's uid
+
+════ observation table (uid 503; files owned by 1001; server ENFORCE) ════
+  arm      0644 read  0600 read    write (not owner)  created owner  server DENIED
+  sys      ok         denied       denied             503            2
+  krb5p    ok         ok           landed             0              0
+
+════ VERDICT: CONFIRMED ════
+  krb5p authenticated the caller and evaluated no rights: the same uid the sys arm denied reads the 0600 file / writes the file it does not own, and the server logged nothing.
+
+=== server DENIED lines ===
+2026-09-05T15:39:29.940593Z  WARN DENIED OPEN(no-create) on "/srv/flintauthz/secret.txt" for uid=503 gid=1000 (file 1001:1001 mode 600)
+2026-09-05T15:39:29.944319Z  WARN DENIED OPEN on "/srv/flintauthz/scratch.txt" for uid=503 gid=1000 (file 1001:1001 mode 644)
+=== server log tail ===
+2026-09-05T15:39:32.063491Z  INFO 🔐 GSS Cred: version=1, procedure=3, seq=9, service=Integrity
+2026-09-05T15:39:32.063492Z  INFO 🔐 RPCSEC_GSS_DESTROY
+2026-09-05T15:39:32.063493Z  INFO RPCSEC_GSS_DESTROY: handle=[4d, c4, c4, 1f, 6a, 74, eb, d6, 3a, f6, 6a, 95, 58, fb, 7e, 97]
+2026-09-05T15:39:32.063604Z  INFO 🔌 [NFS_SERVER] Connection #12 from 127.0.0.1:789 closed after 124.756µs (1 RPCs processed)
+2026-09-05T15:39:32.063617Z  INFO ✓ [NFS_SERVER] Connection #12 from 127.0.0.1:789 closed cleanly (Active: 0)
+=== rpc.gssd: contexts for uid 503 ===
+krb5_not_machine_creds(0xf63a71bbf180): uid 503 tgtname (null)
+
+=== 14 ok, 0 bad — CONFIRMED ===
+
+# binary: spdk-csi-driver/target/aarch64-unknown-linux-musl/release/flint-nfs-server, cross-built from 05cd2968 (clean tree) at 08:37 PDT, sha256 c093b3ed699f9ae0…
+# VM: lima flint-nfs-client (Ubuntu 24.04 aarch64), MIT KDC realm FLINT.TEST installed for this run; caller uid 503 = testuser@FLINT.TEST
