@@ -191,8 +191,8 @@
 <text class="t4" x="563" y="579">Bitmaps ship with every pack; a clone BUNDLE is cut on a floor, uploaded beside the packs</text>
 <text class="t4" x="563" y="594">and advertised as a presigned URL re-signed at half its TTL — the client must opt in</text>
 <text class="t4" x="563" y="609">(transfer.bundleURI=true).</text>
-<text class="t4b" x="563" y="624">Measured on EC2: 1,000 clones cost the server 0.5 MiB of egress with bundles, 4,041</text>
-<text class="t4b" x="563" y="639">MiB without.</text>
+<text class="t4b" x="563" y="624">Measured on EC2 (F8): 1,000 clones cost the server 5.7 MiB of egress with bundles</text>
+<text class="t4b" x="563" y="639">advertised and the client opted in, 40,409 MiB with the opt-in off — 7,000×.</text>
 <text class="t4" x="563" y="654">LFS: the batch API runs in the syncer and answers with presigned URLs, so a checkpoint</text>
 <text class="t4" x="563" y="669">goes client-to-store and the pod sees a few hundred bytes of JSON. The pruner takes only</text>
 <text class="t4" x="563" y="684">branches main already contains, and only once quiet.</text>
@@ -205,8 +205,8 @@
 <text class="t4" x="1087" y="609">It runs AFTER the report and never CASes the snapshot; lean and passthrough readers mount</text>
 <text class="t4" x="1087" y="624">main read-only with no forge code in them.</text>
 <text class="t4b c-red" x="1087" y="639">A mirror that is never repaired: a foreign write into it is not noticed (the barrier diffs a</text>
-<text class="t4b c-red" x="1087" y="654">local scan against a local baseline) and every reader adopts it. Readers of an export</text>
-<text class="t4b c-red" x="1087" y="669">are readers.</text>
+<text class="t4b c-red" x="1087" y="654">local scan against a local baseline); a reader that verifies against the manifest refuses</text>
+<text class="t4b c-red" x="1087" y="669">it, a mount with no manifest takes it. Readers of an export are readers.</text>
 <text class="t4" x="1087" y="684">It is awaited inline with the heartbeat: a blocked barrier now times out and backs off, but</text>
 <text class="t4" x="1087" y="699">pushes stall for that long.</text>
 <rect x="24" y="738" width="1552" height="118" rx="7" class="panel"/>

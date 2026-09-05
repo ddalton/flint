@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
-     aria-label="The four front ends compose by prefix, and the composition is in the reading, never the writing. One agent pod holds a forge clone for its code, a lean workspace for its hot working set, a passthrough mount for datasets and a hub share for what several pods edit live; forge exports main into its own prefix as a real lean workspace that lean and passthrough readers mount. One prefix has one writer — a mechanism within each product, a convention across them, because forge and lean arbitrate on different cells and never meet — and an export is a mirror that is never repaired: a foreign overwrite is adopted by every reader, a foreign delete is refused and never restored.">
+     aria-label="The four front ends compose by prefix, and the composition is in the reading, never the writing. One agent pod holds a forge clone for its code, a lean workspace for its hot working set, a passthrough mount for datasets and a hub share for what several pods edit live; forge exports main into its own prefix as a real lean workspace that lean and passthrough readers mount. One prefix has one writer — a mechanism within each product, a convention across them, because forge and lean arbitrate on different cells and never meet — and an export is a mirror that is never repaired: a foreign overwrite stands and is served to any reader that cannot verify it, a foreign delete is refused and never restored.">
 <style>
   text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
   .t1{font-size:17.0px;font-weight:600}
@@ -88,8 +88,8 @@
 <rect x="24" y="506" width="560" height="84" rx="7" class="bx"/>
 <path class="f-pass" d="M31,506 H577 A7,7 0 0 1 584,513 V511 H24 V513 A7,7 0 0 1 31,506 Z"/>
 <text class="t2 c-pass" x="40" y="530">a build-farm pod, elsewhere</text>
-<text class="t4" x="40" y="550">mounts B — forge's export of main — read-only through lean or passthrough and never runs git. That is</text>
-<text class="t4" x="40" y="564">the composition: several readers of one writer's prefix.</text>
+<text class="t4" x="40" y="550">mounts B/files/ — forge's export of main — read-only through lean or passthrough and never runs git. That</text>
+<text class="t4" x="40" y="564">is the composition: several readers of one writer's prefix.</text>
 <text class="t4b" x="40" y="578">It writes nothing there. See the hazard on the right.</text>
 <rect x="608" y="22" width="470" height="562" rx="7" class="s3"/>
 <text class="t1" x="628" y="50">one bucket, five prefixes, one writer each</text>
@@ -104,7 +104,7 @@
 <path class="f-forge" d="M635,182 H1051 A7,7 0 0 1 1058,189 V187 H628 V189 A7,7 0 0 1 635,182 Z"/>
 <text class="t2 c-forge" x="644" y="206">B  repo-main/ — writer: the syncer, via the shipped flint-sync</text>
 <text class="mono" x="644" y="226" xml:space="preserve">files/&lt;path&gt;  .flint/lean/{epoch,current,chunks/}</text>
-<text class="t4b" x="644" y="241">a REAL lean workspace; readers: lean, passthrough</text>
+<text class="t4b" x="644" y="241">a REAL lean workspace; readers: lean, and passthrough aimed at B/files/</text>
 <rect x="628" y="268" width="430" height="61" rx="7" class="bx"/>
 <path class="f-lean" d="M635,268 H1051 A7,7 0 0 1 1058,275 V273 H628 V275 A7,7 0 0 1 635,268 Z"/>
 <text class="t2 c-lean" x="644" y="292">C  ws/&lt;agent&gt;/ — writer: the lean sidecar</text>
@@ -125,31 +125,32 @@
 <text class="t2" x="1118" y="46">One writer per prefix — where it is a mechanism, and where it is not</text>
 <text class="t4b" x="1118" y="66">Within a product, a mechanism:</text>
 <text class="t4" x="1118" y="80">an epoch lease plus one CAS'd pointer — forge's on git/epoch, lean's on</text>
-<text class="t4" x="1118" y="94">.flint/lean/epoch. A second writer of the same product 412s, fences and exits; drilled</text>
-<text class="t4" x="1118" y="108">both ways.</text>
-<text class="t4b c-red" x="1118" y="122">Across products, a convention: the cells are disjoint.</text>
-<text class="t4" x="1118" y="136">Point forge and lean at ONE prefix and they never meet — both acquire epoch 1 under</text>
-<text class="t4" x="1118" y="150">different holders; no 412, no fence, no log line (drill C1). The operator's arbitration</text>
-<text class="t4" x="1118" y="164">reasons over FlintRepos only: it refuses an export aimed at another repository and</text>
-<text class="t4" x="1118" y="178">sees nothing involving a lean CR.</text>
-<text class="t4" x="1118" y="192">The one arbitrated direction: a read-write lean sidecar on the EXPORT prefix contends</text>
-<text class="t4" x="1118" y="206">on the same cell — and until today that wedged the repository, because the syncer</text>
-<text class="t4" x="1118" y="220">awaited the blocked export inline with its own heartbeat (C2; now bounded by a</text>
-<text class="t4" x="1118" y="234">timeout with backoff — pushes still stall for that long).</text>
+<text class="t4" x="1118" y="94">.flint/lean/epoch. A second writer of the same product does not acquire: it observes the</text>
+<text class="t4" x="1118" y="108">standing lease and waits, superseding only after six quiet polls have shown the holder</text>
+<text class="t4" x="1118" y="122">dead; drilled both ways.</text>
+<text class="t4b c-red" x="1118" y="136">Across products, a convention: the cells are disjoint.</text>
+<text class="t4" x="1118" y="150">Point forge and lean at ONE prefix and they never meet — both acquire epoch 1 under</text>
+<text class="t4" x="1118" y="164">different holders; no 412, no fence, no log line (drill C1). The operator's arbitration</text>
+<text class="t4" x="1118" y="178">reasons over FlintRepos only: it refuses an export aimed at another repository and</text>
+<text class="t4" x="1118" y="192">sees nothing involving a lean CR.</text>
+<text class="t4" x="1118" y="206">The one arbitrated direction: a read-write lean sidecar on the EXPORT prefix contends</text>
+<text class="t4" x="1118" y="220">on the same cell — and until today that wedged the repository, because the syncer</text>
+<text class="t4" x="1118" y="234">awaited the blocked export inline with its own heartbeat (C2; now bounded by a</text>
+<text class="t4" x="1118" y="248">timeout with backoff — pushes still stall for that long).</text>
 <rect x="1102" y="306" width="474" height="278" rx="7" class="bx"/>
 <path class="f-red" d="M1102,313 A7,7 0 0 1 1109,306 H1107 V584 H1109 A7,7 0 0 1 1102,577 Z"/>
 <text class="t2 c-red" x="1118" y="330">An export is a mirror that is never repaired</text>
 <text class="t4" x="1118" y="350">The barrier computes uploads and deletes from a LOCAL scan against a LOCAL</text>
 <text class="t4" x="1118" y="364">baseline; the only remote thing it reads is the pointer's etag. A foreign write into B</text>
 <text class="t4" x="1118" y="378">moves no pointer and changes no local file, so no later export notices it (C3).</text>
-<text class="t4b c-red" x="1118" y="392">Every reader then takes the foreign bytes (C4):</text>
-<text class="t4" x="1118" y="406">a plain reader serves them; lean's checkout adopts them — the etag-pinned refusal fires</text>
-<text class="t4" x="1118" y="420">only under a gated citation — and copies them into an agent's workspace, where they</text>
-<text class="t4" x="1118" y="434">can be committed back into git as real content. Only git clone, which never touches the</text>
-<text class="t4" x="1118" y="448">export, is unaffected.</text>
+<text class="t4b c-red" x="1118" y="392">A reader that cannot verify takes the foreign bytes (C4):</text>
+<text class="t4" x="1118" y="406">a passthrough or lite mount has no manifest to check against and serves them. A</text>
+<text class="t4" x="1118" y="420">reader that verifies now refuses: the export marks its manifests as published by a sole</text>
+<text class="t4" x="1118" y="434">writer, and lean's checkout refuses an object off its citation — after the drill first found</text>
+<text class="t4" x="1118" y="448">it adopting. Detectable, not self-healing.</text>
 <text class="t4b" x="1118" y="462">A foreign DELETE is refused loudly by lean and never restored (C5).</text>
-<text class="t4" x="1118" y="476">Overwrite is adopted silently; delete is refused loudly: the milder-looking operation is</text>
-<text class="t4" x="1118" y="490">the dangerous one.</text>
+<text class="t4" x="1118" y="476">For the unverifying reader an overwrite stands silently while a delete is refused</text>
+<text class="t4" x="1118" y="490">loudly: the milder-looking operation is the dangerous one.</text>
 <text class="t4b c-red" x="1118" y="504">So a read-write mount over an export prefix is unsupported, and readers of an</text>
 <text class="t4b c-red" x="1118" y="518">export are readers.</text>
 <rect x="24" y="600" width="1552" height="256" rx="7" class="panel"/>

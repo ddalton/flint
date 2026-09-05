@@ -90,9 +90,9 @@
 <rect x="326" y="320" width="306" height="140" rx="7" class="bx"/>
 <path class="f-red" d="M326,327 A7,7 0 0 1 333,320 H331 V460 H333 A7,7 0 0 1 326,453 Z"/>
 <text class="t2 c-red" x="342" y="344">An export is a mirror that is never repaired</text>
-<text class="t4" x="342" y="364">a foreign overwrite is not noticed by the next export (C3) and</text>
-<text class="t4" x="342" y="377">every reader adopts it — lean copies the bytes into a</text>
-<text class="t4" x="342" y="390">workspace (C4); a foreign delete is refused loudly and never</text>
-<text class="t4" x="342" y="403">restored (C5). A read-write mount over an export prefix is</text>
-<text class="t4" x="342" y="416">unsupported.</text>
+<text class="t4" x="342" y="364">a foreign overwrite is not noticed by the next export (C3); a</text>
+<text class="t4" x="342" y="377">reader with no manifest serves it, and a reader that verifies</text>
+<text class="t4" x="342" y="390">now refuses it (C4); a foreign delete is refused loudly and</text>
+<text class="t4" x="342" y="403">never restored (C5). A read-write mount over an export prefix</text>
+<text class="t4" x="342" y="416">is unsupported.</text>
 </svg>

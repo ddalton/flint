@@ -852,12 +852,12 @@ def plate_06():
             ("b", "As built the clock counts pushes only: a fetch never reaches the syncer, so read-only use is parked one threshold after its wake.")], fe)
     s.card(M + cw + GAP, 520, cw, 200, "Fleet levers — take the server out of the transfer",
            ["A thousand clones are ~130 CPU-s but 43 GB from one NIC: egress binds before CPU. Bitmaps ship with every pack; a clone BUNDLE is cut on a floor, uploaded beside the packs and advertised as a presigned URL re-signed at half its TTL — the client must opt in (transfer.bundleURI=true).",
-            ("b", "Measured on EC2: 1,000 clones cost the server 0.5 MiB of egress with bundles, 4,041 MiB without."),
+            ("b", "Measured on EC2 (F8): 1,000 clones cost the server 5.7 MiB of egress with bundles advertised and the client opted in, 40,409 MiB with the opt-in off — 7,000×."),
             "LFS: the batch API runs in the syncer and answers with presigned URLs, so a checkpoint goes client-to-store and the pod sees a few hundred bytes of JSON. The pruner takes only branches main already contains, and only once quiet."], fe)
     s.card(M + 2 * (cw + GAP), 520, cw, 200, "The export — a legible mirror, by the shipped lean binary",
            ["After a batch moves an exported ref, the syncer materialises the tree with a two-tree read-tree — touching exactly what changed, removing what is gone — and runs flint-sync barrier over it, so lean's ordering (upload, CAS, deletes LAST) is inherited, not re-derived.",
             "It runs AFTER the report and never CASes the snapshot; lean and passthrough readers mount main read-only with no forge code in them.",
-            ("r", "A mirror that is never repaired: a foreign write into it is not noticed (the barrier diffs a local scan against a local baseline) and every reader adopts it. Readers of an export are readers."),
+            ("r", "A mirror that is never repaired: a foreign write into it is not noticed (the barrier diffs a local scan against a local baseline); a reader that verifies against the manifest refuses it, a mount with no manifest takes it. Readers of an export are readers."),
             "It is awaited inline with the heartbeat: a blocked barrier now times out and backs off, but pushes stall for that long."], fe)
     # ── the ledger ──
     s.box(M, 738, W - 2 * M, 118, None, "panel")
@@ -1088,7 +1088,7 @@ def plate_11():
                   "share for what several pods edit live; forge exports main into its own prefix as a real lean workspace that lean "
                   "and passthrough readers mount. One prefix has one writer — a mechanism within each product, a convention across "
                   "them, because forge and lean arbitrate on different cells and never meet — and an export is a mirror that is never "
-                  "repaired: a foreign overwrite is adopted by every reader, a foreign delete is refused and never restored.")
+                  "repaired: a foreign overwrite stands and is served to any reader that cannot verify it, a foreign delete is refused and never restored.")
     # ── one agent pod, four doors ──
     s.group(M, 22, 560, 470, "one agent pod", "four attachments; a stock image with no flint code in it")
     attach = [
@@ -1102,7 +1102,7 @@ def plate_11():
         s.card(44, y, 372, 96, head, [body, ("b", via)], fe, "tint", lh=14)
         s.arrow(416, y + 48, 470, y + 48, fe)
         s.card(474, y + 16, 102, 64, "", [("b", letter), ("m", prefix)], fe, pad=12)
-    s.card(M, 506, 560, 84, "a build-farm pod, elsewhere", ["mounts B — forge's export of main — read-only through lean or passthrough and never runs git. That is the composition: several readers of one writer's prefix.", ("b", "It writes nothing there. See the hazard on the right.")], "pass", lh=14)
+    s.card(M, 506, 560, 84, "a build-farm pod, elsewhere", ["mounts B/files/ — forge's export of main — read-only through lean or passthrough and never runs git. That is the composition: several readers of one writer's prefix.", ("b", "It writes nothing there. See the hazard on the right.")], "pass", lh=14)
     # ── the bucket ──
     s.box(608, 22, 470, 562, None, "s3")
     s.text(628, 50, "one bucket, five prefixes, one writer each", "t1")
@@ -1110,7 +1110,7 @@ def plate_11():
     s.hair(628, 82, 1058, 82)
     pre = [
         ("forge", "A  repo/ — writer: the syncer", [("m", "git/objects/pack/*  git/snapshot"), ("m", "git/epoch · git/claim  lfs/objects/")]),
-        ("forge", "B  repo-main/ — writer: the syncer, via the shipped flint-sync", [("m", "files/<path>  .flint/lean/{epoch,current,chunks/}"), ("b", "a REAL lean workspace; readers: lean, passthrough")]),
+        ("forge", "B  repo-main/ — writer: the syncer, via the shipped flint-sync", [("m", "files/<path>  .flint/lean/{epoch,current,chunks/}"), ("b", "a REAL lean workspace; readers: lean, and passthrough aimed at B/files/")]),
         ("lean", "C  ws/<agent>/ — writer: the lean sidecar", [("m", "files/<path>  .flint/lean/{epoch,claim,current}")]),
         ("pass", "D  datasets/ — writer: whoever owns them", [("m", "<key>  — objects and nothing else; passthrough reads")]),
         ("lite", "E  shared/ — writer: the hub", [("m", "<path>  .flint/epoch · manifest · owner")]),
@@ -1128,13 +1128,13 @@ def plate_11():
     s.text(628, y + 27, "flint-sync barrier over it. Nothing else crosses a prefix boundary, in either direction.", "t4")
     # ── the rule, and the hazard ──
     s.card(1102, 22, 474, 270, "One writer per prefix — where it is a mechanism, and where it is not",
-           [("b", "Within a product, a mechanism:"), "an epoch lease plus one CAS'd pointer — forge's on git/epoch, lean's on .flint/lean/epoch. A second writer of the same product 412s, fences and exits; drilled both ways.",
+           [("b", "Within a product, a mechanism:"), "an epoch lease plus one CAS'd pointer — forge's on git/epoch, lean's on .flint/lean/epoch. A second writer of the same product does not acquire: it observes the standing lease and waits, superseding only after six quiet polls have shown the holder dead; drilled both ways.",
             ("r", "Across products, a convention: the cells are disjoint."), "Point forge and lean at ONE prefix and they never meet — both acquire epoch 1 under different holders; no 412, no fence, no log line (drill C1). The operator's arbitration reasons over FlintRepos only: it refuses an export aimed at another repository and sees nothing involving a lean CR.",
             "The one arbitrated direction: a read-write lean sidecar on the EXPORT prefix contends on the same cell — and until today that wedged the repository, because the syncer awaited the blocked export inline with its own heartbeat (C2; now bounded by a timeout with backoff — pushes still stall for that long)."], None, lh=14)
     s.card(1102, 306, 474, 278, "An export is a mirror that is never repaired",
            ["The barrier computes uploads and deletes from a LOCAL scan against a LOCAL baseline; the only remote thing it reads is the pointer's etag. A foreign write into B moves no pointer and changes no local file, so no later export notices it (C3).",
-            ("r", "Every reader then takes the foreign bytes (C4):"), "a plain reader serves them; lean's checkout adopts them — the etag-pinned refusal fires only under a gated citation — and copies them into an agent's workspace, where they can be committed back into git as real content. Only git clone, which never touches the export, is unaffected.",
-            ("b", "A foreign DELETE is refused loudly by lean and never restored (C5)."), "Overwrite is adopted silently; delete is refused loudly: the milder-looking operation is the dangerous one.",
+            ("r", "A reader that cannot verify takes the foreign bytes (C4):"), "a passthrough or lite mount has no manifest to check against and serves them. A reader that verifies now refuses: the export marks its manifests as published by a sole writer, and lean's checkout refuses an object off its citation — after the drill first found it adopting. Detectable, not self-healing.",
+            ("b", "A foreign DELETE is refused loudly by lean and never restored (C5)."), "For the unverifying reader an overwrite stands silently while a delete is refused loudly: the milder-looking operation is the dangerous one.",
             ("r", "So a read-write mount over an export prefix is unsupported, and readers of an export are readers.")], None, "warn", lh=14)
     # ── pick per data class ──
     s.box(M, 600, W - 2 * M, 256, None, "panel")
@@ -1382,7 +1382,7 @@ def portrait_p7():
     y = s.para(382, y + 6, "D  datasets/ — objects as-is. E  shared/ — the hub's.", 234)
     s.para(382, y + 8, "Composition is in the reading, never the writing.", 234, "t4b")
     s.card(8, 320, 306, 140, "The rule: mechanism within, convention across", ["forge arbitrates on git/epoch, lean on .flint/lean/epoch: pointed at one prefix they never meet — no 412, no fence, no log line (C1). The operator sees FlintRepos only. A read-write lean sidecar on the export prefix does contend, and used to wedge the repository (C2, now bounded)."], None, lh=13)
-    s.card(326, 320, 306, 140, "An export is a mirror that is never repaired", ["a foreign overwrite is not noticed by the next export (C3) and every reader adopts it — lean copies the bytes into a workspace (C4); a foreign delete is refused loudly and never restored (C5). A read-write mount over an export prefix is unsupported."], None, "warn", lh=13)
+    s.card(326, 320, 306, 140, "An export is a mirror that is never repaired", ["a foreign overwrite is not noticed by the next export (C3); a reader with no manifest serves it, and a reader that verifies now refuses it (C4); a foreign delete is refused loudly and never restored (C5). A read-write mount over an export prefix is unsupported."], None, "warn", lh=13)
     return s
 
 
