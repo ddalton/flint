@@ -280,6 +280,7 @@ push_and_restore() { # repo name mb tag
   t0=$(now); out=$(inpod "DOOR=$DOOR NS=$NS /work/push.sh $name $repo agent/$tag"); rc=$?; t1=$(now)
   sleep $((HEARTBEAT + 5)); stop_watch "$WORK/tok-push-$tag" "$tw"
   P_SECS=$((t1 - t0)); P_SILENCE=$(longest_silence "$WORK/tok-push-$tag")
+  K -n "$NS" logs "$(repo_pod "$repo")" -c syncer --timestamps --since="$((P_SECS + HEARTBEAT + 30))s" > "$WORK/log-push-$tag" 2>/dev/null
   if [ "$rc" = 0 ]; then ok "push of $name acknowledged in $P_SECS s"
   else bad "push of $name failed (rc=$rc): $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; return 1; fi
   note "lease token silent for ${P_SILENCE:-?} s during the push (window ${WINDOW}s)"
@@ -365,6 +366,7 @@ cold_restore() { # repo tag
   R_RSS=$(max_col "$WORK/rss-$tag" 1); R_RSS=${R_RSS:-0}
   R_WS=$(max_col "$WORK/rss-$tag" 2);  R_WS=${R_WS:-0}
   R_SILENCE=$(longest_silence "$WORK/tok-$tag"); R_SILENCE=${R_SILENCE:-0}
+  K -n "$NS" logs "$new" -c syncer --timestamps > "$WORK/log-restore-$tag" 2>/dev/null
   note "$repo restored by $new: $R_SECS s from the delete ($R_SECS_CT s from the syncer's start); anon RSS max $(mib "$R_RSS") MiB; lease token silent $R_SILENCE s"
   [ "$seen" = 1 ] || note "the poll never caught phase=importing (a fast restore)"
   return 0
@@ -408,12 +410,29 @@ leg_S2() {
         inconc "RESTORE: the token was silent only ${R_SILENCE:-?}s ≤ ${WINDOW}s — the repository is not large enough for S3 to open the window; raise MAX_MB or TARGET_RESTORE_SECS"
       fi ;;
     window-closed)
-      [ "${P_SILENCE:-999}" -le "$bound" ] \
-        && ok "PUSH: the token was silent at most ${P_SILENCE}s ≤ ${bound}s while $(mib "$PACK_SIZE") MiB uploaded in $P_SECS s — renewal covers the upload" \
-        || bad "PUSH: the token was silent ${P_SILENCE:-?}s > ${bound}s during the upload: the renewer is NOT covering the batch (EXPECT=window-closed)"
-      [ "${R_SILENCE:-999}" -le "$bound" ] \
-        && ok "RESTORE: the token was silent at most ${R_SILENCE}s ≤ ${bound}s across a ${R_SECS_CT:-?} s restore — renewal covers the restore" \
-        || bad "RESTORE: the token was silent ${R_SILENCE:-?}s > ${bound}s during a ${R_SECS_CT:-?} s restore: the renewer is NOT running before the restore (EXPECT=window-closed)" ;;
+      # The renewer is progress-gated: a transfer that moves nothing
+      # LETS the token go quiet so a wedged server can be taken over,
+      # and the syncer says so in its log. A long silence with that
+      # line present is the gate's, not a missing renewer — and it
+      # means renewal was not exercised across the stall, which is
+      # inconclusive, not a pass.
+      local gp gr
+      gp=$(grep -c 'moved nothing since the last renewal' "$WORK/log-push-big" 2>/dev/null); gp=${gp:-0}
+      gr=$(grep -c 'moved nothing since the last renewal' "$WORK/log-restore-big" 2>/dev/null); gr=${gr:-0}
+      if [ "${P_SILENCE:-999}" -le "$bound" ]; then
+        ok "PUSH: the token was silent at most ${P_SILENCE}s ≤ ${bound}s while $(mib "$PACK_SIZE") MiB uploaded in $P_SECS s — renewal covers the upload (progress-gate lines: $gp)"
+      elif [ "$gp" -gt 0 ]; then
+        inconc "PUSH: the token was silent ${P_SILENCE}s > ${bound}s, and the syncer logged $gp 'moved nothing' line(s): the transfer STALLED and the progress gate held the token quiet by design — renewal across a moving upload was not exercised; rerun"
+      else
+        bad "PUSH: the token was silent ${P_SILENCE:-?}s > ${bound}s during the upload with no stall reported: the renewer is NOT covering the batch (EXPECT=window-closed)"
+      fi
+      if [ "${R_SILENCE:-999}" -le "$bound" ]; then
+        ok "RESTORE: the token was silent at most ${R_SILENCE}s ≤ ${bound}s across a ${R_SECS_CT:-?} s restore — renewal covers the restore (progress-gate lines: $gr)"
+      elif [ "$gr" -gt 0 ]; then
+        inconc "RESTORE: the token was silent ${R_SILENCE}s > ${bound}s, and the syncer logged $gr 'moved nothing' line(s): the restore STALLED and the progress gate held the token quiet by design — renewal across a moving restore was not exercised; rerun"
+      else
+        bad "RESTORE: the token was silent ${R_SILENCE:-?}s > ${bound}s during a ${R_SECS_CT:-?} s restore with no stall reported: the renewer is NOT running before the restore (EXPECT=window-closed)"
+      fi ;;
   esac
 }
 
