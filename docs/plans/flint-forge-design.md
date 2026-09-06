@@ -747,6 +747,35 @@ It also says something about the earlier measurement: a real bought
 forge behaves the same as forge with its lever off, which is what
 those controls were claiming to simulate.
 
+**Prior art, revisited 2026-09-05 for the architecture document**
+(`docs/architecture/forge/`). Two facts above are out of date and one
+neighbour was missed. AWS CodeCommit **returned to general
+availability on 2025-11-24** (29 regions; LFS on its roadmap), so the
+"warning" stands only as history: the storage shape was never the
+reason it closed, and it is open again. **Cursor published
+"Continuity" on 2026-08-18** — a git storage system whose source of
+truth is a write-ahead log of per-push packfiles plus reference
+transactions in S3, made visible by a compare-and-swap on a WAL index
+object, with the on-disk repository a warm cache materialised from the
+WAL, stock git doing every operation, any host able to act as primary,
+read replicas kept current by conditional GET, and 120 pushes/s
+measured on S3 Standard — and **`walgit`** (tobi, MIT, ~2.4k stars) is
+an open-source Rust server built on that architecture: WAL of immutable
+push objects, a manifest rewritten by CAS as the consensus mechanism,
+smart HTTP for stock clients, bundle-uri, LFS, push policy, no
+database and no leader. Behind both stands **Palantir's Stemma (2017)**
+on JGit's `DfsRepository`: packfiles as blobs and refs as rows in a
+transactional store (AtlasDB), and Google's own Bigtable-backed JGit
+before that. So "S3 as the only durable state, disk as a cache, one
+CAS'd pointer, stock git in front" is a shape forge arrived at
+independently in the same month as its nearest neighbour, not a shape
+it invented; what is forge's own is stated in the architecture
+document's last page — the syncer as the only writer behind stock
+`receive-pack` with the acknowledgement carried by `proc-receive`, the
+progress-gated single-writer lease with takeover rotation, the
+per-repository Kubernetes control plane with pod identity and
+idle-to-zero, the legible export, and the model-and-drill record.
+
 **What this run could NOT test, stated plainly.** It ran on a LOCAL
 volume, not a flint POSIX one, so the "git over NFS is slow" half is
 unmeasured — the flint NFS hub on this cluster refuses with

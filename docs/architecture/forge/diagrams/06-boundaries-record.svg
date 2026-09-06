@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
+     aria-label="Boundaries and the record. The credential boundary: the bucket key exists in the syncer container only. The principal boundary: X-Remote-User means something only behind the NetworkPolicy that admits the door. Per-principal policy on the wire. Composition on one bucket with lean and passthrough and the four accepted conditions. Then every campaign that stands behind this document, with its numbers.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .t1{font-size:17.0px;font-weight:600}
+  .t2{font-size:13.0px;font-weight:600}
+  .t3{font-size:12.0px}
+  .t3b{font-size:12.0px;font-weight:600;fill:#334155}
+  .t4{font-size:11.0px;fill:#64748b}
+  .t4b{font-size:11.0px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:9.5px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:11.0px;font-weight:600;fill:#ffffff}
+  .on{font-size:13.0px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:11.0px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
+  .chip-ink{fill:#334155}
+</style>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<rect x="24" y="22" width="505" height="268" rx="7" class="bx"/>
+<path class="f-red" d="M24,29 A7,7 0 0 1 31,22 H29 V290 H31 A7,7 0 0 1 24,283 Z"/>
+<text class="t2 c-red" x="40" y="46">Three boundaries, and what each one actually holds</text>
+<text class="t3b" x="40" y="70">The credential boundary</text>
+<text class="t4" x="40" y="86">AWS keys reach the syncer container by envFrom and nothing else: not the git container, not</text>
+<text class="t4" x="40" y="101">the door, not the operator, not an agent. The process that parses untrusted HTTP cannot write</text>
+<text class="t4" x="40" y="116">the bucket.</text>
+<text class="t3b" x="40" y="135">The principal boundary</text>
+<text class="t4" x="40" y="151">REMOTE_USER is the door's X-Remote-User, set from a verified TokenReview. Reached</text>
+<text class="t4" x="40" y="166">directly, the git port believes the header — so the operator renders a NetworkPolicy admitting</text>
+<text class="t4" x="40" y="181">the door's pods only, and reaching the port is the authorisation where it is not rendered.</text>
+<text class="t4b c-red" x="40" y="196">Measured (run-rights.sh, Cilium): with the policy in place a forged header cannot open</text>
+<text class="t4b c-red" x="40" y="211">8080; with it deleted the same header merges into main. 17 legs, green, twice. kind's</text>
+<text class="t4b c-red" x="40" y="226">default CNI enforces no policy at all.</text>
+<text class="t3b" x="40" y="245">The wire</text>
+<text class="t4" x="40" y="261">two cleartext hops as built; the pod's audience-bound token rides both as a Basic password;</text>
+<text class="t4" x="40" y="276">server-to-S3 is TLS.</text>
+<rect x="547" y="22" width="505" height="268" rx="7" class="bx"/>
+<path class="f-forge" d="M554,22 H1046 A7,7 0 0 1 1053,29 V27 H547 V29 A7,7 0 0 1 554,22 Z"/>
+<text class="t2 c-forge" x="563" y="46">Policy — who moves main, enforced twice</text>
+<text class="mono" x="563" y="66" xml:space="preserve">protected: [main, release/*]</text>
+<text class="mono" x="563" y="81" xml:space="preserve">pushers: {main: [release-bot]}</text>
+<text class="mono" x="563" y="96" xml:space="preserve">agentPattern: agent/*</text>
+<text class="mono" x="563" y="111" xml:space="preserve">mergeInto: {main: [agent-runner]}</text>
+<text class="t4" x="563" y="126">pre-receive names the rule at the edge; the syncer enforces the same document in its judge</text>
+<text class="t4" x="563" y="141">step, so a missing hook does not open the repository.</text>
+<text class="t4b" x="563" y="156">Merge is a push: HEAD:refs/for/main runs merge-tree --write-tree in the syncer, packs</text>
+<text class="t4b" x="563" y="171">what it created, and the batch CAS carries main; refs/for is never stored. One path to</text>
+<text class="t4b" x="563" y="186">S3, structurally.</text>
+<text class="t4" x="563" y="201">Agents never hold an S3 credential; humans use the gateway's bearer today. The Rights axis</text>
+<text class="t4" x="563" y="216">of the radar has three of seven cells on the wire: passthrough per-pod readOnly, forge per-SA</text>
+<text class="t4" x="563" y="231">policy and the NetworkPolicy boundary.</text>
+<rect x="1071" y="22" width="505" height="268" rx="7" class="bx"/>
+<path class="f-forge" d="M1078,22 H1569 A7,7 0 0 1 1576,29 V27 H1071 V29 A7,7 0 0 1 1078,22 Z"/>
+<text class="t2 c-forge" x="1087" y="46">Composition on one bucket — with lean and passthrough</text>
+<text class="t4" x="1087" y="66">The export publishes main as a lean workspace after the report; lean and passthrough</text>
+<text class="t4" x="1087" y="81">readers mount it read-only with no forge code in them. Disjoint prefixes and disjoint lease</text>
+<text class="t4" x="1087" y="96">cells.</text>
+<text class="t3b" x="1087" y="115">Accepted conditions (C1–C5, 2026-09-05)</text>
+<text class="t4b c-red" x="1087" y="131">A1 forge and lean on one prefix do not arbitrate: detection shipped (flint_store::layout),</text>
+<text class="t4b c-red" x="1087" y="146">prevention belongs to whatever assigns prefixes.</text>
+<text class="t4b c-red" x="1087" y="161">A2 a nested export prefix is admitted; the sweep lists only pack/ and bundles/, so</text>
+<text class="t4b c-red" x="1087" y="176">nothing is destroyed.</text>
+<text class="t4b c-red" x="1087" y="191">A3 a foreign write into the export is neither seen nor repaired; A4 a reader with no</text>
+<text class="t4b c-red" x="1087" y="206">manifest takes the foreign bytes. Declined: it needs a second writer on the export</text>
+<text class="t4b c-red" x="1087" y="221">prefix, a misconfiguration.</text>
+<text class="t4" x="1087" y="236">Fixed: C2 a second writer on the export prefix wedged the repository; C4 the</text>
+<text class="t4" x="1087" y="251">manifest-checking readers refuse.</text>
+<rect x="24" y="306" width="1552" height="356" rx="7" class="panel"/>
+<text class="t1" x="46" y="332">The record — every campaign behind this document, 2026-09-04 → 2026-09-05</text>
+<text class="t2" x="56" y="364">falsifiers F1–F11, EC2</text>
+<text class="t4" x="306" y="364">acknowledged-means-durable under 8 mid-push kills; two pushes to one ref; a merge surviving a cold restore; the fence deposing a straggler within one heartbeat; a byte-identical restore and a dumb clone with the server down; protected main</text>
+<text class="t4" x="306" y="379">(found a fresh repository unable to create main); idle-to-zero with an 11 s clone through the door on a pod the request created; the storm (5.7 MiB vs 40,409 MiB); the export; the sweep; an S3 outage — clones served, pushes refused.</text>
+<line class="hair" x1="46" y1="388" x2="1554" y2="388"/>
+<rect x="46" y="388" width="1508" height="30" rx="0" class="rowb"/>
+<text class="t2" x="56" y="406">composition C1–C5, MinIO rig</text>
+<text class="t4" x="306" y="406">two fixed (a second writer wedging the repository; readers taking foreign bytes), three accepted by decision, each leg reporting KNOWN and turning STALE if its condition stops reproducing.</text>
+<line class="hair" x1="46" y1="418" x2="1554" y2="418"/>
+<text class="t2" x="56" y="436">rights, kind + Cilium</text>
+<text class="t4" x="306" y="436">17 legs: a reader refused a direct push and a merge, a writer merging, a forged header overridden at the door and believed at the port without the policy.</text>
+<line class="hair" x1="46" y1="448" x2="1554" y2="448"/>
+<rect x="46" y="448" width="1508" height="30" rx="0" class="rowb"/>
+<text class="t2" x="56" y="466">latency rig, toxiproxy</text>
+<text class="t4" x="306" y="466">a push costs 5.1 round trips + 225 ms with the sibling fan-out and 7.1 without; a 33-file restore 14.3 round trips against 38.6 serial; the renewer through an 8.8 s restore: 7 rotations, longest silence 1.2 s.</text>
+<line class="hair" x1="46" y1="478" x2="1554" y2="478"/>
+<text class="t2" x="56" y="496">runbw, 3 × i4i.xlarge, real S3</text>
+<text class="t4" x="306" y="496">10 GiB composed as 161 parts, CRC accepted; the token silent 125 s in the push and 141 s in the restore — the window OPEN; a challenger seized a live restoring pod at 62 s; every acknowledged push in the bucket; one interrupted upload left</text>
+<text class="t4" x="306" y="511">384 MiB of billed parts.</text>
+<line class="hair" x1="46" y1="520" x2="1554" y2="520"/>
+<rect x="46" y="520" width="1508" height="42" rx="0" class="rowb"/>
+<text class="t2" x="56" y="538">runbx, the confirmation</text>
+<text class="t4" x="306" y="538">40 GiB pushed in 1113 s and restored in 139 s with the token never silent past 11 s; the seize arm closed against a real challenger; told-ok ⇒ durable 40/40; three front-layer defects found in nginx and fcgiwrap — the case for A3 — and a rig</text>
+<text class="t4" x="306" y="553">sampler that lied.</text>
+<line class="hair" x1="46" y1="562" x2="1554" y2="562"/>
+<text class="t2" x="56" y="580">runby, the runner's acceptance</text>
+<text class="t4" x="306" y="580">S5–S10 through flint-forge-gitcgi: a 70 s client stall acknowledged; five pushes and eight clones served concurrently; 48 keepalives across a 232 s hook wait with a 5.8 s longest gap; a rollout mid-push told failed cleanly. The nginx control</text>
+<text class="t4" x="306" y="595">failed exactly those legs: 502 at 60 s, four workers, one burst, four upload-packs.</text>
+<line class="hair" x1="46" y1="604" x2="1554" y2="604"/>
+<rect x="46" y="604" width="1508" height="30" rx="0" class="rowb"/>
+<text class="t2" x="56" y="622">the model, ForgeSync.tla</text>
+<text class="t4" x="306" y="622">2,776,804 states strict; five mutations that must lose; a required-fail probe; two code defects found in the rotation and two model defects found by the liveness run, all the same day.</text>
+<line class="hair" x1="46" y1="634" x2="1554" y2="634"/>
+<rect x="24" y="690" width="1552" height="166" rx="7" class="bx"/>
+<path class="f-red" d="M24,697 A7,7 0 0 1 31,690 H29 V856 H31 A7,7 0 0 1 24,849 Z"/>
+<text class="t2 c-red" x="40" y="714">Not drilled, not built — the edges as they stand</text>
+<text class="t4" x="40" y="734">Agents in another cluster (the door is reachable from one). Production: nothing here has served a team; every number is a rig's. A bought forge on a flint volume: the buy-option control ran on a local disk, so "git over NFS is slow" is unmeasured. Read replicas: one pod serves each repository, and the</text>
+<text class="t4" x="40" y="749">storm lever is the bucket, not a second server. A replayable log: the snapshot is state, not history; provenance is git's own.</text>
+<text class="t4b c-red" x="40" y="764">Known and kept: told-failed-but-durable (the retry converges); a rollout mid-push loses the push (X6); the export is a mirror nobody repairs (A3); a reader with no manifest takes foreign bytes (A4); the 30 s grace, the push-only idle clock (X8) and the blind-poll Starting (X7) are open;</text>
+<text class="t4b c-red" x="40" y="779">geometric repack needs a multi-pack bitmap before the re-upload-everything cost of a full repack goes away.</text>
+<text class="t4" x="40" y="794">What the model does not carry: time (the six-quiet-polls window is a stated axiom), sizes, the door, the operator, and git's own correctness.</text>
+<rect x="28" y="861" width="14" height="14" rx="3" class="f-forge"/>
+<text class="t4" x="48" y="872">forge</text>
+<rect x="96" y="861" width="5" height="14" rx="2" class="f-red"/>
+<text class="t4" x="108" y="872">boundary / accepted condition / edge</text>
+</svg>

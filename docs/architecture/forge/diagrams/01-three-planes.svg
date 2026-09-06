@@ -1,0 +1,255 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
+     aria-label="flint-forge's components placed on three planes. The data plane: an agent's stock git, the door, the flint-forge-gitcgi runner and git's own receive-pack and upload-pack, every byte of every clone and push. The durable path: the hooks, the syncer, content-named packs and one CAS'd snapshot in S3 — the only path that can write the bucket. The control plane: the operator and its FlintRepo, the door's admission, routing and wake, the status poll and the lease cell. A membership matrix places every component; the runner sits on the data plane alone.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .t1{font-size:17.0px;font-weight:600}
+  .t2{font-size:13.0px;font-weight:600}
+  .t3{font-size:12.0px}
+  .t3b{font-size:12.0px;font-weight:600;fill:#334155}
+  .t4{font-size:11.0px;fill:#64748b}
+  .t4b{font-size:11.0px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:9.5px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:11.0px;font-weight:600;fill:#ffffff}
+  .on{font-size:13.0px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:11.0px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
+  .chip-ink{fill:#334155}
+</style>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<rect x="24" y="22" width="250" height="236" rx="7" class="bx"/>
+<path class="f-forge" d="M31,22 H267 A7,7 0 0 1 274,29 V27 H24 V29 A7,7 0 0 1 31,22 Z"/>
+<text class="t2 c-forge" x="40" y="46">the agent pod — any namespace</text>
+<text class="t4" x="40" y="66">a stock git client; the working tree is local</text>
+<text class="t4" x="40" y="81">disk</text>
+<text class="mono" x="40" y="96" xml:space="preserve">helper: flint-forge-credential</text>
+<text class="t4" x="40" y="111">presents the pod's projected</text>
+<text class="t4" x="40" y="126">ServiceAccount token (audience</text>
+<text class="t4" x="40" y="141">forge.chert.us) as the Basic password on</text>
+<text class="t4" x="40" y="156">every call</text>
+<text class="t4b" x="40" y="171">no bucket credential, no sidecar, no</text>
+<text class="t4b" x="40" y="186">privilege</text>
+<rect x="40" y="235" width="62" height="16" rx="8" class="chip-forge"/>
+<text class="cap on" x="49" y="247">DATA</text>
+<line class="l-forge" x1="278" y1="120" x2="296" y2="120" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="300" y="22" width="250" height="236" rx="7" class="bx"/>
+<path class="f-forge" d="M307,22 H543 A7,7 0 0 1 550,29 V27 H300 V29 A7,7 0 0 1 307,22 Z"/>
+<text class="t2 c-forge" x="316" y="46">the door — the gateway's git arm</text>
+<text class="t4" x="316" y="66">N stateless replicas; TokenReview per</text>
+<text class="t4" x="316" y="81">session, cached ≤ 60 s by token hash</text>
+<text class="t4" x="316" y="96">spec.consumers must list the</text>
+<text class="t4" x="316" y="111">ServiceAccount: 401 before any wake</text>
+<text class="t4" x="316" y="126">routes to the repository's pod; forwards</text>
+<text class="t4" x="316" y="141">Git-Protocol and X-Remote-User, never</text>
+<text class="t4" x="316" y="156">Authorization</text>
+<text class="t4b" x="316" y="171">the one client-facing bound: no bytes</text>
+<text class="t4b" x="316" y="186">either way for 300 s cuts the request</text>
+<rect x="316" y="235" width="62" height="16" rx="8" class="chip-forge"/>
+<text class="cap on" x="325" y="247">DATA</text>
+<rect x="384" y="235" width="92" height="16" rx="8" class="chip"/>
+<text class="cap" x="393" y="247">CONTROL</text>
+<line class="l-forge" x1="554" y1="120" x2="572" y2="120" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="576" y="22" width="560" height="236" rx="7" class="bx"/>
+<path class="f-forge" d="M583,22 H1129 A7,7 0 0 1 1136,29 V27 H576 V29 A7,7 0 0 1 583,22 Z"/>
+<text class="t2 c-forge" x="594" y="46">one server pod per FlintRepo — headless Service, emptyDir cache, Recreate</text>
+<line class="hair" x1="594" y1="56" x2="1118" y2="56"/>
+<rect x="590" y="64" width="262" height="180" rx="7" class="bx"/>
+<text class="t2" x="606" y="88">git container</text>
+<text class="mono" x="606" y="108" xml:space="preserve">flint-forge-gitcgi :8080</text>
+<text class="mono" x="606" y="123" xml:space="preserve">→ git http-backend per request</text>
+<text class="mono" x="606" y="138" xml:space="preserve">→ receive-pack · upload-pack</text>
+<text class="t4" x="606" y="153">hooks: pre-receive names the rule;</text>
+<text class="t4" x="606" y="168">proc-receive hands the push to the syncer</text>
+<text class="t4" x="606" y="183">over a socket and WAITS</text>
+<text class="t4b" x="606" y="198">no bucket credential in this container</text>
+<rect x="606" y="221" width="62" height="16" rx="8" class="chip-forge"/>
+<text class="cap on" x="615" y="233">DATA</text>
+<rect x="674" y="221" width="92" height="16" rx="8" class="chip-ink"/>
+<text class="cap on" x="683" y="233">DURABLE</text>
+<rect x="866" y="64" width="256" height="180" rx="7" class="bx"/>
+<text class="t2" x="882" y="88">syncer container</text>
+<text class="t4" x="882" y="108">the batch · the lease renewer · restore ·</text>
+<text class="t4" x="882" y="123">sweep · repack · export · bundles · LFS</text>
+<text class="t4" x="882" y="138">batch API</text>
+<text class="mono" x="882" y="153" xml:space="preserve">/status :9848</text>
+<text class="t4b" x="882" y="168">the only writer of the bucket; the</text>
+<text class="t4b" x="882" y="183">credential lands here only (envFrom)</text>
+<rect x="882" y="221" width="92" height="16" rx="8" class="chip-ink"/>
+<text class="cap on" x="891" y="233">DURABLE</text>
+<rect x="980" y="221" width="92" height="16" rx="8" class="chip"/>
+<text class="cap" x="989" y="233">CONTROL</text>
+<line class="l-forge" x1="1140" y1="120" x2="1158" y2="120" marker-end="url(#a-forge)"/>
+<rect x="1162" y="22" width="414" height="236" rx="7" class="s3"/>
+<text class="t1" x="1180" y="46">S3 — &lt;prefix&gt;/</text>
+<text class="mono" x="1180" y="70" xml:space="preserve">git/objects/pack/*</text>
+<text class="t4" x="1180" y="84">immutable, content-named — the packs</text>
+<rect x="1470" y="65" width="92" height="16" rx="8" class="chip-ink"/>
+<text class="cap on" x="1479" y="77">DURABLE</text>
+<text class="mono" x="1180" y="100" xml:space="preserve">git/snapshot</text>
+<text class="t4" x="1180" y="114">THE pointer: refs + pack list; one CAS</text>
+<rect x="1470" y="95" width="92" height="16" rx="8" class="chip-ink"/>
+<text class="cap on" x="1479" y="107">DURABLE</text>
+<text class="mono" x="1180" y="130" xml:space="preserve">git/epoch · git/claim</text>
+<text class="t4" x="1180" y="144">the lease cell · the operator's claim</text>
+<rect x="1470" y="125" width="92" height="16" rx="8" class="chip"/>
+<text class="cap" x="1479" y="137">CONTROL</text>
+<text class="mono" x="1180" y="160" xml:space="preserve">git/bundles/&lt;oid&gt;</text>
+<text class="t4" x="1180" y="174">clone bundles, presigned — the storm lever</text>
+<rect x="1470" y="155" width="62" height="16" rx="8" class="chip-forge"/>
+<text class="cap on" x="1479" y="167">DATA</text>
+<text class="mono" x="1180" y="190" xml:space="preserve">lfs/objects/&lt;oid&gt;</text>
+<text class="t4" x="1180" y="204">LFS, presigned: client to store</text>
+<rect x="1470" y="185" width="62" height="16" rx="8" class="chip-forge"/>
+<text class="cap on" x="1479" y="197">DATA</text>
+<text class="mono" x="1180" y="220" xml:space="preserve">files/&lt;path&gt;</text>
+<text class="t4" x="1180" y="234">the export: a lean workspace</text>
+<rect x="1470" y="215" width="92" height="16" rx="8" class="chip-ink"/>
+<text class="cap on" x="1479" y="227">DURABLE</text>
+<text class="t4b" x="1180" y="252">a bare repository: clonable with the server down</text>
+<rect x="24" y="282" width="214" height="56" rx="6" class="hd-lbl"/>
+<text class="on" x="38" y="315">plane  ·  component</text>
+<rect x="242" y="282" width="129" height="56" rx="6" class="panel"/>
+<text class="t4b" x="306" y="315" style="text-anchor:middle">agent git</text>
+<rect x="375" y="282" width="129" height="56" rx="6" class="panel"/>
+<text class="t4b" x="440" y="315" style="text-anchor:middle">credential helper</text>
+<rect x="508" y="282" width="129" height="56" rx="6" class="panel"/>
+<text class="t4b" x="572" y="315" style="text-anchor:middle">the door</text>
+<rect x="641" y="282" width="129" height="56" rx="6" class="panel"/>
+<text class="t4b" x="706" y="315" style="text-anchor:middle">gitcgi runner</text>
+<rect x="774" y="282" width="129" height="56" rx="6" class="panel"/>
+<text class="t4b" x="838" y="301" style="text-anchor:middle">http-backend,</text>
+<text class="t4b" x="838" y="315" style="text-anchor:middle">receive-pack,</text>
+<text class="t4b" x="838" y="329" style="text-anchor:middle">upload-pack</text>
+<rect x="907" y="282" width="129" height="56" rx="6" class="panel"/>
+<text class="t4b" x="972" y="308" style="text-anchor:middle">pre-receive,</text>
+<text class="t4b" x="972" y="322" style="text-anchor:middle">proc-receive</text>
+<rect x="1040" y="282" width="129" height="56" rx="6" class="panel"/>
+<text class="t4b" x="1104" y="315" style="text-anchor:middle">the syncer</text>
+<rect x="1173" y="282" width="129" height="56" rx="6" class="panel"/>
+<text class="t4b" x="1238" y="315" style="text-anchor:middle">packs, snapshot</text>
+<rect x="1306" y="282" width="129" height="56" rx="6" class="panel"/>
+<text class="t4b" x="1370" y="315" style="text-anchor:middle">epoch, claim</text>
+<rect x="1439" y="282" width="129" height="56" rx="6" class="panel"/>
+<text class="t4b" x="1504" y="308" style="text-anchor:middle">operator, FlintRepo,</text>
+<text class="t4b" x="1504" y="322" style="text-anchor:middle">apiserver</text>
+<style>.f-ctl{fill:#94a3b8}</style>
+<rect x="24" y="344" width="214" height="46" rx="0" class="lbl"/>
+<text class="t2" x="38" y="364">data plane</text>
+<text class="t4" x="38" y="380">every byte of a clone or push</text>
+<circle cx="304" cy="367" r="8" class="f-forge"/>
+<circle cx="438" cy="367" r="8" class="f-forge"/>
+<circle cx="570" cy="367" r="8" class="f-forge"/>
+<circle cx="704" cy="367" r="8" class="f-forge"/>
+<circle cx="836" cy="367" r="8" class="f-forge"/>
+<circle cx="970" cy="367" r="8" class="f-forge"/>
+<text class="t4 mute" x="1102" y="371" style="text-anchor:middle">—</text>
+<text class="t4 mute" x="1236" y="371" style="text-anchor:middle">—</text>
+<text class="t4 mute" x="1368" y="371" style="text-anchor:middle">—</text>
+<text class="t4 mute" x="1502" y="371" style="text-anchor:middle">—</text>
+<line class="hair" x1="24" y1="390" x2="1568" y2="390"/>
+<rect x="24" y="390" width="214" height="46" rx="0" class="lbl"/>
+<rect x="238" y="390" width="1330" height="46" rx="0" class="rowb"/>
+<text class="t2" x="38" y="410">durable path</text>
+<text class="t4" x="38" y="426">what can write the bucket</text>
+<text class="t4 mute" x="304" y="417" style="text-anchor:middle">—</text>
+<text class="t4 mute" x="438" y="417" style="text-anchor:middle">—</text>
+<text class="t4 mute" x="570" y="417" style="text-anchor:middle">—</text>
+<text class="t4 mute" x="704" y="417" style="text-anchor:middle">—</text>
+<text class="t4 mute" x="836" y="417" style="text-anchor:middle">—</text>
+<circle cx="970" cy="413" r="8" class="f-ink"/>
+<circle cx="1102" cy="413" r="8" class="f-ink"/>
+<circle cx="1236" cy="413" r="8" class="f-ink"/>
+<text class="t4 mute" x="1368" y="417" style="text-anchor:middle">—</text>
+<text class="t4 mute" x="1502" y="417" style="text-anchor:middle">—</text>
+<line class="hair" x1="24" y1="436" x2="1568" y2="436"/>
+<rect x="24" y="436" width="214" height="46" rx="0" class="lbl"/>
+<text class="t2" x="38" y="456">control plane</text>
+<text class="t4" x="38" y="472">placement, admission, the lease</text>
+<text class="t4 mute" x="304" y="463" style="text-anchor:middle">—</text>
+<text class="t4 mute" x="438" y="463" style="text-anchor:middle">—</text>
+<circle cx="570" cy="459" r="8" class="f-ctl"/>
+<text class="t4 mute" x="704" y="463" style="text-anchor:middle">—</text>
+<text class="t4 mute" x="836" y="463" style="text-anchor:middle">—</text>
+<text class="t4 mute" x="970" y="463" style="text-anchor:middle">—</text>
+<circle cx="1102" cy="459" r="8" class="f-ctl"/>
+<text class="t4 mute" x="1236" y="463" style="text-anchor:middle">—</text>
+<circle cx="1368" cy="459" r="8" class="f-ctl"/>
+<circle cx="1502" cy="459" r="8" class="f-ctl"/>
+<line class="hair" x1="24" y1="482" x2="1568" y2="482"/>
+<rect x="24" y="344" width="1544" height="138" rx="0" class="frame"/>
+<rect x="24" y="500" width="505" height="206" rx="7" class="bx"/>
+<path class="f-forge" d="M31,500 H522 A7,7 0 0 1 529,507 V505 H24 V507 A7,7 0 0 1 31,500 Z"/>
+<text class="t2 c-forge" x="40" y="524">The data plane — every byte, nothing durable</text>
+<text class="t4" x="40" y="544">A clone, fetch or push is the smart protocol from a stock client to stock git: the door proxies</text>
+<text class="t4" x="40" y="559">it, the runner execs git http-backend per request and streams both directions as they arrive,</text>
+<text class="t4" x="40" y="574">receive-pack and upload-pack do the git.</text>
+<text class="t4" x="40" y="589">A 40 GiB push crosses the runner twice: the pack in, the sideband keepalives and the report</text>
+<text class="t4" x="40" y="604">out. That is why fcgiwrap's buffering mattered: it held the keepalives that keep a long push</text>
+<text class="t4" x="40" y="619">alive.</text>
+<text class="t4b" x="40" y="634">One client-facing bound, the door's 300 s inactivity cut. The runner has no timeout of</text>
+<text class="t4b" x="40" y="649">its own and answers 503 past a declared ceiling rather than queueing (run 7: five</text>
+<text class="t4b" x="40" y="664">pushes and eight clones at once, a 70 s stall, all served).</text>
+<rect x="547" y="500" width="505" height="206" rx="7" class="panel"/>
+<text class="t2" x="563" y="524">The durable path — what can write the bucket</text>
+<text class="t4" x="563" y="544">proc-receive hands the push to the syncer and waits. The syncer judges it under the agreed</text>
+<text class="t4" x="563" y="559">view, renews the lease once, uploads every complete pack as immutable content-named</text>
+<text class="t4" x="563" y="574">objects, CASes ONE snapshot naming the refs and the packs, applies update-ref, and only</text>
+<text class="t4" x="563" y="589">THEN reports ok.</text>
+<text class="t4" x="563" y="604">The pack is verified by git, uploaded by the syncer, named by the CAS; the runner</text>
+<text class="t4" x="563" y="619">implements no git, holds no credential and never touches S3.</text>
+<text class="t4b" x="563" y="634">The process that parses untrusted HTTP is not the process that can write the bucket.</text>
+<text class="t4b" x="563" y="649">Machine-checked: told ok ⇒ durable; every landed pack complete; no straggler lands</text>
+<text class="t4b" x="563" y="664">after a restore.</text>
+<rect x="1071" y="500" width="505" height="206" rx="7" class="panel"/>
+<text class="t2" x="1087" y="524">The control plane — placement, admission, liveness</text>
+<text class="t4" x="1087" y="544">The operator turns a FlintRepo into a ConfigMap, a headless Service, a one-pod Deployment</text>
+<text class="t4" x="1087" y="559">and a NetworkPolicy, polls the pod's own /status for its phase, and parks an idle repository</text>
+<text class="t4" x="1087" y="574">at replicas 0.</text>
+<text class="t4" x="1087" y="589">The door admits by TokenReview and consumers, routes by repository, and wakes a parked</text>
+<text class="t4" x="1087" y="604">one — 401 before any wake, the request held up to 180 s on the CR, never the pod.</text>
+<text class="t4" x="1087" y="619">The lease cell is the writer's coordination: a token that must keep moving, six quiet polls</text>
+<text class="t4" x="1087" y="634">before a takeover, a rotation of the snapshot on every claim.</text>
+<text class="t4b" x="1087" y="649">The operator never reads the bucket, and A3 touched none of this: chart, CRD, door and</text>
+<text class="t4b" x="1087" y="664">rigs did not change.</text>
+<rect x="24" y="724" width="1552" height="134" rx="7" class="panel"/>
+<text class="t1" x="46" y="750">Reading the placement</text>
+<text class="t4" x="46" y="770">The runner (A3) is squarely on the data plane and nowhere else. It replaced nginx and fcgiwrap in the git container after the runbx drill found three of its four front-layer defects in those two processes — buffered keepalives, two 60 s client timeouts nobody had listed, a four-worker ceiling that</text>
+<text class="t4" x="46" y="785">queued in silence — and it removed that class rather than tuning it. Nothing on the durable path or the control plane moved, which is why the chart, the CRD, the door's URL formula and the rigs did not change.</text>
+<text class="t4" x="46" y="802">Two boundaries are drawn by the planes. The bucket credential exists in the syncer container only, so a compromise of the HTTP-facing process cannot write S3. And X-Remote-User is the principal only behind the NetworkPolicy that admits the door's pods alone: reached directly, the git port</text>
+<text class="t4" x="46" y="817">believes the header (measured, run-rights.sh: with the policy deleted a forged header merges into main).</text>
+<line class="l-ink" x1="28" y1="868" x2="54" y2="868"/>
+<text class="t4" x="60" y="872">durable path</text>
+<rect x="144" y="861" width="14" height="14" rx="3" class="f-forge"/>
+<text class="t4" x="164" y="872">data plane</text>
+<line class="l-ctl" x1="238.015" y1="868" x2="264.015" y2="868" stroke-dasharray="6 5"/>
+<text class="t4" x="270" y="872">control</text>
+<rect x="327" y="861" width="5" height="14" rx="2" class="f-red"/>
+<text class="t4" x="339" y="872">hazard / trust boundary</text>
+</svg>

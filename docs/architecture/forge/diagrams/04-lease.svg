@@ -1,0 +1,221 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
+     aria-label="The single-writer lease. A holder's life: claim the epoch cell by CAS, rotate the snapshot, sweep, restore, serve with a renewal every 10 s, and during a restore or a push renew only if the byte counter moved; a 412 on any CAS of ours is the fence — stop reads too, exit. A challenger polls the cell and takes over only after six consecutive polls saw the same token; a clean release on SIGTERM lets the successor claim at once. What the model found in the rotation, and what the drills measured against a real challenger.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .t1{font-size:17.0px;font-weight:600}
+  .t2{font-size:13.0px;font-weight:600}
+  .t3{font-size:12.0px}
+  .t3b{font-size:12.0px;font-weight:600;fill:#334155}
+  .t4{font-size:11.0px;fill:#64748b}
+  .t4b{font-size:11.0px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:9.5px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:11.0px;font-weight:600;fill:#ffffff}
+  .on{font-size:13.0px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:11.0px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
+  .chip-ink{fill:#334155}
+</style>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<rect x="24" y="70" width="182" height="150" rx="7" class="bx"/>
+<path class="f-forge" d="M31,70 H199 A7,7 0 0 1 206,77 V75 H24 V77 A7,7 0 0 1 31,70 Z"/>
+<text class="t2 c-forge" x="38" y="92">claim</text>
+<text class="t4" x="38" y="112">epoch_acquire:</text>
+<text class="t4" x="38" y="127">If-None-Match:* on an empty</text>
+<text class="t4" x="38" y="142">cell, or If-Match(observed</text>
+<text class="t4" x="38" y="157">token) with epoch + 1 once</text>
+<text class="t4" x="38" y="172">the token has been quiet for</text>
+<text class="t4" x="38" y="187">QUIET_POLLS; a released</text>
+<text class="t4" x="38" y="202">mark claims at once</text>
+<line class="l-ctl" x1="206" y1="130" x2="220" y2="130" marker-end="url(#a-ctl)"/>
+<rect x="220" y="70" width="182" height="150" rx="7" class="bx"/>
+<text class="t2" x="234" y="92">rotate</text>
+<text class="t4" x="234" y="112">the snapshot CAS'd to seq + 1</text>
+<text class="t4" x="234" y="127">with the same content —</text>
+<text class="t4" x="234" y="142">created empty when none</text>
+<text class="t4" x="234" y="157">exists — so every If-Match a</text>
+<text class="t4" x="234" y="172">straggler holds is stale before</text>
+<text class="t4" x="234" y="187">we serve</text>
+<line class="l-ctl" x1="402" y1="130" x2="416" y2="130" marker-end="url(#a-ctl)"/>
+<rect x="416" y="70" width="182" height="150" rx="7" class="bx"/>
+<text class="t2" x="430" y="92">sweep</text>
+<text class="t4" x="430" y="112">abort every in-flight multipart</text>
+<text class="t4" x="430" y="127">upload under the prefix: at</text>
+<text class="t4" x="430" y="142">this moment nothing of ours</text>
+<text class="t4" x="430" y="157">is pending, so what is</text>
+<text class="t4" x="430" y="172">pending is a predecessor's</text>
+<line class="l-ctl" x1="597" y1="130" x2="611" y2="130" marker-end="url(#a-ctl)"/>
+<rect x="611" y="70" width="182" height="150" rx="7" class="bx"/>
+<text class="t2" x="625" y="92">restore</text>
+<text class="t4" x="625" y="112">fetch the packs the snapshot</text>
+<text class="t4" x="625" y="127">names, install its refs</text>
+<text class="t4" x="625" y="142">exactly, fsck; the renewer</text>
+<text class="t4" x="625" y="157">beats through it if the byte</text>
+<text class="t4" x="625" y="172">counter moves</text>
+<line class="l-ctl" x1="793" y1="130" x2="807" y2="130" marker-end="url(#a-ctl)"/>
+<rect x="807" y="70" width="182" height="150" rx="7" class="bx"/>
+<path class="f-forge" d="M814,70 H982 A7,7 0 0 1 989,77 V75 H807 V77 A7,7 0 0 1 814,70 Z"/>
+<text class="t2 c-forge" x="821" y="92">serving</text>
+<text class="t4" x="821" y="112">renew every 10 s</text>
+<text class="t4" x="821" y="127">unconditionally; reads and</text>
+<text class="t4" x="821" y="142">writes served; /status says</text>
+<text class="t4" x="821" y="157">serving</text>
+<line class="l-ctl" x1="989" y1="130" x2="1003" y2="130" marker-end="url(#a-ctl)"/>
+<rect x="1003" y="70" width="182" height="150" rx="7" class="bx"/>
+<path class="f-forge" d="M1010,70 H1178 A7,7 0 0 1 1184,77 V75 H1003 V77 A7,7 0 0 1 1010,70 Z"/>
+<text class="t2 c-forge" x="1017" y="92">pushing / importing</text>
+<text class="t4" x="1017" y="112">the batch or the restore: the</text>
+<text class="t4" x="1017" y="127">renewer renews ONLY if</text>
+<text class="t4" x="1017" y="142">progress moved since its last</text>
+<text class="t4" x="1017" y="157">renewal — a wedged pod lets</text>
+<text class="t4" x="1017" y="172">the token go quiet on purpose</text>
+<rect x="1198" y="70" width="182" height="150" rx="7" class="bx"/>
+<path class="f-red" d="M1198,77 A7,7 0 0 1 1206,70 H1204 V220 H1206 A7,7 0 0 1 1198,213 Z"/>
+<text class="t2 c-red" x="1212" y="92">fenced</text>
+<text class="t4" x="1212" y="112">a 412 on renew or on the</text>
+<text class="t4" x="1212" y="127">snapshot CAS: ng to every</text>
+<text class="t4" x="1212" y="142">waiting hook, stop serving</text>
+<text class="t4" x="1212" y="157">reads as well as writes, exit;</text>
+<text class="t4" x="1212" y="172">the pod restarts and claims</text>
+<text class="t4" x="1212" y="187">again</text>
+<rect x="1394" y="70" width="182" height="150" rx="7" class="bx"/>
+<path class="f-forge" d="M1401,70 H1569 A7,7 0 0 1 1576,77 V75 H1394 V77 A7,7 0 0 1 1401,70 Z"/>
+<text class="t2 c-forge" x="1408" y="92">released</text>
+<text class="t4" x="1408" y="112">SIGTERM between batches:</text>
+<text class="t4" x="1408" y="127">the cell's released mark is</text>
+<text class="t4" x="1408" y="142">written, a successor claims</text>
+<text class="t4" x="1408" y="157">without waiting out the polls;</text>
+<text class="t4" x="1408" y="172">queued pushes are told ng by</text>
+<text class="t4" x="1408" y="187">the closed sockets</text>
+<text class="t1" x="24" y="44">The holder's life — the lease cell is FlintTierEpoch's, and every write to it is a CAS</text>
+<line class="l-ctl" x1="989" y1="170" x2="1003" y2="170" marker-start="url(#a-ctl)" marker-end="url(#a-ctl)"/>
+<text class="t4" x="996" y="162" style="text-anchor:middle">a batch</text>
+<path class="l-red" d="M1184,200 H1198" marker-end="url(#a-red)"/>
+<rect x="1176" y="207" width="30" height="15" rx="3" class="halo"/>
+<text class="t4b c-red" x="1192" y="218" style="text-anchor:middle">412</text>
+<path class="l-ctl" d="M898,220 V248 H1485 V222" stroke-dasharray="6 5" marker-end="url(#a-ctl)"/>
+<rect x="1138" y="249" width="120" height="30" rx="3" class="halo"/>
+<text class="t4b" x="1198" y="260" style="text-anchor:middle">SIGTERM</text>
+<text class="t4" x="1198" y="275" style="text-anchor:middle">between batches only</text>
+<rect x="24" y="262" width="505" height="236" rx="7" class="bx"/>
+<path class="f-forge" d="M31,262 H522 A7,7 0 0 1 529,269 V267 H24 V269 A7,7 0 0 1 31,262 Z"/>
+<text class="t2 c-forge" x="40" y="286">The challenger — a second syncer for the same repository</text>
+<text class="t4" x="40" y="306">A roll against a wedged pod, a takeover of a dead node, or a hand-made challenger. It polls</text>
+<text class="t4" x="40" y="321">the cell every heartbeat and judges the holder dead ONLY by an unchanged token across six</text>
+<text class="t4" x="40" y="336">consecutive polls (60 s), then acquires with If-Match on that token and epoch + 1.</text>
+<text class="t4b" x="40" y="351">A renewing holder is undeposable, structurally: its own renew rotates the token, so the</text>
+<text class="t4b" x="40" y="366">challenger never counts six. The scheduling axiom the model states and cannot</text>
+<text class="t4b" x="40" y="381">discharge: the polls and the heartbeats share a period.</text>
+<text class="t4b" x="40" y="396">runbx, the seize arm CLOSED: a challenger beside a live 40 GiB restore for 398 s</text>
+<text class="t4b" x="40" y="411">never claimed, the holder was never fenced, 24/24 pushes durable under the</text>
+<text class="t4b" x="40" y="426">contention.</text>
+<rect x="547" y="262" width="505" height="236" rx="7" class="bx"/>
+<path class="f-forge" d="M554,262 H1046 A7,7 0 0 1 1053,269 V267 H547 V269 A7,7 0 0 1 554,262 Z"/>
+<text class="t2 c-forge" x="563" y="286">The renewer's gate — a sensor, and a sensor can lie</text>
+<text class="t4" x="563" y="306">The renewer is its own task from the moment the claim lands. While the phase must</text>
+<text class="t4" x="563" y="321">progress (importing, pushing) it renews only if the operation's byte counter advanced since</text>
+<text class="t4" x="563" y="336">its last renewal; renewing for a wedged pod would trade a live pod losing its repository for a</text>
+<text class="t4" x="563" y="351">dead one keeping it forever.</text>
+<text class="t4b c-red" x="563" y="366">Run 3: the checksum pre-pass over a 40 GiB pack (~70 s) did work and ticked nothing,</text>
+<text class="t4b c-red" x="563" y="381">so the token sat quiet for a whole takeover window inside a live push. The pass now</text>
+<text class="t4b c-red" x="563" y="396">ticks; then it was removed (D4: the CRC is accumulated as the parts are read).</text>
+<text class="t4b" x="563" y="411">The model keeps sensorMoved and realMoved apart and proves the sensor honest; the</text>
+<text class="t4b" x="563" y="426">mutation that ticks nothing on the hash must lose.</text>
+<rect x="1071" y="262" width="505" height="236" rx="7" class="bx"/>
+<path class="f-forge" d="M1078,262 H1569 A7,7 0 0 1 1576,269 V267 H1071 V269 A7,7 0 0 1 1078,262 Z"/>
+<text class="t2 c-forge" x="1087" y="286">What the model found in the rotation — X11, X12</text>
+<text class="t4b" x="1087" y="306">X11: a takeover of a repository nobody had published skipped the rotation ("the first</text>
+<text class="t4b" x="1087" y="321">CAS's If-None-Match is the fence").</text>
+<text class="t4" x="1087" y="336">A straggler mid-batch on the old epoch landed its If-None-Match:* create after the successor</text>
+<text class="t4" x="1087" y="351">served, and the successor's own first CAS was what 412'd. The rotation now creates the</text>
+<text class="t4" x="1087" y="366">empty snapshot.</text>
+<text class="t4b" x="1087" y="381">X12: a successor that died between its takeover CAS and its rotation came back</text>
+<text class="t4b" x="1087" y="396">through self-recognition, which skipped the rotation.</text>
+<text class="t4" x="1087" y="411">The straggler from the epoch before still held a valid If-Match. Every claim but a released</text>
+<text class="t4" x="1087" y="426">cell's now rotates: only a releaser has proven it fenced itself before writing the mark. Both</text>
+<text class="t4" x="1087" y="441">fixed with tests that fail against the old code.</text>
+<rect x="24" y="516" width="505" height="316" rx="7" class="bx"/>
+<path class="f-forge" d="M31,516 H522 A7,7 0 0 1 529,523 V521 H24 V523 A7,7 0 0 1 31,516 Z"/>
+<text class="t2 c-forge" x="40" y="540">Measured on the wire — the window, before and after</text>
+<text class="t3b" x="40" y="564">runbw, before the renewer task (window OPEN)</text>
+<text class="t4" x="40" y="580">10 GiB push acknowledged in 262 s with the token silent 125 s; the cold restore 136 s with</text>
+<text class="t4" x="40" y="595">the token silent 141 s; a challenger claimed the live, importing pod 62 s after arriving; the</text>
+<text class="t4" x="40" y="610">two seized each other through epochs 4, 5, 6 until the challenger was removed at +392 s; 21</text>
+<text class="t4" x="40" y="625">of 23 pushes acknowledged and every one in the bucket. The fence held and durability held;</text>
+<text class="t4" x="40" y="640">the cost was availability.</text>
+<text class="t3b" x="40" y="659">runbx, after (window CLOSED)</text>
+<text class="t4b" x="40" y="675">40 GiB push: 1113 s, the hook wait over 8 minutes, token silent ≤ 11 s; restore 139 s at</text>
+<text class="t4b" x="40" y="690">297 MiB/s, silent 11 s; the seize arm never claimed; run 5 at 10 GiB: silent ≤ 11 s,</text>
+<text class="t4b" x="40" y="705">sampler blind 0 s.</text>
+<text class="t3b" x="40" y="724">A blind spot is not silence</text>
+<text class="t4" x="40" y="740">The sampler's head-object hung 64 s on the CLI's own timeouts and read as 66 s of a quiet</text>
+<text class="t4" x="40" y="755">renewer. It now marks a sample blind, counts silence only across contiguous observations,</text>
+<text class="t4" x="40" y="770">and calls a blind spot past the bound inconclusive.</text>
+<rect x="547" y="516" width="505" height="316" rx="7" class="bx"/>
+<path class="f-forge" d="M554,516 H1046 A7,7 0 0 1 1053,523 V521 H547 V523 A7,7 0 0 1 554,516 Z"/>
+<text class="t2 c-forge" x="563" y="540">Numbers that shape the lease</text>
+<text class="mono" x="563" y="560" xml:space="preserve">heartbeat 10 s · QUIET_POLLS 6 · window 60 s</text>
+<text class="mono" x="563" y="575" xml:space="preserve">renew: If-Match(own token) → new token</text>
+<text class="mono" x="563" y="590" xml:space="preserve">claim: If-Match(quiet token), epoch + 1</text>
+<text class="mono" x="563" y="605" xml:space="preserve">release: released = true, token rotated</text>
+<text class="mono" x="563" y="620" xml:space="preserve">orphan grace: outlives the longest upload</text>
+<text class="t4" x="563" y="642">A takeover costs one small CAS on the snapshot plus the restore. A clean roll costs one</text>
+<text class="t4" x="563" y="657">request: the successor claims the released cell at once. A crash costs the quiet polls, then</text>
+<text class="t4" x="563" y="672">the restore.</text>
+<text class="t4b" x="563" y="687">Nothing pins a straggler's writes: its packs are content-named and unnamed by any</text>
+<text class="t4b" x="563" y="702">snapshot, so a straggler that completes an upload after the sweep leaves an object the</text>
+<text class="t4b" x="563" y="717">next sweep removes — hygiene, not integrity, which is why no mutation run exists for</text>
+<text class="t4b" x="563" y="732">the sweep.</text>
+<text class="t4" x="563" y="747">In-flight multipart parts are billed until aborted: one interrupted 2 GiB push left 384 MiB of</text>
+<text class="t4" x="563" y="762">parts on runbw. The sweep runs at the claim and between batches, with no grace, because at</text>
+<text class="t4" x="563" y="777">those two moments nothing of ours is in flight.</text>
+<rect x="1071" y="516" width="505" height="316" rx="7" class="bx"/>
+<path class="f-forge" d="M1078,516 H1569 A7,7 0 0 1 1576,523 V521 H1071 V523 A7,7 0 0 1 1078,516 Z"/>
+<text class="t2 c-forge" x="1087" y="540">How the lease relates to the other two planes</text>
+<text class="t4" x="1087" y="560">The lease cell is coordination — the control plane — and the fence it produces is what the</text>
+<text class="t4" x="1087" y="575">durable path relies on: a syncer that cannot renew cannot know it still holds the repository,</text>
+<text class="t4" x="1087" y="590">so it stops acknowledging AND stops serving reads. Pushes fail while S3 is unreachable;</text>
+<text class="t4" x="1087" y="605">clones keep working until the lease would have lapsed.</text>
+<text class="t4" x="1087" y="620">The operator does not read the cell. It takes the pod's word for its phase through /status;</text>
+<text class="t4" x="1087" y="635">restart is not an operator decision — a fence exits 1, a refusal exits 78, and the kubelet</text>
+<text class="t4" x="1087" y="650">restarts the pod.</text>
+<text class="t4b" x="1087" y="665">Two servers for one repository is not a state the Deployment (Recreate) creates on its</text>
+<text class="t4b" x="1087" y="680">own; it takes a roll against a wedged pod, a lost node whose pod is still counted, or a</text>
+<text class="t4b" x="1087" y="695">hand. Every such case ends with the straggler's next CAS 412ing.</text>
+<text class="t4b c-red" x="1087" y="710">Open: X6 — a rollout during a long push SIGKILLs the batch at 30 s (measured, run 7:</text>
+<text class="t4b c-red" x="1087" y="725">told failed, cleanly, the push lost); whether a roll should wait for the batch is the</text>
+<text class="t4b c-red" x="1087" y="740">decision.</text>
+<line class="l-ctl" x1="28" y1="868" x2="54" y2="868" stroke-dasharray="6 5"/>
+<text class="t4" x="60" y="872">control plane</text>
+<line class="l-ink" x1="147.45" y1="868" x2="173.45" y2="868"/>
+<text class="t4" x="179" y="872">durable path</text>
+<rect x="263" y="861" width="5" height="14" rx="2" class="f-red"/>
+<text class="t4" x="275" y="872">the fence / a hazard</text>
+</svg>

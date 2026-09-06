@@ -1,0 +1,198 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
+     aria-label="Prior art beside forge, dimension by dimension: GitHub Spokes, GitLab Gitaly, AWS CodeCommit, Palantir's Stemma on JGit's DFS backend, Cursor's Continuity and the walgit server built on it, and JGit's S3 dumb transport — against flint-forge on the durable substrate, what serves git, the unit of durability, the acknowledgement, writer coordination, the disk's role, restore and idle, read scaling, identity and how each is verified.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .t1{font-size:17.0px;font-weight:600}
+  .t2{font-size:13.0px;font-weight:600}
+  .t3{font-size:12.0px}
+  .t3b{font-size:12.0px;font-weight:600;fill:#334155}
+  .t4{font-size:11.0px;fill:#64748b}
+  .t4b{font-size:11.0px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:9.5px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:11.0px;font-weight:600;fill:#ffffff}
+  .on{font-size:13.0px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:11.0px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
+  .chip-ink{fill:#334155}
+</style>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<rect x="24" y="22" width="190" height="38" rx="6" class="hd-lbl"/>
+<text class="on" x="38" y="46">dimension</text>
+<rect x="220" y="22" width="216" height="38" rx="6" class="hd-lbl"/>
+<text class="on" x="328" y="46" style="text-anchor:middle">GitHub Spokes</text>
+<rect x="442" y="22" width="216" height="38" rx="6" class="hd-lbl"/>
+<text class="on" x="550" y="46" style="text-anchor:middle">GitLab Gitaly</text>
+<rect x="664" y="22" width="216" height="38" rx="6" class="hd-lbl"/>
+<text class="on" x="772" y="46" style="text-anchor:middle">AWS CodeCommit</text>
+<rect x="886" y="22" width="216" height="38" rx="6" class="hd-lbl"/>
+<text class="on" x="994" y="46" style="text-anchor:middle">Stemma / JGit DFS</text>
+<rect x="1108" y="22" width="226" height="38" rx="6" class="hd-lbl"/>
+<text class="on" x="1221" y="46" style="text-anchor:middle">Continuity · walgit</text>
+<rect x="1340" y="22" width="236" height="38" rx="6" class="hd-forge"/>
+<text class="on" x="1458" y="46" style="text-anchor:middle">flint-forge</text>
+<rect x="24" y="66" width="190" height="71" rx="0" class="lbl"/>
+<text class="t2" x="38" y="88">durable substrate</text>
+<text class="t4" x="228" y="88">three replicas on local disks in three</text>
+<text class="t4" x="228" y="103">racks, replicated at the application</text>
+<text class="t4" x="228" y="118">level</text>
+<text class="t4" x="450" y="88">local SSD per Gitaly node, Praefect</text>
+<text class="t4" x="450" y="103">replicating; object storage for LFS</text>
+<text class="t4" x="450" y="118">and artifacts only</text>
+<text class="t4" x="672" y="88">packs in S3, metadata in DynamoDB;</text>
+<text class="t4" x="672" y="103">managed (closed 2024-07, GA again</text>
+<text class="t4" x="672" y="118">2025-11-24)</text>
+<text class="t4" x="894" y="88">packs as blobs and refs as rows in a</text>
+<text class="t4" x="894" y="103">transactional store (AtlasDB; Google:</text>
+<text class="t4" x="894" y="118">Bigtable)</text>
+<text class="t4" x="1116" y="88">a write-ahead log of per-push objects in</text>
+<text class="t4" x="1116" y="103">S3/GCS plus a CAS'd index or manifest</text>
+<text class="t4b" x="1348" y="88">content-named packs in S3 plus ONE</text>
+<text class="t4b" x="1348" y="103">CAS'd snapshot; nothing else is</text>
+<text class="t4b" x="1348" y="118">trusted</text>
+<line class="hair" x1="24" y1="137" x2="1576" y2="137"/>
+<rect x="24" y="137" width="190" height="71" rx="0" class="lbl"/>
+<rect x="214" y="137" width="1362" height="71" rx="0" class="rowb"/>
+<text class="t2" x="38" y="159">what serves git</text>
+<text class="t4" x="228" y="159">stock git per replica, behind a proxy</text>
+<text class="t4" x="450" y="159">stock git inside Gitaly, over gRPC</text>
+<text class="t4" x="672" y="159">proprietary</text>
+<text class="t4" x="894" y="159">JGit, in Java, on a DFS abstraction</text>
+<text class="t4" x="1116" y="159">stock git on disk (Continuity); a Rust</text>
+<text class="t4" x="1116" y="174">smart-protocol reimplementation</text>
+<text class="t4" x="1116" y="189">(walgit)</text>
+<text class="t4b" x="1348" y="159">stock git — receive-pack, upload-pack,</text>
+<text class="t4b" x="1348" y="174">hooks — behind a 382-line CGI runner;</text>
+<text class="t4b" x="1348" y="189">flint writes no git internals</text>
+<line class="hair" x1="24" y1="208" x2="1576" y2="208"/>
+<rect x="24" y="208" width="190" height="101" rx="0" class="lbl"/>
+<text class="t2" x="38" y="230">the write, and the ack</text>
+<text class="t4" x="228" y="230">a git transaction on ≥ 2 of 3 replicas</text>
+<text class="t4" x="228" y="245">by three-phase commit; ok after that</text>
+<text class="t4" x="450" y="230">a transaction on the primary's disk,</text>
+<text class="t4" x="450" y="245">then replicated; ok after the primary</text>
+<text class="t4" x="672" y="230">a managed write; ok after it</text>
+<text class="t4" x="894" y="230">a database transaction over refs and</text>
+<text class="t4" x="894" y="245">pack ids; ok on commit</text>
+<text class="t4" x="1116" y="230">one WAL entry — the packfile and its ref</text>
+<text class="t4" x="1116" y="245">transaction — then the index CAS;</text>
+<text class="t4" x="1116" y="260">"never acknowledge a push until it has</text>
+<text class="t4" x="1116" y="275">been fully persisted"</text>
+<text class="t4b" x="1348" y="230">every complete pack uploaded, ONE</text>
+<text class="t4b" x="1348" y="245">snapshot CAS, the local ref</text>
+<text class="t4b" x="1348" y="260">transaction, THEN ok — carried by</text>
+<text class="t4b" x="1348" y="275">proc-receive, which waits on the</text>
+<text class="t4b" x="1348" y="290">syncer</text>
+<line class="hair" x1="24" y1="309" x2="1576" y2="309"/>
+<rect x="24" y="309" width="190" height="101" rx="0" class="lbl"/>
+<rect x="214" y="309" width="1362" height="101" rx="0" class="rowb"/>
+<text class="t2" x="38" y="331">writer coordination</text>
+<text class="t4" x="228" y="331">a proxy per push; consensus among</text>
+<text class="t4" x="228" y="346">the replicas</text>
+<text class="t4" x="450" y="331">Praefect elects a primary per</text>
+<text class="t4" x="450" y="346">repository</text>
+<text class="t4" x="672" y="331">the service</text>
+<text class="t4" x="894" y="331">database transactions</text>
+<text class="t4" x="1116" y="331">the index/manifest CAS is the</text>
+<text class="t4" x="1116" y="346">consensus: no leader, no election, any</text>
+<text class="t4" x="1116" y="361">host may be primary</text>
+<text class="t4b" x="1348" y="331">one writer per repository under an S3</text>
+<text class="t4b" x="1348" y="346">epoch lease with a progress-gated</text>
+<text class="t4b" x="1348" y="361">renewer; every claim rotates the</text>
+<text class="t4b" x="1348" y="376">snapshot so a straggler's If-Match is</text>
+<text class="t4b" x="1348" y="391">stale first</text>
+<line class="hair" x1="24" y1="410" x2="1576" y2="410"/>
+<rect x="24" y="410" width="190" height="86" rx="0" class="lbl"/>
+<text class="t2" x="38" y="432">disk, idle, restore</text>
+<text class="t4" x="228" y="432">the repository itself, three times;</text>
+<text class="t4" x="228" y="447">always on</text>
+<text class="t4" x="450" y="432">the repository itself; always on</text>
+<text class="t4" x="672" y="432">none visible; managed</text>
+<text class="t4" x="894" y="432">a DFS block cache; always on</text>
+<text class="t4" x="1116" y="432">a warm cache materialised from the</text>
+<text class="t4" x="1116" y="447">WAL; idle replicas evicted and</text>
+<text class="t4" x="1116" y="462">rematerialised on the next fetch</text>
+<text class="t4b" x="1348" y="432">an emptyDir cache restored from the</text>
+<text class="t4b" x="1348" y="447">snapshot at every start (40 GiB in 139</text>
+<text class="t4b" x="1348" y="462">s); one pod per repository, parked at</text>
+<text class="t4b" x="1348" y="477">replicas 0, woken by the door</text>
+<line class="hair" x1="24" y1="496" x2="1576" y2="496"/>
+<rect x="24" y="496" width="190" height="71" rx="0" class="lbl"/>
+<rect x="214" y="496" width="1362" height="71" rx="0" class="rowb"/>
+<text class="t2" x="38" y="518">reads and storms</text>
+<text class="t4" x="228" y="518">three replicas serve reads</text>
+<text class="t4" x="450" y="518">Praefect distributes reads</text>
+<text class="t4" x="672" y="518">the service</text>
+<text class="t4" x="894" y="518">JGit caches</text>
+<text class="t4" x="1116" y="518">read replicas kept current by</text>
+<text class="t4" x="1116" y="533">conditional GET; linear to 100 replicas;</text>
+<text class="t4" x="1116" y="548">120 pushes/s on S3 Standard</text>
+<text class="t4b" x="1348" y="518">one pod; the lever is bundle URIs on</text>
+<text class="t4b" x="1348" y="533">the bucket — 5.7 MiB against 40,409</text>
+<text class="t4b" x="1348" y="548">MiB of egress for 1,000 clones</text>
+<line class="hair" x1="24" y1="567" x2="1576" y2="567"/>
+<rect x="24" y="567" width="190" height="86" rx="0" class="lbl"/>
+<text class="t2" x="38" y="589">identity and policy</text>
+<text class="t4" x="228" y="589">the platform's</text>
+<text class="t4" x="450" y="589">the platform's</text>
+<text class="t4" x="672" y="589">IAM</text>
+<text class="t4" x="894" y="589">the platform's</text>
+<text class="t4" x="1116" y="589">token or OIDC; per-repository push</text>
+<text class="t4" x="1116" y="604">policy (walgit)</text>
+<text class="t4b" x="1348" y="589">the pod's own ServiceAccount token,</text>
+<text class="t4b" x="1348" y="604">by TokenReview; consumers and a</text>
+<text class="t4b" x="1348" y="619">branch policy per principal, enforced</text>
+<text class="t4b" x="1348" y="634">twice; merge is a push</text>
+<line class="hair" x1="24" y1="653" x2="1576" y2="653"/>
+<rect x="24" y="653" width="190" height="71" rx="0" class="lbl"/>
+<rect x="214" y="653" width="1362" height="71" rx="0" class="rowb"/>
+<text class="t2" x="38" y="675">verification</text>
+<text class="t4" x="228" y="675">production at GitHub scale</text>
+<text class="t4" x="450" y="675">production at GitLab scale</text>
+<text class="t4" x="672" y="675">production since 2015</text>
+<text class="t4" x="894" y="675">production at Palantir</text>
+<text class="t4" x="1116" y="675">production at Cursor; walgit open</text>
+<text class="t4" x="1116" y="690">source, ~2.4k stars</text>
+<text class="t4b" x="1348" y="675">a TLA+ model with mutations, eleven</text>
+<text class="t4b" x="1348" y="690">falsifiers, three campaigns on real S3,</text>
+<text class="t4b" x="1348" y="705">a control arm — and no production</text>
+<line class="hair" x1="24" y1="724" x2="1576" y2="724"/>
+<rect x="24" y="66" width="1552" height="658" rx="0" class="frame"/>
+<line class="hair" x1="436" y1="66" x2="436" y2="724"/>
+<line class="hair" x1="658" y1="66" x2="658" y2="724"/>
+<line class="hair" x1="880" y1="66" x2="880" y2="724"/>
+<line class="hair" x1="1102" y1="66" x2="1102" y2="724"/>
+<line class="hair" x1="1334" y1="66" x2="1334" y2="724"/>
+<rect x="24" y="760" width="1552" height="96" rx="7" class="panel"/>
+<text class="t2" x="46" y="784">The verdict</text>
+<text class="t4" x="46" y="802">Convergent, and independent: S3 as the only durable state, disk as a cache, one CAS'd pointer and stock git is a shape Cursor published on 2026-08-18 and forge reached on 2026-09-04, with CodeCommit (2015) and Stemma (2017) before both on other stores. Forge's own: the syncer as the sole</text>
+<text class="t4" x="46" y="817">writer behind stock receive-pack with the acknowledgement carried by proc-receive; the progress-gated lease with takeover rotation; a per-repository Kubernetes control plane with pod identity and idle-to-zero; the legible export; and the model-and-drill record. Not forge's: read replicas, a</text>
+<text class="t4" x="46" y="832">replayable log, a UI, review.</text>
+</svg>

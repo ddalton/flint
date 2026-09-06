@@ -1,0 +1,232 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
+     aria-label="The durable path: a push as a transaction. proc-receive hands the commands to the syncer and waits; the syncer judges under the agreed view, renews the lease once, uploads every complete pack as an immutable content-named object (multipart above 64 MiB with the CRC accumulated as the parts are read), CASes one snapshot on the etag it last saw, applies the ref transaction and only then reports ok. S3 holds the packs, the snapshot, the lease cell, bundles, LFS objects and the export. The theorems the model checks, the one residual, and how a fresh pod restores from the bucket alone.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .t1{font-size:17.0px;font-weight:600}
+  .t2{font-size:13.0px;font-weight:600}
+  .t3{font-size:12.0px}
+  .t3b{font-size:12.0px;font-weight:600;fill:#334155}
+  .t4{font-size:11.0px;fill:#64748b}
+  .t4b{font-size:11.0px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:9.5px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:11.0px;font-weight:600;fill:#ffffff}
+  .on{font-size:13.0px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:11.0px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
+  .chip-ink{fill:#334155}
+</style>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<rect x="24" y="22" width="1552" height="300" rx="7" class="panel"/>
+<text class="t1" x="46" y="48">One batch, one transaction — receive-pack serialises nothing under proc-receive, so the syncer does</text>
+<rect x="46" y="66" width="205" height="240" rx="7" class="bx"/>
+<circle cx="66" cy="88" r="11" class="f-forge"/>
+<text class="num" x="66" y="92" style="text-anchor:middle">1</text>
+<text class="t2" x="84" y="92">collect and judge</text>
+<text class="t4" x="60" y="114">every pending push, in arrival</text>
+<text class="t4" x="60" y="129">order, against the local refs, the</text>
+<text class="t4" x="60" y="144">snapshot AND the syncer's running</text>
+<text class="t4" x="60" y="159">view; old-oid must match both or</text>
+<text class="t4" x="60" y="174">ng stale, fetch first; fast-forward</text>
+<text class="t4" x="60" y="189">and policy here, since</text>
+<text class="t4" x="60" y="204">receive-pack no longer checks</text>
+<text class="t4" x="60" y="219">them; a refs/for/&lt;target&gt; runs the</text>
+<text class="t4" x="60" y="234">merge and packs what it created</text>
+<line class="l-ink" x1="251" y1="180" x2="263" y2="180" marker-end="url(#a-ink)"/>
+<rect x="263" y="66" width="205" height="240" rx="7" class="bx"/>
+<circle cx="283" cy="88" r="11" class="f-forge"/>
+<text class="num" x="283" y="92" style="text-anchor:middle">2</text>
+<text class="t2" x="301" y="92">renew the lease, once</text>
+<text class="t4" x="277" y="114">epoch_renew with If-Match on our</text>
+<text class="t4" x="277" y="129">token; a 412 takes the</text>
+<text class="t4" x="277" y="144">lost-response rule (re-read; adopt</text>
+<text class="t4" x="277" y="159">if the cell still names us) else it is</text>
+<text class="t4" x="277" y="174">the fence: ng to every hook, stop</text>
+<text class="t4" x="277" y="189">serving reads too, exit</text>
+<line class="l-ink" x1="468" y1="180" x2="480" y2="180" marker-end="url(#a-ink)"/>
+<rect x="480" y="66" width="205" height="240" rx="7" class="bx"/>
+<circle cx="500" cy="88" r="11" class="f-forge"/>
+<text class="num" x="500" y="92" style="text-anchor:middle">3</text>
+<text class="t2" x="518" y="92">hash and upload the</text>
+<text class="t2" x="518" y="107">packs</text>
+<text class="t4" x="494" y="134">every local pack the snapshot</text>
+<text class="t4" x="494" y="149">does not name and whose .idx</text>
+<text class="t4" x="494" y="164">exists, with .idx .bitmap .rev:</text>
+<text class="t4" x="494" y="179">unconditional PUTs of</text>
+<text class="t4" x="494" y="194">content-named keys, siblings four</text>
+<text class="t4" x="494" y="209">in flight; multipart above 64 MiB,</text>
+<text class="t4" x="494" y="224">the CRC-64/NVME accumulated</text>
+<text class="t4" x="494" y="239">per part beside its PUT and judged</text>
+<text class="t4" x="494" y="254">by S3 at Complete</text>
+<line class="l-ink" x1="685" y1="180" x2="697" y2="180" marker-end="url(#a-ink)"/>
+<rect x="697" y="66" width="205" height="240" rx="7" class="bx"/>
+<circle cx="717" cy="88" r="11" class="f-forge"/>
+<text class="num" x="717" y="92" style="text-anchor:middle">4</text>
+<text class="t2" x="735" y="92">ONE snapshot CAS</text>
+<text class="t4" x="711" y="114">If-Match on the etag this syncer</text>
+<text class="t4" x="711" y="129">last synced (If-None-Match:* when</text>
+<text class="t4" x="711" y="144">none): refs and the full pack list</text>
+<text class="t4" x="711" y="159">move as one object; a reader</text>
+<text class="t4" x="711" y="174">never sees half a batch. Under the</text>
+<text class="t4" x="711" y="189">lock a 412 can only be another</text>
+<text class="t4" x="711" y="204">server — the fence</text>
+<line class="l-ink" x1="903" y1="180" x2="915" y2="180" marker-end="url(#a-ink)"/>
+<rect x="915" y="66" width="205" height="240" rx="7" class="bx"/>
+<circle cx="935" cy="88" r="11" class="f-forge"/>
+<text class="num" x="935" y="92" style="text-anchor:middle">5</text>
+<text class="t2" x="953" y="92">the ref transaction</text>
+<text class="t4" x="929" y="114">git update-ref --stdin applies every</text>
+<text class="t4" x="929" y="129">accepted ref locally as one</text>
+<text class="t4" x="929" y="144">transaction</text>
+<line class="l-ink" x1="1120" y1="180" x2="1132" y2="180" marker-end="url(#a-ink)"/>
+<rect x="1132" y="66" width="205" height="240" rx="7" class="bx"/>
+<circle cx="1152" cy="88" r="11" class="f-forge"/>
+<text class="num" x="1152" y="92" style="text-anchor:middle">6</text>
+<text class="t2" x="1170" y="92">THEN the report</text>
+<text class="t4" x="1146" y="114">ok or ng per ref to each waiting</text>
+<text class="t4" x="1146" y="129">hook; per-ref ok reaches the client</text>
+<text class="t4" x="1146" y="144">as it is emitted, so the report</text>
+<text class="t4" x="1146" y="159">follows the whole transaction. A</text>
+<text class="t4" x="1146" y="174">crash before this fails every push</text>
+<text class="t4" x="1146" y="189">at the client; the restart restores</text>
+<text class="t4" x="1146" y="204">from the snapshot</text>
+<line class="l-ink" x1="1337" y1="180" x2="1349" y2="180" marker-end="url(#a-ink)"/>
+<rect x="1349" y="66" width="205" height="240" rx="7" class="bx"/>
+<circle cx="1369" cy="88" r="11" class="f-forge"/>
+<text class="num" x="1369" y="92" style="text-anchor:middle">7</text>
+<text class="t2" x="1387" y="92">after the report</text>
+<text class="t4" x="1363" y="114">best effort, never a gate: derived</text>
+<text class="t4" x="1363" y="129">info/packs then info/refs (in that</text>
+<text class="t4" x="1363" y="144">order), the export, the sweep, a</text>
+<text class="t4" x="1363" y="159">repack when the pack count</text>
+<text class="t4" x="1363" y="174">passes the threshold</text>
+<rect x="24" y="340" width="374" height="440" rx="7" class="s3"/>
+<text class="t1" x="42" y="366">What S3 holds — &lt;prefix&gt;/</text>
+<text class="mono" x="42" y="390" xml:space="preserve">git/objects/pack/pack-&lt;sha&gt;.pack</text>
+<text class="t4" x="42" y="405">immutable, content-named by git; with .idx .bitmap .rev beside it;</text>
+<text class="t4" x="42" y="420">unconditional PUT</text>
+<text class="mono" x="42" y="438" xml:space="preserve">git/snapshot</text>
+<text class="t4" x="42" y="453">THE pointer: {seq, epoch, refs{name: oid}, packs[], bundles[],</text>
+<text class="t4" x="42" y="468">exported_commit}; CAS'd by etag; the only mutable object the</text>
+<text class="t4" x="42" y="483">server trusts</text>
+<text class="mono" x="42" y="501" xml:space="preserve">git/epoch</text>
+<text class="t4" x="42" y="516">the single-writer lease cell: {epoch, token, holder, released};</text>
+<text class="t4" x="42" y="531">every write a CAS</text>
+<text class="mono" x="42" y="549" xml:space="preserve">git/claim</text>
+<text class="t4" x="42" y="564">the operator's project claim: a foreign projectId refuses the start</text>
+<text class="mono" x="42" y="582" xml:space="preserve">git/objects/info/packs · git/info/refs · git/HEAD</text>
+<text class="t4" x="42" y="597">derived, for the dumb protocol and for humans; the server never</text>
+<text class="t4" x="42" y="612">reads them</text>
+<text class="mono" x="42" y="630" xml:space="preserve">git/bundles/&lt;oid&gt;.bundle</text>
+<text class="t4" x="42" y="645">clone bundles, listed in the snapshot, advertised presigned</text>
+<text class="mono" x="42" y="663" xml:space="preserve">lfs/objects/&lt;oid&gt;</text>
+<text class="t4" x="42" y="678">LFS objects, presigned both ways: the pod sees a few hundred</text>
+<text class="t4" x="42" y="693">bytes of JSON</text>
+<text class="mono" x="42" y="711" xml:space="preserve">files/&lt;path&gt; + .flint/lean/</text>
+<text class="t4" x="42" y="726">the export: a valid lean workspace, published after the report by</text>
+<text class="t4" x="42" y="741">the shipped flint-sync barrier</text>
+<text class="t4b" x="42" y="761">Versioning OFF: nothing pins a version</text>
+<rect x="416" y="340" width="374" height="440" rx="7" class="panel"/>
+<text class="t2" x="432" y="364">The theorems — ForgeSync.tla, eight runs in the gate</text>
+<text class="t4" x="432" y="384">Two syncers, two pushes, the batch at store-request granularity</text>
+<text class="t4" x="432" y="399">with a crash between any two steps, the renewer's sensor kept</text>
+<text class="t4" x="432" y="414">distinct from real movement, a challenger, a successor's claim,</text>
+<text class="t4" x="432" y="429">rotation, sweep and restore, git's .idx-last migration, a client that</text>
+<text class="t4" x="432" y="444">can hang up.</text>
+<text class="t3b" x="432" y="463">Invariants — strict run, 2,776,804 states, depth 52</text>
+<text class="t4b" x="432" y="479">Told ok ⇒ the ref landed in the snapshot and the pack is in the</text>
+<text class="t4b" x="432" y="494">bucket WITH its index.</text>
+<text class="t4b" x="432" y="509">Every landed pack is complete with its index.</text>
+<text class="t4b" x="432" y="524">The renewer never skips a heartbeat while the holder moved:</text>
+<text class="t4b" x="432" y="539">the sensor is honest.</text>
+<text class="t4b" x="432" y="554">No CAS lands from a deposed syncer after its successor</text>
+<text class="t4b" x="432" y="569">restored.</text>
+<text class="t4b" x="432" y="584">A restore never refuses: the bucket is always restorable.</text>
+<text class="t3b" x="432" y="603">Mutations that must each find their loss</text>
+<text class="t4" x="432" y="619">early ack (option B1) · no index gate (X1) · the checksum pass</text>
+<text class="t4" x="432" y="634">ticking nothing (run 3) · no rotation · the CAS before the packs (§4</text>
+<text class="t4" x="432" y="649">reversed).</text>
+<text class="t3b" x="432" y="668">What the model found</text>
+<text class="t4" x="432" y="684">Two rotation gaps in the code (X11, X12), fixed the same day with</text>
+<text class="t4" x="432" y="699">tests; then two gaps in itself, found by the liveness run.</text>
+<rect x="809" y="340" width="374" height="440" rx="7" class="bx"/>
+<path class="f-forge" d="M816,340 H1176 A7,7 0 0 1 1184,347 V345 H809 V347 A7,7 0 0 1 816,340 Z"/>
+<text class="t2 c-forge" x="825" y="364">Restore — a fresh pod from the bucket alone</text>
+<text class="t4" x="825" y="384">Claim. Acquire the lease. Rotate the snapshot (seq + 1, same</text>
+<text class="t4" x="825" y="399">content; created empty if none) so any straggler's If-Match is stale</text>
+<text class="t4" x="825" y="414">before this pod serves a byte. Sweep every in-flight multipart</text>
+<text class="t4" x="825" y="429">upload: nothing of ours is in flight at this moment.</text>
+<text class="t4" x="825" y="444">GET the snapshot; fetch the packs it names with .idx .bitmap .rev —</text>
+<text class="t4" x="825" y="459">one bounded fan-out across files and 8 MiB ranged chunks, 38-40</text>
+<text class="t4" x="825" y="474">MiB of memory flat in the pack size, temporaries renamed only</text>
+<text class="t4" x="825" y="489">when every chunk has landed; write packed-refs and HEAD to</text>
+<text class="t4" x="825" y="504">EXACTLY the snapshot's refs; git fsck --connectivity-only; open the</text>
+<text class="t4" x="825" y="519">socket; serve.</text>
+<text class="t4b" x="825" y="534">A named pack the bucket lacks: re-read the snapshot once,</text>
+<text class="t4b" x="825" y="549">then refuse loudly (exit 78, judged before the pod phase) rather</text>
+<text class="t4b" x="825" y="564">than serve a repository git cannot see.</text>
+<text class="t4b" x="825" y="579">Measured: 40 GiB restored in 139 s from the delete (297</text>
+<text class="t4b" x="825" y="594">MiB/s), refs exactly the snapshot's, fsck clean, anon RSS 25</text>
+<text class="t4b" x="825" y="609">MiB; 1 GiB in 9 s.</text>
+<rect x="1202" y="340" width="374" height="440" rx="7" class="bx"/>
+<path class="f-forge" d="M1208,340 H1569 A7,7 0 0 1 1576,347 V345 H1202 V347 A7,7 0 0 1 1208,340 Z"/>
+<text class="t2 c-forge" x="1218" y="364">The residual, and what the drills held</text>
+<text class="t3b" x="1218" y="388">Told failed, but durable</text>
+<text class="t4" x="1218" y="404">A client that hangs up before the report is never noticed by the</text>
+<text class="t4" x="1218" y="419">syncer: the batch completes and the bucket names the pushed tip</text>
+<text class="t4" x="1218" y="434">while the client saw a failed push. Not a loss and not a corruption —</text>
+<text class="t4" x="1218" y="449">the retry finds the ref already there — but a transition the argument</text>
+<text class="t4" x="1218" y="464">carries in the other direction, kept as a required-fail probe in the</text>
+<text class="t4" x="1218" y="479">model and seen on the wire (run 3; run 7's S7 and S8).</text>
+<text class="t3b" x="1218" y="498">Acknowledged means durable, on real S3</text>
+<text class="t4b" x="1218" y="514">runbx: 40 GiB push acknowledged in 1113 s, 641 parts, the</text>
+<text class="t4b" x="1218" y="529">CRC accepted at Complete, the snapshot at the tip; 40 of 40</text>
+<text class="t4b" x="1218" y="544">pushes told ok were in the bucket across both takeover arms.</text>
+<text class="t4b" x="1218" y="559">S4, four kills placed INSIDE the multipart upload by watching</text>
+<text class="t4b" x="1218" y="574">list-multipart-uploads: told failed ⇒ the bucket unchanged; told</text>
+<text class="t4b" x="1218" y="589">ok ⇒ durable; every orphaned upload swept once the successor</text>
+<text class="t4b" x="1218" y="604">served.</text>
+<text class="t3b" x="1218" y="623">The one write the pack directory has</text>
+<text class="t4" x="1218" y="639">git's own gc is off. The syncer repacks under its lock between</text>
+<text class="t4" x="1218" y="654">batches, uploads the new pack, CASes a snapshot naming only it,</text>
+<text class="t4" x="1218" y="669">then sweeps what no snapshot names — after a listing, after</text>
+<text class="t4" x="1218" y="684">re-reading the snapshot, after a HEAD past a grace that outlives the</text>
+<text class="t4" x="1218" y="699">longest upload. Measured cost: a full repack re-uploads the</text>
+<text class="t4" x="1218" y="714">repository (every 24 pushes at the shipped threshold); geometric</text>
+<text class="t4" x="1218" y="729">repack is the lever and needs a multi-pack bitmap.</text>
+<rect x="24" y="796" width="1552" height="62" rx="7" class="panel"/>
+<text class="t2" x="46" y="820">What is NOT on this path</text>
+<text class="t4" x="46" y="838">The runner and the door carry bytes and never write the bucket; the operator never reads it; the export and the derived dumb-protocol files are written after the report and are never a gate; a refused push's pack is never uploaded. Everything that can change what a restore sees goes through steps 3</text>
+<text class="t4" x="46" y="853">and 4, under one lock, in one process.</text>
+<line class="l-ink" x1="28" y1="868" x2="54" y2="868"/>
+<text class="t4" x="60" y="872">durable path</text>
+<line class="l-ctl" x1="144.04" y1="868" x2="170.04" y2="868" stroke-dasharray="6 5"/>
+<text class="t4" x="176" y="872">the lease, on the control plane</text>
+</svg>

@@ -1,12 +1,14 @@
 # flint front ends — architecture deck
 
 The architecture of **flint-lite**, **flint-lean**, **flint-passthrough** and
-**flint-forge**: what each one is, the fleet shape each implies when one user launches
+**flint-forge** — in one word each, NFS, sync, FUSE and git: what each one is, the fleet shape each implies when one user launches
 agents across several Kubernetes clusters, what identity is actually enforced on the
 data path, the security posture of each, where S3 sits in all four, and the rule under
 which they compose on one bucket.
 
 Start with **`flint-front-ends-architecture.pdf`** (13 pages, A3 landscape).
+
+The forge front end has its own document under **`forge/`** — `forge/flint-forge-architecture.pdf` (8 pages, A3 landscape): the components on three planes (data plane, durable path, control plane), the push transaction and its theorems, the lease, the operator and the door, the boundaries and every campaign, and the prior art with a verdict. It is drawn with this deck's kit (`forge/forge-diagrams.py` imports `diagrams.py`) and built by `forge/build.sh` with the same checks.
 
 ## What is source, and what is built
 

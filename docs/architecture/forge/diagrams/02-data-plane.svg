@@ -1,0 +1,231 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
+     aria-label="The data plane hop by hop. A clone or fetch: stock git in the agent pod, the door, the gitcgi runner, git http-backend and upload-pack reading the emptyDir cache. A push: the same hops inbound with the pack, then receive-pack's index-pack, the pre-receive policy hook, and proc-receive waiting on the syncer while receive-pack sends a keepalive every 5 s; the sideband and the report flow back out. Below: the parties between the client and git and the bound each one has after A3, and what run 7 measured through the runner against the nginx control.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .t1{font-size:17.0px;font-weight:600}
+  .t2{font-size:13.0px;font-weight:600}
+  .t3{font-size:12.0px}
+  .t3b{font-size:12.0px;font-weight:600;fill:#334155}
+  .t4{font-size:11.0px;fill:#64748b}
+  .t4b{font-size:11.0px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:9.5px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:11.0px;font-weight:600;fill:#ffffff}
+  .on{font-size:13.0px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:11.0px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
+  .chip-ink{fill:#334155}
+</style>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<text class="t1" x="24" y="44">Clone / fetch — what crosses each hop</text>
+<rect x="24" y="58" width="234" height="110" rx="7" class="bx"/>
+<text class="t2" x="38" y="80">agent pod · stock git</text>
+<text class="t4" x="38" y="98">GET info/refs?service=git-upload-pack,</text>
+<text class="t4" x="38" y="113">then POST git-upload-pack: ls-refs with</text>
+<text class="t4" x="38" y="128">a prefix (protocol v2), fetch</text>
+<text class="mono" x="38" y="143" xml:space="preserve">Basic x:&lt;SA token&gt;</text>
+<line class="l-forge" x1="258" y1="113" x2="288" y2="113" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="288" y="58" width="234" height="110" rx="7" class="bx"/>
+<path class="f-forge" d="M295,58 H514 A7,7 0 0 1 521,65 V63 H288 V65 A7,7 0 0 1 295,58 Z"/>
+<text class="t2 c-forge" x="302" y="80">the door</text>
+<text class="t4" x="302" y="98">TokenReview → 401 or forward;</text>
+<text class="t4" x="302" y="113">consumers; the wake if parked</text>
+<text class="mono" x="302" y="128" xml:space="preserve">X-Remote-User · Git-Protocol</text>
+<text class="t4" x="302" y="143">HTTP, cleartext in-tree</text>
+<line class="l-forge" x1="521" y1="113" x2="551" y2="113" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="551" y="58" width="234" height="110" rx="7" class="bx"/>
+<path class="f-forge" d="M558,58 H778 A7,7 0 0 1 785,65 V63 H551 V65 A7,7 0 0 1 558,58 Z"/>
+<text class="t2 c-forge" x="565" y="80">gitcgi runner</text>
+<text class="t4" x="565" y="98">execs http-backend per request with the</text>
+<text class="t4" x="565" y="113">CGI environment from the request;</text>
+<text class="t4" x="565" y="128">streams the request body in and stdout</text>
+<text class="t4" x="565" y="143">out</text>
+<text class="mono" x="565" y="158" xml:space="preserve">REMOTE_USER · GIT_PROTOCOL</text>
+<line class="l-forge" x1="785" y1="113" x2="815" y2="113" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="815" y="58" width="234" height="110" rx="7" class="bx"/>
+<text class="t2" x="829" y="80">git http-backend</text>
+<text class="t4" x="829" y="98">stock git's CGI: negotiates, forwards to</text>
+<text class="t4" x="829" y="113">upload-pack; sets no policy</text>
+<text class="mono" x="829" y="128" xml:space="preserve">GIT_PROJECT_ROOT · EXPORT_ALL</text>
+<line class="l-forge" x1="1049" y1="113" x2="1079" y2="113" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="1079" y="58" width="234" height="110" rx="7" class="bx"/>
+<text class="t2" x="1093" y="80">receive-pack / upload-pack</text>
+<text class="t4" x="1093" y="98">upload-pack with bitmaps; advertises a</text>
+<text class="t4" x="1093" y="113">presigned bundle URI when the client</text>
+<text class="t4" x="1093" y="128">opted in</text>
+<text class="mono" x="1093" y="143" xml:space="preserve">uploadpack.advertiseBundleURIs</text>
+<line class="l-forge" x1="1312" y1="113" x2="1342" y2="113" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="1342" y="58" width="234" height="110" rx="7" class="bx"/>
+<text class="t2" x="1356" y="80">emptyDir cache</text>
+<text class="t4" x="1356" y="98">the packs the snapshot named, restored</text>
+<text class="t4" x="1356" y="113">at start; a clone reads local NVMe</text>
+<text class="mono" x="1356" y="128" xml:space="preserve">objects/pack/*.pack .idx .bitmap</text>
+<text class="t1" x="24" y="204">Push — the pack in, the sideband out</text>
+<rect x="24" y="218" width="234" height="150" rx="7" class="bx"/>
+<text class="t2" x="38" y="240">agent pod · stock git</text>
+<text class="t4" x="38" y="258">POST git-receive-pack: the commands,</text>
+<text class="t4" x="38" y="273">then the pack, chunked; reads sideband</text>
+<text class="t4" x="38" y="288">packets until the report</text>
+<text class="t4b" x="38" y="303">a 40 GiB push is one request of ~19</text>
+<text class="t4b" x="38" y="318">minutes</text>
+<line class="l-forge" x1="258" y1="293" x2="288" y2="293" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="288" y="218" width="234" height="150" rx="7" class="bx"/>
+<path class="f-forge" d="M295,218 H514 A7,7 0 0 1 521,225 V223 H288 V225 A7,7 0 0 1 295,218 Z"/>
+<text class="t2 c-forge" x="302" y="240">the door</text>
+<text class="t4" x="302" y="258">the inactivity clock is touched by every</text>
+<text class="t4" x="302" y="273">chunk either way; 300 s of silence cuts</text>
+<text class="t4" x="302" y="288">the request</text>
+<text class="t4b" x="302" y="303">the one client-facing bound, by design</text>
+<line class="l-forge" x1="521" y1="293" x2="551" y2="293" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="551" y="218" width="234" height="150" rx="7" class="bx"/>
+<path class="f-forge" d="M558,218 H778 A7,7 0 0 1 785,225 V223 H551 V225 A7,7 0 0 1 558,218 Z"/>
+<text class="t2 c-forge" x="565" y="240">gitcgi runner</text>
+<text class="t4" x="565" y="258">stdin from the request body as it arrives;</text>
+<text class="t4" x="565" y="273">stdout to the client as it is written; the</text>
+<text class="t4" x="565" y="288">child killed when the client goes</text>
+<text class="t4b" x="565" y="303">no timeout, no body limit; 503 past</text>
+<text class="t4b" x="565" y="318">the ceiling (64)</text>
+<line class="l-forge" x1="785" y1="293" x2="815" y2="293" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="815" y="218" width="234" height="150" rx="7" class="bx"/>
+<text class="t2" x="829" y="240">git http-backend</text>
+<text class="t4" x="829" y="258">execs receive-pack --stateless-rpc;</text>
+<text class="t4" x="829" y="273">index-pack writes the pack into</text>
+<text class="t4" x="829" y="288">quarantine, then migrates .keep .pack</text>
+<text class="t4" x="829" y="303">.rev .idx</text>
+<text class="t4b" x="829" y="318">the index lands LAST — X1</text>
+<line class="l-forge" x1="1049" y1="293" x2="1079" y2="293" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="1079" y="218" width="234" height="150" rx="7" class="bx"/>
+<text class="t2" x="1093" y="240">receive-pack / upload-pack</text>
+<text class="t4" x="1093" y="258">pre-receive: the policy, by principal.</text>
+<text class="t4" x="1093" y="273">proc-receive: the push to the syncer,</text>
+<text class="t4" x="1093" y="288">then WAIT</text>
+<text class="mono" x="1093" y="303" xml:space="preserve">receive.keepAlive = 5 s</text>
+<text class="t4" x="1093" y="318">a keepalive every 5 s of hook silence</text>
+<line class="l-forge" x1="1312" y1="293" x2="1342" y2="293" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="1342" y="218" width="234" height="150" rx="7" class="bx"/>
+<text class="t2" x="1356" y="240">emptyDir cache</text>
+<text class="t4" x="1356" y="258">the pack is on local disk; the syncer</text>
+<text class="t4" x="1356" y="273">reads it from here to upload it and</text>
+<text class="t4" x="1356" y="288">names it only once its .idx exists</text>
+<text class="t4b" x="1356" y="303">durable only after the snapshot CAS</text>
+<rect x="24" y="392" width="1552" height="236" rx="7" class="panel"/>
+<text class="t1" x="46" y="418">The parties between the client and git, and the knob each one has — after A3</text>
+<rect x="46" y="434" width="205" height="180" rx="7" class="bx"/>
+<text class="t2" x="58" y="456">git client</text>
+<text class="t4" x="58" y="476">no inactivity bound unless</text>
+<text class="t4" x="58" y="491">http.lowSpeedLimit/Time is set</text>
+<text class="t4" x="58" y="506">(off by default); the rigs set only the</text>
+<text class="t4" x="58" y="521">token header</text>
+<rect x="263" y="434" width="205" height="180" rx="7" class="bx"/>
+<path class="f-forge" d="M270,434 H461 A7,7 0 0 1 468,441 V439 H263 V441 A7,7 0 0 1 270,434 Z"/>
+<text class="t2 c-forge" x="275" y="456">the door</text>
+<text class="t4" x="275" y="476">no bytes either way for</text>
+<text class="t4" x="275" y="491">upstreamTimeoutSecs (300) cuts</text>
+<text class="t4" x="275" y="506">the request; a wake holds a slot ≤</text>
+<text class="t4" x="275" y="521">180 s; TokenReview cached ≤ 60 s</text>
+<rect x="480" y="434" width="205" height="180" rx="7" class="bx"/>
+<path class="f-forge" d="M487,434 H678 A7,7 0 0 1 685,441 V439 H480 V441 A7,7 0 0 1 487,434 Z"/>
+<text class="t2 c-forge" x="492" y="456">the runner</text>
+<text class="t4" x="492" y="476">none of its own: no body limit, no</text>
+<text class="t4" x="492" y="491">timeout; a ceiling of 64 concurrent</text>
+<text class="t4" x="492" y="506">requests that answers 503 at once.</text>
+<text class="t4" x="492" y="521">Removed: nginx's two 60 s</text>
+<text class="t4" x="492" y="536">defaults (X3) and fcgiwrap's four</text>
+<text class="t4" x="492" y="551">workers (X4)</text>
+<rect x="697" y="434" width="205" height="180" rx="7" class="bx"/>
+<text class="t2" x="709" y="456">receive-pack</text>
+<text class="t4" x="709" y="476">receive.keepAlive pinned at 5 s in</text>
+<text class="t4" x="709" y="491">the syncer's config (X5): an empty</text>
+<text class="t4" x="709" y="506">sideband packet whenever the</text>
+<text class="t4" x="709" y="521">hooks have been quiet that long</text>
+<rect x="915" y="434" width="205" height="180" rx="7" class="bx"/>
+<text class="t2" x="927" y="456">the hook</text>
+<text class="t4" x="927" y="476">none, correct as is: it waits for the</text>
+<text class="t4" x="927" y="491">syncer's report, and the process's</text>
+<text class="t4" x="927" y="506">exit closes its socket</text>
+<rect x="1132" y="434" width="205" height="180" rx="7" class="bx"/>
+<text class="t2" x="1144" y="456">the syncer</text>
+<text class="t4" x="1144" y="476">no batch deadline; the wedge</text>
+<text class="t4" x="1144" y="491">detector is the renewer, gated on</text>
+<text class="t4" x="1144" y="506">progress: a batch that moves no</text>
+<text class="t4" x="1144" y="521">bytes for 6 × 10 s is taken over</text>
+<rect x="1349" y="434" width="205" height="180" rx="7" class="bx"/>
+<text class="t2" x="1361" y="456">kubernetes</text>
+<text class="t4" x="1361" y="476">terminationGracePeriodSeconds 30</text>
+<text class="t4" x="1361" y="491">against batches of minutes;</text>
+<text class="t4" x="1361" y="506">SIGTERM is seen between</text>
+<text class="t4" x="1361" y="521">batches, so a roll mid-push is a</text>
+<text class="t4" x="1361" y="536">SIGKILL at 30 s (X6, measured: the</text>
+<text class="t4" x="1361" y="551">push is told failed, cleanly)</text>
+<rect x="24" y="646" width="374" height="210" rx="7" class="bx"/>
+<path class="f-forge" d="M31,646 H392 A7,7 0 0 1 398,653 V651 H24 V653 A7,7 0 0 1 31,646 Z"/>
+<text class="t2 c-forge" x="40" y="670">A stalled client — S5</text>
+<text class="t4" x="40" y="690">1 GiB push, the client SIGSTOPped 3 s into the body for 70 s, then</text>
+<text class="t4" x="40" y="705">resumed.</text>
+<text class="t4b" x="40" y="720">runner: acknowledged, and the bucket holds it.</text>
+<text class="t4b c-red" x="40" y="735">nginx control: HTTP 502 — client_body_timeout's 60 s default</text>
+<text class="t4b c-red" x="40" y="750">cut the client, the door relayed it.</text>
+<rect x="416" y="646" width="374" height="210" rx="7" class="bx"/>
+<path class="f-forge" d="M424,646 H784 A7,7 0 0 1 791,653 V651 H416 V653 A7,7 0 0 1 424,646 Z"/>
+<text class="t2 c-forge" x="432" y="670">Five pushes at once, eight clones at once — S6, S10</text>
+<text class="t4" x="432" y="690">Five 256 MiB pushes stopped mid-body; an advertisement request</text>
+<text class="t4" x="432" y="705">timed beside them. Eight single-branch clones of a 1 GiB branch, a</text>
+<text class="t4" x="432" y="720">push into the storm.</text>
+<text class="t4b" x="432" y="735">runner: 5 receive-packs, the request answered in 0 s, 5/5</text>
+<text class="t4b" x="432" y="750">durable; 8 upload-packs at the peak, all 8 at the tip, 51 s wall</text>
+<text class="t4b" x="432" y="765">against 16 s alone.</text>
+<text class="t4b c-red" x="432" y="780">control: 4 receive-packs, the request queued 60 s, 1/5; 4</text>
+<text class="t4b c-red" x="432" y="795">upload-packs, clones in pairs.</text>
+<rect x="809" y="646" width="374" height="210" rx="7" class="bx"/>
+<path class="f-forge" d="M816,646 H1176 A7,7 0 0 1 1184,653 V651 H809 V653 A7,7 0 0 1 816,646 Z"/>
+<text class="t2 c-forge" x="825" y="670">Keepalives through the front — S9, and its control S8</text>
+<text class="t4" x="825" y="690">20 GiB push, a 232 s hook wait, every packet the client read</text>
+<text class="t4" x="825" y="705">stamped by git's own trace.</text>
+<text class="t4b" x="825" y="720">runner: 48 packets, the first 5.8 s after the pack, longest gap</text>
+<text class="t4b" x="825" y="735">5.8 s.</text>
+<text class="t4b c-red" x="825" y="750">control: 49 packets in ONE burst with the report, 237.9 s after</text>
+<text class="t4b c-red" x="825" y="765">the pack.</text>
+<text class="t4" x="825" y="780">S8: keepalive off and the door at 30 s — the connection closed 30.5</text>
+<text class="t4" x="825" y="795">s after the upload; the batch landed anyway.</text>
+<rect x="1202" y="646" width="374" height="210" rx="7" class="bx"/>
+<path class="f-forge" d="M1208,646 H1569 A7,7 0 0 1 1576,653 V651 H1202 V653 A7,7 0 0 1 1208,646 Z"/>
+<text class="t2 c-forge" x="1218" y="670">The storm lever — bundle URIs (F8, 2026-09-04)</text>
+<text class="t4" x="1218" y="690">A thousand clones are ~130 CPU-s but 43 GB from one NIC: egress</text>
+<text class="t4" x="1218" y="705">binds first. A bundle is cut on a floor, uploaded beside the packs,</text>
+<text class="t4" x="1218" y="720">advertised as a presigned URL.</text>
+<text class="t4b" x="1218" y="735">1,000 clones: 5.7 MiB of server egress with the client opted in</text>
+<text class="t4b" x="1218" y="750">(transfer.bundleURI=true), 40,409 MiB without — 7,000×.</text>
+<text class="t4" x="1218" y="765">Gitea on the same corpus, 100 clones: 4,019 MiB, level with</text>
+<text class="t4" x="1218" y="780">forge's control arms.</text>
+<rect x="28" y="861" width="14" height="14" rx="3" class="f-forge"/>
+<text class="t4" x="48" y="872">data plane</text>
+<rect x="122" y="861" width="5" height="14" rx="2" class="f-red"/>
+<text class="t4" x="134" y="872">the control arm's failure — the class the runner removed</text>
+</svg>

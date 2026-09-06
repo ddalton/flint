@@ -1,0 +1,185 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
+     aria-label="The control plane. The operator watches FlintRepo objects and renders each into a ConfigMap carrying the policy, a headless Service, a one-pod Deployment and, when told where the door runs, a NetworkPolicy; it polls the pod's own /status for its phase, computes Ready, and parks an idle repository at replicas 0. The door admits by TokenReview and consumers, routes by repository, and wakes a parked one by annotating the CR and waiting on it. The lease cell coordinates writers. None of it reads the bucket, and the runner touched none of it.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .t1{font-size:17.0px;font-weight:600}
+  .t2{font-size:13.0px;font-weight:600}
+  .t3{font-size:12.0px}
+  .t3b{font-size:12.0px;font-weight:600;fill:#334155}
+  .t4{font-size:11.0px;fill:#64748b}
+  .t4b{font-size:11.0px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:9.5px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:11.0px;font-weight:600;fill:#ffffff}
+  .on{font-size:13.0px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:11.0px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
+  .chip-ink{fill:#334155}
+</style>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<text class="t1" x="24" y="44">The operator — one FlintRepo becomes three objects and one idle rung</text>
+<rect x="24" y="58" width="250" height="190" rx="7" class="bx"/>
+<path class="f-forge" d="M31,58 H267 A7,7 0 0 1 274,65 V63 H24 V65 A7,7 0 0 1 31,58 Z"/>
+<text class="t2 c-forge" x="40" y="82">FlintRepo (CRD, short name fr)</text>
+<text class="mono" x="40" y="102" xml:space="preserve">spec.bucket · spec.keyPrefix</text>
+<text class="mono" x="40" y="117" xml:space="preserve">spec.consumers.serviceAccounts</text>
+<text class="mono" x="40" y="132" xml:space="preserve">spec.branches: protected,</text>
+<text class="mono" x="40" y="147" xml:space="preserve">  pushers, agentPattern,</text>
+<text class="mono" x="40" y="162" xml:space="preserve">  mergeInto</text>
+<text class="mono" x="40" y="177" xml:space="preserve">spec.suspendAfterSecs</text>
+<text class="t4" x="40" y="192">keyPrefix is immutable: a new prefix is a</text>
+<text class="t4" x="40" y="207">new repository</text>
+<line class="l-ctl" x1="274" y1="150" x2="300" y2="150" stroke-dasharray="6 5" marker-end="url(#a-ctl)"/>
+<rect x="304" y="58" width="300" height="190" rx="7" class="bx"/>
+<path class="f-forge" d="M311,58 H597 A7,7 0 0 1 604,65 V63 H304 V65 A7,7 0 0 1 311,58 Z"/>
+<text class="t2 c-forge" x="320" y="82">reconcile</text>
+<text class="t4" x="320" y="102">claim git/claim with this project's id (a foreign id:</text>
+<text class="t4" x="320" y="117">Refused, exit 78)</text>
+<text class="t4" x="320" y="132">render a ConfigMap (the policy document pre-receive</text>
+<text class="t4" x="320" y="147">and the syncer both read), a headless Service, a</text>
+<text class="t4" x="320" y="162">Deployment of one pod — syncer + git container,</text>
+<text class="t4" x="320" y="177">Recreate, emptyDir, 30 s grace — and a</text>
+<text class="t4" x="320" y="192">NetworkPolicy admitting the door's pods only</text>
+<text class="t4" x="320" y="207">apply the children; poll /status; compute the phase;</text>
+<text class="t4" x="320" y="222">write conditions</text>
+<line class="l-ctl" x1="604" y1="150" x2="630" y2="150" stroke-dasharray="6 5" marker-end="url(#a-ctl)"/>
+<rect x="634" y="58" width="300" height="190" rx="7" class="bx"/>
+<path class="f-forge" d="M641,58 H927 A7,7 0 0 1 934,65 V63 H634 V65 A7,7 0 0 1 641,58 Z"/>
+<text class="t2 c-forge" x="650" y="82">/status — the pod's own word</text>
+<text class="mono" x="650" y="102" xml:space="preserve">{phase, activity.idleSecs, rpoClean,</text>
+<text class="mono" x="650" y="117" xml:space="preserve"> epoch.lastRenewUnix, fenced, progress}</text>
+<text class="t4" x="650" y="132">phases: starting · importing · serving · pushing ·</text>
+<text class="t4" x="650" y="147">draining · released. Ready = serving. Read only from</text>
+<text class="t4" x="650" y="162">the operators' namespace; the door refuses to proxy</text>
+<text class="t4" x="650" y="177">it.</text>
+<text class="t4b" x="650" y="192">the operator consumes phase and idleSecs;</text>
+<text class="t4b" x="650" y="207">nothing reads lastRenewUnix, fenced, rpoClean</text>
+<text class="t4b" x="650" y="222">or progress</text>
+<line class="l-ctl" x1="934" y1="150" x2="960" y2="150" stroke-dasharray="6 5" marker-end="url(#a-ctl)"/>
+<rect x="964" y="58" width="612" height="190" rx="7" class="bx"/>
+<path class="f-forge" d="M971,58 H1569 A7,7 0 0 1 1576,65 V63 H964 V65 A7,7 0 0 1 971,58 Z"/>
+<text class="t2 c-forge" x="980" y="82">the idle rung — replicas 0</text>
+<text class="t4" x="980" y="102">no git traffic for suspendAfterSecs, judged on the polled document only (a poll failure holds forever) ⇒ replicas 0</text>
+<text class="t4" x="980" y="117">and chert.us/idle-state; the emptyDir is gone, the repository is bucket objects and nothing else</text>
+<text class="t4b c-red" x="980" y="132">X8: the activity clock counts pushes only — a fetch never reaches the syncer — so a clone-only repository is</text>
+<text class="t4b c-red" x="980" y="147">parked one threshold after its wake</text>
+<text class="t4b c-red" x="980" y="162">X7: a failed poll with a Ready pod yields Starting, and the door waits on it</text>
+<text class="t1" x="24" y="284">The door — admission, routing, wake</text>
+<rect x="24" y="298" width="296" height="132" rx="7" class="bx"/>
+<path class="f-forge" d="M31,298 H313 A7,7 0 0 1 320,305 V303 H24 V305 A7,7 0 0 1 31,298 Z"/>
+<text class="t2 c-forge" x="40" y="322">1 · authenticate</text>
+<text class="t4" x="40" y="342">Basic x:&lt;token&gt; → TokenReview at the apiserver,</text>
+<text class="t4" x="40" y="357">the verdict cached ≤ 60 s by token hash; a refusal is</text>
+<text class="t4" x="40" y="372">cached, a transport failure is not. A clone is two to</text>
+<text class="t4" x="40" y="387">four requests, so 1,000 clones would otherwise be</text>
+<text class="t4" x="40" y="402">3–4,000 reviews.</text>
+<rect x="338" y="298" width="296" height="132" rx="7" class="bx"/>
+<path class="f-forge" d="M345,298 H627 A7,7 0 0 1 634,305 V303 H338 V305 A7,7 0 0 1 345,298 Z"/>
+<text class="t2 c-forge" x="354" y="322">2 · authorise</text>
+<text class="t4" x="354" y="342">spec.consumers must list the ServiceAccount; a</text>
+<text class="t4" x="354" y="357">credential-less peer gets 401 and is never dialled —</text>
+<text class="t4" x="354" y="372">authentication precedes the wake, so a peer cannot</text>
+<text class="t4" x="354" y="387">scale a parked repository up.</text>
+<rect x="652" y="298" width="296" height="132" rx="7" class="bx"/>
+<path class="f-forge" d="M659,298 H941 A7,7 0 0 1 948,305 V303 H652 V305 A7,7 0 0 1 659,298 Z"/>
+<text class="t2 c-forge" x="668" y="322">3 · route</text>
+<text class="t4" x="668" y="342">one Service per FlintRepo, by name; the door's URL</text>
+<text class="t4" x="668" y="357">formula /git/&lt;ns&gt;/&lt;repo&gt;.git; X-Remote-User =</text>
+<text class="t4" x="668" y="372">system:serviceaccount:&lt;ns&gt;:&lt;sa&gt; is set from the</text>
+<text class="t4" x="668" y="387">verified token and cannot be smuggled past the</text>
+<text class="t4" x="668" y="402">allowlist.</text>
+<rect x="966" y="298" width="296" height="132" rx="7" class="bx"/>
+<path class="f-forge" d="M973,298 H1255 A7,7 0 0 1 1262,305 V303 H966 V305 A7,7 0 0 1 973,298 Z"/>
+<text class="t2 c-forge" x="982" y="322">4 · wake</text>
+<text class="t4" x="982" y="342">a parked repository: arm chert.us/requested-at on</text>
+<text class="t4" x="982" y="357">the CR, wait on the CR — never the pod — up to 180 s</text>
+<text class="t4" x="982" y="372">(git clients do not retry a 503); the restore is the</text>
+<text class="t4" x="982" y="387">packs the snapshot names.</text>
+<rect x="1280" y="298" width="296" height="132" rx="7" class="bx"/>
+<path class="f-forge" d="M1287,298 H1569 A7,7 0 0 1 1576,305 V303 H1280 V305 A7,7 0 0 1 1287,298 Z"/>
+<text class="t2 c-forge" x="1296" y="322">5 · bound</text>
+<text class="t4" x="1296" y="342">no bytes either way for 300 s cuts the request; a</text>
+<text class="t4" x="1296" y="357">wake holds a slot ≤ 180 s. HTTPS at the door is a</text>
+<text class="t4" x="1296" y="372">line in the diagram: nothing in-tree terminates it.</text>
+<rect x="24" y="452" width="505" height="286" rx="7" class="panel"/>
+<text class="t2" x="40" y="476">What the control plane never touches</text>
+<text class="t4b" x="40" y="496">The bucket. The operator holds no S3 credential and reads no object; the door holds</text>
+<text class="t4b" x="40" y="511">none either.</text>
+<text class="t4" x="40" y="526">A credential-free principal that could read the bucket would become a read-everything one for</text>
+<text class="t4" x="40" y="541">fields no decision reads — which is why C2 (the operator reading the bucket) was declined in</text>
+<text class="t4" x="40" y="556">the simplification note.</text>
+<text class="t4b" x="40" y="571">Restart. A fence exits 1, a refusal exits 78 judged before the pod phase, and the kubelet</text>
+<text class="t4b" x="40" y="586">restarts the pod; the claim-against-a-healthy-holder case is the lease's, not the</text>
+<text class="t4b" x="40" y="601">operator's.</text>
+<text class="t4b" x="40" y="616">The transfer. No control-plane request sits in a clone or a push; the TCP liveness probe</text>
+<text class="t4b" x="40" y="631">reaches the status listener on its own task and cannot kill a batch.</text>
+<text class="t4" x="40" y="646">A3 changed none of this: the chart's server.tag, the CRD, the door's URL formula and every</text>
+<text class="t4" x="40" y="661">rig were untouched by the runner.</text>
+<rect x="547" y="452" width="505" height="286" rx="7" class="bx"/>
+<path class="f-forge" d="M554,452 H1046 A7,7 0 0 1 1053,459 V457 H547 V459 A7,7 0 0 1 554,452 Z"/>
+<text class="t2 c-forge" x="563" y="476">Where the planes meet</text>
+<text class="t3b" x="563" y="500">control → data</text>
+<text class="t4" x="563" y="516">the door's admission and routing decide which bytes flow at all; the wake creates the pod the</text>
+<text class="t4" x="563" y="531">bytes will reach; the NetworkPolicy is what makes X-Remote-User a principal.</text>
+<text class="t3b" x="563" y="550">control → durable</text>
+<text class="t4" x="563" y="566">the lease cell's fence is what stops a deposed syncer from writing; the claim cell refuses a</text>
+<text class="t4" x="563" y="581">foreign project; the grace period decides whether a roll lands as a clean release or a</text>
+<text class="t4" x="563" y="596">SIGKILL mid-batch (X6).</text>
+<text class="t3b" x="563" y="615">durable → control</text>
+<text class="t4" x="563" y="631">/status is written by the syncer; the operator believes it; rpoClean is always true by</text>
+<text class="t4" x="563" y="646">construction because nothing is acknowledged before the CAS.</text>
+<text class="t3b" x="563" y="665">data → durable</text>
+<text class="t4" x="563" y="681">only through the hook: proc-receive is the one place the data plane hands anything to the</text>
+<text class="t4" x="563" y="696">writer, and it hands a request, never a credential.</text>
+<rect x="1071" y="452" width="505" height="286" rx="7" class="bx"/>
+<path class="f-red" d="M1071,459 A7,7 0 0 1 1078,452 H1076 V738 H1078 A7,7 0 0 1 1071,731 Z"/>
+<text class="t2 c-red" x="1087" y="476">Open on the control plane — recorded, not hidden</text>
+<text class="t4b c-red" x="1087" y="496">X6 grace: a rollout during a long push SIGKILLs the batch at 30 s. Measured on run 7:</text>
+<text class="t4b c-red" x="1087" y="511">told failed, bucket unchanged, retry converges, orphans swept — clean, and the push is</text>
+<text class="t4b c-red" x="1087" y="526">lost. Decide whether a roll waits for the batch.</text>
+<text class="t4b c-red" x="1087" y="541">X7 a failed /status poll with a Ready pod reads as Starting and takes a live repository</text>
+<text class="t4b c-red" x="1087" y="556">out of rotation on a blind poll.</text>
+<text class="t4b c-red" x="1087" y="571">X8 the idle clock counts pushes only; clone-only repositories are parked and rewoken.</text>
+<text class="t4b c-red" x="1087" y="586">X9 readiness is Serving-only, so Pushing answers 503 and the headless DNS is</text>
+<text class="t4b c-red" x="1087" y="601">withdrawn during a long push — unverified.</text>
+<text class="t4" x="1087" y="616">Not on the list because it is decided: KEDA's HTTP add-on could replace routing, wake and</text>
+<text class="t4" x="1087" y="631">idle-to-zero with no flint code but not the auth, and the gateway exists (decision 12).</text>
+<rect x="24" y="756" width="1552" height="100" rx="7" class="panel"/>
+<text class="t2" x="46" y="782">What the control plane has been through</text>
+<text class="t4" x="46" y="800">The wake: an 11 s clone through the door on a pod the request created (F8's neighbour, EC2). The published artifact: the shipped chart could not install itself — it pinned the one image whose gateway rejected --git-only — found by a drill that installs the chart as a user would, which nothing had</text>
+<text class="t4" x="46" y="815">done; one server.tag now names both server images and the operator warns when the two references it is handed disagree (X10). The idle rung: the lite operator's ladder cut to one rung by copy-and-trim, not import, because ~800 of its lines are PVC and hibernate logic that is dead under an</text>
+<text class="t4" x="46" y="830">emptyDir cache.</text>
+<line class="l-ctl" x1="28" y1="868" x2="54" y2="868" stroke-dasharray="6 5"/>
+<text class="t4" x="60" y="872">control plane</text>
+<rect x="147" y="861" width="14" height="14" rx="3" class="f-forge"/>
+<text class="t4" x="167" y="872">data plane</text>
+<rect x="241" y="861" width="5" height="14" rx="2" class="f-red"/>
+<text class="t4" x="253" y="872">open item / hazard</text>
+</svg>
