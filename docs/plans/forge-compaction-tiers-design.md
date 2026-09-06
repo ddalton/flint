@@ -1080,6 +1080,51 @@ memory double, the operator's ephemeral-storage request (G7), the
 binary until G8 has run.
 
 **Measured locally** (`forge/e2e/repack/run-repack.sh`, the `tiers-*`
-arms added; MinIO on the laptop, 256 MiB blob seed and 100 pushes —
-the 512 MiB the design named was more than the machine's free disk
-that night): see the rig's results log and the CHANGELOG entry.
+arms added; MinIO on the laptop, 256 MiB blob seed and 100 pushes of
+2 MiB — the 512 MiB the design named was more than the machine's free
+disk that night; `forge/e2e/results/repack-tiers-2026-09-06.log`):
+blob shape, shipped rule 8.5× (four whole-repository uploads of up to
+450 MiB) against tiers **7.8×** (55 folds, 2 base rebuilds of which
+the first is the fresh repository's base creation, largest upload
+405 MiB); source shape, shipped rule 83× against tiers **32×** (62
+folds, no base, largest upload 0.7 MiB). Both tiers arms are above the
+ceilings §8.1 pre-registered (5.5× and 25×) because this rig's window
+holds the first base creation and one rebuild, which the simulation
+excluded; F14 as written is FAILED at this rig size and the rule is
+kept for the 512 MiB run.
+
+**Measured on the wire — G8, runca, 2026-09-06** (`forge/e2e/walgit/README.md`
+"The re-match"; the simplification note §9.2): P9 at 48 pushes, wall
+1,021 → 36 s and the worst push 816 → **0.83 s** (F13 and F15 hold:
+no push waited, no base rebuild inside the window); P9 at 300 pushes,
+worst push 5.8 s (F13's 5 s bound missed by 0.8 s, once); P2 1.1 →
+**14.1 pushes/s** with a 1.86 s median (the ≥ 5/s and ≤ 10 s
+pre-registered, met); P7 solo 1.24× at the mid-ladder state and 0.93×
+after the base rebuild (F19's 1.5× holds); P5 unchanged in kind
+(51 s to refs); 97 folds and 1 base rebuild committed, 2 folds failed
+inside an S3 cut and were retried, 0 stalls. **Bytes over run A:
+47.8 GB for ≈ 6.8 GB pushed (7.0×) against walgit's 16.5 GB (2.4×)** —
+F14's P9 bound (≤ 2.0 GB) is not met: the 48-push window carried
+3.08 GB, of which most is the tail of a fold that began before it;
+the 300-push window, tier folds only, carried 12.27 GB for 2.52 GB
+pushed — **4.9×**, the simulation's 4.5–4.8× for this regime — against
+walgit's 4.41 GB (1.75×).
+
+**Three defects the wire run found, each a rule in this document:**
+
+1. `base_rebuild_min_secs` is not persisted: `last_base_rebuild_unix`
+   is process memory, so the pod that P5 restarted rebuilt a 12 GiB
+   base at once. Fix: derive the cadence from the base pack's age in
+   the LIST (`ListedObject.last_modified_unix`) at restore.
+2. The cap (`fold_max_packs`) folds EVERY tier when it trips (§3.1
+   "fold regardless"); at P2's 14 pushes/s it tripped once per batch
+   and rewrote the 300 MiB P9 tiers for tiny pushes, 885 MB in a
+   minute. Fix: the cap folds the light half only (git's split with
+   the count as the weight), never a pack above `fold_min_bytes` × the
+   factor.
+3. Pushes the size of the repository climb the ladder at full price:
+   ten 1 GiB pushes cost about 20 GB of folds (2.3, 4.3, 6.7, 2.0 and
+   3.1 GiB roll-ups). The simulation's shapes had no such push. Fix
+   candidates, to be simulated first: a `fold_min_bytes` floor that
+   exempts packs above a fraction of the base from tier folds until
+   the base rebuild takes them; or a size-aware factor.

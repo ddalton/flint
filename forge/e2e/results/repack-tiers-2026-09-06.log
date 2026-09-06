@@ -1,0 +1,42 @@
+# repack rig, tiers vs the shipped rule — 2026-09-06, laptop (MinIO), BLOB_SEED_MB=256 PUSHES=100 BLOB_PUSH_MB=2, git 2.50.1
+# run 1 (source + the start of blob; killed by the OS with the image build running beside it — never run both on this 8 GiB machine):
+== precondition: FORGE_BIN is newer than the sources it claims to be ==
+  PASS  FORGE_BIN is not older than any source under forge/syncer or flint-store
+== source — 100 pushes of a source-shaped repository, repack threshold 24 ==
+  ....  seed: the import uploaded 3.5 MiB
+  ....  source: the import uploaded 3.5 MiB — excluded from the ratio, since a first import uploads the repository once whatever the repack policy is
+  ....  source: 100 pushes added 0.2 MiB and uploaded 15.9 MiB — amplification 83.3x
+  ....  source: 9 push(es) uploaded more than 10x what they added; the largest was push 96 at 3.7 MiB for 0.002 MiB of content
+  ....  source: 9 repack upload(s) observed, ~4 expected at threshold 24
+== blob — 100 pushes of a blob-shaped repository, repack threshold 24 ==
+  ....  seed: the import uploaded 256.1 MiB
+
+# run 2 (blob, tiers-source, tiers-blob, alone):
+== precondition: FORGE_BIN is newer than the sources it claims to be ==
+  PASS  FORGE_BIN is not older than any source under forge/syncer or flint-store
+== blob — 100 pushes of a blob-shaped repository, repack threshold 24 ==
+  ....  seed: the import uploaded 256.1 MiB
+  ....  blob: the import uploaded 256.1 MiB — excluded from the ratio, since a first import uploads the repository once whatever the repack policy is
+  ....  blob: 100 pushes added 200.0 MiB and uploaded 1705.6 MiB — amplification 8.5x
+  ....  blob: 4 push(es) uploaded more than 10x what they added; the largest was push 97 at 450.2 MiB for 2.000 MiB of content
+  ....  blob: 4 repack upload(s) observed, ~4 expected at threshold 24
+== tiers-source — 100 pushes of a source-shaped repository, compaction tiers at factor 2 ==
+  ....  seed: the import uploaded 3.5 MiB
+  ....  tiers-source: folds committed 62, base rebuilds 0, fold failures 0
+  ....  tiers-source: the import uploaded 3.5 MiB — excluded from the ratio, since a first import uploads the repository once whatever the repack policy is
+  ....  tiers-source: 101 pushes added 0.2 MiB and uploaded 6.2 MiB — amplification 32.5x
+  ....  tiers-source: 64 push(es) uploaded more than 10x what they added; the largest was push 68 at 0.7 MiB for 0.002 MiB of content
+  ....  tiers-source: the largest single upload was push 68 at 0.7 MiB for 0.002 MiB of content
+  FAIL  tiers-source: tiers at factor 2 amortise to 32.5x, above the pre-registered 25x
+== tiers-blob — 100 pushes of a blob-shaped repository, compaction tiers at factor 2 ==
+  ....  seed: the import uploaded 256.1 MiB
+  ....  tiers-blob: folds committed 55, base rebuilds 2, fold failures 0
+  ....  tiers-blob: the import uploaded 256.1 MiB — excluded from the ratio, since a first import uploads the repository once whatever the repack policy is
+  ....  tiers-blob: 101 pushes added 200.0 MiB and uploaded 1568.3 MiB — amplification 7.8x
+  ....  tiers-blob: 11 push(es) uploaded more than 10x what they added; the largest was push 73 at 404.6 MiB for 2.000 MiB of content
+  ....  tiers-blob: the largest single upload was push 73 at 404.6 MiB for 2.000 MiB of content
+  FAIL  tiers-blob: tiers at factor 2 amortise to 7.8x, above the pre-registered 5.5x
+== G — what a geometric repack would rewrite instead, on the blob repository ==
+  ....  blob: from 5 packs — full rewrites 456.2 MiB into 1 pack, geometric rewrites 8.0 MiB into 2
+  PASS  on the blob shape geometric rewrites 8.0 MiB where the full repack rewrites 456.2 MiB
+rig rc=1

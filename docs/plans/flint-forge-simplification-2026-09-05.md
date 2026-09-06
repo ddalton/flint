@@ -600,3 +600,48 @@ spread, "walgit behind the door, with the export as a reader of its
 log" is written into the design as the decision, with the costs named
 at the top of this section. X15 is owed either way — P11 is a loss by
 construction — and X14 is the next number after these two.
+
+### 9.2 The re-match — runca, 2026-09-06, with X18 and X20 built
+
+Run the same day the tiers were built (`docs/plans/forge-compaction-tiers-design.md`
+§12), forge `drill-02f251b8` against the same walgit `e5295e6` on a
+fresh cluster of the same shape; the full tables are in
+`forge/e2e/walgit/README.md` ("The re-match"), the logs in
+`forge/e2e/walgit/results/compare-20260906-*.log`.
+
+| leg | forge before → after | walgit | who |
+|---|---|---|---|
+| P1 1 KiB · 64 MiB · 1 GiB | 0.58 → 0.30 · 2.55 → **2.35** · 27.4 → **30.1** s | 0.14 · 3.11 · 38.8 s | forge at 64 MiB and 1 GiB beyond spread; walgit at 1 KiB by 0.16 s |
+| P9 48 × 8 MiB: wall; worst push | 1021 → 36 s; 816 → **0.83 s** | 28 s; 0.62 s | walgit on wall by 22 %, ranges overlapping |
+| P9 300 × 8 MiB | 285 s; worst 5.8 s | 233 s; 1.4 s | walgit on wall by 22 % |
+| P2 32 pushers, 60 s | 1.1 → **14.1/s**; 79 → 1.86 s median | 10.3/s; 3.26 s | **forge** |
+| P7 solo · eight | 23.1 (mid-ladder) and 17.2 s (after the base rebuild) · 63–64 s | 18.4–19.4 s · 65–66 s | draw |
+| P5 refs / clone | 51 / 69 s | 1 / 45 s (one 503 first) | walgit on refs (X14, untouched) |
+| P10 | not ready at 78 s, no restart, clean recovery — **X13 on the wire** | still ready at 90 s | recorded |
+| bytes uploaded over run A (1675 s, ≈ 6.8 GB pushed) | 39.3 → **47.8 GB** (7.0×) | 16.5 GB (2.4×) | **walgit, three to one** |
+| bytes uploaded for P9 at 300 pushes (2.52 GB pushed, tier folds only) | 12.27 GB (4.9×) | 4.41 GB (1.75×) | walgit, 2.8 to one |
+
+**The reading.** The write path is fixed where the comparison found
+it broken: no push waited (the worst of 1,200 was 5.8 s against 816),
+the rate is thirteen times what it was and now above the neighbour's,
+and the fold's group commit is what P2 measures. What did not move is
+the bytes, and the bucket's own timeline says why: ten 1 GiB pushes
+climbed the geometric ladder at factor 2 and were rewritten as folds
+of 2.3, 4.3, 6.7, 2.0 and 3.1 GiB — about 20 GB for 10 GB pushed, the
+log2 tax applied to pushes the size of the repository; one 12 GiB base
+rebuild fired the moment the P5 pod restarted, because the hourly
+cadence lives in the process and a fresh pod has none; and P2's 848
+pushes in a minute tripped the 64-pack cap, whose rule folds every
+tier, the 300 MiB P9 tiers included, for 885 MB. Each is a knob or a
+rule in `fold.rs`, none is the shape, and walgit's 2.4× is the
+number they are measured against.
+
+**The decision under the rule set in §9.1.** walgit does not win P2
+and wins P9's bytes; the conjunction is not met, so "walgit behind the
+door" is not written as the decision. Forge keeps its place on the
+wire. What is owed next, in order: persist the base-rebuild cadence
+across restarts (derive it from the base pack's age in the LIST);
+make the cap fold the light half rather than every tier; a floor or a
+size-aware factor for pushes the size of the repository, measured on
+the ten-gigabyte ladder this run produced; then X15 (P11 is still a
+loss by construction) and X14 (51 s to the first `ls-remote`).

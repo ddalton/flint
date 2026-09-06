@@ -128,6 +128,73 @@ joint with a number here waiting to move, none is the shape, and the
 decision on "walgit behind the door" is taken from the re-match after
 X18 and X20 are built (§9 of the simplification note).
 
+## The re-match — runca, 2026-09-06, forge with tiers and no window
+
+Forge `drill-02f251b8` (X18 compaction tiers, X20 no batch window,
+X13 the holder's term) against the same walgit `e5295e6`, on a fresh
+cluster of the same shape (`compare-20260906-011113.log` = run A,
+every leg at 48 pushes for P9; `compare-20260906-014138.log` = run B1,
+P9 at 300 pushes; `compare-20260906-015145.log` = run B2, P7 after
+it). A first attempt at run A was killed on the laptop mid-P1 by the
+OS's memory policy (its P1 numbers agree with the rerun's: 0.18 / 2.19 s
+for forge, 0.13 / 1.92 s for walgit); the arms kept that attempt's
+pushes, so run A began on a repository already holding ten 1 GiB
+branches.
+
+| leg | forge (runca) | walgit (runca) | forge on runbz, for the change |
+|---|---|---|---|
+| P0 seed push | 260 ms | 200 ms | 620–660 ms |
+| P1 1 KiB, median (min–max) | 0.30 s (0.27–0.31) | 0.14 s (0.13–0.16) | 0.58 s |
+| P1 64 MiB | **2.35 s** (2.31–2.41) | 3.11 s (2.41–3.53) | 2.55 s (max 19.1) |
+| P1 1 GiB | **30.1 s** (27.7–30.9) | 38.8 s (34.8–58.1) | 27.4 s |
+| P4 | one winner, loser told stale | same | same |
+| P9 48 × 8 MiB, wall; per push median / max | 36 s; 0.61 / **0.83 s** | 28 s; 0.44 / 0.62 s | 1021 s; 0.98 / 816 s |
+| P9 300 × 8 MiB (run B1) | 285 s; 0.78 / 5.81 s | 233 s; 0.63 / 1.36 s | — |
+| P2 32 pushers, 60 s | **848 = 14.1/s; median 1.86 s (0.35–7.53)** | 621 = 10.3/s; median 3.26 s (0.72–6.25) | 64 = 1.1/s; median 78.6 s |
+| P2 S3 requests per push; bytes uploaded | 3.75 (3174 PUT); 885 MB | 5.1 (1329 PUT, 1812 GET); 3.0 MB | 7.9; 5.44 GB |
+| P7 after P2 (mid tier state): solo; eight | 23.1 s; 64 s | 19.4 s; 65 s | 18.6 s; 65 s |
+| P7 after run B1 (the base rebuilt): solo; eight | **17.2 s**; 63 s | 18.4 s; 66 s | — |
+| P5 cold start: refs / complete clone | 51 s / 69 s (clone 18.3 s) | 1 s / 45 s (clone 37.9 s, one 503 first) | 30–119 s / 48–138 s |
+| P11 undo | nothing (X15) | recovered in the rig (`--at-seq 722`) | — |
+| P10 the bucket cut off 90 s | reads at +5 s; **not ready at 78 s, no restart** (X13 on the wire); push hung; clean recovery | reads hung; still ready at 90 s; the leg was cut short by the laptop | still ready at 90 s |
+| **bytes uploaded over run A (CloudWatch, 1675 s)** | **47.8 GB** in 6,360 requests (4,739 PUT) | **16.5 GB** in 6,111 requests (1,779 PUT, 4,202 GET) | 39.3 GB over run 1 (2694 s) |
+| bytes uploaded, run B1's P9 window (300 × 8 MiB = 2.52 GB pushed) | **12.27 GB = 4.9×**, 9.4 requests per push | **4.41 GB = 1.75×**, 17 requests per push | 33× over 48 pushes |
+| the bucket at the end | 65.0 GB in 4,244 objects (superseded packs inside the hour's grace) | 24.0 GB in 2,949 objects | 40.4 GB |
+
+Run A pushed about 6.8 GB of content (five of 1 GiB, five of 64 MiB,
+48 of 8 MiB, 848 tiny, one 1 GiB branch): forge uploaded 7.0× that,
+walgit 2.4×. The syncer's own record for the whole campaign: 97 folds
+committed, 1 base rebuild (12 GiB, from 10 packs), 2 folds failed
+(both `create_multipart_upload: dispatch failure` inside the P10 cut,
+retried after), 0 stalls, 0 sweeps yet (the grace is an hour).
+
+**Where forge's bytes went**, from the bucket's own timeline (`aws s3
+ls`, sizes by upload minute): the ten 1 GiB pushes climbed the
+geometric ladder — folds of 2.3, 4.3, 6.7, 2.0, 3.1 GiB between 08:08
+and 08:18 UTC, each a roll-up of the gigabytes already there, about
+20 GB for 10 GB pushed; ONE base rebuild of 12 GiB at 08:34, fired
+the moment the P5 pod restarted because the hourly cadence lives in
+process memory and a fresh pod has none (a defect this run found);
+and 885 MB inside P2's minute, where 848 tiny pushes at 14/s tripped
+the 64-pack cap, whose rule folds EVERY tier, the 300 MiB P9 tiers
+included. Run B1's 300 pushes of 8 MiB produced folds of 272 to
+1,969 MiB — the ladder as designed, about 2.5 bytes of fold per byte
+pushed. walgit folded too (a 4.4 GiB and a 2.4 GiB roll-up) and paid
+2.4× over the run; its bucket is a third of forge's because it
+retains less and sweeps sooner.
+
+**Under §9.1's rule for the re-match** — "if walgit still wins P2 and
+P9 beyond spread with X18 and X20 built, write walgit behind the door
+as the decision": walgit does not win P2 (10.3 against 14.1 pushes/s,
+3.26 against 1.86 s median); on P9 it wins the wall by 22 % with the
+per-push ranges overlapping, and it wins the BYTES by about three to
+one over the run. The rule's conjunction is not met, so "walgit behind
+the door" is not written as the decision; forge keeps its place on
+the wire with the write path fixed where it was broken — no push
+waited more than 5.8 s in 1,200 pushes, the rate is 13× what it was,
+and the largest push is faster than the neighbour's — and with the
+bytes as the next number, three to one, whose causes the run named.
+
 ### What the runs found in the rig
 
 - **P5, walgit, run 1:** the first clone after the cold start was
@@ -153,6 +220,11 @@ X18 and X20 are built (§9 of the simplification note).
 - **`windows.txt`:** the rig's `window()` dropped the end time of each
   window; run 1's windows were reconstructed from the log (the
   original is kept as `windows.txt.orig`). Fixed after run 2.
+- **The laptop as the driver (runca):** the harness kills a background
+  command when the 8 GiB machine runs low on memory; it killed the
+  first run A mid-P1 and the second one inside walgit's P10, after the
+  forge half had landed. The remaining legs ran in the foreground in
+  chunks. A driver pod on the cluster is the fix.
 - **The image import:** walgit's 949 MB image, imported into
   containerd on the node's 8 GiB root, put the node under DiskPressure
   for the kubelet's five-minute transition. Import once; apply the

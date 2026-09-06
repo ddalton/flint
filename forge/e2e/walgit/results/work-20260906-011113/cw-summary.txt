@@ -1,0 +1,9 @@
+leg  arm     window    AllRequests  PutRequests  GetRequests HeadRequests  BytesUploaded BytesDownloaded
+P9   forge   36s               351          344            0            0     3079431080           3664
+P9   walgit  28s               624          287          266           70    10748602479          55929
+P2   forge   63s              3181         3174            0            0      885034740           4022
+P2   walgit  67s              3147         1329         1812            6        2985468         257578
+RUNA forge   1675s            6360         4739         1570            0    47790412368    12886327855
+RUNA walgit  1675s            6111         1779         4202          128    16457658562    11813872517
+
+per-push figures: divide a P9 row by the pushes that leg made (P9_N, default 48) and a P2 row by the pushes it acknowledged (in the compare log).

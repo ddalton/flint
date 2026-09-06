@@ -1,0 +1,54 @@
+compare 20260906-011113 · bucket flint-forge-scale-runca · forge forge/cmp-202609060041 · walgit walgit/cmp-202609060041 · arms: forge walgit · legs: P0 P1 P4 P9 P2 P7 P5 P11 P10
+
+══ P0 — preconditions and provenance: both arms answer, the agent's clock has milliseconds, versions recorded ══
+  PASS  agent clock: a 300 ms sleep measures 300 ms (sub-second resolution)
+  PASS  forge: forge-small-6dc45ddcf9-5dkc7 serving (dilipdalton/flint-forge-syncer:drill-02f251b8) on runca-aws-2
+  PASS  walgit: walgit-7584d45c56-2tdp4 ready (walgit e5295e6) on runca-aws-2
+  ....  agent on runca-aws-1
+  PASS  forge: seed push to agent/seed-20260906-011113 told ok (260 ms); ls-remote 0e5b9f34
+  PASS  walgit: seed push to agent/seed-20260906-011113 told ok (200 ms); ls-remote 0e5b9f34
+
+══ P1 — push latency at 0 64 1024 MiB, 5 reps, the same bytes to both arms, order alternating ══
+  ....  forge 0 MiB: median/min/max s = 0.30 0.27 0.31 n=5
+  ....  walgit 0 MiB: median/min/max s = 0.14 0.13 0.16 n=5
+  PASS  0 MiB: every push on both arms told ok
+  ....  forge 64 MiB: median/min/max s = 2.35 2.31 2.41 n=5
+  ....  walgit 64 MiB: median/min/max s = 3.11 2.41 3.53 n=5
+  PASS  64 MiB: every push on both arms told ok
+  ....  forge 1024 MiB: median/min/max s = 30.09 27.70 30.85 n=5
+  ....  walgit 1024 MiB: median/min/max s = 38.80 34.75 58.11 n=5
+  PASS  1024 MiB: every push on both arms told ok
+
+══ P4 — two pushes to one ref from one base, concurrently: exactly one winner, the ref is the winner's tip ══
+  PASS  forge: one winner (rc a=0 b=1), the ref is the winner's tip a9cb742e; loser said: rejected] HEAD -> agent/p4-20260906-011113 (stale info: fetch first)
+  PASS  walgit: one winner (rc a=0 b=1), the ref is the winner's tip 4fb4612a; loser said: rejected] HEAD -> agent/p4-20260906-011113 (conflict: expected bc7718fbfad7021fca76caaa873a74f875d13200, got 4fb4612a96d060725b5e9818d92793bd27a63fa4)
+
+══ P9 — repack amplification: 48 pushes of 8 MiB to one branch; bytes uploaded per arm from CloudWatch (cw-summary.sh) ══
+  PASS  forge: 48 pushes told ok in 36 s; per push median/min/max s = 0.61 0.48 0.83 n=48; window 1788682745..1788682781
+  ....  forge: objects under its prefix now: Total Objects: 367    Total Size: 33171556251 
+  PASS  walgit: 48 pushes told ok in 28 s; per push median/min/max s = 0.44 0.37 0.62 n=48; window 1788682782..1788682810
+  ....  walgit: objects under its prefix now: Total Objects: 286    Total Size: 16778757587 
+
+══ P2 — push rate: 32 pushers for 60 s, tiny commits to distinct branches (requests per push from CloudWatch) ══
+  PASS  forge: 848 acknowledged, 0 failed in 60 s = 14.1 pushes/s from 32 pushers; per-push latency median/min/max s = 1.86 0.35 7.53 n=848
+  PASS  walgit: 621 acknowledged, 0 failed in 60 s = 10.3 pushes/s from 32 pushers; per-push latency median/min/max s = 3.26 0.72 6.25 n=621
+
+══ P7 — 8 concurrent clones of a 1024 MiB branch, one alone first, the serving processes watched ══
+  PASS  forge: one clone alone 23.1 s; 8 concurrent all complete in 64 s (2.8× solo, 128 MiB/s aggregate); peak serving processes 8
+  PASS  walgit: one clone alone 19.4 s; 8 concurrent all complete in 65 s (3.4× solo, 126 MiB/s aggregate); peak serving processes 8
+
+══ P5 — cold start: the arm's pod deleted (a fresh emptyDir), time to the first ls-remote and the first clone of the 1024 MiB branch ══
+  PASS  forge: first correct ls-remote 51 s after the delete; first COMPLETE clone 69 s after it (18.3 s for the clone itself), after 0 refused attempt(s)
+  PASS  walgit: first correct ls-remote 1 s after the delete; first COMPLETE clone 45 s after it (37.9 s for the clone itself), after 1 refused attempt(s) — first refusal: error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503
+
+══ P11 — undo: a branch force-pushed back one commit; can the previous tip be recovered from the bucket? ══
+  ....  forge: no history in the bucket — the snapshot is one CAS'd object; the objects of b23fad39 survive in their pack only until the next repack + sweep (X15)
+  PASS  walgit: wal materialize --at-seq 722 recovers the pre-force tip 33e02d17
+
+══ P10 — the bucket cut off from the arm's pod: reads at +5 s, readiness over 90 s, a push, recovery (recorded, not scored) ══
+  ....  forge +5 s: a read during the outage → rc=0
+  ....  forge readiness: not ready after 78 s (restarts 0 → 0)
+  ....  forge: a push during the outage → Terminated
+  PASS  forge: recovers once the bucket returns (push told ok, pod ready, restarts 0 → 0)
+  ....  walgit +5 s: a read during the outage → Terminated
+  ....  walgit readiness: still ready after 90 s (restarts 0 → 0)

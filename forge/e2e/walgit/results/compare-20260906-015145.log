@@ -1,0 +1,17 @@
+compare 20260906-015145 · bucket flint-forge-scale-runca · forge forge/cmp-202609060041 · walgit walgit/cmp-202609060041 · arms: forge walgit · legs: P0 P7
+
+══ P0 — preconditions and provenance: both arms answer, the agent's clock has milliseconds, versions recorded ══
+  PASS  agent clock: a 300 ms sleep measures 300 ms (sub-second resolution)
+  PASS  forge: forge-small-6dc45ddcf9-l7lkn serving (dilipdalton/flint-forge-syncer:drill-02f251b8) on runca-aws-2
+  PASS  walgit: walgit-7584d45c56-bbhb2 ready (walgit e5295e6) on runca-aws-2
+  ....  agent on runca-aws-1
+  PASS  forge: seed push to agent/seed-20260906-015145 told ok (440 ms); ls-remote 2f5bdb0f
+  PASS  walgit: seed push to agent/seed-20260906-015145 told ok (280 ms); ls-remote 2f5bdb0f
+
+══ P7 — 8 concurrent clones of a 1024 MiB branch, one alone first, the serving processes watched ══
+  PASS  forge: one clone alone 17.2 s; 8 concurrent all complete in 63 s (3.7× solo, 130 MiB/s aggregate); peak serving processes 8
+  PASS  walgit: one clone alone 18.4 s; 8 concurrent all complete in 66 s (3.6× solo, 124 MiB/s aggregate); peak serving processes 8
+
+══ verdict ══
+PASS 7  FAIL 0  INCONCLUSIVE 0
+windows for cw-summary.sh: /Users/ddalton/github/flint/forge/e2e/walgit/results/work-20260906-015145/windows.txt

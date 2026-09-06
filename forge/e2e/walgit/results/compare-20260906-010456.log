@@ -1,0 +1,17 @@
+compare 20260906-010456 · bucket flint-forge-scale-runca · forge forge/cmp-202609060041 · walgit walgit/cmp-202609060041 · arms: forge walgit · legs: P0 P1 P4 P9 P2 P7 P5 P11 P10
+
+══ P0 — preconditions and provenance: both arms answer, the agent's clock has milliseconds, versions recorded ══
+  PASS  agent clock: a 300 ms sleep measures 300 ms (sub-second resolution)
+  PASS  forge: forge-small-6dc45ddcf9-5dkc7 serving (dilipdalton/flint-forge-syncer:drill-02f251b8) on runca-aws-2
+  PASS  walgit: walgit-7584d45c56-2tdp4 ready (walgit e5295e6) on runca-aws-2
+  ....  agent on runca-aws-1
+  PASS  forge: seed push to agent/seed-20260906-010456 told ok (240 ms); ls-remote 640e2442
+  PASS  walgit: seed push to agent/seed-20260906-010456 told ok (220 ms); ls-remote 640e2442
+
+══ P1 — push latency at 0 64 1024 MiB, 5 reps, the same bytes to both arms, order alternating ══
+  ....  forge 0 MiB: median/min/max s = 0.18 0.17 0.19 n=5
+  ....  walgit 0 MiB: median/min/max s = 0.13 0.11 0.16 n=5
+  PASS  0 MiB: every push on both arms told ok
+  ....  forge 64 MiB: median/min/max s = 2.19 1.91 2.20 n=5
+  ....  walgit 64 MiB: median/min/max s = 1.92 1.79 1.99 n=5
+  PASS  64 MiB: every push on both arms told ok

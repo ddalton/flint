@@ -916,6 +916,25 @@ Also: `flint-forge-chart` can now render the door itself
   previous batch ran, drained without waiting; the 400 ms window was
   0.48 s of a 1 KiB push's 0.58 s on the wire.
 
+### Measured — the re-match with tiers and no window (runca, 2026-09-06)
+
+- **Forge against walgit again, forge at `drill-02f251b8`.** P9's 48
+  pushes: 1,021 → 36 s, the worst push 816 → 0.83 s; P2: 1.1 → 14.1
+  pushes/s with a 1.86 s median against walgit's 10.3/s and 3.26 s;
+  P1 at 64 MiB and 1 GiB won beyond spread; P7 within 1.24× solo at
+  the mid-ladder state and faster than walgit after the base rebuild;
+  X13 on the wire (readiness withdrawn 78 s into an S3 cut, no
+  restart, clean recovery). Bytes over the run: 47.8 GB for ≈ 6.8 GB
+  pushed against walgit's 16.5 GB — the log2 tax on ten 1 GiB pushes,
+  one 12 GiB base rebuild fired by a restart because the cadence was
+  not persisted, and the pack cap folding every tier under P2's rate;
+  three rules in `fold.rs`, named in the design's §12. Under the rule
+  pre-registered for the re-match "walgit behind the door" is not
+  written as the decision; the bytes, three to one, are the next
+  number. Locally, the repack rig at 256 MiB / 100 pushes: tiers 7.8×
+  against 8.5× on the blob shape and 32× against 83× on the source
+  shape.
+
 ### Measured — flint forge against walgit, push for push
 
 - **The control arm pre-registered in the simplification note's §9

@@ -1,0 +1,19 @@
+compare 20260906-014138 · bucket flint-forge-scale-runca · forge forge/cmp-202609060041 · walgit walgit/cmp-202609060041 · arms: forge walgit · legs: P0 P9
+
+══ P0 — preconditions and provenance: both arms answer, the agent's clock has milliseconds, versions recorded ══
+  PASS  agent clock: a 300 ms sleep measures 300 ms (sub-second resolution)
+  PASS  forge: forge-small-6dc45ddcf9-l7lkn serving (dilipdalton/flint-forge-syncer:drill-02f251b8) on runca-aws-2
+  PASS  walgit: walgit-7584d45c56-bbhb2 ready (walgit e5295e6) on runca-aws-2
+  ....  agent on runca-aws-1
+  PASS  forge: seed push to agent/seed-20260906-014138 told ok (350 ms); ls-remote 3e808952
+  PASS  walgit: seed push to agent/seed-20260906-014138 told ok (700 ms); ls-remote 3e808952
+
+══ P9 — repack amplification: 300 pushes of 8 MiB to one branch; bytes uploaded per arm from CloudWatch (cw-summary.sh) ══
+  PASS  forge: 300 pushes told ok in 285 s; per push median/min/max s = 0.78 0.63 5.81 n=300; window 1788684107..1788684392
+  ....  forge: objects under its prefix now: Total Objects: 4235    Total Size: 60310600447 
+  PASS  walgit: 300 pushes told ok in 233 s; per push median/min/max s = 0.63 0.44 1.36 n=300; window 1788684394..1788684627
+  ....  walgit: objects under its prefix now: Total Objects: 2938    Total Size: 20372438869 
+
+══ verdict ══
+PASS 7  FAIL 0  INCONCLUSIVE 0
+windows for cw-summary.sh: /Users/ddalton/github/flint/forge/e2e/walgit/results/work-20260906-014138/windows.txt
