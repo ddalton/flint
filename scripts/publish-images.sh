@@ -96,9 +96,9 @@ fi
 
 # The forge scope publishes three images of its own and republishes
 # nothing else. The git image is NOT `.prebuilt` by name but is by
-# nature — it stages the hook binary the same way — and it installs
-# nginx, fcgiwrap and git from the distribution, which is why it is the
-# one forge image with a package manager in it.
+# nature — it stages the syncer and gitcgi binaries the same way — and
+# it installs git, git-lfs and git-daemon from the distribution, which
+# is why it is the one forge image with a package manager in it.
 if [ "$SCOPE" = forge ]; then
     set -- \
         "flint-forge-operator:docker/Dockerfile.forge-operator.prebuilt" \

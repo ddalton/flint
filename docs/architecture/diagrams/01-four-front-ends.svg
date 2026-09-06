@@ -138,7 +138,7 @@
 <text class="t2 c-forge" x="1216" y="238">the door, and one server pod per repository</text>
 <text class="t4" x="1216" y="258">the door is lite's gateway with a git arm: TokenReview,</text>
 <text class="t4" x="1216" y="273">consumers, routing, wake</text>
-<text class="mono" x="1216" y="288" xml:space="preserve">nginx + git-http-backend + one syncer</text>
+<text class="mono" x="1216" y="288" xml:space="preserve">gitcgi + git-http-backend + one syncer</text>
 <text class="t4" x="1216" y="303">the local repository is an emptyDir CACHE; the pod idles to zero</text>
 <text class="t4b" x="1216" y="318">one syncer owns every write to the bucket</text>
 <rect x="1200" y="378" width="374" height="96" rx="7" class="panel"/>

@@ -455,7 +455,7 @@ def plate_01():
                             "the pod's projected ServiceAccount token, audience forge.chert.us, is the Basic password",
                             ("b", "the durable unit is a commit — a push")]),
          ("the door, and one server pod per repository", ["the door is lite's gateway with a git arm: TokenReview, consumers, routing, wake",
-                                                          ("m", "nginx + git-http-backend + one syncer"),
+                                                          ("m", "gitcgi + git-http-backend + one syncer"),
                                                           "the local repository is an emptyDir CACHE; the pod idles to zero",
                                                           ("b", "one syncer owns every write to the bucket")]),
          ("coordination — one CAS per batch", ["a push is acknowledged only after its pack and ONE CAS'd snapshot are in S3; a stale push is refused by name; a merge is a push to refs/for/<target>"]),
@@ -776,7 +776,7 @@ def plate_05():
 def plate_06():
     s = SVG(W, H, "flint-forge: an agent pod runs stock git with a credential helper that presents the pod's projected ServiceAccount "
                   "token as the Basic password. The door — the lite gateway's git arm — verifies it by TokenReview, checks the "
-                  "repository's consumers and routes to one server pod per repository, where nginx and git-http-backend serve the "
+                  "repository's consumers and routes to one server pod per repository, where flint's CGI runner and git-http-backend serve the "
                   "smart protocol and hooks hand every push to one syncer. The syncer batches pushes, uploads packs, CASes one "
                   "snapshot and only then reports ok; S3 holds a bare repository, a lease, clone bundles, LFS objects and an "
                   "optional export that is a valid lean workspace.")
@@ -808,7 +808,7 @@ def plate_06():
     s.text(808, 48, "one server pod per FlintRepo — headless Service", f"t2 c-{fe}")
     s.text(808, 66, "emptyDir cache · Recreate · idles to zero", "t4")
     s.hair(808, 76, 1242, 76)
-    s.card(808, 86, 212, 160, "git container", [("m", "nginx :8080"), ("m", "fcgiwrap · git-http-backend"), "REMOTE_USER = X-Remote-User; hooks pre-receive (names the rule) and proc-receive (hands the push to the syncer over a socket)", ("b", "holds no bucket credential")], None, strip=False)
+    s.card(808, 86, 212, 160, "git container", [("m", "flint-forge-gitcgi :8080"), ("m", "http-backend per request"), "REMOTE_USER = X-Remote-User; hooks pre-receive (names the rule) and proc-receive (hands the push to the syncer over a socket)", ("b", "holds no bucket credential")], None, strip=False)
     s.card(1032, 86, 210, 160, "syncer container", ["lock · lease heartbeat 10 s · the batch · S3 sync · repack · sweep · export · bundles · LFS batch API · /status", ("b", "bucket credentials land HERE only (envFrom)"), ("b", "the only writer of the bucket")], None, strip=False)
     s.arrow(1264, 130, 1326, 130, fe)
     s.alabel(1295, 116, "flint-store", fe)
@@ -1054,12 +1054,12 @@ def plate_10():
          [[("r", "Cleartext RPC."), "sec=sys carries no per-user authentication and no encryption; RPC-with-TLS is prospective. Reachability is the boundary, so draw it at the network layer — peering, security groups, a gateway."],
           [("b", "Nothing of flint's crosses the network."), "The agent writes local disk; the worker publishes to the S3 endpoint over its TLS. The credential door is a loopback socket on the node; the broker is reached in-cluster and answers keys, not bytes."],
           [("b", "S3 over TLS, unmediated."), "mount-s3 talks to the endpoint directly; the FUSE descriptor crosses a node-local socket; keys arrive on a loopback door, never as pod env. No flint server is on the read path."],
-          [("r", "Two cleartext hops, as built."), "HTTPS at the door is a line in the diagram; nothing in-tree terminates it, and nginx listens on 8080 with no TLS. The pod's audience-bound token rides both hops as a Basic password — a network observer inside the cluster holds a live credential. Server-to-S3 is TLS."]]),
+          [("r", "Two cleartext hops, as built."), "HTTPS at the door is a line in the diagram; nothing in-tree terminates it, and the git container's runner listens on 8080 with no TLS. The pod's audience-bound token rides both hops as a Basic password — a network observer inside the cluster holds a live credential. Server-to-S3 is TLS."]]),
         ("What a reachable peer can do", "with no credential at all",
          [[("r", "Open a full NFSv4.1 session."), "Port 2049 needs no credential: the defence is caps — state-table quota, slot cap, idle deadline, READ clamp — not authentication. A merely-reachable peer holds a stateful session."],
           [("b", "Very little."), "No flint door sits on the data path; the broker refuses without a valid TokenReview, and S3 refuses unsigned requests. What it can flood is the broker's TokenReview against the local apiserver."],
           [("b", "Very little."), "The same: the reachable service is the broker, and the store refuses unsigned requests. The node plugin's socket is kubelet's, not the network's."],
-          [("b", "A 401 before any wake"), "— authentication precedes the repository's wake, so a peer cannot scale a parked repository up, and a refused token is cached. The lever it keeps: every novel bad token is one TokenReview; behind the door nginx sets no body limit and hour-long timeouts, and a wake holds a door slot up to 180 s."]]),
+          [("b", "A 401 before any wake"), "— authentication precedes the repository's wake, so a peer cannot scale a parked repository up, and a refused token is cached. The lever it keeps: every novel bad token is one TokenReview; behind the door the runner sets no body limit and no timeout of its own (the door's idle bound is the one cut), and a wake holds a door slot up to 180 s."]]),
         ("What keeps tenants apart", "reading or writing another's data",
          [[("r", "The network, and one hub per project."), "No auth on 2049 means the boundary is reachability, which networkPolicy cannot draw for remote clusters; one CR, one prefix, one coherence domain, and everything sharing a hub shares a fate."],
           [("b", "The prefix, its claim and its lease."), "Keys are scoped to the workspace prefix; the claim refuses a foreign project on a reused prefix; the lease admits one writer and lives in the bucket, so it holds across clusters; consumers absent means deny."],
@@ -1353,7 +1353,7 @@ def portrait_p6():
     s.arrow(158, 60, 186, 60, fe, both=True)
     s.card(190, 8, 150, 120, "the door", ["the lite gateway's git arm: TokenReview (cached ≤ 60 s), consumers, 401 before any wake, X-Remote-User onward"], fe, pad=10, lh=13)
     s.arrow(340, 60, 368, 60, fe, both=True)
-    s.card(372, 8, 130, 120, "server, 1 per repo", ["nginx + http-backend; hooks → the syncer: the only writer of the bucket; emptyDir cache; idles to zero"], fe, "tint", pad=10, lh=13)
+    s.card(372, 8, 130, 120, "server, 1 per repo", ["gitcgi + http-backend; hooks → the syncer: the only writer of the bucket; emptyDir cache; idles to zero"], fe, "tint", pad=10, lh=13)
     s.arrow(502, 60, 530, 60, fe)
     s.card(534, 8, 98, 120, "S3", [("m", "git/pack/*"), ("m", "git/snapshot"), ("m", "git/epoch"), ("m", "lfs/ · files/")], None, "s3", pad=8, lh=13)
     s.box(8, 144, 624, 132, None, "panel")

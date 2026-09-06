@@ -12,6 +12,102 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Changed — flint forge, the git container is one process
+
+- **`flint-forge-gitcgi` replaces nginx + fcgiwrap** (option A3 of
+  `docs/plans/flint-forge-simplification-2026-09-05.md`; design
+  decision 15.1 reversed for the runner). A 382-line hyper runner
+  execs `git http-backend` per request with the CGI environment taken
+  from the request, streams both directions as they arrive, parses the
+  CGI `Status:` line, kills the child when the client goes, answers
+  503 past a declared ceiling (`FLINT_FORGE_GIT_CONCURRENCY`, 64) and
+  relays `/info/lfs/objects/{batch,verify}` to the syncer's listener.
+  It sets no timeout of its own: the door's inactivity bound is the one
+  cut. What it removes is the class the runbx drill kept finding
+  members of — fcgiwrap holding `receive-pack`'s keepalives until the
+  push was over (a 40 GiB push cut 311 s into its hook wait), nginx's
+  `client_body_timeout` and `send_timeout` defaulting to 60 s beside
+  backend bounds of an hour, and `FCGIWRAP_CHILDREN=4` queueing the
+  fifth request in silence. `docker/forge/nginx.conf` and
+  `entrypoint.sh` are gone; `Dockerfile.forge-git`'s entrypoint is the
+  runner and the build asserts `git-http-backend` is present. Four
+  integration tests run the runner against real git over real HTTP,
+  the keepalive oracle among them: six `remote:` lines written a second
+  apart must arrive a second apart. Cluster acceptance — the party
+  table's legs and the gap probe through the door — is owed.
+
+### Fixed — flint forge, the takeover rotation had two gaps, found by a model
+
+- **`formal/ForgeSync.tla`** — the push path at store-request
+  granularity beside the lease's progress-gated renewer (its sensor
+  kept distinct from real movement), a challenger, a successor's
+  claim/rotation/sweep/restore, git's `.idx`-last quarantine migration
+  and a client that can hang up; eight runs in `scripts/check-tla.sh`
+  (strict, liveness, five mutations, one required-fail probe). Its
+  first two strict runs refuted the module against the code:
+  - **X11** — a takeover of a repository nobody had published skipped
+    the snapshot rotation ("the first CAS's If-None-Match is the
+    fence"): a straggler mid-batch on the old epoch could land its
+    create after the successor served, and the successor's own first
+    CAS was what 412'd. The rotation now creates the empty snapshot.
+  - **X12** — a successor that died between its takeover CAS and its
+    rotation restarted through self-recognition, which skipped the
+    rotation ("our own previous process died with its writes"); the
+    straggler from the epoch before still held a valid If-Match. Every
+    claim but a released cell's now rotates.
+
+  Both fixed with tests that fail against the old code. The liveness
+  run's first two executions refuted the module itself — a queued push
+  left "sent" by a clean release, and a `NoSuchUpload` exit drawn from
+  the crash budget — fixed in the model; no code change.
+
+### Fixed — flint forge, a pack was listed before its index
+
+- **X1** — `local_packs` listed every `pack-*.pack`. git migrates a
+  push's quarantine as `.keep`, `.pack`, `.rev`, `.idx` (`tmp-objdir.c`,
+  confirmed in v2.43.0), so a batch running beside a concurrent push
+  could upload and name a pack whose index never followed (a pack the
+  snapshot already names is skipped for good), and a restore of that
+  snapshot refused to install refs into objects git cannot see: exit
+  78, unrecoverable. The listing now requires the `.idx`; the test
+  stages the mid-migration state and fails against the old listing.
+- **`receive.keepAlive` pinned at 5 s** in the syncer's receive config,
+  so the sideband packet that carries an 8-minute hook wait past every
+  party does not rest on git's default.
+
+### Changed — flint forge, one pass over a pack, and one image tag
+
+- **D4** — `ComposeSpec::crc64` is `Option<u64>`; `None` asks the
+  store to accumulate the full-object CRC-64/NVME from the parts as it
+  reads them, each part hashed on a blocking thread beside its PUT. The
+  syncer's pre-pass over the pack is gone: reading a 40 GiB pack to
+  hash it took ~70 s on runbx before the first part existed, and in its
+  first shape ticked no progress. Proven against a real bucket: 4
+  parts, S3's checksum equal to the file's. A `BaseCopy` part with no
+  claimed checksum is refused before any part moves.
+- **D1** — the hooks are the syncer binary under the hook names
+  (`flint_forge::hook`; the git image symlinks both to the staged
+  syncer), so the hook and the syncer it talks to are one build and the
+  socket protocol between the two containers cannot drift between two
+  tags. The chart derives both server images from one `server.tag`;
+  the operator warns when the two references it was handed carry
+  different tags (X10). Verified on the wire, run 6 of the scale drill.
+
+### Added — flint forge, the confirmation campaign on runbx
+
+- **Runs 1–6 of `forge/e2e/scale/`**, in its README: a 40 GiB push
+  acknowledged in 1113 s (641 parts, the hook wait over 8 minutes), the
+  40 GiB restore in 139 s at 297 MiB/s, the seize arm closed against a
+  real challenger, told-ok ⇒ durable 40/40, the push-side renewal on
+  an unblinking sampler. **Rig defect four:** `aws s3api head-object`
+  hung 64 s on the CLI's own timeouts and the sampler read the token it
+  had seen at its start as 66 s of a quiet renewer — a blind spot is
+  not silence. The sampler now fails a call at 5 s and marks the sample
+  `blind`, counts silence only across contiguous observations, reports
+  the longest blind spot beside it, and a blind spot longer than the
+  bound is inconclusive rather than a pass or a fail.
+
+
 ### Fixed — flint forge, the chart could not install itself
 
 - **`helm install ./flint-forge-chart --set door.deploy=true` failed for

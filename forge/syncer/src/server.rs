@@ -473,7 +473,8 @@ fn publish(shared: &Shared, sc: &Syncer, phase: Phase) {
 ///
 /// A dependency-free listener rather than a web framework: the surface
 /// is four routes, it is reachable only on the pod network, and the
-/// clients are the operator's poll and nginx forwarding one JSON POST.
+/// clients are the operator's poll and the git container's runner
+/// relaying one JSON POST.
 async fn serve_http(addr: &str, shared: Shared, lfs: Option<Arc<LfsCtx>>) -> ForgeResult<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
     let listener = tokio::net::TcpListener::bind(addr).await?;

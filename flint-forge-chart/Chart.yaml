@@ -2,8 +2,8 @@ apiVersion: v2
 name: flint-forge
 description: >-
   The flint-forge control plane — one FlintRepo per git repository, a
-  controller that renders its server (nginx + git http-backend + the
-  syncer that owns every write to S3), and the door's git arm on the
+  controller that renders its server (flint-forge-gitcgi + git http-backend
+  + the syncer that owns every write to S3), and the door's git arm on the
   shared flint-hub-gateway. Agents are stock git clients; the bucket is
   a bare git repository; a repository's local disk is a cache. No PVCs:
   a suspended repository is bucket objects and nothing else.

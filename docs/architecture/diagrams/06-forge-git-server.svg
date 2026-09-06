@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
-     aria-label="flint-forge: an agent pod runs stock git with a credential helper that presents the pod's projected ServiceAccount token as the Basic password. The door — the lite gateway's git arm — verifies it by TokenReview, checks the repository's consumers and routes to one server pod per repository, where nginx and git-http-backend serve the smart protocol and hooks hand every push to one syncer. The syncer batches pushes, uploads packs, CASes one snapshot and only then reports ok; S3 holds a bare repository, a lease, clone bundles, LFS objects and an optional export that is a valid lean workspace.">
+     aria-label="flint-forge: an agent pod runs stock git with a credential helper that presents the pod's projected ServiceAccount token as the Basic password. The door — the lite gateway's git arm — verifies it by TokenReview, checks the repository's consumers and routes to one server pod per repository, where flint's CGI runner and git-http-backend serve the smart protocol and hooks hand every push to one syncer. The syncer batches pushes, uploads packs, CASes one snapshot and only then reports ok; S3 holds a bare repository, a lease, clone bundles, LFS objects and an optional export that is a valid lean workspace.">
 <style>
   text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
   .t1{font-size:17.0px;font-weight:600}
@@ -85,8 +85,8 @@
 <line class="hair" x1="808" y1="76" x2="1242" y2="76"/>
 <rect x="808" y="86" width="212" height="160" rx="7" class="bx"/>
 <text class="t2" x="824" y="110">git container</text>
-<text class="mono" x="824" y="130" xml:space="preserve">nginx :8080</text>
-<text class="mono" x="824" y="145" xml:space="preserve">fcgiwrap · git-http-backend</text>
+<text class="mono" x="824" y="130" xml:space="preserve">flint-forge-gitcgi :8080</text>
+<text class="mono" x="824" y="145" xml:space="preserve">http-backend per request</text>
 <text class="t4" x="824" y="160">REMOTE_USER = X-Remote-User;</text>
 <text class="t4" x="824" y="175">hooks pre-receive (names the rule)</text>
 <text class="t4" x="824" y="190">and proc-receive (hands the push to</text>

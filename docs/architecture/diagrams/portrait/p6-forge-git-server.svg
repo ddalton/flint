@@ -63,7 +63,7 @@
 <line class="l-forge" x1="340" y1="60" x2="368" y2="60" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
 <rect x="372" y="8" width="130" height="120" rx="7" class="b-forge"/>
 <text class="t2 c-forge" x="382" y="32">server, 1 per repo</text>
-<text class="t4" x="382" y="52">nginx + http-backend;</text>
+<text class="t4" x="382" y="52">gitcgi + http-backend;</text>
 <text class="t4" x="382" y="65">hooks → the syncer: the</text>
 <text class="t4" x="382" y="78">only writer of the</text>
 <text class="t4" x="382" y="91">bucket; emptyDir cache;</text>

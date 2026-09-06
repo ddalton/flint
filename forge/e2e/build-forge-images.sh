@@ -37,8 +37,9 @@ echo "building forge for $ARCH ($TRIPLE), tag $TAG"
 ( cd spdk-csi-driver && cargo zigbuild --release --target "$TRIPLE" --bin flint-forge-operator --bin flint-hub-gateway )
 # The syncer bin has `required-features = ["s3"]` (it talks to the
 # bucket). It is also the hook: the git image installs the same binary
-# under the two hook names.
-( cd forge/syncer   && cargo zigbuild --release --target "$TRIPLE" --features s3 --bin flint-forge-syncer )
+# under the two hook names. The git image's HTTP front is the gitcgi
+# bin (feature `gitcgi`: hyper, no S3).
+( cd forge/syncer   && cargo zigbuild --release --target "$TRIPLE" --features s3,gitcgi --bin flint-forge-syncer --bin flint-forge-gitcgi )
 ( cd lean/sidecar   && cargo zigbuild --release --target "$TRIPLE" --features s3 --bin flint-sync )
 
 STAGE=spdk-csi-driver/docker/prebuilt/$ARCH
@@ -46,11 +47,12 @@ mkdir -p "$STAGE"
 cp spdk-csi-driver/target/$TRIPLE/release/flint-forge-operator "$STAGE/"
 cp spdk-csi-driver/target/$TRIPLE/release/flint-hub-gateway    "$STAGE/"
 cp forge/syncer/target/$TRIPLE/release/flint-forge-syncer      "$STAGE/"
+cp forge/syncer/target/$TRIPLE/release/flint-forge-gitcgi      "$STAGE/"
 cp lean/sidecar/target/$TRIPLE/release/flint-sync             "$STAGE/"
 ls -la "$STAGE"/flint-forge-* "$STAGE"/flint-hub-gateway "$STAGE"/flint-sync
 
 # Context is spdk-csi-driver: the forge-git Dockerfile COPYs
-# docker/forge/nginx.conf and docker/prebuilt/<arch>/… , both relative
+# docker/forge/git-propose.sh and docker/prebuilt/<arch>/… , both relative
 # to that directory. BIN_DIR=docker/prebuilt, matching the release.
 build() { # image dockerfile
     docker build --platform "linux/$ARCH" \

@@ -21,8 +21,10 @@ The user's rule: *"we don't have to reinvent a lot of components and
 still use battle tested components."* Forge's data model is git and
 its server IS git — the same `receive-pack`, `upload-pack`, hooks,
 `merge-tree` and `repack` that GitHub, GitLab and Gerrit run, served by
-nginx and `git http-backend` the way every self-hosted git has been
-served for fifteen years. Flint supplies exactly what git lacks in a
+`git http-backend` the way every self-hosted git has been served for
+fifteen years (behind a 300-line runner of flint's own since
+2026-09-05, where nginx and fcgiwrap had been — §15 decision 1). Flint
+supplies exactly what git lacks in a
 cluster with an S3 store: a door with pod identity, durability of the
 local repo into S3 with an acknowledgement that means it, a lifecycle
 that idles to zero, and an optional legible export so the rest of the
@@ -58,7 +60,7 @@ that want an RPO on the working tree anyway.
 
 | Need | Reused | From |
 |---|---|---|
-| serve clones, fetches, pushes | nginx + fcgiwrap + `git http-backend` (a CGI), smart HTTP; `Git-Protocol` forwarded so sessions are protocol v2 | git, nginx |
+| serve clones, fetches, pushes | `flint-forge-gitcgi` + `git http-backend` (a CGI), smart HTTP; `Git-Protocol` forwarded so sessions are protocol v2 | git; the runner is flint's (it replaced nginx + fcgiwrap, §15 decision 1) |
 | decide and confirm a push per ref | the `proc-receive` hook (git ≥ 2.29): the server executes the ref update and reports `ok`/`ng` per ref | git; Gitee/AGit in production |
 | branch protection, who may push what, who may merge | `pre-receive` with `REMOTE_USER` in the environment | git |
 | server-side merge without a worktree, **as a push** | a push to `refs/for/<target>` (AGit plumbing, Gitea/Gitee) handled by the same `proc-receive`: `git merge-tree --write-tree`, `commit-tree`, `-o strategy=` via `receive.advertisePushOptions` | git ≥ 2.43 for `-X` |
@@ -95,7 +97,7 @@ remotes without a server.
  agent pod                    flint-system                            tenant namespace
  ┌───────────────┐  HTTPS    ┌────────────────────────┐  HTTP       ┌──────────────────────────────┐
  │ git clone/push│ ────────▶ │ flint-hub-gateway,      │ ──────────▶ │ forge server pod (1 per repo) │
- │ cred helper:  │  basic    │ Door::Git               │  chunked    │  nginx+fcgiwrap+http-backend  │
+ │ cred helper:  │  basic    │ Door::Git               │  chunked    │  gitcgi → git http-backend    │
  │  SA token as  │  auth     │ TokenReview (cached)    │  both ways  │  hooks → UDS → syncer         │
  │  password     │           │ Consumers; route; wake  │  X-Remote-  │  syncer: lock, lease, batch,  │
  └───────────────┘           └────────────────────────┘  User        │   S3 sync, repack, export,    │
@@ -1018,8 +1020,6 @@ do not need to be.
     was blocked again. A NetworkPolicy is inert under kind's default
     CNI, which is why this runs on Cilium.
 
-
-## 14. Phases
 **Machine-checked (2026-09-05): `formal/ForgeSync.tla`**, eight runs
 in `scripts/check-tla.sh`. The push path at store-request granularity
 with a crash between any two steps, the progress-gated renewer with
@@ -1039,6 +1039,8 @@ a queued push waiting for ever, where the process's exit closes every
 hook socket; a `NoSuchUpload` exit drawn from the crash budget — and
 the module moved, the code not. The strict run: 2776804 distinct states to depth 52 under a token-rank view and syncer/push symmetry; the liveness run 247,117.
 
+
+## 14. Phases
 
 0. **Measure before building.** (a) Forgejo on a lite share, on kind:
    clone/push latency, git-over-NFS behaviour — the buy control. (b)
@@ -1120,7 +1122,7 @@ the module moved, the code not. The strict run: 2776804 distinct states to depth
    shape).
 
    `forge_operator::render` produces a ConfigMap, a headless Service, a
-   Deployment of one pod (syncer + nginx/fcgiwrap/`http-backend`,
+   Deployment of one pod (syncer + gitcgi/`http-backend`,
    25m/32Mi each, `Recreate`, `emptyDir`) and — when the operator is
    told where the door runs — a NetworkPolicy. `idle` is the one rung.
    `reconcile` arbitrates the bucket subtree, applies the children,
@@ -1221,9 +1223,9 @@ the module moved, the code not. The strict run: 2776804 distinct states to depth
    credentials, which the door deliberately has none of, and the
    objects never pass through either — the response is presigned URLs,
    so a 4 GB checkpoint goes client-to-store and the pod sees a few
-   hundred bytes of JSON. nginx routes `/info/lfs/objects/{batch,verify}`
-   to the syncer; the door gains two static suffixes and keeps §1's
-   path invariant.
+   hundred bytes of JSON. The git container's runner relays
+   `/info/lfs/objects/{batch,verify}` to the syncer; the door gains two
+   static suffixes and keeps §1's path invariant.
 
    `flint-store` gained `presign_put`, and with it a trap worth
    recording: since SDK 1.66 the default `WhenSupported` adds an
@@ -1256,8 +1258,17 @@ the module moved, the code not. The strict run: 2776804 distinct states to depth
 
 ## 15. Decisions and open questions
 
-1. **The server is real git behind nginx; flint writes no git
-   internals and no CGI runner — DECIDED.**
+1. **The server is real git; flint writes no git internals —
+   DECIDED. The "no CGI runner" half was REOPENED and reversed on
+   2026-09-05** (docs/plans/flint-forge-simplification-2026-09-05.md,
+   A3): the runbx drill found three of its four defects in nginx and
+   fcgiwrap — buffered keepalives, two unset 60 s client timeouts, a
+   four-worker ceiling that queued in silence — and a runner that
+   execs `http-backend` implements no git. `flint-forge-gitcgi` is
+   that runner: one process, both directions streamed, a ceiling that
+   answers, no timeouts of its own (the door owns the client-facing
+   bound), the LFS relay. Its integration test is the defect's oracle:
+   a hook's six progress lines arrive a second apart.
 2. **One syncer per repo owns every write to S3 and to
    `objects/pack/`; hooks are clients of it — DECIDED** (§4, §10).
 3. **Acknowledgement after S3 durability; one snapshot CAS per batch;

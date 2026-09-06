@@ -97,10 +97,10 @@
 <text class="t4" x="922" y="245">read path.</text>
 <text class="t4b c-red" x="1254" y="185">Two cleartext hops, as built.</text>
 <text class="t4" x="1254" y="200">HTTPS at the door is a line in the diagram; nothing in-tree</text>
-<text class="t4" x="1254" y="215">terminates it, and nginx listens on 8080 with no TLS. The</text>
-<text class="t4" x="1254" y="230">pod's audience-bound token rides both hops as a Basic</text>
-<text class="t4" x="1254" y="245">password — a network observer inside the cluster holds a</text>
-<text class="t4" x="1254" y="260">live credential. Server-to-S3 is TLS.</text>
+<text class="t4" x="1254" y="215">terminates it, and the git container's runner listens on 8080</text>
+<text class="t4" x="1254" y="230">with no TLS. The pod's audience-bound token rides both</text>
+<text class="t4" x="1254" y="245">hops as a Basic password — a network observer inside the</text>
+<text class="t4" x="1254" y="260">cluster holds a live credential. Server-to-S3 is TLS.</text>
 <line class="hair" x1="24" y1="279" x2="1576" y2="279"/>
 <rect x="24" y="279" width="220" height="131" rx="0" class="lbl"/>
 <text class="t2" x="38" y="301">What a reachable peer can do</text>
@@ -123,9 +123,9 @@
 <text class="t4" x="1254" y="316">— authentication precedes the repository's wake, so a peer</text>
 <text class="t4" x="1254" y="331">cannot scale a parked repository up, and a refused token is</text>
 <text class="t4" x="1254" y="346">cached. The lever it keeps: every novel bad token is one</text>
-<text class="t4" x="1254" y="361">TokenReview; behind the door nginx sets no body limit and</text>
-<text class="t4" x="1254" y="376">hour-long timeouts, and a wake holds a door slot up to 180</text>
-<text class="t4" x="1254" y="391">s.</text>
+<text class="t4" x="1254" y="361">TokenReview; behind the door the runner sets no body limit</text>
+<text class="t4" x="1254" y="376">and no timeout of its own (the door's idle bound is the one</text>
+<text class="t4" x="1254" y="391">cut), and a wake holds a door slot up to 180 s.</text>
 <line class="hair" x1="24" y1="410" x2="1576" y2="410"/>
 <rect x="24" y="410" width="220" height="146" rx="0" class="lbl"/>
 <rect x="244" y="410" width="1332" height="146" rx="0" class="rowb"/>

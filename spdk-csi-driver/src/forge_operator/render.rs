@@ -55,9 +55,10 @@ pub const STATUS_PORT: i32 = 9848;
 pub struct RenderDefaults {
     /// The image carrying `flint-forge-syncer`.
     pub syncer_image: String,
-    /// The image carrying nginx, fcgiwrap, `git http-backend` and the
-    /// hook binary. Separate from the syncer's on purpose: it contains
-    /// a web server and a git, and the syncer's contains neither.
+    /// The image carrying `flint-forge-gitcgi`, `git http-backend` and
+    /// the hook binary. Separate from the syncer's on purpose: it
+    /// contains a git (and the runner in front of it), and the syncer's
+    /// contains neither.
     pub git_image: String,
     pub log_level: String,
     /// Where the door runs, for the NetworkPolicy that admits only it.

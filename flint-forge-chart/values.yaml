@@ -36,7 +36,7 @@ server:
   repository: dilipdalton
   tag: ""
   # Full-reference overrides. Empty = <repository>/flint-forge-git:<tag>
-  # (nginx + fcgiwrap + git http-backend + the two hooks) and
+  # (flint-forge-gitcgi in front of git http-backend, plus the two hooks) and
   # <repository>/flint-forge-syncer:<tag> (the one writer of the
   # repository's S3 state; the pod's main container, so its exit
   # restarts the pod; it also carries flint-sync for the legible export).

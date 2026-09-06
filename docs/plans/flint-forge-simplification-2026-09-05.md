@@ -28,7 +28,7 @@ pinning.
 |---|---|---|---|
 | A1 syncer serves smart-HTTP, door stays | no | nginx, fcgiwrap, their knobs | the bucket credential into the process that parses untrusted HTTP; `index-pack` of a 40 GiB push into the lease holder's cgroup |
 | A2 drop the door too | **reject** | one hop | wake-from-zero (the door holds the request while a parked repo starts), per-repo addressing at 3,000 repos, TokenReview per pod, the NetworkPolicy boundary |
-| **A3 one Rust CGI runner replaces nginx + fcgiwrap; door and container split kept** | **do** | fcgiwrap buffering, the 4-worker ceiling, nginx's 3600 s cutoffs and two unset 60 s defaults | ~300 lines of runner to get right; reopens design decision 15.1 |
+| **A3 one Rust CGI runner replaces nginx + fcgiwrap; door and container split kept** | **built** 2026-09-05; cluster acceptance owed | fcgiwrap buffering, the 4-worker ceiling, nginx's 3600 s cutoffs and two unset 60 s defaults | 382 lines of runner, four integration tests over real git; reverses design decision 15.1 for the runner |
 | B1 early ack | **reject** | the wait | the guarantee: a successor restores strictly to the snapshot and deletes refs it does not name; the client's retry says "Everything up-to-date" |
 | B2 progress lines on the sideband | optional | silence for humans | nothing: same pipe as the keepalives, so every buffering knob stays load-bearing |
 | B3 the door as the only waiter | reject | nothing | the class into the door, which would then promise liveness it cannot verify |
@@ -156,6 +156,28 @@ probe the drill already ran (run 3, finding 2): a hook wait forced past
 acknowledged, with fcgiwrap-without-`NO_BUFFERING` as the failing
 control. Not before the multi-pack-bitmap work, which is the open
 performance item.
+
+Status 2026-09-05: **built**, ahead of the bitmap work on the user's
+order. `flint-forge-gitcgi` (`forge/syncer/src/bin/`, 382 lines, hyper
+1 behind the `gitcgi` feature) execs `git http-backend` per request
+with the CGI environment taken from the request, streams both
+directions as they arrive, parses the CGI `Status:` line, kills the
+child when the client goes, answers 503 past a declared ceiling (64
+by default) and relays the two LFS routes to the syncer's listener; it
+sets no timeout of its own, since the door owns the idle bound. Four
+integration tests run it against real git over real HTTP
+(`forge/syncer/tests/gitcgi.rs`): the clone/push/fetch round trip, the
+LFS relay, the ceiling answering rather than queueing, and the
+keepalive oracle — a pre-receive that writes six lines a second apart
+must be seen a second apart (first within 3 s, spread ≥ 4 s); through
+fcgiwrap they had arrived together with the report. The git image now
+holds one process (`Dockerfile.forge-git`: `ENTRYPOINT
+flint-forge-gitcgi`; `nginx.conf` and `entrypoint.sh` deleted) and a
+clone-push-clone smoke passes through the container's port. Owed: the
+cluster legs — the party table's four (a client stalled 70 s
+mid-pack, five concurrent pushes, a rollout mid-push, and
+`receive.keepAlive=0` as the failing control) and the gap probe
+through the door — which need a cluster.
 
 ## 3. The wait: the hook must keep waiting
 
@@ -378,6 +400,8 @@ exist. Do not delete either. What can be simpler:
 | X8 | push-only activity clock; `requested-at` stamped only on wake | clone-only repositories are suspended and rewoken | open |
 | X9 | readiness Serving-only, `Pushing` answers 503 | headless DNS withdrawn during a long push | unverified |
 | X10 | two image tags nothing checks against each other; git floor asserted on the wrong image | the published-artifact drill's class | **done** by D1: one `server.tag` in the chart, the operator warns on two tags, the git image asserts the floor at build |
+| X11 | a takeover of a repository nobody has published skipped the snapshot rotation ("the first CAS's If-None-Match is the fence"); a straggler mid-batch on the old epoch lands its create after the successor serves, and the successor's own first CAS is what 412s | the successor is fenced by its predecessor's push (no loss: the restart restores it) | **fixed**: the rotation creates the empty snapshot; found by `formal/ForgeSync.tla`'s first strict run; test with control |
+| X12 | a successor that died between its takeover CAS and its rotation restarts through self-recognition, which skipped the rotation ("our own previous process died with its writes"); the straggler from the epoch before still holds a valid If-Match | same class as X11, one crash later | **fixed**: every claim but a released cell's rotates; the model's second strict run; test with control |
 
 ## 8. Order
 
@@ -386,7 +410,8 @@ exist. Do not delete either. What can be simpler:
 3. D1 the multi-call hook and one tag (done; X10 with it).
 4. A3 the runner, with the keepalive-gap probe as its acceptance and
    the party-table legs added to the rig first, so the runner is
-   judged by the class it claims to remove.
+   judged by the class it claims to remove — **built 2026-09-05** and
+   tested against real git locally; the cluster legs are owed.
 5. X7 and X8 in the operator; X6 and X9 decided on the wire.
 6. C2 only when the poll count is the operator's cost.
 
@@ -403,5 +428,3 @@ a pack the bucket holds without its index (the listing is an
 observation that can lie, exactly the class `feedback_model_the_observation`
 records); a push may be told failed and land anyway (run 3, finding 3);
 a rollout is a crash at 30 s from the batch's point of view.
-| X11 | a takeover of a repository nobody has published skipped the snapshot rotation ("the first CAS's If-None-Match is the fence"); a straggler mid-batch on the old epoch lands its create after the successor serves, and the successor's own first CAS is what 412s | the successor is fenced by its predecessor's push (no loss: the restart restores it) | **fixed**: the rotation creates the empty snapshot; found by `formal/ForgeSync.tla`'s first strict run; test with control |
-| X12 | a successor that died between its takeover CAS and its rotation restarts through self-recognition, which skipped the rotation ("our own previous process died with its writes"); the straggler from the epoch before still holds a valid If-Match | same class as X11, one crash later | **fixed**: every claim but a released cell's rotates; the model's second strict run; test with control |

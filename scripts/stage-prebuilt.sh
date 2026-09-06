@@ -101,7 +101,7 @@ fi
 # release stages them.
 FORGE_BINS=""
 if [ "$SCOPE" = forge ] || [ "$SCOPE" = all ]; then
-    FORGE_BINS="flint-forge-syncer"
+    FORGE_BINS="flint-forge-syncer flint-forge-gitcgi"
 fi
 
 # Binaries from the WORKER crate (crates/flint-s3-worker): PID 1 of
@@ -209,7 +209,7 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
         src="$forge_crate/target/$triple/release/$b"
         if [ ! -f "$src" ]; then
             echo "  ✗ MISSING $arch/$b — build it before staging" >&2
-            echo "            (cd forge/syncer && cargo zigbuild --release --features s3 \\" >&2
+            echo "            (cd forge/syncer && cargo zigbuild --release --features s3,gitcgi \\" >&2
             echo "               --target $triple)" >&2
             stale=1; continue
         fi

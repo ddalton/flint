@@ -1,7 +1,7 @@
 //! flint-forge: the per-repo syncer (design of record:
 //! `docs/plans/flint-forge-design.md`).
 //!
-//! Forge serves real git. `nginx` + `fcgiwrap` + `git http-backend`
+//! Forge serves real git. `flint-forge-gitcgi` + `git http-backend`
 //! answer clones, fetches and pushes over the smart protocol; the
 //! repository on local disk is a CACHE; S3 is the truth. This crate is
 //! the one process that stands between the two — one syncer per

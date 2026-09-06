@@ -17,6 +17,9 @@ edition = "2021"
 [features]
 default = []
 s3 = ["flint-store/s3"]
+# The git container's HTTP front (`flint-forge-gitcgi`): hyper and its
+# body/stream helpers, behind a feature so the battery never builds them.
+gitcgi = ["dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:tokio-util", "dep:futures-util"]
 
 [[bin]]
 name = "flint-forge-syncer"
@@ -30,6 +33,14 @@ required-features = ["s3"]
 name = "flint-forge-hook"
 path = "src/bin/flint_forge_hook.rs"
 
+# The git container's HTTP surface: `git http-backend` as a CGI child
+# per request, streamed both ways, plus the LFS relay. Replaces nginx +
+# fcgiwrap (simplification note A3).
+[[bin]]
+name = "flint-forge-gitcgi"
+path = "src/bin/flint_forge_gitcgi.rs"
+required-features = ["gitcgi"]
+
 # The agent-side credential helper: reads the pod's projected token and
 # prints it as the basic password. No store, no dependencies, and it
 # ships in the AGENT image rather than the server's.
@@ -38,6 +49,11 @@ name = "flint-forge-credential"
 path = "src/bin/flint_forge_credential.rs"
 
 [dependencies]
+hyper = { version = "1", features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+tokio-util = { version = "0.7", features = ["io"], optional = true }
+futures-util = { version = "0.3", default-features = false, optional = true }
 flint-store = { path = "../../crates/flint-store" }
 bytes = "1.0"
 serde = { version = "1.0", features = ["derive"] }

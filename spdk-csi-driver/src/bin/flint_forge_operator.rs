@@ -13,7 +13,7 @@
 //! Environment:
 //!   FLINT_FORGE_OP_NAMESPACE   restrict the watch (unset = all)
 //!   FLINT_FORGE_SYNCER_IMAGE   the image carrying flint-forge-syncer
-//!   FLINT_FORGE_GIT_IMAGE      the image carrying nginx + http-backend
+//!   FLINT_FORGE_GIT_IMAGE      the image carrying gitcgi + http-backend
 //!   FLINT_FORGE_LOG_LEVEL      RUST_LOG for the server pods
 //!   FLINT_FORGE_DOOR_NAMESPACE where flint-hub-gateway runs; set it to
 //!                              render the NetworkPolicy that makes

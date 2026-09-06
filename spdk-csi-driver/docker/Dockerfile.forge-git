@@ -1,10 +1,20 @@
 # syntax=docker/dockerfile:1
-# flint-forge-git — nginx + fcgiwrap + `git http-backend`, plus the
-# `proc-receive` and `pre-receive` hooks.
+# flint-forge-git — `git http-backend` behind flint-forge-gitcgi, plus
+# the `proc-receive` and `pre-receive` hooks.
 #
 # The web half of a forge server pod. It shares the repository
 # `emptyDir` with the syncer beside it and talks to that syncer over a
 # Unix socket inside the repository's own state directory.
+#
+# ONE process serves HTTP here: flint-forge-gitcgi spawns http-backend
+# per request, streams both directions as they arrive, answers (503)
+# rather than queues past its ceiling, and relays the LFS batch call to
+# the syncer. It replaced nginx + fcgiwrap (simplification note A3): the
+# runbx drill found fcgiwrap buffering receive-pack's keepalives until
+# the push was over, nginx's two client-side timeouts defaulting to 60 s
+# beside backend bounds of an hour, and a four-worker ceiling that
+# queued in silence — three knobs nobody had listed, in two processes
+# nobody here owned.
 #
 # The hooks ARE the syncer binary, invoked under the hook names: the
 # same staged `flint-forge-syncer` that Dockerfile.forge-syncer.prebuilt
@@ -12,9 +22,9 @@
 # socket protocol between the two containers cannot drift between two
 # image tags.
 #
-#   (cd ../forge/syncer && cargo zigbuild --release --features s3 \
-#     --target $T-unknown-linux-musl --bin flint-forge-syncer)
-#   # stage: docker/prebuilt/{amd64,arm64}/flint-forge-syncer
+#   (cd ../forge/syncer && cargo zigbuild --release --features s3,gitcgi \
+#     --target $T-unknown-linux-musl --bin flint-forge-syncer --bin flint-forge-gitcgi)
+#   # stage: docker/prebuilt/{amd64,arm64}/flint-forge-{syncer,gitcgi}
 #   docker build --platform linux/$A -f docker/Dockerfile.forge-git \
 #     --build-arg BIN_DIR=docker/prebuilt -t <repo>/flint-forge-git:<tag>-$A .
 #
@@ -31,25 +41,17 @@ ARG TARGETARCH
 # what agent pods run, and multi-modal agents are the reason forge
 # carries an LFS batch API at all. Without it the server answers the
 # batch endpoint correctly and the agent cannot use it — which is
-# exactly what the first cluster run found.
-RUN apk add --no-cache git git-lfs git-daemon nginx fcgiwrap spawn-fcgi \
-    && mkdir -p /repo /run/nginx
+# exactly what the first cluster run found. git-daemon carries
+# http-backend on Alpine.
+RUN apk add --no-cache git git-lfs git-daemon \
+    && mkdir -p /repo
 RUN git --version | awk '{ split($3, v, "."); if (v[1] + 0 < 2 || (v[1] + 0 == 2 && v[2] + 0 < 43)) exit 1 }' \
     || { echo "git $(git --version) is below the 2.43 floor (merge-tree -X)" >&2; exit 1; }
-# nginx.conf passes NO_BUFFERING so that fcgiwrap flushes the CGI's
-# output as it comes (Alpine's no-buffering.patch). A base image whose
-# fcgiwrap lacks that patch would buffer `receive-pack`'s keepalives
-# again and every long push would be cut at the door — silently, on
-# real repositories only. So the build refuses it. The binary is split
-# on NUL first: busybox grep matches a line as a C string, so a string
-# past the first NUL of a line is invisible to it — and busybox tr does
-# not know the [:print:] class that the drill's check leans on.
-RUN tr '\0' '\n' < /usr/bin/fcgiwrap | grep -q NO_BUFFERING \
-    || { echo "fcgiwrap lacks the NO_BUFFERING switch: keepalives would buffer" >&2; exit 1; }
+RUN test -x /usr/libexec/git-core/git-http-backend \
+    || { echo "git-http-backend is not in this image (git-daemon package?)" >&2; exit 1; }
 
-COPY docker/forge/nginx.conf /etc/nginx/nginx.conf
-COPY docker/forge/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY ${BIN_DIR}/${TARGETARCH}/flint-forge-syncer /usr/local/bin/flint-forge-syncer
+COPY ${BIN_DIR}/${TARGETARCH}/flint-forge-gitcgi /usr/local/bin/flint-forge-gitcgi
 
 # `git propose` for the agent half of this image. git dispatches an
 # unknown subcommand to `git-<name>` on PATH, so this is a subcommand
@@ -67,4 +69,7 @@ RUN mkdir -p /usr/local/share/flint-forge/hooks \
     && ln -s /usr/local/bin/flint-forge-syncer /usr/local/share/flint-forge/hooks/proc-receive \
     && printf '' | /usr/local/share/flint-forge/hooks/pre-receive
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+# The container's environment carries GIT_PROJECT_ROOT and
+# GIT_HTTP_EXPORT_ALL (rendered by the operator); the listener, the LFS
+# upstream and the ceiling have defaults that match the pod.
+ENTRYPOINT ["/usr/local/bin/flint-forge-gitcgi"]
