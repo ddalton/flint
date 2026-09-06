@@ -44,22 +44,22 @@
 </style>
 <defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
 <rect x="8" y="8" width="410" height="70" rx="7" class="b-lite"/>
-<text class="t2 c-lite" x="24" y="32">flint-lite — the hub</text>
+<text class="t2 c-lite" x="24" y="32">flint-lite — the hub · NFS</text>
 <text class="t4" x="24" y="52">One pod serves a LIVE shared tree over NFSv4.2. Many pods, many clusters, real</text>
 <text class="t4" x="24" y="65">locks.</text>
 <line class="l-lite" x1="418" y1="43" x2="448" y2="43" marker-end="url(#a-lite)"/>
 <rect x="8" y="86" width="410" height="70" rx="7" class="b-lean"/>
-<text class="t2 c-lean" x="24" y="110">flint-lean — checkout / publish</text>
+<text class="t2 c-lean" x="24" y="110">flint-lean — checkout / publish · sync</text>
 <text class="t4" x="24" y="130">Plain files on local disk, checked out at start and published at a boundary. ONE</text>
-<text class="t4" x="24" y="143">writer.</text>
+<text class="t4" x="24" y="143">writer. No FUSE.</text>
 <line class="l-lean" x1="418" y1="121" x2="448" y2="121" marker-end="url(#a-lean)"/>
 <rect x="8" y="164" width="410" height="70" rx="7" class="b-pass"/>
-<text class="t2 c-pass" x="24" y="188">flint-passthrough — the mount</text>
+<text class="t2 c-pass" x="24" y="188">flint-passthrough — the mount · FUSE</text>
 <text class="t4" x="24" y="208">An S3 prefix mounted as-is by Mountpoint for S3. No POSIX, no coordination, no</text>
 <text class="t4" x="24" y="221">boundary.</text>
 <line class="l-pass" x1="418" y1="199" x2="448" y2="199" marker-end="url(#a-pass)"/>
 <rect x="8" y="242" width="410" height="70" rx="7" class="b-forge"/>
-<text class="t2 c-forge" x="24" y="266">flint-forge — the git server</text>
+<text class="t2 c-forge" x="24" y="266">flint-forge — the git server · git</text>
 <text class="t4" x="24" y="286">Stock git against one server pod per repository; a push is acknowledged once it is in</text>
 <text class="t4" x="24" y="299">S3.</text>
 <line class="l-forge" x1="418" y1="277" x2="448" y2="277" marker-end="url(#a-forge)"/>

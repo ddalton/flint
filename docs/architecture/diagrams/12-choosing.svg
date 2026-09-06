@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 836" role="img"
-     aria-label="A ten-row comparison of flint-lite, flint-lean, flint-passthrough and flint-forge across what the pod sees, POSIX fidelity, concurrent writers, reader consistency, multi-cluster shape, enforced identity, user isolation, per-cluster install, recovery point, and the data class each is for.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 937" role="img"
+     aria-label="An eleven-row comparison of flint-lite, flint-lean, flint-passthrough and flint-forge across the technology that carries the bytes, what the pod sees, POSIX fidelity, concurrent writers, reader consistency, multi-cluster shape, enforced identity, user isolation, per-cluster install, recovery point, and the data class each is for.">
 <style>
   text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
   .t1{font-size:17.0px;font-weight:600}
@@ -53,166 +53,184 @@
 <text class="on" x="1077" y="42" style="text-anchor:middle">flint-passthrough</text>
 <rect x="1246" y="18" width="330" height="38" rx="6" class="hd-forge"/>
 <text class="on" x="1411" y="42" style="text-anchor:middle">flint-forge</text>
-<rect x="24" y="62" width="220" height="71" rx="0" class="lbl"/>
-<text class="t2" x="38" y="84">What the pod sees</text>
-<text class="t4" x="38" y="102">the shape of the thing</text>
-<text class="t4" x="258" y="84">a shared NFS mount served by one hub pod that every</text>
-<text class="t4" x="258" y="99">client reaches over the network — one tree, many pods, live</text>
-<text class="t4" x="590" y="84">plain files on local disk, checked out before the first line</text>
-<text class="t4" x="590" y="99">runs and published back on a boundary — one pod's own</text>
-<text class="t4" x="590" y="114">tree</text>
-<text class="t4" x="922" y="84">an S3 prefix presented as files by Mountpoint for S3 —</text>
-<text class="t4" x="922" y="99">objects, with a directory-shaped view over them</text>
-<text class="t4" x="1254" y="84">a git remote. The working tree is a local clone the pod</text>
-<text class="t4" x="1254" y="99">owns; history, branches and a merge policy live at the</text>
-<text class="t4" x="1254" y="114">server</text>
-<line class="hair" x1="24" y1="133" x2="1576" y2="133"/>
-<rect x="24" y="133" width="220" height="71" rx="0" class="lbl"/>
-<rect x="244" y="133" width="1332" height="71" rx="0" class="rowb"/>
-<text class="t2" x="38" y="155">POSIX fidelity</text>
-<text class="t4" x="38" y="173">what actually works</text>
-<text class="t4b" x="258" y="155">Full, and shared.</text>
-<text class="t4" x="258" y="170">byte-range locks, atomic rename, O_EXCL — across pods</text>
-<text class="t4" x="258" y="185">and clusters</text>
-<text class="t4b" x="590" y="155">Full, and local.</text>
-<text class="t4" x="590" y="170">a real filesystem, so git, sqlite and hard links work — for</text>
-<text class="t4" x="590" y="185">one pod</text>
-<text class="t4b c-red" x="922" y="155">None to speak of.</text>
-<text class="t4" x="922" y="170">no rename, no append, no in-place write — at any setting,</text>
-<text class="t4" x="922" y="185">deliberately</text>
-<text class="t4b" x="1254" y="155">Full, and local — for tracked files.</text>
-<text class="t4" x="1254" y="170">the clone is a real disk; what is durable is what is</text>
-<text class="t4" x="1254" y="185">committed</text>
-<line class="hair" x1="24" y1="204" x2="1576" y2="204"/>
-<rect x="24" y="204" width="220" height="71" rx="0" class="lbl"/>
-<text class="t2" x="38" y="226">Concurrent writers</text>
-<text class="t4" x="38" y="244">per tree</text>
-<text class="t4b" x="258" y="226">Many, coordinated.</text>
-<text class="t4" x="258" y="241">the only front end where two pods can edit one directory</text>
-<text class="t4" x="258" y="256">and both be right</text>
-<text class="t4b" x="590" y="226">Exactly one, enforced.</text>
-<text class="t4" x="590" y="241">a second syncer is REFUSED, not merged — several agents</text>
-<text class="t4" x="590" y="256">integrate through git instead</text>
-<text class="t4b c-red" x="922" y="226">Many, uncoordinated.</text>
-<text class="t4" x="922" y="241">two writers on one key race; the loser's write is gone and</text>
-<text class="t4" x="922" y="256">nothing records it</text>
-<text class="t4b" x="1254" y="226">Many, serialised by the server.</text>
-<text class="t4" x="1254" y="241">one syncer per repository; a stale push is refused by name;</text>
-<text class="t4" x="1254" y="256">a merge is a push to refs/for/&lt;target&gt;</text>
-<line class="hair" x1="24" y1="275" x2="1576" y2="275"/>
-<rect x="24" y="275" width="220" height="71" rx="0" class="lbl"/>
-<rect x="244" y="275" width="1332" height="71" rx="0" class="rowb"/>
-<text class="t2" x="38" y="297">What a reader sees</text>
-<text class="t4" x="38" y="315">the consistency contract</text>
-<text class="t4" x="258" y="297">the live tree, strongly — close-to-open, no RPO lag, through</text>
-<text class="t4" x="258" y="312">the coherence authority</text>
-<text class="t4" x="590" y="297">the last PUBLISHED boundary, never your last write; gated</text>
-<text class="t4" x="590" y="312">mode makes it all-or-nothing</text>
-<text class="t4" x="922" y="297">whatever S3 currently holds, with S3's own consistency</text>
-<text class="t4" x="922" y="312">and nothing added</text>
-<text class="t4" x="1254" y="297">on fetch, every acknowledged push — served by the write</text>
-<text class="t4" x="1254" y="312">authority, never stale, never from S3; between fetches, a</text>
-<text class="t4" x="1254" y="327">snapshot with no signal</text>
-<line class="hair" x1="24" y1="346" x2="1576" y2="346"/>
-<rect x="24" y="346" width="220" height="71" rx="0" class="lbl"/>
-<text class="t2" x="38" y="368">Across clusters</text>
-<text class="t4" x="38" y="386">the fleet shape</text>
-<text class="t4" x="258" y="368">ONE hub, mounted from N clusters. Works unchanged — but</text>
-<text class="t4" x="258" y="383">needs unique client names, a network boundary and a</text>
-<text class="t4" x="258" y="398">keepalive</text>
-<text class="t4" x="590" y="368">N independent syncers, one bucket. Clusters never talk; the</text>
-<text class="t4" x="590" y="383">lease lives in the bucket, so single-writer holds ACROSS</text>
-<text class="t4" x="590" y="398">clusters</text>
-<text class="t4" x="922" y="368">N independent mounts, one bucket. There is no fleet</text>
-<text class="t4" x="922" y="383">problem, because nothing is shared to get wrong</text>
-<text class="t4" x="1254" y="368">one server per repository; the door proves tokens to ITS</text>
-<text class="t4" x="1254" y="383">apiserver, so remote agents need the human bearer path.</text>
-<text class="t4" x="1254" y="398">The bucket is a rendezvous for readers only — undrilled</text>
-<line class="hair" x1="24" y1="417" x2="1576" y2="417"/>
-<rect x="24" y="417" width="220" height="71" rx="0" class="lbl"/>
-<rect x="244" y="417" width="1332" height="71" rx="0" class="rowb"/>
-<text class="t2" x="38" y="439">Identity that is enforced</text>
-<text class="t4" x="38" y="457">the user's token reaches NONE of</text>
-<text class="t4" x="38" y="472">these</text>
-<text class="t4b c-red" x="258" y="439">Nobody, on the data path.</text>
-<text class="t4" x="258" y="454">AUTH_SYS: the client asserts its own uid, and the POSIX</text>
-<text class="t4" x="258" y="469">check defaults to log-only</text>
-<text class="t4b" x="590" y="439">The POD's ServiceAccount.</text>
-<text class="t4" x="590" y="454">kubelet-minted, pod-bound, verified ONLINE by</text>
-<text class="t4" x="590" y="469">TokenReview, checked against consumers</text>
-<text class="t4b" x="922" y="439">The POD's ServiceAccount.</text>
-<text class="t4" x="922" y="454">an identical chain to lean — same broker, same registration</text>
-<text class="t4" x="922" y="469">binding, same audit line</text>
-<text class="t4b" x="1254" y="439">The POD's ServiceAccount, at the door.</text>
-<text class="t4" x="1254" y="454">TokenReview per session, consumers per repository, then</text>
-<text class="t4" x="1254" y="469">X-Remote-User to two enforcers of one policy</text>
-<line class="hair" x1="24" y1="488" x2="1576" y2="488"/>
-<rect x="24" y="488" width="220" height="71" rx="0" class="lbl"/>
-<text class="t2" x="38" y="510">Isolating user A from B</text>
-<text class="t4" x="38" y="528">when both launch agents on several</text>
-<text class="t4" x="38" y="543">clusters</text>
-<text class="t4" x="258" y="510">Give each project its own hub and prefix, and bound</text>
-<text class="t4" x="258" y="525">reachability outside Kubernetes.</text>
-<text class="t4b c-red" x="258" y="540">Everything sharing a hub shares a fate.</text>
-<text class="t4" x="590" y="510">Give each user their own workspace prefix. Keys are</text>
-<text class="t4" x="590" y="525">scoped to it, the lease fences it, and consumers says who</text>
-<text class="t4" x="590" y="540">may mount it</text>
-<text class="t4" x="922" y="510">Give each user their own CR and pod. The mount presents</text>
-<text class="t4" x="922" y="525">ONE uid, so pod-level isolation IS user-level isolation</text>
-<text class="t4" x="1254" y="510">Give each project its own repository and each agent its own</text>
-<text class="t4" x="1254" y="525">branch pattern; a shared ServiceAccount reaches every</text>
-<text class="t4" x="1254" y="540">sibling's agent/* branch</text>
-<line class="hair" x1="24" y1="559" x2="1576" y2="559"/>
-<rect x="24" y="559" width="220" height="71" rx="0" class="lbl"/>
-<rect x="244" y="559" width="1332" height="71" rx="0" class="rowb"/>
-<text class="t2" x="38" y="581">Installed per cluster</text>
-<text class="t4" x="38" y="599">in a consumer cluster</text>
-<text class="t4b" x="258" y="581">Nothing.</text>
-<text class="t4" x="258" y="596">the node's own kernel NFS client is the data path; at most</text>
-<text class="t4" x="258" y="611">a PV and PVC</text>
-<text class="t4" x="590" y="581">the s3.csi.chert.us driver, a broker and the lean CRD + thin</text>
-<text class="t4" x="590" y="596">controller — in EVERY cluster; the broker must be local</text>
-<text class="t4" x="922" y="581">the same driver and broker, and the CRD — in every cluster.</text>
-<text class="t4" x="922" y="596">One CSI install serves lean and passthrough together</text>
-<text class="t4b" x="1254" y="581">Nothing in the data path.</text>
-<text class="t4" x="1254" y="596">stock git plus two lines of pod spec; the door and the</text>
-<text class="t4" x="1254" y="611">servers live in the home cluster</text>
-<line class="hair" x1="24" y1="630" x2="1576" y2="630"/>
-<rect x="24" y="630" width="220" height="71" rx="0" class="lbl"/>
-<text class="t2" x="38" y="652">Recovery point</text>
-<text class="t4" x="38" y="670">what a hard kill costs</text>
-<text class="t4" x="258" y="652">the flush cadence. The PVC is a cache — losing it is a</text>
-<text class="t4" x="258" y="667">rebuild from S3, not a loss</text>
-<text class="t4" x="590" y="652">the last barrier: ≤ floorSecs (default 60 s), or zero and</text>
-<text class="t4" x="590" y="667">acknowledged if you declare one</text>
-<text class="t4b" x="922" y="652">None — nothing is buffered.</text>
-<text class="t4" x="922" y="667">a completed PUT is durable; an interrupted one did not</text>
-<text class="t4" x="922" y="682">happen</text>
-<text class="t4" x="1254" y="652">the last acknowledged push — ok means the pack and the</text>
-<text class="t4" x="1254" y="667">snapshot are in S3. Uncommitted work: none, by git's</text>
-<text class="t4" x="1254" y="682">contract</text>
-<line class="hair" x1="24" y1="701" x2="1576" y2="701"/>
-<rect x="24" y="701" width="220" height="71" rx="0" class="lbl"/>
-<rect x="244" y="701" width="1332" height="71" rx="0" class="rowb"/>
-<text class="t2" x="38" y="723">Choose it for</text>
-<text class="t4" x="38" y="741">a data class, not a team</text>
-<text class="t4b" x="258" y="723">What several pods must edit LIVE.</text>
-<text class="t4" x="258" y="738">shared workspaces, cross-pod locking, sqlite, a dataset too</text>
-<text class="t4" x="258" y="753">big for a pod's disk</text>
-<text class="t4b" x="590" y="723">One agent's hot working set.</text>
-<text class="t4" x="590" y="738">a repo-sized tree, full POSIX at local speed, durable at</text>
-<text class="t4" x="590" y="753">breakpoints</text>
-<text class="t4b" x="922" y="723">The bucket, not a filesystem.</text>
-<text class="t4" x="922" y="738">read-mostly datasets, weights, artifacts, or a prefix another</text>
-<text class="t4" x="922" y="753">system already owns</text>
-<text class="t4b" x="1254" y="723">Code, with history.</text>
-<text class="t4" x="1254" y="738">durable on push, a merge policy the server enforces, many</text>
-<text class="t4" x="1254" y="753">agents proposing to one main; large binaries in LFS</text>
-<line class="hair" x1="24" y1="772" x2="1576" y2="772"/>
-<rect x="24" y="62" width="1552" height="710" rx="0" class="frame"/>
-<line class="hair" x1="576" y1="62" x2="576" y2="772"/>
-<line class="hair" x1="908" y1="62" x2="908" y2="772"/>
-<line class="hair" x1="1240" y1="62" x2="1240" y2="772"/>
-<text class="t4b" x="24" y="800">Read the table down a column, not across a row: each front end is coherent with itself, and a row that looks like a weakness is usually the price of a strength two rows up.</text>
-<text class="t4" x="24" y="818">Then read the composition page: one workload usually has several of these data classes, and each has a best door. Because the file-shaped formats are common and forge exports one, a volume can change its mind later.</text>
+<rect x="24" y="62" width="220" height="101" rx="0" class="lbl"/>
+<text class="t2" x="38" y="84">Technology</text>
+<text class="t4" x="38" y="102">in one word: what carries the bytes</text>
+<text class="t4b" x="258" y="84">NFS.</text>
+<text class="t4" x="258" y="99">a hub pod serves the tree over NFSv4.2; the node's kernel</text>
+<text class="t4" x="258" y="114">client carries every byte</text>
+<text class="t4b" x="590" y="84">Sync.</text>
+<text class="t4" x="590" y="99">the agent writes a local directory; a sidecar copies</text>
+<text class="t4" x="590" y="114">changed bytes to S3 with the plain S3 API, after the fact.</text>
+<text class="t4" x="590" y="129">No FUSE anywhere: nothing intercepts a file operation,</text>
+<text class="t4" x="590" y="144">nothing mounts the bucket</text>
+<text class="t4b" x="922" y="84">FUSE.</text>
+<text class="t4" x="922" y="99">Mountpoint for S3 intercepts every file operation in the pod</text>
+<text class="t4" x="922" y="114">and translates it into object requests</text>
+<text class="t4b" x="1254" y="84">Git.</text>
+<text class="t4" x="1254" y="99">real git, served per repository, with S3 as its only durable</text>
+<text class="t4" x="1254" y="114">state</text>
+<line class="hair" x1="24" y1="163" x2="1576" y2="163"/>
+<rect x="24" y="163" width="220" height="71" rx="0" class="lbl"/>
+<rect x="244" y="163" width="1332" height="71" rx="0" class="rowb"/>
+<text class="t2" x="38" y="185">What the pod sees</text>
+<text class="t4" x="38" y="203">the shape of the thing</text>
+<text class="t4" x="258" y="185">a shared NFS mount served by one hub pod that every</text>
+<text class="t4" x="258" y="200">client reaches over the network — one tree, many pods, live</text>
+<text class="t4" x="590" y="185">plain files on local disk, checked out before the first line</text>
+<text class="t4" x="590" y="200">runs and published back on a boundary — one pod's own</text>
+<text class="t4" x="590" y="215">tree</text>
+<text class="t4" x="922" y="185">an S3 prefix presented as files by Mountpoint for S3 —</text>
+<text class="t4" x="922" y="200">objects, with a directory-shaped view over them</text>
+<text class="t4" x="1254" y="185">a git remote. The working tree is a local clone the pod</text>
+<text class="t4" x="1254" y="200">owns; history, branches and a merge policy live at the</text>
+<text class="t4" x="1254" y="215">server</text>
+<line class="hair" x1="24" y1="234" x2="1576" y2="234"/>
+<rect x="24" y="234" width="220" height="71" rx="0" class="lbl"/>
+<text class="t2" x="38" y="256">POSIX fidelity</text>
+<text class="t4" x="38" y="274">what actually works</text>
+<text class="t4b" x="258" y="256">Full, and shared.</text>
+<text class="t4" x="258" y="271">byte-range locks, atomic rename, O_EXCL — across pods</text>
+<text class="t4" x="258" y="286">and clusters</text>
+<text class="t4b" x="590" y="256">Full, and local.</text>
+<text class="t4" x="590" y="271">a real filesystem, so git, sqlite and hard links work — for</text>
+<text class="t4" x="590" y="286">one pod</text>
+<text class="t4b c-red" x="922" y="256">None to speak of.</text>
+<text class="t4" x="922" y="271">no rename, no append, no in-place write — at any setting,</text>
+<text class="t4" x="922" y="286">deliberately</text>
+<text class="t4b" x="1254" y="256">Full, and local — for tracked files.</text>
+<text class="t4" x="1254" y="271">the clone is a real disk; what is durable is what is</text>
+<text class="t4" x="1254" y="286">committed</text>
+<line class="hair" x1="24" y1="305" x2="1576" y2="305"/>
+<rect x="24" y="305" width="220" height="71" rx="0" class="lbl"/>
+<rect x="244" y="305" width="1332" height="71" rx="0" class="rowb"/>
+<text class="t2" x="38" y="327">Concurrent writers</text>
+<text class="t4" x="38" y="345">per tree</text>
+<text class="t4b" x="258" y="327">Many, coordinated.</text>
+<text class="t4" x="258" y="342">the only front end where two pods can edit one directory</text>
+<text class="t4" x="258" y="357">and both be right</text>
+<text class="t4b" x="590" y="327">Exactly one, enforced.</text>
+<text class="t4" x="590" y="342">a second syncer is REFUSED, not merged — several agents</text>
+<text class="t4" x="590" y="357">integrate through git instead</text>
+<text class="t4b c-red" x="922" y="327">Many, uncoordinated.</text>
+<text class="t4" x="922" y="342">two writers on one key race; the loser's write is gone and</text>
+<text class="t4" x="922" y="357">nothing records it</text>
+<text class="t4b" x="1254" y="327">Many, serialised by the server.</text>
+<text class="t4" x="1254" y="342">one syncer per repository; a stale push is refused by name;</text>
+<text class="t4" x="1254" y="357">a merge is a push to refs/for/&lt;target&gt;</text>
+<line class="hair" x1="24" y1="376" x2="1576" y2="376"/>
+<rect x="24" y="376" width="220" height="71" rx="0" class="lbl"/>
+<text class="t2" x="38" y="398">What a reader sees</text>
+<text class="t4" x="38" y="416">the consistency contract</text>
+<text class="t4" x="258" y="398">the live tree, strongly — close-to-open, no RPO lag, through</text>
+<text class="t4" x="258" y="413">the coherence authority</text>
+<text class="t4" x="590" y="398">the last PUBLISHED boundary, never your last write; gated</text>
+<text class="t4" x="590" y="413">mode makes it all-or-nothing</text>
+<text class="t4" x="922" y="398">whatever S3 currently holds, with S3's own consistency</text>
+<text class="t4" x="922" y="413">and nothing added</text>
+<text class="t4" x="1254" y="398">on fetch, every acknowledged push — served by the write</text>
+<text class="t4" x="1254" y="413">authority, never stale, never from S3; between fetches, a</text>
+<text class="t4" x="1254" y="428">snapshot with no signal</text>
+<line class="hair" x1="24" y1="447" x2="1576" y2="447"/>
+<rect x="24" y="447" width="220" height="71" rx="0" class="lbl"/>
+<rect x="244" y="447" width="1332" height="71" rx="0" class="rowb"/>
+<text class="t2" x="38" y="469">Across clusters</text>
+<text class="t4" x="38" y="487">the fleet shape</text>
+<text class="t4" x="258" y="469">ONE hub, mounted from N clusters. Works unchanged — but</text>
+<text class="t4" x="258" y="484">needs unique client names, a network boundary and a</text>
+<text class="t4" x="258" y="499">keepalive</text>
+<text class="t4" x="590" y="469">N independent syncers, one bucket. Clusters never talk; the</text>
+<text class="t4" x="590" y="484">lease lives in the bucket, so single-writer holds ACROSS</text>
+<text class="t4" x="590" y="499">clusters</text>
+<text class="t4" x="922" y="469">N independent mounts, one bucket. There is no fleet</text>
+<text class="t4" x="922" y="484">problem, because nothing is shared to get wrong</text>
+<text class="t4" x="1254" y="469">one server per repository; the door proves tokens to ITS</text>
+<text class="t4" x="1254" y="484">apiserver, so remote agents need the human bearer path.</text>
+<text class="t4" x="1254" y="499">The bucket is a rendezvous for readers only — undrilled</text>
+<line class="hair" x1="24" y1="518" x2="1576" y2="518"/>
+<rect x="24" y="518" width="220" height="71" rx="0" class="lbl"/>
+<text class="t2" x="38" y="540">Identity that is enforced</text>
+<text class="t4" x="38" y="558">the user's token reaches NONE of</text>
+<text class="t4" x="38" y="573">these</text>
+<text class="t4b c-red" x="258" y="540">Nobody, on the data path.</text>
+<text class="t4" x="258" y="555">AUTH_SYS: the client asserts its own uid, and the POSIX</text>
+<text class="t4" x="258" y="570">check defaults to log-only</text>
+<text class="t4b" x="590" y="540">The POD's ServiceAccount.</text>
+<text class="t4" x="590" y="555">kubelet-minted, pod-bound, verified ONLINE by</text>
+<text class="t4" x="590" y="570">TokenReview, checked against consumers</text>
+<text class="t4b" x="922" y="540">The POD's ServiceAccount.</text>
+<text class="t4" x="922" y="555">an identical chain to lean — same broker, same registration</text>
+<text class="t4" x="922" y="570">binding, same audit line</text>
+<text class="t4b" x="1254" y="540">The POD's ServiceAccount, at the door.</text>
+<text class="t4" x="1254" y="555">TokenReview per session, consumers per repository, then</text>
+<text class="t4" x="1254" y="570">X-Remote-User to two enforcers of one policy</text>
+<line class="hair" x1="24" y1="589" x2="1576" y2="589"/>
+<rect x="24" y="589" width="220" height="71" rx="0" class="lbl"/>
+<rect x="244" y="589" width="1332" height="71" rx="0" class="rowb"/>
+<text class="t2" x="38" y="611">Isolating user A from B</text>
+<text class="t4" x="38" y="629">when both launch agents on several</text>
+<text class="t4" x="38" y="644">clusters</text>
+<text class="t4" x="258" y="611">Give each project its own hub and prefix, and bound</text>
+<text class="t4" x="258" y="626">reachability outside Kubernetes.</text>
+<text class="t4b c-red" x="258" y="641">Everything sharing a hub shares a fate.</text>
+<text class="t4" x="590" y="611">Give each user their own workspace prefix. Keys are</text>
+<text class="t4" x="590" y="626">scoped to it, the lease fences it, and consumers says who</text>
+<text class="t4" x="590" y="641">may mount it</text>
+<text class="t4" x="922" y="611">Give each user their own CR and pod. The mount presents</text>
+<text class="t4" x="922" y="626">ONE uid, so pod-level isolation IS user-level isolation</text>
+<text class="t4" x="1254" y="611">Give each project its own repository and each agent its own</text>
+<text class="t4" x="1254" y="626">branch pattern; a shared ServiceAccount reaches every</text>
+<text class="t4" x="1254" y="641">sibling's agent/* branch</text>
+<line class="hair" x1="24" y1="660" x2="1576" y2="660"/>
+<rect x="24" y="660" width="220" height="71" rx="0" class="lbl"/>
+<text class="t2" x="38" y="682">Installed per cluster</text>
+<text class="t4" x="38" y="700">in a consumer cluster</text>
+<text class="t4b" x="258" y="682">Nothing.</text>
+<text class="t4" x="258" y="697">the node's own kernel NFS client is the data path; at most</text>
+<text class="t4" x="258" y="712">a PV and PVC</text>
+<text class="t4" x="590" y="682">the s3.csi.chert.us driver, a broker and the lean CRD + thin</text>
+<text class="t4" x="590" y="697">controller — in EVERY cluster; the broker must be local</text>
+<text class="t4" x="922" y="682">the same driver and broker, and the CRD — in every cluster.</text>
+<text class="t4" x="922" y="697">One CSI install serves lean and passthrough together</text>
+<text class="t4b" x="1254" y="682">Nothing in the data path.</text>
+<text class="t4" x="1254" y="697">stock git plus two lines of pod spec; the door and the</text>
+<text class="t4" x="1254" y="712">servers live in the home cluster</text>
+<line class="hair" x1="24" y1="731" x2="1576" y2="731"/>
+<rect x="24" y="731" width="220" height="71" rx="0" class="lbl"/>
+<rect x="244" y="731" width="1332" height="71" rx="0" class="rowb"/>
+<text class="t2" x="38" y="753">Recovery point</text>
+<text class="t4" x="38" y="771">what a hard kill costs</text>
+<text class="t4" x="258" y="753">the flush cadence. The PVC is a cache — losing it is a</text>
+<text class="t4" x="258" y="768">rebuild from S3, not a loss</text>
+<text class="t4" x="590" y="753">the last barrier: ≤ floorSecs (default 60 s), or zero and</text>
+<text class="t4" x="590" y="768">acknowledged if you declare one</text>
+<text class="t4b" x="922" y="753">None — nothing is buffered.</text>
+<text class="t4" x="922" y="768">a completed PUT is durable; an interrupted one did not</text>
+<text class="t4" x="922" y="783">happen</text>
+<text class="t4" x="1254" y="753">the last acknowledged push — ok means the pack and the</text>
+<text class="t4" x="1254" y="768">snapshot are in S3. Uncommitted work: none, by git's</text>
+<text class="t4" x="1254" y="783">contract</text>
+<line class="hair" x1="24" y1="802" x2="1576" y2="802"/>
+<rect x="24" y="802" width="220" height="71" rx="0" class="lbl"/>
+<text class="t2" x="38" y="824">Choose it for</text>
+<text class="t4" x="38" y="842">a data class, not a team</text>
+<text class="t4b" x="258" y="824">What several pods must edit LIVE.</text>
+<text class="t4" x="258" y="839">shared workspaces, cross-pod locking, sqlite, a dataset too</text>
+<text class="t4" x="258" y="854">big for a pod's disk</text>
+<text class="t4b" x="590" y="824">One agent's hot working set.</text>
+<text class="t4" x="590" y="839">a repo-sized tree, full POSIX at local speed, durable at</text>
+<text class="t4" x="590" y="854">breakpoints</text>
+<text class="t4b" x="922" y="824">The bucket, not a filesystem.</text>
+<text class="t4" x="922" y="839">read-mostly datasets, weights, artifacts, or a prefix another</text>
+<text class="t4" x="922" y="854">system already owns</text>
+<text class="t4b" x="1254" y="824">Code, with history.</text>
+<text class="t4" x="1254" y="839">durable on push, a merge policy the server enforces, many</text>
+<text class="t4" x="1254" y="854">agents proposing to one main; large binaries in LFS</text>
+<line class="hair" x1="24" y1="873" x2="1576" y2="873"/>
+<rect x="24" y="62" width="1552" height="811" rx="0" class="frame"/>
+<line class="hair" x1="576" y1="62" x2="576" y2="873"/>
+<line class="hair" x1="908" y1="62" x2="908" y2="873"/>
+<line class="hair" x1="1240" y1="62" x2="1240" y2="873"/>
+<text class="t4b" x="24" y="901">Read the table down a column, not across a row: each front end is coherent with itself, and a row that looks like a weakness is usually the price of a strength two rows up.</text>
+<text class="t4" x="24" y="919">Then read the composition page: one workload usually has several of these data classes, and each has a best door. Because the file-shaped formats are common and forge exports one, a volume can change its mind later.</text>
 </svg>

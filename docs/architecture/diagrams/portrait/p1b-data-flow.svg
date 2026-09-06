@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 470" role="img"
+     aria-label="The data flow of the four front ends as four rows: the pod, what carries the bytes, and the S3 prefix, with the moment the bytes move written on the arrows.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .t1{font-size:14.96px;font-weight:600}
+  .t2{font-size:11.44px;font-weight:600}
+  .t3{font-size:10.56px}
+  .t3b{font-size:10.56px;font-weight:600;fill:#334155}
+  .t4{font-size:9.68px;fill:#64748b}
+  .t4b{font-size:9.68px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:9.24px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:8.36px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:9.68px;font-weight:600;fill:#ffffff}
+  .on{font-size:11.44px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:9.68px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
+</style>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<rect x="8" y="8" width="46" height="92" rx="7" class="b-lite"/>
+<text class="t2 c-lite" x="31" y="60" style="text-anchor:middle">NFS</text>
+<rect x="62" y="8" width="120" height="92" rx="7" class="bx"/>
+<path class="f-lite" d="M69,8 H175 A7,7 0 0 1 182,15 V13 H62 V15 A7,7 0 0 1 69,8 Z"/>
+<text class="t2 c-lite" x="78" y="32">the pod</text>
+<text class="t4" x="78" y="52">an NFS mount</text>
+<line class="l-lite" x1="182" y1="54" x2="258" y2="54" marker-start="url(#a-lite)" marker-end="url(#a-lite)"/>
+<text class="cap" x="220" y="38" style="text-anchor:middle">every op</text>
+<text class="cap" x="220" y="80" style="text-anchor:middle">live</text>
+<rect x="262" y="8" width="180" height="92" rx="7" class="b-lite"/>
+<text class="t2 c-lite" x="278" y="32">the hub pod</text>
+<text class="t4" x="278" y="52">one process, one tree</text>
+<text class="t4" x="278" y="65">publishes on a cadence;</text>
+<text class="t4" x="278" y="78">hydrates on demand</text>
+<line class="l-lite" x1="442" y1="54" x2="518" y2="54" marker-start="url(#a-lite)" marker-end="url(#a-lite)"/>
+<text class="cap" x="480" y="38" style="text-anchor:middle">publish ↑</text>
+<text class="cap" x="480" y="80" style="text-anchor:middle">hydrate ↓</text>
+<rect x="522" y="8" width="110" height="92" rx="7" class="s3"/>
+<text class="t2" x="577" y="48" style="text-anchor:middle">S3</text>
+<text class="mono" x="577" y="66" style="text-anchor:middle" xml:space="preserve">&lt;prefix&gt;/&lt;path&gt;</text>
+<rect x="8" y="114" width="46" height="92" rx="7" class="b-lean"/>
+<text class="t2 c-lean" x="31" y="166" style="text-anchor:middle">sync</text>
+<rect x="62" y="114" width="120" height="92" rx="7" class="bx"/>
+<path class="f-lean" d="M69,114 H175 A7,7 0 0 1 182,121 V119 H62 V121 A7,7 0 0 1 69,114 Z"/>
+<text class="t2 c-lean" x="78" y="138">the pod</text>
+<text class="t4" x="78" y="158">local disk</text>
+<line class="l-lean" x1="182" y1="160" x2="258" y2="160" stroke-dasharray="6 5" marker-start="url(#a-lean)" marker-end="url(#a-lean)"/>
+<text class="cap" x="220" y="144" style="text-anchor:middle">same dir</text>
+<text class="cap" x="220" y="186" style="text-anchor:middle">no wire</text>
+<rect x="262" y="114" width="180" height="92" rx="7" class="b-lean"/>
+<text class="t2 c-lean" x="278" y="138">flint-sync sidecar</text>
+<text class="t4" x="278" y="158">copies changed files</text>
+<text class="t4" x="278" y="171">at a boundary; checkout at start</text>
+<line class="l-lean" x1="442" y1="160" x2="518" y2="160" marker-start="url(#a-lean)" marker-end="url(#a-lean)"/>
+<text class="cap" x="480" y="144" style="text-anchor:middle">publish ↑</text>
+<text class="cap" x="480" y="186" style="text-anchor:middle">checkout ↓</text>
+<rect x="522" y="114" width="110" height="92" rx="7" class="s3"/>
+<text class="t2" x="577" y="154" style="text-anchor:middle">S3</text>
+<text class="mono" x="577" y="172" style="text-anchor:middle" xml:space="preserve">&lt;prefix&gt;/files/…</text>
+<rect x="8" y="220" width="46" height="92" rx="7" class="b-pass"/>
+<text class="t2 c-pass" x="31" y="272" style="text-anchor:middle">FUSE</text>
+<rect x="62" y="220" width="120" height="92" rx="7" class="bx"/>
+<path class="f-pass" d="M69,220 H175 A7,7 0 0 1 182,227 V225 H62 V227 A7,7 0 0 1 69,220 Z"/>
+<text class="t2 c-pass" x="78" y="244">the pod</text>
+<text class="t4" x="78" y="264">a FUSE mount</text>
+<line class="l-pass" x1="182" y1="266" x2="258" y2="266" marker-start="url(#a-pass)" marker-end="url(#a-pass)"/>
+<text class="cap" x="220" y="250" style="text-anchor:middle">every op</text>
+<text class="cap" x="220" y="292" style="text-anchor:middle">intercepted</text>
+<rect x="262" y="220" width="180" height="92" rx="7" class="b-pass"/>
+<text class="t2 c-pass" x="278" y="244">mount-s3 worker</text>
+<text class="t4" x="278" y="264">each op → a request</text>
+<text class="t4" x="278" y="277">nothing buffered</text>
+<line class="l-pass" x1="442" y1="266" x2="518" y2="266" marker-start="url(#a-pass)" marker-end="url(#a-pass)"/>
+<text class="cap" x="480" y="250" style="text-anchor:middle">GET · PUT</text>
+<text class="cap" x="480" y="292" style="text-anchor:middle">per op</text>
+<rect x="522" y="220" width="110" height="92" rx="7" class="s3"/>
+<text class="t2" x="577" y="260" style="text-anchor:middle">S3</text>
+<text class="mono" x="577" y="278" style="text-anchor:middle" xml:space="preserve">&lt;prefix&gt;/&lt;key&gt;</text>
+<rect x="8" y="326" width="46" height="92" rx="7" class="b-forge"/>
+<text class="t2 c-forge" x="31" y="378" style="text-anchor:middle">git</text>
+<rect x="62" y="326" width="120" height="92" rx="7" class="bx"/>
+<path class="f-forge" d="M69,326 H175 A7,7 0 0 1 182,333 V331 H62 V333 A7,7 0 0 1 69,326 Z"/>
+<text class="t2 c-forge" x="78" y="350">the pod</text>
+<text class="t4" x="78" y="370">a git clone</text>
+<line class="l-forge" x1="182" y1="372" x2="258" y2="372" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<text class="cap" x="220" y="356" style="text-anchor:middle">push ↑</text>
+<text class="cap" x="220" y="398" style="text-anchor:middle">fetch ↓</text>
+<rect x="262" y="326" width="180" height="92" rx="7" class="b-forge"/>
+<text class="t2 c-forge" x="278" y="350">server pod</text>
+<text class="t4" x="278" y="370">gitcgi + syncer</text>
+<text class="t4" x="278" y="383">ack after the packs land</text>
+<line class="l-forge" x1="442" y1="372" x2="518" y2="372" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<text class="cap" x="480" y="356" style="text-anchor:middle">packs ↑</text>
+<text class="cap" x="480" y="398" style="text-anchor:middle">restore ↓</text>
+<rect x="522" y="326" width="110" height="92" rx="7" class="s3"/>
+<text class="t2" x="577" y="366" style="text-anchor:middle">S3</text>
+<text class="mono" x="577" y="384" style="text-anchor:middle" xml:space="preserve">&lt;prefix&gt;/git/…</text>
+<text class="t4b" x="8" y="448">Solid arrows carry file contents; the dashed one is a shared directory, not a wire.</text>
+</svg>

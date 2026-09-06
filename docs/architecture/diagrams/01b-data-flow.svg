@@ -1,0 +1,166 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 772" role="img"
+     aria-label="The data flow of each front end as a column: what the pod touches, what carries the bytes, and what puts them in the bucket. flint-lite: an NFS mount reaches the hub over the wire, live; the hub publishes on a cadence and hydrates on demand. flint-lean: the pod writes a local directory a sidecar copies to S3 at a boundary. flint-passthrough: every file operation is intercepted by mount-s3 and becomes an S3 request. flint-forge: a push carries packs to the server pod, whose syncer uploads them and acknowledges only once they are in S3. Control sits beside each column and never carries a file.">
+<style>
+  text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
+  .t1{font-size:17.0px;font-weight:600}
+  .t2{font-size:13.0px;font-weight:600}
+  .t3{font-size:12.0px}
+  .t3b{font-size:12.0px;font-weight:600;fill:#334155}
+  .t4{font-size:11.0px;fill:#64748b}
+  .t4b{font-size:11.0px;font-weight:600;fill:#334155}
+  .mono{font-family:Menlo,"SF Mono",Consolas,monospace;font-size:10.5px;fill:#334155}
+  .mute{fill:#64748b}
+  .cap{font-size:9.5px;font-weight:600;letter-spacing:.1em;fill:#64748b}
+  .num{font-size:11.0px;font-weight:600;fill:#ffffff}
+  .on{font-size:13.0px;font-weight:600;fill:#ffffff}
+  .onsub{font-size:11.0px;fill:#ffffff;opacity:.85}
+  .c-red{fill:#b4232a}
+  .c-lite{fill:#184f95} .c-lean{fill:#0f7a55} .c-pass{fill:#7d530c} .c-forge{fill:#8c2449}
+  .f-lite{fill:#184f95} .f-lean{fill:#1baf7a} .f-pass{fill:#a06b12} .f-forge{fill:#b03060}
+  .f-red{fill:#b4232a} .f-ink{fill:#334155}
+  .b-lite{fill:#eef3fa;stroke:#184f95;stroke-width:1.4} .b-lean{fill:#ecf8f2;stroke:#1baf7a;stroke-width:1.4} .b-pass{fill:#faf3e6;stroke:#a06b12;stroke-width:1.4} .b-forge{fill:#faedf2;stroke:#b03060;stroke-width:1.4}
+  .hd-lite{fill:#184f95} .hd-lean{fill:#0f7a55} .hd-pass{fill:#7d530c} .hd-forge{fill:#8c2449}
+  .hd-lbl{fill:#334155}
+  .l-lite{stroke:#184f95;stroke-width:2.2;fill:none} .l-lean{stroke:#1baf7a;stroke-width:2.2;fill:none} .l-pass{stroke:#a06b12;stroke-width:2.2;fill:none} .l-forge{stroke:#b03060;stroke-width:2.2;fill:none}
+  .l-ctl{stroke:#94a3b8;stroke-width:1.6;fill:none}
+  .l-ink{stroke:#334155;stroke-width:2.2;fill:none}
+  .l-red{stroke:#b4232a;stroke-width:2.2;fill:none}
+  .bx{fill:#ffffff;stroke:#e2e8f0;stroke-width:1.4}
+  .panel{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.4}
+  .s3{fill:#f1f5f9;stroke:#64748b;stroke-width:1.6}
+  .grp{fill:none;stroke:#94a3b8;stroke-width:1.3;stroke-dasharray:7 5}
+  .hair{stroke:#e2e8f0;stroke-width:1}
+  .lbl{fill:#f8fafc} .rowb{fill:#fbfcfd}
+  .frame{fill:none;stroke:#e2e8f0;stroke-width:1.2}
+  .halo{fill:#ffffff}
+  .chip{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1}
+  .chip-red{fill:#b4232a}
+  .chip-lite{fill:#184f95} .chip-lean{fill:#0f7a55} .chip-pass{fill:#7d530c} .chip-forge{fill:#8c2449}
+  .chip .cap{fill:#334155}
+  /* On a filled shape. Last on purpose: a class beats a presentation
+     attribute, so this must win over .t4/.cap/.mono. */
+  .on,.num,.onsub{fill:#ffffff}
+  .cap.on{fill:#ffffff}
+</style>
+<defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
+<rect x="24" y="16" width="374" height="46" rx="7" class="hd-lite"/>
+<text class="on" x="211" y="38" style="text-anchor:middle">NFS</text>
+<text class="onsub" x="211" y="54" style="text-anchor:middle">flint-lite — live, shared, over the wire</text>
+<rect x="24" y="76" width="374" height="84" rx="7" class="bx"/>
+<path class="f-lite" d="M31,76 H391 A7,7 0 0 1 398,83 V81 H24 V83 A7,7 0 0 1 31,76 Z"/>
+<text class="t2 c-lite" x="40" y="100">the pod</text>
+<text class="mono" x="40" y="120" xml:space="preserve">/data — an NFS mount</text>
+<text class="t4b" x="40" y="135">every read and write crosses the wire</text>
+<line class="l-lite" x1="211" y1="166" x2="211" y2="228" marker-start="url(#a-lite)" marker-end="url(#a-lite)"/>
+<rect x="125" y="179" width="172" height="30" rx="3" class="halo"/>
+<text class="t4b c-lite" x="211" y="190" style="text-anchor:middle">NFSv4.2</text>
+<text class="t4" x="211" y="205" style="text-anchor:middle">both ways, live, every operation</text>
+<rect x="24" y="232" width="374" height="100" rx="7" class="b-lite"/>
+<text class="t2 c-lite" x="40" y="256">the hub pod</text>
+<text class="t4" x="40" y="276">one process holds the tree: leases, locks, close-to-open</text>
+<text class="mono" x="40" y="291" xml:space="preserve">PVC = the working set, a cache</text>
+<line class="l-lite" x1="211" y1="338" x2="211" y2="424" marker-start="url(#a-lite)" marker-end="url(#a-lite)"/>
+<rect x="80" y="363" width="263" height="30" rx="3" class="halo"/>
+<text class="t4b c-lite" x="211" y="374" style="text-anchor:middle">publish on a cadence  ↑   hydrate on demand  ↓</text>
+<text class="t4" x="211" y="389" style="text-anchor:middle">RPO = the cadence</text>
+<text class="mono" x="40" y="470" xml:space="preserve">&lt;prefix&gt;/&lt;path&gt;</text>
+<rect x="24" y="560" width="374" height="118" rx="7" class="panel"/>
+<text class="t2" x="40" y="584">control — never on the data path</text>
+<text class="t4" x="40" y="604">epoch cell in the bucket — who is the hub</text>
+<text class="t4" x="40" y="619">operator — suspend, wake</text>
+<text class="t4" x="40" y="634">port 2049 — no credential; reachability</text>
+<rect x="416" y="16" width="374" height="46" rx="7" class="hd-lean"/>
+<text class="on" x="603" y="38" style="text-anchor:middle">sync</text>
+<text class="onsub" x="603" y="54" style="text-anchor:middle">flint-lean — local disk, then reconciled</text>
+<rect x="416" y="76" width="374" height="84" rx="7" class="bx"/>
+<path class="f-lean" d="M423,76 H783 A7,7 0 0 1 790,83 V81 H416 V83 A7,7 0 0 1 423,76 Z"/>
+<text class="t2 c-lean" x="432" y="100">the pod</text>
+<text class="mono" x="432" y="120" xml:space="preserve">/workspace — local disk</text>
+<text class="t4b" x="432" y="135">reads and writes touch nothing but the disk</text>
+<line class="l-lean" x1="603" y1="166" x2="603" y2="228" stroke-dasharray="6 5" marker-end="url(#a-lean)"/>
+<rect x="470" y="179" width="266" height="30" rx="3" class="halo"/>
+<text class="t4b c-lean" x="603" y="190" style="text-anchor:middle">the same directory</text>
+<text class="t4" x="603" y="205" style="text-anchor:middle">no wire, no interception — the sidecar reads it later</text>
+<rect x="416" y="232" width="374" height="100" rx="7" class="b-lean"/>
+<text class="t2 c-lean" x="432" y="256">flint-sync sidecar</text>
+<text class="t4" x="432" y="276">scans for changed files; copies them with the plain S3 API</text>
+<text class="mono" x="432" y="291" xml:space="preserve">unprivileged, in a system namespace</text>
+<line class="l-lean" x1="603" y1="338" x2="603" y2="424" marker-start="url(#a-lean)" marker-end="url(#a-lean)"/>
+<rect x="477" y="363" width="252" height="30" rx="3" class="halo"/>
+<text class="t4b c-lean" x="603" y="374" style="text-anchor:middle">publish at a boundary  ↑   checkout at start  ↓</text>
+<text class="t4" x="603" y="389" style="text-anchor:middle">RPO = the last barrier</text>
+<text class="mono" x="432" y="470" xml:space="preserve">&lt;prefix&gt;/files/&lt;path&gt;</text>
+<rect x="416" y="560" width="374" height="118" rx="7" class="panel"/>
+<text class="t2" x="432" y="584">control — never on the data path</text>
+<text class="t4" x="432" y="604">lease in the bucket — one writer</text>
+<text class="t4" x="432" y="619">broker → short-lived keys → sidecar</text>
+<text class="t4" x="432" y="634">.flint/publish → .flint/publish.ack</text>
+<rect x="808" y="16" width="374" height="46" rx="7" class="hd-pass"/>
+<text class="on" x="995" y="38" style="text-anchor:middle">FUSE</text>
+<text class="onsub" x="995" y="54" style="text-anchor:middle">flint-passthrough — every operation is a request</text>
+<rect x="808" y="76" width="374" height="84" rx="7" class="bx"/>
+<path class="f-pass" d="M815,76 H1175 A7,7 0 0 1 1182,83 V81 H808 V83 A7,7 0 0 1 815,76 Z"/>
+<text class="t2 c-pass" x="824" y="100">the pod</text>
+<text class="mono" x="824" y="120" xml:space="preserve">/mnt/s3 — a FUSE mount</text>
+<text class="t4b" x="824" y="135">every file operation is intercepted</text>
+<line class="l-pass" x1="995" y1="166" x2="995" y2="228" marker-start="url(#a-pass)" marker-end="url(#a-pass)"/>
+<rect x="893" y="179" width="205" height="30" rx="3" class="halo"/>
+<text class="t4b c-pass" x="995" y="190" style="text-anchor:middle">FUSE</text>
+<text class="t4" x="995" y="205" style="text-anchor:middle">per operation, in the pod's critical path</text>
+<rect x="808" y="232" width="374" height="100" rx="7" class="b-pass"/>
+<text class="t2 c-pass" x="824" y="256">mount-s3 worker</text>
+<text class="t4" x="824" y="276">translates each operation into GET, PUT, LIST</text>
+<text class="mono" x="824" y="291" xml:space="preserve">no cache of flint's, no state</text>
+<line class="l-pass" x1="995" y1="338" x2="995" y2="424" marker-start="url(#a-pass)" marker-end="url(#a-pass)"/>
+<rect x="903" y="363" width="184" height="30" rx="3" class="halo"/>
+<text class="t4b c-pass" x="995" y="374" style="text-anchor:middle">GET · PUT · LIST, per operation</text>
+<text class="t4" x="995" y="389" style="text-anchor:middle">no RPO — nothing is buffered</text>
+<text class="mono" x="824" y="470" xml:space="preserve">&lt;prefix&gt;/&lt;key&gt;</text>
+<rect x="808" y="560" width="374" height="118" rx="7" class="panel"/>
+<text class="t2" x="824" y="584">control — never on the data path</text>
+<text class="t4" x="824" y="604">node plugin — mount(2), hands over the fd</text>
+<text class="t4" x="824" y="619">broker → short-lived keys → worker</text>
+<text class="t4" x="824" y="634">CR consumers — who may mount</text>
+<rect x="1200" y="16" width="374" height="46" rx="7" class="hd-forge"/>
+<text class="on" x="1387" y="38" style="text-anchor:middle">git</text>
+<text class="onsub" x="1387" y="54" style="text-anchor:middle">flint-forge — bytes move on push</text>
+<rect x="1200" y="76" width="374" height="84" rx="7" class="bx"/>
+<path class="f-forge" d="M1207,76 H1567 A7,7 0 0 1 1574,83 V81 H1200 V83 A7,7 0 0 1 1207,76 Z"/>
+<text class="t2 c-forge" x="1216" y="100">the pod</text>
+<text class="mono" x="1216" y="120" xml:space="preserve">a git clone — local disk</text>
+<text class="t4b" x="1216" y="135">commits are local; a push moves them</text>
+<line class="l-forge" x1="1387" y1="166" x2="1387" y2="228" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="1296" y="179" width="181" height="30" rx="3" class="halo"/>
+<text class="t4b c-forge" x="1387" y="190" style="text-anchor:middle">git smart HTTP</text>
+<text class="t4" x="1387" y="205" style="text-anchor:middle">push ↑ · fetch ↓ — through the door</text>
+<rect x="1200" y="232" width="374" height="100" rx="7" class="b-forge"/>
+<text class="t2 c-forge" x="1216" y="256">server pod — gitcgi + syncer</text>
+<text class="t4" x="1216" y="276">git-http-backend serves; the syncer uploads</text>
+<text class="mono" x="1216" y="291" xml:space="preserve">the local repository is a cache</text>
+<line class="l-forge" x1="1387" y1="338" x2="1387" y2="424" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="1258" y="363" width="258" height="30" rx="3" class="halo"/>
+<text class="t4b c-forge" x="1387" y="374" style="text-anchor:middle">packs on push, ack after  ↑   restore at start  ↓</text>
+<text class="t4" x="1387" y="389" style="text-anchor:middle">RPO = the last acknowledged push</text>
+<text class="mono" x="1216" y="470" xml:space="preserve">&lt;prefix&gt;/git/…</text>
+<rect x="1200" y="560" width="374" height="118" rx="7" class="panel"/>
+<text class="t2" x="1216" y="584">control — never on the data path</text>
+<text class="t4" x="1216" y="604">door — TokenReview → X-Remote-User</text>
+<text class="t4" x="1216" y="619">lease + ONE snapshot CAS per batch</text>
+<text class="t4" x="1216" y="634">operator — idle to zero, wake</text>
+<rect x="24" y="430" width="1552" height="96" rx="7" class="s3"/>
+<text class="t1" x="40" y="456">S3 — the durable store. One bucket; each front end has its prefix; the bytes are the same bytes.</text>
+<text class="t4" x="40" y="508">Whole-file objects for the file-shaped three; a bare git repository for forge. What the arrow above says is when the bytes arrive, and that is the recovery point.</text>
+<text class="t4b" x="28" y="720">Solid arrows carry file contents; the dashed arrow is a shared directory, not a wire. The word on each header is the technology between the pod and the bucket.</text>
+<rect x="28" y="737" width="14" height="14" rx="3" class="f-lite"/>
+<text class="t4" x="48" y="748">flint-lite</text>
+<rect x="110" y="737" width="14" height="14" rx="3" class="f-lean"/>
+<text class="t4" x="130" y="748">flint-lean</text>
+<rect x="197" y="737" width="14" height="14" rx="3" class="f-pass"/>
+<text class="t4" x="217" y="748">flint-passthrough</text>
+<rect x="324" y="737" width="14" height="14" rx="3" class="f-forge"/>
+<text class="t4" x="344" y="748">flint-forge</text>
+<line class="l-ink" x1="416.0" y1="744" x2="442.0" y2="744"/>
+<text class="t4" x="448" y="748">data path</text>
+<line class="l-ctl" x1="515.98" y1="744" x2="541.98" y2="744" stroke-dasharray="6 5"/>
+<text class="t4" x="548" y="748">control</text>
+</svg>

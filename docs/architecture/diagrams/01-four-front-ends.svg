@@ -45,7 +45,7 @@
 <defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
 <rect x="24" y="16" width="374" height="46" rx="7" class="hd-lite"/>
 <text class="on" x="211" y="38" style="text-anchor:middle">flint-lite — the hub</text>
-<text class="onsub" x="211" y="54" style="text-anchor:middle">live shared POSIX · many readers and writers</text>
+<text class="onsub" x="211" y="54" style="text-anchor:middle">NFS · live shared POSIX · many readers and writers</text>
 <rect x="24" y="74" width="374" height="128" rx="7" class="bx"/>
 <path class="f-lite" d="M31,74 H391 A7,7 0 0 1 398,81 V79 H24 V81 A7,7 0 0 1 31,74 Z"/>
 <text class="t2 c-lite" x="40" y="98">the consumer pod — any cluster</text>
@@ -73,7 +73,7 @@
 <text class="t4" x="211" y="511" style="text-anchor:middle">RPO = the flush cadence</text>
 <rect x="416" y="16" width="374" height="46" rx="7" class="hd-lean"/>
 <text class="on" x="603" y="38" style="text-anchor:middle">flint-lean — checkout / publish</text>
-<text class="onsub" x="603" y="54" style="text-anchor:middle">one agent, one workspace, one writer</text>
+<text class="onsub" x="603" y="54" style="text-anchor:middle">sync · one agent, one workspace, one writer</text>
 <rect x="416" y="74" width="374" height="128" rx="7" class="bx"/>
 <path class="f-lean" d="M423,74 H783 A7,7 0 0 1 790,81 V79 H416 V81 A7,7 0 0 1 423,74 Z"/>
 <text class="t2 c-lean" x="432" y="98">the agent pod</text>
@@ -99,7 +99,7 @@
 <text class="t4" x="603" y="511" style="text-anchor:middle">RPO = the last barrier</text>
 <rect x="808" y="16" width="374" height="46" rx="7" class="hd-pass"/>
 <text class="on" x="995" y="38" style="text-anchor:middle">flint-passthrough — the mount</text>
-<text class="onsub" x="995" y="54" style="text-anchor:middle">an S3 prefix mounted as-is · no flint semantics</text>
+<text class="onsub" x="995" y="54" style="text-anchor:middle">FUSE · an S3 prefix mounted as-is · no flint semantics</text>
 <rect x="808" y="74" width="374" height="128" rx="7" class="bx"/>
 <path class="f-pass" d="M815,74 H1175 A7,7 0 0 1 1182,81 V79 H808 V81 A7,7 0 0 1 815,74 Z"/>
 <text class="t2 c-pass" x="824" y="98">the tenant pod</text>
@@ -125,7 +125,7 @@
 <text class="t4" x="995" y="511" style="text-anchor:middle">no RPO — nothing is buffered</text>
 <rect x="1200" y="16" width="374" height="46" rx="7" class="hd-forge"/>
 <text class="on" x="1387" y="38" style="text-anchor:middle">flint-forge — the git server</text>
-<text class="onsub" x="1387" y="54" style="text-anchor:middle">a git remote per repository · S3 behind it</text>
+<text class="onsub" x="1387" y="54" style="text-anchor:middle">git · a remote per repository · S3 behind it</text>
 <rect x="1200" y="74" width="374" height="128" rx="7" class="bx"/>
 <path class="f-forge" d="M1207,74 H1567 A7,7 0 0 1 1574,81 V79 H1200 V81 A7,7 0 0 1 1207,74 Z"/>
 <text class="t2 c-forge" x="1216" y="98">the agent pod</text>

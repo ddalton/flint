@@ -95,6 +95,7 @@
 <text class="t4" x="342" y="336">nothing in-tree terminates TLS: the token rides two cleartext</text>
 <text class="t4" x="342" y="349">hops; the X-Remote-User boundary is an opt-in</text>
 <text class="t4" x="342" y="362">NetworkPolicy; the built idle clock counts pushes only; the</text>
-<text class="t4" x="342" y="375">server runs as root. All eleven falsifiers ran on EC2 and went</text>
-<text class="t4" x="342" y="388">green; agents in another cluster are not drilled.</text>
+<text class="t4" x="342" y="375">server runs as root. Twelve falsifiers went green, eleven on</text>
+<text class="t4" x="342" y="388">EC2 and the twelfth on Cilium; agents in another cluster are</text>
+<text class="t4" x="342" y="401">not drilled.</text>
 </svg>

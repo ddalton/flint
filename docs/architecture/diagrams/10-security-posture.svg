@@ -171,7 +171,7 @@
 <text class="t4" x="590" y="623">one key per project. A second lean pod on the same prefix</text>
 <text class="t4" x="590" y="638">does not become a reader — it waits to become the writer.</text>
 <text class="t4" x="590" y="653">The read-only session is a passthrough mount of files/,</text>
-<text class="t4" x="590" y="668">readOnly (page 11).</text>
+<text class="t4" x="590" y="668">readOnly (page 12).</text>
 <text class="t4b" x="922" y="578">Yes, per pod.</text>
 <text class="t4" x="922" y="593">Two pods on one CR, one declared readOnly: --read-only on</text>
 <text class="t4" x="922" y="608">mount-s3 plus a read-only bind mount, and the pod never</text>

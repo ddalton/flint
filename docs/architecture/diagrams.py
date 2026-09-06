@@ -423,7 +423,7 @@ def plate_01():
                   "every push is acknowledged only once it is in S3. All four read and write one bucket, in which each "
                   "front end has its own layout and control namespace.")
     cols = [
-        ("lite", "flint-lite — the hub", "live shared POSIX · many readers and writers",
+        ("lite", "flint-lite — the hub", "NFS · live shared POSIX · many readers and writers",
          ("the consumer pod — any cluster", ["nothing from flint is installed in it", ("m", "/data  (an ordinary PVC)"),
                                              "the node's kernel NFS client carries every byte — one mount per node, shared with its page cache",
                                              ("b", "full POSIX: byte-range locks, atomic rename, O_EXCL")]),
@@ -433,7 +433,7 @@ def plate_01():
                                            ("b", "single replica · Recreate · exclusive flock")]),
          ("coordination — the hub IS the authority", ["leases, locks and close-to-open are enforced in one process, so every client sees one coherent tree; a second hub on the prefix is fenced by the epoch cell"]),
          ("publish · hydrate", "RPO = the flush cadence")),
-        ("lean", "flint-lean — checkout / publish", "one agent, one workspace, one writer",
+        ("lean", "flint-lean — checkout / publish", "sync · one agent, one workspace, one writer",
          ("the agent pod", ["the app image is unchanged and holds no S3 credential", ("m", "/workspace  (local disk — an emptyDir)"),
                             "plain files with no interception anywhere in the read or write path",
                             ("b", "git, sqlite and build caches work, at disk speed")]),
@@ -442,7 +442,7 @@ def plate_01():
                                                   ("b", "preStop drains — a graceful stop loses nothing")]),
          ("coordination — a lease in the BUCKET", ["one writer per subtree, admitted by a CAS on the epoch cell; a second syncer is REFUSED, never merged; readers see the last published boundary"]),
          ("checkout · publish", "RPO = the last barrier")),
-        ("pass", "flint-passthrough — the mount", "an S3 prefix mounted as-is · no flint semantics",
+        ("pass", "flint-passthrough — the mount", "FUSE · an S3 prefix mounted as-is · no flint semantics",
          ("the tenant pod", ["no sidecar, no label, no credential, no privilege — admissible under PodSecurity restricted",
                              ("m", "/mnt/s3  (a csi: volume naming a CR)"), "objects appear as files, served by Mountpoint for S3",
                              ("b", "NOT POSIX: no rename, no append, no in-place write")]),
@@ -450,7 +450,7 @@ def plate_01():
                                                      ("b", "the plugin holds no S3 credential — a broker mints them")]),
          ("coordination — NONE, by design", ["no cache, no manifest, no publish boundary, no coordination between pods sharing a prefix; S3's own consistency is the entire contract"]),
          ("GET · PUT", "no RPO — nothing is buffered")),
-        ("forge", "flint-forge — the git server", "a git remote per repository · S3 behind it",
+        ("forge", "flint-forge — the git server", "git · a remote per repository · S3 behind it",
          ("the agent pod", ["a stock git client; the working tree is local disk", ("m", "credential.helper = flint-forge-credential"),
                             "the pod's projected ServiceAccount token, audience forge.chert.us, is the Basic password",
                             ("b", "the durable unit is a commit — a push")]),
@@ -490,6 +490,63 @@ def plate_01():
     s.legend(M + 4, 826, [("lite", "flint-lite"), ("lean", "flint-lean"), ("pass", "flint-passthrough"), ("forge", "flint-forge"),
                           ("data", "data path"), ("ctl", "control"), ("red", "hazard / trust boundary")])
     s.text(M + 4, 856, "A box wears its front end as the strip on its top edge. S3 and Kubernetes are neutral: they belong to nobody.", "t4")
+    return s
+
+def plate_01b():
+    s = SVG(W, H, "The data flow of each front end as a column: what the pod touches, what carries the bytes, and what puts them "
+                  "in the bucket. flint-lite: an NFS mount reaches the hub over the wire, live; the hub publishes on a cadence and "
+                  "hydrates on demand. flint-lean: the pod writes a local directory a sidecar copies to S3 at a boundary. "
+                  "flint-passthrough: every file operation is intercepted by mount-s3 and becomes an S3 request. flint-forge: a push "
+                  "carries packs to the server pod, whose syncer uploads them and acknowledges only once they are in S3. Control "
+                  "sits beside each column and never carries a file.")
+    cols = [
+        ("lite", "NFS", "flint-lite — live, shared, over the wire",
+         ("the pod", [("m", "/data — an NFS mount"), ("b", "every read and write crosses the wire")]),
+         ("NFSv4.2", "both ways, live, every operation", True, False),
+         ("the hub pod", ["one process holds the tree: leases, locks, close-to-open", ("m", "PVC = the working set, a cache")]),
+         ("publish on a cadence  ↑   hydrate on demand  ↓", "RPO = the cadence"),
+         ("m", "<prefix>/<path>"),
+         ["epoch cell in the bucket — who is the hub", "operator — suspend, wake", "port 2049 — no credential; reachability"]),
+        ("lean", "sync", "flint-lean — local disk, then reconciled",
+         ("the pod", [("m", "/workspace — local disk"), ("b", "reads and writes touch nothing but the disk")]),
+         ("the same directory", "no wire, no interception — the sidecar reads it later", False, True),
+         ("flint-sync sidecar", ["scans for changed files; copies them with the plain S3 API", ("m", "unprivileged, in a system namespace")]),
+         ("publish at a boundary  ↑   checkout at start  ↓", "RPO = the last barrier"),
+         ("m", "<prefix>/files/<path>"),
+         ["lease in the bucket — one writer", "broker → short-lived keys → sidecar", ".flint/publish → .flint/publish.ack"]),
+        ("pass", "FUSE", "flint-passthrough — every operation is a request",
+         ("the pod", [("m", "/mnt/s3 — a FUSE mount"), ("b", "every file operation is intercepted")]),
+         ("FUSE", "per operation, in the pod's critical path", True, False),
+         ("mount-s3 worker", ["translates each operation into GET, PUT, LIST", ("m", "no cache of flint's, no state")]),
+         ("GET · PUT · LIST, per operation", "no RPO — nothing is buffered"),
+         ("m", "<prefix>/<key>"),
+         ["node plugin — mount(2), hands over the fd", "broker → short-lived keys → worker", "CR consumers — who may mount"]),
+        ("forge", "git", "flint-forge — bytes move on push",
+         ("the pod", [("m", "a git clone — local disk"), ("b", "commits are local; a push moves them")]),
+         ("git smart HTTP", "push ↑ · fetch ↓ — through the door", True, False),
+         ("server pod — gitcgi + syncer", ["git-http-backend serves; the syncer uploads", ("m", "the local repository is a cache")]),
+         ("packs on push, ack after  ↑   restore at start  ↓", "RPO = the last acknowledged push"),
+         ("m", "<prefix>/git/…"),
+         ["door — TokenReview → X-Remote-User", "lease + ONE snapshot CAS per batch", "operator — idle to zero, wake"]),
+    ]
+    for i, (fe, word, sub, pod, (alab, asub, both, dashed), comp, (blab, bsub), key, ctl) in enumerate(cols):
+        x = col_x(i); cx = x + COL4 / 2
+        s.header(x, 16, COL4, fe, word, sub)
+        s.card(x, 76, COL4, 84, pod[0], pod[1], fe)
+        s.arrow(cx, 166, cx, 228, fe, dashed=dashed, both=both)
+        s.alabel(cx, 190, alab, fe, asub)
+        s.card(x, 232, COL4, 100, comp[0], comp[1], fe, "tint")
+        s.arrow(cx, 338, cx, 424, fe, both=True)
+        s.alabel(cx, 374, blab, fe, bsub)
+        s.text(x + 16, 470, key[1], "mono")
+        s.card(x, 560, COL4, 118, "control — never on the data path", ctl, None, "panel")
+    # the store
+    s.box(M, 430, W - 2 * M, 96, None, "s3")
+    s.text(M + 16, 456, "S3 — the durable store. One bucket; each front end has its prefix; the bytes are the same bytes.", "t1")
+    s.text(M + 16, 508, "Whole-file objects for the file-shaped three; a bare git repository for forge. What the arrow above says is when the bytes arrive, and that is the recovery point.", "t4")
+    s.text(M + 4, 720, "Solid arrows carry file contents; the dashed arrow is a shared directory, not a wire. The word on each header is the technology between the pod and the bucket.", "t4b")
+    s.legend(M + 4, 748, [("lite", "flint-lite"), ("lean", "flint-lean"), ("pass", "flint-passthrough"), ("forge", "flint-forge"), ("data", "data path"), ("ctl", "control")])
+    s.h = 772
     return s
 
 
@@ -808,8 +865,8 @@ def plate_06():
     s.text(808, 48, "one server pod per FlintRepo — headless Service", f"t2 c-{fe}")
     s.text(808, 66, "emptyDir cache · Recreate · idles to zero", "t4")
     s.hair(808, 76, 1242, 76)
-    s.card(808, 86, 212, 160, "git container", [("m", "flint-forge-gitcgi :8080"), ("m", "http-backend per request"), "REMOTE_USER = X-Remote-User; hooks pre-receive (names the rule) and proc-receive (hands the push to the syncer over a socket)", ("b", "holds no bucket credential")], None, strip=False)
-    s.card(1032, 86, 210, 160, "syncer container", ["lock · lease heartbeat 10 s · the batch · S3 sync · repack · sweep · export · bundles · LFS batch API · /status", ("b", "bucket credentials land HERE only (envFrom)"), ("b", "the only writer of the bucket")], None, strip=False)
+    s.card(808, 86, 212, 170, "git container", [("m", "flint-forge-gitcgi :8080"), ("m", "http-backend per request"), "REMOTE_USER = X-Remote-User; hooks pre-receive (names the rule) and proc-receive (hands the push to the syncer) — the syncer binary under the hook names", ("b", "holds no bucket credential")], None, strip=False)
+    s.card(1032, 86, 210, 170, "syncer container", ["lock · heartbeat on its own task, gated on progress · the batch · S3 sync, four packs at a time · repack · sweep, orphaned uploads too · export · bundles · LFS · /status", ("b", "bucket credentials land HERE only (envFrom)"), ("b", "the only writer of the bucket")], None, strip=False)
     s.arrow(1264, 130, 1326, 130, fe)
     s.alabel(1295, 116, "flint-store", fe)
     s.text(1295, 150, "TLS to S3", "t4", "middle")
@@ -846,25 +903,25 @@ def plate_06():
     s.text(M + 22, 496, "", "t4")
     # ── the three levers ──
     cw = (W - 2 * M - 2 * GAP) / 3
-    s.card(M, 520, cw, 200, "Idle to zero — one rung, and a wake the door holds",
+    s.card(M, 520, cw, 192, "Idle to zero — one rung, and a wake the door holds",
            ["idle for suspendAfterSecs ⇒ replicas 0 and the emptyDir is gone, so a parked repository costs nothing but its objects. The ladder suspends only on the server's own polled /status, and a poll failure holds forever.",
             "The door arms chert.us/requested-at on the CR, waits on the CR — never the pod — and holds the request up to 180 s; the restore is one pack.",
             ("b", "As built the clock counts pushes only: a fetch never reaches the syncer, so read-only use is parked one threshold after its wake.")], fe)
-    s.card(M + cw + GAP, 520, cw, 200, "Fleet levers — take the server out of the transfer",
+    s.card(M + cw + GAP, 520, cw, 192, "Fleet levers — take the server out of the transfer",
            ["A thousand clones are ~130 CPU-s but 43 GB from one NIC: egress binds before CPU. Bitmaps ship with every pack; a clone BUNDLE is cut on a floor, uploaded beside the packs and advertised as a presigned URL re-signed at half its TTL — the client must opt in (transfer.bundleURI=true).",
             ("b", "Measured on EC2 (F8): 1,000 clones cost the server 5.7 MiB of egress with bundles advertised and the client opted in, 40,409 MiB with the opt-in off — 7,000×."),
             "LFS: the batch API runs in the syncer and answers with presigned URLs, so a checkpoint goes client-to-store and the pod sees a few hundred bytes of JSON. The pruner takes only branches main already contains, and only once quiet."], fe)
-    s.card(M + 2 * (cw + GAP), 520, cw, 200, "The export — a legible mirror, by the shipped lean binary",
+    s.card(M + 2 * (cw + GAP), 520, cw, 192, "The export — a legible mirror, by the shipped lean binary",
            ["After a batch moves an exported ref, the syncer materialises the tree with a two-tree read-tree — touching exactly what changed, removing what is gone — and runs flint-sync barrier over it, so lean's ordering (upload, CAS, deletes LAST) is inherited, not re-derived.",
             "It runs AFTER the report and never CASes the snapshot; lean and passthrough readers mount main read-only with no forge code in them.",
             ("r", "A mirror that is never repaired: a foreign write into it is not noticed (the barrier diffs a local scan against a local baseline); a reader that verifies against the manifest refuses it, a mount with no manifest takes it. Readers of an export are readers."),
-            "It is awaited inline with the heartbeat: a blocked barrier now times out and backs off, but pushes stall for that long."], fe)
+            "It runs inline in the serving loop: a blocked barrier times out and backs off, and the heartbeat beats through it on its own task — but pushes stall for that long."], fe)
     # ── the ledger ──
-    s.box(M, 738, W - 2 * M, 118, None, "panel")
-    s.text(M + 22, 766, "Built, and drilled on a real cluster — 2026-09-04", "t1")
-    yy = s.para(M + 22, 784, "All eleven falsifiers ran on EC2 and went green: acknowledged-means-durable under 8 mid-push kills; two pushes to one ref; a merge surviving a cold restore; the fence deposing a straggler within one heartbeat; a byte-identical restore and a dumb clone from the bucket with the server down; protected main, which found a fresh repository unable to create main at all; idle-to-zero, with an 11 s clone through the door on a pod the request created; the storm above; the export, 3 of 164 objects rewritten by a three-file push, after a defect that froze it; the sweep; and an S3 outage — clones served, pushes refused, not ready in ~20 s.", W - 2 * M - 44)
-    yy = s.para(M + 22, yy + 2, "Phase 0 measured the buy option: Gitea's 4,019 MiB of egress for 100 clones sits level with forge's control arms. The composition drills, on a local MinIO rig, found the five things on the composition page. Not drilled: agents in another cluster.", W - 2 * M - 44)
-    s.para(M + 22, yy + 2, "What forge is not: a web UI, pull requests, code search, CI, a POSIX volume, untracked files. Uncommitted work is not durable, which is git's contract; .env, build output and datasets are durable only if committed or put in LFS.", W - 2 * M - 44)
+    s.box(M, 728, W - 2 * M, 132, None, "panel")
+    s.text(M + 22, 756, "Built, and drilled on real clusters — 2026-09-04 and 2026-09-05", "t1")
+    yy = s.para(M + 22, 774, "Twelve falsifiers green: eleven on EC2 on 2026-09-04 — durable under 8 mid-push kills, two pushes to one ref, a merge across a cold restore, the fence, a byte-identical restore and a dumb clone with the server down, protected main, idle-to-zero, the storm, the export, the sweep, an S3 outage — and per-principal rights on Cilium on 2026-09-05, 17 legs. Gitea's 4,019 MiB of egress for 100 clones sits level with forge's control arms.", W - 2 * M - 44)
+    yy = s.para(M + 22, yy + 2, "The large-repository campaign, 2026-09-05, on real S3: a 10 GiB push acknowledged in 262 s with the lease token silent past the 60 s window in both the push and the restore, so a challenger took a live repository mid-restore — durability held, availability paid. Fixed the same day: the heartbeat on its own task, gated on progress; the restore a bounded fan-out over ranged GETs (297 MiB/s at 40 GiB, RAM flat); orphaned uploads swept; every claim rotates the snapshot (two gaps found by the TLA+ model); a pack listed only once its index lands; one runner in place of nginx and fcgiwrap. Confirmed: 40 GiB in 1113 s; a challenger beside a live restore never claimed; 40/40 pushes durable; five stalled pushes and eight clones at once.", W - 2 * M - 44)
+    s.para(M + 22, yy + 2, "Open: a pack's parts upload one at a time; a full repack every 24 pushes re-uploads the repository; a roll mid-push costs that push. Not drilled: agents in another cluster. Not forge: a web UI, pull requests, code search, CI, a POSIX volume, untracked files.", W - 2 * M - 44)
     s.legend(M + 4, 872, [("data", "data path"), ("ctl", "control"), ("red", "hazard / trust boundary")])
     return s
 
@@ -1067,7 +1124,7 @@ def plate_10():
           [("b", "The repository."), "Its own pod, its prefix with a claim that refuses a foreign projectId, arbitration of overlapping prefixes at the operator — export prefixes included — consumers at the door, and a per-principal branch policy read by two enforcers.", ("r", "X-Remote-User is the boundary, and it is a NetworkPolicy: opt-in, and only where the CNI enforces it.")]]),
         ("Can two sessions differ?", "in rights: one project, one reader, one writer",
          [[("r", "No — only a client-side ro mount."), "A read-only claim gets ro, and the CSI publish forces it over operator options; but the server authenticates nobody, so any pod that reaches 2049 mounts rw and asserts uid 0. enforcePermissions checks a claimed uid: defence against accident, not against a session that wants to write."],
-          [("r", "No."), "A workspace is one writer: the publish path hardcodes read-write, the CRD has no readOnly, and the credential is one key per project. A second lean pod on the same prefix does not become a reader — it waits to become the writer. The read-only session is a passthrough mount of files/, readOnly (page 11)."],
+          [("r", "No."), "A workspace is one writer: the publish path hardcodes read-write, the CRD has no readOnly, and the credential is one key per project. A second lean pod on the same prefix does not become a reader — it waits to become the writer. The read-only session is a passthrough mount of files/, readOnly (page 12)."],
           [("b", "Yes, per pod."), "Two pods on one CR, one declared readOnly: --read-only on mount-s3 plus a read-only bind mount, and the pod never holds the key. The broker gates by consumers and hands both pods the SAME scope — one static key or one role ARN. The REST backend is told the ServiceAccount, so an external service can scope the key per principal; nothing in-tree does."],
           [("b", "Yes, per ServiceAccount."), "consumers grants read; the branch policy decides writes per principal, in pre-receive and again in the syncer. A reader is listed in consumers with every ref protected and only the writer's SA in pushers; refs/for stays closed without mergeInto.", ("r", "Until a branches block exists, every consumer may push.")]]),
         ("What an owned agent pod gains", "and how fast the gain is revoked",
@@ -1164,12 +1221,17 @@ def plate_11():
 
 
 def plate_12():
-    s = SVG(W, H, "A ten-row comparison of flint-lite, flint-lean, flint-passthrough and flint-forge across what the pod sees, POSIX "
+    s = SVG(W, H, "An eleven-row comparison of flint-lite, flint-lean, flint-passthrough and flint-forge across the technology that carries the bytes, what the pod sees, POSIX "
                   "fidelity, concurrent writers, reader consistency, multi-cluster shape, enforced identity, user isolation, "
                   "per-cluster install, recovery point, and the data class each is for.")
     header = [("flint-lite", "lite"), ("flint-lean", "lean"), ("flint-passthrough", "pass"), ("flint-forge", "forge")]
     colw = [332, 332, 332, 336]
     rows = [
+        ("Technology", "in one word: what carries the bytes",
+         [[("b", "NFS."), "a hub pod serves the tree over NFSv4.2; the node's kernel client carries every byte"],
+          [("b", "Sync."), "the agent writes a local directory; a sidecar copies changed bytes to S3 with the plain S3 API, after the fact. No FUSE anywhere: nothing intercepts a file operation, nothing mounts the bucket"],
+          [("b", "FUSE."), "Mountpoint for S3 intercepts every file operation in the pod and translates it into object requests"],
+          [("b", "Git."), "real git, served per repository, with S3 as its only durable state"]]),
         ("What the pod sees", "the shape of the thing",
          [["a shared NFS mount served by one hub pod that every client reaches over the network — one tree, many pods, live"],
           ["plain files on local disk, checked out before the first line runs and published back on a boundary — one pod's own tree"],
@@ -1235,10 +1297,10 @@ def portrait_p1():
     s = SVG(640, 400, "Four front ends over one S3 bucket: flint-lite serves a shared live tree over NFS, flint-lean checks a workspace "
                       "out to local disk and publishes boundaries, flint-passthrough mounts a prefix as-is, flint-forge serves git from a "
                       "per-repository pod with every push acknowledged only once it is in S3.", compact=True)
-    rows = [("lite", "flint-lite — the hub", "One pod serves a LIVE shared tree over NFSv4.2. Many pods, many clusters, real locks."),
-            ("lean", "flint-lean — checkout / publish", "Plain files on local disk, checked out at start and published at a boundary. ONE writer."),
-            ("pass", "flint-passthrough — the mount", "An S3 prefix mounted as-is by Mountpoint for S3. No POSIX, no coordination, no boundary."),
-            ("forge", "flint-forge — the git server", "Stock git against one server pod per repository; a push is acknowledged once it is in S3.")]
+    rows = [("lite", "flint-lite — the hub · NFS", "One pod serves a LIVE shared tree over NFSv4.2. Many pods, many clusters, real locks."),
+            ("lean", "flint-lean — checkout / publish · sync", "Plain files on local disk, checked out at start and published at a boundary. ONE writer. No FUSE."),
+            ("pass", "flint-passthrough — the mount · FUSE", "An S3 prefix mounted as-is by Mountpoint for S3. No POSIX, no coordination, no boundary."),
+            ("forge", "flint-forge — the git server · git", "Stock git against one server pod per repository; a push is acknowledged once it is in S3.")]
     for i, (fe, head, body) in enumerate(rows):
         y = 8 + i * 78
         s.card(8, y, 410, 70, head, [body], fe, "tint")
@@ -1253,6 +1315,31 @@ def portrait_p1():
     s.text(468, yy + 38, "<prefix>/git/…", "mono")
     s.para(468, yy + 62, "Each front end owns its prefix; the bytes are the same bytes.", 148)
     s.card(8, 324, 624, 68, "An escalation ladder, cheapest first — and the file-shaped choice is reversible.", ["Passthrough asks nothing and gives nothing back. Lean gives real POSIX at local speed to one writer. The hub is the only one where several pods share one live tree. Forge adds history and a merge policy, for code."], None, "panel", lh=13)
+    return s
+
+def portrait_p1b():
+    s = SVG(640, 470, "The data flow of the four front ends as four rows: the pod, what carries the bytes, and the S3 prefix, with the "
+                      "moment the bytes move written on the arrows.", compact=True)
+    rows = [("lite", "NFS", ["an NFS mount"], ("every op", "live"), "the hub pod", ["one process, one tree", "publishes on a cadence; hydrates on demand"], ("publish ↑", "hydrate ↓"), "<prefix>/<path>"),
+            ("lean", "sync", ["local disk"], ("same dir", "no wire"), "flint-sync sidecar", ["copies changed files", "at a boundary; checkout at start"], ("publish ↑", "checkout ↓"), "<prefix>/files/…"),
+            ("pass", "FUSE", ["a FUSE mount"], ("every op", "intercepted"), "mount-s3 worker", ["each op → a request", "nothing buffered"], ("GET · PUT", "per op"), "<prefix>/<key>"),
+            ("forge", "git", ["a git clone"], ("push ↑", "fetch ↓"), "server pod", ["gitcgi + syncer", "ack after the packs land"], ("packs ↑", "restore ↓"), "<prefix>/git/…")]
+    for i, (fe, word, pod, (a1, a1s), comp, compb, (a2, a2s), key) in enumerate(rows):
+        y = 8 + i * 106
+        s.box(8, y, 46, 92, fe, "tint")
+        s.text(31, y + 52, word, f"t2 c-{fe}", "middle")
+        s.card(62, y, 120, 92, "the pod", pod, fe, lh=13)
+        s.arrow(182, y + 46, 258, y + 46, fe, dashed=(fe == "lean"), both=True)
+        s.text(220, y + 30, a1, "cap", "middle")
+        s.text(220, y + 72, a1s, "cap", "middle")
+        s.card(262, y, 180, 92, comp, compb, fe, "tint", lh=13)
+        s.arrow(442, y + 46, 518, y + 46, fe, both=True)
+        s.text(480, y + 30, a2, "cap", "middle")
+        s.text(480, y + 72, a2s, "cap", "middle")
+        s.box(522, y, 110, 92, None, "s3")
+        s.text(577, y + 40, "S3", "t2", "middle")
+        s.text(577, y + 58, key, "mono", "middle")
+    s.text(8, 448, "Solid arrows carry file contents; the dashed one is a shared directory, not a wire.", "t4b")
     return s
 
 
@@ -1364,7 +1451,7 @@ def portrait_p6():
         y = s.para(24, y, t, 592) + 2
     s.text(24, y + 6, "A crash before step 6 fails every push in the batch at the client; the restart restores from the snapshot.", "t4b")
     s.card(8, 292, 306, 136, "Idle, storm, export", ["one idle rung to replicas 0; the door holds a wake up to 180 s. Clone bundles and LFS are presigned, client-to-store. The export publishes main as a lean workspace that lean and passthrough readers mount with no git."], fe, lh=13)
-    s.card(326, 292, 306, 136, "Honest edges", ["nothing in-tree terminates TLS: the token rides two cleartext hops; the X-Remote-User boundary is an opt-in NetworkPolicy; the built idle clock counts pushes only; the server runs as root. All eleven falsifiers ran on EC2 and went green; agents in another cluster are not drilled."], None, "warn", lh=13)
+    s.card(326, 292, 306, 136, "Honest edges", ["nothing in-tree terminates TLS: the token rides two cleartext hops; the X-Remote-User boundary is an opt-in NetworkPolicy; the built idle clock counts pushes only; the server runs as root. Twelve falsifiers went green, eleven on EC2 and the twelfth on Cilium; agents in another cluster are not drilled."], None, "warn", lh=13)
     return s
 
 
@@ -1394,6 +1481,7 @@ def portrait_p7():
 
 PLATES = {
     "01-four-front-ends.svg": plate_01,
+    "01b-data-flow.svg": plate_01b,
     "02-lite-hub.svg": plate_02,
     "03-lite-multicluster.svg": plate_03,
     "04-lean-workspace.svg": plate_04,
@@ -1406,6 +1494,7 @@ PLATES = {
     "11-composition.svg": plate_11,
     "12-choosing.svg": plate_12,
     "portrait/p1-four-front-ends.svg": portrait_p1,
+    "portrait/p1b-data-flow.svg": portrait_p1b,
     "portrait/p2-lite-hub.svg": portrait_p2,
     "portrait/p3-lite-multicluster.svg": portrait_p3,
     "portrait/p4-lean-workspace.svg": portrait_p4,

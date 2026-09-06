@@ -83,24 +83,26 @@
 <text class="t2 c-forge" x="808" y="48">one server pod per FlintRepo — headless Service</text>
 <text class="t4" x="808" y="66">emptyDir cache · Recreate · idles to zero</text>
 <line class="hair" x1="808" y1="76" x2="1242" y2="76"/>
-<rect x="808" y="86" width="212" height="160" rx="7" class="bx"/>
+<rect x="808" y="86" width="212" height="170" rx="7" class="bx"/>
 <text class="t2" x="824" y="110">git container</text>
 <text class="mono" x="824" y="130" xml:space="preserve">flint-forge-gitcgi :8080</text>
 <text class="mono" x="824" y="145" xml:space="preserve">http-backend per request</text>
 <text class="t4" x="824" y="160">REMOTE_USER = X-Remote-User;</text>
 <text class="t4" x="824" y="175">hooks pre-receive (names the rule)</text>
 <text class="t4" x="824" y="190">and proc-receive (hands the push to</text>
-<text class="t4" x="824" y="205">the syncer over a socket)</text>
-<text class="t4b" x="824" y="220">holds no bucket credential</text>
-<rect x="1032" y="86" width="210" height="160" rx="7" class="bx"/>
+<text class="t4" x="824" y="205">the syncer) — the syncer binary</text>
+<text class="t4" x="824" y="220">under the hook names</text>
+<text class="t4b" x="824" y="235">holds no bucket credential</text>
+<rect x="1032" y="86" width="210" height="170" rx="7" class="bx"/>
 <text class="t2" x="1048" y="110">syncer container</text>
-<text class="t4" x="1048" y="130">lock · lease heartbeat 10 s · the</text>
-<text class="t4" x="1048" y="145">batch · S3 sync · repack · sweep ·</text>
-<text class="t4" x="1048" y="160">export · bundles · LFS batch API ·</text>
-<text class="t4" x="1048" y="175">/status</text>
-<text class="t4b" x="1048" y="190">bucket credentials land HERE</text>
-<text class="t4b" x="1048" y="205">only (envFrom)</text>
-<text class="t4b" x="1048" y="220">the only writer of the bucket</text>
+<text class="t4" x="1048" y="130">lock · heartbeat on its own task,</text>
+<text class="t4" x="1048" y="145">gated on progress · the batch · S3</text>
+<text class="t4" x="1048" y="160">sync, four packs at a time · repack</text>
+<text class="t4" x="1048" y="175">· sweep, orphaned uploads too ·</text>
+<text class="t4" x="1048" y="190">export · bundles · LFS · /status</text>
+<text class="t4b" x="1048" y="205">bucket credentials land HERE</text>
+<text class="t4b" x="1048" y="220">only (envFrom)</text>
+<text class="t4b" x="1048" y="235">the only writer of the bucket</text>
 <line class="l-forge" x1="1264" y1="130" x2="1326" y2="130" marker-end="url(#a-forge)"/>
 <rect x="1264" y="105" width="63" height="15" rx="3" class="halo"/>
 <text class="t4b c-forge" x="1295" y="116" style="text-anchor:middle">flint-store</text>
@@ -174,7 +176,7 @@
 <text class="t4" x="1328" y="438">this fails every push at the client and the</text>
 <text class="t4" x="1328" y="453">restart restores from the snapshot</text>
 <text class="t4" x="46" y="496"></text>
-<rect x="24" y="520" width="505" height="200" rx="7" class="bx"/>
+<rect x="24" y="520" width="505" height="192" rx="7" class="bx"/>
 <path class="f-forge" d="M31,520 H522 A7,7 0 0 1 529,527 V525 H24 V527 A7,7 0 0 1 31,520 Z"/>
 <text class="t2 c-forge" x="40" y="544">Idle to zero — one rung, and a wake the door holds</text>
 <text class="t4" x="40" y="564">idle for suspendAfterSecs ⇒ replicas 0 and the emptyDir is gone, so a parked repository costs</text>
@@ -184,7 +186,7 @@
 <text class="t4" x="40" y="624">the request up to 180 s; the restore is one pack.</text>
 <text class="t4b" x="40" y="639">As built the clock counts pushes only: a fetch never reaches the syncer, so read-only</text>
 <text class="t4b" x="40" y="654">use is parked one threshold after its wake.</text>
-<rect x="547" y="520" width="505" height="200" rx="7" class="bx"/>
+<rect x="547" y="520" width="505" height="192" rx="7" class="bx"/>
 <path class="f-forge" d="M554,520 H1046 A7,7 0 0 1 1053,527 V525 H547 V527 A7,7 0 0 1 554,520 Z"/>
 <text class="t2 c-forge" x="563" y="544">Fleet levers — take the server out of the transfer</text>
 <text class="t4" x="563" y="564">A thousand clones are ~130 CPU-s but 43 GB from one NIC: egress binds before CPU.</text>
@@ -196,7 +198,7 @@
 <text class="t4" x="563" y="654">LFS: the batch API runs in the syncer and answers with presigned URLs, so a checkpoint</text>
 <text class="t4" x="563" y="669">goes client-to-store and the pod sees a few hundred bytes of JSON. The pruner takes only</text>
 <text class="t4" x="563" y="684">branches main already contains, and only once quiet.</text>
-<rect x="1071" y="520" width="505" height="200" rx="7" class="bx"/>
+<rect x="1071" y="520" width="505" height="192" rx="7" class="bx"/>
 <path class="f-forge" d="M1078,520 H1569 A7,7 0 0 1 1576,527 V525 H1071 V527 A7,7 0 0 1 1078,520 Z"/>
 <text class="t2 c-forge" x="1087" y="544">The export — a legible mirror, by the shipped lean binary</text>
 <text class="t4" x="1087" y="564">After a batch moves an exported ref, the syncer materialises the tree with a two-tree</text>
@@ -207,15 +209,16 @@
 <text class="t4b c-red" x="1087" y="639">A mirror that is never repaired: a foreign write into it is not noticed (the barrier diffs a</text>
 <text class="t4b c-red" x="1087" y="654">local scan against a local baseline); a reader that verifies against the manifest refuses</text>
 <text class="t4b c-red" x="1087" y="669">it, a mount with no manifest takes it. Readers of an export are readers.</text>
-<text class="t4" x="1087" y="684">It is awaited inline with the heartbeat: a blocked barrier now times out and backs off, but</text>
-<text class="t4" x="1087" y="699">pushes stall for that long.</text>
-<rect x="24" y="738" width="1552" height="118" rx="7" class="panel"/>
-<text class="t1" x="46" y="766">Built, and drilled on a real cluster — 2026-09-04</text>
-<text class="t4" x="46" y="784">All eleven falsifiers ran on EC2 and went green: acknowledged-means-durable under 8 mid-push kills; two pushes to one ref; a merge surviving a cold restore; the fence deposing a straggler within one heartbeat; a byte-identical restore and a dumb clone from the bucket with the server down;</text>
-<text class="t4" x="46" y="799">protected main, which found a fresh repository unable to create main at all; idle-to-zero, with an 11 s clone through the door on a pod the request created; the storm above; the export, 3 of 164 objects rewritten by a three-file push, after a defect that froze it; the sweep; and an S3 outage — clones</text>
-<text class="t4" x="46" y="814">served, pushes refused, not ready in ~20 s.</text>
-<text class="t4" x="46" y="831">Phase 0 measured the buy option: Gitea's 4,019 MiB of egress for 100 clones sits level with forge's control arms. The composition drills, on a local MinIO rig, found the five things on the composition page. Not drilled: agents in another cluster.</text>
-<text class="t4" x="46" y="848">What forge is not: a web UI, pull requests, code search, CI, a POSIX volume, untracked files. Uncommitted work is not durable, which is git's contract; .env, build output and datasets are durable only if committed or put in LFS.</text>
+<text class="t4" x="1087" y="684">It runs inline in the serving loop: a blocked barrier times out and backs off, and the heartbeat</text>
+<text class="t4" x="1087" y="699">beats through it on its own task — but pushes stall for that long.</text>
+<rect x="24" y="728" width="1552" height="132" rx="7" class="panel"/>
+<text class="t1" x="46" y="756">Built, and drilled on real clusters — 2026-09-04 and 2026-09-05</text>
+<text class="t4" x="46" y="774">Twelve falsifiers green: eleven on EC2 on 2026-09-04 — durable under 8 mid-push kills, two pushes to one ref, a merge across a cold restore, the fence, a byte-identical restore and a dumb clone with the server down, protected main, idle-to-zero, the storm, the export, the sweep, an S3 outage —</text>
+<text class="t4" x="46" y="789">and per-principal rights on Cilium on 2026-09-05, 17 legs. Gitea's 4,019 MiB of egress for 100 clones sits level with forge's control arms.</text>
+<text class="t4" x="46" y="806">The large-repository campaign, 2026-09-05, on real S3: a 10 GiB push acknowledged in 262 s with the lease token silent past the 60 s window in both the push and the restore, so a challenger took a live repository mid-restore — durability held, availability paid. Fixed the same day: the heartbeat on</text>
+<text class="t4" x="46" y="821">its own task, gated on progress; the restore a bounded fan-out over ranged GETs (297 MiB/s at 40 GiB, RAM flat); orphaned uploads swept; every claim rotates the snapshot (two gaps found by the TLA+ model); a pack listed only once its index lands; one runner in place of nginx and fcgiwrap.</text>
+<text class="t4" x="46" y="836">Confirmed: 40 GiB in 1113 s; a challenger beside a live restore never claimed; 40/40 pushes durable; five stalled pushes and eight clones at once.</text>
+<text class="t4" x="46" y="853">Open: a pack's parts upload one at a time; a full repack every 24 pushes re-uploads the repository; a roll mid-push costs that push. Not drilled: agents in another cluster. Not forge: a web UI, pull requests, code search, CI, a POSIX volume, untracked files.</text>
 <line class="l-ink" x1="28" y1="868" x2="54" y2="868"/>
 <text class="t4" x="60" y="872">data path</text>
 <line class="l-ctl" x1="127.98" y1="868" x2="153.98000000000002" y2="868" stroke-dasharray="6 5"/>
