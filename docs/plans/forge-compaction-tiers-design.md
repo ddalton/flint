@@ -1331,5 +1331,43 @@ so the rig measures the floor and the cap, not the ladder: the ladder
 needs a base of gigabytes, which the laptop's disk does not hold
 beside MinIO and a clone.
 
-Owed: the wire measurement — a bytes-only run of the ten 1 GiB
-pushes, P9 at 300 and one restart, CloudWatch the oracle.
+### 13.7 Measured on the wire — runcb, 2026-09-06, A/B in one cluster
+
+Both arms in one cluster on the same day, differing only in the image:
+**arm A** `drill-02f251b8` (tiers as first built) and **arm B**
+`drill-94b2965d` (the three rules), each on its own fresh prefix, the
+same legs and the same bytes, windows disjoint so the bucket's one
+CloudWatch filter separates them. Content per arm: five 1 GiB pushes,
+300 of 8 MiB, and P7's 1 GiB branch — **8.96 GB**.
+(`forge/e2e/results/tiers-wire-ab-2026-09-06.log`.)
+
+| | arm A, as built | arm B, the rules |
+|---|---|---|
+| bytes uploaded, the whole arm | 36.16 GB = **4.03×** | **15.14 GB = 1.69×** |
+| P1, five 1 GiB pushes (5.37 GB) | 11.62 GB = 2.16× | **6.31 GB = 1.18×** |
+| P9, 300 × 8 MiB (2.52 GB) | 18.04 GB = 7.16× | **9.42 GB = 3.74×** |
+| PUT requests, the whole arm | 3,284 | 2,564 |
+| bytes downloaded (the P5 restore) | 10.16 GB | 6.83 GB |
+| worst push in P9 | 5.60 s | **0.75 s** |
+| P7 1 GiB clone, solo · eight | 19.8–24.6 s · 86–106 s | **15.3 s** · 86 s |
+| P5 cold start, refs · complete clone | 37 s · 53 s | 32 s · 47 s |
+| the bucket at the end | 36.15 GB, 1,161 objects | 15.14 GB, 966 objects |
+
+The bucket's timeline shows the mechanism rather than the aggregate:
+arm A holds folds of **7,522 MiB and 4,808 MiB** — git's split
+extension reaching the 1 GiB push packs from below — where arm B's
+largest fold is **576 MiB** and every 1 GiB object in it is a push
+pack that no fold ever touched. The ladder now starts at the floor and
+the big packs wait for the base, exactly as §13.2 says.
+
+Against the neighbour: walgit's re-match numbers on the same rig were
+2.4× over its run and 1.75× on P9 at 300 pushes. Forge's whole-arm
+1.69× is now **below** walgit's 2.4×; on the 8 MiB ladder alone forge
+is 3.74× against walgit's 1.75×, half of what it was (4.9×) and still
+the gap that remains. Nothing was paid for it on the read side: the
+solo clone got faster (15.3 s against 19.8), the eight-clone storm is
+unchanged, and the cold start is 6 s quicker.
+
+Owed: a P2-style rate leg under the new floor (this run measured
+bytes, not rate), and the 64-pack ceiling under a repository that
+actually reaches it.

@@ -1,0 +1,26 @@
+# runcb — the tiers' three rules on the wire, A/B in one cluster, 2026-09-06
+# arm A = drill-02f251b8 (tiers as first built), arm B = drill-94b2965d (floor 256 MiB, big packs wait for the base, cadence = the base's age)
+# same cluster, same legs, same bytes, disjoint windows under the one CloudWatch filter; content pushed per arm = 5 x 1 GiB (P1) + 300 x 8 MiB (P9) + 1 GiB (P7 branch) = 8.96 GB
+
+== arm A ==
+leg  arm     window    AllRequests  PutRequests  GetRequests HeadRequests  BytesUploaded BytesDownloaded
+P1A  forge   229s              419          399            0            0    11619332885          10548
+P9A  forge   246s             2769         2721            0            0    18042249589          25552
+ARMA forge   871s             4577         3284         1227            0    36156705524    10160469807
+
+per-push figures: divide a P9 row by the pushes that leg made (P9_N, default 48) and a P2 row by the pushes it acknowledged (in the compare log).
+== arm B ==
+leg  arm     window    AllRequests  PutRequests  GetRequests HeadRequests  BytesUploaded BytesDownloaded
+P1B  forge   208s              251          235            4            0     6308831471           7453
+P9B  forge   232s             2323         2296            0            0     9417611431          14568
+ARMB forge   640s             3468         2564          866            0    15139257466     6828775105
+
+per-push figures: divide a P9 row by the pushes that leg made (P9_N, default 48) and a P2 row by the pushes it acknowledged (in the compare log).
+== buckets at the end ==
+arm A: 36.15 GB in 1161 objects (largest folds 7522 and 4808 MiB — the ladder reaching the 1 GiB push packs)
+arm B: 15.14 GB in  966 objects (largest fold 576 MiB; the 1 GiB packs never entered a fold)
+== legs ==
+P1 1 GiB x5 median: A 26.95 s, B 27.59 s
+P9 300 x 8 MiB: A 246 s, worst push 5.60 s; B 232 s, worst push 0.75 s
+P7 1 GiB clone, solo / 8 concurrent: A 19.8-24.6 s / 86-106 s; B 15.3 s / 86 s
+P5 cold start, refs / complete clone: A 37 / 53 s; B 32 / 47 s

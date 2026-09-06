@@ -647,6 +647,11 @@ was simulated on this run's own push sequence and built the same day
 (the tiers design's §13: a 256 MiB floor, a pack that alone meets the
 base rule waits for the base, the cadence read from the base's age in
 the store and yielding to the pack cap; 72 → ≈ 32 GB for this
-sequence in the simulation, 4.4× → 1.95×). Its wire measurement is
-owed; then X15 (P11 is still a loss by construction) and X14 (51 s to
-the first `ls-remote`).
+sequence in the simulation, 4.4× → 1.95×). **Measured on the wire the
+same day** (runcb, both arms in one cluster, 8.96 GB of content each):
+36.16 GB → 15.14 GB, **4.03× → 1.69×**, which is below walgit's 2.4×;
+the worst push in the 300-push ladder 5.60 → 0.75 s and the solo 1 GiB
+clone 19.8 → 15.3 s, so the read side paid nothing. What remains
+against walgit is the 8 MiB ladder alone, 3.74× against 1.75×. Next:
+X15 (P11 is still a loss by construction) and X14 (51 s to the first
+`ls-remote`).

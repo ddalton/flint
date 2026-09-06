@@ -42,7 +42,16 @@ covered by the stability guarantee.
   commits on the batch's snapshot. The local repack rig
   at 256 MiB / 100 pushes: tiers-blob 7.8× → 4.9× and tiers-source
   32× → 10.7×, both inside the design's pre-registered ceilings that
-  the first build missed. The wire measurement is owed.
+  the first build missed. **On the wire (runcb, both arms in one
+  cluster, 8.96 GB of content each): 36.16 GB uploaded → 15.14 GB,
+  4.03× → 1.69×**; the five 1 GiB pushes 2.16× → 1.18× and the 300
+  8 MiB pushes 7.16× → 3.74×; the worst push in the ladder 5.60 →
+  0.75 s; the solo 1 GiB clone 19.8 → 15.3 s and the cold start 53 →
+  47 s, so nothing was paid on the read side. The bucket's timeline is
+  the mechanism: folds of 7,522 and 4,808 MiB before, a largest fold of
+  576 MiB after, with every 1 GiB pack left for the base rebuild.
+  Forge's whole-run amplification is now below walgit's 2.4×; on the
+  8 MiB ladder alone it is 3.74× against walgit's 1.75×.
 
 ### Fixed — flint forge, a fold's commit revalidates the lease
 

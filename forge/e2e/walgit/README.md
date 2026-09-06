@@ -198,6 +198,31 @@ waited more than 5.8 s in 1,200 pushes, the rate is 13× what it was,
 and the largest push is faster than the neighbour's — and with the
 bytes as the next number, three to one, whose causes the run named.
 
+### After the re-match: the three rules, measured (runcb, 2026-09-06)
+
+The bytes the re-match left against forge were taken back the same day.
+The three rules named above were chosen by replaying THIS run's own
+push sequence through a simulator of the planner
+(`forge/e2e/repack/foldsim.py`; the tiers design's §13) and then
+measured A/B in one cluster — arm A `drill-02f251b8`, arm B
+`drill-94b2965d`, same legs, same bytes, disjoint CloudWatch windows,
+8.96 GB of content each
+(`forge/e2e/results/tiers-wire-ab-2026-09-06.log`):
+
+| | arm A | arm B | walgit, the re-match |
+|---|---|---|---|
+| bytes uploaded over the arm | 36.16 GB (4.03×) | **15.14 GB (1.69×)** | 2.4× |
+| 300 × 8 MiB | 18.04 GB (7.16×) | 9.42 GB (3.74×) | 1.75× |
+| five 1 GiB pushes | 11.62 GB (2.16×) | 6.31 GB (1.18×) | — |
+| worst push in the ladder | 5.60 s | 0.75 s | 1.36 s |
+| 1 GiB clone, solo | 19.8–24.6 s | 15.3 s | 18.4–19.4 s |
+
+One correction to the re-match's reading above: the 885 MB CloudWatch
+attributed to P2's minute was NOT the pack cap. The bucket holds 2.6 MB
+of objects from that minute — 884 push packs of a median 341 bytes and
+their small folds — and CloudWatch's per-minute buckets do not align
+with a 63 s window.
+
 ### What the runs found in the rig
 
 - **P5, walgit, run 1:** the first clone after the cold start was
