@@ -1160,6 +1160,40 @@ mutation_run ForgeSync ForgeSyncNoTickOnHash.cfg "forge-sync sensor mutation (Ti
 mutation_run ForgeSync ForgeSyncNoRotate.cfg "forge-sync rotation mutation (RotateOnTakeover=FALSE: the straggler's If-Match outlives the successor's restore and its batch lands)" "Inv_NoStragglerLandAfterRestore"
 mutation_run ForgeSync ForgeSyncCasBeforePacks.cfg "forge-sync ordering mutation (PacksBeforeCas=FALSE, design §4 reversed: a crash between the CAS and the upload leaves the snapshot naming a pack the bucket lacks)" "Inv_LandedPackComplete"
 mutation_run ForgeSync ForgeSyncProbeToldFailed.cfg "forge-sync told-failed probe (RESIDUAL required-fail: the client hangs up before the report and the push lands anyway — run 3 finding 3 on the wire)" "Inv_NoToldFailedButDurable"
+# Compaction tiers (X18, fold.rs; docs/plans/forge-compaction-tiers-design.md
+# §5.3 and §13.6). A pack now HOLDS a set of pushes, the fold's task runs
+# beside the loop and its commit on it, and the sweep that DELETES became
+# load-bearing. THE FIRST RUN OF THIS EXTENSION FOUND A CODE DEFECT (the
+# third a model has found here): the fold's commit was the ONE CAS on the
+# loop that never revalidated the lease, so a holder deposed WHILE ITS
+# RESTORE RAN — whose restore then read the successor's rotated snapshot —
+# landed its fold after the successor served. `fold::commit` now renews
+# first, as every batch does at its step 3, and FoldNoRenew is the
+# regression. The run also refuted the design's own claim that the age
+# could be abstracted away: with every orphan deletable, a deposed holder
+# sweeps a live uploader's pack between its Complete and its CAS, so the
+# grace is now an AXIOM (GraceOutlivesUpload, lean's LeanChunkGCRacyGrace
+# rule: orphan_grace_secs must outlive the LONGEST upload) and RacyGrace
+# is its mutation.
+mutation_run ForgeSync ForgeSyncFoldNoRenew.cfg "forge-sync fold-renewal mutation (FoldNoRenew=TRUE: the fold's commit does not revalidate the lease, and a holder deposed during its restore lands a CAS after its successor served — THE DEFECT THIS MODULE FOUND)" "Inv_NoStragglerLandAfterRestore"
+mutation_run ForgeSync ForgeSyncRacyGrace.cfg "forge-sync racy-grace mutation (GraceOutlivesUpload=FALSE, lean's LeanChunkGCRacyGrace on forge's sweep: an object an in-flight batch or fold uploaded is deletable, and a deposed holder takes a live uploader's pack between its Complete and its CAS)" "Inv_(AckedIsDurable|NamedIsUploaded|LandedPackComplete)"
+mutation_run ForgeSync ForgeSyncFoldCasBeforeUpload.cfg "forge-sync fold-ordering mutation (FoldCasBeforeUpload=TRUE, the fold twin of CasBeforePacks: the commit names a roll-up the bucket does not hold)" "Inv_(AckedIsDurable|NamedIsUploaded|LandedPackComplete)"
+mutation_run ForgeSync ForgeSyncFoldCasFromDisk.cfg "forge-sync fold-formula mutation (FoldCasFromDisk=TRUE, the drafts' formula: the commit names localPacks \\ S ∪ {f} and so names a pack landed since the last batch that nothing uploaded)" "Inv_NamedIsUploaded"
+mutation_run ForgeSync ForgeSyncFoldInputsAfterStart.cfg "forge-sync fold-inputs mutation (FoldInputsAfterStart=TRUE: the packs unnamed are read at the commit while the roll-up's contents were fixed at the plan, so a push named in between is unnamed and held by nothing)" "Inv_AckedIsDurable"
+mutation_run ForgeSync ForgeSyncFoldTicksBatchSensor.cfg "forge-sync fold-sensor mutation (FoldTicksBatchSensor=TRUE, design rule 3: the fold's upload ticks the HOLD's counter and a wedged batch's holder keeps renewing through a base rebuild)" "Inv_NoRenewOverWedge"
+# Documented NON-RUNS (a mutation that cannot lose proves nothing), both
+# checked and both green, which is the finding:
+#   FoldCommitMidBatch — the commit beside a batch. The design predicted
+#     Inv_NoUnrestorable; TLC says nothing is lost, because the commit
+#     updates the loop's belief in place (so the batch's own CAS still
+#     matches and lands) and the ledger sweep never deletes a stem the
+#     snapshot names. The between-batches rule is the loop's structure,
+#     not a safety property.
+#   SweepDuringFold — the holder's own sweep mid-fold. Cannot lose either:
+#     the grace already covers the roll-up (it is inside an in-flight
+#     fold), and what the code's guard actually prevents is the
+#     claim-time upload abort ending the holder's OWN fold — wasted work
+#     and a confusing failure, not a lost invariant.
 
 # ── FlintTierMarker.tla — the eviction-marker visibility protocol ──────
 # Two of the chaos campaign's six drill-found bugs were interleaving

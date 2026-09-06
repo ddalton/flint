@@ -95,6 +95,52 @@
 (* THE PROBE (required-fail against the shipped protocol):                 *)
 (*   - Inv_NoToldFailedButDurable: a push whose client gave up lands       *)
 (*     anyway.  Reachable by design; the retry converges.                  *)
+(*                                                                         *)
+(* COMPACTION TIERS (X18, fold.rs; docs/plans/forge-compaction-tiers-      *)
+(* design.md §5.3).  A fold breaks the push = pack identification: a pack  *)
+(* now HOLDS a set of pushes (`holds`), a push pack its own push, a fold   *)
+(* pack the union of its inputs'.  The fold's task runs BESIDE the loop    *)
+(* (plan, initiate, complete — through `uploads`, so the claim-time sweep  *)
+(* ends a straggler's fold with NoSuchUpload, which clears the fold and    *)
+(* does not fall the process); its COMMIT is on the loop between batches: *)
+(* ONE CAS on the loop's current belief naming (belief.packs \ S) ∪ {f},  *)
+(* never the directory.  A fold's completion ticks its OWN counter, not   *)
+(* the hold's.  With a fold the sweep that DELETES becomes load-bearing:  *)
+(* `SweepDelete` takes an object no snapshot names, never while this      *)
+(* holder's own fold is uploaded and uncommitted, never mid-batch, and    *)
+(* never one still inside the GRACE.  THE GRACE IS AN AXIOM, the second   *)
+(* in this module (GraceOutlivesUpload): `orphan_grace_secs` must outlive *)
+(* the LONGEST upload, not the longest plausible one — lean's             *)
+(* `LeanChunkGCRacyGrace` rule — so an object another incarnation's       *)
+(* in-flight batch or fold uploaded and has not yet named is not yet      *)
+(* deletable.  This module's first fold run found exactly that with the   *)
+(* age abstracted away, which the design's §5.3 had proposed: a deposed   *)
+(* holder, still serving on a belief the successor's rotation happened to *)
+(* match, swept the successor's just-uploaded pack between its Complete   *)
+(* and its CAS.  The etag check alone does NOT cover it, and `RacyGrace`  *)
+(* is now a mutation.  A rebuild over ONE  *)
+(* named pack is allowed (the base rebuild's case), which is what lets two *)
+(* pushes reach every ordering below.                                      *)
+(*   - Inv_NamedIsUploaded: every pack the snapshot names is in the bucket *)
+(*     with its index — true of the shipped protocol (a CAS names only     *)
+(*     what it uploaded or a prior CAS named) and what the fold's formula  *)
+(*     preserves.  Mutations FoldCasBeforeUpload (the commit before the    *)
+(*     upload), FoldCasFromDisk (the commit names localPacks \ S ∪ {f}:   *)
+(*     a pack landed since the last batch is named without an upload) and *)
+(*     SweepDuringFold (the holder's sweep takes its own uploaded-         *)
+(*     uncommitted fold pack) must lose it.                                *)
+(*   - Inv_AckedIsDurable, restated over `holds`.  Mutation                *)
+(*     FoldInputsAfterStart (the inputs unnamed are read at the commit,    *)
+(*     the fold's contents were fixed at the plan: a push named in between *)
+(*     is unnamed and held by nothing) must lose it.                       *)
+(*   - Inv_NoUnrestorable / Inv_NamedIsUploaded against FoldCommitMidBatch *)
+(*     (the commit beside a batch, which the loop makes impossible: the    *)
+(*     batch's earlier listing re-names S and omits f, and a sweep in the  *)
+(*     window between the two CASes has taken S).                          *)
+(*   - Inv_NoRenewOverWedge: the renewer never renews a must-progress     *)
+(*     phase on a sensor tick with no real movement behind it — the twin   *)
+(*     of Inv_NoSkipOverMovement.  Mutation FoldTicksBatchSensor (the fold *)
+(*     ticks the hold's counter) must lose it.                             *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, TLC
 
@@ -112,13 +158,25 @@ CONSTANTS
   AckAfterCas,      \* TRUE: the hook is answered after CAS + update-ref
   PacksBeforeCas,   \* TRUE: packs are uploaded before the CAS names them
   SweepAtClaim,     \* TRUE: a claim aborts every in-flight upload
-  PollsNoFasterThanHeartbeat \* the scheduling axiom (see the header)
+  PollsNoFasterThanHeartbeat, \* the scheduling axiom (see the header)
+  \* ── compaction tiers (X18) ──
+  FoldIds,          \* fold pack ids, e.g. {f1}; distinct from Pushes
+  MaxFolds,         \* folds planned per run (bounds FoldIds' use)
+  FoldCasBeforeUpload,  \* mutation: the commit is enabled before the upload
+  FoldCasFromDisk,      \* mutation: the commit names localPacks \ S ∪ {f}
+  FoldInputsAfterStart, \* mutation: the packs unnamed are read at the commit
+  FoldCommitMidBatch,   \* mutation: the commit is enabled beside a batch (and the sweep with it)
+  SweepDuringFold,      \* mutation: the sweep runs with a fold uploaded and uncommitted
+  FoldTicksBatchSensor, \* mutation: the fold's completion ticks the hold's counter
+  FoldNoRenew,          \* mutation: the fold's commit does not renew the lease first
+  GraceOutlivesUpload   \* the grace axiom; FALSE is lean's RacyGrace mutation
 
 Stages == {"none", "judged", "renewed", "hashed", "initiated", "uploaded",
            "cas", "refs"}
 States == {"idle", "watching", "claimed", "rotating", "restoring",
            "serving", "pushing"}
 PushStates == {"new", "sent", "acked", "failed"}
+FoldStages == {"none", "planned", "initiated", "uploaded", "renewed"}
 
 VARIABLES
   \* ── the bucket ──
@@ -144,38 +202,48 @@ VARIABLES
   \* ── the client ──
   pushState,   \* [Pushes -> PushStates]
   pushTo,      \* [Pushes -> Syncers]
+  \* ── compaction tiers ──
+  holds,       \* [PackIds -> SUBSET Pushes]  what each pack in the bucket holds
+  fold,        \* [Syncers -> [id, inputs, stage]]  the fold beside the loop, at most one
+  foldBudget,
   \* ── budgets and witnesses ──
   crashes, renewBudget, claimBudget,
   ackNotDurable, skipOverMovement,
-  stragglerLand, unrestorable, toldFailedButDurable
+  stragglerLand, unrestorable, toldFailedButDurable, renewOverWedge
 
 vars == <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease, lastTok,
           quiet, belief, localMain, localPacks, migrating, batch, sensorMoved,
-          realMoved, hbDue, pushState, pushTo, crashes, renewBudget,
-          claimBudget, ackNotDurable, skipOverMovement,
-          stragglerLand, unrestorable, toldFailedButDurable>>
+          realMoved, hbDue, pushState, pushTo, holds, fold, foldBudget,
+          crashes, renewBudget, claimBudget, ackNotDurable, skipOverMovement,
+          stragglerLand, unrestorable, toldFailedButDurable, renewOverWedge>>
 
 NoBatch   == [push |-> 0, stage |-> "none", listed |-> {}]
 ZeroLease == [ep |-> 0, tok |-> 0]
 NoBelief  == [etag |-> 0, main |-> 0, packs |-> {}]
+NoFold    == [id |-> 0, inputs |-> {}, stage |-> "none"]
 
 PushIds == Pushes \cup {0}
+PackIds == Pushes \cup FoldIds
 
 TypeOK ==
   /\ cell \in [held: BOOLEAN, holder: Syncers \cup {NoSyncer}, ep: Nat, tok: Nat, released: BOOLEAN]
   /\ nextTok \in Nat
-  /\ snap \in [etag: Nat, main: PushIds, packs: SUBSET Pushes, history: SUBSET Pushes]
-  /\ packObj \subseteq Pushes /\ idxObj \subseteq Pushes
-  /\ uploads \subseteq [s: Syncers, p: Pushes, ep: Nat]
+  /\ snap \in [etag: Nat, main: PushIds, packs: SUBSET PackIds, history: SUBSET Pushes]
+  /\ packObj \subseteq PackIds /\ idxObj \subseteq PackIds
+  /\ uploads \subseteq [s: Syncers, p: PackIds, ep: Nat]
   /\ st \in [Syncers -> States]
   /\ lease \in [Syncers -> [ep: Nat, tok: Nat]]
   /\ lastTok \in [Syncers -> Nat]
   /\ quiet \in [Syncers -> 0..Misses]
-  /\ belief \in [Syncers -> [etag: Nat, main: PushIds, packs: SUBSET Pushes]]
+  /\ belief \in [Syncers -> [etag: Nat, main: PushIds, packs: SUBSET PackIds]]
   /\ localMain \in [Syncers -> PushIds]
-  /\ localPacks \in [Syncers -> SUBSET Pushes]
+  /\ localPacks \in [Syncers -> SUBSET PackIds]
   /\ migrating \in [Syncers -> SUBSET Pushes]
-  /\ batch \in [Syncers -> [push: PushIds, stage: Stages, listed: SUBSET Pushes]]
+  /\ batch \in [Syncers -> [push: PushIds, stage: Stages, listed: SUBSET PackIds]]
+  /\ holds \in [PackIds -> SUBSET Pushes]
+  /\ fold \in [Syncers -> [id: FoldIds \cup {0}, inputs: SUBSET PackIds, stage: FoldStages]]
+  /\ foldBudget \in 0..MaxFolds
+  /\ renewOverWedge \in BOOLEAN
   /\ sensorMoved \in [Syncers -> BOOLEAN] /\ realMoved \in [Syncers -> BOOLEAN]
   /\ hbDue \in [Syncers -> BOOLEAN]
   /\ pushState \in [Pushes -> PushStates] /\ pushTo \in [Pushes -> Syncers \cup {NoSyncer}]
@@ -201,13 +269,19 @@ Init ==
   /\ hbDue = [s \in Syncers |-> FALSE]
   /\ pushState = [p \in Pushes |-> "new"]
   /\ pushTo = [p \in Pushes |-> NoSyncer]
+  /\ holds = [q \in PackIds |-> IF q \in Pushes THEN {q} ELSE {}]
+  /\ fold = [s \in Syncers |-> NoFold]
+  /\ foldBudget = MaxFolds
   /\ crashes = 0 /\ renewBudget = MaxRenews /\ claimBudget = MaxClaims
   /\ ackNotDurable = FALSE /\ skipOverMovement = FALSE
   /\ stragglerLand = FALSE
   /\ unrestorable = FALSE /\ toldFailedButDurable = FALSE
+  /\ renewOverWedge = FALSE
 
 Witnesses == <<ackNotDurable, skipOverMovement,
-               stragglerLand, unrestorable, toldFailedButDurable>>
+               stragglerLand, unrestorable, toldFailedButDurable, renewOverWedge>>
+\* What no action but the plan changes.
+FoldPlanVars == <<holds, foldBudget>>
 Bucket    == <<cell, nextTok, snap, packObj, idxObj, uploads>>
 Client    == <<pushState, pushTo>>
 Budgets   == <<crashes, renewBudget, claimBudget>>
@@ -229,6 +303,7 @@ Fall(s) ==
   /\ st' = [st EXCEPT ![s] = "idle"]
   /\ lease' = [lease EXCEPT ![s] = ZeroLease]
   /\ batch' = [batch EXCEPT ![s] = NoBatch]
+  /\ fold' = [fold EXCEPT ![s] = NoFold]
   /\ sensorMoved' = [sensorMoved EXCEPT ![s] = FALSE]
   /\ realMoved' = [realMoved EXCEPT ![s] = FALSE]
   /\ quiet' = [quiet EXCEPT ![s] = 0]
@@ -251,7 +326,7 @@ AcquireCreate(s) ==
   /\ UNCHANGED <<snap, packObj, idxObj, uploads, lastTok, quiet, belief,
                  localMain, localPacks, migrating, batch, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 \* Our own previous incarnation died holding: supersede at once — and
 \* ROTATE, because that incarnation may itself have been a successor
@@ -273,7 +348,7 @@ SupersedeOwn(s) ==
   /\ UNCHANGED <<snap, packObj, idxObj, uploads, lastTok, quiet, belief,
                  localMain, localPacks, migrating, batch, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 \* A released cell is a clean handoff: its holder fenced itself before
 \* it wrote the mark, so nothing can straggle and no rotation is owed.
@@ -289,7 +364,7 @@ ClaimReleased(s) ==
   /\ UNCHANGED <<snap, packObj, idxObj, uploads, lastTok, quiet, belief,
                  localMain, localPacks, migrating, batch, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 ObserveForeign(s) ==
   /\ st[s] = "idle"
@@ -301,7 +376,7 @@ ObserveForeign(s) ==
                  localMain, localPacks, migrating, batch, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 \* The scheduling axiom: a live holder's heartbeat ran since this
 \* challenger's previous poll.  A dead holder has none to wait for.
@@ -326,7 +401,7 @@ PollQuiet(s) ==
                  belief, localMain, localPacks, migrating, batch, sensorMoved,
                  realMoved, pushState, pushTo, crashes, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 \* The takeover CAS on the last observed token.  A holder that renewed
 \* after this observer's last poll is refused by the CAS itself — token
@@ -345,7 +420,7 @@ Takeover(s) ==
   /\ UNCHANGED <<snap, packObj, idxObj, uploads, lastTok, quiet, belief,
                  localMain, localPacks, migrating, batch, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 \* The rotation (snapshot.rs rotate_for_takeover): same content, new
 \* etag, so a straggler's If-Match is stale before we serve a byte.  A
@@ -363,7 +438,7 @@ RotateSnapshot(s) ==
                  localMain, localPacks, migrating, batch, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 \* The claim-time sweep (sweep.rs abort_orphaned_uploads): nothing of
 \* ours is in flight, so everything pending is a predecessor's.
@@ -375,7 +450,7 @@ SweepDone(s) ==
                  belief, localMain, localPacks, migrating, batch, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 (***************************************************************************)
 (* The restore (restore.rs): the snapshot's packs, the snapshot's refs     *)
@@ -389,12 +464,12 @@ Restore(s) ==
        THEN /\ belief' = [belief EXCEPT ![s] = NoBelief]
             /\ localMain' = [localMain EXCEPT ![s] = 0]
             /\ st' = [st EXCEPT ![s] = "serving"]
-            /\ UNCHANGED <<lease, batch, unrestorable, pushState, localPacks,
+            /\ UNCHANGED <<lease, batch, fold, unrestorable, pushState, localPacks,
                            migrating, sensorMoved, realMoved, quiet>>
        ELSE LET fetched == snap.packs \cap packObj
                 usable  == fetched \cap idxObj IN
             IF \/ snap.packs # fetched                       \* a named pack is absent
-               \/ (snap.main # 0 /\ snap.main \notin usable) \* the ref's objects are in no pack git sees
+               \/ (snap.main # 0 /\ ~\E q \in usable : snap.main \in holds[q]) \* the ref's objects are in no pack git sees
               THEN \* exit 78: refused, and the restart refuses again.
                    /\ unrestorable' = TRUE
                    /\ Fall(s)
@@ -407,10 +482,12 @@ Restore(s) ==
                    /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
                    /\ sensorMoved' = [sensorMoved EXCEPT ![s] = TRUE]
                    /\ st' = [st EXCEPT ![s] = "serving"]
-                   /\ UNCHANGED <<lease, batch, unrestorable, pushState, quiet>>
+                   /\ UNCHANGED <<lease, batch, fold, unrestorable, pushState, quiet>>
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, lastTok, hbDue,
                  pushTo, crashes, renewBudget, claimBudget, ackNotDurable,
-                 skipOverMovement, stragglerLand, toldFailedButDurable>>
+                 skipOverMovement, stragglerLand, toldFailedButDurable,
+                 renewOverWedge>>
+  /\ UNCHANGED FoldPlanVars
 
 (***************************************************************************)
 (* The heartbeat (lease.rs spawn_renewer): unconditional while serving,    *)
@@ -425,7 +502,7 @@ RenewCas(s) ==
     THEN /\ cell' = [cell EXCEPT !.tok = nextTok]
          /\ lease' = [lease EXCEPT ![s].tok = nextTok]
          /\ nextTok' = nextTok + 1
-         /\ UNCHANGED <<st, batch, pushState, quiet>>
+         /\ UNCHANGED <<st, batch, fold, pushState, quiet>>
     ELSE /\ Fall(s)                             \* deposed at renew: the fence
          /\ UNCHANGED <<cell, nextTok>>
 
@@ -436,9 +513,13 @@ RenewTick(s) ==
   /\ IF MustProgress(s) /\ ~sensorMoved[s]
        THEN \* the token stays quiet so a wedged server can be taken over
             /\ skipOverMovement' = (skipOverMovement \/ realMoved[s])
-            /\ UNCHANGED <<cell, nextTok, lease, st, batch, pushState, quiet,
-                           sensorMoved, realMoved, renewBudget>>
-       ELSE /\ renewBudget' = renewBudget - 1
+            /\ UNCHANGED <<cell, nextTok, lease, st, batch, fold, pushState, quiet,
+                           sensorMoved, realMoved, renewBudget, renewOverWedge>>
+       ELSE \* the twin witness: a renewal of a must-progress phase on a
+            \* sensor tick with no real movement behind it (a fold ticking
+            \* the hold's counter would keep a wedged batch's holder renewing)
+            /\ renewOverWedge' = (renewOverWedge \/ (MustProgress(s) /\ sensorMoved[s] /\ ~realMoved[s]))
+            /\ renewBudget' = renewBudget - 1
             /\ RenewCas(s)
             /\ sensorMoved' = [sensorMoved EXCEPT ![s] = FALSE]
             /\ realMoved' = [realMoved EXCEPT ![s] = FALSE]
@@ -447,6 +528,7 @@ RenewTick(s) ==
                  localPacks, migrating, pushTo, crashes, claimBudget,
                  ackNotDurable, stragglerLand, unrestorable,
                  toldFailedButDurable>>
+  /\ UNCHANGED FoldPlanVars
 
 (***************************************************************************)
 (* The push, as git and the hook see it.                                   *)
@@ -465,7 +547,7 @@ PushSend(p, s) ==
                  lastTok, quiet, belief, localMain, localPacks, batch,
                  sensorMoved, realMoved, hbDue, crashes, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 \* git renames the .idx last; only then is the pack complete on disk and
 \* the hook runs.
@@ -477,7 +559,7 @@ IdxLand(s, p) ==
                  lastTok, quiet, belief, localMain, batch, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 \* The client gives up (the door's bound, a cut) before the report.  The
 \* syncer never learns it and the batch runs to its end.
@@ -488,7 +570,7 @@ ClientHangup(p) ==
                  lastTok, quiet, belief, localMain, localPacks, migrating,
                  batch, sensorMoved, realMoved, hbDue, pushTo, crashes,
                  renewBudget, claimBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 (***************************************************************************)
 (* The batch (batch.rs run_batch), one push at a time, each step a store   *)
@@ -520,7 +602,7 @@ BatchStart(s) ==
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, lease, lastTok,
                  quiet, belief, localMain, localPacks, migrating, hbDue,
                  pushTo, crashes, renewBudget, claimBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 \* Step 3: the batch's own renewal, through the renewer's path.
 BatchRenew(s) ==
@@ -534,12 +616,12 @@ BatchRenew(s) ==
             /\ batch' = [batch EXCEPT ![s].stage = "renewed"]
             /\ sensorMoved' = [sensorMoved EXCEPT ![s] = FALSE]
             /\ realMoved' = [realMoved EXCEPT ![s] = FALSE]
-            /\ UNCHANGED <<st, pushState, quiet>>
+            /\ UNCHANGED <<st, fold, pushState, quiet>>
        ELSE /\ Fall(s)
             /\ UNCHANGED <<cell, nextTok>>
   /\ UNCHANGED <<snap, packObj, idxObj, uploads, lastTok, belief, localMain,
                  localPacks, migrating, hbDue, pushTo, crashes, claimBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Witnesses
 
 \* The listing that feeds the upload and the snapshot's pack list.  With
 \* the gate, a pack is listed only once its index landed; without it
@@ -556,7 +638,7 @@ BatchHash(s) ==
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,
                  lastTok, quiet, belief, localMain, localPacks, migrating,
                  hbDue, pushState, pushTo, crashes, renewBudget, claimBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 ToUpload(s) == batch[s].listed \ belief[s].packs
 
@@ -572,7 +654,7 @@ BatchInit(s) ==
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, st, lease, lastTok,
                  quiet, belief, localMain, localPacks, migrating, hbDue,
                  pushState, pushTo, crashes, renewBudget, claimBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 \* Step 4b: Complete.  NOT conditional: a swept upload fails NoSuchUpload
 \* and the process exits (any batch error ends the server); otherwise the
@@ -591,12 +673,12 @@ BatchComplete(s) ==
             /\ batch' = [batch EXCEPT ![s].stage = "uploaded"]
             /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
             /\ sensorMoved' = [sensorMoved EXCEPT ![s] = TRUE]
-            /\ UNCHANGED <<st, lease, pushState, quiet, crashes>>
+            /\ UNCHANGED <<st, lease, fold, pushState, quiet, crashes>>
        ELSE /\ Fall(s)
             /\ UNCHANGED <<uploads, packObj, idxObj, crashes>>
   /\ UNCHANGED <<cell, nextTok, snap, lastTok, belief, localMain, localPacks,
                  migrating, hbDue, pushTo, renewBudget, claimBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Witnesses
 
 \* Step 5: ONE snapshot CAS on the etag last seen (If-None-Match:* when
 \* none).  A 412 is the fence.  The witness: this CAS lands from a syncer
@@ -621,13 +703,14 @@ BatchCas(s) ==
             /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
             /\ sensorMoved' = [sensorMoved EXCEPT ![s] = TRUE]
             /\ stragglerLand' = (stragglerLand \/ SuccessorRestored(s))
-            /\ UNCHANGED <<st, lease, pushState, quiet>>
+            /\ UNCHANGED <<st, lease, fold, pushState, quiet>>
        ELSE /\ Fall(s)
             /\ UNCHANGED <<snap, nextTok, belief, stragglerLand>>
   /\ UNCHANGED <<cell, packObj, idxObj, uploads, lastTok, localMain, localPacks,
                  migrating, hbDue, pushTo, crashes, renewBudget, claimBudget,
                  ackNotDurable, skipOverMovement,
-                 unrestorable, toldFailedButDurable>>
+                 unrestorable, toldFailedButDurable, renewOverWedge>>
+  /\ UNCHANGED FoldPlanVars
 
 \* The reversed ordering (mutation): packs go up AFTER the CAS named them.
 BatchLateUpload(s) ==
@@ -639,7 +722,7 @@ BatchLateUpload(s) ==
                  belief, localMain, localPacks, migrating, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 RefsReady(s) ==
   \/ (batch[s].stage = "cas" /\ PacksBeforeCas)
@@ -655,7 +738,7 @@ BatchRefs(s) ==
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,
                  lastTok, quiet, belief, localPacks, migrating, hbDue,
                  pushState, pushTo, crashes, renewBudget, claimBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 \* The report.  A client still waiting is told ok; one that hung up
 \* learns nothing, and the bucket holds its push anyway — the probe.
@@ -670,7 +753,8 @@ BatchAck(s) ==
                  quiet, belief, localMain, localPacks, migrating, sensorMoved,
                  realMoved, hbDue, pushTo, crashes, renewBudget, claimBudget,
                  ackNotDurable, skipOverMovement,
-                 stragglerLand, unrestorable>>
+                 stragglerLand, unrestorable, renewOverWedge>>
+  /\ UNCHANGED <<fold, FoldPlanVars>>
 
 (***************************************************************************)
 (* The clean handoff and the environment.                                  *)
@@ -687,7 +771,7 @@ CleanRelease(s) ==
   /\ UNCHANGED <<snap, packObj, idxObj, uploads, lastTok, belief, localMain,
                  localPacks, migrating, hbDue, pushTo, crashes, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Witnesses
 
 \* Process death: memory vanishes; the emptyDir (packs, refs, the
 \* incarnation file) survives a container restart.  A pod replacement is
@@ -700,7 +784,166 @@ Crash(s) ==
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, lastTok, belief,
                  localMain, localPacks, migrating, hbDue, pushTo, renewBudget,
                  claimBudget>>
+  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Witnesses
+
+(***************************************************************************)
+(* Compaction tiers (fold.rs, design §3.4): the task beside the loop, the  *)
+(* commit on it, and the sweep that deletes.                               *)
+(***************************************************************************)
+
+\* The plan, between batches: S frozen from the BELIEF (never the
+\* directory), the roll-up given its contents.  One named pack is
+\* allowed (the base rebuild's case), which is what lets two pushes
+\* reach every ordering the mutations need.
+FoldPlan(s) ==
+  /\ st[s] = "serving" /\ batch[s].stage = "none"
+  /\ fold[s].stage = "none" /\ foldBudget > 0
+  /\ \E f \in FoldIds, S \in SUBSET belief[s].packs :
+       /\ holds[f] = {} /\ Cardinality(S) >= 1
+       /\ fold' = [fold EXCEPT ![s] = [id |-> f, inputs |-> S, stage |-> "planned"]]
+       /\ holds' = [holds EXCEPT ![f] = UNION {holds[q] : q \in S}]
+  /\ foldBudget' = foldBudget - 1
+  /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,
+                 lastTok, quiet, belief, localMain, localPacks, migrating,
+                 batch, sensorMoved, realMoved, hbDue, pushState, pushTo,
+                 crashes, renewBudget, claimBudget>>
   /\ UNCHANGED Witnesses
+
+\* The task's upload, through the multipart path: initiated, then
+\* Complete.  Beside anything the loop does.
+FoldInit(s) ==
+  /\ st[s] \in {"serving", "pushing"} /\ fold[s].stage = "planned"
+  /\ uploads' = uploads \cup {[s |-> s, p |-> fold[s].id, ep |-> lease[s].ep]}
+  /\ fold' = [fold EXCEPT ![s].stage = "initiated"]
+  /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, st, lease, lastTok,
+                 quiet, belief, localMain, localPacks, migrating, batch,
+                 sensorMoved, realMoved, hbDue, pushState, pushTo, crashes,
+                 renewBudget, claimBudget>>
+  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Witnesses
+
+\* Complete: the roll-up lands with its index, or — the claim-time sweep
+\* took the upload — NoSuchUpload, which clears the fold and falls
+\* nothing (fold_landed logs it; the next plan runs at the next tick).
+\* Rule 3: the fold ticks its OWN counter, never the hold's.
+FoldComplete(s) ==
+  /\ st[s] \in {"serving", "pushing"} /\ fold[s].stage = "initiated"
+  /\ LET u == [s |-> s, p |-> fold[s].id, ep |-> lease[s].ep] IN
+     IF u \in uploads
+       THEN /\ uploads' = uploads \ {u}
+            /\ packObj' = packObj \cup {fold[s].id}
+            /\ idxObj' = idxObj \cup {fold[s].id}
+            /\ fold' = [fold EXCEPT ![s].stage = "uploaded"]
+            /\ sensorMoved' = [sensorMoved EXCEPT ![s] = @ \/ FoldTicksBatchSensor]
+       ELSE /\ fold' = [fold EXCEPT ![s] = NoFold]
+            /\ UNCHANGED <<uploads, packObj, idxObj, sensorMoved>>
+  /\ UNCHANGED <<cell, nextTok, snap, st, lease, lastTok, quiet, belief,
+                 localMain, localPacks, migrating, batch, realMoved, hbDue,
+                 pushState, pushTo, crashes, renewBudget, claimBudget>>
+  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Witnesses
+
+\* The commit, on the loop between batches: ONE CAS on the loop's
+\* CURRENT belief, naming (belief.packs \ S) ∪ {f}; a mismatch is the
+\* fence.  The inputs leave the listing (retained for readers, then
+\* unlinked) and git sees the roll-up.  The commit's one tick is the
+\* loop's.
+FoldCommitReady(s) ==
+  /\ \/ fold[s].stage = "uploaded"
+     \/ (FoldCasBeforeUpload /\ fold[s].stage \in {"planned", "initiated"})
+  /\ \/ (st[s] = "serving" /\ batch[s].stage = "none")
+     \/ (FoldCommitMidBatch /\ st[s] = "pushing")
+
+\* The commit's own renewal, the batch's step 3 (`lease::renew`): a
+\* conditional write on the CELL, which a deposed holder fails.  Without
+\* it the commit is the ONE CAS on the loop that never revalidates the
+\* lease, and the run that added this module's fold found the trace: a
+\* holder deposed WHILE ITS RESTORE RAN, whose restore then read the
+\* successor's rotated snapshot, so its If-Match matched and its fold
+\* landed after the successor served.  Mutation FoldNoRenew.
+FoldReadyToCommit(s) ==
+  /\ \/ fold[s].stage = "uploaded"
+     \/ (FoldCasBeforeUpload /\ fold[s].stage \in {"planned", "initiated"})
+  /\ \/ (st[s] = "serving" /\ batch[s].stage = "none")
+     \/ (FoldCommitMidBatch /\ st[s] = "pushing")
+
+FoldRenew(s) ==
+  /\ ~FoldNoRenew
+  /\ FoldReadyToCommit(s)
+  /\ renewBudget > 0
+  /\ renewBudget' = renewBudget - 1
+  /\ IF cell.held /\ cell.holder = s /\ cell.tok = lease[s].tok
+       THEN /\ cell' = [cell EXCEPT !.tok = nextTok]
+            /\ lease' = [lease EXCEPT ![s].tok = nextTok]
+            /\ nextTok' = nextTok + 1
+            /\ fold' = [fold EXCEPT ![s].stage = "renewed"]
+            /\ UNCHANGED <<st, batch, pushState, quiet>>
+       ELSE /\ Fall(s)                    \* deposed at renew: the fence
+            /\ UNCHANGED <<cell, nextTok>>
+  /\ UNCHANGED <<snap, packObj, idxObj, uploads, lastTok, belief, localMain,
+                 localPacks, migrating, sensorMoved, realMoved, hbDue, pushTo,
+                 crashes, claimBudget>>
+  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Witnesses
+
+\* The commit itself: ONE CAS on the loop's CURRENT belief, naming
+\* (belief.packs \ S) ∪ {f}; a mismatch is the fence.  The inputs leave
+\* the listing (retained for readers, then unlinked) and git sees the
+\* roll-up.  The commit's one tick is the loop's.
+FoldCommit(s) ==
+  /\ IF FoldNoRenew THEN FoldReadyToCommit(s) ELSE fold[s].stage = "renewed"
+  /\ LET f == fold[s].id
+         S == IF FoldInputsAfterStart THEN belief[s].packs ELSE fold[s].inputs
+         named == IF FoldCasFromDisk THEN (localPacks[s] \ S) \cup {f}
+                                    ELSE (belief[s].packs \ S) \cup {f} IN
+     IF snap.etag = belief[s].etag
+       THEN /\ snap' = [snap EXCEPT !.etag = nextTok, !.packs = named]
+            /\ nextTok' = nextTok + 1
+            /\ belief' = [belief EXCEPT ![s].etag = nextTok, ![s].packs = named]
+            /\ localPacks' = [localPacks EXCEPT ![s] = (@ \ S) \cup {f}]
+            /\ fold' = [fold EXCEPT ![s] = NoFold]
+            /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
+            /\ sensorMoved' = [sensorMoved EXCEPT ![s] = TRUE]
+            /\ stragglerLand' = (stragglerLand \/ SuccessorRestored(s))
+            /\ UNCHANGED <<st, lease, batch, pushState, quiet>>
+       ELSE /\ Fall(s)
+            /\ UNCHANGED <<snap, nextTok, belief, localPacks, stragglerLand>>
+  /\ UNCHANGED <<cell, packObj, idxObj, uploads, lastTok, localMain, migrating,
+                 hbDue, pushTo, crashes, renewBudget, claimBudget,
+                 ackNotDurable, skipOverMovement, unrestorable,
+                 toldFailedButDurable, renewOverWedge>>
+  /\ UNCHANGED FoldPlanVars
+
+\* THE GRACE AXIOM.  `orphan_grace_secs` (an hour) must outlive the
+\* LONGEST upload, not the longest plausible one — lean's
+\* `LeanChunkGCRacyGrace` rule, and the reason the shipped sweep reads
+\* the object's age from the STORE's clock at the delete.  An object an
+\* in-flight batch or fold uploaded and has not yet named is inside its
+\* grace, whoever uploaded it; nothing else is.
+InsideGrace(q) ==
+  /\ GraceOutlivesUpload
+  /\ \E t \in Syncers :
+       \/ (batch[t].stage # "none" /\ q \in batch[t].listed /\ q \notin belief[t].packs)
+       \/ (fold[t].stage # "none" /\ q = fold[t].id)
+
+\* The sweep that deletes (sweep.rs: the ledger sweep and the LIST
+\* sweep): an object no snapshot names, past the grace.  Its
+\* list-then-read-then-etag-check collapses to one action whose guard is
+\* the etag check; the grace is what keeps a deposed sweeper from taking
+\* a live uploader's object.  Never mid-batch (the tick runs between
+\* batches) and never with this holder's fold uploaded and uncommitted
+\* (both sweeps refuse mid-fold).
+SweepDelete(s) ==
+  /\ st[s] = "serving" /\ batch[s].stage = "none"
+  /\ snap.etag = belief[s].etag
+  /\ \/ fold[s].stage \notin {"initiated", "uploaded"}
+     \/ SweepDuringFold
+  /\ \E q \in packObj \ snap.packs :
+       /\ ~InsideGrace(q)
+       /\ packObj' = packObj \ {q}
+       /\ idxObj' = idxObj \ {q}
+  /\ UNCHANGED <<cell, nextTok, snap, uploads, st, lease, lastTok, quiet,
+                 belief, localMain, localPacks, migrating, batch, sensorMoved,
+                 realMoved, hbDue, pushState, pushTo, crashes, renewBudget,
+                 claimBudget>>
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 Next ==
   \/ \E s \in Syncers :
@@ -710,6 +953,9 @@ Next ==
        \/ BatchStart(s) \/ BatchRenew(s) \/ BatchHash(s) \/ BatchInit(s)
        \/ BatchComplete(s) \/ BatchCas(s) \/ BatchLateUpload(s)
        \/ BatchRefs(s) \/ BatchAck(s)
+       \/ FoldPlan(s) \/ FoldInit(s) \/ FoldComplete(s)
+       \/ FoldRenew(s) \/ FoldCommit(s)
+       \/ SweepDelete(s)
        \/ CleanRelease(s) \/ Crash(s)
        \/ \E p \in Pushes : PushSend(p, s) \/ IdxLand(s, p)
   \/ \E p \in Pushes : ClientHangup(p)
@@ -726,6 +972,8 @@ Fairness ==
     /\ WF_vars(BatchStart(s)) /\ WF_vars(BatchRenew(s)) /\ WF_vars(BatchHash(s))
     /\ WF_vars(BatchInit(s)) /\ WF_vars(BatchComplete(s)) /\ WF_vars(BatchCas(s))
     /\ WF_vars(BatchLateUpload(s)) /\ WF_vars(BatchRefs(s)) /\ WF_vars(BatchAck(s))
+    /\ WF_vars(FoldInit(s)) /\ WF_vars(FoldComplete(s))
+    /\ WF_vars(FoldRenew(s)) /\ WF_vars(FoldCommit(s))
     /\ \A p \in Pushes : WF_vars(IdxLand(s, p))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
@@ -767,18 +1015,22 @@ View == <<[cell EXCEPT !.tok = Rank(cell.tok)],
           quiet,
           [s \in Syncers |-> [belief[s] EXCEPT !.etag = Rank(belief[s].etag)]],
           localMain, localPacks, migrating, batch, sensorMoved, realMoved,
-          hbDue, pushState, pushTo, crashes, renewBudget, claimBudget,
+          hbDue, pushState, pushTo, holds, fold, foldBudget,
+          crashes, renewBudget, claimBudget,
           ackNotDurable, skipOverMovement, stragglerLand, unrestorable,
-          toldFailedButDurable>>
+          toldFailedButDurable, renewOverWedge>>
 
 (***************************************************************************)
 (* Theorems, and the probe.                                                *)
 (***************************************************************************)
 
+\* A pack the snapshot names, in the bucket with its index, holding p.
+HeldByNamedComplete(p) ==
+  \E q \in snap.packs : p \in holds[q] /\ q \in packObj /\ q \in idxObj
+
 Durable(p) ==
   /\ p \in snap.history
-  /\ p \in snap.packs
-  /\ p \in packObj /\ p \in idxObj
+  /\ HeldByNamedComplete(p)
 
 \* Told ok => in the bucket, with the pack complete.  Stated over the
 \* state rather than a witness so that a later transition (a rotation, a
@@ -789,9 +1041,16 @@ Inv_AckedIsDurable ==
 \* Every landed push's pack is in the bucket with its index — a restore
 \* can see its objects.
 Inv_LandedPackComplete ==
-  \A p \in snap.history : p \in packObj /\ p \in idxObj
+  \A p \in snap.history : HeldByNamedComplete(p)
+
+\* Every pack the snapshot names is in the bucket with its index: what a
+\* CAS that names only what it uploaded or a prior CAS named preserves,
+\* and what the fold's formula must preserve too.
+Inv_NamedIsUploaded ==
+  \A q \in snap.packs : q \in packObj /\ q \in idxObj
 
 Inv_NoSkipOverMovement          == ~skipOverMovement
+Inv_NoRenewOverWedge            == ~renewOverWedge
 Inv_NoStragglerLandAfterRestore == ~stragglerLand
 Inv_NoUnrestorable              == ~unrestorable
 
@@ -802,7 +1061,9 @@ Inv_NoToldFailedButDurable == ~toldFailedButDurable
 Inv == /\ TypeOK
        /\ Inv_AckedIsDurable
        /\ Inv_LandedPackComplete
+       /\ Inv_NamedIsUploaded
        /\ Inv_NoSkipOverMovement
+       /\ Inv_NoRenewOverWedge
        /\ Inv_NoStragglerLandAfterRestore
        /\ Inv_NoUnrestorable
 

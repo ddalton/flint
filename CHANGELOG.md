@@ -36,10 +36,35 @@ covered by the stability guarantee.
   small packs waiting under the floor. Factor 4, a waived cadence and
   a 512 MiB floor were rejected on the same simulation. Tests: the
   planner's properties and, on the rig, the cadence read from the
-  store on a fresh incarnation with its control. The local repack rig
+  store on a fresh incarnation with its control, and a batch running
+  beside a fold's upload (the store double gained a PUT delay for it):
+  the batch names its own pack, never the scratch, and the fold then
+  commits on the batch's snapshot. The local repack rig
   at 256 MiB / 100 pushes: tiers-blob 7.8× → 4.9× and tiers-source
   32× → 10.7×, both inside the design's pre-registered ceilings that
   the first build missed. The wire measurement is owed.
+
+### Fixed — flint forge, a fold's commit revalidates the lease
+
+- **The fold's commit was the one CAS on the loop that never renewed.**
+  Every batch renews at its step 3 — a conditional write on the lease
+  cell that a deposed holder fails — and `fold::commit` did not, so a
+  holder deposed WHILE ITS RESTORE RAN, whose restore then read the
+  successor's rotated snapshot, could land a fold CAS after the
+  successor was serving: the roll-up is benign, but the commit retains
+  its inputs and the ledger sweep then deletes from the bucket packs
+  the true holder still names. Found by extending `ForgeSync.tla` with
+  compaction tiers (the third defect a model has found here; strict run
+  green at 14.7 M distinct states, depth 57), fixed with one renewal
+  per fold commit — never per push — and kept by the mutation
+  `FoldNoRenew` and a rig test whose control is the heir's own commit
+  landing. The same run refuted the design's claim that the sweep's age
+  could be abstracted away: the grace is an axiom of the module now
+  (`GraceOutlivesUpload`, lean's rule that it must outlive the longest
+  upload), with `RacyGrace` as its required-fail mutation. Two further
+  mutations the design predicted, `FoldCommitMidBatch` and
+  `SweepDuringFold`, cannot lose anything and are recorded as
+  documented non-runs with the reasons.
 
 ### Changed — flint forge, the git container is one process
 

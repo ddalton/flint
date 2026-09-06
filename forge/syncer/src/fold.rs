@@ -61,7 +61,7 @@ use std::sync::Arc;
 
 use flint_store::{ObjectStore, StoreError};
 
-use super::{batch, packio, snapshot, ForgeError, ForgeResult, Syncer};
+use super::{batch, lease, packio, snapshot, ForgeError, ForgeResult, Syncer};
 
 /// The content of the base marker, a `.keep` beside the base pack.
 /// git honours any `.keep` (the pack is never rolled by its own tools);
@@ -608,6 +608,19 @@ pub async fn commit(sc: &mut Syncer, res: FoldResult, now: u64) -> ForgeResult<O
         return Err(ForgeError::State(format!("fold failed: {e}")));
     }
     sc.check_fence()?;
+    // One renewal before the write, exactly as a batch takes at its
+    // step 3 (`lease::renew`, design §4). Without it this is the ONE
+    // CAS on the loop that never revalidates the lease against the
+    // cell, and `ForgeSync.tla`'s fold run found what that costs: a
+    // holder deposed while its restore ran, whose restore then read the
+    // successor's rotated snapshot, plans and commits a fold whose
+    // If-Match matches — a straggler's CAS landing after its successor
+    // restored (`Inv_NoStragglerLandAfterRestore`, mutation
+    // `FoldNoRenew`). The roll-up itself is benign — it holds the same
+    // pushes — but the commit retains its inputs and the ledger sweep
+    // then deletes from the bucket packs the true holder still names.
+    // One conditional PUT per fold, never per push.
+    lease::renew(sc).await?;
     let cell = sc.cell()?.clone();
     let f = res.pack.clone();
     let stem_of = |p: &str| p.trim_end_matches(".pack").to_string();

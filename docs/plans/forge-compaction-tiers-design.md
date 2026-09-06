@@ -1258,7 +1258,66 @@ control** (the age unread — what the code did — plans the rebuild at
 once; the base back-dated past the cadence in the store, a re-restore
 plans it). 110 tests, clippy clean.
 
-### 13.5 Measured locally, and owed
+### 13.5 The model (phase 3), and the defect it found
+
+`formal/ForgeSync.tla` per §5.3, run 2026-09-06: a pack now HOLDS a set
+of pushes, the fold's task runs beside the loop (plan, initiate,
+complete through `uploads`, so a claim-time abort ends a straggler's
+fold) and its commit on it, and `SweepDelete` — the sweep that deletes —
+joins the module. Strict run green at **14.7 M distinct states, depth
+57**; `Inv_NamedIsUploaded` (every named pack is in the bucket with its
+index) and `Inv_NoRenewOverWedge` (the twin of `Inv_NoSkipOverMovement`)
+are new theorems.
+
+**The run found a defect in the shipped code**, the third a model has
+found in this repository. `fold::commit` was the ONE CAS on the loop
+that never revalidated the lease: every batch renews at its step 3
+(`lease::renew`, a conditional write on the cell that a deposed holder
+fails), and the fold's commit did not. The trace: a holder claims, its
+restore runs long, a challenger deposes it and rotates the snapshot,
+the successor restores and serves — and then the first holder's restore
+FINISHES, reads the successor's rotated snapshot, plans a fold and
+commits it with an If-Match that now matches. The roll-up itself is
+benign (it holds the same pushes), but the commit retains its inputs
+and the ledger sweep then deletes from the bucket packs the true holder
+still names. Fixed the same day: the commit renews first, one
+conditional PUT per fold and never per push, with a rig test (a deposed
+holder's commit is refused and nothing is retained; the control is the
+heir's own commit landing) and the mutation `FoldNoRenew`.
+
+**And it refuted this document's own §5.3**, which said the sweep's age
+could be abstract, "every orphan is deletable". With that, a deposed
+holder still serving on a belief the successor's rotation happened to
+match sweeps a live uploader's pack between its Complete and its CAS.
+The grace is not decoration: it is an AXIOM of the same kind as the
+scheduling axiom — `GraceOutlivesUpload`, lean's `LeanChunkGCRacyGrace`
+rule that `orphan_grace_secs` must outlive the LONGEST upload — and
+`RacyGrace` is now a required-fail mutation that loses
+`Inv_AckedIsDurable`.
+
+| mutation | must lose | verdict |
+|---|---|---|
+| `FoldNoRenew` | `Inv_NoStragglerLandAfterRestore` | **found the defect**, fails as required |
+| `RacyGrace` | an integrity invariant | fails on `Inv_AckedIsDurable` |
+| `FoldCasBeforeUpload` | the fold twin of `CasBeforePacks` | fails on `Inv_AckedIsDurable` |
+| `FoldCasFromDisk` | `Inv_NamedIsUploaded` | fails as predicted |
+| `FoldInputsAfterStart` | `Inv_AckedIsDurable` | fails as predicted |
+| `FoldTicksBatchSensor` | `Inv_NoRenewOverWedge` | fails as predicted |
+| `FoldCommitMidBatch` | §5.3 predicted `Inv_NoUnrestorable` | **cannot lose** — documented non-run |
+| `SweepDuringFold` | §5.3 predicted `Inv_NamedIsUploaded` | **cannot lose** — documented non-run |
+
+The two non-runs are findings, not omissions. `FoldCommitMidBatch`
+loses nothing because the commit updates the loop's belief in place, so
+the batch's own CAS still matches and lands, and the ledger sweep never
+deletes a stem the snapshot names: "between batches" is the loop's
+structure, not a safety property. `SweepDuringFold` loses nothing
+because the grace already covers a roll-up inside an in-flight fold;
+what the code's guard actually prevents is the claim-time upload abort
+ending the holder's own fold — wasted work, not a lost invariant. Both
+are registered in `scripts/check-tla.sh` as non-runs with their reasons,
+because a mutation that cannot lose proves nothing.
+
+### 13.6 Measured locally, and owed
 
 The repack rig (`forge/e2e/repack/run-repack.sh`, 256 MiB blob seed
 and 3.5 MiB source seed, 100 pushes, the cadence lifted;

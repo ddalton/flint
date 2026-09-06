@@ -184,6 +184,10 @@ pub struct MemoryStore {
     /// a network round trip, so a test can observe whether fetches
     /// OVERLAP rather than time them.
     get_range_delay_ms: AtomicU64,
+    /// Every whole PUT waits this long before it lands: a slow upload,
+    /// so a test can run something BESIDE one (a batch beside a fold's
+    /// upload) rather than race it.
+    put_delay_ms: AtomicU64,
     /// get_range calls in flight, and the most there have ever been at
     /// once: a fan-out's bound, observed from both sides.
     inflight_get_range: AtomicU64,
@@ -251,6 +255,7 @@ impl MemoryStore {
             fail_epoch_renew_count: AtomicU64::new(0),
             stall_next_get_range_ms: AtomicU64::new(0),
             get_range_delay_ms: AtomicU64::new(0),
+            put_delay_ms: AtomicU64::new(0),
             inflight_get_range: AtomicU64::new(0),
             peak_get_range: AtomicU64::new(0),
             strip_version_ids: AtomicBool::new(false),
@@ -302,6 +307,14 @@ impl MemoryStore {
     /// caller's bound rather than the scheduler's luck.
     pub fn inject_get_range_delay_ms(&self, ms: u64) {
         self.get_range_delay_ms.store(ms, Ordering::SeqCst);
+    }
+
+    /// Every whole PUT from now on sleeps `ms` before it lands (0 turns
+    /// it off; a PUT already sleeping keeps its delay). Read at the
+    /// start of each PUT, so a test can slow one task's uploads and
+    /// then let the next caller's through at once.
+    pub fn inject_put_delay_ms(&self, ms: u64) {
+        self.put_delay_ms.store(ms, Ordering::SeqCst);
     }
 
     /// The most get_range calls ever in flight at once since the last
@@ -520,6 +533,10 @@ impl ObjectStore for MemoryStore {
         crc64: u64,
     ) -> StoreResult<ObjectMeta> {
         self.bump("put_whole");
+        let delay = self.put_delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
         let actual = crc64_nvme(&body);
         if actual != crc64 {
             return Err(StoreError::ChecksumMismatch(format!(

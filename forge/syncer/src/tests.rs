@@ -3268,6 +3268,123 @@ async fn the_cadence_is_the_bases_age_in_the_store_not_process_memory() {
     );
 }
 
+/// A batch beside a fold (design §3.5). The fold's upload is slow and a
+/// push lands while it is in flight: the batch runs on the loop with
+/// the fold's task beside it, never sees the scratch — its snapshot
+/// names its own pack and none of the fold's — and the fold's commit
+/// afterwards CASes on the BATCH's snapshot (the loop's current belief,
+/// not the etag the fold was planned under), naming the batch's pack,
+/// the roll-up, and none of the roll-up's inputs, with nothing fenced.
+/// The ordering is proved, not assumed: the fold is still uploading
+/// when the batch has returned.
+#[tokio::test]
+async fn a_batch_beside_a_fold_names_its_own_pack_and_the_fold_commits_on_the_batchs_snapshot() {
+    let mut rig = Rig::new().await;
+    rig.tiers_only();
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    let inputs = rig.sc.cell().unwrap().snap.packs.clone();
+    assert_eq!(inputs.len(), 2);
+    let seq0 = rig.sc.cell().unwrap().snap.seq;
+
+    // Every PUT waits three seconds: the fold's siblings go up slowly.
+    rig.store.inject_put_delay_ms(3000);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let plan = fold::maybe_spawn(&mut rig.sc, tx, super::now_unix()).unwrap().expect("two equal packs fold");
+    assert!(matches!(plan, fold::Plan::Fold { .. }));
+    // Let pack-objects finish and the first PUT begin its sleep, then
+    // let the batch's own PUTs through at once.
+    for _ in 0..100 {
+        if rig.sc.fold.as_ref().unwrap().stage.lock().map(|s| *s == "uploading").unwrap_or(false) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    rig.store.inject_put_delay_ms(0);
+
+    // The batch, beside the fold's upload.
+    let c2 = rig.push_commit("refs/heads/main", Some(&c1), "c2").await;
+    let stage = rig.sc.fold.as_ref().expect("the fold is still in flight").stage.lock().map(|s| *s).unwrap();
+    assert_eq!(stage, "uploading", "the fold was still uploading when the batch returned");
+    let after_batch = rig.sc.cell().unwrap().snap.packs.clone();
+    assert_eq!(after_batch.len(), 3, "the batch named its own pack beside the two inputs");
+    for p in &inputs {
+        assert!(after_batch.contains(p), "the batch re-named the input {p}, which is still what git sees");
+    }
+    let c2_pack: String = after_batch.iter().find(|p| !inputs.contains(p)).cloned().unwrap();
+    assert_eq!(rig.sc.cell().unwrap().snap.seq, seq0 + 1);
+
+    // The fold lands and commits on the batch's snapshot.
+    let res = rx.recv().await.expect("the fold task reports");
+    assert!(res.error.is_none(), "{:?}", res.error);
+    let f = res.pack.clone();
+    assert!(!after_batch.contains(&f), "the batch never saw the scratch");
+    let named = fold::commit(&mut rig.sc, res, super::now_unix()).await.expect("the commit CASes on the batch's snapshot");
+    assert_eq!(named, Some(f.clone()));
+    assert!(rig.sc.fenced().is_none(), "nothing fenced: the fold committed on the loop's current belief");
+    let mut want = vec![c2_pack.clone(), f.clone()];
+    want.sort();
+    assert_eq!(rig.sc.cell().unwrap().snap.packs, want, "the batch's pack and the roll-up, none of the inputs");
+    assert_eq!(rig.sc.cell().unwrap().snap.seq, seq0 + 2);
+    assert_eq!(rig.sc.retained.len(), 2, "the inputs are retained for readers");
+    assert_eq!(rig.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(c2.clone()));
+
+    // A cold restore of the result is whole, and a batch after the
+    // commit uploads nothing of the roll-up.
+    let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
+    restore::restore(&mut cold.sc).await.expect("cold restore");
+    assert_eq!(cold.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(c2));
+    cold.sc.git.fsck_connectivity().await.expect("whole");
+}
+
+/// The fold's commit renews the lease first, so a deposed holder cannot
+/// land it (`ForgeSync.tla`'s `FoldNoRenew`; the trace: a holder deposed
+/// while its restore ran, whose restore then read the successor's
+/// rotated snapshot, so its If-Match would have matched). The control is
+/// the same commit with the lease still held: it lands.
+#[tokio::test]
+async fn a_deposed_holders_fold_commit_is_refused_by_its_renewal() {
+    let store = Arc::new(MemoryStore::new());
+    let mut rig = Rig::with_store(store.clone(), "a").await;
+    rig.tiers_only();
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let _c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+
+    // The fold's task runs while this holder still holds.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let plan = fold::maybe_spawn(&mut rig.sc, tx, super::now_unix()).unwrap().expect("planned");
+    assert!(matches!(plan, fold::Plan::Fold { .. }));
+    let res = rx.recv().await.expect("the task reports");
+    assert!(res.error.is_none());
+
+    // A successor takes the lease over: this holder is deposed and does
+    // not know it. Its belief still matches the snapshot, so the
+    // snapshot CAS alone would let the commit land.
+    let mut heir = Rig::with_store(store.clone(), "b").await;
+    store.backdate_epoch(&rig.sc.cfg.epoch_key(), 10_000);
+    heir.start().await;
+    assert!(heir.sc.lease().unwrap().epoch > rig.sc.lease().unwrap().epoch, "the heir holds a later epoch");
+    let before = rig.sc.cell().unwrap().snap.clone();
+
+    let err = fold::commit(&mut rig.sc, res, super::now_unix()).await.expect_err("the renewal refuses");
+    assert!(matches!(err, ForgeError::Fenced(_)), "deposed at renew is the fence, got {err:?}");
+    assert!(rig.sc.fenced().is_some());
+    let snap_now = snapshot::load(rig.sc.store.as_ref(), &rig.sc.cfg).await.unwrap().snap;
+    assert_eq!(snap_now.packs, before.packs, "no straggler CAS landed");
+    assert!(rig.sc.retained.is_empty(), "and nothing was retained for the ledger sweep to delete");
+
+    // The control: the heir's own fold commits, with its lease held.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    heir.tiers_only();
+    let plan = fold::maybe_spawn(&mut heir.sc, tx, super::now_unix()).unwrap().expect("the heir plans");
+    assert!(matches!(plan, fold::Plan::Fold { .. }));
+    let res = rx.recv().await.unwrap();
+    let named = fold::commit(&mut heir.sc, res, super::now_unix()).await.expect("the holder's commit lands");
+    assert!(named.is_some());
+}
+
 /// The fold ticks its own counter, never the hold's: a fold's upload
 /// must not keep a wedged batch's holder renewing (F21). The commit's
 /// single tick is the loop's, after the CAS.
