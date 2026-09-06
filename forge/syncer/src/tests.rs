@@ -2902,3 +2902,77 @@ async fn transfers_report_their_progress_in_bytes() {
         "the fetch's bytes on top"
     );
 }
+
+/// X13. The facts' one readiness decision: serving needs the phase,
+/// no fence, and a renewal within the term.
+#[tokio::test]
+async fn readiness_needs_a_renewal_within_the_term() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let mut f = status::facts(&rig.sc, Phase::Serving);
+    assert!(f.serving(), "serving, held, freshly renewed: ready");
+    f.renewal_overdue = true;
+    assert!(!f.serving(), "no renewal within the term: not ready (X13)");
+    f.renewal_overdue = false;
+    f.fenced = Some("deposed".into());
+    assert!(!f.serving(), "fenced: not ready");
+    f.fenced = None;
+    f.phase = Phase::Pushing;
+    assert!(!f.serving(), "a batch in flight: not ready");
+    let doc = status::document(&status::facts(&rig.sc, Phase::Serving), super::now_unix());
+    assert_eq!(doc["epoch"]["renewalOverdue"], false);
+    assert_eq!(doc["epoch"]["termSecs"], rig.sc.cfg.renew_term().as_secs());
+}
+
+/// X13, the falsifier-11 shape in-process. The store stops answering
+/// renewals (a transport error, not a 412). Within the term the holder
+/// keeps serving; past it readiness is withdrawn, the lease is NOT
+/// given up and the process is NOT fenced; when the store answers
+/// again the next renewal restores readiness with the same epoch.
+/// Before X13 the first assertion after the term failed: the holder
+/// served for as long as the outage lasted.
+#[tokio::test(start_paused = true)]
+async fn a_holder_that_cannot_renew_withdraws_readiness_after_the_term_and_resumes() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let shared = shared_for(&rig, Phase::Serving);
+    let tick = std::time::Duration::from_millis(100);
+    let term = tick * lease::QUIET_POLLS;
+    let epoch = rig.sc.hold.lease().expect("held").epoch;
+    let task = lease::spawn_renewer(
+        rig.store.clone() as Arc<dyn ObjectStore>,
+        rig.sc.cfg.epoch_key(),
+        rig.sc.hold.clone(),
+        shared.clone(),
+        tick,
+    );
+    // Healthy: renewals land, readiness holds.
+    tokio::time::sleep(tick * 3).await;
+    assert!(shared.lock().unwrap().serving(), "healthy: serving");
+
+    // The store goes away for the holder. Within the term: still serving.
+    rig.store.inject_epoch_renew_failures(1_000);
+    rig.store.reset_op_counts();
+    tokio::time::sleep(term / 2).await;
+    assert!(shared.lock().unwrap().serving(), "inside the term: still serving");
+
+    // Past the term: readiness withdrawn; nothing fenced; the lease kept;
+    // the renewer still trying (the attempts are what a returning store
+    // answers).
+    tokio::time::sleep(term).await;
+    let f = shared.lock().unwrap().clone();
+    assert!(f.renewal_overdue, "past the term: overdue");
+    assert!(!f.serving(), "past the term: NOT serving (X13)");
+    assert!(rig.sc.hold.fenced().is_none(), "an outage is not a deposal: no fence");
+    assert_eq!(rig.sc.hold.lease().map(|l| l.epoch), Some(epoch), "the lease is kept");
+    assert!(renews(&rig) >= lease::QUIET_POLLS as u64, "the renewer kept trying: {} attempts", renews(&rig));
+
+    // The store answers again: the next heartbeat lands and readiness
+    // returns, same epoch — no restore, no restart.
+    rig.store.inject_epoch_renew_failures(0);
+    tokio::time::sleep(tick * 2).await;
+    let f = shared.lock().unwrap().clone();
+    assert!(!f.renewal_overdue && f.serving(), "a landed renewal restores readiness");
+    assert_eq!(rig.sc.hold.lease().map(|l| l.epoch), Some(epoch), "same epoch after the outage");
+    task.abort();
+}

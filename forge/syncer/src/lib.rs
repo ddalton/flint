@@ -185,6 +185,11 @@ pub struct ForgeConfig {
 }
 
 impl ForgeConfig {
+    /// The holder's term: the challenger's takeover window, on the
+    /// holder's own clock (X13). `heartbeat_secs × QUIET_POLLS`.
+    pub fn renew_term(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.heartbeat_secs * lease::QUIET_POLLS as u64)
+    }
     pub fn new(prefix: &str, repo: impl Into<PathBuf>) -> Self {
         let repo = repo.into();
         let state_dir = repo.join("flint-forge");
@@ -282,6 +287,10 @@ pub struct Hold {
     /// `ComposeSpec::progress`, with the store's part loop.
     progress: Arc<std::sync::atomic::AtomicU64>,
     last_renew_unix: std::sync::atomic::AtomicU64,
+    /// The same moment on the runtime's clock, which virtual time can
+    /// drive in a test where the wall clock cannot: the holder's own
+    /// term (X13) is judged against it.
+    last_renew_at: std::sync::Mutex<Option<tokio::time::Instant>>,
     /// Set the moment this syncer is deposed, and never cleared. Every
     /// path checks it before touching the store, and the server stops
     /// answering reads too: a deposed server that kept serving
@@ -310,6 +319,7 @@ impl Hold {
             gate: tokio::sync::Mutex::new(()),
             progress: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_renew_unix: std::sync::atomic::AtomicU64::new(0),
+            last_renew_at: std::sync::Mutex::new(None),
             fenced,
         }
     }
@@ -320,6 +330,22 @@ impl Hold {
     pub fn set_lease(&self, lease: EpochLease) {
         self.state.lock().unwrap().lease = Some(lease);
         self.last_renew_unix.store(now_unix(), std::sync::atomic::Ordering::Relaxed);
+        *self.last_renew_at.lock().unwrap() = Some(tokio::time::Instant::now());
+    }
+    /// How long since a renewal (or the claim) last landed; `None`
+    /// before the first.
+    pub fn since_renew(&self) -> Option<std::time::Duration> {
+        self.last_renew_at.lock().unwrap().map(|t| t.elapsed())
+    }
+    /// The holder's own term (X13). A challenger deposes a holder whose
+    /// token has not moved for `QUIET_POLLS` heartbeats; a holder that
+    /// has landed no renewal for that long must assume it may already
+    /// have been deposed, and stop serving reads until one lands. It
+    /// does NOT give the lease up: nobody else can claim while the
+    /// store is unreachable for everyone, and if it was unreachable for
+    /// this holder alone the next renewal's 412 is the fence as before.
+    pub fn renewal_overdue(&self, term: std::time::Duration) -> bool {
+        matches!(self.since_renew(), Some(d) if d > term)
     }
     pub fn take_lease(&self) -> Option<EpochLease> {
         self.state.lock().unwrap().lease.take()

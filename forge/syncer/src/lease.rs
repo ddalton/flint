@@ -259,6 +259,30 @@ pub fn spawn_renewer(
         ticker.tick().await;
         let mut last_seen = hold.progress();
         let mut quiet_ticks: u32 = 0;
+        // X13: the holder's own term. Six heartbeats without a landed
+        // renewal is exactly the window after which a challenger may
+        // have claimed, so readiness is withdrawn at that point and
+        // restored by the next renewal that lands.
+        let term = heartbeat * QUIET_POLLS;
+        let mut was_overdue = false;
+        let refresh = |was_overdue: &mut bool| {
+            let overdue = hold.renewal_overdue(term);
+            if let Ok(mut g) = shared.lock() {
+                g.last_renew_unix = hold.last_renew_unix();
+                g.renewal_overdue = overdue;
+            }
+            if overdue && !*was_overdue {
+                eprintln!(
+                    "flint-forge: no renewal has landed for {:.0}s (the term is {:.0}s): readiness \
+                     withdrawn until one does — reads stop, the lease is not given up",
+                    hold.since_renew().map(|d| d.as_secs_f64()).unwrap_or(0.0),
+                    term.as_secs_f64()
+                );
+            } else if !overdue && *was_overdue {
+                eprintln!("flint-forge: a renewal landed; readiness restored, serving again");
+            }
+            *was_overdue = overdue;
+        };
         loop {
             ticker.tick().await;
             if hold.fenced().is_some() || hold.is_released() {
@@ -282,6 +306,7 @@ pub fn spawn_renewer(
                         phase.as_str()
                     );
                 }
+                refresh(&mut was_overdue);
                 continue;
             }
             quiet_ticks = 0;
@@ -292,10 +317,14 @@ pub fn spawn_renewer(
                 // The hold is fenced; the serving loop wakes on it.
                 Err(ForgeError::Fenced(_)) => return,
                 // An auth pause or a transient store fault: keep
-                // serving reads, keep trying. The lease is still ours
-                // until it is not.
+                // trying, and keep the lease — nobody can take it while
+                // the store is down for everyone. Reads continue only
+                // within the term (X13): past it this holder may have
+                // been deposed by a challenger that CAN reach the
+                // store, and `refresh` withdraws readiness.
                 Err(e) => eprintln!("flint-forge: heartbeat: {e}"),
             }
+            refresh(&mut was_overdue);
         }
     })
 }

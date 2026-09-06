@@ -176,6 +176,9 @@ pub struct MemoryStore {
     fail_get_range_count: AtomicU64,
     /// Counted HEAD failures — the sweep's transient-throttle drill.
     fail_head_count: AtomicU64,
+    /// Counted `epoch_renew` failures that are NOT a 412: the store
+    /// unreachable from the holder (forge X13's drill).
+    fail_epoch_renew_count: AtomicU64,
     stall_next_get_range_ms: AtomicU64,
     /// A latency every get_range pays, in ms: the double's stand-in for
     /// a network round trip, so a test can observe whether fetches
@@ -245,6 +248,7 @@ impl MemoryStore {
             leave_orphan: AtomicBool::new(false),
             fail_get_range_count: AtomicU64::new(0),
             fail_head_count: AtomicU64::new(0),
+            fail_epoch_renew_count: AtomicU64::new(0),
             stall_next_get_range_ms: AtomicU64::new(0),
             get_range_delay_ms: AtomicU64::new(0),
             inflight_get_range: AtomicU64::new(0),
@@ -318,6 +322,12 @@ impl MemoryStore {
     /// retry absorbs a blip; a sustained throttle outlives it.
     pub fn inject_head_failures(&self, n: u64) {
         self.fail_head_count.store(n, Ordering::SeqCst);
+    }
+
+    /// The next `n` renewals fail as a transport error — not a 412, so
+    /// the holder cannot tell "deposed" from "cut off". Zero clears it.
+    pub fn inject_epoch_renew_failures(&self, n: u64) {
+        self.fail_epoch_renew_count.store(n, Ordering::SeqCst);
     }
 
     /// Step-11 drills: the NEXT get_range stalls `ms` before serving —
@@ -887,6 +897,13 @@ impl ObjectStore for MemoryStore {
         echo: Option<&str>,
     ) -> StoreResult<EpochLease> {
         self.bump("epoch_renew");
+        if self
+            .fail_epoch_renew_count
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| c.checked_sub(1))
+            .is_ok()
+        {
+            return Err(StoreError::Other("injected renew failure: store unreachable".into()));
+        }
         let body = Bytes::from(
             serde_json::to_vec(&EpochBody {
                 holder_id: lease.holder_id.clone(),

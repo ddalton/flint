@@ -501,14 +501,22 @@ async fn serve_http(addr: &str, shared: Shared, lfs: Option<Arc<LfsCtx>>) -> For
                 // "Am I serving", not "am I alive": a headless Service
                 // publishes DNS only for READY pods, so a restoring
                 // server is simply not resolvable and the door holds.
-                let serving = shared
+                // The decision is `Facts::serving`, which also withdraws
+                // readiness when no renewal has landed for the term
+                // (X13) — the body says which.
+                let (serving, why) = shared
                     .lock()
-                    .map(|f| f.phase == Phase::Serving && f.fenced.is_none())
-                    .unwrap_or(false);
+                    .map(|f| {
+                        (
+                            f.serving(),
+                            if f.renewal_overdue { "not serving: no lease renewal within the term\n" } else { "not serving\n" },
+                        )
+                    })
+                    .unwrap_or((false, "status unavailable\n"));
                 if serving {
                     (200, "text/plain", b"ok\n".to_vec())
                 } else {
-                    (503, "text/plain", b"not serving\n".to_vec())
+                    (503, "text/plain", why.as_bytes().to_vec())
                 }
             } else if method == "POST" && path.starts_with("/lfs/objects/") {
                 let len = headers

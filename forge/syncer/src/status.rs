@@ -88,7 +88,24 @@ pub struct Facts {
     pub snapshot_seq: u64,
     pub fenced: Option<String>,
     pub last_renew_unix: u64,
+    /// No renewal has landed for the holder's term (X13). Refreshed by
+    /// the renewer on every heartbeat, so it is at most one heartbeat
+    /// stale here.
+    pub renewal_overdue: bool,
+    pub renew_term_secs: u64,
     pub progress: u64,
+}
+
+impl Facts {
+    /// What `/healthz` answers, and therefore what the readiness probe,
+    /// the headless Service's DNS and the door see. Serving means: the
+    /// phase is `Serving`, this holder has not been fenced, and a
+    /// renewal has landed within the term — the third clause is X13.
+    /// Before it, a holder cut off from the store while a challenger
+    /// was not kept serving refs the successor had already moved.
+    pub fn serving(&self) -> bool {
+        self.phase == Phase::Serving && self.fenced.is_none() && !self.renewal_overdue
+    }
 }
 
 pub fn facts(sc: &Syncer, phase: Phase) -> Facts {
@@ -104,6 +121,8 @@ pub fn facts(sc: &Syncer, phase: Phase) -> Facts {
         snapshot_seq: sc.cell.as_ref().map(|c| c.snap.seq).unwrap_or(0),
         fenced: sc.hold.fenced(),
         last_renew_unix: sc.hold.last_renew_unix(),
+        renewal_overdue: sc.hold.renewal_overdue(sc.cfg.renew_term()),
+        renew_term_secs: sc.cfg.renew_term().as_secs(),
         progress: sc.hold.progress(),
     }
 }
@@ -125,7 +144,10 @@ pub fn document(f: &Facts, now: u64) -> serde_json::Value {
         // True by construction while serving: acknowledged means
         // durable. False until the repository is claimed and proved.
         "rpoClean": held && f.cell_loaded && f.phase == Phase::Serving,
-        "epoch": { "held": held, "number": f.lease_epoch.unwrap_or(0), "lastRenewUnix": f.last_renew_unix },
+        // `renewalOverdue` is X13: no renewal has landed for `termSecs`,
+        // readiness is withdrawn, the lease is not given up.
+        "epoch": { "held": held, "number": f.lease_epoch.unwrap_or(0), "lastRenewUnix": f.last_renew_unix,
+                   "renewalOverdue": f.renewal_overdue, "termSecs": f.renew_term_secs },
         "repo": { "refs": f.refs, "packs": f.packs, "snapshotSeq": f.snapshot_seq },
         "syncerVersion": super::SYNCER_VERSION,
         // Set ⇒ this server has been deposed and serves nothing. The

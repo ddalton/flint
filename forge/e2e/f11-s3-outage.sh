@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 # FALSIFIER 11 — S3 outage.
 #
-# Pushes fail with a clear message; clones and fetches keep succeeding.
+# Pushes fail with a clear message; clones and fetches keep succeeding
+# within the holder's term; past six heartbeats without a landed
+# renewal the syncer withdraws readiness (X13) — the lease is kept, the
+# process stays up, and the next renewal that lands restores it.
 #
-# This header used to go on "until the lease can no longer be renewed;
-# the server then EXITS". The syncer has never had that mechanism (X13
-# in docs/plans/flint-forge-simplification-2026-09-05.md): a renewal
-# that errors without a 412 is "keep serving reads, keep trying". The
-# stand-down leg below passed on 2026-09-04 because the push leg before
-# it crashed the process (any batch error exits the serving loop) and
-# the restart's claim failed against the dead S3. Run the stand-down
-# leg BEFORE the push leg and it fails today; that order is X13's
-# acceptance. Why the stand-down is still worth having: a server that
-# keeps serving through an outage a challenger does not share is a
-# stale reader — a second writer it is not, the rotation fences a
-# straggler's CAS — and stale reads are what X13 closes.
+# HISTORY. This header used to promise "the server then EXITS", and the
+# stand-down leg passed on 2026-09-04 for the wrong reason: it ran AFTER
+# the push leg, the push crashed the process (any batch error exits the
+# serving loop), the restart's claim failed against the dead S3, and the
+# crash loop read as standing down. The syncer had no term of its own
+# (X13 in docs/plans/flint-forge-simplification-2026-09-05.md, found by
+# reading Continuity's every-read-verified rule against lease.rs). X13
+# was built 2026-09-05; the stand-down leg now runs BEFORE any push and
+# is judged by X13's signature — ready=false with the restart count
+# UNCHANGED. A restart here is the old vacuous pass and is reported as
+# a failure of the leg. NOT YET RE-RUN ON THE WIRE after the change.
 set -uo pipefail
 NS=${NS:-agents}; REPO=${REPO:-proj}
 DOOR=${DOOR:-http://flint-forge-door.forge-system.svc}
@@ -51,6 +53,21 @@ OUT=$(agent 'rm -rf /tmp/o1 && G clone -q '"$DOOR"'/git/'"$NS"'/'"$REPO"'.git /t
 case "$OUT" in *CLONE-OK*) ok "clones keep serving from local packs during the outage" ;;
                *) bad "clone failed during the outage: $(echo "$OUT" | tail -1)" ;; esac
 
+echo "── does the server stand down on its own, with NO push since the cut? (X13) ──"
+# Judged by X13's signature: ready=false while the restart count is
+# UNCHANGED. Six heartbeats of 10 s is the term; the probe adds ~5 s.
+GONE=no; WHY=""
+for i in $(seq 1 12); do
+  R=$(kubectl get pods -n "$NS" -l chert.us/repo=proj -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="syncer")].restartCount}' 2>/dev/null)
+  RD=$(kubectl get pods -n "$NS" -l chert.us/repo=proj -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="syncer")].ready}' 2>/dev/null)
+  if [ "${R:-0}" != "$R0" ]; then WHY="restarted ($R0 -> $R) — a crash, not the term"; break; fi
+  if [ "$RD" = "false" ]; then GONE=yes; echo "      readiness withdrawn after ~$((i*10))s, restarts unchanged ($R0)"; break; fi
+  sleep 10
+done
+if [ "$GONE" = yes ]; then ok "the server withdrew readiness on its own within the term, without exiting (X13)"
+elif [ -n "$WHY" ]; then bad "the server stood down by $WHY"
+else bad "after 120s the server was still ready with no S3 — reads a challenger could not share (X13 not in effect)"; fi
+
 echo "── a PUSH during the outage (must fail, and say why) ──"
 OUT=$(agent 'cd /tmp/o1 && git config user.email o@x.y && git config user.name out && echo x > outage.txt && git add -A && git commit -qm outage && G push origin HEAD:refs/heads/agent/outage 2>&1 | tail -3')
 echo "$OUT" | sed 's/^/      /'
@@ -59,19 +76,6 @@ case "$OUT" in
   *) bad "the push appears to have SUCCEEDED with no S3 behind it" ;;
 esac
 
-echo "── and does the server eventually stand down? ──"
-# VACUOUS on its own: what stands the server down today is the push
-# leg above, not a lease term. See the header and X13.
-GONE=no
-for i in $(seq 1 30); do
-  R=$(kubectl get pods -n "$NS" -l chert.us/repo=proj -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="syncer")].restartCount}' 2>/dev/null)
-  RD=$(kubectl get pods -n "$NS" -l chert.us/repo=proj -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="syncer")].ready}' 2>/dev/null)
-  if [ "${R:-0}" != "$R0" ] || [ "$RD" = "false" ]; then GONE=yes; echo "      stood down after ~$((i*10))s (restarts $R0 -> $R, ready=$RD)"; break; fi
-  sleep 10
-done
-[ "$GONE" = yes ] && ok "the server stopped serving rather than holding a lease it cannot renew" \
-  || bad "after 300s the server was still serving with no S3 — that is a second writer waiting to happen"
-
 echo "── healing ──"; kubectl delete networkpolicy -n "$NS" s3-outage >/dev/null 2>&1
-kubectl wait -n "$NS" --for=condition=Available deploy/forge-proj --timeout=300s >/dev/null 2>&1 && ok "recovers once S3 returns" || bad "did not recover"
+kubectl wait -n "$NS" --for=condition=Available deploy/forge-proj --timeout=300s >/dev/null 2>&1 && ok "recovers once S3 returns: a renewal lands and readiness comes back" || bad "did not recover"
 echo ""; echo "══ $pass passed, $fail failed ══"
