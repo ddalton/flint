@@ -31,6 +31,26 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{- define "flint-forge.serverTag" -}}
+{{- default (default .Chart.AppVersion .Values.image.tag) .Values.server.tag -}}
+{{- end -}}
+
+{{- define "flint-forge.gitImage" -}}
+{{- if .Values.server.gitImage -}}
+{{- .Values.server.gitImage -}}
+{{- else -}}
+{{- printf "%s/flint-forge-git:%s" .Values.server.repository (include "flint-forge.serverTag" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "flint-forge.syncerImage" -}}
+{{- if .Values.server.syncerImage -}}
+{{- .Values.server.syncerImage -}}
+{{- else -}}
+{{- printf "%s/flint-forge-syncer:%s" .Values.server.repository (include "flint-forge.serverTag" .) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "flint-forge.doorName" -}}
 {{- printf "%s-door" (include "flint-forge.name" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}

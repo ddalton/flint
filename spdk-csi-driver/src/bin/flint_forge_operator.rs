@@ -124,6 +124,9 @@ async fn main() -> anyhow::Result<()> {
     if let Ok(l) = std::env::var("FLINT_FORGE_LOG_LEVEL") {
         render.log_level = l;
     }
+    if let Some(why) = spdk_csi_driver::forge_operator::render::server_images_disagree(&render) {
+        warn!("{why}");
+    }
     // Where the door runs. Set it and every repository gets a
     // NetworkPolicy admitting only the gateway to its git port; leave
     // it unset and reaching the port IS the authorization, which the

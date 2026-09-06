@@ -35,7 +35,7 @@ pinning.
 | C1 operator reads the epoch cell from S3 | **reject** | the `/status` poll, the NetworkPolicy exception | a credential-free operator becomes a read-everything principal, for fields no decision reads |
 | C2 syncer echoes the lease into a k8s Lease object | later | polling, HTTP surface, NetworkPolicy rule | +3 RBAC objects per repo, 30 writes/s at 300 live, a new lie (write before a failed renew) |
 | C3 operator infers from the pod (readiness, exit codes) | complement | — | no push clock; suspend would rest on one signal |
-| D1 hook = a role of the syncer binary, one tag for both images | **do** | one staged binary, the tag-drift class | ~50 lines + a render test |
+| D1 hook = a role of the syncer binary, one tag for both images | **done** | one staged binary, the tag-drift class | the hook is `flint_forge::hook`, both binaries dispatch on their invoked name, the git image installs the syncer binary as both hooks, the chart derives both images from one tag, the operator warns on two |
 | D2 syncer as receive-pack (gix/git2) | **reject** | 4 forks, the hook | a second pack/ref implementation on the durable path; gitoxide has no server side |
 | D3 keep git, drop the hook | no | — | proc-receive *is* the interposition point; without it refs move before the CAS |
 | D4 CRC inside the compose's part reads | **done** | the second full read of every large pack (~70 s at 40 GiB) | none: the parts go up in order, so a streaming CRC over them in the upload loop is the object's; proven against S3 |
@@ -377,13 +377,13 @@ exist. Do not delete either. What can be simpler:
 | X7 | a failed `/status` poll with a Ready pod yields `Starting`, and the door waits on it | a live repository leaves rotation on a blind poll | open |
 | X8 | push-only activity clock; `requested-at` stamped only on wake | clone-only repositories are suspended and rewoken | open |
 | X9 | readiness Serving-only, `Pushing` answers 503 | headless DNS withdrawn during a long push | unverified |
-| X10 | two image tags nothing checks against each other; git floor asserted on the wrong image | the published-artifact drill's class | open, render test |
+| X10 | two image tags nothing checks against each other; git floor asserted on the wrong image | the published-artifact drill's class | **done** by D1: one `server.tag` in the chart, the operator warns on two tags, the git image asserts the floor at build |
 
 ## 8. Order
 
 1. X1, X3, X5 (done), X10: lines, not designs.
 2. D4 the CRC in the compose (done: `ComposeSpec::crc64: None`, hashed per part on a blocking thread beside its PUT; the memory double adopts the content's CRC, S3 validates ours; the gated `s3_compose` test passed against a real bucket, 4 parts, checksums equal).
-3. D1 the multi-call hook and one tag.
+3. D1 the multi-call hook and one tag (done; X10 with it).
 4. A3 the runner, with the keepalive-gap probe as its acceptance and
    the party-table legs added to the rig first, so the runner is
    judged by the class it claims to remove.

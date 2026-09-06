@@ -75,8 +75,19 @@ verdict() {
 chart_tag() { # chart_tag <yaml path fragment>
   case $1 in
     operator) sed -n '/^image:/,/^[a-z]/p' "$CHART/values.yaml" | sed -n 's/^  tag: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' | head -1 ;;
-    git)      sed -n 's#^  gitImage: *\(.*\)$#\1#p'    "$CHART/values.yaml" | head -1 ;;
-    syncer)   sed -n 's#^  syncerImage: *\(.*\)$#\1#p' "$CHART/values.yaml" | head -1 ;;
+    # The server images are ONE tag derived in the chart's helpers:
+    # <server.repository>/flint-forge-{git,syncer}:<server.tag or
+    # image.tag>, unless a full reference overrides them. Read it the
+    # way the chart computes it, so a values edit that breaks the
+    # derivation breaks this drill too.
+    git|syncer)
+      local full repo tag
+      full=$(sed -n '/^server:/,/^[a-z]/p' "$CHART/values.yaml" | sed -n "s#^  ${1}Image: *\"\{0,1\}\([^\"]*\)\"\{0,1\} *\$#\1#p" | head -1)
+      if [ -n "$full" ]; then printf '%s\n' "$full"; return; fi
+      repo=$(sed -n '/^server:/,/^[a-z]/p' "$CHART/values.yaml" | sed -n 's#^  repository: *\(.*\)$#\1#p' | head -1)
+      tag=$(sed -n '/^server:/,/^[a-z]/p' "$CHART/values.yaml" | sed -n 's/^  tag: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' | head -1)
+      [ -n "$tag" ] || tag=$(chart_tag operator)
+      printf '%s/flint-forge-%s:%s\n' "$repo" "$1" "$tag" ;;
   esac
 }
 

@@ -87,6 +87,34 @@ impl Default for RenderDefaults {
     }
 }
 
+/// The tag of an image reference, if it names one: `repo/name:tag` →
+/// `tag`, `repo/name@sha256:…` → `None` (a digest is not a tag), and a
+/// registry port (`host:5000/name:tag`) is not mistaken for one.
+pub fn image_tag(image: &str) -> Option<&str> {
+    let last = image.rsplit('/').next().unwrap_or(image);
+    if last.contains('@') {
+        return None;
+    }
+    last.split_once(':').map(|(_, t)| t).filter(|t| !t.is_empty())
+}
+
+/// The two server images must be one build: the hook in the git image
+/// is the syncer binary, and a hook from one build talking to a syncer
+/// from another over the pod's socket is the drift the
+/// published-artifact drill found. The chart derives both from one tag;
+/// this is the check on what the operator was actually handed. `Some`
+/// is the complaint; a digest-pinned reference (no tag) is not judged.
+pub fn server_images_disagree(d: &RenderDefaults) -> Option<String> {
+    match (image_tag(&d.syncer_image), image_tag(&d.git_image)) {
+        (Some(a), Some(b)) if a != b => Some(format!(
+            "the syncer image is tagged {a:?} and the git image {b:?}: the hooks in the git \
+             image are the syncer binary, and two builds on one socket is the drift the \
+             chart's single `server.tag` exists to prevent"
+        )),
+        _ => None,
+    }
+}
+
 /// Where the gateway's pods are, as a NetworkPolicy peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PodPeer {
@@ -593,6 +621,31 @@ pub fn subtree(repo: &FlintRepo) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tag is the text after the last colon of the last path
+    /// component; a digest is not a tag; a registry port is not a tag.
+    #[test]
+    fn image_tags_are_read_from_references() {
+        assert_eq!(image_tag("dilipdalton/flint-forge-git:1.46.0-forge.6"), Some("1.46.0-forge.6"));
+        assert_eq!(image_tag("localhost:5000/flint-forge-git:drill-1"), Some("drill-1"));
+        assert_eq!(image_tag("localhost:5000/flint-forge-git"), None);
+        assert_eq!(image_tag("dilipdalton/flint-forge-git@sha256:abcd"), None);
+        assert_eq!(image_tag("flint-forge-git"), None);
+    }
+
+    /// Two tags that differ are the complaint; the same tag, or a
+    /// digest on either side, is not.
+    #[test]
+    fn server_images_on_two_tags_are_reported() {
+        let mut d = RenderDefaults::default();
+        assert!(server_images_disagree(&d).is_none(), "the defaults share :latest");
+        d.git_image = "ghcr.io/chert-us/flint-forge-git:1.46.0-forge.5".into();
+        d.syncer_image = "ghcr.io/chert-us/flint-forge-syncer:1.46.0-forge.6".into();
+        let why = server_images_disagree(&d).expect("two tags");
+        assert!(why.contains("forge.5") && why.contains("forge.6"), "{why}");
+        d.git_image = "ghcr.io/chert-us/flint-forge-git@sha256:0000".into();
+        assert!(server_images_disagree(&d).is_none(), "a digest is not judged");
+    }
     use crate::forge_operator::crd::{BranchPolicy, ExportSpec, FlintRepoSpec};
 
     fn repo() -> FlintRepo {

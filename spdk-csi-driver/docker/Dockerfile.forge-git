@@ -6,15 +6,22 @@
 # `emptyDir` with the syncer beside it and talks to that syncer over a
 # Unix socket inside the repository's own state directory.
 #
-#   for T in x86_64 aarch64; do
-#     (cd ../forge/syncer && cargo zigbuild --release \
-#       --target $T-unknown-linux-musl --bin flint-forge-hook); done
-#   # stage: docker/prebuilt/{amd64,arm64}/flint-forge-hook
+# The hooks ARE the syncer binary, invoked under the hook names: the
+# same staged `flint-forge-syncer` that Dockerfile.forge-syncer.prebuilt
+# copies, so the hook and the syncer it talks to are one build and the
+# socket protocol between the two containers cannot drift between two
+# image tags.
+#
+#   (cd ../forge/syncer && cargo zigbuild --release --features s3 \
+#     --target $T-unknown-linux-musl --bin flint-forge-syncer)
+#   # stage: docker/prebuilt/{amd64,arm64}/flint-forge-syncer
 #   docker build --platform linux/$A -f docker/Dockerfile.forge-git \
 #     --build-arg BIN_DIR=docker/prebuilt -t <repo>/flint-forge-git:<tag>-$A .
 #
-# The git FLOOR is 2.43 (`merge-tree -X`), which the syncer asserts at
-# start rather than discovering inside a merge. alpine:3.20 ships 2.45.
+# The git FLOOR is 2.43 (`merge-tree -X`). The syncer asserts it on ITS
+# git at start; the git that runs `receive-pack` and `index-pack` is
+# this image's, so this build asserts it here too. alpine:3.20 ships
+# 2.45.
 FROM alpine:3.20
 
 ARG BIN_DIR=docker/prebuilt
@@ -27,6 +34,8 @@ ARG TARGETARCH
 # exactly what the first cluster run found.
 RUN apk add --no-cache git git-lfs git-daemon nginx fcgiwrap spawn-fcgi \
     && mkdir -p /repo /run/nginx
+RUN git --version | awk '{ split($3, v, "."); if (v[1] + 0 < 2 || (v[1] + 0 == 2 && v[2] + 0 < 43)) exit 1 }' \
+    || { echo "git $(git --version) is below the 2.43 floor (merge-tree -X)" >&2; exit 1; }
 # nginx.conf passes NO_BUFFERING so that fcgiwrap flushes the CGI's
 # output as it comes (Alpine's no-buffering.patch). A base image whose
 # fcgiwrap lacks that patch would buffer `receive-pack`'s keepalives
@@ -40,7 +49,7 @@ RUN tr '\0' '\n' < /usr/bin/fcgiwrap | grep -q NO_BUFFERING \
 
 COPY docker/forge/nginx.conf /etc/nginx/nginx.conf
 COPY docker/forge/entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY ${BIN_DIR}/${TARGETARCH}/flint-forge-hook /usr/local/bin/flint-forge-hook
+COPY ${BIN_DIR}/${TARGETARCH}/flint-forge-syncer /usr/local/bin/flint-forge-syncer
 
 # `git propose` for the agent half of this image. git dispatches an
 # unknown subcommand to `git-<name>` on PATH, so this is a subcommand
@@ -54,7 +63,8 @@ RUN chmod +x /usr/local/bin/git-propose
 # `core.hooksPath` points every repository at this directory, so a
 # repository created by the syncer needs no per-repo hook install.
 RUN mkdir -p /usr/local/share/flint-forge/hooks \
-    && ln -s /usr/local/bin/flint-forge-hook /usr/local/share/flint-forge/hooks/pre-receive \
-    && ln -s /usr/local/bin/flint-forge-hook /usr/local/share/flint-forge/hooks/proc-receive
+    && ln -s /usr/local/bin/flint-forge-syncer /usr/local/share/flint-forge/hooks/pre-receive \
+    && ln -s /usr/local/bin/flint-forge-syncer /usr/local/share/flint-forge/hooks/proc-receive \
+    && printf '' | /usr/local/share/flint-forge/hooks/pre-receive
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

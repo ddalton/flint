@@ -36,9 +36,9 @@ echo "building forge for $ARCH ($TRIPLE), tag $TAG"
 
 ( cd spdk-csi-driver && cargo zigbuild --release --target "$TRIPLE" --bin flint-forge-operator --bin flint-hub-gateway )
 # The syncer bin has `required-features = ["s3"]` (it talks to the
-# bucket); the hook does not, but building both under --features s3 is
-# harmless and one invocation.
-( cd forge/syncer   && cargo zigbuild --release --target "$TRIPLE" --features s3 --bin flint-forge-syncer --bin flint-forge-hook )
+# bucket). It is also the hook: the git image installs the same binary
+# under the two hook names.
+( cd forge/syncer   && cargo zigbuild --release --target "$TRIPLE" --features s3 --bin flint-forge-syncer )
 ( cd lean/sidecar   && cargo zigbuild --release --target "$TRIPLE" --features s3 --bin flint-sync )
 
 STAGE=spdk-csi-driver/docker/prebuilt/$ARCH
@@ -46,7 +46,6 @@ mkdir -p "$STAGE"
 cp spdk-csi-driver/target/$TRIPLE/release/flint-forge-operator "$STAGE/"
 cp spdk-csi-driver/target/$TRIPLE/release/flint-hub-gateway    "$STAGE/"
 cp forge/syncer/target/$TRIPLE/release/flint-forge-syncer      "$STAGE/"
-cp forge/syncer/target/$TRIPLE/release/flint-forge-hook        "$STAGE/"
 cp lean/sidecar/target/$TRIPLE/release/flint-sync             "$STAGE/"
 ls -la "$STAGE"/flint-forge-* "$STAGE"/flint-hub-gateway "$STAGE"/flint-sync
 

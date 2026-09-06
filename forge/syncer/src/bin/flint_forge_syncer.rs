@@ -90,8 +90,25 @@ fn rendered_policy(dir: &std::path::Path) -> Option<Policy> {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // One binary, three names. Invoked as `pre-receive` or
+    // `proc-receive` — the git image's hook symlinks point here — it
+    // is the hook, and it exits before it has looked at a single
+    // syncer variable. The hook in a pod is then the same build as the
+    // syncer it talks to, so the socket protocol between the two
+    // containers cannot drift between two image tags.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(role) = flint_forge::hook::role_of(&args) {
+        std::process::exit(flint_forge::hook::run_hook(role));
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(serve());
+}
+
+async fn serve() {
     let bucket_name = env_req("FLINT_FORGE_BUCKET");
     let prefix = env_req("FLINT_FORGE_PREFIX");
     let repo = PathBuf::from(env_req("FLINT_FORGE_REPO"));

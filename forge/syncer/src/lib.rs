@@ -55,6 +55,7 @@ pub mod batch;
 pub mod bundle;
 pub mod export;
 pub mod gitcmd;
+pub mod hook;
 pub mod lease;
 pub mod lfs;
 pub mod packio;

@@ -24,13 +24,24 @@ image:
 # The two images a SERVER pod runs. The operator renders them into every
 # repository's Deployment, so changing them here and rolling the
 # operator re-renders the fleet.
+#
+# They are ONE tag by default: the hook in the git image is the syncer
+# binary, and a hook from one build talking to a syncer from another
+# over the pod's socket is the drift the published-artifact drill hit
+# when the two were two free-form strings. `server.tag` covers both
+# and defaults to `image.tag`; the two full-reference overrides below
+# exist for a drill that pins a digest, and the operator warns when
+# what it was handed carries two different tags.
 server:
-  # nginx + fcgiwrap + git http-backend + the two hooks.
-  gitImage: dilipdalton/flint-forge-git:1.46.0-forge.6
-  # The one writer of the repository's S3 state; the pod's main
-  # container, so its exit restarts the pod. It also carries flint-sync,
-  # because the legible export runs the shipped lean binary.
-  syncerImage: dilipdalton/flint-forge-syncer:1.46.0-forge.6
+  repository: dilipdalton
+  tag: ""
+  # Full-reference overrides. Empty = <repository>/flint-forge-git:<tag>
+  # (nginx + fcgiwrap + git http-backend + the two hooks) and
+  # <repository>/flint-forge-syncer:<tag> (the one writer of the
+  # repository's S3 state; the pod's main container, so its exit
+  # restarts the pod; it also carries flint-sync for the legible export).
+  gitImage: ""
+  syncerImage: ""
   logLevel: info
 
 # One replica. The reconcile is idempotent and the arbitration is a

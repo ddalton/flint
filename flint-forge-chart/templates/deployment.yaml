@@ -35,9 +35,9 @@ spec:
               value: {{ .Values.namespace | quote }}
             {{- end }}
             - name: FLINT_FORGE_SYNCER_IMAGE
-              value: {{ .Values.server.syncerImage | quote }}
+              value: {{ include "flint-forge.syncerImage" . | quote }}
             - name: FLINT_FORGE_GIT_IMAGE
-              value: {{ .Values.server.gitImage | quote }}
+              value: {{ include "flint-forge.gitImage" . | quote }}
             - name: FLINT_FORGE_LOG_LEVEL
               value: {{ .Values.server.logLevel | quote }}
             {{- if .Values.door.namespace }}

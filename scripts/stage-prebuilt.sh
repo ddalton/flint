@@ -101,7 +101,7 @@ fi
 # release stages them.
 FORGE_BINS=""
 if [ "$SCOPE" = forge ] || [ "$SCOPE" = all ]; then
-    FORGE_BINS="flint-forge-syncer flint-forge-hook"
+    FORGE_BINS="flint-forge-syncer"
 fi
 
 # Binaries from the WORKER crate (crates/flint-s3-worker): PID 1 of
