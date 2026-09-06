@@ -14,9 +14,32 @@ This directory is what loopback cannot reach:
 | S2 | is the lease token **silent for longer than the takeover window** (6 × 10 s) during the push and during the restore | the silence is the restore's duration at S3's single-stream rate |
 | S3 | does a **challenger seize** a repository whose pod is alive and mid-restore, and is any acknowledged push lost while two servers fight | the seizure needs a restore longer than 60 s; the control (a small repository) is the same procedure with a restore of seconds |
 | S4 | **acknowledged means durable** with the kill placed INSIDE the multipart upload (observed via `list-multipart-uploads`, not a guessed sleep), and how many **orphaned uploads** the kills leave — forge never aborts one | the leak costs money on S3 and nothing on MinIO |
+| S5–S9 | **the front's party table** (the runner's acceptance, A3 of the simplification note; opt-in `LEGS="S0 S5 S6 S7 S9 S8"`): a client stalled 70 s mid-pack (S5, X3), five concurrent pushes and a sixth request timed (S6, X4), a rollout mid-push (S7, X6), the keepalive-gap probe from git's own packet trace (S9, run 3 finding 2) and its control with `receive.keepAlive=0` under a lowered door bound (S8, X5) | the door, the runner and git receive-pack in one pod behind a real door; the **control arm** is the same legs against the pre-A3 git image (`nginx` + `fcgiwrap`) and must FAIL S5, S6 and S9 |
 
 INCONCLUSIVE is not PASS: a leg that could not measure what it exists
 for is counted separately and fails the run.
+
+## The runner's acceptance — legs S5–S9
+
+`flint-forge-gitcgi` (A3, `641e5819`) replaced nginx + fcgiwrap in the
+git container and claims to remove the class of front-layer knobs the
+campaign kept finding members of. These legs judge it by that class,
+each one a row of the simplification note's party table:
+
+| leg | party and knob | how it is exercised | pass |
+|---|---|---|---|
+| S5 | nginx `client_body_timeout` (60 s default, X3) | the agent's `git-remote-http` is SIGSTOPped 3 s into the body for `STALL_SECS` (70) and resumed; the precondition checks the stop landed mid-transfer | acknowledged, the bucket holds it |
+| S6 | `FCGIWRAP_CHILDREN=4` (X4) | `CONC_N` (5) pushes stopped mid-body; the git container's `receive-pack` count is read; one advertisement request is timed beside them; all resumed | 5 receive-packs, the request answered in ≤ 5 s, 5/5 durable |
+| S7 | `terminationGracePeriodSeconds: 30` (X6) | `kubectl rollout restart` once the syncer reports `pushing`; the old pod's exit is timed against the grace period | told ok ⇒ durable, told failed ⇒ unchanged (or durable with a no-op retry), the successor serves, the retry converges, no orphan survives — and the outcome is RECORDED for the X6 decision |
+| S9 | `receive.keepAlive` (X5) through the front | a `GAP_MB` push under `GIT_TRACE_PACKET` + `GIT_TRACE_CURL`; `gap_stats` takes the upload's end from curl and every `sideband<` packet from git | the wait ≥ `GAP_MIN_WAIT`, every gap ≤ `GAP_MAX` (8 s against 5 s keepalives) |
+| S8 | the control for S9 | `receive.keepAlive=0` and the door's `--upstream-timeout-secs` patched to `CTRL_DOOR_SECS` (30); the same push; both restored after | the door cuts the client ≈ 30 s after the upload ends; the batch lands anyway (told failed but durable) |
+
+Run S8 last: it restarts the door. The **control arm** deploys the same
+tree with `server.gitImage=dilipdalton/flint-forge-git:1.46.0-forge.6`
+(the last nginx + fcgiwrap image) and must FAIL S5 (408 at 60 s), S6
+(four receive-packs, the request queued) and S9 (one burst with the
+report); a control that passes means the legs cannot see what they
+judge. S0 prints the git container's PID 1 so a run names its arm.
 
 ## Running it
 

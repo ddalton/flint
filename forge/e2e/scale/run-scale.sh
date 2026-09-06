@@ -33,6 +33,29 @@
 #       killed INSIDE the multipart upload (seen via
 #       list-multipart-uploads, not a guessed sleep), the f1 invariant
 #       is checked, and the orphaned uploads are counted and sized
+#   S5–S9  THE FRONT'S PARTY TABLE (the runner's acceptance, A3 of
+#       docs/plans/flint-forge-simplification-2026-09-05.md), opt-in:
+#       LEGS="S0 S5 S6 S7 S9 S8". Each leg is one member of the class the
+#       drill kept finding between the client and the syncer, and the
+#       CONTROL ARM — the same legs against the pre-A3 git image
+#       (server.gitImage=…:1.46.0-forge.6, nginx + fcgiwrap) — must FAIL
+#       S5, S6 and S9, or the legs cannot see what they judge.
+#   S5  a client SIGSTOPped for STALL_SECS mid-pack is not cut (X3:
+#       nginx's client_body_timeout defaulted to 60 s)
+#   S6  CONC_N pushes stopped mid-pack hold CONC_N receive-packs in the
+#       git container, and a request beside them is answered in seconds
+#       (X4: FCGIWRAP_CHILDREN=4 queued the fifth in silence)
+#   S7  a rollout while the syncer is `pushing` (X6, decided on the
+#       wire): the outcome recorded; told ok ⇒ durable, told failed ⇒
+#       unchanged, the successor serves, the retry converges, no orphan
+#       survives the claim
+#   S8  CONTROL for X5: receive.keepAlive=0 and the door's bound lowered
+#       to CTRL_DOOR_SECS — the door cuts the client during the hook
+#       wait, so the bound is real and the keepalive is what carries a
+#       long push (both settings restored after)
+#   S9  the keepalive-gap probe (run 3 finding 2): across a hook wait of
+#       at least GAP_MIN_WAIT s the client sees a packet at least every
+#       GAP_MAX s, measured from git's own packet trace
 #
 # INCONCLUSIVE is not PASS: a leg that could not measure what it exists
 # for is counted separately and fails the run.
@@ -67,6 +90,13 @@ STATUS_PORT=9848
 WHOLE_PUT_MAX=$((64 * 1024 * 1024))
 LEGS=${LEGS:-S0 S1 S2 S3 S4}
 BIG_MB=${BIG_MB:-}          # set by S1; give it explicitly to skip S1
+# S5–S9 (the front's party table)
+STALL_MB=${STALL_MB:-1024}; STALL_SECS=${STALL_SECS:-70}   # 70 > nginx's 60 s client_body_timeout default (X3)
+CONC_MB=${CONC_MB:-256}; CONC_N=${CONC_N:-5}               # 5 > FCGIWRAP_CHILDREN=4 (X4)
+ROLL_MB=${ROLL_MB:-4096}                                     # a batch longer than the 30 s grace (X6)
+GAP_MB=${GAP_MB:-20480}; GAP_MAX=${GAP_MAX:-8}; GAP_MIN_WAIT=${GAP_MIN_WAIT:-60}   # keepalives every 5 s; a wait long enough to hold many
+CTRL_DOOR_SECS=${CTRL_DOOR_SECS:-30}                         # S8 lowers the door's bound to this for its control
+DOOR_NS=${DOOR_NS:-forge-system}; DOOR_DEPLOY=${DOOR_DEPLOY:-flint-forge-door}
 # What the tree under test is EXPECTED to do. The oracles INVERT with
 # the fixes — a drill that encodes one behaviour as PASS confirms
 # nothing about the other — so the expectation is named, never guessed:
@@ -234,6 +264,27 @@ EOS
 . /work/lib.sh
 G ls-remote "$(url "$1")" "refs/heads/$2"
 EOS
+  put_script lsall.sh <<'EOS'
+#!/bin/sh
+# lsall.sh <repo>: one advertisement request; prints its exit status —
+# S6 times the request, so the answer's content does not matter, only
+# that the server answered.
+. /work/lib.sh
+G ls-remote "$(url "$1")" >/dev/null 2>&1; echo "rc=$?"
+EOS
+  put_script pushtrace.sh <<'EOS'
+#!/bin/sh
+# pushtrace.sh <name> <repo> <ref> <pkt> <curl>: push.sh with every
+# packet the client reads stamped to /work/<pkt> (GIT_TRACE_PACKET:
+# `sideband<` lines are receive-pack's keepalives and its report) and
+# curl's own trace to /work/<curl> (GIT_TRACE_CURL: "upload completely
+# sent off" marks the end of the pack on the wire). Both carry
+# microsecond timestamps; the gap between them is what S9 judges.
+. /work/lib.sh
+rm -f "/work/$4" "/work/$5"
+cd "/work/$1" && GIT_TRACE_PACKET="/work/$4" GIT_TRACE_CURL="/work/$5" GIT_TRACE_CURL_NO_DATA=1 \
+  G push -q "$(url "$2")" "HEAD:refs/heads/$3"
+EOS
   put_script chaos.sh <<'EOS'
 #!/bin/sh
 # chaos.sh <repo> <ref> <interval>: commit and push until /work/chaos.stop
@@ -265,6 +316,7 @@ leg_S0() {
   [ -n "$p" ] || { inconc "no pod for $BIG — deploy first"; return; }
   img=$(K -n "$NS" get pod "$p" -o jsonpath='{.status.containerStatuses[?(@.name=="syncer")].imageID}')
   note "syncer image: $img"
+  note "git container PID 1: $(K -n "$NS" exec "$p" -c git-http -- sh -c 'tr "\0" " " < /proc/1/cmdline' 2>/dev/null | head -c 120)  (flint-forge-gitcgi = the A3 runner; an entrypoint script = the nginx + fcgiwrap image, the S5–S9 control arm)"
   if [ -n "$DIGEST" ]; then
     case "$img" in
       *"@$DIGEST") ok "the syncer pod runs the digest this run pushed ($DIGEST)" ;;
@@ -753,6 +805,205 @@ leg_S4() {
         bad "orphans survived the successor's claim ($swept of $leaked kills swept; $o incomplete upload(s) remain): the sweep is not doing its job"
       fi ;;
   esac
+}
+
+# ── S5–S9: the front's party table ───────────────────────────────────
+# The simplification note lists the parties between the client and the
+# syncer and the knob each one had. The runner (flint-forge-gitcgi, A3)
+# claims to remove nginx's and fcgiwrap's and to carry git's keepalive
+# untouched; these legs judge it by that class. The client-side stalls
+# are SIGSTOP/SIGCONT on the agent's git-remote-http: the TCP connection
+# stays open and no byte moves, which is what a paused client looks like
+# to every party on the server side. The bracketed last character keeps
+# pgrep/pkill from matching their own command line.
+stop_clients()      { inpod "pkill -STOP -f 'git-remote-htt[p]'" >/dev/null 2>&1; }
+cont_clients()      { inpod "pkill -CONT -f 'git-remote-htt[p]'" >/dev/null 2>&1; }
+clients_in_flight() { inpod "pgrep -f 'git-remote-htt[p]' | wc -l" | tr -d '[:space:]'; }
+receive_packs()     { K -n "$NS" exec "$(repo_pod "$1")" -c git-http -- sh -c "pgrep -f 'receive-pac[k]' | wc -l" 2>/dev/null | tr -d '[:space:]'; }
+push_bg() { # name repo ref resfile — the push runs in the agent pod; ACK|NAK lands in /work/<resfile>, its output in /work/out-<resfile>
+  inpod "rm -f /work/$4 /work/out-$4" >/dev/null 2>&1
+  ( K -n "$NS" exec "$AGENT" -c agent -- sh -c "DOOR=$DOOR NS=$NS /work/push.sh $1 $2 $3 >/work/out-$4 2>&1 && echo ACK > /work/$4 || echo NAK > /work/$4" >/dev/null 2>&1 ) &
+}
+push_result() { inpod "cat /work/$1 2>/dev/null" | tr -d '[:space:]'; }
+push_output() { inpod "tail -3 /work/out-$1 2>/dev/null" | tr '\n' ' '; }
+wait_result() { # resfile secs — prints ACK|NAK, or nothing at the deadline
+  local t0 r; t0=$(now)
+  while [ $(( $(now) - t0 )) -lt "$2" ]; do r=$(push_result "$1"); [ -n "$r" ] && { echo "$r"; return 0; }; sleep 2; done
+  echo ""; return 1
+}
+wait_clients() { # n secs — until n remote helpers are in flight; prints the count seen last
+  local t0 n=0; t0=$(now)
+  while [ $(( $(now) - t0 )) -lt "$2" ]; do n=$(clients_in_flight); [ "${n:-0}" -ge "$1" ] && { echo "$n"; return 0; }; sleep 0.5; done
+  echo "${n:-0}"; return 1
+}
+door_bound() { K -n "$DOOR_NS" get deploy "$DOOR_DEPLOY" -o json 2>/dev/null | jq -r '.spec.template.spec.containers[0].args[]? | select(startswith("--upstream-timeout-secs=")) | sub("^.*=";"")' | head -1; }
+set_door_bound() { # secs — patches the door's argument in place and waits for the roll
+  local i
+  i=$(K -n "$DOOR_NS" get deploy "$DOOR_DEPLOY" -o json 2>/dev/null | jq '.spec.template.spec.containers[0].args | to_entries[] | select(.value|startswith("--upstream-timeout-secs=")) | .key' | head -1)
+  [ -n "$i" ] || return 1
+  K -n "$DOOR_NS" patch deploy "$DOOR_DEPLOY" --type=json \
+    -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args/$i\",\"value\":\"--upstream-timeout-secs=$1\"}]" >/dev/null 2>&1 || return 1
+  K -n "$DOOR_NS" rollout status "deploy/$DOOR_DEPLOY" --timeout=180s >/dev/null 2>&1
+}
+# gap_stats <packet-trace> <curl-trace>: "n first wait maxgap" — the
+# packets the client read after the pack left the wire: their count, the
+# seconds to the first, the seconds to the last (the report), and the
+# longest gap between consecutive ones, the upload's end included.
+gap_stats() {
+  python3 - "$1" "$2" <<'PY'
+import re, sys
+def ts(line):
+    m = re.match(r'(\d\d):(\d\d):(\d\d)\.(\d{6})', line)
+    return None if not m else int(m[1])*3600 + int(m[2])*60 + int(m[3]) + int(m[4])/1e6
+def mono(seq):  # a trace can cross midnight
+    out, last, off = [], None, 0.0
+    for t in seq:
+        if last is not None and t + off < last - 1: off += 86400
+        out.append(t + off); last = t + off
+    return out
+up = [ts(l) for l in open(sys.argv[2], errors='replace') if 'upload completely sent off' in l]
+pk = [ts(l) for l in open(sys.argv[1], errors='replace') if re.search(r'packet:\s+sideband<', l)]
+up = [t for t in up if t is not None]; pk = [t for t in pk if t is not None]
+if not up or not pk:
+    print("0 ? 0 0"); sys.exit(0)
+t_up = mono(up)[-1]
+pts = mono([t_up] + pk)
+gaps = [b - a for a, b in zip(pts, pts[1:])]
+print(f"{len(pk)} {pts[1]-t_up:.1f} {pts[-1]-t_up:.1f} {max(gaps):.1f}")
+PY
+}
+
+leg_S5() {
+  leg S5 "a client stalled ${STALL_SECS} s mid-pack is not cut (X3: nginx's client_body_timeout defaulted to 60 s beside backend bounds of an hour)"
+  local name=stall-$RUN ref=agent/stall-$RUN tip before n phase0 early res after
+  wait_serving "$SMALL" 900 || { inconc "$SMALL is not serving"; return; }
+  tip=$(inpod "/work/build.sh $name $STALL_MB" | tail -1)
+  before=$(snap_ref "$SMALL" "$ref")
+  push_bg "$name" "$SMALL" "$ref" res-stall
+  n=$(wait_clients 1 120) || { inconc "no git-remote-http appeared in the agent pod within 120 s (push: '$(push_result res-stall)')"; return; }
+  sleep 3   # past the advertisement and the negotiation, into the body
+  stop_clients
+  phase0=$(phase "$(repo_pod "$SMALL")"); early=$(push_result res-stall)
+  if [ -z "$early" ] && [ "$phase0" != pushing ]; then ok "PRECONDITION: the client was stopped mid-transfer (no answer yet; the server is '$phase0', not pushing)"
+  else bad "PRECONDITION: the stop did not land mid-transfer (answer '$early', server '$phase0') — raise STALL_MB"; fi
+  note "client SIGSTOPped for ${STALL_SECS} s"
+  sleep "$STALL_SECS"
+  cont_clients
+  res=$(wait_result res-stall 1800); after=$(snap_ref "$SMALL" "$ref")
+  case "$res" in
+    ACK) [ "$after" = "$tip" ] && ok "acknowledged after a ${STALL_SECS} s stall mid-pack, and the bucket holds it" \
+           || bad "TOLD OK BUT THE BUCKET LACKS IT (want $tip, bucket $after)" ;;
+    NAK) bad "the stalled push FAILED: $(push_output res-stall)— a bound between the client and git cut a ${STALL_SECS} s pause (X3's class)" ;;
+    *)   inconc "the stalled push never answered within 1800 s" ;;
+  esac
+}
+
+leg_S6() {
+  leg S6 "$CONC_N concurrent pushes are served concurrently, and a request beside them is answered at once (X4: FCGIWRAP_CHILDREN=4 queued the fifth in silence)"
+  local i n rp t0 t1 rc res after acked=0 tips=""
+  wait_serving "$SMALL" 900 || { inconc "$SMALL is not serving"; return; }
+  for i in $(seq 1 "$CONC_N"); do tips="$tips $(inpod "/work/build.sh conc-$RUN-$i $CONC_MB" | tail -1)"; done
+  for i in $(seq 1 "$CONC_N"); do push_bg "conc-$RUN-$i" "$SMALL" "agent/conc-$RUN-$i" "res-conc-$i"; done
+  n=$(wait_clients "$CONC_N" 120) || { inconc "only $n of $CONC_N remote helpers were in flight together within 120 s — raise CONC_MB"; cont_clients; return; }
+  sleep 3; stop_clients
+  rp=$(receive_packs "$SMALL")
+  [ "${rp:-0}" -ge "$CONC_N" ] && ok "the git container runs $rp receive-pack(s) for $CONC_N stopped clients: nothing in front of git queues them" \
+    || bad "the git container runs ${rp:-0} receive-pack(s) for $CONC_N stopped clients: a ceiling in front of git queued the rest (X4's class)"
+  t0=$(now); rc=$(inpod "timeout 60 /work/lsall.sh $SMALL" | tr -d '[:space:]'); t1=$(now)
+  [ $(( t1 - t0 )) -le 5 ] && [ "$rc" = "rc=0" ] && ok "a request beside $CONC_N in-flight pushes was answered in $(( t1 - t0 )) s" \
+    || bad "a request beside $CONC_N in-flight pushes took $(( t1 - t0 )) s ('${rc:-no answer}'): it queued behind them"
+  cont_clients
+  set -- $tips
+  for i in $(seq 1 "$CONC_N"); do
+    res=$(wait_result "res-conc-$i" 1800); after=$(snap_ref "$SMALL" "agent/conc-$RUN-$i")
+    if [ "$res" = ACK ] && [ "$after" = "$1" ]; then acked=$((acked + 1)); else note "push $i: '$res', bucket $after (want $1): $(push_output "res-conc-$i")"; fi
+    shift
+  done
+  [ "$acked" = "$CONC_N" ] && ok "all $CONC_N concurrent pushes acknowledged and in the bucket" || bad "$acked of $CONC_N concurrent pushes acknowledged and durable"
+}
+
+leg_S7() {
+  leg S7 "a rollout during a ${ROLL_MB} MiB push (X6: terminationGracePeriodSeconds 30 against a batch of minutes, SIGTERM seen only between batches): the outcome recorded; told ok ⇒ durable, told failed ⇒ unchanged, the successor serves, a retry converges, no orphan survives its claim"
+  local name=roll-$RUN ref=agent/roll-$RUN tip before pod0 t0 t_roll t_gone res after retry o pp
+  wait_serving "$SMALL" 900 || { inconc "$SMALL is not serving"; return; }
+  pp=$(key "$SMALL" objects/pack/)
+  tip=$(inpod "/work/build.sh $name $ROLL_MB" | tail -1); before=$(snap_ref "$SMALL" "$ref")
+  push_bg "$name" "$SMALL" "$ref" res-roll
+  pod0=$(repo_pod "$SMALL"); t0=$(now)
+  while [ $(( $(now) - t0 )) -lt 900 ] && [ "$(phase "$pod0")" != pushing ] && [ -z "$(push_result res-roll)" ]; do sleep 1; done
+  [ "$(phase "$pod0")" = pushing ] || { inconc "the syncer never reached 'pushing' (push: '$(push_result res-roll)'): the batch was over before a roll could land — raise ROLL_MB"; return; }
+  t_roll=$(now); K -n "$NS" rollout restart "deploy/forge-$SMALL" >/dev/null 2>&1
+  note "rollout restarted while $pod0 was pushing"
+  while [ $(( $(now) - t_roll )) -lt 300 ] && K -n "$NS" get pod "$pod0" >/dev/null 2>&1; do sleep 1; done
+  t_gone=$(( $(now) - t_roll ))
+  if [ "$t_gone" -ge 28 ]; then note "the old pod was gone ${t_gone} s after the restart: the grace period ran out — SIGKILL mid-batch"
+  else note "the old pod was gone ${t_gone} s after the restart: it exited inside the grace period (the batch finished, or the SIGTERM arm ran between batches)"; fi
+  res=$(wait_result res-roll 1800)
+  K -n "$NS" wait --for=condition=Available "deploy/forge-$SMALL" --timeout=600s >/dev/null 2>&1
+  wait_serving "$SMALL" 900 || { inconc "the successor never served"; return; }
+  after=$(snap_ref "$SMALL" "$ref")
+  case "$res" in
+    ACK) [ "$after" = "$tip" ] && ok "told ok across the roll, and the bucket holds it" || bad "TOLD OK BUT THE BUCKET LACKS IT (want $tip, bucket $after)" ;;
+    NAK) if [ "$after" = "$before" ]; then ok "told failed, and the bucket is unchanged ($(push_output res-roll))"
+         elif [ "$after" = "$tip" ]; then ok "told failed, but durable (the roll cut the client after the CAS) — run 3's transition; the retry must be a no-op"
+         else bad "TOLD FAILED AND THE BUCKET HOLDS SOMETHING ELSE ($before -> $after)"; fi ;;
+    *)   inconc "the push never answered within 1800 s" ;;
+  esac
+  retry=$(inpod "DOOR=$DOOR NS=$NS /work/push.sh $name $SMALL $ref 2>&1 | tail -1")
+  [ "$(snap_ref "$SMALL" "$ref")" = "$tip" ] && ok "the retry converged: the bucket names $ref at the tip" || bad "the retry did not converge: $retry"
+  o=$(mpu_count "$pp")
+  [ "${o:-0}" = 0 ] && ok "no incomplete upload under the prefix once the successor served" || bad "$o incomplete upload(s) survived the successor's claim"
+  note "X6 on the wire: told '$res' after the roll, the old pod gone in ${t_gone} s; a roll that waited for the batch would have answered ok every time"
+}
+
+leg_S8() {
+  leg S8 "CONTROL: receive.keepAlive=0 and the door's bound at ${CTRL_DOOR_SECS} s — the door cuts the client during a hook wait longer than the bound, so the bound is real and the keepalive is what carries a long push (X5's anti-vacuity; both settings restored after)"
+  local name=gapctl-$RUN ref=agent/gapctl-$RUN tip before b0 t0 t1 rc out stats n first wait maxgap after t_land
+  wait_serving "$SMALL" 900 || { inconc "$SMALL is not serving"; return; }
+  b0=$(door_bound); [ -n "$b0" ] || { inconc "no --upstream-timeout-secs among deploy/$DOOR_DEPLOY's args in $DOOR_NS (DOOR_NS/DOOR_DEPLOY)"; return; }
+  set_door_bound "$CTRL_DOOR_SECS" || { inconc "could not set the door's bound to ${CTRL_DOOR_SECS} s"; return; }
+  gitq "$SMALL" config receive.keepAlive 0 >/dev/null 2>&1
+  [ "$(gitq "$SMALL" config receive.keepAlive 2>/dev/null)" = 0 ] || { inconc "could not set receive.keepAlive=0 on $SMALL"; set_door_bound "$b0"; return; }
+  note "for the control: the door's bound ${b0} → ${CTRL_DOOR_SECS} s, receive.keepAlive 5 → 0 on $SMALL"
+  tip=$(inpod "/work/build.sh $name $GAP_MB" | tail -1); before=$(snap_ref "$SMALL" "$ref")
+  t0=$(now); out=$(inpod "DOOR=$DOOR NS=$NS /work/pushtrace.sh $name $SMALL $ref pkt-$name curl-$name"); rc=$?; t1=$(now)
+  inpod "cat /work/pkt-$name" > "$WORK/pkt-$name" 2>/dev/null; inpod "cat /work/curl-$name" > "$WORK/curl-$name" 2>/dev/null
+  set -- $(gap_stats "$WORK/pkt-$name" "$WORK/curl-$name"); n=${1:-0}; first=${2:-?}; wait=${3:-0}; maxgap=${4:-0}
+  # the batch runs on without its client: wait for the bucket to settle before restoring anything
+  t_land=""; while [ $(( $(now) - t1 )) -lt 1800 ]; do [ "$(snap_ref "$SMALL" "$ref")" = "$tip" ] && { t_land=$(( $(now) - t0 )); break; }; sleep 5; done
+  after=$(snap_ref "$SMALL" "$ref")
+  gitq "$SMALL" config receive.keepAlive 5 >/dev/null 2>&1; set_door_bound "$b0"
+  note "restored: receive.keepAlive=5, the door's bound ${b0} s"
+  note "client answered after $(( t1 - t0 )) s (rc=$rc); $n packet(s) read after the upload, the last ${wait} s after it; the bucket named the tip ${t_land:-never} s after the push began"
+  [ -n "$t_land" ] && [ "$(( t_land - (t1 - t0) ))" -ge 0 ] || { inconc "the bucket never named the tip: the server side did not finish, nothing here is a bound's doing"; return; }
+  if [ "$rc" != 0 ] && [ "${wait%.*}" -le $(( CTRL_DOOR_SECS + 10 )) ]; then
+    ok "CONTROL: without keepalives the door cut the client ${wait} s after the pack left the wire (bound ${CTRL_DOOR_SECS} s): $(printf '%s' "$out" | tail -1)"
+    [ "$after" = "$tip" ] && note "…and the batch landed anyway ($(( t_land - (t1 - t0) )) s after the cut): told failed but durable (run 3 finding 3); a retry is a no-op"
+  elif [ "$rc" = 0 ]; then
+    bad "CONTROL FAILED: acknowledged through a ${wait} s wait with no keepalives and a ${CTRL_DOOR_SECS} s bound — the bound is not what this rig thinks it is, and S9 cannot tell a held keepalive from a moving one"
+  else
+    bad "the push failed but not at the bound (${wait} s after the upload against ${CTRL_DOOR_SECS} s): $(printf '%s' "$out" | tail -1)"
+  fi
+}
+
+leg_S9() {
+  leg S9 "keepalives through the front: across a hook wait of at least ${GAP_MIN_WAIT} s the client sees a packet at least every ${GAP_MAX} s (run 3 finding 2: through fcgiwrap they arrived in one burst with the report); the door's bound is $(door_bound) s"
+  local name=gap-$RUN ref=agent/gap-$RUN tip t0 t1 rc out n first wait maxgap after
+  wait_serving "$SMALL" 900 || { inconc "$SMALL is not serving"; return; }
+  [ "$(gitq "$SMALL" config receive.keepAlive 2>/dev/null)" = 5 ] && ok "PRECONDITION: receive.keepAlive=5 on $SMALL" \
+    || bad "PRECONDITION: receive.keepAlive is '$(gitq "$SMALL" config receive.keepAlive 2>/dev/null)' on $SMALL"
+  tip=$(inpod "/work/build.sh $name $GAP_MB" | tail -1)
+  t0=$(now); out=$(inpod "DOOR=$DOOR NS=$NS /work/pushtrace.sh $name $SMALL $ref pkt-$name curl-$name"); rc=$?; t1=$(now)
+  inpod "cat /work/pkt-$name" > "$WORK/pkt-$name" 2>/dev/null; inpod "cat /work/curl-$name" > "$WORK/curl-$name" 2>/dev/null
+  set -- $(gap_stats "$WORK/pkt-$name" "$WORK/curl-$name"); n=${1:-0}; first=${2:-?}; wait=${3:-0}; maxgap=${4:-0}
+  after=$(snap_ref "$SMALL" "$ref")
+  [ "$rc" = 0 ] && [ "$after" = "$tip" ] && ok "push of ${GAP_MB} MiB acknowledged in $(( t1 - t0 )) s, and the bucket holds it" \
+    || bad "push rc=$rc, bucket $after (want $tip): $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+  note "$n packet(s) reached the client after the pack left the wire: the first ${first} s after it, the report ${wait} s after it, the longest gap ${maxgap} s"
+  if [ "$n" = 0 ] || [ "$first" = "?" ]; then inconc "no packet trace to judge (n=$n): GIT_TRACE_PACKET/GIT_TRACE_CURL wrote nothing usable"
+  elif [ "${wait%.*}" -lt "$GAP_MIN_WAIT" ]; then inconc "the wait after the upload (${wait} s) is under ${GAP_MIN_WAIT} s: too few keepalives to judge — raise GAP_MB"
+  elif python3 -c "import sys; sys.exit(0 if float('$maxgap') <= $GAP_MAX else 1)"; then ok "every gap ≤ ${GAP_MAX} s across a ${wait} s wait ($n packets): the keepalives cross the front as they are sent"
+  else bad "a gap of ${maxgap} s inside a ${wait} s wait ($n packets, the first after ${first} s): the front held the keepalives (run 3 finding 2's class)"; fi
 }
 
 # ── run ──────────────────────────────────────────────────────────────
