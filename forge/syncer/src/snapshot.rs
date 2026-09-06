@@ -174,6 +174,17 @@ pub async fn cas(
 /// It is needed ONLY for the unreleased-foreign takeover. A released
 /// cell is a clean handoff and self-recognition means our own previous
 /// container died with its writes, so rotating there is pure churn.
+///
+/// A repository nobody has published yet is rotated too, by CREATING
+/// its empty snapshot under `If-None-Match: *`. The first shape
+/// returned early here ("the first batch's If-None-Match is the fence"),
+/// and `formal/ForgeSync.tla`'s first strict run found what that fence
+/// actually fences: a straggler mid-batch on the old epoch lands its
+/// create after the successor has restored and is serving, and it is
+/// then the SUCCESSOR's first CAS that 412s — fenced by its own
+/// predecessor's push. No loss (the restart restores that push), but
+/// the rotation exists precisely so a straggler cannot fence its
+/// successor, and a create is the rotation of an absent snapshot.
 pub async fn rotate_for_takeover(
     store: &dyn ObjectStore,
     cfg: &ForgeConfig,
@@ -181,11 +192,6 @@ pub async fn rotate_for_takeover(
     writer: &str,
 ) -> ForgeResult<Cell> {
     let cell = load(store, cfg).await?;
-    if cell.etag.is_none() {
-        // Nothing to rotate: no predecessor ever published. The first
-        // batch's `If-None-Match: *` is the fence for this case.
-        return Ok(cell);
-    }
     let next = cell.snap.clone();
     match cas(store, cfg, &cell, next, epoch, writer).await {
         Ok(c) => Ok(c),

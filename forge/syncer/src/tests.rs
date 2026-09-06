@@ -711,6 +711,115 @@ async fn a_successor_rotates_and_the_straggler_fences_on_its_next_batch() {
     assert!(matches!(err, ForgeError::Fenced(_)), "{err:?}");
 }
 
+/// Falsifier 4 on a repository nobody has published: the successor's
+/// rotation CREATES the empty snapshot, so the straggler's first CAS
+/// (`If-None-Match: *`, from a belief that no snapshot exists) 412s
+/// into the fence. Before this the rotation returned early here, and
+/// `formal/ForgeSync.tla`'s first strict run found the straggler's
+/// create landing after the successor served — and the successor's own
+/// first CAS then fencing the successor. The control is that early
+/// return: with it, the straggler's batch below LANDS.
+#[tokio::test]
+async fn a_successor_of_an_unpublished_repository_creates_the_snapshot_it_rotates() {
+    let mut a = Rig::new().await;
+    a.start().await;
+    assert!(a.sc.cell().unwrap().etag.is_none(), "nothing published yet");
+    // The straggler's push is staged but its batch has not run.
+    let c1 = a.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+
+    let mut b = Rig::with_store(a.store.clone(), "b").await;
+    let mut claimed = false;
+    for _ in 0..(lease::QUIET_POLLS + 4) {
+        if let lease::ClaimOutcome::Claimed(_) = lease::claim_step(&mut b.sc).await.unwrap() {
+            claimed = true;
+            break;
+        }
+    }
+    assert!(claimed);
+    let created = b.sc.cell().unwrap().clone();
+    assert!(created.etag.is_some(), "the takeover must create the snapshot it could not rotate");
+    assert!(created.snap.refs.is_empty() && created.snap.packs.is_empty());
+    restore::restore(&mut b.sc).await.expect("the successor restores an empty repository");
+
+    let err = batch::run_batch(
+        &mut a.sc,
+        vec![push(1, vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: zero(),
+            new_oid: c1,
+        }])],
+        &Policy::default(),
+    )
+    .await
+    .expect_err("the straggler's If-None-Match create must not land over the successor");
+    assert!(matches!(err, ForgeError::Fenced(_)), "{err:?}");
+    // And the successor's first push lands: its belief is the cell it created.
+    let c2 = b.stage_commit(None, &[("b.txt", "two\n")], "successor").await;
+    let reports = b
+        .run(vec![push(2, vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: zero(),
+            new_oid: c2.clone(),
+        }])])
+        .await;
+    assert!(is_ok(&reports[0].results[0]), "{:?}", reports[0].results[0]);
+    let cell = snapshot::load(b.store.as_ref(), &b.sc.cfg).await.unwrap();
+    assert_eq!(cell.snap.oid("refs/heads/main"), Some(c2.as_str()));
+}
+
+/// Falsifier 4 across a successor's own restart: b's takeover CAS
+/// landed and b died before its rotation (the two are separate store
+/// requests). b's restart self-recognizes — and must rotate, because
+/// the straggler a still holds a valid `If-Match` from the epoch before
+/// b's. Self-recognition once skipped the rotation ("our own previous
+/// process died with its writes"), and `formal/ForgeSync.tla`'s second
+/// strict run found this restart letting a's batch land after b served.
+/// The control is that skip: with it, a's batch below lands.
+#[tokio::test]
+async fn a_restarted_successor_rotates_before_it_serves() {
+    let mut a = Rig::new().await;
+    a.start().await;
+    let c1 = a.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    a.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: c1.clone(),
+    }])])
+    .await;
+    let seq_before = a.sc.cell().unwrap().snap.seq;
+    // a's next push is staged; its batch has not run.
+    let c2 = a.stage_commit(Some(&c1), &[("a.txt", "two\n")], "second").await;
+
+    // b's takeover CAS, by hand, WITHOUT the rotation that follows it
+    // in claim_step: this is b dying between the two requests.
+    let key = a.sc.cfg.epoch_key();
+    let state = a.store.epoch_read(&key).await.unwrap().expect("a holds");
+    a.store.epoch_acquire(&key, "forge-test-b", Some(&state)).await.expect("b's takeover");
+
+    // b comes back with its persisted id and self-recognizes.
+    let mut b = Rig::with_store(a.store.clone(), "b").await;
+    let outcome = lease::claim_step(&mut b.sc).await.unwrap();
+    assert!(matches!(outcome, lease::ClaimOutcome::Claimed(_)), "self-recognition is immediate");
+    assert!(
+        b.sc.cell().unwrap().snap.seq > seq_before,
+        "a restarted successor must rotate: its previous incarnation may not have"
+    );
+    restore::restore(&mut b.sc).await.expect("restore");
+
+    let err = batch::run_batch(
+        &mut a.sc,
+        vec![push(2, vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: c1,
+            new_oid: c2,
+        }])],
+        &Policy::default(),
+    )
+    .await
+    .expect_err("the straggler must not land after the restarted successor served");
+    assert!(matches!(err, ForgeError::Fenced(_)), "{err:?}");
+}
+
 /// A 412 on the renew whose cell still names us at our own epoch is a
 /// lost response, not a deposal. Fencing on it once made a live lean
 /// sidecar go silent for the rest of its tenant's life.

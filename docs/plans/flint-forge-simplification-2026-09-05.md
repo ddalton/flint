@@ -390,8 +390,18 @@ exist. Do not delete either. What can be simpler:
 5. X7 and X8 in the operator; X6 and X9 decided on the wire.
 6. C2 only when the poll count is the operator's cost.
 
-What the formal model must carry from this note: the snapshot may name
+The formal model exists now: `formal/ForgeSync.tla`, eight runs in
+`scripts/check-tla.sh` (strict, liveness, five mutations, one
+required-fail probe). Its first two strict runs refuted the module
+against the code — X11 and X12 above — and both were fixed the same
+day; the liveness run's first two executions refuted the model itself
+(a queued push left waiting by a clean release, where the process's
+exit closes every hook socket; a `NoSuchUpload` exit budgeted as a
+crash), fixed in the module with no code change. What it carries from
+this note: the snapshot may name
 a pack the bucket holds without its index (the listing is an
 observation that can lie, exactly the class `feedback_model_the_observation`
 records); a push may be told failed and land anyway (run 3, finding 3);
 a rollout is a crash at 30 s from the batch's point of view.
+| X11 | a takeover of a repository nobody has published skipped the snapshot rotation ("the first CAS's If-None-Match is the fence"); a straggler mid-batch on the old epoch lands its create after the successor serves, and the successor's own first CAS is what 412s | the successor is fenced by its predecessor's push (no loss: the restart restores it) | **fixed**: the rotation creates the empty snapshot; found by `formal/ForgeSync.tla`'s first strict run; test with control |
+| X12 | a successor that died between its takeover CAS and its rotation restarts through self-recognition, which skipped the rotation ("our own previous process died with its writes"); the straggler from the epoch before still holds a valid If-Match | same class as X11, one crash later | **fixed**: every claim but a released cell's rotates; the model's second strict run; test with control |

@@ -296,10 +296,20 @@ push and retries into a ref already at the new oid.
 **Start.** Claim (`git/claim`; refuse a foreign `projectId`, lean's
 rule). Acquire the lease: a clean release claims at once; after a
 crash, wait out the quiet polls (6 × 10 s). **Rotate the snapshot**
-on an unreleased takeover — `seq + 1`, same content, one small CAS —
-so any straggler's `If-Match` is stale before the successor serves a
-byte; lean's `rotate_for_takeover`, and the mutation `LeanNoRotate`
-is why. Then restore: GET `snapshot`; fetch the listed packs with
+on every claim but a released cell's — `seq + 1`, same content, one
+small CAS; a snapshot that does not exist yet is CREATED empty — so
+any straggler's `If-Match` (or `If-None-Match: *`) is stale before the
+successor serves a byte; lean's `rotate_for_takeover`, and the
+mutation `LeanNoRotate` is why. The two exemptions the first shape
+took — an unpublished repository, and self-recognition ("our own
+previous process died with its writes") — were each refuted by
+`formal/ForgeSync.tla`'s first two strict runs on 2026-09-05: the
+first let a straggler's create land after the successor served and
+fence the successor; the second was a successor that died between its
+takeover CAS and its rotation and came back through self-recognition,
+with the straggler from the epoch before still live. Only a released
+cell is exempt, because only a releaser has proven it fenced itself
+before it wrote the mark. Then restore: GET `snapshot`; fetch the listed packs with
 their `.idx`/`.bitmap`/`.rev`; write `packed-refs` and `HEAD`; `git
 fsck --connectivity-only`; open the socket; serve. A pack the
 snapshot names and the bucket lacks is refused loudly — but first
@@ -1010,6 +1020,25 @@ do not need to be.
 
 
 ## 14. Phases
+**Machine-checked (2026-09-05): `formal/ForgeSync.tla`**, eight runs
+in `scripts/check-tla.sh`. The push path at store-request granularity
+with a crash between any two steps, the progress-gated renewer with
+its sensor kept distinct from real movement, a challenger, a
+successor's claim/rotation/sweep/restore, git's index-last quarantine
+migration, and a client that can hang up. Theorems: told ok ⇒ the ref
+landed and the pack is complete with its index; every landed pack is
+complete; the renewer never skips a heartbeat over a moving holder; no
+CAS lands from a deposed syncer after its successor restored; a
+restore never refuses. Mutations: falsifier 1's early ack, the X1
+index gate, run 3's silent checksum pass, the rotation, and §4's
+ordering reversed; the told-failed-but-durable transition (run 3) is
+a required-fail probe. The module's first two strict runs refuted the
+code on the rotation (above, §5) and the code moved; the liveness
+run's first two executions refuted the module — a clean release left
+a queued push waiting for ever, where the process's exit closes every
+hook socket; a `NoSuchUpload` exit drawn from the crash budget — and
+the module moved, the code not. The strict run: 2776804 distinct states to depth 52 under a token-rank view and syncer/push symmetry; the liveness run 247,117.
+
 
 0. **Measure before building.** (a) Forgejo on a lite share, on kind:
    clone/push latency, git-over-NFS behaviour — the buy control. (b)

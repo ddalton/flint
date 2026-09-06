@@ -110,12 +110,18 @@ pub async fn claim_step(sc: &mut Syncer) -> ForgeResult<ClaimOutcome> {
             let ours = state.holder_id == inc.holder_id;
             let quiet = inc.last_token.as_deref() == Some(state.token.as_str());
             if ours || state.released || (quiet && inc.quiet_polls + 1 >= QUIET_POLLS) {
-                // Rotation is for the unreleased-foreign takeover
-                // alone: a possibly-live straggler may still hold a
-                // valid `If-Match` on the snapshot. A released cell is
-                // a clean handoff, and self-recognition means our own
-                // previous process died with its writes.
-                let rotate = !ours && !state.released;
+                // Rotation is for every claim but a released cell's: a
+                // possibly-live straggler may still hold a valid
+                // `If-Match` on the snapshot. A released cell is a
+                // clean handoff — its holder fenced itself before it
+                // wrote the mark. Self-recognition is NOT exempt: the
+                // incarnation of ours that died may have been a
+                // successor that died between its takeover and its
+                // rotation, with the straggler from the epoch before
+                // still live (`formal/ForgeSync.tla`'s second strict
+                // counterexample). The first shape rotated on the
+                // foreign takeover alone.
+                let rotate = !state.released;
                 match sc.store.epoch_acquire(&key, &inc.holder_id, Some(&state)).await {
                     Ok(lease) => {
                         if rotate {

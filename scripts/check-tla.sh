@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Two hundred and nineteen runs, ALL required.
+# Two hundred and twenty-seven runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -19,10 +19,10 @@
 #
 #   71 FlintReplication    33 FlintComposition    15 FlintExtents
 #   15 FlintClientIdentity   11 FlintExtentsProbe   11 FlintDelegRecall
-#   12 FlintCsiMount        8 FlintTierEpoch       7 FlintTruncate
-#    7 FlintShareDisk       7 FlintTierMarker      7 FlintTierSession
-#    5 FlintAdmission       4 FlintSnapshots       3 FlintA2Probe
-#    3 FlintClaims)
+#   12 FlintCsiMount        8 FlintTierEpoch       8 ForgeSync
+#    7 FlintTruncate        7 FlintShareDisk       7 FlintTierMarker
+#    7 FlintTierSession     5 FlintAdmission       4 FlintSnapshots
+#    3 FlintA2Probe         3 FlintClaims)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -41,6 +41,14 @@
 # claim/sweep/heartbeat/publish over the bucket's CAS cell; model AFTER
 # code AFTER the chaos drills); documented at the bottom of this file,
 # next to its runs.
+#
+# ForgeSync.tla — flint forge's push path (hook -> batch -> pack upload ->
+# ONE snapshot CAS -> ref update -> ack) beside the lease's progress-gated
+# renewer, a challenger, and a successor's claim/rotation/sweep/restore;
+# model AFTER code AFTER the runbw/runbx scale drills. Its first two
+# strict runs each found a code gap in the takeover rotation (fixed the
+# same day, with tests); documented at the bottom of this file, next to
+# its runs.
 #
 # FlintTierMarker.tla — the flint-lite eviction-marker visibility
 # protocol (evict/hydrate/read/crash over one file; chaos bugs 3+4 as
@@ -1105,6 +1113,53 @@ mutation_run FlintTierEpoch FlintTierEpochNoStampCheck.cfg "tier-epoch stamp-che
 # vacuous and the code's drain -> flush -> fence -> release ordering is
 # unmodelled.
 mutation_run FlintTierEpoch FlintTierEpochReleaseBeforeFence.cfg "tier-epoch release-order mutation (FenceBeforeRelease=FALSE: the released mark invites a successor while the outgoing reign can still publish)" "Inv_NoPostReleaseLand"
+
+# ── ForgeSync.tla — flint forge's push path and its lease ──────────────
+# Model-after-code-after-drill: the syncer shipped (forge/syncer), the
+# runbw drill opened the §5 takeover window on the wire and the runbx
+# campaign confirmed the fixes, THEN this module enumerated what the
+# drills sample. Two syncers, two pushes, the batch decomposed at
+# store-request granularity (judge, renew, hash, multipart init and
+# complete, the snapshot CAS, update-ref, the report), a client that can
+# hang up, git's .idx-last quarantine migration, and the renewer's
+# progress SENSOR kept distinct from real movement. Theorems: told ok
+# => the ref landed and the pack is complete WITH its index; every
+# landed pack is complete; the renewer never skips a heartbeat over a
+# moving holder (the sensor is honest); no CAS lands from a deposed
+# syncer after its successor restored; a restore never refuses. The
+# first two strict runs each refuted the module against the CODE and
+# the code was fixed: (1) a takeover of a repository nobody had
+# published skipped the rotation, so a straggler's If-None-Match:*
+# create landed after the successor served and fenced it — the
+# rotation now CREATES the empty snapshot; (2) a successor that died
+# between its takeover CAS and its rotation restarted through
+# self-recognition, which skipped the rotation — every claim but a
+# released cell's rotates now. Both are unit tests with controls
+# (forge/syncer/src/tests.rs). The liveness run's first two executions
+# refuted the MODULE, not the code: a clean release left a queued push
+# "sent" for ever, where the process's exit closes every hook socket
+# (Fall fails every push waiting on the syncer now); and the
+# NoSuchUpload exit after a sweep drew on the crash budget, so with
+# the budget spent a deposed holder's batch could neither finish nor
+# fall. The mutations are the drill and
+# exploration findings kept as regression tests: EarlyAck (option B1),
+# NoIdxGate (X1), NoTickOnHash (run 3 finding 1), NoRotate, and the
+# reversed §4 ordering; the ProbeToldFailed run is a required-fail
+# RESIDUAL — the client hangs up and the push lands anyway (run 3
+# finding 3), which the retry converges on. Documented non-run: the
+# claim-time sweep (SweepAtClaim=FALSE cannot lose — a straggler's
+# completed pack is content-named and unnamed; the sweep is cost, not
+# integrity). The scheduling axiom PollsNoFasterThanHeartbeat is the
+# module's one quantitative assumption (the challenger's polls and the
+# holder's heartbeats share a period), stated in the header.
+strict_run ForgeSync ForgeSync.cfg "forge-sync strict breadth (index gate, ticking hash, rotation on every claim, ack after CAS, packs before CAS: told ok => durable, landed packs complete, the sensor honest, no straggler after a restore, always restorable)"
+strict_run ForgeSync ForgeSyncLive.cfg "forge-sync liveness depth (a watch over a crashed holder resolves; a push that reached a serving syncer is answered one way or the other — the process falling out from under its hooks is an answer)"
+mutation_run ForgeSync ForgeSyncEarlyAck.cfg "forge-sync early-ack mutation (AckAfterCas=FALSE, simplification option B1: the client holds ok for a push the bucket never saw)" "Inv_AckedIsDurable"
+mutation_run ForgeSync ForgeSyncNoIdxGate.cfg "forge-sync index-gate mutation (IdxGate=FALSE, X1: a neighbour's pack listed before its .idx is named without it, and its push lands into a pack git cannot see)" "Inv_LandedPackComplete"
+mutation_run ForgeSync ForgeSyncNoTickOnHash.cfg "forge-sync sensor mutation (TickOnHash=FALSE, run 3 finding 1: the checksum pass moves and ticks nothing, the renewer skips over a moving holder)" "Inv_NoSkipOverMovement"
+mutation_run ForgeSync ForgeSyncNoRotate.cfg "forge-sync rotation mutation (RotateOnTakeover=FALSE: the straggler's If-Match outlives the successor's restore and its batch lands)" "Inv_NoStragglerLandAfterRestore"
+mutation_run ForgeSync ForgeSyncCasBeforePacks.cfg "forge-sync ordering mutation (PacksBeforeCas=FALSE, design §4 reversed: a crash between the CAS and the upload leaves the snapshot naming a pack the bucket lacks)" "Inv_LandedPackComplete"
+mutation_run ForgeSync ForgeSyncProbeToldFailed.cfg "forge-sync told-failed probe (RESIDUAL required-fail: the client hangs up before the report and the push lands anyway — run 3 finding 3 on the wire)" "Inv_NoToldFailedButDurable"
 
 # ── FlintTierMarker.tla — the eviction-marker visibility protocol ──────
 # Two of the chaos campaign's six drill-found bugs were interleaving
