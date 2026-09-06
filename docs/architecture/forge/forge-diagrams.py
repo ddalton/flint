@@ -432,7 +432,7 @@ def plate_04():
             ("b", "Nothing pins a straggler's writes: its packs are content-named and unnamed by any snapshot, so a straggler that completes an upload after the sweep leaves an object the next sweep removes — hygiene, not integrity, which is why no mutation run exists for the sweep."),
             "In-flight multipart parts are billed until aborted: one interrupted 2 GiB push left 384 MiB of parts on runbw. The sweep runs at the claim and between batches, with no grace, because at those two moments nothing of ours is in flight."], FE)
     s.card(M + 2 * (cw + GAP), y1, cw, 316, "How the lease relates to the other two planes",
-           ["The lease cell is coordination — the control plane — and the fence it produces is what the durable path relies on: a syncer that cannot renew cannot know it still holds the repository, so it stops acknowledging AND stops serving reads. Pushes fail while S3 is unreachable; clones keep working until the lease would have lapsed.",
+           ["The lease cell is coordination — the control plane — and the fence it produces is what the durable path relies on: a 412 on any CAS of ours stops acknowledging AND stops serving reads. Pushes fail while S3 is unreachable; clones keep working for as long as the outage lasts, because the holder has no term of its own — a renewal that errors without a 412 is not judged (X13, found by the Continuity comparison).",
             "The operator does not read the cell. It takes the pod's word for its phase through /status; restart is not an operator decision — a fence exits 1, a refusal exits 78, and the kubelet restarts the pod.",
             ("b", "Two servers for one repository is not a state the Deployment (Recreate) creates on its own; it takes a roll against a wedged pod, a lost node whose pod is still counted, or a hand. Every such case ends with the straggler's next CAS 412ing."),
             ("r", "Open: X6 — a rollout during a long push SIGKILLs the batch at 30 s (measured, run 7: told failed, cleanly, the push lost); whether a roll should wait for the batch is the decision.")], FE)
@@ -590,7 +590,7 @@ def plate_07():
           [("b", "content-named packs in S3 plus ONE CAS'd snapshot; nothing else is trusted")]]),
         ("what serves git", None,
          [["stock git per replica, behind a proxy"], ["stock git inside Gitaly, over gRPC"], ["proprietary"],
-          ["JGit, in Java, on a DFS abstraction"], ["stock git on disk (Continuity); a Rust smart-protocol reimplementation (walgit)"],
+          ["JGit, in Java, on a DFS abstraction"], ["stock git on disk (Continuity); walgit: its own receive-pack in Rust, stock git for upload-pack, repack and bundles"],
           [("b", "stock git — receive-pack, upload-pack, hooks — behind a 382-line CGI runner; flint writes no git internals")]]),
         ("the write, and the ack", None,
          [["a git transaction on ≥ 2 of 3 replicas by three-phase commit; ok after that"],
@@ -615,7 +615,7 @@ def plate_07():
           [("b", "the pod's own ServiceAccount token, by TokenReview; consumers and a branch policy per principal, enforced twice; merge is a push")]]),
         ("verification", None,
          [["production at GitHub scale"], ["production at GitLab scale"], ["production since 2015"], ["production at Palantir"],
-          ["production at Cursor; walgit open source, ~2.4k stars"],
+          ["production at Cursor; walgit: a seeded fault-injection simulation (crash, partition, stale, lost response), ~2.4k stars"],
           [("b", "a TLA+ model with mutations, eleven falsifiers, three campaigns on real S3, a control arm — and no production")]]),
     ]
     bottom = s.table(M, 22, colw, header, rows, 190)

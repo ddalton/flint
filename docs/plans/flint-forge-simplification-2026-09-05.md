@@ -415,6 +415,25 @@ exist. Do not delete either. What can be simpler:
 | X10 | two image tags nothing checks against each other; git floor asserted on the wrong image | the published-artifact drill's class | **done** by D1: one `server.tag` in the chart, the operator warns on two tags, the git image asserts the floor at build |
 | X11 | a takeover of a repository nobody has published skipped the snapshot rotation ("the first CAS's If-None-Match is the fence"); a straggler mid-batch on the old epoch lands its create after the successor serves, and the successor's own first CAS is what 412s | the successor is fenced by its predecessor's push (no loss: the restart restores it) | **fixed**: the rotation creates the empty snapshot; found by `formal/ForgeSync.tla`'s first strict run; test with control |
 | X12 | a successor that died between its takeover CAS and its rotation restarts through self-recognition, which skipped the rotation ("our own previous process died with its writes"); the straggler from the epoch before still holds a valid If-Match | same class as X11, one crash later | **fixed**: every claim but a released cell's rotates; the model's second strict run; test with control |
+| X13 | **the holder has no lease term of its own.** A renewal that fails with anything but a 412 is "keep serving reads, keep trying" (`lease.rs`, since `1674f561`), and nothing in the syncer or the operator reads `lastRenewUnix`; a holder cut off from S3 while a challenger is not is deposed after six quiet polls and serves stale refs until it reaches S3 again and sees the 412. Falsifier 11's third leg ("the server then exits") passed on 2026-09-04 because its second leg pushed: any batch error exits the serving loop, the restart's claim failed against the dead S3, and the crash loop read as standing down — with no push, the server serves for as long as the outage lasts | stale reads from a deposed holder under an asymmetric partition; the design's failure-model row and falsifier 11 described a mechanism the code never had (both corrected 2026-09-05) | open — found by the Continuity comparison (every read there is verified against S3). Fix: after `QUIET_POLLS` heartbeats without a successful renewal, `/healthz` answers 503 and reads stop until a renewal succeeds — the process stays up, a blip costs no restore, and a 412 then is the fence as now. Acceptance: f11's stand-down leg run BEFORE its push leg, which fails today |
+| X14 | **the door's wake bound is a constant and a restore is proportional to the repository.** 180 s at the door; the restore fetches every pack, then installs refs, then runs fsck, then reports serving; a challenger restores only after it claims, and `Recreate` hands the successor a fresh emptyDir | the 40 GiB drill repository restores in 139 s from the delete; the design's own arithmetic for a wake after an unclean death — 60 s of quiet polls plus that restore — is 199 s against 180 s, and git clients do not retry the 503; every roll is a full restore of unavailability | open — refs served from the snapshot before the packs land (walgit's refs level) and a waiting challenger that fetches the snapshot's packs before it claims turn both into O(delta); until then derive the bound from the snapshot's pack bytes rather than fixing it |
+| X15 | **no undo.** The snapshot is replaced in place, versioning is OFF (design §3), the bare repository has no reflog and lives in an emptyDir; `repack -a -d` drops unreachable objects and the sweep deletes the old packs after the grace | a force-push or a bad merge is unrecoverable at the storage layer within at most `repack_threshold` (24) pushes; Continuity keeps every state, walgit retains superseded packs for a provenance window | open — cheapest shape: one immutable `snapshot.<seq>` copy beside the pointer per batch (a log entry, which also makes a stale reader's catch-up O(delta) instead of a restore), the sweep's reference set extended to the retained copies, repack keeping unreachable objects for the same window |
+| X16 | **a transient store error inside a batch is a restart.** Before the CAS the batch retries nothing: every push in it is told `ng`, `run_and_report`'s error exits the serving loop, the pod restarts, re-claims, rotates, reconciles the cache (cheap — the emptyDir survives a container restart) and runs `fsck --connectivity-only` (not cheap on a large repository) | one S3 500 costs a restart, an fsck and every queued push | open — retry the batch under the writer lock with jittered backoff while the CAS has not been attempted; packs are immutable and content-named, so a repeated upload is idempotent |
+| X17 | **the upload starts when `proc-receive` runs**, after quarantine migration, so a large push pays transfer then upload in series where Continuity writes the packfile to disk and S3 at once | large-push latency; the split on the 40 GiB run (1113 s) was never measured | open — measure first |
+| X18 | **compaction has no tiers.** Past `repack_threshold` a full `repack -a -d -b` re-uploads the whole repository (measured `22807f9b`) | cost proportional to the repository every 24 pushes | open — the recorded geometric item; the neighbours name the shape: push packs, geometric folds under a lease, a base rebuilt rarely with its bitmap |
+| X19 | **the snapshot carries a map of every ref** and is rewritten by every batch | at 466 k refs (walgit's reference monorepo) tens of MB per CAS and per restore; under 1 MB at agent-fleet ref counts | open — only for the monorepo case |
+| X20 | **`batch_window_ms` (400) is a fixed wait** from the first push of a batch | every solitary push waits the window; pushes arriving during a batch already queue naturally on the channel | open — batch only what arrives while a batch is in flight |
+| X21 | **connectivity is proved at restore only**; nothing audits the snapshot against the bucket while serving | a lifecycle rule or a hand delete in the bucket is found at the next wake, by a refusal | open — a periodic HEAD of every named pack, sized, is one round per pack |
+| X22 | **one pod and ~5 Kubernetes objects per repository**; Continuity serves millions of tiny repositories with one replica each and no per-repository control-plane object | the fleet case the design records as trigger (b) for N:1 | recorded in design §2; the server is multi-repo-capable by construction |
+
+X13–X22 were found on 2026-09-05 by reading Cursor's Continuity
+(2026-08-18) and walgit's design documents against the code, for page 7
+of `docs/architecture/forge/`. None is a data-loss class: X13 is a
+consistency defect the design claimed not to have, X14–X16 are
+availability and recoverability, the rest are cost and scale. Three of
+them are the neighbours' own answers and would be built as one wave if
+forge keeps its place on the wire against walgit (§9): X15's log entry
+per batch, X14's refs-first serving, X18's tiers.
 
 ## 8. Order
 
@@ -428,6 +447,12 @@ exist. Do not delete either. What can be simpler:
    leg it must).
 5. X7 and X8 in the operator; X6 and X9 decided on the wire.
 6. C2 only when the poll count is the operator's cost.
+7. From the prior-art comparison (2026-09-05): X13 first — a term on
+   the holder's clock, symmetric with the challenger's; lines, not a
+   design — then, only after the walgit control arm has run (§9), X15
+   (the log entry), X14 (refs first) and X18 (tiers) as one wave; X16
+   as a small design; X17 measured before anything is built; X19–X22
+   recorded, not scheduled.
 
 The formal model exists now: `formal/ForgeSync.tla`, eight runs in
 `scripts/check-tla.sh` (strict, liveness, five mutations, one
@@ -442,3 +467,76 @@ a pack the bucket holds without its index (the listing is an
 observation that can lie, exactly the class `feedback_model_the_observation`
 records); a push may be told failed and land anyway (run 3, finding 3);
 a rollout is a crash at 30 s from the batch's point of view.
+
+## 9. The walgit control arm — PLAN, 2026-09-05, not run
+
+The architecture document's last page ends with "the next honest
+comparison is walgit on the scale rig, push for push". This section is
+that comparison, pre-registered: the arms, the legs, the metric and
+the pass rule of each, and the verdict rule, written before anything
+runs so the result cannot be read to taste. Nothing here provisions;
+phase 1 waits for a go with its cost in front of it.
+
+**The question.** If walgit wins every leg forge passes, then "walgit
+behind the door, with the export as a reader of its log" is a real
+alternative and is written into the design as the decision it would
+be, with its costs (a second store trait and protobuf formats in the
+bucket, a pre-1.0 single-author dependency with no compatibility
+promise, the door as a shim in front of `X-Walgit-Principal`, no pod
+identity). If it does not, forge's core has earned its place on the
+wire, which no document can settle, and X15, X14 and X18 are built as
+one wave with the neighbours' shapes.
+
+**The arms differ only in the server.** Forge is HEAD's runner image.
+walgit is `tobi/walgit` at a pinned commit, built from its
+`Containerfile` (no published image; node 24 + rust 1.97 + protobuf;
+git ≥ 2.47 inside), configured with the S3 backend on the same bucket
+under its own prefix, `[placement] serve/maintain` = everything,
+`server.auth.mode = "token"`, `cache.mode = "disk"` on the same
+NVMe-backed emptyDir, `bundles.require = false`, `wal.batch_window`
+set to forge's 400 ms (one run at 0 for both if P1 shows the window),
+compaction at its defaults. Both are reached DIRECTLY by the same
+agent pod and the same stock git: the door cannot front walgit (it
+routes to FlintRepo Services and sets `X-Remote-User`), so forge's arm
+sets `X-Remote-User` from the client, which the rights drill showed is
+what reaching the port already means, and walgit's sends its bearer.
+The door's bounds are absent from both arms; S8 is not run.
+
+**Legs, each with its metric and its rule.**
+
+| leg | what | metric | rule |
+|---|---|---|---|
+| P1 | push latency at 1 KiB, 64 MiB, 1 GiB, 10 GiB; 5 reps, arms interleaved per rep | wall to `ok` | within the rep-to-rep spread |
+| P2 | push rate: 32 agents pushing 4 KiB commits to distinct branches for 60 s | acknowledged pushes/s; S3 requests per push (CloudWatch request metrics per prefix) | the number forge has never measured; recorded either way |
+| P3 | acknowledged means durable: S4's shape, the kill placed inside the multipart upload by `list-multipart-uploads` | told ok ⇒ in the bucket, told failed ⇒ unchanged; orphans left | both must hold; orphans counted |
+| P4 | falsifier 2: two pushes to one ref from stale bases | exactly one winner, the loser told stale, nothing acknowledged lost | both must hold |
+| P5 | cold start, the 1 GiB and the 10 GiB repository: forge's pod deleted, walgit's cache dir wiped | time to the first `ls-remote`, time to the first clone | X14's number; walgit claims refs in < 1 s |
+| P6 | a roll mid-push (S7) and a roll idle | unavailability window; the push's fate | recorded |
+| P7 | the read side: S10's 8 concurrent clones, then the 1,000-clone storm with `transfer.bundleURI` on for both (walgit's weekly bundle cut by a maintainer pass first) | peak `upload-pack`s; server egress; wall | within spread on egress |
+| P8 | the party table: a 70 s client stall (S5), five stopped pushes and a sixth request (S6) | acknowledged after the stall; the sixth answered at once | walgit's own bounds are unknown — measured |
+| P9 | repack amplification: 48 pushes of 8 MiB | bytes uploaded per push over the run | X18's number |
+| P10 | S3 outage, f11's shape with the stand-down leg BEFORE the push leg | does the server stop serving reads it cannot verify | forge loses until X13; recorded, not scored |
+| P11 | undo: force-push over a branch, then recover the previous tip | walgit `wal materialize --at-seq`; forge has nothing | forge loses by construction (X15); recorded, not scored |
+
+Excluded, because there is no counterpart: the export, pod identity
+and per-ServiceAccount policy, idle-to-zero and the wake, the web UI.
+
+**The verdict rule.** walgit wins if it passes every P1–P9 leg forge
+passes and beats forge by more than the rep-to-rep spread on P1, P2,
+P5 and P9. A leg walgit loses on a default is re-run once with the
+knob named and the re-run recorded beside the first; a leg that needs
+a code change is a loss. walgit's own goal document says the monorepo
+on a small host is its target and the long tail of tiny repositories
+is served, not tuned for; the plan says so too, and P2 and P5 at 1 GiB
+are where that shows if it does.
+
+**Phase 0 — no cloud, first.** Build walgit's image (the remote x86
+build node, or the Mac with `--platform linux/amd64`), run it in kind
+against the composition rig's MinIO, push and clone with stock git,
+cut a bundle, confirm the S3 backend and token auth. Anything that
+fails here is a finding about walgit's maturity and is recorded as
+such, not as a leg. **Phase 1** is a runby-class cluster (CP + 2
+workers, i4i.xlarge, pure spot), ≈ $2 per campaign plus the build,
+`forge/e2e/scale/` grown by an `ARM=walgit` deploy and the P-legs
+beside the S-legs, results in `results/` with the walgit commit in
+the log's first line. Phase 1 needs a go.

@@ -888,6 +888,19 @@ Also: `flint-forge-chart` can now render the door itself
   the event carries it. Found on EC2 with an ambient mount whose
   platform could not complete the chain.
 
+### Corrected — flint forge documentation
+
+- **The design claimed a self-fence the code never had.** Falsifier 11
+  and the failure-model row in `docs/plans/flint-forge-design.md` said
+  a server that cannot renew its lease exits at the lease TTL; a
+  renewal that errors without a 412 has always been "keep serving
+  reads, keep trying", and falsifier 11's stand-down leg passed only
+  because the push leg before it crashed the process. Recorded as X13
+  in the simplification note with X14–X22, the gaps a reading of
+  Cursor's Continuity and walgit against the code exposed; the
+  architecture document's lease plate and prior-art page corrected
+  (walgit implements receive-pack itself and is verified by a seeded
+  fault simulation, not production).
 
 ## [1.45.0] - 2026-09-04
 

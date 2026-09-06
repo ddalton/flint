@@ -691,7 +691,7 @@ store.
 |---|---|---|
 | syncer crash mid-batch | every push in the batch fails at the client; the pod restarts and restores; retries succeed | §4 ordering; the syncer is the main process |
 | node lost | restore from S3 on the replacement; clones resume | local disk is a cache |
-| S3 unreachable | **pushes fail, clones and fetches keep working** until the lease TTL, then the server self-fences | the syncer refuses to acknowledge; a server that cannot renew cannot know it still holds the repo |
+| S3 unreachable | **pushes fail; clones and fetches keep working for as long as the outage lasts** — the holder has no term of its own (X13 in the simplification note); a push during the outage fails its batch and exits the process, and the restart's claim then fails until S3 returns | the syncer refuses to acknowledge; nothing in the holder judges a renewal that errors without a 412, so it cannot tell "S3 is down" from "S3 is down for me" — corrected 2026-09-05, this row used to claim a self-fence at the lease TTL |
 | door down | all git traffic fails | in the path; N stateless replicas |
 | two servers for one repo | the straggler 412s at its next heartbeat or batch and exits; the successor rotated first | the single-writer fence, lean's models |
 | snapshot names a pack that is gone | re-read the snapshot once; if still gone, refuse to start and name it | fail-closed, lean's `load` rule |
@@ -1023,16 +1023,27 @@ do not need to be.
     holds: every pack object in the bucket is either named by the
     snapshot or younger than the grace. 231 orphans, all within it.
 11. **S3 outage.** Pushes fail with a clear message; clones and fetches
-    succeed until the lease TTL; the server then exits rather than
-    serving what it cannot prove it still holds.
+    keep working. The first draft of this item went on "until the lease
+    TTL; the server then exits rather than serving what it cannot prove
+    it still holds" — **the code has never had that mechanism** (X13 in
+    the simplification note, found 2026-09-05 by reading Continuity's
+    every-read-verified rule against `lease.rs`): a renewal that fails
+    without a 412 is "keep serving reads, keep trying", and nothing
+    reads `lastRenewUnix`.
 
-    **RUN 2026-09-04 on EC2 — GREEN, 4 legs.** With egress to S3 denied
-    (in-cluster traffic and DNS left intact, so the failure is an S3
-    outage and not a DNS one): clones kept serving from local packs; a
-    push was refused with `the repository server is not accepting writes
-    (the syncer closed the connection without a report)`; the server
-    stopped being ready ~20 s later rather than holding a lease it could
-    not renew; and it recovered when S3 returned.
+    **RUN 2026-09-04 on EC2 — GREEN, 4 legs, and the third leg passed
+    for the wrong reason.** With egress to S3 denied (in-cluster
+    traffic and DNS left intact, so the failure is an S3 outage and not
+    a DNS one): clones kept serving from local packs; a push was refused
+    with `the repository server is not accepting writes (the syncer
+    closed the connection without a report)`; the server stopped being
+    ready ~20 s later; and it recovered when S3 returned. The stand-down
+    was the push's doing, not a lease term: any batch error exits the
+    serving loop, the restart's claim failed against the dead S3, and
+    the crash loop is what the leg read as standing down. A server that
+    receives no push during an outage serves for as long as the outage
+    lasts. The leg is kept as it is until X13 is built; X13's acceptance
+    is the stand-down leg run BEFORE the push leg, which fails today.
 12. **Per-principal authorization and the header boundary.** On one
     repository, a reader (in `consumers`, in no push or merge list) and
     a writer (named in `mergeInto`) — the reader refused `main` and

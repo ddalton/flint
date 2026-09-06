@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # FALSIFIER 11 — S3 outage.
 #
-# Pushes fail with a clear message; clones and fetches keep succeeding
-# until the lease can no longer be renewed; the server then EXITS
-# rather than serving a repository it can no longer prove it holds.
+# Pushes fail with a clear message; clones and fetches keep succeeding.
 #
-# The last part is the one worth having. A server that kept serving
-# through an indefinite outage would be a second writer waiting to
-# happen: something else will take the lease once it goes quiet, and
-# two servers that both believe they hold one repository is the state
-# the whole epoch protocol exists to prevent.
+# This header used to go on "until the lease can no longer be renewed;
+# the server then EXITS". The syncer has never had that mechanism (X13
+# in docs/plans/flint-forge-simplification-2026-09-05.md): a renewal
+# that errors without a 412 is "keep serving reads, keep trying". The
+# stand-down leg below passed on 2026-09-04 because the push leg before
+# it crashed the process (any batch error exits the serving loop) and
+# the restart's claim failed against the dead S3. Run the stand-down
+# leg BEFORE the push leg and it fails today; that order is X13's
+# acceptance. Why the stand-down is still worth having: a server that
+# keeps serving through an outage a challenger does not share is a
+# stale reader — a second writer it is not, the rotation fences a
+# straggler's CAS — and stale reads are what X13 closes.
 set -uo pipefail
 NS=${NS:-agents}; REPO=${REPO:-proj}
 DOOR=${DOOR:-http://flint-forge-door.forge-system.svc}
@@ -55,6 +60,8 @@ case "$OUT" in
 esac
 
 echo "── and does the server eventually stand down? ──"
+# VACUOUS on its own: what stands the server down today is the push
+# leg above, not a lease term. See the header and X13.
 GONE=no
 for i in $(seq 1 30); do
   R=$(kubectl get pods -n "$NS" -l chert.us/repo=proj -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="syncer")].restartCount}' 2>/dev/null)

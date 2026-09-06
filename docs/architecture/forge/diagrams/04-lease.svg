@@ -200,18 +200,19 @@
 <path class="f-forge" d="M1078,516 H1569 A7,7 0 0 1 1576,523 V521 H1071 V523 A7,7 0 0 1 1078,516 Z"/>
 <text class="t2 c-forge" x="1087" y="540">How the lease relates to the other two planes</text>
 <text class="t4" x="1087" y="560">The lease cell is coordination — the control plane — and the fence it produces is what the</text>
-<text class="t4" x="1087" y="575">durable path relies on: a syncer that cannot renew cannot know it still holds the repository,</text>
-<text class="t4" x="1087" y="590">so it stops acknowledging AND stops serving reads. Pushes fail while S3 is unreachable;</text>
-<text class="t4" x="1087" y="605">clones keep working until the lease would have lapsed.</text>
-<text class="t4" x="1087" y="620">The operator does not read the cell. It takes the pod's word for its phase through /status;</text>
-<text class="t4" x="1087" y="635">restart is not an operator decision — a fence exits 1, a refusal exits 78, and the kubelet</text>
-<text class="t4" x="1087" y="650">restarts the pod.</text>
-<text class="t4b" x="1087" y="665">Two servers for one repository is not a state the Deployment (Recreate) creates on its</text>
-<text class="t4b" x="1087" y="680">own; it takes a roll against a wedged pod, a lost node whose pod is still counted, or a</text>
-<text class="t4b" x="1087" y="695">hand. Every such case ends with the straggler's next CAS 412ing.</text>
-<text class="t4b c-red" x="1087" y="710">Open: X6 — a rollout during a long push SIGKILLs the batch at 30 s (measured, run 7:</text>
-<text class="t4b c-red" x="1087" y="725">told failed, cleanly, the push lost); whether a roll should wait for the batch is the</text>
-<text class="t4b c-red" x="1087" y="740">decision.</text>
+<text class="t4" x="1087" y="575">durable path relies on: a 412 on any CAS of ours stops acknowledging AND stops serving</text>
+<text class="t4" x="1087" y="590">reads. Pushes fail while S3 is unreachable; clones keep working for as long as the outage</text>
+<text class="t4" x="1087" y="605">lasts, because the holder has no term of its own — a renewal that errors without a 412 is not</text>
+<text class="t4" x="1087" y="620">judged (X13, found by the Continuity comparison).</text>
+<text class="t4" x="1087" y="635">The operator does not read the cell. It takes the pod's word for its phase through /status;</text>
+<text class="t4" x="1087" y="650">restart is not an operator decision — a fence exits 1, a refusal exits 78, and the kubelet</text>
+<text class="t4" x="1087" y="665">restarts the pod.</text>
+<text class="t4b" x="1087" y="680">Two servers for one repository is not a state the Deployment (Recreate) creates on its</text>
+<text class="t4b" x="1087" y="695">own; it takes a roll against a wedged pod, a lost node whose pod is still counted, or a</text>
+<text class="t4b" x="1087" y="710">hand. Every such case ends with the straggler's next CAS 412ing.</text>
+<text class="t4b c-red" x="1087" y="725">Open: X6 — a rollout during a long push SIGKILLs the batch at 30 s (measured, run 7:</text>
+<text class="t4b c-red" x="1087" y="740">told failed, cleanly, the push lost); whether a roll should wait for the batch is the</text>
+<text class="t4b c-red" x="1087" y="755">decision.</text>
 <line class="l-ctl" x1="28" y1="868" x2="54" y2="868" stroke-dasharray="6 5"/>
 <text class="t4" x="60" y="872">control plane</text>
 <line class="l-ink" x1="147.45" y1="868" x2="173.45" y2="868"/>
