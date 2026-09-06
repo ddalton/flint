@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 764" role="img"
      aria-label="One flint-lite hub serving agents in three clusters at once. The wire is identical from each and the hub sees only client names, not clusters. Three things the fleet must supply that the protocol and the chart cannot: a unique client name per node, a reachability boundary drawn outside networkPolicy, and a keepalive so a partitioned cluster is not mistaken for an idle one.">
 <style>
   text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
@@ -147,31 +147,13 @@
 <text class="t4" x="1288" y="562">knows whether work is happening.</text>
 <text class="t4b" x="1288" y="579">suspendWithSessions DEFAULTS to suspending</text>
 <text class="t4b" x="1288" y="594">anyway.</text>
-<rect x="24" y="664" width="1552" height="192" rx="7" class="panel"/>
-<text class="t1" x="46" y="692">The image is unchanged. The operating contract is not.</text>
-<rect x="46" y="708" width="491" height="134" rx="7" class="bx"/>
-<text class="t2" x="62" y="732">Admission uniqueness stops at the cluster edge</text>
-<text class="t4" x="62" y="752">The operator refuses a second share on one prefix from its own cache — CEL and policy</text>
-<text class="t4" x="62" y="767">see one object at a time. Two clusters each admit a share on one prefix and neither sees</text>
-<text class="t4" x="62" y="782">the other; the store-side epoch is the only backstop, and it catches EXACTLY equal</text>
-<text class="t4" x="62" y="797">prefixes.</text>
-<rect x="555" y="708" width="491" height="134" rx="7" class="bx"/>
-<text class="t2" x="571" y="732">Addresses are not arbitrated either</text>
-<text class="t4" x="571" y="752">Two shares may advertise the same address and both report</text>
-<text class="mono" x="571" y="767" xml:space="preserve">Conflict=False (Unique)</text>
-<text class="t4" x="571" y="782">— that condition covers bucket-prefix overlap. A true statement about STORAGE that says</text>
-<text class="t4" x="571" y="797">nothing about addresses.</text>
-<rect x="1063" y="708" width="491" height="134" rx="7" class="bx"/>
-<path class="f-red" d="M1063,715 A7,7 0 0 1 1070,708 H1068 V842 H1070 A7,7 0 0 1 1063,835 Z"/>
-<text class="t2 c-red" x="1079" y="732">The failure mode is silent by construction</text>
-<text class="t4" x="1079" y="752">A colliding client gets NO error. The protocol says it is the same client returning, so the</text>
-<text class="t4" x="1079" y="767">server does exactly the right thing with a false premise, and the loser's state is simply</text>
-<text class="t4" x="1079" y="782">gone.</text>
-<text class="t4b c-red" x="1079" y="797">Six defects in v1.37.0 traced to this one cause.</text>
-<line class="l-ink" x1="28" y1="868" x2="54" y2="868"/>
-<text class="t4" x="60" y="872">data path</text>
-<line class="l-ctl" x1="127.98" y1="868" x2="153.98000000000002" y2="868" stroke-dasharray="6 5"/>
-<text class="t4" x="160" y="872">control</text>
-<rect x="217" y="861" width="5" height="14" rx="2" class="f-red"/>
-<text class="t4" x="229" y="872">hazard / trust boundary</text>
+<rect x="24" y="664" width="1552" height="44" rx="7" class="bx"/>
+<path class="f-red" d="M24,671 A7,7 0 0 1 31,664 H29 V708 H31 A7,7 0 0 1 24,701 Z"/>
+<text class="t4b c-red" x="48" y="691">a colliding client gets NO error: the protocol says it is the same client returning, and the loser's locks and opens are simply gone — six defects in v1.37.0 traced to this one cause.</text>
+<line class="l-ink" x1="28" y1="736" x2="54" y2="736"/>
+<text class="t4" x="60" y="740">data path</text>
+<line class="l-ctl" x1="127.98" y1="736" x2="153.98000000000002" y2="736" stroke-dasharray="6 5"/>
+<text class="t4" x="160" y="740">control</text>
+<rect x="217" y="729" width="5" height="14" rx="2" class="f-red"/>
+<text class="t4" x="229" y="740">hazard / trust boundary</text>
 </svg>

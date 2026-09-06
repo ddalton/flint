@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
-     aria-label="flint-forge: an agent pod runs stock git with a credential helper that presents the pod's projected ServiceAccount token as the Basic password. The door — the lite gateway's git arm — verifies it by TokenReview, checks the repository's consumers and routes to one server pod per repository, where flint's CGI runner and git-http-backend serve the smart protocol and hooks hand every push to one syncer. The syncer batches pushes, uploads packs, CASes one snapshot and only then reports ok; S3 holds a bare repository, a lease, clone bundles, LFS objects and an optional export that is a valid lean workspace.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 642" role="img"
+     aria-label="flint-forge, drawn as a flow: an agent pod's stock git pushes and fetches over smart HTTP through the door, which verifies the pod's ServiceAccount token and routes to one server pod per repository; there gitcgi and git-http-backend serve, hooks hand every push to one syncer, and the syncer uploads packs, CASes one snapshot and only then acknowledges. S3 holds a bare repository. The lease, the operator and the presigned levers are control.">
 <style>
   text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
   .t1{font-size:17.0px;font-weight:600}
@@ -43,186 +43,106 @@
   .cap.on{fill:#ffffff}
 </style>
 <defs><marker id="a-lite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#184f95"/></marker><marker id="a-lean" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1baf7a"/></marker><marker id="a-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker><marker id="a-forge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03060"/></marker><marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker><marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b4232a"/></marker></defs>
-<rect x="24" y="22" width="262" height="236" rx="7" class="bx"/>
-<path class="f-forge" d="M31,22 H279 A7,7 0 0 1 286,29 V27 H24 V29 A7,7 0 0 1 31,22 Z"/>
+<rect x="24" y="22" width="250" height="178" rx="7" class="bx"/>
+<path class="f-forge" d="M31,22 H267 A7,7 0 0 1 274,29 V27 H24 V29 A7,7 0 0 1 31,22 Z"/>
 <text class="t2 c-forge" x="40" y="46">the agent pod — any namespace</text>
-<text class="t4" x="40" y="66">a stock git client; the working tree is local</text>
-<text class="t4" x="40" y="81">disk</text>
-<text class="mono" x="40" y="96" xml:space="preserve">helper: flint-forge-credential</text>
-<text class="t4" x="40" y="111">re-reads the pod's projected ServiceAccount</text>
-<text class="t4" x="40" y="126">token on every call — audience forge.chert.us</text>
-<text class="t4" x="40" y="141">— and presents it as the Basic password</text>
-<text class="t4b" x="40" y="156">no bucket credential, no sidecar, no</text>
-<text class="t4b" x="40" y="171">privilege</text>
-<text class="t4" x="40" y="186">uncommitted work has no RPO: git's contract</text>
-<line class="l-forge" x1="286" y1="130" x2="398" y2="130" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
-<rect x="300" y="105" width="83" height="15" rx="3" class="halo"/>
-<text class="t4b c-forge" x="342" y="116" style="text-anchor:middle">HTTP · Basic</text>
-<text class="t4" x="342" y="152" style="text-anchor:middle">HTTPS is a line in</text>
-<text class="t4" x="342" y="166" style="text-anchor:middle">the diagram: nothing</text>
-<text class="t4" x="342" y="180" style="text-anchor:middle">in-tree terminates it</text>
-<rect x="402" y="22" width="300" height="236" rx="7" class="bx"/>
-<path class="f-forge" d="M409,22 H695 A7,7 0 0 1 702,29 V27 H402 V29 A7,7 0 0 1 409,22 Z"/>
-<text class="t2 c-forge" x="418" y="46">the door — the lite gateway's git arm</text>
-<text class="t4" x="418" y="66">N stateless replicas, no state of their own</text>
-<text class="t4" x="418" y="81">TokenReview per session, cached ≤ 60 s by token</text>
-<text class="t4" x="418" y="96">hash — a refusal is cached, a transport failure is not</text>
-<text class="t4" x="418" y="111">spec.consumers must list the ServiceAccount; a</text>
-<text class="t4" x="418" y="126">credential-less peer gets 401 and is never dialled</text>
-<text class="t4" x="418" y="141">forwards Git-Protocol and X-Remote-User, never</text>
-<text class="t4" x="418" y="156">Authorization; arms the wake, holds a request ≤ 180</text>
-<text class="t4" x="418" y="171">s</text>
-<line class="l-forge" x1="706" y1="130" x2="786" y2="130" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
-<rect x="725" y="105" width="42" height="15" rx="3" class="halo"/>
-<text class="t4b c-forge" x="746" y="116" style="text-anchor:middle">HTTP</text>
-<text class="mono" x="746" y="152" style="text-anchor:middle" xml:space="preserve">X-Remote-User</text>
-<text class="t4" x="746" y="168" style="text-anchor:middle">= the trust</text>
-<text class="t4" x="746" y="182" style="text-anchor:middle">boundary</text>
-<rect x="790" y="22" width="470" height="236" rx="7" class="bx"/>
-<path class="f-forge" d="M797,22 H1253 A7,7 0 0 1 1260,29 V27 H790 V29 A7,7 0 0 1 797,22 Z"/>
-<text class="t2 c-forge" x="808" y="48">one server pod per FlintRepo — headless Service</text>
-<text class="t4" x="808" y="66">emptyDir cache · Recreate · idles to zero</text>
-<line class="hair" x1="808" y1="76" x2="1242" y2="76"/>
-<rect x="808" y="86" width="212" height="170" rx="7" class="bx"/>
-<text class="t2" x="824" y="110">git container</text>
-<text class="mono" x="824" y="130" xml:space="preserve">flint-forge-gitcgi :8080</text>
-<text class="mono" x="824" y="145" xml:space="preserve">http-backend per request</text>
-<text class="t4" x="824" y="160">REMOTE_USER = X-Remote-User;</text>
-<text class="t4" x="824" y="175">hooks pre-receive (names the rule)</text>
-<text class="t4" x="824" y="190">and proc-receive (hands the push to</text>
-<text class="t4" x="824" y="205">the syncer) — the syncer binary</text>
-<text class="t4" x="824" y="220">under the hook names</text>
-<text class="t4b" x="824" y="235">holds no bucket credential</text>
-<rect x="1032" y="86" width="210" height="170" rx="7" class="bx"/>
-<text class="t2" x="1048" y="110">syncer container</text>
-<text class="t4" x="1048" y="130">lock · heartbeat on its own task,</text>
-<text class="t4" x="1048" y="145">gated on progress · the batch · S3</text>
-<text class="t4" x="1048" y="160">sync, four packs at a time · repack</text>
-<text class="t4" x="1048" y="175">· sweep, orphaned uploads too ·</text>
-<text class="t4" x="1048" y="190">export · bundles · LFS · /status</text>
-<text class="t4b" x="1048" y="205">bucket credentials land HERE</text>
-<text class="t4b" x="1048" y="220">only (envFrom)</text>
-<text class="t4b" x="1048" y="235">the only writer of the bucket</text>
-<line class="l-forge" x1="1264" y1="130" x2="1326" y2="130" marker-end="url(#a-forge)"/>
-<rect x="1264" y="105" width="63" height="15" rx="3" class="halo"/>
-<text class="t4b c-forge" x="1295" y="116" style="text-anchor:middle">flint-store</text>
-<text class="t4" x="1295" y="150" style="text-anchor:middle">TLS to S3</text>
-<rect x="1330" y="22" width="246" height="236" rx="7" class="s3"/>
-<text class="t1" x="1348" y="48">S3 — &lt;prefix&gt;/</text>
-<text class="mono" x="1348" y="72" xml:space="preserve">git/objects/pack/*</text>
-<text class="mono mute" x="1348" y="88" xml:space="preserve">  immutable, content-named</text>
-<text class="mono" x="1348" y="103" xml:space="preserve">git/snapshot</text>
-<text class="mono mute" x="1348" y="118" xml:space="preserve">  THE pointer — one CAS</text>
-<text class="mono" x="1348" y="134" xml:space="preserve">git/epoch · git/claim</text>
-<text class="mono mute" x="1348" y="150" xml:space="preserve">  the lease · the owner</text>
-<text class="mono" x="1348" y="165" xml:space="preserve">git/bundles/&lt;oid&gt;</text>
-<text class="mono" x="1348" y="180" xml:space="preserve">lfs/objects/&lt;oid&gt;</text>
-<text class="mono" x="1348" y="196" xml:space="preserve">files/&lt;path&gt;</text>
-<text class="mono mute" x="1348" y="212" xml:space="preserve">  the export = a lean workspace</text>
-<text class="t4" x="1348" y="231">a bare repository: clonable with</text>
-<text class="t4" x="1348" y="245">the server down</text>
-<rect x="24" y="276" width="1552" height="226" rx="7" class="panel"/>
-<text class="t1" x="46" y="304">The push — acknowledged means durable</text>
-<text class="t4" x="46" y="322">receive-pack serialises nothing and, under proc-receive, checks nothing: the syncer re-implements staleness and fast-forward, and batches every push that arrives while one is in flight.</text>
-<rect x="46" y="340" width="240" height="148" rx="7" class="bx"/>
-<circle cx="66" cy="362" r="11" class="f-forge"/>
-<text class="num" x="66" y="366" style="text-anchor:middle">1</text>
-<text class="t2" x="84" y="366">the hook hands the</text>
-<text class="t2" x="84" y="381">commands over</text>
-<text class="t4" x="60" y="408">one process per push; the syncer judges</text>
-<text class="t4" x="60" y="423">them in arrival order against the local</text>
-<text class="t4" x="60" y="438">refs, the snapshot AND its own running</text>
-<text class="t4" x="60" y="453">view; a stale one is ng stale: fetch first</text>
-<line class="l-forge" x1="286" y1="414" x2="300" y2="414" marker-end="url(#a-forge)"/>
-<rect x="300" y="340" width="240" height="148" rx="7" class="bx"/>
-<circle cx="320" cy="362" r="11" class="f-forge"/>
-<text class="num" x="320" y="366" style="text-anchor:middle">2</text>
-<text class="t2" x="338" y="366">policy, twice</text>
-<text class="t4" x="314" y="388">pre-receive names the rule at the edge;</text>
-<text class="t4" x="314" y="403">the syncer enforces the same document,</text>
-<text class="t4" x="314" y="418">so a missing hook does not open the</text>
-<text class="t4" x="314" y="433">repository</text>
-<line class="l-forge" x1="539" y1="414" x2="553" y2="414" marker-end="url(#a-forge)"/>
-<rect x="553" y="340" width="240" height="148" rx="7" class="bx"/>
-<circle cx="573" cy="362" r="11" class="f-forge"/>
-<text class="num" x="573" y="366" style="text-anchor:middle">3</text>
-<text class="t2" x="591" y="366">renew the lease</text>
-<text class="t4" x="567" y="388">a foreign holder ⇒ 412 ⇒ this server</text>
-<text class="t4" x="567" y="403">fences itself: no reads, no writes, exit</text>
-<line class="l-forge" x1="793" y1="414" x2="807" y2="414" marker-end="url(#a-forge)"/>
-<rect x="807" y="340" width="240" height="148" rx="7" class="bx"/>
-<circle cx="827" cy="362" r="11" class="f-forge"/>
-<text class="num" x="827" y="366" style="text-anchor:middle">4</text>
-<text class="t2" x="845" y="366">upload the packs</text>
-<text class="t4" x="821" y="388">unconditional PUT of content-named,</text>
-<text class="t4" x="821" y="403">immutable objects — a merge's loose</text>
-<text class="t4" x="821" y="418">objects are packed first</text>
-<line class="l-forge" x1="1047" y1="414" x2="1061" y2="414" marker-end="url(#a-forge)"/>
-<rect x="1061" y="340" width="240" height="148" rx="7" class="bx"/>
-<circle cx="1081" cy="362" r="11" class="f-forge"/>
-<text class="num" x="1081" y="366" style="text-anchor:middle">5</text>
-<text class="t2" x="1099" y="366">ONE snapshot CAS</text>
-<text class="t4" x="1075" y="388">If-Match on the etag: thirty refs move as</text>
-<text class="t4" x="1075" y="403">one object, and a reader never sees half a</text>
-<text class="t4" x="1075" y="418">batch</text>
-<line class="l-forge" x1="1300" y1="414" x2="1314" y2="414" marker-end="url(#a-forge)"/>
-<rect x="1314" y="340" width="240" height="148" rx="7" class="bx"/>
-<circle cx="1334" cy="362" r="11" class="f-forge"/>
-<text class="num" x="1334" y="366" style="text-anchor:middle">6</text>
-<text class="t2" x="1352" y="366">the ref transaction, then the</text>
-<text class="t2" x="1352" y="381">report</text>
-<text class="t4" x="1328" y="408">update-ref --stdin applies locally; only</text>
-<text class="t4" x="1328" y="423">THEN ok or ng per ref. A crash before</text>
-<text class="t4" x="1328" y="438">this fails every push at the client and the</text>
-<text class="t4" x="1328" y="453">restart restores from the snapshot</text>
-<text class="t4" x="46" y="496"></text>
-<rect x="24" y="520" width="505" height="192" rx="7" class="bx"/>
-<path class="f-forge" d="M31,520 H522 A7,7 0 0 1 529,527 V525 H24 V527 A7,7 0 0 1 31,520 Z"/>
-<text class="t2 c-forge" x="40" y="544">Idle to zero — one rung, and a wake the door holds</text>
-<text class="t4" x="40" y="564">idle for suspendAfterSecs ⇒ replicas 0 and the emptyDir is gone, so a parked repository costs</text>
-<text class="t4" x="40" y="579">nothing but its objects. The ladder suspends only on the server's own polled /status, and a</text>
-<text class="t4" x="40" y="594">poll failure holds forever.</text>
-<text class="t4" x="40" y="609">The door arms chert.us/requested-at on the CR, waits on the CR — never the pod — and holds</text>
-<text class="t4" x="40" y="624">the request up to 180 s; the restore is one pack.</text>
-<text class="t4b" x="40" y="639">As built the clock counts pushes only: a fetch never reaches the syncer, so read-only</text>
-<text class="t4b" x="40" y="654">use is parked one threshold after its wake.</text>
-<rect x="547" y="520" width="505" height="192" rx="7" class="bx"/>
-<path class="f-forge" d="M554,520 H1046 A7,7 0 0 1 1053,527 V525 H547 V527 A7,7 0 0 1 554,520 Z"/>
-<text class="t2 c-forge" x="563" y="544">Fleet levers — take the server out of the transfer</text>
-<text class="t4" x="563" y="564">A thousand clones are ~130 CPU-s but 43 GB from one NIC: egress binds before CPU.</text>
-<text class="t4" x="563" y="579">Bitmaps ship with every pack; a clone BUNDLE is cut on a floor, uploaded beside the packs</text>
-<text class="t4" x="563" y="594">and advertised as a presigned URL re-signed at half its TTL — the client must opt in</text>
-<text class="t4" x="563" y="609">(transfer.bundleURI=true).</text>
-<text class="t4b" x="563" y="624">Measured on EC2 (F8): 1,000 clones cost the server 5.7 MiB of egress with bundles</text>
-<text class="t4b" x="563" y="639">advertised and the client opted in, 40,409 MiB with the opt-in off — 7,000×.</text>
-<text class="t4" x="563" y="654">LFS: the batch API runs in the syncer and answers with presigned URLs, so a checkpoint</text>
-<text class="t4" x="563" y="669">goes client-to-store and the pod sees a few hundred bytes of JSON. The pruner takes only</text>
-<text class="t4" x="563" y="684">branches main already contains, and only once quiet.</text>
-<rect x="1071" y="520" width="505" height="192" rx="7" class="bx"/>
-<path class="f-forge" d="M1078,520 H1569 A7,7 0 0 1 1576,527 V525 H1071 V527 A7,7 0 0 1 1078,520 Z"/>
-<text class="t2 c-forge" x="1087" y="544">The export — a legible mirror, by the shipped lean binary</text>
-<text class="t4" x="1087" y="564">After a batch moves an exported ref, the syncer materialises the tree with a two-tree</text>
-<text class="t4" x="1087" y="579">read-tree — touching exactly what changed, removing what is gone — and runs flint-sync</text>
-<text class="t4" x="1087" y="594">barrier over it, so lean's ordering (upload, CAS, deletes LAST) is inherited, not re-derived.</text>
-<text class="t4" x="1087" y="609">It runs AFTER the report and never CASes the snapshot; lean and passthrough readers mount</text>
-<text class="t4" x="1087" y="624">main read-only with no forge code in them.</text>
-<text class="t4b c-red" x="1087" y="639">A mirror that is never repaired: a foreign write into it is not noticed (the barrier diffs a</text>
-<text class="t4b c-red" x="1087" y="654">local scan against a local baseline); a reader that verifies against the manifest refuses</text>
-<text class="t4b c-red" x="1087" y="669">it, a mount with no manifest takes it. Readers of an export are readers.</text>
-<text class="t4" x="1087" y="684">It runs inline in the serving loop: a blocked barrier times out and backs off, and the heartbeat</text>
-<text class="t4" x="1087" y="699">beats through it on its own task — but pushes stall for that long.</text>
-<rect x="24" y="728" width="1552" height="132" rx="7" class="panel"/>
-<text class="t1" x="46" y="756">Built, and drilled on real clusters — 2026-09-04 and 2026-09-05</text>
-<text class="t4" x="46" y="774">Twelve falsifiers green: eleven on EC2 on 2026-09-04 — durable under 8 mid-push kills, two pushes to one ref, a merge across a cold restore, the fence, a byte-identical restore and a dumb clone with the server down, protected main, idle-to-zero, the storm, the export, the sweep, an S3 outage —</text>
-<text class="t4" x="46" y="789">and per-principal rights on Cilium on 2026-09-05, 17 legs. Gitea's 4,019 MiB of egress for 100 clones sits level with forge's control arms.</text>
-<text class="t4" x="46" y="806">The large-repository campaign, 2026-09-05, on real S3: a 10 GiB push acknowledged in 262 s with the lease token silent past the 60 s window in both the push and the restore, so a challenger took a live repository mid-restore — durability held, availability paid. Fixed the same day: the heartbeat on</text>
-<text class="t4" x="46" y="821">its own task, gated on progress; the restore a bounded fan-out over ranged GETs (297 MiB/s at 40 GiB, RAM flat); orphaned uploads swept; every claim rotates the snapshot (two gaps found by the TLA+ model); a pack listed only once its index lands; one runner in place of nginx and fcgiwrap.</text>
-<text class="t4" x="46" y="836">Confirmed: 40 GiB in 1113 s; a challenger beside a live restore never claimed; 40/40 pushes durable; five stalled pushes and eight clones at once.</text>
-<text class="t4" x="46" y="853">Open: a pack's parts upload one at a time; a full repack every 24 pushes re-uploads the repository; a roll mid-push costs that push. Not drilled: agents in another cluster. Not forge: a web UI, pull requests, code search, CI, a POSIX volume, untracked files.</text>
-<line class="l-ink" x1="28" y1="868" x2="54" y2="868"/>
-<text class="t4" x="60" y="872">data path</text>
-<line class="l-ctl" x1="127.98" y1="868" x2="153.98000000000002" y2="868" stroke-dasharray="6 5"/>
-<text class="t4" x="160" y="872">control</text>
-<rect x="217" y="861" width="5" height="14" rx="2" class="f-red"/>
-<text class="t4" x="229" y="872">hazard / trust boundary</text>
+<text class="mono" x="40" y="66" xml:space="preserve">helper: flint-forge-credential</text>
+<text class="t4" x="40" y="81">stock git; the pod's token is the Basic</text>
+<text class="t4" x="40" y="96">password</text>
+<text class="t4b" x="40" y="111">no bucket credential, no sidecar, no</text>
+<text class="t4b" x="40" y="126">privilege</text>
+<line class="l-forge" x1="274" y1="110" x2="384" y2="110" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="282" y="83" width="94" height="30" rx="3" class="halo"/>
+<text class="t4b c-forge" x="329" y="94" style="text-anchor:middle">git smart HTTP</text>
+<text class="t4" x="329" y="109" style="text-anchor:middle">push ↑ · fetch ↓</text>
+<rect x="388" y="22" width="270" height="178" rx="7" class="bx"/>
+<path class="f-forge" d="M395,22 H651 A7,7 0 0 1 658,29 V27 H388 V29 A7,7 0 0 1 395,22 Z"/>
+<text class="t2 c-forge" x="404" y="46">the door — the lite gateway's git arm</text>
+<text class="t4" x="404" y="66">TokenReview ≤ 60 s · consumers · routes ·</text>
+<text class="t4" x="404" y="81">wakes</text>
+<text class="mono" x="404" y="96" xml:space="preserve">forwards X-Remote-User only</text>
+<text class="t4b" x="404" y="111">stateless; holds a wake request ≤ 180 s</text>
+<line class="l-forge" x1="658" y1="110" x2="770" y2="110" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="666" y="83" width="96" height="30" rx="3" class="halo"/>
+<text class="t4b c-forge" x="714" y="94" style="text-anchor:middle">HTTP</text>
+<text class="t4" x="714" y="109" style="text-anchor:middle">+ X-Remote-User</text>
+<rect x="774" y="22" width="466" height="178" rx="7" class="bx"/>
+<path class="f-forge" d="M781,22 H1233 A7,7 0 0 1 1240,29 V27 H774 V29 A7,7 0 0 1 781,22 Z"/>
+<text class="t2 c-forge" x="792" y="48">one server pod per FlintRepo — emptyDir cache, idles to zero</text>
+<rect x="792" y="62" width="208" height="122" rx="7" class="bx"/>
+<text class="t2" x="808" y="86">git container</text>
+<text class="mono" x="808" y="106" xml:space="preserve">gitcgi + git-http-backend</text>
+<text class="t4" x="808" y="121">the hooks are the syncer binary</text>
+<text class="t4b" x="808" y="136">holds no bucket credential</text>
+<rect x="1012" y="62" width="210" height="122" rx="7" class="bx"/>
+<text class="t2" x="1028" y="86">syncer container</text>
+<text class="t4" x="1028" y="106">batches pushes; uploads packs</text>
+<text class="t4" x="1028" y="121">four at a time</text>
+<text class="t4b" x="1028" y="136">the only writer of the bucket</text>
+<line class="l-forge" x1="1240" y1="110" x2="1352" y2="110" marker-start="url(#a-forge)" marker-end="url(#a-forge)"/>
+<rect x="1247" y="79" width="97" height="30" rx="3" class="halo"/>
+<text class="t4b c-forge" x="1296" y="90" style="text-anchor:middle">packs ↑ on push</text>
+<text class="t4" x="1296" y="105" style="text-anchor:middle">restore ↓ at start</text>
+<text class="t4" x="1296" y="146" style="text-anchor:middle">RPO = last ack</text>
+<rect x="1356" y="22" width="220" height="178" rx="7" class="s3"/>
+<text class="t1" x="1372" y="48">S3 — &lt;prefix&gt;/</text>
+<text class="mono" x="1372" y="74" xml:space="preserve">git/objects/pack/*</text>
+<text class="mono" x="1372" y="91" xml:space="preserve">git/snapshot — ONE CAS</text>
+<text class="mono" x="1372" y="108" xml:space="preserve">git/epoch · git/claim</text>
+<text class="mono" x="1372" y="125" xml:space="preserve">git/bundles · lfs/…</text>
+<text class="mono" x="1372" y="142" xml:space="preserve">files/&lt;path&gt; — export</text>
+<text class="t4" x="1372" y="176">a bare repo; clonable, server down</text>
+<rect x="24" y="224" width="1552" height="100" rx="7" class="panel"/>
+<text class="t1" x="46" y="252">the push — acknowledged means durable</text>
+<circle cx="58" cy="282" r="11" class="f-forge"/>
+<text class="num" x="58" y="286" style="text-anchor:middle">1</text>
+<text class="t2" x="78" y="286">the hook hands over</text>
+<text class="t4" x="78" y="304">the commands, judged in order against</text>
+<text class="t4" x="78" y="319">local refs, the snapshot, the batch</text>
+<circle cx="312" cy="282" r="11" class="f-forge"/>
+<text class="num" x="312" y="286" style="text-anchor:middle">2</text>
+<text class="t2" x="332" y="286">policy, twice</text>
+<text class="t4" x="332" y="304">pre-receive names the rule; the syncer</text>
+<text class="t4" x="332" y="319">enforces it</text>
+<circle cx="565" cy="282" r="11" class="f-forge"/>
+<text class="num" x="565" y="286" style="text-anchor:middle">3</text>
+<text class="t2" x="585" y="286">renew the lease</text>
+<text class="t4" x="585" y="304">412 ⇒ this server fences itself and</text>
+<text class="t4" x="585" y="319">exits</text>
+<circle cx="819" cy="282" r="11" class="f-forge"/>
+<text class="num" x="819" y="286" style="text-anchor:middle">4</text>
+<text class="t2" x="839" y="286">upload the packs</text>
+<text class="t4" x="839" y="304">content-named, immutable, four at a</text>
+<text class="t4" x="839" y="319">time</text>
+<circle cx="1073" cy="282" r="11" class="f-forge"/>
+<text class="num" x="1073" y="286" style="text-anchor:middle">5</text>
+<text class="t2" x="1093" y="286">ONE snapshot CAS</text>
+<text class="t4" x="1093" y="304">If-Match: thirty refs move as one object</text>
+<circle cx="1326" cy="282" r="11" class="f-forge"/>
+<text class="num" x="1326" y="286" style="text-anchor:middle">6</text>
+<text class="t2" x="1346" y="286">ref transaction, then the report</text>
+<text class="t4" x="1346" y="304">only THEN ok or ng — a crash before</text>
+<text class="t4" x="1346" y="319">fails the push</text>
+<rect x="24" y="346" width="760" height="104" rx="10" class="grp"/>
+<text class="cap" x="40" y="368">CONTROL — OFF THE DATA PATH</text>
+<text class="t4" x="44" y="386">lease heartbeat on its own task, gated on progress — a wedged pod loses its lease</text>
+<text class="t4" x="44" y="404">operator: idle to zero on pushes only; the door arms a wake and holds the request</text>
+<text class="t4" x="44" y="422">bundles and LFS answer with presigned URLs — those bytes never cross the pod</text>
+<rect x="808" y="346" width="768" height="104" rx="7" class="bx"/>
+<path class="f-forge" d="M815,346 H1569 A7,7 0 0 1 1576,353 V351 H808 V353 A7,7 0 0 1 815,346 Z"/>
+<text class="t2 c-forge" x="824" y="370">the export — a legible mirror, by the shipped lean binary</text>
+<text class="t4" x="824" y="390">after the report, never a second writer of the snapshot; lean and passthrough readers mount main read-only</text>
+<text class="t4b c-red" x="824" y="405">never repaired: a foreign write is not noticed; a manifest-verifying reader refuses it, a raw mount takes it</text>
+<rect x="24" y="472" width="1552" height="54" rx="7" class="panel"/>
+<text class="t4b" x="48" y="494">drilled: 12 falsifiers green (EC2 2026-09-04, rights on Cilium 2026-09-05) · 10 GiB and 40 GiB pushes on real S3 · the takeover window closed against a real challenger</text>
+<text class="t4" x="48" y="514">open: a pack's parts upload one at a time · a full repack every 24 pushes re-uploads the repository · a roll mid-push costs that push · agents in another cluster are not drilled</text>
+<rect x="24" y="542" width="1552" height="44" rx="7" class="bx"/>
+<path class="f-red" d="M24,549 A7,7 0 0 1 31,542 H29 V586 H31 A7,7 0 0 1 24,579 Z"/>
+<text class="t4b c-red" x="48" y="569">nothing in-tree terminates TLS — the token rides two cleartext hops; X-Remote-User is a NetworkPolicy the operator renders only when told where the door runs; the server runs as root</text>
+<line class="l-ink" x1="28" y1="614" x2="54" y2="614"/>
+<text class="t4" x="60" y="618">data path</text>
+<line class="l-ctl" x1="127.98" y1="614" x2="153.98000000000002" y2="614" stroke-dasharray="6 5"/>
+<text class="t4" x="160" y="618">control</text>
+<rect x="217" y="607" width="5" height="14" rx="2" class="f-red"/>
+<text class="t4" x="229" y="618">hazard / trust boundary</text>
 </svg>
