@@ -1,0 +1,1923 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load git source https://github.com/tobi/walgit.git#e5295e6ee45f5267c661f8bbd27ed0a07e55e7db
+#1 0.002 fatal: Not a valid object name e5295e6ee45f5267c661f8bbd27ed0a07e55e7db^{commit}
+#1 0.845 From https://github.com/tobi/walgit
+#1 0.845  * branch            e5295e6ee45f5267c661f8bbd27ed0a07e55e7db -> FETCH_HEAD
+#1 DONE 0.9s
+
+#2 [internal] load metadata for docker.io/library/rust:1.97-bookworm
+#2 ...
+
+#3 [internal] load metadata for docker.io/library/debian:trixie-slim
+#3 DONE 0.7s
+
+#2 [internal] load metadata for docker.io/library/rust:1.97-bookworm
+#2 DONE 0.7s
+
+#4 [internal] load metadata for docker.io/library/node:24-bookworm-slim
+#4 DONE 0.8s
+
+#5 [build 1/7] FROM docker.io/library/rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
+#5 resolve docker.io/library/rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 done
+#5 sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 6.48kB / 6.48kB done
+#5 sha256:408fe88047cef61a2087653b0c5255fa51c0f2d6d94ddedd7a2562a9b91a46f6 1.94kB / 1.94kB done
+#5 sha256:897e260d0a1a5a5146433bdb73f62bd84f5f47e846d3485e5f70f63912b5917d 4.55kB / 4.55kB done
+#5 sha256:3af9207d37990175f61d5ce9faa0c7373ffcd2d6da1b6ba0a9ca9d61f8f47cc9 5.24MB / 48.50MB 0.3s
+#5 sha256:6b02178232c403d8a6d5b460ad955daba177c38e178ed7dd417e5c4d748e948d 0B / 24.04MB 0.3s
+#5 sha256:3af9207d37990175f61d5ce9faa0c7373ffcd2d6da1b6ba0a9ca9d61f8f47cc9 48.50MB / 48.50MB 0.5s done
+#5 sha256:6b02178232c403d8a6d5b460ad955daba177c38e178ed7dd417e5c4d748e948d 24.04MB / 24.04MB 0.4s done
+#5 sha256:c5a4625b533197abb25ea2a32be06c59c984d97c3c2dc9952e0b76f2e81ee0d2 0B / 64.41MB 0.5s
+#5 sha256:d32ed818f20fae825717c40dbc77cd4ed4bcefad6ba95a83f8c4f3c1f8631c31 0B / 211.66MB 0.5s
+#5 sha256:c5a4625b533197abb25ea2a32be06c59c984d97c3c2dc9952e0b76f2e81ee0d2 23.07MB / 64.41MB 0.6s
+#5 sha256:d32ed818f20fae825717c40dbc77cd4ed4bcefad6ba95a83f8c4f3c1f8631c31 29.36MB / 211.66MB 0.6s
+#5 extracting sha256:3af9207d37990175f61d5ce9faa0c7373ffcd2d6da1b6ba0a9ca9d61f8f47cc9
+#5 sha256:a6c1a23a6280781f0cf3b6b3a43fc59462763953c4285dd4addc7d4963cc923f 0B / 217.85MB 0.6s
+#5 sha256:c5a4625b533197abb25ea2a32be06c59c984d97c3c2dc9952e0b76f2e81ee0d2 53.48MB / 64.41MB 0.7s
+#5 sha256:d32ed818f20fae825717c40dbc77cd4ed4bcefad6ba95a83f8c4f3c1f8631c31 50.33MB / 211.66MB 0.7s
+#5 sha256:c5a4625b533197abb25ea2a32be06c59c984d97c3c2dc9952e0b76f2e81ee0d2 64.41MB / 64.41MB 0.8s done
+#5 sha256:d32ed818f20fae825717c40dbc77cd4ed4bcefad6ba95a83f8c4f3c1f8631c31 73.40MB / 211.66MB 0.8s
+#5 sha256:d32ed818f20fae825717c40dbc77cd4ed4bcefad6ba95a83f8c4f3c1f8631c31 92.27MB / 211.66MB 0.9s
+#5 sha256:a6c1a23a6280781f0cf3b6b3a43fc59462763953c4285dd4addc7d4963cc923f 33.55MB / 217.85MB 0.9s
+#5 sha256:d32ed818f20fae825717c40dbc77cd4ed4bcefad6ba95a83f8c4f3c1f8631c31 110.10MB / 211.66MB 1.0s
+#5 sha256:a6c1a23a6280781f0cf3b6b3a43fc59462763953c4285dd4addc7d4963cc923f 55.57MB / 217.85MB 1.0s
+#5 sha256:d32ed818f20fae825717c40dbc77cd4ed4bcefad6ba95a83f8c4f3c1f8631c31 144.70MB / 211.66MB 1.1s
+#5 sha256:a6c1a23a6280781f0cf3b6b3a43fc59462763953c4285dd4addc7d4963cc923f 91.23MB / 217.85MB 1.1s
+#5 sha256:d32ed818f20fae825717c40dbc77cd4ed4bcefad6ba95a83f8c4f3c1f8631c31 192.94MB / 211.66MB 1.3s
+#5 sha256:a6c1a23a6280781f0cf3b6b3a43fc59462763953c4285dd4addc7d4963cc923f 144.70MB / 217.85MB 1.3s
+#5 sha256:d32ed818f20fae825717c40dbc77cd4ed4bcefad6ba95a83f8c4f3c1f8631c31 211.66MB / 211.66MB 1.4s
+#5 sha256:a6c1a23a6280781f0cf3b6b3a43fc59462763953c4285dd4addc7d4963cc923f 171.97MB / 217.85MB 1.4s
+#5 sha256:d32ed818f20fae825717c40dbc77cd4ed4bcefad6ba95a83f8c4f3c1f8631c31 211.66MB / 211.66MB 1.5s done
+#5 sha256:a6c1a23a6280781f0cf3b6b3a43fc59462763953c4285dd4addc7d4963cc923f 206.57MB / 217.85MB 1.5s
+#5 sha256:a6c1a23a6280781f0cf3b6b3a43fc59462763953c4285dd4addc7d4963cc923f 217.85MB / 217.85MB 1.6s done
+#5 ...
+
+#6 [stage-2 1/6] FROM docker.io/library/debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+#6 resolve docker.io/library/debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 0.0s done
+#6 sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 8.97kB / 8.97kB done
+#6 sha256:abc9cb88a5587630d7f915f47b23b0668fe250fbfc6457aa4d52b534c1bbf73f 1.02kB / 1.02kB done
+#6 sha256:e426a54f50cc4cf82dd5cab8ba8426ed02c391840cb5a62dfd987542dbabea3b 451B / 451B done
+#6 sha256:6310eb16bf4251731feab01e8f633bf5e2d75a657ccad97f420b1f83cce457be 29.79MB / 29.79MB 1.0s done
+#6 extracting sha256:6310eb16bf4251731feab01e8f633bf5e2d75a657ccad97f420b1f83cce457be 1.6s done
+#6 DONE 2.7s
+
+#5 [build 1/7] FROM docker.io/library/rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
+#5 extracting sha256:3af9207d37990175f61d5ce9faa0c7373ffcd2d6da1b6ba0a9ca9d61f8f47cc9 2.9s done
+#5 extracting sha256:6b02178232c403d8a6d5b460ad955daba177c38e178ed7dd417e5c4d748e948d
+#5 extracting sha256:6b02178232c403d8a6d5b460ad955daba177c38e178ed7dd417e5c4d748e948d 0.7s done
+#5 extracting sha256:c5a4625b533197abb25ea2a32be06c59c984d97c3c2dc9952e0b76f2e81ee0d2
+#5 ...
+
+#7 [web 1/7] FROM docker.io/library/node:24-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e
+#7 resolve docker.io/library/node:24-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e done
+#7 sha256:59c575db86dccc264e6b71c316548f05a5c3c7a9aa1c112dc019807e651fd06b 6.76kB / 6.76kB done
+#7 sha256:a8ac7f6c67abc236e4c745052c404112b8fab6fe8ac3a329d1ef3b867ad67c71 28.23MB / 28.23MB 0.2s done
+#7 sha256:013634040cec61eda7919c9682291bc50456a54539f410ef5233821fb9a8c4d9 3.32kB / 3.32kB 0.1s done
+#7 sha256:a82db95c01928dce3a29c0d23bcd2588dafeba6f24ae23115195e3e3d6cc5437 50.78MB / 50.78MB 0.4s done
+#7 sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e 3.93kB / 3.93kB done
+#7 sha256:6642ef280aebc09c4541bee0b15c9f89f0f3f3c247ddee79ae1d37eddfdcbbaa 1.93kB / 1.93kB done
+#7 extracting sha256:a8ac7f6c67abc236e4c745052c404112b8fab6fe8ac3a329d1ef3b867ad67c71 2.2s done
+#7 sha256:9803e0ff8c3d881aa142790ec91f17a1a6fa25189d082c58f4e66cbba4253b66 1.71MB / 1.71MB 0.2s done
+#7 sha256:2254049a7d7763ea7d56bf06d9a6d5cb882d88b136a84c18c254ead00ac5c874 448B / 448B 0.2s done
+#7 extracting sha256:013634040cec61eda7919c9682291bc50456a54539f410ef5233821fb9a8c4d9 done
+#7 extracting sha256:a82db95c01928dce3a29c0d23bcd2588dafeba6f24ae23115195e3e3d6cc5437 1.8s done
+#7 extracting sha256:9803e0ff8c3d881aa142790ec91f17a1a6fa25189d082c58f4e66cbba4253b66 0.1s done
+#7 extracting sha256:2254049a7d7763ea7d56bf06d9a6d5cb882d88b136a84c18c254ead00ac5c874 done
+#7 DONE 4.4s
+
+#5 [build 1/7] FROM docker.io/library/rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
+#5 ...
+
+#8 [web 2/7] RUN corepack enable && corepack prepare pnpm@10 --activate
+#8 0.687 Preparing pnpm@10 for immediate activation...
+#8 DONE 1.8s
+
+#9 [web 3/7] WORKDIR /src/web
+#9 DONE 0.0s
+
+#10 [web 4/7] COPY web/package.json web/pnpm-lock.yaml ./
+#10 DONE 0.0s
+
+#5 [build 1/7] FROM docker.io/library/rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
+#5 extracting sha256:c5a4625b533197abb25ea2a32be06c59c984d97c3c2dc9952e0b76f2e81ee0d2 3.1s done
+#5 extracting sha256:d32ed818f20fae825717c40dbc77cd4ed4bcefad6ba95a83f8c4f3c1f8631c31
+#5 ...
+
+#11 [web 5/7] RUN pnpm install --frozen-lockfile
+#11 1.061 Lockfile is up to date, resolution step is skipped
+#11 1.130 Progress: resolved 1, reused 0, downloaded 0, added 0
+#11 1.223 Packages: +151
+#11 1.223 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#11 1.765 
+#11 1.765    ╭──────────────────────────────────────────────╮
+#11 1.765    │                                              │
+#11 1.765    │     Update available! 10.34.5 → 12.3.4.      │
+#11 1.765    │     Changelog: https://pnpm.io/v/12.3.4      │
+#11 1.765    │   To update, run: corepack use pnpm@12.3.4   │
+#11 1.765    │                                              │
+#11 1.765    ╰──────────────────────────────────────────────╯
+#11 1.765 
+#11 2.137 Progress: resolved 151, reused 0, downloaded 60, added 22
+#11 3.149 Progress: resolved 151, reused 0, downloaded 149, added 59
+#11 3.255 Progress: resolved 151, reused 0, downloaded 151, added 151, done
+#11 3.351 
+#11 3.351 dependencies:
+#11 3.351 + @pierre/diffs 1.3.5
+#11 3.351 + react 19.2.8
+#11 3.351 + react-dom 19.2.8
+#11 3.351 + react-markdown 10.1.0
+#11 3.351 + react-router-dom 7.18.2
+#11 3.351 + remark-gfm 4.0.1
+#11 3.351 
+#11 3.351 devDependencies:
+#11 3.351 + @types/react 19.2.18
+#11 3.351 + @types/react-dom 19.2.4
+#11 3.351 + @vitejs/plugin-react 6.0.5
+#11 3.351 + oxlint 1.78.0
+#11 3.351 + typescript 5.9.3
+#11 3.351 + vite 8.2.1
+#11 3.351 
+#11 3.372 Done in 3s using pnpm v10.34.5
+#11 DONE 3.6s
+
+#12 [web 6/7] COPY web/ ./
+#12 DONE 0.0s
+
+#5 [build 1/7] FROM docker.io/library/rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
+#5 extracting sha256:d32ed818f20fae825717c40dbc77cd4ed4bcefad6ba95a83f8c4f3c1f8631c31 5.1s
+#5 ...
+
+#13 [stage-2 2/6] RUN apt-get update && apt-get install -y --no-install-recommends git git-lfs ca-certificates tini curl     && rm -rf /var/lib/apt/lists/*     && git --version
+#13 0.182 Get:1 http://deb.debian.org/debian trixie InRelease [140 kB]
+#13 0.195 Get:2 http://deb.debian.org/debian trixie-updates InRelease [47.3 kB]
+#13 0.195 Get:3 http://deb.debian.org/debian-security trixie-security InRelease [43.4 kB]
+#13 0.206 Get:4 http://deb.debian.org/debian trixie/main amd64 Packages [9673 kB]
+#13 0.258 Get:5 http://deb.debian.org/debian trixie-updates/main amd64 Packages [4412 B]
+#13 0.258 Get:6 http://deb.debian.org/debian-security trixie-security/main amd64 Packages [251 kB]
+#13 1.116 Fetched 10.2 MB in 1s (10.8 MB/s)
+#13 1.116 Reading package lists...
+#13 1.830 Reading package lists...
+#13 2.616 Building dependency tree...
+#13 2.819 Reading state information...
+#13 3.030 The following additional packages will be installed:
+#13 3.030   git-man libbrotli1 libcom-err2 libcurl3t64-gnutls libcurl4t64 liberror-perl
+#13 3.031   libexpat1 libffi8 libgdbm-compat4t64 libgdbm6t64 libgnutls30t64
+#13 3.031   libgssapi-krb5-2 libidn2-0 libk5crypto3 libkeyutils1 libkrb5-3
+#13 3.031   libkrb5support0 libldap2 libnghttp2-14 libnghttp3-9 libngtcp2-16
+#13 3.034   libngtcp2-crypto-gnutls8 libp11-kit0 libperl5.40 libpsl5t64 librtmp1
+#13 3.034   libsasl2-2 libsasl2-modules-db libssh2-1t64 libssl3t64 libtasn1-6
+#13 3.034   libunistring5 openssl openssl-provider-legacy perl perl-modules-5.40
+#13 3.034 Suggested packages:
+#13 3.034   gettext-base git-doc git-email git-gui gitk gitweb git-cvs git-mediawiki
+#13 3.034   git-svn gdbm-l10n gnutls-bin krb5-doc krb5-user sensible-utils perl-doc
+#13 3.034   libterm-readline-gnu-perl | libterm-readline-perl-perl make
+#13 3.034   libtap-harness-archive-perl
+#13 3.034 Recommended packages:
+#13 3.034   bash-completion patch less ssh-client krb5-locales libldap-common
+#13 3.034   publicsuffix libsasl2-modules netbase
+#13 3.299 The following NEW packages will be installed:
+#13 3.300   ca-certificates curl git git-lfs git-man libbrotli1 libcom-err2
+#13 3.300   libcurl3t64-gnutls libcurl4t64 liberror-perl libexpat1 libffi8
+#13 3.309   libgdbm-compat4t64 libgdbm6t64 libgnutls30t64 libgssapi-krb5-2 libidn2-0
+#13 3.309   libk5crypto3 libkeyutils1 libkrb5-3 libkrb5support0 libldap2 libnghttp2-14
+#13 3.309   libnghttp3-9 libngtcp2-16 libngtcp2-crypto-gnutls8 libp11-kit0 libperl5.40
+#13 3.309   libpsl5t64 librtmp1 libsasl2-2 libsasl2-modules-db libssh2-1t64 libtasn1-6
+#13 3.309   libunistring5 openssl perl perl-modules-5.40 tini
+#13 3.309 The following packages will be upgraded:
+#13 3.309   libssl3t64 openssl-provider-legacy
+#13 3.328 2 upgraded, 39 newly installed, 0 to remove and 0 not upgraded.
+#13 3.328 Need to get 33.1 MB of archives.
+#13 3.328 After this operation, 138 MB of additional disk space will be used.
+#13 3.328 Get:1 http://deb.debian.org/debian-security trixie-security/main amd64 libexpat1 amd64 2.8.3-1~deb13u1 [123 kB]
+#13 3.331 Get:2 http://deb.debian.org/debian-security trixie-security/main amd64 openssl-provider-legacy amd64 3.5.7-1~deb13u2 [316 kB]
+#13 3.341 Get:3 http://deb.debian.org/debian-security trixie-security/main amd64 libssl3t64 amd64 3.5.7-1~deb13u2 [2454 kB]
+#13 3.349 Get:4 http://deb.debian.org/debian-security trixie-security/main amd64 openssl amd64 3.5.7-1~deb13u2 [1507 kB]
+#13 3.355 Get:5 http://deb.debian.org/debian trixie/main amd64 ca-certificates all 20250419 [162 kB]
+#13 3.357 Get:6 http://deb.debian.org/debian trixie/main amd64 perl-modules-5.40 all 5.40.1-6 [3019 kB]
+#13 3.371 Get:7 http://deb.debian.org/debian trixie/main amd64 libgdbm6t64 amd64 1.24-2 [75.2 kB]
+#13 3.374 Get:8 http://deb.debian.org/debian trixie/main amd64 libgdbm-compat4t64 amd64 1.24-2 [50.3 kB]
+#13 3.382 Get:9 http://deb.debian.org/debian trixie/main amd64 libperl5.40 amd64 5.40.1-6 [4341 kB]
+#13 3.400 Get:10 http://deb.debian.org/debian trixie/main amd64 perl amd64 5.40.1-6 [267 kB]
+#13 3.404 Get:11 http://deb.debian.org/debian trixie/main amd64 libbrotli1 amd64 1.1.0-2+b7 [307 kB]
+#13 3.405 Get:12 http://deb.debian.org/debian trixie/main amd64 libkrb5support0 amd64 1.21.3-5+deb13u1 [33.1 kB]
+#13 3.409 Get:13 http://deb.debian.org/debian trixie/main amd64 libcom-err2 amd64 1.47.2-3+b11 [25.0 kB]
+#13 3.410 Get:14 http://deb.debian.org/debian trixie/main amd64 libk5crypto3 amd64 1.21.3-5+deb13u1 [81.2 kB]
+#13 3.410 Get:15 http://deb.debian.org/debian trixie/main amd64 libkeyutils1 amd64 1.6.3-6 [9456 B]
+#13 3.410 Get:16 http://deb.debian.org/debian trixie/main amd64 libkrb5-3 amd64 1.21.3-5+deb13u1 [326 kB]
+#13 3.410 Get:17 http://deb.debian.org/debian trixie/main amd64 libgssapi-krb5-2 amd64 1.21.3-5+deb13u1 [138 kB]
+#13 3.410 Get:18 http://deb.debian.org/debian trixie/main amd64 libunistring5 amd64 1.3-2 [477 kB]
+#13 3.412 Get:19 http://deb.debian.org/debian trixie/main amd64 libidn2-0 amd64 2.3.8-2 [109 kB]
+#13 3.412 Get:20 http://deb.debian.org/debian trixie/main amd64 libsasl2-modules-db amd64 2.1.28+dfsg1-9 [19.8 kB]
+#13 3.413 Get:21 http://deb.debian.org/debian trixie/main amd64 libsasl2-2 amd64 2.1.28+dfsg1-9 [57.5 kB]
+#13 3.414 Get:22 http://deb.debian.org/debian trixie/main amd64 libldap2 amd64 2.6.10+dfsg-1 [194 kB]
+#13 3.415 Get:23 http://deb.debian.org/debian trixie/main amd64 libnghttp2-14 amd64 1.64.0-1.1+deb13u1 [76.2 kB]
+#13 3.415 Get:24 http://deb.debian.org/debian trixie/main amd64 libnghttp3-9 amd64 1.8.0-1 [67.7 kB]
+#13 3.416 Get:25 http://deb.debian.org/debian trixie/main amd64 libpsl5t64 amd64 0.21.2-1.1+b1 [57.2 kB]
+#13 3.417 Get:26 http://deb.debian.org/debian trixie/main amd64 libffi8 amd64 3.4.8-2 [24.1 kB]
+#13 3.422 Get:27 http://deb.debian.org/debian trixie/main amd64 libp11-kit0 amd64 0.25.5-3 [425 kB]
+#13 3.426 Get:28 http://deb.debian.org/debian trixie/main amd64 libtasn1-6 amd64 4.20.0-2+deb13u1 [50.1 kB]
+#13 3.426 Get:29 http://deb.debian.org/debian trixie/main amd64 libgnutls30t64 amd64 3.8.9-3+deb13u4 [1469 kB]
+#13 3.431 Get:30 http://deb.debian.org/debian trixie/main amd64 librtmp1 amd64 2.4+20151223.gitfa8646d.1-2+b5 [58.8 kB]
+#13 3.432 Get:31 http://deb.debian.org/debian trixie/main amd64 libssh2-1t64 amd64 1.11.1-1+deb13u1 [245 kB]
+#13 3.433 Get:32 http://deb.debian.org/debian trixie/main amd64 libcurl4t64 amd64 8.14.1-2+deb13u4 [392 kB]
+#13 3.435 Get:33 http://deb.debian.org/debian trixie/main amd64 curl amd64 8.14.1-2+deb13u4 [270 kB]
+#13 3.439 Get:34 http://deb.debian.org/debian trixie/main amd64 libngtcp2-16 amd64 1.11.0-1+deb13u1 [132 kB]
+#13 3.440 Get:35 http://deb.debian.org/debian trixie/main amd64 libngtcp2-crypto-gnutls8 amd64 1.11.0-1+deb13u1 [29.5 kB]
+#13 3.442 Get:36 http://deb.debian.org/debian trixie/main amd64 libcurl3t64-gnutls amd64 8.14.1-2+deb13u4 [384 kB]
+#13 3.444 Get:37 http://deb.debian.org/debian trixie/main amd64 liberror-perl all 0.17030-1 [26.9 kB]
+#13 3.446 Get:38 http://deb.debian.org/debian trixie/main amd64 git-man all 1:2.47.3-0+deb13u1 [2205 kB]
+#13 3.460 Get:39 http://deb.debian.org/debian trixie/main amd64 git amd64 1:2.47.3-0+deb13u1 [8862 kB]
+#13 3.504 Get:40 http://deb.debian.org/debian trixie/main amd64 git-lfs amd64 3.6.1-1+deb13u1 [3933 kB]
+#13 3.520 Get:41 http://deb.debian.org/debian trixie/main amd64 tini amd64 0.19.0-3+b7 [280 kB]
+#13 3.658 debconf: unable to initialize frontend: Dialog
+#13 3.658 debconf: (TERM is not set, so the dialog frontend is not usable.)
+#13 3.658 debconf: falling back to frontend: Readline
+#13 3.658 debconf: unable to initialize frontend: Readline
+#13 3.658 debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.40.1 /usr/local/share/perl/5.40.1 /usr/lib/x86_64-linux-gnu/perl5/5.40 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.40 /usr/share/perl/5.40 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8, <STDIN> line 41.)
+#13 3.658 debconf: falling back to frontend: Teletype
+#13 3.662 debconf: unable to initialize frontend: Teletype
+#13 3.662 debconf: (This frontend requires a controlling tty.)
+#13 3.662 debconf: falling back to frontend: Noninteractive
+#13 5.215 Preconfiguring packages ...
+#13 5.327 Fetched 33.1 MB in 0s (159 MB/s)
+#13 5.351 Selecting previously unselected package libexpat1:amd64.
+#13 5.351 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 4943 files and directories currently installed.)
+#13 5.358 Preparing to unpack .../libexpat1_2.8.3-1~deb13u1_amd64.deb ...
+#13 5.364 Unpacking libexpat1:amd64 (2.8.3-1~deb13u1) ...
+#13 5.393 Preparing to unpack .../openssl-provider-legacy_3.5.7-1~deb13u2_amd64.deb ...
+#13 5.394 Unpacking openssl-provider-legacy (3.5.7-1~deb13u2) over (3.5.6-1~deb13u2) ...
+#13 5.427 Setting up openssl-provider-legacy (3.5.7-1~deb13u2) ...
+#13 5.470 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 4952 files and directories currently installed.)
+#13 5.474 Preparing to unpack .../libssl3t64_3.5.7-1~deb13u2_amd64.deb ...
+#13 5.477 Unpacking libssl3t64:amd64 (3.5.7-1~deb13u2) over (3.5.6-1~deb13u2) ...
+#13 5.674 Setting up libssl3t64:amd64 (3.5.7-1~deb13u2) ...
+#13 5.701 Selecting previously unselected package openssl.
+#13 5.701 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 4952 files and directories currently installed.)
+#13 5.702 Preparing to unpack .../00-openssl_3.5.7-1~deb13u2_amd64.deb ...
+#13 5.703 Unpacking openssl (3.5.7-1~deb13u2) ...
+#13 5.800 Selecting previously unselected package ca-certificates.
+#13 5.800 Preparing to unpack .../01-ca-certificates_20250419_all.deb ...
+#13 5.810 Unpacking ca-certificates (20250419) ...
+#13 5.877 Selecting previously unselected package perl-modules-5.40.
+#13 5.884 Preparing to unpack .../02-perl-modules-5.40_5.40.1-6_all.deb ...
+#13 5.884 Unpacking perl-modules-5.40 (5.40.1-6) ...
+#13 6.197 Selecting previously unselected package libgdbm6t64:amd64.
+#13 6.199 Preparing to unpack .../03-libgdbm6t64_1.24-2_amd64.deb ...
+#13 6.199 Unpacking libgdbm6t64:amd64 (1.24-2) ...
+#13 6.217 Selecting previously unselected package libgdbm-compat4t64:amd64.
+#13 6.218 Preparing to unpack .../04-libgdbm-compat4t64_1.24-2_amd64.deb ...
+#13 6.220 Unpacking libgdbm-compat4t64:amd64 (1.24-2) ...
+#13 6.237 Selecting previously unselected package libperl5.40:amd64.
+#13 6.238 Preparing to unpack .../05-libperl5.40_5.40.1-6_amd64.deb ...
+#13 6.240 Unpacking libperl5.40:amd64 (5.40.1-6) ...
+#13 6.771 Selecting previously unselected package perl.
+#13 6.772 Preparing to unpack .../06-perl_5.40.1-6_amd64.deb ...
+#13 6.775 Unpacking perl (5.40.1-6) ...
+#13 6.810 Selecting previously unselected package libbrotli1:amd64.
+#13 6.810 Preparing to unpack .../07-libbrotli1_1.1.0-2+b7_amd64.deb ...
+#13 6.811 Unpacking libbrotli1:amd64 (1.1.0-2+b7) ...
+#13 6.846 Selecting previously unselected package libkrb5support0:amd64.
+#13 6.846 Preparing to unpack .../08-libkrb5support0_1.21.3-5+deb13u1_amd64.deb ...
+#13 6.847 Unpacking libkrb5support0:amd64 (1.21.3-5+deb13u1) ...
+#13 6.861 Selecting previously unselected package libcom-err2:amd64.
+#13 6.863 Preparing to unpack .../09-libcom-err2_1.47.2-3+b11_amd64.deb ...
+#13 6.864 Unpacking libcom-err2:amd64 (1.47.2-3+b11) ...
+#13 6.878 Selecting previously unselected package libk5crypto3:amd64.
+#13 6.879 Preparing to unpack .../10-libk5crypto3_1.21.3-5+deb13u1_amd64.deb ...
+#13 6.880 Unpacking libk5crypto3:amd64 (1.21.3-5+deb13u1) ...
+#13 6.902 Selecting previously unselected package libkeyutils1:amd64.
+#13 6.902 Preparing to unpack .../11-libkeyutils1_1.6.3-6_amd64.deb ...
+#13 6.903 Unpacking libkeyutils1:amd64 (1.6.3-6) ...
+#13 6.919 Selecting previously unselected package libkrb5-3:amd64.
+#13 6.919 Preparing to unpack .../12-libkrb5-3_1.21.3-5+deb13u1_amd64.deb ...
+#13 6.920 Unpacking libkrb5-3:amd64 (1.21.3-5+deb13u1) ...
+#13 6.954 Selecting previously unselected package libgssapi-krb5-2:amd64.
+#13 6.955 Preparing to unpack .../13-libgssapi-krb5-2_1.21.3-5+deb13u1_amd64.deb ...
+#13 6.956 Unpacking libgssapi-krb5-2:amd64 (1.21.3-5+deb13u1) ...
+#13 7.000 Selecting previously unselected package libunistring5:amd64.
+#13 7.002 Preparing to unpack .../14-libunistring5_1.3-2_amd64.deb ...
+#13 7.004 Unpacking libunistring5:amd64 (1.3-2) ...
+#13 7.121 Selecting previously unselected package libidn2-0:amd64.
+#13 7.123 Preparing to unpack .../15-libidn2-0_2.3.8-2_amd64.deb ...
+#13 7.124 Unpacking libidn2-0:amd64 (2.3.8-2) ...
+#13 7.149 Selecting previously unselected package libsasl2-modules-db:amd64.
+#13 7.151 Preparing to unpack .../16-libsasl2-modules-db_2.1.28+dfsg1-9_amd64.deb ...
+#13 7.152 Unpacking libsasl2-modules-db:amd64 (2.1.28+dfsg1-9) ...
+#13 7.169 Selecting previously unselected package libsasl2-2:amd64.
+#13 7.171 Preparing to unpack .../17-libsasl2-2_2.1.28+dfsg1-9_amd64.deb ...
+#13 7.172 Unpacking libsasl2-2:amd64 (2.1.28+dfsg1-9) ...
+#13 7.187 Selecting previously unselected package libldap2:amd64.
+#13 7.188 Preparing to unpack .../18-libldap2_2.6.10+dfsg-1_amd64.deb ...
+#13 7.189 Unpacking libldap2:amd64 (2.6.10+dfsg-1) ...
+#13 7.224 Selecting previously unselected package libnghttp2-14:amd64.
+#13 7.224 Preparing to unpack .../19-libnghttp2-14_1.64.0-1.1+deb13u1_amd64.deb ...
+#13 7.224 Unpacking libnghttp2-14:amd64 (1.64.0-1.1+deb13u1) ...
+#13 7.244 Selecting previously unselected package libnghttp3-9:amd64.
+#13 7.244 Preparing to unpack .../20-libnghttp3-9_1.8.0-1_amd64.deb ...
+#13 7.244 Unpacking libnghttp3-9:amd64 (1.8.0-1) ...
+#13 7.259 Selecting previously unselected package libpsl5t64:amd64.
+#13 7.261 Preparing to unpack .../21-libpsl5t64_0.21.2-1.1+b1_amd64.deb ...
+#13 7.261 Unpacking libpsl5t64:amd64 (0.21.2-1.1+b1) ...
+#13 7.276 Selecting previously unselected package libffi8:amd64.
+#13 7.277 Preparing to unpack .../22-libffi8_3.4.8-2_amd64.deb ...
+#13 7.277 Unpacking libffi8:amd64 (3.4.8-2) ...
+#13 7.291 Selecting previously unselected package libp11-kit0:amd64.
+#13 7.291 Preparing to unpack .../23-libp11-kit0_0.25.5-3_amd64.deb ...
+#13 7.291 Unpacking libp11-kit0:amd64 (0.25.5-3) ...
+#13 7.318 Selecting previously unselected package libtasn1-6:amd64.
+#13 7.319 Preparing to unpack .../24-libtasn1-6_4.20.0-2+deb13u1_amd64.deb ...
+#13 7.320 Unpacking libtasn1-6:amd64 (4.20.0-2+deb13u1) ...
+#13 7.331 Selecting previously unselected package libgnutls30t64:amd64.
+#13 7.332 Preparing to unpack .../25-libgnutls30t64_3.8.9-3+deb13u4_amd64.deb ...
+#13 7.333 Unpacking libgnutls30t64:amd64 (3.8.9-3+deb13u4) ...
+#13 7.398 Selecting previously unselected package librtmp1:amd64.
+#13 7.400 Preparing to unpack .../26-librtmp1_2.4+20151223.gitfa8646d.1-2+b5_amd64.deb ...
+#13 7.401 Unpacking librtmp1:amd64 (2.4+20151223.gitfa8646d.1-2+b5) ...
+#13 7.417 Selecting previously unselected package libssh2-1t64:amd64.
+#13 7.418 Preparing to unpack .../27-libssh2-1t64_1.11.1-1+deb13u1_amd64.deb ...
+#13 7.420 Unpacking libssh2-1t64:amd64 (1.11.1-1+deb13u1) ...
+#13 7.444 Selecting previously unselected package libcurl4t64:amd64.
+#13 7.446 Preparing to unpack .../28-libcurl4t64_8.14.1-2+deb13u4_amd64.deb ...
+#13 7.446 Unpacking libcurl4t64:amd64 (8.14.1-2+deb13u4) ...
+#13 7.483 Selecting previously unselected package curl.
+#13 7.484 Preparing to unpack .../29-curl_8.14.1-2+deb13u4_amd64.deb ...
+#13 7.485 Unpacking curl (8.14.1-2+deb13u4) ...
+#13 7.509 Selecting previously unselected package libngtcp2-16:amd64.
+#13 7.510 Preparing to unpack .../30-libngtcp2-16_1.11.0-1+deb13u1_amd64.deb ...
+#13 7.511 Unpacking libngtcp2-16:amd64 (1.11.0-1+deb13u1) ...
+#13 7.530 Selecting previously unselected package libngtcp2-crypto-gnutls8:amd64.
+#13 7.531 Preparing to unpack .../31-libngtcp2-crypto-gnutls8_1.11.0-1+deb13u1_amd64.deb ...
+#13 7.532 Unpacking libngtcp2-crypto-gnutls8:amd64 (1.11.0-1+deb13u1) ...
+#13 7.545 Selecting previously unselected package libcurl3t64-gnutls:amd64.
+#13 7.546 Preparing to unpack .../32-libcurl3t64-gnutls_8.14.1-2+deb13u4_amd64.deb ...
+#13 7.547 Unpacking libcurl3t64-gnutls:amd64 (8.14.1-2+deb13u4) ...
+#13 7.580 Selecting previously unselected package liberror-perl.
+#13 7.580 Preparing to unpack .../33-liberror-perl_0.17030-1_all.deb ...
+#13 7.581 Unpacking liberror-perl (0.17030-1) ...
+#13 7.595 Selecting previously unselected package git-man.
+#13 7.597 Preparing to unpack .../34-git-man_1%3a2.47.3-0+deb13u1_all.deb ...
+#13 7.599 Unpacking git-man (1:2.47.3-0+deb13u1) ...
+#13 7.664 Selecting previously unselected package git.
+#13 7.667 Preparing to unpack .../35-git_1%3a2.47.3-0+deb13u1_amd64.deb ...
+#13 7.673 Unpacking git (1:2.47.3-0+deb13u1) ...
+#13 8.117 Selecting previously unselected package git-lfs.
+#13 8.117 Preparing to unpack .../36-git-lfs_3.6.1-1+deb13u1_amd64.deb ...
+#13 8.117 Unpacking git-lfs (3.6.1-1+deb13u1) ...
+#13 8.365 Selecting previously unselected package tini.
+#13 8.365 Preparing to unpack .../37-tini_0.19.0-3+b7_amd64.deb ...
+#13 8.367 Unpacking tini (0.19.0-3+b7) ...
+#13 8.402 Setting up libexpat1:amd64 (2.8.3-1~deb13u1) ...
+#13 8.404 Setting up libkeyutils1:amd64 (1.6.3-6) ...
+#13 8.404 Setting up libgdbm6t64:amd64 (1.24-2) ...
+#13 8.406 Setting up libgdbm-compat4t64:amd64 (1.24-2) ...
+#13 8.407 Setting up libbrotli1:amd64 (1.1.0-2+b7) ...
+#13 8.408 Setting up libnghttp2-14:amd64 (1.64.0-1.1+deb13u1) ...
+#13 8.409 Setting up libcom-err2:amd64 (1.47.2-3+b11) ...
+#13 8.410 Setting up libkrb5support0:amd64 (1.21.3-5+deb13u1) ...
+#13 8.411 Setting up libsasl2-modules-db:amd64 (2.1.28+dfsg1-9) ...
+#13 8.412 Setting up libunistring5:amd64 (1.3-2) ...
+#13 8.414 Setting up tini (0.19.0-3+b7) ...
+#13 8.415 Setting up libk5crypto3:amd64 (1.21.3-5+deb13u1) ...
+#13 8.416 Setting up libsasl2-2:amd64 (2.1.28+dfsg1-9) ...
+#13 8.418 Setting up libnghttp3-9:amd64 (1.8.0-1) ...
+#13 8.419 Setting up libffi8:amd64 (3.4.8-2) ...
+#13 8.420 Setting up perl-modules-5.40 (5.40.1-6) ...
+#13 8.421 Setting up libtasn1-6:amd64 (4.20.0-2+deb13u1) ...
+#13 8.422 Setting up git-man (1:2.47.3-0+deb13u1) ...
+#13 8.424 Setting up libngtcp2-16:amd64 (1.11.0-1+deb13u1) ...
+#13 8.425 Setting up libkrb5-3:amd64 (1.21.3-5+deb13u1) ...
+#13 8.426 Setting up libssh2-1t64:amd64 (1.11.1-1+deb13u1) ...
+#13 8.427 Setting up openssl (3.5.7-1~deb13u2) ...
+#13 8.430 Setting up libldap2:amd64 (2.6.10+dfsg-1) ...
+#13 8.432 Setting up libidn2-0:amd64 (2.3.8-2) ...
+#13 8.433 Setting up libperl5.40:amd64 (5.40.1-6) ...
+#13 8.434 Setting up ca-certificates (20250419) ...
+#13 8.526 debconf: unable to initialize frontend: Dialog
+#13 8.526 debconf: (TERM is not set, so the dialog frontend is not usable.)
+#13 8.526 debconf: falling back to frontend: Readline
+#13 8.535 debconf: unable to initialize frontend: Readline
+#13 8.535 debconf: (This frontend requires a controlling tty.)
+#13 8.535 debconf: falling back to frontend: Teletype
+#13 8.545 debconf: unable to initialize frontend: Teletype
+#13 8.545 debconf: (This frontend requires a controlling tty.)
+#13 8.545 debconf: falling back to frontend: Noninteractive
+#13 9.209 Updating certificates in /etc/ssl/certs...
+#13 9.885 150 added, 0 removed; done.
+#13 9.903 Setting up perl (5.40.1-6) ...
+#13 9.909 Setting up libp11-kit0:amd64 (0.25.5-3) ...
+#13 9.911 Setting up libgssapi-krb5-2:amd64 (1.21.3-5+deb13u1) ...
+#13 9.913 Setting up libgnutls30t64:amd64 (3.8.9-3+deb13u4) ...
+#13 9.915 Setting up libpsl5t64:amd64 (0.21.2-1.1+b1) ...
+#13 9.916 Setting up liberror-perl (0.17030-1) ...
+#13 9.917 Setting up librtmp1:amd64 (2.4+20151223.gitfa8646d.1-2+b5) ...
+#13 9.919 Setting up libngtcp2-crypto-gnutls8:amd64 (1.11.0-1+deb13u1) ...
+#13 9.920 Setting up libcurl4t64:amd64 (8.14.1-2+deb13u4) ...
+#13 9.921 Setting up libcurl3t64-gnutls:amd64 (8.14.1-2+deb13u4) ...
+#13 9.922 Setting up git (1:2.47.3-0+deb13u1) ...
+#13 9.931 Setting up curl (8.14.1-2+deb13u4) ...
+#13 9.932 Setting up git-lfs (3.6.1-1+deb13u1) ...
+#13 9.958 Processing triggers for libc-bin (2.41-12+deb13u3) ...
+#13 9.968 Processing triggers for ca-certificates (20250419) ...
+#13 9.973 Updating certificates in /etc/ssl/certs...
+#13 ...
+
+#5 [build 1/7] FROM docker.io/library/rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
+#5 ...
+
+#13 [stage-2 2/6] RUN apt-get update && apt-get install -y --no-install-recommends git git-lfs ca-certificates tini curl     && rm -rf /var/lib/apt/lists/*     && git --version
+#13 10.69 0 added, 0 removed; done.
+#13 10.69 Running hooks in /etc/ca-certificates/update.d...
+#13 10.69 done.
+#13 10.72 git version 2.47.3
+#13 DONE 10.9s
+
+#5 [build 1/7] FROM docker.io/library/rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
+#5 ...
+
+#14 [stage-2 3/6] RUN useradd --uid 1000 --create-home --shell /bin/sh walgit     && mkdir -p /etc/walgit /var/lib/walgit && chown walgit:walgit /var/lib/walgit
+#14 DONE 0.2s
+
+#5 [build 1/7] FROM docker.io/library/rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
+#5 extracting sha256:d32ed818f20fae825717c40dbc77cd4ed4bcefad6ba95a83f8c4f3c1f8631c31 9.2s done
+#5 extracting sha256:a6c1a23a6280781f0cf3b6b3a43fc59462763953c4285dd4addc7d4963cc923f
+#5 ...
+
+#15 [web 7/7] RUN pnpm run build && test -f dist/index.html && test -f dist/repos.js
+#15 0.817 
+#15 0.817 > walgit-web@ build /src/web
+#15 0.817 > oxlint --deny-warnings && tsc --noEmit && vite build && vite build -c vite.sdk.config.ts
+#15 0.817 
+#15 1.100 Found 0 warnings and 0 errors.
+#15 1.101 Finished in 230ms on 36 files with 173 rules using 4 threads.
+#15 5.315 vite v8.2.1 building client environment for production...
+#15 5.329 [2Ktransforming...✓ 895 modules transformed.
+#15 5.947 rendering chunks...
+#15 7.419 [plugin walgit:importmap] import map: 332 chunks in 332 groups
+#15 7.420 computing gzip size...
+#15 7.486 dist/index.html                                                   2.09 kB │ gzip:   0.84 kB
+#15 7.486 dist/assets/RepoLayout-CFCFdf6f.css                               1.16 kB │ gzip:   0.52 kB
+#15 7.486 dist/assets/index-D-PDg-hD.css                                   20.01 kB │ gzip:   5.16 kB
+#15 7.486 dist/assets/MarkdownRenderer-C7n5KJtP.js                          0.21 kB │ gzip:   0.18 kB
+#15 7.486 dist/assets/format-96jM8lxG.js                                    0.38 kB │ gzip:   0.27 kB
+#15 7.486 dist/assets/codeowners-C8r90Shi.js                                0.54 kB │ gzip:   0.31 kB
+#15 7.486 dist/assets/shellsession-CVsQGYfZ.js                              0.71 kB │ gzip:   0.43 kB
+#15 7.486 dist/assets/rolldown-runtime-hePW80VL.js                          0.71 kB │ gzip:   0.42 kB
+#15 7.486 dist/assets/tsv-sltzmVWM.js                                       0.73 kB │ gzip:   0.33 kB
+#15 7.486 dist/assets/html-derivative-i4STDFnl.js                           0.84 kB │ gzip:   0.45 kB
+#15 7.486 dist/assets/git-rebase-BDPpS8w6.js                                0.98 kB │ gzip:   0.44 kB
+#15 7.486 dist/assets/qmldir-DCQb3MpD.js                                    0.99 kB │ gzip:   0.44 kB
+#15 7.486 dist/assets/csv-Dx-8-gkx.js                                       1.13 kB │ gzip:   0.36 kB
+#15 7.486 dist/assets/git-commit-BSykSTBG.js                                1.22 kB │ gzip:   0.52 kB
+#15 7.486 dist/assets/xsl-BOPS8gLt.js                                       1.36 kB │ gzip:   0.49 kB
+#15 7.486 dist/assets/dotenv-_5a1GRtc.js                                    1.41 kB │ gzip:   0.52 kB
+#15 7.486 dist/assets/sparql-D_iOobhT.js                                    1.47 kB │ gzip:   0.81 kB
+#15 7.486 dist/assets/ini-B5eOa1yu.js                                       1.51 kB │ gzip:   0.49 kB
+#15 7.486 dist/assets/fortran-fixed-form-DEKoE2YW.js                        1.66 kB │ gzip:   0.68 kB
+#15 7.486 dist/assets/Maintainers-CPtbtXyZ.js                               1.69 kB │ gzip:   0.90 kB
+#15 7.486 dist/assets/docker-IyjqRm3v.js                                    1.73 kB │ gzip:   0.59 kB
+#15 7.486 dist/assets/desktop-Dlh5hvp9.js                                   1.82 kB │ gzip:   0.75 kB
+#15 7.486 dist/assets/hxml-Dcm88srW.js                                      1.89 kB │ gzip:   0.89 kB
+#15 7.486 dist/assets/BlobPage-BOUcpYEb.js                                  1.93 kB │ gzip:   0.93 kB
+#15 7.486 dist/assets/erb-C7MPl934.js                                       2.13 kB │ gzip:   0.62 kB
+#15 7.486 dist/assets/wenyan-C8pVoKbM.js                                    2.15 kB │ gzip:   1.08 kB
+#15 7.486 dist/assets/jssm-DXw9l8Rf.js                                      2.23 kB │ gzip:   0.61 kB
+#15 7.486 dist/assets/edge-DCY0a-ow.js                                      2.30 kB │ gzip:   0.67 kB
+#15 7.486 dist/assets/reg-CRGYupPL.js                                       2.33 kB │ gzip:   0.69 kB
+#15 7.486 dist/assets/diff-woXpYk--.js                                      2.56 kB │ gzip:   0.68 kB
+#15 7.486 dist/assets/gleam-CSRkHgEL.js                                     2.57 kB │ gzip:   0.81 kB
+#15 7.486 dist/assets/hy-CZbG8q4J.js                                        2.64 kB │ gzip:   1.17 kB
+#15 7.486 dist/assets/openscad-BUDT5pXO.js                                  2.81 kB │ gzip:   1.00 kB
+#15 7.486 dist/assets/log-BNLmms1o.js                                       2.84 kB │ gzip:   0.89 kB
+#15 7.486 dist/assets/json-DAgxKhMr.js                                      2.89 kB │ gzip:   0.82 kB
+#15 7.486 dist/assets/cairo-DLTphjLi.js                                     2.93 kB │ gzip:   0.80 kB
+#15 7.486 dist/assets/berry-DKpUyyne.js                                     2.99 kB │ gzip:   0.80 kB
+#15 7.486 dist/assets/jsonl-CmCQp5Yx.js                                     3.00 kB │ gzip:   0.78 kB
+#15 7.486 dist/assets/jsonc-CYpm1nAK.js                                     3.10 kB │ gzip:   0.78 kB
+#15 7.486 dist/assets/logo-Cluzi2Zq.js                                      3.12 kB │ gzip:   1.46 kB
+#15 7.486 dist/assets/po-BiJDBrnU.js                                        3.23 kB │ gzip:   0.90 kB
+#15 7.486 dist/assets/json5-BR5RXkoi.js                                     3.24 kB │ gzip:   0.82 kB
+#15 7.486 dist/assets/mipsasm-BMqwQI7S.js                                   3.25 kB │ gzip:   1.17 kB
+#15 7.486 dist/assets/tasl-DMoTqEGO.js                                      3.28 kB │ gzip:   0.84 kB
+#15 7.486 dist/assets/rbs-C0MpOrj4.js                                       3.30 kB │ gzip:   0.72 kB
+#15 7.486 dist/assets/genie-CV2tkWYe.js                                     3.34 kB │ gzip:   1.20 kB
+#15 7.486 dist/assets/rel-BtDbiS_P.js                                       3.36 kB │ gzip:   1.10 kB
+#15 7.486 dist/assets/vala-zf12oZj6.js                                      3.36 kB │ gzip:   1.18 kB
+#15 7.486 dist/assets/splunk-BC2Px7Mm.js                                    3.42 kB │ gzip:   1.51 kB
+#15 7.486 dist/assets/hurl-DCZHXKU4.js                                      3.51 kB │ gzip:   1.09 kB
+#15 7.486 dist/assets/fluent-C03EYrpw.js                                    3.60 kB │ gzip:   0.89 kB
+#15 7.486 dist/assets/ssh-config-BgfXC-Er.js                                3.61 kB │ gzip:   1.59 kB
+#15 7.486 dist/assets/jsonnet-CJTPZ8u_.js                                   3.61 kB │ gzip:   1.03 kB
+#15 7.486 dist/assets/kdl-CsD5j6eV.js                                       3.62 kB │ gzip:   1.03 kB
+#15 7.486 dist/assets/CommitPage-CuUrHRFZ.js                                3.64 kB │ gzip:   1.35 kB
+#15 7.486 dist/assets/narrat-_X_XdTYD.js                                    3.66 kB │ gzip:   1.09 kB
+#15 7.486 dist/assets/turtle-ByJddavk.js                                    3.69 kB │ gzip:   0.96 kB
+#15 7.486 dist/assets/glsl-D5MA2a_X.js                                      3.69 kB │ gzip:   1.46 kB
+#15 7.486 dist/assets/zenscript-BnlCZFoB.js                                 3.90 kB │ gzip:   1.28 kB
+#15 7.486 dist/assets/ron-VUp2lXgN.js                                       3.90 kB │ gzip:   0.97 kB
+#15 7.486 dist/assets/gn-ilITqXS6.js                                        3.99 kB │ gzip:   1.47 kB
+#15 7.486 dist/assets/pascal-4ZHwLPI5.js                                    4.14 kB │ gzip:   1.67 kB
+#15 7.486 dist/assets/http-kmH8AyfE.js                                      4.41 kB │ gzip:   1.06 kB
+#15 7.486 dist/assets/tcl-CZd0xW_V.js                                       4.42 kB │ gzip:   1.50 kB
+#15 7.486 dist/assets/nextflow-BJtWHP5T.js                                  4.50 kB │ gzip:   1.16 kB
+#15 7.486 dist/assets/rosmsg-CAekHB0j.js                                    4.51 kB │ gzip:   1.05 kB
+#15 7.486 dist/assets/polar-C7UOKdEL.js                                     4.66 kB │ gzip:   1.12 kB
+#15 7.486 dist/assets/sdbl-bTVj8UrX.js                                      4.69 kB │ gzip:   2.00 kB
+#15 7.486 dist/assets/fennel-DQxkIbk2.js                                    4.76 kB │ gzip:   1.53 kB
+#15 7.486 dist/assets/bibtex-Ci_nEsc7.js                                    4.78 kB │ gzip:   0.83 kB
+#15 7.486 dist/assets/llvm-DqHOMS-s.js                                      5.03 kB │ gzip:   2.01 kB
+#15 7.486 dist/assets/wgsl-BsKzXJz4.js                                      5.13 kB │ gzip:   1.38 kB
+#15 7.486 dist/assets/gdresource-xMC7jr7x.js                                5.28 kB │ gzip:   1.33 kB
+#15 7.486 dist/assets/zig-CMLA9XwU.js                                       5.33 kB │ gzip:   1.55 kB
+#15 7.486 dist/assets/qml-_a-QhfPD.js                                       5.33 kB │ gzip:   1.38 kB
+#15 7.486 dist/assets/dax-BkyTk9wS.js                                       5.35 kB │ gzip:   2.21 kB
+#15 7.486 dist/assets/bicep-CUHmPFLl.js                                     5.37 kB │ gzip:   1.14 kB
+#15 7.486 dist/assets/xml-BlnrEAEy.js                                       5.44 kB │ gzip:   1.25 kB
+#15 7.486 dist/assets/awk-BWXHIvNe.js                                       5.45 kB │ gzip:   1.37 kB
+#15 7.486 dist/assets/jinja-B-tLrNsM.js                                     5.62 kB │ gzip:   1.36 kB
+#15 7.486 dist/assets/lean-CewbzKMR.js                                      5.77 kB │ gzip:   1.91 kB
+#15 7.486 dist/assets/powerquery-DNMTfnFr.js                                5.89 kB │ gzip:   1.51 kB
+#15 7.486 dist/assets/shaderlab-TOUzSsQk.js                                 5.91 kB │ gzip:   2.08 kB
+#15 7.486 dist/assets/cypher-ClKdZ_lG.js                                    5.94 kB │ gzip:   1.71 kB
+#15 7.486 dist/assets/coq-DuBRPxYg.js                                       6.03 kB │ gzip:   1.95 kB
+#15 7.486 dist/assets/vb-DOwzaHZ0.js                                        6.06 kB │ gzip:   2.32 kB
+#15 7.486 dist/assets/min-dark-BSWPekZh.js                                  6.28 kB │ gzip:   1.70 kB
+#15 7.486 dist/assets/gdshader-CBce3t8t.js                                  6.31 kB │ gzip:   1.72 kB
+#15 7.486 dist/assets/ara-4CJ0cIlV.js                                       6.35 kB │ gzip:   1.80 kB
+#15 7.486 dist/assets/verilog-B2gwz-sJ.js                                   6.40 kB │ gzip:   1.92 kB
+#15 7.486 dist/assets/clojure-DqKBuwfJ.js                                   6.40 kB │ gzip:   1.41 kB
+#15 7.486 dist/assets/postcss-BXeXVLqQ.js                                   6.41 kB │ gzip:   1.90 kB
+#15 7.486 dist/assets/red-DX1BQOs8.js                                       6.41 kB │ gzip:   1.63 kB
+#15 7.486 dist/assets/toml-CcmNWLt0.js                                      6.41 kB │ gzip:   1.28 kB
+#15 7.486 dist/assets/proto-DB4EqR-F.js                                     6.54 kB │ gzip:   1.41 kB
+#15 7.486 dist/assets/chapel-DmtgEXO_.js                                    6.62 kB │ gzip:   1.85 kB
+#15 7.486 dist/assets/solarized-light-C1IUL_tW.js                           6.62 kB │ gzip:   1.74 kB
+#15 7.486 dist/assets/talonscript-CohzipZa.js                               6.75 kB │ gzip:   1.48 kB
+#15 7.486 dist/assets/r-BHcO8Vjq.js                                         6.80 kB │ gzip:   1.89 kB
+#15 7.486 dist/assets/riscv-Ckw8ddFX.js                                     6.90 kB │ gzip:   1.97 kB
+#15 7.486 dist/assets/soy-DEd-qcad.js                                       6.92 kB │ gzip:   1.62 kB
+#15 7.486 dist/assets/RepoLayout-DqDFM2BK.js                                6.94 kB │ gzip:   2.56 kB
+#15 7.486 dist/assets/min-light-DDpmG2fV.js                                 6.96 kB │ gzip:   1.88 kB
+#15 7.486 dist/assets/solarized-dark-UdsmMDCL.js                            6.99 kB │ gzip:   1.81 kB
+#15 7.486 dist/assets/scheme-DQCgrYNe.js                                    7.16 kB │ gzip:   2.04 kB
+#15 7.486 dist/assets/hlsl-Cvrh5tZx.js                                      7.25 kB │ gzip:   2.18 kB
+#15 7.486 dist/assets/qss-Fe1Jh2GI.js                                       7.46 kB │ gzip:   2.57 kB
+#15 7.486 dist/assets/prisma-DMgNhnYS.js                                    7.73 kB │ gzip:   1.48 kB
+#15 7.486 dist/assets/systemd-BxMlprV5.js                                   7.86 kB │ gzip:   2.54 kB
+#15 7.486 dist/assets/monokai-B_bV9PQ9.js                                   8.02 kB │ gzip:   1.93 kB
+#15 7.486 dist/assets/regexp-DR20uMnK.js                                    8.05 kB │ gzip:   1.47 kB
+#15 7.486 dist/assets/haml-CwEpbK1d.js                                      8.33 kB │ gzip:   1.86 kB
+#15 7.486 dist/assets/vue-html-DkKkQnZL.js                                  8.47 kB │ gzip:   1.68 kB
+#15 7.486 dist/assets/plsql-DGHpHOYJ.js                                     8.50 kB │ gzip:   2.99 kB
+#15 7.486 dist/assets/dart-CnvKMtbv.js                                      8.61 kB │ gzip:   1.99 kB
+#15 7.486 dist/assets/horizon-CE9ld1lL.js                                   8.77 kB │ gzip:   1.94 kB
+#15 7.486 dist/assets/kotlin-DhhofPvG.js                                    8.77 kB │ gzip:   2.12 kB
+#15 7.486 dist/assets/horizon-bright-DSNQnXHK.js                            8.78 kB │ gzip:   1.96 kB
+#15 7.486 dist/assets/make-Dixweg8N.js                                      8.95 kB │ gzip:   1.76 kB
+#15 7.486 dist/assets/andromeeda-vGVdxbeo.js                                9.01 kB │ gzip:   2.35 kB
+#15 7.486 dist/assets/sas-CBpMWA2M.js                                       9.06 kB │ gzip:   3.82 kB
+#15 7.486 dist/assets/dark-plus-Cs2F2srj.js                                 9.09 kB │ gzip:   2.10 kB
+#15 7.486 dist/assets/slack-dark-DnToyrRv.js                                9.11 kB │ gzip:   1.96 kB
+#15 7.486 dist/assets/smithy-Dgaz7aur.js                                    9.12 kB │ gzip:   1.51 kB
+#15 7.486 dist/assets/sass-DXrisJhu.js                                      9.28 kB │ gzip:   2.48 kB
+#15 7.486 dist/assets/plastic-DQwYfKfQ.js                                   9.29 kB │ gzip:   1.96 kB
+#15 7.486 dist/assets/slack-ochin-B2OO5cIa.js                               9.42 kB │ gzip:   2.08 kB
+#15 7.486 dist/assets/jison-CBjhYtSs.js                                     9.69 kB │ gzip:   1.86 kB
+#15 7.486 dist/assets/tex-BK-H2Wn4.js                                       9.73 kB │ gzip:   3.10 kB
+#15 7.486 dist/assets/cmake-Bj61d0ZC.js                                     9.84 kB │ gzip:   3.37 kB
+#15 7.486 dist/assets/light-plus-DVQuIRkW.js                                9.93 kB │ gzip:   2.27 kB
+#15 7.486 dist/assets/hcl-Dh228itO.js                                      10.04 kB │ gzip:   1.93 kB
+#15 7.486 dist/assets/rst-BQCbfb9V.js                                      10.31 kB │ gzip:   2.24 kB
+#15 7.486 dist/assets/pkl-ot-7Btpt.js                                      10.36 kB │ gzip:   1.37 kB
+#15 7.486 dist/assets/beancount-D-usSTwE.js                                10.36 kB │ gzip:   1.43 kB
+#15 7.486 dist/assets/nextflow-groovy-DJMQeKeT.js                          10.43 kB │ gzip:   2.13 kB
+#15 7.486 dist/assets/dream-maker-DW3nJb8Q.js                              10.46 kB │ gzip:   2.25 kB
+#15 7.486 dist/assets/raku-B3gFvitq.js                                     10.46 kB │ gzip:   2.94 kB
+#15 7.486 dist/assets/yaml-Du_6cdrH.js                                     10.57 kB │ gzip:   2.32 kB
+#15 7.486 dist/assets/just-B9Xn_Dp4.js                                     10.84 kB │ gzip:   2.62 kB
+#15 7.486 dist/assets/elm-o4NJxfws.js                                      10.94 kB │ gzip:   2.09 kB
+#15 7.486 dist/assets/github-light-EUqPIrTm.js                             11.18 kB │ gzip:   2.49 kB
+#15 7.486 dist/assets/prolog-iXnhIJG7.js                                   11.34 kB │ gzip:   3.84 kB
+#15 7.486 dist/assets/terraform-DswuEJGm.js                                11.38 kB │ gzip:   2.51 kB
+#15 7.486 dist/assets/github-dark-C-LZuMrd.js                              11.40 kB │ gzip:   2.53 kB
+#15 7.486 dist/assets/puppet-CDv2pdJW.js                                   11.43 kB │ gzip:   2.10 kB
+#15 7.486 dist/assets/laserwave-C_8bwKvT.js                                11.49 kB │ gzip:   2.57 kB
+#15 7.486 dist/assets/ApiPage-CcFqJE5X.js                                  11.67 kB │ gzip:   3.81 kB
+#15 7.486 dist/assets/gherkin-DExj1W_8.js                                  11.93 kB │ gzip:   5.04 kB
+#15 7.486 dist/assets/wasm-ByWQv1Qj.js                                     12.00 kB │ gzip:   2.17 kB
+#15 7.486 dist/assets/hjson-CxZEssPk.js                                    12.04 kB │ gzip:   1.64 kB
+#15 7.486 dist/assets/surrealql-BZoq2lXR.js                                12.06 kB │ gzip:   3.29 kB
+#15 7.486 dist/assets/handlebars-ryMP1rBR.js                               12.16 kB │ gzip:   2.37 kB
+#15 7.486 dist/assets/apache-U0d_L8uA.js                                   12.44 kB │ gzip:   3.71 kB
+#15 7.486 dist/assets/vesper-DdrHHSXu.js                                   12.73 kB │ gzip:   1.99 kB
+#15 7.486 dist/assets/bat-qdxAdBWQ.js                                      12.88 kB │ gzip:   3.23 kB
+#15 7.486 dist/assets/fish-BJitypiv.js                                     13.03 kB │ gzip:   1.73 kB
+#15 7.486 dist/assets/nsis-CjNLYCLg.js                                     13.11 kB │ gzip:   4.06 kB
+#15 7.486 dist/assets/v-DBj4K9d_.js                                        13.32 kB │ gzip:   2.75 kB
+#15 7.486 dist/assets/vitesse-light-VbXTXTou.js                            13.61 kB │ gzip:   3.03 kB
+#15 7.486 dist/assets/aurora-x-CDeNXAV0.js                                 13.65 kB │ gzip:   2.28 kB
+#15 7.486 dist/assets/vitesse-black-fwtXNY1n.js                            13.67 kB │ gzip:   3.05 kB
+#15 7.486 dist/assets/vitesse-dark-BZCL-v6S.js                             13.75 kB │ gzip:   3.06 kB
+#15 7.486 dist/assets/pug-DkgDHZci.js                                      13.84 kB │ gzip:   2.58 kB
+#15 7.486 dist/assets/synthwave-84-nFMaYfgc.js                             14.03 kB │ gzip:   2.85 kB
+#15 7.486 dist/assets/smalltalk-BHpQb5nM.js                                14.11 kB │ gzip:   2.14 kB
+#15 7.486 dist/assets/github-light-default-BXViO-2h.js                     14.15 kB │ gzip:   3.02 kB
+#15 7.486 dist/assets/github-light-high-contrast-B68TUdTA.js               14.27 kB │ gzip:   3.00 kB
+#15 7.486 dist/assets/clarity-CtfBBspg.js                                  14.35 kB │ gzip:   2.50 kB
+#15 7.486 dist/assets/github-dark-dimmed-Bx1FflLF.js                       14.43 kB │ gzip:   3.11 kB
+#15 7.486 dist/assets/github-dark-default-DXG-b-1a.js                      14.43 kB │ gzip:   3.12 kB
+#15 7.486 dist/assets/github-dark-high-contrast-B_tTalzw.js                14.59 kB │ gzip:   3.07 kB
+#15 7.486 dist/assets/gnuplot-7GGW24-e.js                                  14.77 kB │ gzip:   3.27 kB
+#15 7.486 dist/assets/rust-Cfkwpbl8.js                                     15.06 kB │ gzip:   2.71 kB
+#15 7.486 dist/assets/kusto-C7mF5XQf.js                                    15.16 kB │ gzip:   3.92 kB
+#15 7.486 dist/assets/SettingsPage-C_s9nByu.js                             15.37 kB │ gzip:   4.83 kB
+#15 7.486 dist/assets/nix-IvuFDN5E.js                                      15.50 kB │ gzip:   2.47 kB
+#15 7.486 dist/assets/actionscript-3-Cs6JJXT5.js                           15.53 kB │ gzip:   2.70 kB
+#15 7.486 dist/assets/lua-FONpmTUP.js                                      15.60 kB │ gzip:   3.19 kB
+#15 7.486 dist/assets/abap-CLvhMVsD.js                                     15.84 kB │ gzip:   5.93 kB
+#15 7.486 dist/assets/matlab-D7qyCx1q.js                                   16.07 kB │ gzip:   3.06 kB
+#15 7.486 dist/assets/luau-C2pBCSgt.js                                     16.13 kB │ gzip:   3.54 kB
+#15 7.486 dist/assets/cue-CE9AQfxI.js                                      16.19 kB │ gzip:   2.04 kB
+#15 7.486 dist/assets/elixir-DP304Xio.js                                   16.26 kB │ gzip:   2.76 kB
+#15 7.486 dist/assets/solidity-Bj7E1mRn.js                                 16.40 kB │ gzip:   3.14 kB
+#15 7.486 dist/assets/odin-B1RWQWA5.js                                     16.50 kB │ gzip:   2.92 kB
+#15 7.486 dist/assets/ts-tags-Cc5do7zu.js                                  16.54 kB │ gzip:   2.05 kB
+#15 7.486 dist/assets/OverviewPage-B6RRqRNB.js                             16.92 kB │ gzip:   5.52 kB
+#15 7.486 dist/assets/kanagawa-wave-BML5mF2J.js                            17.11 kB │ gzip:   2.90 kB
+#15 7.486 dist/assets/kanagawa-lotus-BmuOG9ZW.js                           17.11 kB │ gzip:   2.91 kB
+#15 7.486 dist/assets/kanagawa-dragon-Bozd7klA.js                          17.12 kB │ gzip:   2.92 kB
+#15 7.486 dist/assets/move-BYnGhZoM.js                                     17.65 kB │ gzip:   3.06 kB
+#15 7.486 dist/assets/graphql-Ctjuxyvl.js                                  18.08 kB │ gzip:   2.53 kB
+#15 7.486 dist/assets/liquid-G0MH4h_m.js                                   18.10 kB │ gzip:   3.14 kB
+#15 7.486 dist/assets/svelte-Bj3Hmc9F.js                                   18.24 kB │ gzip:   3.14 kB
+#15 7.486 dist/assets/material-theme-Bm3Qr25_.js                           18.61 kB │ gzip:   3.10 kB
+#15 7.486 dist/assets/material-theme-darker-2IIEA8gg.js                    18.62 kB │ gzip:   3.10 kB
+#15 7.486 dist/assets/material-theme-ocean-CHQ94UKr.js                     18.62 kB │ gzip:   3.12 kB
+#15 7.486 dist/assets/material-theme-lighter-uhdI0v04.js                   18.63 kB │ gzip:   3.10 kB
+#15 7.486 dist/assets/material-theme-palenight-B5W6OYN7.js                 18.63 kB │ gzip:   3.11 kB
+#15 7.486 dist/assets/gdscript-DYvRD3hg.js                                 19.08 kB │ gzip:   3.76 kB
+#15 7.486 dist/assets/groovy-CacY0gHj.js                                   19.17 kB │ gzip:   3.59 kB
+#15 7.486 dist/assets/index-B9lEXrBH.js                                    19.58 kB │ gzip:   6.97 kB
+#15 7.486 dist/assets/ayu-dark-DluEY0Gj.js                                 20.07 kB │ gzip:   3.93 kB
+#15 7.486 dist/assets/ayu-mirage-Bqwy1Gya.js                               20.08 kB │ gzip:   3.91 kB
+#15 7.486 dist/assets/glimmer-js-BONyzAsu.js                               20.08 kB │ gzip:   2.94 kB
+#15 7.486 dist/assets/glimmer-ts-f9c0GCOe.js                               20.08 kB │ gzip:   2.93 kB
+#15 7.486 dist/assets/mdc-BKfPFPZw.js                                      20.08 kB │ gzip:   6.80 kB
+#15 7.486 dist/assets/ayu-light-C3h-C4tm.js                                20.14 kB │ gzip:   3.89 kB
+#15 7.486 dist/assets/powershell-CCSX75yM.js                               20.15 kB │ gzip:   4.05 kB
+#15 7.486 dist/assets/viml-DvXPmvsu.js                                     20.35 kB │ gzip:   6.73 kB
+#15 7.486 dist/assets/snazzy-light-4G7pJPwS.js                             20.77 kB │ gzip:   3.80 kB
+#15 7.486 dist/assets/nushell-DHYfO66s.js                                  20.87 kB │ gzip:   5.36 kB
+#15 7.486 dist/assets/dracula-BHWKrbxM.js                                  21.06 kB │ gzip:   3.99 kB
+#15 7.486 dist/assets/dracula-soft-5eyTD99u.js                             21.07 kB │ gzip:   4.02 kB
+#15 7.486 dist/assets/wit-DdvCle-K.js                                      21.46 kB │ gzip:   2.87 kB
+#15 7.486 dist/assets/twig-BVSnuTf-.js                                     21.51 kB │ gzip:   3.75 kB
+#15 7.486 dist/assets/rose-pine-aMsaMD1D.js                                21.73 kB │ gzip:   3.88 kB
+#15 7.486 dist/assets/rose-pine-moon-DO-qXg-I.js                           21.74 kB │ gzip:   3.89 kB
+#15 7.486 dist/assets/rose-pine-dawn-8PwUyIlP.js                           21.74 kB │ gzip:   3.89 kB
+#15 7.486 dist/assets/CloneSetup-DCyASztU.js                               22.38 kB │ gzip:   8.15 kB
+#15 7.486 dist/assets/nim-B6yJ_yaC.js                                      22.45 kB │ gzip:   3.15 kB
+#15 7.486 dist/assets/common-lisp-Cv5bFMCO.js                              22.57 kB │ gzip:   6.07 kB
+#15 7.486 dist/assets/gruvbox-dark-hard-C820rvS2.js                        22.63 kB │ gzip:   4.15 kB
+#15 7.486 dist/assets/gruvbox-dark-soft-MrdJrrXF.js                        22.63 kB │ gzip:   4.15 kB
+#15 7.486 dist/assets/gruvbox-light-hard-BC_s9l72.js                       22.63 kB │ gzip:   4.16 kB
+#15 7.486 dist/assets/gruvbox-light-soft-BSMLrYjP.js                       22.63 kB │ gzip:   4.16 kB
+#15 7.486 dist/assets/gruvbox-dark-medium-BPjhmG05.js                      22.63 kB │ gzip:   4.15 kB
+#15 7.486 dist/assets/gruvbox-light-medium-BAWPOn9u.js                     22.63 kB │ gzip:   4.16 kB
+#15 7.486 dist/assets/sql-DdD7vxS4.js                                      23.49 kB │ gzip:   7.51 kB
+#15 7.486 dist/assets/cadence-CQ2zXKGN.js                                  23.66 kB │ gzip:   3.65 kB
+#15 7.486 dist/assets/astro-B-4NNgOP.js                                    24.02 kB │ gzip:   7.59 kB
+#15 7.486 dist/assets/apl-Dhin1L29.js                                      24.02 kB │ gzip:   4.16 kB
+#15 7.486 dist/assets/templ-TjxbArHn.js                                    24.06 kB │ gzip:   5.41 kB
+#15 7.486 dist/assets/angular-html-B8mrqUL5.js                             24.24 kB │ gzip:   3.99 kB
+#15 7.486 dist/assets/vhdl-BroJfC0k.js                                     24.25 kB │ gzip:   3.86 kB
+#15 7.486 dist/assets/purescript-9MfHhQsQ.js                               24.67 kB │ gzip:   3.24 kB
+#15 7.486 dist/assets/moonbit-DgjMoLWr.js                                  24.93 kB │ gzip:   3.76 kB
+#15 7.486 dist/assets/vue-BNQF7r6F.js                                      24.96 kB │ gzip:   3.03 kB
+#15 7.486 dist/assets/typespec-BRdr0IET.js                                 25.03 kB │ gzip:   2.62 kB
+#15 7.486 dist/assets/one-light-D7Lr4KcI.js                                25.29 kB │ gzip:   3.63 kB
+#15 7.486 dist/assets/fsharp-D13ZGOAj.js                                   25.30 kB │ gzip:   4.12 kB
+#15 7.486 dist/assets/marko-DV5GrDmo.js                                    25.48 kB │ gzip:   3.59 kB
+#15 7.486 dist/assets/night-owl-light-eJ-hLW7d.js                          25.89 kB │ gzip:   4.23 kB
+#15 7.486 dist/assets/c3-D0apG41V.js                                       26.37 kB │ gzip:   3.97 kB
+#15 7.486 dist/assets/system-verilog-Dh5ihWbf.js                           26.54 kB │ gzip:   4.85 kB
+#15 7.486 dist/assets/nord-Cb4Vim4T.js                                     26.72 kB │ gzip:   4.35 kB
+#15 7.486 dist/assets/codeql-oeQT6MSM.js                                   26.87 kB │ gzip:   3.79 kB
+#15 7.486 dist/assets/scss-YesllqfO.js                                     27.26 kB │ gzip:   4.23 kB
+#15 7.486 dist/assets/java-DdHNQ9hk.js                                     27.28 kB │ gzip:   4.31 kB
+#15 7.486 dist/assets/coffee-CiiSLhB6.js                                   27.42 kB │ gzip:   6.35 kB
+#15 7.486 dist/assets/razor-BMJ0eI3p.js                                    27.45 kB │ gzip:   3.54 kB
+#15 7.486 dist/assets/scala-BiFt_7mu.js                                    28.88 kB │ gzip:   3.93 kB
+#15 7.486 dist/assets/night-owl-DhmEMT88.js                                28.91 kB │ gzip:   5.14 kB
+#15 7.486 dist/assets/crystal-DGPAtLeY.js                                  29.41 kB │ gzip:   4.44 kB
+#15 7.486 dist/assets/applescript-CCn79oCD.js                              29.56 kB │ gzip:   5.94 kB
+#15 7.486 dist/assets/pierre-dark-CpLgRqie.js                              30.54 kB │ gzip:   4.74 kB
+#15 7.486 dist/assets/pierre-light-CoaEpmwp.js                             30.54 kB │ gzip:   4.73 kB
+#15 7.486 dist/assets/pierre-dark-soft-kZQmAZld.js                         30.55 kB │ gzip:   4.77 kB
+#15 7.486 dist/assets/pierre-light-soft-lWLdNTOI.js                        30.55 kB │ gzip:   4.73 kB
+#15 7.486 dist/assets/pierre-dark-tritanopia-CpjhbsIL.js                   30.56 kB │ gzip:   4.68 kB
+#15 7.486 dist/assets/pierre-light-tritanopia-CEbqgOJL.js                  30.57 kB │ gzip:   4.69 kB
+#15 7.486 dist/assets/pierre-dark-protanopia-deuteranopia-B35FxJx-.js      30.59 kB │ gzip:   4.76 kB
+#15 7.486 dist/assets/pierre-light-protanopia-deuteranopia-0fSaH845.js     30.59 kB │ gzip:   4.72 kB
+#15 7.486 dist/assets/julia-CXJVy74_.js                                    31.00 kB │ gzip:   4.30 kB
+#15 7.486 dist/assets/stylus-B6D30XZt.js                                   31.06 kB │ gzip:   8.01 kB
+#15 7.486 dist/assets/ahk-CA9gdOdF.js                                      31.43 kB │ gzip:   7.82 kB
+#15 7.486 dist/assets/poimandres-DRFjx7u4.js                               33.49 kB │ gzip:   5.49 kB
+#15 7.486 dist/assets/one-dark-pro-CLwyXe_n.js                             33.78 kB │ gzip:   5.50 kB
+#15 7.486 dist/assets/bsl-_VjlB9mv.js                                      33.94 kB │ gzip:   8.35 kB
+#15 7.486 dist/assets/nginx-BTMw9COX.js                                    35.35 kB │ gzip:   4.45 kB
+#15 7.486 dist/assets/houston-CsvMBhTu.js                                  35.41 kB │ gzip:   5.76 kB
+#15 7.486 dist/assets/tokyo-night-oM2G3aXe.js                              35.66 kB │ gzip:   6.22 kB
+#15 7.486 dist/assets/haxe-C8oCnwJJ.js                                     35.94 kB │ gzip:   6.00 kB
+#15 7.486 dist/assets/org-Ddi8Gs6E.js                                      36.26 kB │ gzip:   3.67 kB
+#15 7.486 dist/assets/erlang-Cphh6RMH.js                                   37.47 kB │ gzip:   4.36 kB
+#15 7.486 dist/assets/bird2-CYIUgYqB.js                                    38.67 kB │ gzip:   8.49 kB
+#15 7.486 dist/assets/cobol-Cw2-KvLW.js                                    39.07 kB │ gzip:  10.89 kB
+#15 7.486 dist/assets/asm-Cmm7eHzH.js                                      40.71 kB │ gzip:   8.16 kB
+#15 7.486 dist/assets/haskell-D8IpX4py.js                                  41.48 kB │ gzip:   6.41 kB
+#15 7.486 dist/assets/shellscript-Da78Ox-3.js                              41.54 kB │ gzip:   6.13 kB
+#15 7.486 dist/assets/perl-DEgXgjuC.js                                     43.14 kB │ gzip:   4.64 kB
+#15 7.486 dist/assets/d-qD-0Kul2.js                                        43.78 kB │ gzip:   8.43 kB
+#15 7.486 dist/assets/pierre-dark-vibrant-CpQYzh95.js                      44.75 kB │ gzip:   5.28 kB
+#15 7.486 dist/assets/pierre-light-vibrant-D80Fkn33.js                     44.76 kB │ gzip:   5.27 kB
+#15 7.486 dist/assets/ahk2-_6rzW9BS.js                                     45.05 kB │ gzip:   9.87 kB
+#15 7.486 dist/assets/ruby-B8JcIHv0.js                                     46.60 kB │ gzip:   5.70 kB
+#15 7.486 dist/assets/go-rLFTqkRN.js                                       46.81 kB │ gzip:   5.14 kB
+#15 7.486 dist/assets/apex-KFGFyKwG.js                                     47.88 kB │ gzip:   6.85 kB
+#15 7.486 dist/assets/ada-C5qYipkI.js                                      48.07 kB │ gzip:   5.96 kB
+#15 7.486 dist/assets/css-CNuuLpMC.js                                      49.10 kB │ gzip:  11.96 kB
+#15 7.486 dist/assets/imba-DsUTQ-LC.js                                     49.92 kB │ gzip:   9.47 kB
+#15 7.486 dist/assets/catppuccin-mocha-DjuaAJKi.js                         50.84 kB │ gzip:   8.47 kB
+#15 7.486 dist/assets/catppuccin-latte-CtsyrtPq.js                         50.84 kB │ gzip:   8.48 kB
+#15 7.486 dist/assets/catppuccin-frappe-C9Q5zVZY.js                        50.85 kB │ gzip:   8.48 kB
+#15 7.486 dist/assets/catppuccin-macchiato-R8nAf1vR.js                     50.85 kB │ gzip:   8.48 kB
+#15 7.486 dist/assets/everforest-dark-sB-x3p7T.js                          53.74 kB │ gzip:   8.37 kB
+#15 7.486 dist/assets/everforest-light-Df2xbC6M.js                         53.74 kB │ gzip:   8.36 kB
+#15 7.486 dist/assets/mermaid-BxpfTIzt.js                                  54.80 kB │ gzip:   4.79 kB
+#15 7.486 dist/assets/wikitext-ClFFjSW2.js                                 55.87 kB │ gzip:   4.81 kB
+#15 7.486 dist/assets/stata-CMv7m7Gi.js                                    56.99 kB │ gzip:  12.39 kB
+#15 7.486 dist/assets/html-XwrE-1r6.js                                     57.32 kB │ gzip:  11.78 kB
+#15 7.486 dist/assets/ballerina-B7ZEbQpA.js                                58.68 kB │ gzip:   8.10 kB
+#15 7.486 dist/assets/markdown-BYOwaDjH.js                                 59.32 kB │ gzip:   5.66 kB
+#15 7.486 dist/assets/ocaml-O90oeIOV.js                                    62.44 kB │ gzip:   5.04 kB
+#15 7.486 dist/assets/mojo-fg40_ntQ.js                                     69.51 kB │ gzip:   9.20 kB
+#15 7.486 dist/assets/python-gzcpVVnB.js                                   69.94 kB │ gzip:   9.09 kB
+#15 7.486 dist/assets/c-iCihek07.js                                        72.17 kB │ gzip:  10.55 kB
+#15 7.486 dist/assets/latex-o9DRzaEe.js                                    72.88 kB │ gzip:   6.74 kB
+#15 7.486 dist/assets/vyper-CgoNMtux.js                                    74.64 kB │ gzip:  10.69 kB
+#15 7.486 dist/assets/hack-Dh_ZLRbs.js                                     81.07 kB │ gzip:  26.45 kB
+#15 7.486 dist/assets/swift-CyEgAFGc.js                                    87.22 kB │ gzip:  14.79 kB
+#15 7.486 dist/assets/fortran-free-form-CYNrtFtB.js                        88.96 kB │ gzip:  11.18 kB
+#15 7.486 dist/assets/csharp-oqKa8noW.js                                   90.18 kB │ gzip:  10.71 kB
+#15 7.486 dist/assets/racket-DcIDlBhZ.js                                   92.38 kB │ gzip:  15.07 kB
+#15 7.486 dist/assets/less-DVTAwKKz.js                                     97.62 kB │ gzip:  14.84 kB
+#15 7.486 dist/assets/blade-C6Gedziy.js                                   104.97 kB │ gzip:  28.29 kB
+#15 7.486 dist/assets/objective-c-D1A_Heim.js                             105.40 kB │ gzip:  23.63 kB
+#15 7.486 dist/assets/php-B9UPq-vz.js                                     113.08 kB │ gzip:  28.85 kB
+#15 7.486 dist/assets/vendor-markdown-C3MvO1Cc.js                         135.08 kB │ gzip:  39.69 kB
+#15 7.486 dist/assets/asciidoc-SCjQUq34.js                                136.04 kB │ gzip:   9.45 kB
+#15 7.486 dist/assets/mdx-DQZ5AkYe.js                                     136.10 kB │ gzip:  23.54 kB
+#15 7.486 dist/assets/typst-C40W_gC6.js                                   163.48 kB │ gzip:  10.96 kB
+#15 7.486 dist/assets/objective-cpp-BsSzOQcm.js                           171.96 kB │ gzip:  30.98 kB
+#15 7.486 dist/assets/javascript-obGGvMPs.js                              174.89 kB │ gzip:  16.68 kB
+#15 7.486 dist/assets/tsx-CUOciP0b.js                                     175.60 kB │ gzip:  16.68 kB
+#15 7.486 dist/assets/jsx-gTgmArGx.js                                     177.85 kB │ gzip:  16.77 kB
+#15 7.486 dist/assets/typescript-BydbNFcO.js                              181.14 kB │ gzip:  16.29 kB
+#15 7.486 dist/assets/angular-ts-Bzix210W.js                              183.73 kB │ gzip:  16.78 kB
+#15 7.486 dist/assets/vue-vine-DFaKYU4X.js                                190.05 kB │ gzip:  18.07 kB
+#15 7.486 dist/assets/vendor-react-DXzH6Q7D.js                            228.59 kB │ gzip:  73.12 kB
+#15 7.486 dist/assets/wolfram-DLL8P-h_.js                                 262.38 kB │ gzip:  77.63 kB
+#15 7.486 dist/assets/cpp-71xkOQct.js                                     785.54 kB │ gzip:  58.27 kB
+#15 7.486 dist/assets/emacs-lisp-c_oH4hRZ.js                              790.00 kB │ gzip: 200.30 kB
+#15 7.486 dist/assets/vendor-diffs-62VeCO_I.js                          1,166.69 kB │ gzip: 385.10 kB
+#15 7.486 
+#15 7.487 [plugin builtin:vite-reporter] 
+#15 7.487 (!) Some chunks are larger than 600 kB after minification. Consider:
+#15 7.487 - Using dynamic import() to code-split the application
+#15 7.487 - Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+#15 7.487 - Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+#15 7.492 ✓ built in 2.17s
+#15 ...
+
+#5 [build 1/7] FROM docker.io/library/rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
+#5 extracting sha256:a6c1a23a6280781f0cf3b6b3a43fc59462763953c4285dd4addc7d4963cc923f 5.1s
+#5 extracting sha256:a6c1a23a6280781f0cf3b6b3a43fc59462763953c4285dd4addc7d4963cc923f 6.6s done
+#5 DONE 23.6s
+
+#16 [build 2/7] RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev pkg-config cmake perl python3     && rm -rf /var/lib/apt/lists/*
+#16 0.265 Get:1 http://deb.debian.org/debian bookworm InRelease [151 kB]
+#16 0.277 Get:2 http://deb.debian.org/debian bookworm-updates InRelease [55.4 kB]
+#16 0.278 Get:3 http://deb.debian.org/debian-security bookworm-security InRelease [34.8 kB]
+#16 0.427 Get:4 http://deb.debian.org/debian bookworm/main amd64 Packages [8790 kB]
+#16 0.526 Get:5 http://deb.debian.org/debian bookworm-updates/main amd64 Packages [6924 B]
+#16 0.617 Get:6 http://deb.debian.org/debian-security bookworm-security/main amd64 Packages [337 kB]
+#16 1.665 Fetched 9375 kB in 1s (6751 kB/s)
+#16 1.665 Reading package lists...
+#16 2.351 Reading package lists...
+#16 2.974 Building dependency tree...
+#16 3.099 Reading state information...
+#16 3.233 pkg-config is already the newest version (1.8.1-1).
+#16 3.233 pkg-config set to manually installed.
+#16 3.233 perl is already the newest version (5.36.0-7+deb12u3).
+#16 3.233 perl set to manually installed.
+#16 3.233 python3 is already the newest version (3.11.2-1+b1).
+#16 3.233 python3 set to manually installed.
+#16 3.233 The following additional packages will be installed:
+#16 3.234   cmake-data libarchive13 libjsoncpp25 libprotobuf-lite32 libprotobuf32
+#16 3.235   libprotoc32 librhash0 libuv1
+#16 3.236 Suggested packages:
+#16 3.236   cmake-doc cmake-format elpa-cmake-mode ninja-build lrzip protobuf-mode-el
+#16 3.342 The following NEW packages will be installed:
+#16 3.343   cmake cmake-data libarchive13 libjsoncpp25 libprotobuf-dev
+#16 3.344   libprotobuf-lite32 libprotobuf32 libprotoc32 librhash0 libuv1
+#16 3.344   protobuf-compiler
+#16 3.371 0 upgraded, 11 newly installed, 0 to remove and 13 not upgraded.
+#16 3.371 Need to get 14.8 MB of archives.
+#16 3.371 After this operation, 61.6 MB of additional disk space will be used.
+#16 3.371 Get:1 http://deb.debian.org/debian-security bookworm-security/main amd64 libarchive13 amd64 3.6.2-1+deb12u5 [345 kB]
+#16 3.377 Get:2 http://deb.debian.org/debian bookworm/main amd64 libjsoncpp25 amd64 1.9.5-4 [78.6 kB]
+#16 3.378 Get:3 http://deb.debian.org/debian bookworm/main amd64 librhash0 amd64 1.4.3-3 [134 kB]
+#16 3.381 Get:4 http://deb.debian.org/debian bookworm/main amd64 libuv1 amd64 1.44.2-1+deb12u1 [136 kB]
+#16 3.385 Get:5 http://deb.debian.org/debian bookworm/main amd64 cmake-data all 3.25.1-1 [2026 kB]
+#16 3.394 Get:6 http://deb.debian.org/debian bookworm/main amd64 cmake amd64 3.25.1-1 [8692 kB]
+#16 3.426 Get:7 http://deb.debian.org/debian bookworm/main amd64 libprotobuf32 amd64 3.21.12-3+deb12u1 [932 kB]
+#16 3.433 Get:8 http://deb.debian.org/debian bookworm/main amd64 libprotobuf-lite32 amd64 3.21.12-3+deb12u1 [262 kB]
+#16 3.436 Get:9 http://deb.debian.org/debian bookworm/main amd64 libprotobuf-dev amd64 3.21.12-3+deb12u1 [1283 kB]
+#16 3.441 Get:10 http://deb.debian.org/debian bookworm/main amd64 libprotoc32 amd64 3.21.12-3+deb12u1 [830 kB]
+#16 3.444 Get:11 http://deb.debian.org/debian bookworm/main amd64 protobuf-compiler amd64 3.21.12-3+deb12u1 [84.2 kB]
+#16 3.585 debconf: delaying package configuration, since apt-utils is not installed
+#16 3.611 Fetched 14.8 MB in 0s (155 MB/s)
+#16 3.626 Selecting previously unselected package libarchive13:amd64.
+#16 3.626 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 23256 files and directories currently installed.)
+#16 3.641 Preparing to unpack .../00-libarchive13_3.6.2-1+deb12u5_amd64.deb ...
+#16 3.642 Unpacking libarchive13:amd64 (3.6.2-1+deb12u5) ...
+#16 3.684 Selecting previously unselected package libjsoncpp25:amd64.
+#16 3.688 Preparing to unpack .../01-libjsoncpp25_1.9.5-4_amd64.deb ...
+#16 3.690 Unpacking libjsoncpp25:amd64 (1.9.5-4) ...
+#16 3.709 Selecting previously unselected package librhash0:amd64.
+#16 3.712 Preparing to unpack .../02-librhash0_1.4.3-3_amd64.deb ...
+#16 3.712 Unpacking librhash0:amd64 (1.4.3-3) ...
+#16 3.735 Selecting previously unselected package libuv1:amd64.
+#16 3.738 Preparing to unpack .../03-libuv1_1.44.2-1+deb12u1_amd64.deb ...
+#16 3.738 Unpacking libuv1:amd64 (1.44.2-1+deb12u1) ...
+#16 3.785 Selecting previously unselected package cmake-data.
+#16 3.788 Preparing to unpack .../04-cmake-data_3.25.1-1_all.deb ...
+#16 3.795 Unpacking cmake-data (3.25.1-1) ...
+#16 4.107 Selecting previously unselected package cmake.
+#16 4.112 Preparing to unpack .../05-cmake_3.25.1-1_amd64.deb ...
+#16 4.113 Unpacking cmake (3.25.1-1) ...
+#16 4.810 Selecting previously unselected package libprotobuf32:amd64.
+#16 4.814 Preparing to unpack .../06-libprotobuf32_3.21.12-3+deb12u1_amd64.deb ...
+#16 4.815 Unpacking libprotobuf32:amd64 (3.21.12-3+deb12u1) ...
+#16 4.908 Selecting previously unselected package libprotobuf-lite32:amd64.
+#16 4.908 Preparing to unpack .../07-libprotobuf-lite32_3.21.12-3+deb12u1_amd64.deb ...
+#16 4.908 Unpacking libprotobuf-lite32:amd64 (3.21.12-3+deb12u1) ...
+#16 4.983 Selecting previously unselected package libprotobuf-dev:amd64.
+#16 4.983 Preparing to unpack .../08-libprotobuf-dev_3.21.12-3+deb12u1_amd64.deb ...
+#16 4.986 Unpacking libprotobuf-dev:amd64 (3.21.12-3+deb12u1) ...
+#16 5.268 Selecting previously unselected package libprotoc32:amd64.
+#16 5.268 Preparing to unpack .../09-libprotoc32_3.21.12-3+deb12u1_amd64.deb ...
+#16 5.269 Unpacking libprotoc32:amd64 (3.21.12-3+deb12u1) ...
+#16 5.434 Selecting previously unselected package protobuf-compiler.
+#16 5.439 Preparing to unpack .../10-protobuf-compiler_3.21.12-3+deb12u1_amd64.deb ...
+#16 5.440 Unpacking protobuf-compiler (3.21.12-3+deb12u1) ...
+#16 5.512 Setting up libarchive13:amd64 (3.6.2-1+deb12u5) ...
+#16 5.513 Setting up libuv1:amd64 (1.44.2-1+deb12u1) ...
+#16 5.514 Setting up libjsoncpp25:amd64 (1.9.5-4) ...
+#16 5.515 Setting up libprotobuf32:amd64 (3.21.12-3+deb12u1) ...
+#16 5.517 Setting up librhash0:amd64 (1.4.3-3) ...
+#16 5.518 Setting up libprotobuf-lite32:amd64 (3.21.12-3+deb12u1) ...
+#16 5.520 Setting up cmake-data (3.25.1-1) ...
+#16 5.542 Setting up libprotoc32:amd64 (3.21.12-3+deb12u1) ...
+#16 5.553 Setting up protobuf-compiler (3.21.12-3+deb12u1) ...
+#16 5.555 Setting up libprotobuf-dev:amd64 (3.21.12-3+deb12u1) ...
+#16 5.557 Setting up cmake (3.25.1-1) ...
+#16 5.559 Processing triggers for libc-bin (2.36-9+deb12u14) ...
+#16 DONE 6.2s
+
+#15 [web 7/7] RUN pnpm run build && test -f dist/index.html && test -f dist/repos.js
+#15 18.32 [plugin walgit:precompress] precompressed 335 files: 11045 kB → 1715 kB brotli
+#15 18.51 vite v8.2.1 building client environment for production...
+#15 18.52 [2Ktransforming...✓ 2 modules transformed.
+#15 18.53 rendering chunks...
+#15 18.53 computing gzip size...
+#15 18.54 dist/repos.js  8.87 kB │ gzip: 3.27 kB
+#15 18.54 
+#15 18.54 [2Ktransforming...✓ 2 modules transformed.
+#15 18.54 rendering chunks...
+#15 18.55 computing gzip size...
+#15 18.55 dist/repos.mjs  11.03 kB │ gzip: 3.65 kB
+#15 18.55 
+#15 18.55 ✓ built in 33ms
+#15 ...
+
+#17 [build 3/7] WORKDIR /src
+#17 DONE 0.0s
+
+#18 [build 4/7] COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+#18 DONE 0.0s
+
+#19 [build 5/7] COPY crates ./crates
+#19 DONE 0.1s
+
+#15 [web 7/7] RUN pnpm run build && test -f dist/index.html && test -f dist/repos.js
+#15 27.85 [plugin walgit:precompress] precompressed 337 files: 11065 kB → 1721 kB brotli
+#15 DONE 27.9s
+
+#20 [build 6/7] COPY --from=web /src/web/dist ./web/dist
+#20 DONE 0.1s
+
+#21 [build 7/7] RUN --mount=type=cache,target=/usr/local/cargo/registry     --mount=type=cache,target=/src/target     cargo build --release --locked -p walgit-cli     && install -D target/release/walgit /out/bin/walgit     && install -D target/release/walgit-server /out/bin/walgit-server
+#21 0.186 info: syncing channel updates for 1.97.1-x86_64-unknown-linux-gnu
+#21 0.283 info: latest update on 2026-07-16 for version 1.97.1 (8bab26f4f 2026-07-14)
+#21 0.302 info: downloading component clippy
+#21 1.087     Updating crates.io index
+#21 1.897  Downloading crates ...
+#21 1.953   Downloaded adler2 v2.0.1
+#21 1.971   Downloaded humantime-serde v1.1.1
+#21 1.973   Downloaded httpdate v1.0.3
+#21 1.974   Downloaded itoa v1.0.18
+#21 1.977   Downloaded atomic-waker v1.1.2
+#21 1.978   Downloaded bisync v0.3.0
+#21 1.979   Downloaded ident_case v1.0.1
+#21 1.982   Downloaded block-buffer v0.12.1
+#21 1.983   Downloaded cfg_aliases v0.2.2
+#21 1.984   Downloaded cpufeatures v0.2.17
+#21 1.985   Downloaded crypto-common v0.2.2
+#21 1.986   Downloaded http-body-util v0.1.4
+#21 1.988   Downloaded aws-smithy-observability v0.3.0
+#21 1.989   Downloaded clap_lex v1.1.0
+#21 1.990   Downloaded curve25519-dalek-derive v0.1.1
+#21 1.991   Downloaded base64-simd v0.8.0
+#21 1.992   Downloaded crc32c v0.6.8
+#21 1.994   Downloaded hex v0.4.3
+#21 1.995   Downloaded matchers v0.2.0
+#21 1.996   Downloaded alloc-stdlib v0.2.4
+#21 1.997   Downloaded aws-smithy-runtime-api-macros v1.1.0
+#21 1.998   Downloaded base16ct v0.2.0
+#21 1.999   Downloaded alloc-no-stdlib v2.0.4
+#21 2.000   Downloaded hash32 v0.3.1
+#21 2.001   Downloaded ipnet v2.12.1
+#21 2.003   Downloaded aws-smithy-eventstream v0.61.1
+#21 2.005   Downloaded anstyle-parse v1.0.0
+#21 2.006   Downloaded aws-credential-types v1.3.0
+#21 2.008   Downloaded http-body v0.4.6
+#21 2.009   Downloaded anstyle-query v1.1.5
+#21 2.010   Downloaded bisync_macros v0.2.3
+#21 2.011   Downloaded cron v0.15.0
+#21 2.013   Downloaded aws-smithy-async v1.3.0
+#21 2.015   Downloaded axum-core v0.5.6
+#21 2.017   Downloaded cmov v0.5.4
+#21 2.018   Downloaded compression-core v0.4.32
+#21 2.019   Downloaded async-trait v0.1.92
+#21 2.022   Downloaded aws-smithy-checksums v0.65.0
+#21 2.024   Downloaded hmac v0.13.0
+#21 2.026   Downloaded google-cloud-longrunning v1.12.0
+#21 2.027   Downloaded stable_deref_trait v1.2.1
+#21 2.028   Downloaded time-core v0.1.9
+#21 2.029   Downloaded aws-types v1.5.0
+#21 2.031   Downloaded axum-macros v0.5.1
+#21 2.040   Downloaded base64ct v1.8.3
+#21 2.043   Downloaded asn1-rs-derive v0.6.0
+#21 2.044   Downloaded http-body v1.1.0
+#21 2.045   Downloaded asn1-rs-impl v0.2.0
+#21 2.045   Downloaded aws-smithy-http v0.64.0
+#21 2.047   Downloaded aws-smithy-query v0.62.0
+#21 2.048   Downloaded bitflags v1.3.2
+#21 2.051   Downloaded bs58 v0.5.1
+#21 2.053   Downloaded hyper-timeout v0.5.2
+#21 2.055   Downloaded anstream v1.0.0
+#21 2.057   Downloaded anstyle v1.0.14
+#21 2.058   Downloaded bytes-utils v0.1.4
+#21 2.060   Downloaded cmake v0.1.58
+#21 2.061   Downloaded ctutils v0.4.2
+#21 2.063   Downloaded idna_adapter v1.2.2
+#21 2.064   Downloaded io-close v0.3.7
+#21 2.065   Downloaded jiff-static v0.2.35
+#21 2.065   Downloaded anyhow v1.0.104
+#21 2.069   Downloaded compression-codecs v0.4.38
+#21 2.072   Downloaded heck v0.5.0
+#21 2.074   Downloaded is_terminal_polyfill v1.70.2
+#21 2.075   Downloaded mimalloc v0.1.52
+#21 2.076   Downloaded multimap v0.10.1
+#21 2.077   Downloaded num-iter v0.1.46
+#21 2.078   Downloaded lru-slab v0.1.2
+#21 2.078   Downloaded mime v0.3.17
+#21 2.079   Downloaded google-cloud-lro v1.9.0
+#21 2.081   Downloaded iana-time-zone v0.1.65
+#21 2.084   Downloaded aws-smithy-json v0.63.0
+#21 2.086   Downloaded block-buffer v0.10.4
+#21 2.088   Downloaded bit-vec v0.9.1
+#21 2.089   Downloaded bytesize v2.7.0
+#21 2.092   Downloaded cfg-if v1.0.4
+#21 2.093   Downloaded crossbeam-utils v0.8.22
+#21 2.096   Downloaded crypto-common v0.1.7
+#21 2.097   Downloaded nonempty v0.12.0
+#21 2.098   Downloaded num-conv v0.2.2
+#21 2.099   Downloaded tower-layer v0.3.3
+#21 2.100   Downloaded google-cloud-iam-v1 v1.11.0
+#21 2.104   Downloaded hyper-rustls v0.27.9
+#21 2.104   Downloaded autocfg v1.5.1
+#21 2.106   Downloaded darling v0.23.0
+#21 2.111   Downloaded google-cloud-type v1.6.0
+#21 2.113   Downloaded lazy_static v1.5.0
+#21 2.115   Downloaded utf8parse v0.2.2
+#21 2.115   Downloaded arrayvec v0.7.8
+#21 2.117   Downloaded form_urlencoded v1.2.2
+#21 2.118   Downloaded generic-array v0.14.7
+#21 2.119   Downloaded humantime v2.4.0
+#21 2.120   Downloaded hyper-rustls v0.24.2
+#21 2.123   Downloaded md5 v0.8.1
+#21 2.124   Downloaded allocator-api2 v0.2.21
+#21 2.125   Downloaded aws-smithy-schema v0.2.0
+#21 2.127   Downloaded cpufeatures v0.3.0
+#21 2.128   Downloaded byteorder v1.5.0
+#21 2.130   Downloaded lock_api v0.4.14
+#21 2.131   Downloaded num-integer v0.1.47
+#21 2.132   Downloaded jobserver v0.1.35
+#21 2.134   Downloaded unicode-bom v2.0.3
+#21 2.135   Downloaded colorchoice v1.0.5
+#21 2.137   Downloaded icu_properties v2.2.0
+#21 2.143   Downloaded clap v4.6.6
+#21 2.162   Downloaded equivalent v1.0.2
+#21 2.163   Downloaded gix-zlib v0.1.0
+#21 2.166   Downloaded indexmap v1.9.3
+#21 2.171   Downloaded aws-smithy-xml v0.62.0
+#21 2.175   Downloaded bytes v1.12.1
+#21 2.182   Downloaded either v1.17.0
+#21 2.186   Downloaded hmac v0.12.1
+#21 2.191   Downloaded lru v0.16.4
+#21 2.193   Downloaded mime_guess v2.0.5
+#21 2.196   Downloaded sharded-slab v0.1.7
+#21 2.200   Downloaded async-lock v3.4.2
+#21 2.205   Downloaded bitflags v2.13.1
+#21 2.211   Downloaded chacha20 v0.10.1
+#21 2.214   Downloaded log v0.4.33
+#21 2.217   Downloaded metrics v0.24.6
+#21 2.220   Downloaded signal-hook-registry v1.4.8
+#21 2.221   Downloaded sketches-ddsketch v0.3.1
+#21 2.223   Downloaded zerovec-derive v0.11.3
+#21 2.224   Downloaded gix-trace v0.1.21
+#21 2.225   Downloaded group v0.13.0
+#21 2.226   Downloaded httparse v1.10.1
+#21 2.228   Downloaded hybrid-array v0.4.14
+#21 2.229   Downloaded aws-sigv4 v1.5.1
+#21 2.255   Downloaded base64 v0.22.1
+#21 2.258   Downloaded clru v0.6.3
+#21 2.259   Downloaded dashmap v6.2.1
+#21 2.260   Downloaded metrics-exporter-prometheus v0.17.2
+#21 2.262   Downloaded gix-glob v0.27.0
+#21 2.263   Downloaded matchit v0.8.4
+#21 2.264   Downloaded memmap2 v0.9.11
+#21 2.265   Downloaded md-5 v0.11.0
+#21 2.266   Downloaded gix-chunk v0.7.3
+#21 2.267   Downloaded google-cloud-rpc v1.6.0
+#21 2.268   Downloaded gix-tempfile v24.0.0
+#21 2.269   Downloaded unicase v2.9.0
+#21 2.270   Downloaded nu-ansi-term v0.50.3
+#21 2.271   Downloaded asn1-rs v0.7.2
+#21 2.275   Downloaded aws-smithy-runtime-api v1.14.0
+#21 2.278   Downloaded icu_provider v2.2.0
+#21 2.280   Downloaded litemap v0.8.2
+#21 2.281   Downloaded num-traits v0.2.19
+#21 2.283   Downloaded scopeguard v1.2.0
+#21 2.284   Downloaded signature v2.2.0
+#21 2.285   Downloaded heapless v0.8.0
+#21 2.287   Downloaded rand_core v0.10.1
+#21 2.288   Downloaded rfc6979 v0.4.0
+#21 2.289   Downloaded rustls-native-certs v0.8.4
+#21 2.290   Downloaded tonic-prost v0.14.6
+#21 2.291   Downloaded aws-runtime v1.9.1
+#21 2.293   Downloaded data-encoding v2.11.1
+#21 2.294   Downloaded gix-discover v0.54.0
+#21 2.295   Downloaded jsonwebtoken v10.4.0
+#21 2.298   Downloaded rand_core v0.9.5
+#21 2.299   Downloaded tempfile v3.27.0
+#21 2.301   Downloaded try-lock v0.2.5
+#21 2.302   Downloaded jsonwebtoken v11.0.0
+#21 2.305   Downloaded prost v0.14.4
+#21 2.306   Downloaded unicode-ident v1.0.24
+#21 2.308   Downloaded gix-error v0.2.5
+#21 2.309   Downloaded icu_locale_core v2.2.0
+#21 2.313   Downloaded metrics-util v0.20.4
+#21 2.315   Downloaded oid-registry v0.8.1
+#21 2.316   Downloaded const-oid v0.9.6
+#21 2.317   Downloaded icu_normalizer_data v2.2.0
+#21 2.319   Downloaded miniz_oxide v0.8.9
+#21 2.320   Downloaded socket2 v0.5.10
+#21 2.322   Downloaded icu_collections v2.2.0
+#21 2.325   Downloaded parking_lot_core v0.9.12
+#21 2.327   Downloaded pin-project-lite v0.2.17
+#21 2.330   Downloaded prost-build v0.14.4
+#21 2.332   Downloaded shlex v2.0.1
+#21 2.333   Downloaded strsim v0.11.1
+#21 2.334   Downloaded clap_derive v4.6.4
+#21 2.335   Downloaded crc32fast v1.5.0
+#21 2.336   Downloaded crossbeam-epoch v0.9.20
+#21 2.338   Downloaded http v1.5.0
+#21 2.340   Downloaded minimal-lexical v0.2.1
+#21 2.343   Downloaded signal-hook v0.4.4
+#21 2.345   Downloaded google-cloud-wkt v1.7.0
+#21 2.348   Downloaded hashbrown v0.12.3
+#21 2.351   Downloaded num-bigint v0.4.8
+#21 2.354   Downloaded dunce v1.0.5
+#21 2.354   Downloaded http v0.2.12
+#21 2.357   Downloaded hyper-util v0.1.20
+#21 2.360   Downloaded icu_normalizer v2.2.0
+#21 2.363   Downloaded futures-sink v0.3.34
+#21 2.363   Downloaded mio v1.2.2
+#21 2.367   Downloaded toml v0.9.12+spec-1.1.0
+#21 2.370   Downloaded gix-fs v0.22.0
+#21 2.371   Downloaded gix-config v0.59.0
+#21 2.374   Downloaded google-cloud-gax-internal v0.7.16
+#21 2.378   Downloaded gix-shallow v0.13.0
+#21 2.379   Downloaded cc v1.4.2
+#21 2.381   Downloaded arc-swap v1.9.2
+#21 2.384   Downloaded indexmap v2.14.0
+#21 2.386   Downloaded aws-smithy-http-client v1.2.0
+#21 2.389   Downloaded aws-smithy-types v1.6.1
+#21 2.392   Downloaded const-oid v0.10.2
+#21 2.394   Downloaded gix-utils v0.3.5
+#21 2.395   Downloaded memchr v2.8.3
+#21 2.398   Downloaded nom v7.1.3
+#21 2.401   Downloaded serde_urlencoded v0.7.1
+#21 2.403   Downloaded async-compression v0.4.43
+#21 2.407   Downloaded hashbrown v0.17.1
+#21 2.410   Downloaded prodash v31.0.0
+#21 2.413   Downloaded tonic v0.14.6
+#21 2.417   Downloaded aws-sdk-ssooidc v1.107.0
+#21 2.422   Downloaded futures-core v0.3.34
+#21 2.422   Downloaded num-bigint-dig v0.8.6
+#21 2.425   Downloaded openssl-probe v0.2.1
+#21 2.426   Downloaded schemars v1.2.2
+#21 2.435   Downloaded time-macros v0.2.32
+#21 2.437   Downloaded tower-service v0.3.3
+#21 2.438   Downloaded untrusted v0.9.0
+#21 2.439   Downloaded hashbrown v0.14.5
+#21 2.442   Downloaded sha2 v0.10.9
+#21 2.444   Downloaded typenum v1.20.1
+#21 2.446   Downloaded uuid v1.24.0
+#21 2.448   Downloaded getrandom v0.3.4
+#21 2.450   Downloaded gix-attributes v0.34.0
+#21 2.452   Downloaded gix-features v0.49.0
+#21 2.453   Downloaded futures-io v0.3.34
+#21 2.454   Downloaded gix-pathspec v0.19.0
+#21 2.455   Downloaded hashbrown v0.16.1
+#21 2.458   Downloaded hyper v1.11.0
+#21 2.463   Downloaded idna v1.1.0
+#21 2.465   Downloaded jiff-core v0.1.0
+#21 2.468   Downloaded crypto-bigint v0.5.5
+#21 2.472   Downloaded darling_macro v0.23.0
+#21 2.472   Downloaded percent-encoding v2.3.2
+#21 2.473   Downloaded ppv-lite86 v0.2.21
+#21 2.474   Downloaded quinn-udp v0.5.15
+#21 2.475   Downloaded tracing-attributes v0.1.31
+#21 2.477   Downloaded defmt v1.1.1
+#21 2.479   Downloaded hashbrown v0.15.5
+#21 2.483   Downloaded itertools v0.14.0
+#21 2.487   Downloaded libm v0.2.16
+#21 2.493   Downloaded sec1 v0.7.3
+#21 2.494   Downloaded shell-words v1.1.1
+#21 2.495   Downloaded fs_extra v1.3.0
+#21 2.496   Downloaded icu_properties_data v2.2.0
+#21 2.502   Downloaded tinystr v0.8.3
+#21 2.504   Downloaded zerotrie v0.2.4
+#21 2.506   Downloaded deranged v0.5.8
+#21 2.507   Downloaded foldhash v0.2.0
+#21 2.508   Downloaded gix-path v0.12.4
+#21 2.510   Downloaded gix-revwalk v0.34.0
+#21 2.511   Downloaded pin-project-internal v1.1.13
+#21 2.512   Downloaded same-file v1.0.6
+#21 2.513   Downloaded utf8_iter v1.0.4
+#21 2.513   Downloaded h2 v0.4.15
+#21 2.517   Downloaded rust-embed-impl v8.12.0
+#21 2.518   Downloaded serde_core v1.0.229
+#21 2.520   Downloaded thiserror v2.0.20
+#21 2.524   Downloaded aws-sdk-sso v1.105.0
+#21 2.528   Downloaded displaydoc v0.2.7
+#21 2.530   Downloaded fastrand v2.5.0
+#21 2.531   Downloaded h2 v0.3.27
+#21 2.535   Downloaded hkdf v0.12.4
+#21 2.536   Downloaded hyper v0.14.32
+#21 2.541   Downloaded once_cell v1.21.4
+#21 2.543   Downloaded proc-macro2 v1.0.107
+#21 2.545   Downloaded prost-derive v0.14.4
+#21 2.545   Downloaded rand v0.9.5
+#21 2.548   Downloaded reqwest v0.12.28
+#21 2.552   Downloaded thread_local v1.1.10
+#21 2.552   Downloaded tracing-log v0.2.0
+#21 2.553   Downloaded tracing-opentelemetry v0.33.0
+#21 2.555   Downloaded futures-channel v0.3.34
+#21 2.556   Downloaded rand_pcg v0.10.2
+#21 2.557   Downloaded quanta v0.12.6
+#21 2.559   Downloaded zerovec v0.11.6
+#21 2.563   Downloaded aws-smithy-runtime v1.12.1
+#21 2.567   Downloaded primeorder v0.13.6
+#21 2.568   Downloaded darling_core v0.23.0
+#21 2.571   Downloaded reqwest v0.13.4
+#21 2.575   Downloaded pin-utils v0.1.0
+#21 2.575   Downloaded dyn-clone v1.0.20
+#21 2.576   Downloaded digest v0.10.7
+#21 2.578   Downloaded simd-adler32 v0.3.10
+#21 2.579   Downloaded google-cloud-gax v1.13.0
+#21 2.581   Downloaded der-parser v10.0.0
+#21 2.583   Downloaded gix-bitmap v0.3.3
+#21 2.584   Downloaded yasna v0.6.0
+#21 2.585   Downloaded gix-worktree-state v0.33.0
+#21 2.586   Downloaded gix-worktree-stream v0.35.0
+#21 2.587   Downloaded moka v0.12.16
+#21 2.592   Downloaded spki v0.7.3
+#21 2.593   Downloaded faster-hex v0.10.0
+#21 2.594   Downloaded futures-task v0.3.34
+#21 2.595   Downloaded gix-lock v24.0.0
+#21 2.596   Downloaded ff v0.13.1
+#21 2.597   Downloaded rsa v0.9.10
+#21 2.600   Downloaded slab v0.4.12
+#21 2.601   Downloaded tokio-rustls v0.26.4
+#21 2.602   Downloaded defmt-parser v1.0.0
+#21 2.603   Downloaded gix-ignore v0.22.0
+#21 2.604   Downloaded rust-embed-utils v8.12.0
+#21 2.605   Downloaded sync_wrapper v1.0.2
+#21 2.605   Downloaded gix-object v0.63.0
+#21 2.607   Downloaded gix-url v0.37.1
+#21 2.608   Downloaded pkcs8 v0.10.2
+#21 2.610   Downloaded potential_utf v0.1.5
+#21 2.611   Downloaded ref-cast v1.0.26
+#21 2.613   Downloaded sha1 v0.11.0
+#21 2.614   Downloaded tracing-serde v0.2.0
+#21 2.614   Downloaded yoke-derive v0.8.2
+#21 2.615   Downloaded zerofrom v0.1.8
+#21 2.616   Downloaded getrandom v0.2.17
+#21 2.618   Downloaded prost-types v0.14.4
+#21 2.619   Downloaded serde_path_to_error v0.1.20
+#21 2.620   Downloaded subtle v2.6.1
+#21 2.621   Downloaded tinyvec_macros v0.1.1
+#21 2.621   Downloaded toml_parser v1.1.3+spec-1.1.0
+#21 2.623   Downloaded toml_writer v1.1.2+spec-1.1.0
+#21 2.624   Downloaded untrusted v0.7.1
+#21 2.625   Downloaded want v0.3.1
+#21 2.625   Downloaded xmlparser v0.13.6
+#21 2.627   Downloaded yoke v0.8.3
+#21 2.628   Downloaded zerofrom-derive v0.1.7
+#21 2.628   Downloaded zeroize_derive v1.5.0
+#21 2.629   Downloaded aho-corasick v1.1.5
+#21 2.633   Downloaded crossbeam-channel v0.5.16
+#21 2.636   Downloaded filetime v0.2.29
+#21 2.637   Downloaded foldhash v0.1.5
+#21 2.638   Downloaded gix-actor v0.41.2
+#21 2.638   Downloaded gix-credentials v0.39.1
+#21 2.640   Downloaded gix-hash v0.26.0
+#21 2.641   Downloaded gix-refspec v0.44.0
+#21 2.642   Downloaded pem v3.0.6
+#21 2.643   Downloaded pin-project v1.1.13
+#21 2.650   Downloaded rand v0.8.7
+#21 2.652   Downloaded rand_chacha v0.9.0
+#21 2.653   Downloaded rand_core v0.6.4
+#21 2.654   Downloaded rand_xoshiro v0.7.0
+#21 2.655   Downloaded regex-lite v0.1.9
+#21 2.657   Downloaded rusticata-macros v4.1.0
+#21 2.658   Downloaded rustls-platform-verifier v0.7.0
+#21 2.660   Downloaded sct v0.7.1
+#21 2.662   Downloaded serde v1.0.229
+#21 2.664   Downloaded serde_derive v1.0.229
+#21 2.666   Downloaded serde_spanned v1.1.1
+#21 2.667   Downloaded simple_asn1 v0.6.4
+#21 2.668   Downloaded socket2 v0.6.5
+#21 2.669   Downloaded spin v0.10.1
+#21 2.671   Downloaded tagptr v0.2.0
+#21 2.671   Downloaded tinyvec v1.12.0
+#21 2.673   Downloaded toml_datetime v0.7.5+spec-1.1.0
+#21 2.674   Downloaded tracing-core v0.1.36
+#21 2.676   Downloaded zeroize v1.9.0
+#21 2.677   Downloaded zlib-rs v0.6.7
+#21 2.680   Downloaded zmij v1.0.23
+#21 2.682   Downloaded defmt-macros v1.1.1
+#21 2.684   Downloaded ecdsa v0.16.9
+#21 2.685   Downloaded ed25519 v2.2.3
+#21 2.686   Downloaded errno v0.3.14
+#21 2.687   Downloaded event-listener v5.4.2
+#21 2.688   Downloaded fixedbitset v0.5.7
+#21 2.689   Downloaded gix-diff v0.66.0
+#21 2.691   Downloaded gix-index v0.54.0
+#21 2.694   Downloaded gix-pack v0.73.0
+#21 2.698   Downloaded gix-submodule v0.33.0
+#21 2.699   Downloaded gix-transport v0.58.1
+#21 2.701   Downloaded gix-worktree v0.55.0
+#21 2.702   Downloaded outref v0.5.2
+#21 2.704   Downloaded parking_lot v0.12.5
+#21 2.705   Downloaded rustls-pki-types v1.15.1
+#21 2.707   Downloaded rustversion v1.0.23
+#21 2.709   Downloaded ryu v1.0.23
+#21 2.711   Downloaded semver v1.0.28
+#21 2.712   Downloaded sha2 v0.11.0
+#21 2.714   Downloaded tokio-rustls v0.24.1
+#21 2.716   Downloaded urlencoding v2.1.3
+#21 2.716   Downloaded writeable v0.6.3
+#21 2.718   Downloaded futures v0.3.34
+#21 2.721   Downloaded opentelemetry v0.32.0
+#21 2.723   Downloaded quinn v0.11.11
+#21 2.726   Downloaded schemars v0.9.0
+#21 2.733   Downloaded sha1 v0.10.7
+#21 2.735   Downloaded thiserror-impl v2.0.20
+#21 2.735   Downloaded axum v0.8.9
+#21 2.741   Downloaded elliptic-curve v0.13.8
+#21 2.743   Downloaded find-msvc-tools v0.1.10
+#21 2.744   Downloaded futures-util v0.3.34
+#21 2.752   Downloaded gix-command v0.9.2
+#21 2.752   Downloaded gix-negotiate v0.34.0
+#21 2.753   Downloaded gix-odb v0.83.0
+#21 2.755   Downloaded gix-packetline v0.22.0
+#21 2.757   Downloaded gix-ref v0.66.0
+#21 2.759   Downloaded gix-traverse v0.60.0
+#21 2.761   Downloaded opentelemetry-semantic-conventions v0.32.1
+#21 2.763   Downloaded p256 v0.13.2
+#21 2.765   Downloaded prettyplease v0.2.37
+#21 2.767   Downloaded rustls v0.23.43
+#21 2.775   Downloaded serde_with v3.22.0
+#21 2.783   Downloaded tower-http v0.6.11
+#21 2.788   Downloaded webpki-roots v1.0.9
+#21 2.791   Downloaded winnow v0.6.26
+#21 2.796   Downloaded aws-config v1.10.1
+#21 2.800   Downloaded brotli-decompressor v5.0.3
+#21 2.804   Downloaded clap_builder v4.6.6
+#21 2.808   Downloaded der v0.7.10
+#21 2.812   Downloaded flate2 v1.1.9
+#21 2.815   Downloaded gix-protocol v0.64.0
+#21 2.817   Downloaded google-cloud-storage v1.17.0
+#21 2.828   Downloaded libmimalloc-sys v0.1.49
+#21 2.838   Downloaded quinn-proto v0.11.16
+#21 2.843   Downloaded regex-syntax v0.8.11
+#21 2.848   Downloaded rustls-webpki v0.103.14
+#21 2.850   Downloaded jiff v0.2.35
+#21 2.860   Downloaded libc v0.2.189
+#21 2.886   Downloaded opentelemetry_sdk v0.32.1
+#21 2.892   Downloaded pkcs1 v0.7.5
+#21 2.893   Downloaded rustls-pemfile v2.2.0
+#21 2.895   Downloaded tokio-util v0.7.19
+#21 2.899   Downloaded tower v0.5.3
+#21 2.905   Downloaded uluru v3.1.0
+#21 2.906   Downloaded gix-revision v0.48.0
+#21 2.907   Downloaded winnow v0.7.15
+#21 2.913   Downloaded winnow v1.0.4
+#21 2.919   Downloaded aws-sdk-sts v1.110.0
+#21 2.926   Downloaded tokio-macros v2.7.2
+#21 2.927   Downloaded zerocopy v0.8.56
+#21 2.940   Downloaded aws-lc-rs v1.18.0
+#21 2.946   Downloaded chrono v0.4.45
+#21 2.951   Downloaded ref-cast-impl v1.0.26
+#21 2.952   Downloaded rustc-hash v2.1.3
+#21 2.953   Downloaded time v0.3.55
+#21 2.961   Downloaded gix-sec v0.14.2
+#21 2.962   Downloaded gix-validate v0.11.3
+#21 2.963   Downloaded tracing-subscriber v0.3.23
+#21 2.968   Downloaded vsimd v0.8.0
+#21 2.970   Downloaded walkdir v2.5.0
+#21 2.971   Downloaded gix-hashtable v0.16.0
+#21 2.971   Downloaded gix-prompt v0.16.0
+#21 2.972   Downloaded google-cloud-auth v1.15.0
+#21 2.977   Downloaded pem-rfc7468 v0.7.0
+#21 2.978   Downloaded portable-atomic v1.15.0
+#21 2.983   Downloaded synstructure v0.13.2
+#21 2.984   Downloaded version_check v0.9.5
+#21 2.984   Downloaded x509-parser v0.18.1
+#21 2.988   Downloaded rcgen v0.14.9
+#21 2.989   Downloaded curve25519-dalek v4.1.3
+#21 2.995   Downloaded url v2.5.8
+#21 2.997   Downloaded rapidhash v4.5.1
+#21 2.999   Downloaded regex v1.13.1
+#21 3.003   Downloaded p384 v0.13.1
+#21 3.006   Downloaded rustc_version v0.4.1
+#21 3.007   Downloaded serde_with_macros v3.22.0
+#21 3.008   Downloaded gix-quote v0.7.2
+#21 3.009   Downloaded rustls v0.21.12
+#21 3.016   Downloaded bstr v1.13.1
+#21 3.021   Downloaded syn v3.0.3
+#21 3.028   Downloaded futures-macro v0.3.34
+#21 3.029   Downloaded tracing v0.1.44
+#21 3.038   Downloaded rustix v1.1.4
+#21 3.054   Downloaded rustls-webpki v0.101.7
+#21 3.063   Downloaded digest v0.11.3
+#21 3.064   Downloaded serde_json v1.0.151
+#21 3.069   Downloaded gix-filter v0.33.0
+#21 3.071   Downloaded smallvec v1.15.2
+#21 3.072   Downloaded getrandom v0.4.3
+#21 3.074   Downloaded regex-automata v0.4.18
+#21 3.084   Downloaded quote v1.0.47
+#21 3.085   Downloaded brotli v8.0.4
+#21 3.096   Downloaded event-listener-strategy v0.5.4
+#21 3.097   Downloaded petgraph v0.8.3
+#21 3.110   Downloaded rust-embed v8.12.0
+#21 3.116   Downloaded sha1-checked v0.10.0
+#21 3.121   Downloaded ring v0.17.14
+#21 3.148   Downloaded pkg-config v0.3.33
+#21 3.149   Downloaded tokio-stream v0.1.19
+#21 3.152   Downloaded tokio v1.53.1
+#21 3.179   Downloaded rand v0.10.2
+#21 3.182   Downloaded gix-date v0.15.6
+#21 3.183   Downloaded rand_chacha v0.3.1
+#21 3.184   Downloaded crc-fast v1.10.0
+#21 3.198   Downloaded fnv v1.0.7
+#21 3.199   Downloaded linux-raw-sys v0.12.1
+#21 3.242   Downloaded powerfmt v0.2.0
+#21 3.243   Downloaded encoding_rs v0.8.35
+#21 3.259   Downloaded aws-sdk-s3 v1.141.0
+#21 3.320   Downloaded gix-config-value v0.19.1
+#21 3.321   Downloaded gix-commitgraph v0.38.0
+#21 3.322   Downloaded ed25519-dalek v2.2.0
+#21 3.324   Downloaded futures-executor v0.3.34
+#21 3.325   Downloaded syn v2.0.119
+#21 3.332   Downloaded unicode-normalization v0.1.25
+#21 3.335   Downloaded aws-lc-sys v0.44.0
+#21 3.502   Downloaded spin v0.9.9
+#21 3.503   Downloaded parking v2.2.1
+#21 3.504   Downloaded gix v0.86.0
+#21 3.514   Downloaded raw-cpuid v11.6.0
+#21 3.679    Compiling proc-macro2 v1.0.107
+#21 3.679    Compiling unicode-ident v1.0.24
+#21 3.679    Compiling quote v1.0.47
+#21 3.679    Compiling libc v0.2.189
+#21 3.761    Compiling cfg-if v1.0.4
+#21 3.815    Compiling memchr v2.8.3
+#21 3.863    Compiling smallvec v1.15.2
+#21 4.107    Compiling parking_lot_core v0.9.12
+#21 4.348    Compiling once_cell v1.21.4
+#21 4.665    Compiling scopeguard v1.2.0
+#21 4.718    Compiling lock_api v0.4.14
+#21 4.906    Compiling syn v2.0.119
+#21 4.907    Compiling syn v3.0.3
+#21 5.029    Compiling serde_core v1.0.229
+#21 5.446    Compiling parking_lot v0.12.5
+#21 6.462    Compiling itoa v1.0.18
+#21 6.731    Compiling serde v1.0.229
+#21 7.108    Compiling typenum v1.20.1
+#21 7.999    Compiling subtle v2.6.1
+#21 8.188    Compiling errno v0.3.14
+#21 8.245    Compiling pin-project-lite v0.2.17
+#21 8.296    Compiling signal-hook-registry v1.4.8
+#21 8.309    Compiling thiserror v2.0.20
+#21 8.567    Compiling futures-core v0.3.34
+#21 8.697    Compiling version_check v0.9.5
+#21 8.742    Compiling crc32fast v1.5.0
+#21 8.941    Compiling getrandom v0.4.3
+#21 8.993    Compiling regex-syntax v0.8.11
+#21 9.146    Compiling equivalent v1.0.2
+#21 9.210    Compiling rand_core v0.10.1
+#21 9.417    Compiling serde_derive v1.0.229
+#21 9.427    Compiling thiserror-impl v2.0.20
+#21 11.06    Compiling regex-automata v0.4.18
+#21 11.60    Compiling zeroize_derive v1.5.0
+#21 12.10    Compiling zeroize v1.9.0
+#21 12.36    Compiling generic-array v0.14.7
+#21 12.51    Compiling foldhash v0.2.0
+#21 12.67    Compiling allocator-api2 v0.2.21
+#21 13.66    Compiling stable_deref_trait v1.2.1
+#21 13.72    Compiling bytes v1.12.1
+#21 13.81    Compiling const-oid v0.9.6
+#21 14.28    Compiling futures-sink v0.3.34
+#21 14.41    Compiling log v0.4.33
+#21 14.60    Compiling hashbrown v0.17.1
+#21 14.65    Compiling tokio-macros v2.7.2
+#21 14.76    Compiling mio v1.2.2
+#21 15.36    Compiling socket2 v0.6.5
+#21 15.38    Compiling block-buffer v0.10.4
+#21 15.50    Compiling crypto-common v0.1.7
+#21 15.52    Compiling tracing-core v0.1.36
+#21 15.59    Compiling digest v0.10.7
+#21 15.90    Compiling tokio v1.53.1
+#21 16.12    Compiling tracing-attributes v0.1.31
+#21 16.67    Compiling slab v0.4.12
+#21 16.87    Compiling futures-channel v0.3.34
+#21 17.11    Compiling getrandom v0.2.17
+#21 17.29    Compiling fnv v1.0.7
+#21 17.32    Compiling tracing v0.1.44
+#21 17.65    Compiling bstr v1.13.1
+#21 17.78    Compiling futures-macro v0.3.34
+#21 18.59    Compiling hybrid-array v0.4.14
+#21 18.65    Compiling futures-io v0.3.34
+#21 18.84    Compiling futures-task v0.3.34
+#21 18.88    Compiling fastrand v2.5.0
+#21 19.04    Compiling futures-util v0.3.34
+#21 19.11    Compiling jobserver v0.1.35
+#21 19.21    Compiling shlex v2.0.1
+#21 19.38    Compiling find-msvc-tools v0.1.10
+#21 19.45    Compiling cmov v0.5.4
+#21 19.63    Compiling ctutils v0.4.2
+#21 19.65    Compiling cc v1.4.2
+#21 19.81    Compiling block-buffer v0.12.1
+#21 20.04    Compiling crypto-common v0.2.2
+#21 21.44    Compiling cpufeatures v0.3.0
+#21 21.48    Compiling const-oid v0.10.2
+#21 21.71    Compiling digest v0.11.3
+#21 21.79    Compiling bitflags v2.13.1
+#21 21.94    Compiling tokio-util v0.7.19
+#21 22.26    Compiling http v1.5.0
+#21 22.70    Compiling percent-encoding v2.3.2
+#21 22.88    Compiling autocfg v1.5.1
+#21 23.07    Compiling libm v0.2.16
+#21 23.30    Compiling crossbeam-utils v0.8.22
+#21 23.35    Compiling num-traits v0.2.19
+#21 23.46    Compiling http-body v1.1.0
+#21 23.58    Compiling sha2 v0.11.0
+#21 23.59    Compiling tinyvec_macros v0.1.1
+#21 23.67    Compiling tinyvec v1.12.0
+#21 24.92    Compiling cpufeatures v0.2.17
+#21 25.01    Compiling gix-trace v0.1.21
+#21 25.13    Compiling unicode-normalization v0.1.25
+#21 25.24    Compiling gix-validate v0.11.3
+#21 25.82    Compiling gix-utils v0.3.5
+#21 25.97    Compiling gix-path v0.12.4
+#21 26.59    Compiling time-core v0.1.9
+#21 26.65    Compiling num-conv v0.2.2
+#21 26.74    Compiling deranged v0.5.8
+#21 26.84    Compiling time-macros v0.2.32
+#21 27.01    Compiling powerfmt v0.2.0
+#21 27.45    Compiling http-body-util v0.1.4
+#21 27.49    Compiling same-file v1.0.6
+#21 27.59    Compiling walkdir v2.5.0
+#21 27.83    Compiling crossbeam-channel v0.5.16
+#21 27.94    Compiling ring v0.17.14
+#21 28.27    Compiling prodash v31.0.0
+#21 28.59    Compiling gix-error v0.2.5
+#21 28.84    Compiling time v0.3.55
+#21 29.11    Compiling gix-features v0.49.0
+#21 29.57    Compiling synstructure v0.13.2
+#21 29.99    Compiling ryu v1.0.23
+#21 30.17    Compiling base64 v0.22.1
+#21 30.21    Compiling cmake v0.1.58
+#21 30.62    Compiling indexmap v2.14.0
+#21 30.68    Compiling pkg-config v0.3.33
+#21 31.45    Compiling dunce v1.0.5
+#21 31.54    Compiling untrusted v0.9.0
+#21 31.56    Compiling fs_extra v1.3.0
+#21 31.68    Compiling zerofrom-derive v0.1.7
+#21 31.88    Compiling aws-lc-sys v0.44.0
+#21 32.99    Compiling zerofrom v0.1.8
+#21 33.06    Compiling yoke-derive v0.8.2
+#21 33.12    Compiling heapless v0.8.0
+#21 33.33    Compiling byteorder v1.5.0
+#21 33.48    Compiling httparse v1.10.1
+#21 33.71    Compiling semver v1.0.28
+#21 33.96    Compiling tower-service v0.3.3
+#21 34.03    Compiling rustc_version v0.4.1
+#21 34.06    Compiling yoke v0.8.3
+#21 34.26    Compiling hash32 v0.3.1
+#21 34.29    Compiling num-integer v0.1.47
+#21 34.32    Compiling rustls-pki-types v1.15.1
+#21 34.57    Compiling try-lock v0.2.5
+#21 34.60    Compiling aws-lc-rs v1.18.0
+#21 34.72    Compiling want v0.3.1
+#21 35.19    Compiling sha1 v0.10.7
+#21 35.23    Compiling zerovec-derive v0.11.3
+#21 35.43    Compiling httpdate v1.0.3
+#21 35.70    Compiling tower-layer v0.3.3
+#21 35.90    Compiling faster-hex v0.10.0
+#21 36.10    Compiling http v0.2.12
+#21 36.11    Compiling zerovec v0.11.6
+#21 36.70    Compiling displaydoc v0.2.7
+#21 37.23    Compiling atomic-waker v1.1.2
+#21 37.29    Compiling h2 v0.4.15
+#21 37.48    Compiling http-body v0.4.6
+#21 37.66    Compiling sha1-checked v0.10.0
+#21 38.12    Compiling form_urlencoded v1.2.2
+#21 38.28    Compiling rand_core v0.6.4
+#21 38.50    Compiling ipnet v2.12.1
+#21 39.22    Compiling rustls v0.23.43
+#21 39.31    Compiling jiff-core v0.1.0
+#21 40.94    Compiling jiff v0.2.35
+#21 44.20    Compiling hyper v1.11.0
+#21 45.06    Compiling gix-hash v0.26.0
+#21 45.58    Compiling tinystr v0.8.3
+#21 45.71    Compiling sync_wrapper v1.0.2
+#21 45.76    Compiling vsimd v0.8.0
+#21 46.22    Compiling hyper-util v0.1.20
+#21 47.95    Compiling either v1.17.0
+#21 48.15    Compiling litemap v0.8.2
+#21 48.34    Compiling writeable v0.6.3
+#21 48.64    Compiling outref v0.5.2
+#21 48.75    Compiling base64ct v1.8.3
+#21 48.78    Compiling base64-simd v0.8.0
+#21 49.19    Compiling pem-rfc7468 v0.7.0
+#21 49.36    Compiling icu_locale_core v2.2.0
+#21 49.69    Compiling bytes-utils v0.1.4
+#21 49.71    Compiling gix-date v0.15.6
+#21 49.98    Compiling zerotrie v0.2.4
+#21 50.34    Compiling potential_utf v0.1.5
+#21 50.47    Compiling icu_normalizer_data v2.2.0
+#21 50.56    Compiling icu_properties_data v2.2.0
+#21 50.69    Compiling openssl-probe v0.2.1
+#21 50.87    Compiling utf8_iter v1.0.4
+#21 51.01    Compiling anyhow v1.0.104
+#21 51.18    Compiling pin-utils v0.1.0
+#21 51.26    Compiling aws-smithy-types v1.6.1
+#21 51.32    Compiling icu_collections v2.2.0
+#21 51.38    Compiling rustls-native-certs v0.8.4
+#21 52.04    Compiling icu_provider v2.2.0
+#21 52.05    Compiling der v0.7.10
+#21 52.59    Compiling tower v0.5.3
+#21 53.98    Compiling spki v0.7.3
+#21 54.15    Compiling gix-actor v0.41.2
+#21 54.20    Compiling gix-hashtable v0.16.0
+#21 54.22    Compiling aws-smithy-async v1.3.0
+#21 54.27    Compiling aws-smithy-runtime-api-macros v1.1.0
+#21 54.43    Compiling rustix v1.1.4
+#21 54.50    Compiling zmij v1.0.23
+#21 54.51    Compiling aws-smithy-runtime-api v1.14.0
+#21 54.68    Compiling gix-object v0.63.0
+#21 54.74    Compiling icu_properties v2.2.0
+#21 56.34    Compiling pkcs8 v0.10.2
+#21 56.68    Compiling icu_normalizer v2.2.0
+#21 56.87    Compiling serde_json v1.0.151
+#21 56.96    Compiling linux-raw-sys v0.12.1
+#21 57.32    Compiling zerocopy v0.8.56
+#21 57.60    Compiling idna_adapter v1.2.2
+#21 57.98    Compiling webpki-roots v1.0.9
+#21 58.02    Compiling memmap2 v0.9.11
+#21 58.32    Compiling itertools v0.14.0
+#21 59.81    Compiling idna v1.1.0
+#21 60.85    Compiling signal-hook v0.4.4
+#21 60.98    Compiling url v2.5.8
+#21 61.22    Compiling prost-derive v0.14.4
+#21 62.74    Compiling hmac v0.12.1
+#21 62.85    Compiling strsim v0.11.1
+#21 62.93    Compiling rustversion v1.0.23
+#21 63.11    Compiling ident_case v1.0.1
+#21 63.13    Compiling nonempty v0.12.0
+#21 63.20    Compiling unicase v2.9.0
+#21 63.27    Compiling hashbrown v0.14.5
+#21 63.46    Compiling hex v0.4.3
+#21 63.70    Compiling darling_core v0.23.0
+#21 64.03    Compiling dashmap v6.2.1
+#21 65.03    Compiling tempfile v3.27.0
+#21 65.39    Compiling ppv-lite86 v0.2.21
+#21 65.78    Compiling signature v2.2.0
+#21 65.81    Compiling ff v0.13.1
+#21 65.89    Compiling gix-fs v0.22.0
+#21 65.96    Compiling gix-chunk v0.7.3
+#21 66.26    Compiling alloc-no-stdlib v2.0.4
+#21 66.35    Compiling getrandom v0.3.4
+#21 66.50    Compiling base16ct v0.2.0
+#21 66.56    Compiling darling_macro v0.23.0
+#21 66.57    Compiling alloc-stdlib v0.2.4
+#21 66.65    Compiling sec1 v0.7.3
+#21 66.69    Compiling gix-commitgraph v0.38.0
+#21 66.89    Compiling gix-tempfile v24.0.0
+#21 67.24    Compiling group v0.13.0
+#21 67.55    Compiling hkdf v0.12.4
+#21 67.66    Compiling crypto-bigint v0.5.5
+#21 67.74    Compiling gix-quote v0.7.2
+#21 67.81    Compiling hmac v0.13.0
+#21 67.96    Compiling adler2 v2.0.1
+#21 68.04    Compiling simd-adler32 v0.3.10
+#21 68.05    Compiling gix-revwalk v0.34.0
+#21 68.22    Compiling miniz_oxide v0.8.9
+#21 68.27    Compiling darling v0.23.0
+#21 68.31    Compiling brotli-decompressor v5.0.3
+#21 69.37    Compiling elliptic-curve v0.13.8
+#21 69.73    Compiling rustls v0.21.12
+#21 69.85    Compiling spin v0.9.9
+#21 69.93    Compiling rand_core v0.9.5
+#21 69.95    Compiling lazy_static v1.5.0
+#21 70.04    Compiling brotli v8.0.4
+#21 70.16    Compiling flate2 v1.1.9
+#21 70.62    Compiling serde_with_macros v3.22.0
+#21 70.84    Compiling rfc6979 v0.4.0
+#21 71.08    Compiling aws-smithy-schema v0.2.0
+#21 71.73    Compiling rustls-webpki v0.101.7
+#21 72.43    Compiling sct v0.7.1
+#21 72.66    Compiling gix-glob v0.27.0
+#21 72.84    Compiling sha2 v0.10.9
+#21 73.34    Compiling compression-core v0.4.32
+#21 73.66    Compiling compression-codecs v0.4.38
+#21 74.66    Compiling serde_with v3.22.0
+#21 77.21    Compiling ecdsa v0.16.9
+#21 77.69    Compiling primeorder v0.13.6
+#21 77.81    Compiling gix-lock v24.0.0
+#21 78.00    Compiling aws-smithy-eventstream v0.61.1
+#21 78.45    Compiling h2 v0.3.27
+#21 78.53    Compiling futures-executor v0.3.34
+#21 78.93    Compiling pin-project-internal v1.1.13
+#21 80.07    Compiling socket2 v0.5.10
+#21 80.30    Compiling iana-time-zone v0.1.65
+#21 80.72    Compiling mime v0.3.17
+#21 80.74    Compiling chrono v0.4.45
+#21 81.17    Compiling pin-project v1.1.13
+#21 81.21    Compiling aws-smithy-http v0.64.0
+#21 82.28    Compiling google-cloud-wkt v1.7.0
+#21 83.84    Compiling hyper v0.14.32
+#21 86.07    Compiling tokio-rustls v0.24.1
+#21 86.28    Compiling async-compression v0.4.43
+#21 86.30    Compiling rand_chacha v0.9.0
+#21 86.84    Compiling mime_guess v2.0.5
+#21 86.93    Compiling prost v0.14.4
+#21 87.14    Compiling serde_urlencoded v0.7.1
+#21 87.39    Compiling uuid v1.24.0
+#21 87.71    Compiling hashbrown v0.16.1
+#21 88.06    Compiling unicode-bom v2.0.3
+#21 88.33    Compiling tower-http v0.6.11
+#21 88.51    Compiling rand v0.9.5
+#21 89.59    Compiling hyper-rustls v0.24.2
+#21 90.09    Compiling futures v0.3.34
+#21 90.18    Compiling p256 v0.13.2
+#21 90.64    Compiling arc-swap v1.9.2
+#21 90.79    Compiling aws-credential-types v1.3.0
+#21 91.01    Compiling aws-types v1.5.0
+#21 91.18    Compiling chacha20 v0.10.1
+#21 91.70    Compiling shell-words v1.1.1
+#21 91.99    Compiling gix-command v0.9.2
+#21 92.24    Compiling rand v0.10.2
+#21 92.51    Compiling prost-types v0.14.4
+#21 92.65    Compiling google-cloud-rpc v1.6.0
+#21 93.29    Compiling sharded-slab v0.1.7
+#21 93.59    Compiling aws-smithy-observability v0.3.0
+#21 94.03    Compiling hyper-timeout v0.5.2
+#21 94.04    Compiling google-cloud-auth v1.15.0
+#21 94.18    Compiling gix-config-value v0.19.1
+#21 94.29    Compiling gix-sec v0.14.2
+#21 94.60    Compiling tokio-stream v0.1.19
+#21 94.91    Compiling opentelemetry v0.32.0
+#21 95.08    Compiling tracing-log v0.2.0
+#21 95.18    Compiling tracing-serde v0.2.0
+#21 95.34    Compiling matchers v0.2.0
+#21 95.39    Compiling thread_local v1.1.10
+#21 95.43    Compiling foldhash v0.1.5
+#21 95.59    Compiling prettyplease v0.2.37
+#21 96.39    Compiling heck v0.5.0
+#21 97.27    Compiling nu-ansi-term v0.50.3
+#21 98.65    Compiling tracing-subscriber v0.3.23
+#21 100.8    Compiling hashbrown v0.15.5
+#21 101.2    Compiling google-cloud-gax v1.13.0
+#21 102.8    Compiling aws-sigv4 v1.5.1
+#21 104.3    Compiling gix-attributes v0.34.0
+#21 105.7    Compiling gix-traverse v0.60.0
+#21 106.0    Compiling google-cloud-gax-internal v0.7.16
+#21 106.1    Compiling async-trait v0.1.92
+#21 106.9    Compiling fixedbitset v0.5.7
+#21 107.2    Compiling petgraph v0.8.3
+#21 108.7    Compiling tracing-opentelemetry v0.33.0
+#21 109.0    Compiling regex v1.13.1
+#21 109.1    Compiling opentelemetry_sdk v0.32.1
+#21 109.4    Compiling gix-ref v0.66.0
+#21 109.5    Compiling aws-smithy-json v0.63.0
+#21 112.1    Compiling gix-packetline v0.22.0
+#21 112.5    Compiling gix-url v0.37.1
+#21 112.5    Compiling multimap v0.10.1
+#21 112.7    Compiling xmlparser v0.13.6
+#21 113.9    Compiling opentelemetry-semantic-conventions v0.32.1
+#21 113.9    Compiling regex-lite v0.1.9
+#21 114.0    Compiling prost-build v0.14.4
+#21 115.3    Compiling aws-smithy-xml v0.62.0
+#21 115.4    Compiling gix-revision v0.48.0
+#21 115.7    Compiling gix-bitmap v0.3.3
+#21 116.1    Compiling filetime v0.2.29
+#21 116.3    Compiling zlib-rs v0.6.7
+#21 117.5    Compiling arrayvec v0.7.8
+#21 117.7    Compiling crossbeam-epoch v0.9.20
+#21 117.8    Compiling winnow v1.0.4
+#21 118.0    Compiling uluru v3.1.0
+#21 118.1    Compiling gix-index v0.54.0
+#21 118.3    Compiling toml_parser v1.1.3+spec-1.1.0
+#21 119.5    Compiling gix-refspec v0.44.0
+#21 120.9    Compiling gix-zlib v0.1.0
+#21 120.9    Compiling walgit-proto v0.1.0 (/src/crates/walgit-proto)
+#21 121.0    Compiling gix-prompt v0.16.0
+#21 121.3    Compiling clru v0.6.3
+#21 121.4    Compiling gix-ignore v0.22.0
+#21 121.6    Compiling rapidhash v4.5.1
+#21 121.6    Compiling gix-diff v0.66.0
+#21 121.9    Compiling crc32c v0.6.8
+#21 121.9    Compiling serde_spanned v1.1.1
+#21 122.0    Compiling toml_datetime v0.7.5+spec-1.1.0
+#21 122.1    Compiling encoding_rs v0.8.35
+#21 122.1    Compiling winnow v0.6.26
+#21 122.3    Compiling parking v2.2.1
+#21 122.5    Compiling toml_writer v1.1.2+spec-1.1.0
+#21 122.7    Compiling spin v0.10.1
+#21 122.9    Compiling bisync_macros v0.2.3
+#21 123.1    Compiling urlencoding v2.1.3
+#21 123.3    Compiling humantime v2.4.0
+#21 123.7    Compiling winnow v0.7.15
+#21 124.5    Compiling cron v0.15.0
+#21 125.2    Compiling humantime-serde v1.1.1
+#21 125.3    Compiling gix-filter v0.33.0
+#21 125.8    Compiling toml v0.9.12+spec-1.1.0
+#21 126.6    Compiling aws-smithy-query v0.62.0
+#21 127.4    Compiling bisync v0.3.0
+#21 127.4    Compiling crc-fast v1.10.0
+#21 127.8    Compiling event-listener v5.4.2
+#21 128.2    Compiling metrics v0.24.6
+#21 129.6    Compiling gix-pack v0.73.0
+#21 129.6    Compiling gix-worktree v0.55.0
+#21 130.7    Compiling gix-credentials v0.39.1
+#21 133.2    Compiling gix-transport v0.58.1
+#21 133.8    Compiling gix-config v0.59.0
+#21 134.5    Compiling gix-pathspec v0.19.0
+#21 135.5    Compiling google-cloud-type v1.6.0
+#21 136.0    Compiling gix-shallow v0.13.0
+#21 136.2    Compiling gix-negotiate v0.34.0
+#21 136.4    Compiling sha1 v0.11.0
+#21 136.7    Compiling md-5 v0.11.0
+#21 137.0    Compiling bytesize v2.7.0
+#21 137.2    Compiling io-close v0.3.7
+#21 137.4    Compiling portable-atomic v1.15.0
+#21 137.6    Compiling gix-worktree-state v0.33.0
+#21 137.7    Compiling walgit-config v0.1.0 (/src/crates/walgit-config)
+#21 137.8    Compiling aws-smithy-checksums v0.65.0
+#21 138.4    Compiling gix-protocol v0.64.0
+#21 139.7    Compiling gix-submodule v0.33.0
+#21 141.1    Compiling gix-odb v0.83.0
+#21 142.9    Compiling event-listener-strategy v0.5.4
+#21 143.0    Compiling gix-discover v0.54.0
+#21 143.9    Compiling lru v0.16.4
+#21 144.2    Compiling rand_chacha v0.3.1
+#21 145.1    Compiling curve25519-dalek v4.1.3
+#21 145.3    Compiling md5 v0.8.1
+#21 145.3    Compiling num-bigint-dig v0.8.6
+#21 145.8    Compiling rand v0.8.7
+#21 146.2    Compiling gix v0.86.0
+#21 146.7    Compiling async-lock v3.4.2
+#21 148.4    Compiling num-iter v0.1.46
+#21 148.5    Compiling raw-cpuid v11.6.0
+#21 150.8    Compiling curve25519-dalek-derive v0.1.1
+#21 151.4    Compiling tagptr v0.2.0
+#21 151.6    Compiling utf8parse v0.2.2
+#21 151.6    Compiling moka v0.12.16
+#21 151.6    Compiling anstyle-parse v1.0.0
+#21 152.2    Compiling walgit-git v0.1.0 (/src/crates/walgit-git)
+#21 156.3    Compiling quanta v0.12.6
+#21 159.5    Compiling rust-embed-utils v8.12.0
+#21 159.6    Compiling rand_xoshiro v0.7.0
+#21 159.9    Compiling ed25519 v2.2.3
+#21 160.1    Compiling pkcs1 v0.7.5
+#21 160.5    Compiling num-bigint v0.4.8
+#21 161.3    Compiling pem v3.0.6
+#21 161.9    Compiling libmimalloc-sys v0.1.49
+#21 162.0    Compiling is_terminal_polyfill v1.70.2
+#21 162.1    Compiling anstyle v1.0.14
+#21 162.3    Compiling sketches-ddsketch v0.3.1
+#21 162.5    Compiling colorchoice v1.0.5
+#21 162.6    Compiling anstyle-query v1.1.5
+#21 162.6    Compiling anstream v1.0.0
+#21 163.1    Compiling metrics-util v0.20.4
+#21 163.6    Compiling simple_asn1 v0.6.4
+#21 165.7    Compiling rsa v0.9.10
+#21 167.8    Compiling ed25519-dalek v2.2.0
+#21 167.9    Compiling rust-embed-impl v8.12.0
+#21 168.3    Compiling axum-core v0.5.6
+#21 168.4    Compiling p384 v0.13.1
+#21 170.4    Compiling yasna v0.6.0
+#21 170.8    Compiling axum-macros v0.5.1
+#21 171.6    Compiling serde_path_to_error v0.1.20
+#21 171.7    Compiling matchit v0.8.4
+#21 172.1    Compiling clap_lex v1.1.0
+#21 172.2    Compiling walgit-server v0.1.0 (/src/crates/walgit-server)
+#21 172.4    Compiling clap_builder v4.6.6
+#21 172.4    Compiling axum v0.8.9
+#21 172.7    Compiling rcgen v0.14.9
+#21 175.3    Compiling rust-embed v8.12.0
+#21 175.4    Compiling jsonwebtoken v11.0.0
+#21 177.9    Compiling metrics-exporter-prometheus v0.17.2
+#21 179.4    Compiling clap_derive v4.6.4
+#21 181.3    Compiling rustls-pemfile v2.2.0
+#21 181.4    Compiling clap v4.6.6
+#21 181.5    Compiling mimalloc v0.1.52
+#21 182.6    Compiling rustls-webpki v0.103.14
+#21 186.6    Compiling tokio-rustls v0.26.4
+#21 186.6    Compiling rustls-platform-verifier v0.7.0
+#21 186.8    Compiling hyper-rustls v0.27.9
+#21 187.2    Compiling aws-smithy-http-client v1.2.0
+#21 187.5    Compiling reqwest v0.13.4
+#21 188.0    Compiling tonic v0.14.6
+#21 194.7    Compiling aws-smithy-runtime v1.12.1
+#21 198.3    Compiling tonic-prost v0.14.6
+#21 201.7    Compiling aws-runtime v1.9.1
+#21 207.3    Compiling aws-sdk-sso v1.105.0
+#21 211.5    Compiling google-cloud-longrunning v1.12.0
+#21 213.4    Compiling google-cloud-lro v1.9.0
+#21 214.1    Compiling google-cloud-iam-v1 v1.11.0
+#21 216.0    Compiling aws-sdk-sts v1.110.0
+#21 219.4    Compiling aws-sdk-ssooidc v1.107.0
+#21 219.6    Compiling google-cloud-storage v1.17.0
+#21 223.8    Compiling aws-config v1.10.1
+#21 231.6    Compiling aws-sdk-s3 v1.141.0
+#21 234.7    Compiling reqwest v0.12.28
+#21 264.2    Compiling walgit-store v0.1.0 (/src/crates/walgit-store)
+#21 278.2    Compiling walgit-wal v0.1.0 (/src/crates/walgit-wal)
+#21 295.8    Compiling walgit-bundle v0.1.0 (/src/crates/walgit-bundle)
+#21 331.0    Compiling walgit-cli v0.1.0 (/src/crates/walgit-cli)
+#21 959.5     Finished `release` profile [optimized + debuginfo] target(s) in 15m 58s
+#21 DONE 960.4s
+
+#22 [stage-2 4/6] COPY --from=build /out/bin/walgit /out/bin/walgit-server /usr/local/bin/
+#22 DONE 0.5s
+
+#23 [stage-2 5/6] COPY walgit.example.toml /etc/walgit/walgit.toml
+#23 DONE 0.0s
+
+#24 [stage-2 6/6] WORKDIR /home/walgit
+#24 DONE 0.0s
+
+#25 exporting to image
+#25 exporting layers
+#25 exporting layers 1.5s done
+#25 writing image sha256:3ffb5d9af8d793d80ddb89b17c8adb5464eff9cd3f00584cafec8ac1a2ce8c3c done
+#25 naming to docker.io/library/walgit:e5295e6 done
+#25 DONE 1.5s

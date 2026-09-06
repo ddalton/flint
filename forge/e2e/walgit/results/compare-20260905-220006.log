@@ -1,0 +1,52 @@
+compare 20260905-220006 · bucket flint-forge-scale-runbz · forge forge/cmp-202609052132 · walgit walgit/cmp-202609052132 · arms: forge walgit · legs: P0 P1 P4 P9 P2 P7 P5 P11 P10
+
+══ P0 — preconditions and provenance: both arms answer, the agent's clock has milliseconds, versions recorded ══
+  PASS  agent clock: a 300 ms sleep measures 300 ms (sub-second resolution)
+  PASS  forge: forge-small-6499b46669-kmst6 serving (dilipdalton/flint-forge-syncer:drill-be76cc9c) on runbz-aws-2
+  PASS  walgit: walgit-7765b4554f-c6pjj ready (walgit e5295e6) on runbz-aws-2
+  ....  agent on runbz-aws-1
+  PASS  forge: seed push to agent/seed-20260905-220006 told ok (620 ms); ls-remote e7c078cf
+  PASS  walgit: seed push to agent/seed-20260905-220006 told ok (170 ms); ls-remote e7c078cf
+
+══ P1 — push latency at 0 64 1024 MiB, 5 reps, the same bytes to both arms, order alternating ══
+  ....  forge 0 MiB: median/min/max s = 0.58 0.57 0.59 n=5
+  ....  walgit 0 MiB: median/min/max s = 0.10 0.10 0.11 n=5
+  PASS  0 MiB: every push on both arms told ok
+  ....  forge 64 MiB: median/min/max s = 2.55 2.23 19.10 n=5
+  ....  walgit 64 MiB: median/min/max s = 1.88 1.82 1.90 n=5
+  PASS  64 MiB: every push on both arms told ok
+  ....  forge 1024 MiB: median/min/max s = 27.35 24.25 31.04 n=5
+  ....  walgit 1024 MiB: median/min/max s = 30.81 30.25 42.45 n=5
+  PASS  1024 MiB: every push on both arms told ok
+
+══ P4 — two pushes to one ref from one base, concurrently: exactly one winner, the ref is the winner's tip ══
+  PASS  forge: one winner (rc a=0 b=1), the ref is the winner's tip e9b58f95; loser said: rejected] HEAD -> agent/p4-20260905-220006 (stale info: fetch first)
+  PASS  walgit: one winner (rc a=0 b=1), the ref is the winner's tip 1ec21027; loser said: rejected] HEAD -> agent/p4-20260905-220006 (conflict: expected 6755eebf5682d2c5798b3b9f25fbea6b49611e5a, got 1ec210270159a4e55d4112836cd92622249b023e)
+
+══ P9 — repack amplification: 48 pushes of 8 MiB to one branch; bytes uploaded per arm from CloudWatch (cw-summary.sh) ══
+  PASS  forge: 48 pushes told ok in 1021 s; per push median/min/max s = 0.98 0.91 816.41 n=48; window 1788671250..1788672271
+  ....  forge: objects under its prefix now: Total Objects: 270    Total Size: 18607693939 
+  PASS  walgit: 48 pushes told ok in 34 s; per push median/min/max s = 0.46 0.37 0.99 n=48; window 1788672272..1788672306
+  ....  walgit: objects under its prefix now: Total Objects: 222    Total Size: 12147847583 
+
+══ P2 — push rate: 32 pushers for 60 s, tiny commits to distinct branches (requests per push from CloudWatch) ══
+  PASS  forge: 64 acknowledged, 0 failed in 60 s = 1.1 pushes/s from 32 pushers; per-push latency median/min/max s = 78.64 1.53 155.68 n=64
+  PASS  walgit: 673 acknowledged, 0 failed in 60 s = 11.2 pushes/s from 32 pushers; per-push latency median/min/max s = 2.93 0.72 6.48 n=673
+
+══ P7 — 8 concurrent clones of a 1024 MiB branch, one alone first, the serving processes watched ══
+  PASS  forge: one clone alone 18.6 s; 8 concurrent all complete in 65 s (3.5× solo, 126 MiB/s aggregate); peak serving processes 8
+  PASS  walgit: one clone alone 14.8 s; 8 concurrent all complete in 64 s (4.3× solo, 128 MiB/s aggregate); peak serving processes 8
+
+══ P5 — cold start: the arm's pod deleted (a fresh emptyDir), time to the first ls-remote and the first clone of the 1024 MiB branch ══
+  PASS  forge: first correct ls-remote 119 s after the delete; first clone complete and correct 138 s after it (18.0 s for the clone itself)
+  FAIL  walgit: the first clone after the cold start failed or is wrong (rc 128, none vs fc798724)
+
+══ P11 — undo: a branch force-pushed back one commit; can the previous tip be recovered from the bucket? ══
+  ....  forge: no history in the bucket — the snapshot is one CAS'd object; the objects of 166e2804 survive in their pack only until the next repack + sweep (X15)
+command terminated with exit code 128
+  ....  walgit: materialize at seq 1439 gave nothing (wanted e320fd35); wal ls tail: 1438   1          2fec8b2d488a 0          1 1439   1          9b12594794f7 0          1 1440   1                       0          1 
+
+══ P10 — the bucket cut off from the arm's pod: reads at +5 s, readiness over 90 s, a push, recovery (recorded, not scored) ══
+  ....  forge +5 s: a read during the outage → rc=126
+  ....  forge readiness: not ready after 16 s (restarts 0 → 0)
+  ....  forge: a push during the outage → timed out

@@ -415,7 +415,7 @@ exist. Do not delete either. What can be simpler:
 | X10 | two image tags nothing checks against each other; git floor asserted on the wrong image | the published-artifact drill's class | **done** by D1: one `server.tag` in the chart, the operator warns on two tags, the git image asserts the floor at build |
 | X11 | a takeover of a repository nobody has published skipped the snapshot rotation ("the first CAS's If-None-Match is the fence"); a straggler mid-batch on the old epoch lands its create after the successor serves, and the successor's own first CAS is what 412s | the successor is fenced by its predecessor's push (no loss: the restart restores it) | **fixed**: the rotation creates the empty snapshot; found by `formal/ForgeSync.tla`'s first strict run; test with control |
 | X12 | a successor that died between its takeover CAS and its rotation restarts through self-recognition, which skipped the rotation ("our own previous process died with its writes"); the straggler from the epoch before still holds a valid If-Match | same class as X11, one crash later | **fixed**: every claim but a released cell's rotates; the model's second strict run; test with control |
-| X13 | **the holder has no lease term of its own.** A renewal that fails with anything but a 412 is "keep serving reads, keep trying" (`lease.rs`, since `1674f561`), and nothing in the syncer or the operator reads `lastRenewUnix`; a holder cut off from S3 while a challenger is not is deposed after six quiet polls and serves stale refs until it reaches S3 again and sees the 412. Falsifier 11's third leg ("the server then exits") passed on 2026-09-04 because its second leg pushed: any batch error exits the serving loop, the restart's claim failed against the dead S3, and the crash loop read as standing down — with no push, the server serves for as long as the outage lasts | stale reads from a deposed holder under an asymmetric partition; the design's failure-model row and falsifier 11 described a mechanism the code never had (both corrected 2026-09-05) | open — found by the Continuity comparison (every read there is verified against S3). Fix: after `QUIET_POLLS` heartbeats without a successful renewal, `/healthz` answers 503 and reads stop until a renewal succeeds — the process stays up, a blip costs no restore, and a 412 then is the fence as now. Acceptance: f11's stand-down leg run BEFORE its push leg, which fails today |
+| X13 | **the holder has no lease term of its own.** A renewal that fails with anything but a 412 is "keep serving reads, keep trying" (`lease.rs`, since `1674f561`), and nothing in the syncer or the operator reads `lastRenewUnix`; a holder cut off from S3 while a challenger is not is deposed after six quiet polls and serves stale refs until it reaches S3 again and sees the 412. Falsifier 11's third leg ("the server then exits") passed on 2026-09-04 because its second leg pushed: any batch error exits the serving loop, the restart's claim failed against the dead S3, and the crash loop read as standing down — with no push, the server serves for as long as the outage lasts | stale reads from a deposed holder under an asymmetric partition; the design's failure-model row and falsifier 11 described a mechanism the code never had (both corrected 2026-09-05) | **built** `40b4a079` (2026-09-05): `Hold` records when a renewal last landed on the runtime's clock; the renewer refreshes `renewal_overdue` (no renewal for `heartbeat × QUIET_POLLS`) on every heartbeat; `Facts::serving()` — what `/healthz`, the readiness probe, the headless DNS and the door see — is false while overdue; the lease is kept, the process stays up, the next landed renewal restores readiness with the same epoch; `/status` carries `epoch.renewalOverdue` + `termSecs`. Two unit tests on virtual time (the falsifier-11 shape in-process, the memory double's `inject_epoch_renew_failures`); the second FAILS against the old rule. f11 reordered: stand-down BEFORE any push, judged by ready=false with restarts UNCHANGED. **Wire re-run owed** (the runbz campaign's forge image predates it) |
 | X14 | **the door's wake bound is a constant and a restore is proportional to the repository.** 180 s at the door; the restore fetches every pack, then installs refs, then runs fsck, then reports serving; a challenger restores only after it claims, and `Recreate` hands the successor a fresh emptyDir | the 40 GiB drill repository restores in 139 s from the delete; the design's own arithmetic for a wake after an unclean death — 60 s of quiet polls plus that restore — is 199 s against 180 s, and git clients do not retry the 503; every roll is a full restore of unavailability | open — refs served from the snapshot before the packs land (walgit's refs level) and a waiting challenger that fetches the snapshot's packs before it claims turn both into O(delta); until then derive the bound from the snapshot's pack bytes rather than fixing it |
 | X15 | **no undo.** The snapshot is replaced in place, versioning is OFF (design §3), the bare repository has no reflog and lives in an emptyDir; `repack -a -d` drops unreachable objects and the sweep deletes the old packs after the grace | a force-push or a bad merge is unrecoverable at the storage layer within at most `repack_threshold` (24) pushes; Continuity keeps every state, walgit retains superseded packs for a provenance window | open — cheapest shape: one immutable `snapshot.<seq>` copy beside the pointer per batch (a log entry, which also makes a stale reader's catch-up O(delta) instead of a restore), the sweep's reference set extended to the retained copies, repack keeping unreachable objects for the same window |
 | X16 | **a transient store error inside a batch is a restart.** Before the CAS the batch retries nothing: every push in it is told `ng`, `run_and_report`'s error exits the serving loop, the pod restarts, re-claims, rotates, reconciles the cache (cheap — the emptyDir survives a container restart) and runs `fsck --connectivity-only` (not cheap on a large repository) | one S3 500 costs a restart, an fsck and every queued push | open — retry the batch under the writer lock with jittered backoff while the CAS has not been attempted; packs are immutable and content-named, so a repeated upload is idempotent |
@@ -468,14 +468,16 @@ observation that can lie, exactly the class `feedback_model_the_observation`
 records); a push may be told failed and land anyway (run 3, finding 3);
 a rollout is a crash at 30 s from the batch's point of view.
 
-## 9. The walgit control arm — PLAN, 2026-09-05, not run
+## 9. The walgit control arm — pre-registered 2026-09-05, run the same day (§9.1)
 
 The architecture document's last page ends with "the next honest
 comparison is walgit on the scale rig, push for push". This section is
 that comparison, pre-registered: the arms, the legs, the metric and
 the pass rule of each, and the verdict rule, written before anything
-runs so the result cannot be read to taste. Nothing here provisions;
-phase 1 waits for a go with its cost in front of it.
+ran so the result could not be read to taste. It ran the same day on
+the user's go; the results and the reading are §9.1, and the plan
+above is kept as it was written, with the legs that did not run
+(P3, P6, P8) still in its table.
 
 **The question.** If walgit wins every leg forge passes, then "walgit
 behind the door, with the export as a reader of its log" is a real
@@ -540,3 +542,61 @@ workers, i4i.xlarge, pure spot), ≈ $2 per campaign plus the build,
 `forge/e2e/scale/` grown by an `ARM=walgit` deploy and the P-legs
 beside the S-legs, results in `results/` with the walgit commit in
 the log's first line. Phase 1 needs a go.
+
+### 9.1 Results — runs 1 and 2 on runbz, 2026-09-05
+
+Run on a trove cluster (CP + 2 × i4i.xlarge, all spot, us-west-1),
+forge `drill-be76cc9c` (before X13) and walgit `e5295e6` on one worker,
+the agent alone on the other. Run 1 was every leg of the rig
+(`forge/e2e/walgit/results/compare-20260905-220006.log`); run 2 re-ran
+P7, P5, P11 and P10 after the rig defects run 1 exposed were fixed
+(`compare-20260905-224804.log`). Legs P3, P6 and P8 of the table above
+were not built into the rig and did not run. The full tables, the
+CloudWatch sums and the rig's own defects are in
+`forge/e2e/walgit/README.md`; what follows is the reading.
+
+| leg | forge | walgit | who |
+|---|---|---|---|
+| P1 1 KiB · 64 MiB · 1 GiB, median of 5 | 0.58 · 2.55 · 27.4 s | 0.10 · 1.88 · 30.8 s | walgit beyond spread at 1 KiB and 64 MiB; **forge beyond spread at 1 GiB** |
+| P4 concurrent `--force-with-lease` | one winner, loser told stale | same | both hold |
+| P9 48 × 8 MiB: wall; bytes to S3 | 1021 s (one push waited 816 s); 12.84 GB = 33× the content | 34 s; 0.40 GB = 1.05× | walgit, 30×: X18 |
+| P2 32 pushers, 60 s | 1.1/s, median 79 s; 5.4 GB uploaded (two full repacks inside the minute) | 11.2/s, median 2.9 s; 4 MB uploaded | walgit, 10×: X18 again |
+| P7 8 clones of 1 GiB | 64–65 s, 126–128 MiB/s | 64 s, 128 MiB/s | draw: the client NIC |
+| P5 cold start: refs / complete clone | 119 / 138 s (run 1), 30 / 48 s (run 2) | run 1 the first clone refused (503, git does not retry); run 2 0 / 20 s | walgit on refs: X14; the clone itself a draw |
+| P11 undo | none (X15) | recovered by hand: `wal materialize --at-seq` gives the pre-force tip, complete | by construction |
+| P10 the bucket cut off 90 s | reads served; still ready at 90 s (pre-X13); push failed; clean recovery | reads and the push hang to their timeouts (every read is a conditional GET); still ready at 90 s; clean recovery | recorded, not scored |
+| the bucket after both runs | 40.4 GB in 462 objects, five full packs of 5.6–7.0 GiB | 15.5 GB in 3,064 objects, one 4.4 GiB fold | for ≈ 8 GB of content |
+
+**Under the rule.** walgit passed every leg forge passed and beat forge
+beyond the rep-to-rep spread on P2, P5 and P9, and on P1 at two sizes
+of three. It did not beat forge at 1 GiB, where stock `receive-pack`
+plus one multipart upload finished 3.5 s ahead at the median with the
+ranges disjoint, and its P5 pass needed a client that retries a 503,
+which stock git is not. The rule's letter is met by neither side. What
+the log settles is where forge loses and why, and it is one cause
+almost everywhere: X18. The full repack every 24 packs re-uploaded the
+repository five times in an hour of pushing, held one 8 MiB push for
+816 s, and carried 5.4 GB of upload into a minute of tiny pushes; it is
+33× on bytes and an order of magnitude on rate. Beside it, X20 is
+0.48 s on a lone 1 KiB push and X14 is the difference between 30 s and
+0 s to the first `ls-remote` after a cold start. P10 recorded what X13
+was built for: the pre-X13 holder stayed ready through 90 s without a
+renewal. And one thing walgit's shape costs showed on the wire:
+walgit answered no read while its bucket was cut off — the `ls-remote` at +5 s hung to the rig's 60 s timeout, because every read there is a conditional GET on the manifest — where forge served from its clone. Verified reads are the safer choice under a partition with a live challenger and the costlier one under a partition with none; X13 is forge's middle, serve for six heartbeats, then stop.
+
+**The decision, and why it is not taken here.** "walgit behind the
+door" is not made real by this log: the legs walgit wins are the legs
+whose forge-side fix was already on the list, walgit lost the largest
+push, and it refused its first cold clone to a stock client. Forge has
+not earned its place either: at rate on the write path it is ten times
+behind, which no joint-by-joint argument answers. So the decision is
+the re-match, and its terms are set here so it cannot be read to
+taste: build X20 (a lone push pays no window) and X18 (tiers; the
+design is `forge-compaction-tiers-design.md`, whose one real question
+is the multi-pack index against an immutable layout), run this rig
+again on a fresh cluster with the same legs and CloudWatch's bytes per
+push as the headline; if walgit then still wins P2 and P9 beyond
+spread, "walgit behind the door, with the export as a reader of its
+log" is written into the design as the decision, with the costs named
+at the top of this section. X15 is owed either way — P11 is a loss by
+construction — and X14 is the next number after these two.

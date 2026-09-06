@@ -691,7 +691,7 @@ store.
 |---|---|---|
 | syncer crash mid-batch | every push in the batch fails at the client; the pod restarts and restores; retries succeed | §4 ordering; the syncer is the main process |
 | node lost | restore from S3 on the replacement; clones resume | local disk is a cache |
-| S3 unreachable | **pushes fail; clones and fetches keep working for as long as the outage lasts** — the holder has no term of its own (X13 in the simplification note); a push during the outage fails its batch and exits the process, and the restart's claim then fails until S3 returns | the syncer refuses to acknowledge; nothing in the holder judges a renewal that errors without a 412, so it cannot tell "S3 is down" from "S3 is down for me" — corrected 2026-09-05, this row used to claim a self-fence at the lease TTL |
+| S3 unreachable | **pushes fail; clones and fetches keep working for as long as the outage lasts** — and after six heartbeats without a landed renewal the holder withdraws readiness (X13, built `40b4a079`), keeping the lease and the process; a push during the outage fails its batch and exits the process, and the restart's claim then fails until S3 returns | the syncer refuses to acknowledge; a holder that has not renewed for the challenger's takeover window may already have been deposed by a challenger that CAN reach S3, so it stops serving reads until a renewal lands — this row claimed a self-fence at the lease TTL before X13 existed |
 | door down | all git traffic fails | in the path; N stateless replicas |
 | two servers for one repo | the straggler 412s at its next heartbeat or batch and exits; the successor rotated first | the single-writer fence, lean's models |
 | snapshot names a pack that is gone | re-read the snapshot once; if still gone, refuse to start and name it | fail-closed, lean's `load` rule |
@@ -1042,8 +1042,12 @@ do not need to be.
     serving loop, the restart's claim failed against the dead S3, and
     the crash loop is what the leg read as standing down. A server that
     receives no push during an outage serves for as long as the outage
-    lasts. The leg is kept as it is until X13 is built; X13's acceptance
-    is the stand-down leg run BEFORE the push leg, which fails today.
+    lasts. **X13 BUILT the same day (`40b4a079`)**: the holder withdraws
+    readiness after `QUIET_POLLS` heartbeats without a landed renewal,
+    keeps the lease and the process, and restores readiness when one
+    lands; f11's stand-down leg now runs BEFORE any push and is judged
+    by ready=false with the restart count unchanged. The wire re-run of
+    the reordered leg is owed.
 12. **Per-principal authorization and the header boundary.** On one
     repository, a reader (in `consumers`, in no push or merge list) and
     a writer (named in `mergeInto`) — the reader refused `main` and

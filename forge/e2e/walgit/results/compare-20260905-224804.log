@@ -1,0 +1,35 @@
+compare 20260905-224804 · bucket flint-forge-scale-runbz · forge forge/cmp-202609052132 · walgit walgit/cmp-202609052132 · arms: forge walgit · legs: P0 P7 P5 P11 P10
+
+══ P0 — preconditions and provenance: both arms answer, the agent's clock has milliseconds, versions recorded ══
+  PASS  agent clock: a 300 ms sleep measures 300 ms (sub-second resolution)
+  PASS  forge: forge-small-6499b46669-plmp8 serving (dilipdalton/flint-forge-syncer:drill-be76cc9c) on runbz-aws-2
+  PASS  walgit: walgit-7765b4554f-bzxsx ready (walgit e5295e6) on runbz-aws-2
+  ....  agent on runbz-aws-1
+  PASS  forge: seed push to agent/seed-20260905-224804 told ok (660 ms); ls-remote be8586ff
+  PASS  walgit: seed push to agent/seed-20260905-224804 told ok (120 ms); ls-remote be8586ff
+
+══ P7 — 8 concurrent clones of a 1024 MiB branch, one alone first, the serving processes watched ══
+  PASS  forge: one clone alone 17.1 s; 8 concurrent all complete in 64 s (3.7× solo, 128 MiB/s aggregate); peak serving processes 8
+  PASS  walgit: one clone alone 16.4 s; 8 concurrent all complete in 64 s (3.9× solo, 128 MiB/s aggregate); peak serving processes 8
+
+══ P5 — cold start: the arm's pod deleted (a fresh emptyDir), time to the first ls-remote and the first clone of the 1024 MiB branch ══
+  PASS  forge: first correct ls-remote 30 s after the delete; first COMPLETE clone 48 s after it (17.6 s for the clone itself), after 0 refused attempt(s)
+  PASS  walgit: first correct ls-remote 0 s after the delete; first COMPLETE clone 20 s after it (19.7 s for the clone itself), after 0 refused attempt(s)
+
+══ P11 — undo: a branch force-pushed back one commit; can the previous tip be recovered from the bucket? ══
+  ....  forge: no history in the bucket — the snapshot is one CAS'd object; the objects of 65a5b0c9 survive in their pack only until the next repack + sweep (X15)
+  ....  walgit: materialize at seq 1444 gave nothing (wanted e8445115):  materialized acme/small at seq 1444 into /var/lib/walgit/mat-20260905-224804 
+
+══ P10 — the bucket cut off from the arm's pod: reads at +5 s, readiness over 90 s, a push, recovery (recorded, not scored) ══
+  ....  forge +5 s: a read during the outage → rc=0
+  ....  forge readiness: still ready after 90 s (restarts 0 → 0)
+  ....  forge: a push during the outage → 19580 1
+  PASS  forge: recovers once the bucket returns (push told ok, pod ready, restarts 0 → 0)
+  ....  walgit +5 s: a read during the outage → Terminated
+  ....  walgit readiness: still ready after 90 s (restarts 0 → 0)
+  ....  walgit: a push during the outage → Terminated
+  PASS  walgit: recovers once the bucket returns (push told ok, pod ready, restarts 0 → 0)
+
+══ verdict ══
+PASS 11  FAIL 0  INCONCLUSIVE 0
+windows for cw-summary.sh: /Users/ddalton/github/flint/forge/e2e/walgit/results/work-20260905-224804/windows.txt

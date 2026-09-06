@@ -201,9 +201,9 @@
 <text class="t2 c-forge" x="1087" y="540">How the lease relates to the other two planes</text>
 <text class="t4" x="1087" y="560">The lease cell is coordination — the control plane — and the fence it produces is what the</text>
 <text class="t4" x="1087" y="575">durable path relies on: a 412 on any CAS of ours stops acknowledging AND stops serving</text>
-<text class="t4" x="1087" y="590">reads. Pushes fail while S3 is unreachable; clones keep working for as long as the outage</text>
-<text class="t4" x="1087" y="605">lasts, because the holder has no term of its own — a renewal that errors without a 412 is not</text>
-<text class="t4" x="1087" y="620">judged (X13, found by the Continuity comparison).</text>
+<text class="t4" x="1087" y="590">reads. Pushes fail while S3 is unreachable; clones keep working for six heartbeats, then the</text>
+<text class="t4" x="1087" y="605">holder withdraws readiness until a renewal lands — the lease and the process are kept (X13,</text>
+<text class="t4" x="1087" y="620">found by the Continuity comparison and built the same day).</text>
 <text class="t4" x="1087" y="635">The operator does not read the cell. It takes the pod's word for its phase through /status;</text>
 <text class="t4" x="1087" y="650">restart is not an operator decision — a fence exits 1, a refusal exits 78, and the kubelet</text>
 <text class="t4" x="1087" y="665">restarts the pod.</text>

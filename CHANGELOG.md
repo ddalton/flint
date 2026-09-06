@@ -888,6 +888,41 @@ Also: `flint-forge-chart` can now render the door itself
   the event carries it. Found on EC2 with an ambient mount whose
   platform could not complete the chain.
 
+### Measured — flint forge against walgit, push for push
+
+- **The control arm pre-registered in the simplification note's §9
+  ran on EC2 the same day** (`forge/e2e/walgit/`: walgit `e5295e6`
+  built on the cluster, one agent with stock git against both arms on
+  one bucket, results in `results/`). Forge won the 1 GiB push (27.4 s
+  against 30.8 s, ranges disjoint), held the concurrent-writer leg and
+  drew the eight-clone leg at the client's NIC. It lost the write path
+  at rate by an order of magnitude — 1.1 against 11.2 pushes per second
+  from 32 pushers, 48 pushes of 8 MiB in 1,021 s against 34 s — from
+  one cause, X18: the full repack every 24 packs uploaded 33× the bytes
+  pushed, held one push for 816 s and left five copies of the
+  repository in the bucket (40 GB for 8 GB of content). It lost the
+  first `ls-remote` after a cold start (30 s against 0 s: X14) and paid
+  0.48 s of batch window on a lone push (X20). walgit refused its first
+  cold clone with a 503 stock git does not retry, answered no read
+  while its bucket was cut off (forge served from its clone), and
+  recovered a force-pushed-over tip from its log where forge has
+  nothing (X15). Neither side met the rule's letter; the decision on
+  "walgit behind the door" is deferred to a re-match after X18 and X20
+  are built, on terms written in §9.1. Rig defects found and fixed on
+  the way are in the README's results.
+
+### Fixed — flint forge, the holder's own term (X13)
+
+- **A syncer that cannot renew its lease stops serving reads after the
+  challenger's takeover window.** `Hold` records when a renewal last
+  landed; after `heartbeat × QUIET_POLLS` without one the renewer marks
+  `renewalOverdue`, `/healthz` answers 503 (readiness, headless DNS and
+  the door follow), the lease is kept and the process stays up; the
+  next renewal that lands restores readiness with the same epoch.
+  `/status` carries `epoch.renewalOverdue` and `epoch.termSecs`.
+  `f11-s3-outage.sh` runs its stand-down leg before any push and
+  judges it by readiness with the restart count unchanged.
+
 ### Corrected — flint forge documentation
 
 - **The design claimed a self-fence the code never had.** Falsifier 11
