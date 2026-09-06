@@ -19,7 +19,7 @@
 //!   FLINT_FORGE_FOLD_FACTOR      compaction tiers: git's geometric factor over pack bytes (default 2; 0 = the full repack at REPACK_THRESHOLD)
 //!   FLINT_FORGE_BASE_TIER_PERCENT / BASE_MIN_MIB / BASE_REBUILD_MIN_SECS   when the base is rebuilt (50 / 64 / 3600)
 //!   FLINT_FORGE_FOLD_RETAIN_SECS / FOLD_STALL_SECS / SWEEP_EVERY_SECS      retention for readers, the stall bound, the full sweep's cadence (900 / 300 / 3600)
-//!   FLINT_FORGE_FOLD_MIN_MIB / FOLD_MAX_PACKS   a floor under a tier fold and a cap on the tier count (0 / 64)
+//!   FLINT_FORGE_FOLD_MIN_MIB / FOLD_MAX_PACKS   a floor under a tier fold and a cap on the tier count (256 / 64)
 //!   FLINT_FORGE_BATCH_MAX        pushes per batch (default 64)
 //!   FLINT_FORGE_REPACK_THRESHOLD packs before a repack (default 24)
 //!   FLINT_FORGE_ORPHAN_GRACE_SECS  sweep grace (default 3600)
@@ -140,7 +140,7 @@ async fn serve() {
     cfg.fold_retain_secs = env_u64("FLINT_FORGE_FOLD_RETAIN_SECS", 900);
     cfg.fold_stall_secs = env_u64("FLINT_FORGE_FOLD_STALL_SECS", 300).max(1);
     cfg.sweep_every_secs = env_u64("FLINT_FORGE_SWEEP_EVERY_SECS", 3600);
-    cfg.fold_min_bytes = env_u64("FLINT_FORGE_FOLD_MIN_MIB", 0) * 1024 * 1024;
+    cfg.fold_min_bytes = env_u64("FLINT_FORGE_FOLD_MIN_MIB", 256) * 1024 * 1024;
     cfg.fold_max_packs = env_u64("FLINT_FORGE_FOLD_MAX_PACKS", 64).max(2) as usize;
     cfg.orphan_grace_secs = env_u64("FLINT_FORGE_ORPHAN_GRACE_SECS", 3600);
     cfg.fanout = env_u64("FLINT_FORGE_FANOUT", 4).max(1) as usize;

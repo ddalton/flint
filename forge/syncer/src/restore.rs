@@ -165,6 +165,12 @@ pub async fn restore(sc: &mut Syncer) -> ForgeResult<()> {
         with_bitmap.sort();
         if let Some((_, base)) = with_bitmap.last() {
             super::fold::set_base_marker(&sc.cfg.repo, base)?;
+            // The rebuild cadence is the base's age by the store's
+            // clock. A fresh incarnation has no memory of the last
+            // rebuild, and without this the pod P5 restarted on runca
+            // rebuilt a 12 GiB base the moment it restored.
+            sc.last_base_rebuild_unix =
+                listed.get(base.as_str()).and_then(|o| o.last_modified_unix).unwrap_or(0);
         }
     }
 

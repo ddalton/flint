@@ -134,9 +134,13 @@ impl Rig {
         Some((plan, named))
     }
 
+    /// Tier folds at every opportunity and never a base: the floor off
+    /// (the rig's packs are bytes, not megabytes) and the base rule
+    /// out of reach.
     fn tiers_only(&mut self) {
         self.sc.cfg.fold_factor = 2;
         self.sc.cfg.base_min_bytes = u64::MAX;
+        self.sc.cfg.fold_min_bytes = 0;
     }
 }
 
@@ -3103,6 +3107,7 @@ async fn a_rebuild_that_reproduces_the_bases_name_never_unlinks_it() {
     rig.sc.cfg.fold_factor = 2;
     rig.sc.cfg.base_min_bytes = 0;
     rig.sc.cfg.base_rebuild_min_secs = 0;
+    rig.sc.cfg.fold_min_bytes = 0;
     rig.start().await;
     let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
     let _c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
@@ -3139,6 +3144,7 @@ async fn a_base_rebuild_after_a_rewind_survives_a_warm_restart() {
     rig.sc.cfg.fold_factor = 2;
     rig.sc.cfg.base_min_bytes = 0;
     rig.sc.cfg.base_rebuild_min_secs = 0;
+    rig.sc.cfg.fold_min_bytes = 0;
     rig.start().await;
     let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
     let c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
@@ -3198,6 +3204,68 @@ async fn a_base_rebuild_after_a_rewind_survives_a_warm_restart() {
     assert!(plain.ok(), "after the expiry even the plain proof passes: {}", plain.stderr.trim());
     restore::restore(&mut rig.sc).await.expect("a warm restart serves");
     assert_eq!(rig.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(c1));
+}
+
+/// The cadence is the base's age by the store's clock, not process
+/// memory: the pod P5 restarted on runca rebuilt a 12 GiB base the
+/// moment it restored. A fresh incarnation restores, reads the base's
+/// age from the LIST and plans no rebuild inside the cadence though
+/// the tiers are past the percent; with the base aged past the cadence
+/// IN THE STORE it plans one. The control is the same incarnation with
+/// the age unread (`last_base_rebuild_unix = 0`, what the code did):
+/// it plans the rebuild at once.
+#[tokio::test]
+async fn the_cadence_is_the_bases_age_in_the_store_not_process_memory() {
+    let mut rig = Rig::new().await;
+    rig.sc.cfg.fold_factor = 2;
+    rig.sc.cfg.base_min_bytes = 0;
+    rig.sc.cfg.base_rebuild_min_secs = 0;
+    rig.sc.cfg.fold_min_bytes = 0;
+    rig.start().await;
+    // Two commits before the base, so the rebuild's pack is not a push
+    // pack's byte-for-byte twin (a reproduced name is its own test).
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    let (plan, named) = rig.fold_once().await.expect("the base rule fires");
+    assert!(matches!(plan, fold::Plan::Base { .. }));
+    let base = named.expect("a base was named");
+    // Two more pushes: the tiers are past the percent; the cadence is
+    // now an hour, and this incarnation remembers the rebuild.
+    rig.sc.cfg.base_rebuild_min_secs = 3600;
+    let c2 = rig.push_commit("refs/heads/main", Some(&c1), "c2").await;
+    let _c3 = rig.push_commit("refs/heads/main", Some(&c2), "c3").await;
+    let now = super::now_unix();
+    assert!(
+        !matches!(fold::planned(&rig.sc, now).unwrap(), Some(fold::Plan::Base { .. })),
+        "inside the cadence the holder plans no rebuild"
+    );
+
+    // A fresh incarnation on the same store, as the restarted pod.
+    let mut warm = Rig::with_store(rig.store.clone(), "warm").await;
+    warm.sc.cfg.fold_factor = 2;
+    warm.sc.cfg.base_min_bytes = 0;
+    warm.sc.cfg.base_rebuild_min_secs = 3600;
+    warm.sc.cfg.fold_min_bytes = 0;
+    restore::restore(&mut warm.sc).await.expect("restore");
+    assert!(warm.sc.last_base_rebuild_unix > 0, "the restore read the base's age from the LIST");
+    assert!(
+        !matches!(fold::planned(&warm.sc, now).unwrap(), Some(fold::Plan::Base { .. })),
+        "a fresh incarnation inside the cadence plans no rebuild"
+    );
+    // The control: the age unread, as the code did — a rebuild at once.
+    let remembered = warm.sc.last_base_rebuild_unix;
+    warm.sc.last_base_rebuild_unix = 0;
+    assert!(matches!(fold::planned(&warm.sc, now).unwrap(), Some(fold::Plan::Base { .. })), "control: without the age, at once");
+    warm.sc.last_base_rebuild_unix = remembered;
+
+    // The base aged past the cadence in the store: the next restore
+    // reads an old base and the rebuild is due.
+    rig.store.backdate_epoch(&rig.sc.cfg.pack_key(&base), 3601);
+    restore::restore(&mut warm.sc).await.expect("restore again");
+    assert!(
+        matches!(fold::planned(&warm.sc, now).unwrap(), Some(fold::Plan::Base { .. })),
+        "past the cadence by the store's clock the rebuild is planned"
+    );
 }
 
 /// The fold ticks its own counter, never the hold's: a fold's upload

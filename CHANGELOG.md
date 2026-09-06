@@ -12,6 +12,35 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Changed — flint forge, the bytes: the ladder starts at a floor, big packs wait for the base, the cadence is the base's age
+
+- **Three rules in the fold planner**, chosen by replaying the
+  re-match's own push sequence through a simulator of the planner
+  (`docs/plans/forge-compaction-tiers-design.md` §13): a tier fold
+  under `FLINT_FORGE_FOLD_MIN_MIB` waits, the default now 256 rather
+  than 0, so a byte is rewritten log2(top ÷ 256 MiB) times rather than
+  log2(top ÷ push); a tier pack that alone meets the base rule (at or
+  above `BASE_TIER_PERCENT` of the base) is never a fold input and the
+  base rebuild takes it once, where the ladder rewrote ten 1 GiB
+  pushes as folds of 2.3, 4.3, 6.7, 2.0 and 3.1 GiB and then rebuilt
+  the base over them; and the base-rebuild cadence is the base pack's
+  age by the store's clock, read from the LIST at restore rather than
+  kept in process memory (the pod P5 restarted rebuilt a 12 GiB base
+  the moment it restored), and yields to the pack cap so what the
+  exemption holds back cannot pile up — the disk check never yields.
+  The cap's forced fold of a perfect progression takes the smallest
+  half by count, never every tier. Simulated on the run's sequence:
+  72 → ≈ 32 GB with the hour's rebuild included (4.4× → 1.95×); on the
+  design's steady shapes 5.8× → 4.9×, 6.8× → 3.0× (a fresh
+  repository), 7.6× → 5.2× (the agent fleet); the price is up to 64
+  small packs waiting under the floor. Factor 4, a waived cadence and
+  a 512 MiB floor were rejected on the same simulation. Tests: the
+  planner's properties and, on the rig, the cadence read from the
+  store on a fresh incarnation with its control. The local repack rig
+  at 256 MiB / 100 pushes: tiers-blob 7.8× → 4.9× and tiers-source
+  32× → 10.7×, both inside the design's pre-registered ceilings that
+  the first build missed. The wire measurement is owed.
+
 ### Changed — flint forge, the git container is one process
 
 - **`flint-forge-gitcgi` replaces nginx + fcgiwrap** (option A3 of
@@ -925,10 +954,11 @@ Also: `flint-forge-chart` can now render the door itself
   the mid-ladder state and faster than walgit after the base rebuild;
   X13 on the wire (readiness withdrawn 78 s into an S3 cut, no
   restart, clean recovery). Bytes over the run: 47.8 GB for ≈ 6.8 GB
-  pushed against walgit's 16.5 GB — the log2 tax on ten 1 GiB pushes,
-  one 12 GiB base rebuild fired by a restart because the cadence was
-  not persisted, and the pack cap folding every tier under P2's rate;
-  three rules in `fold.rs`, named in the design's §12. Under the rule
+  pushed against walgit's 16.5 GB — the log2 tax on ten 1 GiB pushes
+  (git's split extension reaching them from below) and one 12 GiB
+  base rebuild the restart brought forward; a third cause first read
+  as the pack cap under P2's rate was withdrawn on a second reading of
+  the bucket (design §13.1). Three rules in `fold.rs`, below. Under the rule
   pre-registered for the re-match "walgit behind the door" is not
   written as the decision; the bytes, three to one, are the next
   number. Locally, the repack rig at 256 MiB / 100 pushes: tiers 7.8×

@@ -161,7 +161,9 @@ pub struct ForgeConfig {
     pub base_tier_percent: u64,
     /// With no base yet, build one once the named packs reach this.
     pub base_min_bytes: u64,
-    /// At most one base rebuild per this many seconds.
+    /// At most one base rebuild per this many seconds, by the base's
+    /// age in the store (read from the LIST at restore), not process
+    /// memory; the pack cap overrides it, the disk check never does.
     pub base_rebuild_min_secs: u64,
     /// Superseded packs stay on disk this long for readers that opened
     /// them before the commit (git's own `repack -d` race).
@@ -172,9 +174,14 @@ pub struct ForgeConfig {
     /// (the ledger sweep covers what folds unname; this one covers what
     /// a crashed incarnation or a straggler left).
     pub sweep_every_secs: u64,
-    /// A tier fold smaller than this is skipped, unless the cap forces it.
+    /// A tier fold smaller than this waits, unless the cap forces it:
+    /// the ladder starts at the floor, not at the push size, so a byte
+    /// is rewritten log2(top ÷ floor) times rather than log2(top ÷
+    /// push). 256 MiB, the simulation's number over the design's
+    /// shapes and runca's sequence (design §13).
     pub fold_min_bytes: u64,
-    /// Fold regardless when the tier count reaches this.
+    /// Fold regardless when the tier count reaches this, and let a
+    /// closed base-rebuild cadence yield to it.
     pub fold_max_packs: usize,
     /// How long an unreferenced pack must have sat before the sweep may
     /// take it. Must outlive the LONGEST upload, not the longest
@@ -236,7 +243,7 @@ impl ForgeConfig {
             fold_retain_secs: 900,
             fold_stall_secs: 300,
             sweep_every_secs: 3600,
-            fold_min_bytes: 0,
+            fold_min_bytes: 256 * 1024 * 1024,
             fold_max_packs: 64,
             orphan_grace_secs: 3600,
             project_id: None,

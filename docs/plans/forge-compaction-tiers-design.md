@@ -128,7 +128,13 @@ with the pack WEIGHT changed from object count to `.pack` bytes:
 3. `Plan::Fold { inputs: S = pack[..split] }` if `|S| ≥ 2`; else none.
 
 Factor 2 (`fold_factor`, `FLINT_FORGE_FOLD_FACTOR`; 0 = off, which keeps
-the shipped `maybe_repack` as the control arm until §8 has run). Bytes,
+the shipped `maybe_repack` as the control arm until §8 has run).
+*Amended after the wire (§13): the split runs over the tier packs
+below `base_tier_percent` of the base — a pack that alone meets the
+base rule waits for the base and is never a fold input; a fold under
+`fold_min_bytes` (now 256 MiB by default) waits; and the cap's forced
+fold of a perfect progression takes the smallest half by count, never
+every tier.* Bytes,
 not git's object counts: forge pays for bytes, and the rig's README
 records why counts fail on a blob-shaped repository. Simulated over
 five shapes (§8), factor 2 beats 3 and 4 on every one (P9 800 pushes:
@@ -154,7 +160,12 @@ folds, and without the pack cap would leave ~1,000 packs unfolded under
   split condition applied to the base),
 
 and `base_rebuild_min_secs` (3600) have elapsed since the last one, and
-the emptyDir has ≥ 1.2× the named pack bytes free (§7.9). The base
+the emptyDir has ≥ 1.2× the named pack bytes free (§7.9). *Amended
+after the wire (§13): the cadence is the base's age by the store's
+clock — set by the commit and, on a fresh incarnation, read from the
+LIST's `last_modified` of the base pack at restore — and it yields to
+the pack cap (`fold_max_packs` tiers named), so what §3.1's exemption
+holds back cannot pile up without bound; the disk check never yields.* The base
 rebuild rolls EVERY named pack, by reachability:
 
 ```
@@ -1110,7 +1121,9 @@ the 300-push window, tier folds only, carried 12.27 GB for 2.52 GB
 pushed — **4.9×**, the simulation's 4.5–4.8× for this regime — against
 walgit's 4.41 GB (1.75×).
 
-**Three defects the wire run found, each a rule in this document:**
+**Three defects the wire run found, each a rule in this document
+(what was built for them is §13; the second, on re-reading the
+bucket, was misattributed — §13.1):**
 
 1. `base_rebuild_min_secs` is not persisted: `last_base_rebuild_unix`
    is process memory, so the pod that P5 restarted rebuilt a 12 GiB
@@ -1128,3 +1141,136 @@ walgit's 4.41 GB (1.75×).
    candidates, to be simulated first: a `fold_min_bytes` floor that
    exempts packs above a fraction of the base from tier folds until
    the base rebuild takes them; or a size-aware factor.
+
+## 13. The bytes — three rules from the wire, simulated and built (2026-09-06)
+
+The re-match left one number against forge: 47.8 GB uploaded for
+≈ 6.8 GB pushed over run A, three times walgit's. §12 named three
+causes from the bucket's timeline. Before code, the run's own push
+sequence — every push and its minute, from `aws s3 ls` of the forge
+prefix and the legs' windows — was replayed through a simulator of
+the planner (`forge/e2e/repack/foldsim.py`: `fold::plan` re-implemented
+over a clock, with a fold in
+flight blocking the next plan at 85 MB/s for a tier fold and 40 MB/s
+for a base rebuild, the rates the run showed), and the candidates
+were scored on it and on the design's own shapes (§3.6).
+
+### 13.1 What the bucket said on a second reading
+
+- **The ladder was git's rule, cascade included.** The 2.3, 4.3 and
+  6.7 GiB folds are the split's *extension* — "absorb the next pack
+  while it is under twice the light half's sum" — reaching the 1 GiB
+  push packs from below. Ten pushes the size of the repository cost
+  ~18 GB of folds, then a 12 GiB base rebuild over the result: the
+  ladder's bytes were spent and then spent again.
+- **The base rebuild was due by the percent rule** (10 GiB of tiers on
+  a 64 MiB base); the restart did not cause it, it only ended the
+  hourly wait early. Persisting the cadence alone shifts that rebuild
+  by half an hour and saves nothing — the simulation's "cadence
+  persisted" row is 62 GB against 72 for the run as it was, and the
+  repository ends the hour with an 11 GiB *tier* and no bitmap over
+  it.
+- **P2's 885 MB was not the cap.** The bucket holds 2.6 MB of objects
+  from that minute — 884 push packs of a median 341 bytes and their
+  small folds; the tiny pushes folded among themselves at every batch,
+  and the cap's "fold every tier" path is reached only by a perfect
+  geometric progression 64 packs long, which no shape here produces.
+  CloudWatch's per-minute buckets do not align with a 63 s window.
+  The README's and §9.2's sentence attributing 885 MB to the cap
+  rewriting the 300 MiB P9 tiers is withdrawn; the cap's rule is still
+  changed below, because as written it was a rewrite of everything
+  but the base by construction.
+
+### 13.2 The rules
+
+1. **The floor.** A tier fold whose light half sums to less than
+   `fold_min_bytes` waits; the default moves from 0 to **256 MiB**.
+   The ladder then starts at the floor rather than the push: an 8 MiB
+   push on a 12 GiB base is rewritten log2(6 GiB ÷ 256 MiB) ≈ 4.6 times
+   before the base takes it, not log2(6 GiB ÷ 8 MiB) ≈ 9.6. What waits
+   under the floor is bounded by `fold_max_packs`.
+2. **A pack that alone meets the base rule is the base rule's.** A
+   tier pack at or above `base_tier_percent` of the base (or of
+   `base_min_bytes` while there is no base) is never a fold input. The
+   rebuild takes it once, where the ladder rewrote it at every level
+   and the rebuild then took it anyway. No new knob: the percent is
+   the base rule's own.
+3. **The cadence is the base's age, and it yields to the cap.**
+   `last_base_rebuild_unix` is set by the commit and, on a fresh
+   incarnation, by the restore from the LIST's `last_modified` of the
+   base pack — the store's clock, as every liveness judgement here.
+   A closed cadence yields when the named tiers reach `fold_max_packs`
+   (the packs rule 2 holds back must not pile up without bound); the
+   disk check (1.2× the named bytes free) never yields.
+4. **The cap's forced fold takes the smallest half by count**, never
+   every tier.
+
+Rejected on the simulation: factor 4 (worse on every shape — the
+extension rule absorbs more at a larger factor: 4.8× against 3.8× on
+runca); waiving the cadence whenever the tiers reach 1×, 2× or 3× the
+base (each rebuild makes the next big push small again and the ladder
+resumes: 3.3–3.8× against 1.2× + the hour's rebuild); no cadence with
+the percent at 100 (3.8×); a 128 MiB floor (worse on every shape than
+256); a 512 MiB floor (better on the 6 GiB steady shapes, 4.4× vs
+4.9×, worse on a fresh repository, 3.4× vs 3.0×, and 292 packs at the
+peak); a 32-pack cap (5.7× vs 5.2× on the fleet shape, for a count no
+reader here needs).
+
+### 13.3 The simulation
+
+Bytes uploaded ÷ bytes pushed, the fold beside the loop modelled;
+"peak packs" is the most the snapshot ever named. The runca row is the
+run's real sequence (run A, B1, B2 with their times and the P5
+restart); its hour's base rebuild (≈ 12.9 GB, due at 02:05) is NOT in
+the "rules 1–4" cell, which ends at 01:58 with the base still 64 MiB —
+add it and the run costs ≈ 32 GB, 1.95×, against 72 as it was.
+
+| shape | as built (§12) | rules 1–4 | peak packs, as built → rules |
+|---|---|---|---|
+| **runca, the run's own sequence** (16.5 GB pushed) | 4.37× (72 GB; 439 folds 42.5 GB, 2 rebuilds 13 GB) | **1.18×** (19.4 GB; 24 folds 2.9 GB) + the hour's rebuild ≈ 1.95× | 309 → 107 |
+| P9 steady: 6 GiB + 800 × 8 MiB at 1/s | 5.78× | **4.94×** | 266 → 266 (a fold in flight) |
+| P9 steady: 6 GiB + 2,000 × 8 MiB | 8.09× | **6.45×** | 266 → 266 |
+| agent fleet: 1 GiB + 10,000 × 32 KiB at 10/s | 7.61× (4,973 folds) | **5.24×** (165 folds) | 37 → 94 |
+| RUN1: 0 → 875 × 8 MiB at 1/s | 6.84× | **3.00×** | 81 → 62 |
+| 20 × 1 GiB on a 12 GiB base, one a minute | 3.00× | 3.00× | 12 → 12 |
+| 20 × 1 GiB on a 0.2 GiB base | 4.22× | **2.07×** | 9 → 20 |
+| rig blob: 512 MiB + 100 × 2 MiB | 4.26× | **1.64×** | 9 → 66 |
+
+The pack count is the price: the floor lets up to `fold_max_packs`
+(64) small packs wait, and rule 2 lets big packs wait for the hour. git
+opens them all; its own `gc.autoPackLimit` is 50. The design accepts
+64 (§3.1) and the wire run's P7 will say if a reader notices.
+
+### 13.4 Built
+
+`fold::plan` (the exemption before the split; the cap's half; the
+floor unchanged in form, its default moved), `fold::planned` (the plan
+without the spawn, for the tests), `base_gate` returning the disk and
+the cadence apart, `restore.rs` reading the base's age from the LIST,
+`ForgeConfig::fold_min_bytes` = 256 MiB and `FLINT_FORGE_FOLD_MIN_MIB`
+256. Tests: the planner's new properties (a big pack waits with the
+cadence closed and is the base rule's with it open; two big packs and
+nothing else plan nothing; four at the cap rebuild under a closed
+cadence and never without the disk; the floor holds three 8s and folds
+thirteen; the cap's forced fold is the smallest half), and on the rig,
+**the cadence read from the store on a fresh incarnation with its
+control** (the age unread — what the code did — plans the rebuild at
+once; the base back-dated past the cadence in the store, a re-restore
+plans it). 110 tests, clippy clean.
+
+### 13.5 Measured locally, and owed
+
+The repack rig (`forge/e2e/repack/run-repack.sh`, 256 MiB blob seed
+and 3.5 MiB source seed, 100 pushes, the cadence lifted;
+`forge/e2e/results/repack-tiers-2026-09-06b.log`): tiers-blob **7.8×
+→ 4.9×** (1 fold, 2 base rebuilds of which the first is the fresh
+repository's base creation; 3.7× without it), inside the
+pre-registered 5.5×; tiers-source **32× → 10.7×** (one cap fold of
+0.7 MiB at push 63, no base), inside the 25×. F14 as written now holds
+at this rig size. At this size the 2 MiB pushes sit under the floor,
+so the rig measures the floor and the cap, not the ladder: the ladder
+needs a base of gigabytes, which the laptop's disk does not hold
+beside MinIO and a clone.
+
+Owed: the wire measurement — a bytes-only run of the ten 1 GiB
+pushes, P9 at 300 and one restart, CloudWatch the oracle.

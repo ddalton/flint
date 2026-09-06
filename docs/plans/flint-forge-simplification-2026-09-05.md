@@ -630,18 +630,23 @@ climbed the geometric ladder at factor 2 and were rewritten as folds
 of 2.3, 4.3, 6.7, 2.0 and 3.1 GiB — about 20 GB for 10 GB pushed, the
 log2 tax applied to pushes the size of the repository; one 12 GiB base
 rebuild fired the moment the P5 pod restarted, because the hourly
-cadence lives in the process and a fresh pod has none; and P2's 848
-pushes in a minute tripped the 64-pack cap, whose rule folds every
-tier, the 300 MiB P9 tiers included, for 885 MB. Each is a knob or a
+cadence lives in the process and a fresh pod has none; and 885 MB
+that CloudWatch put in P2's minute, first read here as the 64-pack
+cap folding every tier and withdrawn on a second reading of the
+bucket (2.6 MB of objects from that minute; the tiny pushes folded
+among themselves — the tiers design's §13.1). Each is a knob or a
 rule in `fold.rs`, none is the shape, and walgit's 2.4× is the
 number they are measured against.
 
 **The decision under the rule set in §9.1.** walgit does not win P2
 and wins P9's bytes; the conjunction is not met, so "walgit behind the
 door" is not written as the decision. Forge keeps its place on the
-wire. What is owed next, in order: persist the base-rebuild cadence
-across restarts (derive it from the base pack's age in the LIST);
-make the cap fold the light half rather than every tier; a floor or a
-size-aware factor for pushes the size of the repository, measured on
-the ten-gigabyte ladder this run produced; then X15 (P11 is still a
-loss by construction) and X14 (51 s to the first `ls-remote`).
+wire. What was owed next — the cadence persisted, the cap's rule, a
+floor or a size-aware rule for pushes the size of the repository —
+was simulated on this run's own push sequence and built the same day
+(the tiers design's §13: a 256 MiB floor, a pack that alone meets the
+base rule waits for the base, the cadence read from the base's age in
+the store and yielding to the pack cap; 72 → ≈ 32 GB for this
+sequence in the simulation, 4.4× → 1.95×). Its wire measurement is
+owed; then X15 (P11 is still a loss by construction) and X14 (51 s to
+the first `ls-remote`).

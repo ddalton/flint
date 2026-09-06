@@ -175,9 +175,12 @@ and 08:18 UTC, each a roll-up of the gigabytes already there, about
 20 GB for 10 GB pushed; ONE base rebuild of 12 GiB at 08:34, fired
 the moment the P5 pod restarted because the hourly cadence lives in
 process memory and a fresh pod has none (a defect this run found);
-and 885 MB inside P2's minute, where 848 tiny pushes at 14/s tripped
-the 64-pack cap, whose rule folds EVERY tier, the 300 MiB P9 tiers
-included. Run B1's 300 pushes of 8 MiB produced folds of 272 to
+and 885 MB attributed by CloudWatch to P2's minute — on a second
+reading of the bucket NOT the pack cap, as this README first said:
+the bucket holds 2.6 MB of objects from that minute, 884 push packs of
+a median 341 bytes and their small folds, and CloudWatch's per-minute
+buckets do not align with a 63 s window (design §13.1). Run B1's 300
+pushes of 8 MiB produced folds of 272 to
 1,969 MiB — the ladder as designed, about 2.5 bytes of fold per byte
 pushed. walgit folded too (a 4.4 GiB and a 2.4 GiB roll-up) and paid
 2.4× over the run; its bucket is a third of forge's because it

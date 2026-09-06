@@ -1,0 +1,28 @@
+# repack rig, the tiers arms after the three rules of design §13 (floor 256 MiB, big packs wait, cadence = the base's age)
+# 2026-09-06, laptop MinIO, 256 MiB blob seed / 3.5 MiB source seed, 100 pushes; before: tiers-blob 7.8x, tiers-source 32x (repack-tiers-2026-09-06.log)
+
+== precondition: FORGE_BIN is newer than the sources it claims to be ==
+  PASS  FORGE_BIN is not older than any source under forge/syncer or flint-store
+== tiers-blob — 100 pushes of a blob-shaped repository, compaction tiers at factor 2 ==
+  ....  seed: the import uploaded 256.1 MiB
+  ....  tiers-blob: folds committed 1, base rebuilds 2, fold failures 0
+  ....  tiers-blob: the import uploaded 256.1 MiB — excluded from the ratio, since a first import uploads the repository once whatever the repack policy is
+  ....  tiers-blob: 101 pushes added 200.0 MiB and uploaded 986.1 MiB — amplification 4.9x
+  ....  tiers-blob: 3 push(es) uploaded more than 10x what they added; the largest was push 74 at 396.6 MiB for 2.000 MiB of content
+  ....  tiers-blob: the largest single upload was push 74 at 396.6 MiB for 2.000 MiB of content
+  PASS  tiers-blob: tiers at factor 2 amortise to 4.9x, within the pre-registered 5.5x
+per-push CSVs (push, content bytes, uploaded bytes): /var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/tmp.EGZlanRCws/*.csv (KEEP=1 to retain)
+repack: 2 passed, 0 failed
+
+== precondition: FORGE_BIN is newer than the sources it claims to be ==
+  PASS  FORGE_BIN is not older than any source under forge/syncer or flint-store
+== tiers-source — 100 pushes of a source-shaped repository, compaction tiers at factor 2 ==
+  ....  seed: the import uploaded 3.5 MiB
+  ....  tiers-source: folds committed 1, base rebuilds 0, fold failures 0
+  ....  tiers-source: the import uploaded 3.5 MiB — excluded from the ratio, since a first import uploads the repository once whatever the repack policy is
+  ....  tiers-source: 101 pushes added 0.2 MiB and uploaded 2.0 MiB — amplification 10.7x
+  ....  tiers-source: 7 push(es) uploaded more than 10x what they added; the largest was push 63 at 0.7 MiB for 0.002 MiB of content
+  ....  tiers-source: the largest single upload was push 63 at 0.7 MiB for 0.002 MiB of content
+  PASS  tiers-source: tiers at factor 2 amortise to 10.7x, within the pre-registered 25x
+per-push CSVs (push, content bytes, uploaded bytes): /var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/tmp.Tcqy9nMbOz/*.csv (KEEP=1 to retain)
+repack: 2 passed, 0 failed

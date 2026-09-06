@@ -29,6 +29,24 @@
 //!    ticking that counter would keep a wedged batch's holder renewing
 //!    for the whole of a base rebuild's upload.
 //!
+//! Three more from the wire (runca, design §12; the simulation in the
+//! design's §13 is what chose them), all in the pure planner:
+//!
+//! 4. **The ladder starts at the floor, not at the push.** A tier fold
+//!    below `fold_min_bytes` (256 MiB) waits, so 8 MiB pushes are
+//!    rewritten log2(top ÷ 256 MiB) times rather than log2(top ÷ 8 MiB);
+//!    the pack cap bounds what waits.
+//! 5. **A pack that alone meets the base rule is the base rule's.** A
+//!    tier pack at or above `base_tier_percent` of the base is never a
+//!    fold input: the rebuild takes it once, where the ladder rewrote
+//!    ten 1 GiB pushes as folds of 2.3, 4.3, 6.7, 2.0 and 3.1 GiB and
+//!    then rebuilt the base over them anyway.
+//! 6. **The cadence is the base's age by the store's clock**, read from
+//!    the LIST at restore, never process memory (a restarted pod
+//!    rebuilt a 12 GiB base at once); and a closed cadence yields to
+//!    the pack cap, so the packs rule 5 holds back cannot pile up
+//!    without bound. The disk check never yields.
+//!
 //! What a tier fold is: `pack-objects --stdin-packs` over S, every
 //! object of the inputs reachable or not, deltas reused, the window off.
 //! What the base rebuild is: `pack-objects --all --write-bitmap-index`,
@@ -91,15 +109,22 @@ pub struct PlanKnobs {
     pub base_min_bytes: u64,
     /// A fold smaller than this is skipped unless the pack cap forces it.
     pub fold_min_bytes: u64,
-    /// Fold regardless when the tier count reaches this.
+    /// Fold regardless when the tier count reaches this; a closed
+    /// cadence yields to it too.
     pub fold_max_packs: usize,
-    /// Whether a base rebuild is allowed now (the cadence and disk
-    /// checks are the caller's; the planner only reads the answer).
+    /// Whether the disk allows a base rebuild now (1.2× the named bytes
+    /// free); the caller's check, the planner only reads the answer.
+    /// Never overridden.
     pub base_allowed: bool,
+    /// Whether the cadence allows one (`base_rebuild_min_secs` since
+    /// the last, by the base's age in the store). The pack cap
+    /// overrides it.
+    pub cadence_open: bool,
 }
 
 /// git's `split_pack_geometry` over bytes, the base excluded, plus the
-/// base rule. Pure; the tests are the design's property tests.
+/// base rule, the floor, the exemption and the cap. Pure; the tests are
+/// the design's property tests.
 pub fn plan(packs: &[PackInfo], k: PlanKnobs) -> Option<Plan> {
     if k.factor == 0 || packs.is_empty() {
         return None;
@@ -114,10 +139,14 @@ pub fn plan(packs: &[PackInfo], k: PlanKnobs) -> Option<Plan> {
         v.sort();
         v
     };
+    let cap = k.fold_max_packs.max(2);
 
     // The base rule first: it is the only rewrite that applies
-    // reachability and the only one that writes a bitmap.
-    if k.base_allowed {
+    // reachability and the only one that writes a bitmap. A closed
+    // cadence yields to the pack cap — the packs the exemption below
+    // holds back wait for this rebuild, and their count must not grow
+    // without bound — but the disk never does.
+    if k.base_allowed && (k.cadence_open || tiers.len() >= cap) {
         if !has_base && tier_bytes >= k.base_min_bytes && !tiers.is_empty() {
             return Some(Plan::Base { inputs: all_names() });
         }
@@ -129,6 +158,15 @@ pub fn plan(packs: &[PackInfo], k: PlanKnobs) -> Option<Plan> {
         }
     }
 
+    // A pack that alone meets the base rule is the base rule's, never
+    // a fold's input: the rebuild takes it once, where the ladder
+    // would rewrite it at every level up to the base. With no base yet
+    // the reference is the floor the first base is built at.
+    let reference = if has_base { base_bytes } else { k.base_min_bytes };
+    let tiers: Vec<&PackInfo> = tiers
+        .into_iter()
+        .filter(|p| p.bytes.saturating_mul(100) < reference.saturating_mul(k.base_tier_percent))
+        .collect();
     let n = tiers.len();
     if n < 2 {
         return None;
@@ -160,15 +198,20 @@ pub fn plan(packs: &[PackInfo], k: PlanKnobs) -> Option<Plan> {
             break;
         }
     }
-    let forced = n >= k.fold_max_packs.max(2);
+    let forced = n >= cap;
     if split < 2 {
         if forced {
-            // The progression is perfect and the count is still too
-            // high: the cap folds every tier.
-            return Some(Plan::Fold { inputs: tiers.iter().map(|p| p.name.clone()).collect() });
+            // A perfect progression that has grown too long: the
+            // smallest half by count, never every tier — every tier is
+            // a rewrite of everything but the base.
+            let mut inputs: Vec<String> = tiers[..n.div_ceil(2)].iter().map(|p| p.name.clone()).collect();
+            inputs.sort();
+            return Some(Plan::Fold { inputs });
         }
         return None;
     }
+    // The floor: the ladder starts here, not at the push size. What
+    // waits under it is bounded by the cap.
     if total < k.fold_min_bytes && !forced {
         return None;
     }
@@ -333,16 +376,17 @@ pub struct FoldResult {
     pub error: Option<String>,
 }
 
-/// Whether a fold may be planned now, and which: the cadence and the
-/// disk are the base rule's preconditions; the planner reads the rest.
-fn base_allowed(sc: &Syncer, now: u64) -> bool {
-    if sc.last_base_rebuild_unix > 0
-        && now.saturating_sub(sc.last_base_rebuild_unix) < sc.cfg.base_rebuild_min_secs
-    {
-        return false;
-    }
+/// The base rule's two preconditions the planner cannot see: the disk
+/// (1.2× the named bytes free, §7.9) and the cadence. Returned apart,
+/// because the pack cap may override the cadence and never the disk.
+/// The cadence is the base's age: `last_base_rebuild_unix` is set by
+/// the commit and, on a fresh incarnation, by the restore from the
+/// LIST's `last_modified` of the base pack.
+fn base_gate(sc: &Syncer, now: u64) -> (bool, bool) {
+    let cadence_open = sc.last_base_rebuild_unix == 0
+        || now.saturating_sub(sc.last_base_rebuild_unix) >= sc.cfg.base_rebuild_min_secs;
     let named: u64 = pack_infos(sc).map(|v| v.iter().map(|p| p.bytes).sum()).unwrap_or(0);
-    match free_bytes(&sc.cfg.repo) {
+    let disk_ok = match free_bytes(&sc.cfg.repo) {
         Some(free) if free < named.saturating_mul(12) / 10 => {
             eprintln!(
                 "flint-forge: base rebuild deferred: {free} bytes free under the repository, \
@@ -351,7 +395,8 @@ fn base_allowed(sc: &Syncer, now: u64) -> bool {
             false
         }
         _ => true,
-    }
+    };
+    (disk_ok, cadence_open)
 }
 
 #[cfg(unix)]
@@ -372,6 +417,28 @@ fn free_bytes(_path: &Path) -> Option<u64> {
     None
 }
 
+/// What the planner would do now, from the syncer's state: the named
+/// packs' sizes and marker, the config's knobs, the disk and the
+/// cadence. `None` when nothing is due, the factor is 0, a fold is in
+/// flight, no snapshot is loaded, or the process is fenced.
+pub fn planned(sc: &Syncer, now: u64) -> ForgeResult<Option<Plan>> {
+    if sc.cfg.fold_factor == 0 || sc.fold.is_some() || sc.cell.is_none() || sc.fenced().is_some() {
+        return Ok(None);
+    }
+    let infos = pack_infos(sc)?;
+    let (base_allowed, cadence_open) = base_gate(sc, now);
+    let knobs = PlanKnobs {
+        factor: sc.cfg.fold_factor,
+        base_tier_percent: sc.cfg.base_tier_percent,
+        base_min_bytes: sc.cfg.base_min_bytes,
+        fold_min_bytes: sc.cfg.fold_min_bytes,
+        fold_max_packs: sc.cfg.fold_max_packs,
+        base_allowed,
+        cadence_open,
+    };
+    Ok(plan(&infos, knobs))
+}
+
 /// Plan and spawn a fold if one is due and none is in flight. Returns
 /// the plan spawned, for the log.
 pub fn maybe_spawn(
@@ -379,19 +446,7 @@ pub fn maybe_spawn(
     done: tokio::sync::mpsc::Sender<FoldResult>,
     now: u64,
 ) -> ForgeResult<Option<Plan>> {
-    if sc.cfg.fold_factor == 0 || sc.fold.is_some() || sc.cell.is_none() || sc.fenced().is_some() {
-        return Ok(None);
-    }
-    let infos = pack_infos(sc)?;
-    let knobs = PlanKnobs {
-        factor: sc.cfg.fold_factor,
-        base_tier_percent: sc.cfg.base_tier_percent,
-        base_min_bytes: sc.cfg.base_min_bytes,
-        fold_min_bytes: sc.cfg.fold_min_bytes,
-        fold_max_packs: sc.cfg.fold_max_packs,
-        base_allowed: base_allowed(sc, now),
-    };
-    let Some(plan) = plan(&infos, knobs) else { return Ok(None) };
+    let Some(plan) = planned(sc, now)? else { return Ok(None) };
     spawn(sc, plan.clone(), done, now)?;
     Ok(Some(plan))
 }
@@ -823,6 +878,7 @@ mod plan_tests {
             fold_min_bytes: 0,
             fold_max_packs: 64,
             base_allowed: true,
+            cadence_open: true,
         }
     }
     fn fold_inputs(p: Option<Plan>) -> Vec<String> {
@@ -862,10 +918,54 @@ mod plan_tests {
     #[test]
     fn the_base_is_never_a_fold_input() {
         let mut p = packs(&[8, 8, 8]);
-        p.push(PackInfo { name: "pack-base.pack".into(), bytes: 4, is_base: true });
-        let got = fold_inputs(plan(&p, PlanKnobs { base_allowed: false, ..knobs() }));
+        p.push(PackInfo { name: "pack-base.pack".into(), bytes: 100, is_base: true });
+        let got = fold_inputs(plan(&p, PlanKnobs { cadence_open: false, ..knobs() }));
         assert!(!got.iter().any(|n| n == "pack-base.pack"));
         assert_eq!(got.len(), 3);
+    }
+
+    /// A tier pack that alone meets the base rule waits for the base
+    /// rebuild and is never a fold input: with the cadence closed the
+    /// two small packs fold and the big one is left where it is; with
+    /// it open the base rule takes everything. The control is the
+    /// rule's absence — the design as first built folded [100, 100,
+    /// 600] into one 800 MiB pack, then rebuilt the base over it.
+    #[test]
+    fn a_pack_that_alone_meets_the_base_rule_waits_for_the_base() {
+        let mut p = packs(&[100, 100, 600]);
+        p.push(PackInfo { name: "pack-base.pack".into(), bytes: 1000, is_base: true });
+        let got = fold_inputs(plan(&p, PlanKnobs { cadence_open: false, ..knobs() }));
+        assert_eq!(got, vec!["pack-000.pack", "pack-001.pack"], "the 600 waits");
+        assert!(matches!(plan(&p, knobs()), Some(Plan::Base { .. })), "the base rule takes it");
+        // Two big packs and nothing else: nothing to fold, the rebuild waits.
+        let mut q = packs(&[600, 700]);
+        q.push(PackInfo { name: "pack-base.pack".into(), bytes: 1000, is_base: true });
+        assert_eq!(plan(&q, PlanKnobs { cadence_open: false, ..knobs() }), None);
+    }
+
+    /// A closed cadence yields to the pack cap, so the packs the
+    /// exemption holds back cannot pile up without bound; the disk
+    /// check never yields.
+    #[test]
+    fn a_closed_cadence_yields_to_the_pack_cap_and_the_disk_does_not() {
+        let mut p = packs(&[600, 600, 600, 600]);
+        p.push(PackInfo { name: "pack-base.pack".into(), bytes: 1000, is_base: true });
+        let closed = PlanKnobs { cadence_open: false, fold_max_packs: 4, ..knobs() };
+        assert!(matches!(plan(&p, closed), Some(Plan::Base { .. })), "four exempt packs at the cap rebuild");
+        let below = PlanKnobs { fold_max_packs: 5, ..closed };
+        assert_eq!(plan(&p, below), None, "below the cap they wait");
+        let no_disk = PlanKnobs { base_allowed: false, ..closed };
+        assert_eq!(plan(&p, no_disk), None, "the disk is never overridden");
+    }
+
+    /// The floor: a fold below it waits, until the cap forces it.
+    #[test]
+    fn the_floor_holds_small_folds_until_the_cap() {
+        let k = PlanKnobs { fold_min_bytes: 100, ..knobs() };
+        assert_eq!(plan(&packs(&[8, 8, 8]), k), None, "24 is under the floor");
+        assert_eq!(fold_inputs(plan(&packs(&[8, 8, 8]), PlanKnobs { fold_max_packs: 3, ..k })).len(), 3);
+        // Thirteen 8s reach the floor and fold together.
+        assert_eq!(fold_inputs(plan(&packs(&[8; 13]), k)).len(), 13);
     }
 
     /// The base rule: the tiers at half the base rebuild it; below that
@@ -891,13 +991,15 @@ mod plan_tests {
         assert!(matches!(plan(&packs(&[8, 8, 16]), k), Some(Plan::Base { .. })));
     }
 
-    /// The cap folds a perfect progression that has grown too long.
+    /// The cap folds a perfect progression that has grown too long:
+    /// the smallest half by count, never every tier (every tier would
+    /// be a rewrite of everything but the base).
     #[test]
-    fn the_pack_cap_forces_a_fold() {
+    fn the_pack_cap_forces_a_fold_of_the_smallest_half() {
         let sizes: Vec<u64> = (0..6).map(|i| 8u64 << i).collect();
         assert_eq!(plan(&packs(&sizes), knobs()), None);
         let got = fold_inputs(plan(&packs(&sizes), PlanKnobs { fold_max_packs: 6, ..knobs() }));
-        assert_eq!(got.len(), 6);
+        assert_eq!(got, vec!["pack-000.pack", "pack-001.pack", "pack-002.pack"]);
     }
 
     /// Factor 0 is the control arm: never a fold, never a base.
