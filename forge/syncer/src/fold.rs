@@ -634,6 +634,19 @@ pub async fn commit(sc: &mut Syncer, res: FoldResult, now: u64) -> ForgeResult<O
     if reproduced {
         let _ = std::fs::remove_dir_all(&scratch);
         if superseded.is_empty() {
+            // The rebuild produced the pack that is already there and
+            // superseded nothing: no rename, no upload, no CAS. But it
+            // IS the base and it DID run, so the marker and the cadence
+            // are still owed — without them the planner sees no base,
+            // plans a rebuild at every opportunity, and the first one
+            // whose reachable set spans two packs writes a whole extra
+            // copy of the repository. Measured on runcb's rate leg: a
+            // repository whose reachable set was exactly one 64 MiB
+            // push pack rebuilt again ten seconds later, for 128 MiB.
+            if res.is_base {
+                sc.last_base_rebuild_unix = now;
+                set_base_marker(&sc.cfg.repo, &f)?;
+            }
             return Ok(None);
         }
     } else {

@@ -53,6 +53,31 @@ covered by the stability guarantee.
   Forge's whole-run amplification is now below walgit's 2.4×; on the
   8 MiB ladder alone it is 3.74× against walgit's 1.75×.
 
+### Fixed — flint forge, a base rebuild that changes nothing still marks the base
+
+- **A reproduced base rebuild neither marked the base nor stamped the
+  cadence.** When the rebuild's pack is the one the snapshot already
+  names — the reachable set is exactly one push pack — `fold::commit`
+  returned early, correctly spending no CAS and no upload, but also
+  skipping `set_base_marker` and `last_base_rebuild_unix`. The planner
+  then sees no base and proposes a rebuild at every opportunity. Found
+  on runcc's rate leg, where it re-uploaded about 200 MB inside each of
+  two one-minute windows and, in the other arm, wrote an extra 128 MiB
+  base ten seconds after the first. The reproduced path now marks and
+  stamps; the test's control is the unmarked, unstamped state.
+
+### Measured — flint forge, the push rate under the compaction floor (runcc)
+
+- **The 256 MiB floor costs no push rate.** Both arms in one cluster,
+  three repetitions of 32 pushers × 60 s of tiny commits: 17.4/16.2,
+  11.7, 9.7 pushes/s without the floor against 15.4, 12.2, 9.3 with it,
+  crossing over at the second repetition, with requests per push level.
+  What both arms do is halve over three minutes, and the cause is not
+  compaction: each repetition leaves about 900 new branches and every
+  push rewrites the snapshot's ref map. That is a ref-scale item, not a
+  tiers one. The cap fired as designed, at 66–82 tier packs, and the
+  arm with the floor folded once per 185 pushes against once per 21.
+
 ### Fixed — flint forge, a fold's commit revalidates the lease
 
 - **The fold's commit was the one CAS on the loop that never renewed.**

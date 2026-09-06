@@ -3134,6 +3134,53 @@ async fn a_rebuild_that_reproduces_the_bases_name_never_unlinks_it() {
     rig.sc.git.fsck_connectivity().await.expect("whole");
 }
 
+/// A base rebuild whose pack is the one already named — the reachable
+/// set is exactly one push pack — still marks that pack the base and
+/// still stamps the cadence, though it renames, uploads and CASes
+/// nothing. The control is what the code did before: with neither, the
+/// planner sees no base and proposes a rebuild again at once, which on
+/// the runcc rate leg wrote a second, 128 MiB copy of the repository
+/// ten seconds after the first.
+#[tokio::test]
+async fn a_reproduced_base_rebuild_still_marks_the_base_and_stamps_the_cadence() {
+    let mut rig = Rig::new().await;
+    rig.sc.cfg.fold_factor = 2;
+    rig.sc.cfg.base_min_bytes = 0;
+    rig.sc.cfg.base_rebuild_min_secs = 3600;
+    rig.sc.cfg.fold_min_bytes = 0;
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let one = rig.sc.cell().unwrap().snap.packs.clone();
+    assert_eq!(one.len(), 1, "one push, one pack");
+
+    let (plan, named) = rig.fold_once().await.expect("the base rule fires with no base yet");
+    assert!(matches!(plan, fold::Plan::Base { .. }));
+    assert_eq!(named, None, "the rebuild reproduced the push pack's name: nothing new was named");
+    assert_eq!(rig.sc.cell().unwrap().snap.packs, one, "and the snapshot is unchanged");
+    assert!(
+        fold::is_base_marker(&rig.sc.cfg.repo, &one[0]),
+        "the reproduced pack is still marked the base"
+    );
+    assert!(rig.sc.last_base_rebuild_unix > 0, "and the cadence is stamped");
+
+    // A second push, then a plan: inside the cadence, with a base now
+    // known, no rebuild is proposed.
+    let _c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    assert!(
+        !matches!(fold::planned(&rig.sc, super::now_unix()).unwrap(), Some(fold::Plan::Base { .. })),
+        "a second rebuild was proposed at once"
+    );
+    // The control: unmark and unstamp, as the early return left it, and
+    // the planner proposes the rebuild that wrote the extra copy.
+    let keep = rig.sc.cfg.repo.join("objects/pack").join(format!("{}.keep", one[0].trim_end_matches(".pack")));
+    std::fs::remove_file(&keep).unwrap();
+    rig.sc.last_base_rebuild_unix = 0;
+    assert!(
+        matches!(fold::planned(&rig.sc, super::now_unix()).unwrap(), Some(fold::Plan::Base { .. })),
+        "control: with no marker and no stamp the rebuild is proposed again"
+    );
+}
+
 /// The reflog trap (design §7.7): a base rebuild drops what a rewind
 /// left reachable only from the reflog; a warm restart keeps the
 /// reflog; the proof must not walk it. The control is the trap itself

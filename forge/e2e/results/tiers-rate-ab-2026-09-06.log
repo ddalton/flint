@@ -1,0 +1,33 @@
+# runcc — the RATE leg under the 256 MiB floor, A/B in one cluster, 2026-09-06
+# arm A = drill-02f251b8 (floor 0), arm B = drill-94b2965d (floor 256 MiB + the exemption + the cadence from the LIST)
+# each arm: a seed, two 64 MiB pushes (so a base exists), then P2 = 32 pushers x 60 s of tiny commits to distinct branches, three times
+
+pushes/s by repetition (32 pushers, 60 s each, the repository carrying every previous rep's branches):
+  arm A   17.4  (first prefix)   |  16.2   11.7    9.7
+  arm B   15.4   12.2    9.3
+per-push latency, median / max seconds:
+  arm A   1.66/7.51 (first)  |  1.70/11.70   2.36/7.65   2.95/7.87
+  arm B   1.51/11.95   2.19/7.82   3.11/8.69
+
+READING: the floor does not cost push rate. Both arms fall by the same shape as the branch
+count grows (~900 new branches a minute; every push rewrites the snapshot's ref map), and the
+arms cross over at repetition 2. Folds: arm A 50 in 1046 pushes (one per 21); arm B 12 in 2216
+(one per 185), each firing at the 64-pack cap over 66-82 tier packs.
+
+S3 request metrics per P2 window (CloudWatch, admin profile; A0 is arm A's first prefix):
+leg  arm     window    AllRequests  PutRequests  GetRequests HeadRequests  BytesUploaded BytesDownloaded
+A0   forge   61s              3570         3546           18            0      205667620       41958303
+B1   forge   63s              2911         2903            0            0      338667684           4288
+B2   forge   61s              3632         3632            0            0        4927782              0
+B3   forge   62s              3501         3442           59            0        5113357       67384468
+A1   forge   62s              2894         2875           13            0      204361660           5934
+A2   forge   67s              5326         5321            0            0      208140981           2778
+A3   forge   62s              4641         4641            0            0        7040545              0
+
+per-push figures: divide a P9 row by the pushes that leg made (P9_N, default 48) and a P2 row by the pushes it acknowledged (in the compare log).
+
+DEFECT FOUND (predates the floor; both arms have it): a base rebuild that reproduces the pack
+the snapshot already names returns before marking the base and before stamping the cadence, so
+the planner sees no base and proposes a rebuild again at once. On the wire that re-uploaded
+~200 MB inside each of arm A's first two windows, and cost arm B a whole extra 128 MiB base.
+Fixed in fold::commit with a test whose control is the unmarked, unstamped state.

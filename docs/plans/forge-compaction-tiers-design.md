@@ -1368,6 +1368,45 @@ the gap that remains. Nothing was paid for it on the read side: the
 solo clone got faster (15.3 s against 19.8), the eight-clone storm is
 unchanged, and the cold start is 6 s quicker.
 
-Owed: a P2-style rate leg under the new floor (this run measured
-bytes, not rate), and the 64-pack ceiling under a repository that
-actually reaches it.
+### 13.8 The rate under the floor — runcc, 2026-09-06
+
+The floor's risk was the write path: with tiny pushes nothing reaches
+256 MiB, so packs pile up to the cap and every push works over more of
+them. Measured the same way, both arms in one cluster, each given a
+seed, two 64 MiB pushes (so a base exists) and then three repetitions
+of 32 pushers × 60 s of tiny commits to distinct branches
+(`forge/e2e/results/tiers-rate-ab-2026-09-06.log`):
+
+| repetition | arm A, floor 0 | arm B, floor 256 MiB |
+|---|---|---|
+| 1 | 17.4 and 16.2 pushes/s | 15.4 |
+| 2 | 11.7 | 12.2 |
+| 3 | 9.7 | 9.3 |
+
+**The floor costs no rate.** The arms are within the spread and cross
+over at the second repetition. What both do is fall by half over three
+minutes, and that is not compaction at all: each repetition leaves
+about 900 new branches, every push rewrites the snapshot's ref map, and
+the map is what grows. That is a finding of its own and belongs to a
+ref-scale item, not to X18.
+
+The cap behaved as designed: arm A folded 50 times in 1,046 pushes (one
+per 21), arm B 12 times in 2,216 (one per 185), each firing at the
+64-pack cap over 66–82 tier packs. Requests per push were level, 3.4–7.6
+for arm A and 3.6–6.3 for arm B.
+
+**And the run found a defect that predates the floor and hits both
+arms.** A base rebuild whose pack reproduces a name the snapshot
+already holds — the reachable set is exactly one push pack — returned
+from `commit` before marking that pack the base and before stamping
+`last_base_rebuild_unix`. The planner then sees no base and proposes a
+rebuild again at the next opportunity, forever. On the wire it
+re-uploaded about 200 MB inside each of arm A's first two windows, and
+in arm B the next rebuild spanned two packs and wrote a whole extra
+128 MiB base. The reproduced path now marks and stamps; the test's
+control is the unmarked, unstamped state, which proposes the rebuild
+again.
+
+Owed: the 64-pack ceiling on a repository large enough that its packs
+matter to a reader, and a ref-scale measurement of the snapshot's ref
+map.
