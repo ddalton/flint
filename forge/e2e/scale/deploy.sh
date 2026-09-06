@@ -25,6 +25,11 @@ root=$(cd "$here/../../.." && pwd)
 : "${KEYFILE:?set KEYFILE to the IAM access-key JSON}"
 : "${TAG:?set TAG to the images built from this tree (build-forge-images.sh PUSH=1)}"
 PREFIX=${PREFIX:-scale-$(date +%Y%m%d%H%M)}
+# The git image's tag alone. Default: TAG. The S5–S9 control arm sets it
+# to the last nginx + fcgiwrap image (see run-scale.sh) with the syncer
+# still at TAG, so the control differs from the runner arm in the one
+# dimension under test.
+GIT_TAG=${GIT_TAG:-$TAG}
 REGION=${REGION:-us-west-1}
 NS_SYS=${NS_SYS:-forge-system}
 NS_AGENTS=${NS_AGENTS:-agents}
@@ -45,7 +50,7 @@ kubectl -n "$NS_AGENTS" create secret generic forge-creds \
 helm upgrade --install flint-forge "$root/flint-forge-chart" \
     -n "$NS_SYS" \
     --set image.tag="$TAG" \
-    --set server.gitImage="dilipdalton/flint-forge-git:$TAG" \
+    --set server.gitImage="dilipdalton/flint-forge-git:$GIT_TAG" \
     --set server.syncerImage="dilipdalton/flint-forge-syncer:$TAG" \
     --set door.deploy=true \
     --set door.namespace="$NS_SYS" \
@@ -73,5 +78,5 @@ done
 kubectl -n "$NS_AGENTS" wait --for=condition=Ready pod/agent1 --timeout=3m 2>/dev/null || true
 kubectl -n "$NS_AGENTS" get flintrepo big small -o wide || true
 echo
-echo "deployed: images :$TAG, bucket $BUCKET, prefix $PREFIX"
+echo "deployed: images :$TAG (git image :$GIT_TAG), bucket $BUCKET, prefix $PREFIX"
 echo "next:     BUCKET=$BUCKET PREFIX=$PREFIX KEYFILE=$KEYFILE $here/run-scale.sh"

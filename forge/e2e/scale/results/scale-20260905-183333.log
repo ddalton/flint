@@ -1,0 +1,38 @@
+forge at scale — bucket flint-forge-scale-runby, prefix scale-202609051832, namespace agents, run 20260905-183333; EXPECT=window-closed SWEEP=claim
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-183333.log
+
+══ S0 — provenance and the rig: the syncer in the pod is the tree under test, both repositories serve, the disks are big enough ══
+  ....  syncer image: docker.io/dilipdalton/flint-forge-syncer@sha256:e50310250fd51b011e3ca69fd2ad0661cafa92f8f057ddc4834ff982bd21fcad
+  ....  git container PID 1: /usr/local/bin/flint-forge-gitcgi   (flint-forge-gitcgi = the A3 runner; an entrypoint script = the nginx + fcgiwrap image, the S5–S9 control arm)
+  PASS  the syncer pod runs the digest this run pushed (sha256:e50310250fd51b011e3ca69fd2ad0661cafa92f8f057ddc4834ff982bd21fcad)
+  PASS  the syncer carries the ranged restore (marker string ×1, 827c5f90) — this is the tree under test, judged by content
+  PASS  the syncer carries the progress-gated renewer (marker ×1, 2a213b01): the window-closed oracle has its subject
+  PASS  the syncer carries the claim-time orphan sweep (marker ×1, 2a213b01)
+  PASS  big is serving (forge-big-5677b87cc6-lnxkv)
+  PASS  small is serving (forge-small-68cbff7768-tm2mb)
+  PASS  big has no snapshot yet (fresh prefix)
+  ....  takeover window = QUIET_POLLS 6 × heartbeat 10s = 60s
+  ....  free: agent /work 833770 MiB, repository cache 833769 MiB; this run may need ~100352 MiB on each
+  PASS  the agent's emptyDir has room
+  PASS  the repository cache has room
+
+══ S5 — a client stalled 70 s mid-pack is not cut (X3: nginx's client_body_timeout defaulted to 60 s beside backend bounds of an hour) ══
+  FAIL  PRECONDITION: the stop did not land mid-transfer (answer 'commandterminatedwithexitcode1', server 'serving') — raise STALL_MB
+  ....  client SIGSTOPped for 70 s
+  INCONCLUSIVE  the stalled push never answered within 1800 s
+
+══ S6 — 5 concurrent pushes are served concurrently, and a request beside them is answered at once (X4: FCGIWRAP_CHILDREN=4 queued the fifth in silence) ══
+  PASS  the git container runs 9 receive-pack(s) for 5 stopped clients: nothing in front of git queues them
+  FAIL  a request beside 5 in-flight pushes took 0 s ('rc=128'): it queued behind them
+  ....  push 1: 'commandterminatedwithexitcode1', bucket <absent> (want 9b22f5cd5dcf817ed1548b2e6dbe3676abf29454): 
+  ....  push 2: 'commandterminatedwithexitcode1', bucket <absent> (want aa3fd255a9997ac1a9f87f468c3d99a2ca037e20): 
+  ....  push 3: 'commandterminatedwithexitcode1', bucket <absent> (want acf2ec92edc528d8d89bd372871a873cc3f339f5): 
+  ....  push 4: 'commandterminatedwithexitcode1', bucket <absent> (want a05c186b1fa1bebbefabd30f25e766c77859379b): 
+  ....  push 5: 'commandterminatedwithexitcode1', bucket <absent> (want 7be7d0000d43f3ebf56d4f7937f2d2f96b79b883): 
+  FAIL  0 of 5 concurrent pushes acknowledged and durable
+
+══ S7 — a rollout during a 4096 MiB push (X6: terminationGracePeriodSeconds 30 against a batch of minutes, SIGTERM seen only between batches): the outcome recorded; told ok ⇒ durable, told failed ⇒ unchanged, the successor serves, a retry converges, no orphan survives its claim ══
+  INCONCLUSIVE  the syncer never reached 'pushing' (push: 'commandterminatedwithexitcode1'): the batch was over before a roll could land — raise ROLL_MB
+
+══ S9 — keepalives through the front: across a hook wait of at least 60 s the client sees a packet at least every 8 s (run 3 finding 2: through fcgiwrap they arrived in one burst with the report); the door's bound is 300 s ══
+  PASS  PRECONDITION: receive.keepAlive=5 on small

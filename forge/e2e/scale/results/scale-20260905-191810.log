@@ -1,0 +1,15 @@
+forge at scale — bucket flint-forge-scale-runby, prefix scale-202609051832, namespace agents, run 20260905-191810; EXPECT=window-closed SWEEP=claim
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-191810.log
+
+══ S10 — 8 concurrent clones of a 1024 MiB branch are served concurrently, every one complete and at the tip, and a push beside them is acknowledged (the fleet's common case: many agents cloning one repository) ══
+  PASS  PRECONDITION: agent/clone-20260905-191810 holds a 1024 MiB history at 838e0aa1bbada038765a3622cbfb425f437023ae
+  ....  one clone alone: 16 s (64 MiB/s)
+  PASS  all 8 concurrent clones completed at the tip 838e0aa1bbada038765a3622cbfb425f437023ae
+  PASS  the git container ran 8 upload-pack(s) at the peak for 8 clients: nothing in front of git serialised them
+  ....  8 clones in 51 s wall (161 MiB/s aggregate) against 16 s alone: 3.2× one clone's time for 8× the bytes
+  PASS  the clones overlapped (wall < 8 × solo)
+  PASS  a push in the middle of the storm was acknowledged and is in the bucket
+
+
+══ 5 passed, 0 failed, 0 inconclusive ══
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-191810.log  (raw timelines: /Users/ddalton/github/flint/forge/e2e/scale/results/work-20260905-191810)

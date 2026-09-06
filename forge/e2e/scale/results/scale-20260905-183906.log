@@ -1,0 +1,52 @@
+forge at scale — bucket flint-forge-scale-runby, prefix scale-202609051832, namespace agents, run 20260905-183906; EXPECT=window-closed SWEEP=claim
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-183906.log
+
+══ S0 — provenance and the rig: the syncer in the pod is the tree under test, both repositories serve, the disks are big enough ══
+  ....  syncer image: docker.io/dilipdalton/flint-forge-syncer@sha256:e50310250fd51b011e3ca69fd2ad0661cafa92f8f057ddc4834ff982bd21fcad
+  ....  git container PID 1: /usr/local/bin/flint-forge-gitcgi   (flint-forge-gitcgi = the A3 runner; an entrypoint script = the nginx + fcgiwrap image, the S5–S9 control arm)
+  PASS  the syncer pod runs the digest this run pushed (sha256:e50310250fd51b011e3ca69fd2ad0661cafa92f8f057ddc4834ff982bd21fcad)
+  PASS  the syncer carries the ranged restore (marker string ×1, 827c5f90) — this is the tree under test, judged by content
+  PASS  the syncer carries the progress-gated renewer (marker ×1, 2a213b01): the window-closed oracle has its subject
+  PASS  the syncer carries the claim-time orphan sweep (marker ×1, 2a213b01)
+  PASS  big is serving (forge-big-5677b87cc6-lnxkv)
+  PASS  small is serving (forge-small-68cbff7768-tm2mb)
+  PASS  big has no snapshot yet (fresh prefix)
+  ....  takeover window = QUIET_POLLS 6 × heartbeat 10s = 60s
+  ....  free: agent /work 793666 MiB, repository cache 827369 MiB; this run may need ~100352 MiB on each
+  PASS  the agent's emptyDir has room
+  PASS  the repository cache has room
+
+══ S5 — a client stalled 70 s mid-pack is not cut (X3: nginx's client_body_timeout defaulted to 60 s beside backend bounds of an hour) ══
+  PASS  PRECONDITION: the client was stopped mid-transfer (no answer yet; the server is 'serving', not pushing)
+  ....  client SIGSTOPped for 70 s
+  PASS  acknowledged after a 70 s stall mid-pack, and the bucket holds it
+
+══ S6 — 5 concurrent pushes are served concurrently, and a request beside them is answered at once (X4: FCGIWRAP_CHILDREN=4 queued the fifth in silence) ══
+  PASS  the git container runs 5 receive-pack(s) for 5 stopped clients: nothing in front of git queues them
+  PASS  a request beside 5 in-flight pushes was answered in 0 s
+  PASS  all 5 concurrent pushes acknowledged and in the bucket
+
+══ S7 — a rollout during a 12288 MiB push (X6: terminationGracePeriodSeconds 30 against a batch of minutes, SIGTERM seen only between batches): the outcome recorded; told ok ⇒ durable, told failed ⇒ unchanged, the successor serves, a retry converges, no orphan survives its claim ══
+  ....  rollout restarted while forge-small-68cbff7768-tm2mb was pushing
+  ....  the old pod was gone 32 s after the restart: the grace period ran out — SIGKILL mid-batch
+  PASS  told failed, and the bucket is unchanged (error: RPC failed; curl 18 transfer closed with outstanding read data remaining send-pack: unexpected disconnect while reading sideband packet fatal: the remote end hung up unexpectedly )
+  PASS  the retry converged: the bucket names agent/roll-20260905-183906 at the tip
+  PASS  no incomplete upload under the prefix once the successor served
+  ....  X6 on the wire: told 'NAK' after the roll, the old pod gone in 32 s; a roll that waited for the batch would have answered ok every time
+
+══ S9 — keepalives through the front: across a hook wait of at least 60 s the client sees a packet at least every 8 s (run 3 finding 2: through fcgiwrap they arrived in one burst with the report); the door's bound is 300 s ══
+  PASS  PRECONDITION: receive.keepAlive=5 on small
+  PASS  push of 20480 MiB acknowledged in 436 s, and the bucket holds it
+  ....  48 packet(s) reached the client after the pack left the wire: the first 5.8 s after it, the report 232.4 s after it, the longest gap 5.8 s
+  PASS  every gap ≤ 8 s across a 232.4 s wait (48 packets): the keepalives cross the front as they are sent
+
+══ S8 — CONTROL: receive.keepAlive=0 and the door's bound at 30 s — the door cuts the client during a hook wait longer than the bound, so the bound is real and the keepalive is what carries a long push (X5's anti-vacuity; both settings restored after) ══
+  ....  for the control: the door's bound 300 → 30 s, receive.keepAlive 5 → 0 on small
+  ....  restored: receive.keepAlive=5, the door's bound 300 s
+  ....  client answered after 233 s (rc=1); 1 packet(s) read after the upload, the last 0.5 s after it; the bucket named the tip 436 s after the push began
+  PASS  CONTROL: without keepalives the door cut the client 0.5 s after the pack left the wire (bound 30 s): command terminated with exit code 1
+  ....  …and the batch landed anyway (203 s after the cut): told failed but durable (run 3 finding 3); a retry is a no-op
+
+
+══ 21 passed, 0 failed, 0 inconclusive ══
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-183906.log  (raw timelines: /Users/ddalton/github/flint/forge/e2e/scale/results/work-20260905-183906)

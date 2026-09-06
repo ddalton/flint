@@ -1,0 +1,75 @@
+forge at scale — bucket flint-forge-scale-runby, prefix scale-202609051922, namespace agents, run 20260905-192355; EXPECT=window-closed SWEEP=claim
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-192355.log
+
+══ S0 — provenance and the rig: the syncer in the pod is the tree under test, both repositories serve, the disks are big enough ══
+  ....  syncer image: docker.io/dilipdalton/flint-forge-syncer@sha256:e50310250fd51b011e3ca69fd2ad0661cafa92f8f057ddc4834ff982bd21fcad
+  ....  git container PID 1: nginx: master process nginx -c /etc/nginx/nginx.conf -g daemon off;   (flint-forge-gitcgi = the A3 runner; an entrypoint script = the nginx + fcgiwrap image, the S5–S9 control arm)
+  PASS  the syncer pod runs the digest this run pushed (sha256:e50310250fd51b011e3ca69fd2ad0661cafa92f8f057ddc4834ff982bd21fcad)
+  PASS  the syncer carries the ranged restore (marker string ×1, 827c5f90) — this is the tree under test, judged by content
+  PASS  the syncer carries the progress-gated renewer (marker ×1, 2a213b01): the window-closed oracle has its subject
+  PASS  the syncer carries the claim-time orphan sweep (marker ×1, 2a213b01)
+  PASS  big is serving (forge-big-f6f6875ff-rxcv4)
+  PASS  small is serving (forge-small-8f4d55859-trkjf)
+  PASS  big has no snapshot yet (fresh prefix)
+  ....  takeover window = QUIET_POLLS 6 × heartbeat 10s = 60s
+  ....  free: agent /work 770515 MiB, repository cache 770515 MiB; this run may need ~100352 MiB on each
+  PASS  the agent's emptyDir has room
+  PASS  the repository cache has room
+
+══ S1 — calibrate: a 1024 MiB repository through the whole path, and its restore rate sizes the large one ══
+  ....  building probe: 1024 MiB of /dev/urandom in the agent's emptyDir
+  PASS  built probe (1024 MiB) in 10 s, tip 419f85d36885
+  PASS  push of probe acknowledged in 26 s
+  ....  lease token silent for 10 s during the push (window 60s); the watcher's longest blind spot 0 s
+  ....  pack pack-fb4de007f9022060c5d194abd688a0f9745da450.pack: 1024.1 MiB, ETag "f62ba8da6b04afe8b58ec2eb8b93cf85-17"
+  PASS  the pack is above the 64.0 MiB whole-put ceiling
+  PASS  ETag carries part count 17 = ceil(size / 64 MiB): composed by the part grid, not whole-PUT
+  PASS  S3 holds a FULL_OBJECT CRC64NVME (RVLW+u8Nq34=): the checksum forge streamed over the file was accepted at CompleteMultipartUpload
+  PASS  S3 reports 17 parts
+  PASS  the snapshot names agent/probe at the tip
+  ....  cold restore of big
+  ....  deleting forge-big-f6f6875ff-rxcv4
+forge/e2e/scale/run-scale.sh: line 173: 86930 Terminated: 15          sleep 2
+forge/e2e/scale/run-scale.sh: line 186: 86934 Terminated: 15          sleep 3
+  ....  big restored by forge-big-f6f6875ff-tptpc: 5 s from the delete (4 s from the syncer's start); anon RSS max 20.5 MiB; lease token silent 8 s (watcher blind at most 0 s)
+  PASS  restored refs are exactly the snapshot's
+  PASS  fsck --strict clean on the restored 1024.1 MiB repository (9 s): the composed bytes came back intact
+  PASS  the door advertises agent/probe at the tip after the restore
+  PASS  the restore's anon RSS peaked at 20.5 MiB for a 1024.1 MiB pack: memory does not scale with the repository
+  ....  …and under 256 MiB, consistent with the 38-40 MiB flat loopback figure (working set 44.8 MiB includes page cache)
+  ....  restore rate 256.0 MiB/s from the syncer's start (sequential 8 MiB ranged GETs, one in flight)
+  ....  restore rate 256.0 MiB/s ⇒ a 150s restore needs ~38400 MiB; BIG_MB=38400 (clamped to [2048, 40960])
+  PASS  the large repository will be 38400 MiB, larger than the probe
+
+══ S5 — a client stalled 70 s mid-pack is not cut (X3: nginx's client_body_timeout defaulted to 60 s beside backend bounds of an hour) ══
+  PASS  PRECONDITION: the client was stopped mid-transfer (no answer yet; the server is 'serving', not pushing)
+  ....  client SIGSTOPped for 70 s
+  FAIL  the stalled push FAILED: error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502 send-pack: unexpected disconnect while reading sideband packet fatal: the remote end hung up unexpectedly — a bound between the client and git cut a 70 s pause (X3's class)
+
+══ S6 — 5 concurrent pushes are served concurrently, and a request beside them is answered at once (X4: FCGIWRAP_CHILDREN=4 queued the fifth in silence) ══
+  FAIL  the git container runs 4 receive-pack(s) for 5 stopped clients: a ceiling in front of git queued the rest (X4's class)
+  FAIL  a request beside 5 in-flight pushes took 60 s ('rc=0'): it queued behind them
+  ....  push 1: 'NAK', bucket <absent> (want 694130403f787f16bfed8efdfe13da2f2fee1ae7): error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502 send-pack: unexpected disconnect while reading sideband packet fatal: the remote end hung up unexpectedly 
+  ....  push 2: 'NAK', bucket <absent> (want d51a190e6d8dc8e725e003338ec5fcf56c1b1275): error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502 send-pack: unexpected disconnect while reading sideband packet fatal: the remote end hung up unexpectedly 
+  ....  push 3: 'NAK', bucket <absent> (want f5e932d544ca103a60913fcab4d352e5673f9b35): error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502 send-pack: unexpected disconnect while reading sideband packet fatal: the remote end hung up unexpectedly 
+  ....  push 4: 'NAK', bucket <absent> (want bd415830c1b65ed7a344bbe6b1188aa13bd818f0): error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502 send-pack: unexpected disconnect while reading sideband packet fatal: the remote end hung up unexpectedly 
+  FAIL  1 of 5 concurrent pushes acknowledged and durable
+
+══ S9 — keepalives through the front: across a hook wait of at least 60 s the client sees a packet at least every 8 s (run 3 finding 2: through fcgiwrap they arrived in one burst with the report); the door's bound is 300 s ══
+  PASS  PRECONDITION: receive.keepAlive=5 on small
+  PASS  push of 20480 MiB acknowledged in 451 s, and the bucket holds it
+  ....  49 packet(s) reached the client after the pack left the wire: the first 237.9 s after it, the report 237.9 s after it, the longest gap 237.9 s
+  FAIL  a gap of 237.9 s inside a 237.9 s wait (49 packets, the first after 237.9 s): the front held the keepalives (run 3 finding 2's class)
+
+══ S10 — 8 concurrent clones of a 1024 MiB branch are served concurrently, every one complete and at the tip, and a push beside them is acknowledged (the fleet's common case: many agents cloning one repository) ══
+  PASS  PRECONDITION: agent/clone-20260905-192355 holds a 1024 MiB history at 87618d9e935c8edb9f0fc925be828521ee29b5df
+  ....  one clone alone: 13 s (79 MiB/s)
+  PASS  all 8 concurrent clones completed at the tip 87618d9e935c8edb9f0fc925be828521ee29b5df
+  FAIL  the git container peaked at 4 upload-pack(s) for 8 clients: a ceiling in front of git queued the rest (X4's class, read side)
+  ....  8 clones in 55 s wall (149 MiB/s aggregate) against 13 s alone: 4.2× one clone's time for 8× the bytes
+  PASS  the clones overlapped (wall < 8 × solo)
+  PASS  a push in the middle of the storm was acknowledged and is in the bucket
+
+
+══ 28 passed, 6 failed, 0 inconclusive ══
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-192355.log  (raw timelines: /Users/ddalton/github/flint/forge/e2e/scale/results/work-20260905-192355)

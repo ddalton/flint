@@ -33,13 +33,14 @@ each one a row of the simplification note's party table:
 | S7 | `terminationGracePeriodSeconds: 30` (X6) | `kubectl rollout restart` once the syncer reports `pushing`; the old pod's exit is timed against the grace period | told ok ⇒ durable, told failed ⇒ unchanged (or durable with a no-op retry), the successor serves, the retry converges, no orphan survives — and the outcome is RECORDED for the X6 decision |
 | S9 | `receive.keepAlive` (X5) through the front | a `GAP_MB` push under `GIT_TRACE_PACKET` + `GIT_TRACE_CURL`; `gap_stats` takes the upload's end from curl and every `sideband<` packet from git | the wait ≥ `GAP_MIN_WAIT`, every gap ≤ `GAP_MAX` (8 s against 5 s keepalives) |
 | S8 | the control for S9 | `receive.keepAlive=0` and the door's `--upstream-timeout-secs` patched to `CTRL_DOOR_SECS` (30); the same push; both restored after | the door cuts the client ≈ 30 s after the upload ends; the batch lands anyway (told failed but durable) |
+| S10 | the fleet's read side (X4's class from the other direction) | `CLONE_N` (8) concurrent single-branch clones of a `CLONE_MB` (1024) branch, one clone alone first for the ratio, the git container's `upload-pack` count sampled twice a second, a push launched into the storm | every clone at the tip, the peak upload-pack count ≥ `CLONE_N`, wall < `CLONE_N` × solo, the push acknowledged |
 
 Run S8 last: it restarts the door. The **control arm** deploys the same
 tree with `server.gitImage=dilipdalton/flint-forge-git:1.46.0-forge.6`
 (the last nginx + fcgiwrap image) and must FAIL S5 (408 at 60 s), S6
-(four receive-packs, the request queued) and S9 (one burst with the
-report); a control that passes means the legs cannot see what they
-judge. S0 prints the git container's PID 1 so a run names its arm.
+(four receive-packs, the request queued), S9 (one burst with the
+report) and S10 (four upload-packs at the peak); a control that passes
+means the legs cannot see what they judge. S0 prints the git container's PID 1 so a run names its arm.
 
 ## Running it
 
@@ -307,3 +308,63 @@ wire — push and restore renewal, keepalives through the front, the
 takeover window closed against a real challenger, orphan sweep, and
 told-ok ⇒ durable under contention (40/40 pushes across both arms).
 
+
+## Results — 2026-09-05, cluster runby (3 × i4i.xlarge all-spot, S3 us-west-1), the runner's acceptance
+
+Images `drill-be76cc9c` = HEAD `be76cc9c` (the TLA+ model with the
+rotation fixes, the `flint-forge-gitcgi` runner in the git container,
+legs S5–S9), syncer `sha256:e5031025…b33d`. `EXPECT=window-closed
+SWEEP=claim`, the same rig as the runbx campaign plus the party-table
+legs, on a fresh cluster.
+
+**Run 7a** (`scale-20260905-183333`, `LEGS="S0 S5 S6 S7 S9 S8"`, killed
+at S9): **rig defect five.** `inpod` merges kubectl's stderr into a
+command's answer, so `push_result` on a result file that did not exist
+yet read "command terminated with exit code 1" and every leg took that
+for the push's answer — S5 judged a push that had not finished, S6
+resumed five clients it had just stopped, S7 never saw `pushing`. And
+S6's sixth request ran without `DOOR`/`NS` in its environment, so
+`url()` produced `/git//small.git` and git failed in 0 s with rc 128,
+which the leg read as "queued". Every push those legs started landed
+regardless (the stalled one, all five concurrent, the roll's). Fixed:
+`; true` after the cat, the environment prefixed, receive-packs counted
+by `--stateless-rpc` (one per request), `ROLL_MB` 12288 (4 GiB uploads
+inside the 30 s grace at i4i rates).
+
+**Run 7b** (`scale-20260905-183906`, `LEGS="S0 S5 S6 S7 S9 S8"`,
+**21 passed / 0 failed / 0 inconclusive**):
+
+| leg | result |
+|---|---|
+| S0 | the git container's PID 1 is `/usr/local/bin/flint-forge-gitcgi` (one process); the syncer pod runs the pushed digest, carries all three markers |
+| S5 | 1 GiB push, the client SIGSTOPped 3 s into the body for 70 s (precondition held: no answer yet, server `serving`); **acknowledged after the stall, and the bucket holds it** — X3's 60 s default is gone with nginx |
+| S6 | five 256 MiB pushes stopped mid-body: **the git container ran 5 receive-packs for the 5 stopped clients; an advertisement request beside them was answered in 0 s; all 5 acknowledged and durable** — X4's four-worker ceiling is gone with fcgiwrap |
+| S7 | 12 GiB push; `rollout restart` once the syncer reported `pushing`; **the old pod was gone 32 s after — the grace period ran out, SIGKILL mid-batch**; the client was told failed (`curl 18 transfer closed`, "the remote end hung up unexpectedly"), the bucket unchanged; the successor served, the retry converged, 0 incomplete uploads after its claim. **X6 on the wire:** a roll during a long push costs that push; a roll that waited for the batch would have answered ok |
+| S9 | 20 GiB push acknowledged in 436 s; after the pack left the wire the client read **48 packets, the first 5.8 s after it, the report 232.4 s after it, longest gap 5.8 s** — the keepalives cross the runner as receive-pack sends them (through fcgiwrap they had arrived in one burst with the report) |
+| S8 | control: the door's bound patched to 30 s, `receive.keepAlive=0`; the same 20 GiB push; **the connection was closed 30.5 s after the upload ended** (curl: "transfer closed with outstanding read data remaining"), the batch landed 203 s later (told failed but durable, run 3 finding 3); both settings restored. The run's own log line says "cut 0.5 s after the upload": `gap_stats` had measured the last sideband packet — the one NUL byte receive-pack writes when the pack is in — not the connection's end; it now reports the end from curl's trace, and the saved traces recomputed give 30.5 s. The PASS stood on a loose criterion (≤ bound + 10 s); the criterion is now a window around the bound |
+| S10 | (`scale-20260905-191810`, 5 / 0 / 0, added at the user's request: a fleet cloning one repository) 8 concurrent single-branch clones of a 1 GiB branch; one clone alone 16 s (64 MiB/s — the agent's own index-pack is the client-side limit); **all 8 at the tip; the git container ran 8 upload-packs at the peak; 51 s wall for 8× the bytes (3.2× one clone, 161 MiB/s aggregate); a 256 MiB push launched into the storm acknowledged and in the bucket** |
+
+**Control arm** (`scale-20260905-192355`): the same syncer and the same rig with
+`GIT_TAG=1.46.0-forge.6`, the last nginx + fcgiwrap git image —
+verified by content before the run: no `NO_BUFFERING` in its
+nginx.conf, no `client_body_timeout`, `FCGIWRAP_CHILDREN` 4, the old
+hook binary, git 2.45.4. `LEGS="S0 S1 S5 S6 S9 S10"`, **28 passed /
+6 failed / 0 inconclusive, and every failure is the one its leg exists
+for:**
+
+| leg | control result |
+|---|---|
+| S0 | the git container's PID 1 is `nginx: master process` |
+| S1 | PASS: 1 GiB push in 26 s, restore in 9 s, fsck clean — plain pushes work through the old front, so the failures below are the front's doing, not a dead path |
+| S5 | **FAIL as required:** the 70 s stall ended in `HTTP 502` — nginx's 60 s `client_body_timeout` cut the client and the door relayed it |
+| S6 | **FAIL as required:** 4 receive-packs for 5 stopped clients; the advertisement request beside them took 60 s (answered only once nginx had timed the stopped pushes out); 1 of 5 pushes durable |
+| S9 | **FAIL as required:** the 20 GiB push was acknowledged (451 s), but the 49 packets reached the client in ONE burst 237.9 s after the upload, with the report — fcgiwrap held every keepalive; the door's 300 s bound was spared only because this hook wait was 238 s |
+| S10 | **FAIL as required:** 4 upload-packs at the peak for 8 clones; all 8 completed, queued in pairs (55 s wall, 4.2× one clone) |
+
+**Verdict on A3:** the runner removed the class it claimed to remove
+and carried what it claimed to carry — a stalled client, five pushes
+at once, eight clones at once, and receive-pack's keepalives across a
+four-minute hook wait — and the control saw every member of that
+class with the same legs. X6 is answered on the wire (a roll during a
+push costs that push, cleanly); whether a roll should wait for the
+batch is the open decision. Cloud cost of the campaign: about $2.

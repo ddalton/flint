@@ -56,6 +56,11 @@
 #   S9  the keepalive-gap probe (run 3 finding 2): across a hook wait of
 #       at least GAP_MIN_WAIT s the client sees a packet at least every
 #       GAP_MAX s, measured from git's own packet trace
+#   S10 CLONE_N concurrent clones of one CLONE_MB branch (the fleet's
+#       common case): every clone complete and at the tip, the git
+#       container's upload-packs peak at CLONE_N (nothing in front of
+#       git serialises them), the clones overlap, and a push in the
+#       middle of the storm is acknowledged
 #
 # INCONCLUSIVE is not PASS: a leg that could not measure what it exists
 # for is counted separately and fails the run.
@@ -93,10 +98,11 @@ BIG_MB=${BIG_MB:-}          # set by S1; give it explicitly to skip S1
 # S5–S9 (the front's party table)
 STALL_MB=${STALL_MB:-1024}; STALL_SECS=${STALL_SECS:-70}   # 70 > nginx's 60 s client_body_timeout default (X3)
 CONC_MB=${CONC_MB:-256}; CONC_N=${CONC_N:-5}               # 5 > FCGIWRAP_CHILDREN=4 (X4)
-ROLL_MB=${ROLL_MB:-4096}                                     # a batch longer than the 30 s grace (X6)
+ROLL_MB=${ROLL_MB:-12288}                                    # a batch longer than the 30 s grace (X6): 4 GiB uploads inside it at i4i rates
 GAP_MB=${GAP_MB:-20480}; GAP_MAX=${GAP_MAX:-8}; GAP_MIN_WAIT=${GAP_MIN_WAIT:-60}   # keepalives every 5 s; a wait long enough to hold many
 CTRL_DOOR_SECS=${CTRL_DOOR_SECS:-30}                         # S8 lowers the door's bound to this for its control
 DOOR_NS=${DOOR_NS:-forge-system}; DOOR_DEPLOY=${DOOR_DEPLOY:-flint-forge-door}
+CLONE_MB=${CLONE_MB:-1024}; CLONE_N=${CLONE_N:-8}               # S10: a fleet cloning one repository
 # What the tree under test is EXPECTED to do. The oracles INVERT with
 # the fixes — a drill that encodes one behaviour as PASS confirms
 # nothing about the other — so the expectation is named, never guessed:
@@ -271,6 +277,27 @@ EOS
 # that the server answered.
 . /work/lib.sh
 G ls-remote "$(url "$1")" >/dev/null 2>&1; echo "rc=$?"
+EOS
+  put_script clones.sh <<'EOS'
+#!/bin/sh
+# clones.sh <repo> <ref> <n> <tag>: n concurrent single-branch clones of
+# <ref> from <repo> through the door, each into its own directory; one
+# line per clone in /work/clone-<tag>.log: "<i> <start> <end> <rc> <head>".
+. /work/lib.sh
+repo=$1; ref=$2; n=$3; tag=$4; log=/work/clone-$tag.log; rm -f "$log"
+i=1
+while [ $i -le $n ]; do
+  (
+    d=/work/clone-$tag-$i; rm -rf "$d"; s=$(date +%s)
+    G clone -q --single-branch --branch "$ref" "$(url "$repo")" "$d" >/dev/null 2>&1; rc=$?
+    h=$(git -C "$d" rev-parse HEAD 2>/dev/null)
+    echo "$i $s $(date +%s) $rc ${h:-none}" >> "$log"
+    rm -rf "$d"
+  ) &
+  i=$((i+1))
+done
+wait
+echo "done $n"
 EOS
   put_script pushtrace.sh <<'EOS'
 #!/bin/sh
@@ -819,13 +846,16 @@ leg_S4() {
 stop_clients()      { inpod "pkill -STOP -f 'git-remote-htt[p]'" >/dev/null 2>&1; }
 cont_clients()      { inpod "pkill -CONT -f 'git-remote-htt[p]'" >/dev/null 2>&1; }
 clients_in_flight() { inpod "pgrep -f 'git-remote-htt[p]' | wc -l" | tr -d '[:space:]'; }
-receive_packs()     { K -n "$NS" exec "$(repo_pod "$1")" -c git-http -- sh -c "pgrep -f 'receive-pac[k]' | wc -l" 2>/dev/null | tr -d '[:space:]'; }
+receive_packs()     { K -n "$NS" exec "$(repo_pod "$1")" -c git-http -- sh -c "pgrep -f 'receive-pack --stateless-rp[c]' | wc -l" 2>/dev/null | tr -d '[:space:]'; }   # one per request
 push_bg() { # name repo ref resfile — the push runs in the agent pod; ACK|NAK lands in /work/<resfile>, its output in /work/out-<resfile>
   inpod "rm -f /work/$4 /work/out-$4" >/dev/null 2>&1
   ( K -n "$NS" exec "$AGENT" -c agent -- sh -c "DOOR=$DOOR NS=$NS /work/push.sh $1 $2 $3 >/work/out-$4 2>&1 && echo ACK > /work/$4 || echo NAK > /work/$4" >/dev/null 2>&1 ) &
 }
-push_result() { inpod "cat /work/$1 2>/dev/null" | tr -d '[:space:]'; }
-push_output() { inpod "tail -3 /work/out-$1 2>/dev/null" | tr '\n' ' '; }
+# `; true` after the cat: inpod merges kubectl's stderr into the answer,
+# and a missing result file would otherwise read as "command terminated
+# with exit code 1" — which the first run took for a push's answer.
+push_result() { inpod "cat /work/$1 2>/dev/null; true" | tr -d '[:space:]'; }
+push_output() { inpod "tail -3 /work/out-$1 2>/dev/null; true" | tr '\n' ' '; }
 wait_result() { # resfile secs — prints ACK|NAK, or nothing at the deadline
   local t0 r; t0=$(now)
   while [ $(( $(now) - t0 )) -lt "$2" ]; do r=$(push_result "$1"); [ -n "$r" ] && { echo "$r"; return 0; }; sleep 2; done
@@ -845,10 +875,15 @@ set_door_bound() { # secs — patches the door's argument in place and waits for
     -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args/$i\",\"value\":\"--upstream-timeout-secs=$1\"}]" >/dev/null 2>&1 || return 1
   K -n "$DOOR_NS" rollout status "deploy/$DOOR_DEPLOY" --timeout=180s >/dev/null 2>&1
 }
-# gap_stats <packet-trace> <curl-trace>: "n first wait maxgap" — the
+# gap_stats <packet-trace> <curl-trace>: "n first wait maxgap end" — the
 # packets the client read after the pack left the wire: their count, the
-# seconds to the first, the seconds to the last (the report), and the
-# longest gap between consecutive ones, the upload's end included.
+# seconds to the first, the seconds to the last (the report), the
+# longest gap between consecutive ones (the upload's end included), and
+# END: the seconds from the upload's end to curl's last line, which is
+# the connection's close — a cut shows up HERE, not among the packets.
+# (The first S8 run reported "cut 0.5 s after the upload" from the one
+# NUL sideband packet receive-pack sends when the pack is in; curl's
+# "transfer closed" line 30.4 s later was the door's cut.)
 gap_stats() {
   python3 - "$1" "$2" <<'PY'
 import re, sys
@@ -869,7 +904,10 @@ if not up or not pk:
 t_up = mono(up)[-1]
 pts = mono([t_up] + pk)
 gaps = [b - a for a, b in zip(pts, pts[1:])]
-print(f"{len(pk)} {pts[1]-t_up:.1f} {pts[-1]-t_up:.1f} {max(gaps):.1f}")
+ends = [ts(l) for l in open(sys.argv[2], errors='replace')]
+ends = mono([t for t in ends if t is not None])
+end = (ends[-1] - t_up) if ends else 0.0
+print(f"{len(pk)} {pts[1]-t_up:.1f} {pts[-1]-t_up:.1f} {max(gaps):.1f} {end:.1f}")
 PY
 }
 
@@ -909,7 +947,7 @@ leg_S6() {
   rp=$(receive_packs "$SMALL")
   [ "${rp:-0}" -ge "$CONC_N" ] && ok "the git container runs $rp receive-pack(s) for $CONC_N stopped clients: nothing in front of git queues them" \
     || bad "the git container runs ${rp:-0} receive-pack(s) for $CONC_N stopped clients: a ceiling in front of git queued the rest (X4's class)"
-  t0=$(now); rc=$(inpod "timeout 60 /work/lsall.sh $SMALL" | tr -d '[:space:]'); t1=$(now)
+  t0=$(now); rc=$(inpod "DOOR=$DOOR NS=$NS timeout 60 /work/lsall.sh $SMALL" | tr -d '[:space:]'); t1=$(now)
   [ $(( t1 - t0 )) -le 5 ] && [ "$rc" = "rc=0" ] && ok "a request beside $CONC_N in-flight pushes was answered in $(( t1 - t0 )) s" \
     || bad "a request beside $CONC_N in-flight pushes took $(( t1 - t0 )) s ('${rc:-no answer}'): it queued behind them"
   cont_clients
@@ -958,7 +996,7 @@ leg_S7() {
 
 leg_S8() {
   leg S8 "CONTROL: receive.keepAlive=0 and the door's bound at ${CTRL_DOOR_SECS} s — the door cuts the client during a hook wait longer than the bound, so the bound is real and the keepalive is what carries a long push (X5's anti-vacuity; both settings restored after)"
-  local name=gapctl-$RUN ref=agent/gapctl-$RUN tip before b0 t0 t1 rc out stats n first wait maxgap after t_land
+  local name=gapctl-$RUN ref=agent/gapctl-$RUN tip before b0 t0 t1 rc out stats n first wait maxgap end after t_land
   wait_serving "$SMALL" 900 || { inconc "$SMALL is not serving"; return; }
   b0=$(door_bound); [ -n "$b0" ] || { inconc "no --upstream-timeout-secs among deploy/$DOOR_DEPLOY's args in $DOOR_NS (DOOR_NS/DOOR_DEPLOY)"; return; }
   set_door_bound "$CTRL_DOOR_SECS" || { inconc "could not set the door's bound to ${CTRL_DOOR_SECS} s"; return; }
@@ -968,21 +1006,21 @@ leg_S8() {
   tip=$(inpod "/work/build.sh $name $GAP_MB" | tail -1); before=$(snap_ref "$SMALL" "$ref")
   t0=$(now); out=$(inpod "DOOR=$DOOR NS=$NS /work/pushtrace.sh $name $SMALL $ref pkt-$name curl-$name"); rc=$?; t1=$(now)
   inpod "cat /work/pkt-$name" > "$WORK/pkt-$name" 2>/dev/null; inpod "cat /work/curl-$name" > "$WORK/curl-$name" 2>/dev/null
-  set -- $(gap_stats "$WORK/pkt-$name" "$WORK/curl-$name"); n=${1:-0}; first=${2:-?}; wait=${3:-0}; maxgap=${4:-0}
+  set -- $(gap_stats "$WORK/pkt-$name" "$WORK/curl-$name"); n=${1:-0}; first=${2:-?}; wait=${3:-0}; maxgap=${4:-0}; end=${5:-0}
   # the batch runs on without its client: wait for the bucket to settle before restoring anything
   t_land=""; while [ $(( $(now) - t1 )) -lt 1800 ]; do [ "$(snap_ref "$SMALL" "$ref")" = "$tip" ] && { t_land=$(( $(now) - t0 )); break; }; sleep 5; done
   after=$(snap_ref "$SMALL" "$ref")
   gitq "$SMALL" config receive.keepAlive 5 >/dev/null 2>&1; set_door_bound "$b0"
   note "restored: receive.keepAlive=5, the door's bound ${b0} s"
-  note "client answered after $(( t1 - t0 )) s (rc=$rc); $n packet(s) read after the upload, the last ${wait} s after it; the bucket named the tip ${t_land:-never} s after the push began"
+  note "client answered after $(( t1 - t0 )) s (rc=$rc); $n packet(s) read after the upload, the last ${wait} s after it; the connection ended ${end} s after the upload; the bucket named the tip ${t_land:-never} s after the push began"
   [ -n "$t_land" ] && [ "$(( t_land - (t1 - t0) ))" -ge 0 ] || { inconc "the bucket never named the tip: the server side did not finish, nothing here is a bound's doing"; return; }
-  if [ "$rc" != 0 ] && [ "${wait%.*}" -le $(( CTRL_DOOR_SECS + 10 )) ]; then
-    ok "CONTROL: without keepalives the door cut the client ${wait} s after the pack left the wire (bound ${CTRL_DOOR_SECS} s): $(printf '%s' "$out" | tail -1)"
+  if [ "$rc" != 0 ] && [ "${end%.*}" -ge $(( CTRL_DOOR_SECS - 5 )) ] && [ "${end%.*}" -le $(( CTRL_DOOR_SECS + 15 )) ]; then
+    ok "CONTROL: without keepalives the door cut the client ${end} s after the pack left the wire (bound ${CTRL_DOOR_SECS} s): $(grep -o 'transfer closed[^"]*\|Recv failure[^"]*\|Empty reply[^"]*' "$WORK/curl-$name" | tail -1)"
     [ "$after" = "$tip" ] && note "…and the batch landed anyway ($(( t_land - (t1 - t0) )) s after the cut): told failed but durable (run 3 finding 3); a retry is a no-op"
   elif [ "$rc" = 0 ]; then
     bad "CONTROL FAILED: acknowledged through a ${wait} s wait with no keepalives and a ${CTRL_DOOR_SECS} s bound — the bound is not what this rig thinks it is, and S9 cannot tell a held keepalive from a moving one"
   else
-    bad "the push failed but not at the bound (${wait} s after the upload against ${CTRL_DOOR_SECS} s): $(printf '%s' "$out" | tail -1)"
+    bad "the push failed but not at the bound (the connection ended ${end} s after the upload against ${CTRL_DOOR_SECS} s): $(printf '%s' "$out" | tail -1)"
   fi
 }
 
@@ -1004,6 +1042,50 @@ leg_S9() {
   elif [ "${wait%.*}" -lt "$GAP_MIN_WAIT" ]; then inconc "the wait after the upload (${wait} s) is under ${GAP_MIN_WAIT} s: too few keepalives to judge — raise GAP_MB"
   elif python3 -c "import sys; sys.exit(0 if float('$maxgap') <= $GAP_MAX else 1)"; then ok "every gap ≤ ${GAP_MAX} s across a ${wait} s wait ($n packets): the keepalives cross the front as they are sent"
   else bad "a gap of ${maxgap} s inside a ${wait} s wait ($n packets, the first after ${first} s): the front held the keepalives (run 3 finding 2's class)"; fi
+}
+
+# clones.sh runs inside the agent pod (installed by install_agent_scripts):
+#   clones.sh <repo> <ref> <n> <tag>: n concurrent single-branch clones of
+#   <ref>, each into /work/clone-<tag>-<i>; per clone "<i> <start> <end>
+#   <rc> <head>" to /work/clone-<tag>.log; prints the wall time.
+upload_packs() { K -n "$NS" exec "$(repo_pod "$1")" -c git-http -- sh -c "pgrep -f 'upload-pack --stateless-rp[c]' | wc -l" 2>/dev/null | tr -d '[:space:]'; }
+up_watch() { # repo outfile — the git container's upload-pack count, twice a second, until <outfile>.stop
+  ( while [ ! -e "$2.stop" ]; do echo "$(now) $(upload_packs "$1")"; sleep 0.5; done ) > "$2" 2>/dev/null &
+}
+
+leg_S10() {
+  leg S10 "$CLONE_N concurrent clones of a ${CLONE_MB} MiB branch are served concurrently, every one complete and at the tip, and a push beside them is acknowledged (the fleet's common case: many agents cloning one repository)"
+  local name=clone-$RUN ref=agent/clone-$RUN tip t0 t1 solo n_ok n_bad peak wall agg pw pres ptip
+  wait_serving "$SMALL" 900 || { inconc "$SMALL is not serving"; return; }
+  tip=$(inpod "/work/build.sh $name $CLONE_MB" | tail -1)
+  inpod "DOOR=$DOOR NS=$NS /work/push.sh $name $SMALL $ref" >/dev/null 2>&1
+  [ "$(snap_ref "$SMALL" "$ref")" = "$tip" ] && ok "PRECONDITION: $ref holds a ${CLONE_MB} MiB history at $tip" || { inconc "the branch to clone did not land"; return; }
+  # one clone alone, for the ratio
+  t0=$(now); inpod "DOOR=$DOOR NS=$NS /work/clones.sh $SMALL $ref 1 solo-$RUN" >/dev/null 2>&1; t1=$(now); solo=$(( t1 - t0 ))
+  note "one clone alone: ${solo} s ($(python3 -c "print(f'{$CLONE_MB/max($solo,1):.0f}')") MiB/s)"
+  # the storm, with a push in the middle of it and the server's upload-packs watched
+  up_watch "$SMALL" "$WORK/up-$RUN"; pw=$!
+  inpod "/work/build.sh push-$name $CONC_MB" >/dev/null 2>&1
+  t0=$(now)
+  ( K -n "$NS" exec "$AGENT" -c agent -- sh -c "DOOR=$DOOR NS=$NS /work/clones.sh $SMALL $ref $CLONE_N storm-$RUN" > "$WORK/clones-$RUN.out" 2>&1 ) & cw=$!
+  sleep 2; push_bg "push-$name" "$SMALL" "agent/push-$name" res-clonepush
+  wait "$cw" 2>/dev/null; t1=$(now); wall=$(( t1 - t0 ))
+  pres=$(wait_result res-clonepush 900)
+  stop_watch "$WORK/up-$RUN" "$pw"
+  inpod "cat /work/clone-storm-$RUN.log; true" > "$WORK/clone-storm-$RUN.log" 2>/dev/null
+  n_ok=$(awk -v t="$tip" '$4==0 && $5==t' "$WORK/clone-storm-$RUN.log" | wc -l | tr -d ' ')
+  n_bad=$(( CLONE_N - n_ok ))
+  peak=$(max_col "$WORK/up-$RUN" 2)
+  [ "$n_bad" = 0 ] && ok "all $CLONE_N concurrent clones completed at the tip $tip" \
+    || bad "$n_bad of $CLONE_N clones failed or stopped short: $(awk '$4!=0 {printf "#%s rc=%s ", $1, $4}' "$WORK/clone-storm-$RUN.log")"
+  [ "${peak:-0}" -ge "$CLONE_N" ] && ok "the git container ran $peak upload-pack(s) at the peak for $CLONE_N clients: nothing in front of git serialised them" \
+    || bad "the git container peaked at ${peak:-0} upload-pack(s) for $CLONE_N clients: a ceiling in front of git queued the rest (X4's class, read side)"
+  agg=$(python3 -c "print(f'{$CLONE_N*$CLONE_MB/max($wall,1):.0f}')")
+  note "$CLONE_N clones in ${wall} s wall (${agg} MiB/s aggregate) against ${solo} s alone: $(python3 -c "print(f'{$wall/max($solo,1):.1f}')")× one clone's time for ${CLONE_N}× the bytes"
+  [ "$wall" -lt $(( solo * CLONE_N )) ] && ok "the clones overlapped (wall < $CLONE_N × solo)" || bad "the clones ran one after another (wall ${wall} s ≥ $CLONE_N × ${solo} s)"
+  ptip=$(snap_ref "$SMALL" "agent/push-$name")
+  [ "$pres" = ACK ] && [ "$ptip" != "<absent>" ] && ok "a push in the middle of the storm was acknowledged and is in the bucket" \
+    || bad "the push beside the storm: '$pres', bucket $ptip — $(push_output res-clonepush)"
 }
 
 # ── run ──────────────────────────────────────────────────────────────
