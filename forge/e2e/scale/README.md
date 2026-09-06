@@ -270,6 +270,15 @@ could not have hidden a silence. The restore (35 s, 301 MiB/s, fsck
 clean, RSS 22 MiB) is inconclusive by the precondition, as 10 GiB must
 be: run 4's 40 GiB restore and its seize arm carry that claim.
 
+**Run 6** (`scale-20260905-171840`, `drill-1288e6ee` = D1 of the
+simplification note, syncer `sha256:8945bd19…16e6af`, `LEGS="S0 S1 S4"`,
+31 passed / 0 failed / 0 inconclusive). The git image's two hooks are
+now the syncer binary under the hook names (one build for the hook and
+the syncer it talks to; one `server.tag` in the chart): a 1 GiB push
+went through them end to end (17 parts, CRC accepted, snapshot at the
+tip, restore 9 s fsck-clean), and S4's four kills held told-failed ⇒
+unchanged and told-ok ⇒ durable, every orphaned upload swept.
+
 Campaign total on `drill-0734a2f9`: every product oracle green on the
 wire — push and restore renewal, keepalives through the front, the
 takeover window closed against a real challenger, orphan sweep, and

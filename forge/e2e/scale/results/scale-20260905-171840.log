@@ -1,0 +1,68 @@
+forge at scale — bucket flint-forge-scale-runbx, prefix scale-202609051717, namespace agents, run 20260905-171840; EXPECT=window-closed SWEEP=claim
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-171840.log
+
+══ S0 — provenance and the rig: the syncer in the pod is the tree under test, both repositories serve, the disks are big enough ══
+  ....  syncer image: docker.io/dilipdalton/flint-forge-syncer@sha256:8945bd195443bad091851e917202d72741591022461e26451c4d69d72916e6af
+  PASS  the syncer pod runs the digest this run pushed (sha256:8945bd195443bad091851e917202d72741591022461e26451c4d69d72916e6af)
+  PASS  the syncer carries the ranged restore (marker string ×1, 827c5f90) — this is the tree under test, judged by content
+  PASS  the syncer carries the progress-gated renewer (marker ×1, 2a213b01): the window-closed oracle has its subject
+  PASS  the syncer carries the claim-time orphan sweep (marker ×1, 2a213b01)
+  PASS  big is serving (forge-big-7f596988f-qgbb9)
+  PASS  small is serving (forge-small-5556c8bcb5-r6dv6)
+  PASS  big has no snapshot yet (fresh prefix)
+  ....  takeover window = QUIET_POLLS 6 × heartbeat 10s = 60s
+  ....  free: agent /work 815296 MiB, repository cache 815296 MiB; this run may need ~100352 MiB on each
+  PASS  the agent's emptyDir has room
+  PASS  the repository cache has room
+
+══ S1 — calibrate: a 1024 MiB repository through the whole path, and its restore rate sizes the large one ══
+  ....  building probe: 1024 MiB of /dev/urandom in the agent's emptyDir
+  PASS  built probe (1024 MiB) in 11 s, tip f8994994b762
+./forge/e2e/scale/run-scale.sh: line 137: 92915 Terminated: 15          sleep 2
+  PASS  push of probe acknowledged in 26 s
+  ....  lease token silent for 11 s during the push (window 60s); the watcher's longest blind spot 0 s
+  ....  pack pack-d7264e44e371600a17160e0769b43b89803d06e5.pack: 1024.1 MiB, ETag "c7aa52c1c54ce177ea552b57bdfa8435-17"
+  PASS  the pack is above the 64.0 MiB whole-put ceiling
+  PASS  ETag carries part count 17 = ceil(size / 64 MiB): composed by the part grid, not whole-PUT
+  PASS  S3 holds a FULL_OBJECT CRC64NVME (7EZ+yq63Jtc=): the checksum forge streamed over the file was accepted at CompleteMultipartUpload
+  PASS  S3 reports 17 parts
+  PASS  the snapshot names agent/probe at the tip
+  ....  cold restore of big
+  ....  deleting forge-big-7f596988f-qgbb9
+./forge/e2e/scale/run-scale.sh: line 137: 93159 Terminated: 15          sleep 2
+./forge/e2e/scale/run-scale.sh: line 150: 93163 Terminated: 15          sleep 3
+  ....  big restored by forge-big-7f596988f-vlgmt: 5 s from the delete (4 s from the syncer's start); anon RSS max 28.5 MiB; lease token silent 8 s (watcher blind at most 0 s)
+  PASS  restored refs are exactly the snapshot's
+  PASS  fsck --strict clean on the restored 1024.1 MiB repository (9 s): the composed bytes came back intact
+  PASS  the door advertises agent/probe at the tip after the restore
+  PASS  the restore's anon RSS peaked at 28.5 MiB for a 1024.1 MiB pack: memory does not scale with the repository
+  ....  …and under 256 MiB, consistent with the 38-40 MiB flat loopback figure (working set 54.3 MiB includes page cache)
+  ....  restore rate 256.0 MiB/s from the syncer's start (sequential 8 MiB ranged GETs, one in flight)
+  ....  restore rate 256.0 MiB/s ⇒ a 150s restore needs ~38400 MiB; BIG_MB=38400 (clamped to [2048, 40960])
+  PASS  the large repository will be 38400 MiB, larger than the probe
+
+══ S4 — acknowledged means durable at multipart size (2048 MiB pushes to small): kills INSIDE the upload, seen not timed; and the orphans counted ══
+  ....  incomplete multipart uploads under scale-202609051717/small/git/objects/pack/ before the leg: 0
+  ....  iter 1: upload A3ng4XJYuYXa… on pack-2178174e5eb9d1f12a67a25a5b7320ecf2cdb7d0.pack seen 28s after the push began; killing 2.0s later, INSIDE the upload
+  PASS  iter 1: told failed, and the bucket is unchanged ()
+  ....  iter 1: incomplete uploads 0 before the push, 1 at the kill, 0 after the successor served (holding 0.0 MiB of parts now)
+  PASS  iter 1: SWEPT — 1 upload(s) orphaned by the kill, none left once the successor served
+  ....  iter 2: upload 4DQ7cGhecknU… on pack-43f9dc2f3f99bb6f80a104b0d08bc8cbae591f5c.pack seen 28s after the push began; killing 3.5s later, INSIDE the upload
+  PASS  iter 2: told failed, and the bucket is unchanged ()
+  ....  iter 2: incomplete uploads 0 before the push, 1 at the kill, 0 after the successor served (holding 0.0 MiB of parts now)
+  PASS  iter 2: SWEPT — 1 upload(s) orphaned by the kill, none left once the successor served
+  ....  iter 3: upload ht63Fr5uZ2xt… on pack-2659d3e7cc7d0150f1bcee866c7363dd4dc67c5d.pack seen 26s after the push began; killing 2.0s later, INSIDE the upload
+  PASS  iter 3: told failed, and the bucket is unchanged ()
+  ....  iter 3: incomplete uploads 0 before the push, 1 at the kill, 0 after the successor served (holding 0.0 MiB of parts now)
+  PASS  iter 3: SWEPT — 1 upload(s) orphaned by the kill, none left once the successor served
+  ....  iter 4: the pack object now exists (upload complete); killing NOW, around the snapshot CAS and the report
+  PASS  iter 4: told ok, and the bucket holds it
+  ....  iter 4: incomplete uploads 0 before the push, 0 at the kill, 0 after the successor served (holding 0.0 MiB of parts now)
+  PASS  fsck --strict clean after 4 crashes
+  ....  1 acknowledged, 3 refused
+  PASS  the kills landed on both sides of the window
+  PASS  SWEPT: every kill that orphaned an upload (3) was followed by a successor that served with none left; 0 incomplete upload(s) remain under the prefix
+
+
+══ 31 passed, 0 failed, 0 inconclusive ══
+log: /Users/ddalton/github/flint/forge/e2e/scale/results/scale-20260905-171840.log  (raw timelines: /Users/ddalton/github/flint/forge/e2e/scale/results/work-20260905-171840)
