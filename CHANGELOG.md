@@ -888,6 +888,34 @@ Also: `flint-forge-chart` can now render the door itself
   the event carries it. Found on EC2 with an ambient mount whose
   platform could not complete the chain.
 
+### Changed — flint forge, compaction tiers (X18) and no batch window (X20)
+
+- **The full repack every 24 packs is replaced by geometric folds of
+  plain packs beside the serving loop** (`forge/syncer/src/fold.rs`;
+  design `docs/plans/forge-compaction-tiers-design.md`, three candidates
+  refuted twice each). git's `split_pack_geometry` over pack BYTES picks
+  the tiers to roll up; `pack-objects --stdin-packs` rolls them into a
+  side directory on a task of their own, the pack is uploaded before it
+  is named, and only the commit — renames with the index last, ONE CAS
+  from the snapshot's list minus the inputs plus the roll-up, never the
+  directory — is on the loop. The base is rebuilt by reachability with
+  the one bitmap when the tiers reach half of it, at most hourly, after
+  `reflog expire`; the restore's proof is `--no-reflogs`, because a
+  warm restart keeps a reflog that names what a rebuild dropped and the
+  plain proof refuses a restorable repository (reproduced on git
+  2.50.1, with the control). Superseded packs stay on disk 15 min for
+  readers and are subtracted from every listing; a ledger sweep deletes
+  them from the bucket past the grace; the full LIST sweep runs hourly
+  and never with a fold in flight; the fold ticks its own progress
+  counter so it cannot keep a wedged batch's holder renewing. Nothing
+  new enters the bucket: no multi-pack index, the snapshot unchanged,
+  the sweep's predicate unchanged. `FLINT_FORGE_FOLD_FACTOR=0` keeps
+  the shipped rule as the control arm until the wire re-match has run.
+- **A lone push pays no batch window.** `FLINT_FORGE_BATCH_WINDOW_MS`
+  defaults to 0: a batch is what queued on the channel while the
+  previous batch ran, drained without waiting; the 400 ms window was
+  0.48 s of a 1 KiB push's 0.58 s on the wire.
+
 ### Measured — flint forge against walgit, push for push
 
 - **The control arm pre-registered in the simplification note's §9

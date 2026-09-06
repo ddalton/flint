@@ -15,7 +15,11 @@
 //!   FLINT_FORGE_SOCKET     hook socket (default <repo>/flint-forge/syncer.sock)
 //!   FLINT_FORGE_STATUS_ADDR   status listener (default 127.0.0.1:9848)
 //!   FLINT_FORGE_HEARTBEAT_SECS   lease renewal period (default 10)
-//!   FLINT_FORGE_BATCH_WINDOW_MS  how long a batch stays open (default 400)
+//!   FLINT_FORGE_BATCH_WINDOW_MS  a fixed wait for more pushes once one arrived (default 0: a batch is what queued while the last one ran)
+//!   FLINT_FORGE_FOLD_FACTOR      compaction tiers: git's geometric factor over pack bytes (default 2; 0 = the full repack at REPACK_THRESHOLD)
+//!   FLINT_FORGE_BASE_TIER_PERCENT / BASE_MIN_MIB / BASE_REBUILD_MIN_SECS   when the base is rebuilt (50 / 64 / 3600)
+//!   FLINT_FORGE_FOLD_RETAIN_SECS / FOLD_STALL_SECS / SWEEP_EVERY_SECS      retention for readers, the stall bound, the full sweep's cadence (900 / 300 / 3600)
+//!   FLINT_FORGE_FOLD_MIN_MIB / FOLD_MAX_PACKS   a floor under a tier fold and a cap on the tier count (0 / 64)
 //!   FLINT_FORGE_BATCH_MAX        pushes per batch (default 64)
 //!   FLINT_FORGE_REPACK_THRESHOLD packs before a repack (default 24)
 //!   FLINT_FORGE_ORPHAN_GRACE_SECS  sweep grace (default 3600)
@@ -124,9 +128,20 @@ async fn serve() {
 
     let mut cfg = ForgeConfig::new(&prefix, &repo);
     cfg.heartbeat_secs = env_u64("FLINT_FORGE_HEARTBEAT_SECS", 10).max(1);
-    cfg.batch_window_ms = env_u64("FLINT_FORGE_BATCH_WINDOW_MS", 400);
+    cfg.batch_window_ms = env_u64("FLINT_FORGE_BATCH_WINDOW_MS", 0);
     cfg.batch_max = env_u64("FLINT_FORGE_BATCH_MAX", 64).max(1) as usize;
     cfg.repack_threshold = env_u64("FLINT_FORGE_REPACK_THRESHOLD", 24) as usize;
+    // Compaction tiers (X18). FOLD_FACTOR=0 is the control: the shipped
+    // full repack at REPACK_THRESHOLD packs.
+    cfg.fold_factor = env_u64("FLINT_FORGE_FOLD_FACTOR", 2);
+    cfg.base_tier_percent = env_u64("FLINT_FORGE_BASE_TIER_PERCENT", 50).max(1);
+    cfg.base_min_bytes = env_u64("FLINT_FORGE_BASE_MIN_MIB", 64) * 1024 * 1024;
+    cfg.base_rebuild_min_secs = env_u64("FLINT_FORGE_BASE_REBUILD_MIN_SECS", 3600);
+    cfg.fold_retain_secs = env_u64("FLINT_FORGE_FOLD_RETAIN_SECS", 900);
+    cfg.fold_stall_secs = env_u64("FLINT_FORGE_FOLD_STALL_SECS", 300).max(1);
+    cfg.sweep_every_secs = env_u64("FLINT_FORGE_SWEEP_EVERY_SECS", 3600);
+    cfg.fold_min_bytes = env_u64("FLINT_FORGE_FOLD_MIN_MIB", 0) * 1024 * 1024;
+    cfg.fold_max_packs = env_u64("FLINT_FORGE_FOLD_MAX_PACKS", 64).max(2) as usize;
     cfg.orphan_grace_secs = env_u64("FLINT_FORGE_ORPHAN_GRACE_SECS", 3600);
     cfg.fanout = env_u64("FLINT_FORGE_FANOUT", 4).max(1) as usize;
     cfg.project_id = std::env::var("FLINT_FORGE_PROJECT_ID").ok().filter(|p| !p.is_empty());

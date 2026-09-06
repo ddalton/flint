@@ -27,6 +27,20 @@
 #   ./run-repack.sh                  # ~6 min, both shapes + the control
 #   ARMS="source" ./run-repack.sh
 #   KEEP=1 ./run-repack.sh
+#
+# TIERS (X18, docs/plans/forge-compaction-tiers-design.md). The
+# `tiers-source` and `tiers-blob` arms run the SAME shapes with
+# `FLINT_FORGE_FOLD_FACTOR=$FOLD` (2): geometric folds of plain packs
+# beside the loop, the base rebuilt at 50 % tier growth (the hourly
+# cadence lifted so the rig can see one). The shipped arms keep
+# `FOLD_FACTOR=0`, the full repack at THRESHOLD, and are the control.
+# The design's re-sized settings are the ones that separate the arms:
+#
+#   ARMS="blob tiers-blob source tiers-source" BLOB_SEED_MB=512 PUSHES=100 ./run-repack.sh
+#
+# (at the shipped 96 MiB / 30 pushes a full repack every 24 is cheap
+# and the tiers are WORSE — the regime, not the rule). Pre-registered
+# there: tiers-blob ≤ 5.5x, tiers-source ≤ 25x; blob ≥ 12x, source ≥ 40x.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)
@@ -43,6 +57,9 @@ SRC_DIRS=${SRC_DIRS:-120}     # source arm: dirs x files small objects
 SRC_FILES=${SRC_FILES:-100}
 BLOB_SEED_MB=${BLOB_SEED_MB:-96}
 BLOB_PUSH_MB=${BLOB_PUSH_MB:-2}
+FOLD=${FOLD:-2}               # the tiers arms' geometric factor
+MAX_TIERS_BLOB=${MAX_TIERS_BLOB:-5.5}     # pre-registered ceilings (design §8.1)
+MAX_TIERS_SOURCE=${MAX_TIERS_SOURCE:-25}
 has_arm() { case " $ARMS " in *" $1 "*) return 0;; esac; return 1; }
 mib() { python3 -c "print(f'{int($1)/1048576:.1f}')"; }
 
@@ -117,9 +134,15 @@ push_blob() {  # push_blob <clone> <n> -> bytes of content added
 # the repack put out of reach: if it does not come back at ~1.0x, the
 # rig is measuring something other than the repack and neither number
 # below means anything.
-run_arm() {
+run_arm() {  # run_arm <name> <shape> <threshold> [fold-factor] [max-ratio]
   local name=$1 shape=$2 threshold=$3
-  head_ "$name — ${PUSHES} pushes of a ${shape}-shaped repository, repack threshold ${threshold}"
+  local fold=${4:-0}
+  local max_ratio=${5:-0}
+  if [ "$fold" = 0 ]; then
+    head_ "$name — ${PUSHES} pushes of a ${shape}-shaped repository, repack threshold ${threshold}"
+  else
+    head_ "$name — ${PUSHES} pushes of a ${shape}-shaped repository, compaction tiers at factor ${fold}"
+  fi
   local prefix="rp/$name"
   local bare="$WORK/$name.git"
   local clone="$WORK/$name"
@@ -138,6 +161,7 @@ run_arm() {
   # shellcheck disable=SC2086
   forge_up "$name" "$bare" "$prefix" FLINT_FORGE_ENDPOINT="$ENDPOINT" \
     FLINT_FORGE_BATCH_WINDOW_MS=0 FLINT_FORGE_REPACK_THRESHOLD="$threshold" \
+    FLINT_FORGE_FOLD_FACTOR="$fold" FLINT_FORGE_BASE_REBUILD_MIN_SECS=0 \
     FLINT_FORGE_ORPHAN_GRACE_SECS=100000
   local n=0
   while [ ! -S "$sock" ] && [ $n -lt 60 ]; do sleep 1; n=$((n+1)); done
@@ -162,8 +186,22 @@ run_arm() {
     up=$(record_new "$prefix" "$seen")
     echo "$i $content $up" >> "$log"
   done
+  if [ "$fold" != 0 ]; then
+    # A fold uploads beside the loop and may land after the last
+    # push's accounting: wait for the syncer to report no fold in
+    # flight (its log), then account once more as a content-less row.
+    local w=0 last
+    while [ $w -lt 180 ]; do
+      last=$(grep -E "folding|rebuilding the base|committed|fold failed|fold not committed|fold stalled" "$WORK/forge-$name.log" | tail -1)
+      case "$last" in *folding*|*"rebuilding the base"*) sleep 1; w=$((w+1));; *) break;; esac
+    done
+    sleep 3
+    up=$(record_new "$prefix" "$seen")
+    echo "$((PUSHES + 1)) 0 $up" >> "$log"
+    note "$name: folds committed $(grep -c 'fold committed' "$WORK/forge-$name.log"), base rebuilds $(grep -c 'base rebuild committed' "$WORK/forge-$name.log"), fold failures $(grep -c 'fold failed\|fold not committed\|fold stalled' "$WORK/forge-$name.log")"
+  fi
   stop_arm "$name"
-  python3 "$HERE/amplify.py" --name "$name" --csv "$log" --threshold "$threshold" > "$WORK/$name.verdict"
+  python3 "$HERE/amplify.py" --name "$name" --csv "$log" --threshold "$threshold" --fold "$fold" --max-ratio "$max_ratio" > "$WORK/$name.verdict"
   local kind rest
   while read -r kind rest; do
     case "$kind" in PASS) ok "$rest";; FAIL) bad "$rest";; INCONCLUSIVE) inconc "$rest";; *) note "$rest";; esac
@@ -241,6 +279,9 @@ main() {
   has_arm blob    && run_arm blob    blob   "$THRESHOLD"
   # The control: the same source shape with the repack out of reach.
   has_arm control && run_arm control source 100000
+  # The tiers (X18): the same shapes under geometric folds.
+  has_arm tiers-source && run_arm tiers-source source "$THRESHOLD" "$FOLD" "$MAX_TIERS_SOURCE"
+  has_arm tiers-blob   && run_arm tiers-blob   blob   "$THRESHOLD" "$FOLD" "$MAX_TIERS_BLOB"
   has_arm source  && geometric_probe source
   has_arm blob    && geometric_probe blob
   say ""; say "per-push CSVs (push, content bytes, uploaded bytes): $WORK/*.csv (KEEP=1 to retain)"

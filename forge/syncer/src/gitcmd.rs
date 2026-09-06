@@ -189,8 +189,14 @@ impl Git {
             ("maintenance.auto", "false"),
             // `-o strategy=…` on a refs/for push.
             ("receive.advertisePushOptions", "true"),
-            // Clones walk a bitmap rather than the object graph (§8).
-            ("repack.writeBitmaps", "true"),
+            // The base pack's bitmap is written by `pack-objects
+            // --write-bitmap-index` (fold.rs); `repack` never runs, so
+            // `repack.writeBitmaps` would decide nothing. Objects above
+            // this size skip the delta search in every `pack-objects`,
+            // `upload-pack`'s included: a 256 MiB blob tier cost 17 CPU-s
+            // per clone at git's 512m default and 0.6 s at 1m
+            // (compaction-tiers design §6, gate G3).
+            ("core.bigFileThreshold", "1m"),
             // A malformed object must be refused at the door, not
             // uploaded and discovered at restore.
             ("receive.fsckObjects", "true"),
@@ -386,18 +392,88 @@ impl Git {
         Ok(Some(format!("pack-{hash}.pack")))
     }
 
-    /// Consolidate into one pack with a bitmap, dropping what the new
-    /// pack supersedes. Run between batches under the writer lock —
-    /// never by git itself (§10).
+    /// The CONTROL rule (X18, `fold_factor == 0`): consolidate into one
+    /// pack with a bitmap, dropping what the new pack supersedes. Run
+    /// between batches under the writer lock — never by git itself
+    /// (§10). Kept until the tiers' measurement has run.
     pub async fn repack(&self) -> ForgeResult<()> {
         self.must(&["repack", "-a", "-d", "-b", "-q"], None).await?;
         Ok(())
     }
 
+    /// A tier fold: every object of `inputs`, reachable or not, into
+    /// one pack at `out_base` (a path prefix OUTSIDE `objects/pack`, so
+    /// git never scans the result before it is durable). Existing
+    /// deltas are reused and the window is off: a fold is a roll-up,
+    /// not a recompression — the base rebuild keeps the search.
+    /// Returns the pack's file name, or `None` for an empty result.
+    pub async fn pack_fold(
+        &self,
+        inputs: &[String],
+        out_base: &Path,
+        threads: usize,
+    ) -> ForgeResult<Option<String>> {
+        let mut stdin = String::new();
+        for p in inputs {
+            stdin.push_str(p);
+            stdin.push('\n');
+        }
+        let threads = threads.to_string();
+        let base = out_base.to_string_lossy().into_owned();
+        let out = self
+            .run(
+                &[
+                    "-c", "pack.window=0", "-c", &format!("pack.threads={threads}"),
+                    "pack-objects", "--stdin-packs", "--delta-base-offset", "--non-empty", "-q", &base,
+                ],
+                Some(stdin.as_bytes()),
+            )
+            .await?;
+        if !out.ok() {
+            return Err(ForgeError::Git(format!("pack-objects --stdin-packs: {}", out.stderr.trim())));
+        }
+        Ok(pack_name_of(&out.stdout))
+    }
+
+    /// The base rebuild: everything reachable from every ref, with the
+    /// bitmap, into one pack at `out_base`. The only place unreachable
+    /// objects are dropped. `--all` reads stdin to EOF, which `run`
+    /// gives it as `/dev/null`.
+    pub async fn pack_base(&self, out_base: &Path, threads: usize) -> ForgeResult<Option<String>> {
+        let threads = threads.to_string();
+        let base = out_base.to_string_lossy().into_owned();
+        let out = self
+            .run(
+                &[
+                    "-c", &format!("pack.threads={threads}"),
+                    "pack-objects", "--all", "--indexed-objects", "--write-bitmap-index",
+                    "--delta-base-offset", "--non-empty", "-q", &base,
+                ],
+                None,
+            )
+            .await?;
+        if !out.ok() {
+            return Err(ForgeError::Git(format!("pack-objects --all: {}", out.stderr.trim())));
+        }
+        Ok(pack_name_of(&out.stdout))
+    }
+
+    /// Before a base rebuild: the reflog would keep what the rebuild
+    /// drops, and a warm restart's proof walks reflogs unless told not
+    /// to. Retention belongs in the bucket (X15), not in an emptyDir.
+    pub async fn reflog_expire_all(&self) -> ForgeResult<()> {
+        self.must(&["reflog", "expire", "--expire=now", "--all"], None).await?;
+        Ok(())
+    }
+
     /// The restore's proof that the packs the bucket handed back
-    /// actually contain what the snapshot's refs name.
+    /// actually contain what the snapshot's refs name. `--no-reflogs`:
+    /// what it proves is the snapshot's refs, which have no reflog, and
+    /// a warm restart's reflog may name what a base rebuild dropped.
     pub async fn fsck_connectivity(&self) -> ForgeResult<()> {
-        let out = self.run(&["fsck", "--connectivity-only", "--no-progress"], None).await?;
+        let out = self
+            .run(&["fsck", "--connectivity-only", "--no-reflogs", "--no-progress"], None)
+            .await?;
         if out.ok() {
             Ok(())
         } else {
@@ -556,4 +632,28 @@ pub struct RefUpdate {
 pub enum MergeOutcome {
     Clean { tree: String },
     Conflict { paths: Vec<String> },
+}
+
+/// `pack_siblings` for a pack that lives in `dir` rather than in the
+/// repository — the fold's scratch directory.
+pub fn siblings_in(dir: &Path, pack: &str) -> Vec<String> {
+    let stem = pack.trim_end_matches(".pack");
+    let mut v = vec![pack.to_string()];
+    for ext in [".idx", ".bitmap", ".rev"] {
+        let name = format!("{stem}{ext}");
+        if dir.join(&name).exists() {
+            v.push(name);
+        }
+    }
+    v
+}
+
+/// `pack-objects` prints the new pack's hash on stdout, or nothing.
+fn pack_name_of(stdout: &str) -> Option<String> {
+    let hash = stdout.trim();
+    if hash.is_empty() {
+        None
+    } else {
+        Some(format!("pack-{hash}.pack"))
+    }
 }

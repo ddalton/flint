@@ -19,7 +19,7 @@ use super::batch::{self, CommandResult, PushRequest};
 use super::policy::{Policy, Verdict};
 use super::gitcmd::RefUpdate;
 use super::status::Phase;
-use super::{lease, restore, snapshot, status, sweep, ForgeConfig, ForgeError, Syncer};
+use super::{fold, lease, restore, snapshot, status, sweep, ForgeConfig, ForgeError, Syncer};
 
 const PREFIX: &str = "tenant/repo";
 
@@ -106,6 +106,37 @@ impl Rig {
 
     async fn run(&mut self, pushes: Vec<PushRequest>) -> Vec<batch::PushReport> {
         batch::run_batch(&mut self.sc, pushes, &Policy::default()).await.expect("batch")
+    }
+
+    /// One commit on `branch`, pushed as its own batch. Returns the tip.
+    async fn push_commit(&mut self, branch: &str, parent: Option<&str>, tag: &str) -> String {
+        let c = self
+            .stage_commit(parent, &[("f.txt", &format!("{tag}\n"))], tag)
+            .await;
+        let old = parent.map(|p| p.to_string()).unwrap_or_else(zero);
+        let reports = self
+            .run(vec![push(1, vec![RefUpdate { name: branch.into(), old_oid: old, new_oid: c.clone() }])])
+            .await;
+        assert!(is_ok(&reports[0].results[0]), "push {tag}: {:?}", reports[0].results[0]);
+        c
+    }
+
+    /// Plan one fold, run its task to completion and commit it — what
+    /// the serving loop does across its post-batch hook, its task and
+    /// its fold arm. `None` when nothing was planned.
+    async fn fold_once(&mut self) -> Option<(fold::Plan, Option<String>)> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let now = super::now_unix();
+        let plan = fold::maybe_spawn(&mut self.sc, tx, now).expect("plan")?;
+        let res = rx.recv().await.expect("the fold task reports");
+        assert!(res.error.is_none(), "the fold task failed: {:?}", res.error);
+        let named = fold::commit(&mut self.sc, res, now).await.expect("commit");
+        Some((plan, named))
+    }
+
+    fn tiers_only(&mut self) {
+        self.sc.cfg.fold_factor = 2;
+        self.sc.cfg.base_min_bytes = u64::MAX;
     }
 }
 
@@ -2975,4 +3006,317 @@ async fn a_holder_that_cannot_renew_withdraws_readiness_after_the_term_and_resum
     assert!(!f.renewal_overdue && f.serving(), "a landed renewal restores readiness");
     assert_eq!(rig.sc.hold.lease().map(|l| l.epoch), Some(epoch), "same epoch after the outage");
     task.abort();
+}
+
+// ── compaction tiers (X18, fold.rs) ──────────────────────────────────
+
+/// The fold's shape end to end: three push packs roll into one, the
+/// snapshot names the roll-up and none of its inputs, the inputs are
+/// uploaded before they are named (the bucket holds the roll-up when
+/// the CAS lands), retention keeps the inputs on disk, the ledger sweep
+/// takes them from the bucket past the grace, and a cold restore of the
+/// result is whole.
+#[tokio::test]
+async fn a_fold_publishes_the_rolled_pack_and_the_sweep_takes_its_inputs() {
+    let mut rig = Rig::new().await;
+    rig.tiers_only();
+    rig.sc.cfg.orphan_grace_secs = 0;
+    rig.start().await;
+    let mut parent: Option<String> = None;
+    for i in 0..3 {
+        let c = rig.push_commit("refs/heads/main", parent.as_deref(), &format!("c{i}")).await;
+        parent = Some(c);
+    }
+    let inputs = rig.sc.cell().unwrap().snap.packs.clone();
+    assert_eq!(inputs.len(), 3);
+
+    let (plan, named) = rig.fold_once().await.expect("three equal packs fold");
+    assert!(matches!(plan, fold::Plan::Fold { .. }));
+    let f = named.expect("a new pack was named");
+    assert_eq!(rig.sc.cell().unwrap().snap.packs, vec![f.clone()], "the roll-up replaces its inputs");
+    rig.store.head(&rig.sc.cfg.pack_key(&f)).await.expect("the roll-up is in the bucket");
+    rig.store.head(&rig.sc.cfg.pack_key(&f.replace(".pack", ".idx"))).await.expect("with its index");
+    for p in &inputs {
+        assert!(rig.sc.git.pack_path(p).exists(), "retention keeps {p} on disk");
+        rig.store.head(&rig.sc.cfg.pack_key(p)).await.expect("an input is still in the bucket until the sweep");
+    }
+    assert_eq!(rig.sc.retained.len(), 3);
+    assert_eq!(rig.sc.fold_ledger.len(), 1);
+
+    let deleted = fold::sweep_ledger(&mut rig.sc, super::now_unix(), 64).await.expect("ledger sweep");
+    assert!(deleted >= 3, "every input's files go: {deleted}");
+    for p in &inputs {
+        assert!(rig.store.head(&rig.sc.cfg.pack_key(p)).await.is_err(), "{p} swept");
+    }
+    rig.store.head(&rig.sc.cfg.pack_key(&f)).await.expect("the named pack is never swept");
+    assert!(rig.sc.fold_ledger.is_empty());
+
+    let past = super::now_unix() + rig.sc.cfg.fold_retain_secs + 1;
+    let unlinked = fold::unlink_retained(&mut rig.sc, past).expect("unlink");
+    assert_eq!(unlinked, 3);
+    for p in &inputs {
+        assert!(!rig.sc.git.pack_path(p).exists(), "{p} unlinked past retention");
+    }
+
+    let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
+    restore::restore(&mut cold.sc).await.expect("cold restore after a fold");
+    assert_eq!(cold.sc.git.ref_oid("refs/heads/main").await.unwrap(), parent);
+    cold.sc.git.fsck_connectivity().await.expect("the folded repository is whole");
+}
+
+/// The commit's CAS names `(snapshot.packs \ S) ∪ {F}` and never the
+/// directory: a pack on disk that no batch uploaded (a refused push's)
+/// stays unnamed, so the restore of that snapshot cannot refuse. The
+/// control is the formula the drafts had — naming the directory would
+/// name the stray, and the bucket does not hold it.
+#[tokio::test]
+async fn a_fold_cas_names_the_snapshots_packs_not_the_directory() {
+    let mut rig = Rig::new().await;
+    rig.tiers_only();
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    // A pack on disk with no batch behind it.
+    rig.stage_commit(Some(&c1), &[("stray.txt", "x\n")], "stray").await;
+    let on_disk = rig.sc.git.local_packs().unwrap();
+    let named_before = rig.sc.cell().unwrap().snap.packs.clone();
+    let stray: Vec<&String> = on_disk.iter().filter(|p| !named_before.contains(p)).collect();
+    assert_eq!(stray.len(), 1, "the stray pack is on disk");
+
+    let (_, named) = rig.fold_once().await.expect("the two named packs fold");
+    let f = named.unwrap();
+    let packs = rig.sc.cell().unwrap().snap.packs.clone();
+    assert_eq!(packs, vec![f]);
+    assert!(!packs.contains(stray[0]), "the stray is not named");
+    assert!(rig.store.head(&rig.sc.cfg.pack_key(stray[0])).await.is_err(), "and not in the bucket");
+
+    let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
+    restore::restore(&mut cold.sc).await.expect("the snapshot names only what the bucket holds");
+}
+
+/// A base rebuild over an unchanged reachable set reproduces the base's
+/// own name. The commit then renames nothing, uploads nothing and —
+/// the case the A refuter found — never unlinks or unnames it.
+#[tokio::test]
+async fn a_rebuild_that_reproduces_the_bases_name_never_unlinks_it() {
+    let mut rig = Rig::new().await;
+    rig.sc.cfg.fold_factor = 2;
+    rig.sc.cfg.base_min_bytes = 0;
+    rig.sc.cfg.base_rebuild_min_secs = 0;
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let _c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    let (plan, named) = rig.fold_once().await.expect("no base yet: the base rule fires");
+    assert!(matches!(plan, fold::Plan::Base { .. }));
+    let base = named.expect("a base was named");
+    assert_eq!(rig.sc.cell().unwrap().snap.packs, vec![base.clone()]);
+    assert!(fold::is_base_marker(&rig.sc.cfg.repo, &base), "the base carries the marker");
+    assert!(rig.sc.git.pack_path(&base.replace(".pack", ".bitmap")).exists(), "and the bitmap");
+    let seq = rig.sc.cell().unwrap().snap.seq;
+
+    // Rebuild again over the same reachable set.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    fold::spawn(&mut rig.sc, fold::Plan::Base { inputs: vec![base.clone()] }, tx, super::now_unix())
+        .expect("spawn");
+    let res = rx.recv().await.unwrap();
+    assert_eq!(res.pack, base, "the same objects give the same name");
+    let named = fold::commit(&mut rig.sc, res, super::now_unix()).await.expect("commit");
+    assert_eq!(named, None, "nothing new was named");
+    assert_eq!(rig.sc.cell().unwrap().snap.packs, vec![base.clone()], "the base stays named");
+    assert_eq!(rig.sc.cell().unwrap().snap.seq, seq, "no CAS was spent");
+    assert!(rig.sc.git.pack_path(&base).exists(), "the base stays on disk");
+    assert!(!rig.sc.retained.iter().any(|r| r.name == base), "and is not retained for unlinking");
+    rig.sc.git.fsck_connectivity().await.expect("whole");
+}
+
+/// The reflog trap (design §7.7): a base rebuild drops what a rewind
+/// left reachable only from the reflog; a warm restart keeps the
+/// reflog; the proof must not walk it. The control is the trap itself
+/// on this git: without the expiry the plain proof refuses.
+#[tokio::test]
+async fn a_base_rebuild_after_a_rewind_survives_a_warm_restart() {
+    let mut rig = Rig::new().await;
+    rig.sc.cfg.fold_factor = 2;
+    rig.sc.cfg.base_min_bytes = 0;
+    rig.sc.cfg.base_rebuild_min_secs = 0;
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    let c2 = rig.push_commit("refs/heads/main", Some(&c1), "c2").await;
+    // Rewind main to c1: c2 is now reachable from the reflog only. (Two
+    // commits stay reachable so the rebuild's pack is not byte-identical
+    // to a push pack — a reproduced name is its own test above.)
+    let pol = Policy { allow_non_fast_forward: vec!["*".into()], ..Policy::default() };
+    let reports = batch::run_batch(
+        &mut rig.sc,
+        vec![push(9, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: c2.clone(), new_oid: c1.clone() }])],
+        &pol,
+    )
+    .await
+    .expect("rewind batch");
+    assert!(is_ok(&reports[0].results[0]), "the rewind is allowed: {:?}", reports[0].results[0]);
+    // The rig's staging leaves loose copies behind that a push never
+    // does (`receive.unpackLimit = 1`): drop them, or the rewound tip
+    // survives the rebuild as a loose object and the trap is masked.
+    rig.git(&["prune-packed", "-q"], None).await;
+
+    // The control first, on a copy of the state: a rebuild WITHOUT the
+    // expiry, its inputs unlinked, and the plain proof.
+    let scratch = rig.sc.cfg.state_dir.join("control");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let f = rig.sc.git.pack_base(&scratch.join("pack"), 1).await.unwrap().unwrap();
+    let dir = rig.sc.cfg.repo.join("objects/pack");
+    let old: Vec<String> = rig.sc.git.local_packs().unwrap().into_iter().filter(|p| *p != f).collect();
+    assert_eq!(old.len(), 3, "the three push packs are the rebuild's inputs");
+    for file in super::gitcmd::siblings_in(&scratch, &f) {
+        std::fs::rename(scratch.join(&file), dir.join(&file)).unwrap();
+    }
+    let mut stash = Vec::new();
+    for p in &old {
+        for file in rig.sc.git.pack_siblings(p) {
+            let bytes = std::fs::read(dir.join(&file)).unwrap();
+            std::fs::remove_file(dir.join(&file)).unwrap();
+            stash.push((file, bytes));
+        }
+    }
+    let plain = rig.sc.git.run(&["fsck", "--connectivity-only", "--no-progress"], None).await.unwrap();
+    assert!(!plain.ok(), "control: the plain proof walks the reflog and refuses ({})", plain.stderr.trim());
+    rig.sc.git.fsck_connectivity().await.expect("the proof with --no-reflogs passes on the same state");
+    // Put the state back.
+    for file in super::gitcmd::siblings_in(&dir, &f) {
+        std::fs::remove_file(dir.join(&file)).unwrap();
+    }
+    for (file, bytes) in stash {
+        std::fs::write(dir.join(&file), bytes).unwrap();
+    }
+
+    // The design's path: expire, rebuild, commit, unlink, warm restart.
+    let (plan, _) = rig.fold_once().await.expect("the base rule fires");
+    assert!(matches!(plan, fold::Plan::Base { .. }));
+    fold::unlink_retained(&mut rig.sc, super::now_unix() + 100_000).unwrap();
+    let plain = rig.sc.git.run(&["fsck", "--connectivity-only", "--no-progress"], None).await.unwrap();
+    assert!(plain.ok(), "after the expiry even the plain proof passes: {}", plain.stderr.trim());
+    restore::restore(&mut rig.sc).await.expect("a warm restart serves");
+    assert_eq!(rig.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(c1));
+}
+
+/// The fold ticks its own counter, never the hold's: a fold's upload
+/// must not keep a wedged batch's holder renewing (F21). The commit's
+/// single tick is the loop's, after the CAS.
+#[tokio::test]
+async fn the_fold_never_ticks_the_holds_counter() {
+    let mut rig = Rig::new().await;
+    rig.tiers_only();
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let _ = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    let before = rig.sc.hold.progress();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let plan = fold::maybe_spawn(&mut rig.sc, tx, super::now_unix()).unwrap().expect("planned");
+    assert!(matches!(plan, fold::Plan::Fold { .. }));
+    let res = rx.recv().await.unwrap();
+    assert!(res.error.is_none());
+    assert!(rig.sc.fold.as_ref().unwrap().progress.load(std::sync::atomic::Ordering::Relaxed) > 0, "the fold's own counter moved");
+    assert_eq!(rig.sc.hold.progress(), before, "the hold's did not");
+    fold::commit(&mut rig.sc, res, super::now_unix()).await.unwrap();
+}
+
+/// Both sweeps refuse while a fold is in flight: the upload sweep's
+/// premise ("nothing of ours is in flight") is false then, and it
+/// would abort the holder's own base rebuild.
+#[tokio::test]
+async fn the_sweeps_refuse_while_a_fold_is_in_flight() {
+    let mut rig = Rig::new().await;
+    rig.tiers_only();
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let _ = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    fold::maybe_spawn(&mut rig.sc, tx, super::now_unix()).unwrap().expect("planned");
+    assert!(sweep::sweep(&mut rig.sc).await.is_err(), "the full sweep waits");
+    assert!(sweep::abort_orphaned_uploads(&rig.sc).await.is_err(), "the upload sweep waits");
+    let res = rx.recv().await.unwrap();
+    fold::commit(&mut rig.sc, res, super::now_unix()).await.unwrap();
+    sweep::sweep(&mut rig.sc).await.expect("and runs once the fold is committed");
+}
+
+/// The ledger sweep deletes past the grace by the store's clock, and
+/// never a pack the snapshot names.
+#[tokio::test]
+async fn the_ledger_sweep_deletes_only_past_the_grace_and_only_unnamed() {
+    let mut rig = Rig::new().await;
+    rig.tiers_only();
+    rig.sc.cfg.orphan_grace_secs = 3600;
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let _ = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    let inputs = rig.sc.cell().unwrap().snap.packs.clone();
+    let (_, named) = rig.fold_once().await.unwrap();
+    let f = named.unwrap();
+    let now = super::now_unix();
+    assert_eq!(fold::sweep_ledger(&mut rig.sc, now, 64).await.unwrap(), 0, "inside the grace nothing goes");
+    assert_eq!(rig.sc.fold_ledger.len(), 1, "the entry waits");
+    rig.sc.cfg.orphan_grace_secs = 0;
+    let deleted = fold::sweep_ledger(&mut rig.sc, now, 64).await.unwrap();
+    assert!(deleted >= 2);
+    for p in &inputs {
+        assert!(rig.store.head(&rig.sc.cfg.pack_key(p)).await.is_err());
+    }
+    rig.store.head(&rig.sc.cfg.pack_key(&f)).await.expect("the named roll-up stays");
+}
+
+/// The restore reconciles packs as it reconciles refs: a local pack
+/// the snapshot does not name is unlinked — unless retention keeps it.
+/// This is what makes every fold crash window benign.
+#[tokio::test]
+async fn a_restore_prunes_packs_the_snapshot_does_not_name_unless_retained() {
+    let mut rig = Rig::new().await;
+    rig.tiers_only();
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    rig.stage_commit(Some(&c0), &[("stray.txt", "x\n")], "stray").await;
+    rig.stage_commit(Some(&c0), &[("kept.txt", "y\n")], "kept").await;
+    let named = rig.sc.cell().unwrap().snap.packs.clone();
+    let unnamed: Vec<String> =
+        rig.sc.git.local_packs().unwrap().into_iter().filter(|p| !named.contains(p)).collect();
+    assert_eq!(unnamed.len(), 2);
+    rig.sc.retained.push(fold::Retained { name: unnamed[1].clone(), unlink_after_unix: u64::MAX });
+    fold::save_retained(&rig.sc).unwrap();
+    restore::restore(&mut rig.sc).await.expect("warm restore");
+    assert!(!rig.sc.git.pack_path(&unnamed[0]).exists(), "the stray is unlinked");
+    assert!(rig.sc.git.pack_path(&unnamed[1]).exists(), "the retained pack is kept");
+    assert!(rig.sc.git.pack_path(&named[0]).exists(), "the named pack is kept");
+}
+
+/// A retained pack is subtracted from every listing: the batch after a
+/// fold names the roll-up and its own pack, never the inputs retention
+/// still holds on disk — which would re-upload them under rule 4.
+#[tokio::test]
+async fn a_retained_pack_is_never_named_by_a_batch() {
+    let mut rig = Rig::new().await;
+    rig.tiers_only();
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    let inputs = rig.sc.cell().unwrap().snap.packs.clone();
+    let (_, named) = rig.fold_once().await.unwrap();
+    let f = named.unwrap();
+    for p in &inputs {
+        assert!(rig.sc.git.pack_path(p).exists(), "still on disk");
+    }
+    let _ = rig.push_commit("refs/heads/main", Some(&c1), "c2").await;
+    let packs = rig.sc.cell().unwrap().snap.packs.clone();
+    assert_eq!(packs.len(), 2, "the roll-up and the new push: {packs:?}");
+    assert!(packs.contains(&f));
+    for p in &inputs {
+        assert!(!packs.contains(p), "{p} is retained, not re-named");
+    }
+    // `objects/info/packs` is the snapshot's list, not the directory's.
+    let info = std::fs::read_to_string(rig.sc.cfg.repo.join("objects/info/packs")).unwrap();
+    let listed: Vec<&str> = info.lines().filter_map(|l| l.strip_prefix("P ")).collect();
+    let mut want: Vec<&str> = packs.iter().map(|s| s.as_str()).collect();
+    want.sort();
+    let mut got = listed.clone();
+    got.sort();
+    assert_eq!(got, want, "info/packs lists exactly the snapshot's packs");
 }

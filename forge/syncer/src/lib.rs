@@ -54,6 +54,7 @@
 pub mod batch;
 pub mod bundle;
 pub mod export;
+pub mod fold;
 pub mod gitcmd;
 pub mod hook;
 pub mod lease;
@@ -138,16 +139,43 @@ pub struct ForgeConfig {
     /// not pushes arrive.
     pub heartbeat_secs: u64,
     /// How long the syncer waits for more pushes once one has arrived,
-    /// before closing the batch. The batch is what turns a per-push
-    /// round-trip chain into a per-batch one; see the design's
-    /// throughput arithmetic (§4).
+    /// before closing the batch. `0` (the default since X20) waits for
+    /// nothing: a batch is the pushes that queued while the previous
+    /// batch ran, so group commit under load costs no wait and a lone
+    /// push pays none. The batch is what turns a per-push round-trip
+    /// chain into a per-batch one (design §4); the fixed 400 ms window
+    /// that used to open it was 0.48 s of a 1 KiB push's 0.58 s on the
+    /// wire.
     pub batch_window_ms: u64,
     /// Ceiling on pushes in one batch, so a storm cannot make a single
     /// CAS carry unbounded work.
     pub batch_max: usize,
-    /// Repack when the repository holds more than this many packs.
-    /// The knob that trades clone cost against repack cost (§10).
+    /// The CONTROL rule (X18): with `fold_factor == 0`, repack when the
+    /// repository holds more than this many packs — the shipped
+    /// `repack -a -d -b`, kept until the tiers' measurement has run.
     pub repack_threshold: usize,
+    /// Compaction tiers (`docs/plans/forge-compaction-tiers-design.md`).
+    /// git's geometric factor over pack bytes; 0 = the control rule.
+    pub fold_factor: u64,
+    /// Rebuild the base once the tiers reach this percent of it.
+    pub base_tier_percent: u64,
+    /// With no base yet, build one once the named packs reach this.
+    pub base_min_bytes: u64,
+    /// At most one base rebuild per this many seconds.
+    pub base_rebuild_min_secs: u64,
+    /// Superseded packs stay on disk this long for readers that opened
+    /// them before the commit (git's own `repack -d` race).
+    pub fold_retain_secs: u64,
+    /// A fold whose upload moves no bytes for this long is aborted.
+    pub fold_stall_secs: u64,
+    /// The full LIST sweep runs at most once per this many seconds
+    /// (the ledger sweep covers what folds unname; this one covers what
+    /// a crashed incarnation or a straggler left).
+    pub sweep_every_secs: u64,
+    /// A tier fold smaller than this is skipped, unless the cap forces it.
+    pub fold_min_bytes: u64,
+    /// Fold regardless when the tier count reaches this.
+    pub fold_max_packs: usize,
     /// How long an unreferenced pack must have sat before the sweep may
     /// take it. Must outlive the LONGEST upload, not the longest
     /// plausible one (`LeanChunkGCRacyGrace`).
@@ -198,9 +226,18 @@ impl ForgeConfig {
             repo,
             state_dir,
             heartbeat_secs: 10,
-            batch_window_ms: 400,
+            batch_window_ms: 0,
             batch_max: 64,
             repack_threshold: 24,
+            fold_factor: 2,
+            base_tier_percent: 50,
+            base_min_bytes: 64 * 1024 * 1024,
+            base_rebuild_min_secs: 3600,
+            fold_retain_secs: 900,
+            fold_stall_secs: 300,
+            sweep_every_secs: 3600,
+            fold_min_bytes: 0,
+            fold_max_packs: 64,
             orphan_grace_secs: 3600,
             project_id: None,
             fanout: 4,
@@ -430,6 +467,15 @@ pub struct Syncer {
     /// new server republishes once rather than trusting a predecessor.
     pub published_head: Option<String>,
     pub started_unix: u64,
+    /// The fold beside the loop, at most one (X18, `fold.rs`).
+    pub fold: Option<fold::InFlight>,
+    /// Superseded packs kept on disk for readers; subtracted from every
+    /// listing so no batch re-names them.
+    pub retained: Vec<fold::Retained>,
+    /// What fold commits unnamed in the bucket, for the ledger sweep.
+    pub fold_ledger: Vec<fold::LedgerEntry>,
+    pub last_base_rebuild_unix: u64,
+    pub last_full_sweep_unix: u64,
 }
 
 impl Syncer {
@@ -447,7 +493,27 @@ impl Syncer {
             pending_bundle: None,
             published_head: None,
             started_unix: now_unix(),
+            fold: None,
+            retained: Vec::new(),
+            fold_ledger: Vec::new(),
+            last_base_rebuild_unix: 0,
+            last_full_sweep_unix: 0,
         }
+    }
+
+    /// The packs a batch may list, upload and name: what git sees,
+    /// minus the packs a fold superseded and retention keeps on disk.
+    /// A retained pack re-listed would be re-named and re-uploaded
+    /// (rule 4 refreshes its age) — the collision every "keep the old
+    /// packs a while" fix has.
+    pub fn listed_packs(&self) -> ForgeResult<Vec<String>> {
+        let mut v = self.git.local_packs()?;
+        if !self.retained.is_empty() {
+            let held: std::collections::BTreeSet<&String> =
+                self.retained.iter().map(|r| &r.name).collect();
+            v.retain(|p| !held.contains(p));
+        }
+        Ok(v)
     }
 
     /// The one gate every store-touching path takes first. A fence is

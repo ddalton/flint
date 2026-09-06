@@ -28,7 +28,7 @@
 //! It sweeps clone bundles too, from the same reference set and under
 //! the same rules.
 
-use super::{restore, snapshot, ForgeResult, Syncer};
+use super::{restore, snapshot, ForgeError, ForgeResult, Syncer};
 
 /// Abort every multipart upload still pending under the repository.
 ///
@@ -42,6 +42,11 @@ use super::{restore, snapshot, ForgeResult, Syncer};
 /// is the shape (`tier::epoch::takeover_sweep`).
 pub async fn abort_orphaned_uploads(sc: &Syncer) -> ForgeResult<usize> {
     sc.check_fence()?;
+    // "Nothing of ours is in flight" is false while a fold uploads on
+    // its task; aborting then would end the holder's own base rebuild.
+    if sc.fold.is_some() {
+        return Err(ForgeError::State("a fold is in flight; the upload sweep waits".into()));
+    }
     let prefix = format!("{}/", sc.cfg.git_prefix());
     let pending = sc.store.list_uploads(&prefix).await?;
     for u in &pending {
@@ -56,6 +61,9 @@ pub async fn abort_orphaned_uploads(sc: &Syncer) -> ForgeResult<usize> {
 
 pub async fn sweep(sc: &mut Syncer) -> ForgeResult<usize> {
     sc.check_fence()?;
+    if sc.fold.is_some() {
+        return Err(ForgeError::State("a fold is in flight; the sweep waits".into()));
+    }
     // In-flight uploads first: between batches nothing of ours is in
     // flight, so every one of them is an orphan.
     abort_orphaned_uploads(sc).await?;
@@ -102,6 +110,7 @@ pub async fn sweep(sc: &mut Syncer) -> ForgeResult<usize> {
                     key: obj.key.clone(),
                     size: obj.size,
                     etag: obj.etag.clone(),
+                    last_modified_unix: obj.last_modified_unix,
                 },
             );
         }
@@ -114,6 +123,16 @@ pub async fn sweep(sc: &mut Syncer) -> ForgeResult<usize> {
         }
         if live_bundles.iter().any(|b| b == name) {
             continue;
+        }
+        // A prefilter on the LISTED age: an object can be made younger
+        // after the listing (a re-upload) but never older, so a listed
+        // age under the grace cannot pass rule 2 at the delete, and the
+        // HEAD is saved. Under tiers every push leaves two orphans and
+        // the serial HEADs would hold the loop for minutes.
+        if let Some(t) = obj.last_modified_unix {
+            if now.saturating_sub(t) < grace {
+                continue;
+            }
         }
         // Rule 2: the age is read at the delete, from the store's own
         // clock — never from ours, and never from the listing, which

@@ -94,6 +94,15 @@ pub struct Facts {
     pub renewal_overdue: bool,
     pub renew_term_secs: u64,
     pub progress: u64,
+    /// Compaction tiers (X18): the base pack, the tier count, the packs
+    /// retention still holds on disk, and the fold in flight.
+    pub base: Option<String>,
+    pub tier_packs: usize,
+    pub retained: usize,
+    pub fold_stage: Option<&'static str>,
+    pub fold_bytes: u64,
+    pub fold_inputs: usize,
+    pub fold_is_base: bool,
 }
 
 impl Facts {
@@ -109,6 +118,7 @@ impl Facts {
 }
 
 pub fn facts(sc: &Syncer, phase: Phase) -> Facts {
+    let ff = super::fold::facts(sc);
     Facts {
         phase,
         holder_id: sc.holder_id.clone(),
@@ -124,6 +134,13 @@ pub fn facts(sc: &Syncer, phase: Phase) -> Facts {
         renewal_overdue: sc.hold.renewal_overdue(sc.cfg.renew_term()),
         renew_term_secs: sc.cfg.renew_term().as_secs(),
         progress: sc.hold.progress(),
+        base: ff.base,
+        tier_packs: ff.tier_packs,
+        retained: ff.retained,
+        fold_stage: ff.stage,
+        fold_bytes: ff.bytes,
+        fold_inputs: ff.inputs,
+        fold_is_base: ff.is_base,
     }
 }
 
@@ -148,7 +165,10 @@ pub fn document(f: &Facts, now: u64) -> serde_json::Value {
         // readiness is withdrawn, the lease is not given up.
         "epoch": { "held": held, "number": f.lease_epoch.unwrap_or(0), "lastRenewUnix": f.last_renew_unix,
                    "renewalOverdue": f.renewal_overdue, "termSecs": f.renew_term_secs },
-        "repo": { "refs": f.refs, "packs": f.packs, "snapshotSeq": f.snapshot_seq },
+        "repo": { "refs": f.refs, "packs": f.packs, "snapshotSeq": f.snapshot_seq,
+                  "base": f.base, "tierPacks": f.tier_packs, "retained": f.retained,
+                  "fold": f.fold_stage.map(|st| serde_json::json!({
+                      "stage": st, "bytes": f.fold_bytes, "inputs": f.fold_inputs, "base": f.fold_is_base })) },
         "syncerVersion": super::SYNCER_VERSION,
         // Set ⇒ this server has been deposed and serves nothing. The
         // operator reads it as it reads `importRefused`: a stated

@@ -43,6 +43,10 @@ pub async fn restore(sc: &mut Syncer) -> ForgeResult<()> {
     let branch = sc.cfg.default_branch.clone();
     let hooks = sc.cfg.hooks_path.clone();
     sc.git.init_bare(&branch, hooks.as_deref()).await?;
+    // The fold's state from a previous incarnation: the retained set
+    // is honoured, the ledger kept, the scratch wiped (nothing in it
+    // was ever named) and a stray multi-pack index removed.
+    super::fold::load_state(sc)?;
 
     let mut cell = match sc.cell.clone() {
         // A takeover rotation already loaded (and rewrote) it.
@@ -119,8 +123,50 @@ pub async fn restore(sc: &mut Syncer) -> ForgeResult<()> {
             }
         }
     }
+    // Largest first, so the base's chunks start at once and the tail
+    // of the fan-out is not one stream.
+    units.sort_by_key(|u| std::cmp::Reverse(u.size));
     packio::fetch_all(sc.store.clone(), units, sc.cfg.fanout, Some(sc.hold.progress_handle()))
         .await?;
+
+    // Reconcile packs, the twin of the refs rule above: a local pack
+    // the snapshot does not name is unlinked unless retention keeps it.
+    // This is what makes every fold crash window benign — a fold pack
+    // renamed in but never CAS'd, or inputs unnamed but not yet
+    // retained — and it brings the code to what `ForgeSync.tla`'s
+    // `Restore` already assumes. A pack without its index (a push
+    // mid-migration) is left alone.
+    {
+        let named: BTreeSet<&String> = cell.snap.packs.iter().collect();
+        let retained: BTreeSet<&String> = sc.retained.iter().map(|r| &r.name).collect();
+        for pack in sc.git.local_packs()? {
+            if named.contains(&pack) || retained.contains(&pack) {
+                continue;
+            }
+            let stem = pack.trim_end_matches(".pack").to_string();
+            for ext in [".idx", ".rev", ".bitmap", ".keep", ".pack"] {
+                let _ = std::fs::remove_file(pack_dir.join(format!("{stem}{ext}")));
+            }
+            eprintln!("flint-forge: restore unlinked {pack}, which the snapshot does not name");
+        }
+    }
+
+    // The base marker: the named pack whose bitmap the bucket carries;
+    // the largest of them if a legacy `repack -b` pack coexists with a
+    // new base (git picks one bitmap silently).
+    {
+        let mut with_bitmap: Vec<(u64, &String)> = cell
+            .snap
+            .packs
+            .iter()
+            .filter(|p| listed.contains_key(&format!("{}.bitmap", p.trim_end_matches(".pack"))))
+            .map(|p| (listed.get(p.as_str()).map(|o| o.size).unwrap_or(0), p))
+            .collect();
+        with_bitmap.sort();
+        if let Some((_, base)) = with_bitmap.last() {
+            super::fold::set_base_marker(&sc.cfg.repo, base)?;
+        }
+    }
 
     // Refs: the snapshot's set, exactly. `update-ref --stdin` verifies
     // each object exists, so this is also the first proof that the
@@ -179,7 +225,12 @@ pub async fn list_pack_files(sc: &Syncer) -> ForgeResult<BTreeMap<String, PackOb
         if let Some(name) = obj.key.rsplit('/').next() {
             out.insert(
                 name.to_string(),
-                PackObject { key: obj.key.clone(), size: obj.size, etag: obj.etag.clone() },
+                PackObject {
+                    key: obj.key.clone(),
+                    size: obj.size,
+                    etag: obj.etag.clone(),
+                    last_modified_unix: obj.last_modified_unix,
+                },
             );
         }
     }
@@ -196,6 +247,9 @@ pub struct PackObject {
     pub key: String,
     pub size: u64,
     pub etag: String,
+    /// The listing's age, for the sweep's prefilter; `None` when the
+    /// store did not say.
+    pub last_modified_unix: Option<u64>,
 }
 
 /// Repack when the pack count passes the threshold, then publish the

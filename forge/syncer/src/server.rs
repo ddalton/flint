@@ -23,7 +23,7 @@ use super::batch::{self, PushReport};
 use super::policy::Policy;
 use super::status::{self, Phase, Shared};
 use super::uds::{self, HookResponse, Incoming};
-use super::{bundle, lease, restore, ForgeError, ForgeResult, Syncer};
+use super::{bundle, fold, lease, restore, ForgeError, ForgeResult, Syncer};
 
 pub struct ServerOpts {
     pub socket: PathBuf,
@@ -165,9 +165,24 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                        from this server until the next cut");
         }
     }
+    // Under tiers the full LIST sweep runs here — what a crashed
+    // incarnation or a deposed straggler left — and then once per
+    // `sweep_every_secs`, never with a fold in flight; the ledger sweep
+    // on the tick covers what folds unname. (The control rule sweeps
+    // after each repack, as it always did.)
+    if sc.cfg.fold_factor > 0 {
+        match super::sweep::sweep(&mut sc).await {
+            Ok(_) => sc.last_full_sweep_unix = super::now_unix(),
+            Err(e @ ForgeError::Fenced(_)) => return Err(e),
+            Err(e) => eprintln!("flint-forge: start-up sweep deferred: {e}"),
+        }
+    }
     publish(&shared, &sc, Phase::Serving);
 
     // ── serve ────────────────────────────────────────────────────────
+    // The fold task beside the loop reports on this channel; the loop
+    // owns the receiver so the select below borrows nothing of `sc`.
+    let (fold_tx, mut fold_rx) = mpsc::channel::<fold::FoldResult>(4);
     let (tx, mut rx) = mpsc::channel::<Incoming>(256);
     {
         let socket = opts.socket.clone();
@@ -202,6 +217,9 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
         tokio::select! {
             _ = term.recv() => {
                 publish(&shared, &sc, Phase::Draining);
+                // A fold in flight named nothing yet: kill its task and
+                // drop its scratch; the successor plans it again.
+                fold::abort(&mut sc);
                 match lease::release(&mut sc).await {
                     Ok(()) => eprintln!("flint-forge: lease released; a successor may claim at once"),
                     // Not fatal: the successor waits out the quiet
@@ -226,6 +244,9 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                 return Err(ForgeError::Fenced(why));
             }
             _ = maintenance.tick() => {
+                if sc.cfg.fold_factor > 0 {
+                    fold_tick(&mut sc, &fold_tx).await?;
+                }
                 if let Some(bcfg) = opts.bundle.as_ref() {
                     match super::bundle::maybe_run(&mut sc, bcfg, super::now_unix()).await {
                         // Stashed for the next batch's CAS, never one
@@ -273,6 +294,11 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                     }
                 }
             }
+            res = fold_rx.recv() => {
+                if let Some(res) = res {
+                    fold_landed(&mut sc, res, &fold_tx).await?;
+                }
+            }
             incoming = rx.recv() => {
                 let Some(first) = incoming else {
                     return Err(ForgeError::State("the hook socket closed".into()));
@@ -293,7 +319,7 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                         ),
                     }
                 }
-                run_and_report(&mut sc, waiting, &policy, &shared).await?;
+                run_and_report(&mut sc, waiting, &policy, &shared, &fold_tx).await?;
                 // AFTER the report, and never before it. The export is
                 // derived data: a push is acknowledged on the strength
                 // of the pack and the snapshot, and nothing about
@@ -336,6 +362,77 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
     }
 }
 
+fn log_plan(plan: &fold::Plan) {
+    match plan {
+        fold::Plan::Fold { inputs } => {
+            eprintln!("flint-forge: folding {} tier pack(s) beside the loop", inputs.len())
+        }
+        fold::Plan::Base { inputs } => eprintln!(
+            "flint-forge: rebuilding the base from {} named pack(s) beside the loop",
+            inputs.len()
+        ),
+    }
+}
+
+/// The fold task's result: its error is logged and the fold cleared;
+/// its pack is committed on the loop, and a commit whose CAS neither
+/// landed nor 412'd is fatal — the process restarts and restores rather
+/// than leave an unnamed pack for the next batch to upload on a push's
+/// path.
+async fn fold_landed(
+    sc: &mut Syncer,
+    res: fold::FoldResult,
+    fold_tx: &mpsc::Sender<fold::FoldResult>,
+) -> ForgeResult<()> {
+    if let Some(e) = res.error.as_ref() {
+        eprintln!("flint-forge: fold failed beside the loop: {e}");
+        fold::abort(sc);
+        return Ok(());
+    }
+    match fold::commit(sc, res, super::now_unix()).await {
+        Ok(_) => {}
+        Err(e @ ForgeError::Fenced(_)) => return Err(e),
+        Err(e) => return Err(e),
+    }
+    match fold::maybe_spawn(sc, fold_tx.clone(), super::now_unix()) {
+        Ok(Some(plan)) => log_plan(&plan),
+        Ok(None) => {}
+        Err(e @ ForgeError::Fenced(_)) => return Err(e),
+        Err(e) => eprintln!("flint-forge: fold not planned: {e}"),
+    }
+    Ok(())
+}
+
+/// The tick's fold work: the stall detector, retention's unlinks, the
+/// ledger sweep (capped), the plan, and the full LIST sweep when due
+/// and no fold is in flight.
+async fn fold_tick(sc: &mut Syncer, fold_tx: &mpsc::Sender<fold::FoldResult>) -> ForgeResult<()> {
+    let now = super::now_unix();
+    fold::check_stall(sc, now);
+    if let Err(e) = fold::unlink_retained(sc, now) {
+        eprintln!("flint-forge: retained packs not unlinked: {e}");
+    }
+    match fold::sweep_ledger(sc, now, 64).await {
+        Ok(_) => {}
+        Err(e @ ForgeError::Fenced(_)) => return Err(e),
+        Err(e) => eprintln!("flint-forge: ledger sweep deferred: {e}"),
+    }
+    match fold::maybe_spawn(sc, fold_tx.clone(), now) {
+        Ok(Some(plan)) => log_plan(&plan),
+        Ok(None) => {}
+        Err(e @ ForgeError::Fenced(_)) => return Err(e),
+        Err(e) => eprintln!("flint-forge: fold not planned: {e}"),
+    }
+    if sc.fold.is_none() && now.saturating_sub(sc.last_full_sweep_unix) >= sc.cfg.sweep_every_secs {
+        match super::sweep::sweep(sc).await {
+            Ok(_) => sc.last_full_sweep_unix = now,
+            Err(e @ ForgeError::Fenced(_)) => return Err(e),
+            Err(e) => eprintln!("flint-forge: sweep deferred: {e}"),
+        }
+    }
+    Ok(())
+}
+
 /// The pruner's own interval, tracked separately from the maintenance
 /// tick so that turning the pass down to daily does not also turn the
 /// bundle cadence down.
@@ -375,7 +472,24 @@ async fn collect(
     };
     *next_id += 1;
     out.push(push_of(first, *next_id));
+    // X20: a batch is what arrived while the previous batch ran, not
+    // what arrives during a fixed wait. Pushes queue on the channel for
+    // as long as a batch takes, so group commit under load is free and
+    // a lone push pays nothing — the 400 ms window it used to pay was
+    // 0.48 s of the 0.58 s a 1 KiB push cost on the wire (the walgit
+    // comparison's P1). What is already queued is drained without
+    // waiting; a window > 0 is kept as a knob for a caller that wants
+    // the old behaviour.
     if sc.cfg.batch_window_ms == 0 {
+        while out.len() < sc.cfg.batch_max {
+            match rx.try_recv() {
+                Ok(inc) => {
+                    *next_id += 1;
+                    out.push(push_of(inc, *next_id));
+                }
+                Err(_) => break,
+            }
+        }
         return out;
     }
     let deadline =
@@ -398,6 +512,7 @@ async fn run_and_report(
     waiting: Vec<Waiting>,
     policy: &Policy,
     shared: &Shared,
+    fold_tx: &mpsc::Sender<fold::FoldResult>,
 ) -> ForgeResult<()> {
     let pushes: Vec<batch::PushRequest> = waiting.iter().map(|w| w.push.clone()).collect();
     // A phase that must move: the renewer renews it only while the
@@ -408,20 +523,31 @@ async fn run_and_report(
         Ok(reports) => {
             deliver(waiting, reports);
             publish(shared, sc, Phase::Serving);
-            // Between batches, never beside them: git's own auto-gc is
-            // off precisely so that nothing but this task writes
-            // `objects/pack/` (design §10).
-            match restore::maybe_repack(sc).await {
-                Ok(true) => {
-                    publish(shared, sc, Phase::Sweeping);
-                    if let Err(e) = super::sweep::sweep(sc).await {
-                        eprintln!("flint-forge: sweep deferred: {e}");
+            if sc.cfg.fold_factor == 0 {
+                // The CONTROL rule (X18): between batches, never beside
+                // them — the full repack with the loop inside its upload.
+                match restore::maybe_repack(sc).await {
+                    Ok(true) => {
+                        publish(shared, sc, Phase::Sweeping);
+                        if let Err(e) = super::sweep::sweep(sc).await {
+                            eprintln!("flint-forge: sweep deferred: {e}");
+                        }
+                        publish(shared, sc, Phase::Serving);
                     }
-                    publish(shared, sc, Phase::Serving);
+                    Ok(false) => {}
+                    Err(e @ ForgeError::Fenced(_)) => return Err(e),
+                    Err(e) => eprintln!("flint-forge: repack deferred: {e}"),
                 }
-                Ok(false) => {}
-                Err(e @ ForgeError::Fenced(_)) => return Err(e),
-                Err(e) => eprintln!("flint-forge: repack deferred: {e}"),
+            } else {
+                // Tiers: a fold's bytes are never on a push's path. The
+                // plan runs here and on the tick; the task runs beside
+                // the loop; only its commit (the fold arm) is on it.
+                match fold::maybe_spawn(sc, fold_tx.clone(), super::now_unix()) {
+                    Ok(Some(plan)) => log_plan(&plan),
+                    Ok(None) => {}
+                    Err(e @ ForgeError::Fenced(_)) => return Err(e),
+                    Err(e) => eprintln!("flint-forge: fold not planned: {e}"),
+                }
             }
             Ok(())
         }
@@ -651,5 +777,100 @@ async fn handle_lfs(
         }
     } else {
         (404, lfs::LFS_MEDIA_TYPE, lfs_error("no such LFS route"))
+    }
+}
+
+#[cfg(test)]
+mod collect_tests {
+    //! X20 on virtual time. Every test here has a control: the timed
+    //! window (> 0) must still wait, or the tests would pass against a
+    //! collector that ignored the knob altogether.
+    use super::super::{gitcmd::RefUpdate, ForgeConfig};
+    use super::*;
+
+    fn syncer(window_ms: u64) -> (Syncer, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = ForgeConfig::new("t/r", dir.path().join("repo.git"));
+        cfg.batch_window_ms = window_ms;
+        cfg.batch_max = 4;
+        let store: Arc<dyn flint_store::ObjectStore> =
+            Arc::new(flint_store::memory::MemoryStore::new());
+        (Syncer::new(store, cfg, "collect-test".into()), dir)
+    }
+
+    fn incoming(n: u64) -> Incoming {
+        let (reply, _rx) = tokio::sync::oneshot::channel();
+        Incoming {
+            request: uds::HookRequest {
+                principal: "tester".into(),
+                options: vec![],
+                commands: vec![RefUpdate {
+                    name: format!("refs/heads/b{n}"),
+                    old_oid: "0".repeat(40),
+                    new_oid: format!("{n:040x}"),
+                }],
+            },
+            reply,
+        }
+    }
+
+    /// A lone push at window 0 is a batch of one, and the collector
+    /// returns without the clock moving.
+    #[tokio::test(start_paused = true)]
+    async fn a_lone_push_pays_no_window() {
+        let (sc, _d) = syncer(0);
+        let (_tx, mut rx) = mpsc::channel::<Incoming>(8);
+        let mut id = 0;
+        let t0 = tokio::time::Instant::now();
+        let got = collect(&mut rx, incoming(1), &sc, &mut id).await;
+        assert_eq!(got.len(), 1);
+        assert_eq!(tokio::time::Instant::now(), t0, "no wait at window 0");
+    }
+
+    /// Pushes that queued while a batch ran are drained into the next
+    /// batch, without waiting and up to `batch_max`.
+    #[tokio::test(start_paused = true)]
+    async fn what_queued_during_a_batch_is_the_next_batch() {
+        let (sc, _d) = syncer(0);
+        let (tx, mut rx) = mpsc::channel::<Incoming>(8);
+        for n in 2..=6 {
+            tx.send(incoming(n)).await.unwrap();
+        }
+        let mut id = 0;
+        let t0 = tokio::time::Instant::now();
+        let got = collect(&mut rx, incoming(1), &sc, &mut id).await;
+        assert_eq!(got.len(), 4, "batch_max bounds the drain");
+        assert_eq!(tokio::time::Instant::now(), t0, "the drain does not wait");
+        let next_first = rx.try_recv().unwrap();
+        let rest = collect(&mut rx, next_first, &sc, &mut id).await;
+        assert_eq!(rest.len(), 2, "the remainder is the batch after");
+        assert_eq!(id, 6);
+    }
+
+    /// The control: a window > 0 still waits for it, so the two tests
+    /// above are about the knob's value and not about a collector that
+    /// never waits.
+    #[tokio::test(start_paused = true)]
+    async fn a_positive_window_still_waits() {
+        let (sc, _d) = syncer(400);
+        let (tx, mut rx) = mpsc::channel::<Incoming>(8);
+        let mut id = 0;
+        let t0 = tokio::time::Instant::now();
+        // A sender stays alive in this scope: a closed channel ends the
+        // window early by design, and this test is about the timer.
+        let late_tx = tx.clone();
+        let late = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            late_tx.send(incoming(2)).await.unwrap();
+        });
+        let got = collect(&mut rx, incoming(1), &sc, &mut id).await;
+        late.await.unwrap();
+        assert_eq!(got.len(), 2, "a push inside the window joins the batch");
+        let waited = tokio::time::Instant::now() - t0;
+        assert!(
+            waited >= std::time::Duration::from_millis(400),
+            "the window is waited out ({waited:?})"
+        );
+        drop(tx);
     }
 }

@@ -16,6 +16,8 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--name", required=True)
 ap.add_argument("--csv", required=True)
 ap.add_argument("--threshold", type=int, required=True)
+ap.add_argument("--fold", type=int, default=0, help="compaction tiers' factor; 0 = the repack rule")
+ap.add_argument("--max-ratio", type=float, default=0.0, help="the tiers arm's pre-registered ceiling")
 a = ap.parse_args()
 
 rows = []
@@ -52,7 +54,23 @@ if spikes:
                f"the largest was push {biggest[0]} at {biggest[2]/MIB:.1f} MiB for "
                f"{biggest[1]/MIB:.3f} MiB of content")
 
-if a.threshold > len(steady):
+if a.fold > 0:
+    # The tiers arm (X18): the claim is a LOGARITHMIC amortised cost,
+    # pre-registered per shape, and no single push paying the whole
+    # repository outside a base rebuild. The largest upload in a run is
+    # named either way; the ceiling is the verdict.
+    biggest = max(steady, key=lambda r: r[2])
+    out.append(f"NOTE {a.name}: the largest single upload was push {biggest[0]} at "
+               f"{biggest[2]/MIB:.1f} MiB for {biggest[1]/MIB:.3f} MiB of content")
+    if a.max_ratio > 0 and ratio <= a.max_ratio:
+        out.append(f"PASS {a.name}: tiers at factor {a.fold} amortise to {ratio:.1f}x, within the "
+                   f"pre-registered {a.max_ratio:g}x")
+    elif a.max_ratio > 0:
+        out.append(f"FAIL {a.name}: tiers at factor {a.fold} amortise to {ratio:.1f}x, above the "
+                   f"pre-registered {a.max_ratio:g}x")
+    else:
+        out.append(f"NOTE {a.name}: tiers at factor {a.fold} amortise to {ratio:.1f}x (no ceiling given)")
+elif a.threshold > len(steady):
     # The control arm: no repack can fire, so nothing but each push's
     # own pack is uploaded. If this is not ~1x the measurement is not
     # measuring the repack.

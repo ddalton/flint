@@ -215,7 +215,10 @@ pub async fn run_batch(
     lease::renew(sc).await?;
 
     // ── step 4: upload every pack the bucket does not have ───────────
-    let local_packs = sc.git.local_packs()?;
+    // The listing minus what a fold superseded and retention keeps on
+    // disk: a retained pack re-listed here would be re-named and
+    // re-uploaded (fold.rs).
+    let local_packs = sc.listed_packs()?;
     let known: BTreeSet<&String> = cell.snap.packs.iter().collect();
     let epoch = sc.lease()?.epoch;
     // Pack siblings are independent, immutable, content-named keys
@@ -268,16 +271,7 @@ pub async fn run_batch(
         }
     }
     next.packs = local_packs;
-    // The export's commit rides this CAS rather than one of its own.
-    if let Some(c) = sc.pending_exported_commit.take() {
-        next.exported_commit = Some(c);
-    }
-    // Only the newest bundle is advertised, so only the newest is
-    // named. The sweep collects the rest past the grace, which
-    // comfortably outlives a clone that is already holding a URL.
-    if let Some(b) = sc.pending_bundle.take() {
-        next.bundles = vec![b];
-    }
+    carry_pending(sc, &mut next);
     let writer = sc.holder_id.clone();
     let new_cell =
         match snapshot::cas(sc.store.as_ref(), &sc.cfg, &cell, next, epoch, &writer).await {
@@ -502,15 +496,45 @@ async fn judge_merge(
 /// The dumb protocol's derived files, so the bucket alone is a
 /// read-only remote (design §3).
 ///
+/// What rides the next snapshot CAS, whichever path writes it — a
+/// batch's or a fold's commit: the export's commit and the newest
+/// bundle. Neither writes the snapshot itself, or it would be a second
+/// writer of the one object that has exactly one.
+///
+/// Only the newest bundle is advertised, so only the newest is named;
+/// the sweep collects the rest past the grace, which comfortably
+/// outlives a clone that is already holding a URL.
+pub(crate) fn carry_pending(sc: &mut Syncer, next: &mut snapshot::Snapshot) {
+    if let Some(c) = sc.pending_exported_commit.take() {
+        next.exported_commit = Some(c);
+    }
+    if let Some(b) = sc.pending_bundle.take() {
+        next.bundles = vec![b];
+    }
+}
+
 /// `objects/info/packs` goes up BEFORE `info/refs`. A dumb clone that
 /// reads fresh refs against a stale pack list looks for objects that
 /// are not listed and fails; the reverse order serves the previous
 /// state, which is merely old. `git update-server-info` writes both
 /// files in the repository, so the format is git's rather than ours.
-async fn publish_derived(sc: &mut Syncer) -> ForgeResult<()> {
+pub(crate) async fn publish_derived(sc: &mut Syncer) -> ForgeResult<()> {
     sc.git.must(&["update-server-info"], None).await?;
     let epoch = sc.lease()?.epoch;
     let repo = sc.cfg.repo.clone();
+    // `update-server-info` lists every pack in the directory, retained
+    // ones included; the dumb protocol's list is the SNAPSHOT's, so a
+    // reader of the bucket is never sent a pack the sweep has taken.
+    {
+        let mut body = String::new();
+        for p in &sc.cell()?.snap.packs {
+            body.push_str("P ");
+            body.push_str(p);
+            body.push('\n');
+        }
+        body.push('\n');
+        std::fs::write(repo.join("objects/info/packs"), body)?;
+    }
     for (rel, key) in [
         ("objects/info/packs", sc.cfg.info_packs_key()),
         ("info/refs", sc.cfg.info_refs_key()),
