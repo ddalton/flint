@@ -102,11 +102,15 @@ the CloudWatch sums for run 1 are in
 | bytes | 40.4 GB | 15.5 GB |
 | the largest packs | 6977, 5953, 5953, 5864, 5672 MiB: five full repacks of one repository | 4416 MiB, one geometric fold; then 1344, 1168, 1024, 1024 |
 | uploaded during run 1 (CloudWatch, one 2694 s window) | 39.3 GB in 4,442 requests (1814 PUT, 983 GET, 1581 HEAD) | 15.8 GB in 14,045 requests (5386 PUT, 5098 GET, 3557 HEAD) |
+| run 2 (908 s: one 1 GiB push, eight clones, a cold start, an undo, an outage) | uploaded 1.07 GB; **downloaded 11.84 GB** in 1,435 GETs | uploaded 1.07 GB; downloaded 2.30 GB in 378 GETs |
 
 Run 1 pushed about 7.2 GB of content (five of 1 GiB, five of 64 MiB,
 48 of 8 MiB, 64 tiny, one 1 GiB branch for P7). Forge uploaded 5.5×
 that and walgit 2.2×; walgit's excess is its own folds, forge's is
-the full repack every 24 packs.
+the full repack every 24 packs. Run 2's download column is X14 in
+bytes: forge's cold start in P5 fetched the whole live pack set, about
+11 GB for a 1 GiB clone, where walgit fetched the packs the clone and
+the undo needed (`results/work-20260905-224804/cw-summary.txt`).
 
 ### Under §9's rule
 
