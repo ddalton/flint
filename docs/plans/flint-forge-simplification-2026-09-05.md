@@ -28,7 +28,7 @@ pinning.
 |---|---|---|---|
 | A1 syncer serves smart-HTTP, door stays | no | nginx, fcgiwrap, their knobs | the bucket credential into the process that parses untrusted HTTP; `index-pack` of a 40 GiB push into the lease holder's cgroup |
 | A2 drop the door too | **reject** | one hop | wake-from-zero (the door holds the request while a parked repo starts), per-repo addressing at 3,000 repos, TokenReview per pod, the NetworkPolicy boundary |
-| **A3 one Rust CGI runner replaces nginx + fcgiwrap; door and container split kept** | **built** 2026-09-05; cluster acceptance owed | fcgiwrap buffering, the 4-worker ceiling, nginx's 3600 s cutoffs and two unset 60 s defaults | 382 lines of runner, four integration tests over real git; reverses design decision 15.1 for the runner |
+| **A3 one Rust CGI runner replaces nginx + fcgiwrap; door and container split kept** | **accepted on the wire** 2026-09-05 (runby, run 7: the party table's legs green, the nginx control fails every one) | fcgiwrap buffering, the 4-worker ceiling, nginx's 3600 s cutoffs and two unset 60 s defaults | 382 lines of runner, four integration tests over real git; reverses design decision 15.1 for the runner |
 | B1 early ack | **reject** | the wait | the guarantee: a successor restores strictly to the snapshot and deletes refs it does not name; the client's retry says "Everything up-to-date" |
 | B2 progress lines on the sideband | optional | silence for humans | nothing: same pipe as the keepalives, so every buffering knob stays load-bearing |
 | B3 the door as the only waiter | reject | nothing | the class into the door, which would then promise liveness it cannot verify |
@@ -173,11 +173,24 @@ must be seen a second apart (first within 3 s, spread ≥ 4 s); through
 fcgiwrap they had arrived together with the report. The git image now
 holds one process (`Dockerfile.forge-git`: `ENTRYPOINT
 flint-forge-gitcgi`; `nginx.conf` and `entrypoint.sh` deleted) and a
-clone-push-clone smoke passes through the container's port. Owed: the
-cluster legs — the party table's four (a client stalled 70 s
-mid-pack, five concurrent pushes, a rollout mid-push, and
-`receive.keepAlive=0` as the failing control) and the gap probe
-through the door — which need a cluster.
+clone-push-clone smoke passes through the container's port.
+
+Accepted on the wire the same evening (cluster runby, `forge/e2e/scale/`
+run 7, `scale-20260905-183906` and `-191810`; the control
+`-192355`): the party table's legs S5–S10 — a client stalled 70 s
+mid-pack acknowledged; five pushes stopped mid-body holding five
+receive-packs with a request beside them answered at once; a rollout
+mid-push SIGKILLing the batch at 32 s with the client told failed, the
+bucket unchanged and the retry converging (X6 answered); 48 keepalive
+packets across a 232 s hook wait with a longest gap of 5.8 s; the
+`receive.keepAlive=0` control cut 30.5 s after the upload under a 30 s
+door bound; eight concurrent clones at the tip with eight upload-packs
+at the peak — and the control arm, the same syncer behind the last
+nginx + fcgiwrap image, failing exactly S5 (502 at 60 s), S6 (four
+receive-packs, the request queued 60 s), S9 (49 packets in one burst
+with the report) and S10 (four upload-packs for eight clones) while
+its plain pushes passed. X3 and X4 are closed by removal; X5 is
+carried; X6 is measured.
 
 ## 3. The wait: the hook must keep waiting
 
@@ -392,10 +405,10 @@ exist. Do not delete either. What can be simpler:
 |---|---|---|---|
 | X1 | `local_packs` listed every `pack-*.pack`; git migrates quarantine as `.keep`, `.pack`, `.rev`, `.idx` (`tmp-objdir.c`, `pack_copy_priority`, confirmed in v2.43.0), so a concurrent push's pack is visible before its index; a batch in step 4 uploads and names it, never uploads the index (a named pack is skipped for good), and a restore installs refs into objects git cannot see: `Refused`, exit 78, unrecoverable | data loss at restore | **fixed**: the listing requires the `.idx`; test `a_pack_without_its_index_is_neither_uploaded_nor_named`, which fails against the old listing |
 | X2 | a pack refused at `proc-receive` is still uploaded and named when any other push in the batch is accepted (`batch.rs:197-202`); the design's "deleted locally once the `.keep` drops" (§4) has no code | cost, not integrity | open |
-| X3 | nginx `client_body_timeout` and `send_timeout` unset (60 s defaults) | a 60 s stall mid-pack is a 408 | **pinned** to 3600 s beside the backend bounds; goes away under A3 |
-| X4 | `FCGIWRAP_CHILDREN=4` | the fifth concurrent request queues until the door cuts it | open; goes away under A3 |
+| X3 | nginx `client_body_timeout` and `send_timeout` unset (60 s defaults) | a 60 s stall mid-pack is a 408 | **gone with nginx** (A3); run 7 S5: a 70 s stall acknowledged through the runner, a 502 through the control |
+| X4 | `FCGIWRAP_CHILDREN=4` | the fifth concurrent request queues until the door cuts it | **gone with fcgiwrap** (A3); run 7 S6/S10: five receive-packs and eight upload-packs at the peak through the runner, four through the control |
 | X5 | `receive.keepAlive` not set explicitly | the guarantee rests on git's default | **pinned** explicitly at 5 s in the receive config |
-| X6 | `terminationGracePeriodSeconds: 30` versus batches of minutes; SIGTERM seen only between batches | any rollout mid-push fails that push | open: decide whether a roll waits for the batch |
+| X6 | `terminationGracePeriodSeconds: 30` versus batches of minutes; SIGTERM seen only between batches | any rollout mid-push fails that push | **measured** (run 7 S7): SIGKILL at 32 s, told failed, bucket unchanged, retry converges, orphans swept — clean, and the push is lost; whether a roll waits for the batch is still the decision |
 | X7 | a failed `/status` poll with a Ready pod yields `Starting`, and the door waits on it | a live repository leaves rotation on a blind poll | open |
 | X8 | push-only activity clock; `requested-at` stamped only on wake | clone-only repositories are suspended and rewoken | open |
 | X9 | readiness Serving-only, `Pushing` answers 503 | headless DNS withdrawn during a long push | unverified |
@@ -410,8 +423,9 @@ exist. Do not delete either. What can be simpler:
 3. D1 the multi-call hook and one tag (done; X10 with it).
 4. A3 the runner, with the keepalive-gap probe as its acceptance and
    the party-table legs added to the rig first, so the runner is
-   judged by the class it claims to remove — **built 2026-09-05** and
-   tested against real git locally; the cluster legs are owed.
+   judged by the class it claims to remove — **built and accepted on
+   the wire 2026-09-05** (run 7 on runby; the nginx control fails every
+   leg it must).
 5. X7 and X8 in the operator; X6 and X9 decided on the wire.
 6. C2 only when the poll count is the operator's cost.
 
