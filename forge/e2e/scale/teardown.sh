@@ -15,6 +15,14 @@ REGION=${REGION:-us-west-1}
 IAM_USER=${IAM_USER:-$BUCKET}
 export AWS_PROFILE=${ADMIN_PROFILE:-trove-admin} AWS_REGION=$REGION AWS_DEFAULT_REGION=$REGION
 TROVE=${TROVE_BASE_URL:-https://localhost:8080/api/v1}
+# The admin identity, verified BEFORE anything is judged. With an expired
+# SSO token every head-bucket and get-user below fails, and the first
+# run of this script on runby (2026-09-05) read those failures as
+# "absent", shredded the keyfile, and left the bucket and the user
+# standing: an auth failure is not an absence. A judgement needs a
+# credential that can see.
+aws sts get-caller-identity --query Arn --output text >/dev/null 2>&1 \
+    || { echo "the admin profile '$AWS_PROFILE' cannot authenticate — run: aws sso login --profile $AWS_PROFILE --use-device-code — nothing judged, nothing removed" >&2; exit 3; }
 api() { curl -sk --noproxy '*' --max-time 60 -X "$1" "$TROVE$2" -H 'Authorization: Bearer trove-dummy-token' -H 'Content-Type: application/json' ${3:+-d "$3"}; }
 
 echo "── cluster $CLUSTER ──"
@@ -23,7 +31,12 @@ if [ -n "$pid" ]; then api POST /projects/delete "{\"projectId\":$pid}" >/dev/nu
 else echo "  no such project (already gone)"; fi
 
 echo "── bucket $BUCKET ──"
-if aws s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
+# 404 is absence; anything else that is not success is "cannot tell".
+hb=$(aws s3api head-bucket --bucket "$BUCKET" 2>&1); hb_rc=$?
+if [ "$hb_rc" != 0 ] && ! printf '%s' "$hb" | grep -q -E '\(404\)|Not Found'; then
+    echo "  cannot tell whether the bucket exists: $hb" >&2; exit 3
+fi
+if [ "$hb_rc" = 0 ]; then
     n=0
     while read -r uid k; do
         [ -n "$uid" ] || continue
@@ -35,7 +48,11 @@ if aws s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
 else echo "  absent"; fi
 
 echo "── iam user $IAM_USER ──"
-if aws iam get-user --user-name "$IAM_USER" >/dev/null 2>&1; then
+gu=$(aws iam get-user --user-name "$IAM_USER" 2>&1); gu_rc=$?
+if [ "$gu_rc" != 0 ] && ! printf '%s' "$gu" | grep -q NoSuchEntity; then
+    echo "  cannot tell whether the user exists: $gu" >&2; exit 3
+fi
+if [ "$gu_rc" = 0 ]; then
     for k in $(aws iam list-access-keys --user-name "$IAM_USER" --query 'AccessKeyMetadata[].AccessKeyId' --output text); do
         aws iam delete-access-key --user-name "$IAM_USER" --access-key-id "$k" && echo "  key ${k:0:4}… deleted"
     done
@@ -44,9 +61,16 @@ if aws iam get-user --user-name "$IAM_USER" >/dev/null 2>&1; then
     done
     aws iam delete-user --user-name "$IAM_USER" && echo "  deleted"
 else echo "  absent"; fi
+# The keyfile goes only once the user it belongs to is confirmed gone:
+# a key on disk is the only way left to empty the bucket if the admin
+# side fails halfway.
 if [ -n "${KEYFILE:-}" ] && [ -f "$KEYFILE" ]; then
-    rm -P "$KEYFILE" 2>/dev/null || shred -u "$KEYFILE" 2>/dev/null || rm -f "$KEYFILE"
-    echo "  keyfile removed"
+    if aws iam get-user --user-name "$IAM_USER" 2>&1 | grep -q NoSuchEntity; then
+        rm -P "$KEYFILE" 2>/dev/null || shred -u "$KEYFILE" 2>/dev/null || rm -f "$KEYFILE"
+        echo "  keyfile removed"
+    else
+        echo "  keyfile KEPT: the user is not confirmed gone"
+    fi
 fi
 
 echo "── verify (instances take ~5 min to terminate) ──"
