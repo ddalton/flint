@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Two hundred and twenty-seven runs, ALL required.
+# Two hundred and thirty-seven runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -17,12 +17,12 @@
 #   awk '/^(strict_run|mutation_run|liveness_mutation_run)[ ]/ {print $2}' \
 #     scripts/check-tla.sh | sort | uniq -c | sort -rn
 #
-#   71 FlintReplication    33 FlintComposition    15 FlintExtents
-#   15 FlintClientIdentity   11 FlintExtentsProbe   11 FlintDelegRecall
-#   12 FlintCsiMount        8 FlintTierEpoch       8 ForgeSync
-#    7 FlintTruncate        7 FlintShareDisk       7 FlintTierMarker
-#    7 FlintTierSession     5 FlintAdmission       4 FlintSnapshots
-#    3 FlintA2Probe         3 FlintClaims)
+#   71 FlintReplication    33 FlintComposition    18 ForgeSync
+#   15 FlintExtents        15 FlintClientIdentity  12 FlintCsiMount
+#   11 FlintExtentsProbe   11 FlintDelegRecall      8 FlintTierEpoch
+#    7 FlintTruncate        7 FlintTierSession      7 FlintTierMarker
+#    7 FlintShareDisk       5 FlintAdmission        4 FlintSnapshots
+#    3 FlintClaims          3 FlintA2Probe)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -1152,10 +1152,10 @@ mutation_run FlintTierEpoch FlintTierEpochReleaseBeforeFence.cfg "tier-epoch rel
 # integrity). The scheduling axiom PollsNoFasterThanHeartbeat is the
 # module's one quantitative assumption (the challenger's polls and the
 # holder's heartbeats share a period), stated in the header.
-strict_run ForgeSync ForgeSync.cfg "forge-sync strict breadth (index gate, ticking hash, rotation on every claim, ack after CAS, packs before CAS: told ok => durable, landed packs complete, the sensor honest, no straggler after a restore, always restorable)"
+strict_run ForgeSync ForgeSync.cfg "forge-sync strict breadth (index gate, ticking hash, rotation on every claim, ack after CAS, packs before CAS: told ok => durable, landed packs complete, the sensor honest, no straggler after a restore, always restorable, and a proof taken only over the packs the snapshot names)"
 strict_run ForgeSync ForgeSyncLive.cfg "forge-sync liveness depth (a watch over a crashed holder resolves; a push that reached a serving syncer is answered one way or the other — the process falling out from under its hooks is an answer)"
 mutation_run ForgeSync ForgeSyncEarlyAck.cfg "forge-sync early-ack mutation (AckAfterCas=FALSE, simplification option B1: the client holds ok for a push the bucket never saw)" "Inv_AckedIsDurable"
-mutation_run ForgeSync ForgeSyncNoIdxGate.cfg "forge-sync index-gate mutation (IdxGate=FALSE, X1: a neighbour's pack listed before its .idx is named without it, and its push lands into a pack git cannot see)" "Inv_LandedPackComplete"
+mutation_run ForgeSync ForgeSyncNoIdxGate.cfg "forge-sync index-gate mutation (IdxGate=FALSE, X1: a neighbour's pack listed before its .idx is named without it, and its push lands into a pack git cannot see; the SHORTER loss TLC actually reaches is the listing naming a pack still migrating and so not uploaded, which is why this takes the alternation and not LandedPackComplete alone -- pinned to the latter, this run was RED at HEAD and had been)" "Inv_(NamedIsUploaded|LandedPackComplete)"
 mutation_run ForgeSync ForgeSyncNoTickOnHash.cfg "forge-sync sensor mutation (TickOnHash=FALSE, run 3 finding 1: the checksum pass moves and ticks nothing, the renewer skips over a moving holder)" "Inv_NoSkipOverMovement"
 mutation_run ForgeSync ForgeSyncNoRotate.cfg "forge-sync rotation mutation (RotateOnTakeover=FALSE: the straggler's If-Match outlives the successor's restore and its batch lands)" "Inv_NoStragglerLandAfterRestore"
 mutation_run ForgeSync ForgeSyncCasBeforePacks.cfg "forge-sync ordering mutation (PacksBeforeCas=FALSE, design §4 reversed: a crash between the CAS and the upload leaves the snapshot naming a pack the bucket lacks)" "Inv_LandedPackComplete"
@@ -1179,16 +1179,61 @@ mutation_run ForgeSync ForgeSyncFoldNoRenew.cfg "forge-sync fold-renewal mutatio
 mutation_run ForgeSync ForgeSyncRacyGrace.cfg "forge-sync racy-grace mutation (GraceOutlivesUpload=FALSE, lean's LeanChunkGCRacyGrace on forge's sweep: an object an in-flight batch or fold uploaded is deletable, and a deposed holder takes a live uploader's pack between its Complete and its CAS)" "Inv_(AckedIsDurable|NamedIsUploaded|LandedPackComplete)"
 mutation_run ForgeSync ForgeSyncFoldCasBeforeUpload.cfg "forge-sync fold-ordering mutation (FoldCasBeforeUpload=TRUE, the fold twin of CasBeforePacks: the commit names a roll-up the bucket does not hold)" "Inv_(AckedIsDurable|NamedIsUploaded|LandedPackComplete)"
 mutation_run ForgeSync ForgeSyncFoldCasFromDisk.cfg "forge-sync fold-formula mutation (FoldCasFromDisk=TRUE, the drafts' formula: the commit names localPacks \\ S ∪ {f} and so names a pack landed since the last batch that nothing uploaded)" "Inv_NamedIsUploaded"
-mutation_run ForgeSync ForgeSyncFoldInputsAfterStart.cfg "forge-sync fold-inputs mutation (FoldInputsAfterStart=TRUE: the packs unnamed are read at the commit while the roll-up's contents were fixed at the plan, so a push named in between is unnamed and held by nothing)" "Inv_AckedIsDurable"
+mutation_run ForgeSync ForgeSyncProveFromDiskRetention.cfg "forge-sync proof-scope mutation NARROWED TO RETENTION (ProveFromDisk=TRUE checking only the narrow witness: the general run stops at a push's pack that its batch has not named yet, which is the same defect but not audit F2 — this one must find fold -> retention -> checkpoint)" "Inv_ProofNeverRestsOnRetention"
+mutation_run ForgeSync ForgeSyncListingKeepsRetained.cfg "forge-sync retention-listing mutation (ListingKeepsRetained=TRUE: a batch lists the packs a fold superseded and retention holds on disk, so the snapshot names one the ledger sweep already took — the first draft of this module's retention, refuted before the rule was written)" "Inv_NamedIsUploaded"
+mutation_run ForgeSync ForgeSyncProveFromDisk.cfg "forge-sync proof-scope mutation (ProveFromDisk=TRUE, audit F2: the proof walks the object DIRECTORY, so it rests on packs a fold retained for readers and the ledger sweep is on its way to deleting — the verdict means the disk while every caller reads it as the bucket)" "Inv_ProofIsOfTheBucket"
+mutation_run ForgeSync ForgeSyncFoldCommitMidBatch.cfg "forge-sync mid-batch-commit mutation (FoldCommitMidBatch=TRUE: the fold commits beside a live batch, whose CAS then writes a listing taken BEFORE the fold retained its inputs and so re-names a retained pack -- recorded here as a harmless NON-RUN until retention was modelled, which gave it teeth)" "Inv_ProofNeverRestsOnRetention"
+mutation_run ForgeSync ForgeSyncFoldSupersedesArrivals.cfg "forge-sync fold-arrivals mutation (FoldSupersedesArrivals=TRUE: the commit unnames EVERY input, held or not, so a push whose objects the roll-up could not reach is unnamed and stranded -- THIS IS runcd, and until 2026-09-07 it had a cfg and no run here at all)" "Inv_LandedPackComplete"
 mutation_run ForgeSync ForgeSyncFoldTicksBatchSensor.cfg "forge-sync fold-sensor mutation (FoldTicksBatchSensor=TRUE, design rule 3: the fold's upload ticks the HOLD's counter and a wedged batch's holder keeps renewing through a base rebuild)" "Inv_NoRenewOverWedge"
-# Documented NON-RUNS (a mutation that cannot lose proves nothing), both
-# checked and both green, which is the finding:
-#   FoldCommitMidBatch — the commit beside a batch. The design predicted
-#     Inv_NoUnrestorable; TLC says nothing is lost, because the commit
-#     updates the loop's belief in place (so the batch's own CAS still
-#     matches and lands) and the ledger sweep never deletes a stem the
-#     snapshot names. The between-batches rule is the loop's structure,
-#     not a safety property.
+# FoldCommitMidBatch was one of these until 2026-09-07 and is now a run
+# above. The entry read: "TLC says nothing is lost ... the between-batches
+# rule is the loop's structure, not a safety property." That was true of a
+# model with no retention in it. Once a fold's superseded inputs stay on
+# disk, the batch's CAS -- carrying a listing taken before the fold
+# retained them -- re-names a retained pack, and the snapshot then names a
+# pack a countdown is about to unlink. The between-batches rule IS a
+# safety property; it just had nothing to protect until retention existed.
+# (The code is safe by the serving loop's `select!` arms, and since
+# b44d6446 by an explicit guard in `unlink_retained` as well.)
+#
+# Documented NON-RUNS (a mutation that cannot lose proves nothing), all
+# checked and all green, which is the finding:
+#   FoldNoCoverageCheck — the pre-upload coverage check in
+#     `fold::run_task`, off. Ran to completion for the first time on
+#     2026-09-07 and found VACUOUS on BOTH the current model and HEAD's
+#     (35.5M distinct, 0 left on queue, depth 57, 40 min) — so this is
+#     not something the retention work did. It is a structural no-op:
+#     the constant gates only the PRECONDITION
+#     `(FoldNoCoverageCheck \/ FoldCovers(s))`, while the set of inputs
+#     the commit unnames is filtered independently by
+#     `D == {q \in S : holds[q] \subseteq holds[f]}`. With the filter
+#     still in place nothing uncovered is ever unnamed, so nothing can
+#     strand however the precondition is set.
+#
+#     That is not a modelling accident, it is the finding: runcd was
+#     fixed TWICE OVER, and the two halves are not equal. The commit's
+#     filter — keep named any input holding an object that became
+#     reachable after the rebuild read its refs — is load-bearing on its
+#     own. The pre-upload check is a belt over braces that already hold.
+#     The mutation that removes the LOAD-BEARING half is
+#     FoldSupersedesArrivals, which reproduces runcd's exact loss
+#     (Inv_LandedPackComplete) in 72 seconds and is now run above.
+#     `forge-model-audit-2026-09-07.md` credited the wrong half.
+#   FoldInputsAfterStart — reading the packs to unname at the COMMIT while
+#     the roll-up's contents were fixed at the PLAN. It ran here as a
+#     required-fail on Inv_AckedIsDurable until 2026-09-07, when it was
+#     run to completion for the first time and found to be VACUOUS: 37.8M
+#     distinct states, 0 left on queue, depth 57, "No error has been
+#     found" — on the model AS IT STOOD, so this is not something the
+#     retention work did. The runcd coverage fix subsumed it. The commit
+#     may only unname an input the roll-up COVERS
+#     (`D == {q \in S : holds[q] \subseteq holds[f]}`), and a push named
+#     between the plan and the commit is by construction not covered by a
+#     roll-up planned before it arrived — so it is never unnamed and
+#     nothing is stranded. Reading the inputs late is safe BECAUSE of the
+#     coverage rule, which is a stronger statement than this mutation was
+#     written to make. Left as a cfg so the claim can be re-checked if
+#     that rule ever weakens.
 #   SweepDuringFold — the holder's own sweep mid-fold. Cannot lose either:
 #     the grace already covers the roll-up (it is inside an in-flight
 #     fold), and what the code's guard actually prevents is the

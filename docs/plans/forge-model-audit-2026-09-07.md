@@ -35,8 +35,40 @@ since). And `fold::run_task` checks coverage from the pack indexes
 before it uploads, with the two kinds contracted differently — a tier
 fold must hold every object its inputs hold; a base rebuild may drop
 objects but never a reachable one. `ForgeSync.tla` may now produce a
-lossy fold, `FoldCovers` guards the commit, and the mutation
-`FoldNoCoverageCheck` reproduces the failure.
+lossy fold, and `FoldCovers` guards the commit.
+
+**Correction, 2026-09-07 (later the same day).** This paragraph ended
+"and the mutation `FoldNoCoverageCheck` reproduces the failure". It does
+not, and never did. Run to completion for the first time — on the
+current model AND on HEAD's, the one this sentence was written against
+— it is exhaustively CLEAN: 35.5M distinct states, 0 left on queue,
+depth 57, 40 minutes, no error. It is a structural no-op. The constant
+gates only the precondition `(FoldNoCoverageCheck \/ FoldCovers(s))`,
+while the packs the commit actually unnames are filtered independently
+by `D == {q \in S : holds[q] \subseteq holds[f]}`. With that filter
+standing, nothing uncovered is ever unnamed, so nothing can strand
+however the precondition is set.
+
+**The two halves of the fix are not equal, and this is the finding.**
+The commit's FILTER — keep named any input holding an object that became
+reachable after the rebuild read its refs — is load-bearing by itself.
+The pre-upload check in `fold::run_task` is a belt over braces that
+already hold. Remove the filter instead (`FoldSupersedesArrivals=TRUE`,
+`D == S`) and runcd's exact loss appears in **72 seconds**:
+`Inv_LandedPackComplete`, a landed push's objects held by nothing.
+
+That mutation had a cfg and **no run in `scripts/check-tla.sh` at all**
+until now, so the gate has never exercised the failure this whole
+tranche was built around, while the doc credited one that cannot fail.
+Both are fixed: `FoldSupersedesArrivals` is a required-fail run, and
+`FoldNoCoverageCheck` is recorded there as a documented non-run with the
+reason.
+
+It is the same shape as F4 and as the fold defect itself: a claim about
+the model, believed because it was plausible, never run to the point
+where it could have been refuted. Three of the four vacuous or stale
+gate items found today had been green — or absent — for as long as they
+had existed.
 
 ## The bug class
 
@@ -149,14 +181,58 @@ exercised it: `forge/e2e/repack/run-repack.sh`, whose full-repack arms
 are now refused rather than silently run at factor 0, where they would
 report the no-compaction floor under the control's name.
 
-## OPEN — F4, F5: smaller
+## F4: the ledger sweep's missing mid-fold guard — CLOSED, UNFOUNDED
 
-- The mid-fold guard covers the LIST sweep only; `fold::sweep_ledger`
-  has no such guard, though the module header claims both sweeps.
+As written this entry was wrong twice over, and both halves are worth
+recording because the shape is the one this document is about: an
+inference about the code, stated as a finding, never checked against it.
+
+**"The module header claims both sweeps" — no header does.** There is no
+such claim in `sweep.rs`'s header or `fold.rs`'s. The entry asserted a
+contradiction between doc and code where the doc says nothing.
+
+**The guard is not missing; it does not apply.** `sweep.rs`'s
+`sc.fold.is_some()` guard (`:47`, `:64`) exists for two hazards that are
+specific to the LIST sweep: `abort_orphaned_uploads` would abort the
+fold's OWN multipart upload, which runs on the fold's task and is
+therefore genuinely in flight; and the listing sweep would see the
+fold's uploaded-but-not-yet-named roll-up as unreferenced and delete it.
+`fold::sweep_ledger` does neither. It touches no uploads, never lists,
+and deletes only by exact key from entries written at PAST commits — a
+set that cannot contain an in-flight fold's artefacts, because the
+ledger is appended at step 7 of the commit and nowhere else
+(`fold.rs:868` is its only writer).
+
+It also carries three protections of its own, any one of which defeats
+the only scenario that survives scrutiny — a content-addressed base
+rebuild reproducing a pack name that is sitting in the ledger awaiting
+deletion:
+
+1. the etag check (`fresh.etag != sc.cell()?.etag` ⇒ return), so a pass
+   never runs against a snapshot that moved under it;
+2. the reference set, which is the fresh snapshot's stems UNIONED with
+   the undo points' (X15) — a stem either names is skipped;
+3. **Rule 2, the age at the delete by the STORE's clock** — a
+   re-uploaded pack has a fresh `last_modified` and is not old enough to
+   go, whatever the ledger entry's own age says.
+
+Protection 2 is pinned by a test that already existed:
+`tests.rs:3417`, "the named pack is never swept".
+
+Adding the guard anyway would have cost something real: a base rebuild
+runs for minutes on a large repository, and gating the ledger sweep on
+it defers every bucket deletion for that whole window, for no safety
+gained — and there would have been no failing case to pin it with.
+
+## OPEN — F5
+
 - The sweep's etag check is atomic in the model and read-once-then-loop
   in the code. That is the declared grace axiom, but the 3600 s grace
   must outlive a base rebuild's whole-repository upload, and that has
-  never been measured.
+  never been measured. Bundled into the M6 drill
+  (`forge-log-first-verdict-2026-09-07.md` §5), which needs the same
+  rig: a base rebuild inside the measurement window on a repository big
+  enough for the upload to take real time.
 
 ## Also fixed alongside
 

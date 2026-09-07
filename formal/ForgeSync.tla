@@ -171,6 +171,8 @@ CONSTANTS
   FoldNoRenew,          \* mutation: the fold's commit does not renew the lease first
   FoldNoCoverageCheck,  \* mutation: the commit lands a roll-up that does not hold its inputs
   FoldSupersedesArrivals, \* mutation: a fold's commit unnames every input, held or not (runcd)
+  ProveFromDisk,        \* mutation: a proof is taken over the object DIRECTORY, not the named packs (F2)
+  ListingKeepsRetained, \* mutation: a batch lists the packs retention holds on disk
   GraceOutlivesUpload   \* the grace axiom; FALSE is lean's RacyGrace mutation
 
 Stages == {"none", "judged", "renewed", "hashed", "initiated", "uploaded",
@@ -196,6 +198,7 @@ VARIABLES
   belief,      \* [Syncers -> [etag, main, packs]] the cached snapshot
   localMain,   \* [Syncers -> Nat]      the local ref (0 = none)
   localPacks,  \* [Syncers -> SUBSET Pushes]  packs on disk WITH index
+  retained,    \* [Syncers -> SUBSET PackIds]  on disk, unnamed, kept for readers
   migrating,   \* [Syncers -> SUBSET Pushes]  packs on disk, index pending
   batch,       \* [Syncers -> [push, stage, listed]]
   sensorMoved, \* [Syncers -> BOOLEAN] progress ticked since the last heartbeat
@@ -211,13 +214,15 @@ VARIABLES
   \* ── budgets and witnesses ──
   crashes, renewBudget, claimBudget,
   ackNotDurable, skipOverMovement,
-  stragglerLand, unrestorable, toldFailedButDurable, renewOverWedge
+  stragglerLand, unrestorable, toldFailedButDurable, renewOverWedge,
+  provedOffBucket, provedOverRetained
 
 vars == <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease, lastTok,
           quiet, belief, localMain, localPacks, migrating, batch, sensorMoved,
           realMoved, hbDue, pushState, pushTo, holds, fold, foldBudget,
           crashes, renewBudget, claimBudget, ackNotDurable, skipOverMovement,
-          stragglerLand, unrestorable, toldFailedButDurable, renewOverWedge>>
+          stragglerLand, unrestorable, toldFailedButDurable, renewOverWedge,
+          retained, provedOffBucket, provedOverRetained>>
 
 NoBatch   == [push |-> 0, stage |-> "none", listed |-> {}]
 ZeroLease == [ep |-> 0, tok |-> 0]
@@ -240,6 +245,8 @@ TypeOK ==
   /\ belief \in [Syncers -> [etag: Nat, main: PushIds, packs: SUBSET PackIds]]
   /\ localMain \in [Syncers -> PushIds]
   /\ localPacks \in [Syncers -> SUBSET PackIds]
+  /\ retained \in [Syncers -> SUBSET PackIds]
+  /\ provedOffBucket \in BOOLEAN /\ provedOverRetained \in BOOLEAN
   /\ migrating \in [Syncers -> SUBSET Pushes]
   /\ batch \in [Syncers -> [push: PushIds, stage: Stages, listed: SUBSET PackIds]]
   /\ holds \in [PackIds -> SUBSET Pushes]
@@ -265,6 +272,8 @@ Init ==
   /\ belief = [s \in Syncers |-> NoBelief]
   /\ localMain = [s \in Syncers |-> 0]
   /\ localPacks = [s \in Syncers |-> {}]
+  /\ retained = [s \in Syncers |-> {}]
+  /\ provedOffBucket = FALSE /\ provedOverRetained = FALSE
   /\ migrating = [s \in Syncers |-> {}]
   /\ batch = [s \in Syncers |-> NoBatch]
   /\ sensorMoved = [s \in Syncers |-> FALSE]
@@ -281,8 +290,14 @@ Init ==
   /\ unrestorable = FALSE /\ toldFailedButDurable = FALSE
   /\ renewOverWedge = FALSE
 
-Witnesses == <<ackNotDurable, skipOverMovement,
-               stragglerLand, unrestorable, toldFailedButDurable, renewOverWedge>>
+Witnesses == <<ackNotDurable, skipOverMovement, stragglerLand, unrestorable,
+               toldFailedButDurable, renewOverWedge, provedOffBucket,
+               provedOverRetained>>
+\* What an action that touches neither a witness nor the disk's retention
+\* leaves alone.  `retained` rides here rather than in `Local` because
+\* only two actions in the whole module change it, and every other one
+\* already named `Witnesses`.
+Untouched == <<Witnesses, retained>>
 \* What no action but the plan changes.
 FoldPlanVars == <<holds, foldBudget>>
 Bucket    == <<cell, nextTok, snap, packObj, idxObj, uploads>>
@@ -329,7 +344,7 @@ AcquireCreate(s) ==
   /\ UNCHANGED <<snap, packObj, idxObj, uploads, lastTok, quiet, belief,
                  localMain, localPacks, migrating, batch, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
 \* Our own previous incarnation died holding: supersede at once — and
 \* ROTATE, because that incarnation may itself have been a successor
@@ -351,7 +366,7 @@ SupersedeOwn(s) ==
   /\ UNCHANGED <<snap, packObj, idxObj, uploads, lastTok, quiet, belief,
                  localMain, localPacks, migrating, batch, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
 \* A released cell is a clean handoff: its holder fenced itself before
 \* it wrote the mark, so nothing can straggle and no rotation is owed.
@@ -367,7 +382,7 @@ ClaimReleased(s) ==
   /\ UNCHANGED <<snap, packObj, idxObj, uploads, lastTok, quiet, belief,
                  localMain, localPacks, migrating, batch, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
 ObserveForeign(s) ==
   /\ st[s] = "idle"
@@ -379,7 +394,7 @@ ObserveForeign(s) ==
                  localMain, localPacks, migrating, batch, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
 \* The scheduling axiom: a live holder's heartbeat ran since this
 \* challenger's previous poll.  A dead holder has none to wait for.
@@ -404,7 +419,7 @@ PollQuiet(s) ==
                  belief, localMain, localPacks, migrating, batch, sensorMoved,
                  realMoved, pushState, pushTo, crashes, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
 \* The takeover CAS on the last observed token.  A holder that renewed
 \* after this observer's last poll is refused by the CAS itself — token
@@ -423,7 +438,7 @@ Takeover(s) ==
   /\ UNCHANGED <<snap, packObj, idxObj, uploads, lastTok, quiet, belief,
                  localMain, localPacks, migrating, batch, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
 \* The rotation (snapshot.rs rotate_for_takeover): same content, new
 \* etag, so a straggler's If-Match is stale before we serve a byte.  A
@@ -441,7 +456,7 @@ RotateSnapshot(s) ==
                  localMain, localPacks, migrating, batch, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
 \* The claim-time sweep (sweep.rs abort_orphaned_uploads): nothing of
 \* ours is in flight, so everything pending is a predecessor's.
@@ -453,7 +468,7 @@ SweepDone(s) ==
                  belief, localMain, localPacks, migrating, batch, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
 (***************************************************************************)
 (* The restore (restore.rs): the snapshot's packs, the snapshot's refs     *)
@@ -480,7 +495,11 @@ Restore(s) ==
               ELSE /\ belief' = [belief EXCEPT ![s] =
                                    [etag |-> snap.etag, main |-> snap.main, packs |-> snap.packs]]
                    /\ localMain' = [localMain EXCEPT ![s] = snap.main]
-                   /\ localPacks' = [localPacks EXCEPT ![s] = usable]
+                   \* `restore.rs` unlinks a pack the snapshot does not
+                   \* name UNLESS retention keeps it, and the retained
+                   \* list comes back from the state file a restart
+                   \* inherits — so retention survives a restore.
+                   /\ localPacks' = [localPacks EXCEPT ![s] = usable \cup retained[s]]
                    /\ migrating' = [migrating EXCEPT ![s] = {}]
                    /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
                    /\ sensorMoved' = [sensorMoved EXCEPT ![s] = TRUE]
@@ -489,7 +508,8 @@ Restore(s) ==
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, lastTok, hbDue,
                  pushTo, crashes, renewBudget, claimBudget, ackNotDurable,
                  skipOverMovement, stragglerLand, toldFailedButDurable,
-                 renewOverWedge>>
+                 renewOverWedge, retained, provedOffBucket,
+                 provedOverRetained>>
   /\ UNCHANGED FoldPlanVars
 
 (***************************************************************************)
@@ -530,7 +550,8 @@ RenewTick(s) ==
   /\ UNCHANGED <<snap, packObj, idxObj, uploads, lastTok, belief, localMain,
                  localPacks, migrating, pushTo, crashes, claimBudget,
                  ackNotDurable, stragglerLand, unrestorable,
-                 toldFailedButDurable>>
+                 toldFailedButDurable, retained, provedOffBucket,
+                 provedOverRetained>>
   /\ UNCHANGED FoldPlanVars
 
 (***************************************************************************)
@@ -550,7 +571,7 @@ PushSend(p, s) ==
                  lastTok, quiet, belief, localMain, localPacks, batch,
                  sensorMoved, realMoved, hbDue, crashes, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
 \* git renames the .idx last; only then is the pack complete on disk and
 \* the hook runs.
@@ -562,7 +583,7 @@ IdxLand(s, p) ==
                  lastTok, quiet, belief, localMain, batch, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
 \* The client gives up (the door's bound, a cut) before the report.  The
 \* syncer never learns it and the batch runs to its end.
@@ -573,7 +594,7 @@ ClientHangup(p) ==
                  lastTok, quiet, belief, localMain, localPacks, migrating,
                  batch, sensorMoved, realMoved, hbDue, pushTo, crashes,
                  renewBudget, claimBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
 (***************************************************************************)
 (* The batch (batch.rs run_batch), one push at a time, each step a store   *)
@@ -605,7 +626,7 @@ BatchStart(s) ==
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, lease, lastTok,
                  quiet, belief, localMain, localPacks, migrating, hbDue,
                  pushTo, crashes, renewBudget, claimBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
 \* Step 3: the batch's own renewal, through the renewer's path.
 BatchRenew(s) ==
@@ -624,12 +645,40 @@ BatchRenew(s) ==
             /\ UNCHANGED <<cell, nextTok>>
   /\ UNCHANGED <<snap, packObj, idxObj, uploads, lastTok, belief, localMain,
                  localPacks, migrating, hbDue, pushTo, crashes, claimBudget>>
-  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Witnesses
+  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Untouched
 
-\* The listing that feeds the upload and the snapshot's pack list.  With
-\* the gate, a pack is listed only once its index landed; without it
-\* (the X1 world) a neighbour's mid-migration pack is listed too.
-Listing(s) == localPacks[s] \cup (IF IdxGate THEN {} ELSE migrating[s])
+\* THE TWO PACK SETS, and the difference is the whole of audit F2.
+\*
+\* `Syncer::listed_packs` is what a batch may list, upload and name;
+\* `Git::local_packs` is the object DIRECTORY, which also holds what a
+\* fold superseded and retention keeps for readers.  `localPacks` here
+\* is the FORMER — the subtraction is by construction, so no run can
+\* forget it.  Modelling the directory instead and deriving the listing
+\* was tried first and TLC refuted it in 3.6M states, exactly as the
+\* code's own comment warns: "a retained pack re-listed would be
+\* re-named and re-uploaded — the collision every 'keep the old packs a
+\* while' fix has".  A batch named a retained pack, the ledger sweep had
+\* already taken it out of the bucket, and Inv_NamedIsUploaded fell.
+\*
+\* `localPacks` is the DIRECTORY and the listing is derived, rather than
+\* the other way round.  The two factorings are isomorphic and cost TLC
+\* the same (measured, against a guess that the second would be
+\* cheaper — it is not).  This one is chosen because it makes the
+\* subtraction a RULE the model states rather than a fact of the
+\* encoding, so a mutation can take it away: as the listing,
+\* `retained` would be read by nothing in the strict run — a variable
+\* paying for its states and holding up no property.
+\*
+\* The rule is load-bearing and TLC said so before it was written.  The
+\* first draft of this module's retention had no subtraction, and TLC
+\* refuted it in 3.6M states, exactly as the code's own comment warns:
+\* "a retained pack re-listed would be re-named and re-uploaded — the
+\* collision every 'keep the old packs a while' fix has".  A batch named
+\* a retained pack, the ledger sweep had already taken it out of the
+\* bucket, and Inv_NamedIsUploaded fell.  Mutation ListingKeepsRetained.
+Listing(s) == (IF ListingKeepsRetained THEN localPacks[s]
+                                       ELSE localPacks[s] \ retained[s])
+                \cup (IF IdxGate THEN {} ELSE migrating[s])
 
 \* The checksum pass over every pack above the whole-PUT ceiling: real
 \* work; it ticks progress only in the fixed tree.
@@ -641,7 +690,7 @@ BatchHash(s) ==
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,
                  lastTok, quiet, belief, localMain, localPacks, migrating,
                  hbDue, pushState, pushTo, crashes, renewBudget, claimBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
 ToUpload(s) == batch[s].listed \ belief[s].packs
 
@@ -657,7 +706,7 @@ BatchInit(s) ==
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, st, lease, lastTok,
                  quiet, belief, localMain, localPacks, migrating, hbDue,
                  pushState, pushTo, crashes, renewBudget, claimBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
 \* Step 4b: Complete.  NOT conditional: a swept upload fails NoSuchUpload
 \* and the process exits (any batch error ends the server); otherwise the
@@ -681,7 +730,7 @@ BatchComplete(s) ==
             /\ UNCHANGED <<uploads, packObj, idxObj, crashes>>
   /\ UNCHANGED <<cell, nextTok, snap, lastTok, belief, localMain, localPacks,
                  migrating, hbDue, pushTo, renewBudget, claimBudget>>
-  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Witnesses
+  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Untouched
 
 \* Step 5: ONE snapshot CAS on the etag last seen (If-None-Match:* when
 \* none).  A 412 is the fence.  The witness: this CAS lands from a syncer
@@ -712,7 +761,9 @@ BatchCas(s) ==
   /\ UNCHANGED <<cell, packObj, idxObj, uploads, lastTok, localMain, localPacks,
                  migrating, hbDue, pushTo, crashes, renewBudget, claimBudget,
                  ackNotDurable, skipOverMovement,
-                 unrestorable, toldFailedButDurable, renewOverWedge>>
+                 unrestorable, toldFailedButDurable, renewOverWedge,
+                 retained, provedOffBucket,
+                 provedOverRetained>>
   /\ UNCHANGED FoldPlanVars
 
 \* The reversed ordering (mutation): packs go up AFTER the CAS named them.
@@ -725,7 +776,7 @@ BatchLateUpload(s) ==
                  belief, localMain, localPacks, migrating, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
 RefsReady(s) ==
   \/ (batch[s].stage = "cas" /\ PacksBeforeCas)
@@ -741,7 +792,7 @@ BatchRefs(s) ==
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,
                  lastTok, quiet, belief, localPacks, migrating, hbDue,
                  pushState, pushTo, crashes, renewBudget, claimBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
 \* The report.  A client still waiting is told ok; one that hung up
 \* learns nothing, and the bucket holds its push anyway — the probe.
@@ -756,7 +807,9 @@ BatchAck(s) ==
                  quiet, belief, localMain, localPacks, migrating, sensorMoved,
                  realMoved, hbDue, pushTo, crashes, renewBudget, claimBudget,
                  ackNotDurable, skipOverMovement,
-                 stragglerLand, unrestorable, renewOverWedge>>
+                 stragglerLand, unrestorable, renewOverWedge,
+                 retained, provedOffBucket,
+                 provedOverRetained>>
   /\ UNCHANGED <<fold, FoldPlanVars>>
 
 (***************************************************************************)
@@ -774,7 +827,7 @@ CleanRelease(s) ==
   /\ UNCHANGED <<snap, packObj, idxObj, uploads, lastTok, belief, localMain,
                  localPacks, migrating, hbDue, pushTo, crashes, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Witnesses
+  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Untouched
 
 \* Process death: memory vanishes; the emptyDir (packs, refs, the
 \* incarnation file) survives a container restart.  A pod replacement is
@@ -787,7 +840,7 @@ Crash(s) ==
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, lastTok, belief,
                  localMain, localPacks, migrating, hbDue, pushTo, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Witnesses
+  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Untouched
 
 (***************************************************************************)
 (* Compaction tiers (fold.rs, design §3.4): the task beside the loop, the  *)
@@ -833,7 +886,7 @@ FoldPlan(s) ==
                  lastTok, quiet, belief, localMain, localPacks, migrating,
                  batch, sensorMoved, realMoved, hbDue, pushState, pushTo,
                  crashes, renewBudget, claimBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED Untouched
 
 \* The task's upload, through the multipart path: initiated, then
 \* Complete.  Beside anything the loop does.
@@ -845,7 +898,7 @@ FoldInit(s) ==
                  quiet, belief, localMain, localPacks, migrating, batch,
                  sensorMoved, realMoved, hbDue, pushState, pushTo, crashes,
                  renewBudget, claimBudget>>
-  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Witnesses
+  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Untouched
 
 \* Complete: the roll-up lands with its index, or — the claim-time sweep
 \* took the upload — NoSuchUpload, which clears the fold and falls
@@ -865,19 +918,13 @@ FoldComplete(s) ==
   /\ UNCHANGED <<cell, nextTok, snap, st, lease, lastTok, quiet, belief,
                  localMain, localPacks, migrating, batch, realMoved, hbDue,
                  pushState, pushTo, crashes, renewBudget, claimBudget>>
-  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Witnesses
+  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Untouched
 
 \* The commit, on the loop between batches: ONE CAS on the loop's
 \* CURRENT belief, naming (belief.packs \ S) ∪ {f}; a mismatch is the
 \* fence.  The inputs leave the listing (retained for readers, then
 \* unlinked) and git sees the roll-up.  The commit's one tick is the
 \* loop's.
-FoldCommitReady(s) ==
-  /\ \/ fold[s].stage = "uploaded"
-     \/ (FoldCasBeforeUpload /\ fold[s].stage \in {"planned", "initiated"})
-  /\ \/ (st[s] = "serving" /\ batch[s].stage = "none")
-     \/ (FoldCommitMidBatch /\ st[s] = "pushing")
-
 \* The commit's own renewal, the batch's step 3 (`lease::renew`): a
 \* conditional write on the CELL, which a deposed holder fails.  Without
 \* it the commit is the ONE CAS on the loop that never revalidates the
@@ -885,11 +932,30 @@ FoldCommitReady(s) ==
 \* holder deposed WHILE ITS RESTORE RAN, whose restore then read the
 \* successor's rotated snapshot, so its If-Match matched and its fold
 \* landed after the successor served.  Mutation FoldNoRenew.
+\* The batch-quiescence half of the commit's guard, factored out so the
+\* COMMIT can re-assert it.  `fold::commit` renews the lease and CASes
+\* inside ONE call holding `&mut Syncer`, reached from the fold-result
+\* arm of the serving loop's `tokio::select!` (server.rs:363); the push
+\* arm holds the same borrow across every await it makes, so no batch
+\* can begin between the fold's renewal and its CAS.
+\*
+\* Checking this at the RENEW and not again at the COMMIT was a real
+\* modelling gap, and the strict run found it the day retention was
+\* added: BatchInit -> FoldCommit -> BatchCas, where the batch's CAS
+\* writes a `listed` set taken BEFORE the fold retained its inputs and
+\* so re-names a retained pack.  `Listing` subtracts `retained`, but it
+\* is evaluated when the batch lists, and at that moment there was
+\* nothing to subtract.  Unreachable in the code for the borrow reason
+\* above; reachable here only because two model steps admitted an
+\* interleaving one function call does not.
+FoldQuiet(s) ==
+  \/ (st[s] = "serving" /\ batch[s].stage = "none")
+  \/ (FoldCommitMidBatch /\ st[s] = "pushing")
+
 FoldReadyToCommit(s) ==
   /\ \/ fold[s].stage = "uploaded"
      \/ (FoldCasBeforeUpload /\ fold[s].stage \in {"planned", "initiated"})
-  /\ \/ (st[s] = "serving" /\ batch[s].stage = "none")
-     \/ (FoldCommitMidBatch /\ st[s] = "pushing")
+  /\ FoldQuiet(s)
 
 FoldRenew(s) ==
   /\ ~FoldNoRenew
@@ -913,7 +979,7 @@ FoldRenew(s) ==
   /\ UNCHANGED <<snap, packObj, idxObj, uploads, lastTok, belief, localMain,
                  localPacks, migrating, hbDue, pushTo,
                  crashes, claimBudget>>
-  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Witnesses
+  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Untouched
 
 \* The commit itself: ONE CAS on the loop's CURRENT belief, naming
 \* (belief.packs \ S) ∪ {f}; a mismatch is the fence.  The inputs leave
@@ -945,10 +1011,12 @@ FoldAbandon(s) ==
                  lastTok, quiet, belief, localMain, localPacks, migrating,
                  batch, sensorMoved, realMoved, hbDue, pushState, pushTo,
                  crashes, renewBudget, claimBudget, holds, foldBudget>>
-  /\ UNCHANGED Witnesses
+  /\ UNCHANGED Untouched
 
 FoldCommit(s) ==
   /\ IF FoldNoRenew THEN FoldReadyToCommit(s) ELSE fold[s].stage = "renewed"
+  \* Re-asserted, not inherited from the renewal: see FoldQuiet.
+  /\ FoldQuiet(s)
   /\ (FoldNoCoverageCheck \/ FoldCovers(s))
   /\ LET f == fold[s].id
          S == IF FoldInputsAfterStart THEN belief[s].packs ELSE fold[s].inputs
@@ -974,19 +1042,100 @@ FoldCommit(s) ==
        THEN /\ snap' = [snap EXCEPT !.etag = nextTok, !.packs = named]
             /\ nextTok' = nextTok + 1
             /\ belief' = [belief EXCEPT ![s].etag = nextTok, ![s].packs = named]
-            /\ localPacks' = [localPacks EXCEPT ![s] = (@ \ D) \cup {f}]
+            \* The inputs leave the LISTING and stay on the DISK: a
+            \* reader mid-clone keeps the pack it is streaming, and
+            \* `unlink_retained` takes them a retention window later.
+            \* The second conjunct is what this module used to lack
+            \* entirely — the inputs simply vanished here — so the state
+            \* audit F2 lives in did not exist to be reached.
+            /\ localPacks' = [localPacks EXCEPT ![s] = @ \cup {f}]
+            /\ retained' = [retained EXCEPT ![s] = @ \cup D]
             /\ fold' = [fold EXCEPT ![s] = NoFold]
             /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
             /\ sensorMoved' = [sensorMoved EXCEPT ![s] = TRUE]
             /\ stragglerLand' = (stragglerLand \/ SuccessorRestored(s))
             /\ UNCHANGED <<st, lease, batch, pushState, quiet>>
        ELSE /\ Fall(s)
-            /\ UNCHANGED <<snap, nextTok, belief, localPacks, stragglerLand>>
+            /\ UNCHANGED <<snap, nextTok, belief, localPacks, retained, stragglerLand>>
   /\ UNCHANGED <<cell, packObj, idxObj, uploads, lastTok, localMain, migrating,
                  hbDue, pushTo, crashes, renewBudget, claimBudget,
                  ackNotDurable, skipOverMovement, unrestorable,
-                 toldFailedButDurable, renewOverWedge>>
+                 toldFailedButDurable, renewOverWedge, provedOffBucket,
+                 provedOverRetained>>
   /\ UNCHANGED FoldPlanVars
+
+(***************************************************************************)
+(* THE PROOF, AND THE RETENTION IT MUST NOT REST ON (follow.rs, fold.rs).  *)
+(*                                                                         *)
+(* `fold::commit` leaves a roll-up's superseded inputs ON DISK for         *)
+(* `fold_retain_secs` so a reader mid-clone keeps the pack it is           *)
+(* streaming, while the ledger sweep takes them out of the BUCKET on its   *)
+(* own schedule.  Between the two, the disk holds objects the bucket is    *)
+(* on its way to losing.                                                   *)
+(*                                                                         *)
+(* This module had neither the retention nor the proof.  `FoldCommit`      *)
+(* dropped the inputs from the disk in the same step that unnamed them,    *)
+(* so the state audit F2 lives in did not exist here and no run could      *)
+(* have reached it — the same shape as the fold defect itself, where       *)
+(* `FoldPlan` DEFINED a roll-up's contents to be its inputs' union.        *)
+(***************************************************************************)
+
+\* What a proof is taken over.  `follow::prove` walks the packs the
+\* SNAPSHOT NAMES, in a scratch object directory holding hardlinks to
+\* those and nothing else (`gitcmd.rs`, ScopedOdb).  The mutation walks
+\* the object directory, which is what shipped until 2026-09-07: it
+\* makes the verdict a statement about this disk while every caller
+\* reads it as one about the repository.
+ProofScope(s) == IF ProveFromDisk THEN localPacks[s] ELSE belief[s].packs
+
+\* `follow::checkpoint`, on the serving loop's slow tick and after a
+\* restore: record what has been proved.  The witness fires when the
+\* scope walked reaches past what the snapshot names — which is the
+\* whole of the discipline, and all this action does, so in the strict
+\* run it is a self-loop that costs no state.
+Checkpoint(s) ==
+  /\ st[s] = "serving" /\ batch[s].stage = "none"
+  /\ provedOffBucket' = (provedOffBucket \/ (ProofScope(s) \ belief[s].packs # {}))
+  \* The second witness is not redundant, and TLC is why it exists.  The
+  \* first one's SHORTEST counterexample has nothing to do with
+  \* retention: a push's pack is on disk one step before its batch names
+  \* it, so a directory-scoped proof reaches past the snapshot with
+  \* `retained` still empty.  That is the same defect and a fair
+  \* refutation, but it is not audit F2's shape, and a run that stops
+  \* there would let this module claim retention coverage it never
+  \* exercised.  This one can only fire on a pack a fold superseded.
+  /\ provedOverRetained' = (provedOverRetained \/ (ProofScope(s) \cap retained[s] # {}))
+  /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,
+                 lastTok, quiet, belief, localMain, localPacks, retained,
+                 migrating, batch, sensorMoved, realMoved, hbDue, pushState,
+                 pushTo, crashes, renewBudget, claimBudget, ackNotDurable,
+                 skipOverMovement, stragglerLand, unrestorable,
+                 toldFailedButDurable, renewOverWedge>>
+  /\ UNCHANGED <<fold, FoldPlanVars>>
+
+\* Retention ending (`fold::unlink_retained`): the packs a roll-up
+\* superseded leave the disk.  Only ever ones the commit unnamed — the
+\* retained list is populated nowhere else, which is why this is not
+\* `localPacks[s] \ belief[s].packs` (that set also holds a push's pack
+\* that has landed and whose batch has not named it yet).
+\*
+\* The whole set at once, not one pack at a time, because that is what
+\* the code does: a commit stamps every input with the SAME
+\* `unlink_after_unix`, and one call sweeps the list.  The restriction
+\* is deliberate and it costs no coverage — `Listing` subtracts
+\* `retained`, so a half-unlinked state has the same listing as the
+\* state before it, and the proof witness fires on any retained pack
+\* remaining.  (The code can leave one behind when a `.keep` is on the
+\* stem; nothing here turns on which.)
+UnlinkRetained(s) ==
+  /\ retained[s] # {}
+  /\ localPacks' = [localPacks EXCEPT ![s] = @ \ retained[s]]
+  /\ retained' = [retained EXCEPT ![s] = {}]
+  /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,
+                 lastTok, quiet, belief, localMain, migrating, batch,
+                 sensorMoved, realMoved, hbDue, pushState, pushTo, crashes,
+                 renewBudget, claimBudget>>
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
 
 \* THE GRACE AXIOM.  `orphan_grace_secs` (an hour) must outlive the
 \* LONGEST upload, not the longest plausible one — lean's
@@ -1020,7 +1169,7 @@ SweepDelete(s) ==
                  belief, localMain, localPacks, migrating, batch, sensorMoved,
                  realMoved, hbDue, pushState, pushTo, crashes, renewBudget,
                  claimBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Witnesses
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
 Next ==
   \/ \E s \in Syncers :
@@ -1032,7 +1181,7 @@ Next ==
        \/ BatchRefs(s) \/ BatchAck(s)
        \/ FoldPlan(s) \/ FoldInit(s) \/ FoldComplete(s)
        \/ FoldRenew(s) \/ FoldCommit(s) \/ FoldAbandon(s)
-       \/ SweepDelete(s)
+       \/ SweepDelete(s) \/ Checkpoint(s) \/ UnlinkRetained(s)
        \/ CleanRelease(s) \/ Crash(s)
        \/ \E p \in Pushes : PushSend(p, s) \/ IdxLand(s, p)
   \/ \E p \in Pushes : ClientHangup(p)
@@ -1091,11 +1240,12 @@ View == <<[cell EXCEPT !.tok = Rank(cell.tok)],
           [s \in Syncers |-> Rank(lastTok[s])],
           quiet,
           [s \in Syncers |-> [belief[s] EXCEPT !.etag = Rank(belief[s].etag)]],
-          localMain, localPacks, migrating, batch, sensorMoved, realMoved,
+          localMain, localPacks, retained, migrating, batch, sensorMoved, realMoved,
           hbDue, pushState, pushTo, holds, fold, foldBudget,
           crashes, renewBudget, claimBudget,
           ackNotDurable, skipOverMovement, stragglerLand, unrestorable,
-          toldFailedButDurable, renewOverWedge>>
+          toldFailedButDurable, renewOverWedge, provedOffBucket,
+          provedOverRetained>>
 
 (***************************************************************************)
 (* Theorems, and the probe.                                                *)
@@ -1126,6 +1276,22 @@ Inv_LandedPackComplete ==
 Inv_NamedIsUploaded ==
   \A q \in snap.packs : q \in packObj /\ q \in idxObj
 
+\* A PROOF IS A STATEMENT ABOUT THE BUCKET.  `follow::prove` may only
+\* walk the packs the snapshot names.  The retained inputs on disk are
+\* on their way out of the bucket, so a proof resting on them is true of
+\* this disk and false of the repository — it passes for the whole
+\* retention window and becomes false the moment the ledger sweep runs.
+\* Audit F2; the code was fixed in 98293bfa, and mutation ProveFromDisk
+\* is what shipped before it.
+Inv_ProofIsOfTheBucket          == ~provedOffBucket
+
+\* The same discipline, narrowed to audit F2's own shape: a proof that
+\* rested on packs RETENTION is holding — the ones the ledger sweep is
+\* on its way to deleting from the bucket.  Implied by the invariant
+\* above and checked separately, because TLC reaches that one by a
+\* shorter route (see Checkpoint).
+Inv_ProofNeverRestsOnRetention  == ~provedOverRetained
+
 Inv_NoSkipOverMovement          == ~skipOverMovement
 Inv_NoRenewOverWedge            == ~renewOverWedge
 Inv_NoStragglerLandAfterRestore == ~stragglerLand
@@ -1143,6 +1309,8 @@ Inv == /\ TypeOK
        /\ Inv_NoRenewOverWedge
        /\ Inv_NoStragglerLandAfterRestore
        /\ Inv_NoUnrestorable
+       /\ Inv_ProofIsOfTheBucket
+       /\ Inv_ProofNeverRestsOnRetention
 
 \* A watcher over a crashed holder's frozen token eventually takes over
 \* (or the configuration otherwise breaks).
