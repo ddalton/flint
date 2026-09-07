@@ -561,6 +561,11 @@ pub struct Syncer {
     /// unwatched, compaction quietly stalls and the pack count climbs.
     /// It belongs in the status document, not only in a log line.
     pub folds_refused: u64,
+    /// Folds and base rebuilds whose CAS LANDED. A byte measurement
+    /// over a window in which nothing committed has measured the
+    /// absence of work, not the ladder — see M6's vacuity guard.
+    pub folds_committed: u64,
+    pub base_rebuilds: u64,
     pub last_fold_refusal: Option<String>,
 }
 
@@ -586,6 +591,8 @@ impl Syncer {
             last_full_sweep_unix: 0,
             last_derived_unix: 0,
             folds_refused: 0,
+            folds_committed: 0,
+            base_rebuilds: 0,
             last_fold_refusal: None,
         }
     }

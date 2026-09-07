@@ -104,6 +104,8 @@ pub struct Facts {
     pub fold_inputs: usize,
     pub fold_is_base: bool,
     pub folds_refused: u64,
+    pub folds_committed: u64,
+    pub base_rebuilds: u64,
     pub last_fold_refusal: Option<String>,
 }
 
@@ -144,6 +146,8 @@ pub fn facts(sc: &Syncer, phase: Phase) -> Facts {
         fold_inputs: ff.inputs,
         fold_is_base: ff.is_base,
         folds_refused: sc.folds_refused,
+        folds_committed: ff.committed,
+        base_rebuilds: ff.base_rebuilds,
         last_fold_refusal: sc.last_fold_refusal.clone(),
     }
 }
@@ -174,6 +178,7 @@ pub fn document(f: &Facts, now: u64) -> serde_json::Value {
                   "fold": f.fold_stage.map(|st| serde_json::json!({
                       "stage": st, "bytes": f.fold_bytes, "inputs": f.fold_inputs, "base": f.fold_is_base })) },
         "foldsRefused": f.folds_refused,
+        "foldsCommitted": f.folds_committed, "baseRebuilds": f.base_rebuilds,
         "lastFoldRefusal": f.last_fold_refusal,
         "syncerVersion": super::SYNCER_VERSION,
         // Set ⇒ this server has been deposed and serves nothing. The

@@ -4126,6 +4126,45 @@ async fn a_restore_prunes_packs_the_snapshot_does_not_name_unless_retained() {
     assert!(rig.sc.git.pack_path(&named[0]).exists(), "the named pack is kept");
 }
 
+/// The counters M6's vacuity guard rests on. A byte window in which no
+/// fold committed has measured the ladder's ABSENCE, not the ladder, and
+/// the drill needs that as a fact reported by the process rather than a
+/// grep of its log.
+///
+/// The control is the leg that must NOT count: a plan that produces
+/// nothing to commit leaves the counter where it was. Without it this
+/// asserts only that a number goes up.
+#[tokio::test]
+async fn a_landed_fold_is_counted_and_a_fold_that_does_not_land_is_not() {
+    let mut rig = Rig::new().await;
+    rig.tiers_only();
+    rig.start().await;
+    assert_eq!(rig.sc.folds_committed, 0, "nothing has folded yet");
+    assert_eq!(rig.sc.base_rebuilds, 0);
+
+    // The control, first and at the same ordinal position as the real
+    // fold: one pack cannot make a tier, so nothing is planned and
+    // nothing may be counted.
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    assert!(fold::planned(&rig.sc, super::now_unix()).unwrap().is_none(), "one pack plans no fold");
+    assert_eq!(rig.sc.folds_committed, 0, "a fold that never planned is not counted");
+
+    // Now the real one: two more pushes make three packs, which is a tier.
+    let mut parent = Some(c0);
+    for i in 1..3 {
+        parent = Some(rig.push_commit("refs/heads/main", parent.as_deref(), &format!("c{i}")).await);
+    }
+    let (_, named) = rig.fold_once().await.expect("three packs fold");
+    assert!(named.is_some(), "the roll-up was named");
+    assert_eq!(rig.sc.folds_committed, 1, "the landed fold is counted");
+    assert_eq!(rig.sc.base_rebuilds, 0, "and it was a tier fold, not a base rebuild");
+
+    // The counter is what /status reports, which is what the drill reads.
+    let f = fold::facts(&rig.sc);
+    assert_eq!(f.committed, 1);
+    assert_eq!(f.base_rebuilds, 0);
+}
+
 /// Retention never unlinks a pack the snapshot NAMES, however long its
 /// deadline has lapsed. The protocol cannot reach that state — see the
 /// comment on `unlink_retained` — but `ForgeSync.tla` can, and the cost

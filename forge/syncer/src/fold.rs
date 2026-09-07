@@ -844,7 +844,9 @@ pub async fn commit(sc: &mut Syncer, res: FoldResult, now: u64) -> ForgeResult<O
     super::log::record(sc, &cell.snap, &new_cell.snap).await;
     sc.cell = Some(new_cell);
     sc.hold.tick(1);
+    sc.folds_committed += 1;
     if res.is_base {
+        sc.base_rebuilds += 1;
         sc.last_base_rebuild_unix = now;
         set_base_marker(&sc.cfg.repo, &f)?;
     }
@@ -1010,6 +1012,8 @@ pub async fn sweep_ledger(sc: &mut Syncer, now: u64, budget: usize) -> ForgeResu
 /// Facts for `/status`.
 pub struct FoldFacts {
     pub base: Option<String>,
+    pub committed: u64,
+    pub base_rebuilds: u64,
     pub tier_packs: usize,
     pub retained: usize,
     pub stage: Option<&'static str>,
@@ -1033,6 +1037,8 @@ pub fn facts(sc: &Syncer) -> FoldFacts {
     FoldFacts {
         tier_packs: named.saturating_sub(usize::from(base.is_some())),
         base,
+        committed: sc.folds_committed,
+        base_rebuilds: sc.base_rebuilds,
         retained: sc.retained.len(),
         stage,
         bytes,
