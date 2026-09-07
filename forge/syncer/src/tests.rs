@@ -4126,6 +4126,48 @@ async fn a_restore_prunes_packs_the_snapshot_does_not_name_unless_retained() {
     assert!(rig.sc.git.pack_path(&named[0]).exists(), "the named pack is kept");
 }
 
+/// Retention never unlinks a pack the snapshot NAMES, however long its
+/// deadline has lapsed. The protocol cannot reach that state — see the
+/// comment on `unlink_retained` — but `ForgeSync.tla` can, and the cost
+/// is the repository: the proof hardlinks every named pack, so one
+/// missing from disk refuses to serve until a restore refetches it.
+///
+/// The unnamed arm is the control. Watching the named pack survive on
+/// its own would pass just as well if the sweep had stopped deleting
+/// anything at all.
+#[tokio::test]
+async fn retention_never_unlinks_a_pack_the_snapshot_names() {
+    let mut rig = Rig::new().await;
+    rig.tiers_only();
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    rig.stage_commit(Some(&c0), &[("stray.txt", "x\n")], "stray").await;
+    let named = rig.sc.cell().unwrap().snap.packs.clone();
+    let unnamed: Vec<String> =
+        rig.sc.git.local_packs().unwrap().into_iter().filter(|p| !named.contains(p)).collect();
+    assert_eq!(unnamed.len(), 1, "one pack on disk that the snapshot does not name");
+
+    // Both entries are past their deadline; only the unnamed one may go.
+    rig.sc.retained.push(fold::Retained { name: named[0].clone(), unlink_after_unix: 0 });
+    rig.sc.retained.push(fold::Retained { name: unnamed[0].clone(), unlink_after_unix: 0 });
+    fold::save_retained(&rig.sc).unwrap();
+
+    let unlinked = fold::unlink_retained(&mut rig.sc, u64::MAX).unwrap();
+    assert_eq!(unlinked, 1, "the unnamed pack is unlinked and the named one is not");
+    assert!(
+        !rig.sc.git.pack_path(&unnamed[0]).exists(),
+        "the control: an unnamed retained pack past its deadline still goes"
+    );
+    assert!(
+        rig.sc.git.pack_path(&named[0]).exists(),
+        "a pack the snapshot names survives its lapsed retention"
+    );
+    assert!(
+        rig.sc.retained.iter().any(|r| r.name == named[0]),
+        "and it stays on the retained list, to be unlinked once nothing names it"
+    );
+}
+
 /// A retained pack is subtracted from every listing: the batch after a
 /// fold names the roll-up and its own pack, never the inputs retention
 /// still holds on disk — which would re-upload them under rule 4.

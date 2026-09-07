@@ -889,11 +889,29 @@ pub async fn commit(sc: &mut Syncer, res: FoldResult, now: u64) -> ForgeResult<O
 /// name, or the base's marker) — those retry next tick.
 pub fn unlink_retained(sc: &mut Syncer, now: u64) -> ForgeResult<usize> {
     let dir = sc.cfg.repo.join("objects/pack");
+    // A pack the snapshot NAMES is never unlinked, whatever the
+    // retention clock says.  Nothing in the protocol reaches that
+    // state: `listed_packs` subtracts retention so no batch lists a
+    // retained pack, a fold records retention only after its CAS has
+    // landed, and the restore's reconcile keeps named and retained
+    // alike.  `ForgeSync.tla` DOES reach it — the model admits a fold
+    // commit between a batch's listing and its CAS, where the serving
+    // loop's `select!` arms do not — and the cost if it ever happened
+    // is the whole repository: `follow::prove` hardlinks every named
+    // pack into its scratch odb, so a named pack missing from disk
+    // refuses to serve until a restore refetches it.  That is runcd's
+    // shape, and this is one lookup.
+    let named: std::collections::BTreeSet<String> =
+        sc.cell.as_ref().map(|c| c.snap.packs.iter().cloned().collect()).unwrap_or_default();
     let mut kept = Vec::new();
     let mut unlinked = 0usize;
     let retained = std::mem::take(&mut sc.retained);
     for r in retained {
         if now < r.unlink_after_unix {
+            kept.push(r);
+            continue;
+        }
+        if named.contains(&r.name) {
             kept.push(r);
             continue;
         }
