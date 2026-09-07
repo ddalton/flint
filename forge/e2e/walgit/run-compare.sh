@@ -340,7 +340,7 @@ leg_P9() {
       if [ -z "$f1" ] || [ -z "$f0" ]; then
         inconc "$arm: /status did not report foldsCommitted — the fold count is unknown, so the bytes below are unscored"
       elif [ "$f1" -le "$f0" ]; then
-        inconc "$arm: NO fold committed during P9 (foldsCommitted $f0 -> $f1). At ${P9_N}x${P9_MB} MiB every pack is under the 256 MiB tier floor, so this leg measured the floor, not the ladder. Raise P9_MB/P9_N until the ladder climbs."
+        inconc "$arm: NO fold committed during P9 (foldsCommitted $f0 -> $f1). foldsim expects exactly ONE fold at ${P9_N}x${P9_MB} MiB under the shipped rule (384 MiB crosses the 256 MiB floor once); zero means the ladder never ran and the bytes score nothing."
       else
         note "$arm: folds committed during P9: $((f1 - f0)) (foldsCommitted $f0 -> $f1)"
       fi

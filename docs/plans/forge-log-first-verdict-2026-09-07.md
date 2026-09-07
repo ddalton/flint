@@ -340,17 +340,32 @@ simulator that will be falsified, and their provenance is named.
   local `foldsim` run failed ("at this size the 2 MiB pushes sit under the
   floor, so the rig measures the floor and the cap, not the ladder").
 
-  **The rig's defaults cannot run this drill, and that is checked, not
-  assumed:** `run-compare.sh:50` is `P9_N=48`, `P9_MB=8` — 48 packs of 8 MiB
-  against a 256 MiB floor, so `after` folds *nothing* and the leg scores the
-  floor's absence of work as a byte win. The same defaults put P9 at 34-35 s
-  (`runce-fold-fix-2026-09-07.log`), under CloudWatch's resolution. P9 must be
-  resized so the ladder climbs several rungs above the floor — of order 3-4
-  GiB of pushes, not 384 MiB — and `FLINT_FORGE_BASE_REBUILD_MIN_SECS` must be
-  set to a few hundred seconds **identically in both arms** so a base rebuild
-  falls inside the drill at all (its default is 3600 s, and the hour's rebuild
-  is where `6bc67980` measured 4.4x → 1.95x). The knob is not the dimension
-  under test; where the base's age is *read from* is.
+  **The rig's defaults turn out to be the right sizing, and both earlier
+  claims in this entry were wrong.** This was asserted twice — first that
+  `P9_N=48`, `P9_MB=8` "folds nothing against a 256 MiB floor", then that
+  P2 should be resized to 10,000 pushes — and simulating the actual shapes
+  refutes both. 48 x 8 MiB is 384 MiB, which is ABOVE the floor, and the
+  cap forces folds at tiny sizes regardless of it. Simulated, rule
+  `1: cadence persisted` against shipped rule `A`:
+
+  | shape | before | after | before/after | folds (A) | GB/rep |
+  |---|---:|---:|---:|---:|---:|
+  | **P9 default 48 x 8 MiB on 1 GiB** | 3.56x | 1.67x | **2.13x** | 1 | 1.4 |
+  | P9 default on an EMPTY base | 4.54x | 2.83x | 1.60x | 1, +2 rebuilds | 1.8 |
+  | P9 x4, 192 x 8 MiB on 1 GiB | 6.40x | 5.26x | 1.22x | 6 | 10.3 |
+  | **P2 default ~930 tiny pushes** | 5.65x | 3.08x | **1.83x** | 14 | ~0.2 |
+
+  Scaling P9 UP makes the effect smaller and the drill 7x dearer. Both legs
+  run at their shipped defaults; nothing is resized. What P9 default does
+  NOT do on a warm 1 GiB base is rebuild the base (`rebuilds=0`), so **F5's
+  leg is P9 on a FRESH repository**, where the same 384 MiB produces two
+  rebuilds for 1.8 GB — that is where a base rebuild's whole-repository
+  upload can be timed against the 3600 s grace.
+
+  One fold in the `after` arm is a thin margin for the guard, so the guard
+  is `>= 1` and the fold count is reported either way; a leg that folds
+  once and a leg that folds zero times are different findings and must not
+  be summarised into one.
 
   Assert the fold count per arm from the batch log before scoring a single
   byte: a P9 leg with zero folds in both arms has measured nothing, however

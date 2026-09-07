@@ -238,6 +238,9 @@ if __name__ == '__main__':
             # turns on is whether the SHIPPED rule (A) folds at all at
             # that size, or whether the 256 MiB floor swallows the leg
             # and the bytes score the floor rather than the ladder.
+            'M6 P9-default 48x8MiB on 0 base':       (uniform(0, 48, 8*MiB, 1.0)),
+            'M6 P9-default 48x8MiB on 1 GiB':        (uniform(GiB, 48, 8*MiB, 1.0)),
+            'M6 P9-x4 192x8MiB on 1 GiB':            (uniform(GiB, 192, 8*MiB, 1.0)),
             'M6 P2-as-is 930x1KiB on 1 GiB, 15/s':   (uniform(GiB, 930, 1024, 0.065)),
             'M6 P2-10k-x-1KiB on 1 GiB, 15/s':       (uniform(GiB, 10000, 1024, 0.065)),
             'M6 P2-as-is 930x32KiB on 1 GiB, 15/s':  (uniform(GiB, 930, 32*1024, 0.065)),
