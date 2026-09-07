@@ -484,6 +484,47 @@ impl Git {
         }
     }
 
+    /// The INCREMENTAL proof (`follow.rs`): every object reachable
+    /// from `tips` and not from `known` must be present and readable.
+    ///
+    /// `fsck --connectivity-only` walks everything the refs reach, and
+    /// on a warm restart nearly all of that was proved by this same
+    /// process minutes ago. `rev-list --objects` over the tips that
+    /// moved, with the previously proved tips as the uninteresting
+    /// side, walks the delta and the boundary — and fails the same way
+    /// fsck does, by refusing to read an object that is not there.
+    ///
+    /// `--quiet` suppresses the listing, not the traversal: git still
+    /// opens every commit, tree and blob it walks, which is the whole
+    /// of the proof.
+    pub async fn prove_reachable(&self, tips: &[String], known: &[String]) -> ForgeResult<()> {
+        if tips.is_empty() {
+            return Ok(());
+        }
+        let mut stdin = String::new();
+        for t in tips {
+            stdin.push_str(t);
+            stdin.push('\n');
+        }
+        for k in known {
+            stdin.push('^');
+            stdin.push_str(k);
+            stdin.push('\n');
+        }
+        let out = self
+            .run(&["rev-list", "--objects", "--quiet", "--stdin"], Some(stdin.as_bytes()))
+            .await?;
+        if out.ok() {
+            Ok(())
+        } else {
+            Err(ForgeError::Refused(format!(
+                "the {} tip(s) this restore added are not connected in the packs it holds: {}",
+                tips.len(),
+                out.stderr.trim()
+            )))
+        }
+    }
+
     /// A three-way merge with no worktree and no index.
     ///
     /// Exit 0 is a clean merge, 1 is a conflict, anything else is a

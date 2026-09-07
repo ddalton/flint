@@ -55,10 +55,12 @@ pub mod batch;
 pub mod bundle;
 pub mod export;
 pub mod fold;
+pub mod follow;
 pub mod gitcmd;
 pub mod hook;
 pub mod lease;
 pub mod lfs;
+pub mod log;
 pub mod packio;
 pub mod policy;
 pub mod prune;
@@ -194,6 +196,23 @@ pub struct ForgeConfig {
     /// reference set. A bound on the sweep's cost, not on how many
     /// exist; the oldest beyond it expire on a later pass.
     pub undo_max_points: usize,
+    /// How many batch-log entries the bucket keeps (`log.rs`). The
+    /// window in which a follower that has fallen behind catches up
+    /// with the deltas instead of the whole snapshot; past it a wake is
+    /// what it always was. 0 writes no log at all — the behaviour
+    /// before X15's second half, and the control arm of its drill.
+    pub log_max_entries: usize,
+    /// Whether a server that is WAITING for another's lease brings its
+    /// repository down and proves it while it waits (X14). The bytes
+    /// and the `fsck` are the whole of a cold wake; paying them before
+    /// the claim is what makes the wake proportional to the pushes
+    /// missed rather than to the repository. Off makes a challenger
+    /// what it was: idle until it claims, then a full restore.
+    pub prewarm: bool,
+    /// How often a warm follower reads the snapshot itself rather than
+    /// the log. The log poll cannot tell "nothing happened" from "the
+    /// entry was never written", so it is never the only source.
+    pub prewarm_resync_secs: u64,
     /// How long an unreferenced pack must have sat before the sweep may
     /// take it. Must outlive the LONGEST upload, not the longest
     /// plausible one (`LeanChunkGCRacyGrace`).
@@ -259,6 +278,9 @@ impl ForgeConfig {
             orphan_grace_secs: 3600,
             undo_window_secs: 7 * 24 * 3600,
             undo_max_points: 64,
+            log_max_entries: 512,
+            prewarm: true,
+            prewarm_resync_secs: 300,
             project_id: None,
             fanout: 4,
             default_branch: "main".into(),
@@ -291,6 +313,15 @@ impl ForgeConfig {
     }
     pub fn undo_prefix(&self) -> String {
         format!("{}/git/undo/", self.prefix)
+    }
+    /// One batch-log entry, keyed by the snapshot seq it produced
+    /// (`log.rs`). Immutable and written once, so the PUT is
+    /// unconditional and a follower may cache what it reads.
+    pub fn log_key(&self, seq: u64) -> String {
+        format!("{}/git/log/{seq}.json", self.prefix)
+    }
+    pub fn log_prefix(&self) -> String {
+        format!("{}/git/log/", self.prefix)
     }
     pub fn epoch_key(&self) -> String {
         format!("{}/git/epoch", self.prefix)

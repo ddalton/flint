@@ -1,0 +1,51 @@
+
+== precondition: FORGE_BIN is newer than the sources it claims to be ==
+  PASS  FORGE_BIN is not older than any source under forge/syncer or flint-store
+
+== cold — prewarm=0 log_max_entries=0 ==
+  ....  cold: 6 pushes, tip a66dce20dc7e6531df345edf5691a75f79de1995, 386 MB of packs, 24024 objects, mean push 5419 ms
+  ....  cold: wake 1457 ms (of it 861 ms after the claim); restore 845 ms, 21 file(s), 430.0 MiB, proof Some(Full)
+  PASS  cold: the successor serves the holder's tip
+  PASS  cold: and the objects behind it are really there
+  PASS  cold: the clone passes fsck
+
+== warm — prewarm=1 log_max_entries=512 ==
+  ....  warm: 6 pushes, tip fd4373ca18106b9ae17aaffce10cda8a5c51bdcb, 386 MB of packs, 24024 objects, mean push 5033 ms
+  ....  warm: warm passes: 2, of them 1 through the log
+  ....  warm: wake 732 ms (of it 222 ms after the claim); restore 232 ms, 0 file(s), 0.0 MiB, proof Some(Nothing)
+  PASS  warm: the successor serves the holder's tip
+  PASS  warm: and the objects behind it are really there
+  PASS  warm: the clone passes fsck
+
+== the control paid, and paid enough to be a measurement ==
+  PASS  cold: the successor fetched 21 file(s)
+  PASS  cold: and 430.0 MiB of them
+  PASS  cold: it proved the whole repository (Some(Full))
+
+== the warmed successor paid neither the bytes nor the proof ==
+  PASS  warm: the successor fetched 0 files at the claim
+  PASS  warm: and walked only the delta (Some(Nothing))
+  PASS  warm: restore 232 ms against the control's 845 ms
+  PASS  warm: claim to serving 222 ms against the control's 861 ms
+  ....  whole wake 732 vs 1457 ms — inside one claim poll; on this store the
+      transfer runs at loopback speed, so the wake's difference is the claim-to-serving span above
+      and the rig cannot resolve more than that
+
+== the log carried the standby over the push it missed ==
+  PASS  warm: 1 catch-up pass(es) read a log entry rather than the snapshot
+
+== the log is in the bucket, and only where it was asked for ==
+  PASS  warm: 7 log entrie(s) under git/log/
+  PASS  cold: LOG_MAX_ENTRIES=0 wrote none
+  PASS  --log-list reads them back and names the ref that moved
+
+== what the log costs the push it rides beside ==
+  ....  mean push: 5033 ms with the log, 5419 ms without (one arm each; the request
+      count is pinned by the unit test, this is the wall clock)
+
+summary
+  arm    wake_ms  claim2srv  restore_ms  files   MiB      proof
+  cold   1457     861        845         21      430.0    Some(Full)
+  warm   732      222        232         0       0.0      Some(Nothing)
+
+c7-prewarm: 18 passed, 0 failed

@@ -318,7 +318,21 @@ pub async fn run_batch(
     sc.last_push_unix = super::now_unix();
 
     // ── step 7: derived files, best effort, after the report path ────
-    if let Err(e) = publish_derived(sc).await {
+    //
+    // The batch log goes here rather than beside the CAS: it is a hint
+    // for followers (`log.rs`), written AFTER the write it describes so
+    // a fenced batch can never leave an entry for a push that did not
+    // land. It rides BESIDE the derived files, not after them: it is
+    // one more small independent PUT, so it costs the batch a request
+    // and not a round trip.
+    let entry = {
+        let next = sc.cell()?.snap.clone();
+        super::log::entry_for(sc, &cell.snap, &next)
+    };
+    let (store, cfg) = (sc.store.clone(), sc.cfg.clone());
+    let logged = async move { super::log::emit(store.as_ref(), &cfg, entry).await };
+    let (_, derived) = tokio::join!(logged, publish_derived(sc));
+    if let Err(e) = derived {
         eprintln!("flint-forge: derived files not refreshed ({e}); the smart protocol is unaffected");
     }
 

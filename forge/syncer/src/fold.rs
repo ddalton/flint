@@ -706,6 +706,7 @@ pub async fn commit(sc: &mut Syncer, res: FoldResult, now: u64) -> ForgeResult<O
             }
         }
     };
+    super::log::record(sc, &cell.snap, &new_cell.snap).await;
     sc.cell = Some(new_cell);
     sc.hold.tick(1);
     if res.is_base {

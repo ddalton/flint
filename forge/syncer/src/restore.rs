@@ -19,7 +19,36 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use flint_store::StoreError;
 
-use super::{gitcmd, packio, snapshot, ForgeError, ForgeResult, Syncer};
+use super::{follow, gitcmd, log, packio, snapshot, ForgeError, ForgeResult, Syncer};
+
+/// What a restore cost, so the difference between a cold wake and a
+/// warm one is a number rather than an impression. Read by `/status`
+/// and by the drills; the tests assert on it, which is what keeps the
+/// incremental paths from silently becoming the full one again.
+#[derive(Debug, Clone, Default)]
+pub struct RestoreReport {
+    pub seq: u64,
+    pub packs_named: usize,
+    pub files_fetched: usize,
+    pub bytes_fetched: u64,
+    pub unlinked: usize,
+    pub proof: Option<follow::Proof>,
+    pub elapsed_ms: u128,
+}
+
+impl RestoreReport {
+    pub fn line(&self) -> String {
+        format!(
+            "seq {}, {} pack(s) named, {} file(s) fetched ({:.1} MiB), proof {:?}, {} ms",
+            self.seq,
+            self.packs_named,
+            self.files_fetched,
+            self.bytes_fetched as f64 / (1024.0 * 1024.0),
+            self.proof,
+            self.elapsed_ms
+        )
+    }
+}
 
 /// `merge-tree -X ours|theirs` is 2.43; below it the option means
 /// something else, so the floor is asserted once at start rather than
@@ -38,8 +67,10 @@ pub async fn check_git_floor(sc: &Syncer) -> ForgeResult<()> {
 }
 
 /// Bring the local repository to exactly what the snapshot names.
-pub async fn restore(sc: &mut Syncer) -> ForgeResult<()> {
+pub async fn restore(sc: &mut Syncer) -> ForgeResult<RestoreReport> {
     sc.check_fence()?;
+    let began = std::time::Instant::now();
+    let mut report = RestoreReport::default();
     let branch = sc.cfg.default_branch.clone();
     let hooks = sc.cfg.hooks_path.clone();
     sc.git.init_bare(&branch, hooks.as_deref()).await?;
@@ -58,7 +89,7 @@ pub async fn restore(sc: &mut Syncer) -> ForgeResult<()> {
         // exactly right, and the first batch creates the snapshot under
         // `If-None-Match: *`.
         sc.cell = Some(cell);
-        return Ok(());
+        return Ok(report);
     }
 
     let mut listed = list_pack_files(sc).await?;
@@ -126,6 +157,8 @@ pub async fn restore(sc: &mut Syncer) -> ForgeResult<()> {
     // Largest first, so the base's chunks start at once and the tail
     // of the fan-out is not one stream.
     units.sort_by_key(|u| std::cmp::Reverse(u.size));
+    report.files_fetched = units.len();
+    report.bytes_fetched = units.iter().map(|u| u.size).sum();
     packio::fetch_all(sc.store.clone(), units, sc.cfg.fanout, Some(sc.hold.progress_handle()))
         .await?;
 
@@ -147,6 +180,7 @@ pub async fn restore(sc: &mut Syncer) -> ForgeResult<()> {
             for ext in [".idx", ".rev", ".bitmap", ".keep", ".pack"] {
                 let _ = std::fs::remove_file(pack_dir.join(format!("{stem}{ext}")));
             }
+            report.unlinked += 1;
             eprintln!("flint-forge: restore unlinked {pack}, which the snapshot does not name");
         }
     }
@@ -216,9 +250,25 @@ pub async fn restore(sc: &mut Syncer) -> ForgeResult<()> {
         Err(e) => return Err(e.into()),
     }
 
-    sc.git.fsck_connectivity().await?;
+    // The proof. `fsck --connectivity-only` over everything is the
+    // cold-start cost; when this process (or the warm pass before the
+    // claim) already proved a pack set that is still whole on disk,
+    // only the tips that moved since are left to walk (`follow.rs`).
+    let local_packs = sc.git.local_packs()?;
+    let proof = follow::prove(sc, &cell.snap.refs, &local_packs).await?;
+    report.proof = Some(proof);
+    report.seq = cell.snap.seq;
+    report.packs_named = cell.snap.packs.len();
     sc.cell = Some(cell);
-    Ok(())
+    // The state that lets the NEXT restore be incremental. Written
+    // after the proof, never before: a state file claiming a proof that
+    // did not happen is the one way this becomes unsound.
+    if let Err(e) = follow::checkpoint(sc, super::now_unix()) {
+        eprintln!("flint-forge: could not record the restore's proof ({e}); the next start-up \
+                   pays a full fsck");
+    }
+    report.elapsed_ms = began.elapsed().as_millis();
+    Ok(report)
 }
 
 /// Every object under the repository's pack prefix, by file name. One
@@ -305,6 +355,7 @@ pub async fn maybe_repack(sc: &mut Syncer) -> ForgeResult<bool> {
             }
             Err(e) => return Err(e),
         };
+    log::record(sc, &cell.snap, &new_cell.snap).await;
     sc.cell = Some(new_cell);
     Ok(true)
 }

@@ -12,6 +12,76 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added — flint forge, the wake: a batch log beside the snapshot, and a challenger that warms before it claims
+
+- **The batch log** (X15's second half, `forge/syncer/src/log.rs`).
+  Every snapshot CAS now also puts one small immutable object at
+  `git/log/<seq>.json` naming what it changed: the refs that moved
+  (the empty oid for a delete), the packs that appeared with the file
+  names beside each, and the packs that left. The snapshot is still
+  the truth and it is still whole — which is exactly why a reader that
+  wanted to know what MOVED had to download the entire ref map and
+  diff it. Three rules keep the log a hint rather than a second source
+  of truth: it is written AFTER its CAS (the other order would let a
+  fenced batch leave an entry for a push that never landed); a
+  follower advances only along a contiguous chain, so a hole — the
+  crash window between a CAS and its put, or an entry the pruner
+  reached — sends it back to the snapshot; and nothing in the log is a
+  reference, so the sweep's reference set is unchanged. An idle
+  follower's poll is one 404 on `<seq + 1>` rather than a whole ref
+  map. It costs a batch exactly one PUT and no latency: the fixed
+  per-push cost is 4 requests with the log off and 5 with it on
+  (`the_batch_log_costs_exactly_one_put_per_batch` pins both arms),
+  and the put rides beside the derived files rather than after them.
+  Bounded by count — `FLINT_FORGE_LOG_MAX_ENTRIES`, default 512,
+  pruned inside the sweep — and 0 turns it off entirely and is the
+  control arm. `flint-forge-syncer --log-list [<n>]` reads it back
+  without a lease.
+
+- **A challenger that warms while it waits** (X14's cheap half,
+  `forge/syncer/src/follow.rs`). A server WAITING for another's lease
+  now brings the repository down and proves it while it waits, then
+  follows the log for what lands after; when the holder leaves, its
+  restore fetches nothing. It warms only while the holder's token
+  still moves (`quiet_polls == 0`) — a challenger about to take over a
+  dead server must race, not download — and the warm pass takes no
+  lease, writes nothing to the bucket and never sets the cell a CAS
+  would use. `FLINT_FORGE_PREWARM=0` is the old behaviour;
+  `FLINT_FORGE_PREWARM_RESYNC_SECS` (300) is how often it reads the
+  snapshot rather than the log, because a log poll cannot distinguish
+  "nothing happened" from "the entry was never written".
+
+- **The proof is incremental on a warm disk.** `fsck
+  --connectivity-only` walks every object the refs reach and ran at
+  every start-up, including the container restart whose `emptyDir`
+  still held the repository it proved seconds earlier. A restore now
+  records what it proved — the snapshot, the pack FILES on disk, the
+  tips walked — and the next one walks only `rev-list --objects <new
+  tips> --not <proved tips>`. It lapses the moment a file the last
+  proof walked is gone, which is the only event that can make it
+  unsound: a fold does NOT lapse it while the fold's inputs are
+  retained on disk, and does the moment retention drops them (the
+  first draft of that test asserted the opposite and the code was
+  right). `restore()` now returns a `RestoreReport` — seq, packs
+  named, files and bytes fetched, the proof's kind, elapsed — which is
+  what the tests and the drill assert on.
+
+- Measured against a real S3 API, two arms of one binary
+  (`forge/e2e/composition/c7-prewarm.sh`, results
+  `forge/e2e/results/c7-prewarm-2026-09-06.log`): 386 MB of packs,
+  24,024 objects, a holder and a challenger on separate disks, and one
+  more push after the challenger was already warm. The control
+  (`PREWARM=0 LOG_MAX_ENTRIES=0`) fetched 21 files and 430.0 MiB and
+  proved the whole repository; the warmed successor fetched 0 and
+  proved nothing new, restore 845 → 232 ms, claim-to-serving 861 → 222
+  ms, and it crossed the missed push through one log entry rather than
+  the snapshot. Both successors were cloned from and checked — the
+  holder's tip, the blob's bytes, `fsck` in the clone — because fast
+  must not be allowed to mean empty. What the rig cannot decide is the
+  whole wall-clock wake: 430 MiB moves at loopback speed, so the
+  transfer is 0.6 s against a 1 s claim poll, and the number that
+  decides it is the cluster's.
+
 ### Changed — flint forge, the bytes: the ladder starts at a floor, big packs wait for the base, the cadence is the base's age
 
 - **Three rules in the fold planner**, chosen by replaying the

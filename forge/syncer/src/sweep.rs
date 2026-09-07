@@ -174,6 +174,21 @@ pub async fn sweep(sc: &mut Syncer) -> ForgeResult<usize> {
         deleted += 1;
         eprintln!("flint-forge: undo point {key} expired past the {}s window", sc.cfg.undo_window_secs);
     }
+    // The batch log is bounded by COUNT and swept here, not by the
+    // rules above: an entry names packs but references none of them,
+    // and it has no grace to serve — nothing reads an entry it has not
+    // already found by seq.
+    match super::log::prune(sc).await {
+        Ok(0) => {}
+        Ok(n) => {
+            deleted += n;
+            eprintln!(
+                "flint-forge: pruned {n} log entrie(s) past the newest {}",
+                sc.cfg.log_max_entries
+            );
+        }
+        Err(e) => eprintln!("flint-forge: the log was not pruned this pass ({e})"),
+    }
     if deleted > 0 {
         eprintln!("flint-forge: swept {deleted} object(s) past the {grace}s grace");
     }

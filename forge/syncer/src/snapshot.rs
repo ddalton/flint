@@ -194,7 +194,15 @@ pub async fn rotate_for_takeover(
     let cell = load(store, cfg).await?;
     let next = cell.snap.clone();
     match cas(store, cfg, &cell, next, epoch, writer).await {
-        Ok(c) => Ok(c),
+        Ok(c) => {
+            // A rotation moves the seq without moving anything else. A
+            // follower needs the entry all the same: without it the
+            // chain has a hole at every handover, and every handover is
+            // exactly when a follower's warm repository is about to be
+            // worth the most.
+            super::log::record_rotation(store, cfg, &cell.snap, &c.snap).await;
+            Ok(c)
+        }
         // Losing the rotation race means another successor rotated
         // first and is now the holder. We are not entitled to serve.
         Err(ForgeError::Store(StoreError::PreconditionFailed(e))) => Err(ForgeError::Fenced(

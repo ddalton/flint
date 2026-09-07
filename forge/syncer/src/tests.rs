@@ -2381,6 +2381,10 @@ async fn a_failed_fetch_never_lands_a_partial_pack() {
 async fn the_fixed_per_push_s3_cost_is_four_requests() {
     let mut rig = Rig::new().await;
     rig.start().await;
+    // The batch log (`log.rs`) is a fifth request by design, and its
+    // own test below measures it against this one. Here it is off, so
+    // this stays what §4 documents.
+    rig.sc.cfg.log_max_entries = 0;
     let c1 = rig.stage_commit(None, &[("a.txt", "one")], "one").await;
     rig.run(vec![push(
         1,
@@ -2412,6 +2416,7 @@ async fn the_fixed_per_push_s3_cost_is_four_requests() {
 async fn head_is_published_once_not_once_per_push() {
     let mut rig = Rig::new().await;
     rig.start().await;
+    rig.sc.cfg.log_max_entries = 0;
     let head_key = rig.sc.cfg.head_key();
 
     let c1 = rig.stage_commit(None, &[("a.txt", "one")], "one").await;
@@ -2451,6 +2456,7 @@ async fn head_is_published_once_not_once_per_push() {
 async fn a_push_with_a_new_pack_pays_only_for_its_siblings() {
     let mut rig = Rig::new().await;
     rig.start().await;
+    rig.sc.cfg.log_max_entries = 0;
     let c1 = rig.stage_commit(None, &[("a.txt", "one")], "one").await;
     rig.run(vec![push(
         1,
@@ -3750,4 +3756,353 @@ async fn a_retained_pack_is_never_named_by_a_batch() {
     let mut got = listed.clone();
     got.sort();
     assert_eq!(got, want, "info/packs lists exactly the snapshot's packs");
+}
+
+// ── the batch log, and the wake it makes cheap (X15's second half, X14) ─
+
+/// The log's price, measured against the same batch without it.
+///
+/// It is one PUT and it must stay one PUT: the fixed per-push cost is
+/// four requests (the test above holds that), and a hint for followers
+/// that quietly became two round trips per push would be a bad trade
+/// nobody had made deliberately.
+#[tokio::test]
+async fn the_batch_log_costs_exactly_one_put_per_batch() {
+    async fn cost(log_on: bool) -> u64 {
+        let mut rig = Rig::new().await;
+        rig.start().await;
+        rig.sc.cfg.log_max_entries = if log_on { 512 } else { 0 };
+        let c1 = rig.stage_commit(None, &[("a.txt", "one")], "one").await;
+        rig.run(vec![push(
+            1,
+            vec![RefUpdate { name: "refs/heads/main".into(), old_oid: zero(), new_oid: c1.clone() }],
+        )])
+        .await;
+        // A second ref at the same commit: no new pack, so what is left
+        // is fixed overhead only.
+        rig.store.reset_op_counts();
+        rig.run(vec![push(
+            2,
+            vec![RefUpdate { name: "refs/heads/side".into(), old_oid: zero(), new_oid: c1 }],
+        )])
+        .await;
+        rig.store.total_ops()
+    }
+    let off = cost(false).await;
+    let on = cost(true).await;
+    assert_eq!(off, 4, "the control is §4's four requests");
+    assert_eq!(on, off + 1, "the log is one PUT per batch and nothing else");
+}
+
+/// What one entry says: the refs that moved, the pack that appeared,
+/// and the files beside it a follower must fetch.
+#[tokio::test]
+async fn a_batch_leaves_a_log_entry_naming_what_it_changed() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c1 = rig.push_commit("refs/heads/main", None, "one").await;
+    let seq = snapshot::load(rig.store.as_ref(), &rig.sc.cfg).await.unwrap().snap.seq;
+
+    let entry = super::log::read(rig.store.as_ref(), &rig.sc.cfg, seq)
+        .await
+        .expect("read")
+        .expect("the batch leaves an entry at its own seq");
+    assert_eq!(entry.from_seq + 1, entry.seq, "an entry chains to the seq it replaced");
+    assert_eq!(entry.refs.get("refs/heads/main"), Some(&c1), "the ref it moved, by name");
+    assert_eq!(entry.packs_added.len(), 1, "the pack the push brought: {:?}", entry.packs_added);
+    let files = &entry.packs_added[0].files;
+    assert!(
+        files.iter().any(|f| f.ends_with(".pack")) && files.iter().any(|f| f.ends_with(".idx")),
+        "a follower fetches files, not stems: {files:?}"
+    );
+
+    // A delete is spelled as the empty oid, so applying an entry can
+    // remove a ref rather than only move one.
+    rig.run(vec![push(
+        9,
+        vec![RefUpdate { name: "refs/heads/main".into(), old_oid: c1.clone(), new_oid: zero() }],
+    )])
+    .await;
+    let seq2 = snapshot::load(rig.store.as_ref(), &rig.sc.cfg).await.unwrap().snap.seq;
+    let del = super::log::read(rig.store.as_ref(), &rig.sc.cfg, seq2)
+        .await
+        .expect("read")
+        .expect("entry");
+    assert_eq!(del.refs.get("refs/heads/main"), Some(&String::new()), "a delete is the empty oid");
+}
+
+/// A fold moves no ref and changes the pack set. A follower that only
+/// watched refs would keep fetching packs the bucket no longer holds,
+/// so the entry carries both sides of the swap.
+#[tokio::test]
+async fn a_fold_commit_leaves_a_log_entry_naming_the_swap() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    rig.tiers_only();
+    let mut parent = None;
+    for i in 0..3 {
+        parent = Some(rig.push_commit("refs/heads/main", parent.as_deref(), &format!("c{i}")).await);
+    }
+    let (plan, named) = rig.fold_once().await.expect("a fold is planned");
+    let named = named.expect("the fold commits");
+    let seq = snapshot::load(rig.store.as_ref(), &rig.sc.cfg).await.unwrap().snap.seq;
+    let entry = super::log::read(rig.store.as_ref(), &rig.sc.cfg, seq)
+        .await
+        .expect("read")
+        .expect("the fold's commit leaves an entry");
+    assert!(entry.refs.is_empty(), "a fold moves no ref: {:?}", entry.refs);
+    assert_eq!(entry.packs_added.len(), 1, "one pack in: {:?}", entry.packs_added);
+    assert_eq!(entry.packs_added[0].pack, named, "the pack the fold named");
+    assert_eq!(
+        entry.packs_removed.len(),
+        plan.inputs().len(),
+        "and its inputs out: {:?}",
+        entry.packs_removed
+    );
+}
+
+/// The log is bounded by count, and the pruner runs inside the sweep.
+#[tokio::test]
+async fn the_log_keeps_only_the_newest_entries() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    rig.sc.cfg.log_max_entries = 3;
+    let mut parent = None;
+    for i in 0..6 {
+        parent = Some(rig.push_commit("refs/heads/main", parent.as_deref(), &format!("c{i}")).await);
+    }
+    let before = super::log::seqs(rig.store.as_ref(), &rig.sc.cfg).await.expect("seqs");
+    assert!(before.len() > 3, "six batches leave six entries: {before:?}");
+    sweep::sweep(&mut rig.sc).await.expect("sweep");
+    let after = super::log::seqs(rig.store.as_ref(), &rig.sc.cfg).await.expect("seqs");
+    assert_eq!(after.len(), 3, "the newest three survive: {after:?}");
+    assert_eq!(after, before[before.len() - 3..], "and they are the newest, not the oldest");
+
+    // Turned off, the pruner takes the lot: entries a previous
+    // configuration wrote are ordinary rubbish once nothing follows.
+    rig.sc.cfg.log_max_entries = 0;
+    sweep::sweep(&mut rig.sc).await.expect("sweep");
+    assert!(super::log::seqs(rig.store.as_ref(), &rig.sc.cfg).await.unwrap().is_empty());
+}
+
+/// The point of the log: a follower catches up on the deltas and never
+/// reads the snapshot.
+///
+/// The oracle is a POISONED snapshot. After the follower has a
+/// position, the snapshot object is overwritten with bytes
+/// `snapshot::load` refuses; a follower that reads it fails loudly, so
+/// a pass that converges cannot have read it. The control is the same
+/// run with the log off, which must NOT converge.
+#[tokio::test]
+async fn a_follower_catches_up_from_the_log_and_not_from_the_snapshot() {
+    let store = Arc::new(MemoryStore::new());
+    let mut a = Rig::with_store(store.clone(), "a").await;
+    a.start().await;
+    let c1 = a.push_commit("refs/heads/main", None, "one").await;
+
+    // The follower's first pass: no position yet, so it reads the
+    // snapshot once and proves what it fetched.
+    let mut b = Rig::with_store(store.clone(), "b").await;
+    let first = super::follow::warm(&mut b.sc).await.expect("first warm");
+    assert_eq!(first.entries, None, "the first pass has no position and reads the snapshot");
+    assert!(first.files_fetched > 0, "and it brings the packs down");
+    assert_eq!(b.sc.git.ref_oid("refs/heads/main").await.unwrap().as_deref(), Some(c1.as_str()));
+
+    // Two more batches on the holder, then the snapshot is made
+    // unreadable.
+    let c2 = a.push_commit("refs/heads/main", Some(&c1), "two").await;
+    let c3 = a.push_commit("refs/heads/main", Some(&c2), "three").await;
+    store.raw_put(&a.sc.cfg.snapshot_key(), bytes::Bytes::from_static(b"not json"), vec![]);
+    assert!(
+        snapshot::load(store.as_ref(), &a.sc.cfg).await.is_err(),
+        "the poison must actually poison"
+    );
+
+    let second = super::follow::warm(&mut b.sc).await.expect("the follower catches up on the log");
+    assert_eq!(second.entries, Some(2), "two batches, two entries: {second:?}");
+    assert_eq!(
+        b.sc.git.ref_oid("refs/heads/main").await.unwrap().as_deref(),
+        Some(c3.as_str()),
+        "and it lands on the holder's tip"
+    );
+    assert!(matches!(second.proof, Some(super::follow::Proof::Delta { .. })), "{second:?}");
+
+    // The control: a follower of a repository with no log has nothing
+    // to read, and the poisoned snapshot is all that is left.
+    let mut c = Rig::with_store(store.clone(), "c").await;
+    assert!(
+        super::follow::warm(&mut c.sc).await.is_err(),
+        "without a position there is only the snapshot, and it is poisoned"
+    );
+}
+
+/// A hole in the log is not a wrong answer, it is a slow one: the
+/// follower stops at the gap and the timed resync reads the snapshot.
+#[tokio::test]
+async fn a_gap_in_the_log_stops_the_follower_and_the_resync_carries_it() {
+    let store = Arc::new(MemoryStore::new());
+    let mut a = Rig::with_store(store.clone(), "a").await;
+    a.start().await;
+    let c1 = a.push_commit("refs/heads/main", None, "one").await;
+    let mut b = Rig::with_store(store.clone(), "b").await;
+    super::follow::warm(&mut b.sc).await.expect("first warm");
+
+    let c2 = a.push_commit("refs/heads/main", Some(&c1), "two").await;
+    let c3 = a.push_commit("refs/heads/main", Some(&c2), "three").await;
+    // Take the FIRST of the two entries the follower needs: the crash
+    // window between a CAS and its put, or an entry the pruner reached.
+    let seqs = super::log::seqs(store.as_ref(), &b.sc.cfg).await.expect("seqs");
+    let hole = seqs[seqs.len() - 2];
+    store.delete(&b.sc.cfg.log_key(hole)).await.expect("delete");
+
+    let stalled = super::follow::warm(&mut b.sc).await.expect("warm");
+    assert_eq!(stalled.entries, Some(0), "the chain is broken at the hole: {stalled:?}");
+    assert_eq!(
+        b.sc.git.ref_oid("refs/heads/main").await.unwrap().as_deref(),
+        Some(c1.as_str()),
+        "so the follower has not moved"
+    );
+
+    // The resync timer is what stops that from being permanent.
+    b.sc.cfg.prewarm_resync_secs = 0;
+    let caught = super::follow::warm(&mut b.sc).await.expect("warm");
+    assert_eq!(caught.entries, None, "it read the snapshot: {caught:?}");
+    assert_eq!(b.sc.git.ref_oid("refs/heads/main").await.unwrap().as_deref(), Some(c3.as_str()));
+}
+
+/// X14's cheap half, end to end: a challenger that warmed while it
+/// waited claims without fetching a byte and without a full `fsck`.
+///
+/// The control is the same takeover with no warm pass, which must pay
+/// both — otherwise the measurement is of a repository small enough for
+/// the difference not to exist.
+#[tokio::test]
+async fn a_prewarmed_challenger_claims_without_the_bytes_or_the_full_proof() {
+    async fn takeover(warm_first: bool) -> restore::RestoreReport {
+        let store = Arc::new(MemoryStore::new());
+        let mut a = Rig::with_store(store.clone(), "a").await;
+        a.start().await;
+        let mut parent = None;
+        for i in 0..4 {
+            parent =
+                Some(a.push_commit("refs/heads/main", parent.as_deref(), &format!("c{i}")).await);
+        }
+
+        let mut b = Rig::with_store(store.clone(), "b").await;
+        if warm_first {
+            // What the claim loop does while the holder's token still
+            // moves.
+            let r = super::follow::warm(&mut b.sc).await.expect("warm");
+            assert!(r.files_fetched > 0, "the warm pass is what pays the bytes: {r:?}");
+        }
+        lease::release(&mut a.sc).await.expect("release");
+        for _ in 0..16 {
+            if matches!(
+                lease::claim_step(&mut b.sc).await.expect("claim"),
+                lease::ClaimOutcome::Claimed(_)
+            ) {
+                break;
+            }
+        }
+        assert!(b.sc.lease().is_ok(), "the successor must hold the lease");
+        restore::restore(&mut b.sc).await.expect("restore")
+    }
+
+    let cold = takeover(false).await;
+    let warm = takeover(true).await;
+    assert!(cold.files_fetched > 0, "the control fetches the repository: {cold:?}");
+    assert_eq!(cold.proof, Some(super::follow::Proof::Full), "and proves all of it: {cold:?}");
+    assert_eq!(warm.files_fetched, 0, "the warmed successor fetches nothing: {warm:?}");
+    assert_eq!(warm.bytes_fetched, 0);
+    assert!(!warm.proof.unwrap().is_full(), "and walks no more than the delta: {warm:?}");
+    assert_eq!(cold.seq, warm.seq, "both arms end at the same snapshot");
+}
+
+/// The warm restart: a container that dies and comes back on the same
+/// `emptyDir` has already proved what it holds.
+#[tokio::test]
+async fn a_second_restore_on_the_same_disk_proves_only_what_moved() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c1 = rig.push_commit("refs/heads/main", None, "one").await;
+    super::follow::checkpoint(&rig.sc, super::now_unix()).expect("checkpoint");
+    let c2 = rig.push_commit("refs/heads/main", Some(&c1), "two").await;
+
+    // The restart: the cell is dropped, the disk is not.
+    rig.sc.cell = None;
+    let again = restore::restore(&mut rig.sc).await.expect("restore");
+    assert_eq!(again.files_fetched, 0, "nothing to fetch: {again:?}");
+    assert_eq!(
+        again.proof,
+        Some(super::follow::Proof::Delta { new: 1 }),
+        "one tip moved since the checkpoint: {again:?}"
+    );
+    assert_eq!(rig.sc.git.ref_oid("refs/heads/main").await.unwrap().as_deref(), Some(c2.as_str()));
+
+    // The control: with no record of a proof, the same restore walks
+    // everything.
+    super::follow::forget(&rig.sc);
+    rig.sc.cell = None;
+    let cold = restore::restore(&mut rig.sc).await.expect("restore");
+    assert_eq!(cold.proof, Some(super::follow::Proof::Full), "{cold:?}");
+}
+
+/// What the incremental proof actually rests on: the FILES, not the
+/// snapshot's pack list.
+///
+/// A fold rewrites the pack list, and the first draft of this test
+/// expected that to cost a full proof. It does not, and the code was
+/// right: the fold RETAINS its inputs on disk for readers, so every
+/// object the last proof walked is still exactly where it was walked.
+/// The proof lapses when those files go — which is what the second half
+/// asserts, and which is the only event that can make the cheap arm
+/// unsound.
+#[tokio::test]
+async fn the_proof_lapses_when_the_files_it_walked_are_unlinked_not_when_the_pack_list_moves() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    rig.tiers_only();
+    let mut parent = None;
+    for i in 0..3 {
+        parent = Some(rig.push_commit("refs/heads/main", parent.as_deref(), &format!("c{i}")).await);
+    }
+    super::follow::checkpoint(&rig.sc, super::now_unix()).expect("checkpoint");
+    rig.fold_once().await.expect("a fold");
+
+    rig.sc.cell = None;
+    let held = restore::restore(&mut rig.sc).await.expect("restore");
+    assert_eq!(
+        held.proof,
+        Some(super::follow::Proof::Nothing),
+        "the inputs are retained, so nothing walked has moved: {held:?}"
+    );
+
+    // Retention over: the packs that carried that proof are unlinked,
+    // and the restart after it has to walk the repository again.
+    let n = fold::unlink_retained(&mut rig.sc, super::now_unix() + 86_400).expect("unlink");
+    assert!(n > 0, "the fold's inputs must actually be dropped for this leg to mean anything");
+    rig.sc.cell = None;
+    let after = restore::restore(&mut rig.sc).await.expect("restore");
+    assert_eq!(
+        after.proof,
+        Some(super::follow::Proof::Full),
+        "a proof whose files are not all here is no proof: {after:?}"
+    );
+}
+
+/// The incremental proof is a proof: an object that is not there fails
+/// it. Without this leg every "Delta" above could be a walk of nothing.
+#[tokio::test]
+async fn the_incremental_proof_refuses_a_tip_it_cannot_walk() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c1 = rig.push_commit("refs/heads/main", None, "one").await;
+
+    // The positive control: the tip this repository holds walks.
+    rig.sc.git.prove_reachable(std::slice::from_ref(&c1), &[]).await.expect("a present tip walks");
+
+    // A tip nothing in the repository reaches.
+    let absent = "1".repeat(40);
+    let err = rig.sc.git.prove_reachable(&[absent], &[c1]).await.expect_err("must refuse");
+    assert!(matches!(err, ForgeError::Refused(_)), "{err:?}");
 }

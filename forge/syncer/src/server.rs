@@ -23,7 +23,7 @@ use super::batch::{self, PushReport};
 use super::policy::Policy;
 use super::status::{self, Phase, Shared};
 use super::uds::{self, HookResponse, Incoming};
-use super::{bundle, fold, lease, restore, ForgeError, ForgeResult, Syncer};
+use super::{bundle, fold, follow, lease, restore, ForgeError, ForgeResult, Syncer};
 
 pub struct ServerOpts {
     pub socket: PathBuf,
@@ -113,6 +113,27 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                     sc.cfg.prefix,
                     lease::QUIET_POLLS
                 );
+                // X14's cheap half: bring the repository down and prove
+                // it WHILE waiting, so a claim costs the pushes missed
+                // rather than the repository.
+                //
+                // Only while the holder's token is still moving. Once a
+                // poll comes back quiet this process may be about to
+                // take over a dead server, and a takeover that first
+                // downloads 40 GiB is the outage this exists to remove,
+                // rebuilt one step earlier.
+                if sc.cfg.prewarm && quiet_polls == 0 {
+                    match follow::warm(&mut sc).await {
+                        Ok(r) if r.moved() => {
+                            eprintln!("flint-forge: warm: {}", r.line())
+                        }
+                        Ok(_) => {}
+                        // Never fatal, and never a reason not to claim:
+                        // the restore after the claim reconciles
+                        // whatever this left behind.
+                        Err(e) => eprintln!("flint-forge: warm pass deferred: {e}"),
+                    }
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(sc.cfg.heartbeat_secs)).await;
             }
         }
@@ -149,7 +170,8 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
 
     // ── restore ──────────────────────────────────────────────────────
     publish(&shared, &sc, Phase::Importing);
-    restore::restore(&mut sc).await?;
+    let restored = restore::restore(&mut sc).await?;
+    eprintln!("flint-forge: restored {}", restored.line());
     let branch = sc.cfg.default_branch.clone();
     restore::set_default_branch(&sc, &branch).await?;
     // The bundle advertisement lives in the repository's local config,
@@ -246,6 +268,13 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
             _ = maintenance.tick() => {
                 if sc.cfg.fold_factor > 0 {
                     fold_tick(&mut sc, &fold_tx).await?;
+                }
+                // What a container restart on this same emptyDir may
+                // skip proving. Taken on the slow tick and not per
+                // push: it is a local write proportional to the ref
+                // map, and nothing waits on it.
+                if let Err(e) = follow::checkpoint(&sc, super::now_unix()) {
+                    eprintln!("flint-forge: could not checkpoint the proof ({e})");
                 }
                 if let Some(bcfg) = opts.bundle.as_ref() {
                     match super::bundle::maybe_run(&mut sc, bcfg, super::now_unix()).await {

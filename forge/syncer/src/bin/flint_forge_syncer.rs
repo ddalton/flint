@@ -120,6 +120,22 @@ fn main() {
             .block_on(undo_list(want));
         return;
     }
+    // The same shape for the batch log: what changed, per snapshot seq,
+    // which is what a follower reads and what an operator wants when a
+    // repository looks like it moved and nobody says when.
+    if args.iter().any(|a| a == "--log-list") {
+        let want = args
+            .iter()
+            .skip_while(|a| *a != "--log-list")
+            .nth(1)
+            .and_then(|v| v.parse::<usize>().ok());
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+            .block_on(log_list(want.unwrap_or(20)));
+        return;
+    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -161,6 +177,13 @@ async fn serve() {
     // X15: how long a destructive push's predecessor state is kept.
     cfg.undo_window_secs = env_u64("FLINT_FORGE_UNDO_WINDOW_SECS", 7 * 24 * 3600);
     cfg.undo_max_points = env_u64("FLINT_FORGE_UNDO_MAX_POINTS", 64).max(1) as usize;
+    // X15's second half and X14's cheap half: the batch log a follower
+    // reads, and whether a server waiting for another's lease brings
+    // the repository down while it waits. 0 entries is the control —
+    // no log, and a wake that pays for the whole repository.
+    cfg.log_max_entries = env_u64("FLINT_FORGE_LOG_MAX_ENTRIES", 512) as usize;
+    cfg.prewarm = env_u64("FLINT_FORGE_PREWARM", 1) != 0;
+    cfg.prewarm_resync_secs = env_u64("FLINT_FORGE_PREWARM_RESYNC_SECS", 300);
     cfg.fanout = env_u64("FLINT_FORGE_FANOUT", 4).max(1) as usize;
     cfg.project_id = std::env::var("FLINT_FORGE_PROJECT_ID").ok().filter(|p| !p.is_empty());
     cfg.default_branch =
@@ -385,5 +408,72 @@ async fn undo_list(want: Option<String>) {
         "\nthese states are kept while their point stands; their packs are held with them. \
          To put one back, set the ref to the oid above through a push from a clone that has it, \
          or restore this repository from the point's pack list."
+    );
+}
+
+/// `--log-list [<n>]`: the last n batch-log entries, oldest first. No
+/// lease, no writes; it reads the entries and nothing else, so it is
+/// safe beside a serving syncer and it answers "what moved, and when"
+/// without downloading the snapshot's whole ref map.
+async fn log_list(n: usize) {
+    let bucket_name = env_req("FLINT_FORGE_BUCKET");
+    let prefix = env_req("FLINT_FORGE_PREFIX");
+    let repo = PathBuf::from(std::env::var("FLINT_FORGE_REPO").unwrap_or_else(|_| "/tmp".into()));
+    let endpoint = std::env::var("FLINT_FORGE_ENDPOINT").ok();
+    let store = match S3Store::connect(bucket_name, endpoint).await {
+        Ok(s) => Arc::new(s) as Arc<dyn ObjectStore>,
+        Err(e) => {
+            eprintln!("flint-forge-syncer: store connect: {e}");
+            std::process::exit(1);
+        }
+    };
+    let cfg = ForgeConfig::new(&prefix, &repo);
+    let seqs = match flint_forge::log::seqs(store.as_ref(), &cfg).await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("flint-forge-syncer: log list: {e}");
+            std::process::exit(1);
+        }
+    };
+    if seqs.is_empty() {
+        println!(
+            "no log entries: either nothing has been pushed, or FLINT_FORGE_LOG_MAX_ENTRIES is 0"
+        );
+        return;
+    }
+    let from = seqs.len().saturating_sub(n);
+    for seq in &seqs[from..] {
+        match flint_forge::log::read(store.as_ref(), &cfg, *seq).await {
+            Ok(Some(e)) => {
+                let refs: Vec<String> = e
+                    .refs
+                    .iter()
+                    .map(|(k, v)| {
+                        if v.is_empty() {
+                            format!("{k} deleted")
+                        } else {
+                            format!("{k} {}", &v[..v.len().min(12)])
+                        }
+                    })
+                    .collect();
+                println!(
+                    "seq {:<6} unix {:<12} +{} pack(s) -{} pack(s)  {}",
+                    e.seq,
+                    e.unix,
+                    e.packs_added.len(),
+                    e.packs_removed.len(),
+                    if refs.is_empty() { "(no ref moved)".to_string() } else { refs.join(", ") }
+                );
+            }
+            Ok(None) => println!("seq {seq:<6} (unreadable — a follower treats this as a gap)"),
+            Err(e) => println!("seq {seq:<6} ({e})"),
+        }
+    }
+    println!(
+        "\n{} entrie(s) in the bucket, seq {}..{}. A follower reads forward from the seq it \
+         stands at; a hole sends it back to the snapshot.",
+        seqs.len(),
+        seqs[0],
+        seqs[seqs.len() - 1]
     );
 }

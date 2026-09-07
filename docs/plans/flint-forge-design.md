@@ -165,6 +165,8 @@ numbers**, with three trims to lite's shape and a hedge:
 <prefix>/git/epoch                              the single-writer lease (flint-store epoch cell)
 <prefix>/git/claim                              the operator's project claim
 <prefix>/git/bundles/<oid>.bundle               phase 5: clone bundles (§8)
+<prefix>/git/undo/<seq>.json                    X15: the snapshot a destructive push replaced, immutable, kept for a window
+<prefix>/git/log/<seq>.json                     X15: what one CAS changed — refs moved, packs in and out; a follower's delta
 <prefix>/lfs/objects/<oid>                      phase 6
 <prefix>/files/<path> + <prefix>/.flint/lean/…  phase 4: the legible export, a valid lean workspace (§9)
 ```
