@@ -1,0 +1,93 @@
+════════════════════════════════════════════════════════════════════════
+M1 — the fold-rule A/B, in-run, runcf, 2026-09-07
+════════════════════════════════════════════════════════════════════════
+
+THE QUESTION. runce reported P9 repack amplification at 1.75x against
+runcd's 0.94x, and `runce-fold-fix-2026-09-07.log` attributed it to the
+strict supersede rule shipped in aaffe335, naming the mechanism: "an
+input the roll-up does not fully hold stays named, so a later fold takes
+it as an input again and re-uploads its contents". That was a CROSS-RUN,
+CROSS-ORDER comparison, and the same log said so and named the
+experiment that would settle it. This is that experiment.
+
+DESIGN. One cluster (trove 145 `runcf`, CP + 2 workers, ALL SPOT
+i4i.xlarge, us-west-1). Two images built from the SAME commit
+(dfcd18f0), differing ONLY in the strict supersede rule — verified by
+CONTENT, not by tag: the marker string "the fold keeps" is present in
+`ab-strict` (1) and absent in `ab-oldfold` (0), checked inside the
+running images. Six runs, ABBA+BA ordering (strict, oldfold, oldfold,
+strict, oldfold, strict) so ordinal position cannot pose as the effect.
+Each run got its OWN FlintRepo and prefix, so bytes are exactly
+attributable, and each ran the identical legs P0+P9+P2.
+
+NON-VACUITY, and this is what three previous local attempts could not
+achieve: the rule FIRED in every strict run and in no oldfold run.
+
+  run  arm      P9 wall  P9 median  P2 rate    rule fired  resident bytes  objects
+   1   strict    34 s     0.57 s    14.7/s         1       1,143,675,655    2958
+   2   oldfold   35 s     0.56 s    16.1/s         0       1,143,875,221    3245
+   3   oldfold   34 s     0.56 s    16.2/s         0       1,144,005,403    3270
+   4   strict    35 s     0.58 s    14.0/s         1       1,143,659,292    2832
+   5   oldfold   41 s     0.59 s    14.7/s         0       1,143,687,894    2980
+   6   strict    34 s     0.55 s    15.2/s         1       1,143,746,462    3050
+
+─────────────────────────── THE RESULT ─────────────────────────────────
+
+THE PRE-REGISTERED FALSIFIER FIRES. It said: "the two arms are within
+0.15x of each other on P9 ⇒ the cross-run difference was repository
+order, the mechanism named is wrong, and the byte problem is somewhere
+else entirely — stop and re-diagnose before touching fold.rs."
+
+  resident bytes  strict mean 1,143,693,803   oldfold mean 1,143,856,173
+                  difference 162,370 bytes = 0.014%
+
+That is not 0.15x. It is not 0.01x. The two arms are the same to within
+a rounding error on a 1.14 GB repository.
+
+**So the strict supersede rule does NOT explain runce's 0.94x → 1.75x.
+The attribution in `runce-fold-fix-2026-09-07.log` is WRONG, and that
+file has been corrected to say so.** The remaining explanation is the
+one that log already flagged as a confound: P9 ran FIRST on runce and
+after P1/P4 on runcd, against a different repository state.
+
+AND THE THIRD PAIR CHANGED THE ANSWER. After four runs the P2 rate
+looked like a real cost — strict 14.7/14.0 against oldfold 16.1/16.2,
+consistent and not ordinal. Two more runs dissolved it:
+
+  P2 rate   strict  14.0  14.7  15.2   (mean 14.63)
+            oldfold 14.7  16.1  16.2   (mean 15.67)
+
+The ranges OVERLAP: oldfold's slowest run is identical to strict's
+fastest-but-one. With n=3 per arm there is no established throughput
+difference, and the 11% that four runs suggested was noise wearing a
+pattern. Objects overlap the same way (strict 2832-3050, oldfold
+2980-3270). P9 wall and median are a dead heat throughout.
+
+CONCLUSION: on this workload the strict supersede rule has NO
+MEASURABLE COST — not in bytes, not in throughput, not in latency —
+while demonstrably firing. The correctness it buys is free here.
+
+────────────────────── WHAT THIS COST TO LEARN ─────────────────────────
+
+Two rig defects, both found by this drill.
+
+1. **P9 PASSED WHILE MEASURING NOTHING.** The first attempt ran
+   `LEGS='P9 P2'` without P0 — and P0 is the leg that installs
+   `/work/seqpush.sh` into the agent pod. Every push failed, no per-push
+   log came back, and P9's guard computed `nbad` with awk over a missing
+   file, got zero, and reported "48 pushes told ok in 0 s; per push
+   median = none" as a PASS. Fixed: the count of SUCCESSFUL rows is now
+   the guard and an absent log is INCONCLUSIVE with the cause named.
+
+2. **CLOUDWATCH CANNOT RESOLVE THIS LEG.** S3 request metrics are summed
+   per MINUTE; P9 runs for 34 seconds and P2 begins immediately after.
+   Padded windows swallowed the neighbouring leg, and the first byte
+   numbers pulled that way were incoherent — strict held both the lowest
+   (1144 MB) and the highest (1953 MB) of four runs. Per-prefix resident
+   bytes are the right instrument for a leg this short, and they are
+   exact. Recorded so the next drill does not repeat it.
+
+Teardown: instances, volumes, spot requests, elastic IPs, trove SGs,
+snapshots, projects and orphans all zero; bucket deleted on the first
+attempt (versioning deliberately OFF this time — it is what forced two
+version-purge passes on runce); IAM user gone; keyfile shredded.

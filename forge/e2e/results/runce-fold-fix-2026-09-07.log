@@ -59,6 +59,17 @@ P10 BUCKET CUT OFF — PASS, and this is Inv_AckedIsDurable on the wire:
   P12 decay across it     2.0x                    2.6x
   resident at the end     2.22 GB / 3221 objects  (not comparable: fewer legs)
 
+*** CORRECTED 2026-09-07 by the in-run A/B (fold-rule-ab-2026-09-07.log).
+*** The attribution below is WRONG. Two images differing ONLY in the
+*** strict supersede rule, six runs, ABBA order, each with its own
+*** repository: resident bytes differ by 0.014% (1,143,693,803 vs
+*** 1,143,856,173) while the rule demonstrably FIRED in every strict run
+*** and no oldfold run. The rule does not move bytes at all. The P9
+*** change from 0.94x to 1.75x was the confound this section names below
+*** and does not resolve: leg ORDER and repository state. The paragraph
+*** is kept as written because the reasoning it records is exactly what
+*** the experiment was built to test.
+
 PREDICTION 3 WAS WRONG ABOUT WHERE THE COST LANDED. I pre-registered
 that the strict rule would cost BYTES, since keeping more input packs
 named means less is collected, and I predicted it would show in P2.
