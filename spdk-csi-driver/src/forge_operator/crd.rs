@@ -124,6 +124,25 @@ pub struct FlintRepoSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle: Option<RepoIdle>,
 
+    /// Extra environment for the SYNCER container, applied after every
+    /// variable the operator derives, so it can override them.
+    ///
+    /// This exists because the operator renders the syncer's whole
+    /// environment and exposes none of the tuning knobs the binary
+    /// documents (`FLINT_FORGE_FOLD_MIN_MIB`, `_FOLD_FACTOR`,
+    /// `_BASE_REBUILD_MIN_SECS`, ...), so a repository could not be
+    /// given a different compaction rule from its neighbour without a
+    /// new field per knob. A measurement whose two arms must differ in
+    /// exactly ONE of them needs this: the M6 drill's arms are one
+    /// repository at `FOLD_MIN_MIB=0` and one at the shipped 256, on
+    /// one cluster, from one image.
+    ///
+    /// It is a tuning surface, not a credential one: the syncer's S3
+    /// credentials come from `credentialsSecretRef` and are not
+    /// settable here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syncer_env: Option<std::collections::BTreeMap<String, String>>,
+
     /// The legible export (design §9): `git archive` of a ref,
     /// published as a lean workspace by the shipped `flint-sync`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

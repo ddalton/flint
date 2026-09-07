@@ -476,6 +476,19 @@ pub fn deployment(repo: &FlintRepo, d: &RenderDefaults, replicas: i32) -> Deploy
         }
     }
 
+    // LAST, and overriding: `syncerEnv` is the operator's only tuning
+    // surface for the knobs the syncer binary documents but the CRD
+    // does not model one-by-one. Applied after everything derived, so a
+    // repository can be given a different compaction rule from its
+    // neighbour — which is what an A/B whose arms must differ in
+    // exactly one variable needs.
+    if let Some(extra) = s.syncer_env.as_ref() {
+        for (k, v) in extra {
+            env.retain(|e| &e.name != k);
+            env.push(EnvVar { name: k.clone(), value: Some(v.clone()), ..Default::default() });
+        }
+    }
+
     let syncer = Container {
         name: "syncer".to_string(),
         image: Some(d.syncer_image.clone()),
@@ -649,10 +662,52 @@ mod tests {
     }
     use crate::forge_operator::crd::{BranchPolicy, ExportSpec, FlintRepoSpec};
 
+    /// `syncerEnv` is the operator's only tuning surface for the knobs
+    /// the syncer documents and the CRD does not model one-by-one, and
+    /// it must be applied LAST so it can override a derived value —
+    /// otherwise an A/B whose arms differ in exactly one knob cannot be
+    /// expressed at all.
+    ///
+    /// The control is the override arm. A test that only checked a new
+    /// name appears would pass just as well if the map were applied
+    /// FIRST and then silently overwritten by the derived value, which
+    /// is the failure that matters.
+    #[test]
+    fn syncer_env_is_applied_last_and_overrides() {
+        let d = RenderDefaults::default();
+        let mut r = repo();
+        let plain = deployment(&r, &d, 1);
+        let env_of = |dep: &Deployment, name: &str| -> Option<String> {
+            dep.spec.as_ref()?.template.spec.as_ref()?.containers.iter()
+                .find(|c| c.name == "syncer")?
+                .env.as_ref()?.iter().find(|e| e.name == name)?.value.clone()
+        };
+        assert!(env_of(&plain, "FLINT_FORGE_FOLD_MIN_MIB").is_none(), "not set by default");
+        let derived = env_of(&plain, "FLINT_FORGE_BUCKET").expect("bucket is derived");
+
+        r.spec.syncer_env = Some(std::collections::BTreeMap::from([
+            ("FLINT_FORGE_FOLD_MIN_MIB".to_string(), "0".to_string()),
+            ("FLINT_FORGE_BUCKET".to_string(), "overridden-bucket".to_string()),
+        ]));
+        let tuned = deployment(&r, &d, 1);
+        assert_eq!(env_of(&tuned, "FLINT_FORGE_FOLD_MIN_MIB").as_deref(), Some("0"),
+                   "a knob the CRD does not model is settable");
+        assert_eq!(env_of(&tuned, "FLINT_FORGE_BUCKET").as_deref(), Some("overridden-bucket"),
+                   "and it wins over a DERIVED value — applied last, not first");
+        assert_ne!(derived, "overridden-bucket", "the control: the derived value really differed");
+
+        let names: Vec<&String> = tuned.spec.as_ref().unwrap().template.spec.as_ref().unwrap()
+            .containers.iter().find(|c| c.name == "syncer").unwrap()
+            .env.as_ref().unwrap().iter().map(|e| &e.name).collect();
+        let n = names.iter().filter(|x| **x == "FLINT_FORGE_BUCKET").count();
+        assert_eq!(n, 1, "overriding REPLACES, it does not duplicate: {names:?}");
+    }
+
     fn repo() -> FlintRepo {
         let mut r = FlintRepo::new(
             "proj",
             FlintRepoSpec {
+                syncer_env: None,
                 project_id: "proj".into(),
                 bucket: "bkt".into(),
                 key_prefix: "tenant/proj/".into(),

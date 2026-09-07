@@ -180,6 +180,7 @@ mod tests {
         let mut r = FlintRepo::new(
             "proj",
             FlintRepoSpec {
+                syncer_env: None,
                 project_id: "proj".into(),
                 bucket: "b".into(),
                 key_prefix: "p/".into(),
