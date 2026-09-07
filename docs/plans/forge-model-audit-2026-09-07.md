@@ -115,16 +115,39 @@ chain at step 1 — so F2 was latent, not live, and that is the only
 reason runcd was a near miss rather than a loss. The proof now proves
 what it says it proves, so the chain is broken at step 2 as well.
 
-## OPEN — F3: a third CAS site the model does not know about
+## F3: a third CAS site the model did not know about — CLOSED by deletion
 
-`restore::maybe_repack` CASes the snapshot, and it is not an action in
-`Next`. It names the **directory** rather than the belief (the shape of
-the `FoldCasFromDisk` mutation), and it does **not renew the lease
-before its CAS** (the shape of `FoldNoRenew` — the very thing
-`fold::commit` carries a twelve-line comment about). It also uses
-`repack -a -d`, which drops unreachable objects. Two shipped mutations
-in one path, reachable whenever `FLINT_FORGE_FOLD_FACTOR=0` — which is
-the comparison drills' own control arm.
+`restore::maybe_repack` CASed the snapshot and was not an action in
+`Next`. It named the **directory** rather than the belief (the shape of
+the `FoldCasFromDisk` mutation), it did **not renew the lease before its
+CAS** (the shape of `FoldNoRenew` — the very thing `fold::commit`
+carries a twelve-line comment about), and its `repack -a -d` dropped
+unreachable objects with no coverage check and unlinked the superseded
+packs with no retention window. Three shipped mutation shapes in one
+path.
+
+**Deleted 2026-09-07**, with `Git::repack` and `repack_threshold`.
+Renewing the lease would have closed one of the three; closing all
+three means re-deriving `fold::commit`, and the base rebuild already
+IS that — `pack-objects --all --indexed-objects --write-bitmap-index`
+produces the same artefact as `repack -a -d -b` and carries the
+coverage check, the renewal, the retention window and the ledger. So
+the weaker duplicate went rather than being hardened. This was already
+the plan of record: the compaction-tiers design's phase 4 is
+"measurement, then the control's removal", and the measurements it was
+gated on had been taken.
+
+**Two corrections to this entry as first written.** It was not two
+shipped mutations but three defects, the third being the missing
+coverage check and retention. And "reachable whenever
+`FLINT_FORGE_FOLD_FACTOR=0` — the comparison drills' own control arm"
+overstated the reach: `fold_factor` defaults to 2, and of the five e2e
+rigs that set it to 0, four also set `REPACK_THRESHOLD` to 100,000 or
+more, so `maybe_repack` could never fire in them — they used factor 0
+to mean "no compaction", which is now all it means. One rig actually
+exercised it: `forge/e2e/repack/run-repack.sh`, whose full-repack arms
+are now refused rather than silently run at factor 0, where they would
+report the no-compaction floor under the control's name.
 
 ## OPEN — F4, F5: smaller
 

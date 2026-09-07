@@ -65,7 +65,7 @@ has_leg() { case " $LEGS " in *" $1 "*) return 0;; esac; return 1; }
 # not carry 200 ms of deliberate waiting; the heartbeat is slow so a
 # renew rarely sits in the serving loop ahead of a push; the repack
 # threshold is out of reach so no push pays for a repack.
-COMMON="FLINT_FORGE_ENDPOINT=$PROXY FLINT_FORGE_BATCH_WINDOW_MS=0 FLINT_FORGE_HEARTBEAT_SECS=30 FLINT_FORGE_REPACK_THRESHOLD=1000"
+COMMON="FLINT_FORGE_ENDPOINT=$PROXY FLINT_FORGE_BATCH_WINDOW_MS=0 FLINT_FORGE_HEARTBEAT_SECS=30"
 
 now_ms() { perl -MTime::HiRes=time -e 'printf "%.0f\n", time()*1000'; }
 ceil_div() { echo $(( ($1 + $2 - 1) / $2 )); }

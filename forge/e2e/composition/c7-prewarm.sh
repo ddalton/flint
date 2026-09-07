@@ -86,8 +86,7 @@ run_arm() {  # run_arm <arm> <prewarm 0|1> <log-entries> <status-port>
   forge_up "$arm-a" "$WORK/$arm-a.git" "$pfx" \
     "FLINT_FORGE_STATUS_ADDR=127.0.0.1:$((port+100))" \
     "FLINT_FORGE_LOG_MAX_ENTRIES=$logmax" \
-    "FLINT_FORGE_FOLD_FACTOR=0" \
-    "FLINT_FORGE_REPACK_THRESHOLD=100000"
+    "FLINT_FORGE_FOLD_FACTOR=0"
   wait_key "$pfx/git/epoch" 30 >/dev/null || { inconc "$arm: the holder never claimed"; return 1; }
 
   # The content. Random bytes, so git's compression does not turn
@@ -125,8 +124,7 @@ run_arm() {  # run_arm <arm> <prewarm 0|1> <log-entries> <status-port>
     "FLINT_FORGE_HEARTBEAT_SECS=1" \
     "FLINT_FORGE_LOG_MAX_ENTRIES=$logmax" \
     "FLINT_FORGE_PREWARM=$prewarm" \
-    "FLINT_FORGE_FOLD_FACTOR=0" \
-    "FLINT_FORGE_REPACK_THRESHOLD=100000"
+    "FLINT_FORGE_FOLD_FACTOR=0"
   wait_line "$WORK/forge-$arm-b.log" "another server holds" 30 \
     || { inconc "$arm: the challenger never saw the holder"; return 1; }
   if [ "$prewarm" = "1" ]; then

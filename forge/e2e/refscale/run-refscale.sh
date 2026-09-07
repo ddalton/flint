@@ -71,7 +71,6 @@ forge_up a "$WORK/a.git" "$PFX" \
   "FLINT_FORGE_BATCH_WINDOW_MS=0" \
   "FLINT_FORGE_DERIVED_EVERY_SECS=$DERIVED" \
   "FLINT_FORGE_FOLD_FACTOR=0" \
-  "FLINT_FORGE_REPACK_THRESHOLD=1000000" \
   "FLINT_FORGE_BATCH_MAX=1"
 wait_key "$PFX/git/epoch" 30 >/dev/null || { inconc "the syncer never claimed"; exit 2; }
 

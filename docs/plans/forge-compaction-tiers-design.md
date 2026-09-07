@@ -127,8 +127,9 @@ with the pack WEIGHT changed from object count to `.pack` bytes:
    `pack[split] ≤ factor × total`.
 3. `Plan::Fold { inputs: S = pack[..split] }` if `|S| ≥ 2`; else none.
 
-Factor 2 (`fold_factor`, `FLINT_FORGE_FOLD_FACTOR`; 0 = off, which keeps
-the shipped `maybe_repack` as the control arm until §8 has run).
+Factor 2 (`fold_factor`, `FLINT_FORGE_FOLD_FACTOR`; 0 = off, which now
+means no compaction at all — it kept the shipped `maybe_repack` as the
+control arm until §8 had run, and phase 4 deleted it).
 *Amended after the wire (§13): the split runs over the tier packs
 below `base_tier_percent` of the base — a pack that alone meets the
 base rule waits for the base and is never a fold input; a fold under
@@ -729,9 +730,12 @@ hourly cost §8 accepted, not X18's.
 
 ## 8. Measurement, pre-registered
 
-The control arm everywhere is the SHIPPED rule (`fold_factor=0`,
-`repack_threshold=24`, kept in the binary until these have run, then
-deleted). Arms differ only in that variable. The simulation the
+The control arm everywhere was the SHIPPED rule (`fold_factor=0`,
+`repack_threshold=24`), kept in the binary until these had run and then
+deleted (phase 4, done 2026-09-07). Arms differ only in that variable.
+`run-repack.sh` now runs `control` (compaction off) against the tiers
+and REFUSES the `source`/`blob` full-repack arms rather than letting
+them report the no-compaction floor under the control's name. The simulation the
 expectations come from is git's `split_pack_geometry` over bytes,
 factor 2, the base excluded from tier folds and rebuilt at 50 % tier
 growth (or at 64 MiB with no base) — 60 lines of Python, reproduced
@@ -917,9 +921,9 @@ in the rig as `amplify.py`'s prediction so the oracle is the same code.
   `pack_fold(inputs, out_base)` and `pack_base(out_base)`
   (`pack_new_objects`, `:354-387`, generalised with an output base);
   `reflog_expire_all()`.
-- `forge/syncer/src/server.rs:414-424` — `maybe_repack` behind
-  `fold_factor == 0` (the control) else `fold::commit_if_ready` then
-  `fold::maybe_spawn`; a `select!` arm on the fold's oneshot; the tick
+- `forge/syncer/src/server.rs:414-424` — `fold::commit_if_ready` then
+  `fold::maybe_spawn` unconditionally (`planned` returns None at factor
+  0, which is the whole of what that setting now means); a `select!` arm on the fold's oneshot; the tick
   (`:228`) runs `commit_if_ready`, `unlink_retained`, `sweep_ledger`
   (capped), `maybe_spawn`, and the full sweep when due and no fold is
   in flight; the SIGTERM arm (`:203-213`) aborts the task and removes
@@ -933,8 +937,9 @@ in the rig as `amplify.py`'s prediction so the oracle is the same code.
   `forge/syncer/src/bin/flint_forge_syncer.rs:129` the env names
   (`FLINT_FORGE_FOLD_FACTOR`, `…_BASE_TIER_PERCENT`, `…_BASE_MIN_MIB`,
   `…_BASE_REBUILD_MIN_SECS`, `…_FOLD_RETAIN_SECS`, `…_FOLD_STALL_SECS`,
-  `…_SWEEP_EVERY_SECS`); `FLINT_FORGE_REPACK_THRESHOLD` read for the
-  control and logged as ignored after phase 4.
+  `…_SWEEP_EVERY_SECS`). `FLINT_FORGE_REPACK_THRESHOLD` is gone with
+  phase 4 — not read, not logged; the rigs that set it were cleaned up
+  in the same commit so no rig carries a knob nothing reads.
 - `forge/syncer/src/status.rs:25-37, 79-96, 151` — `Phase::Sweeping`
   retired; `Facts` gains `base`, `tier_packs`, `tier_bytes`,
   `retained`, `fold`.
@@ -962,11 +967,23 @@ in the rig as `amplify.py`'s prediction so the oracle is the same code.
 state space grows by the fold stages, bounded by `MaxFolds = 1` and
 `FoldIds = {f1}` in `ForgeSync.cfg`.
 
-**Phase 4 — measurement, then the control's removal.** `run-repack.sh`
-+ `amplify.py` (§8.1 item 1); the latency leg (item 3); G8's re-match
-(items 2); then delete `maybe_repack` (`restore.rs:208-250`),
-`Git::repack`, `repack_threshold`, and update design §3, §5, §8 item
-1, §10, §13 (falsifiers 13-22) and the simplification note's X18 row.
+**Phase 4 — measurement, then the control's removal. DONE
+2026-09-07.** `run-repack.sh` + `amplify.py` (§8.1 item 1); the latency
+leg (item 3); G8's re-match (items 2); then `maybe_repack`,
+`Git::repack` and `repack_threshold` deleted, with §3, §5, §8 item 1,
+§10, §13 and the simplification note's X18 row updated.
+
+The removal was not only tidying. `maybe_repack` was a third CAS site
+the model did not know about (audit F3): it never renewed the lease
+before its CAS (the `FoldNoRenew` shape, which TLC has proved violates
+`Inv_NoStragglerLandAfterRestore`), it named the DIRECTORY rather than
+the belief (`FoldCasFromDisk`), and its `repack -a -d` dropped
+unreachable objects with no coverage check and unlinked the superseded
+packs with no retention window. Three shipped mutation shapes in one
+path. Renewing the lease would have closed one of the three; the base
+rebuild is the same operation — one pack holding everything reachable,
+with a bitmap — and already carries all four disciplines, so the
+duplicate went instead of being hardened.
 
 **Phase 5 — contingency, only if F19 fails.** A LOCAL multi-pack
 index over the cold prefix (base + tiers above `base/8`), written
@@ -1031,9 +1048,9 @@ draining what queued at window 0 — three tests on virtual time):
   `load_state` (the retained set, the ledger, the scratch wiped, a
   stray midx removed), the base marker helpers, `facts` for `/status`.
 - `server.rs`: the fold reports on an mpsc the loop owns (no borrow of
-  the syncer in the select); the post-batch hook plans when
-  `fold_factor > 0` and runs the shipped `maybe_repack` + sweep when it
-  is 0 (the control); the tick runs the stall check, retention's
+  the syncer in the select); the post-batch hook plans (at
+  `fold_factor == 0` the planner returns nothing and no compaction
+  runs); the tick runs the stall check, retention's
   unlinks, the ledger sweep (64 requests), the plan, and the full LIST
   sweep when due and no fold is in flight; the start-up runs one full
   sweep after the restore; SIGTERM aborts the task.
@@ -1047,9 +1064,10 @@ draining what queued at window 0 — three tests on virtual time):
   prefilter before the HEAD.
 - `gitcmd.rs`: `pack_fold` (window 0, threads bounded), `pack_base`,
   `reflog_expire_all`, `siblings_in`; `core.bigFileThreshold=1m` in
-  place of `repack.writeBitmaps`; `repack()` kept for the control.
+  place of `repack.writeBitmaps`. `repack()` was kept for the control
+  and deleted with it in phase 4.
 - knobs (`lib.rs`, the binary's env): `FLINT_FORGE_FOLD_FACTOR` (2; 0 =
-  control), `BASE_TIER_PERCENT` 50, `BASE_MIN_MIB` 64,
+  no compaction), `BASE_TIER_PERCENT` 50, `BASE_MIN_MIB` 64,
   `BASE_REBUILD_MIN_SECS` 3600, `FOLD_RETAIN_SECS` 900,
   `FOLD_STALL_SECS` 300, `SWEEP_EVERY_SECS` 3600, `FOLD_MIN_MIB` 0,
   `FOLD_MAX_PACKS` 64.

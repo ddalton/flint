@@ -59,8 +59,7 @@ ROOT=$WORK/root; mkdir -p "$ROOT"
 new_bare_repo "$ROOT/proj.git"
 forge_up q "$ROOT/proj.git" "$PFX" \
   "FLINT_FORGE_ALLOW_NON_FF=refs/heads/force/*" \
-  "FLINT_FORGE_FOLD_FACTOR=0" \
-  "FLINT_FORGE_REPACK_THRESHOLD=100000"
+  "FLINT_FORGE_FOLD_FACTOR=0"
 wait_key "$PFX/git/epoch" 30 >/dev/null || { inconc "the syncer never claimed"; exit 2; }
 
 ( export GIT_PROJECT_ROOT="$ROOT" GIT_HTTP_EXPORT_ALL=1 \

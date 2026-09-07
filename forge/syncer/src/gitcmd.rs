@@ -422,15 +422,6 @@ impl Git {
         Ok(Some(format!("pack-{hash}.pack")))
     }
 
-    /// The CONTROL rule (X18, `fold_factor == 0`): consolidate into one
-    /// pack with a bitmap, dropping what the new pack supersedes. Run
-    /// between batches under the writer lock — never by git itself
-    /// (§10). Kept until the tiers' measurement has run.
-    pub async fn repack(&self) -> ForgeResult<()> {
-        self.must(&["repack", "-a", "-d", "-b", "-q"], None).await?;
-        Ok(())
-    }
-
     /// A tier fold: every object of `inputs`, reachable or not, into
     /// one pack at `out_base` (a path prefix OUTSIDE `objects/pack`, so
     /// git never scans the result before it is durable). Existing

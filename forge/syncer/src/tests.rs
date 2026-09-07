@@ -967,13 +967,24 @@ async fn the_sweep_aborts_when_the_snapshot_moved_under_it() {
     rig.store.head(&orphan).await.expect("nothing is deleted on an aborted pass");
 }
 
-/// A pack the snapshot names is re-uploaded rather than skipped when
-/// the batch runs again, so its age is refreshed — `LeanChunkGC`'s
-/// rule 4, without which a live pack looks like an orphan forever.
+/// Compaction to a single pack, end to end: the consolidated pack is
+/// published, the sweep collects what it superseded, and a cold restore
+/// off the bucket alone is whole.
+///
+/// This was the control rule's test (`restore::maybe_repack`, the full
+/// `repack -a -d -b`). That path was the tiers' control arm and went
+/// with the measurement it existed for (design §10, phase 4); the base
+/// rebuild is the same operation — one pack holding everything
+/// reachable, with a bitmap — carried out with the coverage check, the
+/// lease renewal, the retention window and the ledger that the control
+/// rule had none of.
 #[tokio::test]
-async fn the_repack_publishes_the_new_pack_and_the_sweep_takes_the_old_ones() {
+async fn compaction_to_one_pack_publishes_it_and_the_sweep_takes_the_old_ones() {
     let mut rig = Rig::new().await;
-    rig.sc.cfg.repack_threshold = 1;
+    rig.sc.cfg.fold_factor = 2;
+    rig.sc.cfg.base_min_bytes = 0;
+    rig.sc.cfg.base_rebuild_min_secs = 0;
+    rig.sc.cfg.fold_min_bytes = 0;
     rig.sc.cfg.orphan_grace_secs = 0;
     rig.start().await;
     let mut parent: Option<String> = None;
@@ -992,15 +1003,70 @@ async fn the_repack_publishes_the_new_pack_and_the_sweep_takes_the_old_ones() {
     }
     assert!(rig.sc.cell().unwrap().snap.packs.len() > 1);
 
-    assert!(restore::maybe_repack(&mut rig.sc).await.expect("repack"));
-    assert_eq!(rig.sc.cell().unwrap().snap.packs.len(), 1, "one pack after a repack");
+    let (plan, named) = rig.fold_once().await.expect("no base yet: the base rule fires");
+    assert!(matches!(plan, fold::Plan::Base { .. }), "{plan:?}");
+    named.expect("a base was named");
+    assert_eq!(rig.sc.cell().unwrap().snap.packs.len(), 1, "one pack after the rebuild");
+    // Retention is why this needs its own step and the repack did not:
+    // the superseded inputs stay on disk for readers, so the sweep is
+    // what takes them out of the BUCKET.
     let deleted = sweep::sweep(&mut rig.sc).await.expect("sweep");
     assert!(deleted > 0, "the superseded packs are collected");
 
     let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
-    restore::restore(&mut cold.sc).await.expect("cold restore after a repack");
+    restore::restore(&mut cold.sc).await.expect("cold restore after compaction");
     assert_eq!(cold.sc.git.ref_oid("refs/heads/main").await.unwrap(), parent);
-    cold.sc.git.fsck_connectivity_all().await.expect("the repacked repository must be whole");
+    cold.sc.git.fsck_connectivity_all().await.expect("the compacted repository must be whole");
+}
+
+/// `fold_factor == 0` means no compaction at all, and that is now the
+/// whole of what the setting does — the full repack it used to select
+/// went with the tiers' measurement (design §10, phase 4). Four e2e
+/// rigs run in this mode, so it is a deployment shape and not a dead
+/// branch: nothing is planned, the packs accumulate, and the bucket
+/// still restores.
+#[tokio::test]
+async fn factor_zero_compacts_nothing_and_the_bucket_still_restores() {
+    let mut rig = Rig::new().await;
+    // Set up a repository the planner WOULD compact, so that "nothing
+    // is planned" below is about the factor and not about the rig.
+    //
+    // It must be a BASE rebuild, and that took three attempts to get
+    // right. A tier fold is the wrong control: the geometric split
+    // refuses at factor 0 on its own (a zero factor makes every
+    // progression hold), so with a tier-fold control this leg passes
+    // even with the factor guards mutated out — it would have been a
+    // test that could not fail. The base rule is the one path that
+    // never consults the factor, so the guard is load-bearing there and
+    // only there. Two guards enforce it — `planned`'s and `plan`'s —
+    // and it takes removing BOTH to move this leg; either alone is
+    // covered by the other.
+    rig.sc.cfg.fold_factor = 2;
+    rig.sc.cfg.base_min_bytes = 0;
+    rig.sc.cfg.base_rebuild_min_secs = 0;
+    rig.sc.cfg.fold_min_bytes = 0;
+    rig.start().await;
+    let mut parent: Option<String> = None;
+    for i in 0..3 {
+        parent = Some(rig.push_commit("refs/heads/main", parent.as_deref(), &format!("c{i}")).await);
+    }
+    let packs = rig.sc.cell().unwrap().snap.packs.len();
+    assert!(packs > 1, "the packs must accumulate for this to be about compaction: {packs}");
+    assert!(
+        fold::planned(&rig.sc, super::now_unix()).expect("plan").is_some(),
+        "the positive control: at factor 2 this repository rebuilds its base"
+    );
+
+    // The one thing that changes. The post-batch hook and the tick both
+    // go through `maybe_spawn`, and `planned` refuses at factor 0.
+    rig.sc.cfg.fold_factor = 0;
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    assert!(fold::maybe_spawn(&mut rig.sc, tx, super::now_unix()).expect("plan").is_none());
+    assert_eq!(rig.sc.cell().unwrap().snap.packs.len(), packs, "and nothing was compacted");
+
+    let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
+    restore::restore(&mut cold.sc).await.expect("cold restore with compaction off");
+    assert_eq!(cold.sc.git.ref_oid("refs/heads/main").await.unwrap(), parent);
 }
 
 // ── the dumb protocol's derived files ────────────────────────────────

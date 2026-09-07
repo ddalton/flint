@@ -25,22 +25,28 @@
 # shape only would have answered the wrong question.
 #
 #   ./run-repack.sh                  # ~6 min, both shapes + the control
-#   ARMS="source" ./run-repack.sh
+#   ARMS="tiers-source" ./run-repack.sh
 #   KEEP=1 ./run-repack.sh
 #
 # TIERS (X18, docs/plans/forge-compaction-tiers-design.md). The
-# `tiers-source` and `tiers-blob` arms run the SAME shapes with
+# `tiers-source` and `tiers-blob` arms run the two shapes with
 # `FLINT_FORGE_FOLD_FACTOR=$FOLD` (2): geometric folds of plain packs
 # beside the loop, the base rebuilt at 50 % tier growth (the hourly
-# cadence lifted so the rig can see one). The shipped arms keep
-# `FOLD_FACTOR=0`, the full repack at THRESHOLD, and are the control.
-# The design's re-sized settings are the ones that separate the arms:
+# cadence lifted so the rig can see one). `control` runs the source
+# shape with compaction off, so the ratio has a floor to sit above.
 #
-#   ARMS="blob tiers-blob source tiers-source" BLOB_SEED_MB=512 PUSHES=100 ./run-repack.sh
+#   ARMS="control tiers-blob tiers-source" BLOB_SEED_MB=512 PUSHES=100 ./run-repack.sh
 #
-# (at the shipped 96 MiB / 30 pushes a full repack every 24 is cheap
-# and the tiers are WORSE — the regime, not the rule). Pre-registered
-# there: tiers-blob ≤ 5.5x, tiers-source ≤ 25x; blob ≥ 12x, source ≥ 40x.
+# Pre-registered (design §8.1): tiers-blob ≤ 5.5x, tiers-source ≤ 25x.
+#
+# THE FULL-REPACK ARMS ARE GONE. `source` and `blob` ran the shipped
+# `repack -a -d -b` at THRESHOLD packs, and were the tiers' control arm
+# until the measurement they existed for had run; the code behind them
+# was deleted with it (design §10, phase 4 — `maybe_repack`,
+# `Git::repack`, `repack_threshold`). Asking for them is refused rather
+# than quietly run at `FOLD_FACTOR=0`, which would now mean no
+# compaction at all and would report a floor as if it were the control.
+# Re-running that comparison needs a binary from before the deletion.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)
@@ -50,9 +56,8 @@ MINIO_PORT=${MINIO_PORT:-9105}
 # shellcheck source=../composition/rig.sh
 . "$HERE/../composition/rig.sh"
 
-PUSHES=${PUSHES:-30}          # enough to cross the default threshold of 24
-THRESHOLD=${THRESHOLD:-24}    # the shipped default
-ARMS=${ARMS:-"source blob control"}
+PUSHES=${PUSHES:-30}          # enough for the tiers to roll up several times
+ARMS=${ARMS:-"control tiers-source tiers-blob"}
 SRC_DIRS=${SRC_DIRS:-120}     # source arm: dirs x files small objects
 SRC_FILES=${SRC_FILES:-100}
 BLOB_SEED_MB=${BLOB_SEED_MB:-96}
@@ -134,12 +139,12 @@ push_blob() {  # push_blob <clone> <n> -> bytes of content added
 # the repack put out of reach: if it does not come back at ~1.0x, the
 # rig is measuring something other than the repack and neither number
 # below means anything.
-run_arm() {  # run_arm <name> <shape> <threshold> [fold-factor] [max-ratio]
-  local name=$1 shape=$2 threshold=$3
-  local fold=${4:-0}
-  local max_ratio=${5:-0}
+run_arm() {  # run_arm <name> <shape> <fold-factor> [max-ratio]
+  local name=$1 shape=$2
+  local fold=$3
+  local max_ratio=${4:-0}
   if [ "$fold" = 0 ]; then
-    head_ "$name — ${PUSHES} pushes of a ${shape}-shaped repository, repack threshold ${threshold}"
+    head_ "$name — ${PUSHES} pushes of a ${shape}-shaped repository, compaction OFF"
   else
     head_ "$name — ${PUSHES} pushes of a ${shape}-shaped repository, compaction tiers at factor ${fold}"
   fi
@@ -160,7 +165,7 @@ run_arm() {  # run_arm <name> <shape> <threshold> [fold-factor] [max-ratio]
 
   # shellcheck disable=SC2086
   forge_up "$name" "$bare" "$prefix" FLINT_FORGE_ENDPOINT="$ENDPOINT" \
-    FLINT_FORGE_BATCH_WINDOW_MS=0 FLINT_FORGE_REPACK_THRESHOLD="$threshold" \
+    FLINT_FORGE_BATCH_WINDOW_MS=0 \
     FLINT_FORGE_FOLD_FACTOR="$fold" FLINT_FORGE_BASE_REBUILD_MIN_SECS=0 \
     FLINT_FORGE_ORPHAN_GRACE_SECS=100000
   local n=0
@@ -275,15 +280,26 @@ geometric_probe() {  # geometric_probe <name>
 main() {
   rig_init || { say "rig_init failed"; return 1; }
   binary_is_fresh || { verdict "repack"; return 1; }
-  has_arm source  && run_arm source  source "$THRESHOLD"
-  has_arm blob    && run_arm blob    blob   "$THRESHOLD"
-  # The control: the same source shape with the repack out of reach.
-  has_arm control && run_arm control source 100000
-  # The tiers (X18): the same shapes under geometric folds.
-  has_arm tiers-source && run_arm tiers-source source "$THRESHOLD" "$FOLD" "$MAX_TIERS_SOURCE"
-  has_arm tiers-blob   && run_arm tiers-blob   blob   "$THRESHOLD" "$FOLD" "$MAX_TIERS_BLOB"
-  has_arm source  && geometric_probe source
-  has_arm blob    && geometric_probe blob
+  # The full-repack arms went with the code behind them. Refusing is
+  # the point: at FOLD_FACTOR=0 they would still run, measure the
+  # no-compaction floor, and print it under the name of the control.
+  for gone in source blob; do
+    if has_arm "$gone"; then
+      bad "arm '$gone' was the full repack (maybe_repack), deleted with the tiers' measurement — \
+re-running that comparison needs a binary from before that commit"
+      verdict "repack"; return 1
+    fi
+  done
+  # The floor: the same source shape with compaction off.
+  has_arm control && run_arm control source 0
+  # The tiers (X18): the two shapes under geometric folds.
+  has_arm tiers-source && run_arm tiers-source source "$FOLD" "$MAX_TIERS_SOURCE"
+  has_arm tiers-blob   && run_arm tiers-blob   blob   "$FOLD" "$MAX_TIERS_BLOB"
+  # The probe is git's own repack on a COPY, not the syncer's path, so
+  # it survives the deletion and still says what a geometric repack
+  # would have rewritten.
+  has_arm tiers-source && geometric_probe source
+  has_arm tiers-blob   && geometric_probe blob
   say ""; say "per-push CSVs (push, content bytes, uploaded bytes): $WORK/*.csv (KEEP=1 to retain)"
   verdict "repack"
 }

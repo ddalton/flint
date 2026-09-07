@@ -1,17 +1,26 @@
 # repack amplification — bytes to S3 per byte pushed
 
-`maybe_repack` runs `git repack -a -d -b`, which collapses the
-repository into ONE pack, and then uploads every pack the snapshot does
-not already name. That pack is the whole repository. So every time the
-pack count passes `repack_threshold` (24), a repository re-uploads all
-of itself, with the serving loop inside that upload and pushes queueing
-behind it. The scale drill measured such an upload at **262 s for
-10 GiB on real S3**.
+This rig was built to measure a rule that no longer exists.
+`maybe_repack` ran `git repack -a -d -b`, collapsing the repository
+into ONE pack and uploading every pack the snapshot did not already
+name — so every time the pack count passed `repack_threshold` (24), a
+repository re-uploaded all of itself, with the serving loop inside that
+upload and pushes queueing behind it. The scale drill measured such an
+upload at **262 s for 10 GiB on real S3**. Nobody had measured what it
+cost per push; this rig did, and the number is why the compaction tiers
+(X18) were built.
 
-Nobody had measured what that costs per push. This does, end to end,
-against the shipped binary.
+**The full-repack arms are gone.** That rule was the tiers' control arm
+and was deleted once the measurement it existed for had run
+(compaction-tiers design §10, phase 4, 2026-09-07 — it was also a third
+un-renewed CAS site, audit F3). What remains measures the tiers against
+`control`, which is the same shape with compaction switched off. Asking
+for `source` or `blob` is REFUSED, not quietly run: at
+`FLINT_FORGE_FOLD_FACTOR=0` they would still execute and report the
+no-compaction floor under the old control's name. Re-running the
+original comparison needs a binary from before that commit.
 
-    ./run-repack.sh          # ~6 min: two repository shapes + the control
+    ./run-repack.sh          # ~6 min: the floor + two shapes of tiers
 
 ## What it measures
 

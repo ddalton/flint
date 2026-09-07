@@ -37,8 +37,7 @@ run_arm() {  # run_arm <tag> <prefix> <window-secs>
     "FLINT_FORGE_ALLOW_NON_FF=*" \
     "FLINT_FORGE_UNDO_WINDOW_SECS=$window" \
     "FLINT_FORGE_ORPHAN_GRACE_SECS=0" \
-    "FLINT_FORGE_FOLD_FACTOR=0" \
-    "FLINT_FORGE_REPACK_THRESHOLD=100000"
+    "FLINT_FORGE_FOLD_FACTOR=0"
   wait_key "$pfx/git/epoch" 30 >/dev/null || { inconc "$tag: the syncer never claimed"; return 1; }
   new_clone "$WORK/$tag.git" "$WORK/$tag-wc"
   local wc="$WORK/$tag-wc"

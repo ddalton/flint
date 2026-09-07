@@ -153,12 +153,11 @@ pub struct ForgeConfig {
     /// Ceiling on pushes in one batch, so a storm cannot make a single
     /// CAS carry unbounded work.
     pub batch_max: usize,
-    /// The CONTROL rule (X18): with `fold_factor == 0`, repack when the
-    /// repository holds more than this many packs — the shipped
-    /// `repack -a -d -b`, kept until the tiers' measurement has run.
-    pub repack_threshold: usize,
     /// Compaction tiers (`docs/plans/forge-compaction-tiers-design.md`).
-    /// git's geometric factor over pack bytes; 0 = the control rule.
+    /// git's geometric factor over pack bytes; 0 disables compaction
+    /// entirely — there is no second rule behind it. The full repack
+    /// that used to sit there was the tiers' control arm and went with
+    /// the measurement it existed for (design §10, phase 4).
     pub fold_factor: u64,
     /// Rebuild the base once the tiers reach this percent of it.
     pub base_tier_percent: u64,
@@ -281,7 +280,6 @@ impl ForgeConfig {
             heartbeat_secs: 10,
             batch_window_ms: 0,
             batch_max: 64,
-            repack_threshold: 24,
             fold_factor: 2,
             base_tier_percent: 50,
             base_min_bytes: 64 * 1024 * 1024,

@@ -589,31 +589,16 @@ async fn run_and_report(
         Ok(reports) => {
             deliver(waiting, reports);
             publish(shared, sc, Phase::Serving);
-            if sc.cfg.fold_factor == 0 {
-                // The CONTROL rule (X18): between batches, never beside
-                // them — the full repack with the loop inside its upload.
-                match restore::maybe_repack(sc).await {
-                    Ok(true) => {
-                        publish(shared, sc, Phase::Sweeping);
-                        if let Err(e) = super::sweep::sweep(sc).await {
-                            eprintln!("flint-forge: sweep deferred: {e}");
-                        }
-                        publish(shared, sc, Phase::Serving);
-                    }
-                    Ok(false) => {}
-                    Err(e @ ForgeError::Fenced(_)) => return Err(e),
-                    Err(e) => eprintln!("flint-forge: repack deferred: {e}"),
-                }
-            } else {
-                // Tiers: a fold's bytes are never on a push's path. The
-                // plan runs here and on the tick; the task runs beside
-                // the loop; only its commit (the fold arm) is on it.
-                match fold::maybe_spawn(sc, fold_tx.clone(), super::now_unix()) {
-                    Ok(Some(plan)) => log_plan(&plan),
-                    Ok(None) => {}
-                    Err(e @ ForgeError::Fenced(_)) => return Err(e),
-                    Err(e) => eprintln!("flint-forge: fold not planned: {e}"),
-                }
+            // Tiers: a fold's bytes are never on a push's path. The
+            // plan runs here and on the tick; the task runs beside the
+            // loop; only its commit (the fold arm) is on it. `planned`
+            // returns None at `fold_factor == 0`, which is now the only
+            // meaning that setting has.
+            match fold::maybe_spawn(sc, fold_tx.clone(), super::now_unix()) {
+                Ok(Some(plan)) => log_plan(&plan),
+                Ok(None) => {}
+                Err(e @ ForgeError::Fenced(_)) => return Err(e),
+                Err(e) => eprintln!("flint-forge: fold not planned: {e}"),
             }
             Ok(())
         }

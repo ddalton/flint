@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use flint_store::StoreError;
 
-use super::{follow, gitcmd, log, packio, snapshot, ForgeError, ForgeResult, Syncer};
+use super::{follow, gitcmd, packio, snapshot, ForgeError, ForgeResult, Syncer};
 
 /// What a restore cost, so the difference between a cold wake and a
 /// warm one is a number rather than an impression. Read by `/status`
@@ -320,58 +320,6 @@ pub struct PackObject {
     /// The listing's age, for the sweep's prefilter; `None` when the
     /// store did not say.
     pub last_modified_unix: Option<u64>,
-}
-
-/// Repack when the pack count passes the threshold, then publish the
-/// consolidated pack and drop what it supersedes.
-///
-/// The syncer owns this because git's own auto-gc would be a second,
-/// unowned writer of `objects/pack/` — able to delete a pack mid-upload
-/// and to produce a consolidated pack that must reach the bucket before
-/// the next push can be acknowledged (design §10).
-pub async fn maybe_repack(sc: &mut Syncer) -> ForgeResult<bool> {
-    sc.check_fence()?;
-    let before = sc.git.local_packs()?;
-    if before.len() <= sc.cfg.repack_threshold {
-        return Ok(false);
-    }
-    sc.git.repack().await?;
-    let after = sc.git.local_packs()?;
-    let cell = sc.cell()?.clone();
-    let epoch = sc.lease()?.epoch;
-    let known: BTreeSet<&String> = cell.snap.packs.iter().collect();
-    for pack in &after {
-        if known.contains(pack) {
-            continue;
-        }
-        for file in sc.git.pack_siblings(pack) {
-            let path = sc.git.pack_path(&file);
-            packio::upload_file(
-                sc.store.as_ref(),
-                &sc.cfg.pack_key(&file),
-                &path,
-                epoch,
-                Some(sc.hold.progress_handle()),
-            )
-            .await?;
-        }
-    }
-    let mut next = cell.snap.clone();
-    next.packs = after;
-    let writer = sc.holder_id.clone();
-    let new_cell =
-        match snapshot::cas(sc.store.as_ref(), &sc.cfg, &cell, next, epoch, &writer).await {
-            Ok(c) => c,
-            Err(ForgeError::Store(StoreError::PreconditionFailed(e))) => {
-                return Err(sc.fence(format!(
-                    "snapshot CAS refused during repack, another server holds this repository: {e}"
-                )))
-            }
-            Err(e) => return Err(e),
-        };
-    log::record(sc, &cell.snap, &new_cell.snap).await;
-    sc.cell = Some(new_cell);
-    Ok(true)
 }
 
 /// A repository with no refs and no snapshot: set the default branch so
