@@ -12,6 +12,28 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed — flint forge: a CAS that landed is no longer reported to the client as a failure
+
+- **S3 answers a contended conditional write with 409
+  `ConditionalRequestConflict`, and that answer is indeterminate**: it
+  does not say whether the write landed, and a lost response to a PUT
+  that did land is indistinguishable from it. `batch.rs` matched only
+  `PreconditionFailed` and sent everything else to a generic `Err`,
+  which `run_batch`'s contract turns into `ng` for EVERY push in the
+  batch — as many as `batch_max` clients told their push was refused
+  while the snapshot naming it is already durable.
+- **The batch path now re-reads once and adopts only a snapshot it can
+  prove is its own** (our seq, our epoch, our writer id), which is the
+  discipline `fold::commit` has always had and the batch path did not.
+  A 412 remains the one answer that says the write did not land, and it
+  is still the fence.
+- The oracle in the test is the CLIENT'S REPORT, not the bucket: the
+  bucket is durable either way, which is precisely what made the wrong
+  answer invisible. `MemoryStore::inject_put_lands_then_fails` models
+  the case no other injector did — the object IS stored and the
+  response is an error — narrowed to one key, since a batch uploads its
+  packs before the snapshot CAS.
+
 ### Changed — flint forge: a warm standby keeps chasing the log through the quiet window
 
 - **A follower deliberately went cold over the sixty seconds that

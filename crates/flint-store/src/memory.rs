@@ -179,6 +179,10 @@ pub struct MemoryStore {
     /// Counted `epoch_renew` failures that are NOT a 412: the store
     /// unreachable from the holder (forge X13's drill).
     fail_epoch_renew_count: AtomicU64,
+    /// The next n whole PUTs LAND and then report 409. See
+    /// `inject_put_lands_then_fails`.
+    fail_put_after_land_count: AtomicU64,
+    fail_put_after_land_key: Mutex<String>,
     stall_next_get_range_ms: AtomicU64,
     /// A latency every get_range pays, in ms: the double's stand-in for
     /// a network round trip, so a test can observe whether fetches
@@ -255,6 +259,8 @@ impl MemoryStore {
             fail_get_range_count: AtomicU64::new(0),
             fail_head_count: AtomicU64::new(0),
             fail_epoch_renew_count: AtomicU64::new(0),
+            fail_put_after_land_count: AtomicU64::new(0),
+            fail_put_after_land_key: Mutex::new(String::new()),
             stall_next_get_range_ms: AtomicU64::new(0),
             get_range_delay_ms: AtomicU64::new(0),
             hold_puts: AtomicBool::new(false),
@@ -357,6 +363,23 @@ impl MemoryStore {
     /// the holder cannot tell "deposed" from "cut off". Zero clears it.
     pub fn inject_epoch_renew_failures(&self, n: u64) {
         self.fail_epoch_renew_count.store(n, Ordering::SeqCst);
+    }
+
+    /// The next `n` whole PUTs STORE THE OBJECT and then report 409.
+    ///
+    /// This is the one failure a conditional writer cannot interpret.
+    /// S3 answers a contended conditional write with 409
+    /// `ConditionalRequestConflict`, and a lost response to a PUT that
+    /// landed looks the same from the client: the write is durable and
+    /// the caller was told it failed. Every other injector here models
+    /// a failure that did NOT happen server-side; this one models the
+    /// failure that DID.
+    /// `key_contains` narrows it to one object — a batch uploads its
+    /// packs BEFORE the snapshot CAS, so an untargeted injection would
+    /// break a pack upload and never reach the write under test.
+    pub fn inject_put_lands_then_fails(&self, key_contains: &str, n: u64) {
+        *self.fail_put_after_land_key.lock().unwrap() = key_contains.to_string();
+        self.fail_put_after_land_count.store(n, Ordering::SeqCst);
     }
 
     /// Step-11 drills: the NEXT get_range stalls `ms` before serving —
@@ -586,6 +609,22 @@ impl ObjectStore for MemoryStore {
             // That asymmetry is the hazard: everything keeps working
             // until a citation needs to name a version.
             m.version_id = None;
+        }
+        // The object is already stored. Reporting the failure HERE is
+        // the whole point: the caller cannot tell this from a write
+        // that never happened.
+        if self.fail_put_after_land_count.load(Ordering::SeqCst) > 0 {
+            let pat = self.fail_put_after_land_key.lock().unwrap().clone();
+            if (pat.is_empty() || key.contains(pat.as_str()))
+                && self
+                    .fail_put_after_land_count
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
+                    .is_ok()
+            {
+                return Err(StoreError::Conflict(format!(
+                    "injected: the PUT of {key} landed and the response did not"
+                )));
+            }
         }
         Ok(m)
     }

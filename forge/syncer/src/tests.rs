@@ -4270,6 +4270,63 @@ async fn a_follower_catches_up_from_the_log_and_not_from_the_snapshot() {
     );
 }
 
+/// S3 answers a contended conditional write with 409
+/// `ConditionalRequestConflict`, and that answer is INDETERMINATE: it
+/// does not say whether the write landed. A lost response to a PUT that
+/// did land is indistinguishable from it.
+///
+/// `run_batch`'s contract turns an `Err` into `ng` for every push in the
+/// batch, so guessing "it failed" tells as many as `batch_max` clients
+/// their push was refused while the snapshot naming it is already
+/// durable. `fold::commit` has always re-read to settle this; the batch
+/// path did not.
+///
+/// The oracle is the CLIENT'S REPORT, not the bucket: the bucket is
+/// durable either way, and that is exactly what makes the wrong answer
+/// invisible without this test.
+#[tokio::test]
+async fn a_cas_that_lands_and_then_reports_a_conflict_does_not_refuse_a_durable_push() {
+    let store = Arc::new(MemoryStore::new());
+    let mut rig = Rig::with_store(store.clone(), "a").await;
+    rig.start().await;
+    let c = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+
+    // The object IS stored; only the answer is lost. Narrowed to the
+    // snapshot, because a batch uploads its packs first and an
+    // untargeted injection would never reach the write under test.
+    store.inject_put_lands_then_fails("snapshot", 1);
+
+    let reports = rig
+        .run(vec![push(1, vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: zero(),
+            new_oid: c.clone(),
+        }])])
+        .await;
+    assert!(
+        is_ok(&reports[0].results[0]),
+        "the push is durable, so it must not be told it failed: {:?}",
+        reports[0].results[0]
+    );
+
+    // And it really is durable — the half that was never in doubt.
+    let cell = snapshot::load(rig.store.as_ref(), &rig.sc.cfg).await.expect("snapshot");
+    assert_eq!(
+        cell.snap.refs.get("refs/heads/main").map(String::as_str),
+        Some(c.as_str()),
+        "the CAS landed: {:?}",
+        cell.snap.refs
+    );
+
+    // A cold restore agrees, so the adopted cell is not a local fiction.
+    let mut cold = Rig::with_store(store.clone(), "cold").await;
+    restore::restore(&mut cold.sc).await.expect("a cold restore proves the repository");
+    assert_eq!(
+        cold.sc.git.ref_oid("refs/heads/main").await.unwrap().as_deref(),
+        Some(c.as_str())
+    );
+}
+
 /// The quiet window (`Reach::TailOnly`). A follower that already has a
 /// position keeps chasing the log through the 60 s before a takeover;
 /// one that has none declines the snapshot and stays where it is.

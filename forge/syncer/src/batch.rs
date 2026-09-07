@@ -292,6 +292,7 @@ pub async fn run_batch(
         }
     }
     let writer = sc.holder_id.clone();
+    let want_seq = cell.snap.seq + 1;
     let new_cell =
         match snapshot::cas(sc.store.as_ref(), &sc.cfg, &cell, next, epoch, &writer).await {
             Ok(c) => c,
@@ -301,7 +302,44 @@ pub async fn run_batch(
                 // after a roll, or this pod after a successor rotated.
                 return Err(sc.fence(format!("snapshot CAS refused, another server holds this repository: {e}")));
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                // AMBIGUITY, and it is the whole point of splitting this
+                // arm off. A 412 is the ONLY answer that says the write
+                // did not land. Everything else leaves the question
+                // open: S3 answers a contended conditional write with
+                // 409 `ConditionalRequestConflict`, which is
+                // indeterminate by specification, and a lost response to
+                // a PUT that landed is indistinguishable from it.
+                //
+                // `run_batch`'s contract turns an `Err` into `ng` for
+                // EVERY push in the batch (up to `batch_max`). So the
+                // cost of guessing wrong here is telling as many as
+                // thirty clients their push failed while the snapshot
+                // naming it is already durable — the
+                // told-failed-but-durable state, which this design
+                // treats as reachable rather than impossible.
+                //
+                // It is avoidable for the price of one GET, and
+                // `fold::commit` has always paid it. The batch path did
+                // not. Re-read, and adopt only a snapshot that is
+                // demonstrably the one this batch wrote: our seq, our
+                // epoch, our writer id.
+                let fresh = snapshot::load(sc.store.as_ref(), &sc.cfg).await?;
+                if fresh.snap.seq == want_seq
+                    && fresh.snap.epoch == epoch
+                    && fresh.snap.writer == writer
+                {
+                    eprintln!(
+                        "flint-forge: the snapshot CAS reported an error but seq {} landed ({}); adopting it rather than refusing {} push(es) that are durable",
+                        want_seq,
+                        e,
+                        accepted.len()
+                    );
+                    fresh
+                } else {
+                    return Err(e);
+                }
+            }
         };
     sc.cell = Some(new_cell);
     sc.hold.tick(1);
