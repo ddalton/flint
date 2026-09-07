@@ -3612,8 +3612,8 @@ async fn the_cadence_is_the_bases_age_in_the_store_not_process_memory() {
 /// afterwards CASes on the BATCH's snapshot (the loop's current belief,
 /// not the etag the fold was planned under), naming the batch's pack,
 /// the roll-up, and none of the roll-up's inputs, with nothing fenced.
-/// The ordering is proved, not assumed: the fold is still uploading
-/// when the batch has returned.
+/// The ordering holds by construction, not by the clock: the fold's
+/// first upload is parked at the store until the batch has returned.
 #[tokio::test]
 async fn a_batch_beside_a_fold_names_its_own_pack_and_the_fold_commits_on_the_batchs_snapshot() {
     let mut rig = Rig::new().await;
@@ -3625,25 +3625,33 @@ async fn a_batch_beside_a_fold_names_its_own_pack_and_the_fold_commits_on_the_ba
     assert_eq!(inputs.len(), 2);
     let seq0 = rig.sc.cell().unwrap().snap.seq;
 
-    // Every PUT waits three seconds: the fold's siblings go up slowly.
-    rig.store.inject_put_delay_ms(3000);
+    // Every whole PUT parks at the store's door until released: the
+    // fold's first sibling stops there and stays there, whatever the
+    // clock does. (A fixed three-second delay here was a race: under a
+    // loaded suite the batch outlasted the sleep and the fold finished
+    // first.)
+    rig.store.inject_put_hold(true);
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let plan = fold::maybe_spawn(&mut rig.sc, tx, super::now_unix()).unwrap().expect("two equal packs fold");
     assert!(matches!(plan, fold::Plan::Fold { .. }));
-    // Let pack-objects finish and the first PUT begin its sleep, then
-    // let the batch's own PUTs through at once.
-    for _ in 0..100 {
-        if rig.sc.fold.as_ref().unwrap().stage.lock().map(|s| *s == "uploading").unwrap_or(false) {
+    // Wait for pack-objects to finish and the first PUT to park: a wait
+    // for progress, not a window.
+    for _ in 0..1500 {
+        if rig.store.held_puts() == 1 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    rig.store.inject_put_delay_ms(0);
+    assert_eq!(rig.store.held_puts(), 1, "the fold's first upload is parked at the store");
+    assert_eq!(rig.sc.fold.as_ref().unwrap().stage.lock().map(|s| *s).unwrap(), "uploading");
+    // New PUTs flow from here — the batch's own — while the parked one
+    // stays parked.
+    rig.store.inject_put_hold(false);
 
     // The batch, beside the fold's upload.
     let c2 = rig.push_commit("refs/heads/main", Some(&c1), "c2").await;
     let stage = rig.sc.fold.as_ref().expect("the fold is still in flight").stage.lock().map(|s| *s).unwrap();
-    assert_eq!(stage, "uploading", "the fold was still uploading when the batch returned");
+    assert_eq!(stage, "uploading", "the fold was still uploading when the batch returned: its first PUT is parked");
     let after_batch = rig.sc.cell().unwrap().snap.packs.clone();
     assert_eq!(after_batch.len(), 3, "the batch named its own pack beside the two inputs");
     for p in &inputs {
@@ -3652,7 +3660,9 @@ async fn a_batch_beside_a_fold_names_its_own_pack_and_the_fold_commits_on_the_ba
     let c2_pack: String = after_batch.iter().find(|p| !inputs.contains(p)).cloned().unwrap();
     assert_eq!(rig.sc.cell().unwrap().snap.seq, seq0 + 1);
 
-    // The fold lands and commits on the batch's snapshot.
+    // Let the fold's upload through: it lands and commits on the
+    // batch's snapshot.
+    rig.store.release_held_puts();
     let res = rx.recv().await.expect("the fold task reports");
     assert!(res.error.is_none(), "{:?}", res.error);
     let f = res.pack.clone();
