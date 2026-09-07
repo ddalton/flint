@@ -35,25 +35,48 @@ dev=/dev/$(basename "$ctl")n1
 [ -b "$dev" ] || { echo "no block device $dev"; exit 3; }
 size=$(lsblk -bno SIZE "$dev" | head -1)
 [ "$size" -gt __MIN__ ] || { echo "$dev is $size bytes, under 100 GB: refusing (is this the root disk?)"; exit 3; }
-if findmnt -no SOURCE /var/lib/kubelet/pods >/dev/null 2>&1; then
-  echo "already backed: $(findmnt -no SOURCE,FSTYPE,SIZE,AVAIL /var/lib/kubelet/pods)"; exit 0
+pods_backed() { findmnt -no SOURCE /var/lib/kubelet/pods >/dev/null 2>&1; }
+imgs_backed() { findmnt -no SOURCE /var/lib/containerd  >/dev/null 2>&1; }
+if pods_backed && imgs_backed; then
+  echo "already backed: pods $(findmnt -no SIZE,AVAIL /var/lib/kubelet/pods), images $(findmnt -no SIZE,AVAIL /var/lib/containerd)"; exit 0
 fi
-if lsblk -no MOUNTPOINT "$dev" | grep -q .; then echo "$dev is mounted elsewhere"; lsblk "$dev"; exit 3; fi
-label=$(blkid -s LABEL -o value "$dev" 2>/dev/null || true)
-if [ -n "$(blkid -o value "$dev" 2>/dev/null)" ] && [ "$label" != flint-scale ]; then
-  echo "$dev carries a signature that is not ours: $(blkid "$dev")"; exit 3
+# The data disk carries BOTH: /mnt/data/pods and /mnt/data/containerd.
+# It used to be mounted straight at /mnt/pods, which left containerd's
+# image store on the 8 GiB root — importing one 949 MB image then took a
+# worker to 82% and the kubelet raised DiskPressure, whose NoSchedule
+# taint left the arm being deployed Pending (runcd, 2026-09-07).
+if ! mountpoint -q /mnt/data; then
+  if lsblk -no MOUNTPOINT "$dev" | grep -q .; then echo "$dev is mounted elsewhere"; lsblk "$dev"; exit 3; fi
+  label=$(blkid -s LABEL -o value "$dev" 2>/dev/null || true)
+  if [ -n "$(blkid -o value "$dev" 2>/dev/null)" ] && [ "$label" != flint-scale ]; then
+    echo "$dev carries a signature that is not ours: $(blkid "$dev")"; exit 3
+  fi
+  [ "$label" = flint-scale ] || mkfs.ext4 -F -q -L flint-scale "$dev"
+  mkdir -p /mnt/data && mount "$dev" /mnt/data
 fi
-[ "$label" = flint-scale ] || mkfs.ext4 -F -q -L flint-scale "$dev"
-mkdir -p /mnt/pods && mount "$dev" /mnt/pods
-systemctl stop kubelet
-# Projected/secret volumes are tmpfs mounts under the pod directory;
-# copying THROUGH them would carry live tokens as plain files. Unmount
-# them first (running containers keep their own mount-namespace views).
-findmnt -rn -o TARGET | grep '^/var/lib/kubelet/pods/' | sort -r | xargs -r umount 2>/dev/null || true
-cp -a /var/lib/kubelet/pods/. /mnt/pods/
-mount --bind /mnt/pods /var/lib/kubelet/pods
-systemctl start kubelet
-echo "done: $(findmnt -no SOURCE,FSTYPE,SIZE,AVAIL /var/lib/kubelet/pods)"
+mkdir -p /mnt/data/pods /mnt/data/containerd
+if ! pods_backed; then
+  systemctl stop kubelet
+  # Projected/secret volumes are tmpfs mounts under the pod directory;
+  # copying THROUGH them would carry live tokens as plain files. Unmount
+  # them first (running containers keep their own mount-namespace views).
+  findmnt -rn -o TARGET | grep '^/var/lib/kubelet/pods/' | sort -r | xargs -r umount 2>/dev/null || true
+  cp -a /var/lib/kubelet/pods/. /mnt/data/pods/
+  mount --bind /mnt/data/pods /var/lib/kubelet/pods
+  systemctl start kubelet
+fi
+if ! imgs_backed; then
+  # Stopping containerd stops every container on the node. This runs
+  # BEFORE anything is deployed, so what dies is the system daemonset,
+  # which comes back on its own.
+  systemctl stop kubelet
+  systemctl stop containerd
+  cp -a /var/lib/containerd/. /mnt/data/containerd/
+  mount --bind /mnt/data/containerd /var/lib/containerd
+  systemctl start containerd
+  systemctl start kubelet
+fi
+echo "done: pods $(findmnt -no SOURCE,FSTYPE,SIZE,AVAIL /var/lib/kubelet/pods), images $(findmnt -no SOURCE,SIZE,AVAIL /var/lib/containerd)"
 EOS
 )
 script=${script//__PCI__/$PCI}

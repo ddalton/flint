@@ -46,6 +46,34 @@ pre-X13 outage behaviour, as §9 pre-registered.
 | P5 | the arm's pod deleted (a fresh emptyDir) | time to the first correct `ls-remote`, to the first correct clone | X14's number |
 | P11 | a branch force-pushed back one commit | can the previous tip be recovered from the bucket? | forge loses by construction (X15) |
 | P10 | a NetworkPolicy cuts the arm's pod off from S3 | a read at +5 s, readiness over 90 s, a push, recovery | recorded, not scored |
+| P12 | a lone one-ref push at 0 / 2,000 / 8,000 refs, each arm on a repository of its **own** (forge `big`, walgit `refscale`) so the ladder pollutes no other leg | median lone-push seconds per rung, and the refs each arm actually advertises | both arms must decay, or the ref-scale reading is wrong |
+
+## P12, and the question it settles
+
+The local ref-scale rig (`forge/e2e/refscale/`) timed a lone one-ref push
+against forge and against a bare repository with the same refs and no forge
+at all, and found that **63% of forge's decay under a growing branch count is
+`receive-pack` advertising every ref to the client** — a cost no git server
+escapes. That reading was taken on one laptop against a control that was not
+a competing server, so it predicts something it had not measured: walgit,
+whose own receive-pack does the same advertisement, must decay here too.
+
+P12 is that prediction's test. If walgit stays flat while forge climbs, the
+reading is wrong and the decay is forge's own.
+
+Three bugs had to come out of the leg before it measured anything, and the
+third is the one worth remembering:
+
+* the door confines the agent principal to `refs/heads/agent/*`, so the
+  ladder's bulk and probe refs must live there — and both arms are pushed the
+  same names, so the arms still differ in one dimension only;
+* the branch names carry the run stamp, or a second ladder on the same
+  repository re-pushes a probe branch at a new commit and is refused as a
+  non-fast-forward;
+* **the first draft reported PASS while every probe push was refused and
+  every rung read zero refs advertised.** The guard now demands a median per
+  rung and a ref count that actually climbed. A ladder that measured nothing
+  is INCONCLUSIVE.
 
 ## Running it
 

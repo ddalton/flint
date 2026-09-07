@@ -545,6 +545,52 @@ async fn run_task(
         return Err(ForgeError::State("the fold produced no pack".into()));
     };
     let siblings = super::gitcmd::siblings_in(scratch, &pack);
+
+    // The roll-up must hold everything its inputs hold, and this is
+    // where that is established rather than assumed. The commit below
+    // stops naming `inputs`; an output that does not cover them leaves
+    // whatever only they held reachable from a named ref and present in
+    // no named pack, which is exactly the state runcd reached on
+    // 2026-09-07 — thirteen commits, ancestors of live branches,
+    // stranded by one fold. Nothing was lost (the packs were still in
+    // the bucket) but the next restore could not prove the repository
+    // and the server refused to serve it, correctly and permanently.
+    //
+    // The check reads the INDEXES, never the packs, and runs before the
+    // upload so a bad roll-up costs no bytes. A pack the output
+    // reproduces by name is not superseded and is not checked.
+    // The two kinds are contracted differently, and conflating them
+    // would reject a legitimate rebuild:
+    //
+    //   * a TIER fold (`--stdin-packs`) is a pure roll-up and must hold
+    //     every object its inputs hold;
+    //   * a BASE rebuild (`--all`) is allowed to DROP objects — that is
+    //     what makes it a collection, and a rewind makes it happen —
+    //     but it may never drop a REACHABLE one.
+    let out_idx = scratch.join(pack.trim_end_matches(".pack").to_string() + ".idx");
+    if out_idx.exists() {
+        let missing = if is_base {
+            let reachable = git.reachable_object_ids().await?;
+            git.pack_holds_all(&out_idx, &reachable).await?
+        } else {
+            let superseded: Vec<std::path::PathBuf> = inputs
+                .iter()
+                .filter(|p| **p != pack)
+                .map(|p| git.pack_path(&(p.trim_end_matches(".pack").to_string() + ".idx")))
+                .filter(|p| p.exists())
+                .collect();
+            git.pack_covers(&out_idx, &superseded).await?
+        };
+        if let Some(missing) = missing {
+            return Err(ForgeError::State(format!(
+                "the {} pack {} does not hold object {}, which it must: refusing to commit it",
+                if is_base { "base rebuild's" } else { "fold's" },
+                pack,
+                missing
+            )));
+        }
+    }
+
     if let Ok(mut s) = stage.lock() {
         *s = "uploading";
     }

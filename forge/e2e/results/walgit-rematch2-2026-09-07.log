@@ -1,0 +1,79 @@
+compare 20260906-200124 · bucket flint-forge-scale-runcd · forge forge/cmp-202609070235 · walgit walgit/cmp-202609070235 · arms: forge walgit · legs: P0 P1 P12 P4 P9 P2 P7 P5 P11 P10
+
+══ P0 — preconditions and provenance: both arms answer, the agent's clock has milliseconds, versions recorded ══
+  PASS  agent clock: a 300 ms sleep measures 300 ms (sub-second resolution)
+  PASS  forge: forge-small-76d5fff9b4-phhq6 serving (dilipdalton/flint-forge-syncer:drill-d54b29cf) on runcd-aws-2
+  PASS  walgit: walgit-7c45696d66-6xxll ready (walgit e5295e6) on runcd-aws-2
+  ....  agent on runcd-aws-1
+  PASS  forge: seed push to agent/seed-20260906-200124 told ok (220 ms); ls-remote c6cbf01a
+  PASS  walgit: seed push to agent/seed-20260906-200124 told ok (190 ms); ls-remote c6cbf01a
+
+══ P1 — push latency at 0 64 1024 MiB, 5 reps, the same bytes to both arms, order alternating ══
+  ....  forge 0 MiB: median/min/max s = 0.16 0.15 0.17 n=5
+  ....  walgit 0 MiB: median/min/max s = 0.11 0.11 0.13 n=5
+  PASS  0 MiB: every push on both arms told ok
+  ....  forge 64 MiB: median/min/max s = 1.96 1.82 2.20 n=5
+  ....  walgit 64 MiB: median/min/max s = 1.87 1.79 2.08 n=5
+  PASS  64 MiB: every push on both arms told ok
+  ....  forge 1024 MiB: median/min/max s = 26.86 26.02 30.99 n=5
+  ....  walgit 1024 MiB: median/min/max s = 30.68 29.65 45.46 n=5
+  PASS  1024 MiB: every push on both arms told ok
+
+══ P12 — ref scale: a lone one-ref push at 0 2000 8000 refs, 5 probes per rung, on a repository of its own per arm ══
+  ....  forge at rung 0 (0 refs advertised): lone-push s median/min/max = 0.28 0.21 0.28 n=5
+  ....  forge: filled to 2000 refs (2000 19490 = created ms)
+  ....  forge at rung 2000 (2005 refs advertised): lone-push s median/min/max = 0.43 0.38 0.45 n=5
+  ....  forge: filled to 8000 refs (6000 125930 = created ms)
+  ....  forge at rung 8000 (8010 refs advertised): lone-push s median/min/max = 0.74 0.71 0.85 n=5
+  ....  walgit at rung 0 (0 refs advertised): lone-push s median/min/max = 0.11 0.10 0.17 n=5
+  ....  walgit: filled to 2000 refs (2000 7610 = created ms)
+  ....  walgit at rung 2000 (2005 refs advertised): lone-push s median/min/max = 0.18 0.16 0.21 n=5
+  ....  walgit: filled to 8000 refs (6000 102930 = created ms)
+  ....  walgit at rung 8000 (8010 refs advertised): lone-push s median/min/max = 0.27 0.22 0.32 n=5
+  ....  forge decay across the ladder: 0.28 s → 0.74 s (median)
+  ....  walgit decay across the ladder: 0.11 s → 0.27 s (median)
+  PASS  the ladder measured every rung on every arm (6 rows); the reading is the decay RATIO between the arms (p12.txt)
+
+══ P4 — two pushes to one ref from one base, concurrently: exactly one winner, the ref is the winner's tip ══
+  PASS  forge: one winner (rc a=1 b=0), the ref is the winner's tip cff5aba0; loser said: rejected] HEAD -> agent/p4-20260906-200124 (stale info: fetch first)
+  PASS  walgit: one winner (rc a=0 b=1), the ref is the winner's tip 549692c3; loser said: rejected] HEAD -> agent/p4-20260906-200124 (conflict: expected 31ad4096b3555fe0d4814ec6ea75c5add3158ec2, got 549692c3af6fd23d1f5b0a1506b4f831ccf1cc43)
+
+══ P9 — repack amplification: 48 pushes of 8 MiB to one branch; bytes uploaded per arm from CloudWatch (cw-summary.sh) ══
+  PASS  forge: 48 pushes told ok in 34 s; per push median/min/max s = 0.55 0.44 0.62 n=48; window 1788750784..1788750818
+  ....  forge: objects under its prefix now: Total Objects: 478    Total Size: 6445545359 
+  PASS  walgit: 48 pushes told ok in 34 s; per push median/min/max s = 0.47 0.37 0.82 n=48; window 1788750819..1788750853
+  ....  walgit: objects under its prefix now: Total Objects: 283    Total Size: 12148641366 
+
+══ P2 — push rate: 32 pushers for 60 s, tiny commits to distinct branches (requests per push from CloudWatch) ══
+  PASS  forge: 752 acknowledged, 0 failed in 60 s = 12.5 pushes/s from 32 pushers; per-push latency median/min/max s = 2.23 0.35 7.18 n=752
+  PASS  walgit: 611 acknowledged, 0 failed in 60 s = 10.2 pushes/s from 32 pushers; per-push latency median/min/max s = 3.18 0.60 6.36 n=611
+
+══ P7 — 8 concurrent clones of a 1024 MiB branch, one alone first, the serving processes watched ══
+  PASS  forge: one clone alone 20.2 s; 8 concurrent all complete in 71 s (3.5× solo, 115 MiB/s aggregate); peak serving processes 8
+  PASS  walgit: one clone alone 20.6 s; 8 concurrent all complete in 71 s (3.4× solo, 115 MiB/s aggregate); peak serving processes 8
+
+══ P5 — cold start: the arm's pod deleted (a fresh emptyDir), time to the first ls-remote and the first clone of the 1024 MiB branch ══
+  FAIL  forge: P5 cold start NEVER COMPLETED — the successor refused to serve and
+        crash-looped (exit 78, 10 restarts). Cause, established from the bucket:
+        the snapshot named 55 refs but only 3 packs, and 13 of those refs need
+        commits that live only in packs the snapshot had stopped naming. The
+        batch log shows those 13 packs named at seq 77 and un-named at seq 127 by
+        a fold whose output pack does NOT contain their objects (verified by
+        searching its index). NO DATA LOST: all 13 commits are still in the
+        bucket in their original packs. The refusal is forge's proof working as
+        designed; the defect is the fold. Diagnostic defect alongside it: the
+        refusal message printed only fsck's stderr ("HEAD points to an unborn
+        branch"), while the real reason ("missing commit ...") goes to stdout and
+        was discarded.
+  ....  P11 and P10 NOT RUN — the run was stopped once P5 wedged.
+
+══ CloudWatch, bytes uploaded per arm (the pre-registered metric) ══
+  leg  arm     window  AllRequests PutRequests BytesUploaded
+  P9   forge   34s      225        224          378,499,225   (0.94x of 402.7 MB content)
+  P9   walgit  34s      573        227          394,753,569   (0.98x)
+  P2   forge   63s     2454       2452        1,438,801,181   (752 acked pushes of a few hundred bytes)
+  P2   walgit  66s     3087       1319           11,307,123   (611 acked pushes)
+
+══ bucket resident at the end ══
+  forge   2,812 objects  13,628,559,471 B
+  walgit  2,855 objects  13,223,837,793 B

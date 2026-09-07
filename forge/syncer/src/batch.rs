@@ -574,6 +574,12 @@ pub(crate) fn derived_due(sc: &mut Syncer, now: u64) -> bool {
 }
 
 pub(crate) async fn publish_derived(sc: &mut Syncer) -> ForgeResult<()> {
+    // Fold the loose refs away FIRST: everything below walks every ref,
+    // and so does every push until the next tick. Storage only — no ref
+    // changes value. See `Git::pack_refs` for the measurement.
+    if let Err(e) = sc.git.pack_refs().await {
+        eprintln!("flint-forge: pack-refs failed (refs stay loose, pushes stay slower): {e}");
+    }
     sc.git.must(&["update-server-info"], None).await?;
     let epoch = sc.lease()?.epoch;
     let repo = sc.cfg.repo.clone();

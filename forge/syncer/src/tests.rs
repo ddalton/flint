@@ -3605,6 +3605,172 @@ async fn the_cadence_is_the_bases_age_in_the_store_not_process_memory() {
     );
 }
 
+/// The check that was missing when a fold lost objects on runcd
+/// (2026-09-07): a roll-up must hold everything the packs it supersedes
+/// hold, and `pack-objects` is not taken at its word for it.
+///
+/// The failure that motivated this: a fold's output did not contain
+/// thirteen commits its inputs held; the commit stopped naming the
+/// inputs; the refs still pointed past the missing commits; and the next
+/// cold restore could not prove the repository and refused to serve it.
+/// Nothing was lost — the inputs were still in the bucket, unnamed — but
+/// the repository was unservable until a human intervened.
+///
+/// The predicate is tested both ways round, because a coverage check
+/// that always answers "covered" would have passed that fold too.
+#[tokio::test]
+async fn a_roll_up_that_drops_an_object_is_named_by_the_coverage_check() {
+    let mut rig = Rig::new().await;
+    rig.tiers_only();
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let _c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    let packs = rig.sc.cell().unwrap().snap.packs.clone();
+    assert_eq!(packs.len(), 2, "one pack per push");
+    let dir = rig.sc.cfg.repo.join("objects/pack");
+    let idx = |p: &str| dir.join(p.trim_end_matches(".pack").to_string() + ".idx");
+
+    // Each push's pack holds its own objects and not the other's, so
+    // one is exactly the "roll-up that dropped something" case.
+    let first = idx(&packs[0]);
+    let second = idx(&packs[1]);
+    let missed = rig
+        .sc
+        .git
+        .pack_covers(&first, std::slice::from_ref(&second))
+        .await
+        .expect("the check runs");
+    assert!(
+        missed.is_some(),
+        "a pack that does not hold the other's objects must be NAMED as not covering it"
+    );
+
+    // The control: a pack covers itself. Without this the assertion
+    // above passes for a check that answers "missing" to everything.
+    assert_eq!(
+        rig.sc.git.pack_covers(&first, std::slice::from_ref(&first)).await.unwrap(),
+        None,
+        "a pack covers itself"
+    );
+
+    // And the real thing: a genuine fold's output covers its inputs, so
+    // the check does not refuse the happy path.
+    let (plan, named) = rig.fold_once().await.expect("two equal packs fold");
+    assert!(matches!(plan, fold::Plan::Fold { .. }));
+    let f = named.expect("the fold committed");
+    let inputs: Vec<std::path::PathBuf> = packs.iter().map(|p| idx(p)).collect();
+    assert_eq!(
+        rig.sc.git.pack_covers(&idx(&f), &inputs).await.unwrap(),
+        None,
+        "the roll-up holds everything its inputs held"
+    );
+}
+
+/// The refusal must name what is actually wrong. `git fsck` writes a
+/// broken history to STDOUT (`missing commit …`, `broken link from …`)
+/// and puts only chatter on stderr (`notice: HEAD points to an unborn
+/// branch`). Reporting stderr alone is what made runcd's refusal blame
+/// an unborn HEAD while thirteen commits were missing — an operator
+/// reading that log would have chased the notice and never found the
+/// fold that stranded them.
+///
+/// The repository here is broken the same way runcd's was: a ref points
+/// at a commit that is present, whose PARENT is in no pack the
+/// repository still has.
+#[tokio::test]
+async fn a_refusal_names_the_missing_commit_and_not_just_the_unborn_head_notice() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/topic", None, "c0").await;
+    let c1 = rig.push_commit("refs/heads/topic", Some(&c0), "c1").await;
+    // HEAD is the unborn default branch — the source of the notice that
+    // masked the real fault.
+    assert_eq!(rig.sc.git.head_target().await.unwrap(), "refs/heads/main");
+
+    // Strand c0: drop every loose object and the pack that carries it,
+    // keeping the pack that carries c1. The ref still points at c1.
+    let objdir = rig.sc.cfg.repo.join("objects");
+    for e in std::fs::read_dir(&objdir).unwrap().flatten() {
+        let n = e.file_name().to_string_lossy().to_string();
+        if n.len() == 2 && n.chars().all(|c| c.is_ascii_hexdigit()) {
+            std::fs::remove_dir_all(e.path()).ok();
+        }
+    }
+    let packs = rig.sc.cell().unwrap().snap.packs.clone();
+    let dir = objdir.join("pack");
+    let mut stranded = false;
+    for p in &packs {
+        let stem = p.trim_end_matches(".pack");
+        let idx = dir.join(format!("{stem}.idx"));
+        let ids = rig.sc.git.pack_object_ids(&idx).await.unwrap();
+        if ids.contains(&c0) && !ids.contains(&c1) {
+            for f in rig.sc.git.pack_siblings(p) {
+                std::fs::remove_file(dir.join(f)).ok();
+            }
+            stranded = true;
+        }
+    }
+    assert!(stranded, "the rig must put c0 and c1 in different packs for this to test anything");
+
+    let err = rig.sc.git.fsck_connectivity().await.expect_err("a stranded parent fails the proof");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains(&c0),
+        "the refusal must name the MISSING COMMIT (git puts it on stdout), got: {msg}"
+    );
+    assert!(
+        !msg.contains("dangling"),
+        "dangling objects are noise in a refusal, not the fault: {msg}"
+    );
+}
+
+/// Refs are folded into `packed-refs` on the derived-files tick.
+///
+/// forge sets `gc.auto=0` and never repacked, so every ref it accepted
+/// stayed a loose file forever, and `receive-pack` walked all of them on
+/// every push. Measured on a scratch repository at 8,002 refs: 683 ms
+/// per lone push loose against 121 ms packed, warm. The refs must come
+/// out the other side naming exactly the same objects — this is a
+/// storage change and nothing a reader can see.
+#[tokio::test]
+async fn the_derived_tick_packs_the_refs_away_without_moving_any() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let mut want = std::collections::BTreeMap::new();
+    for i in 0..6 {
+        let b = format!("refs/heads/agent/b{i}");
+        let c = rig.push_commit(&b, None, &format!("c{i}")).await;
+        want.insert(b, c);
+    }
+    let loose = |sc: &Syncer| -> usize {
+        fn walk(d: &std::path::Path) -> usize {
+            let Ok(rd) = std::fs::read_dir(d) else { return 0 };
+            rd.flatten()
+                .map(|e| if e.path().is_dir() { walk(&e.path()) } else { 1 })
+                .sum()
+        }
+        walk(&sc.cfg.repo.join("refs/heads"))
+    };
+    let packed = rig.sc.cfg.repo.join("packed-refs");
+    // The first batch of a fresh syncer publishes the derived files, so
+    // one ref is packed already; every push after that leaves a loose
+    // file behind, which is the state this tick exists to clear.
+    assert!(loose(&rig.sc) > 0, "the later pushes left loose refs");
+
+    batch::publish_derived(&mut rig.sc).await.expect("the derived tick runs");
+
+    assert!(packed.exists(), "the tick wrote packed-refs");
+    assert_eq!(loose(&rig.sc), 0, "and took the loose files away");
+    // The oracle that matters: every ref still names what it named.
+    let after = rig.sc.git.refs().await.expect("refs");
+    for (name, oid) in &want {
+        assert_eq!(after.get(name), Some(oid), "{name} moved");
+    }
+    // And a push still works afterwards, onto a packed ref.
+    let c = rig.push_commit("refs/heads/agent/b0", want.get("refs/heads/agent/b0").map(|s| s.as_str()), "next").await;
+    assert_eq!(rig.sc.git.ref_oid("refs/heads/agent/b0").await.unwrap(), Some(c));
+}
+
 /// A batch beside a fold (design §3.5). The fold's upload is slow and a
 /// push lands while it is in flight: the batch runs on the loop with
 /// the fold's task beside it, never sees the scratch — its snapshot

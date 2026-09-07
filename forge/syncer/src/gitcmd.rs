@@ -471,6 +471,27 @@ impl Git {
     /// Before a base rebuild: the reflog would keep what the rebuild
     /// drops, and a warm restart's proof walks reflogs unless told not
     /// to. Retention belongs in the bucket (X15), not in an emptyDir.
+    /// Fold every loose ref into `packed-refs`.
+    ///
+    /// forge sets `gc.auto=0` and never repacks, so every ref it has
+    /// ever accepted stays a loose file for the life of the repository.
+    /// `receive-pack` then walks all of them on EVERY push — for the
+    /// advertisement, for the connectivity check, and once more through
+    /// the quarantine's alternate — and so does `update-server-info`.
+    /// Measured on a scratch repository at 8,002 refs: a lone one-ref
+    /// push costs 683 ms with loose refs and 121 ms packed, warm; 1041
+    /// vs 275 ms cold. The wire bytes are identical either way, so this
+    /// is filesystem cost and nothing a client can see. `gc.auto` would
+    /// never have rescued it: that counts loose OBJECTS, not refs.
+    ///
+    /// Storage only — no ref changes value, so nothing in the bucket,
+    /// the snapshot, or a reader's view moves. Runs on the derived-files
+    /// timer, never on a push's path.
+    pub async fn pack_refs(&self) -> ForgeResult<()> {
+        self.must(&["pack-refs", "--all"], None).await?;
+        Ok(())
+    }
+
     pub async fn reflog_expire_all(&self) -> ForgeResult<()> {
         self.must(&["reflog", "expire", "--expire=now", "--all"], None).await?;
         Ok(())
@@ -485,13 +506,119 @@ impl Git {
             .run(&["fsck", "--connectivity-only", "--no-reflogs", "--no-progress"], None)
             .await?;
         if out.ok() {
-            Ok(())
-        } else {
-            Err(ForgeError::Refused(format!(
-                "restored repository fails fsck --connectivity-only: {}",
-                out.stderr.trim()
-            )))
+            return Ok(());
         }
+        // `git fsck` puts what is WRONG on stdout ("missing commit <oid>",
+        // "broken link from ... to ...") and only chatter on stderr
+        // ("notice: HEAD points to an unborn branch"). Reporting stderr
+        // alone named the wrong cause on runcd (2026-09-07): the refusal
+        // blamed an unborn HEAD while the real fault was thirteen missing
+        // commits, and an operator reading the log would have chased the
+        // notice. Lead with the faults, and keep only the first few — a
+        // broken repository can print thousands of lines.
+        let faults: Vec<&str> = out
+            .stdout
+            .lines()
+            .filter(|l| !l.starts_with("dangling ") && !l.trim().is_empty())
+            .collect();
+        let shown = faults.iter().take(6).cloned().collect::<Vec<_>>().join("; ");
+        let more = faults.len().saturating_sub(6);
+        let mut why = if faults.is_empty() {
+            String::new()
+        } else if more > 0 {
+            format!("{shown} (and {more} more)")
+        } else {
+            shown
+        };
+        let notes = out.stderr.trim();
+        if !notes.is_empty() {
+            if !why.is_empty() {
+                why.push_str(" | ");
+            }
+            why.push_str(notes);
+        }
+        Err(ForgeError::Refused(format!(
+            "restored repository fails fsck --connectivity-only: {why}"
+        )))
+    }
+
+    /// The object ids an index names, read from the `.idx` alone.
+    ///
+    /// `git show-index` reads an index on stdin and prints one
+    /// `<offset> <oid> (<crc>)` line per object, so this costs the index
+    /// and never the pack.
+    pub async fn pack_object_ids(&self, idx: &Path) -> ForgeResult<Vec<String>> {
+        let bytes = std::fs::read(idx)?;
+        let out = self.run(&["show-index"], Some(&bytes)).await?;
+        if !out.ok() {
+            return Err(ForgeError::Git(format!(
+                "show-index {}: {}",
+                idx.display(),
+                out.stderr.trim()
+            )));
+        }
+        Ok(out
+            .stdout
+            .lines()
+            .filter_map(|l| l.split_whitespace().nth(1).map(|s| s.to_string()))
+            .collect())
+    }
+
+    /// Every object reachable from every ref, by object id.
+    ///
+    /// This is what a base rebuild is contracted to pack (`--all`), and
+    /// so what its output must be checked against: a base MAY drop
+    /// objects its inputs held — that is the point of it, and a rewind
+    /// makes it happen — but it may never drop a REACHABLE one.
+    pub async fn reachable_object_ids(&self) -> ForgeResult<Vec<String>> {
+        let out = self.run(&["rev-list", "--objects", "--all"], None).await?;
+        if !out.ok() {
+            return Err(ForgeError::Git(format!("rev-list --objects --all: {}", out.stderr.trim())));
+        }
+        Ok(out
+            .stdout
+            .lines()
+            .filter_map(|l| l.split_whitespace().next().map(|s| s.to_string()))
+            .filter(|s| s.len() >= 40)
+            .collect())
+    }
+
+    /// Every object in `want` must be named by `out_idx`. Returns the
+    /// first that is not, or `None`.
+    pub async fn pack_holds_all(
+        &self,
+        out_idx: &Path,
+        want: &[String],
+    ) -> ForgeResult<Option<String>> {
+        let have: std::collections::HashSet<String> =
+            self.pack_object_ids(out_idx).await?.into_iter().collect();
+        Ok(want.iter().find(|o| !have.contains(*o)).cloned())
+    }
+
+    /// Every object the `inputs` indexes name must also be named by
+    /// `out_idx`. Returns the first object that is not, or `None`.
+    ///
+    /// A fold rolls packs up and its commit then stops naming the
+    /// inputs, so an output that does not cover them silently strands
+    /// whatever only they held. `pack-objects` is trusted to preserve
+    /// its inputs everywhere else in the design; on runcd (2026-09-07)
+    /// that trust was misplaced, and the repository could not be
+    /// restored afterwards. This is the check that was missing.
+    pub async fn pack_covers(
+        &self,
+        out_idx: &Path,
+        inputs: &[PathBuf],
+    ) -> ForgeResult<Option<String>> {
+        let have: std::collections::HashSet<String> =
+            self.pack_object_ids(out_idx).await?.into_iter().collect();
+        for idx in inputs {
+            for oid in self.pack_object_ids(idx).await? {
+                if !have.contains(&oid) {
+                    return Ok(Some(oid));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// The INCREMENTAL proof (`follow.rs`): every object reachable

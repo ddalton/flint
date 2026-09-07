@@ -12,6 +12,69 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed — flint forge: a fold that loses objects is refused, and the refusal says why
+
+- **A fold produced a pack that did not hold everything its inputs
+  held, and the commit unnamed them anyway** (cluster runcd,
+  2026-09-07, `forge/e2e/results/walgit-rematch2-2026-09-07.log`). The
+  snapshot then named 55 refs but only 3 packs, and 13 of those refs
+  needed commits that lived only in packs it had stopped naming. The
+  batch log — X15's own artefact — traced it exactly: those packs were
+  `packs_added` at seq 77 and `packs_removed` at seq 127, and the
+  rolled-up pack's index does not contain the missing objects. The
+  refs pointed past them, the next cold restore could not prove the
+  repository, and the syncer refused to serve and crash-looped. **No
+  data was lost** — every missing object was still in the bucket in its
+  original pack — but the repository was unservable until a human
+  intervened, and the model audit below shows how close this came to
+  being unrecoverable.
+- **`fold::run_task` now establishes coverage instead of assuming it**,
+  before it uploads, so a bad roll-up costs no bytes. The two kinds are
+  contracted differently and conflating them rejects legitimate work: a
+  **tier fold** (`pack-objects --stdin-packs`) must hold every object
+  its inputs hold; a **base rebuild** (`--all`) may drop objects — that
+  is what makes it a collection, and a rewind makes it happen — but may
+  never drop a **reachable** one. Both are checked from the pack
+  INDEXES, never the packs.
+- **The refusal now names the fault.** `git fsck` writes what is wrong
+  to **stdout** (`missing commit …`, `broken link from …`) and puts only
+  chatter on stderr (`notice: HEAD points to an unborn branch`).
+  Reporting stderr alone made runcd's refusal blame an unborn HEAD while
+  thirteen commits were missing; an operator would have chased the
+  notice. Dangling objects are dropped from the message as noise.
+- **`ForgeSync.tla` asked the right question and assumed away the
+  answer.** It models pack CONTENTS (`holds`) and carries exactly the
+  violated property (`Inv_LandedPackComplete`, `Inv_AckedIsDurable` over
+  `HeldByNamedComplete`) — but `FoldPlan` *defined* the roll-up to hold
+  `UNION {holds[q] : q \in S}`. "A fold loses nothing" was an axiom, so
+  no run could reach the failure. The fold may now drop an object, the
+  commit is guarded by `FoldCovers`, and a refused fold is abandoned the
+  way the real task errors out. New mutation `FoldNoCoverageCheck`
+  (`formal/ForgeSyncFoldNoCoverage.cfg`) reproduces runcd: it violates
+  `Inv_AckedIsDurable` in 4 s. **Fourth time on this project that the
+  abstraction, not the code, was the bug.**
+
+### Changed — flint forge: refs are packed on the derived tick
+
+- **forge never repacked its refs.** It sets `gc.auto=0` and never ran
+  `pack-refs`, so every ref it ever accepted stayed a loose file for the
+  life of the repository — 8,015 of them, 31.8 MB, on the cluster.
+  `receive-pack` walks all of them on EVERY push: once for the v0
+  advertisement, once for the connectivity check, and once more through
+  the quarantine's alternate. `gc.auto` would never have rescued it —
+  that counts loose OBJECTS, not refs.
+- **`pack-refs --all` now runs on the derived-files timer**, off the
+  acknowledgement path. Measured on a scratch repository at 8,002 refs,
+  a lone one-ref push costs **683 ms loose against 121 ms packed** warm,
+  and **1041 against 275 ms** cold. The advertisement's wire bytes are
+  identical either way (543,143 B), so this is filesystem cost and
+  nothing a client can see; no ref changes value.
+- Two levers were measured and rejected: `transfer.hideRefs` makes
+  hidden refs unpushable (create, update and force-with-lease all fail)
+  and buys 5%; bitmaps make no difference. **Protocol v2 does not cover
+  push** — upstream `receive-pack` falls back to v0 — so there is no
+  ref-prefix filter available on the push side.
+
 ### Changed — flint forge: the dumb protocol's files leave the push path, and partial clone works
 
 - **Measured what the rate leg saw** (X19,

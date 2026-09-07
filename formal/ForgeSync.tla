@@ -169,6 +169,7 @@ CONSTANTS
   SweepDuringFold,      \* mutation: the sweep runs with a fold uploaded and uncommitted
   FoldTicksBatchSensor, \* mutation: the fold's completion ticks the hold's counter
   FoldNoRenew,          \* mutation: the fold's commit does not renew the lease first
+  FoldNoCoverageCheck,  \* mutation: the commit lands a roll-up that does not hold its inputs
   GraceOutlivesUpload   \* the grace axiom; FALSE is lean's RacyGrace mutation
 
 Stages == {"none", "judged", "renewed", "hashed", "initiated", "uploaded",
@@ -801,7 +802,20 @@ FoldPlan(s) ==
   /\ \E f \in FoldIds, S \in SUBSET belief[s].packs :
        /\ holds[f] = {} /\ Cardinality(S) >= 1
        /\ fold' = [fold EXCEPT ![s] = [id |-> f, inputs |-> S, stage |-> "planned"]]
-       /\ holds' = [holds EXCEPT ![f] = UNION {holds[q] : q \in S}]
+       \* The roll-up holds the union of its inputs, OR it drops one.
+       \* This used to be the union alone, and that was not a fact about
+       \* the world — it was an ASSUMPTION about `git pack-objects`, and
+       \* on 2026-09-07 (cluster runcd) it was false: a fold's output was
+       \* missing thirteen commits its inputs held, the commit stopped
+       \* naming those inputs, and the next restore could not prove the
+       \* repository and refused to serve it. With the union written in
+       \* as an axiom, no run of this model could reach that state; the
+       \* checker was verifying that folds preserve durability GIVEN that
+       \* folds preserve contents. Dropping one object is enough to
+       \* expose it and keeps the state space linear in the union.
+       /\ LET U == UNION {holds[q] : q \in S} IN
+            \/ holds' = [holds EXCEPT ![f] = U]
+            \/ \E lost \in U : holds' = [holds EXCEPT ![f] = U \ {lost}]
   /\ foldBudget' = foldBudget - 1
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,
                  lastTok, quiet, belief, localMain, localPacks, migrating,
@@ -887,8 +901,35 @@ FoldRenew(s) ==
 \* (belief.packs \ S) ∪ {f}; a mismatch is the fence.  The inputs leave
 \* the listing (retained for readers, then unlinked) and git sees the
 \* roll-up.  The commit's one tick is the loop's.
+\* What the roll-up must hold before it may replace its inputs: every
+\* object those inputs hold. `fold::run_task` establishes this by
+\* comparing the pack INDEXES before it uploads (a tier fold must cover
+\* its inputs exactly; a base rebuild must cover everything REACHABLE,
+\* since collecting the unreachable is what a base is for).
+FoldCovers(s) ==
+  LET f == fold[s].id IN
+    UNION {holds[q] : q \in fold[s].inputs} \subseteq holds[f]
+
+\* A roll-up that does not cover its inputs is thrown away, which is
+\* what `run_task` does when the index comparison fails: it returns an
+\* error before the upload, the loop clears the fold and the scratch
+\* goes. Nothing is named, nothing is unnamed, and the plan can run
+\* again. Without this the model would simply wedge on a lossy fold
+\* rather than recover from one.
+FoldAbandon(s) ==
+  /\ ~FoldNoCoverageCheck
+  /\ fold[s].stage # "none"
+  /\ ~FoldCovers(s)
+  /\ fold' = [fold EXCEPT ![s] = NoFold]
+  /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,
+                 lastTok, quiet, belief, localMain, localPacks, migrating,
+                 batch, sensorMoved, realMoved, hbDue, pushState, pushTo,
+                 crashes, renewBudget, claimBudget, holds, foldBudget>>
+  /\ UNCHANGED Witnesses
+
 FoldCommit(s) ==
   /\ IF FoldNoRenew THEN FoldReadyToCommit(s) ELSE fold[s].stage = "renewed"
+  /\ (FoldNoCoverageCheck \/ FoldCovers(s))
   /\ LET f == fold[s].id
          S == IF FoldInputsAfterStart THEN belief[s].packs ELSE fold[s].inputs
          named == IF FoldCasFromDisk THEN (localPacks[s] \ S) \cup {f}
@@ -954,7 +995,7 @@ Next ==
        \/ BatchComplete(s) \/ BatchCas(s) \/ BatchLateUpload(s)
        \/ BatchRefs(s) \/ BatchAck(s)
        \/ FoldPlan(s) \/ FoldInit(s) \/ FoldComplete(s)
-       \/ FoldRenew(s) \/ FoldCommit(s)
+       \/ FoldRenew(s) \/ FoldCommit(s) \/ FoldAbandon(s)
        \/ SweepDelete(s)
        \/ CleanRelease(s) \/ Crash(s)
        \/ \E p \in Pushes : PushSend(p, s) \/ IdxLand(s, p)
@@ -973,7 +1014,7 @@ Fairness ==
     /\ WF_vars(BatchInit(s)) /\ WF_vars(BatchComplete(s)) /\ WF_vars(BatchCas(s))
     /\ WF_vars(BatchLateUpload(s)) /\ WF_vars(BatchRefs(s)) /\ WF_vars(BatchAck(s))
     /\ WF_vars(FoldInit(s)) /\ WF_vars(FoldComplete(s))
-    /\ WF_vars(FoldRenew(s)) /\ WF_vars(FoldCommit(s))
+    /\ WF_vars(FoldRenew(s)) /\ WF_vars(FoldCommit(s)) /\ WF_vars(FoldAbandon(s))
     /\ \A p \in Pushes : WF_vars(IdxLand(s, p))
 
 Spec == Init /\ [][Next]_vars /\ Fairness

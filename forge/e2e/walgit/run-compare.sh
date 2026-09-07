@@ -21,6 +21,7 @@
 #   P5  cold start: the arm's pod deleted; time to the first ls-remote and the first clone
 #   P11 undo: a force-push, and whether the previous tip can be recovered from the bucket
 #   P10 the bucket cut off (a NetworkPolicy): reads, readiness, pushes, recovery — recorded, not scored
+#   P12 ref scale: a lone one-ref push as the branch count grows, on a repository of its own per arm
 #
 # INCONCLUSIVE is not PASS. A leg whose precondition did not hold says so
 # and is counted apart. The verdict rule is applied by a human against
@@ -41,6 +42,12 @@ P1_SIZES=${P1_SIZES:-"0 64 1024"}; P1_REPS=${P1_REPS:-5}
 P2_N=${P2_N:-32}; P2_SECS=${P2_SECS:-60}
 P7_MB=${P7_MB:-1024}; P7_N=${P7_N:-8}
 P9_N=${P9_N:-48}; P9_MB=${P9_MB:-8}
+# P12 runs on a repository of its OWN on each arm (forge: the rig's second
+# FlintRepo; walgit: a name it creates on first push), because a ladder to
+# 8,000 refs would otherwise leave every later leg standing on 8,000 refs
+# and break comparability with the previous campaigns.
+FREPO12=${FREPO12:-big}; WREPO12=${WREPO12:-refscale}
+P12_RUNGS=${P12_RUNGS:-"0 2000 8000"}; P12_PROBES=${P12_PROBES:-5}; P12_CHUNK=${P12_CHUNK:-500}
 STATUS_PORT=${STATUS_PORT:-9848}   # render.rs STATUS_PORT
 RUN=$(date +%Y%m%d-%H%M%S)
 RESULTS=${RESULTS:-$HERE/results}; WORK=$RESULTS/work-$RUN; mkdir -p "$WORK"
@@ -67,6 +74,7 @@ forge_pod()  { K -n "$NS" get pods -l "chert.us/repo=$FREPO" -o json 2>/dev/null
 walgit_pod() { K -n "$NS" get pods -l app=walgit -o json 2>/dev/null | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)] | sort_by(.metadata.creationTimestamp) | last | .metadata.name // empty'; }
 arm_pod()    { case "$1" in forge) forge_pod;; walgit) walgit_pod;; esac; }
 arm_repo()   { case "$1" in forge) echo "$FREPO";; walgit) echo "$WREPO";; esac; }
+arm_repo12() { case "$1" in forge) echo "$FREPO12";; walgit) echo "$WREPO12";; esac; }
 pod_ready()  { K -n "$NS" get pod "$1" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null; }
 restarts()   { K -n "$NS" get pod "$1" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0; }
 forge_phase() { local p; p=$(forge_pod); [ -n "$p" ] && K -n "$NS" exec "$p" -c syncer -- wget -qO- "http://127.0.0.1:$STATUS_PORT/status" 2>/dev/null | jq -r '.phase // "?"' || echo "?"; }
@@ -152,6 +160,43 @@ i=1; while [ $i -le $n ]; do
   t0=$(ms); G push -q "$(url "$repo")" "HEAD:refs/heads/$ref" >/dev/null 2>&1; rc=$?; t1=$(ms)
   echo "$i $((t1-t0)) $rc" >> "$log"; i=$((i+1)); done
 echo done
+EOS
+  put_script refbulk.sh <<'EOS'
+# refbulk.sh <repo> <from> <to> <chunk> <tag>: create branches bulk-<tag>-<i>
+# for i in from..to at one commit and push them in chunks of <chunk> refs.
+# Prints "<created> <ms>". The working repository is kept between calls so a
+# ladder climbs instead of starting over.
+. /work/lib.sh
+repo=$1; from=$2; to=$3; chunk=$4; tag=$5; d=/work/refb-$tag
+if [ ! -d "$d/.git" ]; then mkdir -p "$d"; cd "$d"; git init -q -b main
+  git config user.email rb@invalid; git config user.name rb; echo x > f; git add f; git commit -qm base >/dev/null
+fi
+cd "$d"; h=$(git rev-parse HEAD); i=$from; t0=$(ms)
+while [ $i -le $to ]; do
+  spec=""; j=0
+  while [ $j -lt $chunk ] && [ $i -le $to ]; do spec="$spec $h:refs/heads/agent/bulk-$tag-$i"; i=$((i+1)); j=$((j+1)); done
+  G push -q "$(url "$repo")" $spec >/dev/null 2>>/work/refb-$tag.err || echo "CHUNK-FAILED ending $i" >> /work/refb-$tag.err
+done
+t1=$(ms); echo "$((to-from+1)) $((t1-t0))"
+EOS
+  put_script refprobe.sh <<'EOS'
+# refprobe.sh <repo> <tag> <n>: n lone one-ref pushes, each a tiny commit to its
+# own new branch, timed one at a time. One "<ms> <rc>" per line.
+. /work/lib.sh
+repo=$1; tag=$2; n=$3; d=/work/refp-$tag
+rm -rf "$d"; mkdir -p "$d"; cd "$d"; git init -q -b main
+git config user.email rp@invalid; git config user.name rp
+i=1
+while [ $i -le $n ]; do
+  echo "$i $(ms)" > f; git add f; git commit -qm "p$i" >/dev/null
+  t0=$(ms); G push -q "$(url "$repo")" "HEAD:refs/heads/agent/probe-$tag-$i" >/dev/null 2>&1; rc=$?; t1=$(ms)
+  echo "$((t1-t0)) $rc"; i=$((i+1))
+done
+EOS
+  put_script refcount.sh <<'EOS'
+# refcount.sh <repo>: how many refs the arm advertises.
+. /work/lib.sh
+G ls-remote "$(url "$1")" 2>/dev/null | wc -l
 EOS
   put_script pusher.sh <<'EOS'
 # pusher.sh <repo> <i> <secs> <tag> <run>: tiny commits pushed to agent/p2-<run>-<tag>-<i> as fast as they are acknowledged, for <secs>; per push "<t_ms> <ms> <rc>" in /work/rate-<tag>-<i>.log
@@ -419,6 +464,68 @@ YAML
     r=$(inpod "$(armenv "$arm") /work/tpush.sh p10 $(arm_repo "$arm") agent/p10-$arm-$RUN" | tail -1)
     [ "${r##* }" = 0 ] && ok "$arm: recovers once the bucket returns (push told ok, pod ready, restarts $r0 → $(restarts "$pod"))" || bad "$arm: did not recover: $r"
   done
+}
+
+# ── P12 ────────────────────────────────────────────────────────────
+# The question the local ref-scale rig raised and could not answer: it
+# measured forge against a bare repository on one laptop and found that
+# 63% of forge's push-latency decay under a growing branch count is git's
+# OWN ref advertisement, which every git server pays. If that reading is
+# right, walgit must decay here too, and by a comparable amount. If walgit
+# stays flat, the reading is wrong and the decay is forge's after all.
+# Each arm gets a repository of its own so the ladder pollutes no other leg.
+leg_P12() {
+  leg P12 "ref scale: a lone one-ref push at ${P12_RUNGS} refs, ${P12_PROBES} probes per rung, on a repository of its own per arm"
+  local arm rung prev refs med r
+  for arm in $ARMS; do
+    prev=0
+    inpod "rm -rf /work/refb-$arm-$RUN /work/refb-$arm-$RUN.err" >/dev/null 2>&1
+    for rung in $P12_RUNGS; do
+      if [ "$rung" -gt "$prev" ]; then
+        r=$(inpod "$(armenv "$arm") /work/refbulk.sh $(arm_repo12 "$arm") $((prev+1)) $rung $P12_CHUNK $arm-$RUN" | tail -1)
+        note "$arm: filled to $rung refs (${r} = created ms)"
+        prev=$rung
+      fi
+      refs=$(inpod "$(armenv "$arm") /work/refcount.sh $(arm_repo12 "$arm")" | tail -1 | tr -d "[:space:]")
+      inpod "$(armenv "$arm") /work/refprobe.sh $(arm_repo12 "$arm") $arm-$rung-$RUN $P12_PROBES" > "$WORK/p12-$arm-$rung.txt" 2>&1
+      med=$(awk "\$2==0 {print \$1/1000}" "$WORK/p12-$arm-$rung.txt" | stats)
+      echo "$arm $rung $refs $med" >> "$WORK/p12.txt"
+      note "$arm at rung $rung ($refs refs advertised): lone-push s median/min/max = $med"
+      local nf; nf=$(awk "\$2!=0" "$WORK/p12-$arm-$rung.txt" | wc -l | tr -d " ")
+      [ "$nf" = 0 ] || note "$arm rung $rung: $nf probe push(es) failed: $(inpod "tail -2 /work/refb-$arm-$RUN.err" | tr "\n" " " | cut -c1-160)"
+    done
+  done
+  # The comparison the leg exists for: each arm own decay, first rung to last.
+  local a lo hi
+  for a in $ARMS; do
+    lo=$(awk -v a="$a" "\$1==a {print \$4; exit}" "$WORK/p12.txt")
+    hi=$(awk -v a="$a" "\$1==a {v=\$4} END{print v}" "$WORK/p12.txt")
+    [ -n "$lo" ] && [ -n "$hi" ] && note "$a decay across the ladder: ${lo} s → ${hi} s (median)"
+  done
+  # A ladder that measured nothing must NOT pass. The first draft of this leg
+  # reported PASS while every probe push was refused by the door's branch
+  # policy and every rung read 0 refs advertised.
+  local rows bad_rows arms_n rungs_n want
+  rows=$(wc -l < "$WORK/p12.txt" 2>/dev/null | tr -d " "); rows=${rows:-0}
+  # A rung with no median measured nothing. (Rung 0 on an empty repository
+  # legitimately advertises 0 refs, so a zero ref COUNT is not a failure —
+  # an earlier draft of this guard called it one.)
+  bad_rows=$(awk "\$4==\"none\"" "$WORK/p12.txt" 2>/dev/null | wc -l | tr -d " ")
+  arms_n=$(echo $ARMS | wc -w | tr -d " "); rungs_n=$(echo $P12_RUNGS | wc -w | tr -d " ")
+  want=$((arms_n * rungs_n))
+  # ...and the ladder must actually have CLIMBED on every arm, or the fill
+  # was refused and every rung is measuring the same empty repository.
+  local climbed=1 a0 first last
+  for a0 in $ARMS; do
+    first=$(awk -v a="$a0" "\$1==a {print \$3; exit}" "$WORK/p12.txt")
+    last=$(awk -v a="$a0" "\$1==a {v=\$3} END{print v+0}" "$WORK/p12.txt")
+    [ "${last:-0}" -gt "${first:-0}" ] 2>/dev/null || { climbed=0; note "$a0: the ref count did not climb (${first:-?} → ${last:-?}) — the bulk fill was refused"; }
+  done
+  if [ "$rows" -eq "$want" ] && [ "$bad_rows" -eq 0 ] && [ "$climbed" -eq 1 ]; then
+    ok "the ladder measured every rung on every arm ($rows rows); the reading is the decay RATIO between the arms (p12.txt)"
+  else
+    inconc "the ladder measured $((rows - bad_rows)) of $want rungs (rows=$rows, unmeasured=$bad_rows, climbed=$climbed) — see p12-*.txt and /work/refb-*.err"
+  fi
 }
 
 # ── run ────────────────────────────────────────────────────────────
