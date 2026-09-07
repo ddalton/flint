@@ -1,0 +1,73 @@
+════════════════════════════════════════════════════════════════════════
+pack-refs on the derived tick — a controlled A/B, 2026-09-07
+════════════════════════════════════════════════════════════════════════
+
+WHY THIS EXISTS. runce's P12 ladder improved (decay 2.6x → 2.0x) but it
+had no in-run control: it compared forge to forge on a different cluster
+on a different day. This rig has the control the question needs — the
+identical push to a PLAIN bare repository holding the identical refs,
+with no hook, no syncer and no bucket.
+
+ARMS — they differ in exactly ONE dimension.
+  after  = HEAD (aaffe335): `publish_derived` and `restore` call
+           `git pack-refs --all`
+  before = the same tree with ONLY those two call sites removed
+Verified by CONTENT, not intent: the eprintln marker and every
+`pack-refs` string appear in `after` (1 and 3) and in `before` (0 and 0);
+the binaries' sha256 differ. ARM=batch, so the treatment fires every
+batch. Two interleaved reps per arm, 15 probes per rung.
+Pre-registered before any number was seen (prereg-packrefs.md).
+
+──────────────────────────── THE NUMBERS ───────────────────────────────
+forge_ms = the lone one-ref push; plain_ms = the same push to the bare
+control; forge-plain = what forge adds; usinfo_ms = update-server-info.
+
+  refs   arm      forge_ms      plain_ms      forge-plain   usinfo_ms
+  ----   ------   -----------   -----------   -----------   ---------
+     0   before   214   213      69    69      145   144     32   32
+     0   after    231   229      69    70      162   159     33   34
+  2000   before   588   569     313   309      275   260     90   86
+  2000   after    376   384     307   311       69    73     34   33
+  8000   before  2847  2670    2142  2079      705   591    251  239
+  8000   after   1825  1818    2057  2052     -232  -234     37   37
+
+──────────────────────── AGAINST THE PREDICTIONS ───────────────────────
+
+(2) HELD, and it is the main result. `forge_ms` is lower with pack-refs
+    at both loaded rungs and the gap grows: 588 → 376 at 2000 (−36%),
+    2847 → 1825 at 8000 (−36%, ≈1.0 s per push). Reproducible across
+    both reps to within 2%.
+(3) HELD, so the comparison is valid: `plain_ms` is unchanged between
+    arms (69/311/2080 either way, within ~4%). The control did not move.
+(5) HELD and then some: the effect at 8000 is ≈1.0 s, not "hundreds of
+    ms".
+(1) MILDLY VIOLATED, and worth recording. I predicted rung 0 would be
+    INDISTINGUISHABLE. It is not: `after` is consistently ~16 ms slower
+    (231/229 against 214/213), in all four runs, with tight spreads.
+    That is the cost of forking `git pack-refs` on a derived tick with
+    nothing to pack. Small, fixed, and paid per batch under ARM=batch.
+(4) WRONG, in the interesting direction. I predicted `forge - plain`
+    would shrink but NOT reach zero, because the snapshot and info/refs
+    are O(refs) and rewritten whole. At 8000 it went NEGATIVE: −232 ms.
+
+    WHAT THAT DOES NOT MEAN. It is not "forge serves a push faster than
+    git". The bare control's refs are LOOSE — nothing ever packs them —
+    so at 8000 refs the control pays a cost forge no longer pays. The
+    honest statement is that the loose-ref walk DOMINATES this
+    workload, and forge now performs the maintenance that removes it
+    while a naive bare repository does not. forge's own O(refs) work is
+    still there and still visible: snapshot_B 545,613 and inforefs_B
+    511,008 are identical in both arms.
+
+`usinfo_ms` is where much of it comes from: 251 → 37 ms at 8000 refs.
+`update-server-info` walks the refs too, and packing them collapses it.
+
+──────────────────────────── WHAT THIS SETTLES ─────────────────────────
+runce's cross-run ladder improvement is corroborated by a controlled
+experiment: packing refs on the derived tick is worth ≈1.0 s per push at
+8,000 refs, against a fixed cost of ≈16 ms per batch when there is
+nothing to pack. On a repository with few refs the change is a small
+loss; from a couple of thousand refs upward it is a large win.
+
+Rig: forge/e2e/refscale/run-refscale.sh, MinIO on loopback, one 8 GB
+laptop. Loopback numbers; the RATIOS are the reading, not the absolutes.
