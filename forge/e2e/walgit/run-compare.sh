@@ -297,8 +297,19 @@ leg_P9() {
     inpod "$(armenv "$arm") /work/seqpush.sh $(arm_repo "$arm") agent/p9-$RUN $P9_N $P9_MB $arm" >/dev/null 2>&1
     t1=$(now); window P9 "$arm" "$t0" "$t1"
     K -n "$NS" cp "$AGENT:/work/seq-$arm.log" "$WORK/p9-$arm.log" -c agent >/dev/null 2>&1
-    s=$(awk '$3==0 {print $2/1000}' "$WORK/p9-$arm.log" | stats); nbad=$(awk '$3!=0' "$WORK/p9-$arm.log" | wc -l | tr -d ' ')
-    [ "$nbad" = 0 ] && ok "$arm: ${P9_N} pushes told ok in $((t1-t0)) s; per push median/min/max s = $s; window $t0..$t1" || bad "$arm: $nbad of ${P9_N} pushes failed"
+    s=$(awk '$3==0 {print $2/1000}' "$WORK/p9-$arm.log" 2>/dev/null | stats)
+    nbad=$(awk '$3!=0' "$WORK/p9-$arm.log" 2>/dev/null | wc -l | tr -d ' ')
+    ngood=$(awk '$3==0' "$WORK/p9-$arm.log" 2>/dev/null | wc -l | tr -d ' ')
+    # A MISSING log used to read as "zero failures" and PASS: awk errors,
+    # nbad is 0, and the leg reports 48 pushes told ok in 0 s with a
+    # median of "none". That is a leg passing while measuring nothing,
+    # and it cost a drill run (runcf, 2026-09-07, LEGS without P0 — the
+    # leg that installs /work/seqpush.sh). The count is now the guard.
+    if [ ! -s "$WORK/p9-$arm.log" ]; then
+      inconc "$arm: no per-push log came back — nothing was measured (did P0 run? it installs /work/seqpush.sh)"
+    elif [ "$nbad" != 0 ]; then bad "$arm: $nbad of ${P9_N} pushes failed"
+    elif [ "$ngood" != "${P9_N}" ]; then bad "$arm: only $ngood of ${P9_N} pushes are in the log"
+    else ok "$arm: ${P9_N} pushes told ok in $((t1-t0)) s; per push median/min/max s = $s; window $t0..$t1"; fi
     note "$arm: objects under its prefix now: $(aws s3 ls "s3://$BUCKET/$([ "$arm" = forge ] && echo "$PREFIX" || echo "$WPREFIX")/" --recursive --summarize 2>/dev/null | grep -E 'Total (Objects|Size)' | tr '\n' ' ')"
   done
 }

@@ -4561,3 +4561,115 @@ async fn the_incremental_proof_refuses_a_tip_it_cannot_walk() {
     let err = rig.sc.git.prove_reachable(&[absent], &[c1]).await.expect_err("must refuse");
     assert!(matches!(err, ForgeError::Refused(_)), "{err:?}");
 }
+
+/// THE REQUEST BUDGET — what each operation costs the object store, as
+/// an assertion rather than as a sentence in a design note.
+///
+/// Every number below is a round-trip a real deployment pays on every
+/// occurrence, and this project has a documented history of budgets
+/// that lived only in prose or in a drill log and drifted without
+/// anyone noticing. walgit pins its equivalent with a test
+/// (`ROUNDTRIPS.md` + an assertion); this is forge's.
+///
+///   operation            | puts | get_whole | get_range | head | list
+///   ---------------------|------|-----------|-----------|------|-----
+///   push, first          |   8  |     -     |     -     |   -  |  -
+///   push, steady state   |   5  |     -     |     -     |   -  |  -
+///   warm follower, idle  |   -  |     1     |     -     |   -  |  -
+///   warm follower, +1    |   -  |     2     |     3     |   3  |  -
+///   warm follower, cold  |   -  |     1     |     6     |   6  |  1
+///   restore, cold        |   -  |     2     |     9     |   -  |  1
+///
+/// The one that matters most is **warm follower, idle: ONE get_whole**.
+/// `log.rs` claims "an idle poll is one 404 on `<seq+1>` instead of a
+/// whole snapshot" — that was documentation, and it is now checked. A
+/// follower polls per heartbeat forever, so a regression here is paid
+/// by every idle repository in the fleet, continuously, and would show
+/// up in a bill long before it showed up in a test.
+///
+/// IF YOU CHANGE A NUMBER HERE, change the table with it and say in the
+/// commit message which round trip you added and why. A budget nobody
+/// has to argue with is not a budget.
+///
+/// `epoch_renew` is deliberately NOT pinned exactly: the renewer runs
+/// on a timer (design §5 — a quiet repository must keep renewing), so
+/// its count is a function of wall clock, not of the operation. The
+/// batch's own renew is asserted as a floor.
+#[tokio::test]
+async fn the_request_budget_per_operation_is_pinned() {
+    let store = Arc::new(MemoryStore::new());
+    let mut rig = Rig::with_store(store.clone(), "a").await;
+    rig.start().await;
+    let n = |m: &std::collections::BTreeMap<&'static str, u64>, k: &str| -> u64 {
+        m.get(k).copied().unwrap_or(0)
+    };
+
+    // ── a push into an empty repository ──────────────────────────────
+    let c = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    store.reset_op_counts();
+    let r = rig
+        .run(vec![push(1, vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: zero(),
+            new_oid: c.clone(),
+        }])])
+        .await;
+    assert!(is_ok(&r[0].results[0]));
+    let m = store.op_counts();
+    assert_eq!(n(&m, "put_whole"), 8, "push, first: {m:?}");
+    assert!(n(&m, "epoch_renew") >= 1, "the batch renews before it commits: {m:?}");
+
+    // ── a push into a repository that already has one ────────────────
+    let c2 = rig.stage_commit(Some(&c), &[("b.txt", "two\n")], "second").await;
+    store.reset_op_counts();
+    let r = rig
+        .run(vec![push(2, vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: c.clone(),
+            new_oid: c2.clone(),
+        }])])
+        .await;
+    assert!(is_ok(&r[0].results[0]));
+    let m = store.op_counts();
+    assert_eq!(n(&m, "put_whole"), 5, "push, steady state: {m:?}");
+
+    // ── a follower's first pass: the snapshot, and the files it names ─
+    let mut b = Rig::with_store(store.clone(), "b").await;
+    store.reset_op_counts();
+    super::follow::warm(&mut b.sc).await.expect("cold warm");
+    let m = store.op_counts();
+    assert_eq!((n(&m, "get_whole"), n(&m, "get_range"), n(&m, "head"), n(&m, "list")),
+               (1, 6, 6, 1), "warm follower, cold: {m:?}");
+
+    // ── the idle poll. THE number: one GET that 404s. ────────────────
+    store.reset_op_counts();
+    super::follow::warm(&mut b.sc).await.expect("idle warm");
+    let m = store.op_counts();
+    assert_eq!(n(&m, "get_whole"), 1, "warm follower, idle: {m:?}");
+    assert_eq!(n(&m, "get_range") + n(&m, "head") + n(&m, "list"), 0,
+               "an idle poll reads NOTHING else — not the snapshot, not a listing: {m:?}");
+
+    // ── one entry behind ─────────────────────────────────────────────
+    let c3 = rig.stage_commit(Some(&c2), &[("c.txt", "three\n")], "third").await;
+    let r = rig
+        .run(vec![push(3, vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: c2.clone(),
+            new_oid: c3.clone(),
+        }])])
+        .await;
+    assert!(is_ok(&r[0].results[0]));
+    store.reset_op_counts();
+    super::follow::warm(&mut b.sc).await.expect("one-entry warm");
+    let m = store.op_counts();
+    assert_eq!((n(&m, "get_whole"), n(&m, "get_range"), n(&m, "head")), (2, 3, 3),
+               "warm follower, one entry behind: {m:?}");
+
+    // ── a cold restore ───────────────────────────────────────────────
+    let mut cold = Rig::with_store(store.clone(), "cold").await;
+    store.reset_op_counts();
+    restore::restore(&mut cold.sc).await.expect("restore");
+    let m = store.op_counts();
+    assert_eq!((n(&m, "get_whole"), n(&m, "get_range"), n(&m, "list")), (2, 9, 1),
+               "restore, cold: {m:?}");
+}
