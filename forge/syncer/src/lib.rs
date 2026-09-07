@@ -557,6 +557,13 @@ pub struct Syncer {
     /// the first batch after a start publishes them however the timer
     /// is set — a fresh server's bucket view is never a predecessor's.
     pub last_derived_unix: u64,
+    /// Roll-ups refused because they did not hold what they would have
+    /// superseded, and the last one's reason. A refusal is the system
+    /// working, but it is also a fold that did NOT happen: left
+    /// unwatched, compaction quietly stalls and the pack count climbs.
+    /// It belongs in the status document, not only in a log line.
+    pub folds_refused: u64,
+    pub last_fold_refusal: Option<String>,
 }
 
 impl Syncer {
@@ -580,6 +587,8 @@ impl Syncer {
             last_base_rebuild_unix: 0,
             last_full_sweep_unix: 0,
             last_derived_unix: 0,
+            folds_refused: 0,
+            last_fold_refusal: None,
         }
     }
 

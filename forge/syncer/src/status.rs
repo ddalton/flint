@@ -103,6 +103,8 @@ pub struct Facts {
     pub fold_bytes: u64,
     pub fold_inputs: usize,
     pub fold_is_base: bool,
+    pub folds_refused: u64,
+    pub last_fold_refusal: Option<String>,
 }
 
 impl Facts {
@@ -141,6 +143,8 @@ pub fn facts(sc: &Syncer, phase: Phase) -> Facts {
         fold_bytes: ff.bytes,
         fold_inputs: ff.inputs,
         fold_is_base: ff.is_base,
+        folds_refused: sc.folds_refused,
+        last_fold_refusal: sc.last_fold_refusal.clone(),
     }
 }
 
@@ -169,6 +173,8 @@ pub fn document(f: &Facts, now: u64) -> serde_json::Value {
                   "base": f.base, "tierPacks": f.tier_packs, "retained": f.retained,
                   "fold": f.fold_stage.map(|st| serde_json::json!({
                       "stage": st, "bytes": f.fold_bytes, "inputs": f.fold_inputs, "base": f.fold_is_base })) },
+        "foldsRefused": f.folds_refused,
+        "lastFoldRefusal": f.last_fold_refusal,
         "syncerVersion": super::SYNCER_VERSION,
         // Set ⇒ this server has been deposed and serves nothing. The
         // operator reads it as it reads `importRefused`: a stated

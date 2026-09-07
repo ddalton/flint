@@ -234,6 +234,17 @@ pub async fn restore(sc: &mut Syncer) -> ForgeResult<RestoreReport> {
                 out.stderr.trim()
             )));
         }
+        // `update-ref` writes a loose file per ref, so a restored
+        // repository would otherwise start with every ref loose and
+        // `receive-pack` would walk all of them on every push until the
+        // first derived tick — which would itself then block the loop
+        // for the whole cold pack. Measured: 5.3 s at 8,000 refs and
+        // 12.0 s at 20,000 when everything is loose, against ~50 ms in
+        // the steady state the tick actually sees. Design §3/§5 always
+        // said the restore writes `packed-refs`; the code did not.
+        if let Err(e) = sc.git.pack_refs().await {
+            eprintln!("flint-forge: pack-refs after restore failed (refs stay loose): {e}");
+        }
     }
 
     // HEAD, from the derived object if the bucket has one.

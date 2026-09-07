@@ -170,6 +170,7 @@ CONSTANTS
   FoldTicksBatchSensor, \* mutation: the fold's completion ticks the hold's counter
   FoldNoRenew,          \* mutation: the fold's commit does not renew the lease first
   FoldNoCoverageCheck,  \* mutation: the commit lands a roll-up that does not hold its inputs
+  FoldSupersedesArrivals, \* mutation: a fold's commit unnames every input, held or not (runcd)
   GraceOutlivesUpload   \* the grace axiom; FALSE is lean's RacyGrace mutation
 
 Stages == {"none", "judged", "renewed", "hashed", "initiated", "uploaded",
@@ -221,7 +222,7 @@ vars == <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease, lastTok,
 NoBatch   == [push |-> 0, stage |-> "none", listed |-> {}]
 ZeroLease == [ep |-> 0, tok |-> 0]
 NoBelief  == [etag |-> 0, main |-> 0, packs |-> {}]
-NoFold    == [id |-> 0, inputs |-> {}, stage |-> "none"]
+NoFold    == [id |-> 0, inputs |-> {}, stage |-> "none", base |-> FALSE, at |-> {}]
 
 PushIds == Pushes \cup {0}
 PackIds == Pushes \cup FoldIds
@@ -242,7 +243,8 @@ TypeOK ==
   /\ migrating \in [Syncers -> SUBSET Pushes]
   /\ batch \in [Syncers -> [push: PushIds, stage: Stages, listed: SUBSET PackIds]]
   /\ holds \in [PackIds -> SUBSET Pushes]
-  /\ fold \in [Syncers -> [id: FoldIds \cup {0}, inputs: SUBSET PackIds, stage: FoldStages]]
+  /\ fold \in [Syncers -> [id: FoldIds \cup {0}, inputs: SUBSET PackIds, stage: FoldStages,
+                          base: BOOLEAN, at: SUBSET Pushes]]
   /\ foldBudget \in 0..MaxFolds
   /\ renewOverWedge \in BOOLEAN
   /\ sensorMoved \in [Syncers -> BOOLEAN] /\ realMoved \in [Syncers -> BOOLEAN]
@@ -799,23 +801,33 @@ Crash(s) ==
 FoldPlan(s) ==
   /\ st[s] = "serving" /\ batch[s].stage = "none"
   /\ fold[s].stage = "none" /\ foldBudget > 0
-  /\ \E f \in FoldIds, S \in SUBSET belief[s].packs :
+  /\ \E f \in FoldIds, S \in SUBSET belief[s].packs, base \in BOOLEAN :
        /\ holds[f] = {} /\ Cardinality(S) >= 1
-       /\ fold' = [fold EXCEPT ![s] = [id |-> f, inputs |-> S, stage |-> "planned"]]
-       \* The roll-up holds the union of its inputs, OR it drops one.
-       \* This used to be the union alone, and that was not a fact about
-       \* the world — it was an ASSUMPTION about `git pack-objects`, and
-       \* on 2026-09-07 (cluster runcd) it was false: a fold's output was
-       \* missing thirteen commits its inputs held, the commit stopped
-       \* naming those inputs, and the next restore could not prove the
-       \* repository and refused to serve it. With the union written in
-       \* as an axiom, no run of this model could reach that state; the
-       \* checker was verifying that folds preserve durability GIVEN that
-       \* folds preserve contents. Dropping one object is enough to
-       \* expose it and keeps the state space linear in the union.
-       /\ LET U == UNION {holds[q] : q \in S} IN
-            \/ holds' = [holds EXCEPT ![f] = U]
-            \/ \E lost \in U : holds' = [holds EXCEPT ![f] = U \ {lost}]
+       /\ fold' = [fold EXCEPT ![s] = [id |-> f, inputs |-> S, stage |-> "planned",
+                                      base |-> base, at |-> snap.history]]
+       \* TWO kinds of fold, with two content rules — and this used to be
+       \* one rule, the tier fold's, written in as an axiom. That is how
+       \* runcd's defect (2026-09-07) got past a checker that carried the
+       \* exact invariant it violated:
+       \*
+       \*   * a TIER fold (`pack-objects --stdin-packs`) holds the union
+       \*     of its inputs' contents;
+       \*   * a BASE rebuild (`pack-objects --all`) holds what the REFS
+       \*     REACH when it reads them — `snap.history` here — and not
+       \*     whatever else its inputs hold. A batch names the DIRECTORY
+       \*     (`batch.listed`), and git migrates a push's pack out of
+       \*     quarantine before the hook that will queue it runs, so a
+       \*     pack can be named one batch BEFORE its push lands. A base
+       \*     planned in that gap has the pack as an input and cannot
+       \*     see the push. Its commit must not unname that pack.
+       \*
+       \* Either kind may also DROP one object: `pack-objects` is a
+       \* subprocess this design trusts nowhere else, and the code now
+       \* checks its output against the indexes (FoldCovers).
+       /\ LET U == UNION {holds[q] : q \in S}
+              R == IF base THEN U \cap snap.history ELSE U IN
+            \/ holds' = [holds EXCEPT ![f] = R]
+            \/ \E lost \in R : holds' = [holds EXCEPT ![f] = R \ {lost}]
   /\ foldBudget' = foldBudget - 1
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,
                  lastTok, quiet, belief, localMain, localPacks, migrating,
@@ -889,11 +901,17 @@ FoldRenew(s) ==
             /\ lease' = [lease EXCEPT ![s].tok = nextTok]
             /\ nextTok' = nextTok + 1
             /\ fold' = [fold EXCEPT ![s].stage = "renewed"]
-            /\ UNCHANGED <<st, batch, pushState, quiet>>
+            \* The fold's renewal does NOT tick the batch's movement sensor;
+            \* that is exactly what mutation FoldTicksBatchSensor turns on.
+            \* This must be said HERE and not in the trailing UNCHANGED: the
+            \* ELSE branch's Fall clears both sensors, and a trailing
+            \* UNCHANGED would silently kill the fence whenever a sensor is
+            \* set -- which, after a restore, is its normal state.
+            /\ UNCHANGED <<st, batch, pushState, quiet, sensorMoved, realMoved>>
        ELSE /\ Fall(s)                    \* deposed at renew: the fence
             /\ UNCHANGED <<cell, nextTok>>
   /\ UNCHANGED <<snap, packObj, idxObj, uploads, lastTok, belief, localMain,
-                 localPacks, migrating, sensorMoved, realMoved, hbDue, pushTo,
+                 localPacks, migrating, hbDue, pushTo,
                  crashes, claimBudget>>
   /\ UNCHANGED FoldPlanVars /\ UNCHANGED Witnesses
 
@@ -907,8 +925,10 @@ FoldRenew(s) ==
 \* its inputs exactly; a base rebuild must cover everything REACHABLE,
 \* since collecting the unreachable is what a base is for).
 FoldCovers(s) ==
-  LET f == fold[s].id IN
-    UNION {holds[q] : q \in fold[s].inputs} \subseteq holds[f]
+  LET f == fold[s].id
+      U == UNION {holds[q] : q \in fold[s].inputs}
+      R == IF fold[s].base THEN U \cap fold[s].at ELSE U IN
+    R \subseteq holds[f]
 
 \* A roll-up that does not cover its inputs is thrown away, which is
 \* what `run_task` does when the index comparison fails: it returns an
@@ -932,13 +952,29 @@ FoldCommit(s) ==
   /\ (FoldNoCoverageCheck \/ FoldCovers(s))
   /\ LET f == fold[s].id
          S == IF FoldInputsAfterStart THEN belief[s].packs ELSE fold[s].inputs
-         named == IF FoldCasFromDisk THEN (localPacks[s] \ S) \cup {f}
-                                    ELSE (belief[s].packs \ S) \cup {f} IN
+         \* WHICH INPUTS THE COMMIT MAY UNNAME. Not "all of them", which
+         \* is what runcd did and what the mutation restores: an input
+         \* may go only if the roll-up HOLDS everything it holds.
+         \*
+         \* Two weaker rules were tried and TLC refuted both. "Unname
+         \* every input" is runcd itself (the mutation). "Unname an
+         \* input whose uncovered objects have already landed" fails
+         \* too: a base rebuild reads the refs before a queued push's
+         \* ref moves, so its roll-up cannot hold that push, and by the
+         \* time the fold commits the push HAS landed — the test passes
+         \* and the object is stranded anyway. Every landed push must
+         \* stay held (Inv_LandedPackComplete), so coverage is the only
+         \* rule that survives. An input holding something the roll-up
+         \* missed simply stays named for a later fold.
+         D == IF FoldSupersedesArrivals THEN S
+                ELSE {q \in S : holds[q] \subseteq holds[f]}
+         named == IF FoldCasFromDisk THEN (localPacks[s] \ D) \cup {f}
+                                    ELSE (belief[s].packs \ D) \cup {f} IN
      IF snap.etag = belief[s].etag
        THEN /\ snap' = [snap EXCEPT !.etag = nextTok, !.packs = named]
             /\ nextTok' = nextTok + 1
             /\ belief' = [belief EXCEPT ![s].etag = nextTok, ![s].packs = named]
-            /\ localPacks' = [localPacks EXCEPT ![s] = (@ \ S) \cup {f}]
+            /\ localPacks' = [localPacks EXCEPT ![s] = (@ \ D) \cup {f}]
             /\ fold' = [fold EXCEPT ![s] = NoFold]
             /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
             /\ sensorMoved' = [sensorMoved EXCEPT ![s] = TRUE]

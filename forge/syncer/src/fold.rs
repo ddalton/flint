@@ -370,6 +370,11 @@ pub struct FoldResult {
     pub siblings: Vec<String>,
     pub inputs: Vec<String>,
     pub is_base: bool,
+    /// A base rebuild only: the ref tips `pack-objects --all` was given,
+    /// read just before it ran. Its contract is everything reachable
+    /// from THESE, and what became reachable afterwards is what its
+    /// commit must not throw away.
+    pub tips_at_pack: Vec<String>,
     pub cell_etag: Option<String>,
     /// `None` on success; the task's error otherwise — the loop logs
     /// it and clears the fold.
@@ -486,11 +491,12 @@ pub fn spawn(
         )
         .await;
         let msg = match result {
-            Ok((pack, siblings)) => FoldResult {
+            Ok((pack, siblings, tips_at_pack)) => FoldResult {
                 pack,
                 siblings,
                 inputs: t_inputs,
                 is_base,
+                tips_at_pack,
                 cell_etag,
                 error: None,
             },
@@ -499,6 +505,7 @@ pub fn spawn(
                 siblings: vec![],
                 inputs: t_inputs,
                 is_base,
+                tips_at_pack: vec![],
                 cell_etag,
                 error: Some(e.to_string()),
             },
@@ -531,9 +538,15 @@ async fn run_task(
     threads: usize,
     progress: Arc<AtomicU64>,
     stage: Arc<std::sync::Mutex<&'static str>>,
-) -> ForgeResult<(String, Vec<String>)> {
+) -> ForgeResult<(String, Vec<String>, Vec<String>)> {
     let out_base = scratch.join("pack");
+    let mut tips_at_pack = Vec::new();
     let pack = if is_base {
+        // The refs the rebuild is about to read, read first. A ref that
+        // moves between this reading and pack-objects' own only makes
+        // the rebuild hold MORE than this list reaches, which errs the
+        // safe way at the commit.
+        tips_at_pack = git.refs().await?.into_values().collect();
         // The reflog would keep what the rebuild drops, and the proof
         // walks reflogs on a warm restart (design §7.7).
         git.reflog_expire_all().await?;
@@ -570,7 +583,12 @@ async fn run_task(
     let out_idx = scratch.join(pack.trim_end_matches(".pack").to_string() + ".idx");
     if out_idx.exists() {
         let missing = if is_base {
-            let reachable = git.reachable_object_ids().await?;
+            // Against the refs it was GIVEN, not the refs now: a push
+            // landing during a long rebuild is reachable now and in no
+            // base, and a check against "now" would refuse every base
+            // rebuild under load. What arrived since is the commit's
+            // business (below), not the pack's failure.
+            let reachable = git.reachable_from(&tips_at_pack).await?;
             git.pack_holds_all(&out_idx, &reachable).await?
         } else {
             let superseded: Vec<std::path::PathBuf> = inputs
@@ -604,7 +622,7 @@ async fn run_task(
     if let Ok(mut s) = stage.lock() {
         *s = "uploaded";
     }
-    Ok((pack, siblings))
+    Ok((pack, siblings, tips_at_pack))
 }
 
 /// The stall detector: a fold whose counter has not moved for
@@ -651,6 +669,15 @@ pub async fn commit(sc: &mut Syncer, res: FoldResult, now: u64) -> ForgeResult<O
     let scratch = scratch_dir(sc);
     if let Some(e) = res.error {
         let _ = std::fs::remove_dir_all(&scratch);
+        // A coverage refusal is not an ordinary task failure: it means a
+        // roll-up would have stranded objects and was thrown away. That
+        // is the system working, but it is also compaction that did NOT
+        // happen, so it is counted where an operator can see it rather
+        // than left in a log line.
+        if e.contains("does not hold object") {
+            sc.folds_refused += 1;
+            sc.last_fold_refusal = Some(e.clone());
+        }
         return Err(ForgeError::State(format!("fold failed: {e}")));
     }
     sc.check_fence()?;
@@ -676,7 +703,8 @@ pub async fn commit(sc: &mut Syncer, res: FoldResult, now: u64) -> ForgeResult<O
     // own). Then nothing is renamed or uploaded, and F is never among
     // the packs unnamed or unlinked.
     let reproduced = cell.snap.packs.iter().any(|p| p == &f);
-    let superseded: Vec<String> = res.inputs.iter().filter(|p| **p != f).cloned().collect();
+    let mut superseded: Vec<String> = res.inputs.iter().filter(|p| **p != f).cloned().collect();
+
     if reproduced {
         let _ = std::fs::remove_dir_all(&scratch);
         if superseded.is_empty() {
@@ -719,6 +747,67 @@ pub async fn commit(sc: &mut Syncer, res: FoldResult, now: u64) -> ForgeResult<O
             std::fs::rename(scratch.join(file), dir.join(file))?;
         }
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    // THE ROOT CAUSE OF RUNCD (2026-09-07), and the rule that closes it.
+    //
+    // A batch names every pack in the DIRECTORY (batch.rs step 5), and
+    // git migrates a push's pack out of quarantine as soon as
+    // pre-receive passes — before the proc-receive hook that queues it
+    // behind the running batch. So a queued push's pack is named one
+    // batch BEFORE its ref moves. A base rebuild planned in that gap
+    // takes the pack as an input, its `--all` cannot reach a commit no
+    // ref points at yet, and unnaming the input strands it. On runcd:
+    // batch 77 named 29 packs and moved 19 refs, batch 78 moved 13 and
+    // named 2, and the 13 stranded commits were batch 78's 13 refs.
+    //
+    // The rule is about CONTENT, not timing. An input may be unnamed
+    // only if everything it holds that the roll-up does NOT hold is
+    // already unreachable — a rewind's leavings, which collecting is
+    // what a base rebuild is for. Anything else may still be a push
+    // about to land: `ForgeSync.tla`'s counterexample to an earlier,
+    // timing-based version of this fix had the push landing AFTER the
+    // commit, where no "has anything arrived yet?" test can see it.
+    //
+    // Costs one index read per input pack, on the loop, once per fold.
+    let out_idx = sc.git.pack_path(&(stem_of(&f) + ".idx"));
+    if !superseded.is_empty() && out_idx.exists() {
+        let held: std::collections::HashSet<String> =
+            sc.git.pack_object_ids(&out_idx).await?.into_iter().collect();
+        let mut kept = Vec::new();
+        let mut still = Vec::with_capacity(superseded.len());
+        for p in superseded.drain(..) {
+            let idx = sc.git.pack_path(&(p.trim_end_matches(".pack").to_string() + ".idx"));
+            let mut safe = true;
+            if idx.exists() {
+                for oid in sc.git.pack_object_ids(&idx).await? {
+                    if held.contains(&oid) {
+                        continue;
+                    }
+                    // Not in the roll-up. There is no test at this
+                    // moment that can tell a rewind's leavings from a
+                    // push that is queued and about to land — the
+                    // model's counterexample has the push landing AFTER
+                    // this commit — so the pack stays named. A later
+                    // fold, planned when the push has landed, takes it
+                    // with its objects in view.
+                    safe = false;
+                    break;
+                }
+            }
+            if safe {
+                still.push(p);
+            } else {
+                kept.push(p);
+            }
+        }
+        superseded = still;
+        if !kept.is_empty() {
+            eprintln!(
+                "flint-forge: the fold keeps {} input pack(s) named: they hold objects the roll-up does not",
+                kept.len()
+            );
+        }
     }
 
     // Step 4: ONE CAS, from the snapshot's list and never the directory.

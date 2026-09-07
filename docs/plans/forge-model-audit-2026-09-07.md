@@ -17,7 +17,21 @@ Nothing was lost. Every missing object was still in the bucket, in the
 pack that originally carried it. The batch log named the culprit
 exactly: `packs_added` at seq 77, `packs_removed` at seq 127.
 
-**Fixed:** `fold::run_task` now checks coverage from the pack indexes
+**Root cause (found afterwards, in the code).** A batch names every
+pack in the directory, not the packs of the pushes it judged; and git
+migrates a push's pack out of quarantine as soon as `pre-receive`
+passes, before the blocking `proc-receive` hook runs. So under
+concurrent pushers a queued push's pack is named one batch before its
+ref moves. The batch log shows it: batch 77 named 29 packs and moved 19
+refs; batch 78 moved 13 refs and named 2. A base rebuild planned in
+that gap took those packs as inputs; its `--all` could not reach commits
+no ref pointed at yet; its commit unnamed their only packs. The
+thirteen missing commits are the thirteen refs of batch 78.
+
+**Fixed, twice over:** a base rebuild's commit now keeps named any input
+pack holding an object that became reachable after the rebuild read its
+refs (the task records those tips; the commit asks git what arrived
+since). And `fold::run_task` checks coverage from the pack indexes
 before it uploads, with the two kinds contracted differently — a tier
 fold must hold every object its inputs hold; a base rebuild may drop
 objects but never a reachable one. `ForgeSync.tla` may now produce a

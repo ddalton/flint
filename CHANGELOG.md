@@ -28,6 +28,28 @@ covered by the stability guarantee.
   original pack — but the repository was unservable until a human
   intervened, and the model audit below shows how close this came to
   being unrecoverable.
+- **Root cause, found in the code and confirmed by the batch log's own
+  arithmetic.** A batch names every pack in the DIRECTORY (`next.packs
+  = local_packs`, step 5), and git migrates a push's pack out of
+  quarantine as soon as `pre-receive` passes — before `proc-receive`
+  runs. So a push queued behind the running batch has its pack named
+  one batch BEFORE its ref moves. On runcd, batch 77 named 29 packs and
+  moved 19 refs; batch 78 moved 13 refs and named 2. A base rebuild
+  planned in that gap took those packs as inputs, its `pack-objects
+  --all` could not see commits no ref had reached, and its commit at
+  seq 127 unnamed the only packs that held them. The thirteen missing
+  commits were exactly the thirteen refs batch 78 moved.
+- **A base rebuild's commit no longer supersedes an input pack that
+  holds anything which became reachable after the rebuild read its
+  refs.** The task records the tips it packed from; the commit computes
+  what arrived since (`rev-list <now> ^<then>`, small) and keeps every
+  input pack holding any of it named for a later fold. A rewind's
+  dropped tip is reachable neither then nor now, so it is still
+  collected. Reproduced deterministically in the crate — a commit
+  packed into the directory with no ref, another pusher's batch naming
+  the directory, the base planned between, the queued push landing
+  before the commit — and mutation-checked: with the old behaviour the
+  test fails exactly as the cluster did.
 - **`fold::run_task` now establishes coverage instead of assuming it**,
   before it uploads, so a bad roll-up costs no bytes. The two kinds are
   contracted differently and conflating them rejects legitimate work: a

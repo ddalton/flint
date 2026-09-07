@@ -3771,6 +3771,75 @@ async fn the_derived_tick_packs_the_refs_away_without_moving_any() {
     assert_eq!(rig.sc.git.ref_oid("refs/heads/agent/b0").await.unwrap(), Some(c));
 }
 
+/// runcd's defect, reproduced deterministically (2026-09-07). A batch
+/// names every pack in the DIRECTORY, and git migrates a push's pack out
+/// of quarantine as soon as pre-receive passes, so a push queued behind
+/// the running batch has its pack named one batch BEFORE its ref moves.
+/// A base rebuild planned in that gap takes the pack as an input; its
+/// `--all` cannot see the commit the ref has not reached; and its commit
+/// then unnames the only pack that holds it. The next cold restore
+/// cannot prove the repository.
+///
+/// The rig can stage that exactly: a commit packed into the directory
+/// with no ref (the queued push, past pre-receive), another pusher's
+/// batch naming the directory, the base planned and packed in between,
+/// and the queued push's own batch landing before the base commits.
+#[tokio::test]
+async fn a_pack_named_before_its_ref_moves_survives_the_base_rebuild_that_could_not_see_it() {
+    let mut rig = Rig::new().await;
+    rig.sc.cfg.fold_factor = 2;
+    rig.sc.cfg.base_min_bytes = 0;
+    rig.sc.cfg.base_rebuild_min_secs = 0;
+    rig.sc.cfg.fold_min_bytes = 0;
+    rig.start().await;
+    let _c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+
+    // The queued push: past pre-receive, so its pack is in the
+    // directory; its proc-receive hook is still waiting, so no ref.
+    let queued = rig.stage_commit(None, &[("q.txt", "q\n")], "queued").await;
+    // Another pusher's batch lands first and names the DIRECTORY.
+    let _c1 = rig.push_commit("refs/heads/other", None, "c1").await;
+    let packs = rig.sc.cell().unwrap().snap.packs.clone();
+    let dir = rig.sc.cfg.repo.join("objects/pack");
+    let mut qpack = None;
+    for p in &packs {
+        let idx = dir.join(p.trim_end_matches(".pack").to_string() + ".idx");
+        if rig.sc.git.pack_object_ids(&idx).await.unwrap().contains(&queued) {
+            qpack = Some(p.clone());
+        }
+    }
+    let qpack = qpack.expect("the batch named the queued push's pack, one batch before its ref");
+    assert!(rig.sc.git.ref_oid("refs/heads/queued").await.unwrap().is_none(), "and the ref has not moved");
+
+    // The base rebuild, planned and packed in exactly that gap.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let now = super::now_unix();
+    let plan = fold::maybe_spawn(&mut rig.sc, tx, now).unwrap().expect("a base is planned");
+    assert!(matches!(plan, fold::Plan::Base { .. }), "{plan:?}");
+    assert!(plan.inputs().contains(&qpack), "the queued pack is one of the base's inputs");
+    let res = rx.recv().await.expect("the task reports");
+    assert!(res.error.is_none(), "the rebuild itself is fine: {:?}", res.error);
+
+    // The queued push's own batch now runs: its ref moves onto a commit
+    // whose ONLY pack is a base input the rebuild could not see.
+    let reports = rig
+        .run(vec![push(7, vec![RefUpdate { name: "refs/heads/queued".into(), old_oid: zero(), new_oid: queued.clone() }])])
+        .await;
+    assert!(is_ok(&reports[0].results[0]), "{:?}", reports[0].results[0]);
+
+    // The commit must NOT unname that pack.
+    let named = fold::commit(&mut rig.sc, res, now).await.expect("the base commits");
+    assert!(named.is_some());
+    let after = rig.sc.cell().unwrap().snap.packs.clone();
+    assert!(after.contains(&qpack), "the pack holding a commit that became reachable during the rebuild stays named: {after:?}");
+
+    // The proof that matters: a cold restore from the bucket is whole.
+    let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
+    restore::restore(&mut cold.sc).await.expect("a cold restore proves the repository");
+    assert_eq!(cold.sc.git.ref_oid("refs/heads/queued").await.unwrap(), Some(queued));
+    cold.sc.git.fsck_connectivity().await.expect("whole");
+}
+
 /// A batch beside a fold (design §3.5). The fold's upload is slow and a
 /// push lands while it is in flight: the batch runs on the loop with
 /// the fold's task beside it, never sees the scratch — its snapshot

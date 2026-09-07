@@ -583,6 +583,55 @@ impl Git {
             .collect())
     }
 
+    /// Every object reachable from `tips`, by object id — what a base
+    /// rebuild that read exactly those refs is contracted to have
+    /// packed. Empty tips reach nothing.
+    pub async fn reachable_from(&self, tips: &[String]) -> ForgeResult<Vec<String>> {
+        if tips.is_empty() {
+            return Ok(Vec::new());
+        }
+        let stdin = tips.join("\n") + "\n";
+        let out = self.run(&["rev-list", "--objects", "--stdin"], Some(stdin.as_bytes())).await?;
+        if !out.ok() {
+            return Err(ForgeError::Git(format!("rev-list --objects --stdin: {}", out.stderr.trim())));
+        }
+        Ok(out
+            .stdout
+            .lines()
+            .filter_map(|l| l.split_whitespace().next().map(|s| s.to_string()))
+            .filter(|s| s.len() >= 40)
+            .collect())
+    }
+
+    /// Objects reachable from `now` and not from `then`: what ARRIVED
+    /// between two readings of the refs. Small when the readings are
+    /// close, which is the only way it is used.
+    pub async fn objects_since(&self, now: &[String], then: &[String]) -> ForgeResult<Vec<String>> {
+        if now.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stdin = String::new();
+        for t in now {
+            stdin.push_str(t);
+            stdin.push('\n');
+        }
+        for t in then {
+            stdin.push('^');
+            stdin.push_str(t);
+            stdin.push('\n');
+        }
+        let out = self.run(&["rev-list", "--objects", "--stdin"], Some(stdin.as_bytes())).await?;
+        if !out.ok() {
+            return Err(ForgeError::Git(format!("rev-list --objects --stdin (since): {}", out.stderr.trim())));
+        }
+        Ok(out
+            .stdout
+            .lines()
+            .filter_map(|l| l.split_whitespace().next().map(|s| s.to_string()))
+            .filter(|s| s.len() >= 40)
+            .collect())
+    }
+
     /// Every object in `want` must be named by `out_idx`. Returns the
     /// first that is not, or `None`.
     pub async fn pack_holds_all(
