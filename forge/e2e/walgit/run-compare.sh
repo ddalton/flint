@@ -375,7 +375,7 @@ leg_P2() {
       if [ -z "$f1" ] || [ -z "$f0" ]; then
         inconc "$arm: /status did not report foldsCommitted — the bytes above are unscored"
       elif [ "$f1" -le "$f0" ]; then
-        inconc "$arm: NO fold committed during P2 (foldsCommitted $f0 -> $f1) — at ${P2_N}x${P2_SECS}s this never reached the ladder. foldsim's fleet shape is 10,000 pushes; raise P2_SECS/P2_N until folds land."
+        inconc "$arm: NO fold committed during P2 (foldsCommitted $f0 -> $f1) — nothing folded, so the bytes above score nothing. foldsim expects ~14 CAP-FORCED folds at this sizing; if none landed the leg is shorter than the 64-pack cap needs."
       else
         note "$arm: folds committed during P2: $((f1 - f0)) (foldsCommitted $f0 -> $f1)"
       fi

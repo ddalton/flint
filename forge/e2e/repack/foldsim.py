@@ -233,6 +233,15 @@ if __name__ == '__main__':
             'P9-800 on 6 GiB, 1/s':        (uniform(6*GiB, 800, 8*MiB, 1.0)),
             'P9-2000 on 6 GiB, 1/s':       (uniform(6*GiB, 2000, 8*MiB, 1.0)),
             'fleet 10000x32KiB on 1 GiB, 10/s': (uniform(GiB, 10000, 32*1024, 0.1)),
+            # M6 sizing. The walgit rig's P2 leg is 32 pushers x 60 s at
+            # ~15.5 pushes/s = ~930 tiny pushes; the question the drill
+            # turns on is whether the SHIPPED rule (A) folds at all at
+            # that size, or whether the 256 MiB floor swallows the leg
+            # and the bytes score the floor rather than the ladder.
+            'M6 P2-as-is 930x1KiB on 1 GiB, 15/s':   (uniform(GiB, 930, 1024, 0.065)),
+            'M6 P2-10k-x-1KiB on 1 GiB, 15/s':       (uniform(GiB, 10000, 1024, 0.065)),
+            'M6 P2-as-is 930x32KiB on 1 GiB, 15/s':  (uniform(GiB, 930, 32*1024, 0.065)),
+            'M6 P2-fleet 10000x32KiB on 1 GiB, 15/s': (uniform(GiB, 10000, 32*1024, 0.065)),
             'RUN1 0 -> 875x8MiB, 1/s':     (uniform(0, 875, 8*MiB, 1.0)),
             '20x1GiB on 12 GiB, 1/min':    (uniform(12*GiB, 20, GiB, 60.0)),
             '20x1GiB on 0.2 GiB, 1/min':   (uniform(200*MiB, 20, GiB, 60.0)),

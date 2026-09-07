@@ -287,8 +287,35 @@ rule `A: big .5 + floor 256M` (the shipped rule):
 | fleet — 10,000 x 32 KiB on 1 GiB | 7.61x | 5.24x | **1.45x** | 4973 -> 165 | 2.5 GB |
 
 So the tiny-push shape has both the biggest predicted effect (1.45x against
-1.17x) and 15x less traffic (2.5 GB a rep against 38.8 GB). **P2's shape is
-the primary byte leg; P9 is confirmatory.** An earlier draft of this entry
+1.17x) and 15x less traffic (2.5 GB a rep against 38.8 GB).
+
+**But the two legs do not measure the same thing, and simulating the rig's
+ACTUAL sizing is what showed it.** `foldsim`'s fold decision is
+`if total < floor and not forced`, with `forced = n >= cap` — so once the
+tier count reaches the 64-pack cap, a fold happens whatever the floor says.
+Consequences, all checked rather than assumed:
+
+- Fold behaviour at tiny sizes is **independent of push size**: 930 x 1 KiB
+  and 930 x 32 KiB both give rule A exactly 14 folds and 3.08x. It is the
+  push COUNT and the cap that decide, not the bytes.
+- P2's leg at its current sizing therefore **does** fold (~14 times), so the
+  `foldsCommitted` guard will NOT fire there. The commit that added it said
+  it would; that was wrong.
+- Those are **cap-forced folds, not ladder folds**. For the floor to bind at
+  all, packs must average more than `256 MiB / 64 = 4 MiB`. Tiny pushes can
+  never reach it, however many of them there are.
+
+So the legs split the fix in half rather than ranking:
+
+| leg | what it actually measures | predicted | bytes/rep |
+|---|---|---:|---:|
+| P2, 930 tiny pushes | the FLOOR suppressing pointless small folds on a cap-limited workload (465 folds -> 14) | 1.83-2.01x | 0.0-0.2 GB |
+| P9, 8 MiB pushes | the LADDER proper, the only shape where the floor binds | 1.17-1.25x | 38.8 GB |
+
+Both are real halves of `6bc67980` and the drill runs both, labelled for what
+they measure. P2 is the cheap, high-contrast leg; P9 is the only one that can
+speak about the ladder — and F5 needs P9 too, since neither P2 sizing produces
+a base rebuild at all (`rebuilds=0` in both). An earlier draft of this entry
 predicted "before >=1.75x, after <=1.20x, ratio of ratios >=1.5x" from a
 remembered 4.03x -> 1.69x, which belongs to the repack rig's `tiers-blob` /
 `tiers-source` arms and not to either wire leg. Numbers now come from the
