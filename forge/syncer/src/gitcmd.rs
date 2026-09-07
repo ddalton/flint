@@ -102,6 +102,18 @@ impl Git {
     /// its scratch tree, so materialising a ref never touches the bare
     /// repository's own index or its HEAD.
     pub async fn run_env(&self, args: &[&str], env: &[(&str, &str)]) -> ForgeResult<Output> {
+        self.run_env_stdin(args, env, None).await
+    }
+
+    /// `run_env` with a body on stdin. The incremental proof needs
+    /// both at once: the tips go in on stdin, and the object directory
+    /// it is permitted to read comes in on the environment.
+    pub async fn run_env_stdin(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+        stdin: Option<&[u8]>,
+    ) -> ForgeResult<Output> {
         let mut cmd = Command::new("git");
         cmd.arg("-C")
             .arg(&self.repo)
@@ -109,13 +121,21 @@ impl Git {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("HOME", "/nonexistent")
-            .stdin(Stdio::null())
+            .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         for (k, v) in env {
             cmd.env(k, v);
         }
-        let out = cmd.output().await?;
+        let mut child = cmd.spawn().map_err(|e| {
+            ForgeError::Git(format!("cannot exec git {}: {e}", args.first().unwrap_or(&"")))
+        })?;
+        if let Some(bytes) = stdin {
+            let mut sink = child.stdin.take().expect("piped");
+            sink.write_all(bytes).await?;
+            sink.shutdown().await?;
+        }
+        let out = child.wait_with_output().await?;
         Ok(Output {
             status: out.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -497,14 +517,49 @@ impl Git {
         Ok(())
     }
 
-    /// The restore's proof that the packs the bucket handed back
-    /// actually contain what the snapshot's refs name. `--no-reflogs`:
-    /// what it proves is the snapshot's refs, which have no reflog, and
-    /// a warm restart's reflog may name what a base rebuild dropped.
-    pub async fn fsck_connectivity(&self) -> ForgeResult<()> {
+    /// The proof that the packs **the snapshot names** contain what the
+    /// snapshot's refs name — that is, that this repository can be
+    /// restored from the bucket.
+    ///
+    /// Scoped deliberately, and this is the whole point of the method:
+    /// the object directory is NOT the bucket. A fold's superseded
+    /// inputs stay on disk for `fold_retain_secs` so a reader mid-clone
+    /// keeps the pack it is streaming, while the ledger sweep is on its
+    /// way to deleting them from the bucket. An unscoped walk therefore
+    /// answers "is the disk coherent" and was being read as "can this
+    /// be restored" — a repository could pass, serve for the whole
+    /// retention window, and become unrestorable the moment the sweep
+    /// ran. runcd (2026-09-07) came within one sweep of the difference,
+    /// and the audit named it F2.
+    ///
+    /// `--no-reflogs`: what it proves is the snapshot's refs, which
+    /// have no reflog, and a warm restart's reflog may name what a base
+    /// rebuild dropped.
+    pub async fn fsck_connectivity_over(&self, packs: &[String]) -> ForgeResult<()> {
+        let odb = ScopedOdb::build(&self.repo, packs)?;
+        let out = self
+            .run_env(
+                &["fsck", "--connectivity-only", "--no-reflogs", "--no-progress"],
+                &[("GIT_OBJECT_DIRECTORY", odb.path.as_str())],
+            )
+            .await?;
+        self.fsck_verdict(out, Some(packs.len()))
+    }
+
+    /// The same walk over every pack on disk, retained ones included.
+    ///
+    /// This answers a genuinely different question from
+    /// `fsck_connectivity_over` — "is what this process is serving
+    /// coherent", not "is the bucket restorable" — and it is not the
+    /// restore's proof. Kept for the tests that assert the former.
+    pub async fn fsck_connectivity_all(&self) -> ForgeResult<()> {
         let out = self
             .run(&["fsck", "--connectivity-only", "--no-reflogs", "--no-progress"], None)
             .await?;
+        self.fsck_verdict(out, None)
+    }
+
+    fn fsck_verdict(&self, out: Output, scoped: Option<usize>) -> ForgeResult<()> {
         if out.ok() {
             return Ok(());
         }
@@ -537,8 +592,16 @@ impl Git {
             }
             why.push_str(notes);
         }
+        let over = match scoped {
+            // Naming the scope in the message matters: an operator who
+            // reads "fails fsck" while `git fsck` in a shell on the same
+            // pod passes will chase the wrong thing, and the difference
+            // between the two is exactly the fault being reported.
+            Some(n) => format!("over the {n} pack(s) the snapshot names"),
+            None => "over every pack on disk".to_string(),
+        };
         Err(ForgeError::Refused(format!(
-            "restored repository fails fsck --connectivity-only: {why}"
+            "restored repository fails fsck --connectivity-only {over}: {why}"
         )))
     }
 
@@ -683,10 +746,21 @@ impl Git {
     /// `--quiet` suppresses the listing, not the traversal: git still
     /// opens every commit, tree and blob it walks, which is the whole
     /// of the proof.
-    pub async fn prove_reachable(&self, tips: &[String], known: &[String]) -> ForgeResult<()> {
+    /// Scoped to the packs the snapshot names, for the same reason
+    /// `fsck_connectivity_over` is: the boundary this walk stops at is
+    /// the previous proof's tips, and that proof is a statement about
+    /// the bucket. Walking the disk instead would let a retained pack —
+    /// one the sweep is about to delete — carry the delta.
+    pub async fn prove_reachable_over(
+        &self,
+        packs: &[String],
+        tips: &[String],
+        known: &[String],
+    ) -> ForgeResult<()> {
         if tips.is_empty() {
             return Ok(());
         }
+        let odb = ScopedOdb::build(&self.repo, packs)?;
         let mut stdin = String::new();
         for t in tips {
             stdin.push_str(t);
@@ -698,14 +772,20 @@ impl Git {
             stdin.push('\n');
         }
         let out = self
-            .run(&["rev-list", "--objects", "--quiet", "--stdin"], Some(stdin.as_bytes()))
+            .run_env_stdin(
+                &["rev-list", "--objects", "--quiet", "--stdin"],
+                &[("GIT_OBJECT_DIRECTORY", odb.path.as_str())],
+                Some(stdin.as_bytes()),
+            )
             .await?;
         if out.ok() {
             Ok(())
         } else {
             Err(ForgeError::Refused(format!(
-                "the {} tip(s) this restore added are not connected in the packs it holds: {}",
+                "the {} tip(s) this restore added are not connected in the {} pack(s) the \
+                 snapshot names: {}",
                 tips.len(),
+                packs.len(),
                 out.stderr.trim()
             )))
         }
@@ -882,5 +962,67 @@ fn pack_name_of(stdout: &str) -> Option<String> {
         None
     } else {
         Some(format!("pack-{hash}.pack"))
+    }
+}
+
+/// A scratch object directory holding hardlinks to exactly the packs a
+/// proof is entitled to read, for the duration of that proof.
+///
+/// git reads objects from the repository's object directory, and that
+/// directory is deliberately not the bucket: `fold::commit` leaves a
+/// roll-up's superseded inputs on disk for `fold_retain_secs` so a
+/// reader mid-clone keeps the pack it is streaming, and the ledger
+/// sweep deletes them from the bucket on its own schedule. A proof
+/// taken over the directory is true of the disk and says nothing about
+/// what a restart could fetch. Pointing `GIT_OBJECT_DIRECTORY` at a
+/// directory holding only the named packs makes the two questions the
+/// same one again — refs still come from the real repository, since
+/// only objects are scoped.
+///
+/// Hardlinks, so one costs no bytes and a concurrent `unlink_retained`
+/// cannot pull a file out from under a running walk.
+struct ScopedOdb {
+    dir: PathBuf,
+    path: String,
+}
+
+impl ScopedOdb {
+    fn build(repo: &Path, packs: &[String]) -> ForgeResult<Self> {
+        // Unique per proof: the serving loop's checkpoint and a warm
+        // pass can be walking at the same time, and a shared directory
+        // would have one proof's cleanup empty the other's odb.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Inside the bare repository, so the hardlinks land on the same
+        // filesystem as objects/pack, but NOT under objects/ — git
+        // reports unknown files there as garbage.
+        let dir = repo.join(format!("forge-proof-{}-{n}", std::process::id()));
+        let me = ScopedOdb {
+            path: dir.to_string_lossy().into_owned(),
+            dir,
+        };
+        std::fs::create_dir_all(me.dir.join("pack"))?;
+        let src = repo.join("objects/pack");
+        for p in packs {
+            let stem = p.trim_end_matches(".pack");
+            for ext in [".pack", ".idx"] {
+                let file = format!("{stem}{ext}");
+                std::fs::hard_link(src.join(&file), me.dir.join("pack").join(&file)).map_err(
+                    |e| {
+                        ForgeError::Refused(format!(
+                            "the snapshot names {file}, which this repository does not hold: {e}"
+                        ))
+                    },
+                )?;
+            }
+        }
+        Ok(me)
+    }
+}
+
+impl Drop for ScopedOdb {
+    fn drop(&mut self) {
+        // Hardlinks only; removing them frees nothing but the entries.
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }

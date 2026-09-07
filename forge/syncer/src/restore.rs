@@ -261,12 +261,15 @@ pub async fn restore(sc: &mut Syncer) -> ForgeResult<RestoreReport> {
         Err(e) => return Err(e.into()),
     }
 
-    // The proof. `fsck --connectivity-only` over everything is the
-    // cold-start cost; when this process (or the warm pass before the
-    // claim) already proved a pack set that is still whole on disk,
-    // only the tips that moved since are left to walk (`follow.rs`).
-    let local_packs = sc.git.local_packs()?;
-    let proof = follow::prove(sc, &cell.snap.refs, &local_packs).await?;
+    // The proof, over the packs the snapshot names and no others. The
+    // retained packs reconciled above are still on disk, deliberately,
+    // and an fsck that walked them would prove the directory rather
+    // than the bucket — passing for a repository that cannot be
+    // restored once the ledger sweep runs (audit F2). A cold start pays
+    // the full walk; when this process (or the warm pass before the
+    // claim) already proved a pack set the snapshot still names, only
+    // the tips that moved since are left to walk (`follow.rs`).
+    let proof = follow::prove(sc, &cell.snap.refs, &cell.snap.packs).await?;
     report.proof = Some(proof);
     report.seq = cell.snap.seq;
     report.packs_named = cell.snap.packs.len();

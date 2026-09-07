@@ -283,7 +283,7 @@ async fn a_cold_restore_reproduces_the_refs_and_passes_fsck() {
     let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
     restore::restore(&mut cold.sc).await.expect("cold restore");
     assert_eq!(cold.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(c2));
-    cold.sc.git.fsck_connectivity().await.expect("a restored repository must be whole");
+    cold.sc.git.fsck_connectivity_all().await.expect("a restored repository must be whole");
 }
 
 /// A snapshot naming a pack the bucket does not hold is refused, not
@@ -497,7 +497,7 @@ async fn a_refs_for_push_merges_and_the_merge_survives_a_cold_restore() {
     let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
     restore::restore(&mut cold.sc).await.expect("cold restore");
     assert_eq!(cold.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(merged));
-    cold.sc.git.fsck_connectivity().await.expect("the merge must be in the bucket");
+    cold.sc.git.fsck_connectivity_all().await.expect("the merge must be in the bucket");
 }
 
 #[tokio::test]
@@ -1000,7 +1000,7 @@ async fn the_repack_publishes_the_new_pack_and_the_sweep_takes_the_old_ones() {
     let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
     restore::restore(&mut cold.sc).await.expect("cold restore after a repack");
     assert_eq!(cold.sc.git.ref_oid("refs/heads/main").await.unwrap(), parent);
-    cold.sc.git.fsck_connectivity().await.expect("the repacked repository must be whole");
+    cold.sc.git.fsck_connectivity_all().await.expect("the repacked repository must be whole");
 }
 
 // ── the dumb protocol's derived files ────────────────────────────────
@@ -3214,7 +3214,7 @@ async fn a_force_push_leaves_the_previous_state_recoverable_from_the_bucket() {
         let out = git.run(&["update-ref", "--stdin"], Some(script.as_bytes())).await.unwrap();
         assert!(out.ok(), "the point's refs install: {}", out.stderr);
         assert_eq!(git.ref_oid("refs/heads/main").await.unwrap(), Some(c1.clone()), "the pre-force tip is back");
-        git.fsck_connectivity().await.expect("and the recovered repository is whole");
+        git.fsck_connectivity_all().await.expect("and the recovered repository is whole");
     }
 }
 
@@ -3360,7 +3360,7 @@ async fn a_fold_publishes_the_rolled_pack_and_the_sweep_takes_its_inputs() {
     let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
     restore::restore(&mut cold.sc).await.expect("cold restore after a fold");
     assert_eq!(cold.sc.git.ref_oid("refs/heads/main").await.unwrap(), parent);
-    cold.sc.git.fsck_connectivity().await.expect("the folded repository is whole");
+    cold.sc.git.fsck_connectivity_all().await.expect("the folded repository is whole");
 }
 
 /// The commit's CAS names `(snapshot.packs \ S) ∪ {F}` and never the
@@ -3426,7 +3426,7 @@ async fn a_rebuild_that_reproduces_the_bases_name_never_unlinks_it() {
     assert_eq!(rig.sc.cell().unwrap().snap.seq, seq, "no CAS was spent");
     assert!(rig.sc.git.pack_path(&base).exists(), "the base stays on disk");
     assert!(!rig.sc.retained.iter().any(|r| r.name == base), "and is not retained for unlinking");
-    rig.sc.git.fsck_connectivity().await.expect("whole");
+    rig.sc.git.fsck_connectivity_all().await.expect("whole");
 }
 
 /// A base rebuild whose pack is the one already named — the reachable
@@ -3529,7 +3529,7 @@ async fn a_base_rebuild_after_a_rewind_survives_a_warm_restart() {
     }
     let plain = rig.sc.git.run(&["fsck", "--connectivity-only", "--no-progress"], None).await.unwrap();
     assert!(!plain.ok(), "control: the plain proof walks the reflog and refuses ({})", plain.stderr.trim());
-    rig.sc.git.fsck_connectivity().await.expect("the proof with --no-reflogs passes on the same state");
+    rig.sc.git.fsck_connectivity_all().await.expect("the proof with --no-reflogs passes on the same state");
     // Put the state back.
     for file in super::gitcmd::siblings_in(&dir, &f) {
         std::fs::remove_file(dir.join(&file)).unwrap();
@@ -3717,7 +3717,7 @@ async fn a_refusal_names_the_missing_commit_and_not_just_the_unborn_head_notice(
     }
     assert!(stranded, "the rig must put c0 and c1 in different packs for this to test anything");
 
-    let err = rig.sc.git.fsck_connectivity().await.expect_err("a stranded parent fails the proof");
+    let err = rig.sc.git.fsck_connectivity_all().await.expect_err("a stranded parent fails the proof");
     let msg = format!("{err}");
     assert!(
         msg.contains(&c0),
@@ -3842,7 +3842,7 @@ async fn a_pack_named_before_its_ref_moves_survives_the_base_rebuild_that_could_
     let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
     restore::restore(&mut cold.sc).await.expect("a cold restore proves the repository");
     assert_eq!(cold.sc.git.ref_oid("refs/heads/queued").await.unwrap(), Some(queued));
-    cold.sc.git.fsck_connectivity().await.expect("whole");
+    cold.sc.git.fsck_connectivity_all().await.expect("whole");
 }
 
 /// A batch beside a fold (design §3.5). The fold's upload is slow and a
@@ -3922,7 +3922,7 @@ async fn a_batch_beside_a_fold_names_its_own_pack_and_the_fold_commits_on_the_ba
     let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
     restore::restore(&mut cold.sc).await.expect("cold restore");
     assert_eq!(cold.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(c2));
-    cold.sc.git.fsck_connectivity().await.expect("whole");
+    cold.sc.git.fsck_connectivity_all().await.expect("whole");
 }
 
 /// The fold's commit renews the lease first, so a deposed holder cannot
@@ -4507,18 +4507,22 @@ async fn a_second_restore_on_the_same_disk_proves_only_what_moved() {
     assert_eq!(cold.proof, Some(super::follow::Proof::Full), "{cold:?}");
 }
 
-/// What the incremental proof actually rests on: the FILES, not the
-/// snapshot's pack list.
+/// What the incremental proof rests on: the snapshot's PACK LIST, not
+/// the files on disk.
 ///
-/// A fold rewrites the pack list, and the first draft of this test
-/// expected that to cost a full proof. It does not, and the code was
-/// right: the fold RETAINS its inputs on disk for readers, so every
-/// object the last proof walked is still exactly where it was walked.
-/// The proof lapses when those files go — which is what the second half
-/// asserts, and which is the only event that can make the cheap arm
-/// unsound.
+/// This test used to assert the opposite, and its comment defended it:
+/// a fold rewrites the pack list, the first draft expected that to cost
+/// a full proof, "it does not, and the code was right — the fold
+/// RETAINS its inputs on disk for readers, so every object the last
+/// proof walked is still exactly where it was walked". Every clause of
+/// that is true and the conclusion is wrong. A proof is only worth
+/// taking as a statement about the BUCKET; the retained files are on
+/// their way out of it, so resting on them left the roll-up — the one
+/// object nothing had verified — inside a `Proof::Nothing`. The first
+/// draft was right, and this test is why the defect survived the audit
+/// that went looking for it (F2).
 #[tokio::test]
-async fn the_proof_lapses_when_the_files_it_walked_are_unlinked_not_when_the_pack_list_moves() {
+async fn a_fold_costs_a_full_proof_because_what_is_proved_is_the_bucket() {
     let mut rig = Rig::new().await;
     rig.start().await;
     rig.tiers_only();
@@ -4533,21 +4537,93 @@ async fn the_proof_lapses_when_the_files_it_walked_are_unlinked_not_when_the_pac
     let held = restore::restore(&mut rig.sc).await.expect("restore");
     assert_eq!(
         held.proof,
-        Some(super::follow::Proof::Nothing),
-        "the inputs are retained, so nothing walked has moved: {held:?}"
+        Some(super::follow::Proof::Full),
+        "the fold unnamed the packs that carried the last proof, so it is spent — \
+         retention keeping the files on disk is not the question: {held:?}"
+    );
+    // The retained inputs really are still there: without this the leg
+    // above could be passing because the files went, which is the OLD
+    // rule, and the test would once again assert nothing.
+    let on_disk = rig.sc.git.local_packs().expect("packs");
+    assert!(
+        !rig.sc.retained.is_empty()
+            && rig.sc.retained.iter().all(|r| on_disk.contains(&r.name)),
+        "the fold's inputs must still be on disk for this leg to be about naming: {:?} vs {on_disk:?}",
+        rig.sc.retained
     );
 
-    // Retention over: the packs that carried that proof are unlinked,
-    // and the restart after it has to walk the repository again.
+    // The control: the proof taken AFTER the fold covers the snapshot
+    // the fold left, so the next restart is cheap again. Without this
+    // the rule above would be indistinguishable from "always full".
+    rig.sc.cell = None;
+    let next = restore::restore(&mut rig.sc).await.expect("restore");
+    assert_eq!(
+        next.proof,
+        Some(super::follow::Proof::Nothing),
+        "nothing moved since the post-fold proof: {next:?}"
+    );
+
+    // And retention ending changes nothing either way — the files were
+    // never what the proof rested on.
     let n = fold::unlink_retained(&mut rig.sc, super::now_unix() + 86_400).expect("unlink");
     assert!(n > 0, "the fold's inputs must actually be dropped for this leg to mean anything");
     rig.sc.cell = None;
     let after = restore::restore(&mut rig.sc).await.expect("restore");
+    assert_eq!(after.proof, Some(super::follow::Proof::Nothing), "{after:?}");
+}
+
+/// F2, the audit's open defect: a proof must refuse a snapshot that
+/// names less than its refs need, even when the missing objects are
+/// sitting on disk in a pack the snapshot no longer names.
+///
+/// This is the shape a bad fold leaves behind, and the shape the whole
+/// retention window has: the roll-up is named, the inputs are not, and
+/// the inputs are still on disk for 900 s. `fsck` over the object
+/// directory passes for that entire window; the ledger sweep then
+/// deletes the inputs from the bucket and the next restart cannot
+/// restore. runcd was one sweep away from it. The pack list is the
+/// bucket's set, so proving over it is what makes the answer mean what
+/// the caller reads it as.
+#[tokio::test]
+async fn a_proof_refuses_what_the_snapshot_does_not_name_though_the_objects_are_on_disk() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c1 = rig.push_commit("refs/heads/main", None, "one").await;
+    let before: std::collections::BTreeSet<String> =
+        rig.sc.git.local_packs().expect("packs").into_iter().collect();
+    let c2 = rig.push_commit("refs/heads/main", Some(&c1), "two").await;
+    let named = rig.sc.git.local_packs().expect("packs");
+    let tip_pack: Vec<String> = named.iter().filter(|p| !before.contains(*p)).cloned().collect();
+    assert_eq!(tip_pack.len(), 1, "the second push must land exactly one pack: {named:?}");
+    let refs = rig.sc.cell().expect("cell").snap.refs.clone();
+    assert_eq!(refs.get("refs/heads/main").map(String::as_str), Some(c2.as_str()));
+
+    // The positive control: over everything the snapshot names, the
+    // same walk passes. Without it the refusal below could be a walk
+    // that fails for any reason at all.
+    super::follow::forget(&rig.sc);
     assert_eq!(
-        after.proof,
-        Some(super::follow::Proof::Full),
-        "a proof whose files are not all here is no proof: {after:?}"
+        super::follow::prove(&rig.sc, &refs, &named).await.expect("the named set holds the tip"),
+        super::follow::Proof::Full
     );
+
+    // F2: the tip's pack leaves the snapshot and stays on disk —
+    // exactly what a fold's retention does to its inputs.
+    let short: Vec<String> = named.iter().filter(|p| **p != tip_pack[0]).cloned().collect();
+    super::follow::forget(&rig.sc);
+    let err = super::follow::prove(&rig.sc, &refs, &short)
+        .await
+        .expect_err("a snapshot that cannot reach its own tip must be refused");
+    assert!(matches!(err, ForgeError::Refused(_)), "{err:?}");
+
+    // The file is still right there. That is the point: the proof
+    // refused on what the bucket holds, not on what the disk holds, and
+    // an unscoped `fsck` passes on this very state.
+    assert!(
+        rig.sc.git.local_packs().expect("packs").contains(&tip_pack[0]),
+        "the leg is vacuous unless the objects are still on disk"
+    );
+    rig.sc.git.fsck_connectivity_all().await.expect("the disk is coherent — and that is not the question");
 }
 
 /// The incremental proof is a proof: an object that is not there fails
@@ -4558,12 +4634,19 @@ async fn the_incremental_proof_refuses_a_tip_it_cannot_walk() {
     rig.start().await;
     let c1 = rig.push_commit("refs/heads/main", None, "one").await;
 
+    let packs = rig.sc.git.local_packs().expect("packs");
+
     // The positive control: the tip this repository holds walks.
-    rig.sc.git.prove_reachable(std::slice::from_ref(&c1), &[]).await.expect("a present tip walks");
+    rig.sc
+        .git
+        .prove_reachable_over(&packs, std::slice::from_ref(&c1), &[])
+        .await
+        .expect("a present tip walks");
 
     // A tip nothing in the repository reaches.
     let absent = "1".repeat(40);
-    let err = rig.sc.git.prove_reachable(&[absent], &[c1]).await.expect_err("must refuse");
+    let err =
+        rig.sc.git.prove_reachable_over(&packs, &[absent], &[c1]).await.expect_err("must refuse");
     assert!(matches!(err, ForgeError::Refused(_)), "{err:?}");
 }
 

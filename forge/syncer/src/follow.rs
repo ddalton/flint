@@ -39,7 +39,11 @@ use super::{log, packio, restore, snapshot::Snapshot, ForgeError, ForgeResult, S
 
 /// Bumped when the shape changes; an older or newer file is discarded
 /// rather than parsed, and the full proof runs.
-pub const FOLLOW_VERSION: u32 = 1;
+///
+/// 2: `packs` became the snapshot's named set rather than the pack
+/// files on disk. The shape is unchanged, so a version-1 file would
+/// parse — and would be read as a claim it never made.
+pub const FOLLOW_VERSION: u32 = 2;
 
 /// What this repository has been brought to, and what was proved about
 /// it.
@@ -51,7 +55,10 @@ pub struct FollowState {
     /// entitled to CAS, and carrying a token it may not use is how a
     /// cache becomes a second writer.
     pub snap: Snapshot,
-    /// The pack files on disk when the proof was made.
+    /// The pack files the snapshot NAMED when the proof was made — the
+    /// bucket's set, never the directory's. Recording the directory's
+    /// set recorded a fold's retained inputs, and the unverified roll-up
+    /// beside them, as proved (audit F2).
     pub packs: Vec<String>,
     /// The tips walked by that proof.
     pub tips: Vec<String>,
@@ -100,7 +107,7 @@ pub enum Proof {
     /// proof walked. `new` is how many tips that was.
     Delta { new: usize },
     /// Nothing moved since the last proof and every pack that carried
-    /// it is still on disk.
+    /// it is still named by the snapshot.
     Nothing,
 }
 
@@ -110,23 +117,28 @@ impl Proof {
     }
 }
 
-/// Prove that every object `want` names is present and connected,
-/// skipping what a previous proof already walked.
+/// Prove that every object `want` names is present and connected in
+/// the packs `named` — the set the snapshot names, which is to say the
+/// bucket — skipping what a previous proof already walked.
 ///
-/// The incremental arm holds only when EVERY pack the last proof was
-/// made over is still on disk. A fold or a base rebuild replaces packs,
-/// and the objects the old proof walked are then in files this process
-/// never verified — so a fold costs one full proof, exactly as a cold
-/// start does, and says so.
+/// The incremental arm holds only when every pack the last proof was
+/// made over is STILL NAMED. Not "still on disk": that was the bug
+/// (audit F2). A fold's superseded inputs stay on disk for the whole
+/// retention window, so "still on disk" went on holding across exactly
+/// the window in which the roll-up had never been verified, and this
+/// returned `Proof::Nothing` for a repository nothing had checked. The
+/// doc comment claimed a fold costs one full proof; retention is why it
+/// did not. Naming is the property that tracks the bucket, so a fold or
+/// a base rebuild now does cost one full proof, as it always said.
 pub async fn prove(
     sc: &Syncer,
     want: &BTreeMap<String, String>,
-    local_packs: &[String],
+    named: &[String],
 ) -> ForgeResult<Proof> {
-    let here: BTreeSet<&String> = local_packs.iter().collect();
-    let prior = load(sc).filter(|st| st.packs.iter().all(|p| here.contains(p)));
+    let bucket: BTreeSet<&String> = named.iter().collect();
+    let prior = load(sc).filter(|st| st.packs.iter().all(|p| bucket.contains(p)));
     let Some(prior) = prior else {
-        sc.git.fsck_connectivity().await?;
+        sc.git.fsck_connectivity_over(named).await?;
         return Ok(Proof::Full);
     };
     let known: BTreeSet<&String> = prior.tips.iter().collect();
@@ -135,7 +147,7 @@ pub async fn prove(
     if new.is_empty() {
         return Ok(Proof::Nothing);
     }
-    sc.git.prove_reachable(&new, &prior.tips).await?;
+    sc.git.prove_reachable_over(named, &new, &prior.tips).await?;
     Ok(Proof::Delta { new: new.len() })
 }
 
@@ -150,14 +162,13 @@ pub async fn prove(
 /// keeps a 50 KB local write off the acknowledgement path.
 pub fn checkpoint(sc: &Syncer, confirmed_unix: u64) -> ForgeResult<()> {
     let Ok(cell) = sc.cell() else { return Ok(()) };
-    let packs = sc.git.local_packs()?;
     let tips: Vec<String> = cell.snap.refs.values().cloned().collect::<BTreeSet<_>>().into_iter().collect();
     save(
         sc,
         &FollowState {
             version: FOLLOW_VERSION,
+            packs: cell.snap.packs.clone(),
             snap: cell.snap.clone(),
-            packs,
             tips,
             confirmed_unix,
         },
@@ -412,8 +423,7 @@ pub async fn warm_reach(sc: &mut Syncer, reach: Reach) -> ForgeResult<WarmReport
             )));
         }
     }
-    let local_packs = sc.git.local_packs()?;
-    let proof = prove(sc, &target.refs, &local_packs).await?;
+    let proof = prove(sc, &target.refs, &target.packs).await?;
     report.proof = Some(proof);
 
     let tips: Vec<String> =
@@ -422,8 +432,8 @@ pub async fn warm_reach(sc: &mut Syncer, reach: Reach) -> ForgeResult<WarmReport
         sc,
         &FollowState {
             version: FOLLOW_VERSION,
+            packs: target.packs.clone(),
             snap: target,
-            packs: local_packs,
             tips,
             confirmed_unix: confirmed,
         },

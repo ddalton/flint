@@ -48,9 +48,44 @@ the abstraction, rather than the code, was the bug.
 
 The audit below looked for the same shape everywhere else.
 
-## OPEN — F2: the restore's proof is weaker than it claims
+## F2: the restore's proof was weaker than it claimed — CODE FIXED, MODEL OPEN
 
-**This is worse than the fold defect, and it is not fixed.**
+**Fixed in the code 2026-09-07.** A proof is now taken over the packs
+the snapshot NAMES, never the object directory: `fsck` and the
+incremental `rev-list` run against a scratch object directory holding
+hardlinks to the named packs alone (`ScopedOdb`, `gitcmd.rs`), and the
+incremental arm lapses when a pack the last proof used stops being
+named rather than when its file goes. A fold therefore does cost one
+full proof, exactly as `follow::prove`'s doc comment had always said it
+did. `FOLLOW_VERSION` went to 2: the field's meaning changed, and a
+version-1 file would have parsed as a claim it never made.
+
+**A test had pinned the defect in place**, which is why the audit found
+it by reading and not by running. `the_proof_lapses_when_the_files_it_
+walked_are_unlinked_not_when_the_pack_list_moves` asserted the wrong
+behaviour and its comment defended it: the first draft had expected a
+fold to cost a full proof, the draft was corrected to match the code,
+and the comment recorded the correction as a finding. Every clause in
+it was true and the conclusion was wrong. It is now
+`a_fold_costs_a_full_proof_because_what_is_proved_is_the_bucket`, with
+the retained files asserted to be still on disk so the leg cannot pass
+for the old reason.
+
+**Still open: the model half.** `ForgeSync.tla` has no retention at
+all — `FoldCommit` drops the superseded inputs from `localPacks` in the
+same step that unnames them, so the state in which a proof could be
+taken over a retained pack does not exist in the model. Closing that
+needs `FoldCommit` to keep the inputs on disk, an `UnlinkRetained`
+action, a `provedOver` variable and a `Checkpoint` action, and two
+invariants: `Inv_ProofIsOfTheBucket` (violated by a `ProveFromDisk`
+mutation alone — the discipline) and `Inv_ProvedIsRestorable` (violated
+only by `ProveFromDisk` AND `FoldNoCoverageCheck` together — which is
+the useful part: it says in the model what is true in the code, that
+the coverage check is the single thing standing between this defect and
+data loss). Sized: ~31 actions' `UNCHANGED` lists, 18 configs,
+`localPacks` semantics in 47 places. Not a footnote.
+
+### What it was
 
 The model's `Restore` asserts the proof covers only the packs the
 snapshot names. The code proves over the raw object directory, and a
@@ -75,12 +110,10 @@ data would have been gone.
 proof. `follow::checkpoint` then records the retained packs, and the
 unverified roll-up, as proved.
 
-The coverage check now stops a bad fold from ever landing, which breaks
-this chain at step 1. But the proof still does not prove what it says it
-proves, and no invariant in the model would catch a bucket that cannot
-be restored while somebody is happily serving from disk. A fix needs
-`retained` and `proved` as model variables and a new
-`Inv_BrokenBucketIsRefused`.
+The coverage check stops a bad fold from ever landing, which breaks this
+chain at step 1 — so F2 was latent, not live, and that is the only
+reason runcd was a near miss rather than a loss. The proof now proves
+what it says it proves, so the chain is broken at step 2 as well.
 
 ## OPEN — F3: a third CAS site the model does not know about
 
