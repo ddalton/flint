@@ -250,6 +250,66 @@ Baselines, all from this repository: P2 15.5 pushes/s and 1.22 MB/push (`runce-f
 - *Predict:* time from node loss to first correct `ls-remote` on the successor is dominated by 60 s of quiet polls and is **55-75 s** today; letting a warm follower chase the log tail through the quiet window moves the *post-claim* term from ~222 ms to **<150 ms** and leaves the 60 s untouched.
 - *Falsifier:* the post-claim term does not improve, because the follower was already caught up — in which case the whole failover story is already finished and the only remaining lever is `heartbeat_secs`, and you should say so and stop.
 
+**M6 — fold amplification on the wire.** The measurement `6bc67980` ends by
+declaring owed ("The wire measurement is owed"), and the one the tiers' byte
+work has never had: every figure behind 4.03x → 1.69x comes from `foldsim.py`
+replaying a bucket listing, not from a cluster. One cluster, one repository
+state, **arms interleaved with P9 and P2 at the same ordinal position in
+both** — `runce`'s byte regression was leg order, not a rule, and that log had
+to be corrected in place.
+
+*Arms differ only in the fold planner.* `after` = main; `before` = main with
+`6bc67980`'s planner surgically reverted (the 256 MiB ladder floor, "a pack
+that alone meets the base rule waits for the base", and the cadence read from
+the store rather than process memory). **Not main-vs-parent:** ten unrelated
+commits sit between them, including the proof scope and the `--atomic` fix.
+Where a knob isolates the dimension, prefer it to a second image —
+`FLINT_FORGE_FOLD_MIN_MIB=0` vs `256` is the ladder floor alone, one image, no
+build skew.
+
+- *Legs:* **P0 first and mandatory** — on `runce` P9 passed while measuring
+  nothing precisely because P0 had not run — then P9, then P2.
+- *Measure:* **per-prefix resident bytes from the bucket listing**, per leg
+  window. NOT CloudWatch: it cannot resolve a 34 s leg, and this project has
+  already believed one of its attributions that the bucket then contradicted.
+- *Reps:* three pairs minimum, order alternating within each pair, **ranges
+  quoted, never means** — two pairs once showed a clean 11% that a third
+  dissolved.
+- *Predict (P9):* `before` reproduces amplification ≥1.75x (the `runce`
+  figure); `after` is ≤1.20x; the ratio of ratios is ≥1.5x.
+- *Predict (P2):* rate holds within ±1.0 push/s of 15.5/s and bytes/push falls
+  from 1.22 MB — but modestly. P2's 127x is **push-pack dominated, not fold
+  dominated**: `6bc67980` found 884 push packs carrying 2.6 MB of objects. A
+  small P2 byte win is the expected result, not a failure. What P2 tests here
+  is that the floor did not buy bytes with rate.
+- *Falsifier:* the arms land within 0.25x of each other on P9 ⇒ the `foldsim`
+  ladder model does not transfer to the wire. Stop and re-diagnose; do not
+  start Design B, which does not touch amplification in either direction.
+- *Falsifier 2:* P2 rate falls >2 pushes/s in `after` ⇒ the floor is deferring
+  folds onto the push path and is wrong at this size.
+- *Vacuity guard, MANDATORY:* the `before` arm must reproduce ≥1.75x. If
+  **both** arms come in low, the rig never drove the ladder — exactly how the
+  local `foldsim` run failed ("at this size the 2 MiB pushes sit under the
+  floor, so the rig measures the floor and the cap, not the ladder").
+
+  **The rig's defaults cannot run this drill, and that is checked, not
+  assumed:** `run-compare.sh:50` is `P9_N=48`, `P9_MB=8` — 48 packs of 8 MiB
+  against a 256 MiB floor, so `after` folds *nothing* and the leg scores the
+  floor's absence of work as a byte win. The same defaults put P9 at 34-35 s
+  (`runce-fold-fix-2026-09-07.log`), under CloudWatch's resolution. P9 must be
+  resized so the ladder climbs several rungs above the floor — of order 3-4
+  GiB of pushes, not 384 MiB — and `FLINT_FORGE_BASE_REBUILD_MIN_SECS` must be
+  set to a few hundred seconds **identically in both arms** so a base rebuild
+  falls inside the drill at all (its default is 3600 s, and the hour's rebuild
+  is where `6bc67980` measured 4.4x → 1.95x). The knob is not the dimension
+  under test; where the base's age is *read from* is.
+
+  Assert the fold count per arm from the batch log before scoring a single
+  byte: a P9 leg with zero folds in both arms has measured nothing, however
+  green its ratio looks.
+- *Provenance:* `foldsRefused` is per-process — read it before the destructive
+  legs. A versioned bucket survives teardown's `s3 rm`.
+
 **One thing not to measure:** anything about multi-writer throughput. The ceiling is arithmetic — two in-region round trips per commit, ~12-25 commits/s, independent of N — and one writer with batching already sustains 15.5 pushes/s. A drill would only confirm what the capacity model at `flint-forge-design.md:258-260` already says.
 
 ---

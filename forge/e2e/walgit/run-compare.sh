@@ -84,6 +84,13 @@ arm_repo12() { case "$1" in forge) echo "$FREPO12";; walgit) echo "$WREPO12";; e
 pod_ready()  { K -n "$NS" get pod "$1" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null; }
 restarts()   { K -n "$NS" get pod "$1" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0; }
 forge_phase() { local p; p=$(forge_pod); [ -n "$p" ] && K -n "$NS" exec "$p" -c syncer -- wget -qO- "http://127.0.0.1:$STATUS_PORT/status" 2>/dev/null | jq -r '.phase // "?"' || echo "?"; }
+# Folds whose CAS landed. The oracle for "did this leg exercise the
+# ladder at all?" — a byte figure taken over a window in which nothing
+# folded has measured the ladder's ABSENCE, and reads as a win. The
+# tiers' floor is 256 MiB and P9 defaults to 48 packs of 8 MiB, so the
+# default sizing folds NOTHING; this is what makes that visible instead
+# of scoring it.
+forge_folds() { local p; p=$(forge_pod); [ -n "$p" ] && K -n "$NS" exec "$p" -c syncer -- wget -qO- "http://127.0.0.1:$STATUS_PORT/status" 2>/dev/null | jq -r '.foldsCommitted // 0' || echo 0; }
 upload_packs() { # arm — processes named upload-pack in the serving container
   case "$1" in
     forge)  K -n "$NS" exec "$(forge_pod)" -c git-http -- sh -c "pgrep -f 'upload-pack --stateless-rp[c]' | wc -l" 2>/dev/null;;
@@ -291,11 +298,11 @@ leg_P4() {
 # ── P9 ─────────────────────────────────────────────────────────────
 leg_P9() {
   leg P9 "repack amplification: ${P9_N} pushes of ${P9_MB} MiB to one branch; bytes uploaded per arm from CloudWatch (cw-summary.sh)"
-  local arm t0 t1 s nbad
+  local arm t0 t1 s nbad f0 f1
   for arm in $ARMS; do
-    t0=$(now)
+    t0=$(now); f0=$([ "$arm" = forge ] && forge_folds || echo -)
     inpod "$(armenv "$arm") /work/seqpush.sh $(arm_repo "$arm") agent/p9-$RUN $P9_N $P9_MB $arm" >/dev/null 2>&1
-    t1=$(now); window P9 "$arm" "$t0" "$t1"
+    t1=$(now); f1=$([ "$arm" = forge ] && forge_folds || echo -); window P9 "$arm" "$t0" "$t1"
     K -n "$NS" cp "$AGENT:/work/seq-$arm.log" "$WORK/p9-$arm.log" -c agent >/dev/null 2>&1
     s=$(awk '$3==0 {print $2/1000}' "$WORK/p9-$arm.log" 2>/dev/null | stats)
     nbad=$(awk '$3!=0' "$WORK/p9-$arm.log" 2>/dev/null | wc -l | tr -d ' ')
@@ -310,6 +317,18 @@ leg_P9() {
     elif [ "$nbad" != 0 ]; then bad "$arm: $nbad of ${P9_N} pushes failed"
     elif [ "$ngood" != "${P9_N}" ]; then bad "$arm: only $ngood of ${P9_N} pushes are in the log"
     else ok "$arm: ${P9_N} pushes told ok in $((t1-t0)) s; per push median/min/max s = $s; window $t0..$t1"; fi
+    # The vacuity guard, AFTER the push assertions and before any byte is
+    # read: a green amplification ratio over a window with zero folds is
+    # the floor doing nothing, not the ladder doing it cheaply.
+    if [ "$arm" = forge ] && [ "$f0" != - ]; then
+      if [ -z "$f1" ] || [ -z "$f0" ]; then
+        inconc "$arm: /status did not report foldsCommitted — the fold count is unknown, so the bytes below are unscored"
+      elif [ "$f1" -le "$f0" ]; then
+        inconc "$arm: NO fold committed during P9 (foldsCommitted $f0 -> $f1). At ${P9_N}x${P9_MB} MiB every pack is under the 256 MiB tier floor, so this leg measured the floor, not the ladder. Raise P9_MB/P9_N until the ladder climbs."
+      else
+        note "$arm: folds committed during P9: $((f1 - f0)) (foldsCommitted $f0 -> $f1)"
+      fi
+    fi
     note "$arm: objects under its prefix now: $(aws s3 ls "s3://$BUCKET/$([ "$arm" = forge ] && echo "$PREFIX" || echo "$WPREFIX")/" --recursive --summarize 2>/dev/null | grep -E 'Total (Objects|Size)' | tr '\n' ' ')"
   done
 }
