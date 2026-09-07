@@ -90,6 +90,22 @@ forge_phase() { local p; p=$(forge_pod); [ -n "$p" ] && K -n "$NS" exec "$p" -c 
 # tiers' floor is 256 MiB and P9 defaults to 48 packs of 8 MiB, so the
 # default sizing folds NOTHING; this is what makes that visible instead
 # of scoring it.
+# Bytes UPLOADED under an arm's prefix since the last call, by diffing
+# pack keys against a seen-file — not the resident delta, which the
+# sweeps make an undercount. Mirrors `repack/run-repack.sh:record_new`,
+# which is the method M6 pre-registers; CloudWatch cannot resolve legs
+# this short and has already been contradicted by the bucket once.
+arm_prefix() { [ "$1" = forge ] && echo "$PREFIX" || echo "$WPREFIX"; }
+uploaded_since() { # uploaded_since <arm> <seen-file> -> bytes
+  local seen=$2 total=0 key size
+  touch "$seen"
+  while read -r key size; do
+    [ -n "$key" ] || continue
+    if ! grep -qxF "$key" "$seen"; then echo "$key" >> "$seen"; total=$((total + size)); fi
+  done < <(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$(arm_prefix "$1")/git/objects/pack/" \
+             --query 'Contents[].[Key,Size]' --output text 2>/dev/null)
+  echo "$total"
+}
 forge_folds() { local p; p=$(forge_pod); [ -n "$p" ] && K -n "$NS" exec "$p" -c syncer -- wget -qO- "http://127.0.0.1:$STATUS_PORT/status" 2>/dev/null | jq -r '.foldsCommitted // 0' || echo 0; }
 upload_packs() { # arm — processes named upload-pack in the serving container
   case "$1" in
@@ -336,9 +352,12 @@ leg_P9() {
 # ── P2 ─────────────────────────────────────────────────────────────
 leg_P2() {
   leg P2 "push rate: ${P2_N} pushers for ${P2_SECS} s, tiny commits to distinct branches (requests per push from CloudWatch)"
-  local arm t0 t1 i acks naks rate lat
+  local arm t0 t1 i acks naks rate lat f0 f1 up
   for arm in $ARMS; do
     inpod "rm -f /work/stop /work/rate-$arm-*.log" >/dev/null 2>&1
+    # Prime the seen-file so only THIS leg's uploads are counted.
+    uploaded_since "$arm" "$WORK/seen-p2-$arm" >/dev/null
+    f0=$([ "$arm" = forge ] && forge_folds || echo -)
     t0=$(now)
     inpod "for i in \$(seq 1 $P2_N); do ( $(armenv "$arm") /work/pusher.sh $(arm_repo "$arm") \$i $P2_SECS $arm $RUN ) & done; wait; echo done" >/dev/null 2>&1
     t1=$(now); window P2 "$arm" "$t0" "$t1"
@@ -346,6 +365,21 @@ leg_P2() {
     acks=$(awk '$3==0' "$WORK/p2-$arm.log" | wc -l | tr -d ' '); naks=$(awk '$3!=0' "$WORK/p2-$arm.log" | wc -l | tr -d ' ')
     rate=$(python3 -c "print(f'{$acks/max($P2_SECS,1):.1f}')"); lat=$(awk '$3==0 {print $2/1000}' "$WORK/p2-$arm.log" | stats)
     [ "$acks" -gt 0 ] && ok "$arm: $acks acknowledged, $naks failed in ${P2_SECS} s = ${rate} pushes/s from ${P2_N} pushers; per-push latency median/min/max s = $lat" || bad "$arm: no push acknowledged"
+    # M6: P2 is the PRIMARY byte leg — foldsim puts the fold rules'
+    # effect at 1.45x on this shape against 1.17x on P9 — so the bytes
+    # and the fold count are scored here, not just the rate.
+    up=$(uploaded_since "$arm" "$WORK/seen-p2-$arm")
+    f1=$([ "$arm" = forge ] && forge_folds || echo -)
+    note "$arm: pack bytes uploaded during P2: $up ($(python3 -c "print(f'{$up/1048576:.1f}')") MiB) over $acks pushes = $(python3 -c "print(f'{$up/max($acks,1)/1024:.1f}')") KiB/push"
+    if [ "$arm" = forge ] && [ "$f0" != - ]; then
+      if [ -z "$f1" ] || [ -z "$f0" ]; then
+        inconc "$arm: /status did not report foldsCommitted — the bytes above are unscored"
+      elif [ "$f1" -le "$f0" ]; then
+        inconc "$arm: NO fold committed during P2 (foldsCommitted $f0 -> $f1) — at ${P2_N}x${P2_SECS}s this never reached the ladder. foldsim's fleet shape is 10,000 pushes; raise P2_SECS/P2_N until folds land."
+      else
+        note "$arm: folds committed during P2: $((f1 - f0)) (foldsCommitted $f0 -> $f1)"
+      fi
+    fi
   done
 }
 

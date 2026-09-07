@@ -275,16 +275,37 @@ build skew.
 - *Reps:* three pairs minimum, order alternating within each pair, **ranges
   quoted, never means** — two pairs once showed a clean 11% that a third
   dissolved.
-- *Predict (P9):* `before` reproduces amplification ≥1.75x (the `runce`
-  figure); `after` is ≤1.20x; the ratio of ratios is ≥1.5x.
-- *Predict (P2):* rate holds within ±1.0 push/s of 15.5/s and bytes/push falls
-  from 1.22 MB — but modestly. P2's 127x is **push-pack dominated, not fold
-  dominated**: `6bc67980` found 884 push packs carrying 2.6 MB of objects. A
-  small P2 byte win is the expected result, not a failure. What P2 tests here
-  is that the floor did not buy bytes with rate.
-- *Falsifier:* the arms land within 0.25x of each other on P9 ⇒ the `foldsim`
+**The effect is largest on the TINY-PUSH shape, not on P9** — which inverts
+the obvious framing of this drill and is the reason it is affordable.
+`foldsim.py`'s own scenarios, rule `1: cadence persisted` (before) against
+rule `A: big .5 + floor 256M` (the shipped rule):
+
+| scenario | before | after | before/after | folds | uploaded, before |
+|---|---:|---:|---:|---:|---:|
+| P9-800 — 800 x 8 MiB on 6 GiB | 5.78x | 4.94x | **1.17x** | 218 -> 22 | 38.8 GB |
+| P9-2000 — 2000 x 8 MiB on 6 GiB | 8.09x | 6.45x | **1.25x** | 654 -> 66 | 135.7 GB |
+| fleet — 10,000 x 32 KiB on 1 GiB | 7.61x | 5.24x | **1.45x** | 4973 -> 165 | 2.5 GB |
+
+So the tiny-push shape has both the biggest predicted effect (1.45x against
+1.17x) and 15x less traffic (2.5 GB a rep against 38.8 GB). **P2's shape is
+the primary byte leg; P9 is confirmatory.** An earlier draft of this entry
+predicted "before >=1.75x, after <=1.20x, ratio of ratios >=1.5x" from a
+remembered 4.03x -> 1.69x, which belongs to the repack rig's `tiers-blob` /
+`tiers-source` arms and not to either wire leg. Numbers now come from the
+simulator that will be falsified, and their provenance is named.
+
+- *Predict (P2, primary):* extended to ~10,000 tiny pushes so it matches the
+  fleet scenario, `before` amplification is 6-9x and `after` is 4.5-6x, with
+  before/after **>=1.30x**. Rate holds within ±1.0 push/s of 15.5/s.
+- *Predict (P9, confirmatory):* before/after **>=1.10x**, in the same
+  direction. P9 alone cannot carry this drill: a predicted 1.17x is close
+  enough to run-to-run spread that two pairs would show it and a third could
+  dissolve it, which has happened on this project before.
+- *Falsifier:* P2's arms land within **0.10x** of each other ⇒ the `foldsim`
   ladder model does not transfer to the wire. Stop and re-diagnose; do not
   start Design B, which does not touch amplification in either direction.
+- *Falsifier 2:* the two legs disagree in DIRECTION ⇒ something shape-specific
+  is dominating and neither number describes the fix.
 - *Falsifier 2:* P2 rate falls >2 pushes/s in `after` ⇒ the floor is deferring
   folds onto the push path and is wrong at this size.
 - *Vacuity guard, MANDATORY:* the `before` arm must reproduce ≥1.75x. If
