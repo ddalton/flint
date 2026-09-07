@@ -1,5 +1,44 @@
 # forge, log-first: making history the truth and the pointer derived
 
+> **CORRECTED 2026-09-07 — read `forge-log-first-verdict-2026-09-07.md` first.**
+> A 14-agent adversarial review refuted four of this note's six load-bearing
+> claims as FATAL, and I verified the four most consequential against the source
+> by hand. What this note got wrong, in its own words:
+>
+> * **§2's headline is wrong.** The 127x tiny-push storm is NOT the O(refs)
+>   snapshot rewrite. P2's pushers each push to their OWN branch
+>   (`run-compare.sh:216`, `P2_N=32`), so that repository holds ~32 refs and its
+>   snapshot is 2-3 KB — under 0.3% of the bytes. The 127x is fold
+>   amplification. Log-first does not move it at all.
+> * **§2/§4/§10 are wrong about walgit.** walgit is NOT log-first. It is
+>   snapshot-CAS-first, exactly like forge (`wal.proto:10`: "manifest.pb: tiny,
+>   CAS-rewritten: the linearization point"). What it actually did was move the
+>   REF MAP out of the CAS'd object, so its pointer is ~2-12 KB independent of
+>   ref count. That is the whole byte win, and it does NOT require inverting
+>   authority. git's own `reftable` reached the same design independently.
+> * **§4's "the lease stops being a correctness mechanism" is wrong, and fatal.**
+>   `sweep::abort_orphaned_uploads` (`sweep.rs:43-59`) aborts EVERY pending
+>   multipart upload under the prefix, justified explicitly by single-process
+>   reasoning. Leaseless, one writer's routine sweep deterministically kills
+>   another's in-flight push over 64 MiB. Not a race window — every sweep,
+>   every concurrent large upload.
+> * **§9's "the append path is ~50 lines" is wrong.** `log::put` is
+>   `Unconditional` today, `log::emit` is best-effort AFTER the CAS,
+>   `log::prune` deletes keys (so a stalled writer can commit in the past under
+>   `IfNoneMatchAny`), and S3's contended answer — 409 — is unhandled and
+>   cannot even be produced by the in-tree fake.
+> * **Multi-writer is REFUSED, not deferred.** The ceiling is arithmetic: two
+>   in-region round trips per commit, ~12-25 commits/s regardless of N, against
+>   15.5 pushes/s that one batching writer already sustains. Multi-writer trades
+>   away forge's only super-linear property (batching amortises ~23-30 pushes
+>   per CAS) to buy contention. No production git system does otherwise.
+>
+> What SURVIVED: X19 is real (545,613 snapshot bytes at 8,000 refs); the log
+> tail is already complete at all four CAS sites; and splitting the pointer from
+> the ref map — WITHOUT inverting authority — is worth doing. That is "Design B"
+> in the verdict. The note below is kept as the record of what was proposed.
+
+
 *An investigation, 2026-09-07. Question asked: keep the operator, door, CRD
 and status surface; change forge's own storage discipline to be log-first;
 how hard is multi-writer then? No external pre-1.0 dependency, and local-clone
