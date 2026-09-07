@@ -4270,6 +4270,70 @@ async fn a_follower_catches_up_from_the_log_and_not_from_the_snapshot() {
     );
 }
 
+/// The quiet window (`Reach::TailOnly`). A follower that already has a
+/// position keeps chasing the log through the 60 s before a takeover;
+/// one that has none declines the snapshot and stays where it is.
+///
+/// Both halves matter and they pull against each other. The first is
+/// the point of the change — `server.rs` used to stop warming the
+/// moment a poll came back quiet, so a follower deliberately went cold
+/// over exactly the window that decides its own takeover. The second is
+/// the reason the old guard existed: a COLD follower must not start
+/// pulling a whole repository seconds before it claims.
+///
+/// The oracle for the first is a POISONED snapshot: a pass that
+/// converges cannot have read it. The oracle for the second is a
+/// PERFECTLY READABLE one that the pass must decline anyway — the
+/// interesting direction, because a tail pass that quietly fell back
+/// would look identical to a working one on every other assertion.
+#[tokio::test]
+async fn the_quiet_window_keeps_a_warm_follower_chasing_and_leaves_a_cold_one_alone() {
+    let store = Arc::new(MemoryStore::new());
+    let mut a = Rig::with_store(store.clone(), "a").await;
+    a.start().await;
+    let c1 = a.push_commit("refs/heads/main", None, "one").await;
+
+    // A follower with a position, taken while the token was moving.
+    let mut b = Rig::with_store(store.clone(), "b").await;
+    super::follow::warm(&mut b.sc).await.expect("the first pass takes a position");
+    assert_eq!(b.sc.git.ref_oid("refs/heads/main").await.unwrap().as_deref(), Some(c1.as_str()));
+
+    // Half two first, while the snapshot is still READABLE — declining
+    // a snapshot that could not be read would prove nothing.
+    let mut cold = Rig::with_store(store.clone(), "cold").await;
+    assert!(
+        snapshot::load(store.as_ref(), &a.sc.cfg).await.is_ok(),
+        "the snapshot must be readable, or declining it proves nothing"
+    );
+    let declined = super::follow::warm_tail(&mut cold.sc).await.expect("a tail pass never fails");
+    assert_eq!(declined.files_fetched, 0, "it fetched nothing: {declined:?}");
+    assert_eq!(
+        cold.sc.git.ref_oid("refs/heads/main").await.unwrap(),
+        None,
+        "a cold follower stays cold in the quiet window; the restore after the claim carries it"
+    );
+
+    // Half one. The holder pushes twice more and then dies; its
+    // snapshot is poisoned so that reading it is loud rather than
+    // silent.
+    let c2 = a.push_commit("refs/heads/main", Some(&c1), "two").await;
+    let c3 = a.push_commit("refs/heads/main", Some(&c2), "three").await;
+    store.raw_put(&a.sc.cfg.snapshot_key(), bytes::Bytes::from_static(b"not json"), vec![]);
+    assert!(
+        snapshot::load(store.as_ref(), &a.sc.cfg).await.is_err(),
+        "the poison must actually poison"
+    );
+
+    // The quiet window: the warm follower keeps up, on entries alone.
+    let tail = super::follow::warm_tail(&mut b.sc).await.expect("the tail pass carries it");
+    assert_eq!(tail.entries, Some(2), "two batches, two entries: {tail:?}");
+    assert_eq!(
+        b.sc.git.ref_oid("refs/heads/main").await.unwrap().as_deref(),
+        Some(c3.as_str()),
+        "and it arrives at its own takeover holding the holder's tip"
+    );
+}
+
 /// A hole in the log is not a wrong answer, it is a slow one: the
 /// follower stops at the gap and the timed resync reads the snapshot.
 #[tokio::test]

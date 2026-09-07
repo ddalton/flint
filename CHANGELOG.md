@@ -12,6 +12,30 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Changed — flint forge: a warm standby keeps chasing the log through the quiet window
+
+- **A follower deliberately went cold over the sixty seconds that
+  decide its own takeover.** `server.rs` warmed only while
+  `quiet_polls == 0`, so the moment the holder's token went quiet —
+  `QUIET_POLLS x heartbeat_secs`, 6 x 10 s by default — the standby
+  stopped following and arrived at its claim with stale packs. The
+  guard's stated reason is a COLD follower pulling 40 GiB seconds
+  before it claims, and that reason is sound; it just does not apply to
+  a follower that is one entry behind.
+- **`follow::warm_tail` (`Reach::TailOnly`) is the narrow version:**
+  log entries only, never the snapshot, and under a byte budget
+  (`TAIL_BUDGET_BYTES`, 64 MiB — `packio`'s own line between a push and
+  a lot of bytes), because `warm` is awaited on the claim loop and
+  every byte it fetches is a byte the claim waits for. The first entry
+  is always taken, or a follower sitting behind one large push could
+  never move again. A cold follower — no position, a gap, a version it
+  does not speak, or the resync timer — declines and stays where it is.
+- Measured baseline this targets: warm claim-to-serving 222 ms against
+  861 ms cold, restore 232 ms against 845 ms, 0 files against 430 MiB
+  (`forge/e2e/results/c7-prewarm-2026-09-06.log`). The 60 s of quiet
+  polls is untouched — that is a knob traded against false takeover,
+  not a defect.
+
 ### Fixed — flint forge: a fold that loses objects is refused, and the refusal says why
 
 - **A fold produced a pack that did not hold everything its inputs

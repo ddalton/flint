@@ -201,6 +201,33 @@ impl WarmReport {
 /// reconcile whole.
 const MAX_CHASE: usize = 512;
 
+/// How far a TAIL-ONLY pass will chase. The quiet window before a
+/// takeover is the one time a warm pass must not become the outage it
+/// exists to remove: `warm` is awaited on the claim loop, so every byte
+/// it fetches is a byte the claim waits for. A follower that is one
+/// entry behind should keep up; one that is a whole base rebuild behind
+/// should let the restore after the claim do it.
+///
+/// 64 MiB is `packio`'s whole-PUT ceiling — the size above which a pack
+/// is multipart, which is this codebase's existing line between "a
+/// push" and "a lot of bytes".
+const TAIL_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
+
+/// How much of the bucket a warm pass may reach for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// The log if it can, the whole snapshot if it must. The holder's
+    /// token is still moving, so there is time.
+    Full,
+    /// The log tail only, under a byte budget, and NEVER the snapshot.
+    /// Used once a poll comes back quiet: this process may be seconds
+    /// from claiming a dead server's repository, and a warm pass that
+    /// starts a 40 GiB download then is the outage rebuilt one step
+    /// earlier. Staying a little behind is free — the restore after the
+    /// claim reconciles whatever this leaves.
+    TailOnly,
+}
+
 /// Bring the local repository towards what the bucket holds, without a
 /// lease and without touching the bucket's state.
 ///
@@ -210,6 +237,16 @@ const MAX_CHASE: usize = 512;
 /// on a timer, because a log poll cannot distinguish "nothing happened"
 /// from "the entry was never written".
 pub async fn warm(sc: &mut Syncer) -> ForgeResult<WarmReport> {
+    warm_reach(sc, Reach::Full).await
+}
+
+/// A warm pass for the quiet window: entries only, under a budget,
+/// never the snapshot. See `Reach::TailOnly`.
+pub async fn warm_tail(sc: &mut Syncer) -> ForgeResult<WarmReport> {
+    warm_reach(sc, Reach::TailOnly).await
+}
+
+pub async fn warm_reach(sc: &mut Syncer, reach: Reach) -> ForgeResult<WarmReport> {
     let branch = sc.cfg.default_branch.clone();
     let hooks = sc.cfg.hooks_path.clone();
     sc.git.init_bare(&branch, hooks.as_deref()).await?;
@@ -227,9 +264,22 @@ pub async fn warm(sc: &mut Syncer) -> ForgeResult<WarmReport> {
         (Some(st), false) => {
             let mut snap = st.snap.clone();
             let mut applied = 0usize;
+            let mut budget = TAIL_BUDGET_BYTES;
             while applied < MAX_CHASE {
                 match log::read(sc.store.as_ref(), &sc.cfg, snap.seq + 1).await? {
                     Some(entry) => {
+                        // The tail pass stops BEFORE an entry it cannot
+                        // afford, rather than part-way through fetching
+                        // it: the claim is waiting on this call. The
+                        // first entry is always taken, or a follower
+                        // behind one big push could never move again.
+                        if reach == Reach::TailOnly {
+                            let cost: u64 = entry.packs_added.iter().map(|a| a.bytes).sum();
+                            if applied > 0 && cost > budget {
+                                break;
+                            }
+                            budget = budget.saturating_sub(cost);
+                        }
                         for add in &entry.packs_added {
                             files_from_log.insert(add.pack.clone(), add.files.clone());
                         }
@@ -249,6 +299,10 @@ pub async fn warm(sc: &mut Syncer) -> ForgeResult<WarmReport> {
             report.entries = Some(applied);
             (snap, st.confirmed_unix)
         }
+        // No state, a gap, a version we do not speak, or the resync
+        // timer: the snapshot is the only way on. A tail pass declines
+        // it and stays where it is.
+        _ if reach == Reach::TailOnly => return Ok(report),
         _ => {
             let cell = super::snapshot::load(sc.store.as_ref(), &sc.cfg).await?;
             if cell.etag.is_none() {

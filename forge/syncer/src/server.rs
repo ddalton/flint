@@ -117,13 +117,27 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                 // it WHILE waiting, so a claim costs the pushes missed
                 // rather than the repository.
                 //
-                // Only while the holder's token is still moving. Once a
-                // poll comes back quiet this process may be about to
-                // take over a dead server, and a takeover that first
-                // downloads 40 GiB is the outage this exists to remove,
-                // rebuilt one step earlier.
-                if sc.cfg.prewarm && quiet_polls == 0 {
-                    match follow::warm(&mut sc).await {
+                // While the holder's token is still moving, reach for
+                // whatever it takes — the log if it can, the snapshot if
+                // it must. Once a poll comes back quiet this process may
+                // be about to take over a dead server, and a takeover
+                // that first downloads 40 GiB is the outage this exists
+                // to remove, rebuilt one step earlier.
+                //
+                // But that argument is about a COLD follower. One that
+                // is a single entry behind should keep chasing the tail
+                // through the quiet window, or it deliberately goes cold
+                // over the 60 s that matter most (QUIET_POLLS ×
+                // heartbeat_secs) and arrives at its own takeover with
+                // stale packs. `Reach::TailOnly` is the narrow version:
+                // entries only, under a byte budget, never the snapshot.
+                if sc.cfg.prewarm {
+                    let pass = if quiet_polls == 0 {
+                        follow::warm(&mut sc).await
+                    } else {
+                        follow::warm_tail(&mut sc).await
+                    };
+                    match pass {
                         Ok(r) if r.moved() => {
                             eprintln!("flint-forge: warm: {}", r.line())
                         }
