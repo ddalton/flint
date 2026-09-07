@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::gitcmd::{is_zero, zero_oid, MergeOutcome, RefUpdate};
 use super::policy::{Policy, Verdict};
-use super::{lease, packio, snapshot, ForgeError, ForgeResult, Syncer};
+use super::{lease, packio, snapshot, undo, ForgeError, ForgeResult, Syncer};
 
 /// One push, as `proc-receive` handed it over.
 #[derive(Debug, Clone)]
@@ -272,6 +272,25 @@ pub async fn run_batch(
     }
     next.packs = local_packs;
     carry_pending(sc, &mut next);
+    // X15: before the CAS, and only when this batch would make a state
+    // unreachable (a delete or a non-fast-forward move), keep an
+    // immutable copy of the snapshot it is about to replace. Written
+    // first on purpose — a crash between the two costs one small
+    // object, the other order loses the point exactly when it was
+    // earned. A fast-forward writes nothing.
+    if sc.cfg.undo_window_secs > 0 && undo::is_destructive(&sc.git, &accepted).await? {
+        match undo::write_point(sc.store.as_ref(), &sc.cfg, &cell.snap).await {
+            Ok(key) => eprintln!(
+                "flint-forge: a destructive push: snapshot seq {} kept at {key} for {} s",
+                cell.snap.seq, sc.cfg.undo_window_secs
+            ),
+            // The undo point is a courtesy to a future operator, not a
+            // precondition of the push. Refusing the push because the
+            // copy failed would turn a storage hiccup into a refused
+            // force-push; the failure is loud instead.
+            Err(e) => eprintln!("flint-forge: undo point NOT written for seq {}: {e}", cell.snap.seq),
+        }
+    }
     let writer = sc.holder_id.clone();
     let new_cell =
         match snapshot::cas(sc.store.as_ref(), &sc.cfg, &cell, next, epoch, &writer).await {

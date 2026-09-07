@@ -23,6 +23,8 @@
 //!   FLINT_FORGE_BATCH_MAX        pushes per batch (default 64)
 //!   FLINT_FORGE_REPACK_THRESHOLD packs before a repack (default 24)
 //!   FLINT_FORGE_ORPHAN_GRACE_SECS  sweep grace (default 3600)
+//!   FLINT_FORGE_UNDO_WINDOW_SECS / UNDO_MAX_POINTS  how long a force-pushed state stays recoverable, and how many
+//!                                  points a sweep reads (604800 / 64; 0 = undo off)
 //!   FLINT_FORGE_FANOUT           pack PUTs / ranged GETs in flight (default 4)
 //!   FLINT_FORGE_DEFAULT_BRANCH   HEAD for an empty repository (main)
 //!   FLINT_FORGE_HOOKS_PATH       core.hooksPath (the hooks ship in the
@@ -105,6 +107,19 @@ fn main() {
     if let Some(role) = flint_forge::hook::role_of(&args) {
         std::process::exit(flint_forge::hook::run_hook(role));
     }
+    // A read-only listing of what a force-push left recoverable (X15).
+    // Its own process, no lease and no writes, so an operator can run
+    // it beside the serving one: `kubectl exec … -- flint-forge-syncer
+    // --undo-list [<ref>]`.
+    if args.iter().any(|a| a == "--undo-list") {
+        let want = args.iter().skip_while(|a| *a != "--undo-list").nth(1).cloned();
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+            .block_on(undo_list(want));
+        return;
+    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -143,6 +158,9 @@ async fn serve() {
     cfg.fold_min_bytes = env_u64("FLINT_FORGE_FOLD_MIN_MIB", 256) * 1024 * 1024;
     cfg.fold_max_packs = env_u64("FLINT_FORGE_FOLD_MAX_PACKS", 64).max(2) as usize;
     cfg.orphan_grace_secs = env_u64("FLINT_FORGE_ORPHAN_GRACE_SECS", 3600);
+    // X15: how long a destructive push's predecessor state is kept.
+    cfg.undo_window_secs = env_u64("FLINT_FORGE_UNDO_WINDOW_SECS", 7 * 24 * 3600);
+    cfg.undo_max_points = env_u64("FLINT_FORGE_UNDO_MAX_POINTS", 64).max(1) as usize;
     cfg.fanout = env_u64("FLINT_FORGE_FANOUT", 4).max(1) as usize;
     cfg.project_id = std::env::var("FLINT_FORGE_PROJECT_ID").ok().filter(|p| !p.is_empty());
     cfg.default_branch =
@@ -291,4 +309,81 @@ async fn serve() {
             std::process::exit(1);
         }
     }
+}
+
+/// `--undo-list [<ref>]`: the states a destructive push left behind,
+/// newest first, and for each the refs it held. With a ref name, only
+/// the points whose value for that ref differs from the live snapshot's
+/// — which is the question an operator actually has ("what was this
+/// branch before?"). Reads the bucket and nothing else.
+async fn undo_list(want: Option<String>) {
+    let bucket_name = env_req("FLINT_FORGE_BUCKET");
+    let prefix = env_req("FLINT_FORGE_PREFIX");
+    let repo = PathBuf::from(std::env::var("FLINT_FORGE_REPO").unwrap_or_else(|_| "/tmp".into()));
+    let endpoint = std::env::var("FLINT_FORGE_ENDPOINT").ok();
+    let store = match S3Store::connect(bucket_name, endpoint).await {
+        Ok(s) => Arc::new(s) as Arc<dyn ObjectStore>,
+        Err(e) => {
+            eprintln!("flint-forge-syncer: store connect: {e}");
+            std::process::exit(1);
+        }
+    };
+    let cfg = ForgeConfig::new(&prefix, &repo);
+    let live = match flint_forge::snapshot::load(store.as_ref(), &cfg).await {
+        Ok(c) => c.snap,
+        Err(e) => {
+            eprintln!("flint-forge-syncer: snapshot: {e}");
+            std::process::exit(1);
+        }
+    };
+    let points = match flint_forge::undo::list(store.as_ref(), &cfg, 256).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("flint-forge-syncer: undo list: {e}");
+            std::process::exit(1);
+        }
+    };
+    if points.is_empty() {
+        println!("no undo points: no destructive push has landed inside the window");
+        return;
+    }
+    for p in &points {
+        let when = p.unix.map(|t| t.to_string()).unwrap_or_else(|| "?".into());
+        match &want {
+            Some(name) => {
+                let full = if name.starts_with("refs/") {
+                    name.clone()
+                } else {
+                    format!("refs/heads/{name}")
+                };
+                let then = p.snap.refs.get(&full);
+                let now = live.refs.get(&full);
+                if then == now {
+                    continue;
+                }
+                println!(
+                    "seq {:<6} unix {:<12} {full}: {} (live: {})",
+                    p.seq,
+                    when,
+                    then.map(|s| s.as_str()).unwrap_or("absent"),
+                    now.map(|s| s.as_str()).unwrap_or("absent")
+                );
+            }
+            None => {
+                println!(
+                    "seq {:<6} unix {:<12} {} ref(s), {} pack(s), written by {}",
+                    p.seq,
+                    when,
+                    p.snap.refs.len(),
+                    p.snap.packs.len(),
+                    p.snap.writer
+                );
+            }
+        }
+    }
+    println!(
+        "\nthese states are kept while their point stands; their packs are held with them. \
+         To put one back, set the ref to the oid above through a push from a clone that has it, \
+         or restore this repository from the point's pack list."
+    );
 }

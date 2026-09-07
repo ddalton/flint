@@ -68,6 +68,7 @@ pub mod server;
 pub mod snapshot;
 pub mod status;
 pub mod sweep;
+pub mod undo;
 pub mod uds;
 
 #[cfg(test)]
@@ -183,6 +184,16 @@ pub struct ForgeConfig {
     /// Fold regardless when the tier count reaches this, and let a
     /// closed base-rebuild cadence yield to it.
     pub fold_max_packs: usize,
+    /// How long a destructive push's predecessor state is kept, and
+    /// with it every pack that state named (X15). 0 turns undo points
+    /// off entirely — nothing is written and old copies are ordinary
+    /// orphans. The cost is bucket bytes, and only after a force-push
+    /// or a delete: a fast-forward loses nothing and writes nothing.
+    pub undo_window_secs: u64,
+    /// How many undo points a sweep reads before it stops widening its
+    /// reference set. A bound on the sweep's cost, not on how many
+    /// exist; the oldest beyond it expire on a later pass.
+    pub undo_max_points: usize,
     /// How long an unreferenced pack must have sat before the sweep may
     /// take it. Must outlive the LONGEST upload, not the longest
     /// plausible one (`LeanChunkGCRacyGrace`).
@@ -246,6 +257,8 @@ impl ForgeConfig {
             fold_min_bytes: 256 * 1024 * 1024,
             fold_max_packs: 64,
             orphan_grace_secs: 3600,
+            undo_window_secs: 7 * 24 * 3600,
+            undo_max_points: 64,
             project_id: None,
             fanout: 4,
             default_branch: "main".into(),
@@ -269,6 +282,15 @@ impl ForgeConfig {
     /// THE pointer: the only mutable object the server trusts.
     pub fn snapshot_key(&self) -> String {
         format!("{}/git/snapshot", self.prefix)
+    }
+    /// One immutable copy of the snapshot, keyed by the seq it held.
+    /// Written only before a batch that would make a state unreachable
+    /// (X15, `undo.rs`).
+    pub fn undo_key(&self, seq: u64) -> String {
+        format!("{}/git/undo/{seq}.json", self.prefix)
+    }
+    pub fn undo_prefix(&self) -> String {
+        format!("{}/git/undo/", self.prefix)
     }
     pub fn epoch_key(&self) -> String {
         format!("{}/git/epoch", self.prefix)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run every composition drill (C1-C5) and summarise.
+# Run every composition drill (C1-C6) and summarise.
 #
 #   bash forge/e2e/composition/run-all.sh          # run them
 #   DOWN=1 bash forge/e2e/composition/run-all.sh   # ...then stop MinIO
@@ -13,7 +13,7 @@ cd "$(dirname "$0")/../../.."
 d=forge/e2e/composition
 tp=0; tf=0; tk=0
 for drill in c1-shared-prefix c2-export-contention c3-foreign-write \
-             c4-three-readers c5-cited-delete; do
+             c4-three-readers c5-cited-delete c6-undo; do
   printf '\n\n######## %s ########\n' "$drill"
   out=$(bash "$d/$drill.sh" 2>&1 | grep -v 'Terminated: 15\|Killed: 9')
   printf '%s\n' "$out"

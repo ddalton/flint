@@ -53,6 +53,40 @@ covered by the stability guarantee.
   Forge's whole-run amplification is now below walgit's 2.4×; on the
   8 MiB ladder alone it is 3.74× against walgit's 1.75×.
 
+### Added — flint forge, a force-push is recoverable for a week (X15)
+
+- **Undo points.** Forge kept one live state: the snapshot replaced in
+  place, versioning off, no reflog that survives a restart, and a base
+  rebuild that drops what nothing reaches — so a force-push or a branch
+  delete was unrecoverable at the storage layer once the sweep took the
+  packs. It was the one leg of the walgit comparison forge lost
+  outright. A batch that would make a state unreachable now writes an
+  immutable copy of the snapshot it is about to replace, at
+  `git/undo/<seq>.json`, BEFORE its CAS, and both sweeps — the LIST
+  sweep and the fold's ledger sweep — treat the packs a copy names as
+  referenced. Past `FLINT_FORGE_UNDO_WINDOW_SECS` (7 days) the copy is
+  deleted, and only on the pass after do its packs become ordinary
+  orphans, so a window never opens where the packs are free and the
+  record of why they mattered is gone.
+- **Only a destructive push pays.** A fast-forward leaves the old tip
+  an ancestor of the new one, so nothing becomes unreachable and
+  nothing is written: an ordinary push's fixed cost is unchanged, and
+  the copy is one small object on a force-push or a delete. A branch
+  create writes nothing either. `FLINT_FORGE_UNDO_WINDOW_SECS=0` turns
+  the feature off and makes existing copies ordinary orphans.
+- **Reading them.** `flint-forge-syncer --undo-list [<ref>]` lists the
+  recoverable states newest first, or, given a ref, only the points
+  whose value for it differs from the live snapshot — the question an
+  operator actually has. It is a separate read-only process: no lease,
+  no writes, safe to run beside the serving one. Putting a state back
+  is deliberately not automatic. The comparison rig's P11 leg now
+  checks forge's answer from the bucket alone: the point holds the
+  pre-force tip and every pack it names is still there. Tests cover the
+  recovery end to end (a fresh repository built from the point's packs
+  and refs has the pre-force tip whole and passes fsck), that a
+  fast-forward and a create write nothing, and that a point expires
+  before its packs.
+
 ### Fixed — flint forge, a base rebuild that changes nothing still marks the base
 
 - **A reproduced base rebuild neither marked the base nor stamped the

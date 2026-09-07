@@ -19,7 +19,7 @@ use super::batch::{self, CommandResult, PushRequest};
 use super::policy::{Policy, Verdict};
 use super::gitcmd::RefUpdate;
 use super::status::Phase;
-use super::{fold, lease, restore, snapshot, status, sweep, ForgeConfig, ForgeError, Syncer};
+use super::{fold, lease, restore, snapshot, status, sweep, undo, ForgeConfig, ForgeError, Syncer};
 
 const PREFIX: &str = "tenant/repo";
 
@@ -3010,6 +3010,205 @@ async fn a_holder_that_cannot_renew_withdraws_readiness_after_the_term_and_resum
     assert!(!f.renewal_overdue && f.serving(), "a landed renewal restores readiness");
     assert_eq!(rig.sc.hold.lease().map(|l| l.epoch), Some(epoch), "same epoch after the outage");
     task.abort();
+}
+
+// ── undo points (X15, undo.rs) ───────────────────────────────────────
+
+/// The leg the walgit comparison lost (P11): a branch is force-pushed
+/// back one commit, and the state before it is recoverable FROM THE
+/// BUCKET ALONE — the undo point names the refs and the packs, the
+/// sweep leaves those packs alone while it stands, and a fresh
+/// repository built from them has the pre-force tip whole.
+///
+/// The control is the same run with the window at 0 (undo off), which
+/// is what the code did before: no point is written, and the sweep
+/// takes the pack that held the rewound commit.
+#[tokio::test]
+async fn a_force_push_leaves_the_previous_state_recoverable_from_the_bucket() {
+    for undo_on in [true, false] {
+        let mut rig = Rig::new().await;
+        rig.tiers_only();
+        rig.sc.cfg.orphan_grace_secs = 0;
+        rig.sc.cfg.undo_window_secs = if undo_on { 7 * 24 * 3600 } else { 0 };
+        rig.start().await;
+        let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+        let c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+        let c1_pack = rig
+            .sc
+            .cell()
+            .unwrap()
+            .snap
+            .packs
+            .last()
+            .cloned()
+            .expect("c1's pack");
+
+        // The force-push: main back to c0. c1 is now reachable from
+        // nothing the snapshot names.
+        let pol = Policy { allow_non_fast_forward: vec!["*".into()], ..Policy::default() };
+        let reports = batch::run_batch(
+            &mut rig.sc,
+            vec![push(9, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: c1.clone(), new_oid: c0.clone() }])],
+            &pol,
+        )
+        .await
+        .expect("rewind batch");
+        assert!(is_ok(&reports[0].results[0]), "the rewind is allowed");
+        assert_eq!(rig.sc.cell().unwrap().snap.refs.get("refs/heads/main"), Some(&c0));
+
+        let points = undo::list(rig.sc.store.as_ref(), &rig.sc.cfg, 16).await.unwrap();
+        if !undo_on {
+            assert!(points.is_empty(), "control: undo off writes nothing");
+            // And the sweep is free to take c1's pack: a full repack
+            // would drop the objects and nothing names the pack.
+            let mut next = rig.sc.cell().unwrap().snap.clone();
+            next.packs.retain(|p| p != &c1_pack);
+            let cell = rig.sc.cell().unwrap().clone();
+            let epoch = rig.sc.lease().unwrap().epoch;
+            let c = snapshot::cas(rig.sc.store.as_ref(), &rig.sc.cfg, &cell, next, epoch, "test").await.unwrap();
+            rig.sc.cell = Some(c);
+            sweep::sweep(&mut rig.sc).await.expect("sweep");
+            assert!(
+                rig.store.head(&rig.sc.cfg.pack_key(&c1_pack)).await.is_err(),
+                "control: with no undo point the sweep takes the rewound commit's pack"
+            );
+            continue;
+        }
+
+        // The point names the state before the rewind.
+        assert_eq!(points.len(), 1, "one destructive push, one point");
+        let p = &points[0];
+        assert_eq!(p.snap.refs.get("refs/heads/main"), Some(&c1), "the point holds the pre-force tip");
+        assert!(p.snap.packs.contains(&c1_pack), "and names the pack that holds it");
+
+        // The sweep leaves that pack alone even once the snapshot has
+        // stopped naming it (a fold, a base rebuild, or a repack).
+        let mut next = rig.sc.cell().unwrap().snap.clone();
+        next.packs.retain(|q| q != &c1_pack);
+        let cell = rig.sc.cell().unwrap().clone();
+        let epoch = rig.sc.lease().unwrap().epoch;
+        let c = snapshot::cas(rig.sc.store.as_ref(), &rig.sc.cfg, &cell, next, epoch, "test").await.unwrap();
+        rig.sc.cell = Some(c);
+        sweep::sweep(&mut rig.sc).await.expect("sweep");
+        rig.store
+            .head(&rig.sc.cfg.pack_key(&c1_pack))
+            .await
+            .expect("the undo point's pack survives the sweep");
+
+        // Recovery, from the bucket and nothing else: a fresh
+        // repository, the point's packs fetched, its refs installed.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("recovered.git");
+        let git = super::gitcmd::Git::new(&repo);
+        git.init_bare("main", None).await.unwrap();
+        let pack_dir = repo.join("objects/pack");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        for pack in &p.snap.packs {
+            for ext in [".pack", ".idx"] {
+                let name = format!("{}{ext}", pack.trim_end_matches(".pack"));
+                if let Ok((_, bytes)) = rig.store.get_whole(&rig.sc.cfg.pack_key(&name), None).await {
+                    std::fs::write(pack_dir.join(&name), &bytes).unwrap();
+                }
+            }
+        }
+        let mut script = String::new();
+        for (name, oid) in &p.snap.refs {
+            script.push_str(&format!("update {name} {oid}\n"));
+        }
+        let out = git.run(&["update-ref", "--stdin"], Some(script.as_bytes())).await.unwrap();
+        assert!(out.ok(), "the point's refs install: {}", out.stderr);
+        assert_eq!(git.ref_oid("refs/heads/main").await.unwrap(), Some(c1.clone()), "the pre-force tip is back");
+        git.fsck_connectivity().await.expect("and the recovered repository is whole");
+    }
+}
+
+/// A fast-forward writes no undo point: nothing became unreachable, and
+/// an ordinary push must not pay for the destructive one's insurance.
+/// The control is the force-push in the same test, which does write one.
+#[tokio::test]
+async fn only_a_destructive_push_writes_an_undo_point() {
+    let mut rig = Rig::new().await;
+    rig.tiers_only();
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    let c2 = rig.push_commit("refs/heads/main", Some(&c1), "c2").await;
+    assert!(
+        undo::list(rig.sc.store.as_ref(), &rig.sc.cfg, 16).await.unwrap().is_empty(),
+        "three fast-forwards, no undo point"
+    );
+
+    // A branch CREATE is not destructive either.
+    let side = rig.stage_commit(Some(&c2), &[("f.txt", "side\n")], "side").await;
+    let reports = rig
+        .run(vec![push(6, vec![RefUpdate { name: "refs/heads/side".into(), old_oid: zero(), new_oid: side.clone() }])])
+        .await;
+    assert!(is_ok(&reports[0].results[0]), "the create is allowed: {:?}", reports[0].results[0]);
+    assert!(
+        undo::list(rig.sc.store.as_ref(), &rig.sc.cfg, 16).await.unwrap().is_empty(),
+        "a create loses nothing"
+    );
+
+    // A branch delete is destructive.
+    let pol = Policy { allow_non_fast_forward: vec!["*".into()], ..Policy::default() };
+    let reports = batch::run_batch(
+        &mut rig.sc,
+        vec![push(7, vec![RefUpdate { name: "refs/heads/side".into(), old_oid: side.clone(), new_oid: zero() }])],
+        &pol,
+    )
+    .await
+    .expect("delete batch");
+    assert!(is_ok(&reports[0].results[0]), "the delete is allowed: {:?}", reports[0].results[0]);
+    let points = undo::list(rig.sc.store.as_ref(), &rig.sc.cfg, 16).await.unwrap();
+    assert_eq!(points.len(), 1, "the delete wrote one");
+    assert_eq!(points[0].snap.refs.get("refs/heads/side"), Some(&side), "with the branch it removed");
+}
+
+/// Past its window an undo point is deleted, and only then do its packs
+/// become ordinary orphans. The order matters: while the point stands
+/// its packs are referenced, so a sweep that deleted the copy first
+/// would open a pass where the packs are free and the record of why
+/// they mattered is gone.
+#[tokio::test]
+async fn an_undo_point_expires_before_its_packs_do() {
+    let mut rig = Rig::new().await;
+    rig.tiers_only();
+    rig.sc.cfg.orphan_grace_secs = 0;
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    let c1_pack = rig.sc.cell().unwrap().snap.packs.last().cloned().unwrap();
+    let pol = Policy { allow_non_fast_forward: vec!["*".into()], ..Policy::default() };
+    batch::run_batch(
+        &mut rig.sc,
+        vec![push(9, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: c1, new_oid: c0 }])],
+        &pol,
+    )
+    .await
+    .expect("rewind");
+    let point_key = undo::list(rig.sc.store.as_ref(), &rig.sc.cfg, 16).await.unwrap()[0].key.clone();
+
+    // Stop naming the pack, then sweep inside the window: both survive.
+    let mut next = rig.sc.cell().unwrap().snap.clone();
+    next.packs.retain(|q| q != &c1_pack);
+    let cell = rig.sc.cell().unwrap().clone();
+    let epoch = rig.sc.lease().unwrap().epoch;
+    let c = snapshot::cas(rig.sc.store.as_ref(), &rig.sc.cfg, &cell, next, epoch, "test").await.unwrap();
+    rig.sc.cell = Some(c);
+    sweep::sweep(&mut rig.sc).await.unwrap();
+    rig.store.head(&point_key).await.expect("the point stands");
+    rig.store.head(&rig.sc.cfg.pack_key(&c1_pack)).await.expect("and holds its pack");
+
+    // Age the point past the window: this pass takes the point, and
+    // the pack only on the pass after, when nothing references it.
+    rig.store.backdate_epoch(&point_key, rig.sc.cfg.undo_window_secs + 1);
+    sweep::sweep(&mut rig.sc).await.unwrap();
+    assert!(rig.store.head(&point_key).await.is_err(), "the point expired");
+    sweep::sweep(&mut rig.sc).await.unwrap();
+    assert!(
+        rig.store.head(&rig.sc.cfg.pack_key(&c1_pack)).await.is_err(),
+        "and its pack is an ordinary orphan on the pass after"
+    );
 }
 
 // ── compaction tiers (X18, fold.rs) ──────────────────────────────────

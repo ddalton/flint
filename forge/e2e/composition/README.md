@@ -1,4 +1,4 @@
-# Composition drills (C1–C5)
+# Composition drills (C1–C6)
 
 Every other drill in `forge/e2e/` tests forge against itself. These
 test what happens when **two products meet on one bucket** — forge and
@@ -18,7 +18,7 @@ for lean — so nothing contends, nothing 412s, and nothing is logged.
 ## Running
 
 ```sh
-bash forge/e2e/composition/run-all.sh          # all five
+bash forge/e2e/composition/run-all.sh          # all six
 bash forge/e2e/composition/c3-foreign-write.sh # one
 DOWN=1 bash forge/e2e/composition/run-all.sh   # and stop MinIO after
 ```
@@ -29,6 +29,23 @@ Needs Docker, `git`, and the two binaries:
 cargo build --manifest-path forge/syncer/Cargo.toml --features s3
 cargo build --manifest-path lean/sidecar/Cargo.toml --features s3 --bin flint-sync
 ```
+
+## C6 is not a composition drill
+
+`c6-undo.sh` is the odd one out: it tests forge against itself, on a
+real S3 API rather than the memory double, because what it checks is a
+SWEEP — and a sweep is the one thing a double makes too easy to believe.
+The question is X15's: after a branch is force-pushed back, is the
+previous state still recoverable from the bucket?
+
+Its three anti-vacuity devices are the point of it. A **decoy** orphan
+under the pack prefix, which the sweep must take, so "the protected
+pack survived" cannot be read off a sweep that never ran. A **control
+arm** with the window at 0 — the code before X15 — which must LOSE the
+pack. And a wait for a sweep **past the rebuild**, because the sweep
+that ran at start-up says nothing about packs a later base rebuild
+unnamed. Three shapes of this drill were green before those were added,
+and all three were measuring nothing.
 
 ## Why MinIO and not the memory double
 

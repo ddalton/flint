@@ -352,7 +352,30 @@ leg_P11() {
           || note "walgit: materialize at seq ${seq_before:-?} gave ${got:-nothing} (wanted ${t2:0:8}): $(echo "$mat" | tr '\n' ' ' | cut -c1-200)"
         K -n "$NS" exec "$wp" -- rm -rf "$out" >/dev/null 2>&1;;
       forge)
-        note "forge: no history in the bucket — the snapshot is one CAS'd object; the objects of ${t2:0:8} survive in their pack only until the next repack + sweep (X15)";;
+        # X15: a destructive push keeps an immutable copy of the
+        # snapshot it replaced under <prefix>/git/undo/<seq>.json, and
+        # the sweep treats the packs that copy names as referenced. The
+        # recovery this leg asks about is therefore: does the bucket
+        # still say what the branch was, and are the packs that hold it
+        # still there? Both are read from the bucket alone, with no
+        # server in the picture.
+        local ukey uoid upacks missing=0
+        ukey=$(aws s3 ls "s3://$BUCKET/$PREFIX/$FREPO/git/undo/" 2>/dev/null | awk '{print $4}' | sed 's/\.json$//' | sort -n | tail -1)
+        if [ -z "$ukey" ]; then
+          note "forge: no undo point under $PREFIX/$FREPO/git/undo/ — is FLINT_FORGE_UNDO_WINDOW_SECS 0?"
+        else
+          aws s3 cp "s3://$BUCKET/$PREFIX/$FREPO/git/undo/$ukey.json" "$WORK/undo-$ukey.json" >/dev/null 2>&1
+          uoid=$(python3 -c "import json,sys; d=json.load(open('$WORK/undo-$ukey.json')); print(d['refs'].get('refs/heads/agent/p11-$RUN',''))" 2>/dev/null)
+          upacks=$(python3 -c "import json; print(' '.join(json.load(open('$WORK/undo-$ukey.json'))['packs']))" 2>/dev/null)
+          for pk in $upacks; do
+            aws s3api head-object --bucket "$BUCKET" --key "$PREFIX/$FREPO/git/objects/pack/$pk" >/dev/null 2>&1 || missing=$((missing+1))
+          done
+          if [ "$uoid" = "$t2" ] && [ "$missing" -eq 0 ]; then
+            ok "forge: undo point seq $ukey holds the pre-force tip ${t2:0:8}, and every pack it names is still in the bucket ($(echo "$upacks" | wc -w | tr -d ' ') of them)"
+          else
+            note "forge: undo point seq ${ukey:-none} gave ${uoid:-nothing} (wanted ${t2:0:8}), $missing pack(s) missing"
+          fi
+        fi;;
     esac
   done
 }

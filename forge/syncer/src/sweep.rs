@@ -85,13 +85,21 @@ pub async fn sweep(sc: &mut Syncer) -> ForgeResult<usize> {
         return Ok(0);
     }
 
-    let stems: Vec<String> = fresh
+    let mut stems: Vec<String> = fresh
         .snap
         .packs
         .iter()
         .map(|p| p.trim_end_matches(".pack").to_string())
         .collect();
     let now = super::now_unix();
+    // X15: the reference set is the live snapshot's packs AND the packs
+    // the undo points name. Without this the sweep takes exactly the
+    // packs a force-push made recoverable — the copies would name packs
+    // the bucket no longer holds, which is a recovery that refuses to
+    // start rather than one that returns the wrong history, but a
+    // refusal is still nothing to recover with.
+    let undo_ref = super::undo::referenced(sc.store.as_ref(), &sc.cfg, now).await?;
+    stems.extend(undo_ref.stems.iter().cloned());
     let grace = sc.cfg.orphan_grace_secs;
     let mut deleted = 0usize;
 
@@ -156,6 +164,15 @@ pub async fn sweep(sc: &mut Syncer) -> ForgeResult<usize> {
         }
         sc.store.delete(&obj.key).await?;
         deleted += 1;
+    }
+    // Undo points past their window go last: while one stands, its
+    // packs are referenced above, so deleting the copy first would open
+    // a pass where the packs are free and the record of why they
+    // mattered is gone.
+    for key in &undo_ref.expired {
+        sc.store.delete(key).await?;
+        deleted += 1;
+        eprintln!("flint-forge: undo point {key} expired past the {}s window", sc.cfg.undo_window_secs);
     }
     if deleted > 0 {
         eprintln!("flint-forge: swept {deleted} object(s) past the {grace}s grace");

@@ -1,0 +1,22 @@
+
+== undo — undo window 604800s ==
+  ....  undo: after two pushes the bucket holds 2 pack(s)
+  PASS  undo: the force-push landed — main is 4b495479, and 63581d97 is reachable from nothing live
+  PASS  undo: undo point seq 2 holds the pre-force tip 63581d97
+  ....  undo: --undo-list says: seq 2      unix 1788739343   refs/heads/main: 63581d97dd0611dbb285c56d4c4798dcb26ad913 (live: 4b495479bb3a5d1da930f6323cc31ecb697cb10f)
+  ....  undo: waited 200s for a sweep past the rebuild (1 -> 1 sweep line(s))
+  PASS  undo: the sweep ran and took the decoy orphan
+  ....  undo: the rebuild left 1 pack(s) named; 1 dropped
+  PASS  undo: the sweep dropped 0 pack(s) and left the 1 the undo point names
+  PASS  undo: a fresh repository built from the point's packs has 63581d97 and passes fsck
+
+== noundo — undo window 0s ==
+  ....  noundo: after two pushes the bucket holds 2 pack(s)
+  PASS  noundo: the force-push landed — main is 3d068a33, and 259c40f7 is reachable from nothing live
+  PASS  control: with the window at 0 no undo point is written
+  ....  noundo: waited 60s for a sweep past the rebuild (1 -> 2 sweep line(s))
+  PASS  noundo: the sweep ran and took the decoy orphan
+  ....  noundo: the rebuild left 1 pack(s) named; 1 dropped
+  PASS  control: with no undo point the sweep took 1 dropped pack(s)
+
+c6-undo: 9 passed, 0 failed

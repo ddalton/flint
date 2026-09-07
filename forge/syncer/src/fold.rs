@@ -789,13 +789,17 @@ pub async fn sweep_ledger(sc: &mut Syncer, now: u64, budget: usize) -> ForgeResu
         return Ok(0);
     }
     // The reference set, read once for the pass: a stem the snapshot
-    // names is never deleted (X15's retained copies will widen this).
+    // names — or an undo point names — is never deleted.
     let fresh = snapshot::load(sc.store.as_ref(), &sc.cfg).await?;
     if fresh.etag != sc.cell()?.etag {
         return Ok(0);
     }
-    let named: BTreeSet<String> =
+    let mut named: BTreeSet<String> =
         fresh.snap.packs.iter().map(|p| p.trim_end_matches(".pack").to_string()).collect();
+    // X15: an undo point's packs are referenced too. This sweep deletes
+    // by exact key and never lists, so without the union it would take
+    // the packs a force-push just made recoverable.
+    named.extend(super::undo::referenced(sc.store.as_ref(), &sc.cfg, now).await?.stems);
     let mut requests = 0usize;
     let mut deleted = 0usize;
     let mut remaining = Vec::new();
