@@ -258,14 +258,22 @@ state, **arms interleaved with P9 and P2 at the same ordinal position in
 both** — `runce`'s byte regression was leg order, not a rule, and that log had
 to be corrected in place.
 
-*Arms differ only in the fold planner.* `after` = main; `before` = main with
-`6bc67980`'s planner surgically reverted (the 256 MiB ladder floor, "a pack
-that alone meets the base rule waits for the base", and the cadence read from
-the store rather than process memory). **Not main-vs-parent:** ten unrelated
-commits sit between them, including the proof scope and the `--atomic` fix.
-Where a knob isolates the dimension, prefer it to a second image —
-`FLINT_FORGE_FOLD_MIN_MIB=0` vs `256` is the ladder floor alone, one image, no
-build skew.
+*Arms differ by ONE ENVIRONMENT VARIABLE.* `FLINT_FORGE_FOLD_MIN_MIB=0`
+against the shipped `256`, from a single image. No revert patch, no second
+build, no skew — the strongest isolation available, and it was not obvious:
+the plan was two images until the knob-only arm was simulated.
+
+Simulated, "K" is rule A with the floor at 0 and everything else shipped:
+
+| shape | 1 (full before) | A (shipped) | **K (knob only)** |
+|---|---:|---:|---:|
+| P9 48 x 8 MiB on 1 GiB | 3.56x, 23 folds | 1.67x, 1 fold | **3.56x, 23 folds** |
+| P2 ~930 tiny | 5.65x, 465 folds | 3.08x, 14 folds | **5.65x, 465 folds** |
+
+K reproduces the full before-rule EXACTLY on both shapes. The floor carries
+the entire effect; `6bc67980`'s other two rules — the base-percent exemption
+and the cap's half-fold — contribute nothing at these shapes, which is itself
+worth knowing and is why the one-knob arm is faithful rather than partial.
 
 - *Legs:* **P0 first and mandatory** — on `runce` P9 passed while measuring
   nothing precisely because P0 had not run — then P9, then P2.

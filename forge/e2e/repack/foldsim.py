@@ -212,6 +212,7 @@ CANDS = [
     ("today, cadence lost at P5",        dict(persist=False)),
     ("1: cadence persisted",             dict(persist=True)),
     ("A: big .5 + floor 256M",           dict(persist=True, cap_mode='half', big=0.5, floor=256*MiB)),
+    ("K: A with floor 0 (KNOB-ONLY arm)", dict(persist=True, cap_mode='half', big=0.5, floor=0)),
     ("B: A + waive at 2x",               dict(persist=True, cap_mode='half', big=0.5, floor=256*MiB, waive=True, waive_x=2.0)),
     ("C: A + waive at 3x",               dict(persist=True, cap_mode='half', big=0.5, floor=256*MiB, waive=True, waive_x=3.0)),
     ("D: A + waive at 1x",               dict(persist=True, cap_mode='half', big=0.5, floor=256*MiB, waive=True, waive_x=1.0)),
