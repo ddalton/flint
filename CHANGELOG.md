@@ -12,6 +12,32 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed — flint forge: `git push --atomic` is honoured instead of silently ignored
+
+- **forge accepted the `atomic` capability and did not keep its
+  contract.** `receive.procReceiveRefs = refs/` puts every ref through
+  `proc-receive`, which is exactly the set git EXCLUDES from its own
+  atomic ref transaction — so git does not keep the promise for forge.
+  And `hook.rs` parsed the client capability list for `push-options`
+  only, dropping `atomic` on the floor: `grep -i atomic` across the
+  syncer found nothing but `AtomicU64`. A two-ref `--atomic` push with
+  one bad ref landed the good one, durably, into the snapshot.
+- **The contract is now kept where nothing else can keep it.** One
+  refused command in an atomic push refuses the whole push: the batch
+  rolls back that push's accepted updates, its merge tips and its
+  effective-ref view, and every command reports `ng` naming the one
+  that failed. Per-command refusal remains the default for ordinary
+  pushes, which is a deliberate design choice — the bug was accepting
+  a capability that contradicts it.
+- **The test for this was vacuous and is replaced.** `gitqual` pushed
+  `--atomic` with a non-fast-forward and no `--force`, which the client
+  rejects locally against the advertisement — git aborted with "atomic
+  push failed for ref refs/heads/main" and never contacted the server,
+  so the leg passed against a server with no atomicity whatsoever. It
+  now uses `--force` so the client sends it and the SERVER refuses, and
+  it carries a negative oracle: git's local-abort message must not
+  appear.
+
 ### Fixed — flint forge: a CAS that landed is no longer reported to the client as a failure
 
 - **S3 answers a contended conditional write with 409

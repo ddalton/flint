@@ -36,6 +36,11 @@ pub struct HookRequest {
     pub principal: String,
     #[serde(default)]
     pub options: Vec<String>,
+    /// The client asked for `git push --atomic`. receive-pack offers
+    /// the capability in the proc-receive handshake, and forge must
+    /// either honour it or not accept it — see `PushRequest::atomic`.
+    #[serde(default)]
+    pub atomic: bool,
     pub commands: Vec<RefUpdate>,
 }
 
@@ -127,6 +132,7 @@ pub fn to_push(id: u64, req: HookRequest) -> PushRequest {
         id,
         principal: req.principal,
         options: req.options,
+        atomic: req.atomic,
         commands: req.commands,
     }
 }

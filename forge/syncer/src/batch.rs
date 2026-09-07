@@ -43,6 +43,13 @@ pub struct PushRequest {
     /// `git push -o …` options, available because
     /// `receive.advertisePushOptions` is on.
     pub options: Vec<String>,
+    /// `git push --atomic`: EVERY command of this push lands or none
+    /// does. forge judges per command by design (see the comment in the
+    /// judging loop), and `receive.procReceiveRefs = refs/` takes every
+    /// ref out of git's own atomic transaction — so if this flag is not
+    /// honoured HERE, nothing honours it, and a client that asked for
+    /// all-or-nothing gets neither the guarantee nor an error.
+    pub atomic: bool,
     pub commands: Vec<RefUpdate>,
 }
 
@@ -148,6 +155,15 @@ pub async fn run_batch(
     // ── step 2: judge every command, in arrival order ────────────────
     for push in &pushes {
         let mut results = Vec::new();
+        // An ATOMIC push is all-or-nothing, so remember what it
+        // contributed to the shared state before it contributes any of
+        // it. A later command of the same push may be judged against an
+        // earlier one through `eff`, so the rollback has to restore
+        // `eff` too — the push is being refused whole.
+        let accepted_at = accepted.len();
+        let tips_at = merge_tips.len();
+        let bases_at = merge_bases.len();
+        let mut eff_before: BTreeMap<String, Option<String>> = BTreeMap::new();
         for cmd in &push.commands {
             let outcome = judge(sc, push, cmd, policy, &eff, &disagreed).await;
             sc.hold.tick(1);
@@ -173,6 +189,11 @@ pub async fn run_batch(
                         merge_tips.push(tip);
                         merge_bases.push(base);
                     }
+                    if push.atomic {
+                        eff_before
+                            .entry(update.name.clone())
+                            .or_insert_with(|| eff.get(&update.name).cloned());
+                    }
                     eff.insert(update.name.clone(), norm(Some(&update.new_oid)));
                     let new_oid = if is_zero(&update.new_oid) {
                         None
@@ -190,6 +211,40 @@ pub async fn run_batch(
                     });
                 }
             }
+        }
+        // The contract, kept here because nothing else keeps it: one
+        // refused command in an atomic push refuses the whole push, and
+        // nothing it touched reaches the CAS.
+        if push.atomic && results.iter().any(|r| matches!(r, CommandResult::Ng { .. })) {
+            let refused: Vec<String> = results
+                .iter()
+                .filter_map(|r| match r {
+                    CommandResult::Ng { name, .. } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+            accepted.truncate(accepted_at);
+            merge_tips.truncate(tips_at);
+            merge_bases.truncate(bases_at);
+            for (name, before) in eff_before {
+                match before {
+                    Some(v) => eff.insert(name, v),
+                    None => eff.remove(&name),
+                };
+            }
+            results = results
+                .into_iter()
+                .map(|r| match r {
+                    CommandResult::Ok { name, .. } => CommandResult::Ng {
+                        name,
+                        reason: format!(
+                            "atomic push: refused because {} was refused",
+                            refused.join(", ")
+                        ),
+                    },
+                    ng => ng,
+                })
+                .collect();
         }
         reports.push(PushReport { id: push.id, results });
     }

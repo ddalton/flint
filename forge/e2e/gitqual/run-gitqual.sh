@@ -208,15 +208,29 @@ check "--force-with-lease against the ref the client last saw" ok \
      origin '"$C3"':refs/heads/force/x'
 check "--force-with-lease with a stale expectation is refused" refuse \
   'GC "$WC" push -q --force-with-lease=refs/heads/force/x:'"$C1"' origin '"$C1"':refs/heads/force/x'
-# The control first: without --atomic the SAME pair lands the good ref.
-# Without it, "atomic-a is absent" could mean the pair was unpushable
-# for some other reason and the atomic guarantee was never exercised.
-check "the control: without --atomic the good half of the pair lands" ok \
-  'GC "$WC" push -q origin '"$C3"':refs/heads/atomic-ctl '"$C1"':refs/heads/main; \
+# THE BAD REF MUST BE REFUSED BY THE SERVER, NOT BY THE CLIENT.
+#
+# This pair used to push `$C1:refs/heads/main` with no --force. That is
+# a non-fast-forward the client can see in the advertisement, so with
+# --atomic git aborts LOCALLY ("error: atomic push failed for ref
+# refs/heads/main") and never contacts the server at all — the leg
+# passed against a server with no atomicity whatsoever, and its control
+# controlled for the wrong thing. Verified 2026-09-07; forge did not
+# even parse the `atomic` capability at the time.
+#
+# --force is what makes the client send it. The policy opens
+# non-fast-forward on refs/heads/force/* only (see the env above), so
+# main is refused by the SERVER, which is the thing under test. The
+# negative oracle below pins that: git's local-abort message must NOT
+# appear, or we are back to measuring nothing.
+check "the control: without --atomic the good half of the SAME pair lands" ok \
+  'GC "$WC" push -q --force origin '"$C3"':refs/heads/atomic-ctl '"$C1"':refs/heads/main; \
    G ls-remote "$URL" refs/heads/atomic-ctl | grep -q .'
-check "push --atomic: one bad ref and NEITHER lands" ok \
-  'GC "$WC" push -q --atomic origin '"$C3"':refs/heads/atomic-a '"$C1"':refs/heads/main; \
-   ! G ls-remote "$URL" refs/heads/atomic-a | grep -q .'
+check "push --atomic: a SERVER-refused ref and NEITHER lands" ok \
+  'out=$(GC "$WC" push --atomic --force origin '"$C3"':refs/heads/atomic-a '"$C1"':refs/heads/main 2>&1); \
+   ! printf "%s" "$out" | grep -q "atomic push failed" \
+     && ! G ls-remote "$URL" refs/heads/atomic-a | grep -q . \
+     && [ "$(G ls-remote "$URL" refs/heads/main | cut -f1)" = "'"$C3"'" ]'
 check "push -o reaches the server" ok \
   'GC "$WC" push -q -o strategy=ours origin '"$C3"':refs/heads/opt'
 check "push --all" ok \

@@ -162,9 +162,20 @@ fn run() -> std::io::Result<i32> {
     // the one that matters: without echoing it, receive-pack sends no
     // options and `-o strategy=theirs` would vanish silently.
     let hello = read_until_flush(&mut input)?;
-    let offers_push_options = hello
-        .iter()
-        .any(|l| l.split('\0').nth(1).map(|caps| caps.split(' ').any(|c| c == "push-options")).unwrap_or(false));
+    let caps = |want: &str| {
+        hello
+            .iter()
+            .any(|l| l.split('\0').nth(1).map(|c| c.split(' ').any(|x| x == want)).unwrap_or(false))
+    };
+    let offers_push_options = caps("push-options");
+    // `atomic` is NOT echoed back — this hook implements no capability
+    // by echoing it — but it must be READ. receive-pack sets it when
+    // the client said `git push --atomic`, and because
+    // `receive.procReceiveRefs = refs/` puts every ref through
+    // proc-receive, git has already excluded these commands from its
+    // own atomic transaction. If the all-or-nothing contract is not
+    // kept below, nothing keeps it.
+    let atomic = caps("atomic");
     if offers_push_options {
         write_str(&mut out, "version=1\0push-options")?;
     } else {
@@ -197,6 +208,7 @@ fn run() -> std::io::Result<i32> {
     let request = HookRequest {
         principal: std::env::var("REMOTE_USER").unwrap_or_default(),
         options,
+        atomic,
         commands: commands.clone(),
     };
 

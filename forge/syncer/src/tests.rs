@@ -148,7 +148,12 @@ impl Rig {
 /// on the rig, so a test can build one while the rig is borrowed for
 /// the batch it is about to run.
 fn push(id: u64, cmds: Vec<RefUpdate>) -> PushRequest {
-    PushRequest { id, principal: "tester".into(), options: vec![], commands: cmds }
+    PushRequest { id, principal: "tester".into(), options: vec![], atomic: false, commands: cmds }
+}
+
+/// `git push --atomic`: every command lands or none does.
+fn atomic_push(id: u64, cmds: Vec<RefUpdate>) -> PushRequest {
+    PushRequest { id, principal: "tester".into(), options: vec![], atomic: true, commands: cmds }
 }
 
 fn zero() -> String {
@@ -4672,4 +4677,68 @@ async fn the_request_budget_per_operation_is_pinned() {
     let m = store.op_counts();
     assert_eq!((n(&m, "get_whole"), n(&m, "get_range"), n(&m, "list")), (2, 9, 1),
                "restore, cold: {m:?}");
+}
+
+/// `git push --atomic` promises the client that every command lands or
+/// none does. forge judges PER COMMAND by design, and
+/// `receive.procReceiveRefs = refs/` puts every ref through
+/// proc-receive — which is exactly the set git EXCLUDES from its own
+/// atomic ref transaction. So git does not keep this contract for
+/// forge, and until now neither did forge: the capability was read off
+/// the wire and dropped, and a two-ref atomic push with one bad ref
+/// landed the good one. Durably, into the snapshot.
+///
+/// The control is the SAME pair without `--atomic`, which must still
+/// land the good ref. Without it, "neither landed" could mean the pair
+/// was unpushable for some unrelated reason and the guarantee was never
+/// exercised — which is the mistake the gitqual leg made.
+#[tokio::test]
+async fn an_atomic_push_with_one_bad_ref_lands_neither_and_the_control_lands_one() {
+    let store = Arc::new(MemoryStore::new());
+    let mut rig = Rig::with_store(store.clone(), "a").await;
+    rig.start().await;
+
+    // A ref that exists, so a stale old_oid against it is refused by
+    // the SERVER — not by the client, which is not in this test at all.
+    let base = rig.push_commit("refs/heads/main", None, "seed").await;
+    let good = rig.stage_commit(Some(&base), &[("g.txt", "good\n")], "good").await;
+
+    // ── the control: no --atomic, so the good half lands ─────────────
+    let r = rig
+        .run(vec![push(1, vec![
+            RefUpdate { name: "refs/heads/ctl".into(), old_oid: zero(), new_oid: good.clone() },
+            RefUpdate { name: "refs/heads/main".into(), old_oid: zero(), new_oid: good.clone() },
+        ])])
+        .await;
+    assert!(is_ok(&r[0].results[0]), "the good ref lands without --atomic: {:?}", r[0].results[0]);
+    assert!(!is_ok(&r[0].results[1]), "and the stale one is refused: {:?}", r[0].results[1]);
+    assert_eq!(
+        rig.sc.git.ref_oid("refs/heads/ctl").await.unwrap().as_deref(),
+        Some(good.as_str()),
+        "the control must actually land something, or the test below proves nothing"
+    );
+
+    // ── the contract: --atomic, and NEITHER may land ─────────────────
+    let r = rig
+        .run(vec![atomic_push(2, vec![
+            RefUpdate { name: "refs/heads/at".into(), old_oid: zero(), new_oid: good.clone() },
+            RefUpdate { name: "refs/heads/main".into(), old_oid: zero(), new_oid: good.clone() },
+        ])])
+        .await;
+    assert!(
+        r[0].results.iter().all(|x| !is_ok(x)),
+        "one refused command refuses the whole atomic push: {:?}",
+        r[0].results
+    );
+    assert_eq!(
+        rig.sc.git.ref_oid("refs/heads/at").await.unwrap(),
+        None,
+        "the good ref of an atomic push must NOT be on disk"
+    );
+    let cell = snapshot::load(rig.store.as_ref(), &rig.sc.cfg).await.expect("snapshot");
+    assert!(
+        !cell.snap.refs.contains_key("refs/heads/at"),
+        "and it must NOT be in the snapshot — the durable half is the one that matters: {:?}",
+        cell.snap.refs
+    );
 }

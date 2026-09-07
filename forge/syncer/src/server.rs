@@ -337,6 +337,10 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                                     id: 0,
                                     principal: "system:flint-forge".into(),
                                     options: vec![],
+                                    // The pruner's own deletions: no
+                                    // client asked for anything, so
+                                    // there is no contract to keep.
+                                    atomic: false,
                                     commands: dead,
                                 };
                                 if let Err(e) =
@@ -866,6 +870,7 @@ mod collect_tests {
             request: uds::HookRequest {
                 principal: "tester".into(),
                 options: vec![],
+                atomic: false,
                 commands: vec![RefUpdate {
                     name: format!("refs/heads/b{n}"),
                     old_oid: "0".repeat(40),
