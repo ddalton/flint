@@ -1,0 +1,168 @@
+════════════════════════════════════════════════════════════════════════
+runce — the drill for the fold fix, 2026-09-07
+════════════════════════════════════════════════════════════════════════
+
+WHAT THIS WAS FOR. runcd (2026-09-07) found a fold that produced a pack
+missing thirteen commits its inputs held, stopped naming those inputs,
+and left forge refusing to serve. The fix is aaffe335: a fold's commit
+may unname an input only if the roll-up HOLDS everything that input
+holds. P5 — cold start — is the leg that exposed the defect, and it is
+the oracle here.
+
+SHAPE. trove project 144 `runce`, CP + 2 workers, ALL SPOT i4i.xlarge,
+us-west-1. FORGE ONLY; walgit was not deployed (its arm costs a 949 MB
+on-cluster build and compares nothing these legs need).
+Image drill-aaffe335, verified BY DIGEST on the running pods:
+  operator sha256:c5b7b8c6…  syncer sha256:9b177141…  git sha256:feca1180…
+  stamped revision aaffe3356dec3a416c98ca4694ecb9010c5028ee == HEAD
+Pre-registration written before the cluster served a push: prereg-runce.md
+(reproduced at the foot of this file).
+
+────────────────────────── THE RESULT ──────────────────────────────────
+
+P5 COLD START — PASS. The prediction the whole fix stands on.
+  first correct ls-remote  13 s after the pod was deleted
+  first COMPLETE clone     29 s after it (16.0 s for the clone itself)
+  refused attempts         0
+  runcd, same leg:         REFUSED TO SERVE — exit 78, crash-loop, 10 restarts
+
+  NOT VACUOUS. The repository had folded hard before the delete: the
+  batch log carries 13 fold commits, each superseding real inputs —
+    seq  12: −9 packs     seq  49: −32     seq  70: −64    seq  72: −206
+    seq  78: −69          seq  83: −72     seq  88: −63    seq  93: −75
+    seq  99: −68          seq 106: −64     seq 112: −80    seq 118: −72
+    seq 124: −75
+  and it carried P9's 48 pushes and P2's 931 before the pod went away.
+  A P5 against a repository that never folded would prove nothing; that
+  is the trap this rig has fallen into before.
+
+P11 UNDO — PASS. Undo point seq 1 holds the pre-force tip a7034cc3 and
+  every pack it names is still in the bucket (1 of them).
+
+P10 BUCKET CUT OFF — PASS, and this is Inv_AckedIsDurable on the wire:
+  a read at +5 s               rc=0 (still serving from local packs)
+  readiness                    not ready after 79 s
+  a push during the outage     TIMED OUT — not acknowledged
+  recovery                     push told ok, pod ready, restarts 0 → 0
+  No push was acked that was not durable.
+
+────────────────────── THE NUMBERS, AND ONE COST ───────────────────────
+
+                          runce (aaffe335)        runcd (d54b29cf)
+  P9  48×8 MiB            35 s, median 0.56 s     34 s
+  P9  bytes uploaded      705.5 MB = 1.75x        378.5 MB = 0.94x   ← WORSE
+  P2  rate                931 acked = 15.5/s      752 acked = 12.5/s
+  P2  bytes               1.136 GB = 1.22 MB/push 1.44 GB = 1.92 MB/push
+  P7  1 GiB clone solo    17.0 s                  20.2 s
+  P7  8 concurrent        82 s, 100 MiB/s agg     71 s
+  P12 ref ladder (s)      0.20 / 0.29 / 0.40      0.28 / 0.43 / 0.74
+  P12 decay across it     2.0x                    2.6x
+  resident at the end     2.22 GB / 3221 objects  (not comparable: fewer legs)
+
+PREDICTION 3 WAS WRONG ABOUT WHERE THE COST LANDED. I pre-registered
+that the strict rule would cost BYTES, since keeping more input packs
+named means less is collected, and I predicted it would show in P2.
+P2 got BETTER (1.92 → 1.22 MB per push). P9's amplification is what
+regressed, 0.94x → 1.75x — for the same 402.7 MB of payload, forge
+uploaded 705.5 MB instead of 378.5 MB. The mechanism is the one
+predicted, in the leg not predicted: an input the roll-up does not
+fully hold stays named, so a later fold takes it as an input again and
+re-uploads its contents.
+  CONFOUND, STATED: in runce P9 ran FIRST, against a fresh repository;
+  in runcd it ran after P1 and P4. Different repository state drives
+  different fold planning. This is cross-run and cross-order, so it
+  bounds the cost rather than measuring it. A same-cluster A/B of the
+  two fold rules is the experiment that would settle it, and it has
+  not been run.
+
+P12 is cross-run too — there is no in-run control arm, so the ladder's
+improvement (2.6x → 2.0x decay) is suggestive, not established. The
+controlled version of that question is the local rig, which has a plain
+bare-repository control; it is set up (prereg-packrefs.md, two binaries
+differing ONLY in the two pack-refs call sites, verified by content) and
+was not run because the cluster took priority.
+
+foldsRefused: 0 on every syncer, and no "the fold keeps N input pack(s)
+named" line in any log.
+  LIMITATION: that counter is per PROCESS and P5 deletes the pod. The
+  13 folds happened before the restart; their process's counter and
+  logs are gone. So this is evidence about the successor's life only,
+  not about the folds that matter. READ THE COUNTER BEFORE THE
+  DESTRUCTIVE LEG — a rig fix for next time.
+
+──────────────────────── TWO RIG DEFECTS FOUND ─────────────────────────
+
+1. P5 SILENTLY DEPENDS ON P7. P5 clones `agent/p7-$RUN`; run without
+   P7 in the same invocation it reports INCONCLUSIVE ("not present").
+   The first pass of this drill dropped P7 to save time and lost the
+   one leg it existed to run. The dependency is not documented in the
+   leg list.
+2. P11 CANNOT RUN THROUGH THE DOOR ON A DEFAULT REPOSITORY. The door's
+   branch policy refuses the non-fast-forward update ("remote rejected
+   … non-fast-forward update to refs/heads/agent/…") — correct
+   behaviour, but it makes the undo leg INCONCLUSIVE by construction.
+   It needs a repository with `allowNonFastForward: ["agent/*"]`; this
+   run created a third FlintRepo `undo` for it.
+
+────────────────────────────── TEARDOWN ────────────────────────────────
+
+Zero set confirmed after the run:
+  instances 0 · volumes 0 · spot open/active 0 · elastic IPs 0
+  trove* SGs 0 · owned snapshots 0 · trove projects 0
+  orphans {"matched":0,"ghostRows":[],"purgedRows":0}
+  bucket GONE (404) · IAM user GONE · keyfile shredded · kubeconfig removed
+The bucket was versioned: 3,901 versions purged, then 4 more that the
+still-running syncers wrote during the first purge — a `s3 rm
+--recursive` alone leaves a versioned bucket undeletable, and the
+teardown script does not purge versions. Purge AFTER the instances are
+gone, not before.
+Lifetime ≈ 23:10–23:55 local (~45 min, ~$0.35/h).
+# Pre-registration — runce, the drill for the fold fix
+Written 2026-09-06 23:2x UTC, BEFORE the cluster served a single push.
+Cluster: trove project 144 `runce`, CP + 2 workers, ALL SPOT i4i.xlarge, us-west-1.
+Image: drill-aaffe335 (HEAD). Arms: FORGE ONLY — walgit is not deployed.
+
+## Why forge only
+P5, P11 and P10 are forge-specific behaviours; walgit has no comparable undo
+and its cold start was already measured. walgit's arm costs a 949 MB image
+built on-cluster, which put a node under DiskPressure on runcd. The one leg
+that genuinely wants a control arm is the ref ladder, and its honest control
+is the local rig (see prereg-packrefs.md), not walgit.
+CONSEQUENCE, STATED UP FRONT: P12 here has no in-run control, so any
+comparison to runcd's ladder is CROSS-RUN and therefore suggestive at best.
+
+## The leg that matters
+P5 is the oracle. On runcd, deleting forge's pod made the successor REFUSE to
+serve (exit 78, crash-loop, 10 restarts) because a fold had superseded the
+only packs holding thirteen commits. The fix is the strict supersede rule.
+
+Order: P0, P9, P2, P12, P5, P11, P10. P9 and P2 come FIRST ON PURPOSE — they
+are the load that drives compaction. A P5 run against a repository that never
+folded proves nothing, and that vacuity is the trap this rig has fallen into
+before.
+
+## Predictions
+1. **P5 PASSES.** The successor restores, proves the repository and serves;
+   no exit 78, no crash-loop. FALSIFIER: any refusal or restart loop. This is
+   the prediction the whole fix stands on.
+2. **`foldsRefused` may be NON-ZERO and that is NOT a failure.** It counts
+   roll-ups the coverage check rejected BEFORE upload. Non-zero means the
+   check is doing work; zero means git never lost an object on this workload.
+   I pre-register that I will not read non-zero as a defect.
+3. **P2's resident bytes will be EQUAL OR HIGHER than runcd's 1.44 GB**, not
+   lower. The strict rule keeps more packs named, so less is collected. This
+   is the known cost of the fix and I want it measured, not hidden. A large
+   regression here is a real finding against the fix.
+4. **P11 undo:** a force-push's previous tip is recoverable from the bucket
+   and `--undo-list` names it.
+5. **P10 outage:** with the bucket cut off, NO PUSH IS ACKED THAT IS NOT
+   DURABLE — Inv_AckedIsDurable on the wire. Reads may continue from local
+   packs; readiness may fail; recovery restores service. An ack of a push
+   that is not in the bucket is a FAILURE of the central claim.
+6. **P12:** forge's ladder at or below runcd's 0.28 / 0.43 / 0.74 s at
+   0 / 2005 / 8010 refs. Cross-run, so a same-or-slower result does not by
+   itself refute the pack-refs change.
+
+## Teardown, committed to in advance
+`BUCKET=flint-forge-scale-runce KEYFILE=<keyfile> CLUSTER=runce
+forge/e2e/scale/teardown.sh` with ADMIN_PROFILE=trove-admin, then the zero

@@ -19,7 +19,13 @@
 #   P2  push rate: P2_N pushers for P2_SECS s to distinct branches     (pushes/s; requests per push — CloudWatch)
 #   P7  P7_N concurrent clones of a P7_MB MiB branch, one alone first  (wall, ratio, peak upload-packs)
 #   P5  cold start: the arm's pod deleted; time to the first ls-remote and the first clone
+#       REQUIRES P7 IN THE SAME INVOCATION: it clones `agent/p7-$RUN`, so
+#       a leg list without P7 makes P5 INCONCLUSIVE (runce, 2026-09-07).
 #   P11 undo: a force-push, and whether the previous tip can be recovered from the bucket
+#       REQUIRES a repository whose policy allows the rewind
+#       (`allowNonFastForward: ["agent/*"]`). On a default FlintRepo the
+#       door refuses the non-fast-forward update and the leg is
+#       INCONCLUSIVE by construction (runce, 2026-09-07).
 #   P10 the bucket cut off (a NetworkPolicy): reads, readiness, pushes, recovery — recorded, not scored
 #   P12 ref scale: a lone one-ref push as the branch count grows, on a repository of its own per arm
 #
