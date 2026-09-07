@@ -182,6 +182,9 @@ async fn serve() {
     // the repository down while it waits. 0 entries is the control —
     // no log, and a wake that pays for the whole repository.
     cfg.log_max_entries = env_u64("FLINT_FORGE_LOG_MAX_ENTRIES", 512) as usize;
+    // The dumb protocol's derived files, off the push path (X19's
+    // cheap half). 0 restores the shipped behaviour, once per batch.
+    cfg.derived_every_secs = env_u64("FLINT_FORGE_DERIVED_EVERY_SECS", 60);
     cfg.prewarm = env_u64("FLINT_FORGE_PREWARM", 1) != 0;
     cfg.prewarm_resync_secs = env_u64("FLINT_FORGE_PREWARM_RESYNC_SECS", 300);
     cfg.fanout = env_u64("FLINT_FORGE_FANOUT", 4).max(1) as usize;

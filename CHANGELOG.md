@@ -12,6 +12,69 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Changed — flint forge: the dumb protocol's files leave the push path, and partial clone works
+
+- **Measured what the rate leg saw** (X19,
+  `forge/e2e/refscale/`, results
+  `forge/e2e/results/refscale-2026-09-06.log`). The A/B on runcc
+  watched both arms fall from 17.4 to 9.7 pushes a second over three
+  minutes while the branch count grew ~900/min, and the suspect was
+  the snapshot's ref map. A lone push that moves ONE ref does cost 240
+  ms at 0 refs and 1,824 ms at 8,000 — **but the control refuted the
+  obvious reading**: the identical push to a plain bare repository
+  with the same refs and no forge costs 79 → 1,147 ms, so 63 % of the
+  growth is `receive-pack` advertising every ref to the client, and no
+  git server escapes that. Reading forge's column alone would have
+  charged forge for git's own advertisement.
+
+- **What forge did own was three quarters dumb protocol.** Of the four
+  O(refs) costs a batch paid, three were `update-server-info` over
+  every ref (220 ms at 8,000), `info/refs` uploaded whole (511 KB) and
+  `objects/info/packs` — a view nothing on the serving path reads, since
+  the smart protocol answers from the local repository and the syncer
+  from the snapshot. They are on a timer now:
+  `FLINT_FORGE_DERIVED_EVERY_SECS`, default 60, with 0 restoring the
+  per-batch behaviour and standing as the rig's control arm. The first
+  batch after a start still publishes them, the serving loop's tick
+  keeps them fresh once pushes stop, and a clean drain flushes them
+  once more — the moment a server leaves is exactly when what the
+  bucket carries stops being refreshed by anything. Forge's share of a
+  push at 8,000 refs: 677 → 385 ms. The fixed per-push request count:
+  4 → **2** for every batch but one a minute (3 with the batch log).
+
+- **`upload-pack` silently ignored `--filter`** (X23):
+  `uploadpack.allowFilter` was never set, so a client asking for a
+  blobless clone got the whole repository and a warning nobody reads.
+  Now set in `init_bare`.
+
+### Added — flint forge: a git qualification suite, and a second implementation
+
+- **`forge/e2e/gitqual/`** — the reference client against forge over
+  real HTTP through `flint-forge-gitcgi`, not the file transport the
+  other local drills use. There is no published conformance suite for
+  a git *server*; what there is, is the reference implementation. 38
+  legs across the protocol's surface, deliberately including the
+  corners forge had never been asked about: shallow clone and
+  `--unshallow`, partial clone, fetch by object id, `push --atomic`,
+  `--force-with-lease` (both directions), mirror clone, protocol v0
+  against v2, annotated and lightweight tags, `--prune`, and ref names
+  with slashes, 180 characters and UTF-8. Three outcomes, and the
+  third is the point: PASS, FAIL, and KNOWN for a gap forge never
+  claimed to fill, so it is written down rather than found by a user.
+  It found X23 above — and only after the leg was hardened, because
+  its first draft asserted that the filtered clone SUCCEEDED and
+  passed while the filter was being ignored.
+
+- **A second implementation** (`forge/e2e/gitqual/gogit/`). Stock git
+  proves forge speaks what git speaks; it cannot prove forge speaks
+  the protocol rather than git's habits, because a server that
+  depended on the exact order the reference client sends things would
+  pass every leg above. A small [go-git](https://github.com/go-git/go-git)
+  program clones, commits, pushes and reads its own push back off the
+  advertisement, and stock git then reads go-git's branch. When the Go
+  toolchain or the module cache is absent the leg says it did not run
+  rather than counting itself.
+
 ### Added — flint forge, the wake: a batch log beside the snapshot, and a challenger that warms before it claims
 
 - **The batch log** (X15's second half, `forge/syncer/src/log.rs`).

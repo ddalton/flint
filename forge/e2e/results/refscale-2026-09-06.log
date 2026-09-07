@@ -1,0 +1,24 @@
+# ref scale — a lone push's latency as the branch count grows, 2026-09-06
+# one binary, two arms; the CONTROL at every rung is the identical push to a plain bare
+# repository with the same refs and no forge (git's own ref advertisement).
+
+arm batch (derived files every 0 s)
+refs    forge_ms   plain_ms   forge-plain snapshot_B   inforefs_B   usinfo_ms 
+0       240        79         161         1130         115          33        
+2000    586        314        272         136818       127008       87        
+8000    1824       1147       677         545613       511008       220       
+
+
+arm timer (derived files every 60 s)
+refs    forge_ms   plain_ms   forge-plain snapshot_B   inforefs_B   usinfo_ms 
+0       188        75         113         1130         57           32        
+2000    514        322        192         136818       127008       89        
+8000    1464       1079       385         545613       511008       258       
+
+
+READING: at 8,000 refs a push takes 1,824 ms of which 1,147 ms (63%) is git advertising
+every ref to the client — no git server escapes that, walgit included. forge's own share
+was 677 ms; moving the dumb protocol's derived files off the push path (a full-ref-scan
+subprocess and a 511 KB upload) takes it to 385 ms, a 43% cut of forge's share and 20% of
+the whole push. What is left of forge's share is the snapshot's ref map (X19, 545 KB at
+8,000 refs, rewritten by every batch) and one for-each-ref.

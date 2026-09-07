@@ -331,7 +331,16 @@ pub async fn run_batch(
     };
     let (store, cfg) = (sc.store.clone(), sc.cfg.clone());
     let logged = async move { super::log::emit(store.as_ref(), &cfg, entry).await };
-    let (_, derived) = tokio::join!(logged, publish_derived(sc));
+    // The derived files are the dumb protocol's, and two of the three
+    // are O(refs): a push waited on `update-server-info` over every ref
+    // and on an upload of `info/refs` whole, for a view nothing on the
+    // serving path reads. On a timer they cost one batch a minute
+    // instead of every batch; the serving loop's tick and the drain
+    // keep them from going stale.
+    let due = derived_due(sc, super::now_unix());
+    let (_, derived) = tokio::join!(logged, async {
+        if due { publish_derived(sc).await } else { Ok(()) }
+    });
     if let Err(e) = derived {
         eprintln!("flint-forge: derived files not refreshed ({e}); the smart protocol is unaffected");
     }
@@ -551,6 +560,19 @@ pub(crate) fn carry_pending(sc: &mut Syncer, next: &mut snapshot::Snapshot) {
 /// are not listed and fails; the reverse order serves the previous
 /// state, which is merely old. `git update-server-info` writes both
 /// files in the repository, so the format is git's rather than ours.
+/// Whether the derived files are due, and STAMPS them as refreshed
+/// when they are — the stamp goes with the decision so no call site can
+/// take one without the other.
+pub(crate) fn derived_due(sc: &mut Syncer, now: u64) -> bool {
+    if sc.cfg.derived_every_secs == 0
+        || now.saturating_sub(sc.last_derived_unix) >= sc.cfg.derived_every_secs
+    {
+        sc.last_derived_unix = now;
+        return true;
+    }
+    false
+}
+
 pub(crate) async fn publish_derived(sc: &mut Syncer) -> ForgeResult<()> {
     sc.git.must(&["update-server-info"], None).await?;
     let epoch = sc.lease()?.epoch;

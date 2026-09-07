@@ -196,6 +196,22 @@ pub struct ForgeConfig {
     /// reference set. A bound on the sweep's cost, not on how many
     /// exist; the oldest beyond it expire on a later pass.
     pub undo_max_points: usize,
+    /// How often the DERIVED files are refreshed: `info/refs`,
+    /// `objects/info/packs` and `HEAD`, the dumb protocol's view of the
+    /// bucket (design §3). 0 keeps the shipped behaviour, once per
+    /// batch.
+    ///
+    /// Per batch is what they cost before this, and two of the three
+    /// are O(refs): `update-server-info` reads every ref (208 ms at
+    /// 8,000 of them, measured `forge/e2e/refscale/`) and `info/refs`
+    /// is then uploaded whole (511 KB at the same point). Nothing on
+    /// the serving path reads any of it — the smart protocol answers
+    /// from the local repository and the syncer from the snapshot —
+    /// so a push waited on a subprocess and an upload for a view only
+    /// a dumb clone of the bucket uses. Refreshed on a timer instead,
+    /// and flushed once more on a clean drain so what the bucket
+    /// carries when the server is gone is what the server last knew.
+    pub derived_every_secs: u64,
     /// How many batch-log entries the bucket keeps (`log.rs`). The
     /// window in which a follower that has fallen behind catches up
     /// with the deltas instead of the whole snapshot; past it a wake is
@@ -278,6 +294,7 @@ impl ForgeConfig {
             orphan_grace_secs: 3600,
             undo_window_secs: 7 * 24 * 3600,
             undo_max_points: 64,
+            derived_every_secs: 60,
             log_max_entries: 512,
             prewarm: true,
             prewarm_resync_secs: 300,
@@ -536,6 +553,10 @@ pub struct Syncer {
     pub fold_ledger: Vec<fold::LedgerEntry>,
     pub last_base_rebuild_unix: u64,
     pub last_full_sweep_unix: u64,
+    /// When the derived files were last refreshed. 0 means never, so
+    /// the first batch after a start publishes them however the timer
+    /// is set — a fresh server's bucket view is never a predecessor's.
+    pub last_derived_unix: u64,
 }
 
 impl Syncer {
@@ -558,6 +579,7 @@ impl Syncer {
             fold_ledger: Vec::new(),
             last_base_rebuild_unix: 0,
             last_full_sweep_unix: 0,
+            last_derived_unix: 0,
         }
     }
 

@@ -1,0 +1,69 @@
+
+== precondition: FORGE_BIN is newer than the sources it claims to be ==
+  PASS  FORGE_BIN is not older than any source under forge/syncer or flint-store
+
+== precondition: the transport is HTTP through flint-forge-gitcgi ==
+  PASS  ls-remote answers over http://127.0.0.1:9723
+
+== discovery on an empty repository ==
+  PASS  ls-remote on an empty repository is empty and succeeds
+  PASS  clone of an empty repository succeeds
+  PASS  push creates the default branch
+
+== advertisement ==
+  PASS  ls-remote names the branch just pushed
+  PASS  --symref advertises HEAD as a symbolic ref to the default branch
+  PASS  protocol v0 and v2 advertise the same refs
+
+== clone and fetch ==
+  PASS  full clone reproduces the tree
+  PASS  the clone passes fsck
+  PASS  clone over protocol v0
+  PASS  shallow clone --depth 1
+  PASS  single-branch clone
+  PASS  mirror clone, then fsck
+  PASS  fetch --unshallow completes the shallow clone
+  PASS  fetch --prune drops a branch the server deleted
+  PASS  partial clone --filter=blob:none really omits the blobs
+  PASS  fetch by object id (uploadpack.allowAnySHA1InWant)
+
+== tags ==
+  PASS  push an annotated tag and a lightweight one
+  PASS  a fresh clone gets both tags, and the annotated one is a tag object
+  PASS  push --delete removes a tag
+
+== push ==
+  PASS  fast-forward
+  PASS  a no-op push says everything is up to date
+  PASS  non-fast-forward on a branch the policy does not open (refused, as the policy says)
+  PASS  and the branch did not move
+  PASS  force where the policy allows it
+  PASS  --force-with-lease against the ref the client last saw
+  PASS  --force-with-lease with a stale expectation is refused (refused, as the policy says)
+  PASS  the control: without --atomic the good half of the pair lands
+  PASS  push --atomic: one bad ref and NEITHER lands
+  PASS  push -o reaches the server
+  PASS  push --all
+  PASS  concurrent pushes to different branches both land
+
+== names the protocol allows ==
+  PASS  a ref with slashes
+  PASS  a long ref name
+  PASS  a UTF-8 ref name
+
+== the repository the server hands back is whole ==
+  PASS  a final clone matches the working tree's tip and passes fsck --strict
+  PASS  and the bucket alone rebuilds the same tip
+
+== a second implementation: go-git ==
+  PASS  go-git cloned over smart HTTP, HEAD = 6c911fdeebd6e1a357deeed9b7bc437f2e3ed734
+  PASS  go-git pushed 8d4848f612453e68bb4e365328bc06e6c69e0c4f to refs/heads/gogit
+  PASS  go-git read its own push back off the advertisement
+  PASS  stock git reads go-git's branch back
+
+gitqual: 42 passed, 0 failed
+/Users/ddalton/github/flint/forge/e2e/gitqual/../composition/rig.sh: line 296: 36545 Killed: 9               ( export FLINT_FORGE_BUCKET="$BUCKET" FLINT_FORGE_PREFIX="$prefix" FLINT_FORGE_REPO="$repo" FLINT_FORGE_ENDPOINT="$ENDPOINT" FLINT_FORGE_HOOKS_PATH="$repo/hooks-flint" FLINT_FORGE_SOCKET="/tmp/fc-$tag.sock" FLINT_FORGE_STATUS_ADDR="127.0.0.1:$((9848 + RANDOM % 900))" FLINT_FORGE_HEARTBEAT_SECS=2 FLINT_FORGE_BATCH_WINDOW_MS=200 FLINT_FORGE_SYNC_BIN="$SYNC_BIN"; for kv in "$@";
+do
+    export "$kv";
+done; exec "$FORGE_BIN" ) > "$log" 2>&1
+/Users/ddalton/github/flint/forge/e2e/gitqual/../composition/rig.sh: line 296: 36689 Terminated: 15          ( export GIT_PROJECT_ROOT="$ROOT" GIT_HTTP_EXPORT_ALL=1 FLINT_FORGE_GIT_LISTEN="127.0.0.1:$PORT" FLINT_FORGE_SOCKET=/tmp/fc-q.sock; exec "$GITCGI_BIN" ) > "$WORK/cgi.log" 2>&1

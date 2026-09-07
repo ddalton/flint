@@ -242,6 +242,16 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                 // A fold in flight named nothing yet: kill its task and
                 // drop its scratch; the successor plans it again.
                 fold::abort(&mut sc);
+                // One last refresh of the dumb view. It is on a timer
+                // while serving, and the moment a server leaves is
+                // exactly when what the bucket carries stops being
+                // refreshed by anything.
+                sc.last_derived_unix = 0;
+                if batch::derived_due(&mut sc, super::now_unix()) {
+                    if let Err(e) = batch::publish_derived(&mut sc).await {
+                        eprintln!("flint-forge: derived files not flushed on the drain ({e})");
+                    }
+                }
                 match lease::release(&mut sc).await {
                     Ok(()) => eprintln!("flint-forge: lease released; a successor may claim at once"),
                     // Not fatal: the successor waits out the quiet
@@ -275,6 +285,15 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                 // map, and nothing waits on it.
                 if let Err(e) = follow::checkpoint(&sc, super::now_unix()) {
                     eprintln!("flint-forge: could not checkpoint the proof ({e})");
+                }
+                // The derived files' timer. They left the push path
+                // because two of the three are O(refs); this is what
+                // keeps the bucket's dumb view from drifting once
+                // pushes stop.
+                if batch::derived_due(&mut sc, super::now_unix()) {
+                    if let Err(e) = batch::publish_derived(&mut sc).await {
+                        eprintln!("flint-forge: derived files not refreshed on the tick ({e})");
+                    }
                 }
                 if let Some(bcfg) = opts.bundle.as_ref() {
                     match super::bundle::maybe_run(&mut sc, bcfg, super::now_unix()).await {

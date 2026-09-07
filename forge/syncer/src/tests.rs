@@ -2375,13 +2375,21 @@ async fn a_failed_fetch_never_lands_a_partial_pack() {
 // here rather than on a bucket's request bill.
 
 /// The fixed cost of a batch, isolated from git's pack behaviour by
-/// pushing a ref that introduces no new objects: one lease renewal,
-/// one snapshot CAS, and the two derived files a dumb clone reads.
+/// pushing a ref that introduces no new objects.
+///
+/// §4 costs it at four requests: one lease renewal, one snapshot CAS,
+/// and the two derived files a dumb clone reads. Two of those four are
+/// now on a timer rather than on the push (`derived_every_secs`), so
+/// there are two numbers and both are asserted here: four on the batch
+/// that refreshes them, and TWO on every batch until the timer comes
+/// round again. The second is the one a repository at rate actually
+/// pays, and at 8,000 refs the two it no longer pays were a
+/// full-ref-scan subprocess and a 511 KB upload.
 #[tokio::test]
-async fn the_fixed_per_push_s3_cost_is_four_requests() {
+async fn the_fixed_per_push_s3_cost_is_four_requests_then_two() {
     let mut rig = Rig::new().await;
     rig.start().await;
-    // The batch log (`log.rs`) is a fifth request by design, and its
+    // The batch log (`log.rs`) is one more request by design, and its
     // own test below measures it against this one. Here it is off, so
     // this stays what §4 documents.
     rig.sc.cfg.log_max_entries = 0;
@@ -2393,7 +2401,10 @@ async fn the_fixed_per_push_s3_cost_is_four_requests() {
     .await;
 
     // A second ref at the SAME commit: the pack is already in the
-    // snapshot, so every request left is fixed overhead.
+    // snapshot, so every request left is fixed overhead. The derived
+    // files are due (nothing has refreshed them inside the window),
+    // which is §4's four.
+    rig.sc.last_derived_unix = 0;
     rig.store.reset_op_counts();
     rig.run(vec![push(
         2,
@@ -2405,8 +2416,82 @@ async fn the_fixed_per_push_s3_cost_is_four_requests() {
     assert_eq!(
         rig.store.total_ops(),
         4,
-        "the fixed per-push cost is renew + CAS + objects/info/packs + info/refs: {ops:?}"
+        "publishing batch: renew + CAS + objects/info/packs + info/refs: {ops:?}"
     );
+
+    // And the next one inside the window pays the renew and the CAS.
+    rig.store.reset_op_counts();
+    rig.run(vec![push(
+        3,
+        vec![RefUpdate { name: "refs/heads/third".into(), old_oid: zero(), new_oid: c1 }],
+    )])
+    .await;
+    let ops = rig.store.op_counts();
+    assert_eq!(
+        rig.store.total_ops(),
+        2,
+        "inside the window a batch is renew + CAS and nothing else: {ops:?}"
+    );
+}
+
+/// The derived files leave the push path, and nothing else does.
+///
+/// The control is `derived_every_secs = 0`, the shipped behaviour, in
+/// which every batch republishes them. Without that arm "they were not
+/// written" could mean the timer worked or could mean the write broke.
+#[tokio::test]
+async fn the_derived_files_are_on_a_timer_and_the_first_batch_still_publishes() {
+    async fn puts_per_batch(every: u64, batches: usize) -> Vec<u64> {
+        let mut rig = Rig::new().await;
+        rig.start().await;
+        rig.sc.cfg.log_max_entries = 0;
+        rig.sc.cfg.derived_every_secs = every;
+        let c1 = rig.stage_commit(None, &[("a.txt", "one")], "one").await;
+        let mut out = Vec::new();
+        for i in 0..batches {
+            rig.store.reset_op_counts();
+            rig.run(vec![push(
+                i as u64 + 1,
+                vec![RefUpdate {
+                    name: format!("refs/heads/b{i}"),
+                    old_oid: zero(),
+                    new_oid: c1.clone(),
+                }],
+            )])
+            .await;
+            out.push(rig.store.total_ops());
+        }
+        out
+    }
+    let timed = puts_per_batch(60, 3).await;
+    assert_eq!(
+        timed,
+        vec![8, 2, 2],
+        "the first batch publishes (and carries this push's pack), the rest do not: {timed:?}"
+    );
+    let control = puts_per_batch(0, 3).await;
+    assert_eq!(
+        control,
+        vec![8, 4, 4],
+        "with the timer off every batch republishes them: {control:?}"
+    );
+
+    // The bucket still gets them: what the timer changes is when.
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c1 = rig.push_commit("refs/heads/main", None, "one").await;
+    assert!(rig.store.get_whole(&rig.sc.cfg.info_refs_key(), None).await.is_ok());
+    let _ = rig.push_commit("refs/heads/main", Some(&c1), "two").await;
+    let before = rig.store.get_whole(&rig.sc.cfg.info_refs_key(), None).await.unwrap().1;
+    // The tick's due check, which is what the serving loop runs.
+    assert!(!batch::derived_due(&mut rig.sc, super::now_unix()), "not due inside the window");
+    assert!(
+        batch::derived_due(&mut rig.sc, super::now_unix() + 61),
+        "due once the window has passed"
+    );
+    batch::publish_derived(&mut rig.sc).await.expect("derived");
+    let after = rig.store.get_whole(&rig.sc.cfg.info_refs_key(), None).await.unwrap().1;
+    assert_ne!(before, after, "and the refresh carries the second push's ref");
 }
 
 /// `HEAD` names the default branch. It is published once and then only
@@ -3749,6 +3834,10 @@ async fn a_retained_pack_is_never_named_by_a_batch() {
         assert!(!packs.contains(p), "{p} is retained, not re-named");
     }
     // `objects/info/packs` is the snapshot's list, not the directory's.
+    // Written on the batch here rather than on the timer: what this
+    // asserts is WHICH packs the derived list names, not when.
+    rig.sc.cfg.derived_every_secs = 0;
+    batch::publish_derived(&mut rig.sc).await.expect("derived");
     let info = std::fs::read_to_string(rig.sc.cfg.repo.join("objects/info/packs")).unwrap();
     let listed: Vec<&str> = info.lines().filter_map(|l| l.strip_prefix("P ")).collect();
     let mut want: Vec<&str> = packs.iter().map(|s| s.as_str()).collect();
@@ -3762,10 +3851,10 @@ async fn a_retained_pack_is_never_named_by_a_batch() {
 
 /// The log's price, measured against the same batch without it.
 ///
-/// It is one PUT and it must stay one PUT: the fixed per-push cost is
-/// four requests (the test above holds that), and a hint for followers
-/// that quietly became two round trips per push would be a bad trade
-/// nobody had made deliberately.
+/// It is one PUT and it must stay one PUT. The batch it is measured on
+/// is one inside the derived files' window — the shape a repository at
+/// rate actually runs — so the control is two requests and the log
+/// makes it three.
 #[tokio::test]
 async fn the_batch_log_costs_exactly_one_put_per_batch() {
     async fn cost(log_on: bool) -> u64 {
@@ -3790,7 +3879,7 @@ async fn the_batch_log_costs_exactly_one_put_per_batch() {
     }
     let off = cost(false).await;
     let on = cost(true).await;
-    assert_eq!(off, 4, "the control is §4's four requests");
+    assert_eq!(off, 2, "the control inside the derived window is renew + CAS");
     assert_eq!(on, off + 1, "the log is one PUT per batch and nothing else");
 }
 

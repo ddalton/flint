@@ -209,6 +209,16 @@ impl Git {
             // same 5 s; it is set here so the guarantee does not rest
             // on a default.
             ("receive.keepAlive", "5"),
+            // Partial clone. Without this `upload-pack` IGNORES a
+            // client's `--filter`, silently, and serves a full clone
+            // while git prints a warning the user does not read — which
+            // is how `forge/e2e/gitqual` first passed the leg for it.
+            // A blobless clone of a repository whose size is its blobs
+            // is the difference between a working agent and a pod that
+            // downloads a tier it will never open, and the objects it
+            // then asks for on demand are served from the same local
+            // repository every other read comes from.
+            ("uploadpack.allowFilter", "true"),
             ("core.logAllRefUpdates", "true"),
         ] {
             self.must(&["config", k, v], None).await?;
