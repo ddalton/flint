@@ -12,6 +12,313 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.47.0] - 2026-09-08
+
+Cut for the first entry below, which is a data-integrity fix. Anyone
+running 1.46.0 should move to this release: the `flint-forge-syncer`
+image published at `1.46.0` predates the fix, and under concurrent
+`refs/for` pushes it can write a bucket it will later refuse to restore
+from.
+
+### Fixed — flint forge: a batch could publish a ref whose parent reached no pack
+
+- **A repository could become unrecoverable from S3 while intact on
+  disk.** Found by the F14 drill on a live cluster (runcj): after ~500
+  push attempts from 4 concurrent agents plus `refs/for` proposals, the
+  syncer CrashLooped with exit 78, its deliberate refusal code —
+  `broken link from commit 12ea8ff2… to commit 453b2836…; missing
+  commit 453b2836…`. Every restart refused again, which is correct:
+  forge detected the broken chain rather than serving a corrupt
+  repository, and **no client was served bad data**. But the repository
+  could not be rebuilt from the bucket.
+- **Two defects, and the second is why the first became durable.**
+  `judge_merge` takes its base from the *effective* ref map, which
+  earlier commands in the same batch have already moved — so a second
+  merge's base is the first merge's tip, a commit that exists at that
+  moment only as a loose object the very same call is meant to pack.
+  `excludes` was `merge_bases + snap.refs`, so `pack-objects` was handed
+  `M ^M` and dropped M from its own pack. Separately,
+  `update-ref --stdin` refuses two updates to one ref, and it refuses at
+  **step 6** — after the pack was built, uploaded, and the snapshot CAS
+  landed at step 5. So a batch that git will reject gets **published
+  first**, and errors afterwards.
+- **Fixed by excluding only what the bucket provably holds** — the
+  snapshot's own refs, which a CAS names only when it uploaded them or a
+  prior CAS did. A base equal to one of those, the ordinary case, is
+  still excluded through it, so the pack stays small exactly when that
+  is safe. And by **coalescing to one transaction entry per ref**,
+  keeping the first entry's `old_oid` and the last entry's `new_oid`.
+  Coalescing rather than refusing the later proposals, because the
+  merges are already chained — the last tip contains every earlier one —
+  so every agent's work lands, which is what `refs/for` under
+  concurrency is for.
+- Concurrency makes this ordinary rather than exotic: **four agents
+  proposing `refs/for/main` at once arrive in one batch.**
+- The regression test reproduces the cluster's exact message — two
+  merges in one batch, a cold restore from the bucket alone, and
+  `fsck --connectivity-only`, the same oracle the real syncer runs on
+  every start. The single-merge test beside it cannot see this, because
+  with one merge the only base *is* the snapshot's ref and is durable.
+- Also fixes a doctest failing since it was written: an indented block
+  in `server_created`'s doc comment is a doctest, and rustdoc was trying
+  to compile a git error message as Rust.
+
+### Added — flint forge: the third door, `/repo/<ns>/<name>/files` beside git on one port
+
+- **One listener, one port, two route tables.** v1.46.0 shipped the
+  syncer's half of the REST file API; this is the routing, the identity
+  and the wake. Rows 1-8 of `decide_for` are shared with the git door
+  and a test asserts they agree on every one; row 9 is not.
+- **The wake was missing rather than merely absent.** The idle ladder
+  parks a quiet repository at replicas 0 and only a door arms
+  `chert.us/requested-at`, so an HTTP read of a slept repository reached
+  a headless name with no EndpointSlice behind it while a `git fetch`
+  for the same repository came straight back. One backend, two answers,
+  depending on which client asked.
+- **A healthy repository used to answer `503` forever.**
+  `Door::FileApi` switches on an `ApiEndpointPublished` condition the
+  *lite* operator writes, and a `FlintRepo` hardcodes
+  `conditions: None`. It is now `501` when `spec.fileApi.enabled` is
+  unset — nothing about waiting fixes that — and `503` only when the
+  flag is on and the status write has not landed.
+- Two absences found by writing the branch above them: `status.refused`
+  was read nowhere, so every refused repository was answered "this share
+  is Failed — see its conditions", pointing at a field the forge
+  operator hardcodes to `None`; and `token_version` was left at `0`
+  while the deriver's contract is that the first version is 1.
+- Refusals above row 9 now say **"repository"** to a repository door. A
+  message saying "share" to someone holding a repository URL sends them
+  looking for a FlintShare that does not exist.
+- `--git-only` deliberately does **not** imply `--repo-files`. Written
+  the other way first, which would have made the chart's own
+  `repoFiles.enabled: false` a lie — an operator who turned the file
+  door off would have got it anyway, onto tenant data.
+- `spec.fileApi.tokenSecret` and this door are alternatives, and the
+  door says so by name rather than 401-ing every request.
+
+### Added — flint forge: a person at the door — an issuer-minted JWT as the principal
+
+- **The door accepts a JWT an external issuer minted, verifies it
+  offline against that issuer's keys, and uses its `sub` — an actual
+  person — as the principal.** Off entirely unless `--jwt-issuer` is
+  set, so an install that does not configure it behaves exactly as
+  before.
+- **Branch patterns become per-person.** `agent/alice/*` now bounds
+  Alice's branches, which is the limitation the architecture document
+  records as unfixable while every principal is a ServiceAccount many
+  pods share.
+- **No CRD change.** `jwt:user:<sub>` is a prefixed entry in the
+  existing `serviceAccounts` array: one matcher arm, no schema edit,
+  nothing pruned, and no blast radius to lean, passthrough, the broker
+  or the CSI node plugin, which all deserialize the same `Consumers`.
+  Unprefixed keeps meaning a ServiceAccount and `*` keeps meaning both.
+- **Keys are cached; verdicts never are.** `CachingReviewer` exists to
+  spare the apiserver a round trip; a signature check has no round trip
+  to spare. A verdict cache would buy nothing and would cost the one
+  bound that matters — with revocation out of scope, `exp` is the only
+  thing that ends a session, and a cached verdict honours it up to a TTL
+  late.
+- **The verifier is chosen from an unverified `iss`, and there is no
+  fallback.** That is safe because the choice only *selects* a verifier
+  and every verifier still checks signature, issuer and audience itself
+  — a forged `iss` routes a token to something that refuses it. A
+  fallback is what would make it unsafe, so an unrecognised issuer goes
+  to TokenReview, which fails closed. The door **refuses to start** when
+  the cluster's ServiceAccount issuer equals the configured one, reading
+  the cluster's issuer from its own mounted token rather than asking an
+  operator to look it up.
+- `Vouched::{Kubernetes, Issuer}` is an explicit discriminator on
+  `Identity` rather than optional fields. Both directions are
+  load-bearing: a person whose `sub` is `agent-runner` must not match a
+  bare ServiceAccount entry, and a pod must not match a `jwt:user:` one
+  however its username reads.
+- An algorithm allowlist, because `alg` comes from the token — an HS256
+  token is refused rather than verified with a public key as its secret.
+  A door-side lifetime ceiling, because issuers default to lifetimes
+  measured in months. A refetch floor on the key set, so a stream of
+  unknown-`kid` tokens cannot become a denial-of-service against the
+  issuer, delivered by the door.
+- `aud` is supported and optional, enforced when `--jwt-audience` is set
+  and **warned about at start-up when it is not**.
+- 151 unit tests behind it and a 12/12 mutation matrix. The router's
+  oracle is a **counter**, not a status code: a broken router still
+  refuses, so a test asserting 401 passes with the routing inverted,
+  deleted, or replaced by a coin flip. Adding a fallback killed exactly
+  one test out of 151, which is why both directions are pinned.
+
+### Fixed — flint forge: an unreachable verifier is not a bad credential
+
+- `CachingReviewer` decided what was safe to cache by reading the
+  error's text — `Err(e) => !e.starts_with("TokenReview:")`. Right for
+  exactly one reviewer; a second one's transport failure does not begin
+  with that prefix and **would have been cached as though the credential
+  had been judged**, holding the door shut for the whole TTL after the
+  dependency recovered. That is the shape of a deploy of that
+  dependency. Latent while `KubeReviewer` was alone, live the moment a
+  second verifier landed beside it.
+- The question the cache asks is not "what went wrong" but "whose fault
+  is it", so that is now the type. `ReviewError::Refused` is a
+  judgement about the credential and is cached on purpose — an agent
+  with a dead token retries in a loop, and an uncached refusal turns
+  that loop into load. `ReviewError::Unreachable` says nothing about the
+  credential and is never cached.
+- **Both doors stop answering `401` for a verifier they could not
+  reach.** A git credential helper told its credential was rejected may
+  *discard* it, so an apiserver blip became a re-authentication for
+  every agent that hit it. Unreachable is now `503` with a `Retry-After`
+  and no challenge; a genuine refusal still challenges.
+- The test that named this behaviour **already existed and was vacuous
+  for the case it named** — it constructed the string
+  `"TokenReview: connection refused"`, which is precisely what the
+  `starts_with` guess looked for. It pinned the convention, not the
+  property.
+
+### Added — flint forge: `ConsumersSound`, so the operator says what `spec.consumers` authorizes
+
+- With an issuer configured, `serviceAccounts: ["*"]` no longer means
+  "any pod in this cluster holding a token for the door's audience". It
+  means that **and** "any person that issuer will vouch for" — not a
+  pod, not in the cluster. `aud` cannot narrow it when the issuer mints
+  only a topology-wide audience. Nothing in the CR said so.
+- **Four findings, security before breakage**: `PrincipalsUnenforced`
+  (people can reach this repository and no NetworkPolicy is rendered —
+  the syncer takes `X-Remote-User` on trust, so forging it stops buying
+  the coarse rights shared by every pod on a ServiceAccount and starts
+  buying one named person's); `WildcardAdmitsPeople`;
+  `PrincipalsWithNoIssuer` (the mirror, and a *silent breakage* rather
+  than an exposure — nothing can verify these entries, so every person
+  named is refused and nothing anywhere logs why); and
+  `EntryMatchesNobody`.
+- **It refuses nothing**, and that is the decision. `Failed` takes a
+  repository to zero replicas, so a wrong opinion here would cost a
+  working repository its service. One `ConsumersSound` condition plus a
+  log line; a door with no issuer is reported on nothing at all, so an
+  ordinary forge deployment carries no standing condition.
+- **The operator is told, not guessing.** The chart renders this
+  operator and the door from one values file, so `door.jwt.issuer` is
+  passed as `FLINT_FORGE_DOOR_JWT_ISSUER`. The audit is exact rather
+  than inferring an issuer from the shape of the list — a bare `*` names
+  no person, is indistinguishable by shape from an ordinary list, and is
+  precisely the case that needs reporting.
+- One condition type rather than four, and `lastTransitionTime` is
+  carried forward while the status holds — restamping it would make it a
+  clock, and this reconcile runs every 5 to 300 seconds.
+- The prefix comes from the matcher: `consumer_allows`' own
+  `JWT_USER_PREFIX` is imported rather than spelled again.
+- No CRD change (`status.conditions` was already in the schema and
+  unused), no chart values change.
+
+### Added — formal: server-built commits and ancestry (`ForgeMergeChain.tla`)
+
+- **`ForgeSync.tla` could not have caught the defect above**, and the
+  reason is specific: `merge`, `commit_tree`, `refs/for` and
+  `server_created` appear zero times in it, so it has no server-built
+  commits; `holds[q]` maps a pack to a set of pushes, so a commit is an
+  atomic token with no parent and "the tip is present, its parent is
+  not" is not expressible. Its `Restore` refuses only when the tip is in
+  no named pack, while the syncer runs `fsck --connectivity-only` over
+  the whole reachable graph — **so `ForgeSync` would call the corrupt
+  bucket restorable.** A comment at the predicate now says so, so
+  `Inv_NoUnrestorable` is not cited as covering this class.
+- The new module adds that dimension and nothing else — server-built
+  commits, the base each was built on, the pack a batch writes, and a
+  restore predicate that is **reachability** rather than tip-presence.
+  Deliberately separate and small: `ForgeSync` is 1,300 lines about
+  leases, folds and stragglers, and this question is orthogonal.
+- Three runs wired into the gate (237 → 240). The strict run's action
+  coverage shows `BatchTwoMerges` firing 4 times, so it is not passing
+  vacuously; the two mutation runs restore each defect and TLC must find
+  the invariant that defect is *about* — named individually rather than
+  as one combined `Inv`, because a combined one lets a mutation "find
+  the loss" by breaking something else entirely.
+
+### Added — flint forge: three drills on real clusters, and a control with teeth
+
+- **F13, the third door (runci): 25 passed, 0 failed.** A `git clone`
+  and a REST list at the same authority, asserted as a byte-identical
+  authority component. A forged `X-Remote-User` overridden by the door —
+  the leg F12 structurally could not run. Four concurrent writers on one
+  file with one `If-Match`: 1× 2xx, 3× 409/412. **A repository reaped to
+  replicas 0 and woken by a plain HTTP read in 7 s**, with a fresh pod
+  UID and the annotation armed by the door.
+- **What a browser save costs, which nobody had:** 199 saves of ~45
+  typed bytes, 180 ms apart — **2,790 bytes in S3 per save, 62× the
+  bytes typed, and ~4 objects** (804 for 199 saves). That is the fixed
+  cost of a commit and it does not shrink for a smaller edit, which
+  makes per-keystroke autosave the wrong shape for a browser app and
+  human-paced saving unremarkable. Pre-compaction.
+- **F14, N agents editing one file (runck): 22 passed, 0 failed.**
+  Nothing here can deadlock — no client holds anything another waits on
+  — so the failure mode is *starvation*, measured as a distribution of
+  attempts per agent and never as a wall-clock number.
+  **`refs/for` removes the race, not the disagreement**: with disjoint
+  content all 20 edits landed on the first attempt with 0 refusals and
+  19 server-built merges, where the same work by rebase-retry took 30
+  refusals and a worst case of 16 attempts; on one contested file 5
+  landed and all 15 refusals were deterministic content conflicts naming
+  the path. Arm C is a positive control on **data loss** and fails if it
+  does not lose work — `-X ours` during a rebase discards the agent's
+  own edit and then reports success.
+- **F15, a person at the door (runck): 20 passed, 0 failed.** The
+  repository does not list `agent-runner`, and that absence is the whole
+  drill: every other forge drill authenticates with the pod's own
+  ServiceAccount token, so if that worked here the JWT would be
+  decoration — P2 asserts the pod token is refused. The credential
+  helper emits the JWT as the Basic **password**, which is the design's
+  claim that no protocol change is needed, tried here for the first
+  time.
+- **What the verified identity does and does not govern, corrected on
+  the wire.** A commit a *client* makes is authored by that client's git
+  config and arrives inside a pack; forge cannot rewrite it without
+  invalidating the pack, and does not try. The verified identity governs
+  **authorization**, and authors the commits the **server** creates — a
+  `refs/for` merge, or a file-API write. P3 sets `user.name`/
+  `user.email` to someone else and asserts both halves. P4 has alice
+  push `agent/alice/x` (must succeed) and `agent/bob/x` (must be
+  refused), so the per-person pattern is doing work rather than
+  admitting everything. P5 requires a valid signature with a 30-day
+  lifetime — the shape of Knox's 120-day default — to be refused, with a
+  10-minute token accepted as the control. P6 reads `status.conditions`
+  and requires `ConsumersSound=False` naming `WildcardAdmitsPeople`,
+  with a control repository that stays `True`.
+- **A corrupt-bucket control, because a leg that only ever sees healthy
+  buckets cannot be trusted to notice an unhealthy one.** F14's
+  restorability oracle would have passed every run before 2026-09-08,
+  including the one whose bucket was already corrupt. It now requires no
+  syncer restart through any arm, then deletes the pod and requires a
+  **fresh** one to rebuild from S3 alone, with the UID compared so
+  "still Ready" cannot be the old process that never reread the bucket.
+  `f14-corrupt-control.sh` replays a preserved corrupt prefix and
+  requires the refusal, through exactly the path that oracle uses —
+  4 passed, 0 failed against the fixed build.
+
+### Known — flint forge
+
+- **JWT phase 2 is blocked upstream.** Groups arrive from Knox as an
+  unsigned header rather than as claims, so binding them would mean
+  trusting a relay; and revocation would make forge depend on a Knox
+  runtime call. Both are deferred, which removes two problem classes
+  rather than postponing them. The consequence with teeth: **`exp` is
+  the only thing that ends a session**, and it is now a person's rights
+  rather than a shared robot's.
+- **The audience is topology-wide, not forge-specific.** Knox can set an
+  `aud` but only as a static topology-wide value, and this deployment
+  leaves it unset — so any service in the same topology can replay a
+  user's token against forge as that user, bounded by `spec.consumers`
+  and with no second line while revocation is deferred. The fix is a
+  dedicated Knox topology, which is a deployment decision and not a code
+  one. This is what `ConsumersSound` exists to make visible.
+
+### Fixed — docs: the agent-fleet guide pinned a chart version it does not ship
+
+- `docs/flint-lite-for-agent-fleets.{md,html,pdf}` said
+  `flint-lite-operator` `0.2.12` in its table row and in **the helm
+  install line a reader copy-pastes**, while the chart has been `0.2.13`
+  since v1.45.0 — the same commit bumped the chart and updated only the
+  guide's footer. A reader following it would install the wrong
+  operator. The `guide_pins` test caught it and had been red for four
+  days.
+
 ## [1.46.0] - 2026-09-08
 
 ### Added — flint forge: a REST file API, so a browser can edit what agents push
@@ -5275,7 +5582,9 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.45.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.47.0...HEAD
+[1.47.0]: https://github.com/ddalton/flint/compare/v1.46.0...v1.47.0
+[1.46.0]: https://github.com/ddalton/flint/compare/v1.45.0...v1.46.0
 [1.45.0]: https://github.com/ddalton/flint/compare/v1.44.0...v1.45.0
 [1.44.0]: https://github.com/ddalton/flint/compare/v1.43.0...v1.44.0
 [1.43.0]: https://github.com/ddalton/flint/compare/v1.42.0...v1.43.0
