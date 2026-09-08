@@ -915,6 +915,287 @@ impl Git {
         let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
         Ok((major, minor))
     }
+
+    // ── The file API's plumbing (docs/plans/forge-file-api-design.md §4.2) ──
+    //
+    // A REST write is structurally the same shape as a server-side
+    // merge: it invents objects the server was not handed, and the
+    // batch packs and uploads them before any ref moves. What it needs
+    // beyond the merge path is a tree edited BY PATH — which git gives
+    // through a scratch index — and content that survives the trip,
+    // which `Output` does not provide.
+
+    /// Run git and keep stdout as BYTES.
+    ///
+    /// `Output::stdout` is `from_utf8_lossy`, which is right for oids
+    /// and ref names and destroys everything else: a 1 KiB blob of all
+    /// 256 byte values comes back through it with 512 replacement
+    /// characters. No caller before the file API ever read content, so
+    /// this is a second runner rather than a change to the first —
+    /// `must()`'s error text still wants a `String`.
+    pub async fn run_bytes(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+        stdin: Option<&[u8]>,
+    ) -> ForgeResult<OutputBytes> {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
+            .arg(&self.repo)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("HOME", "/nonexistent")
+            .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd.spawn()?;
+        if let Some(bytes) = stdin {
+            let mut sink = child.stdin.take().expect("stdin piped");
+            sink.write_all(bytes).await?;
+            sink.shutdown().await?;
+        }
+        let out = child.wait_with_output().await?;
+        Ok(OutputBytes {
+            status: out.status.code().unwrap_or(-1),
+            stdout: out.stdout,
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
+    /// Write a blob and return its oid. Bytes in, oid out — the oid is
+    /// ASCII, so the lossy runner is safe for the OUTPUT here even
+    /// though it would not be for the input.
+    pub async fn hash_object(&self, bytes: &[u8]) -> ForgeResult<String> {
+        Ok(self
+            .must(&["hash-object", "-w", "--stdin"], Some(bytes))
+            .await?
+            .trim()
+            .to_string())
+    }
+
+    /// A blob's bytes, by oid. Callers resolve the path to an oid with
+    /// [`Git::ls_tree`] first, which is also the only reliable
+    /// existence check: `cat-file --batch-check` EXITS 0 on a missing
+    /// path and reports it as text, and an absent submodule commit is
+    /// indistinguishable from an absent path through it.
+    pub async fn cat_blob(&self, oid: &str) -> ForgeResult<Vec<u8>> {
+        let out = self.run_bytes(&["cat-file", "blob", oid], &[], None).await?;
+        if out.status != 0 {
+            return Err(ForgeError::Git(format!(
+                "git cat-file blob {oid} exited {}: {}",
+                out.status,
+                out.stderr.trim()
+            )));
+        }
+        Ok(out.stdout)
+    }
+
+    /// Entries of `rev:path`, or of `rev` itself when `path` is empty.
+    ///
+    /// `-z` throughout because git ACCEPTS a path containing a newline
+    /// (measured), which a line-oriented parse would split in half.
+    /// `--format` rather than the default columns so the delimiter is
+    /// ours and the size is present.
+    ///
+    /// An empty result means "no such path": git cannot store an empty
+    /// directory, so there is no case where a real path lists as
+    /// nothing.
+    pub async fn ls_tree(
+        &self,
+        rev: &str,
+        path: &str,
+        recursive: bool,
+    ) -> ForgeResult<Vec<TreeEntry>> {
+        const FMT: &str = "--format=%(objectmode) %(objecttype) %(objectname) %(objectsize) %(path)";
+        let spec = if path.is_empty() { rev.to_string() } else { format!("{rev}:{path}") };
+        let mut args = vec!["ls-tree", "-z", FMT];
+        if recursive {
+            args.push("-r");
+        }
+        args.push(&spec);
+        let out = self.run_bytes(&args, &[], None).await?;
+        if out.status != 0 {
+            // 128 here is "not a valid object name" — an absent path or
+            // an unborn branch, not a failure of the server.
+            return Ok(Vec::new());
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut entries = Vec::new();
+        for rec in text.split('\0') {
+            if rec.is_empty() {
+                continue;
+            }
+            // mode SP type SP oid SP size SP path — path may contain
+            // spaces, so split only four times.
+            let mut it = rec.splitn(5, ' ');
+            let (Some(mode), Some(kind), Some(oid), Some(size), Some(p)) =
+                (it.next(), it.next(), it.next(), it.next(), it.next())
+            else {
+                continue;
+            };
+            entries.push(TreeEntry {
+                mode: mode.to_string(),
+                kind: kind.to_string(),
+                oid: oid.to_string(),
+                // Trees and gitlinks report "-", not a number.
+                size: size.trim().parse::<u64>().ok(),
+                path: p.to_string(),
+            });
+        }
+        Ok(entries)
+    }
+
+    /// One entry of `rev:path`, or `None`. The single-path form uses
+    /// `-- <path>` rather than `rev:path` so that a directory answers
+    /// with its own tree entry instead of its contents.
+    pub async fn tree_entry(&self, rev: &str, path: &str) -> ForgeResult<Option<TreeEntry>> {
+        const FMT: &str = "--format=%(objectmode) %(objecttype) %(objectname) %(objectsize) %(path)";
+        let out = self
+            .run_bytes(&["ls-tree", "-z", FMT, rev, "--", path], &[], None)
+            .await?;
+        if out.status != 0 {
+            return Ok(None);
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let Some(rec) = text.split('\0').find(|r| !r.is_empty()) else {
+            return Ok(None);
+        };
+        let mut it = rec.splitn(5, ' ');
+        let (Some(mode), Some(kind), Some(oid), Some(size), Some(p)) =
+            (it.next(), it.next(), it.next(), it.next(), it.next())
+        else {
+            return Ok(None);
+        };
+        Ok(Some(TreeEntry {
+            mode: mode.to_string(),
+            kind: kind.to_string(),
+            oid: oid.to_string(),
+            size: size.trim().parse::<u64>().ok(),
+            path: p.to_string(),
+        }))
+    }
+
+    /// Apply `edits` to `parent_tree` and return the new tree's oid.
+    ///
+    /// A scratch index, never `mktree`: `mktree` validates almost
+    /// nothing — it ACCEPTS an entry named `.git` (measured), and
+    /// forge's own restore proof is `fsck --connectivity-only`, which
+    /// does not flag it. `read-tree` + `update-index` gets git's
+    /// `verify_path` for free, so `/abs`, `a/../b`, `.git/config`,
+    /// `.GIT/config` and file-vs-directory collisions are all refused
+    /// before anything is written.
+    ///
+    /// The index is per CALL. Sharing one across concurrent requests
+    /// gives either a hard `index.lock` failure or a phantom write in
+    /// which every racer commits everyone's edits (both measured).
+    ///
+    /// **What this does NOT guard: a file-over-directory collision.**
+    /// `Set { path: "a/b" }` where `a/b/` is a directory succeeds with
+    /// exit 0, no stderr, and **silently replaces the whole subtree** —
+    /// every file under `a/b/` is gone from the result (measured;
+    /// `--cacheinfo` refuses the same edit, `--index-info` does not).
+    /// A caller that serves file writes MUST read the target's kind
+    /// first and refuse, which the API layer does because it needs the
+    /// kind for the ETag and the mode anyway.
+    pub async fn build_tree(
+        &self,
+        parent_tree: Option<&str>,
+        edits: &[IndexEdit],
+    ) -> ForgeResult<String> {
+        let idx = ScratchIndex::new(&self.repo)?;
+        let env = [("GIT_INDEX_FILE", idx.path.as_str())];
+
+        // git's intrinsic empty tree makes the unborn branch and the
+        // ordinary case one code path: `read-tree` accepts it without
+        // the object existing on disk. `read-tree HEAD` on a commitless
+        // repository is a fatal error, which is the branch this avoids.
+        let base = parent_tree.unwrap_or(EMPTY_TREE_OID);
+        // `-c index.skipHash` drops the index file's trailing checksum.
+        // The index is deleted before this function returns and is read
+        // only by the git that wrote it, so the checksum protects
+        // nothing; it is ~17% of the read-tree/write-tree pair at 50k
+        // entries. An older git ignores the unknown key.
+        let skip = ["-c", "index.skipHash=true"];
+        let read = self
+            .run_bytes(&[&skip[..], &["read-tree", base][..]].concat(), &env, None)
+            .await?;
+        if read.status != 0 {
+            return Err(ForgeError::Git(format!(
+                "git read-tree {base} exited {}: {}",
+                read.status,
+                read.stderr.trim()
+            )));
+        }
+
+        if !edits.is_empty() {
+            let mut script = Vec::new();
+            for e in edits {
+                let path = match e {
+                    IndexEdit::Set { path, .. } | IndexEdit::Remove { path } => path,
+                };
+                validate_tree_path(path).map_err(|why| {
+                    ForgeError::Refused(format!("{path}: {why}"))
+                })?;
+                match e {
+                    IndexEdit::Set { path, mode, oid } => {
+                        script.extend_from_slice(format!("{mode} {oid}\t{path}\0").as_bytes());
+                    }
+                    // Mode 0 is the delete. `--remove` and
+                    // `--force-remove` are both "this operation must be
+                    // run in a work tree" in a bare repository
+                    // (measured), so this is the only spelling that
+                    // works here.
+                    IndexEdit::Remove { path } => {
+                        script.extend_from_slice(
+                            format!("0 {}\t{path}\0", zero_oid(40)).as_bytes(),
+                        );
+                    }
+                }
+            }
+            let upd = self
+                .run_bytes(
+                    &[&skip[..], &["update-index", "-z", "--index-info"][..]].concat(),
+                    &env,
+                    Some(&script),
+                )
+                .await?;
+            if upd.status != 0 {
+                return Err(ForgeError::Refused(format!(
+                    "the path was refused by git: {}",
+                    upd.stderr.trim()
+                )));
+            }
+            // The status is NOT the verdict. `--index-info` reports a
+            // refused path as exit 0 with `Ignoring path <p>` and drops
+            // the entry, after which `write-tree` returns a valid oid
+            // for a tree that is missing the write. Anything this
+            // module's own validator did not catch is caught here
+            // rather than answered 200.
+            if upd.stderr.contains("Ignoring path") {
+                return Err(ForgeError::Refused(format!(
+                    "git refused a path in this write: {}",
+                    upd.stderr.trim()
+                )));
+            }
+        }
+
+        let wrote = self
+            .run_bytes(&[&skip[..], &["write-tree"][..]].concat(), &env, None)
+            .await?;
+        if wrote.status != 0 {
+            return Err(ForgeError::Git(format!(
+                "git write-tree exited {}: {}",
+                wrote.status,
+                wrote.stderr.trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&wrote.stdout).trim().to_string())
+    }
+
 }
 
 /// One ref movement, in the shape `receive-pack` hands it to
@@ -924,6 +1205,152 @@ pub struct RefUpdate {
     pub name: String,
     pub old_oid: String,
     pub new_oid: String,
+}
+
+/// Refuse a path git would silently drop, or that would escape the tree.
+///
+/// **This is load-bearing, and the reason is a measurement.**
+/// `update-index --index-info` validates paths and then reports the
+/// refusal as **exit 0 with `Ignoring path <p>` on stderr** — it drops
+/// the entry and succeeds. `--cacheinfo` exits 0 as well, with
+/// `error: Invalid path`. So git's own check exists but its STATUS
+/// cannot be read as a verdict: a caller that trusted the exit code
+/// would build a tree missing the file it was asked to write, and
+/// `write-tree` would hand back a perfectly valid oid for it.
+///
+/// The rules mirror git's `verify_path`. `build_tree` also scans stderr
+/// for `Ignoring path`, so a rule git has that this does not still
+/// becomes an error rather than a silent omission.
+pub fn validate_tree_path(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("the path is empty".into());
+    }
+    if path.starts_with('/') {
+        return Err("the path is absolute".into());
+    }
+    if path.contains('\0') {
+        return Err("the path contains a NUL".into());
+    }
+    // git ACCEPTS a newline in a path (measured). `--index-info -z`
+    // would carry it, but nothing else in this system would survive it
+    // — least of all a listing a browser renders.
+    if path.contains('\n') || path.contains('\r') {
+        return Err("the path contains a newline".into());
+    }
+    for part in path.split('/') {
+        if part.is_empty() {
+            return Err("the path has an empty component".into());
+        }
+        if part == "." || part == ".." {
+            return Err("the path contains `.` or `..`".into());
+        }
+        // `.git` in any case, and the spellings git itself rejects on
+        // case-insensitive and 8.3 filesystems. A tree entry under any
+        // of these is a hook the next clone would run.
+        let lower = part.to_ascii_lowercase();
+        let squeezed = lower.trim_end_matches(['.', ' ']);
+        if squeezed == ".git" || lower.starts_with("git~") {
+            return Err("the path names a git directory".into());
+        }
+    }
+    Ok(())
+}
+
+/// git's intrinsic empty tree. Known to every git without the object
+/// existing on disk, which is what lets [`Git::build_tree`] treat an
+/// unborn branch and an ordinary commit as one path. SHA-1's value —
+/// a SHA-256 repository has a different one, so if forge ever moves,
+/// take this from `git hash-object -t tree /dev/null` rather than
+/// editing the constant.
+pub const EMPTY_TREE_OID: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// A completed `git` run whose stdout is CONTENT rather than text.
+/// See [`Git::run_bytes`] for why this exists alongside [`Output`].
+pub struct OutputBytes {
+    pub status: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: String,
+}
+
+/// One entry of a git tree, as `ls-tree --format` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeEntry {
+    /// `100644` file, `100755` executable, `120000` symlink,
+    /// `160000` submodule (a gitlink), `040000` directory.
+    pub mode: String,
+    /// `blob`, `tree`, or `commit` — a gitlink reports `commit`.
+    pub kind: String,
+    pub oid: String,
+    /// `None` for trees and gitlinks, which report `-` rather than a
+    /// number. A blob's size is available WITHOUT reading the blob,
+    /// which is what makes the API's size cap enforceable before any
+    /// allocation.
+    pub size: Option<u64>,
+    pub path: String,
+}
+
+impl TreeEntry {
+    /// The API's type name for this entry. A symlink is data, never
+    /// something to follow; a gitlink names a commit that is not in
+    /// this repository at all.
+    pub fn kind_name(&self) -> &'static str {
+        match self.mode.as_str() {
+            "040000" | "40000" => "directory",
+            "120000" => "symlink",
+            "160000" => "submodule",
+            "100755" => "executable",
+            _ => "file",
+        }
+    }
+
+    pub fn is_regular_file(&self) -> bool {
+        matches!(self.mode.as_str(), "100644" | "100755")
+    }
+}
+
+/// One path-level change to apply to a tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexEdit {
+    /// Add `path`, or replace what is there, at `mode`.
+    ///
+    /// The mode is an INPUT, never an inheritance: `--index-info`
+    /// silently demoted a `100755` entry to `100644` when the caller
+    /// named the wrong one (measured). A content write must read the
+    /// existing mode and pass it back.
+    Set { path: String, mode: String, oid: String },
+    /// Remove `path`. A rename is a `Remove` and a `Set` in one call.
+    Remove { path: String },
+}
+
+/// A per-call index file, deleted on drop.
+///
+/// Named like [`ScopedOdb`] and for the same reason: two of these must
+/// never collide, because a shared index gives either a hard
+/// `index.lock` failure or a phantom write in which concurrent callers
+/// each commit the others' edits.
+struct ScratchIndex {
+    dir: PathBuf,
+    path: String,
+}
+
+impl ScratchIndex {
+    fn new(repo: &Path) -> ForgeResult<Self> {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Inside the repository so the index lands on the same
+        // filesystem as the objects it names, but not under `objects/`,
+        // where git reports unknown files as garbage.
+        let dir = repo.join(format!("forge-index-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let file = dir.join("index");
+        Ok(ScratchIndex { path: file.to_string_lossy().into_owned(), dir })
+    }
+}
+
+impl Drop for ScratchIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
