@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
-     aria-label="The control plane. The operator watches FlintRepo objects and renders each into a ConfigMap carrying the policy, a headless Service, a one-pod Deployment and, when told where the door runs, a NetworkPolicy; it polls the pod's own /status for its phase, computes Ready, and parks an idle repository at replicas 0. The door admits by TokenReview and consumers, routes by repository, and wakes a parked one by annotating the CR and waiting on it. The lease cell coordinates writers. None of it reads the bucket, and the runner touched none of it.">
+     aria-label="The control plane. The operator watches FlintRepo objects and renders each into a ConfigMap carrying the policy, a headless Service, a one-pod Deployment and, when told where the door runs, a NetworkPolicy; it polls the pod's own /status for its phase, computes Ready, and parks an idle repository at replicas 0. The door admits by TokenReview and consumers, routes by repository across two route tables — git and the REST file API on one listener and one port — and wakes a parked one by annotating the CR and waiting on it. The lease cell coordinates writers. None of it reads the bucket, and the runner touched none of it.">
 <style>
   text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
   .t1{font-size:17.0px;font-weight:600}
@@ -91,7 +91,7 @@
 <text class="t4b c-red" x="980" y="132">X8: the activity clock counts pushes only — a fetch never reaches the syncer — so a clone-only repository is</text>
 <text class="t4b c-red" x="980" y="147">parked one threshold after its wake</text>
 <text class="t4b c-red" x="980" y="162">X7: a failed poll with a Ready pod yields Starting, and the door waits on it</text>
-<text class="t1" x="24" y="284">The door — admission, routing, wake</text>
+<text class="t1" x="24" y="284">The door — admission, routing, wake — five steps in front of TWO route tables</text>
 <rect x="24" y="298" width="296" height="132" rx="7" class="bx"/>
 <path class="f-forge" d="M31,298 H313 A7,7 0 0 1 320,305 V303 H24 V305 A7,7 0 0 1 31,298 Z"/>
 <text class="t2 c-forge" x="40" y="322">1 · authenticate</text>
@@ -110,18 +110,21 @@
 <rect x="652" y="298" width="296" height="132" rx="7" class="bx"/>
 <path class="f-forge" d="M659,298 H941 A7,7 0 0 1 948,305 V303 H652 V305 A7,7 0 0 1 659,298 Z"/>
 <text class="t2 c-forge" x="668" y="322">3 · route</text>
-<text class="t4" x="668" y="342">one Service per FlintRepo, by name; the door's URL</text>
-<text class="t4" x="668" y="357">formula /git/&lt;ns&gt;/&lt;repo&gt;.git; X-Remote-User =</text>
-<text class="t4" x="668" y="372">system:serviceaccount:&lt;ns&gt;:&lt;sa&gt; is set from the</text>
-<text class="t4" x="668" y="387">verified token and cannot be smuggled past the</text>
-<text class="t4" x="668" y="402">allowlist.</text>
+<text class="t4" x="668" y="342">TWO route tables, one listener, one port:</text>
+<text class="t4" x="668" y="357">/git/&lt;ns&gt;/&lt;repo&gt;.git for stock git,</text>
+<text class="t4" x="668" y="372">/repo/&lt;ns&gt;/&lt;name&gt;/files for a file manager (syncer</text>
+<text class="t4" x="668" y="387">:9850). The repository is in the PATH, so 3,000 cost</text>
+<text class="t4" x="668" y="402">one address. X-Remote-User is set from the verified</text>
+<text class="t4" x="668" y="417">token; a forged one is overridden (F13).</text>
 <rect x="966" y="298" width="296" height="132" rx="7" class="bx"/>
 <path class="f-forge" d="M973,298 H1255 A7,7 0 0 1 1262,305 V303 H966 V305 A7,7 0 0 1 973,298 Z"/>
 <text class="t2 c-forge" x="982" y="322">4 · wake</text>
-<text class="t4" x="982" y="342">a parked repository: arm chert.us/requested-at on</text>
-<text class="t4" x="982" y="357">the CR, wait on the CR — never the pod — up to 180 s</text>
-<text class="t4" x="982" y="372">(git clients do not retry a 503); the restore is the</text>
-<text class="t4" x="982" y="387">packs the snapshot names.</text>
+<text class="t4" x="982" y="342">arm chert.us/requested-at on the CR and wait on the</text>
+<text class="t4" x="982" y="357">CR, never the pod — 180 s for git, 25 s for a file read</text>
+<text class="t4" x="982" y="372">(git does not retry a 503; a backend does). ONLY a</text>
+<text class="t4" x="982" y="387">door arms it: before the file door a read of a slept</text>
+<text class="t4" x="982" y="402">repository found no endpoints. F13: woken by a</text>
+<text class="t4" x="982" y="417">READ in 7 s.</text>
 <rect x="1280" y="298" width="296" height="132" rx="7" class="bx"/>
 <path class="f-forge" d="M1287,298 H1569 A7,7 0 0 1 1576,305 V303 H1280 V305 A7,7 0 0 1 1287,298 Z"/>
 <text class="t2 c-forge" x="1296" y="322">5 · bound</text>
@@ -173,9 +176,10 @@
 <text class="t4" x="1087" y="631">idle-to-zero with no flint code but not the auth, and the gateway exists (decision 12).</text>
 <rect x="24" y="756" width="1552" height="100" rx="7" class="panel"/>
 <text class="t2" x="46" y="782">What the control plane has been through</text>
-<text class="t4" x="46" y="800">The wake: an 11 s clone through the door on a pod the request created (F8's neighbour, EC2). The published artifact: the shipped chart could not install itself — it pinned the one image whose gateway rejected --git-only — found by a drill that installs the chart as a user would, which nothing had</text>
-<text class="t4" x="46" y="815">done; one server.tag now names both server images and the operator warns when the two references it is handed disagree (X10). The idle rung: the lite operator's ladder cut to one rung by copy-and-trim, not import, because ~800 of its lines are PVC and hibernate logic that is dead under an</text>
-<text class="t4" x="46" y="830">emptyDir cache.</text>
+<text class="t4" x="46" y="800">The wake: an 11 s clone through the door on a pod the request created (F8's neighbour, EC2), and a 7 s HTTP READ through the file door on a repository reaped to replicas 0, the annotation armed by the door alone (F13, runci, 25 legs green). A browser save is a commit and costs 2,791 B and ~4</text>
+<text class="t4" x="46" y="815">objects in S3 whatever its size — 62x the bytes typed, pre-compaction — so per-keystroke autosave is the wrong shape and human-paced saving is unremarkable. The published artifact: the shipped chart could not install itself — it pinned the one image whose gateway rejected --git-only — found by a</text>
+<text class="t4" x="46" y="830">drill that installs the chart as a user would, which nothing had done; one server.tag now names both server images and the operator warns when the two references it is handed disagree (X10). The idle rung: the lite operator's ladder cut to one rung by copy-and-trim, not import, because ~800 of its</text>
+<text class="t4" x="46" y="845">lines are PVC and hibernate logic that is dead under an emptyDir cache.</text>
 <line class="l-ctl" x1="28" y1="868" x2="54" y2="868" stroke-dasharray="6 5"/>
 <text class="t4" x="60" y="872">control plane</text>
 <rect x="147" y="861" width="14" height="14" rx="3" class="f-forge"/>

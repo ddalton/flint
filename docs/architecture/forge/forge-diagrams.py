@@ -447,9 +447,9 @@ def plate_05():
     s = Plate(W, H, "The control plane. The operator watches FlintRepo objects and renders each into a ConfigMap carrying the "
                     "policy, a headless Service, a one-pod Deployment and, when told where the door runs, a NetworkPolicy; it "
                     "polls the pod's own /status for its phase, computes Ready, and parks an idle repository at replicas 0. "
-                    "The door admits by TokenReview and consumers, routes by repository, and wakes a parked one by annotating "
-                    "the CR and waiting on it. The lease cell coordinates writers. None of it reads the bucket, and the "
-                    "runner touched none of it.")
+                    "The door admits by TokenReview and consumers, routes by repository across two route tables — git and the "
+                    "REST file API on one listener and one port — and wakes a parked one by annotating the CR and waiting on it. "
+                    "The lease cell coordinates writers. None of it reads the bucket, and the runner touched none of it.")
     # operator loop
     s.text(M, 44, "The operator — one FlintRepo becomes three objects and one idle rung", "t1")
     ow = 250
@@ -472,12 +472,12 @@ def plate_05():
             ("r", "X8: the activity clock counts pushes only — a fetch never reaches the syncer — so a clone-only repository is parked one threshold after its wake"),
             ("r", "X7: a failed poll with a Ready pod yields Starting, and the door waits on it")], FE)
     # the door
-    s.text(M, 284, "The door — admission, routing, wake", "t1")
+    s.text(M, 284, "The door — admission, routing, wake — five steps in front of TWO route tables", "t1")
     dw = (W - 2 * M - 4 * GAP) / 5
     door = [("1 · authenticate", "Basic x:<token> → TokenReview at the apiserver, the verdict cached ≤ 60 s by token hash; a refusal is cached, a transport failure is not. A clone is two to four requests, so 1,000 clones would otherwise be 3–4,000 reviews."),
             ("2 · authorise", "spec.consumers must list the ServiceAccount; a credential-less peer gets 401 and is never dialled — authentication precedes the wake, so a peer cannot scale a parked repository up."),
-            ("3 · route", "one Service per FlintRepo, by name; the door's URL formula /git/<ns>/<repo>.git; X-Remote-User = system:serviceaccount:<ns>:<sa> is set from the verified token and cannot be smuggled past the allowlist."),
-            ("4 · wake", "a parked repository: arm chert.us/requested-at on the CR, wait on the CR — never the pod — up to 180 s (git clients do not retry a 503); the restore is the packs the snapshot names."),
+            ("3 · route", "TWO route tables, one listener, one port: /git/<ns>/<repo>.git for stock git, /repo/<ns>/<name>/files for a file manager (syncer :9850). The repository is in the PATH, so 3,000 cost one address. X-Remote-User is set from the verified token; a forged one is overridden (F13)."),
+            ("4 · wake", "arm chert.us/requested-at on the CR and wait on the CR, never the pod — 180 s for git, 25 s for a file read (git does not retry a 503; a backend does). ONLY a door arms it: before the file door a read of a slept repository found no endpoints. F13: woken by a READ in 7 s."),
             ("5 · bound", "no bytes either way for 300 s cuts the request; a wake holds a slot ≤ 180 s. HTTPS at the door is a line in the diagram: nothing in-tree terminates it.")]
     for i, (head, body) in enumerate(door):
         x = M + i * (dw + GAP)
@@ -504,7 +504,7 @@ def plate_05():
             "Not on the list because it is decided: KEDA's HTTP add-on could replace routing, wake and idle-to-zero with no flint code but not the auth, and the gateway exists (decision 12)."], None, "warn")
     s.box(M, 756, W - 2 * M, 100, None, "panel")
     s.text(M + 22, 782, "What the control plane has been through", "t2")
-    yy = s.para(M + 22, 800, "The wake: an 11 s clone through the door on a pod the request created (F8's neighbour, EC2). The published artifact: the shipped chart could not install itself — it pinned the one image whose gateway rejected --git-only — found by a drill that installs the chart as a user would, which nothing had done; one server.tag now names both server images and the operator warns when the two references it is handed disagree (X10). The idle rung: the lite operator's ladder cut to one rung by copy-and-trim, not import, because ~800 of its lines are PVC and hibernate logic that is dead under an emptyDir cache.", W - 2 * M - 44)
+    yy = s.para(M + 22, 800, "The wake: an 11 s clone through the door on a pod the request created (F8's neighbour, EC2), and a 7 s HTTP READ through the file door on a repository reaped to replicas 0, the annotation armed by the door alone (F13, runci, 25 legs green). A browser save is a commit and costs 2,791 B and ~4 objects in S3 whatever its size — 62x the bytes typed, pre-compaction — so per-keystroke autosave is the wrong shape and human-paced saving is unremarkable. The published artifact: the shipped chart could not install itself — it pinned the one image whose gateway rejected --git-only — found by a drill that installs the chart as a user would, which nothing had done; one server.tag now names both server images and the operator warns when the two references it is handed disagree (X10). The idle rung: the lite operator's ladder cut to one rung by copy-and-trim, not import, because ~800 of its lines are PVC and hibernate logic that is dead under an emptyDir cache.", W - 2 * M - 44)
     s.legend(M + 4, 872, [("ctl", "control plane"), (FE, "data plane"), ("red", "open item / hazard")])
     return s
 
