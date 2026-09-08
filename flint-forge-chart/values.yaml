@@ -17,7 +17,7 @@
 image:
   repository: dilipdalton
   name: flint-forge-operator
-  tag: "1.46.0-forge.6"
+  tag: "1.46.0"
   ref: ""
   pullPolicy: IfNotPresent
 

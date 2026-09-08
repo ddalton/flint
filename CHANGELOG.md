@@ -12,6 +12,68 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.46.0] - 2026-09-08
+
+### Added — flint forge: a REST file API, so a browser can edit what agents push
+
+- **Six verbs with flint lite's shape**, served by the syncer on its own
+  port: `GET /files`, `GET|PUT|DELETE /files/content`,
+  `POST /files/move`, and `POST /files/folder` answering `501`. Lite's
+  shape rather than GitHub's for one reason that survives scrutiny — an
+  application already speaking it for lite-backed projects makes the
+  backing module a routing decision instead of a second integration.
+  Both shapes lose the same verb anyway: git has no empty directories,
+  and GitHub's API has no create-folder either.
+- **Still exactly one writer.** A mutation reaches the serving loop on a
+  channel and is executed by the ordinary batch; the handler builds
+  objects and never moves a ref. Writes are planned INSIDE the loop,
+  which is single-threaded over `&mut Syncer` and the only thing that
+  moves these refs — so a tree planned there cannot go stale before the
+  CAS, and ref contention stops being the common case with many writers.
+  A burst of saves becomes one ref movement carrying one commit per
+  person, so authorship survives and the burst still costs one CAS.
+- **Identity split the way git already splits it.** The principal is
+  `X-Remote-User`, which the door sets from a verified TokenReview and
+  the policy judges; the author is `X-Flint-Author`, which the
+  application supplies for the end user it authenticated.
+- **A directory rename costs no content.** Measured, both arms through
+  `pack_new_objects`: renaming a directory holding a 1 MiB file uploads
+  **226 bytes**; editing that same file uploads **1,049,173**. S3 has no
+  rename — a move there is COPY + DELETE billed by the byte, and a folder
+  rename is that for every object under it.
+- `spec.fileApi` renders the listener, its Service port, its
+  environment, and a `status.apiEndpoint`. Off by default. Its own port,
+  never the status one: the syncer serves an unauthenticated `/status`
+  there, and admitting the door to it would delete an explicit test.
+
+### Fixed — flint forge: a ref the server builds must have its objects packed
+
+- **The bucket could hold a ref whose commit was in no pack.** A pushed
+  ref's objects arrive inside a pack `index-pack` already wrote; a ref
+  the SERVER builds has nothing on disk but loose objects, and only
+  packs are uploaded. The next restore then refuses to start with
+  `cannot update ref … trying to write ref with nonexistent object`.
+  The merge path was already safe because it registers its commits
+  explicitly; `PushRequest.server_created` is how everything else says
+  the same thing. **Found by a cluster drill, not by the suite — nothing
+  local restores.**
+- `is_zero("")` is false by design, so an empty base reached
+  `pack-objects` as a bare `^` and it exited `fatal: bad revision '^'`.
+- ...which came back to the caller as **403 policy-refused**, because an
+  unrecognised batch error was classified as a policy refusal. A git
+  failure is the server's, not the caller's, and is a 500 now.
+
+### Fixed — release tooling: a forge scope, and the gate `tag_exists` cannot be
+
+- **`release.sh` had no `forge` scope**, so there was no tooling path to
+  release the forge chart and the only way to do it was by hand.
+- **`Chart.yaml` and `values.yaml` disagreed about which tag the chart
+  pulls** (`-forge.4` vs `-forge.6`). A gate modelled only on lean's
+  would NOT have caught it: both tags were on Docker Hub, so
+  `tag_exists` passes on whichever it is pointed at while the chart
+  pulls the other. The two are now compared to each other.
+
+
 ### Fixed — flint forge: the pack cap plans a fold instead of rewriting the repository
 
 - **A count condition was buying a rewrite unbounded in bytes.** The

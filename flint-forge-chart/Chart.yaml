@@ -13,12 +13,12 @@ type: application
 # 0.1.0: first cut — CRD, controller, server pods, the door's --git arm.
 # 0.2.0: `door.deploy` renders the door itself, with the RBAC it needs
 #        (flintrepos + tokenreviews). First cluster run.
-version: 0.2.0
+version: 0.3.0
 
 # The flint release whose images this chart runs. The operator, the
 # syncer and the gateway ship from the same build and speak the same
 # bucket format and the same status document — keep them in step.
-appVersion: "1.46.0-forge.6"
+appVersion: "1.46.0"
 
 keywords:
   - git
