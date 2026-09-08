@@ -21,7 +21,21 @@ bump — `v1.46.0` — under the policy in `project_release_policy`.
   lines, with the day's five entries at the top.
 - **The suite.** 140 forge lib tests green at `9b81ac9f`.
 
-## BLOCKER 1 — `release.sh` has no `forge` scope
+## BLOCKER 1 — `release.sh` has no `forge` scope — **FIXED 2026-09-07**
+
+A `forge` scope now exists, modelled on lean's, with the three gates
+below plus a fourth the others do not have (see BLOCKER 2). Exercised
+against a disarmed copy of the script — `helm push` and `push_chart`
+stubbed — because it cannot be run for real without publishing.
+
+**The recipe gate caught something on its first run: itself.** It was
+written against `Dockerfile.operator.prebuilt` and the forge chart
+pulls an image built by `Dockerfile.forge-operator.prebuilt`, so it
+refused a release that was fine. Same wrong-recipe miss recorded
+against an earlier forge check. Fixed and re-run; it now passes on
+correct config and refuses on drift.
+
+### The original finding
 
 `publish-images.sh` takes `[all|lean|s3csi|forge]`; `release.sh` takes
 only `lean`, `s3csi|passthrough`, `all`, and no block in it packages or
@@ -46,7 +60,18 @@ exercised end to end without publishing. It wants the user's hand or at
 least the user's review, not a speculative draft written while they were
 out.
 
-## BLOCKER 2 — the chart's two versions disagree
+## BLOCKER 2 — the chart's two versions disagree — **FIXED 2026-09-07**
+
+`Chart.yaml` appVersion is now `1.46.0-forge.6`, agreeing with
+`values.yaml image.tag`. The release still sets both to `1.46.0`.
+
+**And a gate now enforces the agreement, because `tag_exists` cannot.**
+Both `-forge.4` and `-forge.6` were on Docker Hub, so a gate modelled
+only on lean's would have verified one tag while the chart pulled the
+other and passed. Mutation-checked: putting the two back out of sync
+refuses with the reason named.
+
+### The original finding
 
 ```
 flint-forge-chart/Chart.yaml    appVersion: "1.46.0-forge.4"

@@ -39,7 +39,7 @@ chart_dir="$repo_root/flint-csi-driver-chart"
 
 cmd=${1:-check}
 case "$cmd" in check|images|chart|all) ;; *)
-    echo "usage: $0 [check|images|chart|all] [all|lean|s3csi] [--force-republish]" >&2; exit 2 ;;
+    echo "usage: $0 [check|images|chart|all] [all|lean|s3csi|forge] [--force-republish]" >&2; exit 2 ;;
 esac
 
 # SCOPE, matching stage-prebuilt.sh and publish-images.sh. A lean-scoped
@@ -65,9 +65,10 @@ for a in "$@"; do
     case "$a" in
         lean) scope=lean ;;
         s3csi|passthrough) scope=s3csi ;;
+        forge) scope=forge ;;
         all)  scope=all ;;
         --force-republish) force_republish=1 ;;
-        *) echo "unknown argument '$a' — usage: $0 [check|images|chart|all] [all|lean|s3csi] [--force-republish]" >&2
+        *) echo "unknown argument '$a' — usage: $0 [check|images|chart|all] [all|lean|s3csi|forge] [--force-republish]" >&2
            exit 2 ;;
     esac
 done
@@ -295,6 +296,105 @@ EOF
     # so the chart's values no longer name it (`sidecarImage` is gone;
     # reading it crashed the 1.45.0 release gate mid-run). The syncer's
     # tag is still this chart's appVersion, and still must be published.
+    # ── forge ────────────────────────────────────────────────────────
+    #
+    # `publish-images.sh` has taken a `forge` scope since the images
+    # shipped; this did not, so until now there was NO TOOLING PATH to
+    # release the forge chart and the only way to do it was by hand —
+    # which is the thing the note at the top of this file exists to
+    # stop.
+    forge_dir="$repo_root/flint-forge-chart"
+    if [ -d "$forge_dir" ] && in_scope "all forge"; then
+        forge_version=$(python3 -c "import yaml; print(yaml.safe_load(open('$forge_dir/Chart.yaml'))['version'])")
+        forge_app=$(python3 -c "import yaml; print(yaml.safe_load(open('$forge_dir/Chart.yaml'))['appVersion'])")
+        forge_img=$(python3 -c "import yaml; print(yaml.safe_load(open('$forge_dir/values.yaml'))['image']['name'])")
+        forge_tag=$(python3 -c "import yaml; print(yaml.safe_load(open('$forge_dir/values.yaml'))['image'].get('tag') or '')")
+
+        # THE GATE THE OTHERS DO NOT HAVE, and the one this chart
+        # actually needed. `appVersion` and `values.yaml image.tag` are
+        # two answers to "which tag does this chart pull", and they were
+        # `-forge.4` and `-forge.6` when this block was written.
+        #
+        # `tag_exists` cannot catch that: BOTH tags were on Docker Hub,
+        # so a gate modelled only on lean's would verify one tag, the
+        # chart would pull the other, and the drift would ship silently.
+        # Checked here rather than trusted.
+        if [ -n "$forge_tag" ] && [ "$forge_tag" != "$forge_app" ]; then
+            echo "REFUSING to push flint-forge $forge_version: Chart.yaml appVersion" \
+                 "is '$forge_app' but values.yaml image.tag is '$forge_tag'." \
+                 "Two answers to which tag this chart pulls; every gate below would" \
+                 "verify the first while the chart pulled the second." >&2
+            exit 1
+        fi
+
+        # Every image the chart can name, at that one tag. The operator
+        # image is what the chart's own pods run; the syncer and git
+        # images are what the OPERATOR renders per repository, so a
+        # missing one fails later and further away — at the first
+        # FlintRepo rather than at install.
+        forge_syncer=$(python3 -c "import yaml; v=yaml.safe_load(open('$forge_dir/values.yaml')); print((v.get('server') or {}).get('syncerImage') or '')")
+        forge_git=$(python3 -c "import yaml; v=yaml.safe_load(open('$forge_dir/values.yaml')); print((v.get('server') or {}).get('gitImage') or '')")
+        for img in "$forge_img" flint-forge-syncer flint-forge-git; do
+            if ! tag_exists "$img" "$forge_app"; then
+                echo "REFUSING to push flint-forge $forge_version:" \
+                     "$hub_ns/$img:$forge_app is not on Docker Hub." >&2
+                exit 1
+            fi
+        done
+        # A values.yaml that pins a syncer or git image by full
+        # reference must pin THIS appVersion, or the chart ships one
+        # version and renders another.
+        for pinned in "$forge_syncer" "$forge_git"; do
+            case "$pinned" in
+                "") ;;
+                *:"$forge_app") ;;
+                *) echo "REFUSING to push flint-forge $forge_version: values.yaml pins" \
+                        "'$pinned', which is not at appVersion $forge_app." >&2
+                   exit 1 ;;
+            esac
+        done
+
+        # The binaries the chart EXECS must exist in the image it pulls.
+        # `tag_exists` proves something was published; it cannot prove
+        # what is inside it. Both of these are `command:` entries in the
+        # chart's own templates.
+        # Dockerfile.FORGE-operator, not Dockerfile.operator: they are
+        # different images and the forge chart pulls the former. Aiming
+        # this at the latter produced a confident, wrong REFUSING on the
+        # first run of this gate — the same wrong-recipe miss recorded
+        # against an earlier forge check.
+        forge_recipe="$repo_root/spdk-csi-driver/docker/Dockerfile.forge-operator.prebuilt"
+        for bin in flint-forge-operator flint-hub-gateway; do
+            if ! grep -q "/usr/local/bin/$bin" "$forge_recipe"; then
+                echo "REFUSING to push flint-forge $forge_version: the chart execs" \
+                     "/usr/local/bin/$bin but $(basename "$forge_recipe") does not" \
+                     "install it — the image would start and the binary would not exist." >&2
+                exit 1
+            fi
+        done
+
+        # If the operator image is ever an ALIAS rather than its own
+        # build, the two names drift the moment one is rebuilt and the
+        # other is not. Digest equality is the only thing that closes
+        # it, and it is one API call. (Today it is its own build, so
+        # this is inert — it is here so that the day it becomes an
+        # alias, the release does not have to remember.)
+        if [ "$forge_img" != flint-forge-operator ]; then
+            alias_d=$(tag_digest "$forge_img" "$forge_app")
+            src_d=$(tag_digest flint-forge-operator "$forge_app")
+            if [ -z "$alias_d" ] || [ -z "$src_d" ] || [ "$alias_d" != "$src_d" ]; then
+                echo "REFUSING to push flint-forge $forge_version:" \
+                     "$hub_ns/$forge_img:$forge_app is not the same image as" \
+                     "$hub_ns/flint-forge-operator:$forge_app." >&2
+                exit 1
+            fi
+        fi
+
+        helm package "$forge_dir" --destination "$pkg_dir" >/dev/null
+        forge_pkg="$pkg_dir/flint-forge-$forge_version.tgz"
+        push_chart "all forge" flint-forge "$forge_version" "$forge_pkg"
+    fi
+
     lean_dir="$repo_root/flint-lean-chart"
     if [ -d "$lean_dir" ] && in_scope "all lean"; then
         lean_version=$(python3 -c "import yaml; print(yaml.safe_load(open('$lean_dir/Chart.yaml'))['version'])")
