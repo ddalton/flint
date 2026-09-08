@@ -343,6 +343,113 @@ simulator that will be falsified, and their provenance is named.
   is dominating and neither number describes the fix.
 - *Falsifier 2:* P2 rate falls >2 pushes/s in `after` ⇒ the floor is deferring
   folds onto the push path and is wrong at this size.
+
+### M6 RESULT — ran 2026-09-07 on `runcg`, cluster `flint-forge-runcg-530245`
+
+Two runs. The shared-repository run (`m6-after`/`m6-before`, prefix
+`m6-20260907172535`, P9 then P2 on one repository, 3 pairs) and the
+P2-ISOLATED control (`m6p2-after`/`m6p2-before`, prefix
+`m6p2b-20260907175435`, P2 only on repositories that never see P9, 3
+pairs). Both arms of both runs differ by one environment variable, read
+off each pod before anything is scored.
+
+**P9 — the ladder. The floor works, and `foldsim` transferred.**
+
+| arm | pair 1 | pair 2 | pair 3 | range | folds |
+|---|---:|---:|---:|---:|---:|
+| `m6-after` (floor 256) | 1.83x | 1.67x | 1.67x | **1.67-1.83x** | 2 |
+| `m6-before` (floor 0) | 3.08x | 2.90x | 4.33x | **2.90-4.33x** | 26-30 |
+
+Ranges do not overlap; before/after is 1.58-2.60x against a pre-registered
+>=1.10x. `foldsim` predicted the after arm at **1.67x** and the wire
+measured 1.67x twice. This half of `6bc67980` is confirmed on the wire.
+
+**P2 — the floor. The pre-registered prediction is FALSIFIED, and the
+`foldsim` P2 model does not transfer.**
+
+Isolated control, the only P2 figures that are not confounded:
+
+| arm | KiB/push range | folds | base rebuilds |
+|---|---:|---:|---:|
+| `m6p2-after` (floor 256) | 2.57-3.12 | **9-15** | 0 |
+| `m6p2-before` (floor 0) | 2.94-3.66 | **32-48** | 0 |
+
+before/after spans **0.94-1.42x** — it straddles 1.0 and the ranges
+overlap. The pre-registered falsifier ("P2 arms land within 0.10x =>
+the `foldsim` ladder model does not transfer to the wire") FIRES. The
+predicted 5.65x -> 3.08x is simulator-only. The floor's one measured
+effect on tiny pushes is **3x fewer folds at the same bytes** — an
+operation saving, not a byte saving, and it should be claimed as that.
+
+**The mixed-workload interaction — the finding neither leg was designed
+to produce, and the most important one.**
+
+On the SHARED repository the floored arm re-uploaded the whole repository
+during every tiny-push leg:
+
+| P2 leg | `m6-after` uploaded | folds | `m6-before` uploaded | folds |
+|---|---:|---:|---:|---:|
+| pair 1 (repo ~384 MiB) | **385.4 MiB** | 6 | 3.0 MiB | 45 |
+| pair 2 (repo ~768 MiB) | **769.8 MiB** | 7 | 770.2 MiB | 29 |
+| pair 3 (repo ~1152 MiB) | **1153.9 MiB** | 5 | 1.4 MiB | 32 |
+| cumulative | 24 folds / **4 base rebuilds** | | 187 folds / **2** | |
+
+after's bytes are 1x, 2x, 3x of the 384 MiB each P9 leg deposits, to
+within 0.2%, three times running. The unfloored arm — 8x the folds —
+did it once in three.
+
+*Mechanism.* The 64-pack cap forces a fold once tiny packs accumulate.
+The floor requires that fold to reach 256 MiB. Tiny packs cannot reach it
+between them, so the only fold that satisfies the floor is one that pulls
+in the large packs — the whole repository. The floor converts many cheap
+folds into one full base rebuild per cap trip.
+
+*What the control does and does NOT establish.* The isolated control
+returns **0 base rebuilds on both arms in all six legs**, so the floor
+ALONE, on a repository holding only tiny pushes, does not cause this. But
+that control removed the FUEL, not merely the confound: a 3 MiB
+repository cannot satisfy a 256 MiB floor, so the mechanism cannot fire
+there by construction. The two runs together give a 2x2 — floor AND
+>=256 MiB of content => a rebuild every leg; either alone => none — which
+supports the mechanism and supports "the floor alone is harmless". It
+does NOT support "the floor is safe". An earlier reading in this session,
+that P2's bytes were DEFERRED P9 work being paid off, was refuted by
+pair 3: the unfloored arm sat on the same 1152 MiB repository and
+uploaded 1.4 MiB. It owed nothing.
+
+*Consequence.* The realistic forge workload is exactly the mixed one —
+agents landing small commits into a repository that also takes large
+merges. On that shape the shipped floor is a byte REGRESSION of the size
+of the repository, per cap trip. This is a live defect in `6bc67980`, not
+a rig artifact, and it is the first thing to settle before Design B.
+`docs/architecture/forge/` and the tiers' claims should not quote the
+P2 improvement at all; the P9 ladder number is the one that survived.
+
+**Two rig defects found while running this, both of the "a check that
+cannot fail" class, both fixed and both mutation-checked:**
+
+1. `uploaded_since` ended its S3 listing with `2>/dev/null` and never
+   checked the exit status. A run launched without `AWS_PROFILE` got
+   `NoCredentials` on every listing, an empty stream, and the function
+   returned **0** — indistinguishable from "nothing was uploaded". The
+   first P2-isolated control ran that way, reported 0.0 MiB on both arms
+   with 7,074 keys actually in the bucket, and NOTHING in the run said so.
+   Now it returns `ERR`, callers refuse the leg, the baseline calls fail
+   loudly too (a failed baseline seeds an empty seen-file, which would
+   score the whole repository as new), and P0 proves the listing answers
+   for the prefix before any leg scores bytes. Positive control: with
+   credentials stripped the run now FAILs P0 and exits 1.
+2. P0's arm-assignment check — the one whose comment reads "the arm
+   assignment IS the experiment" — named `m6-after`/`m6-before`
+   literally. Under `ARMS="m6p2-after m6p2-before"` it still PASSED, by
+   reading the floors of the PREVIOUS run's repositories, which were
+   still in the cluster. It now reads `$ARMS`.
+
+The summary also printed P2's bytes-per-push with an `x` suffix, so the
+leg read as `663521.73x` and invited comparison against a 1.30x bar. P9
+divides by pushed bytes and is dimensionless; P2 divides by acks and is
+not. Units are now carried per leg.
+
 - *Vacuity guard, MANDATORY:* the `before` arm must reproduce ≥1.75x. If
   **both** arms come in low, the rig never drove the ladder — exactly how the
   local `foldsim` run failed ("at this size the 2 MiB pushes sit under the
