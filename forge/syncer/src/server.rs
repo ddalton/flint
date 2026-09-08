@@ -57,6 +57,40 @@ pub struct ServerOpts {
     /// repository with no large binaries wants: a client that never
     /// asks pays nothing, and one that does is told plainly.
     pub lfs: Option<LfsOpts>,
+    /// The file API. `None` = not served, which is the default: a
+    /// repository nobody browses through a UI pays nothing.
+    pub file_api: Option<FileApiOpts>,
+}
+
+/// The file API's listener (`docs/plans/forge-file-api-design.md`).
+///
+/// Its OWN port, deliberately. The status listener serves an
+/// unauthenticated `/status` — the epoch holder, the ref map, the
+/// phase — and the door must never be able to reach it. Putting the
+/// file API there would mean admitting the door to that port, which
+/// deletes `render.rs`'s explicit negative test and leaves a route-table
+/// bug one step from a fleet-wide disclosure.
+#[derive(Debug, Clone)]
+pub struct FileApiOpts {
+    /// `host:port`.
+    pub addr: String,
+    /// The ref every write moves. Never `main` by default: the branch
+    /// policy is applied to file-API writes exactly as it is to pushes,
+    /// so pointing this at a protected branch makes every save a 403.
+    pub branch: String,
+    /// The largest object read or written in one request.
+    pub cap: u64,
+    /// A shared bearer, checked before routing. `None` = the port and
+    /// the NetworkPolicy are the whole boundary, which is the rigs'
+    /// posture and not a deployment's.
+    pub token: Option<String>,
+    /// Where the listener actually bound, published once it has.
+    ///
+    /// `addr` may name port 0, and then the real port is only knowable
+    /// from the socket. A caller that guesses instead — bind, drop,
+    /// hope — races anything else doing the same, which is a bug this
+    /// existing precisely to remove.
+    pub bound: Option<Arc<Mutex<Option<String>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +132,23 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
             }
         });
     }
+
+    // The file API's writes reach the serving loop on this channel and
+    // are executed by the ordinary batch. The handler never moves a
+    // ref: one that this process moved outside the batch would be a ref
+    // the bucket does not know about.
+    let (file_tx, mut file_rx) = mpsc::channel::<super::fileapi::FileWrite>(256);
+    if let Some(fa) = opts.file_api.clone() {
+        let git = sc.git.clone();
+        let tx = file_tx.clone();
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            if let Err(e) = super::filehttp::serve(&fa, git, tx, shared).await {
+                eprintln!("flint-forge: file API on {} stopped: {e}", fa.addr);
+            }
+        });
+    }
+    drop(file_tx);
 
     // ── claim ────────────────────────────────────────────────────────
     publish(&shared, &sc, Phase::ClaimingEpoch);
@@ -363,6 +414,68 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
             res = fold_rx.recv() => {
                 if let Some(res) = res {
                     fold_landed(&mut sc, res, &fold_tx).await?;
+                }
+            }
+            incoming = file_rx.recv(), if opts.file_api.is_some() => {
+                // `None` only when every sender is gone, which happens
+                // when the API is not served at all — the guard keeps
+                // this arm from spinning on a closed channel.
+                if let Some(first) = incoming {
+                    let mut writes = vec![first];
+                    // Drain what arrived while the last batch ran, the
+                    // way the hook arm does. A burst of saves from
+                    // several people becomes ONE ref movement.
+                    while writes.len() < 64 {
+                        match file_rx.try_recv() {
+                            Ok(w) => writes.push(w),
+                            Err(_) => break,
+                        }
+                    }
+                    let fa = opts.file_api.clone().expect("guarded above");
+                    // One chain per principal. In this deployment there
+                    // is one — the door authenticates the application
+                    // and the end user is the AUTHOR, not the principal
+                    // — but a chain judged under one principal must not
+                    // carry another's write.
+                    while !writes.is_empty() {
+                        let who = writes[0].principal.clone();
+                        let (mine, rest): (Vec<_>, Vec<_>) =
+                            writes.into_iter().partition(|w| w.principal == who);
+                        writes = rest;
+                        let planned =
+                            super::fileapi::plan_writes(&sc.git, &fa.branch, mine).await;
+                        let moved = match planned.command.clone() {
+                            None => None,
+                            Some(cmd) => {
+                                let push = batch::PushRequest {
+                                    id: 0,
+                                    principal: who.clone(),
+                                    options: vec![],
+                                    // Each caller is answered on its own
+                                    // command's fate; there is one
+                                    // command, so atomicity is moot.
+                                    atomic: false,
+                                    commands: vec![cmd],
+                                };
+                                match batch::run_batch(&mut sc, vec![push], &policy).await {
+                                    Ok(reports) => Some(first_verdict(&reports)),
+                                    Err(e @ ForgeError::Fenced(_)) => {
+                                        super::fileapi::answer(
+                                            planned,
+                                            Some(Err(e.to_string())),
+                                        );
+                                        return Err(e);
+                                    }
+                                    Err(e) => Some(Err(e.to_string())),
+                                }
+                            }
+                        };
+                        let landed = matches!(moved, None | Some(Ok(())));
+                        super::fileapi::answer(planned, moved);
+                        if landed {
+                            publish(&shared, &sc, Phase::Serving);
+                        }
+                    }
                 }
             }
             incoming = rx.recv() => {
@@ -744,6 +857,18 @@ struct LfsCtx {
     store: Arc<dyn flint_store::ObjectStore>,
     prefix: String,
     ttl_secs: u64,
+}
+
+/// The batch's answer for a single-command push, as the file API's
+/// callers need it: `Ok` when the ref moved, the refusal's own words
+/// otherwise. A report with no results is a refusal with no reason,
+/// which must not read as success.
+fn first_verdict(reports: &[PushReport]) -> Result<(), String> {
+    match reports.first().and_then(|r| r.results.first()) {
+        Some(batch::CommandResult::Ok { .. }) => Ok(()),
+        Some(batch::CommandResult::Ng { reason, .. }) => Err(reason.clone()),
+        None => Err("the batch returned no result for this write".into()),
+    }
 }
 
 fn lfs_error(message: &str) -> Vec<u8> {

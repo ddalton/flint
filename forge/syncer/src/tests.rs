@@ -4972,3 +4972,895 @@ async fn an_atomic_push_with_one_bad_ref_lands_neither_and_the_control_lands_one
         cell.snap.refs
     );
 }
+
+// ── The file API's plumbing (docs/plans/forge-file-api-design.md §4.2) ──
+//
+// Every test here pins a behaviour that was MEASURED against real git
+// during the design, not one that was assumed. Where the design names
+// a mutation that must fail, the test runs it.
+
+/// A bare repository with nothing in it, for the plumbing tests.
+async fn bare_repo() -> (tempfile::TempDir, super::gitcmd::Git) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let git = super::gitcmd::Git::new(dir.path().join("repo.git"));
+    git.init_bare("main", None).await.expect("init");
+    (dir, git)
+}
+
+/// The bytes runner exists because the lossy one destroys content, and
+/// this is the control that shows it: the SAME blob through
+/// `cat_blob` is byte-identical and through the lossy path is not.
+///
+/// Without the second half this test would pass against a runner that
+/// happened to be lossless for the bytes it was given — which is every
+/// runner, for ASCII. The 256-value pattern is chosen so that the
+/// lossy path MUST corrupt it.
+#[tokio::test]
+async fn a_blob_of_every_byte_value_round_trips_and_the_lossy_runner_would_not() {
+    let (_d, git) = bare_repo().await;
+    let content: Vec<u8> = (0..=255u8).cycle().take(1024).collect();
+
+    let oid = git.hash_object(&content).await.expect("hash-object");
+    let back = git.cat_blob(&oid).await.expect("cat-blob");
+    assert_eq!(back, content, "cat_blob must return the bytes that went in");
+
+    // The control: the same read through the lossy runner. If this ever
+    // stops differing, `run_bytes` has stopped being necessary and this
+    // test has stopped testing anything.
+    let lossy = git
+        .must(&["cat-file", "blob", &oid], None)
+        .await
+        .expect("cat-file via the lossy runner");
+    assert_ne!(
+        lossy.as_bytes(),
+        content.as_slice(),
+        "the lossy runner must still corrupt this, or the bytes runner is not load-bearing"
+    );
+}
+
+/// An unborn branch has no tree to read, and `read-tree HEAD` on a
+/// commitless repository is a fatal error — so `build_tree` uses git's
+/// intrinsic empty tree and the first write takes the ordinary path.
+/// The nested path also pins that `write-tree` invents the intermediate
+/// trees: `a/` and `a/b/` are never named.
+#[tokio::test]
+async fn the_first_write_needs_no_parent_and_invents_the_intermediate_trees() {
+    let (_d, git) = bare_repo().await;
+    let oid = git.hash_object(b"hello\n").await.expect("blob");
+
+    let tree = git
+        .build_tree(
+            None,
+            &[super::gitcmd::IndexEdit::Set {
+                path: "a/b/c.txt".into(),
+                mode: "100644".into(),
+                oid: oid.clone(),
+            }],
+        )
+        .await
+        .expect("build_tree on an unborn branch");
+
+    let entries = git.ls_tree(&tree, "", true).await.expect("ls-tree");
+    assert_eq!(entries.len(), 1, "one blob, got {entries:?}");
+    assert_eq!(entries[0].path, "a/b/c.txt");
+    assert_eq!(entries[0].oid, oid);
+    assert_eq!(entries[0].size, Some(6));
+}
+
+/// The mode is an INPUT, never an inheritance — measured: naming the
+/// wrong one silently demotes an executable. So the API must read the
+/// existing mode and pass it back, and this pins both halves: the
+/// entry the caller names takes the mode the caller gives, and every
+/// OTHER entry keeps its own.
+#[tokio::test]
+async fn a_write_takes_the_mode_it_is_given_and_leaves_the_others_alone() {
+    let (_d, git) = bare_repo().await;
+    let script = git.hash_object(b"#!/bin/sh\n").await.expect("blob");
+    let plain = git.hash_object(b"one\n").await.expect("blob");
+    use super::gitcmd::IndexEdit;
+
+    let base = git
+        .build_tree(
+            None,
+            &[
+                IndexEdit::Set { path: "run.sh".into(), mode: "100755".into(), oid: script },
+                IndexEdit::Set { path: "a.txt".into(), mode: "100644".into(), oid: plain },
+            ],
+        )
+        .await
+        .expect("base");
+
+    // Rewrite only a.txt; run.sh must keep 100755.
+    let two = git.hash_object(b"two\n").await.expect("blob");
+    let next = git
+        .build_tree(
+            Some(&base),
+            &[IndexEdit::Set { path: "a.txt".into(), mode: "100644".into(), oid: two.clone() }],
+        )
+        .await
+        .expect("update");
+
+    let entries = git.ls_tree(&next, "", true).await.expect("ls-tree");
+    let run = entries.iter().find(|e| e.path == "run.sh").expect("run.sh survived");
+    assert_eq!(run.mode, "100755", "an untouched entry keeps its mode: {entries:?}");
+    let a = entries.iter().find(|e| e.path == "a.txt").expect("a.txt");
+    assert_eq!(a.oid, two, "the touched entry took the new content");
+
+    // And the demotion the design warns about is real: name 100644 for
+    // the executable and it becomes one.
+    let demoted = git
+        .build_tree(
+            Some(&base),
+            &[IndexEdit::Set { path: "run.sh".into(), mode: "100644".into(), oid: run.oid.clone() }],
+        )
+        .await
+        .expect("demote");
+    let e = git.ls_tree(&demoted, "", true).await.expect("ls-tree");
+    let run = e.iter().find(|x| x.path == "run.sh").expect("run.sh");
+    assert_eq!(run.mode, "100644", "the mode follows the caller, which is why it must be read first");
+}
+
+/// git's own `verify_path` is the reason the design chose a scratch
+/// index over `mktree` — `mktree` accepts an entry named `.git`, and
+/// forge's restore proof (`fsck --connectivity-only`) does not flag it.
+///
+/// The second half is the trap that makes this test worth more than
+/// its first half: after a refused `--index-info`, `write-tree` exits 0
+/// and returns the UNCHANGED tree. A `build_tree` that did not check
+/// the status would answer with a valid oid and silently commit
+/// nothing.
+#[tokio::test]
+async fn a_refused_path_is_an_error_and_never_the_unchanged_tree() {
+    let (_d, git) = bare_repo().await;
+    let blob = git.hash_object(b"x\n").await.expect("blob");
+    use super::gitcmd::IndexEdit;
+
+    let base = git
+        .build_tree(
+            None,
+            &[IndexEdit::Set { path: "keep.txt".into(), mode: "100644".into(), oid: blob.clone() }],
+        )
+        .await
+        .expect("base");
+
+    for bad in [".git/config", ".GIT/hooks/pre-commit", "a/../b.txt", "/abs.txt", "./x.txt"] {
+        let r = git
+            .build_tree(
+                Some(&base),
+                &[IndexEdit::Set { path: bad.into(), mode: "100644".into(), oid: blob.clone() }],
+            )
+            .await;
+        match r {
+            Err(super::ForgeError::Refused(_)) => {}
+            Err(other) => panic!("{bad}: wrong error kind: {other:?}"),
+            Ok(tree) => panic!(
+                "{bad}: accepted, tree {tree} — and note it equals the base ({}), which is \
+                 exactly how an unchecked write-tree reports success having done nothing",
+                tree == base
+            ),
+        }
+    }
+}
+
+/// `--remove` and `--force-remove` are both "this operation must be run
+/// in a work tree" in a bare repository — measured. Mode 0 through
+/// `--index-info` is the only spelling that works, and a rename is a
+/// Remove and a Set in ONE call, which is what makes it atomic.
+#[tokio::test]
+async fn delete_and_rename_go_through_index_info_and_rename_keeps_the_mode() {
+    let (_d, git) = bare_repo().await;
+    use super::gitcmd::IndexEdit;
+    let script = git.hash_object(b"#!/bin/sh\n").await.expect("blob");
+    let doomed = git.hash_object(b"bye\n").await.expect("blob");
+
+    let base = git
+        .build_tree(
+            None,
+            &[
+                IndexEdit::Set { path: "bin/run.sh".into(), mode: "100755".into(), oid: script.clone() },
+                IndexEdit::Set { path: "README.md".into(), mode: "100644".into(), oid: doomed },
+            ],
+        )
+        .await
+        .expect("base");
+
+    let next = git
+        .build_tree(
+            Some(&base),
+            &[
+                IndexEdit::Remove { path: "README.md".into() },
+                IndexEdit::Remove { path: "bin/run.sh".into() },
+                IndexEdit::Set { path: "tools/run.sh".into(), mode: "100755".into(), oid: script },
+            ],
+        )
+        .await
+        .expect("delete + rename");
+
+    let entries = git.ls_tree(&next, "", true).await.expect("ls-tree");
+    let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(paths, vec!["tools/run.sh"], "one entry left, got {entries:?}");
+    assert_eq!(entries[0].mode, "100755", "a rename carries the mode the caller supplies");
+    // The emptied directory is pruned by write-tree — the thing an
+    // mktree implementation would have had to do by hand.
+    let top = git.ls_tree(&next, "", false).await.expect("ls-tree root");
+    let names: Vec<&str> = top.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(names, vec!["tools"], "the emptied `bin/` is gone, not an empty tree: {top:?}");
+}
+
+/// The classifier the API answers with. A symlink's content IS its
+/// target and a gitlink's commit is not in this repository at all, so
+/// neither may be served as file bytes.
+#[tokio::test]
+async fn ls_tree_classifies_every_entry_kind() {
+    let (_d, git) = bare_repo().await;
+    use super::gitcmd::IndexEdit;
+    let plain = git.hash_object(b"plain\n").await.expect("blob");
+    let target = git.hash_object(b"dir/target.txt").await.expect("blob");
+
+    let tree = git
+        .build_tree(
+            None,
+            &[
+                IndexEdit::Set { path: "plain.txt".into(), mode: "100644".into(), oid: plain.clone() },
+                IndexEdit::Set { path: "run.sh".into(), mode: "100755".into(), oid: plain.clone() },
+                IndexEdit::Set { path: "link".into(), mode: "120000".into(), oid: target },
+                IndexEdit::Set {
+                    path: "vendor/mod".into(),
+                    mode: "160000".into(),
+                    // A gitlink may name a commit this repository does
+                    // not hold; git accepts it and fsck --connectivity-only
+                    // passes, which is why the API must refuse it by KIND
+                    // rather than by trying to read it.
+                    oid: "0123456789012345678901234567890123456789".into(),
+                },
+                IndexEdit::Set { path: "d/nested.txt".into(), mode: "100644".into(), oid: plain },
+            ],
+        )
+        .await
+        .expect("tree");
+
+    let top = git.ls_tree(&tree, "", false).await.expect("ls-tree");
+    let kind = |p: &str| {
+        top.iter().find(|e| e.path == p).unwrap_or_else(|| panic!("{p} missing from {top:?}")).kind_name()
+    };
+    assert_eq!(kind("plain.txt"), "file");
+    assert_eq!(kind("run.sh"), "executable");
+    assert_eq!(kind("link"), "symlink");
+    assert_eq!(kind("d"), "directory");
+
+    let deep = git.ls_tree(&tree, "", true).await.expect("ls-tree -r");
+    let sub = deep.iter().find(|e| e.path == "vendor/mod").expect("gitlink");
+    assert_eq!(sub.kind_name(), "submodule");
+    assert_eq!(sub.kind, "commit", "a gitlink reports type `commit`");
+    assert!(sub.size.is_none(), "a gitlink has no size");
+    assert!(!sub.is_regular_file(), "a submodule is never servable as file bytes");
+}
+
+/// A blob's size comes from `ls-tree` WITHOUT reading the blob. This is
+/// the whole basis of the design's decision not to stream (§2.2): the
+/// cap can be enforced before a single byte is allocated.
+#[tokio::test]
+async fn a_blobs_size_is_known_before_it_is_read() {
+    let (_d, git) = bare_repo().await;
+    let big = vec![b'z'; 3 * 1024 * 1024];
+    let oid = git.hash_object(&big).await.expect("blob");
+    let tree = git
+        .build_tree(
+            None,
+            &[super::gitcmd::IndexEdit::Set {
+                path: "big.bin".into(),
+                mode: "100644".into(),
+                oid,
+            }],
+        )
+        .await
+        .expect("tree");
+
+    let e = git.tree_entry(&tree, "big.bin").await.expect("entry").expect("present");
+    assert_eq!(e.size, Some(3 * 1024 * 1024), "the size is in the tree listing");
+    assert!(e.is_regular_file());
+
+    // And a path that is not there is None, not an error and not an
+    // empty file — `ls-tree` exits 0 with empty output for a missing
+    // path, which is a silence a caller must not read as success.
+    assert!(git.tree_entry(&tree, "nosuch.txt").await.expect("query").is_none());
+}
+
+/// Concurrent builds must not see each other. A shared index gives
+/// either a hard `index.lock` failure or a phantom write in which every
+/// racer commits everyone's edits — both measured — so the index is per
+/// call, and this runs enough of them at once to catch a regression to
+/// a shared one.
+#[tokio::test]
+async fn concurrent_builds_on_one_repository_do_not_interfere() {
+    let (_d, git) = bare_repo().await;
+    use super::gitcmd::IndexEdit;
+    let seed = git.hash_object(b"seed\n").await.expect("blob");
+    let base = git
+        .build_tree(
+            None,
+            &[IndexEdit::Set { path: "seed.txt".into(), mode: "100644".into(), oid: seed }],
+        )
+        .await
+        .expect("base");
+
+    let mut tasks = Vec::new();
+    for i in 0..8 {
+        let g = git.clone();
+        let b = base.clone();
+        tasks.push(tokio::spawn(async move {
+            let oid = g.hash_object(format!("body {i}\n").as_bytes()).await.expect("blob");
+            let tree = g
+                .build_tree(
+                    Some(&b),
+                    &[IndexEdit::Set {
+                        path: format!("f{i}.txt"),
+                        mode: "100644".into(),
+                        oid,
+                    }],
+                )
+                .await
+                .expect("build");
+            g.ls_tree(&tree, "", true).await.expect("ls-tree")
+        }));
+    }
+
+    for (i, t) in tasks.into_iter().enumerate() {
+        let entries = t.await.expect("join");
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![format!("f{i}.txt").as_str(), "seed.txt"],
+            "build {i} must see its own edit and the base only — a shared index would \
+             show every racer's file here"
+        );
+    }
+}
+
+/// A file written over a directory REPLACES it, silently — exit 0, no
+/// stderr, the whole subtree gone. `--cacheinfo` refuses this and
+/// `--index-info` does not, so nothing in `build_tree` catches it and
+/// the guard has to live where the target's kind is known.
+///
+/// This test does not assert that forge is safe. It asserts that the
+/// primitive is DANGEROUS, so that the day someone writes a second
+/// caller for `build_tree` there is a test standing between them and a
+/// silent recursive delete.
+#[tokio::test]
+async fn build_tree_replaces_a_directory_with_a_file_and_says_nothing() {
+    let (_d, git) = bare_repo().await;
+    use super::gitcmd::IndexEdit;
+    let blob = git.hash_object(b"x\n").await.expect("blob");
+
+    let base = git
+        .build_tree(
+            None,
+            &[
+                IndexEdit::Set { path: "a/b/c.txt".into(), mode: "100644".into(), oid: blob.clone() },
+                IndexEdit::Set { path: "a/b/d.txt".into(), mode: "100644".into(), oid: blob.clone() },
+            ],
+        )
+        .await
+        .expect("base");
+
+    let after = git
+        .build_tree(
+            Some(&base),
+            &[IndexEdit::Set { path: "a/b".into(), mode: "100644".into(), oid: blob }],
+        )
+        .await
+        .expect("git accepts this — that is the point of the test");
+
+    let entries = git.ls_tree(&after, "", true).await.expect("ls-tree");
+    let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        vec!["a/b"],
+        "two files were destroyed by one write and git reported success: {entries:?}"
+    );
+
+    // The kind check the API layer must make, shown here as the thing
+    // that would have prevented it.
+    let target = git.tree_entry(&base, "a/b").await.expect("query").expect("present");
+    assert_eq!(target.kind_name(), "directory", "this is the refusal the API owes the caller");
+}
+
+/// The validator refuses what git would silently drop. Kept separate
+/// from the `build_tree` test so a change to either is a change to one
+/// test, and so the rules are readable as a list.
+#[test]
+fn the_path_validator_refuses_what_git_would_ignore() {
+    use super::gitcmd::validate_tree_path as v;
+    for bad in [
+        "", "/abs.txt", "a//b.txt", "./x.txt", "a/../b.txt", "..", ".",
+        ".git/config", ".GIT/hooks/pre-commit", ".Git/x", "a/.git/hooks/pre-commit",
+        ".git./config", "git~1/x", "with\nnewline", "with\0nul",
+    ] {
+        assert!(v(bad).is_err(), "{bad:?} must be refused");
+    }
+    for ok in [
+        "a.txt", "a/b/c.txt", "dir/file with spaces.txt", ".gitignore",
+        ".gitmodules", "a/.gitkeep", "digit9/x", "UPPER/Case.MD",
+    ] {
+        assert!(v(ok).is_ok(), "{ok:?} must be accepted: {:?}", v(ok));
+    }
+}
+
+// ── The file API's verbs (docs/plans/forge-file-api-design.md §3, §4) ──
+
+use super::fileapi::{self, FileError};
+
+/// A repository with one commit and a small tree, returning the tree oid.
+async fn repo_with_tree() -> (tempfile::TempDir, super::gitcmd::Git, String) {
+    let (dir, git) = bare_repo().await;
+    use super::gitcmd::IndexEdit;
+    let plain = git.hash_object(b"one\n").await.expect("blob");
+    let script = git.hash_object(b"#!/bin/sh\n").await.expect("blob");
+    let target = git.hash_object(b"d/nested.txt").await.expect("blob");
+    let tree = git
+        .build_tree(
+            None,
+            &[
+                IndexEdit::Set { path: "a.txt".into(), mode: "100644".into(), oid: plain.clone() },
+                IndexEdit::Set { path: "run.sh".into(), mode: "100755".into(), oid: script },
+                IndexEdit::Set { path: "link".into(), mode: "120000".into(), oid: target },
+                IndexEdit::Set { path: "d/nested.txt".into(), mode: "100644".into(), oid: plain },
+                IndexEdit::Set {
+                    path: "vendor/mod".into(),
+                    mode: "160000".into(),
+                    oid: "0123456789012345678901234567890123456789".into(),
+                },
+            ],
+        )
+        .await
+        .expect("tree");
+    (dir, git, tree)
+}
+
+/// The guard for the silent recursive delete. `build_tree` would accept
+/// this write and remove everything under `d/` without a word — pinned
+/// by `build_tree_replaces_a_directory_with_a_file_and_says_nothing`.
+/// The API refuses it, and this is the test that says so.
+#[tokio::test]
+async fn a_write_over_a_directory_is_refused_not_performed() {
+    let (_d, git, tree) = repo_with_tree().await;
+    let e = fileapi::plan_put(&git, Some(&tree), "d", b"clobber\n", Some("*"), 1 << 20)
+        .await
+        .expect_err("must refuse");
+    assert_eq!(e, FileError::WouldReplaceDirectory);
+    assert_eq!(e.status(), 409);
+
+    // And the subtree is still there, which is the property that
+    // actually matters.
+    let l = fileapi::list(&git, Some(&tree), "d").await.expect("still a directory");
+    assert_eq!(l.entries.len(), 1);
+    assert_eq!(l.entries[0].path, "d/nested.txt");
+}
+
+/// The rule that makes many writers safe. Two people editing one file
+/// in a browser must not silently overwrite each other, so an existing
+/// path REQUIRES a condition and a stale one is refused.
+#[tokio::test]
+async fn an_existing_file_needs_if_match_and_a_stale_one_is_refused() {
+    let (_d, git, tree) = repo_with_tree().await;
+
+    let bare = fileapi::plan_put(&git, Some(&tree), "a.txt", b"two\n", None, 1 << 20)
+        .await
+        .expect_err("unconditioned overwrite must be refused");
+    assert_eq!(bare, FileError::PreconditionRequired);
+    assert_eq!(bare.status(), 428);
+
+    let stale = fileapi::plan_put(
+        &git,
+        Some(&tree),
+        "a.txt",
+        b"two\n",
+        Some("dead00000000000000000000000000000000beef"),
+        1 << 20,
+    )
+    .await
+    .expect_err("a stale condition must be refused");
+    assert_eq!(stale.status(), 412);
+    assert_eq!(stale.reason(), "file-changed");
+
+    // The current etag succeeds — and quoted, as a browser sends it.
+    let (cur, _) = fileapi::stat(&git, Some(&tree), "a.txt").await.expect("stat");
+    let quoted = format!("\"{}\"", cur.oid);
+    let plan = fileapi::plan_put(&git, Some(&tree), "a.txt", b"two\n", Some(&quoted), 1 << 20)
+        .await
+        .expect("the current version is accepted");
+    let after = git.tree_entry(&plan.tree, "a.txt").await.expect("q").expect("present");
+    assert_eq!(after.oid, plan.etag, "the plan's etag is the new content");
+    assert_ne!(after.oid, cur.oid, "and it actually changed");
+}
+
+/// A write must never move the executable bit. The mode is read from
+/// the existing entry, because naming the wrong one silently demotes it
+/// — pinned one layer down in
+/// `a_write_takes_the_mode_it_is_given_and_leaves_the_others_alone`.
+#[tokio::test]
+async fn editing_an_executable_keeps_it_executable() {
+    let (_d, git, tree) = repo_with_tree().await;
+    let (cur, _) = fileapi::stat(&git, Some(&tree), "run.sh").await.expect("stat");
+    assert_eq!(cur.mode, "100755");
+    let plan = fileapi::plan_put(&git, Some(&tree), "run.sh", b"#!/bin/bash\n", Some(&cur.oid), 1 << 20)
+        .await
+        .expect("edit");
+    let after = git.tree_entry(&plan.tree, "run.sh").await.expect("q").expect("present");
+    assert_eq!(after.mode, "100755", "the executable bit survived an edit through the API");
+}
+
+/// A symlink's content is its target and a submodule's commit is not in
+/// this repository. Neither may be served as file bytes, and the two
+/// refusals must be distinguishable — a client that cannot tell them
+/// apart cannot explain either to a user.
+#[tokio::test]
+async fn the_kinds_that_are_not_files_are_refused_distinctly() {
+    let (_d, git, tree) = repo_with_tree().await;
+    let cases = [
+        ("d", 409, "is-a-directory"),
+        ("link", 409, "not-a-file"),
+        ("vendor/mod", 409, "not-a-file"),
+    ];
+    for (path, status, reason) in cases {
+        let e = fileapi::read(&git, Some(&tree), path, 1 << 20).await.expect_err(path);
+        assert_eq!(e.status(), status, "{path}: {e:?}");
+        assert_eq!(e.reason(), reason, "{path}: {e:?}");
+    }
+    // The two `not-a-file`s still say WHICH in the human message.
+    let link = fileapi::read(&git, Some(&tree), "link", 1 << 20).await.unwrap_err();
+    let sub = fileapi::read(&git, Some(&tree), "vendor/mod", 1 << 20).await.unwrap_err();
+    assert!(link.message().contains("symbolic link"), "{}", link.message());
+    assert!(sub.message().contains("submodule"), "{}", sub.message());
+}
+
+/// The cap is decided from the size in the TREE listing, not from the
+/// bytes — which is what lets an oversized object be refused without
+/// being held in memory, and is the whole basis for not streaming.
+///
+/// **What this pins and what it does not.** It pins that the size is
+/// available from `stat`, which never calls `cat_blob`, and that `read`
+/// answers `413` from it. It does NOT prove the blob was never read: a
+/// control that deleted the object failed, because
+/// `ls-tree --format=%(objectsize)` needs the object too — git reads
+/// its header for the size, so nothing MATERIALISES the content, but
+/// the object must be present. The ordering is therefore structural,
+/// and `the_cap_is_checked_before_the_read` below is the mutation that
+/// catches a regression.
+#[tokio::test]
+async fn the_size_cap_is_decided_from_the_tree_listing() {
+    let (_d, git) = bare_repo().await;
+    let body = vec![b'z'; 4096];
+    let oid = git.hash_object(&body).await.expect("blob");
+    let tree = git
+        .build_tree(
+            None,
+            &[super::gitcmd::IndexEdit::Set {
+                path: "big.bin".into(),
+                mode: "100644".into(),
+                oid,
+            }],
+        )
+        .await
+        .expect("tree");
+
+    // `stat` yields the size and reads no content.
+    let (raw, rendered) = fileapi::stat(&git, Some(&tree), "big.bin").await.expect("stat");
+    assert_eq!(raw.size, Some(4096));
+    assert_eq!(rendered.size, Some(4096));
+
+    let e = fileapi::read(&git, Some(&tree), "big.bin", 1024).await.expect_err("over cap");
+    assert_eq!(e, FileError::TooLarge { size: 4096, cap: 1024 });
+    assert_eq!(e.status(), 413);
+
+    // Under the cap the same file reads back whole.
+    let (_, bytes) = fileapi::read(&git, Some(&tree), "big.bin", 1 << 20).await.expect("under cap");
+    assert_eq!(bytes.len(), 4096);
+}
+
+/// The mutation for the ordering above: at exactly the cap it reads, one
+/// byte over it refuses. An implementation that read first and checked
+/// after would pass the first half and fail nothing — so this asserts
+/// the boundary, which is the part a reordering would move.
+#[tokio::test]
+async fn the_cap_is_checked_before_the_read() {
+    let (_d, git) = bare_repo().await;
+    let oid = git.hash_object(&vec![b'q'; 100]).await.expect("blob");
+    let tree = git
+        .build_tree(
+            None,
+            &[super::gitcmd::IndexEdit::Set {
+                path: "f".into(),
+                mode: "100644".into(),
+                oid,
+            }],
+        )
+        .await
+        .expect("tree");
+    assert!(fileapi::read(&git, Some(&tree), "f", 100).await.is_ok(), "at the cap it reads");
+    assert_eq!(
+        fileapi::read(&git, Some(&tree), "f", 99).await.unwrap_err().status(),
+        413,
+        "one byte over the cap it refuses"
+    );
+    // And a write is bounded by the same number, from the body length.
+    assert_eq!(
+        fileapi::plan_put(&git, Some(&tree), "g", &vec![b'x'; 101], None, 100)
+            .await
+            .unwrap_err()
+            .status(),
+        413
+    );
+}
+
+/// **The cost claim, pinned.** A directory rename in forge moves names,
+/// never content: every blob keeps its oid, so nothing is copied and
+/// nothing is re-uploaded. This is the operation S3 charges for by the
+/// byte — a folder rename there is a COPY of every object under it —
+/// and it is the clearest thing the forge backend buys a file manager.
+///
+/// The assertion that carries it is the oid comparison. If a future
+/// implementation rebuilt blobs instead of reusing them, every other
+/// assertion here would still pass and this one would not.
+#[tokio::test]
+async fn a_directory_rename_copies_no_content() {
+    let (_d, git) = bare_repo().await;
+    use super::gitcmd::IndexEdit;
+    let mut edits = Vec::new();
+    let mut before = std::collections::BTreeMap::new();
+    for i in 0..12 {
+        let oid = git.hash_object(format!("body {i}\n").as_bytes()).await.expect("blob");
+        let path = format!("src/pkg{}/f{i}.txt", i % 3);
+        before.insert(format!("moved/pkg{}/f{i}.txt", i % 3), oid.clone());
+        edits.push(IndexEdit::Set {
+            path,
+            mode: if i == 0 { "100755".into() } else { "100644".into() },
+            oid,
+        });
+    }
+    let tree = git.build_tree(None, &edits).await.expect("tree");
+
+    let plan = fileapi::plan_move(&git, Some(&tree), "src", "moved", None)
+        .await
+        .expect("a directory rename is allowed");
+
+    assert!(git.tree_entry(&plan.tree, "src").await.unwrap().is_none(), "the old name is gone");
+    let after = git.ls_tree(&plan.tree, "", true).await.expect("ls-tree");
+    assert_eq!(after.len(), 12, "every file moved: {after:?}");
+
+    for e in &after {
+        let want = before.get(&e.path).unwrap_or_else(|| panic!("unexpected path {}", e.path));
+        assert_eq!(
+            &e.oid, want,
+            "{} was rebuilt rather than reused — a rename must copy no content",
+            e.path
+        );
+    }
+    let exec = after.iter().find(|e| e.path.ends_with("f0.txt")).expect("f0");
+    assert_eq!(exec.mode, "100755", "modes survive a directory rename");
+}
+
+/// A directory rename is bounded by COUNT, not by bytes, so the refusal
+/// names the count. The bound exists because each file is one index
+/// line, not because any content is moved.
+#[tokio::test]
+async fn a_directory_rename_is_bounded_by_entry_count() {
+    let (_d, git) = bare_repo().await;
+    use super::gitcmd::IndexEdit;
+    let oid = git.hash_object(b"x\n").await.expect("blob");
+    let edits: Vec<IndexEdit> = (0..5)
+        .map(|i| IndexEdit::Set {
+            path: format!("d/f{i}.txt"),
+            mode: "100644".into(),
+            oid: oid.clone(),
+        })
+        .collect();
+    let tree = git.build_tree(None, &edits).await.expect("tree");
+
+    // Under the shipped bound it succeeds; the bound itself is pinned
+    // by the constant rather than by building ten thousand files.
+    assert!(fileapi::plan_move(&git, Some(&tree), "d", "e", None).await.is_ok());
+    assert_eq!(
+        super::fileapi::MAX_RENAME_ENTRIES, 10_000,
+        "the bound is part of the contract; changing it is a decision"
+    );
+    let e = FileError::TooManyEntries { count: 10_001, cap: 10_000 };
+    assert_eq!(e.status(), 413);
+    assert!(e.message().contains("10001"), "the refusal names the count: {}", e.message());
+}
+
+/// A rename is one tree edit, so it is atomic — the property lite
+/// cannot offer. It must carry the mode, refuse a destination that
+/// exists, and refuse a move into its own subtree.
+#[tokio::test]
+async fn a_rename_is_one_edit_and_refuses_the_unsafe_shapes() {
+    let (_d, git, tree) = repo_with_tree().await;
+    let (src, _) = fileapi::stat(&git, Some(&tree), "run.sh").await.expect("stat");
+
+    let plan = fileapi::plan_move(&git, Some(&tree), "run.sh", "tools/run.sh", Some(&src.oid))
+        .await
+        .expect("rename");
+    assert!(git.tree_entry(&plan.tree, "run.sh").await.unwrap().is_none(), "source gone");
+    let dst = git.tree_entry(&plan.tree, "tools/run.sh").await.unwrap().expect("destination");
+    assert_eq!(dst.mode, "100755", "a rename carries the mode");
+    assert_eq!(dst.oid, src.oid, "and the content is untouched");
+
+    // A destination that exists is a refusal, not a silent replace.
+    let occupied = fileapi::plan_move(&git, Some(&tree), "run.sh", "a.txt", Some(&src.oid))
+        .await
+        .expect_err("must refuse");
+    assert_eq!(occupied.status(), 412, "{occupied:?}");
+
+    // Into its own subtree, and onto a directory. A directory rename
+    // itself is allowed — see `a_directory_rename_copies_no_content`.
+    assert_eq!(
+        fileapi::plan_move(&git, Some(&tree), "d", "d/inner", None).await.unwrap_err().reason(),
+        "bad-path"
+    );
+    assert_eq!(
+        fileapi::plan_move(&git, Some(&tree), "a.txt", "d", Some("*")).await.unwrap_err(),
+        FileError::WouldReplaceDirectory
+    );
+}
+
+/// Deleting a directory in git is always recursive, because a directory
+/// only exists while it holds a file. Refused rather than performed.
+#[tokio::test]
+async fn deleting_a_directory_is_refused_and_a_file_is_not() {
+    let (_d, git, tree) = repo_with_tree().await;
+    let e = fileapi::plan_delete(&git, Some(&tree), "d", Some("*")).await.expect_err("refuse");
+    assert_eq!(e, FileError::WouldDeleteDirectory);
+
+    let (a, _) = fileapi::stat(&git, Some(&tree), "a.txt").await.expect("stat");
+    let plan = fileapi::plan_delete(&git, Some(&tree), "a.txt", Some(&a.oid)).await.expect("delete");
+    assert!(git.tree_entry(&plan.tree, "a.txt").await.unwrap().is_none());
+    assert!(git.tree_entry(&plan.tree, "run.sh").await.unwrap().is_some(), "only the one file");
+}
+
+/// A listing reports paths from the root, not relative names, and
+/// carries the directory's own oid as an ETag — which lite's file API
+/// has no way to provide.
+#[tokio::test]
+async fn a_listing_is_rooted_and_carries_the_trees_own_etag() {
+    let (_d, git, tree) = repo_with_tree().await;
+    let root = fileapi::list(&git, Some(&tree), "").await.expect("root");
+    assert_eq!(root.etag, tree, "the root listing's etag is the tree itself");
+    let mut names: Vec<&str> = root.entries.iter().map(|e| e.path.as_str()).collect();
+    names.sort();
+    assert_eq!(names, vec!["a.txt", "d", "link", "run.sh", "vendor"]);
+
+    let sub = fileapi::list(&git, Some(&tree), "d").await.expect("subdir");
+    assert_eq!(sub.entries[0].path, "d/nested.txt", "rooted, not relative");
+    assert_eq!(sub.entries[0].name, "nested.txt");
+    assert_ne!(sub.etag, tree, "a subdirectory has its own etag");
+
+    // Listing a file is a refusal, matching lite.
+    assert_eq!(fileapi::list(&git, Some(&tree), "a.txt").await.unwrap_err().status(), 409);
+}
+
+/// An empty repository answers, rather than failing. The first write
+/// needs no parent and is not a special case for the caller.
+#[tokio::test]
+async fn an_empty_repository_reads_as_empty_and_takes_a_first_write() {
+    let (_d, git) = bare_repo().await;
+    let tree = fileapi::tree_of(&git, "refs/heads/main").await.expect("query");
+    assert!(tree.is_none(), "an unborn branch has no tree");
+
+    assert_eq!(fileapi::list(&git, None, "").await.unwrap_err().reason(), "empty-repository");
+    assert_eq!(fileapi::read(&git, None, "a.txt", 1 << 20).await.unwrap_err().status(), 404);
+
+    let plan = fileapi::plan_put(&git, None, "a/b/c.txt", b"first\n", None, 1 << 20)
+        .await
+        .expect("the first write");
+    let e = git.tree_entry(&plan.tree, "a/b/c.txt").await.unwrap().expect("present");
+    assert_eq!(e.oid, plan.etag);
+}
+
+/// Every failure the taxonomy names must be distinguishable. If two
+/// collapse to one reason a client cannot tell the user which happened,
+/// and §4.6's whole contract is that it can.
+#[test]
+fn every_failure_has_its_own_reason_and_status() {
+    let all = [
+        FileError::BadPath("x".into()),
+        FileError::NotFound,
+        FileError::Unborn,
+        FileError::IsADirectory,
+        FileError::NotAFile("symbolic link"),
+        FileError::WouldReplaceDirectory,
+        FileError::WouldDeleteDirectory,
+        FileError::TooLarge { size: 2, cap: 1 },
+        FileError::PreconditionRequired,
+        FileError::FileChanged { etag: "x".into() },
+        FileError::Git("boom".into()),
+    ];
+    let mut reasons: Vec<&str> = all.iter().map(|e| e.reason()).collect();
+    let n = reasons.len();
+    reasons.sort();
+    reasons.dedup();
+    assert_eq!(reasons.len(), n, "two failures share a reason: {reasons:?}");
+    for e in &all {
+        assert!((400..=599).contains(&e.status()), "{e:?} -> {}", e.status());
+        assert!(!e.message().is_empty(), "{e:?} has no message for a person");
+        // The message must not leak git's own phrasing at a user.
+        assert!(!e.message().contains("fatal:"), "{e:?}: {}", e.message());
+    }
+}
+
+/// **The cost claim, MEASURED.** A rename uploads no content; an edit
+/// of the same file uploads all of it. Both arms run the same
+/// machinery — `pack_new_objects(tips, ^excludes)`, which is exactly
+/// what the batch uploads — and differ in ONE dimension: whether the
+/// blob changed.
+///
+/// This replaces an earlier assertion that compared blob oids, which
+/// could not discriminate: git is content-addressed, so re-hashing the
+/// same bytes yields the same oid and a "rebuilt" implementation would
+/// have passed. Pack bytes cannot be faked that way.
+#[tokio::test]
+async fn a_rename_uploads_no_content_and_an_edit_uploads_all_of_it() {
+    let (_d, git) = bare_repo().await;
+    use super::gitcmd::IndexEdit;
+
+    // Incompressible-ish, so the pack size tracks the content rather
+    // than zlib's opinion of it. A deterministic LCG, not randomness:
+    // a flaky size threshold would be worse than no test.
+    let mut x: u32 = 0x1234_5678;
+    let big: Vec<u8> = (0..(1 << 20))
+        .map(|_| {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (x >> 16) as u8
+        })
+        .collect();
+
+    let oid = git.hash_object(&big).await.expect("blob");
+    let tree_a = git
+        .build_tree(
+            None,
+            &[IndexEdit::Set { path: "src/big.bin".into(), mode: "100644".into(), oid }],
+        )
+        .await
+        .expect("tree");
+    let a = git.commit_tree(&tree_a, &[], "seed", "tester").await.expect("commit");
+    // The base pack holds the blob, as it would after the first push.
+    let base = git.pack_new_objects(&[a.clone()], &[]).await.expect("pack").expect("non-empty");
+    let base_len = std::fs::metadata(git.pack_path(&base)).expect("stat").len();
+    assert!(base_len > 900_000, "control: the base really carries the content ({base_len} B)");
+
+    // ARM 1 — rename the directory holding it.
+    let renamed = fileapi::plan_move(&git, Some(&tree_a), "src", "moved", None)
+        .await
+        .expect("rename");
+    let b = git.commit_tree(&renamed.tree, &[a.clone()], "rename", "tester").await.expect("commit");
+    let rename_pack = git
+        .pack_new_objects(&[b], &[a.clone()])
+        .await
+        .expect("pack")
+        .expect("non-empty");
+    let rename_len = std::fs::metadata(git.pack_path(&rename_pack)).expect("stat").len();
+
+    // ARM 2 — edit the same file instead. One dimension different.
+    let (cur, _) = fileapi::stat(&git, Some(&tree_a), "src/big.bin").await.expect("stat");
+    let mut edited = big.clone();
+    edited[0] ^= 0xff;
+    let put = fileapi::plan_put(&git, Some(&tree_a), "src/big.bin", &edited, Some(&cur.oid), 4 << 20)
+        .await
+        .expect("edit");
+    let c = git.commit_tree(&put.tree, &[a.clone()], "edit", "tester").await.expect("commit");
+    let edit_pack = git.pack_new_objects(&[c], &[a]).await.expect("pack").expect("non-empty");
+    let edit_len = std::fs::metadata(git.pack_path(&edit_pack)).expect("stat").len();
+
+    eprintln!("rename={rename_len} B  edit={edit_len} B  base={base_len} B");
+    assert!(
+        rename_len < 4096,
+        "a rename must upload only trees and a commit, got {rename_len} B"
+    );
+    assert!(
+        edit_len > 100_000,
+        "control: an edit of the same file must upload content, got {edit_len} B"
+    );
+    assert!(
+        edit_len > rename_len * 20,
+        "the two arms must differ by orders of magnitude: rename={rename_len} edit={edit_len}"
+    );
+}

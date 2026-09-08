@@ -54,6 +54,8 @@
 pub mod batch;
 pub mod bundle;
 pub mod export;
+pub mod fileapi;
+pub mod filehttp;
 pub mod fold;
 pub mod follow;
 pub mod gitcmd;
