@@ -31,9 +31,6 @@ REPO_FILES_SET=""
 JWT_SET=""
 if [ -n "${JWT_ISSUER:-}" ]; then
     : "${JWT_PUBKEY:?JWT_ISSUER needs JWT_PUBKEY — the door refuses to start with an issuer and no key source}"
-    kubectl -n "$NS_SYS" create secret generic forge-jwt-key \
-        --from-file=public.pem="$JWT_PUBKEY" \
-        --dry-run=client -o yaml | kubectl apply -f -
     JWT_SET="--set door.jwt.issuer=$JWT_ISSUER --set door.jwt.publicKeySecret.name=forge-jwt-key"
     JWT_SET="$JWT_SET --set door.jwt.maxLifetimeSecs=${JWT_MAX_LIFETIME:-3600}"
     [ -n "${JWT_AUDIENCE:-}" ] && JWT_SET="$JWT_SET --set door.jwt.audience=$JWT_AUDIENCE"
@@ -48,6 +45,15 @@ kubectl create namespace "$NS_AGENTS" --dry-run=client -o yaml | kubectl apply -
 # The syncer reads these through `envFrom`, so the KEYS ARE THE ENV VAR
 # NAMES and must be AWS_* verbatim — a renamed key is a credential the
 # SDK never looks for, and the failure is a timeout, not a 403.
+# The door's issuer key, in the door's namespace. AFTER the namespaces
+# exist: this is an object, not a flag, and computing the flags early
+# does not mean creating it early.
+if [ -n "${JWT_ISSUER:-}" ]; then
+    kubectl -n "$NS_SYS" create secret generic forge-jwt-key \
+        --from-file=public.pem="$JWT_PUBKEY" \
+        --dry-run=client -o yaml | kubectl apply -f -
+fi
+
 kubectl -n "$NS_AGENTS" create secret generic forge-creds \
     --from-literal=AWS_ACCESS_KEY_ID="$AK" \
     --from-literal=AWS_SECRET_ACCESS_KEY="$SK" \

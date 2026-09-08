@@ -84,6 +84,10 @@ mkdir -p "$WORK" || { echo "cannot create WORK=$WORK"; exit 2; }
 PASS=0; FAIL=0; INCONC=0
 
 K() { kubectl "$@"; }
+# `grep -c` prints its count AND exits 1 on zero matches, so the usual
+# `|| echo 0` appends a SECOND zero and every arithmetic test downstream
+# fails with "integer expression expected". Count through this.
+count() { local n; n=$(grep -c "$1" "$2" 2>/dev/null); printf '%s' "${n:-0}"; }
 ok()     { PASS=$((PASS+1));     printf '  PASS  %s\n' "$*"; }
 bad()    { FAIL=$((FAIL+1));     printf '  FAIL  %s\n' "$*"; }
 inconc() { INCONC=$((INCONC+1)); printf '  INCONCLUSIVE  %s\n' "$*"; }
@@ -144,7 +148,7 @@ loop_body() { # <agent-index> <label> <content: append|headline> <resolution: un
   cat <<LOOP
 $SETUP &&
 git config --global user.name agent$i &&
-rm -rf /tmp/w && git clone -q $DOOR/git/$NS/$REPO.git /tmp/w && cd /tmp/w &&
+rm -rf /tmp/w && git clone -q -b agents $DOOR/git/$NS/$REPO.git /tmp/w && cd /tmp/w &&
 : > /tmp/report &&
 for e in \$(seq 1 $EDITS); do
   # ONE commit per edit, made BEFORE the retry loop. The loop then only
@@ -228,7 +232,7 @@ present_once() { # <label> <file> -> count
   local label=$1 file=$2 i e c n=0
   for i in $(seq 1 "$AGENTS"); do
     for e in $(seq 1 "$EDITS"); do
-      c=$(grep -c "^$label agent$i line $e\$" "$file" 2>/dev/null || echo 0)
+      c=$(count "^$label agent$i line $e\$" "$file")
       [ "$c" -eq 1 ] && n=$((n+1))
     done
   done
@@ -237,7 +241,7 @@ present_once() { # <label> <file> -> count
 
 final_file() { # -> stdout
   K exec -n "$NS" "$A1" -- sh -c "$SETUP &&
-    rm -rf /tmp/f && git clone -q $DOOR/git/$NS/$REPO.git /tmp/f &&
+    rm -rf /tmp/f && git clone -q -b agents $DOOR/git/$NS/$REPO.git /tmp/f &&
     cat /tmp/f/shared.md" 2>/dev/null
 }
 
@@ -246,9 +250,9 @@ echo "== P1: arm A — disjoint appends, resolved as a UNION =="
 run_arm A append union
 final_file > "$WORK/A-final.txt"
 
-refused=$(grep -c 'REFUSED' "$WORK/A-all.txt" 2>/dev/null || echo 0)
-landed=$(grep -c 'LANDED'  "$WORK/A-all.txt" 2>/dev/null || echo 0)
-starved=$(grep -c 'STARVED' "$WORK/A-all.txt" 2>/dev/null || echo 0)
+refused=$(count 'REFUSED' "$WORK/A-all.txt")
+landed=$(count 'LANDED' "$WORK/A-all.txt")
+starved=$(count 'STARVED' "$WORK/A-all.txt")
 want=$((AGENTS * EDITS))
 
 # TRAP 1. Zero refusals means the agents never raced, and every claim
@@ -293,8 +297,8 @@ echo "== P4: the control — a stale push, with no retry, must be refused =="
 # pushes its own commit built on the now-stale tip.
 K exec -n "$NS" "$A1" -- sh -c "$SETUP && git config --global user.name stale &&
   rm -rf /tmp/s1 /tmp/s2 &&
-  git clone -q $DOOR/git/$NS/$REPO.git /tmp/s1 &&
-  git clone -q $DOOR/git/$NS/$REPO.git /tmp/s2 &&
+  git clone -q -b agents $DOOR/git/$NS/$REPO.git /tmp/s1 &&
+  git clone -q -b agents $DOOR/git/$NS/$REPO.git /tmp/s2 &&
   cd /tmp/s1 && echo winner >> shared.md && git commit -aqm winner && git push -q origin agents &&
   cd /tmp/s2 && echo loser  >> shared.md && git commit -aqm loser  && git push -q origin agents" \
   > "$WORK/P4.log" 2>&1
@@ -313,9 +317,9 @@ echo
 echo "== P2: arm B — every agent rewrites the SAME line =="
 run_arm B headline theirs
 final_file > "$WORK/B-final.txt"
-conflicts=$(grep -c 'CONFLICT' "$WORK/B-all.txt" 2>/dev/null || echo 0)
-blanded=$(grep -c 'LANDED' "$WORK/B-all.txt" 2>/dev/null || echo 0)
-bstarved=$(grep -c 'STARVED' "$WORK/B-all.txt" 2>/dev/null || echo 0)
+conflicts=$(count 'CONFLICT' "$WORK/B-all.txt")
+blanded=$(count 'LANDED' "$WORK/B-all.txt")
+bstarved=$(count 'STARVED' "$WORK/B-all.txt")
 
 # TRAP 5. If nothing conflicted, this arm is arm A with a different
 # string and says nothing about conflict resolution.
@@ -359,8 +363,8 @@ echo "== P5: the naive resolution, as a positive control on data loss =="
 # run where nothing was lost did not reproduce the hazard it names.
 run_arm C append ours
 final_file > "$WORK/C-final.txt"
-clanded=$(grep -c 'LANDED' "$WORK/C-all.txt" 2>/dev/null || echo 0)
-crefused=$(grep -c 'REFUSED' "$WORK/C-all.txt" 2>/dev/null || echo 0)
+clanded=$(count 'LANDED' "$WORK/C-all.txt")
+crefused=$(count 'REFUSED' "$WORK/C-all.txt")
 chere=$(present_once C "$WORK/C-final.txt")
 
 note "arm C: $clanded/$want reported LANDED, $crefused refusals, $chere/$want lines actually in the file"
@@ -380,7 +384,7 @@ echo "== P6: what an agent can actually look at to resolve =="
 # that the history it would read is THERE and is legible through the
 # door — a rebased branch could have flattened it.
 hist=$(K exec -n "$NS" "$A1" -- sh -c "$SETUP &&
-  rm -rf /tmp/h && git clone -q $DOOR/git/$NS/$REPO.git /tmp/h && cd /tmp/h &&
+  rm -rf /tmp/h && git clone -q -b agents $DOOR/git/$NS/$REPO.git /tmp/h && cd /tmp/h &&
   git log --oneline | wc -l" 2>/dev/null | tr -d ' \r')
 if [ "${hist:-0}" -ge "$want" ]; then
   ok "the branch carries $hist commits — an agent can read who changed what, and when"
@@ -417,7 +421,7 @@ echo "-- D: disjoint content (each agent owns its own file) --"
 for i in $(seq 1 "$AGENTS"); do
   A=$(agent_name "$i")
   K exec -n "$NS" "$A" -- sh -c "$SETUP && git config --global user.name agent$i &&
-    rm -rf /tmp/d && git clone -q $DOOR/git/$NS/$REPO.git /tmp/d && cd /tmp/d && : > /tmp/dreport &&
+    rm -rf /tmp/d && git clone -q -b agents $DOOR/git/$NS/$REPO.git /tmp/d && cd /tmp/d && : > /tmp/dreport &&
     for e in \$(seq 1 $EDITS); do
       printf 'D agent%s line %s\n' '$i' \"\$e\" >> agent$i.md
       git add agent$i.md && git commit -qm 'D agent$i edit \$e' >/dev/null 2>&1
@@ -437,8 +441,8 @@ for i in $(seq 1 "$AGENTS"); do
 done
 cat "$WORK"/D-report-*.txt > "$WORK/D-all.txt" 2>/dev/null
 
-dlanded=$(grep -c 'LANDED'  "$WORK/D-all.txt" 2>/dev/null || echo 0)
-drefused=$(grep -c 'REFUSED' "$WORK/D-all.txt" 2>/dev/null || echo 0)
+dlanded=$(count 'LANDED' "$WORK/D-all.txt")
+drefused=$(count 'REFUSED' "$WORK/D-all.txt")
 [ "$dlanded" -eq "$want" ] \
   && ok "all $want disjoint edits landed on the FIRST attempt — no pull, no rebase, no retry" \
   || bad "only $dlanded of $want disjoint refs/for edits landed first time ($drefused refused)"
@@ -450,7 +454,7 @@ drefused=$(grep -c 'REFUSED' "$WORK/D-all.txt" 2>/dev/null || echo 0)
 dmissing=0
 for i in $(seq 1 "$AGENTS"); do
   got=$(K exec -n "$NS" "$A1" -- sh -c "$SETUP &&
-    rm -rf /tmp/dv && git clone -q $DOOR/git/$NS/$REPO.git /tmp/dv &&
+    rm -rf /tmp/dv && git clone -q -b agents $DOOR/git/$NS/$REPO.git /tmp/dv &&
     grep -c '^D agent$i line ' /tmp/dv/agent$i.md" 2>/dev/null | tr -d ' \r')
   [ "${got:-0}" -eq "$EDITS" ] || { dmissing=$((dmissing+1)); note "agent$i has ${got:-0} of $EDITS lines"; }
 done
@@ -466,7 +470,7 @@ echo "-- E: the same contested file, through refs/for --"
 for i in $(seq 1 "$AGENTS"); do
   A=$(agent_name "$i")
   K exec -n "$NS" "$A" -- sh -c "$SETUP && git config --global user.name agent$i &&
-    rm -rf /tmp/e && git clone -q $DOOR/git/$NS/$REPO.git /tmp/e && cd /tmp/e && : > /tmp/ereport &&
+    rm -rf /tmp/e && git clone -q -b agents $DOOR/git/$NS/$REPO.git /tmp/e && cd /tmp/e && : > /tmp/ereport &&
     for e in \$(seq 1 $EDITS); do
       printf 'E agent%s line %s\n' '$i' \"\$e\" >> shared.md
       git add shared.md && git commit -qm 'E agent$i edit \$e' >/dev/null 2>&1
@@ -485,9 +489,9 @@ done
 cat "$WORK"/E-report-*.txt > "$WORK/E-all.txt" 2>/dev/null
 final_file > "$WORK/E-final.txt"
 
-elanded=$(grep -c 'LANDED'  "$WORK/E-all.txt" 2>/dev/null || echo 0)
-erefused=$(grep -c 'REFUSED' "$WORK/E-all.txt" 2>/dev/null || echo 0)
-econflict=$(grep -ci 'conflict' "$WORK/E-all.txt" 2>/dev/null || echo 0)
+elanded=$(count 'LANDED' "$WORK/E-all.txt")
+erefused=$(count 'REFUSED' "$WORK/E-all.txt")
+econflict=$(count 'conflict' "$WORK/E-all.txt")
 ehere=$(present_once E "$WORK/E-final.txt")
 note "arm E: $elanded/$want landed, $erefused refused, of which $econflict say 'conflict', $ehere lines in the file"
 

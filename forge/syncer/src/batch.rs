@@ -60,8 +60,10 @@ pub struct PushRequest {
     /// objects, and a pack-only upload would leave the bucket holding a
     /// ref whose commit is in no pack. The restore then refuses:
     ///
-    ///     cannot update ref 'refs/heads/agents': trying to write ref
-    ///     with nonexistent object <oid>
+    /// ```text
+    /// cannot update ref 'refs/heads/agents': trying to write ref
+    /// with nonexistent object <oid>
+    /// ```
     ///
     /// Measured on a cluster (F12, 2026-09-07): the file API's first
     /// write published a ref and the syncer CrashLooped on the next
@@ -81,6 +83,38 @@ impl PushRequest {
             matches!(*s, "ours" | "theirs")
         })
     }
+}
+
+/// ONE transaction entry per ref, however many commands moved it.
+///
+/// `git update-ref --stdin` refuses two updates to one ref — `fatal:
+/// multiple updates for ref 'refs/heads/main' not allowed` — and it
+/// refuses them at STEP 6, after the pack was built, uploaded and the
+/// snapshot CAS landed. So a batch git will reject is published first
+/// and errors afterwards, which is how runcj ended up with a snapshot
+/// naming a commit and no log entry for the batch that wrote it.
+///
+/// Concurrency makes this ordinary rather than exotic: four agents
+/// proposing `refs/for/main` at once arrive in ONE batch, and each
+/// merge is judged against the previous one's tip. Coalescing is the
+/// answer rather than refusing the later ones, because the merges are
+/// already CHAINED — the last tip contains every earlier one — so a
+/// single update from the first command's old oid to the last
+/// command's new oid is exactly what the batch did, and every agent's
+/// work lands.
+///
+/// Order is preserved for every ref, and the FIRST entry's `old_oid` is
+/// kept: it is the value the transaction must still be able to check.
+pub(crate) fn coalesce_per_ref(updates: &[RefUpdate]) -> Vec<RefUpdate> {
+    let mut out: Vec<RefUpdate> = Vec::new();
+    for u in updates {
+        match out.iter_mut().find(|e| e.name == u.name) {
+            // Same ref again: keep where it started and where it ended.
+            Some(e) => e.new_oid = u.new_oid.clone(),
+            None => out.push(u.clone()),
+        }
+    }
+    out
 }
 
 /// The per-ref report, in the shape `proc-receive` relays to the
@@ -168,7 +202,6 @@ pub async fn run_batch(
     // trees). They are loose, and a pack-only upload would leave the
     // bucket holding a ref whose commit is in no pack.
     let mut merge_tips: Vec<String> = Vec::new();
-    let mut merge_bases: Vec<String> = Vec::new();
 
     // ── step 2: judge every command, in arrival order ────────────────
     for push in &pushes {
@@ -180,7 +213,6 @@ pub async fn run_batch(
         // `eff` too — the push is being refused whole.
         let accepted_at = accepted.len();
         let tips_at = merge_tips.len();
-        let bases_at = merge_bases.len();
         let mut eff_before: BTreeMap<String, Option<String>> = BTreeMap::new();
         for cmd in &push.commands {
             let outcome = judge(sc, push, cmd, policy, &eff, &disagreed).await;
@@ -203,27 +235,14 @@ pub async fn run_batch(
                     results.push(CommandResult::Ng { name: cmd.name.clone(), reason });
                 }
                 Ok(Judged::Accepted { update, alt_ref, created }) => {
-                    if let Some((tip, base)) = created {
+                    if let Some((tip, _base)) = created {
                         merge_tips.push(tip);
-                        merge_bases.push(base);
                     }
                     // The same treatment for objects this process built
                     // outside the merge path. Registered on ACCEPTANCE
                     // so an atomic rollback unwinds it with the rest.
                     if push.server_created.iter().any(|o| o == &update.new_oid) {
                         merge_tips.push(update.new_oid.clone());
-                        // Only a REAL base. `norm` renders "this ref did
-                        // not exist" as the empty string, and `is_zero`
-                        // answers false for it (it requires at least one
-                        // character), so an empty base reaches
-                        // `pack-objects` as a bare `^` and it exits
-                        // `fatal: bad revision '^'` — which this code
-                        // then reported to the caller as a policy
-                        // refusal, because an unrecognised batch error
-                        // was classified as one.
-                        if !update.old_oid.is_empty() && !is_zero(&update.old_oid) {
-                            merge_bases.push(update.old_oid.clone());
-                        }
                     }
                     if push.atomic {
                         eff_before
@@ -261,7 +280,6 @@ pub async fn run_batch(
                 .collect();
             accepted.truncate(accepted_at);
             merge_tips.truncate(tips_at);
-            merge_bases.truncate(bases_at);
             for (name, before) in eff_before {
                 match before {
                     Some(v) => eff.insert(name, v),
@@ -294,10 +312,31 @@ pub async fn run_batch(
 
     // Pack what the server itself created, before anything is uploaded.
     if !merge_tips.is_empty() {
-        let mut excludes = merge_bases;
-        // Excluding every ref the bucket already holds keeps the pack
-        // to the objects the merge actually introduced.
-        excludes.extend(cell.snap.refs.values().cloned());
+        // EXCLUDE ONLY WHAT THE BUCKET PROVABLY HOLDS.
+        //
+        // Excluding a base keeps the pack to what the merge introduced,
+        // and that is correct exactly while the base is already in the
+        // bucket. `merge_bases` is not that set: `judge_merge` takes its
+        // base from the EFFECTIVE ref map, which earlier commands in
+        // THIS batch have already moved, so a second merge's base is the
+        // first merge's TIP — a commit that exists at this moment only
+        // as a loose object this very call is meant to pack. Handing
+        // `pack-objects` `M ^M` drops M from its own pack; the snapshot
+        // then names a commit whose parent reached no pack, and every
+        // restart refuses with exit 78 over a repository that is
+        // perfectly intact on disk and unrecoverable from S3.
+        //
+        // The snapshot's own refs ARE durable — a CAS names only what it
+        // uploaded or a prior CAS named — so they stay, and a base equal
+        // to one of them (the ordinary case) is still excluded through
+        // that. Measured on runcj 2026-09-08 by F14.
+        let excludes: Vec<String> = cell
+            .snap
+            .refs
+            .values()
+            .cloned()
+            .filter(|r| !merge_tips.iter().any(|t| t == r))
+            .collect();
         sc.git.pack_new_objects(&merge_tips, &excludes).await?;
         sc.hold.tick(1);
     }
@@ -442,7 +481,7 @@ pub async fn run_batch(
     // repository has not moved; a transaction that half-applied would
     // acknowledge a snapshot the repository does not match. Both are
     // closed by doing all of it before any of it is said.
-    sc.git.update_refs(&accepted).await?;
+    sc.git.update_refs(&coalesce_per_ref(&accepted)).await?;
     sc.hold.tick(1);
     sc.last_push_unix = super::now_unix();
 

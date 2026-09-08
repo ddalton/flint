@@ -500,6 +500,124 @@ async fn a_refs_for_push_merges_and_the_merge_survives_a_cold_restore() {
     cold.sc.git.fsck_connectivity_all().await.expect("the merge must be in the bucket");
 }
 
+/// TWO MERGES IN ONE BATCH, and the second's base is the first's TIP.
+///
+/// Found on runcj by F14 (2026-09-08): forge published a ref whose
+/// PARENT had reached no pack in the bucket, and every restart then
+/// refused with exit 78 — `fsck --connectivity-only` reporting
+/// `broken link ... missing commit`. The repository was unrecoverable
+/// from S3 while being perfectly intact on the pod's disk.
+///
+/// THE MECHANISM. `judge_merge` takes its base from the EFFECTIVE ref
+/// map, which earlier commands in the same batch have already moved. So
+/// a second merge's base is the first merge's tip — a commit that
+/// exists at that moment only as a LOOSE object this batch is supposed
+/// to pack. The packing step excluded every base, so `pack-objects` was
+/// handed `M1 ^M1` and dropped M1 from its own pack. The snapshot then
+/// named M2, whose parent M1 was nowhere.
+///
+/// The single-merge test above cannot see this: with one merge the only
+/// base is already durable in the bucket, which is exactly the case the
+/// exclusion was written for.
+#[tokio::test]
+async fn two_merges_in_one_batch_both_reach_the_bucket() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let base = rig.stage_commit(None, &[("a.txt", "base\n")], "base").await;
+    rig.run(vec![push(1, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: zero(),
+        new_oid: base.clone(),
+    }])])
+    .await;
+    // main moves, so neither proposal below can be a fast-forward.
+    let main2 = rig.stage_commit(Some(&base), &[("a.txt", "base\n"), ("m.txt", "m\n")], "on main").await;
+    rig.run(vec![push(2, vec![RefUpdate {
+        name: "refs/heads/main".into(),
+        old_oid: base.clone(),
+        new_oid: main2.clone(),
+    }])])
+    .await;
+    // Two agents, each branched from the ORIGINAL base and each
+    // touching a file of its own, so both merges are clean.
+    let side_a = rig.stage_commit(Some(&base), &[("a.txt", "base\n"), ("c.txt", "c\n")], "side a").await;
+    let side_b = rig.stage_commit(Some(&base), &[("a.txt", "base\n"), ("d.txt", "d\n")], "side b").await;
+
+    // ONE batch. This is the whole point: the second merge's base is
+    // the first merge's tip.
+    //
+    // Before the fix this batch did two things wrong, in this order:
+    // the pack excluded the first merge (a base that was also a tip),
+    // and then `update_refs` refused two updates to one ref — at STEP
+    // 6, after the pack, the upload and the snapshot CAS. So a batch
+    // git rejects was published first and errored afterwards, which is
+    // why runcj's snapshot advanced past a batch whose log entry (seq
+    // 52) never appeared.
+    let outcome = batch::run_batch(
+        &mut rig.sc,
+        vec![
+            push(3, vec![RefUpdate {
+                name: "refs/for/main".into(),
+                old_oid: zero(),
+                new_oid: side_a.clone(),
+            }]),
+            push(4, vec![RefUpdate {
+                name: "refs/for/main".into(),
+                old_oid: zero(),
+                new_oid: side_b.clone(),
+            }]),
+        ],
+        &Policy::default(),
+    )
+    .await;
+    let reports = outcome.expect("two proposals for one ref must not error the batch");
+    for (i, r) in reports.iter().enumerate() {
+        assert!(
+            matches!(r.results[0], CommandResult::Ok { .. }),
+            "proposal {i} was not accepted: {:?} — both agents' work must land",
+            r.results[0]
+        );
+    }
+    let tip = rig
+        .sc
+        .cell()
+        .unwrap()
+        .snap
+        .refs
+        .get("refs/heads/main")
+        .cloned()
+        .expect("the batch published a tip for main");
+    // The local repository and the bucket must AGREE, or the next batch
+    // refuses every push to this ref as `disagreed`.
+    assert_eq!(
+        rig.sc.git.ref_oid("refs/heads/main").await.unwrap(),
+        Some(tip.clone()),
+        "the ref transaction and the snapshot disagree"
+    );
+
+    // THE PREMISE: the published tip is a merge built on ANOTHER merge
+    // this same batch created. Without that the test proves nothing —
+    // one merge's base is the snapshot's own ref and is durable.
+    let parents = rig.git(&["rev-list", "--parents", "-n", "1", &tip], None).await;
+    let first_parent = parents.split_whitespace().nth(1).unwrap_or("").to_string();
+    assert_ne!(first_parent, main2, "the published tip must be built on the FIRST merge, not on main");
+    let subject = rig.git(&["log", "-1", "--format=%s", &first_parent], None).await;
+    assert!(subject.contains("Merge"), "the parent must itself be a server-built merge: {subject}");
+
+    // THE ORACLE, and it is the one the real syncer runs on every
+    // start: restore from the bucket ALONE and walk the graph. A
+    // published tip whose parent reached no pack fails here exactly as
+    // it did on runcj, with `broken link ... missing commit`.
+    let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
+    restore::restore(&mut cold.sc).await.expect("cold restore");
+    cold.sc
+        .git
+        .fsck_connectivity_all()
+        .await
+        .expect("every server-built commit the snapshot depends on must be in the bucket");
+}
+
+
 #[tokio::test]
 async fn a_conflicting_merge_moves_no_ref_and_names_the_paths() {
     let mut rig = Rig::new().await;
@@ -5863,4 +5981,37 @@ async fn a_rename_uploads_no_content_and_an_edit_uploads_all_of_it() {
         edit_len > rename_len * 20,
         "the two arms must differ by orders of magnitude: rename={rename_len} edit={edit_len}"
     );
+}
+
+/// `update-ref --stdin` takes ONE entry per ref, and the batch must
+/// hand it one however many commands moved that ref. The first entry's
+/// `old_oid` is what the transaction still has to check, and the last
+/// entry's `new_oid` is where the batch actually left the ref.
+#[test]
+fn coalescing_keeps_where_a_ref_started_and_where_it_ended() {
+    let u = |name: &str, old: &str, new: &str| RefUpdate {
+        name: name.into(),
+        old_oid: old.into(),
+        new_oid: new.into(),
+    };
+    let out = batch::coalesce_per_ref(&[
+        u("refs/heads/main", "aaa", "bbb"),
+        u("refs/heads/other", "111", "222"),
+        u("refs/heads/main", "bbb", "ccc"),
+        u("refs/heads/main", "ccc", "ddd"),
+    ]);
+    assert_eq!(out.len(), 2, "one entry per ref: {out:?}");
+    let main = out.iter().find(|e| e.name == "refs/heads/main").expect("main");
+    assert_eq!(main.old_oid, "aaa", "the transaction must still check where the ref STARTED");
+    assert_eq!(main.new_oid, "ddd", "and land where the batch left it");
+    // Untouched refs pass through, and ORDER is preserved — the control
+    // that this is not simply returning the first entry.
+    assert_eq!(out[0].name, "refs/heads/main");
+    assert_eq!(out[1].name, "refs/heads/other");
+    assert_eq!(out[1].old_oid, "111");
+    assert_eq!(out[1].new_oid, "222");
+    // A single update is unchanged.
+    let one = batch::coalesce_per_ref(&[u("refs/heads/x", "0", "1")]);
+    assert_eq!(one.len(), 1);
+    assert_eq!((one[0].old_oid.as_str(), one[0].new_oid.as_str()), ("0", "1"));
 }

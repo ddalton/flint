@@ -16,6 +16,11 @@ spec:
   projectId: __REPO__
   bucket: __BUCKET__
   keyPrefix: __PREFIX__/__REPO__/
+  # HEAD points where the work is. Without this the repository's default
+  # branch is `main`, which nothing ever pushes: every clone checks out
+  # nothing, and the first push fails with `src refspec agents does not
+  # match any` — which reads as a door problem and is not one.
+  defaultBranch: agents
   credentialsSecretRef: forge-creds
   consumers:
     serviceAccounts: ["agent-runner"]

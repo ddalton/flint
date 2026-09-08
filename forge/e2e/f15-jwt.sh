@@ -89,6 +89,16 @@ tok() {
 }
 
 AGENT=f15-agent
+# TWO pods, because the git image carries git and no curl (busybox wget
+# only), and the status-code legs need curl. The split is not a
+# workaround: the CURL pod has no forge token projected into it at all,
+# so every 200 it gets is proof that the credential is the TOKEN and not
+# the pod — which is the whole difference between a person and a
+# ServiceAccount.
+CURL=f15-curl
+c() { # <curl args…> -> http code on stdout
+  K exec -n "$NS" "$CURL" -- curl -sS -o /dev/null -w '%{http_code}' "$@" 2>/dev/null
+}
 
 echo "== P0: the rig, and a door that is actually verifying an issuer =="
 # Two repositories differing in ONE line: the wildcard. P6's control
@@ -102,7 +112,18 @@ apply_repo() { # <name> <extra-consumers-line-or-empty>
 apply_repo "$REPO" ""
 apply_repo "$REPO_WILD" '    - "*"\n'
 AGENT=$AGENT TAG=$TAG envsubst '$AGENT $TAG' < forge/e2e/agent.yaml.tpl | K apply -f - >/dev/null
-K wait -n "$NS" --for=condition=Ready "pod/$AGENT" --timeout=300s >/dev/null 2>&1
+K apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Pod
+metadata: { name: $CURL, namespace: $NS }
+spec:
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: curlimages/curl:8.10.1
+      command: ["sleep","36000"]
+EOF
+K wait -n "$NS" --for=condition=Ready "pod/$AGENT" "pod/$CURL" --timeout=300s >/dev/null 2>&1
 
 for _ in $(seq 1 60); do
   ph=$(K get -n "$NS" flintrepo "$REPO" -o jsonpath='{.status.phase}' 2>/dev/null)
@@ -116,8 +137,7 @@ done
 # below fails for one uninteresting reason. A good token must be
 # accepted before anything else is believed.
 GATE=$(tok "$ALICE")
-code=$(K exec -n "$NS" "$AGENT" -- curl -sS -o /dev/null -w '%{http_code}' \
-  "$DOOR/git/$NS/$REPO.git/info/refs?service=git-upload-pack" -u "x:$GATE" 2>/dev/null)
+code=$(c "$DOOR/git/$NS/$REPO.git/info/refs?service=git-upload-pack" -u "x:$GATE")
 case "$code" in
   200) ok "the door verifies $ISS and admits $ALICE" ;;
   401) bad "a good token was refused — the door was probably deployed without --jwt-issuer"
@@ -140,14 +160,12 @@ declare -a ARMS=(
 )
 for arm in "${ARMS[@]}"; do
   what=${arm%%|*}; t=${arm#*|}
-  code=$(K exec -n "$NS" "$AGENT" -- curl -sS -o /dev/null -w '%{http_code}' \
-    "$DOOR/git/$NS/$REPO.git/info/refs?service=git-upload-pack" -u "x:$t" 2>/dev/null)
+  code=$(c "$DOOR/git/$NS/$REPO.git/info/refs?service=git-upload-pack" -u "x:$t")
   [ "$code" = "401" ] && ok "$what: 401" || bad "$what answered $code, want 401"
 done
 # THE CONTROL, repeated after the refusals: the door still admits the
 # good token, so the five 401s are judgements and not an outage.
-code=$(K exec -n "$NS" "$AGENT" -- curl -sS -o /dev/null -w '%{http_code}' \
-  "$DOOR/git/$NS/$REPO.git/info/refs?service=git-upload-pack" -u "x:$(tok "$ALICE")" 2>/dev/null)
+code=$(c "$DOOR/git/$NS/$REPO.git/info/refs?service=git-upload-pack" -u "x:$(tok "$ALICE")")
 [ "$code" = "200" ] && ok "and the good token still works, so those were judgements" \
   || bad "the door stopped admitting the good token ($code) — the refusals above prove nothing"
 
@@ -156,21 +174,29 @@ echo "== P2: the JWT is the ONLY way in — a pod token is refused here =="
 # $REPO does not list `agent-runner`, so the pod's own credential — the
 # one every other forge drill uses — must not open it. Without this,
 # every push below could be succeeding as the ServiceAccount.
-code=$(K exec -n "$NS" "$AGENT" -- sh -c "curl -sS -o /dev/null -w '%{http_code}' \
-  '$DOOR/git/$NS/$REPO.git/info/refs?service=git-upload-pack' \
-  -u \"x:\$(cat /var/run/secrets/forge/token)\"" 2>/dev/null)
+PODTOK=$(K exec -n "$NS" "$AGENT" -- cat /var/run/secrets/forge/token 2>/dev/null | tr -d '\r\n')
+[ -n "$PODTOK" ] || bad "could not read the agent's projected token — P2 measures nothing without it"
+code=$(c "$DOOR/git/$NS/$REPO.git/info/refs?service=git-upload-pack" -u "x:$PODTOK")
 [ "$code" = "403" ] && ok "the pod's ServiceAccount token: 403 — it is not a consumer here" \
   || bad "a pod token answered $code at a repository that does not list it"
 
 echo
-echo "== P3: a real git push, and who forge says wrote it =="
-# The credential helper emits the JWT as the Basic PASSWORD, which is
-# the design's claim that no protocol change is needed. `user.name` and
-# `user.email` are deliberately SOMEONE ELSE, so the recorded author can
-# only have come from the verified token.
+echo "== P3: a real git push, and where the verified identity lands =="
+# The credential helper emits the JWT as the Basic PASSWORD, which is the
+# design's claim that no protocol change is needed.
+#
+# WHAT FORGE CAN AND CANNOT DECIDE, corrected on the wire. A commit a
+# CLIENT makes is authored by that client's git config and arrives
+# inside a pack; forge cannot rewrite it without invalidating the pack,
+# and does not try. The verified identity governs AUTHORIZATION (P4) and
+# authors the commits the SERVER itself creates — a `refs/for` merge,
+# or a file-API write. So `user.name`/`user.email` are set to SOMEONE
+# ELSE below and both halves are asserted: the client's commit keeps the
+# client's name, and the server's merge carries the token's `sub`.
 T=$(tok "$ALICE" "$ISS" "$AUD" 900)
+HELPER="git config --global credential.helper '!f(){ echo username=x; echo password=$T; };f'"
 K exec -n "$NS" "$AGENT" -- sh -c "
-  git config --global credential.helper '!f(){ echo username=x; echo password=$T; };f' &&
+  $HELPER &&
   git config --global user.email impostor@example.com &&
   git config --global user.name  impostor &&
   git config --global init.defaultBranch agents &&
@@ -178,22 +204,40 @@ K exec -n "$NS" "$AGENT" -- sh -c "
   echo hello > a.txt && git add a.txt && git commit -qm 'from alice' &&
   git push -q $DOOR/git/$NS/$REPO.git agents:agents" > "$WORK/p3.log" 2>&1 \
   && ok "a git client pushed with a JWT as the Basic password — no protocol change" \
-  || { bad "the JWT push failed: $(tail -2 "$WORK/p3.log" | tr '\n' ' ')"; }
+  || bad "the JWT push failed: $(tail -2 "$WORK/p3.log" | tr '\n' ' ')"
 
-author=$(K exec -n "$NS" "$AGENT" -- sh -c "
-  git config --global credential.helper '!f(){ echo username=x; echo password=$T; };f' &&
-  rm -rf /tmp/r && git clone -q $DOOR/git/$NS/$REPO.git /tmp/r &&
-  cd /tmp/r && git log -1 --format='%an|%ae'" 2>/dev/null | tr -d '\r')
-note "the recorded author is: ${author:-<none>}"
-if printf '%s' "$author" | grep -q "$ALICE"; then
-  ok "the commit is attributed to the TOKEN's subject, not the client's git config"
-elif printf '%s' "$author" | grep -qi impostor; then
-  bad "the client's own git config decided the author — the verified identity was not used"
+# A CLIENT's commit keeps the client's identity. Stated as a PASS
+# because it is the correct behaviour, not a shortfall: anything else
+# would mean forge rewriting objects it received.
+cl=$(K exec -n "$NS" "$AGENT" -- sh -c "
+  $HELPER && rm -rf /tmp/r && git clone -q -b agents $DOOR/git/$NS/$REPO.git /tmp/r &&
+  cd /tmp/r && git log -1 --format='%an'" 2>/dev/null | tr -d '\r')
+[ "$cl" = "impostor" ] \
+  && ok "a client's own commit keeps the client's author ($cl) — forge does not rewrite a received pack" \
+  || bad "the client's commit is authored '$cl', want 'impostor'"
+
+# THE SERVER'S OWN COMMIT. Two clones from one tip: the first advances
+# `agents`, the second is then stale and proposes a merge through
+# `refs/for`, which forge performs with `merge-tree` inside the batch
+# and commits AS THE PRINCIPAL.
+merge_author=$(K exec -n "$NS" "$AGENT" -- sh -c "
+  $HELPER &&
+  rm -rf /tmp/m1 /tmp/m2 &&
+  git clone -q -b agents $DOOR/git/$NS/$REPO.git /tmp/m1 &&
+  git clone -q -b agents $DOOR/git/$NS/$REPO.git /tmp/m2 &&
+  cd /tmp/m1 && echo one > one.txt && git add one.txt && git commit -qm first && git push -q origin agents &&
+  cd /tmp/m2 && echo two > two.txt && git add two.txt && git commit -qm 'second, diverging' &&
+  git push -q origin HEAD:refs/for/agents 2>/dev/null &&
+  git fetch -q origin agents 2>/dev/null; git log -1 --format='%an' FETCH_HEAD" 2>/dev/null | tr -d '\r')
+note "the server-created merge is authored: ${merge_author:-<none>}"
+if printf '%s' "$merge_author" | grep -q "$ALICE"; then
+  ok "the merge forge itself built carries the TOKEN's subject, not the client's git config"
+elif printf '%s' "$merge_author" | grep -qi impostor; then
+  bad "forge authored its own merge as the client's git config — the verified identity was not used"
 else
-  bad "the author is neither: ${author:-<none>}"
+  bad "the merge author is neither: ${merge_author:-<none>}"
 fi
 
-echo
 echo "== P4: branch policy keyed on a PERSON =="
 # `agent/alice/*` is alice's; `agent/bob/*` is not. This is the
 # limitation the architecture document records as unfixable while every
@@ -216,8 +260,7 @@ else
   ok "alice may NOT push agent/bob/x — the pattern binds to the person"
 fi
 # And bob, whom the repository does not list at all, gets nowhere.
-code=$(K exec -n "$NS" "$AGENT" -- curl -sS -o /dev/null -w '%{http_code}' \
-  "$DOOR/git/$NS/$REPO.git/info/refs?service=git-upload-pack" -u "x:$(tok "$BOB")" 2>/dev/null)
+code=$(c "$DOOR/git/$NS/$REPO.git/info/refs?service=git-upload-pack" -u "x:$(tok "$BOB")")
 [ "$code" = "403" ] && ok "a validly-signed token for $BOB: 403 — signature is not authority" \
   || bad "an unlisted person answered $code"
 
@@ -226,13 +269,11 @@ echo "== P5: the lifetime ceiling refuses a VALID signature =="
 # The shape of Knox's shipped 120-day default. Everything about this
 # token is correct except how long it lives.
 LONG=$(t=$(now); "$MINT" "$KEYDIR/jwt.pem" "$KID" "$ISS" "$ALICE" "$AUD" "$t" $((t + 30*86400)))
-code=$(K exec -n "$NS" "$AGENT" -- curl -sS -o /dev/null -w '%{http_code}' \
-  "$DOOR/git/$NS/$REPO.git/info/refs?service=git-upload-pack" -u "x:$LONG" 2>/dev/null)
+code=$(c "$DOOR/git/$NS/$REPO.git/info/refs?service=git-upload-pack" -u "x:$LONG")
 [ "$code" = "401" ] && ok "a 30-day token is refused though its signature is good" \
   || bad "a 30-day token answered $code — the ceiling is ornamental"
 # The control, differing ONLY in lifetime.
-code=$(K exec -n "$NS" "$AGENT" -- curl -sS -o /dev/null -w '%{http_code}' \
-  "$DOOR/git/$NS/$REPO.git/info/refs?service=git-upload-pack" -u "x:$(tok "$ALICE" "$ISS" "$AUD" 600)" 2>/dev/null)
+code=$(c "$DOOR/git/$NS/$REPO.git/info/refs?service=git-upload-pack" -u "x:$(tok "$ALICE" "$ISS" "$AUD" 600)")
 [ "$code" = "200" ] && ok "the same token minted for 10 minutes is accepted" \
   || bad "the short token answered $code — P5's arms differ in more than lifetime"
 
