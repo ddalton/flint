@@ -1080,48 +1080,66 @@ mod plan_tests {
 
     /// M6 on `runcg` measured the floored arm re-uploading the WHOLE
     /// repository during every tiny-push leg — 385.4, 769.8, 1153.9 MiB
-    /// against repositories of 384, 768, 1152 MiB. This is that shape in
-    /// the planner: a repository holding one leg of 8 MiB pushes, then
-    /// enough tiny pushes to reach the pack cap.
+    /// against repositories of 384, 768, 1152 MiB. This is that shape.
     ///
-    /// The cap is a COUNT condition and `Plan::Base` is unbounded in
-    /// BYTES — `all_names()` is every pack there is. Reaching the cap on
-    /// tiny packs therefore buys a rewrite of the large ones too.
+    /// THE CADENCE IS SHUT, and that is the whole point. The gate is
+    /// `cadence_open || tiers.len() >= cap`, so a test run with the
+    /// cadence OPEN fires through the cadence arm and says nothing about
+    /// the cap. The first version of this test did exactly that: it
+    /// passed unchanged with `|| tiers.len() >= cap` deleted from the
+    /// planner, which is the mutation it existed to catch.
+    ///
+    /// With the cadence shut the cap is the ONLY thing that can admit a
+    /// rebuild — and it admits one whose cost is unbounded in bytes,
+    /// because `Plan::Base` takes `all_names()`.
     #[test]
-    fn the_pack_cap_trips_the_base_rule_and_rewrites_every_large_pack() {
+    fn the_pack_cap_does_not_buy_the_rebuild_the_cadence_refused() {
         const MIB: u64 = 1024 * 1024;
-        // 48 x 8 MiB, the P9 leg, plus tiny pushes up to the cap.
+        // 48 x 8 MiB (the P9 leg) + 20 tiny pushes: 68 tiers, over the cap.
         let mut sizes: Vec<u64> = vec![8 * MIB; 48];
         sizes.extend(std::iter::repeat_n(4 * 1024, 20));
         let p = packs(&sizes);
-        let k = PlanKnobs { base_min_bytes: 64 * MIB, fold_min_bytes: 256 * MIB, ..knobs() };
-
+        let k = PlanKnobs {
+            base_min_bytes: 64 * MIB,
+            fold_min_bytes: 256 * MIB,
+            cadence_open: false,
+            ..knobs()
+        };
         assert!(p.len() >= k.fold_max_packs, "the cap must actually be reached");
-        let got = plan(&p, k);
 
-        // What it does today: rewrite everything.
-        match &got {
+        // The defect: a COUNT condition buys a rewrite of every pack.
+        match plan(&p, k) {
             Some(Plan::Base { inputs }) => assert_eq!(
                 inputs.len(),
                 p.len(),
                 "the base rule takes every pack — that is the 1x/2x/3x on the wire"
             ),
-            other => panic!("expected the base rule to fire, got {other:?}"),
+            other => panic!("expected the cap to admit the base rule, got {other:?}"),
         }
 
-        // THE POSITIVE CONTROL, and the thing that names the defect: the
-        // bytes that justify the rebuild are the LARGE packs', while the
-        // condition that admitted it is the count of the TINY ones. Hold
-        // the byte total fixed and drop the tier count below the cap and
-        // the same repository is left alone — so it is the count, not
-        // the bytes, that bought the rewrite.
-        let below_cap = packs(&vec![8 * MIB; 48]);
-        let tier_bytes: u64 = below_cap.iter().map(|q| q.bytes).sum();
-        assert!(tier_bytes >= k.base_min_bytes, "same byte justification");
-        assert!(below_cap.len() < k.fold_max_packs, "only the count differs");
+        // CONTROL 1 — one dimension: the count, held under the cap. Same
+        // packs, same knobs, 63 tiers instead of 68. The byte
+        // justification is untouched (tier_bytes is far over
+        // base_min_bytes either way), so if this does not rebuild, it is
+        // the COUNT that bought the rewrite and not the bytes.
+        let mut fewer: Vec<u64> = vec![8 * MIB; 48];
+        fewer.extend(std::iter::repeat_n(4 * 1024, 15));
+        let q = packs(&fewer);
+        assert!(q.len() < k.fold_max_packs, "only the count differs");
+        let tier_bytes: u64 = q.iter().map(|x| x.bytes).sum();
+        assert!(tier_bytes >= k.base_min_bytes, "the byte justification is unchanged");
         assert!(
-            !matches!(plan(&below_cap, PlanKnobs { cadence_open: false, ..k }), Some(Plan::Base { .. })),
-            "with the cadence closed and the count under the cap the same bytes do NOT rebuild"
+            !matches!(plan(&q, k), Some(Plan::Base { .. })),
+            "under the cap the same bytes do NOT rebuild — the count is what bought it"
+        );
+
+        // CONTROL 2 — one dimension: the cadence, opened. The cap arm is
+        // not the only way in, and this pins that the OTHER arm still
+        // works, so a fix that disables the cap must not silently
+        // disable the base rule altogether.
+        assert!(
+            matches!(plan(&p, PlanKnobs { cadence_open: true, ..k }), Some(Plan::Base { .. })),
+            "an open cadence must still admit the base rule"
         );
     }
 
