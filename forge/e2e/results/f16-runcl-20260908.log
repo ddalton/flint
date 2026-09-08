@@ -1,0 +1,66 @@
+F16 — the lease, on the wire.  repo=f16b ns=agents
+
+== P0: one writer, and two observations that agree ==
+  PASS  the agent pod is Running
+  PASS  the status port is 9848
+  PASS  the git port is 8080
+  PASS  the holder is up and holds the lease (phase=serving)
+  PASS  the lease object is s3://flint-forge-runcl-1788903032/drill/f16b/git/epoch
+  ....  holder=forge-2bab33cf-71be-45e2-806c-0087a89c8dbd epoch=1 term=60s
+  PASS  the pod and the bucket name the same holder
+  PASS  and the holder says it holds the lease
+  PASS  a push advances the snapshot (0 -> 1) — the writer is writing
+
+== P1: a second syncer does not take a lease that is being renewed ==
+  PASS  the challenger is derived from the live Deployment, not hand-written
+  PASS  the challenger pod is forge-f16b-chal-5b4974d46f-8vnr6
+  PASS  the challenger is alive and answering after 80s (restarts=0, id=forge-6f06ece5-707a-43c7-8e7c-6d2d5e3bb667)
+  PASS  and it is a DIFFERENT incarnation (forge-6f06ece5-707a-43c7-8e7c-6d2d5e3bb667 != forge-2bab33cf-71be-45e2-806c-0087a89c8dbd) — it took the takeover path
+  PASS  the challenger is polling the cell and reports 0/6 quiet polls
+  PASS  and the count is ZERO — the holder's token is moving under it
+  PASS  and it is parked in claimingEpoch, not serving
+  PASS  the bucket still names the original holder
+  PASS  and the epoch did not advance (still 1)
+  PASS  the challenger does not claim the lease
+  PASS  pushes keep landing while the challenger waits
+/private/tmp/claude-503/-Users-ddalton-github-flint/2834f77e-73d3-4c23-b931-2c7bee0451cf/scratchpad/f16-frozen2.sh: line 184:  1328 Terminated: 15          K port-forward -n "$NS" "pod/$pod" "$LPORT:$GPORT" > /dev/null 2>&1
+  PASS  a direct push into the holding pod LANDS — P4's path works when the lease is held
+
+== P2: the holder loses S3 — X13's signature is ready=false with NO restart ==
+  PASS  the holder's renewal is overdue — the partition is REAL and enforced
+  PASS  and it did NOT restart (0) — the lease is kept, the process stays up
+
+== P3: the challenger supersedes, but only after the quiet window ==
+  PASS  the lease moved to the challenger 77s after the partition
+  PASS  and the epoch advanced 1 -> 2
+  PASS  the new holder is the challenger
+  PASS  the takeover waited at least one term (77s >= 60s) — it is not eager
+
+== P4: the ZOMBIE — S3 returns to a holder that has been deposed ==
+  PASS  the partition is healed; the deposed pod has S3 again
+/private/tmp/claude-503/-Users-ddalton-github-flint/2834f77e-73d3-4c23-b931-2c7bee0451cf/scratchpad/f16-frozen2.sh: line 184:  1554 Terminated: 15          K port-forward -n "$NS" "pod/$pod" "$LPORT:$GPORT" > /dev/null 2>&1
+  ....  the deposed pod answered: To http://127.0.0.1:18718/agents/f16b.git  ! [remote rejected] agents -> agents (the repository server is not accepting writes (Connection refused (os error 111
+  PASS  the deposed holder REFUSED a push the SAME path landed while it held the lease
+  PASS  the bucket still names the successor
+  PASS  the deposed pod no longer claims the lease (phase=claimingEpoch fenced=null)
+  PASS  and the bucket's holder is a different server than the deposed one
+  PASS  the zombie's commit is in NO ref the successor serves
+
+== P5: every acknowledged push survived the takeover ==
+  PASS  f16-p0-993 survived
+  PASS  f16-p1-993 survived
+  PASS  f16-direct-993 survived
+
+== P6: a fresh syncer rebuilds from S3 alone ==
+  PASS  a FRESH pod came up (uid changed) — not the old process still answering
+  ....  clean handover + restore took 6s; P3's quiet-window takeover took 77s (term 60s)
+  PASS  and it is serving from the bucket alone (phase=serving)
+  PASS  f16-p0-993 is in the rebuilt repository
+  PASS  f16-p1-993 is in the rebuilt repository
+  PASS  f16-direct-993 is in the rebuilt repository
+  PASS  and the zombie's commit is not in it either
+
+== the biconditional ==
+  PASS  both arms ran: no takeover while renewing, takeover after 77s of quiet
+
+==== F16: 42 passed, 0 failed, 0 inconclusive ====

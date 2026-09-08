@@ -62,6 +62,8 @@ AGENT=${AGENT:-f16agent}
 TAG=${TAG:?set TAG to the image tag the rig deployed}
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)
 PASS=0; FAIL=0; INC=0
+RUN=$$
+M_P0="f16-p0-$RUN"; M_P1="f16-p1-$RUN"; M_DIRECT="f16-direct-$RUN"
 CHAL="forge-$REPO-chal"
 NP=f16-partition
 K() { kubectl "$@"; }
@@ -75,7 +77,7 @@ cleanup() {
   pkill -f "port-forward -n $NS pod/forge-$REPO" 2>/dev/null
   K delete -n "$NS" networkpolicy "$NP" --wait=false >/dev/null 2>&1
   K delete -n "$NS" deploy "$CHAL" --wait=false >/dev/null 2>&1
-  K delete -n "$NS" pod "$AGENT" --wait=false >/dev/null 2>&1
+  K delete -n "$NS" pod "$AGENT" --ignore-not-found >/dev/null 2>&1
   for p in $(K get pods -n "$NS" -o name 2>/dev/null | grep "forge-$REPO"); do
     K label -n "$NS" "$p" chaos- >/dev/null 2>&1
   done
@@ -108,6 +110,19 @@ sfield() { pod_status "$1" | jq -r "$2 // \"\"" 2>/dev/null; }
 # `false` and `null` as absent, so a real `false` would be reported as
 # an empty read and the two would be indistinguishable in a message.
 sraw()   { pod_status "$1" | jq -r "$2" 2>/dev/null; }
+# Is this pod up and writing? NOT `phase == serving`: the phase strings
+# are lowercase (`Phase::as_str`) and the steady state moves through
+# `pushing` and `sweeping` while perfectly healthy, so an exact match
+# samples a race. What actually means "this is the writer" is the pair
+# the code's own `serving()` rests on — the lease is held and nothing
+# has fenced it.
+is_up() {
+  local ph
+  ph=$(sraw "$1" .phase)
+  case "$ph" in serving|pushing|sweeping) ;; *) return 1 ;; esac
+  [ "$(sraw "$1" '.epoch.held')" = true ] || return 1
+  [ "$(sraw "$1" .fenced)" = null ]
+}
 
 # The bucket's own answer. Discovered, never constructed: `keyPrefix`
 # and the repo path compose in a way that has been got wrong by hand
@@ -115,7 +130,12 @@ sraw()   { pod_status "$1" | jq -r "$2" 2>/dev/null; }
 # returning a legal value.
 find_epoch_key() {
   local n
-  EPOCH_KEY=$(aws s3 ls "s3://$BUCKET/$PREFIX/" --recursive 2>/dev/null | awk '{print $4}' | grep '/git/epoch$')
+  # Scoped to THIS repository's own keyPrefix, not to $PREFIX: the rig
+  # deploys `proj` at `<prefix>/git/` in the same bucket, so a search
+  # from `<prefix>/` finds two leases and the drill would be observing
+  # another repository's writer. The "exactly one" guard caught this on
+  # the first run rather than silently picking the wrong one.
+  EPOCH_KEY=$(aws s3 ls "s3://$BUCKET/$PREFIX/$REPO/" --recursive 2>/dev/null | awk '{print $4}' | grep '/git/epoch$')
   n=$(printf '%s\n' "$EPOCH_KEY" | grep -c . )
   [ "${n:-0}" = 1 ] || { EPOCH_KEY=""; return 1; }
 }
@@ -195,11 +215,24 @@ sed -e "s|__REPO__|$REPO|g" -e "s|__NS__|$NS|g" -e "s|__BUCKET__|$BUCKET|g" \
 # The SHARED agent template, not one of this drill's own: an agent is
 # one projected token and nothing else, and a drill that rolled its own
 # could give itself authority the design does not grant.
-AGENT=$AGENT TAG=$TAG envsubst '$AGENT $TAG' < "$HERE/agent.yaml.tpl" | K apply -f - >/dev/null
+# A Pod is not a Deployment: `apply` over one that is still Terminating
+# from a previous run's cleanup FAILS, and the first draft sent that
+# error to /dev/null and then reported the consequence — "the snapshot
+# did not advance" — as though the REPOSITORY had not written. A missing
+# client must never read as a broken server.
+K delete -n "$NS" pod "$AGENT" --ignore-not-found >/dev/null 2>&1
+for _ in $(seq 1 24); do
+  K get -n "$NS" pod "$AGENT" >/dev/null 2>&1 || break
+  sleep 5
+done
+APPLY=$(AGENT=$AGENT TAG=$TAG envsubst '$AGENT $TAG' < "$HERE/agent.yaml.tpl" | K apply -f - 2>&1)
 for _ in $(seq 1 24); do
   [ "$(K get -n "$NS" pod "$AGENT" -o jsonpath='{.status.phase}' 2>/dev/null)" = Running ] && break
   sleep 5
 done
+[ "$(K get -n "$NS" pod "$AGENT" -o jsonpath='{.status.phase}' 2>/dev/null)" = Running ] \
+  && ok "the agent pod is Running" \
+  || { bad "no agent pod — every push leg below would report a missing CLIENT as a stalled SERVER: $APPLY"; exit 1; }
 
 for _ in $(seq 1 60); do
   [ "$(K get -n "$NS" flintrepo "$REPO" -o jsonpath='{.status.phase}' 2>/dev/null)" = Ready ] && break
@@ -211,10 +244,11 @@ SPORT=$(status_port); GPORT=$(git_port)
 
 H0=$(repo_pods | head -1)
 [ -n "$H0" ] || { bad "no pod for forge-$REPO"; exit 1; }
-[ "$(sfield "$H0" .phase)" = Serving ] && ok "the holder is Serving" || { bad "the holder is not Serving: $(sfield "$H0" .phase)"; exit 1; }
+is_up "$H0" && ok "the holder is up and holds the lease (phase=$(sraw "$H0" .phase))" \
+  || { bad "the holder is not writing: phase=$(sraw "$H0" .phase) held=$(sraw "$H0" '.epoch.held') fenced=$(sraw "$H0" .fenced)"; exit 1; }
 
 find_epoch_key && ok "the lease object is s3://$BUCKET/$EPOCH_KEY" \
-  || { bad "could not find exactly one */git/epoch under $PREFIX/ — cannot observe the lease independently"; exit 1; }
+  || { bad "found $(aws s3 ls "s3://$BUCKET/$PREFIX/$REPO/" --recursive 2>/dev/null | awk '{print $4}' | grep -c '/git/epoch$') lease objects under $PREFIX/$REPO/, not one — cannot observe the lease independently"; exit 1; }
 
 ID0=$(sfield "$H0" .serverId); BID0=$(bucket_holder); E0=$(bucket_epochno)
 TERM=$(sfield "$H0" '.epoch.termSecs'); TERM=${TERM:-60}
@@ -228,12 +262,13 @@ note "holder=$ID0 epoch=$E0 term=${TERM}s"
 # A writer that is not writing makes every "nothing was written" below
 # vacuous. Prove the ordinary path works before breaking it.
 SEQ0=$(sfield "$H0" '.repo.snapshotSeq')
-agent_push f16-p0 >/dev/null 2>&1
+PUSHOUT=$(agent_push "$M_P0" 2>&1)
 sleep 5
 SEQ1=$(sfield "$H0" '.repo.snapshotSeq')
 [ -n "$SEQ1" ] && [ "${SEQ1:-0}" -gt "${SEQ0:-0}" ] \
   && ok "a push advances the snapshot ($SEQ0 -> $SEQ1) — the writer is writing" \
-  || bad "the snapshot did not advance ($SEQ0 -> $SEQ1); later legs would prove nothing"
+  || { bad "the snapshot did not advance ($SEQ0 -> $SEQ1); later legs would prove nothing"
+       note "the client said: $(printf '%s' "$PUSHOUT" | tr '\n' ' ' | cut -c1-200)"; }
 
 # ── P1: a LIVE holder is not superseded ──────────────────────────────
 hdr "P1: a second syncer does not take a lease that is being renewed"
@@ -272,6 +307,27 @@ fi
   && ok "and it is a DIFFERENT incarnation ($CSID != $ID0) — it took the takeover path" \
   || inc "the challenger's id is not distinguishable from the holder's"
 
+# THE STRONGEST CONTROL AVAILABLE, and it is the mechanism itself rather
+# than a proxy for it. The challenger logs `another server holds <p>
+# (N/6 quiet polls)` every heartbeat. That it is being PRINTED proves the
+# challenger is awake and reading the cell; that N stays at 0 proves the
+# holder's token is still moving under it. "Pod is Running" cannot tell
+# a polling challenger from one wedged on a socket.
+CLOG=$(K logs -n "$NS" "$CP" -c syncer --tail=40 2>/dev/null)
+QUIET=$(printf '%s' "$CLOG" | grep -o '[0-9]\+/6 quiet polls' | tail -1)
+if [ -n "$QUIET" ]; then
+  ok "the challenger is polling the cell and reports $QUIET"
+  case "$QUIET" in
+    0/6*) ok "and the count is ZERO — the holder's token is moving under it" ;;
+    *)    bad "the quiet count reached $QUIET while the holder was renewing" ;;
+  esac
+else
+  inc "the challenger logged no quiet-poll line; it may not be observing the cell at all"
+fi
+[ "$(sraw "$CP" .phase)" = claimingEpoch ] \
+  && ok "and it is parked in claimingEpoch, not serving" \
+  || note "challenger phase is $(sraw "$CP" .phase)"
+
 BID1=$(bucket_holder); E1=$(bucket_epochno)
 [ "$BID1" = "$BID0" ] && ok "the bucket still names the original holder" \
   || bad "the lease moved to '$BID1' while the holder was renewing — SPLIT BRAIN"
@@ -281,17 +337,18 @@ BID1=$(bucket_holder); E1=$(bucket_epochno)
   && bad "the challenger claims to hold the lease as well — SPLIT BRAIN" \
   || ok "the challenger does not claim the lease"
 
-agent_push f16-p1 >/dev/null 2>&1; sleep 5
+PUSHOUT=$(agent_push "$M_P1" 2>&1); sleep 5
 SEQ2=$(sfield "$H0" '.repo.snapshotSeq')
 [ "${SEQ2:-0}" -gt "${SEQ1:-0}" ] && ok "pushes keep landing while the challenger waits" \
-  || bad "the repository stopped accepting pushes when a challenger appeared"
+  || { bad "the repository stopped accepting pushes when a challenger appeared"
+       note "the client said: $(printf '%s' "$PUSHOUT" | tr '\n' ' ' | cut -c1-200)"; }
 
 # THE POSITIVE CONTROL FOR P4, and it must run BEFORE the partition.
 # Exactly the path P4 uses — port-forward, clone from that pod, commit,
 # push back — against a pod that still holds the lease. If this cannot
 # land, P4's refusal is not evidence of fencing; it is evidence the
 # drill cannot push into a pod at all.
-direct_push "$H0" f16-direct-ok
+direct_push "$H0" "$M_DIRECT"
 if [ "$DPUSH_RC" -eq 0 ]; then
   ok "a direct push into the holding pod LANDS — P4's path works when the lease is held"
   P4_ARMED=yes
@@ -303,6 +360,14 @@ fi
 # ── P2: a partitioned holder stands down without restarting ──────────
 hdr "P2: the holder loses S3 — X13's signature is ready=false with NO restart"
 RST_BEFORE=$(K get -n "$NS" pod "$H0" -o jsonpath='{.status.containerStatuses[?(@.name=="syncer")].restartCount}' 2>/dev/null)
+# THE CLOCK STARTS HERE, at the partition — not at the top of P3.
+# The first run timed the takeover from after P2 had ALREADY waited a
+# full term for `renewalOverdue`, so it measured the tail of the window
+# (6s) against the whole term (60s) and called a correct lease eager.
+# The challenger's own log settled it: 0/6 through 21:37:25, then one
+# poll every ~10s, `holding at epoch 2` at 21:38:26 — 61s after the
+# holder's token stopped moving, which is exactly QUIET_POLLS.
+T_CUT=$(date +%s)
 K label -n "$NS" pod "$H0" chaos=blocked --overwrite >/dev/null 2>&1
 cat <<NPEOF | K apply -f - >/dev/null 2>&1
 apiVersion: networking.k8s.io/v1
@@ -335,15 +400,14 @@ RST_AFTER=$(K get -n "$NS" pod "$H0" -o jsonpath='{.status.containerStatuses[?(@
 
 # ── P3: a QUIET holder IS superseded ─────────────────────────────────
 hdr "P3: the challenger supersedes, but only after the quiet window"
-T_START=$(date +%s)
 BID2=""; TOOK=""
 for _ in $(seq 1 $(( (TERM * 6) / 5 ))); do
   BID2=$(bucket_holder)
-  [ -n "$BID2" ] && [ "$BID2" != "$BID0" ] && { TOOK=$(( $(date +%s) - T_START )); break; }
+  [ -n "$BID2" ] && [ "$BID2" != "$BID0" ] && { TOOK=$(( $(date +%s) - T_CUT )); break; }
   sleep 5
 done
 if [ -n "$TOOK" ]; then
-  ok "the lease moved to the challenger after ${TOOK}s"
+  ok "the lease moved to the challenger ${TOOK}s after the partition"
   E2=$(bucket_epochno)
   [ "${E2:-0}" -gt "${E0:-0}" ] && ok "and the epoch advanced $E0 -> $E2" \
     || bad "the holder changed but the epoch did not advance ($E0 -> ${E2:-?})"
@@ -362,7 +426,7 @@ K delete -n "$NS" networkpolicy "$NP" >/dev/null 2>&1
 K label -n "$NS" pod "$H0" chaos- >/dev/null 2>&1
 ok "the partition is healed; the deposed pod has S3 again"
 
-MARK="f16-zombie-$$"
+MARK="f16-zombie-$RUN"
 if [ "${P4_ARMED:-no}" != yes ]; then
   inc "the direct path never landed against a healthy holder, so a refusal here would not be evidence — P4 is not armed"
 else
@@ -373,10 +437,15 @@ else
   # transport failure and a fencing both exit non-zero, and only one of
   # them is evidence. The control above already proved this path can
   # reach a pod, so a transport failure now is a drill fault.
-  if [ "$(count "$DPUSH_OUT" 'Connection refused')" != 0 ] \
-     || [ "$(count "$DPUSH_OUT" 'Could not resolve')" != 0 ] \
-     || [ "$(count "$DPUSH_OUT" 'Failed to connect')" != 0 ] \
-     || [ "$(count "$DPUSH_OUT" 'not found')" != 0 ]; then
+  # WHAT PROVES THE FRONT ANSWERED is `[remote rejected]` (or `To <url>`),
+  # not the absence of "Connection refused" — forge's own refusal CARRIES
+  # that phrase as its reason: the deposed syncer stops serving its hook
+  # socket, so `proc-receive` reaches nothing and reports
+  # `the repository server is not accepting writes (Connection refused)`.
+  # The first run matched on the reason and called a correct refusal
+  # inconclusive.
+  if [ "$(count "$DPUSH_OUT" '\[remote rejected\]')" = 0 ] \
+     && [ "$(count "$DPUSH_OUT" "^To ")" = 0 ]; then
     inc "the push never reached the deposed pod's git front — 'it did not write' proves nothing here"
   elif [ "$DPUSH_RC" -ne 0 ]; then
     ok "the deposed holder REFUSED a push the SAME path landed while it held the lease"
@@ -388,10 +457,18 @@ sleep 15
 BID3=$(bucket_holder)
 [ "$BID3" = "$BID2" ] && ok "the bucket still names the successor" \
   || bad "the lease went back to '$BID3' — the zombie re-acquired"
-FENCED=$(sraw "$H0" .fenced)
-[ -n "$FENCED" ] && [ "$FENCED" != null ] \
-  && ok "and the deposed pod says it is fenced: $(printf '%s' "$FENCED" | cut -c1-80)" \
-  || inc "the deposed pod reports fenced=${FENCED:-<none>}; it may not have noticed yet"
+# WHAT SAFETY REQUIRES is that the deposed pod no longer claims to be the
+# writer — NOT that `fenced` is set. Observed on the wire: a deposed
+# holder drops back to `claimingEpoch` at 0/6 and warms from the batch
+# log as a standby, leaving `fenced` null. That is the better behaviour
+# and the first run's expectation was simply wrong about the mechanism.
+DHELD=$(sraw "$H0" '.epoch.held'); DPHASE=$(sraw "$H0" .phase); FENCED=$(sraw "$H0" .fenced)
+[ "$DHELD" != true ] \
+  && ok "the deposed pod no longer claims the lease (phase=$DPHASE fenced=$FENCED)" \
+  || bad "the deposed pod STILL claims to hold the lease — TWO WRITERS"
+[ "$(sraw "$H0" .serverId)" != "$BID2" ] \
+  && ok "and the bucket's holder is a different server than the deposed one" \
+  || bad "the deposed pod's id is the bucket's holder"
 
 NP2=$(holder_pod) || NP2=""
 if [ -n "$NP2" ]; then
@@ -406,7 +483,7 @@ fi
 # ── P5: nothing acknowledged was lost ────────────────────────────────
 hdr "P5: every acknowledged push survived the takeover"
 if [ -n "$NP2" ]; then
-  for m in f16-p0 f16-p1 f16-direct-ok; do
+  for m in "$M_P0" "$M_P1" "$M_DIRECT"; do
     n=$(K -n "$NS" exec "$NP2" -c syncer -- sh -c "git --git-dir=/repo/$NS/$REPO.git log --all --oneline 2>/dev/null | grep -c $m" 2>/dev/null)
     [ "${n:-0}" -ge 1 ] && ok "$m survived" || bad "$m was acknowledged before the partition and is GONE"
   done
@@ -437,10 +514,10 @@ CLEAN=$(( $(date +%s) - T_CLEAN ))
 if [ -n "$NEWUID" ] && [ "$NEWUID" != "$OLDUID" ]; then
   ok "a FRESH pod came up (uid changed) — not the old process still answering"
   note "clean handover + restore took ${CLEAN}s; P3's quiet-window takeover took ${TOOK:-?}s (term ${TERM}s)"
-  [ "$(sfield "$NEWP" .phase)" = Serving ] \
-    && ok "and it reached Serving from the bucket alone" \
-    || bad "the fresh syncer never reached Serving: $(sfield "$NEWP" .phase)"
-  for m in f16-p0 f16-p1 f16-direct-ok; do
+  is_up "$NEWP" \
+    && ok "and it is serving from the bucket alone (phase=$(sraw "$NEWP" .phase))" \
+    || bad "the fresh syncer never took the lease: phase=$(sraw "$NEWP" .phase) held=$(sraw "$NEWP" '.epoch.held')"
+  for m in "$M_P0" "$M_P1" "$M_DIRECT"; do
     n=$(K -n "$NS" exec "$NEWP" -c syncer -- sh -c "git --git-dir=/repo/$NS/$REPO.git log --all --oneline 2>/dev/null | grep -c $m" 2>/dev/null)
     [ "${n:-0}" -ge 1 ] && ok "$m is in the rebuilt repository" || bad "$m did not survive the rebuild"
   done
