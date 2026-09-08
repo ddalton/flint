@@ -146,7 +146,17 @@ pub fn plan(packs: &[PackInfo], k: PlanKnobs) -> Option<Plan> {
     // cadence yields to the pack cap — the packs the exemption below
     // holds back wait for this rebuild, and their count must not grow
     // without bound — but the disk never does.
-    if k.base_allowed && (k.cadence_open || tiers.len() >= cap) {
+    // The cap is a COUNT condition; `Plan::Base` is unbounded in BYTES.
+    // Let it admit a rebuild only when NO fold could reduce the count —
+    // i.e. when the packs over the exemption really are the reason the
+    // count is high. `eligible` is the tiers a fold may actually take.
+    let reference_pre = if has_base { base_bytes } else { k.base_min_bytes };
+    let eligible_now = tiers
+        .iter()
+        .filter(|p| p.bytes.saturating_mul(100) < reference_pre.saturating_mul(k.base_tier_percent))
+        .count();
+    let cap_tripped = tiers.len() >= cap;
+    if k.base_allowed && (k.cadence_open || (cap_tripped && eligible_now < 2)) {
         if !has_base && tier_bytes >= k.base_min_bytes && !tiers.is_empty() {
             return Some(Plan::Base { inputs: all_names() });
         }
@@ -198,13 +208,13 @@ pub fn plan(packs: &[PackInfo], k: PlanKnobs) -> Option<Plan> {
             break;
         }
     }
-    let forced = n >= cap;
+    let forced = n >= cap || cap_tripped;
     if split < 2 {
         if forced {
             // A perfect progression that has grown too long: the
             // smallest half by count, never every tier — every tier is
             // a rewrite of everything but the base.
-            let mut inputs: Vec<String> = tiers[..n.div_ceil(2)].iter().map(|p| p.name.clone()).collect();
+            let mut inputs: Vec<String> = tiers[..n.div_ceil(2).max(2)].iter().map(|p| p.name.clone()).collect();
             inputs.sort();
             return Some(Plan::Fold { inputs });
         }
@@ -1080,20 +1090,18 @@ mod plan_tests {
 
     /// M6 on `runcg` measured the floored arm re-uploading the WHOLE
     /// repository during every tiny-push leg — 385.4, 769.8, 1153.9 MiB
-    /// against repositories of 384, 768, 1152 MiB. This is that shape.
+    /// against repositories of 384, 768, 1152 MiB, 1x/2x/3x to within
+    /// 0.2%. The cause was here: the pack cap is a COUNT condition and
+    /// `Plan::Base` is unbounded in BYTES (`all_names()`), so tiny packs
+    /// reaching the cap bought a rewrite of the large ones.
     ///
-    /// THE CADENCE IS SHUT, and that is the whole point. The gate is
-    /// `cadence_open || tiers.len() >= cap`, so a test run with the
-    /// cadence OPEN fires through the cadence arm and says nothing about
-    /// the cap. The first version of this test did exactly that: it
-    /// passed unchanged with `|| tiers.len() >= cap` deleted from the
-    /// planner, which is the mutation it existed to catch.
-    ///
-    /// With the cadence shut the cap is the ONLY thing that can admit a
-    /// rebuild — and it admits one whose cost is unbounded in bytes,
-    /// because `Plan::Base` takes `all_names()`.
+    /// THE CADENCE IS SHUT in every arm below, and that is the point.
+    /// The gate reads `cadence_open || ...`, so an arm with the cadence
+    /// OPEN fires through the cadence and says nothing about the cap.
+    /// The first version of this test did exactly that, and passed
+    /// unchanged with the cap arm deleted from the planner.
     #[test]
-    fn the_pack_cap_does_not_buy_the_rebuild_the_cadence_refused() {
+    fn the_pack_cap_folds_and_does_not_rewrite_the_repository() {
         const MIB: u64 = 1024 * 1024;
         // 48 x 8 MiB (the P9 leg) + 20 tiny pushes: 68 tiers, over the cap.
         let mut sizes: Vec<u64> = vec![8 * MIB; 48];
@@ -1107,36 +1115,59 @@ mod plan_tests {
         };
         assert!(p.len() >= k.fold_max_packs, "the cap must actually be reached");
 
-        // The defect: a COUNT condition buys a rewrite of every pack.
-        match plan(&p, k) {
-            Some(Plan::Base { inputs }) => assert_eq!(
-                inputs.len(),
-                p.len(),
-                "the base rule takes every pack — that is the 1x/2x/3x on the wire"
-            ),
-            other => panic!("expected the cap to admit the base rule, got {other:?}"),
-        }
-
-        // CONTROL 1 — one dimension: the count, held under the cap. Same
-        // packs, same knobs, 63 tiers instead of 68. The byte
-        // justification is untouched (tier_bytes is far over
-        // base_min_bytes either way), so if this does not rebuild, it is
-        // the COUNT that bought the rewrite and not the bytes.
-        let mut fewer: Vec<u64> = vec![8 * MIB; 48];
-        fewer.extend(std::iter::repeat_n(4 * 1024, 15));
-        let q = packs(&fewer);
-        assert!(q.len() < k.fold_max_packs, "only the count differs");
-        let tier_bytes: u64 = q.iter().map(|x| x.bytes).sum();
-        assert!(tier_bytes >= k.base_min_bytes, "the byte justification is unchanged");
+        // The cap reduces the COUNT — which is what it is for — and does
+        // not buy the rebuild the cadence refused.
+        let got = plan(&p, k);
         assert!(
-            !matches!(plan(&q, k), Some(Plan::Base { .. })),
-            "under the cap the same bytes do NOT rebuild — the count is what bought it"
+            !matches!(got, Some(Plan::Base { .. })),
+            "the cap must not admit a whole-repository rewrite: {got:?}"
+        );
+        assert!(fold_inputs(got).len() >= 2, "a forced fold never takes a single input");
+
+        // CONTROL 1 — the case that makes the cap's rebuild NECESSARY,
+        // and the reason deleting the cap arm is the WRONG fix. Every
+        // pack is over the exemption, so nothing can be folded at all;
+        // if the cap does not admit a rebuild here the count grows with
+        // nothing able to reduce it. The one-line fix fails this.
+        let mut all_exempt = packs(&[600, 600, 600, 600]);
+        all_exempt.push(PackInfo { name: "pack-base.pack".into(), bytes: 1000, is_base: true });
+        assert!(
+            matches!(plan(&all_exempt, PlanKnobs { fold_max_packs: 4, ..k }), Some(Plan::Base { .. })),
+            "with nothing foldable the cap MUST still rebuild, or the count is unbounded"
         );
 
-        // CONTROL 2 — one dimension: the cadence, opened. The cap arm is
-        // not the only way in, and this pins that the OTHER arm still
-        // works, so a fix that disables the cap must not silently
-        // disable the base rule altogether.
+        // CONTROL 3 — the cap tripped by EXEMPT packs, with a few
+        // eligible ones under the floor. `tiers.len()` is at the cap but
+        // the POST-exemption count is 14, so a `forced` that reads the
+        // post-exemption count is false, the floor suppresses the fold,
+        // and nothing at all is planned while the count keeps growing —
+        // strictly worse than before the change. This is why `forced`
+        // must read the pre-exemption count.
+        let mut mixed: Vec<u64> = vec![40 * MIB; 50]; // exempt: over 50% of a 64 MiB reference
+        mixed.extend(std::iter::repeat_n(1 * MIB, 14)); // eligible, and 14 MiB is under the floor
+        let m = packs(&mixed);
+        assert_eq!(m.len(), 64, "the cap is tripped by the exempt packs");
+        let got = plan(&m, k);
+        assert!(
+            matches!(got, Some(Plan::Fold { .. })),
+            "the cap must plan a fold of the eligible packs, not nothing: {got:?}"
+        );
+
+        // CONTROL 4 — the cap tripped with exactly TWO eligible packs in
+        // geometric progression. `split` is 0, so the forced path takes
+        // the smallest half by count: 1 of 2. A one-input fold is a
+        // no-op that `commit` reproduces and re-plans forever, so the
+        // forced half must never be fewer than two.
+        let mut pair: Vec<u64> = vec![40 * MIB; 62];
+        pair.push(1 * MIB);
+        pair.push(16 * MIB);
+        let pr = packs(&pair);
+        assert_eq!(pr.len(), 64, "the cap is tripped");
+        let got = plan(&pr, k);
+        assert!(fold_inputs(got).len() >= 2, "a forced fold never takes a single input");
+
+        // CONTROL 2 — one dimension: the cadence, opened. The base rule
+        // itself must be untouched by this change.
         assert!(
             matches!(plan(&p, PlanKnobs { cadence_open: true, ..k }), Some(Plan::Base { .. })),
             "an open cadence must still admit the base rule"
