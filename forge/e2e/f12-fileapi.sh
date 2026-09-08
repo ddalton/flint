@@ -40,6 +40,14 @@ NS=${NS:-agents}
 # WITHOUT that identity cannot reach the port at all.
 NS_DOOR=${NS_DOOR:-forge-system}
 DOOR_LABEL=${DOOR_LABEL:-flint-forge-door}
+# The git client is a REAL agent: one projected token and nothing else,
+# reaching the repository through the door, which is the only thing that
+# can turn that token into an identity. Pushing straight at the
+# repository's git port is 403 — correctly, since it carries no verified
+# principal — and an earlier version of this drill did exactly that and
+# reported the resulting refusals as evidence of a race.
+DOOR=${DOOR:-http://flint-forge-door.forge-system.svc}
+TAG=${TAG:-drill-2ab7b5fb}
 : "${BUCKET:?}"; : "${PREFIX:?}"
 REPO=${REPO:-f12}
 HTTP_WRITERS=${HTTP_WRITERS:-12}
@@ -97,12 +105,25 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: $GITPOD
-  namespace: $NS_DOOR
-  labels: { app.kubernetes.io/name: $DOOR_LABEL }
+  namespace: $NS
+  labels: { role: forge-agent }
 spec:
+  serviceAccountName: agent-runner
   restartPolicy: Never
   containers:
-    - { name: c, image: alpine/git:2.45.2, command: ["sleep","36000"] }
+    - name: c
+      image: dilipdalton/flint-forge-git:$TAG
+      command: ["sleep","36000"]
+      volumeMounts:
+        - { name: forge-token, mountPath: /var/run/secrets/forge, readOnly: true }
+  volumes:
+    - name: forge-token
+      projected:
+        sources:
+          - serviceAccountToken:
+              path: token
+              audience: forge.chert.us
+              expirationSeconds: 3600
 ---
 apiVersion: v1
 kind: Pod
@@ -112,8 +133,8 @@ spec:
   containers:
     - { name: c, image: curlimages/curl:8.10.1, command: ["sleep","36000"] }
 EOF
-K wait -n "$NS_DOOR" --for=condition=Ready pod/$HTTPPOD pod/$GITPOD --timeout=180s >/dev/null 2>&1
-K wait -n "$NS" --for=condition=Ready pod/$STRANGER --timeout=180s >/dev/null 2>&1
+K wait -n "$NS_DOOR" --for=condition=Ready pod/$HTTPPOD --timeout=180s >/dev/null 2>&1
+K wait -n "$NS" --for=condition=Ready pod/$GITPOD pod/$STRANGER --timeout=180s >/dev/null 2>&1
 
 for i in $(seq 1 60); do
   EP=$(K get -n "$NS" flintrepo "$REPO" -o jsonpath='{.status.apiEndpoint}' 2>/dev/null)
@@ -166,10 +187,11 @@ else
 guarding this port"
 fi
 
-GITURL=$(K get -n "$NS" flintrepo "$REPO" -o jsonpath='{.status.gitEndpoint}')
-gitp() { K exec -n "$NS_DOOR" "$GITPOD" -- sh -c "$1" 2>&1; }
-gitp "git config --global user.email a@b.c; git config --global user.name agent; \
-      git config --global init.defaultBranch main; rm -rf /tmp/c" >/dev/null
+# The door, not status.gitEndpoint: the endpoint is the repository's own
+# port, which refuses anything without a door-verified principal.
+GITPRE='T=$(cat /var/run/secrets/forge/token); A="Authorization: Basic $(printf "x:%s" "$T" | base64 | tr -d "\n")"; G() { git -c http.extraHeader="$A" "$@"; }; U='"$DOOR"'/git/'"$NS"'/'"$REPO"'.git; '
+gitp() { K exec -n "$NS" "$GITPOD" -- sh -c "$GITPRE$1" 2>&1; }
+gitp "git config --global user.email a@b.c; git config --global user.name agent; rm -rf /tmp/c" >/dev/null
 
 echo
 echo "== P1: the browser writes, the agent's git client reads =="
@@ -177,15 +199,20 @@ for i in $(seq 1 3); do
   code=$(curlp PUT "/files/content?path=ui/f$i.txt" -H "X-Flint-Author: ada" --data-binary "from-ui-$i")
   [ "$code" = "200" ] || bad "UI write $i answered $code: $(body)"
 done
-gitp "rm -rf /tmp/c && git clone -q -b agents $GITURL /tmp/c" >/dev/null
+gitp "rm -rf /tmp/c && G clone -q -b agents \$U /tmp/c" >/dev/null
 got=$(gitp "cat /tmp/c/ui/f2.txt")
 [ "$got" = "from-ui-2" ] && ok "git reads the browser's bytes: '$got'" \
   || bad "git read '$got', expected from-ui-2"
 
 echo
 echo "== P2: the agent pushes, the browser reads =="
-gitp "cd /tmp/c && mkdir -p code && echo from-agent > code/a.txt && git add -A && \
-      git commit -qm agent && git push -q origin HEAD:agents" >/dev/null
+pushout=$(gitp "cd /tmp/c && mkdir -p code && echo from-agent > code/a.txt && git add -A && \
+      git commit -qm agent && G push \$U HEAD:agents")
+if echo "$pushout" | grep -qiE "error|fatal|reject"; then
+  bad "the agent's push failed, so P2 cannot test what it is for: $(echo "$pushout" | tail -2)"
+else
+  ok "the agent pushed through the door"
+fi
 code=$(curlp GET "/files/content?path=code/a.txt")
 got=$(body)
 [ "$code" = "200" ] && [ "$got" = "from-agent" ] \
@@ -194,7 +221,7 @@ got=$(body)
 
 echo
 echo "== P3: both doors at once — nothing acknowledged may be lost =="
-refused_any=0
+refused_any=0; landed_any=0
 for r in $(seq 1 "$ROUNDS"); do
   : > "$WORK/acked.$r"
   for i in $(seq 1 "$HTTP_WRITERS"); do
@@ -202,21 +229,25 @@ for r in $(seq 1 "$ROUNDS"); do
             -H "X-Flint-Author: user$i" --data-binary "r$r-$i")
       [ "$c" = "200" ] && echo "race/r$r-$i.txt" >> "$WORK/acked.$r" ) &
   done
-  ( gitp "cd /tmp/c && echo g$r > code/g$r.txt && git add -A && git commit -qm g$r && \
-          git push -q origin HEAD:agents" > "$WORK/push.$r" 2>&1
-    echo $? > "$WORK/pushrc.$r" ) &
+  ( out=$(gitp "cd /tmp/c && echo g$r > code/g$r.txt && git add -A && git commit -qm g$r && \
+          G push \$U HEAD:agents")
+    echo "$out" > "$WORK/push.$r"
+    echo "$out" | grep -qiE "error|fatal|reject" && echo 1 > "$WORK/pushrc.$r" || echo 0 > "$WORK/pushrc.$r" ) &
   wait
-  if [ "$(cat "$WORK/pushrc.$r" 2>/dev/null)" != "0" ]; then
+  if [ "$(cat "$WORK/pushrc.$r" 2>/dev/null)" = "0" ]; then
+    landed_any=1
+  else
     refused_any=1
     note "round $r: the push was refused (the API moved the branch first) — retrying"
-    gitp "cd /tmp/c && git fetch -q origin && git rebase -q origin/agents && \
-          git push -q origin HEAD:agents" >/dev/null
+    out=$(gitp "cd /tmp/c && G fetch -q \$U agents && git rebase -q FETCH_HEAD && \
+          G push \$U HEAD:agents")
+    echo "$out" | grep -qiE "error|fatal|reject" || landed_any=1
   fi
   n=$(wc -l < "$WORK/acked.$r" | tr -d ' ')
   note "round $r: $n of $HTTP_WRITERS HTTP writes acknowledged"
 done
 
-gitp "cd /tmp/c && git fetch -q origin && git reset -q --hard origin/agents" >/dev/null
+gitp "cd /tmp/c && G fetch -q \$U agents && git reset -q --hard FETCH_HEAD" >/dev/null
 missing=0
 for r in $(seq 1 "$ROUNDS"); do
   while read -r p; do
@@ -228,11 +259,18 @@ done
 
 # The vacuity gate: if the pusher never lost a race, the concurrency
 # never happened and "nothing was lost" measured a queue.
-if [ "$refused_any" -eq 0 ]; then
+# BOTH halves, and the second is the one that was missing. "Refused at
+# least once" is satisfied by a push that can NEVER succeed — which is
+# exactly what happened when this drill pushed at the repository's own
+# port and collected 403s. A race needs contention AND progress.
+if [ "$landed_any" -eq 0 ]; then
+  bad "no git push ever landed across $ROUNDS rounds — the git door is not working, and \
+every 'refusal' below was that, not contention"
+elif [ "$refused_any" -eq 0 ]; then
   inconc "the git push was never refused across $ROUNDS rounds — the two doors did not \
 actually contend, so P3's green says nothing about concurrency"
 else
-  ok "the race is real: the push was refused at least once and recovered by fetching"
+  ok "the race is real: the push both landed and was refused at least once, and recovered"
 fi
 
 echo
@@ -246,14 +284,18 @@ code=$(curlp PUT "/files/content?path=shared.txt" -H "X-Flint-Author: seed" --da
 tag=$(K exec -n "$NS_DOOR" "$HTTPPOD" -- curl -sS -D- -o /dev/null \
         -H "Authorization: Bearer $TOKEN" -H "X-Remote-User: x" \
         "$EP/files/content?path=shared.txt" 2>/dev/null | tr -d '\r' | \
-        awk 'BEGIN{IGNORECASE=1} /^etag:/{gsub(/"/,"",$2); print $2}')
+        awk '/^[Ee][Tt][Aa][Gg]:/{gsub(/"/,"",$2); print $2}')
 if [ -z "$tag" ]; then
   bad "no ETag came back for shared.txt — P4 cannot condition on a version it does not have"
 fi
 : > "$WORK/codes"
 for i in $(seq 1 8); do
-  ( curlp PUT "/files/content?path=shared.txt" -H "X-Flint-Author: u$i" \
-      -H "If-Match: \"$tag\"" --data-binary "v$i" >> "$WORK/codes" ) &
+  # `%{http_code}` carries no newline, so eight concurrent appends
+  # arrive as one line — `2004124124124...` — and every count reads 0.
+  # The run that found this had the right answer (one 200, seven 412s)
+  # and reported a lost update.
+  ( c=$(curlp PUT "/files/content?path=shared.txt" -H "X-Flint-Author: u$i" \
+      -H "If-Match: \"$tag\"" --data-binary "v$i"); printf '%s\n' "$c" >> "$WORK/codes" ) &
 done
 wait
 w=$(grep -c '^200$' "$WORK/codes" 2>/dev/null || echo 0)
@@ -274,7 +316,7 @@ code=$(curlp PUT "/files/content?path=ui" --data-binary "clobber")
 [ "$code" = "409" ] && ok "a write over a directory is refused (409), not performed" \
   || bad "directory clobber got $code"
 gitp "cd /tmp/c && echo x > m.txt && git add -A && git commit -qm m && \
-      git push origin HEAD:main" > "$WORK/protected" 2>&1
+      G push \$U HEAD:main" > "$WORK/protected" 2>&1
 # Any refusal counts, and the wording is git's, not ours: a direct push
 # to the repository's own git port carries no door-verified principal,
 # so the refusal may come back as a plain 403 rather than the hook's
