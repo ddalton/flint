@@ -13,12 +13,19 @@ type: application
 # 0.1.0: first cut — CRD, controller, server pods, the door's --git arm.
 # 0.2.0: `door.deploy` renders the door itself, with the RBAC it needs
 #        (flintrepos + tokenreviews). First cluster run.
-version: 0.3.0
+# 0.3.0: `spec.fileApi` renders the syncer's REST listener, its Service
+#        port and its status endpoint. Off by default.
+# 0.4.0: the door's third route table (`repoFiles`) on the SAME listener
+#        and port as git, and `door.jwt.*` — an external issuer's token
+#        as the principal. Both off by default; `door.jwt.issuer` is
+#        also passed to the operator, which audits `spec.consumers`
+#        against it and reports `ConsumersSound`.
+version: 0.4.0
 
 # The flint release whose images this chart runs. The operator, the
 # syncer and the gateway ship from the same build and speak the same
 # bucket format and the same status document — keep them in step.
-appVersion: "1.46.0"
+appVersion: "1.47.0"
 
 keywords:
   - git
