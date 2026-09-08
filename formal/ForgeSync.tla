@@ -488,6 +488,21 @@ Restore(s) ==
                 usable  == fetched \cap idxObj IN
             IF \/ snap.packs # fetched                       \* a named pack is absent
                \/ (snap.main # 0 /\ ~\E q \in usable : snap.main \in holds[q]) \* the ref's objects are in no pack git sees
+              \* WHAT THIS CONDITION DOES NOT ASK. It checks the TIP —
+              \* `snap.main` in some usable pack — and nothing about the
+              \* tip's ANCESTORS, because this module has no parent
+              \* relation and no server-built commits (no merge, no
+              \* commit_tree, no refs/for: the words appear nowhere in
+              \* it). The shipped syncer runs `git fsck
+              \* --connectivity-only` over the whole reachable graph,
+              \* which is strictly stronger.
+              \*
+              \* On 2026-09-08 F14 found a bucket this predicate calls
+              \* RESTORABLE and the real syncer refuses: a published tip
+              \* whose parent reached no pack. Do not cite
+              \* Inv_NoUnrestorable as covering that class — it cannot
+              \* fire for it. `ForgeMergeChain.tla` adds the dimension
+              \* and carries both mutations.
               THEN \* exit 78: refused, and the restart refuses again.
                    /\ unrestorable' = TRUE
                    /\ Fall(s)

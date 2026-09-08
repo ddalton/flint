@@ -1127,6 +1127,61 @@ cannot rediscover the bug classes it exists for proves nothing.
   recoverable all along.  A green run is a claim about the config, not
   about the code — both times the config was wrong.
 
+## `ForgeMergeChain.tla` — server-built commits and ancestry
+
+**Written because a cluster found what the model could not express.** On
+2026-09-08 the F14 drill on runcj caught forge publishing a ref whose
+PARENT had reached no pack in the bucket: the syncer refused on every
+restart with exit 78 (`fsck --connectivity-only`: `broken link … missing
+commit`) over a repository perfectly intact on the pod's disk and
+unrecoverable from S3.
+
+`ForgeSync.tla` could not have caught it, and the reason is specific
+rather than a shrug:
+
+- it has **no server-built commits** — `merge`, `commit_tree`,
+  `refs/for` and `server_created` appear **zero** times in it; it models
+  client `Pushes` and `FoldIds`, and the missing commit was one the
+  *server* created;
+- it has **no ancestry** — `holds[q]` maps a pack to a set of `Pushes`,
+  and a commit is an atomic token with no parent, so *"the tip is
+  present, its parent is not"* is not expressible;
+- therefore its `Restore` is strictly weaker than the shipped one. It
+  refuses only when the **tip** is in no named pack, while the syncer
+  walks the whole reachable graph. **`ForgeSync` would call the corrupt
+  bucket restorable** — so `Inv_NoUnrestorable` cannot be cited as
+  covering this class. A comment at that predicate now says so.
+
+This module adds that dimension and nothing else: server-built commits,
+the base each was built on, the pack a batch writes for them, and a
+restore predicate that is REACHABILITY (`Inv_RestorableFromBucket`)
+rather than tip-presence. Separate and small on purpose — `ForgeSync` is
+1,300 lines about leases, folds and stragglers, and this question is
+orthogonal to all of it.
+
+Three runs, all in the gate:
+
+1. `ForgeMergeChain.cfg` — the shipped code after `8381b557`: every
+   invariant holds. `BatchTwoMerges` fires 4 times (TLC action coverage),
+   so the strict run is not passing vacuously.
+2. `ForgeMergeChainExcludeBase.cfg` — **the first shipped defect**.
+   `excludes` was `merge_bases + snap.refs`, and a second merge's base is
+   the first merge's TIP, a loose commit the pack was meant to carry:
+   `pack-objects` gets `M ^M`. TLC **must find**
+   `Inv_RestorableFromBucket` violated.
+3. `ForgeMergeChainNoCoalesce.cfg` — **the second**. `update-ref --stdin`
+   refuses two updates to one ref, at step 6, *after* the pack, the
+   upload and the CAS — so a batch git rejects is published first and
+   errors after (which is why runcj's snapshot advanced past a batch
+   whose log entry, seq 52, never appeared). TLC **must find**
+   `Inv_LocalAgreesWithBucket` violated.
+
+Each mutation trips the invariant it is *about*: the cfgs name the
+invariants individually, because a combined one would let a run "find
+the loss" by breaking something else entirely.
+
+---
+
 ## Deliberate scope limits
 
 - Hot-rejoin's esnap window internals — crash *inside* catch-up/scrub is

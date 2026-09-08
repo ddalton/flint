@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Two hundred and thirty-seven runs, ALL required.
+# Two hundred and forty runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -22,7 +22,7 @@
 #   11 FlintExtentsProbe   11 FlintDelegRecall      8 FlintTierEpoch
 #    7 FlintTruncate        7 FlintTierSession      7 FlintTierMarker
 #    7 FlintShareDisk       5 FlintAdmission        4 FlintSnapshots
-#    3 FlintClaims          3 FlintA2Probe)
+#    3 FlintClaims          3 FlintA2Probe     3 ForgeMergeChain)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -1185,6 +1185,22 @@ mutation_run ForgeSync ForgeSyncProveFromDisk.cfg "forge-sync proof-scope mutati
 mutation_run ForgeSync ForgeSyncFoldCommitMidBatch.cfg "forge-sync mid-batch-commit mutation (FoldCommitMidBatch=TRUE: the fold commits beside a live batch, whose CAS then writes a listing taken BEFORE the fold retained its inputs and so re-names a retained pack -- recorded here as a harmless NON-RUN until retention was modelled, which gave it teeth)" "Inv_ProofNeverRestsOnRetention"
 mutation_run ForgeSync ForgeSyncFoldSupersedesArrivals.cfg "forge-sync fold-arrivals mutation (FoldSupersedesArrivals=TRUE: the commit unnames EVERY input, held or not, so a push whose objects the roll-up could not reach is unnamed and stranded -- THIS IS runcd, and until 2026-09-07 it had a cfg and no run here at all)" "Inv_LandedPackComplete"
 mutation_run ForgeSync ForgeSyncFoldTicksBatchSensor.cfg "forge-sync fold-sensor mutation (FoldTicksBatchSensor=TRUE, design rule 3: the fold's upload ticks the HOLD's counter and a wedged batch's holder keeps renewing through a base rebuild)" "Inv_NoRenewOverWedge"
+
+# ── ForgeMergeChain.tla — SERVER-BUILT COMMITS AND ANCESTRY ────────────
+#
+# The dimension ForgeSync does not have. It models client Pushes and
+# FoldIds and has NO merge, no commit_tree, no refs/for, and no parent
+# relation — so its Restore refuses only when the TIP is in no named
+# pack, while the shipped syncer walks the whole reachable graph. It
+# would have called runcj's corrupt bucket restorable.
+#
+# Both mutations are defects F14 found on the wire on 2026-09-08 and
+# 8381b557 fixed. Each must trip the SPECIFIC invariant it is about: a
+# combined one would let a run "find the loss" by breaking something
+# else.
+strict_run ForgeMergeChain ForgeMergeChain.cfg "forge merge-chain strict (excludes only what the bucket holds, one ref-transaction entry per ref: every commit reachable from the published tip is in a named, uploaded pack, and the pod agrees with the bucket)"
+mutation_run ForgeMergeChain ForgeMergeChainExcludeBase.cfg "forge merge-chain exclude-base mutation (ExcludeMergeBase=TRUE, runcj/F14: a second merge's base is the FIRST merge's tip, so pack-objects is handed M ^M and drops M from its own pack; the snapshot then names a commit whose parent reached no pack and every restart refuses with exit 78)" "Inv_RestorableFromBucket"
+mutation_run ForgeMergeChain ForgeMergeChainNoCoalesce.cfg "forge merge-chain coalesce mutation (CoalesceRefUpdates=FALSE, runcj/F14: update-ref refuses two updates to one ref at STEP 6 -- after the pack, the upload and the CAS -- so a batch git rejects is published first and errors after, which is why seq 52 has no log entry while the snapshot moved past it)" "Inv_LocalAgreesWithBucket"
 # FoldCommitMidBatch was one of these until 2026-09-07 and is now a run
 # above. The entry read: "TLC says nothing is lost ... the between-batches
 # rule is the loop's structure, not a safety property." That was true of a
