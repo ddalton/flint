@@ -40,6 +40,17 @@ spec:
               value: {{ include "flint-forge.gitImage" . | quote }}
             - name: FLINT_FORGE_LOG_LEVEL
               value: {{ .Values.server.logLevel | quote }}
+            {{- with (default dict .Values.door.jwt).issuer }}
+            {{- /*
+            WHAT THE DOOR VERIFIES, told to the operator so it can audit
+            `spec.consumers` exactly rather than guessing. The operator
+            is not in the request path and renders nothing from this —
+            it is the difference between "`*` might now admit people"
+            and knowing that it does.
+            */}}
+            - name: FLINT_FORGE_DOOR_JWT_ISSUER
+              value: {{ . | quote }}
+            {{- end }}
             {{- if .Values.door.namespace }}
             - name: FLINT_FORGE_DOOR_NAMESPACE
               value: {{ .Values.door.namespace | quote }}

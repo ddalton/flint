@@ -82,6 +82,13 @@ pub struct RenderDefaults {
     /// clean release lets a successor claim at once instead of waiting
     /// out six quiet polls.
     pub termination_grace_secs: i64,
+    /// The `iss` the DOOR verifies, when one is configured. Not used to
+    /// render anything — the operator is not in the request path — but
+    /// it is what makes `consumers_audit` an exact check rather than a
+    /// guess about what a list was meant to express. The chart renders
+    /// both this operator and the door from one values file, so the
+    /// fact is already there to pass.
+    pub door_jwt_issuer: Option<String>,
 }
 
 impl Default for RenderDefaults {
@@ -93,6 +100,7 @@ impl Default for RenderDefaults {
             door: None,
             operator: None,
             termination_grace_secs: 30,
+            door_jwt_issuer: None,
         }
     }
 }
@@ -123,6 +131,117 @@ pub fn server_images_disagree(d: &RenderDefaults) -> Option<String> {
         )),
         _ => None,
     }
+}
+
+/// What `spec.consumers` ACTUALLY AUTHORIZES, said out loud (design D6a
+/// and §7.3).
+///
+/// With an issuer configured, `serviceAccounts: ["*"]` does not mean
+/// "any pod in this cluster holding a token for the door's audience".
+/// It means that AND "any person that issuer will vouch for" — not a
+/// pod, not in this cluster. `aud` cannot narrow it, because Knox mints
+/// only a topology-wide audience and this deployment leaves it unset,
+/// which is precisely why D6a says `spec.consumers` is the only
+/// forge-specific check left in the chain.
+///
+/// **The operator is TOLD whether an issuer is configured** rather than
+/// inferring it from the shape of the list. The chart renders this
+/// operator and the door from one values file, so the fact is already
+/// there to pass; guessing from "does this repository name a person"
+/// would both miss a bare `*` on a cluster that does have an issuer and
+/// invent a warning on one that does not.
+///
+/// **It REFUSES NOTHING, and that is a decision.** Marking the
+/// repository `Failed` takes it to zero replicas, so a wrong opinion
+/// here would cost a working repository its service — far worse than
+/// anything it warns about. The operator can see the situation; it
+/// cannot know whether it is intended.
+///
+/// Returned most-severe first, as `(reason, message)`, security before
+/// breakage: an over-grant is worse than a grant that silently does
+/// nothing. The prefix comes from the MATCHER rather than being spelled
+/// again here — a guard carrying its own copy of the thing it guards is
+/// one edit away from warning about a syntax nothing enforces.
+pub fn consumers_audit(
+    repo: &FlintRepo,
+    policy_rendered: bool,
+    issuer: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    use crate::lite_gateway::git::JWT_USER_PREFIX;
+    let mut out = Vec::new();
+    let Some(c) = repo.spec.consumers.as_ref() else { return out };
+    let entries = &c.service_accounts;
+
+    let people = entries.iter().filter(|e| e.starts_with(JWT_USER_PREFIX)).count();
+    let wildcard = entries.iter().any(|e| e == "*");
+    // Can a PERSON reach this repository at all? Only with an issuer,
+    // and then by either spelling.
+    let admits_people = issuer.is_some() && (people > 0 || wildcard);
+
+    // MOST SEVERE. The last hop from door to syncer is a plain
+    // `X-Remote-User`, trusted behind the NetworkPolicy this operator
+    // renders only when it was told where the door runs. Forging that
+    // header buys the coarse rights shared by every pod on a
+    // ServiceAccount; once people can reach the repository the same
+    // forgery is worth exactly a named person's branch rights, and
+    // under a wildcard, any person's.
+    if admits_people && !policy_rendered {
+        out.push((
+            "PrincipalsUnenforced",
+            format!(
+                "person principals can reach this repository (issuer {}), and NO NetworkPolicy \
+                 is rendered for it — this operator was not told where the door runs. The \
+                 syncer takes X-Remote-User on trust, so anything that can reach the git port \
+                 can assert any of them and gets exactly their branch rights. Set \
+                 `door.namespace`, and check the CNI enforces NetworkPolicy.",
+                issuer.unwrap_or_default()
+            ),
+        ));
+    }
+
+    // D6a proper, and now an exact check rather than a guess about
+    // intent.
+    if wildcard && issuer.is_some() {
+        out.push((
+            "WildcardAdmitsPeople",
+            format!(
+                "`*` is listed while the door verifies tokens from {}. It no longer means \
+                 \"any pod we trust\": it admits ANY user of ANY service sharing that issuer. \
+                 List the principals, or accept the wildcard knowingly.",
+                issuer.unwrap_or_default()
+            ),
+        ));
+    }
+
+    // The mirror, and it is a SILENT breakage rather than an exposure:
+    // with no issuer there is no verifier for these entries, so the
+    // people named are refused and nothing anywhere says why.
+    if people > 0 && issuer.is_none() {
+        out.push((
+            "PrincipalsWithNoIssuer",
+            format!(
+                "{people} person principal(s) are listed, but the door has no issuer \
+                 configured — nothing can verify a token for them, so every one of them is \
+                 refused. Set the door's `jwt.issuer`, or remove the entries."
+            ),
+        ));
+    }
+
+    // A typo that grants nothing and that nothing else will ever
+    // report: the matcher requires a non-empty subject, so a bare
+    // prefix matches no one and the person it was meant for is simply
+    // refused.
+    let empty = entries.iter().filter(|e| *e == JWT_USER_PREFIX).count();
+    if empty > 0 {
+        out.push((
+            "EntryMatchesNobody",
+            format!(
+                "{empty} entr(ies) are a bare `{JWT_USER_PREFIX}` with no subject. These match \
+                 nobody, so whoever they were meant for is refused with no other sign."
+            ),
+        ));
+    }
+    out
 }
 
 /// Where the gateway's pods are, as a NetworkPolicy peer.
@@ -1218,6 +1337,157 @@ mod tests {
         assert_eq!(claims.len(), 2);
         assert!(claims.iter().any(|c| c.prefix == "tenant/proj-export" && c.kind == "export"));
     }
+
+    // ── D6a: what `spec.consumers` actually authorizes ──────────────
+    //
+    // Every assertion is paired with a control in the SAME test,
+    // because "no finding" is also what a guard that inspects nothing
+    // produces — and this guard's entire job is to notice something the
+    // CR does not say.
+
+    const ISS: &str = "https://knox.example/token";
+
+    fn consumers(list: &[&str]) -> FlintRepo {
+        let mut r = repo();
+        r.spec.consumers = Some(crate::s3csi::policy::Consumers {
+            service_accounts: list.iter().map(|s| s.to_string()).collect(),
+        });
+        r
+    }
+    fn reasons(r: &FlintRepo, policy: bool, iss: Option<&str>) -> Vec<&'static str> {
+        consumers_audit(r, policy, iss).into_iter().map(|(x, _)| x).collect()
+    }
+
+    /// A DOOR WITH NO ISSUER IS SILENT. The ordinary forge deployment
+    /// has the JWT path off, and a guard that put a standing condition
+    /// on every repository there would be noise nobody reads by the
+    /// second week.
+    #[test]
+    fn nothing_is_reported_when_the_door_verifies_no_issuer() {
+        for list in [&["*"][..], &["agent-runner"][..], &[][..]] {
+            assert!(reasons(&consumers(list), true, None).is_empty(), "{list:?}");
+            assert!(reasons(&consumers(list), false, None).is_empty(), "{list:?} no policy");
+        }
+        assert!(consumers_audit(&repo(), false, None).is_empty(), "no consumers list at all");
+
+        // THE CONTROL: the SAME wildcard, with an issuer configured, IS
+        // reported. Without it every assertion above is equally true of
+        // a function that returns an empty vector.
+        assert!(
+            reasons(&consumers(&["*"]), true, Some(ISS)).contains(&"WildcardAdmitsPeople"),
+            "the guard reports nothing at all"
+        );
+    }
+
+    /// D6a proper, and the reason the operator is TOLD rather than
+    /// guessing: a bare `*` — naming no person, so indistinguishable by
+    /// shape from an ordinary list — is exactly the case that must be
+    /// reported once an issuer exists.
+    #[test]
+    fn a_wildcard_is_reported_only_when_an_issuer_exists() {
+        let wild = consumers(&["*"]);
+        assert_eq!(reasons(&wild, true, Some(ISS)), vec!["WildcardAdmitsPeople"]);
+        // Control, moving ONE dimension: the same list, no issuer.
+        assert!(reasons(&wild, true, None).is_empty());
+        // Control, moving the other: an issuer, no wildcard.
+        let named = consumers(&["agent-runner", "jwt:user:alice@example.com"]);
+        assert!(!reasons(&named, true, Some(ISS)).contains(&"WildcardAdmitsPeople"));
+
+        // Actionable: the message must name the issuer whose users are
+        // now admitted, since that is the fact the CR does not carry.
+        let (_, msg) = consumers_audit(&wild, true, Some(ISS)).remove(0);
+        assert!(msg.contains(ISS), "{msg}");
+        assert!(msg.contains('*'), "{msg}");
+    }
+
+    /// THE MIRROR, and it is a silent breakage rather than an exposure:
+    /// people listed with no issuer to verify them are refused by
+    /// something that logs nothing.
+    #[test]
+    fn people_listed_with_no_issuer_are_reported_as_refused() {
+        let named = consumers(&["agent-runner", "jwt:user:alice@example.com"]);
+        assert_eq!(reasons(&named, true, None), vec!["PrincipalsWithNoIssuer"]);
+        // Control: the same list once an issuer exists.
+        assert!(!reasons(&named, true, Some(ISS)).contains(&"PrincipalsWithNoIssuer"));
+        // Control: a list with no people is not reported either way.
+        assert!(reasons(&consumers(&["agent-runner"]), true, None).is_empty());
+    }
+
+    /// §7.3. The last hop is a plain `X-Remote-User` behind a policy
+    /// this operator renders only when told where the door runs. People
+    /// reaching the repository does not change the forgery — it changes
+    /// what the forgery is WORTH, from rights shared by every pod on a
+    /// ServiceAccount to exactly one person's, and under a wildcard, any
+    /// person's.
+    #[test]
+    fn an_unenforced_last_hop_is_reported_once_people_can_reach_it() {
+        // By either spelling.
+        for list in [&["jwt:user:alice@example.com"][..], &["*"][..]] {
+            assert_eq!(
+                reasons(&consumers(list), false, Some(ISS))[0],
+                "PrincipalsUnenforced",
+                "{list:?} with no policy"
+            );
+            // Control: the SAME repository with a policy rendered.
+            assert!(
+                !reasons(&consumers(list), true, Some(ISS)).contains(&"PrincipalsUnenforced"),
+                "{list:?} with a policy"
+            );
+        }
+        // Control: no issuer means no person can reach it, so an
+        // unrendered policy is the ordinary posture and not this
+        // finding.
+        assert!(reasons(&consumers(&["*"]), false, None).is_empty());
+
+        // SECURITY BEFORE BREAKAGE. An over-grant outranks a list that
+        // silently grants nothing, and an unenforced hop outranks both.
+        let everything = consumers(&["*", "jwt:user:alice@example.com", "jwt:user:"]);
+        assert_eq!(
+            reasons(&everything, false, Some(ISS)),
+            vec!["PrincipalsUnenforced", "WildcardAdmitsPeople", "EntryMatchesNobody"]
+        );
+    }
+
+    /// The guard and the matcher must agree on what a person entry IS.
+    /// A guard carrying its own copy of the prefix is one edit away
+    /// from warning about a syntax nothing enforces — so it imports the
+    /// matcher's, and this pins the two together.
+    #[test]
+    fn the_guard_keys_on_the_matchers_own_prefix() {
+        let entry = format!("{}alice@example.com", crate::lite_gateway::git::JWT_USER_PREFIX);
+        let r = consumers(&["agent-runner", &entry]);
+        // The guard sees a person here…
+        assert_eq!(reasons(&r, true, None), vec!["PrincipalsWithNoIssuer"]);
+        // …and so does the matcher, for the same entry.
+        assert!(crate::lite_gateway::git::consumer_allows(
+            r.spec.consumers.as_ref(),
+            "tenant",
+            &crate::s3csi::broker::Identity::person("alice@example.com")
+        ));
+    }
+
+    /// A bare prefix matches nobody — the matcher requires a non-empty
+    /// subject — so it is a typo that grants nothing and that nothing
+    /// else in the system will ever mention.
+    #[test]
+    fn a_bare_prefix_is_reported_as_matching_nobody() {
+        let typo = consumers(&["agent-runner", "jwt:user:", "jwt:user:alice@example.com"]);
+        assert!(reasons(&typo, true, Some(ISS)).contains(&"EntryMatchesNobody"));
+        // Control: a prefix WITH a subject is not a typo.
+        let fine = consumers(&["agent-runner", "jwt:user:alice@example.com"]);
+        assert!(!reasons(&fine, true, Some(ISS)).contains(&"EntryMatchesNobody"));
+
+        // And the claim it rests on, asserted against the MATCHER
+        // rather than restated, so the two cannot drift into
+        // disagreeing about the same string.
+        assert!(!crate::lite_gateway::git::consumer_allows(
+            typo.spec.consumers.as_ref(),
+            "tenant",
+            &crate::s3csi::broker::Identity::person("")
+        ));
+    }
+
+
 }
 
 /// Admit only the door to the git port.

@@ -33,7 +33,7 @@ use kube::{Client, ResourceExt};
 
 use crate::lite_operator::hubstatus::{self, HubSnapshot};
 
-use super::crd::{FlintRepo, FlintRepoStatus, RepoLifecycle, RepoPhase, RepoStats};
+use super::crd::{FlintRepo, FlintRepoStatus, RepoCondition, RepoLifecycle, RepoPhase, RepoStats};
 use super::idle::{self, Decision, IdleState, ANN_IDLE_SINCE, ANN_IDLE_STATE};
 use super::render::{self, RenderDefaults, STATUS_PORT};
 
@@ -177,6 +177,48 @@ pub fn phase_of(
         Some(s) if ready_replicas >= 1 && s.phase.is_quiescible() => RepoPhase::Ready,
         _ if ready_replicas >= 1 => RepoPhase::Starting,
         _ => RepoPhase::Pending,
+    }
+}
+
+/// D6a's audit, as ONE condition of one type.
+///
+/// `ConsumersSound=True` when nothing was found; `False` with the
+/// most-severe reason and every message. One type rather than one per
+/// finding, because a condition list is keyed by type and three types
+/// that are usually absent read as noise in `kubectl describe` — this
+/// way `ConsumersSound` is a thing an operator can look for and a thing
+/// an alert can key on.
+///
+/// `lastTransitionTime` is carried forward when the STATUS is
+/// unchanged. Kubernetes means it as "when this last flipped", and
+/// restamping it every reconcile — which is every 5 to 300 seconds —
+/// would make it a clock rather than an event, and would write status
+/// on every pass forever.
+pub fn consumers_condition(
+    repo: &FlintRepo,
+    findings: &[(&'static str, String)],
+    now: chrono::DateTime<chrono::Utc>,
+) -> RepoCondition {
+    let status = if findings.is_empty() { "True" } else { "False" };
+    let previous = repo
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .and_then(|cs| cs.iter().find(|c| c.r#type == "ConsumersSound"));
+    let last_transition_time = match previous {
+        Some(p) if p.status == status => p.last_transition_time.clone(),
+        _ => Some(now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+    };
+    RepoCondition {
+        r#type: "ConsumersSound".into(),
+        status: status.into(),
+        reason: findings.first().map(|(r, _)| (*r).to_string()).unwrap_or_else(|| "Audited".into()),
+        message: if findings.is_empty() {
+            None
+        } else {
+            Some(findings.iter().map(|(_, m)| m.as_str()).collect::<Vec<_>>().join(" | "))
+        },
+        last_transition_time,
     }
 }
 
@@ -339,6 +381,16 @@ pub async fn full_pass(
         .and_then(|dep| dep.status.and_then(|s| s.ready_replicas))
         .unwrap_or(0);
 
+    // D6a. Audited every pass because it is a function of the SPEC and
+    // of whether this operator renders a policy, both of which change
+    // without a restart. It refuses nothing — see `render::consumers_audit`
+    // for why a wrong opinion here must not cost a repository its pod.
+    let consumers =
+        render::consumers_audit(repo, d.render.door.is_some(), d.render.door_jwt_issuer.as_deref());
+    for (reason, message) in &consumers {
+        tracing::warn!(namespace = %ns, repo = %name, reason, "{message}");
+    }
+
     let phase = phase_of(repo, refused.as_deref(), state, ready_replicas, snapshot);
     let replicas = replicas_for(phase, &decision);
     apply(
@@ -401,7 +453,7 @@ pub async fn full_pass(
             last_push_unix: forge_doc.and_then(|f| f.activity.as_ref()).map(|a| a.last_activity_unix),
         }),
         refused: refused.clone(),
-        conditions: None,
+        conditions: Some(vec![consumers_condition(repo, &consumers, now)]),
     };
     let patch = serde_json::json!({ "status": status });
     repos
@@ -632,4 +684,56 @@ mod tests {
         assert_eq!((stats.refs, stats.packs, stats.snapshot_seq), (4, 1, 12));
         assert_eq!(forge.activity.map(|a| a.last_activity_unix), Some(1700000000));
     }
+
+    /// `lastTransitionTime` means "when this last FLIPPED", so it is
+    /// carried forward while the status holds. Restamping it every pass
+    /// would make it a clock rather than an event — and, because this
+    /// reconcile runs every 5 to 300 seconds, would write status
+    /// forever on a repository where nothing is happening.
+    #[test]
+    fn a_condition_that_did_not_flip_keeps_its_transition_time() {
+        let t0 = "2026-01-01T00:00:00Z";
+        let now: chrono::DateTime<chrono::Utc> =
+            "2026-06-01T12:00:00Z".parse().expect("a timestamp");
+        let mut r = repo("proj", "tenant/proj/", "u1", "2026-01-01T00:00:00Z");
+
+        // A fresh repository with nothing to report.
+        let first = consumers_condition(&r, &[], now);
+        assert_eq!(first.status, "True");
+        assert_eq!(first.reason, "Audited");
+        assert!(first.message.is_none());
+        assert_eq!(first.last_transition_time.as_deref(), Some("2026-06-01T12:00:00Z"));
+
+        // Carry the previous condition, and audit again with the SAME
+        // verdict: the stamp must not move.
+        r.status = Some(FlintRepoStatus {
+            conditions: Some(vec![RepoCondition {
+                r#type: "ConsumersSound".into(),
+                status: "True".into(),
+                reason: "Audited".into(),
+                message: None,
+                last_transition_time: Some(t0.into()),
+            }]),
+            ..Default::default()
+        });
+        let held = consumers_condition(&r, &[], now);
+        assert_eq!(held.last_transition_time.as_deref(), Some(t0), "the stamp moved without a flip");
+
+        // THE CONTROL: a real flip DOES restamp, and carries the
+        // most-severe reason with every message.
+        let findings = [
+            ("PrincipalsUnenforced", "no policy".to_string()),
+            ("WildcardAdmitsPeople", "a wildcard".to_string()),
+        ];
+        let flipped = consumers_condition(&r, &findings, now);
+        assert_eq!(flipped.status, "False");
+        assert_eq!(flipped.reason, "PrincipalsUnenforced");
+        assert_eq!(flipped.message.as_deref(), Some("no policy | a wildcard"));
+        assert_eq!(
+            flipped.last_transition_time.as_deref(),
+            Some("2026-06-01T12:00:00Z"),
+            "a flip did not restamp"
+        );
+    }
+
 }

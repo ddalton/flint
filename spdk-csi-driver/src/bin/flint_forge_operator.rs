@@ -19,6 +19,8 @@
 //!                              render the NetworkPolicy that makes
 //!                              `X-Remote-User` trustworthy
 //!   FLINT_FORGE_DOOR_POD_LABEL the door's pod label (k=v)
+//!   FLINT_FORGE_DOOR_JWT_ISSUER  the `iss` the door verifies, if any —
+//!     audited, never rendered
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -127,6 +129,15 @@ async fn main() -> anyhow::Result<()> {
     if let Some(why) = spdk_csi_driver::forge_operator::render::server_images_disagree(&render) {
         warn!("{why}");
     }
+    // What the DOOR verifies, which this operator never does. It is
+    // here only so `consumers_audit` can say exactly what a
+    // repository's list authorizes instead of guessing from its shape:
+    // with an issuer, `*` admits any person that issuer vouches for,
+    // and without one, every `jwt:user:` entry is refused by something
+    // that logs nothing.
+    render.door_jwt_issuer = std::env::var("FLINT_FORGE_DOOR_JWT_ISSUER")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
     // Where the door runs. Set it and every repository gets a
     // NetworkPolicy admitting only the gateway to its git port; leave
     // it unset and reaching the port IS the authorization, which the

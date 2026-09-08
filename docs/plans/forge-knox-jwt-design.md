@@ -186,9 +186,34 @@ practical before accepting the weaker posture.
 **D6a. `spec.consumers` now carries weight it was not designed for.**
 With `aud` unable to isolate, it is the ONLY forge-specific check in the
 chain. `serviceAccounts: ["*"]` stops meaning "any pod we trust" and
-starts meaning "any user of any service in this Knox topology". The
-operator should warn on a wildcard in any repository that also names a
-`jwt:user:` principal.
+starts meaning "any user of any service in this Knox topology".
+
+**BUILT** as `render::consumers_audit`, and it is an exact check rather
+than the heuristic this line first proposed. The original text said to
+warn on a wildcard "in any repository that also names a `jwt:user:`
+principal" — inferring from the shape of the list that an issuer must be
+in play. That is both unsound and unnecessary: unsound because a bare
+`*` names no person and is exactly the case that needs reporting, and
+unnecessary because **the chart renders this operator and the door from
+one values file**, so `door.jwt.issuer` can simply be passed
+(`FLINT_FORGE_DOOR_JWT_ISSUER`). The operator renders nothing from it —
+it is not in the request path — and audits with it.
+
+Four findings, security before breakage:
+
+| reason | when | what it costs |
+|---|---|---|
+| `PrincipalsUnenforced` | people can reach the repository (a `jwt:user:` entry **or** `*`, with an issuer) and no NetworkPolicy is rendered | §7.3: forging `X-Remote-User` stops buying coarse shared rights and starts buying one named person's — or under a wildcard, any person's |
+| `WildcardAdmitsPeople` | `*` listed **and** an issuer configured | D6a proper: any user of any service sharing that issuer |
+| `PrincipalsWithNoIssuer` | `jwt:user:` entries listed, **no** issuer configured | the mirror, and a SILENT breakage: nothing can verify them, so every person named is refused and nothing logs why |
+| `EntryMatchesNobody` | a bare `jwt:user:` with no subject | matches nobody; the person it was meant for is refused with no other sign |
+
+**It refuses nothing**, and that is the decision: `Failed` takes a
+repository to zero replicas, so a wrong opinion here would cost a
+working repository its service — worse than anything it warns about. It
+is one status condition, `ConsumersSound`, plus a log line. A door with
+no issuer is reported on nothing at all, so the ordinary forge
+deployment carries no standing condition.
 
 **D7. A lifetime ceiling, enforced door-side.** A token whose
 `exp - iat` exceeds `--jwt-max-lifetime` (default 1 h) is refused
@@ -470,7 +495,7 @@ set, so an install that does not configure it behaves exactly as today.
 | D4 | the router's oracle is a per-verifier counter, not a status code |
 | D5 | signature · `iss` · `aud` · `exp` · `nbf` · skew ≤ 60 s |
 | D6 | `aud` supported and optional; unset is loud, not silent |
-| D6a | `consumers` is the only forge-specific check left — warn on `*` beside a `jwt:user:` entry |
+| D6a | `consumers` is the only forge-specific check left — the operator is TOLD the door's issuer and audits exactly; one `ConsumersSound` condition, refusing nothing |
 | D7 | door-side lifetime ceiling, default 1 h |
 | D8 | JWKS with kid-refresh and a refetch floor; static PEM accepted |
 | D9 | key-server failure is 503, never 401 |
