@@ -16,6 +16,29 @@ TAG=${TAG:-1.46.0-forge.2}
 NS_SYS=${NS_SYS:-forge-system}
 NS_AGENTS=${NS_AGENTS:-agents}
 
+# THE DOOR'S OPTIONAL ROUTE TABLES AND VERIFIERS, off unless asked for.
+#
+# Both are deliberately opt-in here for the same reason the chart makes
+# them opt-in: `--repo-files` is a second door onto tenant data, and
+# `--jwt-issuer` is a second authority. A drill that needs one says so.
+#
+#   REPO_FILES=1                                   F13's second route table
+#   JWT_ISSUER=... JWT_PUBKEY=<file> [JWT_AUDIENCE=...] [JWT_MAX_LIFETIME=...]
+#                                                  F15's external issuer
+REPO_FILES_SET=""
+[ "${REPO_FILES:-0}" = "1" ] && REPO_FILES_SET="--set door.repoFiles.enabled=true"
+
+JWT_SET=""
+if [ -n "${JWT_ISSUER:-}" ]; then
+    : "${JWT_PUBKEY:?JWT_ISSUER needs JWT_PUBKEY — the door refuses to start with an issuer and no key source}"
+    kubectl -n "$NS_SYS" create secret generic forge-jwt-key \
+        --from-file=public.pem="$JWT_PUBKEY" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    JWT_SET="--set door.jwt.issuer=$JWT_ISSUER --set door.jwt.publicKeySecret.name=forge-jwt-key"
+    JWT_SET="$JWT_SET --set door.jwt.maxLifetimeSecs=${JWT_MAX_LIFETIME:-3600}"
+    [ -n "${JWT_AUDIENCE:-}" ] && JWT_SET="$JWT_SET --set door.jwt.audience=$JWT_AUDIENCE"
+fi
+
 AK=$(jq -r .AccessKey.AccessKeyId "$KEYFILE")
 SK=$(jq -r .AccessKey.SecretAccessKey "$KEYFILE")
 
@@ -38,6 +61,7 @@ helm upgrade --install flint-forge "$root/flint-forge-chart" \
     --set server.syncerImage="dilipdalton/flint-forge-syncer:$TAG" \
     --set door.deploy=true \
     --set door.namespace="$NS_SYS" \
+    $REPO_FILES_SET $JWT_SET \
     --wait --timeout 5m
 
 BUCKET="$BUCKET" PREFIX="$PREFIX" \

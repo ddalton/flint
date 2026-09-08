@@ -73,7 +73,7 @@
 set -uo pipefail
 NS=${NS:-agents}
 DOOR=${DOOR:-http://flint-forge-door.forge-system.svc}
-TAG=${TAG:-drill-e2cc04f6}
+TAG=${TAG:?set TAG to the image tag this drill deployed}
 : "${BUCKET:?}"; : "${PREFIX:?}"
 REPO=${REPO:-f14}
 AGENTS=${AGENTS:-4}          # concurrent editors
