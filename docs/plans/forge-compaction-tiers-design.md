@@ -1236,6 +1236,32 @@ reader here needs).
 
 ### 13.3 The simulation
 
+> **EVERY NUMBER IN THIS SECTION WAS PRODUCED WITHOUT THE PACK CAP'S
+> BASE-RULE TERM, and the "rules 1–4" column is the one to distrust.**
+> `foldsim.py`'s base gate was cadence-and-waiver only; the planner's is
+> `k.base_allowed && (k.cadence_open || tiers.len() >= cap)`. The model
+> had no `cap` term at all, so it could not express a cap-triggered
+> whole-repository rebuild — the mechanism M6 measured on `runcg` as
+> 385.4 / 769.8 / 1153.9 MiB against repositories of 384 / 768 / 1152
+> MiB, 1×/2×/3× to within 0.2%. On that state the planner answered
+> `base` over every pack and this model answered `fold`.
+>
+> It was not merely silent. The old gate gives the same answer as the
+> planner does AFTER the fix (`7202c2b5`), so the model agreed with a
+> forge that did not exist yet and nothing looked wrong. That is why the
+> P2 prediction below transferred to the wire as nothing at all: M6
+> measured before/after at 0.94–1.42× against a pre-registered ≥1.30×,
+> its own falsifier.
+>
+> The gate is fixed as of 2026-09-07 (`base_cap_mode`, default
+> `eligible`, with `foldsim.py selfcheck` pinning it against the two
+> behaviours `fold.rs`'s tests pin). **Re-derive this table before
+> quoting it**; run it with `base_cap_mode='cap'` for as-shipped-then and
+> `'eligible'` for now. Until then, treat the "rules 1–4" column as a
+> lower bound on cost: the runs it models never rebuild the base at the
+> cap, and the real planner did, repeatedly.
+
+
 Bytes uploaded ÷ bytes pushed, the fold beside the loop modelled;
 "peak packs" is the most the snapshot ever named. The runca row is the
 run's real sequence (run A, B1, B2 with their times and the P5

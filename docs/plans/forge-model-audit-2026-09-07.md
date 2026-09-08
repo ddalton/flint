@@ -224,7 +224,7 @@ runs for minutes on a large repository, and gating the ledger sweep on
 it defers every bucket deletion for that whole window, for no safety
 gained — and there would have been no failing case to pin it with.
 
-## OPEN — F5
+## F5 — MEASURED by M6 on `runcg`, 2026-09-07; NARROWED, not closed
 
 - The sweep's etag check is atomic in the model and read-once-then-loop
   in the code. That is the declared grace axiom, but the 3600 s grace
@@ -233,6 +233,51 @@ gained — and there would have been no failing case to pin it with.
   (`forge-log-first-verdict-2026-09-07.md` §5), which needs the same
   rig: a base rebuild inside the measurement window on a repository big
   enough for the upload to take real time.
+
+### What M6 delivered
+
+M6 ran that rig, and the arm carrying the shipped floor did a
+whole-repository base rebuild inside EVERY tiny-push leg — the event F5
+needed and could not previously get on demand. The uploads are per-leg
+resident-byte deltas under the arm's prefix; each leg's rebuild began
+and finished inside its own window:
+
+| leg | repository | uploaded | leg wall | implied rate |
+|---|---:|---:|---:|---:|
+| P2 pair 1 | ~384 MiB | 385.4 MiB | 69 s | >= 5.6 MiB/s |
+| P2 pair 2 | ~768 MiB | 769.8 MiB | 61 s | >= 12.6 MiB/s |
+| P2 pair 3 | ~1152 MiB | 1153.9 MiB | 62 s | **>= 18.6 MiB/s** |
+
+The rate is a LOWER bound twice over: the rebuild's duration is not
+isolated from the leg's, and the leg concurrently served 591-684
+acknowledged pushes, so the rebuild had strictly less than the whole
+window. At >= 18.6 MiB/s the 3600 s grace covers a **~65 GiB (70 GB)**
+repository before the sweep could reach a pack a reader still holds.
+
+**So the grace is not tight at the sizes forge is built for, and F5's
+worry does not reproduce at 1.15 GB.** Three things stop that closing
+the item outright, and they are the residual:
+
+1. **One node type, one region, one run** — `i4i.xlarge` on `runcg`,
+   `us-west-1`. No rep-to-rep spread; the third pair is a single
+   number, and this project has twice had an effect dissolve on a third
+   rep.
+2. **Linearity is assumed, not measured.** `pack-objects` is not
+   guaranteed linear from 1 GB to 65 GB, and this extrapolates over
+   nearly two orders of magnitude. walgit's large repository carries a
+   32 GB base, so the regime is reachable.
+3. **It measures the pre-`7202c2b5` planner.** That fix makes
+   cap-triggered rebuilds rarer, which only helps this bound — fewer
+   rebuilds, same grace — but the number was taken before it.
+
+**What would close it:** one leg on a repository of tens of GB with a
+base rebuild inside the window, timing the rebuild directly rather than
+bounding it by the leg. That is a big-repository drill and is NOT worth
+a cluster on its own — bundle it with the next run that needs a large
+repository anyway.
+
+**What this replaces:** "that has never been measured." It has now, at
+1.15 GB, with the limits above stated.
 
 ## Also fixed alongside
 
