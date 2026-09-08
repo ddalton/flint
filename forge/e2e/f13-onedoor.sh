@@ -52,13 +52,14 @@ NS_SYS=${NS_SYS:-forge-system}
 # ONE address. Every client below builds its URL from this and nothing
 # else — which is what leg P1 checks.
 DOOR=${DOOR:-http://flint-forge-door.forge-system.svc}
-TAG=${TAG:-drill-3rd-door}
+TAG=${TAG:-drill-68afeb40}
 : "${BUCKET:?}"; : "${PREFIX:?}"
 REPO=${REPO:-f13}
 REPO_OFF=${REPO_OFF:-f13off}
 SAVES=${SAVES:-200}
 REAP_WAIT=${REAP_WAIT:-420}
 WORK=${WORK:-$(mktemp -d)}
+mkdir -p "$WORK" || { echo "cannot create WORK=$WORK"; exit 2; }
 PASS=0; FAIL=0; INCONC=0
 
 K() { kubectl "$@"; }
@@ -155,19 +156,27 @@ done
 [ "${ph:-}" = "Ready" ] && ok "the repository is Ready" \
   || { bad "the repository never became Ready (phase=${ph:-none}); the rest measures nothing"; exit 1; }
 
-# The door must be serving the NEW route table. A door on the old image
-# 404s /repo/... and every leg below would read as a routing failure.
-code=$(app GET "?path=/")
-if [ "$code" = "404" ]; then
-  bad "the door 404s /repo/... — it is not running an image with the third door"
-  echo "F13 cannot proceed."; exit 1
-fi
-ok "the door serves /repo/<ns>/<name>/files (got $code)"
-
-# No credential at all.
+# THE GATE, and it must not be a status code that means two things.
+#
+# The first cut asked for any path and treated 404 as "the door is not
+# running the third door". It is not: the SYNCER answers
+# 404 {"reason":"empty-repository"} for a repository with no commits,
+# which is a legal application answer and exactly what a fresh drill
+# repository returns. The gate failed a working door.
+#
+# An UNAUTHENTICATED request discriminates properly, because the answer
+# is the door's own and is produced before any upstream call: a mounted
+# route refuses with 401, an unmounted one is warp's unmatched-path 404.
+# Repository state cannot reach it.
 code=$(K exec -n "$NS" "$APP" -- curl -sS -o /dev/null -D /tmp/hdr -w '%{http_code}' \
         "$DOOR$FILES?path=/" 2>/dev/null)
-[ "$code" = "401" ] && ok "no credential: 401" || bad "no credential answered $code"
+case "$code" in
+  401) ok "the door serves /repo/<ns>/<name>/files — no credential: 401" ;;
+  404) bad "the door 404s an unauthenticated /repo/... — it is not running an image with the third door"
+       echo "F13 cannot proceed."; exit 1 ;;
+  *)   bad "an unauthenticated /repo/... answered $code, which is neither"
+       echo "F13 cannot proceed."; exit 1 ;;
+esac
 # …and NOT a Basic challenge. The git door must send one; this one must
 # not, or a stray browser gets a native password dialog.
 if K exec -n "$NS" "$APP" -- grep -qi '^www-authenticate' /tmp/hdr 2>/dev/null; then
@@ -196,11 +205,29 @@ code=$(K exec -n "$NS" "$STRANGER" -- sh -c "curl -sS -o /dev/null -w '%{http_co
 # above might have bypassed the gateway.
 EP=$(K get -n "$NS" flintrepo "$REPO" -o jsonpath='{.status.apiEndpoint}')
 direct=$(K exec -n "$NS" "$APP" -- curl -sS -o /dev/null -w '%{http_code}' \
-          --max-time 8 "$EP/files?path=/" 2>/dev/null || echo "blocked")
-case "$direct" in
-  000|blocked|"") ok "an ordinary pod cannot reach the syncer's file port directly" ;;
-  *) bad "the syncer's file port answered an ordinary pod ($direct) — the NetworkPolicy is not enforcing, so every leg below may have bypassed the door" ;;
-esac
+          --max-time 8 "$EP/files?path=/" 2>/dev/null)
+rc=$?
+if [ "$rc" != "0" ] || [ "$direct" = "000" ] || [ -z "$direct" ]; then
+  ok "an ordinary pod cannot reach the syncer's file port directly (curl rc=$rc code='$direct')"
+else
+  bad "the syncer's file port answered an ordinary pod ($direct) — the NetworkPolicy is not enforcing, so every leg below may have bypassed the door"
+fi
+
+echo "== P0b: seed the repository, through the git door =="
+# A read of an empty repository is a legitimate 404, so every content
+# leg below would be measuring an empty repository rather than the
+# door. The seed is a real push by a real agent through the door.
+K exec -n "$NS" "$AGENT" -- sh -c "
+  git config --global credential.helper '!f(){ echo username=x; echo password=\$(cat /var/run/secrets/forge/token); };f' &&
+  git config --global user.email a@b.c && git config --global user.name agent &&
+  git config --global init.defaultBranch agents &&
+  rm -rf /tmp/seed && mkdir -p /tmp/seed && cd /tmp/seed && git init -q &&
+  printf 'seeded' > seed.txt && git add seed.txt && git commit -qm seed &&
+  git push -q $DOOR/git/$NS/$REPO.git agents:agents" >/dev/null 2>&1 \
+  && ok "seeded agents through the git door" || bad "the seed push failed"
+code=$(app GET "?path=/")
+[ "$code" = "200" ] && ok "and the file door now lists it (200)" \
+  || bad "the file door answered $code after the seed: $(appbody)"
 
 echo "== P1: one address, two prefixes =="
 AUTH_G=$(printf '%s' "$DOOR/git/$NS/$REPO.git/info/refs" | sed -E 's|^[a-z]+://([^/]+).*|\1|')
@@ -270,10 +297,17 @@ else
           --data-binary 'tab-$w'" 2>/dev/null >> "$WORK/p4" ) &
   done
   wait
-  wins=$(grep -c '^20[01]$' "$WORK/p4" || true)
-  lost=$(grep -cE '^(409|412)$' "$WORK/p4" || true)
-  [ "$wins" = "1" ] && ok "exactly one writer won ($wins x 2xx, $lost x 409/412)" \
-    || bad "$wins writers won — a lost update (codes: $(tr '\n' ' ' < "$WORK/p4"))"
+  wins=$(grep -c '^20[01]$' "$WORK/p4" 2>/dev/null || true)
+  lost=$(grep -cE '^(409|412)$' "$WORK/p4" 2>/dev/null || true)
+  total=$(grep -c . "$WORK/p4" 2>/dev/null || true)
+  # A leg that collected nothing is INCONCLUSIVE, never a defect.
+  if [ -z "$total" ] || [ "$total" -lt 4 ] 2>/dev/null; then
+    inconc "only ${total:-0} of 4 writers reported, so the conflict check measured nothing"
+  elif [ "$wins" = "1" ]; then
+    ok "exactly one writer won ($wins x 2xx, $lost x 409/412)"
+  else
+    bad "$wins writers won — a lost update (codes: $(tr '\n' ' ' < "$WORK/p4"))"
+  fi
 fi
 
 echo "== P5: the branch policy applies to a browser save =="
@@ -356,27 +390,53 @@ echo "== P8: what $SAVES small browser saves cost in S3 (MEASURED, not asserted)
 pfx="s3://$BUCKET/$PREFIX/$REPO/"
 b0=$(aws s3 ls --recursive --summarize "$pfx" 2>/dev/null | awk '/Total Size/{print $3}')
 o0=$(aws s3 ls --recursive --summarize "$pfx" 2>/dev/null | awk '/Total Objects/{print $3}')
+# THE SAVES MUST ACTUALLY LAND, and the first cut did not check.
+#
+# The file API refuses a blind overwrite of an existing file with 428
+# Precondition Required — a real safety property: a client that does not
+# participate in the ETag protocol cannot lose someone else's update.
+# The first version of this leg sent no If-Match, so all 200 "saves"
+# were refused in 3 s and it reported 11 bytes per save as if that were
+# a measurement.
+#
+# So the loop does what a browser app must do: carry If-Match, and take
+# the new ETag from each response for the next save. Every status code
+# is counted, and a shortfall makes the leg INCONCLUSIVE rather than a
+# number.
 s0=$(date +%s)
 K exec -n "$NS" "$APP" -- sh -c "
   T=\$(cat /var/run/secrets/forge/token)
-  i=0; while [ \$i -lt $SAVES ]; do
-    curl -sS -o /dev/null -X PUT '$DOOR$FILES/content?path=notes.md' \
-      -H \"Authorization: Bearer \$T\" -H 'Content-Type: text/plain' \
-      --data-binary \"save number \$i, the kind a person makes while typing\"
+  U='$DOOR$FILES/content?path=notes.md'
+  # Establish the file and its first ETag. A create needs no If-Match.
+  E=\$(curl -sS -D - -o /dev/null -X PUT \"\$U\" -H \"Authorization: Bearer \$T\" \
+        -H 'Content-Type: text/plain' --data-binary 'save 0' \
+        | tr -d '\r' | awk 'tolower(\$1)==\"etag:\"{print \$2}')
+  i=1; while [ \$i -lt $SAVES ]; do
+    R=\$(curl -sS -D /tmp/h -o /dev/null -w '%{http_code}' -X PUT \"\$U\" \
+          -H \"Authorization: Bearer \$T\" -H \"If-Match: \$E\" \
+          -H 'Content-Type: text/plain' \
+          --data-binary \"save number \$i, the kind a person makes while typing\")
+    echo \"\$R\"
+    E=\$(tr -d '\r' < /tmp/h | awk 'tolower(\$1)==\"etag:\"{print \$2}')
     i=\$((i+1))
-  done" >/dev/null 2>&1
+  done" > "$WORK/p8" 2>/dev/null
 s1=$(date +%s)
+landed=$(grep -c '^20[01]$' "$WORK/p8" 2>/dev/null || true)
+sent=$(grep -c . "$WORK/p8" 2>/dev/null || true)
 sleep 30
 b1=$(aws s3 ls --recursive --summarize "$pfx" 2>/dev/null | awk '/Total Size/{print $3}')
 o1=$(aws s3 ls --recursive --summarize "$pfx" 2>/dev/null | awk '/Total Objects/{print $3}')
-if [ -n "${b0:-}" ] && [ -n "${b1:-}" ]; then
-  note "saves: $SAVES in $((s1-s0))s"
-  note "bytes resident: $b0 -> $b1 (delta $((b1-b0)); $(( (b1-b0) / (SAVES>0?SAVES:1) )) per save)"
+if [ -z "${b0:-}" ] || [ -z "${b1:-}" ]; then
+  inconc "could not read the bucket, so the save cost was not measured"
+elif [ "${landed:-0}" -lt $((SAVES - 10)) ] 2>/dev/null; then
+  inconc "only ${landed:-0} of ${sent:-0} saves landed 2xx — the cost below would be \
+the cost of REFUSALS. Codes seen: $(sort "$WORK/p8" 2>/dev/null | uniq -c | tr '\n' ' ')"
+else
+  note "saves: $landed landed of $sent sent, in $((s1-s0))s ($(( (s1-s0) * 1000 / (landed>0?landed:1) )) ms each)"
+  note "bytes resident: $b0 -> $b1 (delta $((b1-b0)); $(( (b1-b0) / (landed>0?landed:1) )) per save)"
   note "objects:        $o0 -> $o1 (delta $((o1-o0)))"
   note "THIS IS THE NUMBER TO COMPARE against an agent-push workload; forge's"
   note "byte economics were measured on pushes, never on a typing cadence."
-else
-  inconc "could not read the bucket, so the save cost was not measured"
 fi
 
 echo

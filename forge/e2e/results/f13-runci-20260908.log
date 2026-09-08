@@ -1,0 +1,44 @@
+== P0: the door is the only way in, and it refuses whom it should ==
+  PASS  the repository is Ready
+  PASS  the door serves /repo/<ns>/<name>/files — no credential: 401
+  PASS  and no WWW-Authenticate challenge, unlike the git door
+  PASS  a garbage credential: 401
+  PASS  a non-consumer at the FILE door: 403
+  PASS  the same non-consumer at the GIT door: 403
+  PASS  an ordinary pod cannot reach the syncer's file port directly (curl rc=28 code='000')
+== P0b: seed the repository, through the git door ==
+  PASS  seeded agents through the git door
+  PASS  and the file door now lists it (200)
+== P1: one address, two prefixes ==
+  PASS  both doors are the same authority: flint-forge-door.forge-system.svc
+  PASS  a real git clone through the door
+  PASS  and a REST list at the same authority
+== P2: each door reads the other's bytes ==
+  PASS  the browser wrote ui.txt (200)
+  PASS  git reads the browser's bytes: 'written-by-the-browser'
+  PASS  the agent pushed through the door
+  PASS  the browser reads the agent's bytes: 'written-by-the-agent'
+== P3: the door decides who you are ==
+  PASS  the door overrode the forged principal: system:serviceaccount:agents:agent-runner <system:serviceaccount:agents:agent-runner@forge.chert.us>
+== P4: two browser tabs, one file, no silent loss ==
+  ....  both writers send If-Match: "a7568cab25e4e78231e29eaf4863a35f147f32d6"
+  PASS  exactly one writer won (1 x 2xx, 3 x 409/412)
+== P5: the branch policy applies to a browser save ==
+  PASS  a save at a protected branch: 403
+== P6: the browser wakes a sleeping repository ==
+  PASS  the repository was reaped: replicas 0 and no pod
+  PASS  a plain HTTP READ woke it in 7s and the content survived
+  PASS  and it is a FRESH pod (df02473e-a504-42e6-8570-ea62b5f0367e -> f9c6a76b-dfeb-41d3-990c-a76bf7b8892e)
+  PASS  the DOOR armed the wake annotation: 2026-09-08T15:02:43Z
+== P7: a repository without the file API says so, permanently ==
+  PASS  fileApi disabled: 501
+  PASS  and no Retry-After
+== P8: what 200 small browser saves cost in S3 (MEASURED, not asserted) ==
+  ....  saves: 199 landed of 199 sent, in 36s (180 ms each)
+  ....  bytes resident: 11180 -> 566559 (delta 555379; 2790 per save)
+  ....  objects:        25 -> 829 (delta 804)
+  ....  THIS IS THE NUMBER TO COMPARE against an agent-push workload; forge's
+  ....  byte economics were measured on pushes, never on a typing cadence.
+
+==== F13: 25 passed, 0 failed, 0 inconclusive ====
+work: /private/tmp/claude-503/-Users-ddalton-github-flint/2834f77e-73d3-4c23-b931-2c7bee0451cf/scratchpad/f13-work3

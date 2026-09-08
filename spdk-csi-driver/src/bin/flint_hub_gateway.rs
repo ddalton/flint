@@ -396,7 +396,11 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             repo_store.wait_until_ready().await.ok();
             repo_ready.store(true, Ordering::Relaxed);
-            info!("repository cache listed — the git door is serving");
+            info!(
+                git = git_door,
+                repo_files = repo_door,
+                "repository cache listed — the forge doors are serving"
+            );
         });
         // The repository FILE door, beside the git one: the same
         // store, the same readiness gate and — the part that is not an
