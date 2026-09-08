@@ -785,3 +785,84 @@ async fn a_stale_condition_on_a_move_is_refused() {
     assert_eq!(ok.status, 200, "{}", ok.text());
     assert_eq!(rig.on_branch(), vec!["new.txt"]);
 }
+
+/// **The defect a cluster found and the local suite could not.**
+///
+/// A pushed ref's objects arrive inside a pack `index-pack` already
+/// wrote. A ref the SERVER builds has nothing on disk but loose
+/// objects, and only packs are uploaded — so the bucket ends up holding
+/// a ref whose commit is in no pack, and the next restore refuses to
+/// start:
+///
+///     cannot update ref 'refs/heads/agents': trying to write ref
+///     with nonexistent object <oid>
+///
+/// F12 hit exactly that on `runch` (2026-09-07): the file API's first
+/// write published a ref and the syncer CrashLooped on restore. Nothing
+/// here could catch it, because nothing here restores — so this asserts
+/// the property one step earlier, where it is cheap: after a write, the
+/// branch tip must be IN A PACK.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_api_commit_is_packed_and_not_merely_loose() {
+    let rig = Rig::start().await;
+    let w = rig.put("ada", "packed.txt", b"content\n", None).await;
+    assert_eq!(w.status, 200, "{}", w.text());
+
+    let git = |args: &[&str]| -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&rig.repo)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", "/nonexistent")
+            .output()
+            .expect("git");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let tip = git(&["rev-parse", BRANCH]);
+    assert!(!tip.is_empty(), "the branch must exist after a write");
+
+    // `--batch-all-objects` over packs only. If the commit is loose and
+    // in no pack, it is absent here — and absent here means absent from
+    // the bucket, because loose objects are never uploaded.
+    let packed = git(&["cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype)"]);
+    let in_pack = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&rig.repo)
+        .args(["verify-pack", "-v", "--", ])
+        .output()
+        .is_ok();
+    let _ = (packed, in_pack);
+
+    // The direct question, asked of git: which packs hold this oid?
+    let mut found = false;
+    let packs = std::fs::read_dir(rig.repo.join("objects/pack"))
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().map(|x| x == "idx").unwrap_or(false))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert!(!packs.is_empty(), "a write must produce at least one pack");
+    for idx in &packs {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&rig.repo)
+            .args(["verify-pack", "-v", idx.to_str().unwrap()])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", "/nonexistent")
+            .output()
+            .expect("verify-pack");
+        if String::from_utf8_lossy(&out.stdout).contains(&tip) {
+            found = true;
+            break;
+        }
+    }
+    assert!(
+        found,
+        "the branch tip {tip} is in no pack — it is loose, so it was never uploaded, and \
+         the next restore will refuse the ref that names it"
+    );
+}

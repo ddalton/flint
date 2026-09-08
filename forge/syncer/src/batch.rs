@@ -51,6 +51,24 @@ pub struct PushRequest {
     /// all-or-nothing gets neither the guarantee nor an error.
     pub atomic: bool,
     pub commands: Vec<RefUpdate>,
+    /// New oids whose objects this process created and which are
+    /// therefore LOOSE on disk, not in any pack.
+    ///
+    /// A pushed ref's objects arrive inside a pack that `index-pack`
+    /// already wrote, so the upload finds them. A ref the SERVER built
+    /// — a merge, or a file-API write — has nothing on disk but loose
+    /// objects, and a pack-only upload would leave the bucket holding a
+    /// ref whose commit is in no pack. The restore then refuses:
+    ///
+    ///     cannot update ref 'refs/heads/agents': trying to write ref
+    ///     with nonexistent object <oid>
+    ///
+    /// Measured on a cluster (F12, 2026-09-07): the file API's first
+    /// write published a ref and the syncer CrashLooped on the next
+    /// restore. The merge path was already safe because it registers
+    /// its commits explicitly; this field is how everything else says
+    /// the same thing.
+    pub server_created: Vec<String>,
 }
 
 impl PushRequest {
@@ -188,6 +206,24 @@ pub async fn run_batch(
                     if let Some((tip, base)) = created {
                         merge_tips.push(tip);
                         merge_bases.push(base);
+                    }
+                    // The same treatment for objects this process built
+                    // outside the merge path. Registered on ACCEPTANCE
+                    // so an atomic rollback unwinds it with the rest.
+                    if push.server_created.iter().any(|o| o == &update.new_oid) {
+                        merge_tips.push(update.new_oid.clone());
+                        // Only a REAL base. `norm` renders "this ref did
+                        // not exist" as the empty string, and `is_zero`
+                        // answers false for it (it requires at least one
+                        // character), so an empty base reaches
+                        // `pack-objects` as a bare `^` and it exits
+                        // `fatal: bad revision '^'` — which this code
+                        // then reported to the caller as a policy
+                        // refusal, because an unrecognised batch error
+                        // was classified as one.
+                        if !update.old_oid.is_empty() && !is_zero(&update.old_oid) {
+                            merge_bases.push(update.old_oid.clone());
+                        }
                     }
                     if push.atomic {
                         eff_before

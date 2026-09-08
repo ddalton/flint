@@ -592,6 +592,13 @@ pub fn classify(reason: &str) -> FileError {
         FileError::RefContended
     } else if reason.contains("differs between this server and the bucket") {
         FileError::Reconciling(reason.to_string())
+    } else if reason.starts_with("git: ") || reason.contains("fatal:") {
+        // A git failure is OURS, not the caller's. Classifying it as a
+        // policy refusal told a caller their write was not permitted
+        // when in fact `pack-objects` had exited on a malformed
+        // argument this code built — a 403 that sent everyone looking
+        // at the branch policy.
+        FileError::Git(reason.to_string())
     } else {
         FileError::PolicyRefused(reason.to_string())
     }

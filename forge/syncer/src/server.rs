@@ -392,8 +392,7 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                                     // client asked for anything, so
                                     // there is no contract to keep.
                                     atomic: false,
-                                    commands: dead,
-                                };
+                                    commands: dead, server_created: vec![] };
                                 if let Err(e) =
                                     batch::run_batch(&mut sc, vec![push], &policy).await
                                 {
@@ -455,6 +454,11 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                                     // command's fate; there is one
                                     // command, so atomicity is moot.
                                     atomic: false,
+                                    // THE COMMIT IS LOOSE. Nothing else
+                                    // will pack it, and a ref published
+                                    // without its objects makes the next
+                                    // restore refuse to start.
+                                    server_created: vec![cmd.new_oid.clone()],
                                     commands: vec![cmd],
                                 };
                                 match batch::run_batch(&mut sc, vec![push], &policy).await {

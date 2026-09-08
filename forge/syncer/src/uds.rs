@@ -134,5 +134,8 @@ pub fn to_push(id: u64, req: HookRequest) -> PushRequest {
         options: req.options,
         atomic: req.atomic,
         commands: req.commands,
+        // A pushed ref's objects arrive inside a pack `index-pack`
+        // already wrote, so nothing here is loose.
+        server_created: vec![],
     }
 }

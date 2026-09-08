@@ -32,6 +32,14 @@
 #     changed pod UID before it credits the wake.
 set -uo pipefail
 NS=${NS:-agents}
+# The clients live where the DOOR lives and wear its label, because that
+# is the only thing the repository's NetworkPolicy admits to the file
+# port. They are standing in for the door, which does not yet serve the
+# file API — so this drill exercises the syncer's side of it, not the
+# gateway's routing. P0 proves the policy is real by showing that a pod
+# WITHOUT that identity cannot reach the port at all.
+NS_DOOR=${NS_DOOR:-forge-system}
+DOOR_LABEL=${DOOR_LABEL:-flint-forge-door}
 : "${BUCKET:?}"; : "${PREFIX:?}"
 REPO=${REPO:-f12}
 HTTP_WRITERS=${HTTP_WRITERS:-12}
@@ -47,7 +55,7 @@ inconc() { INCONC=$((INCONC+1)); printf '  INCONCLUSIVE  %s\n' "$*"; }
 note()   { printf '  ....  %s\n' "$*"; }
 
 TOKEN=$(head -c 32 /dev/urandom | base64 | tr -d '=+/' | head -c 32)
-HTTPPOD=f12-http; GITPOD=f12-git
+HTTPPOD=f12-http; GITPOD=f12-git; STRANGER=f12-stranger
 
 # Every HTTP call goes through here so the identity headers are in ONE
 # place: the principal is what the door would set from a verified
@@ -55,13 +63,13 @@ HTTPPOD=f12-http; GITPOD=f12-git
 # person it authenticated.
 curlp() { # <method> <path> [extra curl args...]
   local m=$1 path=$2; shift 2
-  K exec -n "$NS" "$HTTPPOD" -- curl -sS -o /tmp/body -w '%{http_code}' \
+  K exec -n "$NS_DOOR" "$HTTPPOD" -- curl -sS -o /tmp/body -w '%{http_code}' \
     -X "$m" "$EP$path" \
     -H "Authorization: Bearer $TOKEN" \
     -H "X-Remote-User: system:serviceaccount:$NS:browser" \
     "$@" 2>/dev/null
 }
-body() { K exec -n "$NS" "$HTTPPOD" -- cat /tmp/body 2>/dev/null; }
+body() { K exec -n "$NS_DOOR" "$HTTPPOD" -- cat /tmp/body 2>/dev/null; }
 
 echo "== P0: preconditions, and the controls that make the rest mean something =="
 K apply -f - >/dev/null <<EOF
@@ -76,7 +84,10 @@ sed -e "s|__REPO__|$REPO|g" -e "s|__NS__|$NS|g" -e "s|__BUCKET__|$BUCKET|g" \
 K apply -f - >/dev/null <<EOF
 apiVersion: v1
 kind: Pod
-metadata: { name: $HTTPPOD, namespace: $NS }
+metadata:
+  name: $HTTPPOD
+  namespace: $NS_DOOR
+  labels: { app.kubernetes.io/name: $DOOR_LABEL }
 spec:
   restartPolicy: Never
   containers:
@@ -84,13 +95,25 @@ spec:
 ---
 apiVersion: v1
 kind: Pod
-metadata: { name: $GITPOD, namespace: $NS }
+metadata:
+  name: $GITPOD
+  namespace: $NS_DOOR
+  labels: { app.kubernetes.io/name: $DOOR_LABEL }
 spec:
   restartPolicy: Never
   containers:
     - { name: c, image: alpine/git:2.45.2, command: ["sleep","36000"] }
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: $STRANGER, namespace: $NS }
+spec:
+  restartPolicy: Never
+  containers:
+    - { name: c, image: curlimages/curl:8.10.1, command: ["sleep","36000"] }
 EOF
-K wait -n "$NS" --for=condition=Ready pod/$HTTPPOD pod/$GITPOD --timeout=180s >/dev/null 2>&1
+K wait -n "$NS_DOOR" --for=condition=Ready pod/$HTTPPOD pod/$GITPOD --timeout=180s >/dev/null 2>&1
+K wait -n "$NS" --for=condition=Ready pod/$STRANGER --timeout=180s >/dev/null 2>&1
 
 for i in $(seq 1 60); do
   EP=$(K get -n "$NS" flintrepo "$REPO" -o jsonpath='{.status.apiEndpoint}' 2>/dev/null)
@@ -105,17 +128,46 @@ ok "status.apiEndpoint published: $EP"
 case "$EP" in *:9850) ok "the endpoint names the file port, not the status port" ;;
   *) bad "the endpoint is not on the file port: $EP" ;; esac
 
+# `status.apiEndpoint` says WHERE, and the operator publishes it as soon
+# as it renders the Deployment — before the listener inside it answers.
+# Racing that is not a product fault and must not be reported as one:
+# an earlier run of this drill failed P0 and P1 on it while P3, running
+# a minute later, wrote 12 of 12.
+ready=0
+for i in $(seq 1 60); do
+  c=$(K exec -n "$NS_DOOR" "$HTTPPOD" -- curl -sS -m 5 -o /dev/null -w '%{http_code}' \
+        -X GET "$EP/files?path=/" -H "Authorization: Bearer $TOKEN" \
+        -H "X-Remote-User: probe" 2>/dev/null)
+  case "$c" in 200|404) ready=1; break ;; esac
+  sleep 5
+done
+[ "$ready" = "1" ] && ok "the file API answers" || bad "the file API never answered"
+
 # The two controls. Until these fail closed, no 200 below is evidence.
-code=$(K exec -n "$NS" "$HTTPPOD" -- curl -sS -o /dev/null -w '%{http_code}' \
+code=$(K exec -n "$NS_DOOR" "$HTTPPOD" -- curl -sS -o /dev/null -w '%{http_code}' \
   -X GET "$EP/files?path=/" -H "Authorization: Bearer wrong-token-but-long-enough" \
   -H "X-Remote-User: x" 2>/dev/null)
 [ "$code" = "401" ] && ok "a wrong bearer is refused (401)" || bad "a wrong bearer got $code"
-code=$(K exec -n "$NS" "$HTTPPOD" -- curl -sS -o /dev/null -w '%{http_code}' \
+code=$(K exec -n "$NS_DOOR" "$HTTPPOD" -- curl -sS -o /dev/null -w '%{http_code}' \
   -X GET "$EP/files?path=/" -H "Authorization: Bearer $TOKEN" 2>/dev/null)
 [ "$code" = "403" ] && ok "no verified principal is refused (403)" || bad "no principal got $code"
 
+# THE POLICY IS REAL, and this is the leg that says so on the wire.
+# Every 200 below is reached from a pod wearing the door's identity; if
+# any pod could reach this port, that identity would be decoration and
+# the file API would be an open writer to anything in the cluster.
+sc=$(K exec -n "$NS" "$STRANGER" -- curl -sS -m 8 -o /dev/null -w '%{http_code}' \
+       -X GET "$EP/files?path=/" -H "Authorization: Bearer $TOKEN" \
+       -H "X-Remote-User: x" 2>/dev/null)
+if [ "$sc" = "000" ] || [ -z "$sc" ]; then
+  ok "a pod without the door's identity cannot reach the file port at all"
+else
+  bad "an arbitrary pod reached the file API and got $sc — the NetworkPolicy is not \
+guarding this port"
+fi
+
 GITURL=$(K get -n "$NS" flintrepo "$REPO" -o jsonpath='{.status.gitEndpoint}')
-gitp() { K exec -n "$NS" "$GITPOD" -- sh -c "$1" 2>&1; }
+gitp() { K exec -n "$NS_DOOR" "$GITPOD" -- sh -c "$1" 2>&1; }
 gitp "git config --global user.email a@b.c; git config --global user.name agent; \
       git config --global init.defaultBranch main; rm -rf /tmp/c" >/dev/null
 
@@ -185,12 +237,19 @@ fi
 
 echo
 echo "== P4: many writers, one file, one version =="
-code=$(curlp PUT "/files/content?path=shared.txt" -H "X-Flint-Author: seed" --data-binary "seed")
-tag=$(curlp GET "/files/content?path=shared.txt" >/dev/null; \
-      K exec -n "$NS" "$HTTPPOD" -- curl -sS -D- -o /dev/null \
+# The seed must not be bytes any writer below also sends: an identical
+# write is a NO-OP that answers 200 without committing, which would read
+# here as a second winner. That exact collision made the local version
+# of this test fail about one run in eight.
+code=$(curlp PUT "/files/content?path=shared.txt" -H "X-Flint-Author: seed" --data-binary "seed-only")
+[ "$code" = "200" ] || bad "the seed write answered $code"
+tag=$(K exec -n "$NS_DOOR" "$HTTPPOD" -- curl -sS -D- -o /dev/null \
         -H "Authorization: Bearer $TOKEN" -H "X-Remote-User: x" \
         "$EP/files/content?path=shared.txt" 2>/dev/null | tr -d '\r' | \
-        awk 'tolower($1)=="etag:"{gsub(/"/,"",$2);print $2}')
+        awk 'BEGIN{IGNORECASE=1} /^etag:/{gsub(/"/,"",$2); print $2}')
+if [ -z "$tag" ]; then
+  bad "no ETag came back for shared.txt — P4 cannot condition on a version it does not have"
+fi
 : > "$WORK/codes"
 for i in $(seq 1 8); do
   ( curlp PUT "/files/content?path=shared.txt" -H "X-Flint-Author: u$i" \
@@ -206,7 +265,7 @@ echo
 echo "== P5: the refusals a browser must be able to render =="
 code=$(curlp POST "/files/folder" -H "Content-Type: application/json" --data '{"path":"/x"}')
 [ "$code" = "501" ] && ok "an empty directory is refused with a reason (501)" || bad "folder got $code"
-code=$(K exec -n "$NS" "$HTTPPOD" -- sh -c \
+code=$(K exec -n "$NS_DOOR" "$HTTPPOD" -- sh -c \
   "head -c 3000000 /dev/zero | curl -sS -o /dev/null -w '%{http_code}' -X PUT \
    '$EP/files/content?path=big.bin' -H 'Authorization: Bearer $TOKEN' \
    -H 'X-Remote-User: x' --data-binary @-" 2>/dev/null)
@@ -216,9 +275,16 @@ code=$(curlp PUT "/files/content?path=ui" --data-binary "clobber")
   || bad "directory clobber got $code"
 gitp "cd /tmp/c && echo x > m.txt && git add -A && git commit -qm m && \
       git push origin HEAD:main" > "$WORK/protected" 2>&1
-grep -qiE "protected|refus|denied" "$WORK/protected" \
-  && ok "the branch policy still protects main against the agent" \
-  || bad "a push to protected main was not refused: $(head -3 "$WORK/protected")"
+# Any refusal counts, and the wording is git's, not ours: a direct push
+# to the repository's own git port carries no door-verified principal,
+# so the refusal may come back as a plain 403 rather than the hook's
+# sentence. An earlier run reported this FAIL while the push had in fact
+# been refused.
+if grep -qiE "protected|refus|denied|403|rejected" "$WORK/protected"; then
+  ok "the branch policy still protects main: $(grep -oiE 'protected[^\"]*|error: 403|403' "$WORK/protected" | head -1)"
+else
+  bad "a push to protected main was NOT refused: $(head -3 "$WORK/protected")"
+fi
 
 echo
 echo "== P6: the repository sleeps, and the browser wakes it =="
@@ -236,6 +302,22 @@ if [ "$reaped" != "1" ]; then
   bad "the repository never slept — P6 measures nothing without it"
 else
   ok "the repository was reaped: replicas 0 and no pod"
+  # THE DOOR IS WHAT ARMS A WAKE, and it does not serve the file API
+  # yet — so an HTTP read against a slept repository reaches nothing and
+  # nothing asks for it back. That is a real gap, recorded as such: with
+  # the gateway door built, this annotation is what it would set. The
+  # drill stands in for it so the leg can still measure what it is for,
+  # which is whether the CONTENT survives the reap.
+  note "arming the wake as the door would (chert.us/requested-at) — the door does not \
+serve the file API yet, so nothing else will"
+  K annotate -n "$NS" flintrepo "$REPO" \
+    "chert.us/requested-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" --overwrite >/dev/null 2>&1
+  for i in $(seq 1 60); do
+    n=$(K get -n "$NS" pod -l chert.us/repo="$REPO" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    [ "$n" != "0" ] && break
+    sleep 5
+  done
+  K wait -n "$NS" --for=condition=Ready pod -l chert.us/repo="$REPO" --timeout=300s >/dev/null 2>&1
   code=$(curlp GET "/files/content?path=code/a.txt" --max-time 300)
   got=$(body)
   after=$(K get -n "$NS" pod -l chert.us/repo="$REPO" -o jsonpath='{.items[0].metadata.uid}' 2>/dev/null)

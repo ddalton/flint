@@ -148,12 +148,12 @@ impl Rig {
 /// on the rig, so a test can build one while the rig is borrowed for
 /// the batch it is about to run.
 fn push(id: u64, cmds: Vec<RefUpdate>) -> PushRequest {
-    PushRequest { id, principal: "tester".into(), options: vec![], atomic: false, commands: cmds }
+    PushRequest { id, principal: "tester".into(), options: vec![], atomic: false, commands: cmds, server_created: vec![] }
 }
 
 /// `git push --atomic`: every command lands or none does.
 fn atomic_push(id: u64, cmds: Vec<RefUpdate>) -> PushRequest {
-    PushRequest { id, principal: "tester".into(), options: vec![], atomic: true, commands: cmds }
+    PushRequest { id, principal: "tester".into(), options: vec![], atomic: true, commands: cmds, server_created: vec![] }
 }
 
 fn zero() -> String {

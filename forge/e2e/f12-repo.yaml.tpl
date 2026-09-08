@@ -16,11 +16,12 @@ spec:
   keyPrefix: __PREFIX__/__REPO__/
   credentialsSecretRef: forge-creds
   consumers:
-    - "*"
+    serviceAccounts: ["*"]
   branches:
-    protected: ["refs/heads/main"]
+    # Bare names, not `refs/heads/...` — the schema's own spelling.
+    protected: ["main"]
   fileApi:
     enabled: true
     branch: agents
-    maxMB: 2
+    maxMb: 2
     tokenSecret: __REPO__-file-token
