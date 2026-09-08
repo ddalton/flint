@@ -82,6 +82,29 @@ impl Default for JwtConfig {
     }
 }
 
+impl JwtConfig {
+    /// What an operator must be told at start-up, as DATA rather than
+    /// as a side effect.
+    ///
+    /// The design's F4a says the check is the warning, not the
+    /// acceptance — silently skipping `aud` is the failure mode — and a
+    /// `warn!` buried in a binary is exactly the thing no test can
+    /// reach. So the decision lives here and the binary only prints it.
+    pub fn start_up_warnings(&self) -> Vec<String> {
+        let mut w = Vec::new();
+        if self.audience.is_none() {
+            w.push(format!(
+                "NO --jwt-audience: any token {} minted is accepted, including one minted \
+                 for another service. Every service sharing this issuer can therefore \
+                 present a user's token here as that user, bounded only by spec.consumers. \
+                 Set --jwt-audience, and give this door its own audience upstream, to close it.",
+                self.issuer
+            ));
+        }
+        w
+    }
+}
+
 /// Where the signing keys come from.
 pub enum Keys {
     /// A JWKS endpoint, fetched and cached, refetched when a token
@@ -596,4 +619,29 @@ FPR3Nl+Roh3riCJV1QReFzE=
         let t = mint(&enc, "k1", good("https://knox.example/token", "alice", "aud"));
         assert_eq!(unverified_issuer(&t).as_deref(), Some("https://knox.example/token"));
     }
+
+    /// F4a — **the check is the WARNING, not the acceptance.** An unset
+    /// audience is a real exposure (any service sharing this issuer can
+    /// replay a user's token here as that user) and the failure mode is
+    /// passing over it silently. The test above asserts the acceptance;
+    /// this asserts the operator was told, and told something they can
+    /// act on.
+    #[test]
+    fn an_unset_audience_is_warned_about_and_a_configured_one_is_not() {
+        let unset = JwtConfig {
+            issuer: "https://knox.example/token".into(),
+            audience: None,
+            ..Default::default()
+        };
+        let w = unset.start_up_warnings();
+        assert_eq!(w.len(), 1, "an unset audience was passed over silently");
+        assert!(w[0].contains("--jwt-audience"), "which flag? {}", w[0]);
+        assert!(w[0].contains("https://knox.example/token"), "which issuer? {}", w[0]);
+
+        // The control: a configured audience warns about nothing, so
+        // this is not a function that warns unconditionally.
+        let set = JwtConfig { audience: Some("forge.chert.us".into()), ..unset };
+        assert!(set.start_up_warnings().is_empty(), "a configured audience still warned");
+    }
+
 }

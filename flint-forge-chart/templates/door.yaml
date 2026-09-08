@@ -21,6 +21,24 @@ inversion the lite gateway carries: the operator refuses to render a
 routable Service per repository, so exposure is concentrated on one
 object that can actually be guarded.
 */}}
+{{- $jwt := default dict .Values.door.jwt }}
+{{- $pks := default dict $jwt.publicKeySecret }}
+{{- $pem := "" }}
+{{- if $jwt.issuer }}
+{{- $pem = default "public.pem" $pks.key }}
+{{- /*
+REFUSED AT TEMPLATE TIME, not at start-up. The door refuses both of
+these itself — it has to, since it can be run without this chart — but
+a CrashLoopBackOff is a poor way to learn that two flags were
+alternatives, and `helm install` is the moment an operator is looking.
+*/}}
+{{- if and $jwt.jwksUrl $pks.name }}
+{{- fail "door.jwt.jwksUrl and door.jwt.publicKeySecret.name are alternatives; passing both leaves it ambiguous which key set the door verifies against" }}
+{{- end }}
+{{- if not (or $jwt.jwksUrl $pks.name) }}
+{{- fail "door.jwt.issuer needs a key source: set door.jwt.jwksUrl or door.jwt.publicKeySecret.name. Without one the door could verify nothing and would refuse every token from that issuer." }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -139,6 +157,33 @@ spec:
             # the chart itself wrote.
             - --repo-files-max-bytes={{ int64 .Values.door.repoFiles.maxBytes }}
             {{- end }}
+            {{- if $jwt.issuer }}
+            # A JWT AN EXTERNAL ISSUER MINTED, beside the pod tokens
+            # TokenReview already handles. A router picks the verifier
+            # from the token's own `iss` and there is no fallback
+            # between them, so the door refuses to start when this
+            # collides with the cluster's OWN ServiceAccount issuer —
+            # every pod token would otherwise be routed to the offline
+            # verifier, which cannot see that a pod was deleted.
+            - --jwt-issuer={{ $jwt.issuer }}
+            {{- with $jwt.audience }}
+            - --jwt-audience={{ . }}
+            {{- end }}
+            {{- with $jwt.jwksUrl }}
+            - --jwt-jwks-url={{ . }}
+            {{- end }}
+            {{- if $pks.name }}
+            - --jwt-public-key-file=/etc/flint/jwt/{{ $pem }}
+            - --jwt-key-id={{ default "static" $jwt.keyId }}
+            {{- end }}
+            # `int64` for the same reason --repo-files-max-bytes needs
+            # it, and this one is REACHABLE: an issuer whose default
+            # token lifetime is months is exactly the case this bound
+            # exists for, and 120 days is 10368000 — which Helm would
+            # otherwise render as `1.0368e+07`.
+            - --jwt-max-lifetime-secs={{ int64 (default 3600 $jwt.maxLifetimeSecs) }}
+            - --jwt-leeway-secs={{ int64 (default 60 $jwt.leewaySecs) }}
+            {{- end }}
           env:
             - name: RUST_LOG
               value: {{ .Values.door.logLevel | default .Values.server.logLevel | default "info" | quote }}
@@ -169,4 +214,23 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- if and $jwt.issuer $pks.name }}
+          volumeMounts:
+            - name: jwt-key
+              mountPath: /etc/flint/jwt
+              readOnly: true
+          {{- end }}
+      {{- if and $jwt.issuer $pks.name }}
+      volumes:
+        # A PUBLIC key, so this is a Secret only because that is where
+        # an operator already keeps issuer material — nothing here is
+        # confidential, and the door never holds a private key or a
+        # client secret of any kind.
+        - name: jwt-key
+          secret:
+            secretName: {{ $pks.name }}
+            items:
+              - key: {{ $pem }}
+                path: {{ $pem }}
+      {{- end }}
 {{- end }}

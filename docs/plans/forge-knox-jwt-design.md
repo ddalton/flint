@@ -278,6 +278,51 @@ work" would let every caller set their own groups. It would look like
 plumbing in review. A test asserts the allowlist does not contain them,
 so the one-line version of this mistake fails CI rather than a drill.
 
+### 6.1 Behind a token-injecting mesh
+
+The deployment this door will actually meet verifies JWTs of its own.
+Istio/Envoy enforces access at the sidecar but **delegates the
+decision**: a custom `ext_authz` gRPC call asks Knox to verify the token
+— signature, issuer, expiry, against Knox's own JWKS — and returns the
+identity as username/roles headers, which applications behind that mesh
+conventionally trust without ever parsing a token.
+
+Three things follow, and the first is the one that could have killed
+this design.
+
+**The credential still arrives.** `proxy-extauthz` is a *token-injecting*
+authorizer, not a scrubbing one. It does not consume `Authorization`; it
+injects and refreshes it, and the backend is deliberately handed an
+authenticated bearer token, a cookie, and a validated-user header. So
+the door needs no protocol change to work behind the mesh — a bearer
+token reaches it, which is the only thing §2 asks for.
+
+**D16. The door verifies for itself, and reads the token rather than the
+header.** Two sources of identity with no principled winner is worse than
+one, and only one of them carries a signature the door can check. The
+validated-user header and its several spellings are not in
+`GIT_REQUEST_HEADERS`, are not read, and are not forwarded — exactly as
+`X-Roles` is not (D15). The redundancy with the mesh's own verification
+is deliberate: **the door's authorization must not be a function of
+whether a sidecar was injected.** A request that reaches the pod by any
+other route — a namespace without injection, a misconfigured mesh, a
+port-forward — gets the same answer.
+
+**The caveat is a deployment question, not a code change.** The
+`Authorization` value reaching the door is proxy-extauthz's token, not
+necessarily the client's original bytes. Whether `jwt:user:<sub>` ever
+matches anyone therefore depends on whether the *refreshed* token still
+carries the end user in `sub` — the `doAs` subject — or the calling
+service's own identity. If it carries the service, every `jwt:user:`
+entry silently matches nobody: the door refuses, which is safe, and the
+feature does not work. §8 Q6.
+
+**And an opportunity.** If proxy-extauthz mints or refreshes per
+backend, it may be able to set a per-backend `aud`. That would close
+D6's replay gap **without a new Knox topology** — which is the answer
+§8 Q1's follow-up was looking for, and cheaper than the one it asked
+for. §8 Q7.
+
 ---
 
 ## 7. What forge trusts and cannot verify
@@ -341,6 +386,13 @@ One can block; the rest shape configuration.
    cluster's ServiceAccount issuer? (D3 refuses to start otherwise.)
 5. **Is the JWKS reachable** from every cluster that runs a door, or
    should this deployment take the static-PEM path (D8)?
+6. **Does the token proxy-extauthz injects still carry the END USER in
+   `sub`,** or its own service identity? (§6.1.) This one decides
+   whether the feature works at all, and it is invisible from forge's
+   side: the door would simply refuse every person.
+7. **Can proxy-extauthz set a per-backend `aud`?** If it can, D6's
+   replay gap closes with configuration rather than with a new Knox
+   topology. Ask this before asking for the topology.
 
 ---
 
@@ -349,26 +401,38 @@ One can block; the rest shape configuration.
 Each is an assertion plus a control that must fail when the mechanism is
 removed. A test without its control is not on this list.
 
-| # | asserts | control |
-|---|---|---|
-| F1 | the router reaches the Knox verifier for a Knox `iss` | **counter**, not status: force the router to always pick TokenReview; F1 fails on the counter while every status stays identical |
-| F2 | a pod token is never accepted by the Knox verifier | delete the `iss` check ⇒ F2 fails |
-| F3 | the door refuses to start when the two issuers are equal | remove the start-up guard ⇒ F3 fails |
-| F4 | with `--jwt-audience` set, a token for another audience is refused | delete the `aud` check ⇒ F4 fails; control: the same token WITH the right `aud` is accepted |
-| F4a | with `--jwt-audience` UNSET, a token of any audience is accepted AND the start-up warning was emitted | drop the warning ⇒ F4a fails. The check is the warning, not the acceptance: silently skipping is the failure mode |
-| F5 | an expired token is refused, and is not accepted a second time from any cache | wrap `KnoxReviewer` in `CachingReviewer` ⇒ F5 fails |
-| F6 | a token signed by an unknown key is refused | accept-any-key ⇒ F6 fails |
-| F7 | `sub` becomes the commit author; a caller-supplied `X-Remote-User` is overridden | already green on the wire (F13 P3); mutation: stop setting the header ⇒ fails |
-| F8 | a JWKS transport failure answers 503 and the door recovers on the next request | restore the `starts_with("TokenReview:")` heuristic ⇒ the failure is cached and F8 fails |
-| F9 | `jwt:user:alice` matches the person and NOT a ServiceAccount literally named `jwt:user:alice` | drop the prefix arm ⇒ F9 fails |
-| F10 | an unprefixed entry still matches only a ServiceAccount | make the prefix optional ⇒ F10 fails |
+**State as of phase 1.** Every row below is a test that runs in CI, and
+each was checked by MUTATION — the named control applied to the source,
+the suite re-run, and the row's test observed to fail. F4a's warning
+half needed the warning moved out of the binary to be reachable at all;
+that is noted in its row rather than quietly dropped.
 
-**F8 names a defect that exists today.** `CachingReviewer` decides what
-is safe to cache with `Err(e) => !e.starts_with("TokenReview:")`. A
-second reviewer's transport failure does not match that prefix and would
-therefore be **cached** — the door would stay shut for the whole TTL
-after Knox came back. Latent while there is one reviewer; live the
-moment there are two. Fix it with typed errors before, not after.
+| # | asserts | control | test |
+|---|---|---|---|
+| F1 | the router reaches the Knox verifier for a Knox `iss` | **counter**, not status: force the router to always pick TokenReview; F1 fails on the counter while every status stays identical | `git::each_issuer_reaches_its_own_verifier_and_only_that_one` — killed by `invert`, `no-route`, `all-offline` and `lying-counter` |
+| F2 | a pod token is never accepted by the Knox verifier | delete the `iss` check ⇒ F2 fails | `git::an_unplaceable_token_goes_to_the_apiserver` + `jwt::the_checks_that_must_refuse` |
+| F3 | the door refuses to start when the two issuers are equal | remove the start-up guard ⇒ F3 fails | `git::the_guard_refuses_exactly_what_the_router_would_confuse` (a **biconditional** against the router, so a guard that normalises where the router does not is caught) + `git::the_collision_refusal_names_the_flag_and_an_unknown_cluster_is_not_refused` |
+| F4 | with `--jwt-audience` set, a token for another audience is refused | delete the `aud` check ⇒ F4 fails; control: the same token WITH the right `aud` is accepted | `jwt::the_checks_that_must_refuse` |
+| F4a | with `--jwt-audience` UNSET, a token of any audience is accepted AND the start-up warning was emitted | drop the warning ⇒ F4a fails. The check is the warning, not the acceptance: silently skipping is the failure mode | `jwt::an_unset_audience_skips_the_check_instead_of_refusing_everything` (acceptance) + `jwt::an_unset_audience_is_warned_about_and_a_configured_one_is_not` (the warning — moved out of the binary into `JwtConfig::start_up_warnings` so a test can reach it) |
+| F5 | an expired token is refused, and is not accepted a second time from any cache | wrap `KnoxReviewer` in `CachingReviewer` ⇒ F5 fails | `jwt::a_token_that_lives_too_long_is_refused`; the cache half is **F12** |
+| F6 | a token signed by an unknown key is refused | accept-any-key ⇒ F6 fails | `jwt::the_checks_that_must_refuse` |
+| F7 | `sub` becomes the commit author; a caller-supplied `X-Remote-User` is overridden | already green on the wire (F13 P3); mutation: stop setting the header ⇒ fails | `git::the_token_decides_the_principal_not_an_injected_header` — and it mints for one subject while sending a header naming another, so it says WHICH won |
+| F8 | a JWKS transport failure answers 503 and the door recovers on the next request | restore the `starts_with("TokenReview:")` heuristic ⇒ the failure is cached and F8 fails | `git::a_refusal_is_cached_and_an_unreachable_apiserver_is_not` — **the defect below is fixed** |
+| F9 | `jwt:user:alice` matches the person and NOT a ServiceAccount literally named `jwt:user:alice` | drop the prefix arm ⇒ F9 fails | `git::a_person_and_a_pod_never_match_each_others_entry` — killed by `person-as-pod` |
+| F10 | an unprefixed entry still matches only a ServiceAccount | make the prefix optional ⇒ F10 fails | `git::a_person_and_a_pod_never_match_each_others_entry` — killed by `pod-as-person` |
+| F11 | no mesh identity header is read or forwarded, in any of its spellings | add one to `GIT_REQUEST_HEADERS` ⇒ F11 fails; control: the allowlist is not empty | `git::no_identity_or_role_header_is_ever_forwarded` |
+| F12 | the issuer verifier's verdicts are NEVER cached, while the apiserver's are | wrap the issuer arm in `CachingReviewer` ⇒ F12 fails; control: the same double, wrapped, collapses four calls to one | `git::the_issuer_verifier_is_never_cached` |
+
+**F8 named a defect that existed when this was written. It is FIXED**
+(`872eceed`). `CachingReviewer` used to decide what was safe to cache
+with `Err(e) => !e.starts_with("TokenReview:")` — a guess at an error's
+TEXT that was right for exactly one implementation. A second reviewer's
+transport failure does not match that prefix and would therefore have
+been **cached**: the door would have stayed shut for the whole TTL after
+Knox came back. Latent while there was one reviewer; live the moment
+there were two. The cache now asks a type — `ReviewError::Refused` is
+cacheable, `ReviewError::Unreachable` never is — so the distinction
+cannot be lost by a construction site forgetting a convention.
 
 ---
 
@@ -416,6 +480,7 @@ set, so an install that does not configure it behaves exactly as today.
 | D13 | no CRD change — `jwt:user:` prefix in the existing array |
 | D14 | unprefixed keeps meaning a ServiceAccount; `*` keeps meaning both |
 | D15 | `X-Roles`/`X-Groups` never read, never forwarded, never allowlisted |
+| D16 | the door verifies for itself behind a verifying mesh, and reads the token rather than the injected validated-user header (§6.1) |
 
 **Deferred, with the reason:** groups (unsigned in transit, and the
 rotating token id makes the relay binding unbuildable), revocation (a

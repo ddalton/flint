@@ -1893,6 +1893,398 @@ mod tests {
         assert!(GIT_REQUEST_HEADERS.contains(&"git-protocol"));
     }
 
+    // ────────────────────────── THE ROUTER ──────────────────────────
+    //
+    // Both credentials this door accepts are RS256 JWTs, and the choice
+    // between their verifiers is made from an UNVERIFIED `iss`. Which
+    // makes these tests awkward in one specific way: **a broken router
+    // still refuses.** Send a pod token to the offline verifier and the
+    // signature fails; send an issuer's token to `TokenReview` and the
+    // apiserver disowns it. A test asserting a status code would pass
+    // with the routing inverted, deleted, or replaced by a coin flip.
+    //
+    // So the oracle is WHICH VERIFIER WAS REACHED, and it is a counter
+    // (design D4). Two of them, in fact: the one inside each double,
+    // which proves the arm was actually called, and the router's own
+    // exported pair, cross-checked against it — a router that bumped
+    // its counters and called nobody would otherwise satisfy the
+    // oracle it publishes.
+    //
+    // The tokens below are structurally real (base64url header,
+    // base64url payload, a signature segment) and deliberately
+    // UNSIGNED, because the router verifies nothing. Signing them would
+    // test the fixture rather than the routing; that the verifiers
+    // themselves check signatures is `jwt`'s business and is tested
+    // there.
+
+    const KNOX: &str = "https://knox.example/token";
+    const CLUSTER_SA: &str = "https://kubernetes.default.svc.cluster.local";
+
+    fn token_claiming(iss: Option<&str>) -> String {
+        let enc = |v: serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&v).expect("json"))
+        };
+        let header = enc(serde_json::json!({"alg": "RS256", "kid": "k1", "typ": "JWT"}));
+        let payload = match iss {
+            Some(i) => enc(serde_json::json!({"iss": i, "sub": "someone", "exp": 9e9})),
+            None => enc(serde_json::json!({"sub": "someone", "exp": 9e9})),
+        };
+        format!("{header}.{payload}.bm90LWEtc2lnbmF0dXJl")
+    }
+
+    struct Arms {
+        router: Arc<RoutingReviewer>,
+        kube_seen: Arc<AtomicU64>,
+        issuer_seen: Arc<AtomicU64>,
+    }
+
+    impl Arms {
+        /// `(kube, issuer)`, read from the DOUBLES and cross-checked
+        /// against the router's own exported counters.
+        fn counts(&self) -> (u64, u64) {
+            let k = self.kube_seen.load(Ordering::SeqCst);
+            let i = self.issuer_seen.load(Ordering::SeqCst);
+            assert_eq!(
+                k,
+                self.router.kube_calls.load(Ordering::SeqCst),
+                "the router's kube_calls disagrees with what the kube arm was actually asked"
+            );
+            assert_eq!(
+                i,
+                self.router.issuer_calls.load(Ordering::SeqCst),
+                "the router's issuer_calls disagrees with what the issuer arm was actually asked"
+            );
+            (k, i)
+        }
+    }
+
+    /// A router over two doubles that count and answer. The two
+    /// verdicts are made distinguishable so a test can see which ANSWER
+    /// came back as well as which arm was counted.
+    fn arms(kube: Result<Identity, ReviewError>, issuer: Result<Identity, ReviewError>) -> Arms {
+        let kube_seen = Arc::new(AtomicU64::new(0));
+        let issuer_seen = Arc::new(AtomicU64::new(0));
+        let router = RoutingReviewer::new(
+            Arc::new(CountingReviewer { calls: kube_seen.clone(), verdict: kube }),
+            Arc::new(CountingReviewer { calls: issuer_seen.clone(), verdict: issuer }),
+            KNOX.to_string(),
+        );
+        Arms { router, kube_seen, issuer_seen }
+    }
+
+    fn two_arms() -> Arms {
+        arms(Ok(identity("tenant", "agent-runner")), Ok(Identity::person("alice@example.com")))
+    }
+
+    /// THE D4 ORACLE. Each issuer reaches its own verifier, and only
+    /// that one.
+    #[tokio::test]
+    async fn each_issuer_reaches_its_own_verifier_and_only_that_one() {
+        let a = two_arms();
+        let who = a.router.review(&token_claiming(Some(KNOX))).await.expect("verdict");
+        assert_eq!(a.counts(), (0, 1), "a token from the configured issuer did not reach it");
+        assert_eq!(who.username, "alice@example.com");
+        assert_eq!(who.vouched, Vouched::Issuer);
+
+        let b = two_arms();
+        let who = b.router.review(&token_claiming(Some(CLUSTER_SA))).await.expect("verdict");
+        assert_eq!(b.counts(), (1, 0), "a pod token did not reach TokenReview");
+        assert_eq!(who.username, "system:serviceaccount:tenant:agent-runner");
+        assert_eq!(who.vouched, Vouched::Kubernetes);
+    }
+
+    /// Anything the router cannot place goes to the APISERVER, which is
+    /// the conservative direction: it fails closed against a live
+    /// authority that can see a pod was deleted, rather than against a
+    /// cached key set that cannot.
+    ///
+    /// The control is in the same test: a token that IS placeable still
+    /// reaches the other arm, so this is not a rig that sends
+    /// everything one way.
+    #[tokio::test]
+    async fn an_unplaceable_token_goes_to_the_apiserver() {
+        for (what, token) in [
+            ("no iss claim at all", token_claiming(None)),
+            ("some third party's iss", token_claiming(Some("https://elsewhere.example"))),
+            ("an opaque, non-JWT credential", "not-a-jwt-at-all".to_string()),
+            ("a JWT with an unparseable payload", "aaa.!!!!.ccc".to_string()),
+            ("the issuer as a PREFIX, not the whole claim", token_claiming(Some(&format!("{KNOX}/v2")))),
+        ] {
+            let a = two_arms();
+            a.router.review(&token).await.expect("verdict");
+            assert_eq!(a.counts(), (1, 0), "{what} was not sent to TokenReview");
+        }
+        // The control.
+        let a = two_arms();
+        a.router.review(&token_claiming(Some(KNOX))).await.expect("verdict");
+        assert_eq!(a.counts(), (0, 1), "the rig sends everything to TokenReview");
+    }
+
+    /// NO FALLBACK — the property that makes routing on an unverified
+    /// claim safe at all.
+    ///
+    /// If a refusal from one verifier were retried against the other, a
+    /// caller could choose its checker by writing an `iss`, and would
+    /// pick whichever has the weaker opinion. Both directions are
+    /// pinned, because a fallback added for one would look symmetric
+    /// and be written for both. The arm that is NOT supposed to be
+    /// reached accepts everything, so a fallback would turn each
+    /// refusal into a success — the failure is loud rather than subtle.
+    #[tokio::test]
+    async fn a_refusal_is_never_retried_against_the_other_verifier() {
+        // The issuer refuses; TokenReview would say yes to anything.
+        let a = arms(
+            Ok(identity("tenant", "agent-runner")),
+            Err(ReviewError::Refused("signature".into())),
+        );
+        assert!(
+            a.router.review(&token_claiming(Some(KNOX))).await.is_err(),
+            "a token the issuer verifier refused was admitted by falling back"
+        );
+        assert_eq!(a.counts(), (0, 1), "the refusal was retried against TokenReview");
+        // The control: that same accepting arm does accept, when it is
+        // the one the router picks.
+        a.router.review(&token_claiming(Some(CLUSTER_SA))).await.expect("verdict");
+        assert_eq!(a.counts(), (1, 1));
+
+        // And the mirror. An UNREACHABLE apiserver is the tempting case
+        // for a fallback — "we could still answer" — and is exactly the
+        // one that must not have one.
+        let b = arms(
+            Err(ReviewError::Unreachable("apiserver".into())),
+            Ok(Identity::person("alice@example.com")),
+        );
+        assert!(
+            b.router.review(&token_claiming(Some(CLUSTER_SA))).await.is_err(),
+            "a pod token was admitted by the offline verifier when the apiserver was down"
+        );
+        assert_eq!(b.counts(), (1, 0), "the failure was retried against the issuer verifier");
+        b.router.review(&token_claiming(Some(KNOX))).await.expect("verdict");
+        assert_eq!(b.counts(), (1, 1));
+    }
+
+    /// The start-up guard and the router must agree ON THE SAME
+    /// COMPARISON, so this asserts the biconditional rather than the
+    /// guard's opinion in isolation: `refuse_colliding_issuers` errors
+    /// for exactly those configurations in which a token minted by the
+    /// CLUSTER would be handed to the offline verifier.
+    ///
+    /// Written this way because the failure that matters is drift — a
+    /// guard normalising trailing slashes, or lowercasing, while the
+    /// router keeps comparing bytes — and neither side's own tests
+    /// would notice.
+    #[tokio::test]
+    async fn the_guard_refuses_exactly_what_the_router_would_confuse() {
+        let cases = [
+            ("identical", CLUSTER_SA, CLUSTER_SA),
+            ("plainly different", CLUSTER_SA, KNOX),
+            // Near misses. The comparison is exact on both sides, so
+            // these are ALLOWED — and that is a real hazard worth
+            // seeing written down: a cluster issuer that differs from
+            // the configured one only by a trailing slash starts
+            // cleanly, and its pod tokens then route by that same exact
+            // comparison, i.e. to the apiserver. Safe, because both
+            // sides are wrong in the same direction.
+            ("trailing slash", "https://oidc.example", "https://oidc.example/"),
+            ("case", "https://OIDC.example", "https://oidc.example"),
+        ];
+        for (what, cluster, configured) in cases {
+            let guard_refuses = refuse_colliding_issuers(Some(cluster), configured).is_err();
+
+            let seen = Arc::new(AtomicU64::new(0));
+            let router = RoutingReviewer::new(
+                Arc::new(CountingReviewer {
+                    calls: Arc::new(AtomicU64::new(0)),
+                    verdict: Ok(identity("tenant", "agent-runner")),
+                }),
+                Arc::new(CountingReviewer {
+                    calls: seen.clone(),
+                    verdict: Ok(Identity::person("alice@example.com")),
+                }),
+                configured.to_string(),
+            );
+            router.review(&token_claiming(Some(cluster))).await.expect("verdict");
+            let router_confuses = seen.load(Ordering::SeqCst) == 1;
+
+            assert_eq!(
+                guard_refuses, router_confuses,
+                "{what}: the guard and the router disagree — guard refuses: {guard_refuses}, \
+                 router sends a CLUSTER token to the offline verifier: {router_confuses}"
+            );
+        }
+    }
+
+    /// What the refusal has to say, and the one case it cannot judge.
+    #[test]
+    fn the_collision_refusal_names_the_flag_and_an_unknown_cluster_is_not_refused() {
+        let why = refuse_colliding_issuers(Some(CLUSTER_SA), CLUSTER_SA).expect_err("refusal");
+        assert!(why.contains("--jwt-issuer"), "the operator is not told which flag: {why}");
+        assert!(why.contains(CLUSTER_SA), "the operator is not told which value: {why}");
+
+        // No cluster issuer means the door could not read its own
+        // ServiceAccount token — it is not running as a pod. The guard
+        // cannot invent the answer, and refusing to start would make
+        // the binary unrunnable outside a cluster. What it costs: the
+        // collision is then undetected until a pod token is routed
+        // offline. Nothing else in the door notices, which is why this
+        // is asserted rather than left implicit.
+        assert!(refuse_colliding_issuers(None, KNOX).is_ok());
+    }
+
+    /// F12 — **the issuer verifier is never cached, and the asymmetry
+    /// is deliberate.**
+    ///
+    /// `CachingReviewer` exists to spare the apiserver a round trip.
+    /// Signature verification has no round trip to spare — it is
+    /// arithmetic on a key already in memory — so a verdict cache would
+    /// buy nothing and would cost the one bound that matters: with
+    /// revocation out of scope `exp` is the only thing that ends a
+    /// session, and a cached verdict honours it up to a TTL late.
+    ///
+    /// This runs through `with_reviewer`, which is where the wiring
+    /// decision actually lives; asserting it on a hand-built
+    /// `RoutingReviewer` would pin the test's own construction rather
+    /// than the door's.
+    #[tokio::test]
+    async fn the_issuer_verifier_is_never_cached() {
+        crate::install_crypto_provider();
+        let seen = Arc::new(AtomicU64::new(0));
+        let door = GitDoor::with_reviewer(
+            kube::Client::try_from(kube::Config::new(
+                "http://127.0.0.1:1".parse().expect("uri"),
+            ))
+            .expect("client"),
+            store_of(vec![]),
+            reqwest::Client::builder().build().expect("http"),
+            GitConfig { review_ttl: Duration::from_secs(60), ..GitConfig::default() },
+            Arc::new(AtomicBool::new(true)),
+            Some((
+                Arc::new(CountingReviewer {
+                    calls: seen.clone(),
+                    verdict: Ok(Identity::person("alice@example.com")),
+                }),
+                KNOX.to_string(),
+            )),
+        );
+
+        let tok = token_claiming(Some(KNOX));
+        for _ in 0..4 {
+            door.reviewer.review(&tok).await.expect("verdict");
+        }
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            4,
+            "the issuer verifier was cached — a revoked or expired token then keeps working \
+             for up to the review TTL"
+        );
+
+        // THE CONTROL, and it is the necessary one: the same double,
+        // wrapped in the cache the door deliberately did not wrap it
+        // in, collapses four calls to one. So a count of 4 above is a
+        // fact about the wiring and not about a rig that cannot see a
+        // cache at all.
+        let cached_seen = Arc::new(AtomicU64::new(0));
+        let cached = CachingReviewer::new(
+            Arc::new(CountingReviewer {
+                calls: cached_seen.clone(),
+                verdict: Ok(Identity::person("alice@example.com")),
+            }),
+            Duration::from_secs(60),
+        );
+        for _ in 0..4 {
+            cached.review(&tok).await.expect("verdict");
+        }
+        assert_eq!(cached_seen.load(Ordering::SeqCst), 1, "the control cannot detect a cache");
+    }
+
+
+    // ─────────────────── PEOPLE, PODS, AND THE LIST ───────────────────
+
+    /// F9/F10 — the two cross-matches, both of which are silent
+    /// authorization bugs and neither of which can be decided from the
+    /// entry alone.
+    ///
+    /// A person whose `sub` happens to read like a ServiceAccount name
+    /// must not match a bare entry; a pod must not match a `jwt:user:`
+    /// entry however its username reads. The discriminator is
+    /// [`Vouched`] on the identity, so these are the tests that would
+    /// fail if it were ever inferred from the string instead.
+    #[test]
+    fn a_person_and_a_pod_never_match_each_others_entry() {
+        let list = |v: Vec<&str>| Consumers {
+            service_accounts: v.into_iter().map(String::from).collect(),
+        };
+        let alice = Identity::person("alice@example.com");
+        let pod = identity("tenant", "agent-runner");
+
+        // The happy paths, so nothing below is refused by a rig that
+        // refuses everything.
+        let mixed = list(vec!["agent-runner", "jwt:user:alice@example.com"]);
+        assert!(consumer_allows(Some(&mixed), "tenant", &alice));
+        assert!(consumer_allows(Some(&mixed), "tenant", &pod));
+
+        // F9. A PERSON does not match a ServiceAccount entry, in either
+        // spelling, even when the strings are equal.
+        let sa_named_alike = Identity::person("agent-runner");
+        assert!(!consumer_allows(Some(&list(vec!["agent-runner"])), "tenant", &sa_named_alike));
+        let qualified = "system:serviceaccount:tenant:agent-runner";
+        assert!(!consumer_allows(
+            Some(&list(vec![qualified])),
+            "tenant",
+            &Identity::person(qualified)
+        ));
+
+        // F10. A POD does not match a `jwt:user:` entry, in either
+        // spelling of the name it would have to be written as.
+        assert!(!consumer_allows(Some(&list(vec!["jwt:user:agent-runner"])), "tenant", &pod));
+        assert!(!consumer_allows(
+            Some(&list(vec!["jwt:user:system:serviceaccount:tenant:agent-runner"])),
+            "tenant",
+            &pod
+        ));
+
+        // Another person's `sub` is another person.
+        assert!(!consumer_allows(
+            Some(&list(vec!["jwt:user:alice@example.com"])),
+            "tenant",
+            &Identity::person("mallory@example.com")
+        ));
+
+        // A BARE PREFIX matches nobody. Otherwise `jwt:user:` — a
+        // plausible thing to leave behind while editing — would admit
+        // any identity the issuer vouched for whose `sub` was empty.
+        assert!(!consumer_allows(Some(&list(vec!["jwt:user:"])), "tenant", &alice));
+        assert!(!consumer_allows(Some(&list(vec!["jwt:user:"])), "tenant", &Identity::person("")));
+
+        // `*` still means BOTH, deliberately: every FlintRepo in the
+        // fleet has one of these lists, and narrowing it would
+        // re-authorize them all at once.
+        assert!(consumer_allows(Some(&list(vec!["*"])), "tenant", &alice));
+        assert!(consumer_allows(Some(&list(vec!["*"])), "tenant", &pod));
+    }
+
+    /// A person's entry carries no namespace, and the repository's
+    /// namespace therefore does not scope it — unlike a bare
+    /// ServiceAccount name, which is scoped and has its own test.
+    ///
+    /// This is a PROPERTY, not an oversight: an issuer's `sub` is
+    /// cluster-wide by construction, and pretending otherwise would
+    /// mean inventing a namespace for a person who has none.
+    #[test]
+    fn a_person_is_not_scoped_by_the_repositorys_namespace() {
+        let c = Consumers { service_accounts: vec!["jwt:user:alice@example.com".into()] };
+        let alice = Identity::person("alice@example.com");
+        assert!(consumer_allows(Some(&c), "tenant", &alice));
+        assert!(consumer_allows(Some(&c), "some-other-namespace", &alice));
+
+        // The control, which is the contrasting rule in one line: a
+        // bare ServiceAccount entry IS scoped.
+        let sa = Consumers { service_accounts: vec!["agent-runner".into()] };
+        assert!(consumer_allows(Some(&sa), "tenant", &identity("tenant", "agent-runner")));
+        assert!(!consumer_allows(Some(&sa), "tenant", &identity("other", "agent-runner")));
+    }
+
     /// Fails `fail_first` times as UNREACHABLE, then succeeds.
     struct FlakyReviewer {
         calls: Arc<AtomicU64>,

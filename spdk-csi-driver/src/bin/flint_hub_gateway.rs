@@ -566,14 +566,11 @@ fn build_jwt_reviewer(
         max_lifetime: Duration::from_secs(args.jwt_max_lifetime_secs),
         leeway: Duration::from_secs(args.jwt_leeway_secs),
     };
-    if cfg.audience.is_none() {
-        warn!(
-            issuer = %issuer,
-            "NO --jwt-audience: any token this issuer minted is accepted, including one \
-             minted for another service. Every service sharing this issuer can therefore \
-             present a user's token here as that user, bounded only by spec.consumers. \
-             Set --jwt-audience, and give this door its own audience upstream, to close it."
-        );
+    // The DECISION to warn lives in `JwtConfig`, not here: a `warn!` in
+    // a binary is unreachable from a test, and the design's F4a says
+    // the check is the warning rather than the acceptance.
+    for why in cfg.start_up_warnings() {
+        warn!(issuer = %issuer, "{why}");
     }
 
     let reviewer: std::sync::Arc<dyn git::Reviewer> =

@@ -123,6 +123,67 @@ door:
     # reviewed. 64 MiB.
     maxBytes: 67108864
 
+  # A JWT AN EXTERNAL ISSUER MINTED, beside the pod tokens the door
+  # already reviews (design `docs/plans/forge-knox-jwt-design.md`).
+  #
+  # Agents authenticate with their own ServiceAccount token and always
+  # will; this is for the OTHER caller — a browser app's backend, or
+  # anything holding a token an issuer minted for a PERSON. Both
+  # credentials arrive the same way (`Authorization`, or the Basic
+  # password for a git client), a router picks the verifier from the
+  # token's own `iss`, and there is no fallback between them.
+  #
+  # A verified token's `sub` becomes the principal, and a repository
+  # admits it by listing `jwt:user:<sub>` in `spec.consumers` — the
+  # SAME list the ServiceAccounts are in, so authority stays keyed on
+  # one thing.
+  #
+  # Leave `issuer` empty and none of this is rendered: no key is
+  # fetched from anywhere and the door behaves exactly as it did.
+  jwt:
+    # The `iss` accepted, matched EXACTLY. It must not be the cluster's
+    # own ServiceAccount issuer — the door reads that from its own
+    # token and refuses to start on a collision, because every pod
+    # token would then be routed to the offline verifier, which cannot
+    # see that a pod was deleted.
+    issuer: ""
+
+    # The audience a verified token must carry.
+    #
+    # OPTIONAL, and its absence is a real exposure rather than a
+    # nicety: with no audience check, any token this issuer minted is
+    # accepted here, INCLUDING one minted for another service. Every
+    # service sharing the issuer can then present a user's token to
+    # this door as that user, bounded only by `spec.consumers`. Left
+    # empty because some issuers cannot mint a per-application audience
+    # at all — a topology-wide value, or none — which is a
+    # configuration this chart does not control. The door logs a loud
+    # warning at start-up when it is unset.
+    audience: ""
+
+    # WHERE THE SIGNING KEYS COME FROM — exactly one of these two.
+    #
+    # `jwksUrl` is fetched, cached, and refetched when a token names a
+    # key the door does not hold, no sooner than once a minute — so a
+    # stream of unknown-key tokens cannot become a denial-of-service
+    # against the issuer, delivered by the door.
+    jwksUrl: ""
+    # …or a Secret holding one RSA public key in PEM, for a deployment
+    # that would rather the door never reached the issuer at all. It is
+    # mounted read-only; `keyId` is the `kid` that key answers to, and
+    # a token naming any other `kid` is refused.
+    publicKeySecret:
+      name: ""
+      key: "public.pem"
+    keyId: "static"
+
+    # The longest `exp - iat` accepted, WHATEVER THE SIGNATURE SAYS.
+    # Some issuers default to lifetimes measured in months, and with
+    # revocation out of scope this is the only bound on a stolen token.
+    maxLifetimeSecs: 3600
+    # Clock-skew tolerance on `exp` and `nbf`.
+    leewaySecs: 60
+
   service:
     type: ClusterIP
     port: 80
