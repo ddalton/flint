@@ -12,6 +12,95 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed — flint forge: the pack cap plans a fold instead of rewriting the repository
+
+- **A count condition was buying a rewrite unbounded in bytes.** The
+  base gate read `base_allowed && (cadence_open || tiers.len() >= cap)`,
+  and `Plan::Base`'s inputs are `all_names()` — every pack there is. So
+  tiny packs reaching the 64-pack cap bought a full rewrite of the large
+  ones, and because the cap overrode the cadence, it repeated. Measured
+  on `runcg`: the arm carrying the shipped floor re-uploaded the WHOLE
+  repository during every tiny-push leg — 385.4, 769.8 and 1153.9 MiB
+  against repositories of 384, 768 and 1152 MiB, 1x/2x/3x to within
+  0.2%, three times running. The arm without the floor, with eight times
+  the folds (187 against 24), did it once in three.
+- **The cap now forces a fold, and admits a rebuild only when no fold
+  could reduce the count** (fewer than two tiers survive the exemption
+  filter) — which is precisely when the packs the exemption holds back
+  really are the reason the count is high.
+- **Deleting the cap arm outright is the wrong fix**, and the suite
+  already said so: four packs over the exemption with a closed cadence
+  can fold nothing, so with no rebuild admitted the count grows with
+  nothing able to reduce it. Replaying the wire shape through the real
+  planner with the cadence shut: peak tiers 650 -> 677 -> 747 -> 947 at
+  3/30/100/300 pairs, +1 per pair and not converging, against 711 flat
+  for the change as made.
+- Two supporting edits the tests refuse to go without: `forced` reads
+  the pre-exemption count (without it nothing is planned at all and the
+  result is worse than before), and a forced fold's half is clamped to
+  at least two inputs (a one-input fold is a no-op that re-plans
+  forever). All four mutations — restoring the cap arm, deleting it,
+  reverting `forced`, dropping the clamp — fail the suite.
+- Replaying 3/300 pairs of the wire shape with the cadence opening as
+  `base_rebuild_min_secs` would: 2.00x -> 1.00x and 5.19x -> 4.83x. The
+  win is concentrated in short bursts against a long cadence, which is
+  the agent workload. **Not yet measured on the wire.**
+
+### Added — flint forge: `syncerEnv`, so a rendered tuning knob can be set
+
+- The operator rendered the syncer's whole environment and exposed none
+  of the knobs the binary documents (`FLINT_FORGE_FOLD_MIN_MIB`,
+  `_FOLD_FACTOR`, `_BASE_REBUILD_MIN_SECS`, ...), so a repository could
+  not be tuned and an A/B arm could not differ by one variable.
+  `FlintRepoSpec.syncerEnv` is applied last, after every derived
+  variable, and can override them.
+
+### Measured — flint forge: the compaction ladder on a cluster (M6, runcg)
+
+- Every figure behind the tiers' byte work came from replaying a bucket
+  listing; this is the first cluster measurement. Two arms on one
+  bucket, one image and one node, differing by ONE environment variable.
+- **The ladder holds.** P9, 48 x 8 MiB: amplification 1.67-1.83x with
+  the floor against 2.90-4.33x without, non-overlapping across three
+  pairs, and the simulator's prediction for the floored arm — 1.67x —
+  measured 1.67x twice.
+- **The floor's tiny-push claim does not.** On repositories that never
+  see the large pushes, the arms are 2.57-3.12 against 2.94-3.66
+  KiB/push: before/after straddles 1.0 at 0.94-1.42x with the ranges
+  overlapping, which is the pre-registered falsifier verbatim. The
+  predicted 5.65x -> 3.08x was simulator-only. What the floor does buy
+  on tiny pushes is 3x fewer folds at the same bytes — an operation
+  saving, and it is claimed as one.
+
+### Verified — flint forge: acknowledged survives the idle reap (M7, runcg)
+
+- A repository reaped for inactivity (`replicas: 0`, the pod destroyed
+  with its `emptyDir` cache), woken by a git request, and every commit
+  acknowledged before the reap checked by CONTENT from a clone into an
+  empty directory. Green on 20 checks: the reap observed with
+  `replicas=0` AND no pod after 68 s; the successor a different pod UID
+  with `foldsCommitted` falling 1 -> 0; the door holding the request and
+  answering `ls-remote` in 6 s; HEAD equal to the last ack; all 70
+  commits byte-for-byte; and the negative control — a policy-refused ref
+  absent, a never-pushed commit unresolvable.
+
+### Fixed — flint forge: the fold simulator had no pack cap in its base gate
+
+- `foldsim.py` modelled the base rule with cadence and waiver only, no
+  `tiers.len() >= cap` term, so it could not express the rebuild the cap
+  admits. On the state M6 measured, the planner answers `base` over
+  every pack and the model answered `fold`. It was not merely silent:
+  the old gate gives the same answer as the planner does AFTER this
+  wave's fix, so the model agreed with a forge that did not exist yet.
+  That is why its tiny-push prediction transferred to the wire as
+  nothing at all.
+- `base_cap_mode` now selects the gate ('none' — the old one, kept only
+  to reproduce figures published before this; 'cap' — as shipped before
+  the fix; 'eligible' — as shipped now), pinned by `foldsim.py
+  selfcheck` and mutation-checked. The tiers design's S13.3 table is
+  marked: every number in it was produced without the cap term.
+
+
 ### Fixed — flint forge: `git push --atomic` is honoured instead of silently ignored
 
 - **forge accepted the `atomic` capability and did not keep its
