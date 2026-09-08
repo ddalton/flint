@@ -14,6 +14,10 @@
 //!   FLINT_FORGE_PROJECT_ID refuse a prefix another project claims
 //!   FLINT_FORGE_SOCKET     hook socket (default <repo>/flint-forge/syncer.sock)
 //!   FLINT_FORGE_STATUS_ADDR   status listener (default 127.0.0.1:9848)
+//!   FLINT_FORGE_FILE_ADDR     file API listener; unset = not served
+//!   FLINT_FORGE_FILE_BRANCH   the ref file-API writes move
+//!   FLINT_FORGE_FILE_MAX_MB   per-request ceiling (default 10)
+//!   FLINT_FORGE_FILE_TOKEN    shared bearer for the file API
 //!   FLINT_FORGE_HEARTBEAT_SECS   lease renewal period (default 10)
 //!   FLINT_FORGE_BATCH_WINDOW_MS  a fixed wait for more pushes once one arrived (default 0: a batch is what queued while the last one ran)
 //!   FLINT_FORGE_FOLD_FACTOR      compaction tiers: git's geometric factor over pack bytes (default 2; 0 = no compaction at all)
@@ -294,9 +298,38 @@ async fn serve() {
             ttl_secs: env_u64("FLINT_FORGE_LFS_TTL_SECS", flint_forge::lfs::DEFAULT_TTL_SECS),
         });
 
+    // The file API is off unless an address is given. A repository
+    // nobody browses through a UI pays nothing for the option, and the
+    // listener is deliberately NOT the status one: `/status` is served
+    // unauthenticated there, and the door must never be able to reach
+    // it.
+    let file_api = std::env::var("FLINT_FORGE_FILE_ADDR")
+        .ok()
+        .filter(|a| !a.is_empty() && a != "off")
+        .map(|addr| {
+            let branch = std::env::var("FLINT_FORGE_FILE_BRANCH")
+                .ok()
+                .filter(|b| !b.is_empty())
+                .unwrap_or_else(|| "agents".to_string());
+            // Never `main` by default. The branch policy applies to a
+            // file-API write exactly as it does to a push, so pointing
+            // this at a protected branch makes every save a 403 — and
+            // the operator that protects `main` is the common case.
+            let branch =
+                if branch.starts_with("refs/") { branch } else { format!("refs/heads/{branch}") };
+            server::FileApiOpts {
+                addr,
+                branch,
+                cap: env_u64("FLINT_FORGE_FILE_MAX_MB", 10) * 1024 * 1024,
+                token: std::env::var("FLINT_FORGE_FILE_TOKEN").ok().filter(|t| !t.is_empty()),
+                bound: None,
+            }
+        });
+
     let opts = ServerOpts {
         socket,
         status_addr,
+        file_api,
         // The rendered document beside the repository is the operator's
         // surface; the env knobs are the pre-operator posture and the
         // rigs'. A file, when present, wins outright rather than

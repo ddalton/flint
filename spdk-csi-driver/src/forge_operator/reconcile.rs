@@ -378,6 +378,14 @@ pub async fn full_pass(
             RepoPhase::Failed | RepoPhase::Terminating => None,
             _ => render::git_endpoint(repo),
         },
+        // Withdrawn on the two phases that must not advertise a door,
+        // under the same rule as the git endpoint: a published address
+        // for a repository that is Failed would send the browser at a
+        // pod that will not answer.
+        api_endpoint: match phase {
+            RepoPhase::Failed | RepoPhase::Terminating => None,
+            _ => render::api_endpoint(repo),
+        },
         observed_generation: repo.metadata.generation,
         server_id: snapshot.and_then(|s| s.server_id.clone()),
         // The DEBUG spelling, so `hub_phase_blocks` at the door — which
@@ -445,6 +453,7 @@ mod tests {
                 lfs: None,
                 log_level: None,
                 lifecycle: None,
+                file_api: None,
             },
         );
         r.metadata.namespace = Some("tenant".into());

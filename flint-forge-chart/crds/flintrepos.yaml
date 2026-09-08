@@ -143,6 +143,45 @@ spec:
                 required:
                 - prefix
                 type: object
+              fileApi:
+                description: |-
+                  The REST file API (`docs/plans/forge-file-api-design.md`).
+                  Absent = not served, which is the default: a repository nobody
+                  browses through a UI opens no second door.
+                nullable: true
+                properties:
+                  branch:
+                    description: |-
+                      The ref every file-API write moves.
+
+                      **Deliberately not `main`, and deliberately required to be
+                      stated.** `policy.judge` applies to a file-API write exactly as
+                      it does to a push, so aiming this at a protected branch makes
+                      every save a 403 — and protecting `main` is the ordinary case.
+                      Promotion to `main` stays in the review flow that already
+                      exists.
+                    nullable: true
+                    type: string
+                  enabled:
+                    type: boolean
+                  maxMb:
+                    description: |-
+                      The largest object read or written in one request, in MiB.
+
+                      A memory bound, not a preference: the listener buffers, and the
+                      syncer's container is sized for `git http-backend`. Agents move
+                      large objects with a git client, which streams.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  tokenSecret:
+                    description: A Secret with key `token`, mounted as the API's shared bearer.
+                    nullable: true
+                    type: string
+                required:
+                - enabled
+                type: object
               fleet:
                 description: 'Fleet levers: clone bundles, and pruning merged agent branches.'
                 nullable: true
@@ -273,6 +312,28 @@ spec:
                   standing claim naming another project is refused on the DATA
                   plane by the syncer, not merely by the operator.
                 type: string
+              syncerEnv:
+                additionalProperties:
+                  type: string
+                description: |-
+                  Extra environment for the SYNCER container, applied after every
+                  variable the operator derives, so it can override them.
+
+                  This exists because the operator renders the syncer's whole
+                  environment and exposes none of the tuning knobs the binary
+                  documents (`FLINT_FORGE_FOLD_MIN_MIB`, `_FOLD_FACTOR`,
+                  `_BASE_REBUILD_MIN_SECS`, ...), so a repository could not be
+                  given a different compaction rule from its neighbour without a
+                  new field per knob. A measurement whose two arms must differ in
+                  exactly ONE of them needs this: the M6 drill's arms are one
+                  repository at `FOLD_MIN_MIB=0` and one at the shipped 256, on
+                  one cluster, from one image.
+
+                  It is a tuning surface, not a credential one: the syncer's S3
+                  credentials come from `credentialsSecretRef` and are not
+                  settable here.
+                nullable: true
+                type: object
             required:
             - bucket
             - keyPrefix
@@ -296,6 +357,12 @@ spec:
           status:
             nullable: true
             properties:
+              apiEndpoint:
+                description: |-
+                  Where the file API answers, when it is served. Says WHERE, never
+                  WHETHER — `phase` says whether, and the door reads phase first.
+                nullable: true
+                type: string
               conditions:
                 items:
                   properties:

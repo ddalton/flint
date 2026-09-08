@@ -195,6 +195,7 @@ mod tests {
                 lfs: None,
                 log_level: None,
                 lifecycle: None,
+                file_api: None,
             },
         );
         r.metadata.namespace = Some("tenant".into());

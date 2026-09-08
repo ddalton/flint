@@ -147,6 +147,11 @@ pub struct FlintRepoSpec {
     /// published as a lean workspace by the shipped `flint-sync`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export: Option<ExportSpec>,
+    /// The REST file API (`docs/plans/forge-file-api-design.md`).
+    /// Absent = not served, which is the default: a repository nobody
+    /// browses through a UI opens no second door.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_api: Option<FileApiSpec>,
 
     /// Fleet levers: clone bundles, and pruning merged agent branches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -269,6 +274,34 @@ pub struct ExportSpec {
     pub every_secs: Option<u64>,
 }
 
+/// The browser's door onto a repository. Agents keep using git; this is
+/// for a file manager.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FileApiSpec {
+    pub enabled: bool,
+    /// The ref every file-API write moves.
+    ///
+    /// **Deliberately not `main`, and deliberately required to be
+    /// stated.** `policy.judge` applies to a file-API write exactly as
+    /// it does to a push, so aiming this at a protected branch makes
+    /// every save a 403 — and protecting `main` is the ordinary case.
+    /// Promotion to `main` stays in the review flow that already
+    /// exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The largest object read or written in one request, in MiB.
+    ///
+    /// A memory bound, not a preference: the listener buffers, and the
+    /// syncer's container is sized for `git http-backend`. Agents move
+    /// large objects with a git client, which streams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_mb: Option<u64>,
+    /// A Secret with key `token`, mounted as the API's shared bearer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_secret: Option<String>,
+}
+
 /// The levers that decide what a thousand agents cost (design §8).
 ///
 /// There is deliberately NO `wipSnapshots` here. An RPO on the agent's
@@ -374,6 +407,10 @@ pub struct FlintRepoStatus {
     /// rather than guessing from a crash loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<String>,
+    /// Where the file API answers, when it is served. Says WHERE, never
+    /// WHETHER — `phase` says whether, and the door reads phase first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_endpoint: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<RepoCondition>>,

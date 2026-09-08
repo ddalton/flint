@@ -30,7 +30,7 @@ use k8s_openapi::api::core::v1::{
     ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EmptyDirVolumeSource, EnvFromSource,
     EnvVar, EnvVarSource, HTTPGetAction, ObjectFieldSelector, PodSpec, PodTemplateSpec, Probe,
     ResourceRequirements, SecretEnvSource, Service, ServicePort, ServiceSpec, TCPSocketAction,
-    Volume, VolumeMount,
+    SecretKeySelector, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, OwnerReference};
@@ -50,6 +50,15 @@ pub const POLICY_DIR: &str = "/etc/flint-forge";
 pub const HOOKS_PATH: &str = "/usr/local/share/flint-forge/hooks";
 pub const GIT_PORT: i32 = 8080;
 pub const STATUS_PORT: i32 = 9848;
+/// The file API's listener, and deliberately NOT `STATUS_PORT`.
+///
+/// The syncer serves an unauthenticated `/status` — the epoch holder,
+/// the ref map, the phase — on the status listener. Serving the file
+/// API there would mean admitting the door to that port, which is
+/// exactly what `the_policy_admits_the_door_to_git_only` refuses. A
+/// third port keeps that test true and makes the separation structural
+/// rather than a route table nobody can regress.
+pub const FILE_PORT: i32 = 9850;
 
 #[derive(Debug, Clone)]
 pub struct RenderDefaults {
@@ -241,6 +250,21 @@ pub fn config_map(repo: &FlintRepo) -> ConfigMap {
 /// A headless Service. `cluster_ip: None` would be "assign me one";
 /// the string `"None"` is what makes it headless, and getting that
 /// wrong is how a fleet quietly spends 3,000 addresses.
+/// Where the file API answers, as an absolute URL.
+///
+/// No repository in the path, unlike `git_endpoint`: one syncer process
+/// serves one repository, so the API needs no repo segment — and
+/// omitting it removes a whole class of path-joining question at the
+/// door.
+pub fn api_endpoint(repo: &FlintRepo) -> Option<String> {
+    if repo.spec.file_api.as_ref().map(|f| f.enabled) != Some(true) {
+        return None;
+    }
+    let n = names(repo);
+    let ns = repo.namespace().unwrap_or_default();
+    Some(format!("http://{}.{}.svc.cluster.local:{}", n.service, ns, FILE_PORT))
+}
+
 pub fn service(repo: &FlintRepo) -> Service {
     let n = names(repo);
     Service {
@@ -248,22 +272,37 @@ pub fn service(repo: &FlintRepo) -> Service {
         spec: Some(ServiceSpec {
             cluster_ip: Some("None".to_string()),
             selector: Some(selector_labels(repo)),
-            ports: Some(vec![
-                ServicePort {
-                    name: Some("git".to_string()),
-                    port: GIT_PORT,
-                    target_port: Some(IntOrString::Int(GIT_PORT)),
-                    protocol: Some("TCP".to_string()),
-                    ..Default::default()
-                },
-                ServicePort {
-                    name: Some("status".to_string()),
-                    port: STATUS_PORT,
-                    target_port: Some(IntOrString::Int(STATUS_PORT)),
-                    protocol: Some("TCP".to_string()),
-                    ..Default::default()
-                },
-            ]),
+            ports: Some({
+                let mut ports = vec![
+                    ServicePort {
+                        name: Some("git".to_string()),
+                        port: GIT_PORT,
+                        target_port: Some(IntOrString::Int(GIT_PORT)),
+                        protocol: Some("TCP".to_string()),
+                        ..Default::default()
+                    },
+                    ServicePort {
+                        name: Some("status".to_string()),
+                        port: STATUS_PORT,
+                        target_port: Some(IntOrString::Int(STATUS_PORT)),
+                        protocol: Some("TCP".to_string()),
+                        ..Default::default()
+                    },
+                ];
+                // Only when it is served. A port on a Service that
+                // nothing listens on is an endpoint that answers
+                // "connection refused" to anything that finds it.
+                if repo.spec.file_api.as_ref().map(|f| f.enabled) == Some(true) {
+                    ports.push(ServicePort {
+                        name: Some("files".to_string()),
+                        port: FILE_PORT,
+                        target_port: Some(IntOrString::Int(FILE_PORT)),
+                        protocol: Some("TCP".to_string()),
+                        ..Default::default()
+                    });
+                }
+                ports
+            }),
             ..Default::default()
         }),
         ..Default::default()
@@ -393,6 +432,45 @@ pub fn deployment(repo: &FlintRepo, d: &RenderDefaults, replicas: i32) -> Deploy
             ..Default::default()
         });
     }
+    // The file API (`docs/plans/forge-file-api-design.md`). Its own
+    // port, never the status one — `/status` is unauthenticated there
+    // and the door must not be able to reach it.
+    if let Some(fa) = s.file_api.as_ref().filter(|f| f.enabled) {
+        env.push(EnvVar {
+            name: "FLINT_FORGE_FILE_ADDR".into(),
+            value: Some(format!("0.0.0.0:{FILE_PORT}")),
+            ..Default::default()
+        });
+        if let Some(b) = fa.branch.as_ref().filter(|b| !b.is_empty()) {
+            env.push(EnvVar {
+                name: "FLINT_FORGE_FILE_BRANCH".into(),
+                value: Some(b.clone()),
+                ..Default::default()
+            });
+        }
+        if let Some(mb) = fa.max_mb {
+            env.push(EnvVar {
+                name: "FLINT_FORGE_FILE_MAX_MB".into(),
+                value: Some(mb.to_string()),
+                ..Default::default()
+            });
+        }
+        if let Some(sec) = fa.token_secret.as_ref().filter(|t| !t.is_empty()) {
+            env.push(EnvVar {
+                name: "FLINT_FORGE_FILE_TOKEN".into(),
+                value_from: Some(EnvVarSource {
+                    secret_key_ref: Some(SecretKeySelector {
+                        name: sec.clone(),
+                        key: "token".into(),
+                        optional: Some(false),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+    }
+
     // The legible export (§9). Both halves or neither: the syncer
     // refuses half a configuration rather than defaulting a prefix,
     // because the only plausible default — the repository's own — is
@@ -496,11 +574,21 @@ pub fn deployment(repo: &FlintRepo, d: &RenderDefaults, replicas: i32) -> Deploy
         env: Some(env),
         env_from,
         volume_mounts: Some(vec![repo_mount.clone(), policy_mount]),
-        ports: Some(vec![ContainerPort {
-            name: Some("status".to_string()),
-            container_port: STATUS_PORT,
-            ..Default::default()
-        }]),
+        ports: Some({
+            let mut p = vec![ContainerPort {
+                name: Some("status".to_string()),
+                container_port: STATUS_PORT,
+                ..Default::default()
+            }];
+            if s.file_api.as_ref().map(|f| f.enabled) == Some(true) {
+                p.push(ContainerPort {
+                    name: Some("files".to_string()),
+                    container_port: FILE_PORT,
+                    ..Default::default()
+                });
+            }
+            p
+        }),
         resources: Some(git_sized()),
         // Readiness is "serving", which `/healthz` answers and
         // `/status` describes. A headless Service publishes DNS only
@@ -703,7 +791,7 @@ mod tests {
         assert_eq!(n, 1, "overriding REPLACES, it does not duplicate: {names:?}");
     }
 
-    fn repo() -> FlintRepo {
+    pub(super) fn repo() -> FlintRepo {
         let mut r = FlintRepo::new(
             "proj",
             FlintRepoSpec {
@@ -722,6 +810,7 @@ mod tests {
                 lfs: None,
                 log_level: None,
                 lifecycle: None,
+                file_api: None,
             },
         );
         r.metadata.namespace = Some("tenant".into());
@@ -1185,6 +1274,15 @@ pub fn network_policy(
 
     let mut ingress = vec![rule(as_peer(door), GIT_PORT)];
 
+    // The file API's own port, and only when it is served. The door
+    // reaches this and the status port stays closed to it — which is
+    // the whole reason the file API does not share the status
+    // listener. `the_policy_admits_the_door_to_git_only` still holds
+    // for STATUS_PORT and must keep holding.
+    if repo.spec.file_api.as_ref().map(|f| f.enabled) == Some(true) {
+        ingress.push(rule(as_peer(door), FILE_PORT));
+    }
+
     // THE STATUS PORT IS NOT OPTIONAL, and leaving it out is how this
     // policy shipped broken. A NetworkPolicy that selects a pod is
     // default-deny for every port it does not name, so admitting only
@@ -1211,5 +1309,148 @@ pub fn network_policy(
             ingress: Some(ingress),
             egress: None,
         }),
+    }
+}
+
+#[cfg(test)]
+mod file_api_render_tests {
+    use super::*;
+
+    fn repo_with_file_api(enabled: bool) -> FlintRepo {
+        let mut r = super::tests::repo();
+        r.spec.file_api = Some(crate::forge_operator::crd::FileApiSpec {
+            enabled,
+            branch: Some("agents".into()),
+            max_mb: Some(4),
+            token_secret: Some("forge-file-token".into()),
+        });
+        r
+    }
+
+    /// Off by default, and off means nothing is rendered: no port, no
+    /// endpoint, no environment. A repository nobody browses opens no
+    /// second door.
+    #[test]
+    fn the_file_api_is_off_unless_asked_for() {
+        let r = super::tests::repo();
+        assert!(api_endpoint(&r).is_none());
+        let svc = service(&r);
+        let names: Vec<String> =
+            svc.spec.unwrap().ports.unwrap().iter().filter_map(|p| p.name.clone()).collect();
+        assert!(!names.contains(&"files".to_string()), "{names:?}");
+
+        let off = repo_with_file_api(false);
+        assert!(api_endpoint(&off).is_none(), "enabled:false is not enabled");
+    }
+
+    /// The endpoint says WHERE. It carries no repository segment —
+    /// one syncer serves one repository — and it names the file port,
+    /// never the status one.
+    #[test]
+    fn the_endpoint_names_the_file_port_and_no_repository_path() {
+        let r = repo_with_file_api(true);
+        let ep = api_endpoint(&r).expect("published");
+        assert!(ep.ends_with(&format!(":{FILE_PORT}")), "{ep}");
+        assert!(!ep.contains(".git"), "no repository in the path: {ep}");
+        assert!(!ep.contains(&STATUS_PORT.to_string()), "{ep}");
+
+        let names: Vec<String> = service(&r)
+            .spec
+            .unwrap()
+            .ports
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.name.clone())
+            .collect();
+        assert!(names.contains(&"files".to_string()), "{names:?}");
+    }
+
+    /// The environment the syncer reads, and the Secret reference that
+    /// keeps the bearer out of the pod spec.
+    #[test]
+    fn the_syncer_is_told_where_to_serve_and_on_which_branch() {
+        let r = repo_with_file_api(true);
+        let d = deployment(&r, &RenderDefaults::default(), 1);
+        let syncer = d
+            .spec
+            .unwrap()
+            .template
+            .spec
+            .unwrap()
+            .containers
+            .into_iter()
+            .find(|c| c.name == "syncer")
+            .expect("the syncer container");
+        let env = syncer.env.unwrap_or_default();
+        let get = |k: &str| env.iter().find(|e| e.name == k).cloned();
+
+        assert_eq!(
+            get("FLINT_FORGE_FILE_ADDR").and_then(|e| e.value),
+            Some(format!("0.0.0.0:{FILE_PORT}"))
+        );
+        assert_eq!(get("FLINT_FORGE_FILE_BRANCH").and_then(|e| e.value), Some("agents".into()));
+        assert_eq!(get("FLINT_FORGE_FILE_MAX_MB").and_then(|e| e.value), Some("4".into()));
+
+        let tok = get("FLINT_FORGE_FILE_TOKEN").expect("the bearer");
+        assert!(tok.value.is_none(), "the token must never be a literal in the pod spec");
+        let sel = tok.value_from.unwrap().secret_key_ref.unwrap();
+        assert_eq!(sel.name, "forge-file-token");
+        assert_eq!(sel.key, "token");
+
+        let ports: Vec<String> =
+            syncer.ports.unwrap_or_default().iter().filter_map(|p| p.name.clone()).collect();
+        assert!(ports.contains(&"files".to_string()), "{ports:?}");
+    }
+
+    /// The door reaches the file port and STILL never the status port.
+    /// That second half is the reason the file API has its own port at
+    /// all, so it is asserted here as well as in the policy's own test.
+    #[test]
+    fn the_policy_opens_the_file_port_and_keeps_status_shut() {
+        let r = repo_with_file_api(true);
+        let door = PodPeer {
+            namespace: "flint-system".into(),
+            pod_labels: BTreeMap::from([("app".to_string(), "flint-forge-door".to_string())]),
+        };
+        let op = PodPeer {
+            namespace: "flint-system".into(),
+            pod_labels: BTreeMap::from([("app".to_string(), "flint-forge".to_string())]),
+        };
+        let np = network_policy(&r, &door, Some(&op));
+        let rules = np.spec.unwrap().ingress.unwrap_or_default();
+        let admits = |port: i32, app: &str| {
+            rules.iter().any(|r| {
+                r.ports.as_ref().is_some_and(|ps| {
+                    ps.iter().any(|p| p.port == Some(IntOrString::Int(port)))
+                }) && r.from.as_ref().is_some_and(|f| {
+                    f.iter().any(|peer| {
+                        peer.pod_selector
+                            .as_ref()
+                            .and_then(|s| s.match_labels.as_ref())
+                            .and_then(|l| l.get("app"))
+                            .map(|v| v == app)
+                            .unwrap_or(false)
+                    })
+                })
+            })
+        };
+        assert!(admits(FILE_PORT, "flint-forge-door"), "the door must reach the file API");
+        assert!(admits(GIT_PORT, "flint-forge-door"), "and still git");
+        assert!(
+            !admits(STATUS_PORT, "flint-forge-door"),
+            "the door has no business on the status port — that is why the file API has its own"
+        );
+        assert!(admits(STATUS_PORT, "flint-forge"), "the operator still polls status");
+
+        // And with the API off, the port is not opened at all.
+        let off = super::tests::repo();
+        let np = network_policy(&off, &door, Some(&op));
+        let rules = np.spec.unwrap().ingress.unwrap_or_default();
+        assert!(
+            !rules.iter().any(|r| r.ports.as_ref().is_some_and(|ps| ps
+                .iter()
+                .any(|p| p.port == Some(IntOrString::Int(FILE_PORT))))),
+            "a port nobody serves must not be opened"
+        );
     }
 }
