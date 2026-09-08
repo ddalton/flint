@@ -1,0 +1,14 @@
+══ F11: S3 goes away ══
+── cutting the server off from S3 ──
+── a CLONE during the outage (should still work: it is a read) ──
+  PASS  clones keep serving from local packs during the outage
+── does the server stand down on its own, with NO push since the cut? (X13) ──
+      readiness withdrawn after ~80s, restarts unchanged (0)
+  PASS  the server withdrew readiness on its own within the term, without exiting (X13)
+── a PUSH during the outage (must fail, and say why) ──
+      fatal: unable to access 'http://flint-forge-door.forge-system.svc/git/agents/proj.git/': The requested URL returned error: 503
+  PASS  the push was refused rather than silently accepted
+── healing ──
+  PASS  recovers once S3 returns: a renewal lands and readiness comes back
+
+══ 4 passed, 0 failed ══

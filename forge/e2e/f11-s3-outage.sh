@@ -16,7 +16,11 @@
 # was built 2026-09-05; the stand-down leg now runs BEFORE any push and
 # is judged by X13's signature — ready=false with the restart count
 # UNCHANGED. A restart here is the old vacuous pass and is reported as
-# a failure of the leg. NOT YET RE-RUN ON THE WIRE after the change.
+# a failure of the leg.
+#
+# RE-RUN ON THE WIRE 2026-09-08 (runcl): 4/0. Readiness withdrawn after
+# ~80 s with restartCount unchanged at 0 — the signature, not a crash
+# loop. F16's P2 reached the same state independently the same day.
 set -uo pipefail
 NS=${NS:-agents}; REPO=${REPO:-proj}
 DOOR=${DOOR:-http://flint-forge-door.forge-system.svc}
