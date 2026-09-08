@@ -1,0 +1,59 @@
+== P0: the repository, the agents, and a push that works at all ==
+  PASS  the repository is Ready
+  PASS  the shared file exists and one agent can push through the door
+
+== P1: arm A — disjoint appends, resolved as a UNION ==
+  ....  arm A: append edits, 'union' resolution (4 agents x 5 edits, bound 40)
+  PASS  the agents genuinely contended (28 pushes refused)
+  PASS  every one of the 20 edits is in the final file exactly once
+  PASS  every edit reported LANDED (20/20)
+  PASS  no agent hit the 40-attempt bound
+== P3: the shape of the contention, per agent ==
+  ....  agent1: 5 landed, 14 refusals, attempts total=229 max=15
+  ....  agent2: 5 landed, 9 refusals, attempts total=104 max=10
+  ....  agent3: 5 landed, 5 refusals, attempts total=40 max=6
+  ....  agent4: 5 landed, 0 refusals, attempts total=5 max=1
+  ....  worst single edit took 15 attempts (bound 40)
+
+== P4: the control — a stale push, with no retry, must be refused ==
+  PASS  a stale push is refused, so P1's convergence is arbitration and not permissiveness
+
+== P2: arm B — every agent rewrites the SAME line ==
+  ....  arm B: headline edits, 'theirs' resolution (4 agents x 5 edits, bound 40)
+  PASS  the same-line edits genuinely conflicted (30 rebase conflicts)
+  PASS  every same-line edit eventually landed (20/20)
+  PASS  no agent starved under same-line contention
+  ....  the surviving headline is: HEADLINE: B agent2 edit 5
+  PASS  the surviving line is one agent's whole value, not a merge of several
+  PASS  all 20 of arm A's lines survived arm B untouched
+== P5: the naive resolution, as a positive control on data loss ==
+  ....  arm C: append edits, 'ours' resolution (4 agents x 5 edits, bound 40)
+  ....  arm C: 20/20 reported LANDED, 21 refusals, 9/20 lines actually in the file
+  ....  arm A: 20/20 reported LANDED, 28 refusals, 20/20 lines still in the file
+  PASS  '-X ours' reported all 20 edits landed while only 9 reached the file — the hazard reproduces, silently
+== P6: what an agent can actually look at to resolve ==
+  PASS  the branch carries 51 commits — an agent can read who changed what, and when
+  PASS  the last writer of the file is attributable: agent2
+
+== P7: refs/for — the server merges, and what that does and does not buy ==
+-- D: disjoint content (each agent owns its own file) --
+  PASS  all 20 disjoint edits landed on the FIRST attempt — no pull, no rebase, no retry
+  PASS  every agent's 5 lines are in its own file
+  ....  arm A (rebase-retry): 28 refusals, worst edit 15 attempts
+  ....  arm D (refs/for):     0 refusals, 1 attempt per edit by construction
+  ....  the branch carries 19 merge commits, built by the SYNCER on the agents' behalf
+-- E: the same contested file, through refs/for --
+  ....  arm E: 5/20 landed, 15 refused, of which 15 say 'conflict', 5 lines in the file
+  PASS  every refs/for refusal is a content conflict — deterministic, so retrying unchanged cannot help, and cannot starve
+  PASS  the refusal names the conflicting path, so the agent knows where to look
+  PASS  no refused merge left conflict markers in the file
+  ....  FINDING: refs/for removes the RACE (arm D: 0 refusals in 20 pushes).
+  ....           It does not remove the DISAGREEMENT (arm E: 15 refusals in 20).
+  ....           merge-tree is the same three-way merge the client would run, at a fresher base.
+
+== P8: is the repository still RESTORABLE from the bucket? ==
+  PASS  the syncer has not restarted once through every arm (0 restarts)
+  PASS  a FRESH syncer restored from the bucket and reached Ready (201ed94a-fec2-4825-8ba5-62c6104b0c35 -> 7370fe3a-2133-47fa-8273-4a4e1405138f)
+
+F14: 22 passed, 0 failed, 0 inconclusive
+reports in /var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/tmp.SIqfo9rJTN

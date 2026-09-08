@@ -1,0 +1,9 @@
+  ....  seeding 472 preserved objects into s3://flint-forge-runcl-1788903032/drill/f14corrupt/
+  PASS  the corrupt state is in the bucket (472 objects)
+  ....  phase after 180s: Pending
+  PASS  the syncer REFUSED the corrupt bucket rather than serving it
+  ....  refused: restored repository fails fsck --connectivity-only over the 3 pack(s) the snapshot names: broken link from  commit 8f5e07dc840d1e8134beabfca2835de0deb0
+  PASS  and it named the missing object — the oracle discriminates
+  PASS  the corrupt repository never reached Ready
+
+F14-control: 4 passed, 0 failed
