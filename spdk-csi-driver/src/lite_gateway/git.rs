@@ -203,6 +203,54 @@ impl Default for GitConfig {
     }
 }
 
+/// Why a review did not yield an identity.
+///
+/// The distinction is the CACHE'S, and it is the only question the
+/// cache asks: was the credential judged, or could no verdict be
+/// reached at all? That used to be inferred from the error's text —
+/// `!e.starts_with("TokenReview:")` — which worked for exactly one
+/// reviewer and silently mis-classified any second one's failures as
+/// judgements, holding the door shut for a whole TTL after the
+/// dependency came back. A type cannot be got wrong by a new
+/// implementation the way a string convention can.
+#[derive(Debug, Clone)]
+pub enum ReviewError {
+    /// The credential was SEEN and judged: expired, revoked, wrong
+    /// audience, not a ServiceAccount, signed by an unknown key.
+    ///
+    /// Cacheable, and cached on purpose: an agent with a dead token
+    /// retries in a loop, and an uncached refusal turns that loop into
+    /// load on whatever did the judging.
+    Refused(String),
+    /// No verdict could be reached — the apiserver was unreachable, a
+    /// key server timed out, DNS failed.
+    ///
+    /// NEVER cacheable. This says nothing about the credential, and
+    /// caching it would keep the door shut for the whole TTL after the
+    /// dependency recovered — which is precisely the shape of a deploy
+    /// of that dependency.
+    Unreachable(String),
+}
+
+impl ReviewError {
+    pub fn message(&self) -> &str {
+        match self {
+            ReviewError::Refused(m) | ReviewError::Unreachable(m) => m,
+        }
+    }
+
+    /// The one question the cache asks.
+    pub fn is_cacheable(&self) -> bool {
+        matches!(self, ReviewError::Refused(_))
+    }
+}
+
+impl std::fmt::Display for ReviewError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
 /// Turning a token into a principal.
 ///
 /// A trait, so the cache in front of it is a wrapper rather than a
@@ -211,7 +259,7 @@ impl Default for GitConfig {
 /// exists for.
 #[async_trait::async_trait]
 pub trait Reviewer: Send + Sync {
-    async fn review(&self, token: &str) -> Result<Identity, String>;
+    async fn review(&self, token: &str) -> Result<Identity, ReviewError>;
 }
 
 /// The real one: `TokenReview` against the apiserver.
@@ -222,7 +270,7 @@ pub struct KubeReviewer {
 
 #[async_trait::async_trait]
 impl Reviewer for KubeReviewer {
-    async fn review(&self, token: &str) -> Result<Identity, String> {
+    async fn review(&self, token: &str) -> Result<Identity, ReviewError> {
         let api: Api<TokenReview> = Api::all(self.client.clone());
         let tr = TokenReview {
             spec: TokenReviewSpec {
@@ -232,15 +280,21 @@ impl Reviewer for KubeReviewer {
             ..Default::default()
         };
         match api.create(&PostParams::default(), &tr).await {
-            Ok(out) => identity_from_review(&out, &self.audience),
-            Err(e) => Err(format!("TokenReview: {e}")),
+            // Everything `identity_from_review` can say is a judgement
+            // ABOUT THE CREDENTIAL — unauthenticated, wrong audience,
+            // not a ServiceAccount. The apiserver answered; the answer
+            // was no.
+            Ok(out) => identity_from_review(&out, &self.audience).map_err(ReviewError::Refused),
+            // The apiserver did not answer. This says nothing about the
+            // token.
+            Err(e) => Err(ReviewError::Unreachable(format!("TokenReview: {e}"))),
         }
     }
 }
 
 struct CachedReview {
     at: Instant,
-    verdict: Result<Identity, String>,
+    verdict: Result<Identity, ReviewError>,
 }
 
 /// A TTL cache in front of any reviewer.
@@ -277,7 +331,7 @@ impl CachingReviewer {
 
 #[async_trait::async_trait]
 impl Reviewer for CachingReviewer {
-    async fn review(&self, token: &str) -> Result<Identity, String> {
+    async fn review(&self, token: &str) -> Result<Identity, ReviewError> {
         let key = Self::key_of(token);
         if let Ok(cache) = self.cache.lock() {
             if let Some(hit) = cache.get(&key) {
@@ -287,15 +341,13 @@ impl Reviewer for CachingReviewer {
             }
         }
         let verdict = self.inner.review(token).await;
-        // A REFUSAL is cached; a transport failure is not. An agent
-        // with an expired token retries in a loop, and an uncached
-        // refusal turns that loop into apiserver load. An apiserver
-        // that could not be reached is a different thing entirely:
-        // caching it would keep the door shut for the whole TTL after
-        // the apiserver came back.
+        // A REFUSAL is cached; a failure to reach a verdict is not. The
+        // reviewer that produced it says which, because only it can
+        // tell them apart — this used to be a guess at the error's
+        // text, and the guess was right for exactly one reviewer.
         let cacheable = match &verdict {
             Ok(_) => true,
-            Err(e) => !e.starts_with("TokenReview:"),
+            Err(e) => e.is_cacheable(),
         };
         if cacheable {
             if let Ok(mut cache) = self.cache.lock() {
@@ -960,7 +1012,20 @@ async fn proxy(
     };
     let identity = match door.reviewer.review(&token).await {
         Ok(id) => id,
-        Err(e) => return challenge(&e),
+        Err(ReviewError::Refused(why)) => return challenge(&why),
+        // NOT a challenge. The credential may be perfectly good, and a
+        // 401 tells the client to fix it — which for a git credential
+        // helper can mean DISCARDING a cached credential that was fine,
+        // turning an apiserver blip into a re-authentication for every
+        // agent that hit it.
+        Err(ReviewError::Unreachable(why)) => {
+            return json_err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ReviewerUnreachable",
+                &format!("could not verify your credential just now: {why}"),
+                Some(5),
+            )
+        }
     };
 
     let Some(repo) = door.look_up(&ns, &name) else {
@@ -1222,12 +1287,12 @@ mod tests {
     /// Counts what reaches the apiserver, and can be told to fail.
     struct CountingReviewer {
         calls: Arc<AtomicU64>,
-        verdict: Result<Identity, String>,
+        verdict: Result<Identity, ReviewError>,
     }
 
     #[async_trait::async_trait]
     impl Reviewer for CountingReviewer {
-        async fn review(&self, _token: &str) -> Result<Identity, String> {
+        async fn review(&self, _token: &str) -> Result<Identity, ReviewError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.verdict.clone()
         }
@@ -1516,16 +1581,24 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 3, "the TTL is also how fast a deleted pod loses access");
     }
 
-    /// A refusal is cached (an expired token retries in a loop); an
-    /// apiserver that could not be reached is NOT, because caching it
+    /// A refusal is cached (an expired token retries in a loop); a
+    /// verifier that could not be reached is NOT, because caching it
     /// would keep the door shut for the whole TTL after it came back.
+    ///
+    /// **This test used to be vacuous for the case it names.** It
+    /// asserted the behaviour by constructing the string
+    /// `"TokenReview: connection refused"` — which is exactly what the
+    /// cache's `starts_with` guess looked for — so it pinned a STRING
+    /// CONVENTION, not the property. A second reviewer whose transport
+    /// failures did not begin with that prefix would have had them
+    /// cached, and this test would have stayed green throughout.
     #[tokio::test]
     async fn a_refusal_is_cached_and_an_unreachable_apiserver_is_not() {
         let calls = Arc::new(AtomicU64::new(0));
         let refused = CachingReviewer::new(
             Arc::new(CountingReviewer {
                 calls: calls.clone(),
-                verdict: Err("token is not authenticated".into()),
+                verdict: Err(ReviewError::Refused("token is not authenticated".into())),
             }),
             Duration::from_secs(60),
         );
@@ -1538,7 +1611,7 @@ mod tests {
         let down = CachingReviewer::new(
             Arc::new(CountingReviewer {
                 calls: calls.clone(),
-                verdict: Err("TokenReview: connection refused".into()),
+                verdict: Err(ReviewError::Unreachable("connection refused".into())),
             }),
             Duration::from_secs(60),
         );
@@ -1546,6 +1619,120 @@ mod tests {
             assert!(down.review("t").await.is_err());
         }
         assert_eq!(calls.load(Ordering::SeqCst), 4, "a transport failure is retried, not cached");
+
+        // THE CASE THE OLD TEST COULD NOT SEE: a second reviewer whose
+        // unreachable-message shares no text with the first's. Under the
+        // `starts_with("TokenReview:")` guess this was CACHED, and the
+        // door would then refuse every request for a full TTL after the
+        // dependency recovered.
+        let calls = Arc::new(AtomicU64::new(0));
+        let other = CachingReviewer::new(
+            Arc::new(CountingReviewer {
+                calls: calls.clone(),
+                verdict: Err(ReviewError::Unreachable(
+                    "jwks: dns error: failed to lookup address".into(),
+                )),
+            }),
+            Duration::from_secs(60),
+        );
+        for _ in 0..4 {
+            assert!(other.review("t").await.is_err());
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            4,
+            "a reviewer whose transport error does not say 'TokenReview:' was cached — the \
+             door would stay shut for the whole TTL after it recovered"
+        );
+
+        // …and it RECOVERS on the first good answer, which is the
+        // property a caller actually feels. No TTL to wait out.
+        let calls = Arc::new(AtomicU64::new(0));
+        let healed = CachingReviewer::new(
+            Arc::new(FlakyReviewer {
+                calls: calls.clone(),
+                fail_first: 2,
+                ok: identity("tenant", "agent-runner"),
+            }),
+            Duration::from_secs(60),
+        );
+        assert!(healed.review("t").await.is_err());
+        assert!(healed.review("t").await.is_err());
+        assert!(
+            healed.review("t").await.is_ok(),
+            "the door did not recover on the first good answer"
+        );
+    }
+
+    /// Fails `fail_first` times as UNREACHABLE, then succeeds.
+    struct FlakyReviewer {
+        calls: Arc<AtomicU64>,
+        fail_first: u64,
+        ok: Identity,
+    }
+
+    #[async_trait::async_trait]
+    impl Reviewer for FlakyReviewer {
+        async fn review(&self, _token: &str) -> Result<Identity, ReviewError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n < self.fail_first {
+                Err(ReviewError::Unreachable("the verifier is down".into()))
+            } else {
+                Ok(self.ok.clone())
+            }
+        }
+    }
+
+    /// An unreachable verifier is NOT the caller's fault and must not be
+    /// answered 401. A git credential helper told its credential was
+    /// rejected may DISCARD it, so a blip in the apiserver would become
+    /// a re-authentication for every agent that hit it.
+    #[tokio::test]
+    async fn an_unreachable_verifier_is_503_and_a_bad_credential_is_401() {
+        let log: Log = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = fake_git_server(log.clone()).await;
+
+        let down = door_with(
+            vec![repo(Some(&endpoint), vec!["agent-runner"], RepoPhase::Ready)],
+            Arc::new(CountingReviewer {
+                calls: Arc::new(AtomicU64::new(0)),
+                verdict: Err(ReviewError::Unreachable("connection refused".into())),
+            }),
+            false,
+        );
+        let res = warp::test::request()
+            .method("GET")
+            .path(&format!("{ADVERT}?service=git-upload-pack"))
+            .header("authorization", &basic("tok"))
+            .reply(&routes(down))
+            .await;
+        assert_eq!(res.status(), 503, "an unreachable verifier answered as a bad credential");
+        assert!(
+            res.headers().get("www-authenticate").is_none(),
+            "a 503 carried a credential challenge"
+        );
+        assert_eq!(res.headers().get("retry-after").unwrap(), "5");
+
+        // THE CONTROL, through the same rig: a genuine refusal still
+        // challenges, so the 503 above is a distinction and not a door
+        // that stopped authenticating.
+        let refused = door_with(
+            vec![repo(Some(&endpoint), vec!["agent-runner"], RepoPhase::Ready)],
+            Arc::new(CountingReviewer {
+                calls: Arc::new(AtomicU64::new(0)),
+                verdict: Err(ReviewError::Refused("token is not authenticated".into())),
+            }),
+            false,
+        );
+        let res = warp::test::request()
+            .method("GET")
+            .path(&format!("{ADVERT}?service=git-upload-pack"))
+            .header("authorization", &basic("tok"))
+            .reply(&routes(refused))
+            .await;
+        assert_eq!(res.status(), 401);
+        assert!(res.headers().get("www-authenticate").is_some());
+        assert!(log.lock().unwrap().is_empty(), "neither case dialled the server");
     }
 
     /// A push is a streamed pack of unknown length. The file API's

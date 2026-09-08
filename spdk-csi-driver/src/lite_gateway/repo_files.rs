@@ -71,7 +71,8 @@ use crate::s3csi::broker::Identity;
 
 use super::git::{
     self, basic_password, consumer_allows, from_refusal, json_err, look_up_repo, plausible_name,
-    repo_name, stream_body, wait_for_ready, CachingReviewer, KubeReviewer, Response, Reviewer,
+    repo_name, stream_body, wait_for_ready, CachingReviewer, KubeReviewer, Response, ReviewError,
+    Reviewer,
 };
 use super::resolve::{self, Decision, Door, ShareView};
 use super::route::{self, Verb, RESPONSE_HEADERS};
@@ -441,7 +442,19 @@ async fn serve(
     };
     let identity = match door.reviewer.review(&token).await {
         Ok(id) => id,
-        Err(e) => return unauthorized(&e),
+        Err(ReviewError::Refused(why)) => return unauthorized(&why),
+        // NOT a 401. The credential may be fine; the verifier could not
+        // be reached. A backend told 401 discards its token and
+        // re-authenticates, turning a blip in the verifier into a
+        // credential churn across every caller at once.
+        Err(ReviewError::Unreachable(why)) => {
+            return json_err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ReviewerUnreachable",
+                &format!("could not verify your credential just now: {why}"),
+                Some(5),
+            )
+        }
     };
 
     let Some(repo) = look_up_repo(&door.repos, &ns, &name) else {
@@ -766,12 +779,12 @@ mod tests {
 
     struct CountingReviewer {
         calls: Arc<AtomicU64>,
-        verdict: Result<Identity, String>,
+        verdict: Result<Identity, ReviewError>,
     }
 
     #[async_trait::async_trait]
     impl Reviewer for CountingReviewer {
-        async fn review(&self, _token: &str) -> Result<Identity, String> {
+        async fn review(&self, _token: &str) -> Result<Identity, ReviewError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.verdict.clone()
         }

@@ -153,11 +153,42 @@ obvious way.
 by `kid` · `iss` exact · `aud` contains the configured audience · `exp`
 · `nbf` · clock skew ≤ 60 s.
 
-**D6. `aud` is REQUIRED, not optional.** A token with no audience, or
-one that does not name forge, is refused. Without this, a token minted
-for any other service behind Knox is a forge credential — and with
-revocation out of scope there is nothing to fall back on. **This is the
-one upstream capability that can block the design** (§8).
+**D6. `aud` is supported and OPTIONAL, and its absence is loud.**
+
+`--jwt-audience <value>`: when set, a token whose `aud` does not contain
+it is refused. When unset, the check is skipped and the door logs a
+warning at start-up naming the consequence, so the posture is visible in
+a pod's logs rather than inferred from a missing flag.
+
+Optional rather than mandatory because of what Knox can actually do
+here: **it does not mint a per-application audience.** It can set one,
+but only as a **static, topology-wide** value, and this deployment
+currently leaves it unset — tokens are scoped by **issuer + TTL + `sub`
+and nothing else**. Whether `aud` is populated at all is an application
+and Knox-configuration decision, not forge's, so the door supports it
+and enforces it when told to.
+
+**What that costs, stated plainly, because the design cannot fix it.**
+A topology-wide audience does not separate forge from its siblings. Any
+service behind the same Knox topology that receives a user's token can
+replay it against forge **as that user** — a compromised, careless or
+merely log-happy sibling becomes a forge credential for every user it
+has seen. The exposure is bounded by `spec.consumers` (the `sub` must
+still be listed), so it is *a forge user's token stolen from a sibling*
+rather than *anyone with a Knox token*; and with revocation deferred
+(§7.2) there is no second line.
+
+**The clean fix is a deployment decision, not a code one:** a dedicated
+Knox topology for forge gives forge its own audience value, and D6 then
+does what audiences are for. Worth establishing whether that is
+practical before accepting the weaker posture.
+
+**D6a. `spec.consumers` now carries weight it was not designed for.**
+With `aud` unable to isolate, it is the ONLY forge-specific check in the
+chain. `serviceAccounts: ["*"]` stops meaning "any pod we trust" and
+starts meaning "any user of any service in this Knox topology". The
+operator should warn on a wildcard in any repository that also names a
+`jwt:user:` principal.
 
 **D7. A lifetime ceiling, enforced door-side.** A token whose
 `exp - iat` exceeds `--jwt-max-lifetime` (default 1 h) is refused
@@ -294,11 +325,16 @@ repository `Degraded` when it names people with no policy rendered
 
 One can block; the rest shape configuration.
 
-1. **Can Knox mint a forge-specific `aud`?** (BLOCKING — D6.) If every
-   service behind Knox shares an audience, a token stolen from any of
-   them is a forge credential.
+1. ~~Can Knox mint a forge-specific `aud`?~~ **ANSWERED: no.** It can
+   set one, but only as a static topology-wide value, and it is
+   currently unused. Tokens are scoped by issuer + TTL + `sub`. This no
+   longer blocks — D6 supports `aud` optionally — but it moves the
+   isolation forge does not get onto `spec.consumers` and the network
+   (D6a). **The follow-up worth asking: can forge have its own Knox
+   topology?** That, and not a code change, is what would restore it.
 2. **Can the Auth service request short-lived access tokens** and
-   refresh, so D7's ceiling is satisfiable?
+   refresh, so D7's ceiling is satisfiable? More load-bearing now that
+   `aud` cannot isolate: TTL is one of the three things scoping a token.
 3. **What is in `sub`** — an email, a directory uid, a display name? D11
    requires stability.
 4. **What is Knox's `iss`,** exactly, and is it distinct from the
@@ -318,7 +354,8 @@ removed. A test without its control is not on this list.
 | F1 | the router reaches the Knox verifier for a Knox `iss` | **counter**, not status: force the router to always pick TokenReview; F1 fails on the counter while every status stays identical |
 | F2 | a pod token is never accepted by the Knox verifier | delete the `iss` check ⇒ F2 fails |
 | F3 | the door refuses to start when the two issuers are equal | remove the start-up guard ⇒ F3 fails |
-| F4 | a token for another audience is refused | delete the `aud` check ⇒ F4 fails; control: the same token WITH the right `aud` is accepted |
+| F4 | with `--jwt-audience` set, a token for another audience is refused | delete the `aud` check ⇒ F4 fails; control: the same token WITH the right `aud` is accepted |
+| F4a | with `--jwt-audience` UNSET, a token of any audience is accepted AND the start-up warning was emitted | drop the warning ⇒ F4a fails. The check is the warning, not the acceptance: silently skipping is the failure mode |
 | F5 | an expired token is refused, and is not accepted a second time from any cache | wrap `KnoxReviewer` in `CachingReviewer` ⇒ F5 fails |
 | F6 | a token signed by an unknown key is refused | accept-any-key ⇒ F6 fails |
 | F7 | `sub` becomes the commit author; a caller-supplied `X-Remote-User` is overridden | already green on the wire (F13 P3); mutation: stop setting the header ⇒ fails |
@@ -368,7 +405,8 @@ set, so an install that does not configure it behaves exactly as today.
 | D3 | refuse to start when the two issuers collide |
 | D4 | the router's oracle is a per-verifier counter, not a status code |
 | D5 | signature · `iss` · `aud` · `exp` · `nbf` · skew ≤ 60 s |
-| D6 | `aud` required — the one blocking upstream question |
+| D6 | `aud` supported and optional; unset is loud, not silent |
+| D6a | `consumers` is the only forge-specific check left — warn on `*` beside a `jwt:user:` entry |
 | D7 | door-side lifetime ceiling, default 1 h |
 | D8 | JWKS with kid-refresh and a refetch floor; static PEM accepted |
 | D9 | key-server failure is 503, never 401 |
