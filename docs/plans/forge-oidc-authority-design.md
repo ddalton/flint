@@ -1,6 +1,13 @@
 # flint forge — a verified JWT identity as the authorization principal: design
 
-Written 2026-09-08. **Design only — no code.** Status: proposal.
+Written 2026-09-08. **Design only — no code.** Status: **SUPERSEDED in
+scope** by `docs/plans/forge-knox-jwt-design.md`, which is written
+against the deployment as it actually is — the Auth service RELAYS and
+Knox mints, `doAs` puts the end user in `sub`, roles and groups arrive
+as an unsigned header rather than as claims, and the client id is the
+Knox token id and therefore rotates. Groups and revocation are deferred
+there. This document is kept for its analysis of those deferred parts;
+where the two disagree, the other one is current.
 
 > **Framing, and the filename.** This file is `forge-oidc-authority-design.md`
 > because that is where the question was asked. The design is **JWT bearer
