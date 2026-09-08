@@ -26,7 +26,7 @@
 # That is what P3 measures, and it is measured as a distribution of
 # attempts, never as a wall-clock number.
 #
-# HOW A GREEN RUN COULD MEAN NOTHING. Seven ways, each with its leg:
+# HOW A GREEN RUN COULD MEAN NOTHING. Eight ways, each with its leg:
 #
 #  1. THE AGENTS NEVER CONTENDED. If they happen to serialise, every
 #     push is a fast-forward, nothing is ever refused, and "no
@@ -60,6 +60,14 @@
 #     first attempt with zero refusals; E uses the same contested file
 #     and is EXPECTED to be refused, because merge-tree is the same
 #     three-way merge the client would run, only at a fresher base.
+#  8. THE BUCKET IS ALREADY CORRUPT AND NOTHING ASKED. Every leg above
+#     runs against a syncer that holds the whole repository on its own
+#     disk, so all of them pass over a bucket that can no longer be
+#     restored from. That is not hypothetical: it is exactly what
+#     happened on 2026-09-08, and this drill found it only because arm D
+#     happened to run after the syncer had already died. P8 asks on
+#     purpose — no restarts through the run, then a forced restart that
+#     must rebuild from S3 alone and reach Ready.
 #
 # THE ARMS. Same repository, same pods, same loop, same bounds; each
 # labels the lines it writes, so no arm can be credited with another's
@@ -524,6 +532,57 @@ fi
 note "FINDING: refs/for removes the RACE (arm D: $drefused refusals in $want pushes)."
 note "         It does not remove the DISAGREEMENT (arm E: $erefused refusals in $want)."
 note "         merge-tree is the same three-way merge the client would run, at a fresher base."
+
+echo
+echo "== P8: is the repository still RESTORABLE from the bucket? =="
+# THE LEG THIS DRILL DID NOT HAVE, and its absence is why the defect it
+# found on 2026-09-08 was found by luck: arm D happened to run after the
+# syncer had already died, and every earlier leg would have passed over a
+# repository that was already unrecoverable. Nothing here asked.
+#
+# The corruption's signature is exact: the syncer refuses on RESTORE with
+# exit 78 (`fsck --connectivity-only`: broken link ... missing commit),
+# so it survives as long as the process keeps running and fails the
+# moment anything restarts it. Two checks, and the second is the real
+# one.
+SYNCER=$(K get pods -n "$NS" -l app.kubernetes.io/instance="$REPO" -o name 2>/dev/null | head -1)
+[ -n "$SYNCER" ] || SYNCER=$(K get pods -n "$NS" -o name 2>/dev/null | grep "forge-$REPO" | head -1)
+restarts=$(K get -n "$NS" "$SYNCER" -o jsonpath='{.status.containerStatuses[?(@.name=="syncer")].restartCount}' 2>/dev/null)
+if [ "${restarts:-0}" -eq 0 ]; then
+  ok "the syncer has not restarted once through every arm ($restarts restarts)"
+else
+  bad "the syncer restarted ${restarts}x during the run — read its log for 'refused:'"
+  K logs -n "$NS" "$SYNCER" -c syncer --tail=5 2>/dev/null | sed 's/^/        /'
+fi
+
+# THE REAL TEST. A running syncer holds the whole repository on its own
+# disk, so "it is still serving" says nothing about the bucket. Restart
+# it and make it rebuild from S3 alone — which is exactly the path that
+# refuses when a published ref's parent reached no pack.
+old_uid=$(K get -n "$NS" "$SYNCER" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+K delete -n "$NS" "$SYNCER" --wait=false >/dev/null 2>&1
+back=""
+for _ in $(seq 1 60); do
+  new_pod=$(K get pods -n "$NS" -o name 2>/dev/null | grep "forge-$REPO" | head -1)
+  new_uid=$(K get -n "$NS" "$new_pod" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+  ph=$(K get -n "$NS" flintrepo "$REPO" -o jsonpath='{.status.phase}' 2>/dev/null)
+  rs=$(K get -n "$NS" "$new_pod" -o jsonpath='{.status.containerStatuses[?(@.name=="syncer")].restartCount}' 2>/dev/null)
+  if [ -n "$new_uid" ] && [ "$new_uid" != "$old_uid" ] && [ "$ph" = "Ready" ]; then back=$new_uid; break; fi
+  # A crashlooping syncer never reaches Ready; say so early rather than
+  # burning the whole timeout.
+  [ "${rs:-0}" -ge 3 ] && break
+  sleep 5
+done
+if [ -n "$back" ]; then
+  # THE CONTROL: it must be a genuinely NEW pod, or "still Ready" is just
+  # the old process that never reread the bucket.
+  ok "a FRESH syncer restored from the bucket and reached Ready ($old_uid -> $back)"
+else
+  bad "the repository did not come back after a restart — it is not restorable from S3"
+  np=$(K get pods -n "$NS" -o name 2>/dev/null | grep "forge-$REPO" | head -1)
+  K logs -n "$NS" "$np" -c syncer --tail=6 2>/dev/null | sed 's/^/        /'
+  K get -n "$NS" flintrepo "$REPO" -o jsonpath='{.status.phase}{"\n"}' 2>/dev/null | sed 's/^/        phase: /'
+fi
 
 echo
 echo "F14: $PASS passed, $FAIL failed, $INCONC inconclusive"
