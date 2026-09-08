@@ -126,6 +126,19 @@ spec:
             - --git-review-ttl-secs={{ .Values.door.reviewTtlSecs }}
             - --read-only={{ .Values.door.readOnly }}
             - --upstream-timeout-secs={{ .Values.door.upstreamTimeoutSecs }}
+            {{- if .Values.door.repoFiles.enabled }}
+            # The browser's door onto the same repositories, on the same
+            # listener and the same port — the repository is in the
+            # path, so this costs no second address and no second
+            # Service.
+            - --repo-files
+            - --repo-files-wake-wait-secs={{ .Values.door.repoFiles.wakeWaitSecs }}
+            # `int64`, not the bare value: Helm renders a large YAML
+            # integer in scientific notation (`6.7108864e+07`), which
+            # clap refuses — the door would crash-loop on an argument
+            # the chart itself wrote.
+            - --repo-files-max-bytes={{ int64 .Values.door.repoFiles.maxBytes }}
+            {{- end }}
           env:
             - name: RUST_LOG
               value: {{ .Values.door.logLevel | default .Values.server.logLevel | default "info" | quote }}

@@ -46,6 +46,7 @@
 pub mod derive;
 pub mod git;
 pub mod proxy;
+pub mod repo_files;
 pub mod resolve;
 pub mod route;
 

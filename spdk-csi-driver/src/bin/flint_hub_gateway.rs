@@ -41,7 +41,7 @@ use kube::{Api, Client};
 use spdk_csi_driver::lite_gateway::derive::{self, Binding, Minter};
 use spdk_csi_driver::forge_operator::crd::FlintRepo;
 use warp::Filter;
-use spdk_csi_driver::lite_gateway::{git, proxy, Config, Gateway};
+use spdk_csi_driver::lite_gateway::{git, proxy, repo_files, Config, Gateway};
 use spdk_csi_driver::lite_operator::crd::FlintShare;
 use spdk_csi_driver::pnfs::mds::fileapi::token::{self, TokenSource};
 use tracing::{error, info, warn};
@@ -114,6 +114,32 @@ struct Args {
     /// is short and why it is a knob.
     #[arg(long, env = "FLINT_GATEWAY_GIT_REVIEW_TTL_SECS", default_value_t = 60)]
     git_review_ttl_secs: u64,
+
+    /// Serve flint forge's REST file API at
+    /// `/repo/<namespace>/<name>/files…` (design
+    /// `docs/plans/forge-file-api-design.md` §7).
+    ///
+    /// The browser's door onto the same repositories the git door
+    /// serves, under the same `spec.consumers` and the same wake. It
+    /// needs the repository cache, so it implies `--git`'s machinery
+    /// even when the git routes themselves are not wanted — which is
+    /// why it is checked alongside it below rather than on its own.
+    #[arg(long, env = "FLINT_GATEWAY_REPO_FILES")]
+    repo_files: bool,
+
+    /// Seconds a file-API request is HELD for a parked repository.
+    /// SECONDS, not the git door's minutes: a browser backend retries a
+    /// 503, and holding its request for three minutes is how one parked
+    /// repository exhausts its connection pool.
+    #[arg(long, env = "FLINT_GATEWAY_REPO_FILES_WAKE_WAIT_SECS", default_value_t = 25)]
+    repo_files_wake_wait_secs: u64,
+
+    /// Largest body the repository file door will accept, in bytes. A
+    /// DOOR-side bound as well as the syncer's `spec.fileApi.maxMb`:
+    /// without it a single request of arbitrary length is buffered on
+    /// behalf of a caller the door has not yet reviewed.
+    #[arg(long, env = "FLINT_GATEWAY_REPO_FILES_MAX_BYTES", default_value_t = 64 * 1024 * 1024)]
+    repo_files_max_bytes: u64,
 
     /// Serve ONLY the git door: no file API, and nothing about
     /// `FlintShare` is touched.
@@ -197,6 +223,14 @@ async fn main() -> anyhow::Result<()> {
 
     // `--git-only` is the forge posture: the git door is the only door.
     let git_door = args.git || args.git_only;
+    // Both forge doors read one `FlintRepo` cache, so either flag turns
+    // it on — but `--git-only` must NOT imply this one. It has always
+    // meant "no FlintShare machinery", every forge chart passes it, and
+    // making it also mount a NEW door onto tenant data would have
+    // turned an upgrade into an exposure and made the chart's own
+    // `repoFiles.enabled: false` a lie.
+    let repo_door = args.repo_files;
+    let forge_cache = git_door || repo_door;
 
     if args.git_only && (args.derive_token.is_some() || args.derive_for.is_some()) {
         anyhow::bail!(
@@ -313,6 +347,7 @@ async fn main() -> anyhow::Result<()> {
         namespace = %args.namespace.clone().unwrap_or_else(|| "<all>".into()),
         read_only = args.read_only,
         git = git_door,
+        repo_files = repo_door,
         file_api = gw.is_some(),
         "flint-hub-gateway starting"
     );
@@ -321,7 +356,7 @@ async fn main() -> anyhow::Result<()> {
     // second process: it shares the wake machinery, the readiness gate
     // and the operational surface the file API already has. When it is
     // off, nothing here touches the FlintRepo CRD at all.
-    if git_door {
+    if forge_cache {
         let repos: Api<FlintRepo> = match &args.namespace {
             Some(ns) => Api::namespaced(client.clone(), ns),
             None => Api::all(client.clone()),
@@ -363,19 +398,70 @@ async fn main() -> anyhow::Result<()> {
             repo_ready.store(true, Ordering::Relaxed);
             info!("repository cache listed — the git door is serving");
         });
-        // Two doors on one listener, or the git door alone. The
-        // combined filter's TYPE differs from the git-only one, so
-        // these cannot collapse into one `warp::serve` call.
-        match gw {
-            Some(gw) => {
+        // The repository FILE door, beside the git one: the same
+        // store, the same readiness gate and — the part that is not an
+        // optimisation — the same `TokenReview` cache, so a backend
+        // that pushes and then saves pays one review for one token.
+        let files = repo_door.then(|| {
+            repo_files::RepoFileDoor::beside(
+                &door,
+                repo_files::RepoFileConfig {
+                    audience: args.git_audience.clone(),
+                    wake_wait: Duration::from_secs(args.repo_files_wake_wait_secs),
+                    review_ttl: Duration::from_secs(args.git_review_ttl_secs),
+                    upstream_timeout: Duration::from_secs(args.upstream_timeout_secs),
+                    read_only: args.read_only,
+                    max_upload_bytes: args.repo_files_max_bytes,
+                },
+            )
+        });
+
+        // Up to three route tables on ONE listener — which is the whole
+        // point: a git client and a browser backend reach the same
+        // repository at the same host and port, and differ only in
+        // their path prefix. Each combination's filter has a different
+        // TYPE, so they cannot collapse into one `warp::serve` call.
+        //
+        // The probes are the trap here. `/healthz` and `/readyz` live
+        // in `proxy::routes`; a forge-only posture does not mount it, so
+        // without `git::health_routes` every probe 404s and a correctly
+        // serving pod crash-loops. That has happened once already, when
+        // `--git-only` first broke the inheritance.
+        let health = git::health_routes(door.ready.clone());
+        match (gw, files, git_door) {
+            // Everything: lite's file API, forge's git, forge's files.
+            (Some(gw), Some(files), true) => {
+                warp::serve(
+                    git::routes(door)
+                        .or(repo_files::routes(files))
+                        .or(proxy::routes(gw)),
+                )
+                .run(args.listen)
+                .await
+            }
+            (Some(gw), None, _) => {
                 warp::serve(git::routes(door).or(proxy::routes(gw))).run(args.listen).await
             }
-            // Alone, the git door must carry its OWN probes: the file
-            // API's /healthz and /readyz live in `proxy::routes`, which
-            // is not mounted here, so without this every probe 404s and
-            // a correctly serving pod crash-loops.
-            None => {
-                let health = git::health_routes(door.ready.clone());
+            // Forge only, both its doors.
+            (None, Some(files), true) => {
+                warp::serve(
+                    git::routes(door)
+                        .or(repo_files::routes(files))
+                        .or(health),
+                )
+                .run(args.listen)
+                .await
+            }
+            // The browser-only posture: no git routes mounted at all.
+            (None, Some(files), false) => {
+                warp::serve(repo_files::routes(files).or(health)).run(args.listen).await
+            }
+            (Some(gw), Some(files), false) => {
+                warp::serve(repo_files::routes(files).or(proxy::routes(gw)))
+                    .run(args.listen)
+                    .await
+            }
+            (None, None, _) => {
                 warp::serve(git::routes(door).or(health)).run(args.listen).await
             }
         }

@@ -97,6 +97,32 @@ door:
   # pack to the bucket first (git keeps the connection alive meanwhile).
   upstreamTimeoutSecs: 300
   logLevel: ""
+
+  # THE REST FILE API (design `docs/plans/forge-file-api-design.md` §7).
+  #
+  # A second route table on the SAME listener and the same port as the
+  # git door: `/repo/<namespace>/<name>/files…` beside
+  # `/git/<namespace>/<repo>.git/…`. A browser app's backend reaches a
+  # repository here; agents keep using a git client. One address, one
+  # `spec.consumers` list, one wake.
+  #
+  # Off by default, and `--git-only` deliberately does NOT imply it: an
+  # existing install must not grow a new door onto tenant data by being
+  # upgraded. A repository still serves the file API only when its own
+  # `spec.fileApi.enabled` is set, so this alone exposes nothing — but
+  # it is a door, and it deserves a decision rather than a default.
+  repoFiles:
+    enabled: false
+    # SECONDS, unlike the git door's minutes: a browser backend retries
+    # a 503, and holding its request for three minutes is how one parked
+    # repository exhausts its connection pool.
+    wakeWaitSecs: 25
+    # A door-side bound as well as the repository's own
+    # `spec.fileApi.maxMb`. Without it a single request of arbitrary
+    # length is buffered on behalf of a caller the door has not yet
+    # reviewed. 64 MiB.
+    maxBytes: 67108864
+
   service:
     type: ClusterIP
     port: 80

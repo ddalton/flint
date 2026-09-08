@@ -341,77 +341,120 @@ impl GitDoor {
     }
 
     fn look_up(&self, ns: &str, name: &str) -> Option<Arc<FlintRepo>> {
-        self.repos.get(&ObjectRef::<FlintRepo>::new(name).within(ns))
-    }
-
-    /// Arm `chert.us/requested-at` on the CR. The operator's ladder is
-    /// level-triggered on it; the door never scales anything itself.
-    async fn arm_wake(&self, view: &ShareView) {
-        let api: Api<FlintRepo> = Api::namespaced(self.client.clone(), &view.namespace);
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let patch = serde_json::json!({ "metadata": { "annotations": { ANN_REQUESTED_AT: now } } });
-        if let Err(e) = api.patch(&view.name, &PatchParams::default(), &Patch::Merge(&patch)).await {
-            tracing::warn!(
-                repo = %format!("{}/{}", view.namespace, view.name),
-                error = %e,
-                "could not arm the wake annotation; the request will wait and may time out"
-            );
-        }
+        look_up_repo(&self.repos, ns, name)
     }
 
     /// Resolve, waking if needed, until the repository is dialable or
-    /// the hold expires. Waits on the CR, never on the pod: polling the
-    /// pod would count as activity and pin every repository it touched
-    /// awake.
+    /// the hold expires.
     async fn wait_for_ready(&self, ns: &str, name: &str) -> Result<(ShareView, String), Response> {
-        let deadline = Instant::now() + self.cfg.wake_wait;
-        let mut armed = false;
-        loop {
-            let Some(repo) = self.look_up(ns, name) else {
-                return Err(json_err(
-                    StatusCode::NOT_FOUND,
-                    "NoSuchRepository",
-                    &format!("no FlintRepo named {name:?} in namespace {ns:?}"),
-                    None,
-                ));
-            };
-            let view = ShareView::of_repo(&repo);
-            match resolve::decide_for(&view, Door::Git) {
-                Decision::Dial(endpoint) => {
-                    // The server's own phase can still say "not yet",
-                    // and dialling it would burn a round trip to learn
-                    // what the CR already recorded.
-                    if let Some(r) = resolve::hub_phase_blocks(&view) {
-                        if Instant::now() >= deadline {
-                            return Err(from_refusal(&r));
-                        }
-                    } else {
-                        return Ok((view, endpoint));
-                    }
-                }
-                Decision::Refuse(r) => return Err(from_refusal(&r)),
-                Decision::Wake => {
-                    if !armed && !view.wake_requested {
-                        self.arm_wake(&view).await;
-                        armed = true;
-                    }
-                }
-                Decision::Wait => {}
-            }
-            if Instant::now() >= deadline {
-                return Err(json_err(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "RepositoryNotReady",
-                    "the repository is starting; it was not serving within the door's hold",
-                    Some(10),
-                ));
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
+        wait_for_ready(
+            &self.client,
+            &self.repos,
+            ns,
+            name,
+            Door::Git,
+            self.cfg.wake_wait,
+        )
+        .await
     }
 }
 
-type Response = warp::reply::Response;
+/// The reflector lookup, as a free function: the repository file door
+/// reads the SAME store, so this is shared rather than reimplemented —
+/// two caches of one CRD would be two answers to "is it up".
+pub(super) fn look_up_repo(
+    repos: &Store<FlintRepo>,
+    ns: &str,
+    name: &str,
+) -> Option<Arc<FlintRepo>> {
+    repos.get(&ObjectRef::<FlintRepo>::new(name).within(ns))
+}
+
+/// Arm `chert.us/requested-at` on the CR. The operator's ladder is
+/// level-triggered on it; the door never scales anything itself.
+pub(super) async fn arm_wake(client: &Client, view: &ShareView) {
+    let api: Api<FlintRepo> = Api::namespaced(client.clone(), &view.namespace);
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let patch = serde_json::json!({ "metadata": { "annotations": { ANN_REQUESTED_AT: now } } });
+    if let Err(e) = api.patch(&view.name, &PatchParams::default(), &Patch::Merge(&patch)).await {
+        tracing::warn!(
+            repo = %format!("{}/{}", view.namespace, view.name),
+            error = %e,
+            "could not arm the wake annotation; the request will wait and may time out"
+        );
+    }
+}
+
+/// Resolve, waking if needed, until the repository is dialable at
+/// `door` or the hold expires. Waits on the CR, never on the pod:
+/// polling the pod would count as activity and pin every repository it
+/// touched awake.
+///
+/// `door` is a PARAMETER and not `Door::Git`, because the two forge
+/// doors part company at exactly the last step of the ladder — and a
+/// file-API request that resolved at the git door would be told to dial
+/// port 9418's endpoint and would then talk HTTP file verbs at
+/// `http-backend`.
+///
+/// `hold` is a parameter for a blunter reason: git clients do not retry
+/// a 503, so the git door holds for minutes; a browser backend does
+/// retry, and holding its request for minutes is how one parked
+/// repository exhausts a connection pool.
+pub(super) async fn wait_for_ready(
+    client: &Client,
+    repos: &Store<FlintRepo>,
+    ns: &str,
+    name: &str,
+    door: Door,
+    hold: Duration,
+) -> Result<(ShareView, String), Response> {
+    let deadline = Instant::now() + hold;
+    let mut armed = false;
+    loop {
+        let Some(repo) = look_up_repo(repos, ns, name) else {
+            return Err(json_err(
+                StatusCode::NOT_FOUND,
+                "NoSuchRepository",
+                &format!("no FlintRepo named {name:?} in namespace {ns:?}"),
+                None,
+            ));
+        };
+        let view = ShareView::of_repo(&repo);
+        match resolve::decide_for(&view, door) {
+            Decision::Dial(endpoint) => {
+                // The server's own phase can still say "not yet",
+                // and dialling it would burn a round trip to learn
+                // what the CR already recorded.
+                if let Some(r) = resolve::hub_phase_blocks(&view) {
+                    if Instant::now() >= deadline {
+                        return Err(from_refusal(&r));
+                    }
+                } else {
+                    return Ok((view, endpoint));
+                }
+            }
+            Decision::Refuse(r) => return Err(from_refusal(&r)),
+            Decision::Wake => {
+                if !armed && !view.wake_requested {
+                    arm_wake(client, &view).await;
+                    armed = true;
+                }
+            }
+            Decision::Wait => {}
+        }
+        if Instant::now() >= deadline {
+            return Err(json_err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "RepositoryNotReady",
+                "the repository is starting; it was not serving within the door's hold",
+                Some(10),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+pub(super) type Response = warp::reply::Response;
 
 #[derive(Serialize)]
 struct ErrorBody {
@@ -419,7 +462,7 @@ struct ErrorBody {
     reason: String,
 }
 
-fn json_err(status: StatusCode, reason: &str, msg: &str, retry_after: Option<u64>) -> Response {
+pub(super) fn json_err(status: StatusCode, reason: &str, msg: &str, retry_after: Option<u64>) -> Response {
     let mut res = warp::reply::json(&ErrorBody {
         error: msg.to_string(),
         reason: reason.to_string(),
@@ -434,7 +477,7 @@ fn json_err(status: StatusCode, reason: &str, msg: &str, retry_after: Option<u64
     res
 }
 
-fn from_refusal(r: &Refusal) -> Response {
+pub(super) fn from_refusal(r: &Refusal) -> Response {
     json_err(
         StatusCode::from_u16(r.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
         r.reason,
@@ -460,7 +503,7 @@ fn challenge(detail: &str) -> Response {
 /// credential is the pod's token and the token names the principal, so
 /// a username field would be a second, unverified opinion about who
 /// this is.
-fn basic_password(header: Option<&str>) -> Option<String> {
+pub(super) fn basic_password(header: Option<&str>) -> Option<String> {
     let raw = header?.strip_prefix("Basic ").or_else(|| header?.strip_prefix("basic "))?;
     let decoded = base64::engine::general_purpose::STANDARD.decode(raw.trim()).ok()?;
     let text = String::from_utf8(decoded).ok()?;
@@ -491,7 +534,7 @@ pub fn consumer_allows(consumers: Option<&Consumers>, repo_ns: &str, id: &Identi
 /// boundary — the upstream path never contains these bytes — but a
 /// cheap way to answer a nonsense request without a store lookup and
 /// without putting arbitrary text in a log line.
-fn plausible_name(s: &str) -> bool {
+pub(super) fn plausible_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 253
         && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
@@ -501,7 +544,7 @@ fn plausible_name(s: &str) -> bool {
 
 /// git addresses a repository as `<name>.git` by convention and as
 /// `<name>` when someone types it by hand. Both resolve to the same CR.
-fn repo_name(segment: &str) -> String {
+pub(super) fn repo_name(segment: &str) -> String {
     segment.strip_suffix(".git").unwrap_or(segment).to_string()
 }
 
@@ -750,7 +793,7 @@ fn lfs_route(
 /// unbounded size and buffering one per concurrent writer is how a
 /// door with a small memory limit is killed by two agents pushing at
 /// once.
-fn stream_body<S, B>(body: S) -> ByteStream
+pub(super) fn stream_body<S, B>(body: S) -> ByteStream
 where
     S: Stream<Item = Result<B, warp::Error>> + Send + 'static,
     B: Buf,
@@ -761,7 +804,7 @@ where
     )
 }
 
-type ByteStream = Pin<Box<dyn Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send>>;
+pub(super) type ByteStream = Pin<Box<dyn Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send>>;
 
 /// A request body on its way to the server: whole (an LFS call, a few
 /// KiB at most) or streamed (a pack, as long as the repository).

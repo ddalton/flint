@@ -121,6 +121,36 @@ pub struct ShareView {
     /// `status.gitEndpoint` — a `FlintRepo`'s git server, as an
     /// absolute URL. Only ever set by [`ShareView::of_repo`].
     pub git_endpoint: Option<String>,
+    /// `status.apiEndpoint` on a `FlintRepo` — forge's REST file API.
+    ///
+    /// A SEPARATE field from `api_endpoint`, which carries a
+    /// `FlintShare`'s. The two are written by different operators and
+    /// their absence means different things, so folding them into one
+    /// field would have made [`Door::RepoFileApi`] inherit the lite
+    /// operator's `ApiEndpointPublished` reasons — a condition type the
+    /// forge operator never emits, which is exactly how a `Ready`
+    /// repository came to answer a permanent `503 NoApiEndpoint`.
+    pub repo_api_endpoint: Option<String>,
+    /// `spec.fileApi.enabled` on a `FlintRepo`.
+    ///
+    /// Read ALONGSIDE `repo_api_endpoint`, because that endpoint is a
+    /// pure formula over the spec rather than an observation
+    /// (`forge_operator/render.rs::api_endpoint`). Absent-and-disabled
+    /// is a 501 nobody should retry; absent-and-enabled is a status
+    /// write that has not landed — or an operator too old to publish
+    /// the field — and is worth coming back for. Without this the door
+    /// cannot tell those apart and has to pick one and be wrong about
+    /// the other.
+    pub file_api_enabled: bool,
+    /// `status.refused` — the server declined to serve, said why, and
+    /// no restart will change it (a foreign claim, a snapshot naming a
+    /// pack the bucket lacks, a git below the floor).
+    ///
+    /// Only ever set by [`ShareView::of_repo`]. Until this was read,
+    /// every refused repository was refused at the door with "see its
+    /// conditions" — pointing at `status.conditions`, which the forge
+    /// operator hardcodes to `None`.
+    pub refused: Option<String>,
     /// The hub's persisted NFS server identity. **A change here means
     /// every existing mount is stale**: it is stable across ordinary
     /// restarts, but a hibernate deletes the PVC, so a woken share
@@ -164,11 +194,18 @@ impl ShareView {
     /// A `FlintRepo` (flint forge), projected onto the same view.
     ///
     /// The fields a repository has no analogue for stay at their
-    /// defaults rather than being faked: there is no NFS address, no
-    /// file-API condition and no derived token, because forge forwards
-    /// the caller's own identity instead of minting one. What it does
+    /// defaults rather than being faked: there is no NFS address and no
+    /// `ApiEndpointPublished` condition, because that condition is the
+    /// lite operator's and the forge operator emits none. What it does
     /// fill is exactly what the decision reads — deletion, phase, the
-    /// wake annotation, the server's observed phase, and the endpoint.
+    /// wake annotation, the server's observed phase, the refusal, and
+    /// BOTH of a repository's endpoints.
+    ///
+    /// `api_endpoint` is spelled `None` rather than left to the
+    /// default, for the same reason `of` spells `git_endpoint: None`:
+    /// which door a projection does not fill should be a decision at
+    /// each construction site, not something a `..Default::default()`
+    /// can quietly supply.
     pub fn of_repo(repo: &FlintRepo) -> Self {
         let st = repo.status.as_ref();
         ShareView {
@@ -177,7 +214,11 @@ impl ShareView {
             deleting: repo.metadata.deletion_timestamp.is_some(),
             phase: st.and_then(|s| s.phase).map(|p| p.as_share_phase()),
             hub_phase: st.and_then(|s| s.server_phase.clone()),
+            api_endpoint: None,
             git_endpoint: st.and_then(|s| s.git_endpoint.clone()),
+            repo_api_endpoint: st.and_then(|s| s.api_endpoint.clone()),
+            file_api_enabled: repo.spec.file_api.as_ref().map(|f| f.enabled) == Some(true),
+            refused: st.and_then(|s| s.refused.clone()).filter(|r| !r.trim().is_empty()),
             server_id: st.and_then(|s| s.server_id.clone()),
             wake_requested: repo
                 .metadata
@@ -188,6 +229,21 @@ impl ShareView {
             bucket: Some(repo.spec.bucket.clone()),
             key_prefix: Some(repo.spec.key_prefix.clone()),
             endpoint_s3: repo.spec.endpoint.clone().unwrap_or_default(),
+            // Read, not defaulted. `Default` gives 0, which `binding()`
+            // would hand to the deriver as version 0 while the contract
+            // (`derive.rs`) says the first version is 1 — so a repo view
+            // that ever reached a derived token would mint one nobody
+            // provisioned. Nothing calls `binding()` on a repo today,
+            // which is precisely why it had to be fixed before a third
+            // door made that a live path rather than a latent one.
+            token_version: repo
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get(ANN_TOKEN_VERSION))
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|v| *v >= 1)
+                .unwrap_or(1),
             suspend_after_secs: repo.spec.idle.as_ref().and_then(|i| i.suspend_after_secs),
             ..Default::default()
         }
@@ -216,11 +272,16 @@ impl ShareView {
             hub_phase: st.and_then(|s| s.hub_phase.clone()),
             api_endpoint: st.and_then(|s| s.api_endpoint.clone()),
             address: st.and_then(|s| s.address.clone()),
-            // A share has no git door. Spelled rather than defaulted,
-            // so that the field is a decision at each construction
-            // site instead of something a `..Default::default()` can
-            // quietly supply.
+            // A share has no git door and no repository file door.
+            // Spelled rather than defaulted, so that each field is a
+            // decision at each construction site instead of something a
+            // `..Default::default()` can quietly supply.
             git_endpoint: None,
+            repo_api_endpoint: None,
+            file_api_enabled: false,
+            // A share records the same class of thing on its
+            // conditions, which `api_condition` already carries.
+            refused: None,
             server_id: st.and_then(|s| s.server_id.clone()),
             api_condition,
             conflict_with: st
@@ -370,14 +431,42 @@ pub enum Door {
     /// refused. Only the last step — which status field carries the
     /// address, and what its absence means — differs by door.
     Git,
+    /// `status.apiEndpoint` on a `FlintRepo` — forge's REST file API
+    /// (design `docs/plans/forge-file-api-design.md` §7).
+    ///
+    /// **Its own variant, not a reuse of [`Door::FileApi`].** The phase
+    /// ladder above the last step is shared and correct for a
+    /// repository; the last step is not. `Door::FileApi` reads an
+    /// `ApiEndpointPublished` condition whose reasons are produced by
+    /// the LITE operator, and a `FlintRepo` carries no conditions at
+    /// all — so a perfectly healthy repository asked at that door got
+    /// `503 NoApiEndpoint … no ApiEndpointPublished condition`, a
+    /// retryable error that would never stop being returned.
+    RepoFileApi,
+}
+
+impl Door {
+    /// What this door calls the thing it serves.
+    ///
+    /// The refusals above the last step are genuinely shared, and a
+    /// shared message that says "share" to someone holding a repository
+    /// URL sends them looking for a `FlintShare` that does not exist.
+    /// One word, threaded through the three messages that name it.
+    pub fn noun(self) -> &'static str {
+        match self {
+            Door::FileApi | Door::Nfs => "share",
+            Door::Git | Door::RepoFileApi => "repository",
+        }
+    }
 }
 
 pub fn decide_for(v: &ShareView, door: Door) -> Decision {
+    let noun = door.noun();
     if v.deleting || v.phase == Some(Phase::Terminating) {
         return refuse(
             410,
             "Terminating",
-            "this project's share is being deleted; its files are no longer served",
+            format!("this {noun} is being deleted; its files are no longer served"),
         );
     }
 
@@ -391,19 +480,28 @@ pub fn decide_for(v: &ShareView, door: Door) -> Decision {
         return refuse_later(
             503,
             "NotReconciledYet",
-            "the operator has not reported on this share yet",
+            format!("the operator has not reported on this {noun} yet"),
             5,
         );
     };
 
     match phase {
         Phase::Failed => {
-            let msg = match &v.conflict_with {
-                Some(winner) => format!(
-                    "this share is refused: {winner} owns its bucket subtree. \
+            // `status.refused` FIRST. The server writes it when it
+            // declines to serve and says exactly why — a foreign claim,
+            // a snapshot naming a pack the bucket lacks, a git below the
+            // floor — and until it was read here every one of those was
+            // answered "see its conditions", pointing at a field the
+            // forge operator hardcodes to `None`.
+            let msg = match (&v.refused, &v.conflict_with) {
+                (Some(why), _) => {
+                    format!("this {noun} is refused and will not serve until it is fixed: {why}")
+                }
+                (None, Some(winner)) => format!(
+                    "this {noun} is refused: {winner} owns its bucket subtree. \
                      Serving it here would publish two hubs over one prefix."
                 ),
-                None => "this share is Failed — see its conditions".to_string(),
+                (None, None) => format!("this {noun} is Failed — see its conditions"),
             };
             return refuse(409, "Failed", msg);
         }
@@ -414,7 +512,10 @@ pub fn decide_for(v: &ShareView, door: Door) -> Decision {
             return refuse(
                 409,
                 "AdminSuspended",
-                "this share is administratively suspended; a wake request does not override it",
+                format!(
+                    "this {noun} is administratively suspended; a wake request does not \
+                     override it"
+                ),
             );
         }
         // Already answered above. Spelled out rather than folded into a
@@ -459,6 +560,41 @@ pub fn decide_for(v: &ShareView, door: Door) -> Decision {
                 "the repository is up but has published no git endpoint yet",
                 5,
             ),
+        };
+    }
+
+    if door == Door::RepoFileApi {
+        // Like the git door, a HEADLESS Service name — but on its own
+        // port, and with no repository in the path: one syncer process
+        // serves one repository, so the API needs no repo segment.
+        if let Some(ep) = v.repo_api_endpoint.as_deref().filter(|e| !e.is_empty()) {
+            return Decision::Dial(ep.to_string());
+        }
+        // Absent. The endpoint is a pure formula over the spec
+        // (`forge_operator/render.rs::api_endpoint`), so the SPEC says
+        // which of the two absences this is — and they call for
+        // opposite answers.
+        return if v.file_api_enabled {
+            // Enabled but unpublished: a status write that has not
+            // landed, or an operator older than the field. Both pass.
+            refuse_later(
+                503,
+                "NoApiEndpoint",
+                "this repository has the file API enabled but has published no endpoint \
+                 yet; the operator has not written its status",
+                5,
+            )
+        } else {
+            // NOT retryable, and answered as such. Nothing about
+            // waiting will make this repository grow a file API —
+            // somebody has to set `spec.fileApi.enabled`. This is the
+            // case that used to be a permanent 503.
+            refuse(
+                501,
+                "FileApiDisabled",
+                "this repository does not serve the file API; set spec.fileApi.enabled on \
+                 its FlintRepo. Its git door is unaffected.",
+            )
         };
     }
 
@@ -1458,5 +1594,289 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(ShareView::of(&share).binding(), Err(NoBinding));
+    }
+
+    // ---- the repository doors -------------------------------------
+    //
+    // `Door::RepoFileApi` shares rows 1-8 of the ladder with
+    // `Door::Git` and parts from it at row 9. These pin BOTH halves:
+    // that the shared rows really are shared (so a repository is not
+    // woken by one door and refused by the other), and that the last
+    // row is genuinely different.
+
+    fn repo_json(v: serde_json::Value) -> FlintRepo {
+        serde_json::from_value(v).expect("FlintRepo")
+    }
+
+    /// Ready, file API on, endpoint published.
+    fn serving_repo() -> FlintRepo {
+        repo_json(serde_json::json!({
+            "apiVersion": "chert.us/v1alpha1", "kind": "FlintRepo",
+            "metadata": {"name": "proj", "namespace": "tenant"},
+            "spec": {"projectId": "proj", "bucket": "b", "keyPrefix": "tenant/proj/",
+                     "fileApi": {"enabled": true}},
+            "status": {"phase": "Ready", "serverPhase": "Serving",
+                       "gitEndpoint": "http://svc.tenant.svc.cluster.local:8080/proj.git",
+                       "apiEndpoint": "http://svc.tenant.svc.cluster.local:9850"}
+        }))
+    }
+
+    /// THE DEFECT design §7.2 NAMED.
+    ///
+    /// A healthy repository asked at the LITE file door answers
+    /// `503 NoApiEndpoint … no ApiEndpointPublished condition` — a
+    /// retryable error naming a condition the forge operator never
+    /// emits, so it would be returned forever. Its own door answers the
+    /// endpoint. Both halves are asserted here because the 501/503
+    /// distinction below is only meaningful if the doors really are
+    /// separate.
+    #[test]
+    fn a_repository_needs_its_own_file_door_and_the_lite_one_is_permanently_wrong() {
+        let v = ShareView::of_repo(&serving_repo());
+
+        assert_eq!(
+            decide_for(&v, Door::RepoFileApi),
+            Decision::Dial("http://svc.tenant.svc.cluster.local:9850".into())
+        );
+        // …and not the git port, which is the other way this could
+        // have been wired and would have sent file verbs at
+        // `http-backend`.
+        assert_eq!(
+            decide_for(&v, Door::Git),
+            Decision::Dial("http://svc.tenant.svc.cluster.local:8080/proj.git".into())
+        );
+
+        // The old behaviour, still there, still wrong for a repo —
+        // which is why `Door::FileApi` must never be used on one.
+        match decide_for(&v, Door::FileApi) {
+            Decision::Refuse(r) => {
+                assert_eq!(r.status, 503);
+                assert_eq!(r.reason, "NoApiEndpoint");
+                assert!(r.retry_after.is_some(), "and it would be retried forever");
+            }
+            other => panic!("expected the lite door to refuse a repo: {other:?}"),
+        }
+    }
+
+    /// Absent endpoint has two causes and they need OPPOSITE answers.
+    /// `spec.fileApi.enabled` is what tells them apart — the endpoint
+    /// is a pure formula over it, so without reading the spec the door
+    /// has to pick one and be wrong about the other.
+    #[test]
+    fn a_missing_api_endpoint_is_501_when_disabled_and_503_when_merely_unpublished() {
+        // Disabled: nothing about waiting will fix it.
+        let mut off = serving_repo();
+        off.spec.file_api = None;
+        off.status.as_mut().unwrap().api_endpoint = None;
+        match decide_for(&ShareView::of_repo(&off), Door::RepoFileApi) {
+            Decision::Refuse(r) => {
+                assert_eq!(r.status, 501);
+                assert_eq!(r.reason, "FileApiDisabled");
+                assert_eq!(r.retry_after, None, "501 must not invite a retry");
+                assert!(r.message.contains("spec.fileApi.enabled"), "{}", r.message);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // Enabled but not yet published: a status write that has not
+        // landed, or an operator older than the field. Retryable.
+        let mut pending = serving_repo();
+        pending.status.as_mut().unwrap().api_endpoint = None;
+        match decide_for(&ShareView::of_repo(&pending), Door::RepoFileApi) {
+            Decision::Refuse(r) => {
+                assert_eq!(r.status, 503);
+                assert_eq!(r.reason, "NoApiEndpoint");
+                assert_eq!(r.retry_after, Some(5));
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // An empty string is an absence too, not an endpoint to dial.
+        let mut empty = serving_repo();
+        empty.status.as_mut().unwrap().api_endpoint = Some(String::new());
+        assert!(matches!(
+            decide_for(&ShareView::of_repo(&empty), Door::RepoFileApi),
+            Decision::Refuse(_)
+        ));
+
+        // The CONTROL: the same repo with the endpoint present dials,
+        // so the three refusals above are not a rig that refuses
+        // everything.
+        assert!(matches!(
+            decide_for(&ShareView::of_repo(&serving_repo()), Door::RepoFileApi),
+            Decision::Dial(_)
+        ));
+    }
+
+    /// Rows 1-8 are genuinely shared. If they ever diverge, a
+    /// repository could be woken by a `git fetch` and refused for a
+    /// file read at the same instant — one backend giving two answers
+    /// depending on which client asked.
+    #[test]
+    fn the_two_repository_doors_agree_on_every_row_above_the_endpoint() {
+        let mut cases: Vec<(&str, FlintRepo)> = Vec::new();
+
+        let deleting = repo_json(serde_json::json!({
+            "apiVersion": "chert.us/v1alpha1", "kind": "FlintRepo",
+            "metadata": {"name": "proj", "namespace": "tenant",
+                         "deletionTimestamp": "2026-09-08T00:00:00Z",
+                         "finalizers": ["chert.us/forge"]},
+            "spec": {"projectId": "proj", "bucket": "b", "keyPrefix": "tenant/proj/",
+                     "fileApi": {"enabled": true}},
+            "status": {"phase": "Ready", "serverPhase": "Serving",
+                       "gitEndpoint": "http://svc:8080/proj.git",
+                       "apiEndpoint": "http://svc:9850"}
+        }));
+        cases.push(("deleting", deleting));
+
+        let mut no_status = serving_repo();
+        no_status.status = None;
+        cases.push(("no status", no_status));
+
+        // Every non-Ready `RepoPhase`. Named one by one rather than
+        // iterated, so that ADDING a phase to the CRD makes this list
+        // incomplete visibly rather than silently.
+        use crate::forge_operator::crd::RepoPhase;
+        for (label, phase) in [
+            ("Failed", RepoPhase::Failed),
+            ("Suspended", RepoPhase::Suspended),
+            ("IdleSuspended", RepoPhase::IdleSuspended),
+            ("Pending", RepoPhase::Pending),
+            ("Starting", RepoPhase::Starting),
+            ("Terminating", RepoPhase::Terminating),
+        ] {
+            let mut r = serving_repo();
+            r.status.as_mut().unwrap().phase = Some(phase);
+            cases.push((label, r));
+        }
+
+        for (what, r) in cases {
+            let v = ShareView::of_repo(&r);
+            assert_eq!(
+                decide_for(&v, Door::Git),
+                decide_for(&v, Door::RepoFileApi),
+                "the two repository doors disagreed on {what}"
+            );
+        }
+
+        // The anti-vacuity control: on a serving repo they DO differ,
+        // so the equality above is not "every case refuses identically".
+        let v = ShareView::of_repo(&serving_repo());
+        assert_ne!(decide_for(&v, Door::Git), decide_for(&v, Door::RepoFileApi));
+    }
+
+    /// D2. `status.refused` is where the server records that it
+    /// declined and why. Until it was read here, every refused
+    /// repository was answered "see its conditions" — pointing at
+    /// `status.conditions`, which the forge operator hardcodes to
+    /// `None`, so the caller was sent to look at nothing.
+    #[test]
+    fn a_refused_repository_says_why_instead_of_pointing_at_absent_conditions() {
+        let mut r = serving_repo();
+        {
+            let st = r.status.as_mut().unwrap();
+            st.phase = Some(crate::forge_operator::crd::RepoPhase::Failed);
+            st.refused = Some("the snapshot names pack 0c1f… which the bucket does not have".into());
+        }
+        for door in [Door::Git, Door::RepoFileApi] {
+            match decide_for(&ShareView::of_repo(&r), door) {
+                Decision::Refuse(rf) => {
+                    assert_eq!(rf.status, 409);
+                    assert!(rf.message.contains("which the bucket does not have"), "{}", rf.message);
+                    assert!(
+                        !rf.message.contains("see its conditions"),
+                        "still pointing at conditions the forge operator never writes: {}",
+                        rf.message
+                    );
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+
+        // The control: with no `refused` recorded the old message is
+        // still the right one — there is genuinely nothing better to
+        // say, and this test must not be passing because the field is
+        // always populated.
+        let mut bare = serving_repo();
+        bare.status.as_mut().unwrap().phase =
+            Some(crate::forge_operator::crd::RepoPhase::Failed);
+        match decide_for(&ShareView::of_repo(&bare), Door::RepoFileApi) {
+            Decision::Refuse(rf) => assert!(rf.message.contains("see its conditions"), "{}", rf.message),
+            other => panic!("{other:?}"),
+        }
+
+        // Whitespace is an absence, not a reason.
+        let mut blank = serving_repo();
+        {
+            let st = blank.status.as_mut().unwrap();
+            st.phase = Some(crate::forge_operator::crd::RepoPhase::Failed);
+            st.refused = Some("   ".into());
+        }
+        match decide_for(&ShareView::of_repo(&blank), Door::RepoFileApi) {
+            Decision::Refuse(rf) => assert!(rf.message.contains("see its conditions"), "{}", rf.message),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// D1. `of_repo` left `token_version` at `Default`, which is 0,
+    /// while `derive.rs`'s contract is that the first version is 1. No
+    /// call site reached it — which is exactly why it had to be fixed
+    /// BEFORE a third repository door made `binding()` a live path
+    /// rather than a latent one.
+    #[test]
+    fn a_repo_view_never_derives_a_binding_at_version_zero() {
+        assert_eq!(ShareView::of_repo(&serving_repo()).token_version, 1);
+        assert_eq!(
+            ShareView::of_repo(&serving_repo()).binding().expect("bucket and prefix").version,
+            1
+        );
+
+        let mut bumped = serving_repo();
+        bumped
+            .metadata
+            .annotations
+            .get_or_insert_with(Default::default)
+            .insert(ANN_TOKEN_VERSION.to_string(), "3".into());
+        assert_eq!(ShareView::of_repo(&bumped).token_version, 3);
+
+        // Junk floors at 1 rather than at 0, on the same rule `of` uses.
+        for junk in ["0", "", "-1", "nonsense"] {
+            let mut r = serving_repo();
+            r.metadata
+                .annotations
+                .get_or_insert_with(Default::default)
+                .insert(ANN_TOKEN_VERSION.to_string(), junk.into());
+            assert_eq!(ShareView::of_repo(&r).token_version, 1, "{junk:?}");
+        }
+    }
+
+    /// A refusal that says "share" to someone holding a repository URL
+    /// sends them looking for a `FlintShare` that does not exist.
+    #[test]
+    fn a_repository_door_calls_it_a_repository() {
+        let mut suspended = serving_repo();
+        suspended.status.as_mut().unwrap().phase =
+            Some(crate::forge_operator::crd::RepoPhase::Suspended);
+        let v = ShareView::of_repo(&suspended);
+        for door in [Door::Git, Door::RepoFileApi] {
+            match decide_for(&v, door) {
+                Decision::Refuse(r) => {
+                    assert!(r.message.contains("repository"), "{}", r.message);
+                    assert!(!r.message.contains("share"), "{}", r.message);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        // And the share doors still say share.
+        let share: FlintShare = serde_json::from_value(serde_json::json!({
+            "apiVersion": "chert.us/v1alpha1", "kind": "FlintShare",
+            "metadata": {"name": "fs-p", "namespace": "ns"},
+            "spec": {"bucket": "b", "keyPrefix": "p/", "persistence": {"size": "1Gi"}},
+            "status": {"phase": "Suspended"}
+        })).expect("FlintShare");
+        match decide_for(&ShareView::of(&share), Door::FileApi) {
+            Decision::Refuse(r) => assert!(r.message.contains("share"), "{}", r.message),
+            other => panic!("{other:?}"),
+        }
     }
 }
