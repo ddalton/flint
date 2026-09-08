@@ -41,7 +41,7 @@ use kube::{Api, Client};
 use spdk_csi_driver::lite_gateway::derive::{self, Binding, Minter};
 use spdk_csi_driver::forge_operator::crd::FlintRepo;
 use warp::Filter;
-use spdk_csi_driver::lite_gateway::{git, proxy, repo_files, Config, Gateway};
+use spdk_csi_driver::lite_gateway::{git, jwt, proxy, repo_files, Config, Gateway};
 use spdk_csi_driver::lite_operator::crd::FlintShare;
 use spdk_csi_driver::pnfs::mds::fileapi::token::{self, TokenSource};
 use tracing::{error, info, warn};
@@ -114,6 +114,58 @@ struct Args {
     /// is short and why it is a knob.
     #[arg(long, env = "FLINT_GATEWAY_GIT_REVIEW_TTL_SECS", default_value_t = 60)]
     git_review_ttl_secs: u64,
+
+    /// Verify a JWT an EXTERNAL ISSUER minted, beside the pod tokens
+    /// `TokenReview` already handles
+    /// (`docs/plans/forge-knox-jwt-design.md`).
+    ///
+    /// The `iss` this door will accept, matched exactly. It is also
+    /// what the router keys on: a token carrying it goes to the offline
+    /// verifier, anything else goes to `TokenReview`, and there is no
+    /// fallback between them. Unset ⇒ the whole path is off and the
+    /// door behaves exactly as it did before.
+    #[arg(long, env = "FLINT_GATEWAY_JWT_ISSUER")]
+    jwt_issuer: Option<String>,
+
+    /// The audience a verified token must carry.
+    ///
+    /// OPTIONAL, and its absence is warned about at start-up rather
+    /// than being silent. An issuer that cannot mint a per-application
+    /// audience — a topology-wide value, or none — is a configuration
+    /// this door does not control, so it supports the check and
+    /// enforces it when told to. What the absence costs: a shared
+    /// audience does not separate this service from its siblings, so
+    /// any of them holding a user's token can replay it here AS THAT
+    /// USER, bounded only by `spec.consumers`.
+    #[arg(long, env = "FLINT_GATEWAY_JWT_AUDIENCE")]
+    jwt_audience: Option<String>,
+
+    /// Where the issuer publishes its signing keys. Fetched, cached,
+    /// and refetched when a token names a key the door does not hold —
+    /// no sooner than once a minute, so a stream of unknown-key tokens
+    /// cannot become a denial-of-service against the issuer.
+    #[arg(long, env = "FLINT_GATEWAY_JWT_JWKS_URL")]
+    jwt_jwks_url: Option<String>,
+
+    /// An RSA public key in PEM, for a deployment that would rather the
+    /// door never reached the issuer at all. Mutually exclusive with
+    /// --jwt-jwks-url.
+    #[arg(long, env = "FLINT_GATEWAY_JWT_PUBLIC_KEY_FILE")]
+    jwt_public_key_file: Option<String>,
+
+    /// The `kid` the static key answers to.
+    #[arg(long, env = "FLINT_GATEWAY_JWT_KEY_ID", default_value = "static")]
+    jwt_key_id: String,
+
+    /// The longest `exp - iat` accepted, whatever the signature says.
+    /// With revocation out of scope this is the only bound on a stolen
+    /// token, and some issuers default to lifetimes measured in months.
+    #[arg(long, env = "FLINT_GATEWAY_JWT_MAX_LIFETIME_SECS", default_value_t = 3600)]
+    jwt_max_lifetime_secs: u64,
+
+    /// Clock-skew tolerance on `exp` and `nbf`.
+    #[arg(long, env = "FLINT_GATEWAY_JWT_LEEWAY_SECS", default_value_t = 60)]
+    jwt_leeway_secs: u64,
 
     /// Serve flint forge's REST file API at
     /// `/repo/<namespace>/<name>/files…` (design
@@ -367,7 +419,8 @@ async fn main() -> anyhow::Result<()> {
 
         let (repo_store, repo_writer) = reflector::store::<FlintRepo>();
         let repo_ready = Arc::new(AtomicBool::new(false));
-        let door = git::GitDoor::new(
+        let issuer = build_jwt_reviewer(&args)?;
+        let door = git::GitDoor::with_reviewer(
             client.clone(),
             repo_store.clone(),
             proxy::upstream_client(Duration::from_secs(5))?,
@@ -379,6 +432,7 @@ async fn main() -> anyhow::Result<()> {
                 read_only: args.read_only,
             },
             repo_ready.clone(),
+            issuer,
         );
         tokio::spawn(async move {
             let stream = watcher(repos, watcher::Config::default())
@@ -479,6 +533,77 @@ async fn main() -> anyhow::Result<()> {
         warp::serve(proxy::routes(gw)).run(args.listen).await;
     }
     Ok(())
+}
+
+/// The external-issuer verifier, when one is configured.
+///
+/// Every refusal here is a START-UP refusal. A door that discovered a
+/// misconfiguration per request would already have been wrong for every
+/// request before it, and the two that matter — a colliding issuer and
+/// no key source — are both decidable once.
+fn build_jwt_reviewer(
+    args: &Args,
+) -> anyhow::Result<Option<(std::sync::Arc<dyn git::Reviewer>, String)>> {
+    let Some(issuer) = args.jwt_issuer.clone() else {
+        // Nothing configured: the door behaves exactly as before, and
+        // no key is fetched from anywhere.
+        if args.jwt_audience.is_some() || args.jwt_jwks_url.is_some() {
+            warn!("--jwt-audience/--jwt-jwks-url were given without --jwt-issuer; the JWT path is OFF");
+        }
+        return Ok(None);
+    };
+
+    // The cluster's ServiceAccount issuer, read from the door's own
+    // token rather than configured — the door already holds the
+    // document that answers it.
+    if let Err(why) = git::refuse_colliding_issuers(git::cluster_sa_issuer().as_deref(), &issuer) {
+        anyhow::bail!(why);
+    }
+
+    let cfg = jwt::JwtConfig {
+        issuer: issuer.clone(),
+        audience: args.jwt_audience.clone(),
+        max_lifetime: Duration::from_secs(args.jwt_max_lifetime_secs),
+        leeway: Duration::from_secs(args.jwt_leeway_secs),
+    };
+    if cfg.audience.is_none() {
+        warn!(
+            issuer = %issuer,
+            "NO --jwt-audience: any token this issuer minted is accepted, including one \
+             minted for another service. Every service sharing this issuer can therefore \
+             present a user's token here as that user, bounded only by spec.consumers. \
+             Set --jwt-audience, and give this door its own audience upstream, to close it."
+        );
+    }
+
+    let reviewer: std::sync::Arc<dyn git::Reviewer> =
+        match (&args.jwt_jwks_url, &args.jwt_public_key_file) {
+            (Some(_), Some(_)) => anyhow::bail!(
+                "--jwt-jwks-url and --jwt-public-key-file are alternatives; passing both \
+                 leaves it ambiguous which key set the door verifies against"
+            ),
+            (Some(url), None) => {
+                jwt::JwtReviewer::with_jwks(cfg, url.clone(), proxy::upstream_client(Duration::from_secs(5))?)
+            }
+            (None, Some(path)) => {
+                let pem = std::fs::read(path)
+                    .map_err(|e| anyhow::anyhow!("cannot read --jwt-public-key-file {path}: {e}"))?;
+                jwt::JwtReviewer::with_static_pem(cfg, &args.jwt_key_id, &pem)
+                    .map_err(|e| anyhow::anyhow!(e))?
+            }
+            (None, None) => anyhow::bail!(
+                "--jwt-issuer needs a key source: give --jwt-jwks-url or \
+                 --jwt-public-key-file. Without one the door could verify nothing and \
+                 would refuse every token from that issuer."
+            ),
+        };
+    info!(
+        issuer = %issuer,
+        audience = ?args.jwt_audience,
+        max_lifetime_secs = args.jwt_max_lifetime_secs,
+        "external-issuer JWT verification is ON"
+    );
+    Ok(Some((reviewer, issuer)))
 }
 
 /// How this process produces the credential it presents to a hub.

@@ -114,7 +114,30 @@ impl BrokerConfig {
     }
 }
 
-/// What `TokenReview` said about a token.
+/// Who vouched for an identity, and therefore what KIND of principal it
+/// is.
+///
+/// An explicit discriminator rather than inferring "a person has no
+/// ServiceAccount" from an empty or absent field. The authorization
+/// matcher turns on this — a person must never match a bare
+/// ServiceAccount entry by happening to have the right `username`, and
+/// a pod must never match a `jwt:user:` one — and a safety property
+/// that rests on a type cannot be lost by a future construction site
+/// forgetting the convention. That is the same lesson as
+/// `ReviewError`: the cache used to infer "transport failure" from an
+/// error's text and was right for exactly one implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vouched {
+    /// The apiserver, via `TokenReview`. `namespace` and
+    /// `service_account` are meaningful.
+    Kubernetes,
+    /// An external issuer, via a signature the door verified. The
+    /// principal is a PERSON: `username` is the issuer's `sub`, and the
+    /// ServiceAccount fields are empty and must not be read.
+    Issuer,
+}
+
+/// What a verifier said about a token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
     pub username: String,
@@ -122,6 +145,23 @@ pub struct Identity {
     pub service_account: String,
     pub pod_uid: Option<String>,
     pub pod_name: Option<String>,
+    /// Who vouched. Everything below `username` is meaningful only for
+    /// [`Vouched::Kubernetes`].
+    pub vouched: Vouched,
+}
+
+impl Identity {
+    /// A person, as an external issuer named them.
+    pub fn person(sub: impl Into<String>) -> Self {
+        Identity {
+            username: sub.into(),
+            namespace: String::new(),
+            service_account: String::new(),
+            pod_uid: None,
+            pod_name: None,
+            vouched: Vouched::Issuer,
+        }
+    }
 }
 
 pub fn identity_from_review(tr: &TokenReview, audience: &str) -> Result<Identity, String> {
@@ -150,6 +190,7 @@ pub fn identity_from_review(tr: &TokenReview, audience: &str) -> Result<Identity
         service_account: sa.to_string(),
         pod_uid: extra("authentication.kubernetes.io/pod-uid"),
         pod_name: extra("authentication.kubernetes.io/pod-name"),
+        vouched: Vouched::Kubernetes,
     })
 }
 
@@ -522,7 +563,7 @@ mod tests {
     }
 
     fn id() -> Identity {
-        Identity { username: "system:serviceaccount:team-a:trainer".into(), namespace: "team-a".into(), service_account: "trainer".into(), pod_uid: Some("p1".into()), pod_name: None }
+        Identity { username: "system:serviceaccount:team-a:trainer".into(), namespace: "team-a".into(), service_account: "trainer".into(), pod_uid: Some("p1".into()), pod_name: None, vouched: Vouched::Kubernetes }
     }
 
     fn reg(nonce: &str) -> Registration {

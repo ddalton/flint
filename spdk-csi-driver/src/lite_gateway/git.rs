@@ -62,7 +62,7 @@ use warp::{Filter, Rejection, Reply};
 
 use crate::forge_operator::crd::FlintRepo;
 use crate::lite_operator::idle::ANN_REQUESTED_AT;
-use crate::s3csi::broker::{identity_from_review, Identity};
+use crate::s3csi::broker::{identity_from_review, Identity, Vouched};
 use crate::s3csi::policy::Consumers;
 
 use super::resolve::{self, Decision, Door, Refusal, ShareView};
@@ -365,6 +365,93 @@ impl Reviewer for CachingReviewer {
     }
 }
 
+/// Which verifier a token goes to, decided BEFORE anything is verified.
+///
+/// Both credentials this door accepts are RS256 JWTs — a pod's
+/// projected ServiceAccount token and one an external issuer minted —
+/// so the choice has to be made from an unverified claim. That is safe
+/// only because of what the choice can and cannot do: it selects a
+/// verifier, and every verifier still checks the signature, the issuer
+/// and the audience for itself. A forged `iss` therefore routes a token
+/// to a verifier that will refuse it. What would make this unsafe is a
+/// FALLBACK — trying one verifier and then the other — because then a
+/// caller could pick the checker with the weakest opinion. There is
+/// none, deliberately.
+///
+/// The default is `TokenReview`, which is the conservative direction:
+/// an unrecognised issuer fails closed against the apiserver rather
+/// than against a cached key set, and keeps the online revocation
+/// window that makes a deleted pod's credential die.
+///
+/// **The counters are the test oracle** (design D4). A broken router
+/// still refuses — both verifiers reject a token meant for the other —
+/// so a test asserting a status code passes whether the routing works
+/// or not. The only way to see which verifier was REACHED is to count.
+pub struct RoutingReviewer {
+    kube: Arc<dyn Reviewer>,
+    issuer: Arc<dyn Reviewer>,
+    issuer_iss: String,
+    pub kube_calls: Arc<std::sync::atomic::AtomicU64>,
+    pub issuer_calls: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl RoutingReviewer {
+    pub fn new(kube: Arc<dyn Reviewer>, issuer: Arc<dyn Reviewer>, issuer_iss: String) -> Arc<Self> {
+        Arc::new(RoutingReviewer {
+            kube,
+            issuer,
+            issuer_iss,
+            kube_calls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            issuer_calls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Reviewer for RoutingReviewer {
+    async fn review(&self, token: &str) -> Result<Identity, ReviewError> {
+        let iss = super::jwt::unverified_issuer(token);
+        if iss.as_deref() == Some(self.issuer_iss.as_str()) {
+            self.issuer_calls.fetch_add(1, Ordering::SeqCst);
+            self.issuer.review(token).await
+        } else {
+            self.kube_calls.fetch_add(1, Ordering::SeqCst);
+            self.kube.review(token).await
+        }
+    }
+}
+
+/// The `iss` of the door's OWN ServiceAccount token, which is the
+/// cluster's ServiceAccount issuer.
+///
+/// Read rather than configured: the door already holds exactly the
+/// document that answers the question, and an operator asked to supply
+/// it by hand would have to look it up in the same place.
+pub fn cluster_sa_issuer() -> Option<String> {
+    let raw =
+        std::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/token").ok()?;
+    super::jwt::unverified_issuer(raw.trim())
+}
+
+/// Refuse to start when the two issuers cannot be told apart.
+///
+/// If the cluster's ServiceAccount issuer and the configured external
+/// issuer are the same string, routing is undefined: every pod token
+/// would go to the offline verifier, which does not consult the
+/// apiserver and cannot know a pod was deleted. Checked ONCE at
+/// start-up, because a door that discovers this per request has already
+/// been wrong for every request before it.
+pub fn refuse_colliding_issuers(cluster: Option<&str>, configured: &str) -> Result<(), String> {
+    match cluster {
+        Some(c) if c == configured => Err(format!(
+            "--jwt-issuer is {configured:?}, which is also this cluster's ServiceAccount \
+             issuer. Every pod token would be routed to the offline verifier, which cannot \
+             see that a pod was deleted. Refusing to start."
+        )),
+        _ => Ok(()),
+    }
+}
+
 pub struct GitDoor {
     pub client: Client,
     pub repos: Store<FlintRepo>,
@@ -385,10 +472,38 @@ impl GitDoor {
         cfg: GitConfig,
         ready: Arc<AtomicBool>,
     ) -> Arc<Self> {
-        let reviewer = CachingReviewer::new(
+        Self::with_reviewer(client.clone(), repos, http, cfg.clone(), ready, None)
+    }
+
+    /// The door, with an optional external-issuer verifier beside
+    /// `TokenReview`.
+    ///
+    /// The pod credential is ALWAYS available — agents hold nothing
+    /// else — so the issuer verifier is added beside it rather than
+    /// instead of it, and a router picks between them per request. Both
+    /// forge doors share whatever this produces, so they cannot come to
+    /// different conclusions about who a caller is.
+    pub fn with_reviewer(
+        client: Client,
+        repos: Store<FlintRepo>,
+        http: reqwest::Client,
+        cfg: GitConfig,
+        ready: Arc<AtomicBool>,
+        issuer: Option<(Arc<dyn Reviewer>, String)>,
+    ) -> Arc<Self> {
+        // TokenReview is cached; the issuer verifier is not, and that
+        // asymmetry is the point. One is a round trip to the apiserver
+        // worth sparing; the other is arithmetic on a key already in
+        // memory, where a cache would buy nothing and would honour
+        // `exp` up to a TTL late.
+        let kube: Arc<dyn Reviewer> = CachingReviewer::new(
             Arc::new(KubeReviewer { client: client.clone(), audience: cfg.audience.clone() }),
             cfg.review_ttl,
         );
+        let reviewer: Arc<dyn Reviewer> = match issuer {
+            Some((jwt, iss)) => RoutingReviewer::new(kube, jwt, iss),
+            None => kube,
+        };
         Arc::new(GitDoor { client, repos, http, cfg, ready, reviewer })
     }
 
@@ -563,22 +678,57 @@ pub(super) fn basic_password(header: Option<&str>) -> Option<String> {
     Some(pass.to_string())
 }
 
+/// A person, named by an external issuer's `sub`
+/// (`docs/plans/forge-knox-jwt-design.md` D13).
+///
+/// A PREFIX inside the existing array rather than a new CRD field. It
+/// costs no schema change, prunes nothing, and has no blast radius to
+/// lean, passthrough, the broker or the CSI node plugin — all of which
+/// deserialize the same `Consumers`. It is also the syntax a groups
+/// design would extend, so that stays additive.
+pub const JWT_USER_PREFIX: &str = "jwt:user:";
+
 /// Is this principal allowed to reach this repository at all?
 ///
-/// Two spellings are accepted, and the difference matters. A bare
-/// `agent-runner` means "that ServiceAccount IN THIS REPOSITORY'S
-/// NAMESPACE" — the common case, and the one where a bare name is
-/// unambiguous. A fully qualified `system:serviceaccount:<ns>:<sa>`
-/// names a principal in any namespace, which is what a repository
-/// shared across tenant namespaces needs. Matching a bare name against
-/// any namespace would have made `agent-runner` in a namespace the
-/// repository's owner has never heard of into a consumer of it.
+/// Three spellings, and the differences matter.
+///
+/// A bare `agent-runner` means "that ServiceAccount IN THIS
+/// REPOSITORY'S NAMESPACE" — the common case, and the one where a bare
+/// name is unambiguous. A fully qualified
+/// `system:serviceaccount:<ns>:<sa>` names a principal in any
+/// namespace, which is what a repository shared across tenant
+/// namespaces needs. Matching a bare name against any namespace would
+/// have made `agent-runner` in a namespace the repository's owner has
+/// never heard of into a consumer of it.
+///
+/// `jwt:user:<sub>` names a PERSON, and the two kinds are kept apart by
+/// [`Vouched`] rather than by the shape of the string. Both directions
+/// are load-bearing: a person whose `sub` happened to be `agent-runner`
+/// must not match a bare entry, and a pod must not match a
+/// `jwt:user:` one however its username reads. Neither can be got
+/// right by inspecting the entry alone, which is why the discriminator
+/// is on the identity.
+///
+/// `*` still means both, and deliberately: every `FlintRepo` in the
+/// fleet has one of these lists, and narrowing what a wildcard means
+/// would re-authorize them all at once. **It is now much broader than
+/// it was** — with an issuer configured it admits any person that
+/// issuer will vouch for — which is why the design asks the operator to
+/// warn on it (D6a).
 pub fn consumer_allows(consumers: Option<&Consumers>, repo_ns: &str, id: &Identity) -> bool {
     let Some(c) = consumers else { return false };
     c.service_accounts.iter().any(|entry| {
-        entry == "*"
-            || entry == &id.username
-            || (entry == &id.service_account && id.namespace == repo_ns)
+        if entry == "*" {
+            return true;
+        }
+        match entry.strip_prefix(JWT_USER_PREFIX) {
+            Some(sub) => id.vouched == Vouched::Issuer && !sub.is_empty() && sub == id.username,
+            None => {
+                id.vouched == Vouched::Kubernetes
+                    && (entry == &id.username
+                        || (entry == &id.service_account && id.namespace == repo_ns))
+            }
+        }
     })
 }
 
@@ -1305,6 +1455,7 @@ mod tests {
             service_account: sa.into(),
             pod_uid: None,
             pod_name: None,
+            vouched: crate::s3csi::broker::Vouched::Kubernetes,
         }
     }
 
@@ -1662,6 +1813,84 @@ mod tests {
             healed.review("t").await.is_ok(),
             "the door did not recover on the first good answer"
         );
+    }
+
+    /// ONE SOURCE OF IDENTITY.
+    ///
+    /// A token-injecting authorizer hands the door a bearer token AND a
+    /// validated-user header naming the same person. The door reads the
+    /// token, because a verified signature beats an asserted header and
+    /// two sources with no principled winner is worse than one. This
+    /// mints a token for one subject and sends a header naming another,
+    /// so the test can say WHICH won rather than merely that something
+    /// worked.
+    #[tokio::test]
+    async fn the_token_decides_the_principal_not_an_injected_header() {
+        let log: Log = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = fake_git_server(log.clone()).await;
+        let door = door_with(
+            vec![repo(Some(&endpoint), vec!["agent-runner"], RepoPhase::Ready)],
+            Arc::new(CountingReviewer {
+                calls: Arc::new(AtomicU64::new(0)),
+                // What the TOKEN says.
+                verdict: Ok(identity("tenant", "agent-runner")),
+            }),
+            false,
+        );
+        let res = warp::test::request()
+            .method("GET")
+            .path(&format!("{ADVERT}?service=git-upload-pack"))
+            .header("authorization", &basic("tok"))
+            // What a header says. Several spellings, because a mesh
+            // picks its own and the door must ignore all of them.
+            .header("x-validated-user", "bob@example.com")
+            .header("x-forwarded-user", "bob@example.com")
+            .header("x-auth-request-user", "bob@example.com")
+            .header("x-remote-user", "bob@example.com")
+            .reply(&routes(door))
+            .await;
+        assert_eq!(res.status(), 200);
+
+        let seen = log.lock().unwrap().clone();
+        let got = seen[0].headers.get("x-remote-user").expect("the door sets one");
+        assert_eq!(
+            got.to_str().unwrap(),
+            "system:serviceaccount:tenant:agent-runner",
+            "an injected header decided the principal instead of the token"
+        );
+        assert_eq!(seen[0].headers.get_all("x-remote-user").iter().count(), 1);
+        // None of the other spellings reached the server either: the
+        // upstream header set is an allowlist, and identity is not in
+        // it except as the door writes it.
+        for h in ["x-validated-user", "x-forwarded-user", "x-auth-request-user"] {
+            assert!(seen[0].headers.get(h).is_none(), "{h} was forwarded upstream");
+        }
+    }
+
+    /// The one-line mistake that would undo the test above: adding an
+    /// identity-bearing header to the forwarded allowlist, where it
+    /// would look like plumbing.
+    #[test]
+    fn no_identity_or_role_header_is_ever_forwarded() {
+        for h in [
+            "x-remote-user",
+            "x-remote-groups",
+            "x-validated-user",
+            "x-forwarded-user",
+            "x-auth-request-user",
+            "x-auth-request-groups",
+            "x-roles",
+            "x-groups",
+            "cookie",
+            "authorization",
+        ] {
+            assert!(
+                !GIT_REQUEST_HEADERS.iter().any(|n| n.eq_ignore_ascii_case(h)),
+                "{h} is in the forwarded allowlist — every caller can now assert it"
+            );
+        }
+        // The control: the allowlist is not simply empty.
+        assert!(GIT_REQUEST_HEADERS.contains(&"git-protocol"));
     }
 
     /// Fails `fail_first` times as UNREACHABLE, then succeeds.

@@ -797,6 +797,7 @@ mod tests {
             service_account: sa.into(),
             pod_uid: None,
             pod_name: None,
+            vouched: crate::s3csi::broker::Vouched::Kubernetes,
         }
     }
 

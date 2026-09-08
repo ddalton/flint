@@ -171,6 +171,15 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 anyhow = "1.0"
 base64 = "0.22"
+
+# JWT verification at the door, for an identity an external issuer
+# minted (docs/plans/forge-knox-jwt-design.md). `ring` is its backend
+# and is ALREADY in this tree via hyper-rustls, and the musl release
+# recipe already ships binaries containing it — so this adds a parser
+# and a validation policy, not a new crypto backend to cross-build.
+# `default-features = false` drops the `aws_lc_rs` alternative so the
+# provider ambiguity that bit rustls (see below) cannot recur here.
+jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
