@@ -1078,6 +1078,53 @@ mod plan_tests {
         }
     }
 
+    /// M6 on `runcg` measured the floored arm re-uploading the WHOLE
+    /// repository during every tiny-push leg — 385.4, 769.8, 1153.9 MiB
+    /// against repositories of 384, 768, 1152 MiB. This is that shape in
+    /// the planner: a repository holding one leg of 8 MiB pushes, then
+    /// enough tiny pushes to reach the pack cap.
+    ///
+    /// The cap is a COUNT condition and `Plan::Base` is unbounded in
+    /// BYTES — `all_names()` is every pack there is. Reaching the cap on
+    /// tiny packs therefore buys a rewrite of the large ones too.
+    #[test]
+    fn the_pack_cap_trips_the_base_rule_and_rewrites_every_large_pack() {
+        const MIB: u64 = 1024 * 1024;
+        // 48 x 8 MiB, the P9 leg, plus tiny pushes up to the cap.
+        let mut sizes: Vec<u64> = vec![8 * MIB; 48];
+        sizes.extend(std::iter::repeat_n(4 * 1024, 20));
+        let p = packs(&sizes);
+        let k = PlanKnobs { base_min_bytes: 64 * MIB, fold_min_bytes: 256 * MIB, ..knobs() };
+
+        assert!(p.len() >= k.fold_max_packs, "the cap must actually be reached");
+        let got = plan(&p, k);
+
+        // What it does today: rewrite everything.
+        match &got {
+            Some(Plan::Base { inputs }) => assert_eq!(
+                inputs.len(),
+                p.len(),
+                "the base rule takes every pack — that is the 1x/2x/3x on the wire"
+            ),
+            other => panic!("expected the base rule to fire, got {other:?}"),
+        }
+
+        // THE POSITIVE CONTROL, and the thing that names the defect: the
+        // bytes that justify the rebuild are the LARGE packs', while the
+        // condition that admitted it is the count of the TINY ones. Hold
+        // the byte total fixed and drop the tier count below the cap and
+        // the same repository is left alone — so it is the count, not
+        // the bytes, that bought the rewrite.
+        let below_cap = packs(&vec![8 * MIB; 48]);
+        let tier_bytes: u64 = below_cap.iter().map(|q| q.bytes).sum();
+        assert!(tier_bytes >= k.base_min_bytes, "same byte justification");
+        assert!(below_cap.len() < k.fold_max_packs, "only the count differs");
+        assert!(
+            !matches!(plan(&below_cap, PlanKnobs { cadence_open: false, ..k }), Some(Plan::Base { .. })),
+            "with the cadence closed and the count under the cap the same bytes do NOT rebuild"
+        );
+    }
+
     /// git's own example: four equal packs roll into one.
     #[test]
     fn equal_packs_fold_together() {
