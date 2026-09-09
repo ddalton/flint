@@ -1,0 +1,22 @@
+# The collector's cost on the wake path — local ladder, 2026-09-09
+#
+# cargo test -p flint-forge --lib d4_scale -- --ignored --nocapture
+# Darwin 25.3.0, arm64, machine otherwise idle.
+#
+# ON  = reclaim_at_rest timed alone (Instant bracket around the call only)
+# OFF = the same call with the flag down: it returns on its first line.
+#       The control prices the CALL, not the rig.
+
+ packs  files   refs   objects     ON (ms)  OFF (ms)
+     8      1      1        24       123.3     0.001
+    16      1      1        48       220.7     0.001
+    32      1      1        96       425.0     0.001
+    64      1      1       192       847.6     0.001
+test tests::d4_scale_ladder has been running for over 60 seconds
+    64      8      1       640       856.3     0.001
+    64     32      1      2176       865.0     0.001
+    64    128      1      8320       894.3     0.001
+    64    512      1     32896      1015.9     0.001
+    64      8     65       640       844.6     0.001
+    64      8    513       640       832.1     0.001
+    64      8   2049       640       835.6     0.001

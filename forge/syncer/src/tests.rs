@@ -6420,3 +6420,139 @@ async fn direction_4_collects_nothing_when_it_is_off() {
         assert!(dir.join(p).exists(), "the control arm unlinked {p}");
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// THE COLLECTOR'S COST ON THE WAKE PATH
+//
+// `reclaim_at_rest` runs at `server.rs:247` — between the restore and
+// `Phase::Serving`, so on every start AND every wake from idle, which
+// is user-visible latency (runci woke a slept repository with a plain
+// HTTP read in 7 s). It walks every ref, reads an `.idx` per named
+// pack, and runs a greedy loop that re-tests every candidate against
+// every kept pack. Every drill so far ran at <= 23 packs and a handful
+// of refs, so what it costs on a repository of real size is UNMEASURED.
+//
+// This is a measurement, not an assertion. `#[ignore]`d, run by hand:
+//
+//   cargo test -p flint-forge --lib d4_scale -- --ignored --nocapture
+// ─────────────────────────────────────────────────────────────────────
+
+/// One rung. Builds `packs` packs (one push each, `files` files per
+/// commit), adds `extra_refs` refs pointing at commits that already
+/// exist, and times `reclaim_at_rest` over the result.
+///
+/// Returns (elapsed, named packs, refs, reachable objects).
+async fn d4_scale_once(
+    packs: usize,
+    files: usize,
+    extra_refs: usize,
+    reclaim: bool,
+) -> (std::time::Duration, usize, usize, usize) {
+    let mut rig = Rig::new().await;
+    rig.sc.cfg.reclaim_at_rest = reclaim;
+    rig.start().await;
+
+    let mut tip: Option<String> = None;
+    let mut chain: Vec<String> = Vec::new();
+    for i in 0..packs {
+        let owned: Vec<(String, String)> = (0..files.max(1))
+            .map(|f| (format!("f{f}.txt"), format!("c{i}-f{f}\n")))
+            .collect();
+        let spec: Vec<(&str, &str)> =
+            owned.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let c = rig.stage_commit(tip.as_deref(), &spec, &format!("c{i}")).await;
+        let old = tip.clone().unwrap_or_else(zero);
+        let reports = rig
+            .run(vec![push(
+                i as u64 + 1,
+                vec![RefUpdate { name: "refs/heads/main".into(), old_oid: old, new_oid: c.clone() }],
+            )])
+            .await;
+        assert!(is_ok(&reports[0].results[0]), "push c{i}: {:?}", reports[0].results[0]);
+        chain.push(c.clone());
+        tip = Some(c);
+    }
+
+    // Refs pointing at commits that already exist: they add tips for
+    // `reachable_from` to walk without adding objects, which is what
+    // separates the ref dimension from the size dimension.
+    if extra_refs > 0 {
+        let cmds: Vec<RefUpdate> = (0..extra_refs)
+            .map(|r| RefUpdate {
+                name: format!("refs/heads/r{r}"),
+                old_oid: zero(),
+                new_oid: chain[r % chain.len()].clone(),
+            })
+            .collect();
+        let reports = rig.run(vec![push(9_000, cmds)]).await;
+        for res in &reports[0].results {
+            assert!(is_ok(res), "extra ref push: {res:?}");
+        }
+    }
+
+    // THE PREMISE, ASSERTED BEFORE ANYTHING IS TIMED. `reclaim_at_rest`
+    // has five early returns and every one of them yields the SAME
+    // empty report that a complete walk yields when there is nothing to
+    // collect. A rung that tripped one would print a fast, flat,
+    // meaningless number and read as "the collector is cheap". So the
+    // conditions are checked here: a rung that cannot measure fails
+    // loudly instead of timing a return.
+    let cell = rig.sc.cell().expect("cell").clone();
+    let named = cell.snap.packs.clone();
+    let dir = rig.sc.cfg.repo.join("objects/pack");
+    assert!(named.len() >= 2, "only {} named pack(s): reclaim returns early", named.len());
+    for p in &named {
+        let stem = p.trim_end_matches(".pack");
+        assert!(dir.join(format!("{stem}.idx")).exists(), "{p}: no .idx, reclaim returns early");
+        assert!(dir.join(p).exists(), "{p}: not on disk, reclaim returns early");
+    }
+
+    let tips: Vec<String> = cell.snap.refs.values().cloned().collect();
+    let reach = rig.sc.git.reachable_from(&tips).await.expect("reach").len();
+
+    let t0 = std::time::Instant::now();
+    restore::reclaim_at_rest(&mut rig.sc, restore::AtRest::before_serving())
+        .await
+        .expect("reclaim");
+    let dt = t0.elapsed();
+    (dt, named.len(), cell.snap.refs.len(), reach)
+}
+
+/// The ladder. The OFF column is the control: with the flag down the
+/// function returns on its first line, so it prices the CALL and not
+/// the rig — if ON and OFF were both ~0 the ladder would be measuring
+/// the harness, and the table would say so.
+#[tokio::test]
+#[ignore = "a measurement, not an assertion — run by hand with --nocapture"]
+async fn d4_scale_ladder() {
+    println!(
+        "\n{:>6} {:>6} {:>6} {:>9} {:>11} {:>9}",
+        "packs", "files", "refs", "objects", "ON (ms)", "OFF (ms)"
+    );
+    let rungs: [(usize, usize, usize); 11] = [
+        // the pack dimension, at one file per commit
+        (8, 1, 0),
+        (16, 1, 0),
+        (32, 1, 0),
+        (64, 1, 0),
+        // the size dimension, at the production pack cap (fold_max_packs)
+        (64, 8, 0),
+        (64, 32, 0),
+        (64, 128, 0),
+        (64, 512, 0),
+        // the ref dimension, size held down
+        (64, 8, 64),
+        (64, 8, 512),
+        (64, 8, 2048),
+    ];
+    for (packs, files, extra) in rungs {
+        let (on, np, nr, obj) = d4_scale_once(packs, files, extra, true).await;
+        let (off, _, _, _) = d4_scale_once(packs, files, extra, false).await;
+        println!(
+            "{np:6} {files:6} {nr:6} {obj:9} {:11.1} {:9.3}",
+            on.as_secs_f64() * 1000.0,
+            off.as_secs_f64() * 1000.0
+        );
+    }
+    println!();
+}
