@@ -12,6 +12,22 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.48.0] - 2026-09-09
+
+Two front ends move, and only two. **flint forge** gets the pack-residue
+work (a refused push's dead objects no longer pin live packs) and
+**flint lite** gets a reader-hang fix found by the first drill ever to
+point the S3 tier at real AWS S3. Published: `flint-forge-operator`,
+`flint-forge-git`, `flint-forge-syncer` and `flint-pnfs` at `1.48.0`,
+multi-arch (amd64 + arm64); charts `flint-forge` 0.5.0 and `flint-lite`
+0.4.14, both appVersion `1.48.0`.
+
+The lite chart's appVersion moves 1.45.0 -> 1.48.0 **because the reader
+hang is in the image, not the chart**. Nothing else republishes: the
+CSI, lean, passthrough, lite-operator and s3-csi charts stay where they
+are, and a release that quietly re-pushed three unrelated charts at
+their existing versions is already recorded here as a defect (1.39.0).
+
 ### Added — flint forge: dead objects stop pinning live packs (directions 5 and 4)
 
 - **The residue was 58% of named bytes on runcl, and 81% on content
@@ -158,6 +174,45 @@ covered by the stability guarantee.
   explicitly by name when an input is missing, and `|| true` on the
   pipeline that may legitimately match nothing.
 
+
+### Verified — flint lite: the compliance number every release has quoted was taken with the S3 tier OFF
+
+- **`FLINT_TIER_CAPTURE` appeared in no rig, no script and no make
+  target** — only in the source that reads it and the plan that named
+  the arm on 2026-08-28. So every pjdfstest number this repo has
+  recorded ran with `capture::enabled()` false: LINK was never refused
+  and no object was ever written, and **flint-lite IS the tier**. Those
+  numbers are the floor for the shipped posture, not a measurement of
+  it.
+- **With the tier on: 727 flint-only assertions vs 614 with it off**
+  (an assertion that fails on flint and PASSES on knfsd; the knfsd
+  control was 108 in every run). All 113 are the LINK refusal and its
+  cascade, in eight files — verified by diffing the two runs assertion
+  by assertion, not by comparing area totals, which invited exactly the
+  wrong reading. S3 cannot encode a hard link, so the hub advertises
+  `LINK_SUPPORT=false` and refuses LINK rather than promising a link it
+  cannot keep.
+- **What that costs an application, measured against a knfsd control:**
+  `tar -x` on any archive containing a hard link fails mid-extract
+  (rc=2), with no fallback and no flag; `cp -a` rc=1; `rsync -aH`
+  rc=23. `cp -r`, `rsync -a` and `git clone` are fine — git falls back
+  to copying. **No tool falls back on its own**: forcing `link(2)` to
+  fail with EPERM, then EOPNOTSUPP, then the 524 flint's
+  `NFS4ERR_NOTSUPP` actually produces, gives identical failures every
+  time. The status code changes the message, nothing else.
+- **`FLINT_NFS_ENFORCE_PERMISSIONS` still resolves to `warn` when
+  unset** — evaluate, log, deny nothing — and that is where 255 of the
+  614 come from: flint permitting an operation it owes EACCES or EPERM.
+  Setting it to `1` takes the shipped posture from 727 to **370**, and
+  the risk side is measured rather than assumed: **0 assertions newly
+  fail**, 374 stop failing, and knfsd-only stays at 106. The default
+  stays `warn` in this release — a hub that starts refusing writes is
+  an outage for anyone unknowingly relying on its absence — but the
+  blast radius against a POSIX suite is now known to be zero.
+- Artefacts: `tests/lima/armc-pjdfstest-tier-20260909.txt` and
+  `tests/lima/pnfs/pjdfstest-delta.py`, which identifies an assertion by
+  (file, prove's number), VOIDs on a control that parsed to nothing, and
+  prints what it cannot attribute in full.
 
 ## [1.47.0] - 2026-09-08
 
@@ -5729,7 +5784,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.47.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.48.0...HEAD
+[1.48.0]: https://github.com/ddalton/flint/compare/v1.47.0...v1.48.0
 [1.47.0]: https://github.com/ddalton/flint/compare/v1.46.0...v1.47.0
 [1.46.0]: https://github.com/ddalton/flint/compare/v1.45.0...v1.46.0
 [1.45.0]: https://github.com/ddalton/flint/compare/v1.44.0...v1.45.0

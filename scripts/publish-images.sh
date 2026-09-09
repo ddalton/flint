@@ -19,7 +19,7 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-ver=${1:?usage: publish-images.sh <version> [all|lean|s3csi|forge] [--dry-run]}
+ver=${1:?usage: publish-images.sh <version> [all|lean|s3csi|forge|lite] [--dry-run]}
 # Scope, matching stage-prebuilt.sh. A lean-scoped release publishes the
 # operator image (which carries the lean binaries) and the sidecar, then
 # aliases the operator to its lean name — it does not republish the CSI
@@ -41,6 +41,7 @@ for a in "$@"; do
         lean)        SCOPE=lean ;;
         s3csi|passthrough) SCOPE=s3csi ;;
         forge)       SCOPE=forge ;;
+        lite)        SCOPE=lite ;;
         all)         SCOPE=all ;;
         --dry-run)   dry=--dry-run ;;
         --no-moving-tags) moving=0 ;;
@@ -135,6 +136,14 @@ if [ "$SCOPE" = forge ]; then
         "flint-forge-git:docker/Dockerfile.forge-git"
 fi
 
+# The lite scope publishes ONE image: the hub the flint-lite chart runs.
+# It is deliberately not `all` — the CSI driver, the operator and the s3
+# images carry no change in a release like 1.48.0, and republishing them
+# moves `latest` and the major tag on code that did not move.
+if [ "$SCOPE" = lite ]; then
+    set -- "flint-pnfs:docker/Dockerfile.pnfs.prebuilt"
+fi
+
 minor=${ver%.*}      # 1.31.0 -> 1.31
 major=${ver%%.*}     # 1.31.0 -> 1
 
@@ -203,7 +212,13 @@ set -- "flint-lite-operator:flint-lean-operator"
 # this version. Aliasing would then copy the PREVIOUS release's digest
 # under this version's tag — the provenance drift the alias exists to
 # prevent, produced by the alias itself.
-if [ "$SCOPE" = forge ]; then
+# …and the same is true of a LITE-scoped release, which builds only
+# flint-pnfs. The dry run of the first lite release caught this: it
+# would have aliased flint-lean-operator:{1.48.0,1.48,1,latest} onto a
+# flint-lite-operator:1.48.0 that does not exist — failing at best, and
+# at worst repointing `latest` for the lean chart's users at a digest
+# from a release they did not ask for.
+if [ "$SCOPE" = forge ] || [ "$SCOPE" = lite ]; then
     set --
 fi
 
@@ -224,6 +239,9 @@ if [ "$moving" = 1 ]; then
 else
     echo "published $ver ONLY (no moving tags) for scope=$SCOPE"
 fi
-if [ "$SCOPE" != forge ]; then
+# Two conditions, one fact. This line and the alias loop above were
+# guarded SEPARATELY on the scope, so adding `lite` to one and not the
+# other made the release log assert an alias it had just skipped.
+if [ "$SCOPE" != forge ] && [ "$SCOPE" != lite ]; then
     echo "aliased   flint-lite-operator -> flint-lean-operator at the same digest"
 fi

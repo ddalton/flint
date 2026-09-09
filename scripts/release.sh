@@ -39,7 +39,7 @@ chart_dir="$repo_root/flint-csi-driver-chart"
 
 cmd=${1:-check}
 case "$cmd" in check|images|chart|all) ;; *)
-    echo "usage: $0 [check|images|chart|all] [all|lean|s3csi|forge] [--force-republish]" >&2; exit 2 ;;
+    echo "usage: $0 [check|images|chart|all] [all|lean|s3csi|forge|lite] [--force-republish]" >&2; exit 2 ;;
 esac
 
 # SCOPE, matching stage-prebuilt.sh and publish-images.sh. A lean-scoped
@@ -66,9 +66,14 @@ for a in "$@"; do
         lean) scope=lean ;;
         s3csi|passthrough) scope=s3csi ;;
         forge) scope=forge ;;
+        # The 1.48.0 shape: a fix in the HUB image with nothing changed
+        # in the CSI driver, the operator or the s3 images. `all` would
+        # move `latest` and the major tag on code that did not move, and
+        # would re-push four charts at their existing versions.
+        lite) scope=lite ;;
         all)  scope=all ;;
         --force-republish) force_republish=1 ;;
-        *) echo "unknown argument '$a' — usage: $0 [check|images|chart|all] [all|lean|s3csi|forge] [--force-republish]" >&2
+        *) echo "unknown argument '$a' — usage: $0 [check|images|chart|all] [all|lean|s3csi|forge|lite] [--force-republish]" >&2
            exit 2 ;;
     esac
 done
@@ -235,7 +240,7 @@ EOF
     # The flint-lite chart ships alongside as its OWN OCI artifact
     # (independent version; its appVersion pins the flint-pnfs tag, which
     # the gate above already verified via the pnfs image row).
-    if in_scope "all"; then
+    if in_scope "all lite"; then
     lite_dir="$repo_root/flint-lite-chart"
     lite_version=$(python3 -c "import yaml; print(yaml.safe_load(open('$repo_root/flint-lite-chart/Chart.yaml'))['version'])")
     lite_app=$(python3 -c "import yaml; print(yaml.safe_load(open('$repo_root/flint-lite-chart/Chart.yaml'))['appVersion'])")
@@ -245,7 +250,7 @@ EOF
     fi
     helm package "$lite_dir" --destination "$pkg_dir" >/dev/null
     lite_pkg="$pkg_dir/flint-lite-$lite_version.tgz"
-    push_chart "all" flint-lite "$lite_version" "$lite_pkg"
+    push_chart "all lite" flint-lite "$lite_version" "$lite_pkg"
     fi
 
     # The flint-lite OPERATOR chart, likewise its own artifact. Two

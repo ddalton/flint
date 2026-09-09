@@ -72,7 +72,16 @@ case "$SCOPE" in
     # (Dockerfile.forge-git, which carries the hook). Its binaries come
     # from THREE crates, which is why it has its own clock below.
     forge) BINS="flint-forge-operator flint-hub-gateway" ;;
-    *)    echo "usage: stage-prebuilt.sh [all|lean|s3csi|forge]" >&2; exit 2 ;;
+    # A LITE-scoped release publishes ONE image, flint-pnfs
+    # (Dockerfile.pnfs.prebuilt), which COPYs exactly these two binaries
+    # — the hub the flint-lite chart runs and the data server. It exists
+    # for the 1.48.0 shape: a fix in the hub with nothing changed in the
+    # CSI driver or the operator, where an `all` release would move
+    # `latest` on images whose code did not move. Demanding csi-driver
+    # and the s3 binaries be fresh for it is a refusal with no safety
+    # content, which is the same reasoning `lean` is written on.
+    lite)  BINS="flint-pnfs-mds flint-pnfs-ds" ;;
+    *)    echo "usage: stage-prebuilt.sh [all|lean|s3csi|forge|lite]" >&2; exit 2 ;;
 esac
 
 # Binaries from the LEAN crate (lean/sidecar) — a separate crate with a
@@ -97,6 +106,12 @@ if [ "$SCOPE" = forge ]; then
     LEAN_BINS="flint-sync"
 fi
 
+# A lite release publishes only flint-pnfs, which COPYs nothing from the
+# lean crate.
+if [ "$SCOPE" = lite ]; then
+    LEAN_BINS=""
+fi
+
 # Binaries from the FORGE crate (forge/syncer). Only a forge-scoped
 # release stages them.
 FORGE_BINS=""
@@ -108,7 +123,7 @@ fi
 # every worker pod the s3.csi.chert.us plugin creates, and the payload both
 # worker images COPY (Dockerfile.s3worker, Dockerfile.s3worker-lean).
 WORKER_BINS="flint-s3-worker"
-if [ "$SCOPE" = lean ] || [ "$SCOPE" = forge ]; then
+if [ "$SCOPE" = lean ] || [ "$SCOPE" = forge ] || [ "$SCOPE" = lite ]; then
     WORKER_BINS=""
 fi
 
