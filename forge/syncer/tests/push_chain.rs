@@ -517,6 +517,60 @@ fn recorded_pushes(log: &Path) -> Vec<Recorded> {
     out
 }
 
+/// What the snapshot's named bytes are worth, split the way the
+/// direction-5 question needs: what is redundant, and of that, what the
+/// rule would drop versus keep. `producers_all_refused` is the pack ->
+/// "every push that produced it was refused" map.
+#[derive(Default, Debug)]
+struct Residue {
+    named: u64,
+    redundant: u64,
+    removable: u64,
+    kept_mixed: u64,
+    kept_unattributed: u64,
+}
+
+fn classify_residue(
+    repo: &Path,
+    scratch: &Path,
+    snap: &flint_forge::snapshot::Snapshot,
+    producers_all_refused: &std::collections::BTreeMap<String, bool>,
+) -> Residue {
+    let dir = repo.join("objects/pack");
+    let mut r = Residue::default();
+    for p in &snap.packs {
+        let bytes = std::fs::metadata(dir.join(p)).map(|m| m.len()).unwrap_or(0);
+        r.named += bytes;
+        if !is_redundant(scratch, &dir, &snap.packs, p, &snap.refs) {
+            continue;
+        }
+        r.redundant += bytes;
+        match producers_all_refused.get(p) {
+            Some(true) => r.removable += bytes,
+            Some(false) => r.kept_mixed += bytes,
+            None => r.kept_unattributed += bytes,
+        }
+    }
+    r
+}
+
+/// The pack -> "every producer refused" map, from the recorder's log and
+/// the refs that ended up reachable. MANY-TO-ONE, so it ANDs.
+fn producers_all_refused(
+    records: &[Recorded],
+    reach: &std::collections::HashSet<String>,
+) -> std::collections::BTreeMap<String, bool> {
+    let mut m: std::collections::BTreeMap<String, bool> = Default::default();
+    for rec in records {
+        let any_live = rec.news.iter().any(|n| reach.contains(n));
+        for pk in &rec.packs {
+            let e = m.entry(pk.clone()).or_insert(true);
+            *e = *e && !any_live;
+        }
+    }
+    m
+}
+
 /// Every object id a pack holds, from its index.
 fn pack_objects(repo: &Path, idx: &Path) -> Vec<String> {
     let out = Command::new("sh")
@@ -913,4 +967,136 @@ async fn measure_what_a_refused_push_leaves_in_the_snapshot() {
     // and nothing kept means arm M never shared a pack.
     assert!(d5_removable > 0, "no residue attributed to a wholly-refused push");
     assert!(d5_kept_mixed > 0, "arm M produced no shared pack — R7 is not being measured");
+}
+
+// ── does the residue direction 5 KEEPS grow without bound? ───────────
+//
+// Direction 5 removes 78-81% of the residue and keeps what came from
+// MIXED pushes, because git built one pack for a push whose refs got
+// different verdicts. That is a constant-factor win. The question this
+// answers is whether it is a constant factor off a BOUNDED quantity or
+// an unbounded one — because direction 5 does not touch the pinning
+// rule at all, and if the kept share accumulates then direction 5 buys
+// time while direction 4 (a reclaiming rebuild under quiescence) is the
+// only thing that collects.
+//
+// So: run identical rounds, and read the curve rather than the ratio.
+// Each round is one accepted push (live content grows too, which is the
+// honest denominator), one mixed push, and one wholly-refused push.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn measure_whether_the_residue_direction_5_keeps_grows() {
+    let rig = Rig::start_tuned(Policy::default(), true, |c| {
+        c.fold_factor = 2;
+        c.fold_min_bytes = 0;
+        c.base_min_bytes = 0;
+        c.base_rebuild_min_secs = 0;
+    })
+    .await;
+    let reclog = rig.repo.parent().unwrap().join("pushrec.log");
+    install_pre_receive_recorder(&rig.repo, &reclog);
+
+    let big = |mark: &str| -> String {
+        (0..4000)
+            .map(|i| if i == 2000 { format!("line {i} {mark}\n") } else { format!("line {i}\n") })
+            .collect::<String>()
+    };
+    rig.commit("big.txt", &big("base"));
+    assert!(rig.push(&["--quiet", "origin", "HEAD:refs/heads/main"]).0);
+    // The fixed OLD base every refused push is built on, so every round
+    // is genuinely non-fast-forward as main advances past it.
+    let base = must(&rig.client, &["rev-parse", "HEAD"]).trim().to_string();
+    let parent = rig.client.parent().unwrap().to_path_buf();
+    let scratch = parent.join("scratch.git");
+
+    const ROUNDS: usize = 8;
+    let mut curve: Vec<(usize, Residue, usize)> = Vec::new();
+    for r in 0..ROUNDS {
+        // 1. an ordinary ACCEPTED push: live content grows too.
+        rig.commit("big.txt", &big(&format!("live{r}")));
+        assert!(rig.push(&["--quiet", "origin", "HEAD:refs/heads/main"]).0);
+
+        // 2. a MIXED push: one ref accepted, one refused, ONE pack.
+        let c = parent.join(format!("mix{r}"));
+        must(&parent, &["clone", "--quiet", rig.repo.to_str().unwrap(), &format!("mix{r}")]);
+        must(&c, &["config", "user.email", "t@example.invalid"]);
+        must(&c, &["config", "user.name", "t"]);
+        must(&c, &["checkout", "--quiet", "-b", "good", &base]);
+        std::fs::write(c.join("big.txt"), big(&format!("g{r}"))).unwrap();
+        must(&c, &["add", "big.txt"]);
+        must(&c, &["commit", "--quiet", "-m", "good"]);
+        must(&c, &["checkout", "--quiet", "-b", "bad", &base]);
+        std::fs::write(c.join("big.txt"), big(&format!("b{r}"))).unwrap();
+        must(&c, &["add", "big.txt"]);
+        must(&c, &["commit", "--quiet", "-m", "bad"]);
+        let out = git(
+            &c,
+            &[
+                "push",
+                "--force",
+                "--quiet",
+                "origin",
+                &format!("good:refs/heads/mixed{r}"),
+                "bad:refs/heads/main",
+            ],
+        );
+        assert!(!out.status.success(), "round {r}: the mixed push's bad half must be refused");
+
+        // 3. a WHOLLY refused push, the class direction 5 does remove.
+        let n = parent.join(format!("nff{r}"));
+        must(&parent, &["clone", "--quiet", rig.repo.to_str().unwrap(), &format!("nff{r}")]);
+        must(&n, &["config", "user.email", "t@example.invalid"]);
+        must(&n, &["config", "user.name", "t"]);
+        must(&n, &["reset", "--quiet", "--hard", &base]);
+        std::fs::write(n.join("big.txt"), big(&format!("n{r}"))).unwrap();
+        must(&n, &["add", "big.txt"]);
+        must(&n, &["commit", "--quiet", "-m", "nff"]);
+        let out = git(&n, &["push", "--force", "--quiet", "origin", "HEAD:refs/heads/main"]);
+        assert!(!out.status.success(), "round {r}: the non-ff push must be refused");
+
+        // Let the ladder settle: the fold and the base rebuild are where
+        // pinning actually happens, so measuring before they run would
+        // measure the wrong thing.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let snap = rig.snapshot().await;
+        let tips: Vec<String> = snap.refs.values().cloned().collect();
+        let reach = reachable_from(&rig.repo, &tips);
+        let map = producers_all_refused(&recorded_pushes(&reclog), &reach);
+        let res = classify_residue(&rig.repo, &scratch, &snap, &map);
+        curve.push((r, res, snap.packs.len()));
+    }
+
+    eprintln!("\n=== does direction 5's leftover grow? {ROUNDS} identical rounds ===");
+    eprintln!(
+        "{:>5} {:>6} {:>10} {:>10} {:>10} {:>10} {:>8}",
+        "round", "packs", "named B", "redundant", "d5 drops", "d5 KEEPS", "keeps %"
+    );
+    for (r, res, packs) in &curve {
+        let pct = if res.redundant > 0 { res.kept_mixed * 100 / res.redundant } else { 0 };
+        eprintln!(
+            "{r:>5} {packs:>6} {:>10} {:>10} {:>10} {:>10} {:>7}%",
+            res.named, res.redundant, res.removable, res.kept_mixed, pct
+        );
+    }
+    let first = &curve.first().unwrap().1;
+    let last = &curve.last().unwrap().1;
+    eprintln!(
+        "\nd5 KEEPS: {} B after round 0 -> {} B after round {}  ({}x)",
+        first.kept_mixed,
+        last.kept_mixed,
+        ROUNDS - 1,
+        if first.kept_mixed > 0 { last.kept_mixed / first.kept_mixed } else { 0 }
+    );
+    eprintln!(
+        "named:    {} B -> {} B  ({}x) — the denominator grows too",
+        first.named,
+        last.named,
+        if first.named > 0 { last.named / first.named } else { 0 }
+    );
+    eprintln!("unattributed residue at the end: {} B", last.kept_unattributed);
+
+    // The rounds are identical, so a flat curve and a rising one are
+    // both real answers — but the measurement must have MEASURED.
+    assert_eq!(curve.len(), ROUNDS);
+    assert!(last.kept_mixed > 0, "no mixed-push residue: the arm is not measuring R7");
 }

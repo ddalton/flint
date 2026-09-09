@@ -201,6 +201,24 @@ because something in it was accepted. Arm M of
 | direction 5 keeps | 18–21%, all of it in mixed-push packs |
 | direction 5 keeps (not from a push) | 0% |
 
+**And what it keeps GROWS.** Eight identical rounds (one accepted push,
+one mixed push, one wholly-refused push each), n=3, artefact
+`forge/e2e/results/residue-growth-20260908.log`: the bytes direction 5
+keeps rise **+9,651 B per mixed push, with a dead-constant slope** —
+9,767 B after round 0 and 77,445 B after round 7, +2 pinned packs per
+round. That is expected and it is the point: direction 5 changes which
+packs step 5 NAMES, not the coverage rule that pins them, and the only
+collector is a base rebuild's `--all`, whose output by construction
+cannot cover what it dropped. **Direction 5 lowers the slope; it does
+not make it zero. Direction 4 is the only thing that collects.**
+
+The *percentage* converges rather than growing, because live content
+grows too — to ~53% here, tending to 50.4%, which is only this rig's 1:1
+mix of mixed to wholly-refused pushes. The 78–81% above came from a 1:3
+mix. **Neither ratio is a prediction for a real repository**: the rate of
+mixed pushes on one is unmeasured, and it is the single input that
+decides how much direction 5 is worth.
+
 **Two constraints it inherits.** The pack→push map is MANY-TO-ONE — two
 pushes of identical content produce the same checksum and so the same
 name — so a pack is droppable only if EVERY producer was refused; record
