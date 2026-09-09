@@ -56,8 +56,30 @@ covered by the stability guarantee.
   collector's remaining job is residue the reducer cannot prevent — a
   MIXED push, where accepted and refused refs share one pack, is the
   reducer's ceiling.
-- **Not yet measured at realistic repository size or over a long
-  duration.** The drills are minutes long on small repositories.
+- **The collector runs on the WAKE path, and what that costs is now
+  measured on Linux** (`forge/e2e/results/d4-wake-cost-20260909-linux.log`,
+  and `-local.log` for darwin):
+
+      time ~= 2 + 0.5 x packs + 0.0063 x objects   (ms)
+
+  At `fold_max_packs: 64` a repository pays ~32 ms for the packs and
+  ~6.3 us per reachable object, on every start and every wake from
+  idle, **whether or not there is anything to collect**. Refs are free
+  (flat to 2,049 — `reachable_from` is one `rev-list --stdin`). So a
+  100k-object repository pays ~0.6 s and a **1M-object one ~6 s**,
+  against the ~7 s wake measured on runci. Both defaults stay ON —
+  turning the only collector off would leave the mixed-push residue
+  growing with nothing to bound it — but a large repository should
+  expect that, and `spec.packs.reclaimAtRest: false` is the opt-out.
+  The follow-up is a CADENCE (skip the walk if one ran recently, the
+  marker living in the snapshot because the repository directory does
+  not survive a wake), which bounds the amortised cost without giving
+  up the collection.
+- **The 1M figure is an EXTRAPOLATION**, 30x beyond the largest rung
+  measured (32,896 objects), and the per-object slope drifts upward
+  across the ladder (5.2 -> 6.5 us), so a straight line is optimistic
+  rather than conservative. Nothing has been measured over a long
+  duration either; the drills are minutes long.
 
 ### Fixed — release tooling: the forge scope of `stage-prebuilt.sh` had never once succeeded
 

@@ -487,14 +487,37 @@ async fn reclaim_inner(sc: &mut Syncer) -> ForgeResult<ReclaimReport> {
     order.sort_by(|a, b| live[a].len().cmp(&live[b].len()).then_with(|| a.cmp(b)));
     let mut kept: Vec<String> = named.clone();
     let mut drop: Vec<String> = Vec::new();
+
+    // HOLDER COUNTS, not a scan of every kept pack per object. Asking
+    // "does some OTHER kept pack hold this object" by walking `kept`
+    // made the test O(objects x packs), which is 64M lookups on a
+    // million-object repository at the fold cap — and this walk runs
+    // before `Phase::Serving`, so it is wake latency. Counting how many
+    // kept packs hold each object makes the same test O(1), and the
+    // count stays exact because it is decremented as packs leave.
+    // Measured at 6 us/object before, on BOTH platforms: it is CPU, not
+    // the forks, so it was the term that did not get cheaper on Linux.
+    let mut holders: std::collections::HashMap<&str, usize> = Default::default();
+    for p in &kept {
+        for o in &live[p] {
+            *holders.entry(o.as_str()).or_insert(0) += 1;
+        }
+    }
     loop {
+        // `> 1` is "held by a kept pack OTHER than this one" — the
+        // count includes the candidate itself.
         let victim = order
             .iter()
             .filter(|p| kept.contains(p))
-            .find(|p| live[*p].iter().all(|o| kept.iter().any(|q| q != *p && live[q].contains(o))))
+            .find(|p| live[*p].iter().all(|o| holders.get(o.as_str()).copied().unwrap_or(0) > 1))
             .cloned();
         match victim {
             Some(v) => {
+                for o in &live[&v] {
+                    if let Some(c) = holders.get_mut(o.as_str()) {
+                        *c -= 1;
+                    }
+                }
                 kept.retain(|x| x != &v);
                 report.bytes += size[&v];
                 drop.push(v);

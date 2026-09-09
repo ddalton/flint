@@ -6566,6 +6566,22 @@ async fn d4_scale_ladder() {
         "\n{:>6} {:>6} {:>6} {:>9} {:>11} {:>9}",
         "packs", "files", "refs", "objects", "ON (ms)", "OFF (ms)"
     );
+    // The pack dimension alone, for a quick cross-platform reading: it
+    // is the only term that matters (objects ~5 us each, refs free) and
+    // it is the cheap half of the ladder to build.
+    if std::env::var("D4_SCALE_PACKS_ONLY").is_ok() {
+        for (packs, files, extra) in [(8usize, 1usize, 0usize), (16, 1, 0), (32, 1, 0), (64, 1, 0)] {
+            let (on, np, nr, obj) = d4_scale_once(packs, files, extra, true).await;
+            let (off, _, _, _) = d4_scale_once(packs, files, extra, false).await;
+            println!(
+                "{np:6} {files:6} {nr:6} {obj:9} {:11.1} {:9.3}",
+                on.as_secs_f64() * 1000.0,
+                off.as_secs_f64() * 1000.0
+            );
+        }
+        println!();
+        return;
+    }
     let rungs: [(usize, usize, usize); 11] = [
         // the pack dimension, at one file per commit
         (8, 1, 0),

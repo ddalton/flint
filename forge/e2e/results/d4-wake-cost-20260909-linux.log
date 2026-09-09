@@ -1,0 +1,48 @@
+# The collector's cost on the wake path — LINUX, 2026-09-09
+#
+# lima flint-nfs-client: aarch64, kernel 6.8.0-138-generic, 2 vCPU.
+# Cross-built aarch64-unknown-linux-musl, run through the REAL
+# reclaim_at_rest (the load-bearing path), n=2.
+#
+#   time ~= 2 + 0.5 x packs + 0.0063 x objects   (ms)
+#
+# vs darwin/arm64, same code, same probe:
+#   time ~= 26 + 12.9 x packs + 0.005 x objects   (ms)
+#
+# The PACK term is 25x cheaper on Linux (0.5 vs 12.9 ms) — it is a
+# fork, and macOS forks slowly. The OBJECT term is NOT cheaper
+# (6.3 vs 5 us) because it is CPU: rev-list output, show-index
+# output, and 33k object ids allocated as Strings and hashed.
+# REFS ARE FREE on both, to 2,049.
+#
+# A holder-count rewrite of the greedy changed NOTHING (239.4 -> 237.2):
+# all() short-circuits, so with a chain of packs the scan already
+# exited on the first object. The predicted O(objects x packs) term
+# is not reached by this workload. Kept anyway — it costs nothing
+# measurable and bounds the COLLECTING case, which is UNMEASURED.
+
+=== rep 1 ===
+     8      1      1        24         4.3     0.001
+    16      1      1        48         8.1     0.003
+    32      1      1        96        15.3     0.002
+    64      1      1       192        31.5     0.002
+    64      8      1       640        35.4     0.002
+    64     32      1      2176        44.4     0.002
+    64    128      1      8320        83.9     0.002
+    64    512      1     32896       239.7     0.003
+    64      8     65       640        34.4     0.002
+    64      8    513       640        34.9     0.002
+    64      8   2049       640        36.3     0.002
+=== rep 2 ===
+     8      1      1        24         4.3     0.002
+    16      1      1        48         8.1     0.002
+    32      1      1        96        16.0     0.002
+    64      1      1       192        31.8     0.002
+    64      8      1       640        35.0     0.002
+    64     32      1      2176        44.7     0.002
+    64    128      1      8320        82.5     0.002
+    64    512      1     32896       237.2     0.003
+    64      8     65       640        34.2     0.002
+    64      8    513       640        35.0     0.002
+    64      8   2049       640        36.0     0.002
+
