@@ -1,5 +1,39 @@
 # Dead objects pin live packs — measured on runcl, 2026-09-08
 
+> **STATUS 2026-09-09 — BOTH DIRECTIONS ARE BUILT AND DRILLED.**
+> Direction 5 (the reducer) and direction 4 (the collector) are in
+> production code behind two flags, both OFF, opted into per repository
+> with `spec.packs.{nameAcceptedSet,reclaimAtRest}`. Commits
+> `2c5c7c1d` (syncer), `baf11c7b` (operator + CRD schema guard),
+> `9d6890a8` (the drill).
+>
+> **On the wire**, two repositories on one cluster differing only in
+> that block (`forge/e2e/residue/`, artefacts
+> `residue-drill-20260909-default.log` and `-compact1.log`):
+>
+> | | control | treated |
+> |---|---|---|
+> | the pack a REFUSED push leaves | snapshot **NAMES** it | **not named** |
+> | after a restart of both | 8 packs / 76,972 B, unchanged | 4 packs / **38,532 B** |
+> | clone + `fsck --strict` | clean | clean |
+>
+> **The rig condition selects which claim is testable.** At the shipped
+> compaction thresholds (`COMPACT=0`, the default) both legs work. At
+> `COMPACT=1` a base rebuild runs every cycle and `--all` drops dead
+> objects, so the residue is collected in BOTH arms and direction 5 has
+> no pinning left to observe — that leg is SKIPPED there, with its own
+> exit code, because a leg that could not run is not a leg that passed.
+>
+> **The first drill run reported GREEN while both rules did nothing**
+> (`residue-drill-20260909-vacuous-first-run.log`, kept deliberately).
+> Four defects, all in the checks rather than the rules: the recorder
+> was not running at all (`pre_receive` has three exits and one was
+> instrumented); a three-byte difference was credited as a reduction;
+> aggregate named bytes was the wrong oracle entirely; and the leg that
+> replaced it measured the wrong pack, with the control passing by luck
+> because the directory rule names everything. See `9d6890a8`.
+
+
 **Not a correctness defect. No data is lost and nothing is served
 wrong.** This is byte amplification with an exact mechanism, found while
 building the positive control for F14's restorability oracle.

@@ -33,7 +33,7 @@ NS_AGENTS=agents
 DOOR=${DOOR:-http://flint-forge-door.$NS_SYS.svc}
 RUN=$(date +%s)
 
-PASS=0; FAILED=0
+PASS=0; FAILED=0; SKIPPED=0
 ok()  { PASS=$((PASS+1));     echo "  ok: $1"; }
 bad() { FAILED=$((FAILED+1)); echo "  BAD: $1"; }
 note(){ echo "  ..  $1"; }
@@ -43,22 +43,25 @@ mcx() { $K -n "$NS_SYS" exec mc-s3 -- "$@" 2>/dev/null; }
 # THE TWO DIRECTIONS NEED OPPOSITE RIG CONDITIONS, and one run cannot
 # show both.
 #
-#   COMPACT=1 (default) drives the base rebuild to run: direction 4
-#   only collects a pack another KEPT pack wholly covers, and at the
-#   shipped thresholds a drill-sized repository never builds a coverer.
+#   COMPACT=0 (DEFAULT) leaves the shipped thresholds alone, and BOTH
+#   legs work in it: the seed push already leaves a pack that covers the
+#   history, so direction 4 has a coverer, and no base rebuild runs to
+#   erase direction 5's difference before it is measured. The green run
+#   of record is this one — R3 and R4 both pass, 12/0.
 #
-#   COMPACT=0 leaves the shipped thresholds alone, so no base rebuild
-#   runs. That is the condition direction 5 is FOR: `--all` is the only
-#   thing that drops dead objects, so with rebuilds frequent the base
-#   collects the residue in BOTH arms and erases the difference before
-#   it can be measured. A run at COMPACT=1 says nothing about
-#   direction 5, and this is why.
+#   COMPACT=1 drives a base rebuild every cycle. Direction 4 still shows
+#   (larger, because more is superseded), but direction 5 CANNOT: `--all`
+#   is the only thing that drops dead objects, so a frequent base
+#   collects the residue in BOTH arms and there is no pinning left to
+#   observe. R3 is SKIPPED there rather than failed — the condition is
+#   wrong for that claim, which is not the same as the claim being
+#   false.
 render_rig() {
   # The knobs go through a FILE, not `awk -v`: awk rejects a newline in
   # a -v assignment, and the multi-line block silently became an error
   # on every line of the template.
   local kf; kf=$(mktemp)
-  if [ "${COMPACT:-1}" = 1 ]; then
+  if [ "${COMPACT:-0}" = 1 ]; then
     cat > "$kf" <<'KNOBS'
   syncerEnv:
     FLINT_FORGE_FOLD_MIN_MIB: "0"
@@ -154,8 +157,11 @@ except Exception: pass' 2>/dev/null
 
 verdict() {
   echo
-  echo "══ residue drill: $PASS passed, $FAILED failed ══"
+  echo "══ residue drill: $PASS passed, $FAILED failed, $SKIPPED skipped ══"
   [ "$FAILED" -gt 0 ] && { echo "   FAILED"; return 1; }
+  # A leg that could not run is not a leg that passed, and the verdict
+  # says so rather than folding it into the green.
+  [ "$SKIPPED" -gt 0 ] && { echo "   GREEN, with $SKIPPED leg(s) skipped for the rig condition"; return 2; }
   echo "   GREEN"; return 0
 }
 
@@ -237,6 +243,13 @@ main() {
   # land an accepted push, and ask whether the snapshot names it.
   # The control must say YES or the leg is not testing the rule.
   leg R3 "direction 5: the pack a REFUSED push leaves is not named by the accepted set"
+  if [ "${COMPACT:-0}" = 1 ]; then
+    note "SKIPPED at COMPACT=1: a base rebuild runs every cycle and \`--all\` drops dead"
+    note "objects, so the residue is collected in BOTH arms and there is no pinning to"
+    note "observe. This leg needs COMPACT=0. Skipped, not failed — the condition is"
+    note "wrong for the claim, which is not the same as the claim being false."
+    SKIPPED=$((SKIPPED+1))
+  else
   local r before after residue named verdict_ctl="" verdict_treated=""
   for r in ctl treated; do
     local pre; pre=$(door_pre "$r")
@@ -294,6 +307,7 @@ main() {
 
   # Bytes, reported but not asserted: they move with compaction timing
   # and with pack-name collisions, so they are context, not the claim.
+  fi
   local nc bc nt bt
   read -r nc bc <<<"$(named_bytes ctl)"
   read -r nt bt <<<"$(named_bytes treated)"

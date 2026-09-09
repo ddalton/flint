@@ -1,0 +1,39 @@
+residue drill — context kind-forge-residue, images drill-fix1
+
+── R0 — the rig stands up and BOTH repositories serve
+  ok: both repositories reached Ready
+
+── R1 — the treated repository's syncer actually received the two flags
+  ok: treated carries FLINT_FORGE_NAME_ACCEPTED_SET
+  ok: treated carries FLINT_FORGE_RECLAIM_AT_REST
+  ok: the control carries neither flag
+
+── R2 — the same workload against both, and the refusals are real
+  ..  ctl push 1: To http://flint-forge-door.forge-system.svc/git/agents/ctl.git| ! [remote rejected] agent/b1 -> agent/b1 (non-fast-forward update to refs/he
+  ..  ctl push 2: To http://flint-forge-door.forge-system.svc/git/agents/ctl.git| ! [remote rejected] agent/b2 -> agent/b2 (non-fast-forward update to refs/he
+  ..  ctl push 3: To http://flint-forge-door.forge-system.svc/git/agents/ctl.git| ! [remote rejected] agent/b3 -> agent/b3 (non-fast-forward update to refs/he
+  ..  treated push 1: To http://flint-forge-door.forge-system.svc/git/agents/treated.git| ! [remote rejected] agent/b1 -> agent/b1 (non-fast-forward update to ref
+  ..  treated push 2: To http://flint-forge-door.forge-system.svc/git/agents/treated.git| ! [remote rejected] agent/b2 -> agent/b2 (non-fast-forward update to ref
+  ..  treated push 3: To http://flint-forge-door.forge-system.svc/git/agents/treated.git| ! [remote rejected] agent/b3 -> agent/b3 (non-fast-forward update to ref
+  ..  refusals: ctl 3/3, treated 3/3
+  ok: every non-fast-forward was refused in both arms
+
+── R3 — direction 5: the pack a REFUSED push leaves is not named by the accepted set
+  ..  SKIPPED at COMPACT=1: a base rebuild runs every cycle and `--all` drops dead
+  ..  objects, so the residue is collected in BOTH arms and there is no pinning to
+  ..  observe. This leg needs COMPACT=0. Skipped, not failed — the condition is
+  ..  wrong for the claim, which is not the same as the claim being false.
+  ..  named totals — ctl: 3 pack(s) 28884 B;  treated: 3 pack(s) 28882 B
+
+── R4 — direction 4: a RESTART collects what is left, and the control's does not
+  ..  after restart — ctl: 3 pack(s) 28884 B (was 28884 B);  treated: 1 pack(s) 9676 B (was 28882 B)
+  ok: both arms still name packs (neither emptied itself)
+  ok: the treated named set did not grow across the restart (28882 B -> 9676 B)
+  ok: after the restart treated names 9676 B against the control's 28884 B
+
+── R5 — and the treated repository still serves a clone that fsck's
+  ok: a fresh clone of the treated repository passes git fsck --strict
+  ok: the control clones cleanly too (R5 discriminates)
+
+══ residue drill: 10 passed, 0 failed, 1 skipped ══
+   GREEN, with 1 leg(s) skipped for the rig condition
