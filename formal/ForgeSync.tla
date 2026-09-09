@@ -175,6 +175,7 @@ CONSTANTS
   ReclaimAtRestore,     \* DIRECTION 4: a reclaiming rebuild between the restore and the first served hook
   ReclaimWhileServing,  \* mutation: the reclaim's relaxed rule, taken on a SERVING syncer
   ReclaimBySet,         \* DIRECTION 4, THE FREE FORM: the coverer is the KEPT SET, not a new pack
+  RestoreLosesQueue,    \* a restore begins a FRESH incarnation: pending requests are gone
   NameAcceptedSet,      \* DIRECTION 5: a batch names the packs it ACCEPTED, never the directory
   ForgetPushPack,       \* mutation: direction 5 without the push->pack mapping
   ProveFromDisk,        \* mutation: a proof is taken over the object DIRECTORY, not the named packs (F2)
@@ -544,7 +545,27 @@ Restore(s) ==
                    \* "pushing", so while this syncer sits here NO push
                    \* can reach it and no pack can be waiting for a ref.
                    /\ st' = [st EXCEPT ![s] = IF ReclaimAtRestore THEN "reclaiming" ELSE "serving"]
-                   /\ UNCHANGED <<lease, batch, fold, unrestorable, pushState, quiet>>
+                   \* A RESTORE BEGINS A FRESH INCARNATION. `restore::restore`
+                   \* is called ONCE (server.rs:238) before the first
+                   \* Phase::Serving, and a lease loss returns Fenced and
+                   \* exits — so the process that restores has an EMPTY
+                   \* request queue and cannot land a push whose
+                   \* proc-receive request it never received. Without this
+                   \* the model lands such a push anyway, because Queued(s)
+                   \* is derived from the pack being on DISK.
+                   \*
+                   \* Reset to "new", not to a dead state: the client is
+                   \* free to RETRY, and the pack is still on disk under the
+                   \* same name — pack names are many-to-one, so an
+                   \* identical-content retry reuses it (measured
+                   \* 2026-09-08). That is the hazard this must not assume
+                   \* away while removing the other one.
+                   /\ pushState' = IF RestoreLosesQueue
+                                     THEN [q \in Pushes |->
+                                             IF pushTo[q] = s /\ q \notin snap.history
+                                               THEN "new" ELSE pushState[q]]
+                                     ELSE pushState
+                   /\ UNCHANGED <<lease, batch, fold, unrestorable, quiet>>
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, lastTok, hbDue,
                  pushTo, crashes, renewBudget, claimBudget, ackNotDurable,
                  skipOverMovement, stragglerLand, toldFailedButDurable,

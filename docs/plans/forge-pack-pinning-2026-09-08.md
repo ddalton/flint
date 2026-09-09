@@ -261,34 +261,64 @@ With the two guards fixed, `ForgeSyncReclaimAtRestore` **VIOLATES**
 violates with `MaxCrashes = 0` in 1min 08s — so it does not depend on
 the crash path.
 
-**But the counterexample is not obviously realisable, and that is the
-open question.** Its trace runs `CleanRelease -> ClaimReleased ->
-Restore` while a push is still queued, so the reclaim drops the pack of
-a push that lands afterwards. `restore::restore` is called ONCE, at
-`server.rs:238`, before the first `Phase::Serving`; a lease loss returns
-`ForgeError::Fenced` and the process exits. A real restore therefore
-always happens in a FRESH process whose in-memory queue is empty, and
-`Queued(s)` in the model is derived from the pack being on DISK rather
-than from that queue — which is more permissive than the code.
+**THE REFUTATION SURVIVED THE FIX. DIRECTION 4 IS DEAD.**
 
-**What has to happen next, in order:**
+The first counterexample ran `CleanRelease -> ClaimReleased -> Restore`
+with a push still queued, which the code cannot do: `restore::restore`
+is called ONCE (`server.rs:238`) before the first `Phase::Serving`, and a
+lease loss returns `Fenced` and exits, so a real restore always begins a
+FRESH process with an empty request queue. `Queued(s)` in the model was
+derived from the pack being on DISK, which is more permissive.
 
-1. Make `Queued` (or `Restore`) match the implementation: a restore
-   begins a new incarnation with no pending requests. Then re-run.
-2. If it still violates, direction 4 is refuted and this whole section
-   goes.
-3. If it holds, the refutation was a modelling artefact — but a
-   NEIGHBOURING hazard remains and is real: pack names are MANY-TO-ONE
-   (measured today), so an identical-content retry of a push refused
-   during the window produces the SAME pack name, which
-   `Listing(s) == localPacks \ retained` would then exclude. That one is
-   a code-level concern whether or not the model finds it.
+So the model was corrected — constant `RestoreLosesQueue`, TRUE only in
+the two reclaim cfgs, leaving the other 21 runs untouched. A restore now
+resets every pending push destined for that syncer to **"new"**: the
+request is gone, and the client is FREE TO RETRY. Resetting to a dead
+state instead would have assumed away the hazard while removing the
+other one.
 
-Everything MEASURED about direction 4 stands — it collects 100% of the
-residue at every base cadence, building nothing. Only its SAFETY is
-unresolved.
+**It still violates** — 4min 11s, 51,070,395 generated / 13,226,538
+distinct, counts distinct from both the vacuous baseline and the earlier
+run, so the change took. The set form `ForgeSyncReclaimBySet` violates
+too (4min 01s, 45,151,741 / 11,868,582).
 
-## Direction 4 — reclaim under quiescence (as originally argued)
+**The mechanism, and it is grounded in a measured property of real git:**
+
+| state | |
+|---|---|
+| 19 | `Restore` — the syncer enters the window; p2's pending request is lost |
+| 20-24 | the reclaim commits: p2's pack is unreachable, so it goes to `retained` |
+| 25 | `ReclaimDone` — the window closes, the syncer serves |
+| **26** | **the client RETRIES p2** |
+| 27-32 | the batch lands p2: `history = {p1,p2}` but `snap.packs = {p1,f1}` |
+
+`Listing(s) == localPacks[s] \ retained[s]` excludes the pack, so the
+landed push's objects are in nothing the snapshot names.
+
+**The window stops pushes ARRIVING. It does not stop the client
+RETRYING afterwards.** And the retry reuses the pack NAME, because pack
+names are many-to-one — identical content, identical checksum, measured
+2026-09-08. That is the same property recorded above as a constraint on
+direction 5; here it is what kills direction 4.
+
+**Why the STRICT rule is safe and every relaxed one is not.** Under
+strict coverage an input is superseded only when the roll-up HOLDS
+everything it holds, so a later landing is covered by the roll-up. The
+relaxed rule drops objects that are NOT in the roll-up — and those are
+exactly the objects a retry makes reachable. Quiescence does not change
+that, because the retry happens after the window.
+
+**So all four relaxed-coverage variants are now refuted:** direction 1
+while serving (`FoldReachableCoverage`), `ReclaimWhileServing`,
+`ReclaimAtRestore`, and `ReclaimBySet`. **The residue has no safe
+collector under the current listing rule**, and direction 5 — name the
+packs of accepted pushes — is the only surviving fix. Note it is
+probably immune to this specific hazard by construction:
+`AcceptedListing == (belief.packs \ retained) \cup {batch.push}` names
+the current push's pack EXPLICITLY rather than reading the directory
+minus retained. That is worth checking rather than assuming.
+
+## Direction 4 — reclaim under quiescence (REFUTED; the original argument, kept for the record)
 
 Cut the knot where the ambiguity does not exist. The hazard is entirely
 "a pack on disk whose ref has not moved YET". There is a window in which
