@@ -261,7 +261,46 @@ With the two guards fixed, `ForgeSyncReclaimAtRestore` **VIOLATES**
 violates with `MaxCrashes = 0` in 1min 08s — so it does not depend on
 the crash path.
 
-**THE REFUTATION SURVIVED THE FIX. DIRECTION 4 IS DEAD.**
+**DIRECTION 4 IS ALIVE — IF IT UNLINKS INSTEAD OF RETAINING.**
+
+The refutation below is real but NARROWER than it looks. The loss does
+not come from UNNAMING the pack; it comes from unnaming it into
+`retained`, because `Listing(s) == localPacks[s] \ retained[s]` excludes
+a retained pack permanently, so a retry reusing that pack NAME cannot be
+named. **Retention exists for readers mid-clone, and in the reclaim
+window there are none** — the syncer is not serving. So the reclaim may
+UNLINK what it drops.
+
+`ForgeSyncReclaimUnlinks` **HOLDS**: 409,336,983 generated, 86,039,237
+distinct, depth 62, 1h 33min. Flipping the one constant flips the
+verdict — `ReclaimUnlinks = FALSE` violates in 4 min at 13,226,538
+distinct — so this is not a vacuous green.
+
+**And the window is load-bearing**, which is the control that matters:
+`ForgeSyncReclaimUnlinksServing`, differing in EXACTLY ONE constant
+(`ReclaimWhileServing`), violates `Inv_AckedIsDurable` in 1min 12s.
+Outside the window, unlinking destroys a pack an ACKED push needed. So
+the green is "safe *there*", not "unlinking is safe".
+
+**What this gives forge: a COLLECTOR.** Combined with the measurement —
+the greedy set collects 100% of the residue at every base cadence
+building nothing — the reclaim costs a reachability read and a snapshot
+CAS. No `pack-objects`, no upload, nothing on the wake path. That is
+what turns the growth from unbounded into bounded by the restart
+interval.
+
+**Direction 5 also survives this hazard.** `ForgeSyncNameAcceptedSetRetry`
+HOLDS at 26,867,483 distinct (vs 25,203,710 without the retry path, so
+the added behaviours are real). `AcceptedListing == (belief.packs \
+retained) \cup {batch.push}` names the current push's pack EXPLICITLY,
+which is exactly the escape `Listing` lacks.
+
+**So the finding now has both halves: a REDUCER (direction 5, −78-81%)
+and a COLLECTOR (direction 4 with unlink).** Neither is built.
+
+### The refutation this replaced, kept because it is why unlink is needed
+
+**THE RETAIN FORM IS DEAD.**
 
 The first counterexample ran `CleanRelease -> ClaimReleased -> Restore`
 with a push still queued, which the code cannot do: `restore::restore`

@@ -176,6 +176,7 @@ CONSTANTS
   ReclaimWhileServing,  \* mutation: the reclaim's relaxed rule, taken on a SERVING syncer
   ReclaimBySet,         \* DIRECTION 4, THE FREE FORM: the coverer is the KEPT SET, not a new pack
   RestoreLosesQueue,    \* a restore begins a FRESH incarnation: pending requests are gone
+  ReclaimUnlinks,       \* the reclaim UNLINKS what it drops instead of retaining it
   NameAcceptedSet,      \* DIRECTION 5: a batch names the packs it ACCEPTED, never the directory
   ForgetPushPack,       \* mutation: direction 5 without the push->pack mapping
   ProveFromDisk,        \* mutation: a proof is taken over the object DIRECTORY, not the named packs (F2)
@@ -1236,8 +1237,21 @@ FoldCommit(s) ==
               \* The second conjunct is what this module used to lack
               \* entirely — the inputs simply vanished here — so the state
               \* audit F2 lives in did not exist to be reached.
-              /\ localPacks' = [localPacks EXCEPT ![s] = @ \cup {f}]
-              /\ retained' = [retained EXCEPT ![s] = @ \cup D]
+              \* RETENTION EXISTS FOR READERS MID-CLONE. In the reclaim
+              \* window there are none — the syncer is not serving — so a
+              \* reclaim may UNLINK what it drops rather than retain it.
+              \* Not cosmetic: `Listing == localPacks \ retained` excludes
+              \* a retained pack PERMANENTLY, and direction 4's refutation
+              \* runs entirely through that exclusion — the client retries,
+              \* the retry reuses the pack NAME because names are
+              \* many-to-one, and the listing cannot name it. Unlinking
+              \* takes the pack off the DISK instead, so a retry's pack
+              \* lands in localPacks and IS nameable.
+              /\ IF ReclaimUnlinks /\ fold[s].atRest
+                   THEN /\ localPacks' = [localPacks EXCEPT ![s] = (@ \ D) \cup {f}]
+                        /\ retained' = retained
+                   ELSE /\ localPacks' = [localPacks EXCEPT ![s] = @ \cup {f}]
+                        /\ retained' = [retained EXCEPT ![s] = @ \cup D]
               /\ fold' = [fold EXCEPT ![s] = NoFold]
               /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
               /\ sensorMoved' = [sensorMoved EXCEPT ![s] = TRUE]
