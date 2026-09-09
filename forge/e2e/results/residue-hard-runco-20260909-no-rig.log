@@ -1,0 +1,55 @@
+residue HARD drill — context kubernetes-admin@kubernetes, images drill-8ee0c0ad, concurrency 6
+
+── H1 — 6 concurrent ACCEPTED pushes — every new pack must be named
+  ..  ctl: 0 new pack(s) on disk after the burst, 8 named, 0 on disk but unnamed
+  BAD: ctl: the burst produced 0 new pack(s) — it did not actually run concurrently
+  ok: ctl: NO pack is on disk but unnamed — every accepted push was named
+  BAD: ctl: only 0 of 6 branches landed
+        · Error from server (NotFound): namespaces "agents" not found
+  ..  treated: 0 new pack(s) on disk after the burst, 4 named, 0 on disk but unnamed
+  BAD: treated: the burst produced 0 new pack(s) — it did not actually run concurrently
+  ok: treated: NO pack is on disk but unnamed — every accepted push was named
+  BAD: treated: only 0 of 6 branches landed
+        · Error from server (NotFound): namespaces "agents" not found
+  BAD: H1: ctl does not clone+fsck — Error from server (NotFound): namespaces "agents" not found
+  BAD: H1: treated does not clone+fsck — Error from server (NotFound): namespaces "agents" not found
+
+── H2 — 6 concurrent pushes, half REFUSED — no accepted pack may be declined
+  ..  ctl: 0 pack(s) on disk but unnamed after the mixed burst
+  ok: ctl: names every pack, as the directory rule must
+  BAD: ctl: none of the accepted half landed
+  ..  treated: 0 pack(s) on disk but unnamed after the mixed burst
+  ..  treated: declined none this round (the refusals may have shared names)
+  BAD: treated: none of the accepted half landed
+  BAD: H2: ctl does not clone+fsck — Error from server (NotFound): namespaces "agents" not found
+  BAD: H2: treated does not clone+fsck — Error from server (NotFound): namespaces "agents" not found
+
+── H3 — a MIXED push (one ref accepted, one refused) must still be NAMED
+  ..  ctl: the mixed push produced no new pack (content may have deduplicated)
+  BAD: ctl: the accepted half of the mixed push did not land
+  ..  treated: the mixed push produced no new pack (content may have deduplicated)
+  BAD: treated: the accepted half of the mixed push did not land
+  BAD: H3: ctl does not clone+fsck — Error from server (NotFound): namespaces "agents" not found
+  BAD: H3: treated does not clone+fsck — Error from server (NotFound): namespaces "agents" not found
+
+── H4 — an ATOMIC push refused as a whole leaves a pack the accepted set declines
+  ..  ctl: atomic push said: Error from server (NotFound): namespaces "agents" not found
+  ok: ctl: the atomic push was refused as a whole (no ref landed)
+  BAD: ctl: the atomic push left NO pack — this leg tested nothing (did the client refuse it locally?)
+  ..  treated: atomic push said: Error from server (NotFound): namespaces "agents" not found
+  ok: treated: the atomic push was refused as a whole (no ref landed)
+  BAD: treated: the atomic push left NO pack — this leg tested nothing (did the client refuse it locally?)
+  BAD: H4: ctl does not clone+fsck — Error from server (NotFound): namespaces "agents" not found
+  BAD: H4: treated does not clone+fsck — Error from server (NotFound): namespaces "agents" not found
+
+── H5 — the collector collects residue direction 5 did not prevent, then converges
+  ..  with direction 5 off, treated names 4 pack(s) — residue included
+  ..  restart 1: treated names 4 pack(s) (was 4)
+  BAD: H5/restart1: treated does not clone+fsck — Error from server (NotFound): namespaces "agents" not found
+  BAD: the collector never collected — 'converged' would be vacuous
+  ok: ctl held at 8 pack(s) across a restart — the collector is what moved treated
+  BAD: H5: ctl does not clone+fsck — Error from server (NotFound): namespaces "agents" not found
+
+══ residue HARD drill: 6 passed, 21 failed ══
+   FAILED
+HARD RC=1

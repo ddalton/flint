@@ -1,0 +1,59 @@
+residue HARD drill — context kubernetes-admin@kubernetes, images drill-8ee0c0ad, concurrency 6
+
+── H1 — 6 concurrent ACCEPTED pushes — every new pack must be named
+  ..  ctl: 6 new pack(s) on disk after the burst, 15 named, 0 on disk but unnamed
+  ok: ctl: the burst produced 6 new packs
+  ok: ctl: NO pack is on disk but unnamed — every accepted push was named
+  ok: ctl: all 6 branches landed
+  ..  treated: 6 new pack(s) on disk after the burst, 11 named, 0 on disk but unnamed
+  ok: treated: the burst produced 6 new packs
+  ok: treated: NO pack is on disk but unnamed — every accepted push was named
+  ok: treated: all 6 branches landed
+  ok: H1: ctl clones, fsck --strict passes, and every named ref resolves
+  ok: H1: treated clones, fsck --strict passes, and every named ref resolves
+
+── H2 — 6 concurrent pushes, half REFUSED — no accepted pack may be declined
+  ..  ctl: 0 pack(s) on disk but unnamed after the mixed burst
+  ok: ctl: names every pack, as the directory rule must
+  ok: ctl: the accepted half of the burst landed (1)
+  ..  treated: 3 pack(s) on disk but unnamed after the mixed burst
+  ok: treated: declines 3 refused pack(s)
+  ok: treated: the accepted half of the burst landed (3)
+  ok: H2: ctl clones, fsck --strict passes, and every named ref resolves
+  ok: H2: treated clones, fsck --strict passes, and every named ref resolves
+
+── H3 — a MIXED push (one ref accepted, one refused) must still be NAMED
+  ok: ctl: the mixed push's pack is NAMED — accepted objects are not stranded
+  ok: ctl: the accepted half of the mixed push landed
+  ok: treated: the mixed push's pack is NAMED — accepted objects are not stranded
+  ok: treated: the accepted half of the mixed push landed
+  ok: H3: ctl clones, fsck --strict passes, and every named ref resolves
+  ok: H3: treated clones, fsck --strict passes, and every named ref resolves
+
+── H4 — an ATOMIC push refused as a whole leaves a pack the accepted set declines
+  ..  ctl: atomic push said:  ! [remote rejected] HEAD~1 -> agent/c2 (non-fast-forward update to refs/heads/agent/c2)| ! [remote rejected] HEAD -> ag
+  ok: ctl: the atomic push was refused as a whole (no ref landed)
+  ok: ctl: names the refused atomic push's pack (the pinning)
+  ..  treated: atomic push said:  ! [remote rejected] HEAD~1 -> agent/c2 (non-fast-forward update to refs/heads/agent/c2)| ! [remote rejected] HEAD -> ag
+  ok: treated: the atomic push was refused as a whole (no ref landed)
+  ok: treated: declines the wholly-refused atomic push's pack
+  ok: H4: ctl clones, fsck --strict passes, and every named ref resolves
+  ok: H4: treated clones, fsck --strict passes, and every named ref resolves
+
+── H5 — the collector collects residue direction 5 did not prevent, then converges
+  ..  with direction 5 off, treated names 20 pack(s) — residue included
+  ..  restart 1: treated names 17 pack(s) (was 20)
+  ok: H5/restart1: treated clones, fsck --strict passes, and every named ref resolves
+  ..  restart 2: treated names 17 pack(s) (was 17)
+  ok: H5/restart2: treated clones, fsck --strict passes, and every named ref resolves
+  ..  restart 3: treated names 17 pack(s) (was 17)
+  ok: H5/restart3: treated clones, fsck --strict passes, and every named ref resolves
+  ok: converged — the last restart changed nothing
+  ok: the collector actually collected, so the plateau means something
+  ok: ctl held at 20 pack(s) across a restart — the collector is what moved treated
+  ok: H5: ctl clones, fsck --strict passes, and every named ref resolves
+
+══ residue HARD drill: 33 passed, 0 failed ══
+   GREEN
+KEEP=1: namespaces left standing
+HARD RC=0

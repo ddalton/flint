@@ -1,0 +1,24 @@
+# The collector's wake cost ON A REAL NODE — runco, 2026-09-09
+#
+# i4i.large spot (x86_64, AL2023, kernel 6.18), 3-node all-spot
+# cluster, REAL S3 (us-west-1). Read from the syncer's own log line,
+# which this release added for exactly this purpose.
+#
+#   flint-forge: reclaim examined 17 pack(s) in 17 ms, dropped 0 (0 B)
+#
+# THE STEADY STATE, which is the one that matters: it walked every
+# named pack, found nothing to collect, and returned BEFORE the CAS.
+# So 17 ms is the walk and nothing else — ~1 ms/pack.
+#
+# The COLLECTING case reads higher and must not be quoted as the wake
+# cost: 'examined 6 pack(s) in 42 ms, dropped 2' includes an S3 CAS
+# round trip and ten unlinks. That is network, not the walk.
+#
+# Against the models:
+#   lima aarch64   ~0.5 ms/pack
+#   runco x86_64   ~1.0 ms/pack   (2 vCPU spot node)
+#   darwin arm64  ~12.9 ms/pack   (the outlier — macOS forks slowly)
+#
+# The OBJECT term (~6 us/object) is NOT validated here: the drill
+# repositories are tiny. The 1M-object extrapolation remains an
+# extrapolation.
