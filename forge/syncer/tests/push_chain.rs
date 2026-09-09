@@ -539,7 +539,7 @@ fn classify_residue(
     let dir = repo.join("objects/pack");
     let mut r = Residue::default();
     for p in &snap.packs {
-        let bytes = std::fs::metadata(dir.join(p)).map(|m| m.len()).unwrap_or(0);
+        let bytes = pack_bytes(&dir, p);
         r.named += bytes;
         if !is_redundant(scratch, &dir, &snap.packs, p, &snap.refs) {
             continue;
@@ -594,7 +594,7 @@ fn zero_work_droppable(
         let stem = p.trim_end_matches(".pack");
         let objs = pack_objects(repo, &dir.join(format!("{stem}.idx")));
         live.insert(p.clone(), objs.into_iter().filter(|o| reach.contains(o)).collect());
-        size.insert(p.clone(), std::fs::metadata(dir.join(p)).map(|m| m.len()).unwrap_or(0));
+        size.insert(p.clone(), pack_bytes(&dir, p));
     }
     let mut kept: Vec<String> = named.to_vec();
     let (mut n, mut bytes) = (0usize, 0u64);
@@ -639,11 +639,26 @@ fn covering_pack(
         let objs: std::collections::HashSet<String> =
             pack_objects(repo, &dir.join(format!("{stem}.idx"))).into_iter().collect();
         if reach.iter().all(|o| objs.contains(o)) {
-            let bytes = std::fs::metadata(dir.join(p)).map(|m| m.len()).unwrap_or(0);
+            let bytes = pack_bytes(&dir, p);
             return Some((p.clone(), bytes));
         }
     }
     None
+}
+
+/// The size of a pack the snapshot NAMES — and a named pack that is not
+/// on disk is a failure, never a zero.
+///
+/// This was `.map(|m| m.len()).unwrap_or(0)` in four places, which is an
+/// error returning a LEGAL value: a pack that vanished (retention
+/// unlink, a sweep, a racing fold) would contribute 0 bytes to `named`
+/// AND 0 to `redundant`, so it would CANCEL in every ratio this file
+/// reports and leave the percentages looking right. A symmetric error is
+/// invisible precisely because it is symmetric.
+fn pack_bytes(dir: &Path, pack: &str) -> u64 {
+    std::fs::metadata(dir.join(pack))
+        .unwrap_or_else(|e| panic!("the snapshot names {pack} but it is not on disk: {e}"))
+        .len()
 }
 
 /// Every object id a pack holds, from its index.
@@ -915,7 +930,7 @@ async fn measure_what_a_refused_push_leaves_in_the_snapshot() {
     );
     for p in &snap.packs {
         let stem = p.trim_end_matches(".pack");
-        let bytes = std::fs::metadata(dir.join(p)).map(|m| m.len()).unwrap_or(0);
+        let bytes = pack_bytes(&dir, p);
         let objs = pack_objects(&rig.repo, &dir.join(format!("{stem}.idx")));
         let live = objs.iter().filter(|o| reach.contains(*o)).count();
         let red = is_redundant(&scratch, &dir, &snap.packs, p, &snap.refs);
