@@ -1,0 +1,44 @@
+residue drill — context kubernetes-admin@kubernetes, images hard-amd64
+
+── R0 — the rig stands up and BOTH repositories serve
+  ok: the bucket <bucket> is reachable
+  ok: both repositories reached Ready
+
+── R1 — the treated repository's syncer actually received the two flags
+  ok: treated carries FLINT_FORGE_NAME_ACCEPTED_SET
+  ok: treated carries FLINT_FORGE_RECLAIM_AT_REST
+  ok: the control carries FLINT_FORGE_NAME_ACCEPTED_SET=0
+  ok: the control carries FLINT_FORGE_RECLAIM_AT_REST=0
+
+── R2 — the same workload against both, and the refusals are real
+  ..  ctl push 1: To http://flint-forge-door.forge-system.svc/git/agents/ctl.git| ! [remote rejected] agent/b1 -> agent/b1 (non-fast-forward update to refs/he
+  ..  ctl push 2: To http://flint-forge-door.forge-system.svc/git/agents/ctl.git| ! [remote rejected] agent/b2 -> agent/b2 (non-fast-forward update to refs/he
+  ..  ctl push 3: To http://flint-forge-door.forge-system.svc/git/agents/ctl.git| ! [remote rejected] agent/b3 -> agent/b3 (non-fast-forward update to refs/he
+  ..  treated push 1: To http://flint-forge-door.forge-system.svc/git/agents/treated.git| ! [remote rejected] agent/b1 -> agent/b1 (non-fast-forward update to ref
+  ..  treated push 2: To http://flint-forge-door.forge-system.svc/git/agents/treated.git| ! [remote rejected] agent/b2 -> agent/b2 (non-fast-forward update to ref
+  ..  treated push 3: To http://flint-forge-door.forge-system.svc/git/agents/treated.git| ! [remote rejected] agent/b3 -> agent/b3 (non-fast-forward update to ref
+  ..  refusals: ctl 3/3, treated 3/3
+  ok: every non-fast-forward was refused in both arms
+
+── R3 — direction 5: the pack a REFUSED push leaves is not named by the accepted set
+  ..  ctl: the refusal left pack-addbd1da3528854268f8f2ba7b710278f22c9933.pack on disk
+  ..  ctl: the snapshot NAMES pack-addbd1da3528854268f8f2ba7b710278f22c9933.pack
+  ..  treated: the refusal left pack-48c775f761bfbf4d32ad2dd45d7d4a52d033db4a.pack on disk
+  ..  treated: the snapshot does NOT name pack-48c775f761bfbf4d32ad2dd45d7d4a52d033db4a.pack
+  ok: the control NAMES the refused push's pack — the pinning is reproduced here
+  ok: direction 5 declines to name it, on the same cluster and the same workload
+  ..  named totals — ctl: 8 pack(s) 76983 B;  treated: 6 pack(s) 57737 B
+
+── R4 — direction 4: a RESTART collects what is left, and the control's does not
+  ..  after restart — ctl: 8 pack(s) 76983 B (was 76983 B);  treated: 4 pack(s) 38531 B (was 57737 B)
+  ok: both arms still name packs (neither emptied itself)
+  ok: the treated named set did not grow across the restart (57737 B -> 38531 B)
+  ok: after the restart treated names 38531 B against the control's 76983 B
+
+── R5 — and the treated repository still serves a clone that fsck's
+  ok: a fresh clone of the treated repository passes git fsck --strict
+  ok: the control clones cleanly too (R5 discriminates)
+
+══ residue drill: 14 passed, 0 failed, 0 skipped ══
+   GREEN
+KEEP=1: namespaces left standing
