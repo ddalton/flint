@@ -1,0 +1,66 @@
+published-artifact drill — context kind-forge-pub, chart /Users/ddalton/github/flint/flint-forge-chart
+  ..  chart names: dilipdalton/flint-forge-git:1.47.0
+  ..               dilipdalton/flint-forge-syncer:1.47.0
+  ..               dilipdalton/flint-forge-operator:1.47.0
+
+── P0 — every image the chart names is actually published
+  ok: dilipdalton/flint-forge-operator:1.47.0 is on the registry
+  ok: dilipdalton/flint-forge-git:1.47.0 is on the registry
+  ok: dilipdalton/flint-forge-syncer:1.47.0 is on the registry
+
+── P1 — the chart names the newest published tag, not an older one
+  ok: the chart is current at 1.47.0
+
+── P2 — the images are PULLED from the registry, not found in the node cache
+  ..  cleared 3 cached image(s) from 1 node(s)
+  ok: the node cache was cleared before install (the pull below cannot be satisfied locally)
+
+── P3 — helm install the chart as shipped — no --set of any image
+  ok: the store is up and the bucket exists
+  ok: the chart installed with its own image defaults
+
+── P4 — a FlintRepo becomes a serving repository
+  ok: the chart installed the FlintRepo CRD
+  ok: the FlintRepo was accepted by the apiserver
+  ok: agents/proj reached Ready in 5s
+  ok: the agent pod is running the published forge-git image
+  ok: all 3 distinct flint image(s) carry a registry digest — operator, git and syncer all came from Docker Hub
+        · docker.io/dilipdalton/flint-forge-git@sha256:755d18e93cb960ef73e46f7836891d865fdcc0649e4e4b8b8fbe6bea19a3bde4
+        · docker.io/dilipdalton/flint-forge-operator@sha256:2dbafae37397fe0030b693436e4a5ae5ea8b0863a18a176f48509d8498a0e1b4
+        · docker.io/dilipdalton/flint-forge-syncer@sha256:e48eb30b07f7d0fbb79f2993744ff2471ef86fc3504c67cd395e5a307a3e07f5
+
+── P5 — clone, commit and push — and the BUCKET names the ref before the client is told ok
+  ok: the writer seeds main via refs/for/main
+  ok: an agent branch push is accepted
+  ok: the bucket's snapshot names agent/pub-1788958761
+  ..  agent branch tip b31b4c0de15a1fb3ac42cac34d311c1982733827
+
+── P6 — main is protected, and the refusal names the remedy
+  ok: a direct push to protected main (refused)
+        ·  ! [remote rejected] main -> main (refs/heads/main is protected: push to refs/for/main to propose a merge)
+  ok: the same change proposed through refs/for/main merges
+  ok: main now carries it
+
+── P7 — the published forge-git image carries the 'git propose' verb
+  ok: an absent verb reports 'is not a git command' — the dispatch check has teeth
+  ok: git propose proposes into the default branch
+
+── P8 — the pod is destroyed and the published image restores from the bucket alone
+  ..  server pod deleted — the emptyDir went with it, so the bucket is all that is left
+  ok: main is at the same commit after the restore (69d733912eea25dc1f25fdcc19579dcb00157d29)
+  ok: a FRESH clone from the restored repository passes git fsck --strict
+
+── P9 — the chart's default leaves /repo/<ns>/<name>/files unrouted
+  ..  default install: git route -> 401, files route -> 404
+  ok: the git door on the same listener answers (401) — the port and the path are right
+  ok: the file route is absent by default (404, no route mounted)
+  ok: the rendered door args do not carry --repo-files
+
+── P10 — setting door.repoFiles.enabled opens exactly that route, on the same image and port
+  ok: the rendered door now carries --repo-files
+  ..  with the door open: git route -> 401, files route -> 401
+  ok: the same URL now reaches the handler (401) — so P9's 404 was the flag, not a dead route
+  ok: the git route is unchanged at 401 — one listener, two tables
+
+══ published artifact: 28 passed, 0 failed, 0 pending ══
+   GREEN

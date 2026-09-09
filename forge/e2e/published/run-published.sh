@@ -17,6 +17,14 @@
 # job forge exists for: clone, push durably, move a protected branch,
 # lose its pod, and serve a clone restored from the bucket alone.
 #
+# P9/P10 ask the other question a published artifact is uniquely able
+# to answer: WHICH DOORS DOES A DEFAULT INSTALL OPEN. values.yaml
+# claims `--git-only` does not imply `--repo-files` so that an upgrade
+# cannot grow a new door onto tenant data. That is a claim about the
+# shipped default, so only a run that sets nothing can test it — and
+# it is checked as a BICONDITIONAL, because a door that is shut and a
+# door that is broken both refuse.
+#
 #   ./run-published.sh                 # against the current kind context
 #   CTX=kind-forge-pub ./run-published.sh
 #   KEEP=1 ./run-published.sh          # leave the cluster up afterwards
@@ -136,6 +144,28 @@ expect() { # expect <pod> ok|refuse <label> <script>
 }
 
 mcx() { $K -n "$NS_SYS" exec mc-s3 -- "$@" 2>/dev/null; }
+
+# HTTP STATUS from inside an agent pod. curl is not in the forge-git
+# image (Alpine + git + git-daemon, nothing else); busybox wget is, and
+# `-S` puts the status line on stderr, so both forms are parsed.
+#
+# An unreachable door must NOT come back as a number that means
+# something else. It comes back as 000, which is neither of the two
+# codes P9/P10 discriminate on, so a dead door fails both rather than
+# passing either.
+httpcode() { # httpcode <pod> <url>
+  inpod "$1" "if command -v curl >/dev/null 2>&1; then
+                curl -s -o /dev/null -w '%{http_code}' --max-time 20 '$2'
+              else
+                wget -S -q -O /dev/null -T 20 '$2' 2>&1 |
+                  awk '{ for (i = 1; i <= NF; i++) if (\$i ~ /^HTTP\//) c = \$(i+1) }
+                       END { print (c == \"\" ? \"000\" : c) }'
+              fi" | tr -d '\r' | tr -d ' ' | grep -E '^[0-9]{3}$' | tail -1
+}
+
+# The args the SHIPPED chart actually rendered onto the door.
+door_args() { $K -n "$NS_SYS" get deploy flint-forge-door \
+                -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null; }
 
 main() {
   [ -n "$CTX" ] || { echo "no kube context; set CTX"; return 1; }
@@ -378,8 +408,32 @@ main() {
   # be in an image published before it. This leg turns green on its own
   # the first time a release carries it, which is the point of writing
   # it now rather than after.
+  #
+  # THE PROBE USED TO BE `git propose --help`, WHICH CAN NEVER SUCCEED.
+  # `git <verb> --help` is dispatched to a MAN VIEWER, and this image
+  # ships git, git-lfs and git-daemon and no `man` — so it exits 128
+  # with "no man viewer handled the request" whether or not the verb is
+  # there. 1.47.0 carries /usr/local/bin/git-propose and this leg still
+  # reported "git-propose is not in <image>": a false reason, and a leg
+  # that would have stayed PENDING through every future release while
+  # looking like it was merely waiting for one.
+  #
+  # Three checks instead, none of which touch git's help system:
+  #   1. the binary is installed;
+  #   2. it RUNS -- `git-propose --help` called directly prints its own
+  #      usage and exits 0;
+  #   3. git DISPATCHES it -- `git propose` must not answer "is not a
+  #      git command", and the control on the next line proves that
+  #      string is what a genuinely absent verb produces.
   leg P7 "the published forge-git image carries the 'git propose' verb"
-  if inpod writer "command -v git-propose >/dev/null && git propose --help >/dev/null 2>&1"; then
+  # The negative control comes FIRST: if a verb that certainly does not
+  # exist fails to produce the marker, check 3 discriminates nothing.
+  if inpod writer "git nosuchverb 2>&1 | grep -q \"is not a git command\""; then
+    ok "an absent verb reports 'is not a git command' — the dispatch check has teeth"
+  else
+    bad "an absent verb did NOT report 'is not a git command' — P7's dispatch check proves nothing"
+  fi
+  if inpod writer "command -v git-propose >/dev/null && git-propose --help >/dev/null 2>&1 && ! git propose 2>&1 | grep -q \"is not a git command\""; then
     expect writer ok "git propose proposes into the default branch" \
       "$(door_pre proj); cd /tmp/w && git checkout -q -B prop-$RUN origin/main && echo 'via propose $RUN' >> README.md && git commit -qam propose && GIT_PROPOSE_REMOTE=origin git -c http.extraHeader=\"\$A\" propose"
   else
@@ -410,6 +464,93 @@ main() {
   fi
   expect writer ok "a FRESH clone from the restored repository passes git fsck --strict" \
     "$(door_pre proj); rm -rf /tmp/fresh && G clone -q \$U /tmp/fresh && cd /tmp/fresh && git fsck --strict --no-progress >/dev/null 2>&1 && grep -q 'published-$RUN' README.md"
+
+  # ── P9 — the shipped DEFAULT does not open the file door ────────────
+  # The one claim in values.yaml that only a published artifact can
+  # test: "`--git-only` deliberately does NOT imply it: an existing
+  # install must not grow a new door onto tenant data by being
+  # upgraded." Every other drill sets its own values; this leg asks
+  # what a user who types nothing gets.
+  #
+  # The discriminator is 404-vs-401 and NOT "did it refuse". Both
+  # states refuse an unauthenticated caller, so a leg that asserted
+  # "not 200" would pass whether the door were shut or wide open and
+  # would be measuring nothing. 404 is warp with no route mounted; 401
+  # is the handler reached, demanding a token. P10 below is what makes
+  # this one mean anything.
+  leg P9 "the chart's default leaves /repo/<ns>/<name>/files unrouted"
+  local files_url="$DOOR/repo/$NS_AGENTS/proj/files"
+  local git_url="$DOOR/git/$NS_AGENTS/proj.git/info/refs?service=git-upload-pack"
+  local shut_files shut_git
+  shut_git=$(httpcode writer "$git_url")
+  shut_files=$(httpcode writer "$files_url")
+  note "default install: git route -> ${shut_git:-<none>}, files route -> ${shut_files:-<none>}"
+  # THE CONTROL, and it comes first: a door that answers nothing would
+  # make the 404 below free.
+  if [ -n "$shut_git" ] && [ "$shut_git" != 000 ] && [ "$shut_git" != 404 ]; then
+    ok "the git door on the same listener answers ($shut_git) — the port and the path are right"
+  else
+    bad "the git door answered ${shut_git:-<none>} — nothing below is evidence about the file door"
+  fi
+  if [ "$shut_files" = 404 ]; then
+    ok "the file route is absent by default (404, no route mounted)"
+  elif [ "$shut_files" = 401 ]; then
+    bad "the file door is OPEN in a default install — 401 means the handler was reached"
+  else
+    bad "the file route answered ${shut_files:-<none>}, which is neither absent (404) nor open (401)"
+  fi
+  if door_args | grep -q -- '--repo-files'; then
+    bad "the rendered door carries --repo-files with no value set for it"
+  else
+    ok "the rendered door args do not carry --repo-files"
+  fi
+
+  # ── P10 — and it opens when, and only when, asked ───────────────────
+  # The other arm of the biconditional. Without it P9 passes on a door
+  # that is broken, misrouted, or reading a path this drill got wrong —
+  # every one of which also produces a 404.
+  leg P10 "setting door.repoFiles.enabled opens exactly that route, on the same image and port"
+  local ulog="/tmp/forge-pub-upgrade-$RUN.log" urc
+  # The SAME --set list P3 used, plus the one under test. Not
+  # `--reuse-values`: that takes the values from the last release
+  # rather than from the chart, so a default this drill exists to
+  # observe would be read from a snapshot instead of from the shipped
+  # artifact — which is the whole claim of P9.
+  helm --kube-context "$CTX" upgrade flint-forge "$CHART" \
+       -n "$NS_SYS" "${img_sets[@]+"${img_sets[@]}"}" \
+       --set door.deploy=true --set door.namespace="$NS_SYS" \
+       --set door.repoFiles.enabled=true \
+       --wait --timeout 4m > "$ulog" 2>&1
+  urc=$?
+  if [ $urc -ne 0 ]; then
+    bad "helm upgrade --set door.repoFiles.enabled=true failed (rc=$urc)"
+    tail -6 "$ulog" | sed 's/^/        /'
+  else
+    $K -n "$NS_SYS" rollout status deploy/flint-forge-door --timeout=180s >/dev/null 2>&1
+    if door_args | grep -q -- '--repo-files'; then
+      ok "the rendered door now carries --repo-files"
+    else
+      bad "door.repoFiles.enabled=true rendered no --repo-files — the chart ignored the value"
+    fi
+    local open_files open_git
+    open_git=$(httpcode writer "$git_url")
+    open_files=$(httpcode writer "$files_url")
+    note "with the door open: git route -> ${open_git:-<none>}, files route -> ${open_files:-<none>}"
+    if [ "$open_files" = 401 ]; then
+      ok "the same URL now reaches the handler (401) — so P9's 404 was the flag, not a dead route"
+    elif [ "$open_files" = 404 ]; then
+      bad "the route is STILL absent with --repo-files set — P9's 404 was not evidence about the flag"
+    else
+      bad "the file route answered ${open_files:-<none>} with the door open; expected 401"
+    fi
+    # The point of one listener is that opening the second table does
+    # not disturb the first.
+    if [ "$open_git" = "$shut_git" ]; then
+      ok "the git route is unchanged at $open_git — one listener, two tables"
+    else
+      bad "the git route moved from $shut_git to ${open_git:-<none>} when the file door opened"
+    fi
+  fi
 
   verdict
 }
