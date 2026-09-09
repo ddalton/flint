@@ -274,10 +274,32 @@ that pack during normal serving. What the coverage rule withholds is not
 the pack — it is the PERMISSION TO UNNAME, and the quiescent window is
 exactly what grants it.**
 
-Caveat: this rig sets `base_rebuild_min_secs = 0`, so a base rebuild is
-always current and the hit rate is maximised. The real-world rate is
-unknown. When no single pack covers, the generalisation is to keep the
-base plus every pack named since it — also unmodelled.
+**The single-pack form does not survive a real cadence — the SET does.**
+That 24-of-24 ran at `base_rebuild_min_secs = 0`; shipped is 3600
+(`lib.rs:288`). Re-measured with that as the only dimension
+(`forge/e2e/results/direction4-cadence-20260908.log`, n=3 × 3 cadences ×
+6 rounds):
+
+| `base_rebuild_min_secs` | single coverer | greedy SET collects |
+|---|---|---|
+| 0 | 6/6 rounds | 105,656 of 105,656 B |
+| 6 | **0/6** | 86,668 of 86,674 B |
+| **3600 (shipped)** | **0/6** | 48,017 of 48,017 B |
+
+The greedy — keep a set holding every reachable object, drop a pack when
+every reachable object it holds is in another kept pack — collects
+**100% of the redundant bytes at every cadence, in every rep, building
+nothing**. It equals the drop-and-fsck oracle exactly. So the reclaim
+never runs `pack-objects` and never uploads: it reads reachability once
+in the window and writes a shorter pack list.
+
+A second reading: at the shipped cadence the residue is itself smaller
+(48,017 B vs 105,656 B), because residue *requires* a base rebuild to
+create it — `--all` is the only thing that drops dead objects and so the
+only thing that leaves an uncoverable input.
+
+Neither form is what TLC checked: `FoldPlan` always builds a fresh
+coverer. The set rule owes a model run.
 
 ### Checked in the shipped code
 

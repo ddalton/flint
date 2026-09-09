@@ -571,6 +571,49 @@ fn producers_all_refused(
     m
 }
 
+/// Which named packs can be unnamed WITHOUT BUILDING ANYTHING?
+///
+/// The greedy an implementation would actually run. Invariant: the kept
+/// set always holds every reachable object, so it always restores. Drop
+/// a pack when every reachable object it holds is in another KEPT pack;
+/// repeat until nothing moves. Order-dependent in which packs go, never
+/// in whether the result is safe.
+///
+/// This is the generalisation of `covering_pack`: it does not need one
+/// pack to cover everything, only the SET it keeps to.
+fn zero_work_droppable(
+    repo: &Path,
+    named: &[String],
+    reach: &std::collections::HashSet<String>,
+) -> (usize, u64) {
+    let dir = repo.join("objects/pack");
+    let mut live: std::collections::BTreeMap<String, std::collections::HashSet<String>> =
+        Default::default();
+    let mut size: std::collections::BTreeMap<String, u64> = Default::default();
+    for p in named {
+        let stem = p.trim_end_matches(".pack");
+        let objs = pack_objects(repo, &dir.join(format!("{stem}.idx")));
+        live.insert(p.clone(), objs.into_iter().filter(|o| reach.contains(o)).collect());
+        size.insert(p.clone(), std::fs::metadata(dir.join(p)).map(|m| m.len()).unwrap_or(0));
+    }
+    let mut kept: Vec<String> = named.to_vec();
+    let (mut n, mut bytes) = (0usize, 0u64);
+    loop {
+        let victim = kept.iter().find(|p| {
+            live[*p].iter().all(|o| kept.iter().any(|q| q != *p && live[q].contains(o)))
+        });
+        match victim.cloned() {
+            Some(v) => {
+                kept.retain(|x| x != &v);
+                n += 1;
+                bytes += size[&v];
+            }
+            None => break,
+        }
+    }
+    (n, bytes)
+}
+
 /// Is there ALREADY a named pack that holds every reachable object?
 ///
 /// The model's direction 4 plans a fresh pack (`holds[f] = {}` in
@@ -1147,4 +1190,153 @@ async fn measure_whether_the_residue_direction_5_keeps_grows() {
     // both real answers — but the measurement must have MEASURED.
     assert_eq!(curve.len(), ROUNDS);
     assert!(last.kept_mixed > 0, "no mixed-push residue: the arm is not measuring R7");
+}
+
+// ── does the zero-work reclaim survive a REALISTIC base cadence? ─────
+//
+// `measure_whether_the_residue_direction_5_keeps_grows` found a single
+// named pack covering the whole reachable set in 24 of 24 rounds — but
+// it ran at `base_rebuild_min_secs = 0`, so a base rebuild was always
+// current. Shipped is 3600: at most one base rebuild an HOUR (the pack
+// cap overrides it, the disk check never does). Every accepted push
+// after a base rebuild adds reachable objects the base does not hold,
+// so the SINGLE-pack coverer should degrade — and the question that
+// actually decides whether direction 4 is free is the SET version:
+// can the reclaim still collect the whole residue without building?
+//
+// Three arms, differing only in that cadence.
+
+struct Row {
+    packs: usize,
+    named: u64,
+    redundant: u64,
+    greedy_n: usize,
+    greedy_bytes: u64,
+    single_coverer: bool,
+}
+
+async fn residue_at_cadence(base_rebuild_min_secs: u64, rounds: usize) -> Vec<Row> {
+    let rig = Rig::start_tuned(Policy::default(), true, |c| {
+        c.fold_factor = 2;
+        c.fold_min_bytes = 0;
+        c.base_min_bytes = 0;
+        // THE ONLY DIMENSION UNDER TEST.
+        c.base_rebuild_min_secs = base_rebuild_min_secs;
+    })
+    .await;
+    let reclog = rig.repo.parent().unwrap().join("pushrec.log");
+    install_pre_receive_recorder(&rig.repo, &reclog);
+    let big = |mark: &str| -> String {
+        (0..4000)
+            .map(|i| if i == 2000 { format!("line {i} {mark}\n") } else { format!("line {i}\n") })
+            .collect::<String>()
+    };
+    rig.commit("big.txt", &big("base"));
+    assert!(rig.push(&["--quiet", "origin", "HEAD:refs/heads/main"]).0);
+    let base = must(&rig.client, &["rev-parse", "HEAD"]).trim().to_string();
+    let parent = rig.client.parent().unwrap().to_path_buf();
+    let scratch = parent.join("scratch.git");
+
+    let mut rows = Vec::new();
+    for r in 0..rounds {
+        rig.commit("big.txt", &big(&format!("live{r}")));
+        assert!(rig.push(&["--quiet", "origin", "HEAD:refs/heads/main"]).0);
+        let c = parent.join(format!("mix{r}"));
+        must(&parent, &["clone", "--quiet", rig.repo.to_str().unwrap(), &format!("mix{r}")]);
+        must(&c, &["config", "user.email", "t@example.invalid"]);
+        must(&c, &["config", "user.name", "t"]);
+        must(&c, &["checkout", "--quiet", "-b", "good", &base]);
+        std::fs::write(c.join("big.txt"), big(&format!("g{r}"))).unwrap();
+        must(&c, &["add", "big.txt"]);
+        must(&c, &["commit", "--quiet", "-m", "good"]);
+        must(&c, &["checkout", "--quiet", "-b", "bad", &base]);
+        std::fs::write(c.join("big.txt"), big(&format!("b{r}"))).unwrap();
+        must(&c, &["add", "big.txt"]);
+        must(&c, &["commit", "--quiet", "-m", "bad"]);
+        let out = git(
+            &c,
+            &[
+                "push",
+                "--force",
+                "--quiet",
+                "origin",
+                &format!("good:refs/heads/mixed{r}"),
+                "bad:refs/heads/main",
+            ],
+        );
+        assert!(!out.status.success(), "round {r}: the mixed push's bad half must be refused");
+        let n = parent.join(format!("nff{r}"));
+        must(&parent, &["clone", "--quiet", rig.repo.to_str().unwrap(), &format!("nff{r}")]);
+        must(&n, &["config", "user.email", "t@example.invalid"]);
+        must(&n, &["config", "user.name", "t"]);
+        must(&n, &["reset", "--quiet", "--hard", &base]);
+        std::fs::write(n.join("big.txt"), big(&format!("n{r}"))).unwrap();
+        must(&n, &["add", "big.txt"]);
+        must(&n, &["commit", "--quiet", "-m", "nff"]);
+        let out = git(&n, &["push", "--force", "--quiet", "origin", "HEAD:refs/heads/main"]);
+        assert!(!out.status.success(), "round {r}: the non-ff push must be refused");
+
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let snap = rig.snapshot().await;
+        let tips: Vec<String> = snap.refs.values().cloned().collect();
+        let reach = reachable_from(&rig.repo, &tips);
+        let map = producers_all_refused(&recorded_pushes(&reclog), &reach);
+        let res = classify_residue(&rig.repo, &scratch, &snap, &map);
+        let (greedy_n, greedy_bytes) = zero_work_droppable(&rig.repo, &snap.packs, &reach);
+        rows.push(Row {
+            packs: snap.packs.len(),
+            named: res.named,
+            redundant: res.redundant,
+            greedy_n,
+            greedy_bytes,
+            single_coverer: covering_pack(&rig.repo, &snap.packs, &reach).is_some(),
+        });
+    }
+    rows
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn measure_the_zero_work_reclaim_against_a_real_base_cadence() {
+    const ROUNDS: usize = 6;
+    // 0 = the earlier rig (a base rebuild is always current);
+    // 6 = a base rebuild every few rounds;
+    // 3600 = SHIPPED (one at the start, none after).
+    for cadence in [0u64, 6, 3600] {
+        let rows = residue_at_cadence(cadence, ROUNDS).await;
+        eprintln!("\n=== base_rebuild_min_secs = {cadence} ===");
+        eprintln!(
+            "{:>5} {:>6} {:>10} {:>10} {:>8} {:>11} {:>9}  {}",
+            "round", "packs", "named B", "redundant", "greedy n", "greedy B", "greedy %",
+            "single coverer?"
+        );
+        for (r, row) in rows.iter().enumerate() {
+            let pct =
+                if row.redundant > 0 { row.greedy_bytes * 100 / row.redundant } else { 100 };
+            eprintln!(
+                "{r:>5} {:>6} {:>10} {:>10} {:>8} {:>11} {:>8}%  {}",
+                row.packs,
+                row.named,
+                row.redundant,
+                row.greedy_n,
+                row.greedy_bytes,
+                pct,
+                if row.single_coverer { "YES" } else { "no — must BUILD one" }
+            );
+        }
+        let singles = rows.iter().filter(|r| r.single_coverer).count();
+        let last = rows.last().unwrap();
+        eprintln!(
+            "cadence {cadence}: single coverer in {singles}/{ROUNDS} rounds; the GREEDY SET \
+             collects {} of {} redundant B at the last round, building nothing.",
+            last.greedy_bytes, last.redundant
+        );
+        // The greedy must never claim MORE than the drop-and-fsck oracle
+        // says is redundant — that would mean it is unsafe.
+        assert!(
+            last.greedy_bytes <= last.redundant,
+            "cadence {cadence}: greedy claims {} B but only {} B is redundant",
+            last.greedy_bytes,
+            last.redundant
+        );
+    }
 }

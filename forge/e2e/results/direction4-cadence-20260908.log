@@ -1,0 +1,78 @@
+# The zero-work reclaim at a REAL base-rebuild cadence — 2026-09-08
+# n=3 x 3 cadences x 6 rounds
+#
+# forge/syncer/tests/push_chain.rs::measure_the_zero_work_reclaim_against_a_real_base_cadence
+#
+# CORRECTION FIRST. direction4-check-20260908.log reported a SINGLE named
+# pack covering the whole reachable set in 24 of 24 rounds. That was an
+# artefact of the rig: it ran at base_rebuild_min_secs = 0, so a base
+# rebuild was always current. SHIPPED IS 3600 (lib.rs:288) — at most one
+# base rebuild an hour, the pack cap overriding it. Every accepted push
+# after a base rebuild adds reachable objects the base does not hold.
+#
+# Arms differ ONLY in base_rebuild_min_secs.
+
+## single-pack coverer — the earlier claim, at three cadences
+
+  cadence    0: 6/6 rounds   <- the earlier rig
+  cadence    6: 0/6 rounds
+  cadence 3600: 0/6 rounds   <- SHIPPED
+
+Identical in all three reps. The single-pack form does NOT survive a
+real cadence, and "24 of 24" should never have been quoted without it.
+
+## the GREEDY SET — keep a set that holds every reachable object, drop
+## a pack when every reachable object it holds is in another KEPT pack
+
+  cadence    0: 105656/105656, 105530/105530, 105657/105657 B
+  cadence    6:  86668/86674,   86674/86674,   86673/86673 B
+  cadence 3600:  48017/48017,   48017/48017,   48021/48021 B
+
+100% OF THE REDUNDANT BYTES, AT EVERY CADENCE, IN EVERY REP, BUILDING
+NOTHING. Greedy collected = drop-and-fsck oracle, exactly.
+
+## full table, rep 1
+
+=== base_rebuild_min_secs = 0 ===
+round  packs    named B  redundant greedy n    greedy B  greedy %  single coverer?
+    0      2      19644       9768        1        9768      100%  YES
+    1      4      39300      29039        3       29039      100%  YES
+    2      6      58839      48192        5       48192      100%  YES
+    3      8      78380      67346        7       67346      100%  YES
+    4     10      97921      86501        9       86501      100%  YES
+    5     12     117461     105656       11      105656      100%  YES
+
+=== base_rebuild_min_secs = 6 ===
+    0      3      28867          0        0           0      100%  no — must BUILD one
+    1      6      57859       9604        1        9604      100%  no
+    2      6      58996      38742        4       38742      100%  no
+    3      9      87768      48244        5       48244      100%  no
+    4     10      98074      77166        8       77166      100%  no
+    5     13     126848      86668        9       86668      100%  no
+
+=== base_rebuild_min_secs = 3600 (SHIPPED) ===
+    0      3      28866          0        0           0      100%  no — must BUILD one
+    1      6      57858       9604        1        9604      100%  no
+    2      9      86849      19207        2       19207      100%  no
+    3     12     115842      28811        3       28811      100%  no
+    4     15     144833      38414        4       38414      100%  no
+    5     18     173826      48017        5       48017      100%  no
+
+## What it means
+
+Direction 4 is FREE — through the SET, not through a single pack. The
+reclaim never has to run pack-objects and never has to upload: it reads
+reachability once in the quiescent window and writes a shorter pack list.
+
+A second, smaller reading: at the shipped cadence the residue itself is
+SMALLER (48,017 B vs 105,656 B at cadence 0) because residue requires a
+base rebuild to create it — `--all` is the only thing that drops the
+dead objects and so the only thing that leaves an uncoverable input. A
+rarer base rebuild makes less residue AND collects it less often.
+
+## Not measured
+
+Wall-clock of the reachability read on a large repository. It is a
+rev-list over the refs plus a pass over the pack indices — the same read
+fold.rs already does for coverage — but "already does it" is not a
+latency measurement, and this window is on the WAKE path.
