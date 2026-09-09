@@ -65,3 +65,121 @@
 # DR — expected-worst). pjdfstest STRUCTURALLY cannot ask it: it
 # creates, asserts and removes inside one test body, so there is no seam
 # for a flush barrier.
+#
+#
+# ════════════════════════════════════════════════════════════════════
+# ADDENDUM 2026-09-09, later the same day: the +113 DECOMPOSED, and
+# the 2x2 that says what to do about the REST of the number.
+# ════════════════════════════════════════════════════════════════════
+#
+# The arm above reported +113 by CATEGORY (link +65, rename +30,
+# unlink +18) and that shape invited the wrong reading: that ~48
+# assertions in rename and unlink were an unexplained regression, with
+# `unlink ... expected 0, got ENOENT` looking like files going missing.
+# THAT READING IS WRONG. Re-running the tier-OFF arm on the same binary
+# and diffing ASSERTION BY ASSERTION instead of by category:
+#
+#   the OFF arm reproduced EXACTLY — 614 across 64 files, every
+#   category to the digit, knfsd control 108 both times.
+#
+#   123 assertions newly FAIL, 10 newly PASS, net +113, in EIGHT files:
+#   link/00,02,06,07,09.t, rename/00.t, rename/23.t, unlink/00.t.
+#
+#       30  the LINK operation itself, refused with 524
+#       62  an operation on a name the refused link never created
+#        4  an `nlink` count short by exactly the links never made
+#       26  continuation lines of the above
+#        1  rename/00.t #14 — hand-checked: `lstat n0` after
+#           `link n1 n0` was refused. Same inode, same mode, nlink 1.
+#
+# The alarming line is the SECOND line of this pair, every time:
+#
+#   not ok 27 - tried 'link A B', expected 0, got 524    <- by design
+#   not ok 28 - tried 'unlink B', expected 0, got ENOENT <- never made
+#
+# ENOENT went 42 -> 149; all 107 are that cascade. EIO is 46 IN BOTH
+# ARMS — the long-path failures are pre-existing and untouched.
+#
+# THE 10 THAT "IMPROVED" ARE NOT A WIN. Seven are `rmdir ...
+# ENOTEMPTY` in link/06.t and link/07.t. With the tier off flint
+# PERMITTED `link` as uid 65534 where it owed EACCES, so a stray entry
+# survived and rmdir failed. With the tier on LINK is refused outright,
+# the entry is never made, and rmdir passes. The tier's refusal is
+# MASKING an authorization defect — exactly what this drill's own
+# header warns about.
+#
+# ── what the refusal costs a real application ───────────────────────
+# Probed on the mount, knfsd as the control:
+#
+#                       flint tier ON           knfsd
+#   tar -x  (hardlink)  rc=2, extract fails     rc=0
+#   cp -a   (hardlink)  rc=1, copy fails        rc=0
+#   rsync -aH           rc=23, not transferred  rc=0
+#   cp -r / rsync -a    rc=0                    rc=0
+#   git clone (local)   rc=0                    rc=0
+#
+# git falls back to copying. cp -r and rsync without -H are fine.
+# `tar -x` has NO fallback and NO flag: any archive containing a hard
+# link fails mid-extract. That is the practical cost of the +113.
+#
+# THE ERRNO IS COSMETIC — I EXPECTED OTHERWISE AND MEASURED IT.
+# LINK returns NFS4ERR_NOTSUPP, which the Linux client leaks as a raw
+# 524 (ENOTSUPP, kernel-internal, "should never be seen by user
+# programs"), so tools print "Unknown error 524". An LD_PRELOAD shim
+# forcing link(2) to fail with EPERM, then EOPNOTSUPP, then 524, with
+# everything else identical:
+#
+#   errno 1 / 95 / 524 -> cp rc=1, tar rc=2, rsync rc=23, EVERY TIME.
+#   control, no shim   -> cp rc=0, nlink=2.
+#
+# No tool falls back on ANY of them. Changing the status code buys a
+# better MESSAGE and nothing else. This REFUTES the comment at
+# fileops.rs FATTR4_LINK_SUPPORT, which says tar/rsync/cp "read this
+# bit to decide whether to attempt a link or to fall back to copying".
+# They do not, and they do not fall back. LINK_SUPPORT=false is still
+# the right answer; it just does not buy what the comment claims.
+#
+# ── the 614 was never mostly about the tier ─────────────────────────
+# The tier-OFF differential by SHAPE:
+#
+#    251  attribute/value mismatch (mostly the long-path EIO family)
+#    255  flint PERMITTED what must be refused (149 EPERM + 106 EACCES)
+#     42  continuation lines
+#     47  flint refused what must succeed
+#     10  refused with the wrong error
+#
+# ── THE 2x2, AND THE FLAG THAT HAS BEEN SITTING THERE ───────────────
+# `nfs/v4/authz.rs` implements the POSIX mode-bit check against the
+# CALLER, gated on FLINT_NFS_ENFORCE_PERMISSIONS, which resolves to
+# WARN when unset: evaluate, log what would be denied, DENY NOTHING.
+# Every arm above, and every compliance number this repo has recorded,
+# ran with it unset. Same binary, same rig, one dimension at a time:
+#
+#                    permissions WARN (ships)   permissions ENFORCE
+#     tier OFF               614                       240
+#     tier ON                727                       370
+#
+# Flipping the existing flag removes 357 of the 727 — 49%. chown goes
+# 182 -> 8; "PERMITTED what must be refused" goes 255 -> 3.
+#
+# THE RISK SIDE IS MEASURED, NOT ASSUMED. Diffing warn -> enforce at
+# tier OFF, assertion by assertion:
+#
+#     NEW failures under enforcement : 0
+#     GONE                           : 374
+#
+# NOTHING BROKE. Not one assertion that passed under warn fails under
+# enforce, and knfsd-only stayed at 106 in all four runs, so enforcing
+# did not make flint stricter than the reference anywhere either.
+#
+# The default is warn DELIBERATELY — authz.rs says a hub that starts
+# refusing writes is an outage for deployments unknowingly relying on
+# the absence of checks, and unlike forge, flint-lite HAS an installed
+# base. So this is a release-note-and-flip decision, not a silent
+# default change. What the measurement adds is that the blast radius
+# against a POSIX suite is ZERO.
+#
+# What is left at 370 is a different problem: 268 attribute/value
+# mismatches and 60 "refused what must succeed -> ENOENT", which is the
+# long-path family plus the link cascade. Real, and unrelated to
+# authorization.
