@@ -38,6 +38,19 @@ use serde::{Deserialize, Serialize};
 use crate::lite_operator::crd::Phase as SharePhase;
 use crate::s3csi::policy::Consumers;
 
+/// The two pack-residue rules, both off by default. See
+/// `FlintRepoSpec::packs`.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PackRules {
+    /// Direction 5, the reducer.
+    #[serde(default)]
+    pub name_accepted_set: bool,
+    /// Direction 4, the collector.
+    #[serde(default)]
+    pub reclaim_at_rest: bool,
+}
+
 #[derive(CustomResource, KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[kube(
     group = "chert.us",
@@ -102,6 +115,26 @@ pub struct FlintRepoSpec {
     /// S3 endpoint override (a deployment proxy, or a MinIO rig).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+
+    /// PACK RESIDUE (`docs/plans/forge-pack-pinning-2026-09-08.md`).
+    /// Both default off; both are the syncer's own rules and change no
+    /// bucket format, so a repository can be moved between them.
+    ///
+    /// `nameAcceptedSet` is the REDUCER: name the packs of pushes
+    /// something was accepted from, rather than whatever is in
+    /// `objects/pack`. git migrates a push's pack when `pre-receive`
+    /// passes, before forge's verdict at `proc-receive`, so the
+    /// directory also holds the packs of pushes forge REFUSED — and
+    /// strict coverage supersede then pins them forever.
+    ///
+    /// `reclaimAtRest` is the COLLECTOR: at restore, before the
+    /// repository serves, drop and UNLINK any named pack whose every
+    /// reachable object another kept pack already holds. It builds
+    /// nothing and uploads nothing. The placement is load-bearing —
+    /// the same rule outside that window loses acked pushes — which is
+    /// why the syncer takes an `AtRest` witness rather than a comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packs: Option<PackRules>,
 
     /// Secret with the SYNCER's S3 credentials, keys `AWS_*` verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -527,6 +560,31 @@ impl RepoPhase {
 
 #[cfg(test)]
 mod tests {
+
+    /// A SPEC FIELD THE CRD SCHEMA DOES NOT DECLARE IS PRUNED BY THE
+    /// APISERVER, silently: the YAML applies, `kubectl get` shows the
+    /// field gone, and the operator renders as if it had never been
+    /// set. For a rule that is OFF by default that failure is invisible
+    /// — the drill would set the flag, observe no change, and conclude
+    /// the rule does nothing.
+    ///
+    /// The operator applies its COMPILED-IN copy at startup, so this
+    /// asserts the generated schema carries the block and both of its
+    /// booleans.
+    #[test]
+    fn the_crd_schema_declares_the_pack_rules() {
+        let crd = super::crd();
+        let json = serde_json::to_string(&crd).expect("crd serialises");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let props = v["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]
+            .clone();
+        let packs = &props["packs"];
+        assert!(!packs.is_null(), "spec.packs is not in the CRD schema — it would be PRUNED");
+        let inner = &packs["properties"];
+        assert_eq!(inner["nameAcceptedSet"]["type"], "boolean", "nameAcceptedSet missing: {inner}");
+        assert_eq!(inner["reclaimAtRest"]["type"], "boolean", "reclaimAtRest missing: {inner}");
+    }
     use super::*;
     use serde_json::Value;
 

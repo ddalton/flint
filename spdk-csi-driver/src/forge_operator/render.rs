@@ -551,6 +551,25 @@ pub fn deployment(repo: &FlintRepo, d: &RenderDefaults, replicas: i32) -> Deploy
             ..Default::default()
         });
     }
+    // The pack-residue rules. Rendered ONLY when on, so a repository
+    // that has not asked for them carries no new environment at all and
+    // the syncer takes its own defaults — which are off.
+    if let Some(pr) = s.packs.as_ref() {
+        if pr.name_accepted_set {
+            env.push(EnvVar {
+                name: "FLINT_FORGE_NAME_ACCEPTED_SET".into(),
+                value: Some("1".into()),
+                ..Default::default()
+            });
+        }
+        if pr.reclaim_at_rest {
+            env.push(EnvVar {
+                name: "FLINT_FORGE_RECLAIM_AT_REST".into(),
+                value: Some("1".into()),
+                ..Default::default()
+            });
+        }
+    }
     // The file API (`docs/plans/forge-file-api-design.md`). Its own
     // port, never the status one — `/status` is unauthenticated there
     // and the door must not be able to reach it.
@@ -919,6 +938,7 @@ mod tests {
                 bucket: "bkt".into(),
                 key_prefix: "tenant/proj/".into(),
                 endpoint: None,
+                packs: None,
                 credentials_secret_ref: Some("forge-creds".into()),
                 default_branch: None,
                 consumers: None,

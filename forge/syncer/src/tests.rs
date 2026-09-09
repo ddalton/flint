@@ -6286,6 +6286,25 @@ async fn d4_rig(reclaim: bool) -> (Rig, restore::ReclaimReport, Vec<String>) {
     // Name all three, as a batch with the directory rule would.
     let all = rig.sc.git.local_packs().expect("local packs");
     assert_eq!(all.len(), 3, "the setup must produce three packs");
+
+    // UPLOAD BEFORE NAMING, which is what a batch does (step 4 before
+    // step 5) and what the first cut of this setup skipped. A snapshot
+    // naming a pack the bucket does not hold is a repository that
+    // cannot be restored, and `restore` refuses to serve it — which is
+    // how the omission surfaced: the reclaim itself was fine and the
+    // SECOND start refused, naming the pack this test had never
+    // uploaded.
+    let epoch0 = rig.sc.lease().expect("lease").epoch;
+    for pack in &all {
+        for file in rig.sc.git.pack_siblings(pack) {
+            let key = rig.sc.cfg.pack_key(&file);
+            let path = rig.sc.git.pack_path(&file);
+            super::packio::upload_file(rig.sc.store.as_ref(), &key, &path, epoch0, None)
+                .await
+                .expect("upload pack sibling");
+        }
+    }
+
     let cell = rig.sc.cell().expect("cell").clone();
     let mut next = cell.snap.clone();
     next.packs = all.clone();
@@ -6296,6 +6315,47 @@ async fn d4_rig(reclaim: bool) -> (Rig, restore::ReclaimReport, Vec<String>) {
             .await
             .expect("cas");
     rig.sc.cell = Some(new_cell);
+
+    // ASSERT THE PREMISE BEFORE MEASURING ANYTHING. This setup is only
+    // a test of the collector if it actually built the shape it meant
+    // to: one pack holding every reachable object, and two whose
+    // reachable objects it subsumes. An earlier cut asserted only the
+    // OUTCOME and produced 2 collected on one run and 1 on the next —
+    // a flake that would have been read as a bug in the reclaim. If
+    // git packs differently, this now says so in the setup rather than
+    // reporting a wrong number from the thing under test.
+    let dir = rig.sc.cfg.repo.join("objects/pack");
+    let tips: Vec<String> = rig.sc.cell().expect("cell").snap.refs.values().cloned().collect();
+    let reach: std::collections::HashSet<String> =
+        rig.sc.git.reachable_from(&tips).await.expect("reach").into_iter().collect();
+    let mut live: Vec<(String, std::collections::HashSet<String>)> = Vec::new();
+    for p in &all {
+        let stem = p.trim_end_matches(".pack");
+        let ids = rig.sc.git.pack_object_ids(&dir.join(format!("{stem}.idx"))).await.expect("ids");
+        live.push((p.clone(), ids.into_iter().filter(|o| reach.contains(o)).collect()));
+    }
+    let coverers: Vec<&String> =
+        live.iter().filter(|(_, l)| l.len() == reach.len()).map(|(p, _)| p).collect();
+    assert_eq!(
+        coverers.len(),
+        1,
+        "setup premise broken: {} pack(s) hold all {} reachable objects, live sets {:?}",
+        coverers.len(),
+        reach.len(),
+        live.iter().map(|(p, l)| (p, l.len())).collect::<Vec<_>>()
+    );
+    let coverer = coverers[0].clone();
+    for (p, l) in &live {
+        if p == &coverer {
+            continue;
+        }
+        let covering: &std::collections::HashSet<String> =
+            &live.iter().find(|(q, _)| q == &coverer).unwrap().1;
+        assert!(
+            l.iter().all(|o| covering.contains(o)),
+            "setup premise broken: {p} is not subsumed by the coverer"
+        );
+    }
 
     let report = restore::reclaim_at_rest(&mut rig.sc, restore::AtRest::before_serving())
         .await
@@ -6328,6 +6388,23 @@ async fn direction_4_collects_a_wholly_covered_pack_and_unlinks_it() {
     // connectivity is whole from the packs that remain.
     let out = rig.sc.git.must(&["fsck", "--connectivity-only", "--no-progress"], None).await;
     assert!(out.is_ok(), "fsck failed after the reclaim: {out:?}");
+
+    // A SECOND START MUST COLLECT NOTHING. The reclaim runs on every
+    // restore, so a rule that keeps finding something to drop would
+    // shrink the repository a little on each restart until it had
+    // dropped something it needed. Running the real startup pair again
+    // — restore, then the window — is what says it converges.
+    let mut rig = rig;
+    restore::restore(&mut rig.sc).await.expect("second restore");
+    let again = restore::reclaim_at_rest(&mut rig.sc, restore::AtRest::before_serving())
+        .await
+        .expect("second reclaim");
+    assert_eq!(again.dropped, 0, "the reclaim is not idempotent — a restart would keep eating");
+    assert_eq!(
+        rig.sc.cell().expect("cell").snap.packs.len(),
+        1,
+        "the second start changed what the snapshot names"
+    );
 }
 
 #[tokio::test]

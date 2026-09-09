@@ -185,6 +185,7 @@ mod tests {
                 bucket: "b".into(),
                 key_prefix: "p/".into(),
                 endpoint: None,
+                packs: None,
                 credentials_secret_ref: None,
                 default_branch: None,
                 consumers: None,

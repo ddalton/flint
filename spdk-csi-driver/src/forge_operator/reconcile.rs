@@ -495,6 +495,7 @@ mod tests {
                 bucket: "bkt".into(),
                 key_prefix: prefix.into(),
                 endpoint: None,
+                packs: None,
                 credentials_secret_ref: None,
                 default_branch: None,
                 consumers: None,
