@@ -43,9 +43,38 @@ for a in "$@"; do
         forge)       SCOPE=forge ;;
         all)         SCOPE=all ;;
         --dry-run)   dry=--dry-run ;;
+        --no-moving-tags) moving=0 ;;
     esac
 done
 run() { if [ "$dry" = "--dry-run" ]; then echo "  + $*"; else "$@"; fi; }
+
+# WHICH TAGS THIS PUBLISH MOVES. A release advances `latest`, the major
+# and the minor, and forgetting that is the 1.29.0 bug this script's
+# header records. But the loops below were UNCONDITIONAL, so the same
+# script could not publish a tag WITHOUT moving them — and the natural
+# thing to type for a drill build,
+#
+#   publish-images.sh drill-8ee0c0ad forge
+#
+# repoints `latest` at an undrilled binary for everyone who pulls it,
+# plus a `$minor`/`$major` derived from a string that is not a version
+# at all. `--no-moving-tags` is the way to say "this one is not a
+# release"; a version that does not look like N.N.N refuses instead of
+# guessing, because the guess is the outward-facing mistake.
+moving=${moving:-1}
+case "$ver" in
+    [0-9]*.[0-9]*.[0-9]*) : ;;
+    *) if [ "$moving" = 1 ]; then
+           echo "refusing: '$ver' is not a release version (N.N.N), so the moving tags" >&2
+           echo "          latest/major/minor would be derived from nonsense and would" >&2
+           echo "          repoint published images. Pass --no-moving-tags for a drill" >&2
+           echo "          or dev build." >&2
+           exit 2
+       fi ;;
+esac
+tags_for() {
+    if [ "$moving" = 1 ]; then echo "$ver $minor $major latest"; else echo "$ver"; fi
+}
 
 here=$(cd "$(dirname "$0")" && pwd)
 crate=$(cd "$here/../spdk-csi-driver" && pwd)
@@ -142,7 +171,7 @@ for spec in "$@"; do
 
     # One manifest list per tag, all from the same two digests. `--amend`
     # so a re-run replaces rather than appending a duplicate.
-    for tag in "$ver" "$minor" "$major" latest; do
+    for tag in $(tags_for); do
         echo "--- manifest $repo:$tag ---"
         run docker manifest rm "$repo:$tag" 2>/dev/null || true
         run docker manifest create "$repo:$tag" \
@@ -182,7 +211,7 @@ for spec in "$@"; do
     from=${spec%%:*}
     to=${spec#*:}
     echo "=== dilipdalton/$to (alias of $from) ==="
-    for tag in "$ver" "$minor" "$major" latest; do
+    for tag in $(tags_for); do
         echo "--- alias $to:$tag ---"
         run docker buildx imagetools create \
             -t "dilipdalton/$to:$tag" "dilipdalton/$from:$ver"
@@ -190,7 +219,11 @@ for spec in "$@"; do
 done
 
 echo
-echo "published $ver (+ $minor, $major, latest) for scope=$SCOPE"
+if [ "$moving" = 1 ]; then
+    echo "published $ver (+ $minor, $major, latest) for scope=$SCOPE"
+else
+    echo "published $ver ONLY (no moving tags) for scope=$SCOPE"
+fi
 if [ "$SCOPE" != forge ]; then
     echo "aliased   flint-lite-operator -> flint-lean-operator at the same digest"
 fi

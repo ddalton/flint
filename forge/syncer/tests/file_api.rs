@@ -35,11 +35,17 @@ struct Rig {
     token: String,
 }
 
+/// How long any single git call in this file may take. Generous for a
+/// local rig under a loaded CI box, and finite, which is the point.
+const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 fn git_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
-    std::process::Command::new("git")
+    let mut child = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("HOME", "/nonexistent")
         .env("GIT_AUTHOR_NAME", "pusher")
@@ -48,8 +54,40 @@ fn git_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
         .env("GIT_COMMITTER_EMAIL", "pusher@example.invalid")
         // What the door sets, and what the hooks read.
         .env("REMOTE_USER", "system:serviceaccount:apps:agent")
-        .output()
-        .expect("git")
+        .spawn()
+        .expect("spawn git");
+    // A BOUND, BECAUSE `output()` HAS NONE. One of these was found
+    // wedged for THIRTY-SIX HOURS on 2026-09-09 — orphaned to init,
+    // two `git push` children still blocked, from
+    // `both_doors_under_sustained_traffic_keep_one_history`. A push to
+    // a server that stops answering never returns, `output()` waits
+    // forever, and the test waits with it: in CI that is the job's
+    // whole time budget spent on a process nobody is reading.
+    //
+    // A timeout is not a retry. It fails the test LOUDLY and names the
+    // command, because a git call that takes two minutes against a
+    // local rig is a defect in whatever it is talking to, and the
+    // useful thing is to say so rather than to hang until someone
+    // notices.
+    let deadline = std::time::Instant::now() + GIT_TIMEOUT;
+    loop {
+        match child.try_wait().expect("try_wait") {
+            Some(_) => break,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "git {args:?} in {} did not finish within {:?} — killed. \
+                     A hung git call here means the thing it is talking to \
+                     stopped answering; the test fails rather than waits.",
+                    dir.display(),
+                    GIT_TIMEOUT,
+                );
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+    child.wait_with_output().expect("git output")
 }
 
 fn must_git(dir: &std::path::Path, args: &[&str]) -> String {
