@@ -250,6 +250,52 @@ the result, let the ledger sweep take the rest — collects the dead
 objects with no weakening of the coverage rule, because it is not a
 fold and supersedes nothing.
 
+### It probably does not need the repack at all
+
+**The model plans a FRESH pack** — `FoldPlan` requires `holds[f] = {}`
+(`ForgeSync.tla:925`) — so what TLC proved safe always pays
+`pack-objects --all --indexed-objects --write-bitmap-index` over the
+whole repository plus the upload of its output. **But the rule it proves
+never asks the coverer to be new:**
+
+    D == {q \in S : (holds[q] \cap fold[s].at) \subseteq holds[f]}
+
+If a pack the snapshot ALREADY names covers the reachable set, every
+other named pack can be unnamed for the cost of a snapshot CAS.
+Measured, n=3 × 8 rounds
+(`forge/e2e/results/direction4-check-20260908.log`): **24 of 24 rounds a
+named pack already covered every reachable object**, making 92% of named
+bytes unnamable with no `pack-objects` run and nothing uploaded. The
+coverer is the base rebuild's own output, and it grows only with live
+content.
+
+That is the shape of the whole finding: **forge is already paying for
+that pack during normal serving. What the coverage rule withholds is not
+the pack — it is the PERMISSION TO UNNAME, and the quiescent window is
+exactly what grants it.**
+
+Caveat: this rig sets `base_rebuild_min_secs = 0`, so a base rebuild is
+always current and the hit rate is maximised. The real-world rate is
+unknown. When no single pack covers, the generalisation is to keep the
+base plus every pack named since it — also unmodelled.
+
+### Checked in the shipped code
+
+- **The window is real.** The UDS listener is bound only after
+  `publish(Phase::Serving)` (`server.rs:267`); when `ask` fails the hook
+  writes `ng … the repository server is not accepting writes` for every
+  command (`hook.rs:216-224`).
+- **Undo does not conflict.** `undo::referenced` unions the undo points'
+  pack stems into the sweep's `named` set (`fold.rs:965-968`),
+  independent of the current snapshot, so unnaming cannot delete one.
+- **The reclaim is already optional and time-boxable inside the proof.**
+  `FoldAbandon` exists and `ReclaimDone` is enabled as soon as no fold
+  is in flight, so a syncer may simply leave.
+- **It is on the WAKE path, not just cold start.** `restore()` runs
+  before every `Phase::Serving`, and a slept repo wakes on a plain read.
+  That contradicts the "not on the wake path" bullet below — and the
+  zero-work form is what dissolves the contradiction.
+
 What it owes before any code:
 
 - **Its own model run.** The claim "no ref moves between `Importing` and

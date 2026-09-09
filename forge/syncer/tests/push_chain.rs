@@ -571,6 +571,38 @@ fn producers_all_refused(
     m
 }
 
+/// Is there ALREADY a named pack that holds every reachable object?
+///
+/// The model's direction 4 plans a fresh pack (`holds[f] = {}` in
+/// `FoldPlan`), so the reclaim it proves safe always pays a
+/// `pack-objects --all --write-bitmap-index` over the whole repository
+/// plus the upload of its output. But the rule it proves — drop an
+/// input whose REACHABLE objects the new pack covers — never asks that
+/// the coverer be new. If a pack the snapshot already names covers the
+/// reachable set, every other named pack can be unnamed for the cost of
+/// a snapshot CAS: no pack-objects, no upload, nothing on the wire.
+///
+/// That variant is NOT what TLC checked. This measures whether it would
+/// ever apply, which is the question worth answering before modelling
+/// it.
+fn covering_pack(
+    repo: &Path,
+    packs: &[String],
+    reach: &std::collections::HashSet<String>,
+) -> Option<(String, u64)> {
+    let dir = repo.join("objects/pack");
+    for p in packs {
+        let stem = p.trim_end_matches(".pack");
+        let objs: std::collections::HashSet<String> =
+            pack_objects(repo, &dir.join(format!("{stem}.idx"))).into_iter().collect();
+        if reach.iter().all(|o| objs.contains(o)) {
+            let bytes = std::fs::metadata(dir.join(p)).map(|m| m.len()).unwrap_or(0);
+            return Some((p.clone(), bytes));
+        }
+    }
+    None
+}
+
 /// Every object id a pack holds, from its index.
 fn pack_objects(repo: &Path, idx: &Path) -> Vec<String> {
     let out = Command::new("sh")
@@ -1010,7 +1042,7 @@ async fn measure_whether_the_residue_direction_5_keeps_grows() {
     let scratch = parent.join("scratch.git");
 
     const ROUNDS: usize = 8;
-    let mut curve: Vec<(usize, Residue, usize)> = Vec::new();
+    let mut curve: Vec<(usize, Residue, usize, Option<(String, u64)>)> = Vec::new();
     for r in 0..ROUNDS {
         // 1. an ordinary ACCEPTED push: live content grows too.
         rig.commit("big.txt", &big(&format!("live{r}")));
@@ -1063,21 +1095,37 @@ async fn measure_whether_the_residue_direction_5_keeps_grows() {
         let reach = reachable_from(&rig.repo, &tips);
         let map = producers_all_refused(&recorded_pushes(&reclog), &reach);
         let res = classify_residue(&rig.repo, &scratch, &snap, &map);
-        curve.push((r, res, snap.packs.len()));
+        let cover = covering_pack(&rig.repo, &snap.packs, &reach);
+        curve.push((r, res, snap.packs.len(), cover));
     }
 
     eprintln!("\n=== does direction 5's leftover grow? {ROUNDS} identical rounds ===");
     eprintln!(
-        "{:>5} {:>6} {:>10} {:>10} {:>10} {:>10} {:>8}",
-        "round", "packs", "named B", "redundant", "d5 drops", "d5 KEEPS", "keeps %"
+        "{:>5} {:>6} {:>10} {:>10} {:>10} {:>10} {:>8}  {}",
+        "round", "packs", "named B", "redundant", "d5 drops", "d5 KEEPS", "keeps %",
+        "a named pack already covers the reachable set?"
     );
-    for (r, res, packs) in &curve {
+    for (r, res, packs, cover) in &curve {
         let pct = if res.redundant > 0 { res.kept_mixed * 100 / res.redundant } else { 0 };
+        let c = match cover {
+            Some((p, b)) => format!(
+                "YES {} ({b} B) — {} B unnamable for a CAS",
+                &p[5..13.min(p.len())],
+                res.named - b
+            ),
+            None => "no — a reclaim here must BUILD one".to_string(),
+        };
         eprintln!(
-            "{r:>5} {packs:>6} {:>10} {:>10} {:>10} {:>10} {:>7}%",
+            "{r:>5} {packs:>6} {:>10} {:>10} {:>10} {:>10} {:>7}%  {c}",
             res.named, res.redundant, res.removable, res.kept_mixed, pct
         );
     }
+    let covered = curve.iter().filter(|(_, _, _, c)| c.is_some()).count();
+    eprintln!(
+        "\nzero-work reclaim applies in {covered} of {ROUNDS} rounds: a pack the snapshot \
+         ALREADY names covers everything reachable, so the other packs could be unnamed \
+         without running pack-objects at all."
+    );
     let first = &curve.first().unwrap().1;
     let last = &curve.last().unwrap().1;
     eprintln!(

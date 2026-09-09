@@ -1,0 +1,72 @@
+# Direction 4, checked — and it need not repack at all
+# Measured 2026-09-08, n=3 x 8 rounds
+#
+# forge/syncer/tests/push_chain.rs::measure_whether_the_residue_direction_5_keeps_grows
+#
+# The model's direction 4 plans a FRESH pack: FoldPlan requires
+# `holds[f] = {}` (ForgeSync.tla:925), so the reclaim TLC proved safe
+# always pays `pack-objects --all --indexed-objects --write-bitmap-index`
+# over the whole repository (gitcmd.rs:463) plus the upload of its
+# output, blocking Importing -> Serving.
+#
+# But the RULE it proves never asks the coverer to be new:
+#   D == {q \in S : (holds[q] \cap fold[s].at) \subseteq holds[f]}
+# If a pack the snapshot ALREADY names covers the reachable set, every
+# other named pack can be unnamed for the cost of a snapshot CAS.
+
+round  packs    named B  redundant   covering pack already named?
+    0      2      19627       9768   YES 80a339d1 (9859 B) -> 9768 B unnamable for a CAS
+    1      4      39165      28919   YES 6a03e4d2 (10246 B) -> 28919 B
+    2      6      58704      48072   YES 42d68c1c (10632 B) -> 48072 B
+    3      8      78244      67226   YES 96469d49 (11018 B) -> 67226 B
+    4     10      97784      86380   YES 97a88fc8 (11404 B) -> 86380 B
+    5     12     117339     105547   YES 3e6c64f8 (11792 B) -> 105547 B
+    6     14     136878     124700   YES 579193f1 (12178 B) -> 124700 B
+    7     16     156417     143853   YES c677e286 (12564 B) -> 143853 B
+
+  rep 2 round 7: 156527 named, 143961 unnamable, coverer 255dbdd6 (12566 B)
+  rep 3 round 7: 156431 named, 143863 unnamable, coverer d56ed7c7 (12568 B)
+
+24 of 24 rounds: a pack the snapshot already names holds every reachable
+object. At round 7 that is 92% of named bytes unnamable with NO
+pack-objects run and NOTHING uploaded.
+
+The coverer is the base rebuild's own output, and it grows only with
+live content (9,859 -> 12,564 B). forge is ALREADY PAYING for that pack
+during normal serving. What the coverage rule withholds is not the pack,
+it is the PERMISSION TO UNNAME — and the quiescent window is exactly
+what grants it.
+
+## CAVEAT — this rig maximises the hit rate
+
+`base_rebuild_min_secs = 0` here, so a base rebuild is always current.
+On shipped defaults it runs far less often, and a covering pack can be
+stale relative to recent pushes. This measures that the variant EXISTS
+and what it saves when it applies; it does NOT measure the real-world
+hit rate, which is unknown.
+
+When no single pack covers, the generalisation is to keep the base plus
+every pack named since it and drop the rest. Neither variant is what
+TLC checked: the model always builds a fresh coverer.
+
+## Also checked, in the shipped code
+
+- The window is REAL: the UDS listener is bound only after
+  `publish(&shared, &sc, Phase::Serving)` (server.rs:267), and when
+  `ask` fails the hook writes `ng <ref> the repository server is not
+  accepting writes` for EVERY command (hook.rs:216-224). No ref moves.
+- A pack CAN still migrate in the window: pre-receive passes, git
+  migrates, proc-receive then fails. Unreachable and unnamed, so the
+  reclaim collecting it is safe — but the test must state it.
+- UNDO DOES NOT CONFLICT. Undo protects pack STEMS in the bucket:
+  `undo::referenced` is unioned into the sweep's `named` set
+  (fold.rs:965-968), independent of the current snapshot. Unnaming a
+  pack the current snapshot holds cannot delete an undo point's pack.
+- The reclaim is OPTIONAL and TIME-BOXABLE inside the existing proof:
+  `FoldAbandon` exists (ForgeSync.tla:1078) and `ReclaimDone` is enabled
+  as soon as no fold is in flight (:471), so a syncer may simply leave.
+- THE WINDOW IS ON THE WAKE PATH. `restore()` runs before every
+  `Phase::Serving`, not only on a cold start, and a slept forge repo
+  wakes on a plain read. The finding doc's "not on the wake path" bullet
+  is in tension with putting the reclaim there — unresolved, and the
+  zero-work form is what dissolves it.
