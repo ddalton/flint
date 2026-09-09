@@ -256,7 +256,7 @@ pub struct ForgeConfig {
     /// itself carries no binaries. `None` = git's default, which is
     /// what the rigs and the local spike use.
     pub hooks_path: Option<String>,
-    /// DIRECTION 5 (`FLINT_FORGE_NAME_ACCEPTED_SET`, default off).
+    /// DIRECTION 5 (`FLINT_FORGE_NAME_ACCEPTED_SET`, DEFAULT ON).
     ///
     /// Name the packs of pushes something was ACCEPTED from, instead of
     /// naming whatever is in `objects/pack`. The two differ because git
@@ -284,7 +284,7 @@ pub struct ForgeConfig {
     /// and refused objects in ONE pack, which must still be named.
     /// Measured to remove 78-81% of the residue.
     pub name_accepted_set: bool,
-    /// DIRECTION 4 (`FLINT_FORGE_RECLAIM_AT_REST`, default off).
+    /// DIRECTION 4 (`FLINT_FORGE_RECLAIM_AT_REST`, DEFAULT ON).
     ///
     /// THE COLLECTOR. Direction 5 lowers the slope; this empties the
     /// bin. At restore — after the snapshot is read and BEFORE the
@@ -361,8 +361,14 @@ impl ForgeConfig {
             fanout: 4,
             default_branch: "main".into(),
             hooks_path: None,
-            name_accepted_set: false,
-            reclaim_at_rest: false,
+            // DEFAULT ON since 2026-09-09, after both were drilled on a
+            // cluster against a control. forge has no installed base, so
+            // there is no upgrade to be careful of — the question is
+            // only which behaviour a new repository should get, and
+            // naming the packs of pushes that were REFUSED is not a
+            // behaviour anyone would choose deliberately.
+            name_accepted_set: true,
+            reclaim_at_rest: true,
         }
     }
 

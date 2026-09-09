@@ -29,8 +29,8 @@
 //!   FLINT_FORGE_UNDO_WINDOW_SECS / UNDO_MAX_POINTS  how long a force-pushed state stays recoverable, and how many
 //!                                  points a sweep reads (604800 / 64; 0 = undo off)
 //!   FLINT_FORGE_FANOUT           pack PUTs / ranged GETs in flight (default 4)
-//!   FLINT_FORGE_NAME_ACCEPTED_SET  name only ACCEPTED pushes' packs (default off)
-//!   FLINT_FORGE_RECLAIM_AT_REST    drop packs wholly covered, at restore (default off)
+//!   FLINT_FORGE_NAME_ACCEPTED_SET  name only ACCEPTED pushes' packs (default ON)
+//!   FLINT_FORGE_RECLAIM_AT_REST    drop packs wholly covered, at restore (default ON)
 //!   FLINT_FORGE_DEFAULT_BRANCH   HEAD for an empty repository (main)
 //!   FLINT_FORGE_HOOKS_PATH       core.hooksPath (the hooks ship in the
 //!                                git image, not in the repository)
@@ -197,15 +197,20 @@ async fn serve() {
     // DIRECTION 5, default OFF. On, the batch names the packs of pushes
     // it ACCEPTED rather than whatever is in `objects/pack` — see
     // `ForgeConfig::name_accepted_set`.
-    cfg.name_accepted_set = matches!(
-        std::env::var("FLINT_FORGE_NAME_ACCEPTED_SET").unwrap_or_default().as_str(),
-        "1" | "true" | "yes" | "on"
-    );
-    // DIRECTION 4, default OFF — see `ForgeConfig::reclaim_at_rest`.
-    cfg.reclaim_at_rest = matches!(
-        std::env::var("FLINT_FORGE_RECLAIM_AT_REST").unwrap_or_default().as_str(),
-        "1" | "true" | "yes" | "on"
-    );
+    // BOTH DEFAULT ON, and an ABSENT variable must leave the default
+    // alone. Reading `unwrap_or_default()` into a `matches!` forced the
+    // value to FALSE whenever the variable was unset — which is every
+    // repository that has not spelled out `spec.packs`, i.e. the exact
+    // population the default exists for. The flag would have been
+    // one-way: settable on, impossible to leave alone.
+    let env_flag = |name: &str, current: bool| -> bool {
+        match std::env::var(name) {
+            Err(_) => current,
+            Ok(v) => matches!(v.trim(), "1" | "true" | "yes" | "on"),
+        }
+    };
+    cfg.name_accepted_set = env_flag("FLINT_FORGE_NAME_ACCEPTED_SET", cfg.name_accepted_set);
+    cfg.reclaim_at_rest = env_flag("FLINT_FORGE_RECLAIM_AT_REST", cfg.reclaim_at_rest);
     cfg.default_branch =
         std::env::var("FLINT_FORGE_DEFAULT_BRANCH").unwrap_or_else(|_| "main".into());
     cfg.hooks_path = std::env::var("FLINT_FORGE_HOOKS_PATH").ok().filter(|p| !p.is_empty());

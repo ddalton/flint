@@ -38,16 +38,24 @@ use serde::{Deserialize, Serialize};
 use crate::lite_operator::crd::Phase as SharePhase;
 use crate::s3csi::policy::Consumers;
 
-/// The two pack-residue rules, both off by default. See
+fn yes() -> bool {
+    true
+}
+
+/// The two pack-residue rules, both ON by default. See
 /// `FlintRepoSpec::packs`.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PackRules {
-    /// Direction 5, the reducer.
-    #[serde(default)]
+    /// Direction 5, the reducer. `#[serde(default)]` makes an OMITTED
+    /// key false WITHIN a block that is present — so writing the block
+    /// at all opts out of anything not named in it. That is deliberate:
+    /// a block is an explicit statement, and absence of the block is
+    /// how a repository says "the defaults".
+    #[serde(default = "yes")]
     pub name_accepted_set: bool,
     /// Direction 4, the collector.
-    #[serde(default)]
+    #[serde(default = "yes")]
     pub reclaim_at_rest: bool,
 }
 
@@ -117,8 +125,13 @@ pub struct FlintRepoSpec {
     pub endpoint: Option<String>,
 
     /// PACK RESIDUE (`docs/plans/forge-pack-pinning-2026-09-08.md`).
-    /// Both default off; both are the syncer's own rules and change no
-    /// bucket format, so a repository can be moved between them.
+    /// BOTH DEFAULT ON since 2026-09-09, after both were drilled on a
+    /// cluster against a control. Set the block only to turn one OFF —
+    /// an absent block means "take the syncer's defaults", and both
+    /// values are rendered explicitly when it is present, so `false`
+    /// really does disable rather than falling back to the default.
+    /// Neither changes the bucket format, so a repository can be moved
+    /// between them freely.
     ///
     /// `nameAcceptedSet` is the REDUCER: name the packs of pushes
     /// something was accepted from, rather than whatever is in

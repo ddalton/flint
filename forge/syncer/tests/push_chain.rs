@@ -737,6 +737,15 @@ fn is_redundant(
 async fn measure_what_a_refused_push_leaves_in_the_snapshot() {
     let policy = Policy { protected: vec!["refs/heads/locked".into()], ..Policy::default() };
     let rig = Rig::start_tuned(policy, true, |c| {
+        // MEASURES THE PROBLEM, so it must opt OUT of the fixes. Both
+        // rules default ON since 2026-09-09; with them on there is no
+        // residue for this rig to find and the leg fails with "no
+        // residue attributed to a wholly-refused push" — which is the
+        // fix working, not the measurement breaking. Pinned FALSE here
+        // so this stays a record of the unfixed behaviour, which is
+        // what the finding rests on.
+        c.name_accepted_set = false;
+        c.reclaim_at_rest = false;
         // The ladder, brought down to a test-sized repository so the
         // COLLECTOR (a base rebuild's `--all`) actually runs. Without
         // this nothing is ever dropped and there is no residue to see.
@@ -1077,6 +1086,15 @@ async fn measure_what_a_refused_push_leaves_in_the_snapshot() {
 #[tokio::test(flavor = "multi_thread")]
 async fn measure_whether_the_residue_direction_5_keeps_grows() {
     let rig = Rig::start_tuned(Policy::default(), true, |c| {
+        // MEASURES THE PROBLEM, so it must opt OUT of the fixes. Both
+        // rules default ON since 2026-09-09; with them on there is no
+        // residue for this rig to find and the leg fails with "no
+        // residue attributed to a wholly-refused push" — which is the
+        // fix working, not the measurement breaking. Pinned FALSE here
+        // so this stays a record of the unfixed behaviour, which is
+        // what the finding rests on.
+        c.name_accepted_set = false;
+        c.reclaim_at_rest = false;
         c.fold_factor = 2;
         c.fold_min_bytes = 0;
         c.base_min_bytes = 0;
@@ -1232,6 +1250,15 @@ struct Row {
 
 async fn residue_at_cadence(base_rebuild_min_secs: u64, rounds: usize) -> Vec<Row> {
     let rig = Rig::start_tuned(Policy::default(), true, |c| {
+        // MEASURES THE PROBLEM, so it must opt OUT of the fixes. Both
+        // rules default ON since 2026-09-09; with them on there is no
+        // residue for this rig to find and the leg fails with "no
+        // residue attributed to a wholly-refused push" — which is the
+        // fix working, not the measurement breaking. Pinned FALSE here
+        // so this stays a record of the unfixed behaviour, which is
+        // what the finding rests on.
+        c.name_accepted_set = false;
+        c.reclaim_at_rest = false;
         c.fold_factor = 2;
         c.fold_min_bytes = 0;
         c.base_min_bytes = 0;

@@ -554,21 +554,23 @@ pub fn deployment(repo: &FlintRepo, d: &RenderDefaults, replicas: i32) -> Deploy
     // The pack-residue rules. Rendered ONLY when on, so a repository
     // that has not asked for them carries no new environment at all and
     // the syncer takes its own defaults — which are off.
+    // EMITTED IN BOTH DIRECTIONS. These default ON in the syncer, so a
+    // block that only rendered the `true` case could turn them on and
+    // never off: `nameAcceptedSet: false` would emit nothing and the
+    // syncer would take its own default, which is now the opposite of
+    // what the repository asked for. An ABSENT block still emits
+    // nothing, which is what lets the default be a default.
     if let Some(pr) = s.packs.as_ref() {
-        if pr.name_accepted_set {
-            env.push(EnvVar {
-                name: "FLINT_FORGE_NAME_ACCEPTED_SET".into(),
-                value: Some("1".into()),
-                ..Default::default()
-            });
-        }
-        if pr.reclaim_at_rest {
-            env.push(EnvVar {
-                name: "FLINT_FORGE_RECLAIM_AT_REST".into(),
-                value: Some("1".into()),
-                ..Default::default()
-            });
-        }
+        env.push(EnvVar {
+            name: "FLINT_FORGE_NAME_ACCEPTED_SET".into(),
+            value: Some(if pr.name_accepted_set { "1" } else { "0" }.into()),
+            ..Default::default()
+        });
+        env.push(EnvVar {
+            name: "FLINT_FORGE_RECLAIM_AT_REST".into(),
+            value: Some(if pr.reclaim_at_rest { "1" } else { "0" }.into()),
+            ..Default::default()
+        });
     }
     // The file API (`docs/plans/forge-file-api-design.md`). Its own
     // port, never the status one — `/status` is unauthenticated there
@@ -860,7 +862,56 @@ pub fn subtree(repo: &FlintRepo) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    /// THE FLAG MUST BE TWO-WAY. Both rules default ON in the syncer,
+    /// so a render that only emitted the `true` case could turn them on
+    /// and never off: `nameAcceptedSet: false` would emit nothing, the
+    /// syncer would take its own default, and the repository would get
+    /// the OPPOSITE of what it asked for. An absent block must still
+    /// emit nothing, because that is what lets a default be a default.
+    #[test]
+    fn the_pack_rules_can_be_turned_off_and_not_only_on() {
+        let d = RenderDefaults::default();
+        let mut r = repo();
+        let env_of = |dep: &Deployment, name: &str| -> Option<String> {
+            dep.spec.as_ref()?.template.spec.as_ref()?.containers.iter()
+                .find(|c| c.name == "syncer")?
+                .env.as_ref()?.iter().find(|e| e.name == name)?.value.clone()
+        };
+
+        // ABSENT: no environment at all, so the syncer's default stands.
+        r.spec.packs = None;
+        let plain = deployment(&r, &d, 1);
+        assert!(
+            env_of(&plain, "FLINT_FORGE_NAME_ACCEPTED_SET").is_none(),
+            "an absent block must render nothing — a value would override the default"
+        );
+        assert!(env_of(&plain, "FLINT_FORGE_RECLAIM_AT_REST").is_none());
+
+        // OFF: rendered EXPLICITLY, or it cannot be turned off at all.
+        r.spec.packs = Some(crate::forge_operator::crd::PackRules {
+            name_accepted_set: false,
+            reclaim_at_rest: false,
+        });
+        let off = deployment(&r, &d, 1);
+        assert_eq!(
+            env_of(&off, "FLINT_FORGE_NAME_ACCEPTED_SET").as_deref(),
+            Some("0"),
+            "false must render 0; emitting nothing would leave the default ON"
+        );
+        assert_eq!(env_of(&off, "FLINT_FORGE_RECLAIM_AT_REST").as_deref(), Some("0"));
+
+        // ON: the control for the pair above.
+        r.spec.packs = Some(crate::forge_operator::crd::PackRules {
+            name_accepted_set: true,
+            reclaim_at_rest: true,
+        });
+        let on = deployment(&r, &d, 1);
+        assert_eq!(env_of(&on, "FLINT_FORGE_NAME_ACCEPTED_SET").as_deref(), Some("1"));
+        assert_eq!(env_of(&on, "FLINT_FORGE_RECLAIM_AT_REST").as_deref(), Some("1"));
+    }
 
     /// A tag is the text after the last colon of the last path
     /// component; a digest is not a tag; a registry port is not a tag.
