@@ -13,13 +13,13 @@ description: >-
 type: application
 
 # Chart version, independent of the flint release train.
-version: 0.1.0
+version: 0.2.0
 
 # The flint release whose images this chart runs: the node plugin and
 # the broker come out of ONE image (flint-s3-csi), the workers out of
 # two (flint-s3-worker, flint-s3-worker-lean). All four speak the same
 # launch-socket protocol — keep them in step.
-appVersion: "1.45.0"
+appVersion: "1.49.0"
 
 keywords:
   - s3

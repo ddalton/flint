@@ -15,7 +15,7 @@ images:
   repository: dilipdalton  # Docker Hub registry
   flintCsiDriver:
     name: flint-driver      # CSI Driver binary (supports controller and node modes via CSI_MODE env var)
-    tag: "1.45.0"       # 1.45.0: the CSI delivery of S3 (s3.csi.chert.us) and the chert.us identifiers — driver and MDS share the crate so this image moves with the release
+    tag: "1.49.0"       # 1.49.0: driver and MDS share the crate, and this image had not been rebuilt since 1.45.0 — see CHANGELOG. 1.45.0: the CSI delivery of S3 (s3.csi.chert.us) and the chert.us identifiers — driver and MDS share the crate so this image moves with the release
   # SPDK Target daemon (runs on each node)
   spdkTarget:
     name: spdk-tgt          # SPDK target daemon (SPDK v26.05)
@@ -529,7 +529,7 @@ pnfs:
     # MDS + DS ship in one image (both binaries; entrypoint selects).
     image:
       name: flint-pnfs
-      tag: "1.45.0"  # 1.45.0: THE RENAME-AND-DELIVERY RELEASE — machine identifiers move to chert.us (BREAKING, no migration), both S3 front ends delivered by one CSI node DaemonSet, the lean integrity-audit fixes
+      tag: "1.49.0"  # 1.49.0 carries the tier reader-hang fix (a 404 hung every reader of that file forever). 1.45.0: THE RENAME-AND-DELIVERY RELEASE — machine identifiers move to chert.us (BREAKING, no migration), both S3 front ends delivered by one CSI node DaemonSet, the lean integrity-audit fixes
 
     # FILE-layout stripe unit in bytes. Pinned PER FILE at first
     # LAYOUTGET (Phase 0): changing this affects only files created

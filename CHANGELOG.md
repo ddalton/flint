@@ -12,6 +12,84 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.49.0] - 2026-09-09
+
+**NO NEW CODE. This is the release that puts the code into the images.**
+Every image except `flint-pnfs` and the three forge images had not been
+rebuilt since **1.45.0**, so three releases' worth of change existed on
+`main` and in nothing anyone could pull. 1.48.0 made that worse rather
+than better: it shipped the tier reader-hang fix in `flint-pnfs:1.48.0`
+and bumped the `flint-lite` chart, and left the **flint-lite-OPERATOR**
+chart at appVersion 1.45.0 — where `--hub-image=dilipdalton/flint-pnfs:1.45.0`
+is the default handed to **every FlintShare in the fleet**. The
+standalone chart got the fix; the operator-managed fleet did not.
+
+Published multi-arch (amd64 + arm64) at `1.49.0`: `flint-driver`,
+`flint-pnfs`, `flint-lite-operator` (+ its `flint-lean-operator` alias),
+`flint-sync`, `flint-passthrough-mounter`, `flint-s3-csi`,
+`flint-s3-worker`, `flint-s3-worker-lean`. Charts: `flint-csi-driver`
+1.49.0, `flint-lite` 0.4.15, `flint-lite-operator` 0.3.0, `flint-lean`
+0.7.0, `flint-s3-csi` 0.2.0, `flint-passthrough` 0.3.0 — all appVersion
+`1.49.0`. **The forge chart and its three images are NOT republished**:
+they went out at 1.48.0 from this same tree and are current, and
+re-tagging identical bits is the thing this repo already records as a
+defect.
+
+### Fixed — the fleet default pointed at the image with the reader hang
+
+- `flint-lite-operator-chart` renders `--hub-image` from its appVersion,
+  so a FlintShare that does not pin `spec.image` got `flint-pnfs:1.45.0`.
+  That image conflates a definitive 404 with a transient one and retries
+  forever, so a deleted object, an expired lifecycle rule or a moved
+  prefix wedged every reader of that file for the life of the mount. The
+  fix shipped in `flint-pnfs:1.48.0` and reached only the standalone
+  chart. **A release that bumps one chart's appVersion must be checked
+  against every OTHER chart that renders the same image.**
+
+### Fixed — s3.csi.chert.us: a refusal that existed only on main
+
+- `identity.mode: webIdentity` on a passthrough mount is refused — the
+  mounter has no web-identity provider, and it is the CLIENT, not the
+  transport or the ARN. Landed in `c34e2e4e` and, until now, was in no
+  published image: `flint-s3-csi:1.45.0` predates it and would happily
+  accept a configuration that cannot work.
+- Also reaching the image for the first time: a mounter's last words now
+  reach the tenant (`5ea5657e`, the fourteen-leg EC2 spot suite).
+
+### Fixed — flint-s3-worker-lean embedded a stale flint-sync
+
+- `Dockerfile.s3worker-lean` is `FROM ${SYNC_IMAGE}`, defaulting to
+  `flint-sync:1.45.0`. The worker's own payload was current
+  (`crates/flint-s3-worker` has no commits since 1.45.0) and the image
+  was still shipping a sync binary four releases old. `publish-images.sh`
+  names the release's own bases, so 1.49.0's worker-lean is FROM
+  `flint-sync:1.49.0`.
+
+### Fixed — flint-sync and the lean/lite operator images, four releases behind
+
+- `flint-sync:1.45.0` predates `2a213b01` (the lease heartbeat could not
+  beat while the server worked, and a killed push left its multipart
+  parts billed) and three other `lean/sidecar` commits. The SAME binary
+  at current code was already shipping inside `flint-forge-syncer:1.48.0`
+  — so the code was published and the standalone image was not, which is
+  the shape that makes "is it published?" unanswerable without an audit.
+- `flint-lite-operator:1.45.0` likewise `COPY`s `flint-hub-gateway`,
+  which has ~31 commits of change that were current inside
+  `flint-forge-operator:1.48.0` and stale here.
+
+### How the gap was found, and what would have caught it earlier
+
+- Asked directly: "are all changes published?" Answered by diffing each
+  image's SOURCE TREE against the tag of its newest published version,
+  not by reading the changelog. `spdk-csi-driver/src` had 28 commits
+  since v1.45.0, `lean/sidecar` 4, `forge/syncer` 60.
+- **`release.sh check` cannot see this.** It asks whether the tag a chart
+  NAMES exists on the Hub — and `flint-driver:1.45.0` exists, so a chart
+  frozen at 1.45.0 passes forever while its source moves underneath. The
+  check is "is the reference resolvable", never "is the reference
+  current". A staleness gate belongs beside it.
+
+
 ## [1.48.0] - 2026-09-09
 
 Two front ends move, and only two. **flint forge** gets the pack-residue
@@ -5784,7 +5862,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.48.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.49.0...HEAD
+[1.49.0]: https://github.com/ddalton/flint/compare/v1.48.0...v1.49.0
 [1.48.0]: https://github.com/ddalton/flint/compare/v1.47.0...v1.48.0
 [1.47.0]: https://github.com/ddalton/flint/compare/v1.46.0...v1.47.0
 [1.46.0]: https://github.com/ddalton/flint/compare/v1.45.0...v1.46.0
