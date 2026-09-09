@@ -1,6 +1,21 @@
 # Dead objects pin live packs — measured on runcl, 2026-09-08
 
-> **STATUS 2026-09-09 — BOTH DIRECTIONS ARE BUILT AND DRILLED.**
+> **STATUS 2026-09-09 — BUILT, DEFAULT ON, VALIDATED ON A LIVE CLUSTER.**
+>
+> Both rules DEFAULT ON (`8dc3c1c4`); a repository opts OUT with
+> `spec.packs`. 198 syncer + 52 operator tests pass with them on.
+> **runcm** — 3 all-spot `i4i.large` in us-west-1, control plane
+> included, REAL S3, images from Docker Hub — 14 passed, 0 failed
+> (`715ef710`, artefact `residue-drill-runcm-20260909-aws.log`): the
+> control NAMES the pack a refused push leaves and the treated arm does
+> not; after restarting both, control 8 packs / 76,975 B unchanged
+> against treated 4 / 38,532 B; both clone and pass `fsck --strict`.
+> The wire numbers agree with kind to within a few bytes. Not void — all
+> nodes `reclaim=false` with ages spanning the run. Torn down; bucket,
+> IAM user and key deleted, absence asserted by NAMED errors against a
+> control probe that was seen to answer.
+>
+> **BOTH DIRECTIONS ARE BUILT AND DRILLED.**
 > Direction 5 (the reducer) and direction 4 (the collector) are in
 > production code behind two flags, both OFF, opted into per repository
 > with `spec.packs.{nameAcceptedSet,reclaimAtRest}`. Commits
