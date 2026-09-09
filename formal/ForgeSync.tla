@@ -174,6 +174,7 @@ CONSTANTS
   FoldReachableCoverage, \* mutation: an input may go if its UNCOVERED objects are unreachable (the pack-pinning 'direction 1')
   ReclaimAtRestore,     \* DIRECTION 4: a reclaiming rebuild between the restore and the first served hook
   ReclaimWhileServing,  \* mutation: the reclaim's relaxed rule, taken on a SERVING syncer
+  ReclaimBySet,         \* DIRECTION 4, THE FREE FORM: the coverer is the KEPT SET, not a new pack
   NameAcceptedSet,      \* DIRECTION 5: a batch names the packs it ACCEPTED, never the directory
   ForgetPushPack,       \* mutation: direction 5 without the push->pack mapping
   ProveFromDisk,        \* mutation: a proof is taken over the object DIRECTORY, not the named packs (F2)
@@ -962,8 +963,22 @@ FoldPlan(s) ==
 
 \* The task's upload, through the multipart path: initiated, then
 \* Complete.  Beside anything the loop does.
+\* "reclaiming" is in these two guards because DIRECTION 4 IS DEAD CODE
+\* WITHOUT IT, and its absence made ForgeSyncReclaimAtRestore's green
+\* VACUOUS for a whole day. `FoldPlan` was extended to allow a fold to be
+\* planned in the reclaim window; `FoldInit` and `FoldComplete` were not,
+\* so such a fold could never reach "uploaded", therefore never
+\* "renewed", therefore never COMMIT — and `ReclaimDone` requires
+\* `fold[s].stage = "none"`, so the syncer cannot leave the window
+\* carrying one either. The atRest arm of `FoldCommit` was unreachable.
+\*
+\* It was caught by the state counts: ForgeSyncReclaimBySet returned
+\* EXACTLY ForgeSyncReclaimAtRestore's 215,837,588 generated and
+\* 47,449,859 distinct. A mutation that fires cannot leave the generated
+\* count untouched. Comparing counts against a neighbouring run is now
+\* the acceptance test for any run in this family, not a courtesy.
 FoldInit(s) ==
-  /\ st[s] \in {"serving", "pushing"} /\ fold[s].stage = "planned"
+  /\ st[s] \in {"serving", "pushing", "reclaiming"} /\ fold[s].stage = "planned"
   /\ uploads' = uploads \cup {[s |-> s, p |-> fold[s].id, ep |-> lease[s].ep]}
   /\ fold' = [fold EXCEPT ![s].stage = "initiated"]
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, st, lease, lastTok,
@@ -977,7 +992,7 @@ FoldInit(s) ==
 \* nothing (fold_landed logs it; the next plan runs at the next tick).
 \* Rule 3: the fold ticks its OWN counter, never the hold's.
 FoldComplete(s) ==
-  /\ st[s] \in {"serving", "pushing"} /\ fold[s].stage = "initiated"
+  /\ st[s] \in {"serving", "pushing", "reclaiming"} /\ fold[s].stage = "initiated"
   /\ LET u == [s |-> s, p |-> fold[s].id, ep |-> lease[s].ep] IN
      IF u \in uploads
        THEN /\ uploads' = uploads \ {u}
@@ -1069,6 +1084,15 @@ FoldCovers(s) ==
       R == IF fold[s].base THEN U \cap fold[s].at ELSE U IN
     R \subseteq holds[f]
 
+\* DIRECTION 4, THE FREE FORM: which inputs a reclaim may drop, and the
+\* set it is chosen from. Forced to {{}} — a single choice — whenever the
+\* constant is off, so the other 21 ForgeSync runs keep exactly the state
+\* spaces they had.
+FoldInputSet(s) == IF FoldInputsAfterStart THEN belief[s].packs ELSE fold[s].inputs
+
+ReclaimDropSet(s) ==
+  IF ReclaimBySet /\ fold[s].atRest THEN SUBSET FoldInputSet(s) ELSE {{}}
+
 \* A roll-up that does not cover its inputs is thrown away, which is
 \* what `run_task` does when the index comparison fails: it returns an
 \* error before the upload, the loop clears the fold and the scratch
@@ -1091,86 +1115,115 @@ FoldCommit(s) ==
   \* Re-asserted, not inherited from the renewal: see FoldQuiet.
   /\ FoldQuiet(s)
   /\ (FoldNoCoverageCheck \/ FoldCovers(s))
-  /\ LET f == fold[s].id
-         S == IF FoldInputsAfterStart THEN belief[s].packs ELSE fold[s].inputs
-         \* WHICH INPUTS THE COMMIT MAY UNNAME. Not "all of them", which
-         \* is what runcd did and what the mutation restores: an input
-         \* may go only if the roll-up HOLDS everything it holds.
-         \*
-         \* Two weaker rules were tried and TLC refuted both. "Unname
-         \* every input" is runcd itself (the mutation). "Unname an
-         \* input whose uncovered objects have already landed" fails
-         \* too: a base rebuild reads the refs before a queued push's
-         \* ref moves, so its roll-up cannot hold that push, and by the
-         \* time the fold commits the push HAS landed — the test passes
-         \* and the object is stranded anyway. Every landed push must
-         \* stay held (Inv_LandedPackComplete), so coverage is the only
-         \* rule that survives. An input holding something the roll-up
-         \* missed simply stays named for a later fold.
-         \* DIRECTION 1 of the pack-pinning finding (2026-09-08), and the
-         \* THIRD weakening of this rule TLC has now refuted. Dead
-         \* objects pin live packs: on runcl 58% of the snapshot's named
-         \* bytes were two packs kept only because each held three
-         \* UNREACHABLE objects — the residue of a correctly refused
-         \* push. The tempting fix is to supersede on REACHABLE
-         \* coverage: let an input go when everything it holds that the
-         \* refs can reach is in the roll-up, and ignore what they
-         \* cannot reach.
-         \*
-         \* It is runcd again, with the arrow reversed. A base rebuild
-         \* holds what the refs REACHED when it read them, and a batch
-         \* names the DIRECTORY, so a queued push's pack is named one
-         \* batch before its ref moves. In that gap its objects are
-         \* exactly "unreachable objects in a named pack" — the same
-         \* observation as a refusal's residue, and NO test at this
-         \* moment separates them. The reachable rule unnames the pack;
-         \* the push then lands; its objects are in nothing named.
-         \*
-         \* So the two rules already refuted here have a third sibling:
-         \* "unname every input" (FoldSupersedesArrivals) loses a push
-         \* that has landed, "unname an input whose uncovered objects
-         \* have landed" loses one that lands during the fold, and this
-         \* one loses the push that has not landed YET. Coverage — the
-         \* whole of it, reachable or not — remains the only rule that
-         \* survives, and the pinning must be paid for somewhere the
-         \* queue cannot reach.
-         \* DIRECTION 4. The SAME rule the mutation above refutes —
-         \* "drop an input whose uncovered objects no ref reaches" —
-         \* taken only where the observation is not ambiguous. Between
-         \* the restore and the first served hook `PushSend` cannot fire
-         \* at this syncer, so no pack on disk is waiting for a ref that
-         \* is about to move. Reachability is read at PLAN time
-         \* (`fold[s].at`), so the plan-to-commit gap is exposed rather
-         \* than assumed away, and a straggler's landing is free to
-         \* exploit it. Mutation ReclaimWhileServing takes the same rule
-         \* out of the window and must lose.
-         D == IF FoldSupersedesArrivals THEN S
-                ELSE IF FoldReachableCoverage
-                       THEN {q \in S : (holds[q] \cap snap.history) \subseteq holds[f]}
-                       ELSE IF fold[s].atRest
-                              THEN {q \in S : (holds[q] \cap fold[s].at) \subseteq holds[f]}
-                              ELSE {q \in S : holds[q] \subseteq holds[f]}
-         named == IF FoldCasFromDisk THEN (localPacks[s] \ D) \cup {f}
-                                    ELSE (belief[s].packs \ D) \cup {f} IN
-     IF snap.etag = belief[s].etag
-       THEN /\ snap' = [snap EXCEPT !.etag = nextTok, !.packs = named]
-            /\ nextTok' = nextTok + 1
-            /\ belief' = [belief EXCEPT ![s].etag = nextTok, ![s].packs = named]
-            \* The inputs leave the LISTING and stay on the DISK: a
-            \* reader mid-clone keeps the pack it is streaming, and
-            \* `unlink_retained` takes them a retention window later.
-            \* The second conjunct is what this module used to lack
-            \* entirely — the inputs simply vanished here — so the state
-            \* audit F2 lives in did not exist to be reached.
-            /\ localPacks' = [localPacks EXCEPT ![s] = @ \cup {f}]
-            /\ retained' = [retained EXCEPT ![s] = @ \cup D]
-            /\ fold' = [fold EXCEPT ![s] = NoFold]
-            /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
-            /\ sensorMoved' = [sensorMoved EXCEPT ![s] = TRUE]
-            /\ stragglerLand' = (stragglerLand \/ SuccessorRestored(s))
-            /\ UNCHANGED <<st, lease, batch, pushState, quiet>>
-       ELSE /\ Fall(s)
-            /\ UNCHANGED <<snap, nextTok, belief, localPacks, retained, stragglerLand>>
+  \* DIRECTION 4, THE FREE FORM (measured 2026-09-08). The rule below
+  \* drops an input whose reachable objects the NEW pack covers, and
+  \* `FoldPlan` demands that pack be fresh (`holds[f] = {}`) — so the
+  \* reclaim TLC proved safe always pays a whole-repository
+  \* `pack-objects --all --write-bitmap-index` plus its upload, on the
+  \* WAKE path. The rule never asked the coverer to be NEW. Keeping a
+  \* SET that still holds everything reachable collects 100% of the
+  \* redundant bytes at every base-rebuild cadence including the shipped
+  \* one, building nothing (forge/e2e/results/direction4-cadence-*.log).
+  \*
+  \* Modelled as a nondeterministic choice rather than as the greedy an
+  \* implementation would run: TLC then explores EVERY set that greedy
+  \* could reach and many it could not, so a green covers the algorithm
+  \* without pinning the algorithm. `Drop` is forced to {} when the
+  \* constant is off, which is what keeps the other 21 runs' state
+  \* spaces exactly as they were.
+  \*
+  \* The kept set here INCLUDES the fold's own output, so the modelled
+  \* rule is strictly more permissive than an implementation that builds
+  \* nothing — a green covers the free form a fortiori.
+  /\ \E Drop \in ReclaimDropSet(s) :
+     LET f == fold[s].id
+           S == FoldInputSet(s)
+           \* WHICH INPUTS THE COMMIT MAY UNNAME. Not "all of them", which
+           \* is what runcd did and what the mutation restores: an input
+           \* may go only if the roll-up HOLDS everything it holds.
+           \*
+           \* Two weaker rules were tried and TLC refuted both. "Unname
+           \* every input" is runcd itself (the mutation). "Unname an
+           \* input whose uncovered objects have already landed" fails
+           \* too: a base rebuild reads the refs before a queued push's
+           \* ref moves, so its roll-up cannot hold that push, and by the
+           \* time the fold commits the push HAS landed — the test passes
+           \* and the object is stranded anyway. Every landed push must
+           \* stay held (Inv_LandedPackComplete), so coverage is the only
+           \* rule that survives. An input holding something the roll-up
+           \* missed simply stays named for a later fold.
+           \* DIRECTION 1 of the pack-pinning finding (2026-09-08), and the
+           \* THIRD weakening of this rule TLC has now refuted. Dead
+           \* objects pin live packs: on runcl 58% of the snapshot's named
+           \* bytes were two packs kept only because each held three
+           \* UNREACHABLE objects — the residue of a correctly refused
+           \* push. The tempting fix is to supersede on REACHABLE
+           \* coverage: let an input go when everything it holds that the
+           \* refs can reach is in the roll-up, and ignore what they
+           \* cannot reach.
+           \*
+           \* It is runcd again, with the arrow reversed. A base rebuild
+           \* holds what the refs REACHED when it read them, and a batch
+           \* names the DIRECTORY, so a queued push's pack is named one
+           \* batch before its ref moves. In that gap its objects are
+           \* exactly "unreachable objects in a named pack" — the same
+           \* observation as a refusal's residue, and NO test at this
+           \* moment separates them. The reachable rule unnames the pack;
+           \* the push then lands; its objects are in nothing named.
+           \*
+           \* So the two rules already refuted here have a third sibling:
+           \* "unname every input" (FoldSupersedesArrivals) loses a push
+           \* that has landed, "unname an input whose uncovered objects
+           \* have landed" loses one that lands during the fold, and this
+           \* one loses the push that has not landed YET. Coverage — the
+           \* whole of it, reachable or not — remains the only rule that
+           \* survives, and the pinning must be paid for somewhere the
+           \* queue cannot reach.
+           \* DIRECTION 4. The SAME rule the mutation above refutes —
+           \* "drop an input whose uncovered objects no ref reaches" —
+           \* taken only where the observation is not ambiguous. Between
+           \* the restore and the first served hook `PushSend` cannot fire
+           \* at this syncer, so no pack on disk is waiting for a ref that
+           \* is about to move. Reachability is read at PLAN time
+           \* (`fold[s].at`), so the plan-to-commit gap is exposed rather
+           \* than assumed away, and a straggler's landing is free to
+           \* exploit it. Mutation ReclaimWhileServing takes the same rule
+           \* out of the window and must lose.
+           D == IF ReclaimBySet /\ fold[s].atRest THEN Drop
+                  ELSE IF FoldSupersedesArrivals THEN S
+                  ELSE IF FoldReachableCoverage
+                         THEN {q \in S : (holds[q] \cap snap.history) \subseteq holds[f]}
+                         ELSE IF fold[s].atRest
+                                THEN {q \in S : (holds[q] \cap fold[s].at) \subseteq holds[f]}
+                                ELSE {q \in S : holds[q] \subseteq holds[f]}
+           named == IF FoldCasFromDisk THEN (localPacks[s] \ D) \cup {f}
+                                      ELSE (belief[s].packs \ D) \cup {f} IN
+       \* THE SET RULE'S ONLY CONDITION: what stays NAMED must still
+       \* hold everything the refs reached when the plan was taken.
+       \* Read at PLAN time (`fold[s].at`), so the plan-to-commit gap is
+       \* exposed rather than assumed away and a straggler's landing is
+       \* free to exploit it — the same shape the atRest rule uses.
+       /\ ((ReclaimBySet /\ fold[s].atRest)
+             => fold[s].at \subseteq UNION {holds[q] : q \in named})
+       /\ IF snap.etag = belief[s].etag
+         THEN /\ snap' = [snap EXCEPT !.etag = nextTok, !.packs = named]
+              /\ nextTok' = nextTok + 1
+              /\ belief' = [belief EXCEPT ![s].etag = nextTok, ![s].packs = named]
+              \* The inputs leave the LISTING and stay on the DISK: a
+              \* reader mid-clone keeps the pack it is streaming, and
+              \* `unlink_retained` takes them a retention window later.
+              \* The second conjunct is what this module used to lack
+              \* entirely — the inputs simply vanished here — so the state
+              \* audit F2 lives in did not exist to be reached.
+              /\ localPacks' = [localPacks EXCEPT ![s] = @ \cup {f}]
+              /\ retained' = [retained EXCEPT ![s] = @ \cup D]
+              /\ fold' = [fold EXCEPT ![s] = NoFold]
+              /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
+              /\ sensorMoved' = [sensorMoved EXCEPT ![s] = TRUE]
+              /\ stragglerLand' = (stragglerLand \/ SuccessorRestored(s))
+              /\ UNCHANGED <<st, lease, batch, pushState, quiet>>
+         ELSE /\ Fall(s)
+              /\ UNCHANGED <<snap, nextTok, belief, localPacks, retained, stragglerLand>>
   /\ UNCHANGED <<cell, packObj, idxObj, uploads, lastTok, localMain, migrating,
                  hbDue, pushTo, crashes, renewBudget, claimBudget,
                  ackNotDurable, skipOverMovement, unrestorable,

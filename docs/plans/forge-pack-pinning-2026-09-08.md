@@ -235,7 +235,60 @@ the fold floor, because the pin is coverage and not size. The cost is
 three tiny objects' worth of pack per refusal, permanently, on a
 workload whose refusals are correct and routine.
 
-## Direction 4 — reclaim under quiescence (the one that survives)
+## Direction 4 — SAFETY IS UNRESOLVED (2026-09-08, late)
+
+**The green this section rested on was VACUOUS, and the correction is
+not yet finished.** Read this before the rest of the section, which was
+written when `ForgeSyncReclaimAtRestore` was believed to hold.
+
+`FoldPlan` was extended to let a fold be planned in the reclaim window;
+`FoldInit` and `FoldComplete` were NOT — both required
+`st \in {"serving", "pushing"}`. So a fold planned while reclaiming could
+never reach `"uploaded"`, therefore never `"renewed"`, therefore never
+COMMIT; and `ReclaimDone` requires `fold[s].stage = "none"`, so the
+syncer could not carry one out of the window either. **The `atRest` arm
+of `FoldCommit` was unreachable.** The 47,449,859-state green proved
+nothing, and neither did the `ReclaimBySet` run built on top of it.
+
+It surfaced only because `ForgeSyncReclaimBySet` returned EXACTLY
+`ForgeSyncReclaimAtRestore`'s 215,837,588 generated / 47,449,859
+distinct. A mutation that fires cannot leave the generated count
+untouched. **Comparing counts against a neighbouring run is now the
+acceptance test for anything in this family.**
+
+With the two guards fixed, `ForgeSyncReclaimAtRestore` **VIOLATES**
+`Inv_LandedPackComplete` in 2min 33s (31-state trace), and still
+violates with `MaxCrashes = 0` in 1min 08s — so it does not depend on
+the crash path.
+
+**But the counterexample is not obviously realisable, and that is the
+open question.** Its trace runs `CleanRelease -> ClaimReleased ->
+Restore` while a push is still queued, so the reclaim drops the pack of
+a push that lands afterwards. `restore::restore` is called ONCE, at
+`server.rs:238`, before the first `Phase::Serving`; a lease loss returns
+`ForgeError::Fenced` and the process exits. A real restore therefore
+always happens in a FRESH process whose in-memory queue is empty, and
+`Queued(s)` in the model is derived from the pack being on DISK rather
+than from that queue — which is more permissive than the code.
+
+**What has to happen next, in order:**
+
+1. Make `Queued` (or `Restore`) match the implementation: a restore
+   begins a new incarnation with no pending requests. Then re-run.
+2. If it still violates, direction 4 is refuted and this whole section
+   goes.
+3. If it holds, the refutation was a modelling artefact — but a
+   NEIGHBOURING hazard remains and is real: pack names are MANY-TO-ONE
+   (measured today), so an identical-content retry of a push refused
+   during the window produces the SAME pack name, which
+   `Listing(s) == localPacks \ retained` would then exclude. That one is
+   a code-level concern whether or not the model finds it.
+
+Everything MEASURED about direction 4 stands — it collects 100% of the
+residue at every base cadence, building nothing. Only its SAFETY is
+unresolved.
+
+## Direction 4 — reclaim under quiescence (as originally argued)
 
 Cut the knot where the ambiguity does not exist. The hazard is entirely
 "a pack on disk whose ref has not moved YET". There is a window in which
