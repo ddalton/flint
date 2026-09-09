@@ -130,6 +130,12 @@ fn record_push_packs() {
     let _ = std::fs::write(&path, names.join("\n"));
 }
 
+/// Drop a record for a push that is being refused at `pre-receive`,
+/// whose quarantine git therefore discards whole.
+fn forget_push_packs() {
+    let _ = std::fs::remove_file(push_packs_path());
+}
+
 /// Read back what `pre-receive` recorded, and REMOVE it: the file is
 /// one push's handoff, and a leftover would be read by a later push
 /// that happened to reuse the pid — naming a pack that push never
@@ -185,6 +191,20 @@ pub fn run_hook(role: &str) -> i32 {
 /// `pre-receive`: every command on stdin as `<old> <new> <ref>`, and an
 /// exit status that accepts or refuses ALL of them.
 fn pre_receive() -> std::io::Result<i32> {
+    // RECORDED FIRST, BEFORE ANY DECISION. This function has three
+    // exits and every one that returns 0 lets git migrate the pack out
+    // of quarantine — so recording on only one of them records on only
+    // some pushes.
+    //
+    // It was attached to the "policy evaluated, nothing refused" path,
+    // which missed the FIRST exit: no policy document at all returns 0
+    // right here. A local rig that renders a policy always took the
+    // instrumented path and the omission was invisible; the cluster
+    // renders the document elsewhere, so the recorder never ran, the
+    // listing fell back to naming the directory, and the treated arm
+    // measured byte-identical to its control. Found by the drill,
+    // unreachable from the unit rig.
+    record_push_packs();
     let policy = match Policy::load(&state_dir()) {
         Ok(Some(p)) => p,
         // No document is the pre-operator posture and is permissive by
@@ -193,6 +213,7 @@ fn pre_receive() -> std::io::Result<i32> {
         Ok(None) => return Ok(0),
         Err(e) => {
             eprintln!("flint-forge: {e}");
+            forget_push_packs();
             return Ok(1);
         }
     };
@@ -215,14 +236,15 @@ fn pre_receive() -> std::io::Result<i32> {
         }
     }
     if refusals.is_empty() {
-        // Recorded only on ACCEPT, because only then does git migrate
-        // the quarantine into `objects/pack`. A push `pre-receive`
-        // refuses has its quarantine discarded whole and leaves no pack
-        // to name — which is why a policy refusal produces no residue
-        // and a `proc-receive` refusal does.
-        record_push_packs();
         return Ok(0);
     }
+    // REFUSED HERE: git discards the whole quarantine, so the packs
+    // recorded above will never exist on disk and the record must go
+    // with them. (The batch also filters what it names by what is on
+    // disk, so a leaked record could not name a phantom pack — but a
+    // file per refused push, keyed by a pid that recycles, is litter
+    // this can simply not create.)
+    forget_push_packs();
     // git prints these to the pusher verbatim. One line per rule, and
     // the whole push is refused: `pre-receive` has no per-ref verdict.
     for why in &refusals {

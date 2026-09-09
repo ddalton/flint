@@ -1380,8 +1380,18 @@ struct D5Arm {
 }
 
 async fn d5_arm(name_accepted_set: bool) -> D5Arm {
+    d5_arm_rendered(name_accepted_set, true).await
+}
+
+/// `render` is whether a POLICY DOCUMENT exists for the hooks to read,
+/// and it is a dimension this A/B has to cover rather than fix at true.
+/// `pre-receive` returns 0 immediately when there is no document, and a
+/// recorder attached after that point never runs — which is exactly
+/// what happened on the cluster, where the document lives elsewhere.
+/// A rig that always renders one cannot see it.
+async fn d5_arm_rendered(name_accepted_set: bool, render: bool) -> D5Arm {
     let policy = Policy { protected: vec!["refs/heads/locked".into()], ..Policy::default() };
-    let rig = Rig::start_tuned(policy, true, move |c| {
+    let rig = Rig::start_tuned(policy, render, move |c| {
         // Identical to the measurement rig, so the two arms differ in
         // the ONE field under test and in nothing else.
         c.fold_factor = 2;
@@ -1502,5 +1512,43 @@ async fn direction_5_built_names_less_and_still_reconstructs_every_ref() {
         on.packs < off.packs,
         "direction 5 named {} pack(s) and the directory rule {} — no pack was declined",
         on.packs, off.packs
+    );
+}
+
+/// DIRECTION 5 WITH NO POLICY DOCUMENT — the cluster's own condition.
+///
+/// `pre-receive` loads the policy first and returns 0 immediately when
+/// there is none. The recorder was attached to the "policy evaluated,
+/// nothing refused" path, so with no document it never ran: the batch
+/// saw an empty recording, fell back to naming the directory, and the
+/// treated arm measured BYTE-IDENTICAL to its control on a real
+/// cluster — 38,272 B against 38,275 B, a difference of three bytes.
+///
+/// The local A/B could not see it because it always rendered a
+/// document. This is that arm.
+#[tokio::test(flavor = "multi_thread")]
+async fn direction_5_records_even_with_no_policy_document() {
+    let off = d5_arm_rendered(false, false).await;
+    let on = d5_arm_rendered(true, false).await;
+
+    eprintln!("\n=== direction 5, no policy document ===");
+    eprintln!("  OFF: {} pack(s), {} B named", off.packs, off.named);
+    eprintln!("  ON:  {} pack(s), {} B named", on.packs, on.named);
+
+    let names: Vec<&String> = off.refs.keys().collect();
+    let on_names: Vec<&String> = on.refs.keys().collect();
+    assert_eq!(names, on_names, "the rule changed WHICH refs landed");
+    assert_eq!(off.tip_tree, on.tip_tree, "the rule changed the CONTENT that landed");
+    assert!(off.intact && on.intact, "a named set cannot reconstruct its own refs");
+
+    // A MATERIAL reduction, not merely `<`. The cluster run passed a
+    // `treated < control` assertion on a three-byte difference and
+    // reported success while both rules did nothing; the threshold has
+    // to be big enough that noise cannot clear it.
+    assert!(
+        on.named * 2 < off.named,
+        "direction 5 named {} B against {} B with no policy document —          it is not recording (the reduction must be material, not noise)",
+        on.named,
+        off.named
     );
 }

@@ -1,0 +1,31 @@
+residue drill — context kind-forge-residue, images drill-b04024af
+
+── R0 — the rig stands up and BOTH repositories serve
+  ok: both repositories reached Ready
+
+── R1 — the treated repository's syncer actually received the two flags
+  ok: treated carries FLINT_FORGE_NAME_ACCEPTED_SET
+  ok: treated carries FLINT_FORGE_RECLAIM_AT_REST
+  ok: the control carries neither flag
+
+── R2 — the same workload against both, and the refusals are real
+  ..  refusals: ctl 3/3, treated 3/3
+  ok: every non-fast-forward was refused in both arms
+
+── R3 — direction 5: the treated snapshot NAMES less
+  ..  ctl:     4 pack(s), 38275 B named
+  ..  treated: 4 pack(s), 38272 B named
+  ok: both arms named something (neither measurement is an empty read)
+  ok: treated names 38272 B against the control's 38275 B
+
+── R4 — direction 4: a RESTART collects what is left
+  ..  treated after restart: 4 pack(s), 38272 B named (was 4 / 38272 B)
+  ok: the repository still names packs after the reclaim (it did not empty itself)
+  ok: the reclaim did not grow the named set (38272 B -> 38272 B)
+
+── R5 — and the treated repository still serves a clone that fsck's
+  ok: a fresh clone of the treated repository passes git fsck --strict
+  ok: the control clones cleanly too (R5 discriminates)
+
+══ residue drill: 11 passed, 0 failed ══
+   GREEN
