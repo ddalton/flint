@@ -1,0 +1,149 @@
+# residue measurement — push_chain::measure_what_a_refused_push_leaves_in_the_snapshot
+# 2026-09-09T00:12:15Z  e21e0c1b  git version 2.50.1 (Apple Git-155)
+# 9 refusals: 3 non-fast-forward (syncer), 3 refs/for conflicts (syncer), 3 policy (pre-receive, the control)
+# corpus: one 4,000-line file, one line edited per push -- pushes DELTIFY, which the unit rig cannot stage
+
+
+running 1 test
+flint-forge: holding tenant/repo at epoch 1
+flint-forge: restored seq 0, 0 pack(s) named, 0 file(s) fetched (0.0 MiB), proof None, 0 ms
+flint-forge: rebuilding the base from 1 named pack(s) beside the loop
+flint-forge: rebuilding the base from 2 named pack(s) beside the loop
+flint-forge: base rebuild committed: pack-e5894a483002e65b8f26f3d8333c99f5aaccdf19.pack from 2 pack(s), snapshot seq 3, 1 named
+flint-forge: rebuilding the base from 3 named pack(s) beside the loop
+flint-forge: the fold keeps 1 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-4e12f42ea756716fe3cc2d157f0d7e6cf45716d6.pack from 3 pack(s), snapshot seq 5, 2 named
+flint-forge: rebuilding the base from 2 named pack(s) beside the loop
+flint-forge: the fold keeps 1 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-4e12f42ea756716fe3cc2d157f0d7e6cf45716d6.pack from 2 pack(s), snapshot seq 6, 2 named
+flint-forge: rebuilding the base from 2 named pack(s) beside the loop
+flint-forge: the fold keeps 1 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-4e12f42ea756716fe3cc2d157f0d7e6cf45716d6.pack from 2 pack(s), snapshot seq 8, 4 named
+flint-forge: rebuilding the base from 4 named pack(s) beside the loop
+flint-forge: the fold keeps 2 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-0eca5bf362d00ffa4acb333db4502540b9e0f914.pack from 4 pack(s), snapshot seq 9, 3 named
+flint-forge: rebuilding the base from 3 named pack(s) beside the loop
+flint-forge: the fold keeps 2 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-0eca5bf362d00ffa4acb333db4502540b9e0f914.pack from 3 pack(s), snapshot seq 11, 5 named
+flint-forge: rebuilding the base from 5 named pack(s) beside the loop
+  arm F 0: ok=false To /var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/.tmpLaz4eU/repo.git |  ! [remote rejected] HEAD -> refs/for/main (conflict: big.txt) | error: failed to push some refs to '/var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/.tmpLaz4eU/repo.git'
+flint-forge: the fold keeps 3 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-083323b6cb46690bcee52b8c76ebf03eede64303.pack from 5 pack(s), snapshot seq 12, 4 named
+flint-forge: rebuilding the base from 4 named pack(s) beside the loop
+flint-forge: the fold keeps 3 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-083323b6cb46690bcee52b8c76ebf03eede64303.pack from 4 pack(s), snapshot seq 13, 4 named
+flint-forge: rebuilding the base from 4 named pack(s) beside the loop
+flint-forge: the fold keeps 3 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-083323b6cb46690bcee52b8c76ebf03eede64303.pack from 4 pack(s), snapshot seq 15, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+  arm F 1: ok=false To /var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/.tmpLaz4eU/repo.git |  ! [remote rejected] HEAD -> refs/for/main (conflict: big.txt) | error: failed to push some refs to '/var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/.tmpLaz4eU/repo.git'
+flint-forge: the fold keeps 4 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-44ecf00bb6526ce10932bc82242136cfb0e35eb1.pack from 6 pack(s), snapshot seq 16, 5 named
+flint-forge: rebuilding the base from 5 named pack(s) beside the loop
+flint-forge: the fold keeps 4 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-44ecf00bb6526ce10932bc82242136cfb0e35eb1.pack from 5 pack(s), snapshot seq 17, 5 named
+flint-forge: rebuilding the base from 5 named pack(s) beside the loop
+flint-forge: the fold keeps 4 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-44ecf00bb6526ce10932bc82242136cfb0e35eb1.pack from 5 pack(s), snapshot seq 19, 7 named
+flint-forge: rebuilding the base from 7 named pack(s) beside the loop
+  arm F 2: ok=false To /var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/.tmpLaz4eU/repo.git |  ! [remote rejected] HEAD -> refs/for/main (conflict: big.txt) | error: failed to push some refs to '/var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/.tmpLaz4eU/repo.git'
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 7 pack(s), snapshot seq 20, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 21, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 22, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 23, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 24, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 25, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 26, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 27, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 28, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 29, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 30, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 31, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 32, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 33, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 34, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 35, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 36, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 37, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+
+=== residue measurement: 9 refusals, 3 conflicts ===
+snapshot seq 37 names 6 pack(s), 1 ref(s)
+pack             bytes    objs reachable redundant?
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+3d0ac13d         20093      21        21         no
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 38, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+a7645fe9         18959       6         3        YES
+b1129eeb         18960       6         3        YES
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 39, 6 named
+flint-forge: rebuilding the base from 6 named pack(s) beside the loop
+b27926e1         19645      15        12        YES
+c05bac49         19871      18        15        YES
+flint-forge: the fold keeps 5 input pack(s) named: they hold objects the roll-up does not
+c0eaae17          9704       6         3        YES
+
+named 107232 B, redundant 87139 B  => 81%
+
+arm P control — count-objects before:
+count: 6
+size: 48
+in-pack: 180
+packs: 19
+size-pack: 282
+prune-packable: 0
+garbage: 0
+size-garbage: 0
+after:
+count: 6
+size: 48
+in-pack: 180
+packs: 19
+size-pack: 282
+prune-packable: 0
+garbage: 0
+size-garbage: 0
+
+packs named before arm P: 7, after: 6
+flint-forge: derived files not republished after a fold: git: git symbolic-ref HEAD exited 128: fatal: not a git repository (or any of the parent directories): .git
+flint-forge: base rebuild committed: pack-3d0ac13d2cb3c4ebda7b94c04d65afa4d3b43751.pack from 6 pack(s), snapshot seq 40, 6 named
+test measure_what_a_refused_push_leaves_in_the_snapshot ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 7.66s
+

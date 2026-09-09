@@ -19,6 +19,43 @@ Keeping only the two load-bearing packs, `git fsck --connectivity-only`
 passes clean. So **45,664 of 79,159 snapshot-named bytes — 58% — are
 redundant**, and every restore downloads them.
 
+## MEASURED ON REAL CONTENT — 81%, and the number got worse
+
+The runcl figure below (58%) came from one ~80 KB repository whose
+pushes do not deltify, and it existed only as prose. It is now measured
+through forge's own chain — a real `git push`, a real `receive-pack`,
+both hooks, the serving loop —
+(`forge/syncer/tests/push_chain.rs::measure_what_a_refused_push_leaves_in_the_snapshot`,
+artefact `forge/e2e/results/residue-measure-20260908.log`):
+
+| | |
+|---|---|
+| corpus | one 4,000-line file, one line edited per push (pushes DELTIFY) |
+| refusals | 3 non-fast-forward + 3 `refs/for` conflicts (syncer) + 3 policy (pre-receive) |
+| named | 107,232 B in 6 packs |
+| **redundant** | **87,139 B — 81%**, n=3, 81/81/81 (82 on a fourth, differently-timed run) |
+
+Five of six named packs are redundant; the only load-bearing one is the
+base rebuild's own output. The syncer says so in its log:
+`the fold keeps 5 input pack(s) named: they hold objects the roll-up
+does not`.
+
+**Every redundant pack holds REACHABLE objects — 3, 3, 3, 12, 15 — and
+not one holds zero.** That is `index-pack --fix-thin` completing a thin
+push with delta bases the server already has. So a rule keyed on "no
+object in this pack is reachable" fires on NONE of them, which is why
+the fold-input filter in
+`forge-pack-residue-plan-2026-09-08.md` was rejected. The right
+predicate is *contributes no reachable object that no other named pack
+holds* — but see that document: anything reachability-keyed in front of
+the coverage rule disarms the rule's own tests.
+
+**The control holds.** The three policy-refused pushes go through
+`pre-receive`, and `count-objects -v` is byte-identical across them
+(`count: 6, in-pack: 180, packs: 19` before and after). Refusing before
+git migrates the quarantine really does leave nothing — measured through
+forge's own hook, not from the git manual.
+
 ## Where the dead objects come from
 
 `28abff1b` holds 263 objects, 260 of which are in the consolidated pack.

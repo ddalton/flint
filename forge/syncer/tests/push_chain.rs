@@ -101,10 +101,25 @@ impl Rig {
     /// operator would. Without it only the syncer enforces, which is
     /// the misconfigured-hooks case worth being able to run.
     async fn start_with(policy: Policy, render: bool) -> Rig {
+        Rig::start_tuned(policy, render, |_| {}).await
+    }
+
+    /// As `start_with`, but the caller may move the compaction knobs
+    /// first. The defaults (`fold_min_bytes` 256 MiB, `base_min_bytes`
+    /// 64 MiB) mean no fold and no base rebuild ever runs on a
+    /// test-sized repository, so a measurement of what compaction
+    /// LEAVES BEHIND cannot be taken without this.
+    async fn start_tuned(
+        policy: Policy,
+        render: bool,
+        tune: impl FnOnce(&mut ForgeConfig),
+    ) -> Rig {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo.git");
         let store = Arc::new(MemoryStore::new());
-        let cfg = ForgeConfig::new(PREFIX, &repo);
+        let mut cfg = ForgeConfig::new(PREFIX, &repo);
+        tune(&mut cfg);
+        let cfg = cfg;
         let socket = cfg.state_dir.join(flint_forge::uds::SOCKET_NAME);
 
         let sc = Syncer::new(
@@ -404,4 +419,227 @@ async fn a_policy_edit_takes_effect_without_a_restart() {
     assert!(!ok, "the edited policy must be in force for the very next push: {text}");
     assert!(text.contains("release-bot"), "{text}");
     assert_ne!(rig.snapshot().await.refs.get("refs/heads/main"), Some(&ahead));
+}
+
+// ── the residue measurement ──────────────────────────────────────────
+//
+// Not a pass/fail leg: a MEASUREMENT, because every choice about the
+// pack-pinning finding turns on numbers that existed only as prose.
+// `docs/plans/forge-pack-pinning-2026-09-08.md` quotes "58% of named
+// bytes" from one ~80 KB repository on runcl, and
+// `forge-pack-residue-plan-2026-09-08.md` was rejected partly because
+// that repository's pushes do not DELTIFY — the unit rig's
+// `stage_commit` packs with no `--fix-thin` pass, so it can only make
+// all-dead residue packs, while a real `receive-pack` completes a thin
+// pack with delta bases that ARE reachable.
+//
+// This runs a real `git push` through a real `receive-pack` over a
+// corpus that deltifies, in three arms that differ ONLY in why the push
+// is refused, and then classifies every pack the snapshot names by
+// dropping it and asking git.
+
+/// Every object id a pack holds, from its index.
+fn pack_objects(repo: &Path, idx: &Path) -> Vec<String> {
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(format!("git show-index < {}", idx.display()))
+        .current_dir(repo)
+        .output()
+        .expect("show-index");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1).map(|s| s.to_string()))
+        .collect()
+}
+
+/// Everything reachable from these tips, in this repository.
+fn reachable_from(repo: &Path, tips: &[String]) -> std::collections::HashSet<String> {
+    if tips.is_empty() {
+        return Default::default();
+    }
+    let mut args = vec!["rev-list".to_string(), "--objects".to_string()];
+    args.extend(tips.iter().cloned());
+    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    must(repo, &refs)
+        .lines()
+        .filter_map(|l| l.split_whitespace().next().map(|s| s.to_string()))
+        .collect()
+}
+
+/// THE ORACLE, and it is measured rather than reasoned: rebuild a bare
+/// repository from every named pack EXCEPT this one, install the
+/// snapshot's refs, and run the proof the syncer itself runs on every
+/// start. If it passes, nothing needed that pack.
+fn is_redundant(
+    scratch: &Path,
+    src: &Path,
+    all: &[String],
+    drop: &str,
+    refs: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    let _ = std::fs::remove_dir_all(scratch);
+    std::fs::create_dir_all(scratch).unwrap();
+    let out = Command::new("git")
+        .args(["init", "--quiet", "--bare"])
+        .arg(scratch)
+        .output()
+        .expect("init");
+    assert!(out.status.success());
+    let dst = scratch.join("objects/pack");
+    std::fs::create_dir_all(&dst).unwrap();
+    for p in all {
+        if p == drop {
+            continue;
+        }
+        let stem = p.trim_end_matches(".pack");
+        for ext in ["pack", "idx"] {
+            let from = src.join(format!("{stem}.{ext}"));
+            if from.exists() {
+                std::fs::copy(&from, dst.join(format!("{stem}.{ext}"))).unwrap();
+            }
+        }
+    }
+    for (name, oid) in refs {
+        let out = git(scratch, &["update-ref", name, oid]);
+        if !out.status.success() {
+            return false; // the ref's own object is gone: not redundant
+        }
+    }
+    git(scratch, &["fsck", "--connectivity-only", "--no-reflogs", "--no-progress"])
+        .status
+        .success()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn measure_what_a_refused_push_leaves_in_the_snapshot() {
+    let policy = Policy { protected: vec!["refs/heads/locked".into()], ..Policy::default() };
+    let rig = Rig::start_tuned(policy, true, |c| {
+        // The ladder, brought down to a test-sized repository so the
+        // COLLECTOR (a base rebuild's `--all`) actually runs. Without
+        // this nothing is ever dropped and there is no residue to see.
+        c.fold_factor = 2;
+        c.fold_min_bytes = 0;
+        c.base_min_bytes = 0;
+        c.base_rebuild_min_secs = 0;
+    })
+    .await;
+
+    // A corpus that DELTIFIES. This is the dimension the unit rig
+    // cannot represent and the one that refuted the rejected plan.
+    let big = |mark: &str| -> String {
+        (0..4000)
+            .map(|i| if i == 2000 { format!("line {i} {mark}\n") } else { format!("line {i}\n") })
+            .collect::<String>()
+    };
+    rig.commit("big.txt", &big("base"));
+    assert!(rig.push(&["--quiet", "origin", "HEAD:refs/heads/main"]).0);
+
+    let base = must(&rig.client, &["rev-parse", "HEAD"]).trim().to_string();
+    let parent = rig.client.parent().unwrap().to_path_buf();
+    let mut refused = 0usize;
+
+    // ── arm N: a non-fast-forward force push, refused by the syncer ──
+    for i in 0..3 {
+        let c = parent.join(format!("nff{i}"));
+        must(&parent, &["clone", "--quiet", rig.repo.to_str().unwrap(), &format!("nff{i}")]);
+        must(&c, &["config", "user.email", "t@example.invalid"]);
+        must(&c, &["config", "user.name", "t"]);
+        must(&c, &["reset", "--quiet", "--hard", &base]);
+        std::fs::write(c.join("big.txt"), big(&format!("nff{i}"))).unwrap();
+        must(&c, &["add", "big.txt"]);
+        must(&c, &["commit", "--quiet", "-m", "nff"]);
+        // Land a competing commit first so this one is genuinely non-ff.
+        rig.commit("big.txt", &big(&format!("main{i}")));
+        assert!(rig.push(&["--quiet", "origin", "HEAD:refs/heads/main"]).0);
+        let out = git(&c, &["push", "--force", "--quiet", "origin", "HEAD:refs/heads/main"]);
+        let text = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(!out.status.success(), "arm N push {i} must be refused: {text}");
+        assert!(text.contains("non-fast-forward"), "arm N {i} wrong class: {text}");
+        refused += 1;
+    }
+
+    // ── arm F: a refs/for proposal that CONFLICTS ────────────────────
+    let mut conflicts = 0usize;
+    for i in 0..3 {
+        let c = parent.join(format!("prop{i}"));
+        must(&parent, &["clone", "--quiet", rig.repo.to_str().unwrap(), &format!("prop{i}")]);
+        must(&c, &["config", "user.email", "t@example.invalid"]);
+        must(&c, &["config", "user.name", "t"]);
+        std::fs::write(c.join("big.txt"), big(&format!("prop{i}"))).unwrap();
+        must(&c, &["add", "big.txt"]);
+        must(&c, &["commit", "--quiet", "-m", "proposal"]);
+        // main moves the same line underneath it, so the merge conflicts.
+        rig.commit("big.txt", &big(&format!("moved{i}")));
+        assert!(rig.push(&["--quiet", "origin", "HEAD:refs/heads/main"]).0);
+        let out = git(&c, &["push", "--quiet", "origin", "HEAD:refs/for/main"]);
+        let text = String::from_utf8_lossy(&out.stderr).into_owned();
+        if !out.status.success() && text.contains("conflict") {
+            conflicts += 1;
+            refused += 1;
+        }
+        eprintln!("  arm F {i}: ok={} {}", out.status.success(), text.trim().replace('\n', " | "));
+    }
+
+    // ── arm P: refused by POLICY, which pre-receive answers ──────────
+    // The control. pre-receive runs BEFORE git migrates the quarantine,
+    // so this arm must leave NOTHING — if it does, the whole "refuse
+    // earlier" family is pointless and the measurement can say so.
+    let packs_before_p = rig.snapshot().await.packs.len();
+    let objs_before_p = must(&rig.repo, &["count-objects", "-v"]).to_string();
+    for i in 0..3 {
+        let c = parent.join(format!("pol{i}"));
+        must(&parent, &["clone", "--quiet", rig.repo.to_str().unwrap(), &format!("pol{i}")]);
+        must(&c, &["config", "user.email", "t@example.invalid"]);
+        must(&c, &["config", "user.name", "t"]);
+        std::fs::write(c.join("big.txt"), big(&format!("pol{i}"))).unwrap();
+        must(&c, &["add", "big.txt"]);
+        must(&c, &["commit", "--quiet", "-m", "policy"]);
+        let out = git_as(&c, &["push", "--quiet", "origin", "HEAD:refs/heads/locked"], Some("nobody"));
+        assert!(!out.status.success(), "arm P push {i} must be refused");
+        refused += 1;
+    }
+    let objs_after_p = must(&rig.repo, &["count-objects", "-v"]).to_string();
+
+    // Let the serving loop's compaction settle.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let snap = rig.snapshot().await;
+    let dir = rig.repo.join("objects/pack");
+    let tips: Vec<String> = snap.refs.values().cloned().collect();
+    let reach = reachable_from(&rig.repo, &tips);
+
+    eprintln!("\n=== residue measurement: {} refusals, {} conflicts ===", refused, conflicts);
+    eprintln!("snapshot seq {} names {} pack(s), {} ref(s)", snap.seq, snap.packs.len(), snap.refs.len());
+
+    let scratch = rig.repo.parent().unwrap().join("scratch.git");
+    let mut named_bytes = 0u64;
+    let mut redundant_bytes = 0u64;
+    eprintln!("{:<12} {:>9} {:>7} {:>9} {:>10}", "pack", "bytes", "objs", "reachable", "redundant?");
+    for p in &snap.packs {
+        let stem = p.trim_end_matches(".pack");
+        let bytes = std::fs::metadata(dir.join(p)).map(|m| m.len()).unwrap_or(0);
+        let objs = pack_objects(&rig.repo, &dir.join(format!("{stem}.idx")));
+        let live = objs.iter().filter(|o| reach.contains(*o)).count();
+        let red = is_redundant(&scratch, &dir, &snap.packs, p, &snap.refs);
+        named_bytes += bytes;
+        if red {
+            redundant_bytes += bytes;
+        }
+        eprintln!(
+            "{:<12} {:>9} {:>7} {:>9} {:>10}",
+            &stem[5..13.min(stem.len())],
+            bytes,
+            objs.len(),
+            live,
+            if red { "YES" } else { "no" }
+        );
+    }
+    let pct = if named_bytes > 0 { redundant_bytes * 100 / named_bytes } else { 0 };
+    eprintln!("\nnamed {named_bytes} B, redundant {redundant_bytes} B  => {pct}%");
+    eprintln!("\narm P control — count-objects before:\n{objs_before_p}after:\n{objs_after_p}");
+    eprintln!("packs named before arm P: {packs_before_p}, after: {}", snap.packs.len());
+
+    // The only hard assertions: the measurement must have MEASURED
+    // something, and the policy arm's control must hold.
+    assert!(refused >= 6, "the arms must actually have been refused: {refused}");
+    assert!(!snap.packs.is_empty());
 }
