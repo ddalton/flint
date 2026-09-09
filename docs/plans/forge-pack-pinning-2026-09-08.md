@@ -161,6 +161,55 @@ to *pack* them; it could only decline to *name* them, and that is
 step 5's directory naming — which is direction 1's problem again, from
 the other end, and refuted with it.
 
+## Direction 5 — name only the accepted set: SAFE, and it removes 4/5 of it
+
+Record each push's pack at `pre-receive`, where the quarantine pack is
+still identifiable as *this push's* pack, and have step 5 name only the
+packs of pushes something was accepted from — instead of naming the
+whole directory.
+
+**The model says it is safe.** `formal/ForgeSyncNameAcceptedSet.cfg`
+HOLDS: 25,203,710 distinct states, depth 58, 22min 12s, all nine
+invariants including `Inv_LandedPackComplete` — the one that refuted
+direction 1 in 35 s. The control has teeth: `ForgeSyncForgetPushPack`,
+the same rule with the push→pack mapping lost, violates it in 1 s. That
+control is in the gate; the 22-minute strict run is not.
+
+**Real git says the name is stable, for a structural reason.**
+`index-pack --fix-thin` completes BEFORE `pre-receive` runs, so the hook
+already sees the final post-fix pack name — 9/9 across fat, thin,
+50-ref/40 MB, mixed and relative-invocation shapes, and replicated in
+forge's own chain (16 of 19 recorded names survive migration; the 3 that
+do not are the policy arm's, which git discards). Also measured: one
+pack maximum per push; a ref-only push produces no pack at all;
+`GIT_QUARANTINE_PATH` is always absolute.
+
+**But it is a reduction, not an elimination — and the ceiling is
+measured.** `receive.procReceiveRefs = refs/` lets the syncer answer per
+ref, but git built ONE pack for the whole push. A push with one ref
+accepted and one refused produces a single pack holding both verdicts'
+objects (measured: 6 objects, 3 reachable), and direction 5 names it
+because something in it was accepted. Arm M of
+`measure_what_a_refused_push_leaves_in_the_snapshot`
+(artefact `forge/e2e/results/residue-direction5-20260908.log`, n=7):
+
+| | |
+|---|---|
+| named | 147,562–166,076 B |
+| redundant | 92–93% of it |
+| **direction 5 removes** | **78–81% of the residue** |
+| direction 5 keeps | 18–21%, all of it in mixed-push packs |
+| direction 5 keeps (not from a push) | 0% |
+
+**Two constraints it inherits.** The pack→push map is MANY-TO-ONE — two
+pushes of identical content produce the same checksum and so the same
+name — so a pack is droppable only if EVERY producer was refused; record
+`pack → {pushes}`, never `push → pack` as ownership. And `gc.auto` /
+`receive.autogc` would invalidate every recorded name (measured: with
+autogc on, all three recorded names vanished between pushes). `gitcmd.rs`
+already pins both off, which turns that config from tidiness into a
+correctness dependency deserving a start-up assertion.
+
 ## Direction 3 — leave it
 
 Still available, and now better priced: it is not self-correcting above

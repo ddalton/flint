@@ -1,0 +1,110 @@
+# What direction 5 could actually remove — measured 2026-09-08
+#
+# forge/syncer/tests/push_chain.rs::measure_what_a_refused_push_leaves_in_the_snapshot
+# `cargo test --test push_chain measure_what_a_refused_push_leaves_in_the_snapshot -- --nocapture`
+#
+# Arms N (non-fast-forward), F (refs/for conflict), M (MIXED: one push,
+# one ref accepted and one refused), P (policy — the control).
+# Corpus: one 4,000-line file, one line edited per push, so pushes DELTIFY.
+#
+# Direction 5 = name only the packs of pushes something was ACCEPTED from,
+# recorded at pre-receive where the quarantine pack is still identifiable.
+# Classified here by a recorder wrapped on the real pre-receive hook; a
+# push counts as wholly refused iff NONE of the object ids it proposed
+# ended up reachable — derived from the final state, not from the
+# measurement's own bookkeeping.
+
+## Seven reps
+
+rep  named B   redundant B   %red   d5 removes    d5 keeps (mixed)   d5 keeps (no push)
+  1   156801       145477    92%   116491 (80%)      28986 (19%)          0 (0%)
+  2   166044       154742    93%   125756 (81%)      28986 (18%)          0 (0%)
+  3   157040       145708    92%   116485 (79%)      29223 (20%)          0 (0%)
+  4   156768       145472    92%   116486 (80%)      28986 (19%)          0 (0%)
+  5   147562       136235    92%   107236 (78%)      28999 (21%)          0 (0%)
+  6   166076       154743    93%   125756 (81%)      28987 (18%)          0 (0%)
+  7   166053       154728    93%   125743 (81%)      28985 (18%)          0 (0%)
+
+RANGE: direction 5 removes 78-81% of the residue; 18-21% survives it,
+all of it in packs from MIXED pushes. Not a mean — the range is the claim.
+
+## Controls
+
+- arm P (refused at pre-receive, before git migrates the quarantine):
+  3 quarantine packs built, 0 migrated, 0 named, in every rep.
+- THE OTHER ARM: the same predicate on arm N, where git DID migrate —
+  3 of 3 present in objects/pack. Without this, `!exists` proves nothing.
+- count-objects across arm P is NO LONGER a control in this rig: with arm M
+  added the compaction ladder runs continuously, and a base rebuild's output
+  (30 objects, 1 pack) lands inside arm P's window in every rep. Shown below
+  for the record, not relied on.
+- R1 replicated in forge's own chain: 16 of 19 recorded quarantine pack names
+  exist in objects/pack afterwards; the 3 that do not are arm P's. If the name
+  had not survived `index-pack --fix-thin` + migration, every pack would have
+  classified "not from a push" and the answer would have been 0%.
+- The recorder's count of wholly-refused pushes (9) is derived from
+  reachability and asserted equal to the arms' own count (3+3+3).
+
+## Model runs behind this
+
+ForgeSyncNameAcceptedSet.cfg   HOLDS   25,203,710 distinct, depth 58, 22min 12s
+ForgeSyncForgetPushPack.cfg    Inv_LandedPackComplete violated, 1s (the teeth)
+
+## Full output, rep 7
+
+=== residue measurement: 12 refusals, 3 conflicts ===
+snapshot seq 41 names 10 pack(s), 4 ref(s)
+pack             bytes    objs reachable redundant?  direction 5
+flint-forge: the fold keeps 9 input pack(s) named: they hold objects the roll-up does not
+flint-forge: base rebuild committed: pack-efe39a0f05f7ca834f6fd9b859690648149fd63a.pack from 10 pack(s), snapshot seq 42, 10 named
+flint-forge: rebuilding the base from 10 named pack(s) beside the loop
+10ed458e          9704       6         3        YES  drops (push wholly refused)
+flint-forge: the fold keeps 9 input pack(s) named: they hold objects the roll-up does not
+3e28fcb8         18959       6         3        YES  drops (push wholly refused)
+flint-forge: base rebuild committed: pack-efe39a0f05f7ca834f6fd9b859690648149fd63a.pack from 10 pack(s), snapshot seq 43, 10 named
+flint-forge: rebuilding the base from 10 named pack(s) beside the loop
+5d35969e         29125      18        15        YES  drops (push wholly refused)
+flint-forge: the fold keeps 9 input pack(s) named: they hold objects the roll-up does not
+8295fcb5         18959       6         3        YES  drops (push wholly refused)
+flint-forge: base rebuild committed: pack-efe39a0f05f7ca834f6fd9b859690648149fd63a.pack from 10 pack(s), snapshot seq 44, 10 named
+flint-forge: rebuilding the base from 10 named pack(s) beside the loop
+a69e0249         29351      21        18        YES  drops (push wholly refused)
+flint-forge: the fold keeps 9 input pack(s) named: they hold objects the roll-up does not
+c091096e          9660       6         3        YES  NAMES (mixed/accepted push)
+flint-forge: base rebuild committed: pack-efe39a0f05f7ca834f6fd9b859690648149fd63a.pack from 10 pack(s), snapshot seq 45, 10 named
+flint-forge: rebuilding the base from 10 named pack(s) beside the loop
+ca9dacd0          9664       6         3        YES  NAMES (mixed/accepted push)
+flint-forge: the fold keeps 9 input pack(s) named: they hold objects the roll-up does not
+d3231816         19645      15        12        YES  drops (push wholly refused)
+flint-forge: base rebuild committed: pack-efe39a0f05f7ca834f6fd9b859690648149fd63a.pack from 10 pack(s), snapshot seq 46, 10 named
+flint-forge: rebuilding the base from 10 named pack(s) beside the loop
+efe39a0f         11325      30        30         no  NAMES (not from a push)
+f1e44e94          9661       6         3        YES  NAMES (mixed/accepted push)
+
+named 166053 B, redundant 154728 B  => 93%
+recorder: 19 push(es), 19 pack name(s), 9 wholly refused, 3 quarantine pack(s) never migrated (arm P)
+direction 5 removes  125743 B of the 154728 B residue => 81%
+direction 5 KEEPS    28985 B (18%) in mixed/accepted packs  + 0 B (0%) not from a push
+arm P control: 3 quarantine pack(s) built, 0 migrated, 0 named — refusing at
+  pre-receive really does leave nothing, measured through forge's own hook.
+count-objects across arm P (CONFOUNDED by concurrent compaction, shown for
+  the record) before:
+count: 6
+size: 48
+in-pack: 249
+packs: 24
+size-pack: 357
+prune-packable: 0
+garbage: 0
+size-garbage: 0
+after:
+count: 6
+size: 48
+in-pack: 279
+packs: 25
+size-pack: 370
+prune-packable: 0
+garbage: 0
+size-garbage: 0
+
+packs named before arm P: 10, after: 10

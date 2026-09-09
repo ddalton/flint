@@ -174,6 +174,8 @@ CONSTANTS
   FoldReachableCoverage, \* mutation: an input may go if its UNCOVERED objects are unreachable (the pack-pinning 'direction 1')
   ReclaimAtRestore,     \* DIRECTION 4: a reclaiming rebuild between the restore and the first served hook
   ReclaimWhileServing,  \* mutation: the reclaim's relaxed rule, taken on a SERVING syncer
+  NameAcceptedSet,      \* DIRECTION 5: a batch names the packs it ACCEPTED, never the directory
+  ForgetPushPack,       \* mutation: direction 5 without the push->pack mapping
   ProveFromDisk,        \* mutation: a proof is taken over the object DIRECTORY, not the named packs (F2)
   ListingKeepsRetained, \* mutation: a batch lists the packs retention holds on disk
   GraceOutlivesUpload   \* the grace axiom; FALSE is lean's RacyGrace mutation
@@ -717,11 +719,39 @@ Listing(s) == (IF ListingKeepsRetained THEN localPacks[s]
                                        ELSE localPacks[s] \ retained[s])
                 \cup (IF IdxGate THEN {} ELSE migrating[s])
 
+(***************************************************************************)
+(* DIRECTION 5: NAME WHAT WAS DECIDED, NOT WHAT WAS OBSERVED.              *)
+(*                                                                         *)
+(* `Listing` above is the shipped rule and it is a DIRECTORY read, so the  *)
+(* snapshot names packs forge never decided to name — including a push it  *)
+(* refused.  That is where the 81% residue comes from, and it is why every *)
+(* later "may I drop this?" is a reachability question with no answer      *)
+(* while serving (ForgeSyncFoldReachableCoverage).                          *)
+(*                                                                         *)
+(* The alternative is what walgit gets for free by owning its own receive  *)
+(* path: name the packs of the pushes this batch ACCEPTED, plus whatever   *)
+(* was already named.  forge can have it without reimplementing anything,  *)
+(* because `pre-receive` sees GIT_QUARANTINE_PATH before git migrates it   *)
+(* and the pack keeps its name across the migration — so the push->pack    *)
+(* mapping is recordable at the door.                                      *)
+(*                                                                         *)
+(* The question for TLC is whether it is SAFE: the directory read is what  *)
+(* makes a QUEUED push durable (runcd), because that push's pack is named  *)
+(* a batch before its ref moves.  Under this rule it is not named early —  *)
+(* it is named by its OWN batch, when its own commands are accepted.       *)
+(* Inv_LandedPackComplete is the question, and the mutation below is the   *)
+(* teeth: keep the rule and LOSE the mapping.                              *)
+(***************************************************************************)
+AcceptedListing(s) ==
+  LET kept == belief[s].packs \ retained[s] IN
+  IF ForgetPushPack THEN kept ELSE kept \cup {batch[s].push}
+
 \* The checksum pass over every pack above the whole-PUT ceiling: real
 \* work; it ticks progress only in the fixed tree.
 BatchHash(s) ==
   /\ st[s] = "pushing" /\ batch[s].stage = "renewed"
-  /\ batch' = [batch EXCEPT ![s].stage = "hashed", ![s].listed = Listing(s)]
+  /\ batch' = [batch EXCEPT ![s].stage = "hashed",
+                 ![s].listed = IF NameAcceptedSet THEN AcceptedListing(s) ELSE Listing(s)]
   /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
   /\ sensorMoved' = [sensorMoved EXCEPT ![s] = @ \/ TickOnHash]
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,

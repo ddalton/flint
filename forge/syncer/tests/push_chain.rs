@@ -438,6 +438,85 @@ async fn a_policy_edit_takes_effect_without_a_restart() {
 // is refused, and then classifies every pack the snapshot names by
 // dropping it and asking git.
 
+/// The direction-5 RECORDER, in the only place it can run.
+///
+/// `pre-receive` is the last moment a push's pack is still identifiable
+/// as *this push's* pack: it sits in `$GIT_QUARANTINE_PATH/pack/`, and
+/// the probe against real git established that `index-pack --fix-thin`
+/// has already completed by then — so the name read here is the name
+/// the pack keeps after git migrates it. (That probe also found the
+/// map is MANY-TO-ONE: two pushes of identical content produce the same
+/// pack name, which is why the classification below ANDs over producers
+/// instead of treating a pack as one push's property.)
+///
+/// This WRAPS the shipped hook rather than replacing it — same stdin,
+/// same environment, same exit status, invoked through the binary's own
+/// explicit-role argument — so the policy arm still runs through the
+/// real refusal and its control still means something.
+fn install_pre_receive_recorder(repo: &Path, log: &Path) {
+    let target = repo.join("hooks/pre-receive");
+    let _ = std::fs::remove_file(&target);
+    let script = format!(
+        r#"#!/bin/sh
+tmp="{log}.$$"
+cat > "$tmp"
+{{
+  printf 'push\n'
+  if [ -n "$GIT_QUARANTINE_PATH" ]; then
+    for p in "$GIT_QUARANTINE_PATH"/pack/pack-*.pack; do
+      [ -e "$p" ] || continue
+      printf 'pack %s\n' "$(basename "$p")"
+    done
+  fi
+  while read -r _old new ref; do printf 'ref %s %s\n' "$new" "$ref"; done < "$tmp"
+}} >> "{log}"
+exec "{bin}" pre-receive < "$tmp"
+"#,
+        log = log.display(),
+        bin = env!("CARGO_BIN_EXE_flint-forge-hook"),
+    );
+    std::fs::write(&target, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut perm = std::fs::metadata(&target).unwrap().permissions();
+    perm.set_mode(0o755);
+    std::fs::set_permissions(&target, perm).unwrap();
+}
+
+/// One push, as the recorder saw it.
+struct Recorded {
+    packs: Vec<String>,
+    news: Vec<String>,
+    refs: Vec<String>,
+}
+
+fn recorded_pushes(log: &Path) -> Vec<Recorded> {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    let mut out: Vec<Recorded> = Vec::new();
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        match it.next() {
+            Some("push") => {
+                out.push(Recorded { packs: vec![], news: vec![], refs: vec![] })
+            }
+            Some("pack") => {
+                if let (Some(r), Some(v)) = (out.last_mut(), it.next()) {
+                    r.packs.push(v.to_string());
+                }
+            }
+            Some("ref") => {
+                if let (Some(r), Some(v)) = (out.last_mut(), it.next()) {
+                    r.news.push(v.to_string());
+                    if let Some(name) = it.next() {
+                        r.refs.push(name.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Every object id a pack holds, from its index.
 fn pack_objects(repo: &Path, idx: &Path) -> Vec<String> {
     let out = Command::new("sh")
@@ -524,6 +603,13 @@ async fn measure_what_a_refused_push_leaves_in_the_snapshot() {
     })
     .await;
 
+    // The recorder goes in before ANY push, so every push in every arm
+    // appears in it — including the rig's own accepted ones, which is
+    // what makes "unattributed" mean "not from a push" rather than
+    // "from a push we forgot to watch".
+    let reclog = rig.repo.parent().unwrap().join("pushrec.log");
+    install_pre_receive_recorder(&rig.repo, &reclog);
+
     // A corpus that DELTIFIES. This is the dimension the unit rig
     // cannot represent and the one that refuted the rejected plan.
     let big = |mark: &str| -> String {
@@ -580,6 +666,53 @@ async fn measure_what_a_refused_push_leaves_in_the_snapshot() {
         eprintln!("  arm F {i}: ok={} {}", out.status.success(), text.trim().replace('\n', " | "));
     }
 
+    // ── arm M: ONE push, one ref accepted and one refused ────────────
+    //
+    // The ceiling the git probe found (R7), now in forge's own chain.
+    // `receive.procReceiveRefs = refs/` routes every ref through
+    // proc-receive, so the syncer answers PER REF — but git built ONE
+    // pack for the whole push, and that pack holds both verdicts'
+    // objects. Direction 5 names it because something in it was
+    // accepted, so the refused half's residue survives the fix. This
+    // arm exists to price exactly that.
+    let mut mixed = 0usize;
+    let mut mixed_refs: Vec<String> = Vec::new();
+    for i in 0..3 {
+        let c = parent.join(format!("mix{i}"));
+        must(&parent, &["clone", "--quiet", rig.repo.to_str().unwrap(), &format!("mix{i}")]);
+        must(&c, &["config", "user.email", "t@example.invalid"]);
+        must(&c, &["config", "user.name", "t"]);
+        // TWO INDEPENDENT commits on the old base. Neither is an
+        // ancestor of the other, so accepting one must not make the
+        // other reachable — otherwise the arm measures nothing.
+        must(&c, &["checkout", "--quiet", "-b", "good", &base]);
+        std::fs::write(c.join("big.txt"), big(&format!("mixgood{i}"))).unwrap();
+        must(&c, &["add", "big.txt"]);
+        must(&c, &["commit", "--quiet", "-m", "good"]);
+        must(&c, &["checkout", "--quiet", "-b", "bad", &base]);
+        std::fs::write(c.join("big.txt"), big(&format!("mixbad{i}"))).unwrap();
+        must(&c, &["add", "big.txt"]);
+        must(&c, &["commit", "--quiet", "-m", "bad"]);
+        let good_ref = format!("refs/heads/mixed{i}");
+        let out = git(
+            &c,
+            &[
+                "push",
+                "--force",
+                "--quiet",
+                "origin",
+                &format!("good:{good_ref}"),
+                "bad:refs/heads/main",
+            ],
+        );
+        let text = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(!out.status.success(), "arm M {i}: the bad half must be refused: {text}");
+        assert!(text.contains("non-fast-forward"), "arm M {i} wrong class: {text}");
+        mixed_refs.push(good_ref);
+        mixed += 1;
+        refused += 1;
+    }
+
     // ── arm P: refused by POLICY, which pre-receive answers ──────────
     // The control. pre-receive runs BEFORE git migrates the quarantine,
     // so this arm must leave NOTHING — if it does, the whole "refuse
@@ -610,36 +743,174 @@ async fn measure_what_a_refused_push_leaves_in_the_snapshot() {
     eprintln!("\n=== residue measurement: {} refusals, {} conflicts ===", refused, conflicts);
     eprintln!("snapshot seq {} names {} pack(s), {} ref(s)", snap.seq, snap.packs.len(), snap.refs.len());
 
+    // ── what direction 5 would name ──────────────────────────────────
+    //
+    // A recorded push was WHOLLY refused iff NONE of the object ids it
+    // proposed ended up reachable. That is the same fact the syncer
+    // holds at proc-receive time (which refs it said `ok` to), but it
+    // is derived here from the FINAL STATE rather than from the
+    // measurement's own bookkeeping, so a mislabelled arm cannot
+    // produce a flattering answer.
+    let records = recorded_pushes(&reclog);
+    let mut producers_all_refused: std::collections::BTreeMap<String, bool> = Default::default();
+    let mut wholly_refused = 0usize;
+    let mut recorded_packs = 0usize;
+    for r in &records {
+        let any_live = r.news.iter().any(|n| reach.contains(n));
+        if !any_live {
+            wholly_refused += 1;
+        }
+        recorded_packs += r.packs.len();
+        for pk in &r.packs {
+            // MANY-TO-ONE: identical content gives identical checksums,
+            // so one pack name can have several producers. It is
+            // droppable only if EVERY producer was refused.
+            let e = producers_all_refused.entry(pk.clone()).or_insert(true);
+            *e = *e && !any_live;
+        }
+    }
+    let never_migrated = producers_all_refused
+        .keys()
+        .filter(|pk| !dir.join(pk.as_str()).exists())
+        .count();
+
     let scratch = rig.repo.parent().unwrap().join("scratch.git");
     let mut named_bytes = 0u64;
     let mut redundant_bytes = 0u64;
-    eprintln!("{:<12} {:>9} {:>7} {:>9} {:>10}", "pack", "bytes", "objs", "reachable", "redundant?");
+    let mut d5_removable = 0u64;
+    let mut d5_kept_mixed = 0u64;
+    let mut d5_kept_unattributed = 0u64;
+    eprintln!(
+        "{:<12} {:>9} {:>7} {:>9} {:>10}  {}",
+        "pack", "bytes", "objs", "reachable", "redundant?", "direction 5"
+    );
     for p in &snap.packs {
         let stem = p.trim_end_matches(".pack");
         let bytes = std::fs::metadata(dir.join(p)).map(|m| m.len()).unwrap_or(0);
         let objs = pack_objects(&rig.repo, &dir.join(format!("{stem}.idx")));
         let live = objs.iter().filter(|o| reach.contains(*o)).count();
         let red = is_redundant(&scratch, &dir, &snap.packs, p, &snap.refs);
+        let verdict = match producers_all_refused.get(p) {
+            Some(true) => "drops (push wholly refused)",
+            Some(false) => "NAMES (mixed/accepted push)",
+            None => "NAMES (not from a push)",
+        };
         named_bytes += bytes;
         if red {
             redundant_bytes += bytes;
+            match producers_all_refused.get(p) {
+                Some(true) => d5_removable += bytes,
+                Some(false) => d5_kept_mixed += bytes,
+                None => d5_kept_unattributed += bytes,
+            }
         }
         eprintln!(
-            "{:<12} {:>9} {:>7} {:>9} {:>10}",
+            "{:<12} {:>9} {:>7} {:>9} {:>10}  {}",
             &stem[5..13.min(stem.len())],
             bytes,
             objs.len(),
             live,
-            if red { "YES" } else { "no" }
+            if red { "YES" } else { "no" },
+            verdict
         );
     }
     let pct = if named_bytes > 0 { redundant_bytes * 100 / named_bytes } else { 0 };
     eprintln!("\nnamed {named_bytes} B, redundant {redundant_bytes} B  => {pct}%");
-    eprintln!("\narm P control — count-objects before:\n{objs_before_p}after:\n{objs_after_p}");
+    eprintln!(
+        "recorder: {} push(es), {recorded_packs} pack name(s), {wholly_refused} wholly refused, \
+         {never_migrated} quarantine pack(s) never migrated (arm P)",
+        records.len()
+    );
+    let share = |b: u64| if redundant_bytes > 0 { b * 100 / redundant_bytes } else { 0 };
+    eprintln!(
+        "direction 5 removes  {d5_removable} B of the {redundant_bytes} B residue => {}%",
+        share(d5_removable)
+    );
+    eprintln!(
+        "direction 5 KEEPS    {d5_kept_mixed} B ({}%) in mixed/accepted packs  \
+         + {d5_kept_unattributed} B ({}%) not from a push",
+        share(d5_kept_mixed),
+        share(d5_kept_unattributed)
+    );
+    // ── arm P's control, and why it is no longer count-objects ───────
+    //
+    // With arm M added, the compaction ladder runs CONTINUOUSLY through
+    // this rig, so a base rebuild's output can land inside arm P's
+    // window: `count-objects` moved by exactly one pack and 30 objects
+    // in every rep, which is the size of the base rebuild's own output.
+    // A control a second writer can move is not a control, so the claim
+    // is made from the recorder instead, where nothing else can write:
+    // every pack an arm P push put in quarantine must be absent from
+    // `objects/pack` AND unnamed by the snapshot.
+    let mut p_packs = 0usize;
+    for r in records.iter().filter(|r| r.refs.iter().any(|n| n == "refs/heads/locked")) {
+        for pk in &r.packs {
+            p_packs += 1;
+            assert!(
+                !dir.join(pk.as_str()).exists(),
+                "arm P control: {pk} was migrated out of quarantine"
+            );
+            assert!(!snap.packs.contains(pk), "arm P control: {pk} is NAMED by the snapshot");
+        }
+    }
+    assert_eq!(p_packs, 3, "arm P must have put three packs in quarantine");
+    // THE OTHER ARM. `!exists` is only evidence if `exists` can be true
+    // for the same predicate, read from the same log against the same
+    // directory — so run it on arm N, where git DID migrate: a
+    // single-ref push to main that nothing reachable came out of.
+    let mut n_packs = 0usize;
+    for r in records
+        .iter()
+        .filter(|r| r.refs == ["refs/heads/main"] && !r.news.iter().any(|n| reach.contains(n)))
+    {
+        for pk in &r.packs {
+            n_packs += 1;
+            assert!(
+                dir.join(pk.as_str()).exists(),
+                "arm N: {pk} should have been MIGRATED — the control's other arm is open"
+            );
+        }
+    }
+    assert_eq!(n_packs, 3, "arm N must have produced three migrated packs");
+    eprintln!("arm P control: 3 quarantine pack(s) built, 0 migrated, 0 named — refusing at");
+    eprintln!("  pre-receive really does leave nothing, measured through forge's own hook.");
+    eprintln!("count-objects across arm P (CONFOUNDED by concurrent compaction, shown for");
+    eprintln!("  the record) before:\n{objs_before_p}after:\n{objs_after_p}");
     eprintln!("packs named before arm P: {packs_before_p}, after: {}", snap.packs.len());
 
-    // The only hard assertions: the measurement must have MEASURED
-    // something, and the policy arm's control must hold.
-    assert!(refused >= 6, "the arms must actually have been refused: {refused}");
+    // The in-chain replication of the git probe's R1: a quarantine pack
+    // name survives migration unchanged. If it did not, every pack
+    // below would classify as "not from a push" and direction 5 would
+    // measure 0% — so the two asserts after the table are this claim's
+    // positive control, not decoration.
+    let migrated = recorded_packs - never_migrated;
+    eprintln!(
+        "R1 in forge's chain: {migrated} of {recorded_packs} recorded quarantine names exist in \
+         objects/pack; the {never_migrated} that do not are arm P's."
+    );
+
+    // The hard assertions: the measurement must have MEASURED
+    // something, and each arm must have done what it claims.
+    assert!(refused >= 9, "the arms must actually have been refused: {refused}");
     assert!(!snap.packs.is_empty());
+    assert_eq!(mixed, 3, "arm M must have run");
+    // A mixed push whose accepted half did NOT land is just arm N
+    // again, and the arm would be measuring nothing.
+    for r in &mixed_refs {
+        assert!(snap.refs.contains_key(r), "arm M: {r} must have LANDED, refs={:?}", snap.refs.keys());
+    }
+    // Two independent derivations of the same count must agree: the
+    // arms constructed 3+3+3 wholly-refused pushes (N, F, P) and the
+    // recorder derived its own answer from reachability alone.
+    assert_eq!(
+        wholly_refused,
+        3 + conflicts + 3,
+        "recorder disagrees with the arms about how many pushes were wholly refused"
+    );
+    // Both halves of the direction-5 answer must be non-zero, or the
+    // measurement is reporting a mapping that silently failed: nothing
+    // removable means the recorded names did not survive migration,
+    // and nothing kept means arm M never shared a pack.
+    assert!(d5_removable > 0, "no residue attributed to a wholly-refused push");
+    assert!(d5_kept_mixed > 0, "arm M produced no shared pack — R7 is not being measured");
 }
