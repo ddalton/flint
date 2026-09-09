@@ -551,15 +551,13 @@ pub fn deployment(repo: &FlintRepo, d: &RenderDefaults, replicas: i32) -> Deploy
             ..Default::default()
         });
     }
-    // The pack-residue rules. Rendered ONLY when on, so a repository
-    // that has not asked for them carries no new environment at all and
-    // the syncer takes its own defaults — which are off.
-    // EMITTED IN BOTH DIRECTIONS. These default ON in the syncer, so a
-    // block that only rendered the `true` case could turn them on and
-    // never off: `nameAcceptedSet: false` would emit nothing and the
-    // syncer would take its own default, which is now the opposite of
-    // what the repository asked for. An ABSENT block still emits
-    // nothing, which is what lets the default be a default.
+    // The pack-residue rules, EMITTED IN BOTH DIRECTIONS when the block
+    // is present and not at all when it is absent. These default ON in
+    // the syncer, so a block that only rendered the `true` case could
+    // turn them on and never off: `nameAcceptedSet: false` would emit
+    // nothing and the syncer would take its own default, which is the
+    // opposite of what the repository asked for. An ABSENT block still
+    // emits nothing, which is what lets the default be a default.
     if let Some(pr) = s.packs.as_ref() {
         env.push(EnvVar {
             name: "FLINT_FORGE_NAME_ACCEPTED_SET".into(),

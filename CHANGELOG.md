@@ -12,6 +12,68 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added — flint forge: dead objects stop pinning live packs (directions 5 and 4)
+
+- **The residue was 58% of named bytes on runcl, and 81% on content
+  that deltifies.** A push that forge correctly REFUSES still leaves its
+  objects behind: git migrates the pack out of quarantine when
+  `pre-receive` passes, which is *before* `proc-receive` carries forge's
+  verdict, and `receive.unpackLimit = 1` makes every push a pack. Those
+  dead objects then pin live packs forever, because supersede is strict
+  object coverage — a later pack must hold *every* object of the one it
+  replaces, and it never holds the dead ones. The cap makes it
+  permanent at any repository size.
+- **Direction 5, the reducer (`nameAcceptedSet`).** The `pre-receive`
+  hook records the push's packs from `$GIT_QUARANTINE_PATH`; the batch
+  then names `(belief.packs \ retained) ∪ {accepted pushes' packs} ∪
+  {the pack the server built}`, instead of naming whatever it finds in a
+  directory git owns. The durable set becomes DECIDED rather than
+  DERIVED — which is what `fold::commit` already did.
+- **Direction 4, the collector (`reclaimAtRest`).** At restore, in the
+  window after the repository is rebuilt and before it is served, any
+  named pack whose every reachable object another kept pack also holds
+  is dropped from the set and **unlinked** — never merely un-named, or
+  the next listing would name it again. The window is encoded as an
+  `AtRest` witness the function demands, not as a comment. A belt
+  assertion over the final kept set refuses the whole reclaim if any
+  reachable object would be stranded, and the CAS lands before any
+  unlink.
+- **Both default ON**, with `spec.packs` to opt out per repository —
+  `{nameAcceptedSet: false}` and `{reclaimAtRest: false}`. The block
+  renders in BOTH directions, because a block that only rendered `true`
+  could turn a rule on and never off once the syncer's own default
+  moved. `syncerEnv` still wins over both, being applied last.
+- **Measured on the wire, two arms differing only in the rules:** 3
+  packs / 38,830 B named with them off, 1 pack / 10,162 B with them on,
+  zero redundant packs left, and both arms serving identical refs
+  (name + tree + depth — commit OIDs carry timestamps and cannot be
+  compared across arms). Live on two all-spot AWS clusters against real
+  S3: 14/0 twice, plus a hard drill at **33/0** covering 8-way
+  concurrency, mixed pushes, `--atomic`, and the collector's
+  convergence (23 → 20 → 20 → 20 packs).
+- **The two rules overlap**, and that is worth saying plainly: with the
+  reducer on there is almost nothing left for the collector to find. The
+  collector's remaining job is residue the reducer cannot prevent — a
+  MIXED push, where accepted and refused refs share one pack, is the
+  reducer's ceiling.
+- **Not yet measured at realistic repository size or over a long
+  duration.** The drills are minutes long on small repositories.
+
+### Fixed — release tooling: the forge scope of `stage-prebuilt.sh` had never once succeeded
+
+- Under `set -euo pipefail` it died mute inside a `$(...)` at a pin
+  check reading a binary the forge scope does not build. **Failure and
+  success were indistinguishable by their effects**, because it died
+  *before* the refusal path that exists to `rm -rf` the staging tree —
+  so it exited 1 having left a complete and correct tree behind. The
+  same `grep`-returns-1 bug one step in made the `✗ WRONG BUILD` branch
+  unreachable: the check that catches a fresh timestamp on a stale
+  checkout could report agreement but never disagreement. Fixed by
+  gating the check to the scopes that stage the binary, refusing
+  explicitly by name when an input is missing, and `|| true` on the
+  pipeline that may legitimately match nothing.
+
+
 ## [1.47.0] - 2026-09-08
 
 Cut for the first entry below, which is a data-integrity fix. Anyone
