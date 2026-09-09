@@ -554,7 +554,7 @@ fn apply_settable_attrs_inner(
             if crate::tier::evict::is_evicted(lmeta.dev(), lmeta.ino()) {
                 // Blocked ⇒ NOSPC, not DELAY: parking a truncate on a
                 // restore that can never be admitted wedges the caller.
-                if let crate::tier::hydrate::Verdict::Blocked(_) =
+                match
                     crate::tier::hydrate::request(
                         lmeta.dev(),
                         lmeta.ino(),
@@ -562,7 +562,18 @@ fn apply_settable_attrs_inner(
                         crate::tier::hydrate::Trigger::Write,
                     )
                 {
-                    return (applied, Some(Nfs4Status::NoSpc));
+                    crate::tier::hydrate::Verdict::Blocked(_) => {
+                        return (applied, Some(Nfs4Status::NoSpc));
+                    }
+                    // This lane speaks Nfs4Status directly rather than
+                    // io::Error, so it maps the verdict itself: IO, for
+                    // the same reason Blocked maps to NOSPC — parking a
+                    // truncate on a restore that can never complete
+                    // wedges the caller.
+                    crate::tier::hydrate::Verdict::Gone => {
+                        return (applied, Some(Nfs4Status::Io));
+                    }
+                    crate::tier::hydrate::Verdict::Queued => {}
                 }
                 crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
                 return (applied, Some(Nfs4Status::Delay));

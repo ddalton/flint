@@ -801,18 +801,36 @@ impl PerfOperationHandler {
             {
                 let mut parked = false;
                 if crate::tier::evict::file_is_evicted(&src_file) {
-                    if let crate::tier::hydrate::Verdict::Blocked(size) =
+                    match
                         request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read)
                     {
-                        return Err(blocked_err(size));
+                        crate::tier::hydrate::Verdict::Blocked(size) => {
+                            return Err(blocked_err(size));
+                        }
+                        crate::tier::hydrate::Verdict::Gone => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "tier: the bucket does not hold this file's object",
+                            ));
+                        }
+                        crate::tier::hydrate::Verdict::Queued => {}
                     }
                     parked = true;
                 }
                 if crate::tier::evict::file_is_evicted(&dst_file) {
-                    if let crate::tier::hydrate::Verdict::Blocked(size) =
+                    match
                         request_by_file(&dst_file, &dst_path, crate::tier::hydrate::Trigger::Write)
                     {
-                        return Err(blocked_err(size));
+                        crate::tier::hydrate::Verdict::Blocked(size) => {
+                            return Err(blocked_err(size));
+                        }
+                        crate::tier::hydrate::Verdict::Gone => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "tier: the bucket does not hold this file's object",
+                            ));
+                        }
+                        crate::tier::hydrate::Verdict::Queued => {}
                     }
                     parked = true;
                 }
@@ -921,10 +939,19 @@ impl PerfOperationHandler {
                 // later retry re-copies and notes it again, which is
                 // harmless; failing to note it at all is not.
                 note_partial_copy(&dst_file, dst_offset, total_copied);
-                if let crate::tier::hydrate::Verdict::Blocked(size) =
+                match
                     request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read)
                 {
-                    return Err(blocked_err(size));
+                    crate::tier::hydrate::Verdict::Blocked(size) => {
+                        return Err(blocked_err(size));
+                    }
+                    crate::tier::hydrate::Verdict::Gone => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "tier: the bucket does not hold this file's object",
+                        ));
+                    }
+                    crate::tier::hydrate::Verdict::Queued => {}
                 }
                 crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
                 return Err(std::io::Error::new(
@@ -1194,18 +1221,36 @@ impl PerfOperationHandler {
             {
                 let mut parked = false;
                 if crate::tier::evict::file_is_evicted(&src_file) {
-                    if let crate::tier::hydrate::Verdict::Blocked(size) =
+                    match
                         request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read)
                     {
-                        return Err(blocked_err(size));
+                        crate::tier::hydrate::Verdict::Blocked(size) => {
+                            return Err(blocked_err(size));
+                        }
+                        crate::tier::hydrate::Verdict::Gone => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "tier: the bucket does not hold this file's object",
+                            ));
+                        }
+                        crate::tier::hydrate::Verdict::Queued => {}
                     }
                     parked = true;
                 }
                 if crate::tier::evict::file_is_evicted(&dst_file) {
-                    if let crate::tier::hydrate::Verdict::Blocked(size) =
+                    match
                         request_by_file(&dst_file, &dst_path, crate::tier::hydrate::Trigger::Write)
                     {
-                        return Err(blocked_err(size));
+                        crate::tier::hydrate::Verdict::Blocked(size) => {
+                            return Err(blocked_err(size));
+                        }
+                        crate::tier::hydrate::Verdict::Gone => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "tier: the bucket does not hold this file's object",
+                            ));
+                        }
+                        crate::tier::hydrate::Verdict::Queued => {}
                     }
                     parked = true;
                 }
@@ -1241,10 +1286,19 @@ impl PerfOperationHandler {
             // C2's order covers the eviction, the cycle guard the
             // completed evict+hydrate cycle — FlintTierMarker's find).
             if !crate::tier::evict::file_read_window_intact(&src_file, marker_cycle_began) {
-                if let crate::tier::hydrate::Verdict::Blocked(size) =
+                match
                     request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read)
                 {
-                    return Err(blocked_err(size));
+                    crate::tier::hydrate::Verdict::Blocked(size) => {
+                        return Err(blocked_err(size));
+                    }
+                    crate::tier::hydrate::Verdict::Gone => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "tier: the bucket does not hold this file's object",
+                        ));
+                    }
+                    crate::tier::hydrate::Verdict::Queued => {}
                 }
                 crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
                 return Err(std::io::Error::new(
@@ -1428,10 +1482,19 @@ impl PerfOperationHandler {
                 // stub is not an operation on the data. Step 11: DELAY
                 // triggers hydration with write priority.
                 if crate::tier::evict::file_is_evicted(&file) {
-                    if let crate::tier::hydrate::Verdict::Blocked(size) =
+                    match
                         request_by_file(&file, &p, crate::tier::hydrate::Trigger::Write)
                     {
-                        return Err(blocked_err(size));
+                        crate::tier::hydrate::Verdict::Blocked(size) => {
+                            return Err(blocked_err(size));
+                        }
+                        crate::tier::hydrate::Verdict::Gone => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "tier: the bucket does not hold this file's object",
+                            ));
+                        }
+                        crate::tier::hydrate::Verdict::Queued => {}
                     }
                     crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
                     return Err(std::io::Error::new(

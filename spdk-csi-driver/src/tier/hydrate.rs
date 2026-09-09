@@ -154,6 +154,16 @@ pub struct Hydrator {
     /// can be expanded under a running hub) and dropped the moment the
     /// object becomes admissible or its bytes land by any other route.
     blocked: DashMap<(u64, u64), u64>,
+    /// Objects the bucket does not hold: value is the key that 404'd.
+    ///
+    /// Like `blocked` this is a RECORD, not a cache — it is what lets a
+    /// content lane answer IO instead of DELAY. UNLIKE `blocked` it is
+    /// not re-evaluated per request: re-deciding would put a HEAD on
+    /// the read path to re-ask a question only an operator can change
+    /// (restore the version, fix the prefix, put the object back). An
+    /// object that comes back is picked up by a hub restart, or by the
+    /// file being rewritten or removed.
+    absent: DashMap<(u64, u64), String>,
 }
 
 // ── the global the handlers reach ────────────────────────────────────
@@ -191,6 +201,7 @@ pub fn install(
         handle: tokio::runtime::Handle::current(),
         inflight: DashMap::new(),
         blocked: DashMap::new(),
+        absent: DashMap::new(),
     });
     *active().write().unwrap() = Some(Arc::clone(&h));
     INSTALLED.store(true, Ordering::Relaxed);
@@ -241,6 +252,7 @@ pub(crate) fn local_for_tests(
         warm_admitted: std::sync::atomic::AtomicU64::new(0),
         inflight: DashMap::new(),
         blocked: DashMap::new(),
+        absent: DashMap::new(),
     })
 }
 
@@ -251,7 +263,7 @@ pub(crate) fn local_for_tests(
 /// lane that ignores it answers DELAY for an object the volume can
 /// never hold, and the client retries until someone kills it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[must_use = "a Blocked verdict must be answered NOSPC, not DELAY"]
+#[must_use = "Blocked must be answered NOSPC and Gone must be answered IO — never DELAY"]
 pub enum Verdict {
     /// A restore is running or queued — answer `NFS4ERR_DELAY` and let
     /// the client retry.
@@ -260,6 +272,16 @@ pub enum Verdict {
     /// amount of eviction will ever admit it — answer `NFS4ERR_NOSPC`.
     /// Carries the object's size for the log.
     Blocked(u64),
+    /// THE BUCKET DOES NOT HOLD THE OBJECT — a HEAD said 404, which is
+    /// definitive rather than slow. Answer `NFS4ERR_IO`.
+    ///
+    /// The same principle as `Blocked`, and found the same way: DELAY
+    /// is a promise, and a promise that cannot be kept parks the reader
+    /// forever. runco (2026-09-09) deleted one file's backing object
+    /// and read it back — the hub saw `head: 404 NotFound`, logged it,
+    /// and retried every 30 s while the kernel client retried the DELAY
+    /// silently. Neither side was wrong alone; nobody was going to stop.
+    Gone,
 }
 
 /// Request hydration of an evicted file. Sync and cheap — callable
@@ -283,6 +305,14 @@ pub(crate) fn request_on(
 ) -> Verdict {
     if !evict::is_evicted(dev, ino) {
         return Verdict::Queued;
+    }
+    // ABSENCE FIRST, before the size check: an object that is not in
+    // the bucket cannot be admitted by expanding the PVC either, so
+    // asking about space would answer a question that no longer
+    // matters. This is the one impossibility the hub cannot re-decide
+    // for itself — see the field comment.
+    if h.absent.contains_key(&(dev, ino)) {
+        return Verdict::Gone;
     }
     // Decide impossibility HERE rather than leaving it to the restore
     // task. The check is a cheap read of the cached gauge, and taking
@@ -347,6 +377,49 @@ pub(crate) fn request_on(
 
 /// Is this inode one the volume can never hold? The content lanes ask
 /// on the paths that do not go through [`request`].
+/// THE ONE PLACE A VERDICT BECOMES AN ERROR, so a lane cannot answer a
+/// verdict it has not considered.
+///
+/// Every content lane used to spell this itself: an `if let Blocked(_)`
+/// for NOSPC and, falling through it, an unconditional `WouldBlock` for
+/// DELAY. That shape silently absorbs any arm added later — `Gone` went
+/// straight through eight of them into the DELAY the hang was made of.
+/// Here the `match` is exhaustive, so a new arm is a compile error at
+/// one site instead of a hang at eight.
+pub fn evicted_error(dev: u64, ino: u64, path: &Path, trigger: Trigger) -> std::io::Error {
+    match request(dev, ino, path, trigger) {
+        Verdict::Queued => {
+            meter::bump(Counter::EvictedOpDelays);
+            std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "tier: file evicted (awaiting hydration)",
+            )
+        }
+        Verdict::Blocked(size) => std::io::Error::new(
+            std::io::ErrorKind::StorageFull,
+            format!("tier: {size} bytes cannot fit this volume"),
+        ),
+        // NOT WouldBlock, and that is the whole point: the caller maps
+        // WouldBlock to NFS4ERR_DELAY, which is the promise nobody can
+        // keep for an object that is not in the bucket.
+        Verdict::Gone => std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "tier: the bucket does not hold this file's object",
+        ),
+    }
+}
+
+/// Is this inode's backing object known ABSENT from the bucket?
+pub fn is_absent(dev: u64, ino: u64) -> bool {
+    current().is_some_and(|h| is_absent_on(&h, dev, ino))
+}
+
+/// [`is_absent`] against an explicit hydrator — the module's drills run
+/// LOCAL hydrators to stay out of other tests' way.
+pub(crate) fn is_absent_on(h: &Arc<Hydrator>, dev: u64, ino: u64) -> bool {
+    h.absent.contains_key(&(dev, ino))
+}
+
 pub fn is_blocked(dev: u64, ino: u64) -> bool {
     current().is_some_and(|h| is_blocked_on(&h, dev, ino))
 }
@@ -707,6 +780,22 @@ pub(crate) async fn run(
                 }
                 meter::bump(Counter::HydrationFailures);
                 attempt += 1;
+                // ABSENCE ENDS THE LOOP. Checked BEFORE the warm bound
+                // so the DEMAND lane stops too — that lane has no
+                // attempt ceiling by design, because a slow store must
+                // not cost a reader its data. This is the only
+                // condition under which demand gives up, and it gives
+                // up because retrying cannot change the answer.
+                if h.absent.contains_key(&(dev, ino)) {
+                    drop(_permit);
+                    error!(
+                        "tier hydrate: {} ABANDONED after {} attempt(s) — its object is \
+                         not in the bucket. Readers get IO, not an endless DELAY.",
+                        path.display(),
+                        attempt,
+                    );
+                    break;
+                }
                 // Warm retry bound. The lane is re-read HERE: an
                 // upgrade that landed during the attempt (the window
                 // spans the whole restore) converts to demand-retry,
@@ -1029,11 +1118,29 @@ async fn adopt_foreign(
     ino: u64,
     meta: &mut EvictedMeta,
 ) -> Result<(), String> {
-    let head = h
-        .store
-        .head(&meta.key)
-        .await
-        .map_err(|e| format!("adopt HEAD: {}", e))?;
+    // A 404 HERE IS NOT A FOREIGN OVERWRITE. The chunk fetch routes
+    // both `PreconditionFailed` (the etag moved — someone republished)
+    // and `NotFound` into this adopt, because both mean "what you
+    // remembered is not what is there". But NotFound has a second
+    // reading the adopt cannot act on — there is no object at all —
+    // and this HEAD is what separates them. Recording it is what stops
+    // the caller retrying a 404 forever.
+    let head = match h.store.head(&meta.key).await {
+        Ok(x) => x,
+        Err(StoreError::NotFound(m)) => {
+            if h.absent.insert((dev, ino), meta.key.clone()).is_none() {
+                error!(
+                    "tier hydrate: {} is ABSENT from the bucket (HEAD 404) — the object \
+                     this file's data lives in is not there. Answering IO rather than \
+                     waiting forever. Restore the object (the bucket is versioned) or \
+                     remove the file; a hub restart picks up a restored object.",
+                    meta.key,
+                );
+            }
+            return Err(format!("adopt HEAD: object ABSENT from the bucket: {m}"));
+        }
+        Err(e) => return Err(format!("adopt HEAD: {}", e)),
+    };
     warn!(
         "tier hydrate: FOREIGN overwrite at {} (etag {} → {}) — S3-wins: adopting the \
          bucket's current object",
@@ -1180,6 +1287,7 @@ mod tests {
             warm_admitted: std::sync::atomic::AtomicU64::new(0),
             inflight: DashMap::new(),
             blocked: DashMap::new(),
+            absent: DashMap::new(),
         })
     }
 
@@ -1294,6 +1402,65 @@ mod tests {
             capture::snapshot(dev, ino).is_none_or(|c| !c.is_dirty()),
             "hydration must not mark the file dirty"
         );
+    }
+
+    /// AN ABSENT OBJECT IS NOT A SLOW ONE, and the difference is a read
+    /// that fails against a read that never returns.
+    ///
+    /// Found on runco, the first drill ever to point the tier at real
+    /// S3: deleting one file's backing object and reading it back hung
+    /// the client forever. The hub SAW the 404 —
+    ///
+    ///   tier hydrate: control.bin attempt 9 failed:
+    ///     adopt HEAD: not found: head: 404 NotFound — retrying in 30s
+    ///
+    /// — and retried anyway, every 30 s, while the reader parked on
+    /// NFS4ERR_DELAY and the kernel retried it silently. The cause is a
+    /// conflation: `StoreError::NotFound` on a chunk fetch is read as
+    /// "someone overwrote this, adopt the bucket's current object", but
+    /// it also means "there is no object here at all". The adopt then
+    /// HEADs and 404s in turn, which the loop treats as transient.
+    ///
+    /// The existing `Blocked` arm already establishes the principle for
+    /// the other impossible case — an object too large for the volume
+    /// answers NOSPC rather than DELAY, because "DELAY would be a
+    /// promise the volume cannot keep". An object that is not in the
+    /// bucket is the same kind of promise.
+    #[tokio::test]
+    async fn an_object_absent_from_the_bucket_is_gone_not_retried_forever() {
+        let r = rig();
+        let (dev, ino, key) = evicted_file(&r, "gone.bin", vec![7u8; 4096]).await;
+        let f = r.root.join("gone.bin");
+        let h = local_hydrator(&r, 2);
+
+        // THE CONTROL, FIRST: with the object present this same rig
+        // hydrates. Without it, a Gone verdict below could mean the rig
+        // never had a working object at all.
+        assert!(
+            restore_once(&h, dev, ino, &f).await.is_ok(),
+            "control: the object is present, so the restore must succeed"
+        );
+        assert!(!is_absent_on(&h, dev, ino), "control: nothing is absent yet");
+
+        // Now the real arm: evict it again and DELETE the backing
+        // object — a lifecycle rule, an operator, a migration that
+        // moved the prefix.
+        let (dev, ino, key2) = evicted_file(&r, "gone2.bin", vec![9u8; 4096]).await;
+        let f2 = r.root.join("gone2.bin");
+        assert_eq!(key2.is_empty(), false);
+        r.mem.delete(&key2).await.expect("delete the backing object");
+
+        let e = restore_once(&h, dev, ino, &f2).await.expect_err("absent object cannot restore");
+        assert!(
+            is_absent_on(&h, dev, ino),
+            "an object the bucket does not hold must be RECORDED absent, not retried: {e}"
+        );
+        assert_eq!(
+            request_on(&h, dev, ino, &f2, Trigger::Read),
+            Verdict::Gone,
+            "a reader must be told GONE — parking on DELAY is the hang this test exists for"
+        );
+        let _ = key;
     }
 
     #[tokio::test]

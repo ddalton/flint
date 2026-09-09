@@ -2207,24 +2207,10 @@ impl IoOperationHandler {
                     // room for this object, so DELAY would be a promise
                     // the volume cannot keep — the client would retry
                     // until something killed it.
-                    if let crate::tier::hydrate::Verdict::Blocked(size) =
-                        crate::tier::hydrate::request(
-                            metadata.dev(),
+                    return Err(crate::tier::hydrate::evicted_error(metadata.dev(),
                             metadata.ino(),
                             &path,
-                            crate::tier::hydrate::Trigger::Read,
-                        )
-                    {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::StorageFull,
-                            format!("tier: {size} bytes cannot fit this volume"),
-                        ));
-                    }
-                    crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::WouldBlock,
-                        "tier: file evicted (awaiting hydration)",
-                    ));
+                            crate::tier::hydrate::Trigger::Read,));
                 }
             }
             let file_size = metadata.len();
@@ -2264,7 +2250,7 @@ impl IoOperationHandler {
                     metadata.ino(),
                     marker_cycle_began,
                 ) {
-                    if let crate::tier::hydrate::Verdict::Blocked(size) =
+                    match
                         crate::tier::hydrate::request(
                             metadata.dev(),
                             metadata.ino(),
@@ -2272,10 +2258,19 @@ impl IoOperationHandler {
                             crate::tier::hydrate::Trigger::Read,
                         )
                     {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::StorageFull,
-                            format!("tier: {size} bytes cannot fit this volume"),
-                        ));
+                        crate::tier::hydrate::Verdict::Blocked(size) => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::StorageFull,
+                                format!("tier: {size} bytes cannot fit this volume"),
+                            ));
+                        }
+                        crate::tier::hydrate::Verdict::Gone => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "tier: the bucket does not hold this file's object",
+                            ));
+                        }
+                        crate::tier::hydrate::Verdict::Queued => {}
                     }
                     crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
                     return Err(std::io::Error::new(
@@ -2657,7 +2652,7 @@ impl IoOperationHandler {
                             // object that can never land here can never
                             // be written through either — NOSPC now
                             // beats a DELAY the volume cannot honour.
-                            if let crate::tier::hydrate::Verdict::Blocked(size) =
+                            match
                                 crate::tier::hydrate::request(
                                     md.dev(),
                                     md.ino(),
@@ -2665,10 +2660,19 @@ impl IoOperationHandler {
                                     crate::tier::hydrate::Trigger::Write,
                                 )
                             {
-                                return Err(std::io::Error::new(
-                                    std::io::ErrorKind::StorageFull,
-                                    format!("tier: {size} bytes cannot fit this volume"),
-                                ));
+                                crate::tier::hydrate::Verdict::Blocked(size) => {
+                                    return Err(std::io::Error::new(
+                                        std::io::ErrorKind::StorageFull,
+                                        format!("tier: {size} bytes cannot fit this volume"),
+                                    ));
+                                }
+                                crate::tier::hydrate::Verdict::Gone => {
+                                    return Err(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "tier: the bucket does not hold this file's object",
+                                    ));
+                                }
+                                crate::tier::hydrate::Verdict::Queued => {}
                             }
                         }
                         crate::tier::meter::bump(

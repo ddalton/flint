@@ -1,0 +1,58 @@
+# flint-lite's S3 tier against REAL AWS S3 — runco, 2026-09-09
+#
+# THE FIRST TIME THE TIER HAS EVER RUN AGAINST S3. Every tier drill in
+# the tree — tier-drill, tier-chaos, tier-scale, and the L3 chart e2e —
+# uses MinIO, and tier-drill.sh HARDCODES it ("aws CLI pinned to the
+# drill's MinIO — never the ambient AWS world"). Deliberate, and its
+# side effect is that the backend the product names was never under it.
+#
+# Rig: 3x i4i.large all-spot (CP included), AL2023, kernel 6.18.
+# Hub: flint-lite chart, tier.endpoint="" (real S3), versioned bucket,
+# bucket-scoped IAM key via credentialsSecret. Client: a privileged pod
+# doing a REAL kernel NFSv4.1 mount, on a DIFFERENT node from the hub.
+#
+# ── legs ────────────────────────────────────────────────────────────
+# 1  conditional-write conformance   VERIFIED against AWS
+#    and it GATES STARTUP: the first container refused to boot when the
+#    IAM policy had not yet propagated —
+#      tier: conditional-write conformance probe FAILED: If-Match on the
+#      CURRENT etag was refused: not authorized: put_whole: 403
+#    0.9 s later, with the policy live, it verified. The refusal is the
+#    designed posture: lean already refused a non-conformant bucket,
+#    lite "used to start and trust" until d6da6b2f.
+# 2  flush to bucket                 vol1/probe.bin at 12,582,912 B —
+#    full size, manifest riding the barrier.
+# 3  restart under a live mount      owner VERIFIED (not re-stamped),
+#    self-recognition resumes at epoch 2 with NO takeover wait,
+#    filehandles survive, reread byte-identical.
+# 4  DR FROM THE BUCKET ALONE        helm uninstall (PVC destroyed, PV
+#    reclaimed), reinstall fresh: clean-release detected, epoch 3 with
+#    no wait, manifest seq 6 / 2 entries / 0 beyond RPO, 2 stubs
+#    restored, hydrate-on-read byte-identical in 0.30 s.
+# 5  RPO MEASURED                    fsync returns on the PVC, NOT the
+#    bucket. A 2 MiB file written and left alone appeared in S3 after
+#    20 s = tickSecs 10 + quiesceSecs 10. A continuously-written file is
+#    capped by flushFloorSecs 60. The floor exists because the design's
+#    own gate priced uncapped per-fsync PUTs at $6,480/mo.
+#
+# ── the control, and what it found ──────────────────────────────────
+# Matching sha256 proves the CONTENT is right, not that it came from
+# S3: a local remnant would look identical. So: delete ONE file's
+# backing object, keep the other, and read both.
+#
+#   probe.bin   (object intact)   d315c3f5...  rc=0
+#   control.bin (object DELETED)  HUNG FOREVER
+#
+# The hub SAW the 404 and retried anyway:
+#   tier hydrate: control.bin attempt 9 failed:
+#     adopt HEAD: not found: head: 404 NotFound — retrying in 30s
+# while the client parked on NFS4ERR_DELAY and the kernel retried it
+# silently. Neither side wrong alone; nobody was going to stop.
+#
+# FIXED — Verdict::Gone. AFTER, same experiment, same cluster:
+#   probe.bin    rc=0   d315c3f5...          (control still hydrates)
+#   control.bin  rc=1   an error, not a hang
+#   ERROR tier hydrate: vol1/control.bin is ABSENT from the bucket (HEAD 404)
+#   ERROR tier hydrate: control.bin ABANDONED after 1 attempt(s)
+#
+# 2483 lib tests pass with the fix.
