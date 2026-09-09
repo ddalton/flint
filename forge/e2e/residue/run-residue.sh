@@ -70,9 +70,14 @@ render_rig() {
     FLINT_FORGE_FOLD_FACTOR: "2"
 KNOBS
   fi
-  awk -v kf="$kf" -v tag="$TAG" '
+  # On a REAL cluster the store is S3 and there is no MinIO to stand
+  # up, so the rig is a different file rather than the same one with
+  # holes punched in it.
+  local tpl="$HERE/rig.yaml.tpl"
+  [ -n "${S3_BUCKET:-}" ] && tpl="$HERE/rig-aws.yaml.tpl"
+  awk -v kf="$kf" -v tag="$TAG" -v bucket="${S3_BUCKET:-s3bucket}" '
     /^__KNOBS__$/ { while ((getline line < kf) > 0) print line; close(kf); next }
-    { gsub(/__TAG__/, tag); print }' "$HERE/rig.yaml.tpl"
+    { gsub(/__TAG__/, tag); gsub(/__BUCKET__/, bucket); print }' "$tpl"
   rm -f "$kf"
 }
 inpod() { $K -n "$NS_AGENTS" exec writer -c agent -- sh -c "$*" 2>&1; }
@@ -83,7 +88,27 @@ door_pre() { # door_pre <repo>
 }
 
 # The snapshot a repository has published, straight out of the bucket.
-snapshot_of() { mcx mc cat "m/s3bucket/residue/$1/git/snapshot" 2>/dev/null; }
+snapshot_of() {
+  if [ -n "${S3_BUCKET:-}" ]; then
+    aws s3 cp "s3://$S3_BUCKET/residue/$1/git/snapshot" - \
+      --profile "${AWS_PROFILE_DRILL:-trove-admin}" 2>/dev/null
+  else
+    mcx mc cat "m/s3bucket/residue/$1/git/snapshot" 2>/dev/null
+  fi
+}
+
+# One pack's size IN THE STORE, which is what "what forge keeps" means.
+pack_size() { # pack_size <repo> <pack>
+  if [ -n "${S3_BUCKET:-}" ]; then
+    aws s3api head-object --bucket "$S3_BUCKET" --key "residue/$1/git/objects/pack/$2" \
+      --profile "${AWS_PROFILE_DRILL:-trove-admin}" --query ContentLength --output text 2>/dev/null
+  else
+    mcx mc stat --json "m/s3bucket/residue/$1/git/objects/pack/$2" 2>/dev/null \
+      | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get("size",0))
+except Exception: print(0)' 2>/dev/null
+  fi
+}
 
 # Bytes of the packs the snapshot NAMES — the number the whole finding
 # is about. Read from the BUCKET, not from a pod's disk: what forge
@@ -94,11 +119,9 @@ named_bytes() { # named_bytes <repo>
   local packs; packs=$(printf '%s' "$snap" | python3 -c 'import sys,json; print(" ".join(json.load(sys.stdin).get("packs",[])))' 2>/dev/null)
   local total=0 n=0 sz
   for p in $packs; do
-    sz=$(mcx mc stat --json "m/s3bucket/residue/$1/git/objects/pack/$p" 2>/dev/null \
-         | python3 -c 'import sys,json;
-try: print(json.load(sys.stdin).get("size",0))
-except Exception: print(0)' 2>/dev/null)
-    total=$((total + ${sz:-0})); n=$((n+1))
+    sz=$(pack_size "$1" "$p")
+    case "$sz" in ''|*[!0-9]*) sz=0 ;; esac
+    total=$((total + sz)); n=$((n+1))
   done
   echo "$n $total"
 }
@@ -170,11 +193,35 @@ main() {
 
   leg R0 "the rig stands up and BOTH repositories serve"
   render_rig | $K apply -f - >/dev/null 2>&1
-  $K -n "$NS_SYS" rollout status deploy/minio --timeout=180s >/dev/null 2>&1
-  $K -n "$NS_SYS" wait --for=condition=complete job/seed-bucket --timeout=180s >/dev/null 2>&1
-  $K -n "$NS_SYS" wait --for=condition=ready pod/mc-s3 --timeout=120s >/dev/null 2>&1
+  if [ -n "${S3_BUCKET:-}" ]; then
+    : "${KEYFILE:?a real bucket needs KEYFILE, the IAM access-key JSON}"
+    local ak sk
+    ak=$(python3 -c "import json;print(json.load(open('$KEYFILE'))['AccessKey']['AccessKeyId'])")
+    sk=$(python3 -c "import json;print(json.load(open('$KEYFILE'))['AccessKey']['SecretAccessKey'])")
+    $K -n "$NS_AGENTS" create secret generic forge-creds \
+      --from-literal=AWS_ACCESS_KEY_ID="$ak" \
+      --from-literal=AWS_SECRET_ACCESS_KEY="$sk" \
+      --from-literal=AWS_REGION="${AWS_REGION:-us-west-1}" \
+      --dry-run=client -o yaml | $K apply -f - >/dev/null 2>&1
+    if aws s3 ls "s3://$S3_BUCKET/" --profile "${AWS_PROFILE_DRILL:-trove-admin}" >/dev/null 2>&1; then
+      ok "the bucket $S3_BUCKET is reachable"
+    else
+      bad "cannot list s3://$S3_BUCKET — every leg below would read an empty store"
+      verdict; return 1
+    fi
+  else
+    $K -n "$NS_SYS" rollout status deploy/minio --timeout=180s >/dev/null 2>&1
+    $K -n "$NS_SYS" wait --for=condition=complete job/seed-bucket --timeout=180s >/dev/null 2>&1
+    $K -n "$NS_SYS" wait --for=condition=ready pod/mc-s3 --timeout=120s >/dev/null 2>&1
+    if mcx mc ls m/s3bucket/ >/dev/null 2>&1; then
+      ok "the in-cluster store is up and the bucket exists"
+    else
+      bad "the store never seeded — every leg below would read an empty store"
+      verdict; return 1
+    fi
+  fi
   helm --kube-context "$CTX" upgrade --install flint-forge "$CHART" -n "$NS_SYS" \
-       --set image.tag="$TAG" --set image.pullPolicy=IfNotPresent \
+       --set image.tag="$TAG" --set image.pullPolicy="${PULL_POLICY:-IfNotPresent}" \
        --set server.gitImage="dilipdalton/flint-forge-git:$TAG" \
        --set server.syncerImage="dilipdalton/flint-forge-syncer:$TAG" \
        --set door.deploy=true --set door.namespace="$NS_SYS" \
@@ -208,11 +255,22 @@ main() {
     *FLINT_FORGE_RECLAIM_AT_REST*) ok "treated carries FLINT_FORGE_RECLAIM_AT_REST" ;;
     *) bad "treated does NOT carry FLINT_FORGE_RECLAIM_AT_REST" ;;
   esac
-  # The control must NOT carry them, or the arms do not differ.
+  # THE CONTROL MUST CARRY THEM SET TO 0, not be missing them. Both
+  # rules DEFAULT ON since 2026-09-09, so a control with no environment
+  # would take the defaults and be the same repository as the treated
+  # arm — the drill would compare something against itself. "Absent"
+  # used to be the right answer here and is now the failure.
   case "$env_c" in
-    *FLINT_FORGE_NAME_ACCEPTED_SET*|*FLINT_FORGE_RECLAIM_AT_REST*)
-      bad "the CONTROL carries a pack flag — the arms do not differ" ;;
-    *) ok "the control carries neither flag" ;;
+    *'"name":"FLINT_FORGE_NAME_ACCEPTED_SET","value":"0"'*)
+      ok "the control carries FLINT_FORGE_NAME_ACCEPTED_SET=0" ;;
+    *FLINT_FORGE_NAME_ACCEPTED_SET*)
+      bad "the control carries NAME_ACCEPTED_SET but not as 0 — the arms may not differ" ;;
+    *)  bad "the control carries NO pack flags, so it takes the ON defaults — the arms are identical" ;;
+  esac
+  case "$env_c" in
+    *'"name":"FLINT_FORGE_RECLAIM_AT_REST","value":"0"'*)
+      ok "the control carries FLINT_FORGE_RECLAIM_AT_REST=0" ;;
+    *)  bad "the control does not carry RECLAIM_AT_REST=0 — it would reclaim too" ;;
   esac
 
   leg R2 "the same workload against both, and the refusals are real"

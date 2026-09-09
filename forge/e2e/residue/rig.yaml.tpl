@@ -100,6 +100,16 @@ spec:
     mergeInto:
       main: ["system:serviceaccount:agents:forge-writer"]
     agentPattern: "agent/*"
+  # EXPLICITLY OFF. Both rules DEFAULT ON since 2026-09-09, so an
+  # ABSENT block would give the control the rules too and the two arms
+  # would be identical — the drill would compare a repository against
+  # itself and report a green that means nothing, which is exactly the
+  # failure its first run already made once. The control has to say NO
+  # out loud, and being able to say it is why the operator renders
+  # `false` as an explicit 0 rather than as silence.
+  packs:
+    nameAcceptedSet: false
+    reclaimAtRest: false
 __KNOBS__
 ---
 # ── THE TREATED ARM: both rules, and NOTHING else differs ────────────
