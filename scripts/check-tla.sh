@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Two hundred and forty runs, ALL required.
+# Two hundred and forty-one runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -17,7 +17,7 @@
 #   awk '/^(strict_run|mutation_run|liveness_mutation_run)[ ]/ {print $2}' \
 #     scripts/check-tla.sh | sort | uniq -c | sort -rn
 #
-#   71 FlintReplication    33 FlintComposition    18 ForgeSync
+#   71 FlintReplication    33 FlintComposition    19 ForgeSync
 #   15 FlintExtents        15 FlintClientIdentity  12 FlintCsiMount
 #   11 FlintExtentsProbe   11 FlintDelegRecall      8 FlintTierEpoch
 #    7 FlintTruncate        7 FlintTierSession      7 FlintTierMarker
@@ -1184,6 +1184,7 @@ mutation_run ForgeSync ForgeSyncListingKeepsRetained.cfg "forge-sync retention-l
 mutation_run ForgeSync ForgeSyncProveFromDisk.cfg "forge-sync proof-scope mutation (ProveFromDisk=TRUE, audit F2: the proof walks the object DIRECTORY, so it rests on packs a fold retained for readers and the ledger sweep is on its way to deleting — the verdict means the disk while every caller reads it as the bucket)" "Inv_ProofIsOfTheBucket"
 mutation_run ForgeSync ForgeSyncFoldCommitMidBatch.cfg "forge-sync mid-batch-commit mutation (FoldCommitMidBatch=TRUE: the fold commits beside a live batch, whose CAS then writes a listing taken BEFORE the fold retained its inputs and so re-names a retained pack -- recorded here as a harmless NON-RUN until retention was modelled, which gave it teeth)" "Inv_ProofNeverRestsOnRetention"
 mutation_run ForgeSync ForgeSyncFoldSupersedesArrivals.cfg "forge-sync fold-arrivals mutation (FoldSupersedesArrivals=TRUE: the commit unnames EVERY input, held or not, so a push whose objects the roll-up could not reach is unnamed and stranded -- THIS IS runcd, and until 2026-09-07 it had a cfg and no run here at all)" "Inv_LandedPackComplete"
+mutation_run ForgeSync ForgeSyncFoldReachableCoverage.cfg "forge-sync reachable-coverage mutation (FoldReachableCoverage=TRUE: supersede an input when everything it holds that the REFS REACH is in the roll-up -- 'direction 1' of the runcl pack-pinning finding, where three unreachable objects from a correctly refused push pinned 58% of the snapshot's named bytes. It is runcd with the arrow reversed: a queued push's pack is named a batch before its ref moves, so in that gap its objects ARE unreachable-objects-in-a-named-pack and no test separates them from a refusal's residue)" "Inv_LandedPackComplete"
 mutation_run ForgeSync ForgeSyncFoldTicksBatchSensor.cfg "forge-sync fold-sensor mutation (FoldTicksBatchSensor=TRUE, design rule 3: the fold's upload ticks the HOLD's counter and a wedged batch's holder keeps renewing through a base rebuild)" "Inv_NoRenewOverWedge"
 
 # ── ForgeMergeChain.tla — SERVER-BUILT COMMITS AND ANCESTRY ────────────

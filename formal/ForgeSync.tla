@@ -171,6 +171,9 @@ CONSTANTS
   FoldNoRenew,          \* mutation: the fold's commit does not renew the lease first
   FoldNoCoverageCheck,  \* mutation: the commit lands a roll-up that does not hold its inputs
   FoldSupersedesArrivals, \* mutation: a fold's commit unnames every input, held or not (runcd)
+  FoldReachableCoverage, \* mutation: an input may go if its UNCOVERED objects are unreachable (the pack-pinning 'direction 1')
+  ReclaimAtRestore,     \* DIRECTION 4: a reclaiming rebuild between the restore and the first served hook
+  ReclaimWhileServing,  \* mutation: the reclaim's relaxed rule, taken on a SERVING syncer
   ProveFromDisk,        \* mutation: a proof is taken over the object DIRECTORY, not the named packs (F2)
   ListingKeepsRetained, \* mutation: a batch lists the packs retention holds on disk
   GraceOutlivesUpload   \* the grace axiom; FALSE is lean's RacyGrace mutation
@@ -178,7 +181,7 @@ CONSTANTS
 Stages == {"none", "judged", "renewed", "hashed", "initiated", "uploaded",
            "cas", "refs"}
 States == {"idle", "watching", "claimed", "rotating", "restoring",
-           "serving", "pushing"}
+           "reclaiming", "serving", "pushing"}
 PushStates == {"new", "sent", "acked", "failed"}
 FoldStages == {"none", "planned", "initiated", "uploaded", "renewed"}
 
@@ -227,7 +230,7 @@ vars == <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease, lastTok,
 NoBatch   == [push |-> 0, stage |-> "none", listed |-> {}]
 ZeroLease == [ep |-> 0, tok |-> 0]
 NoBelief  == [etag |-> 0, main |-> 0, packs |-> {}]
-NoFold    == [id |-> 0, inputs |-> {}, stage |-> "none", base |-> FALSE, at |-> {}]
+NoFold    == [id |-> 0, inputs |-> {}, stage |-> "none", base |-> FALSE, at |-> {}, atRest |-> FALSE]
 
 PushIds == Pushes \cup {0}
 PackIds == Pushes \cup FoldIds
@@ -251,7 +254,7 @@ TypeOK ==
   /\ batch \in [Syncers -> [push: PushIds, stage: Stages, listed: SUBSET PackIds]]
   /\ holds \in [PackIds -> SUBSET Pushes]
   /\ fold \in [Syncers -> [id: FoldIds \cup {0}, inputs: SUBSET PackIds, stage: FoldStages,
-                          base: BOOLEAN, at: SUBSET Pushes]]
+                          base: BOOLEAN, at: SUBSET Pushes, atRest: BOOLEAN]]
   /\ foldBudget \in 0..MaxFolds
   /\ renewOverWedge \in BOOLEAN
   /\ sensorMoved \in [Syncers -> BOOLEAN] /\ realMoved \in [Syncers -> BOOLEAN]
@@ -458,6 +461,21 @@ RotateSnapshot(s) ==
                  claimBudget>>
   /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
+\* DIRECTION 4's exit: the window closes and the syncer starts answering
+\* hooks. Enabled only with no fold in flight, so the reclaim either
+\* committed or was abandoned before a single push can arrive. It is
+\* always enabled at once, which is what makes the reclaim OPTIONAL —
+\* a syncer that does not want one simply leaves.
+ReclaimDone(s) ==
+  /\ st[s] = "reclaiming"
+  /\ fold[s].stage = "none"
+  /\ st' = [st EXCEPT ![s] = "serving"]
+  /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, lease, lastTok, quiet,
+                 belief, localMain, localPacks, migrating, batch, sensorMoved,
+                 realMoved, hbDue, pushState, pushTo, crashes, renewBudget,
+                 claimBudget>>
+  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
+
 \* The claim-time sweep (sweep.rs abort_orphaned_uploads): nothing of
 \* ours is in flight, so everything pending is a predecessor's.
 SweepDone(s) ==
@@ -518,7 +536,11 @@ Restore(s) ==
                    /\ migrating' = [migrating EXCEPT ![s] = {}]
                    /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
                    /\ sensorMoved' = [sensorMoved EXCEPT ![s] = TRUE]
-                   /\ st' = [st EXCEPT ![s] = "serving"]
+                   \* DIRECTION 4. The refs are installed and the hook is
+                   \* not answered yet: `PushSend` requires "serving" or
+                   \* "pushing", so while this syncer sits here NO push
+                   \* can reach it and no pack can be waiting for a ref.
+                   /\ st' = [st EXCEPT ![s] = IF ReclaimAtRestore THEN "reclaiming" ELSE "serving"]
                    /\ UNCHANGED <<lease, batch, fold, unrestorable, pushState, quiet>>
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, lastTok, hbDue,
                  pushTo, crashes, renewBudget, claimBudget, ackNotDurable,
@@ -533,7 +555,7 @@ Restore(s) ==
 (* actually moved is the sensor lying — the witness.  A 412 is the fence.  *)
 (***************************************************************************)
 
-MustProgress(s) == st[s] \in {"restoring", "pushing"}
+MustProgress(s) == st[s] \in {"restoring", "reclaiming", "pushing"}
 
 RenewCas(s) ==
   IF cell.held /\ cell.holder = s /\ cell.tok = lease[s].tok
@@ -545,7 +567,7 @@ RenewCas(s) ==
          /\ UNCHANGED <<cell, nextTok>>
 
 RenewTick(s) ==
-  /\ st[s] \in {"restoring", "serving", "pushing"}
+  /\ st[s] \in {"restoring", "reclaiming", "serving", "pushing"}
   /\ renewBudget > 0
   /\ hbDue' = [hbDue EXCEPT ![s] = FALSE]
   /\ IF MustProgress(s) /\ ~sensorMoved[s]
@@ -867,12 +889,17 @@ Crash(s) ==
 \* allowed (the base rebuild's case), which is what lets two pushes
 \* reach every ordering the mutations need.
 FoldPlan(s) ==
-  /\ st[s] = "serving" /\ batch[s].stage = "none"
+  /\ st[s] \in {"serving", "reclaiming"} /\ batch[s].stage = "none"
   /\ fold[s].stage = "none" /\ foldBudget > 0
   /\ \E f \in FoldIds, S \in SUBSET belief[s].packs, base \in BOOLEAN :
        /\ holds[f] = {} /\ Cardinality(S) >= 1
+       \* `atRest` is stamped at PLAN time and read at COMMIT time, which
+       \* is the honest shape: an implementation computes what the refs
+       \* reach while it builds the pack, and commits later. Whether that
+       \* gap can be exploited is the question this models.
        /\ fold' = [fold EXCEPT ![s] = [id |-> f, inputs |-> S, stage |-> "planned",
-                                      base |-> base, at |-> snap.history]]
+                                      base |-> base, at |-> snap.history,
+                                      atRest |-> (ReclaimWhileServing \/ st[s] = "reclaiming")]]
        \* TWO kinds of fold, with two content rules — and this used to be
        \* one rule, the tier fold's, written in as an axiom. That is how
        \* runcd's defect (2026-09-07) got past a checker that carried the
@@ -965,6 +992,7 @@ FoldComplete(s) ==
 \* interleaving one function call does not.
 FoldQuiet(s) ==
   \/ (st[s] = "serving" /\ batch[s].stage = "none")
+  \/ (st[s] = "reclaiming" /\ batch[s].stage = "none")
   \/ (FoldCommitMidBatch /\ st[s] = "pushing")
 
 FoldReadyToCommit(s) ==
@@ -1049,8 +1077,49 @@ FoldCommit(s) ==
          \* stay held (Inv_LandedPackComplete), so coverage is the only
          \* rule that survives. An input holding something the roll-up
          \* missed simply stays named for a later fold.
+         \* DIRECTION 1 of the pack-pinning finding (2026-09-08), and the
+         \* THIRD weakening of this rule TLC has now refuted. Dead
+         \* objects pin live packs: on runcl 58% of the snapshot's named
+         \* bytes were two packs kept only because each held three
+         \* UNREACHABLE objects — the residue of a correctly refused
+         \* push. The tempting fix is to supersede on REACHABLE
+         \* coverage: let an input go when everything it holds that the
+         \* refs can reach is in the roll-up, and ignore what they
+         \* cannot reach.
+         \*
+         \* It is runcd again, with the arrow reversed. A base rebuild
+         \* holds what the refs REACHED when it read them, and a batch
+         \* names the DIRECTORY, so a queued push's pack is named one
+         \* batch before its ref moves. In that gap its objects are
+         \* exactly "unreachable objects in a named pack" — the same
+         \* observation as a refusal's residue, and NO test at this
+         \* moment separates them. The reachable rule unnames the pack;
+         \* the push then lands; its objects are in nothing named.
+         \*
+         \* So the two rules already refuted here have a third sibling:
+         \* "unname every input" (FoldSupersedesArrivals) loses a push
+         \* that has landed, "unname an input whose uncovered objects
+         \* have landed" loses one that lands during the fold, and this
+         \* one loses the push that has not landed YET. Coverage — the
+         \* whole of it, reachable or not — remains the only rule that
+         \* survives, and the pinning must be paid for somewhere the
+         \* queue cannot reach.
+         \* DIRECTION 4. The SAME rule the mutation above refutes —
+         \* "drop an input whose uncovered objects no ref reaches" —
+         \* taken only where the observation is not ambiguous. Between
+         \* the restore and the first served hook `PushSend` cannot fire
+         \* at this syncer, so no pack on disk is waiting for a ref that
+         \* is about to move. Reachability is read at PLAN time
+         \* (`fold[s].at`), so the plan-to-commit gap is exposed rather
+         \* than assumed away, and a straggler's landing is free to
+         \* exploit it. Mutation ReclaimWhileServing takes the same rule
+         \* out of the window and must lose.
          D == IF FoldSupersedesArrivals THEN S
-                ELSE {q \in S : holds[q] \subseteq holds[f]}
+                ELSE IF FoldReachableCoverage
+                       THEN {q \in S : (holds[q] \cap snap.history) \subseteq holds[f]}
+                       ELSE IF fold[s].atRest
+                              THEN {q \in S : (holds[q] \cap fold[s].at) \subseteq holds[f]}
+                              ELSE {q \in S : holds[q] \subseteq holds[f]}
          named == IF FoldCasFromDisk THEN (localPacks[s] \ D) \cup {f}
                                     ELSE (belief[s].packs \ D) \cup {f} IN
      IF snap.etag = belief[s].etag
@@ -1190,7 +1259,7 @@ Next ==
   \/ \E s \in Syncers :
        \/ AcquireCreate(s) \/ SupersedeOwn(s) \/ ClaimReleased(s) \/ ObserveForeign(s)
        \/ PollQuiet(s) \/ Takeover(s) \/ RotateSnapshot(s) \/ SweepDone(s)
-       \/ Restore(s) \/ RenewTick(s)
+       \/ Restore(s) \/ ReclaimDone(s) \/ RenewTick(s)
        \/ BatchStart(s) \/ BatchRenew(s) \/ BatchHash(s) \/ BatchInit(s)
        \/ BatchComplete(s) \/ BatchCas(s) \/ BatchLateUpload(s)
        \/ BatchRefs(s) \/ BatchAck(s)
@@ -1209,6 +1278,7 @@ Fairness ==
     /\ WF_vars(AcquireCreate(s)) /\ WF_vars(SupersedeOwn(s)) /\ WF_vars(ClaimReleased(s))
     /\ WF_vars(ObserveForeign(s)) /\ WF_vars(PollQuiet(s)) /\ WF_vars(Takeover(s))
     /\ WF_vars(RotateSnapshot(s)) /\ WF_vars(SweepDone(s)) /\ WF_vars(Restore(s))
+    /\ WF_vars(ReclaimDone(s))
     /\ WF_vars(RenewTick(s))
     /\ WF_vars(BatchStart(s)) /\ WF_vars(BatchRenew(s)) /\ WF_vars(BatchHash(s))
     /\ WF_vars(BatchInit(s)) /\ WF_vars(BatchComplete(s)) /\ WF_vars(BatchCas(s))

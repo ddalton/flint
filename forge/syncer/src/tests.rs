@@ -4029,6 +4029,248 @@ async fn a_pack_named_before_its_ref_moves_survives_the_base_rebuild_that_could_
     cold.sc.git.fsck_connectivity_all().await.expect("whole");
 }
 
+/// TLC'S COUNTEREXAMPLE, EXECUTABLE — the ordering the test above does
+/// NOT have (2026-09-08).
+///
+/// The sibling above lands the queued push BEFORE the fold's commit, so
+/// any rule that asks "has it landed?" at commit time answers yes and
+/// keeps the pack. That ordering cannot refute a reachability-based
+/// supersede rule, and for a while nothing here could: the pack-pinning
+/// finding's "direction 1" passed every test in this file.
+///
+/// `formal/ForgeSyncFoldReachableCoverage.cfg` finds the ordering that
+/// kills it — the push lands AFTER the commit (states 21 then 27) — and
+/// this is that trace in the rig:
+///
+///   the pack is on disk and NAMED, its ref has not moved;
+///   a base rebuild cannot reach it, and commits;
+///   only then does the push land.
+///
+/// At the moment of the commit the pack is indistinguishable from the
+/// one in `a_refused_pushs_dead_objects_pin_their_pack_...` — objects
+/// no ref reaches — and there the right answer is "dead", here it is
+/// "about to be live". Strict object coverage is what refuses to guess,
+/// and this test is the reason it may not be relaxed to reachability.
+#[tokio::test]
+async fn a_base_commit_may_not_unname_a_pack_whose_push_lands_after_it() {
+    let mut rig = Rig::new().await;
+    rig.sc.cfg.fold_factor = 2;
+    rig.sc.cfg.base_min_bytes = 0;
+    rig.sc.cfg.base_rebuild_min_secs = 0;
+    rig.sc.cfg.fold_min_bytes = 0;
+    rig.start().await;
+    let _c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+
+    // Past pre-receive, so the pack is in the directory; the
+    // proc-receive hook is still queued, so no ref names it.
+    let queued = rig.stage_commit(None, &[("q.txt", "q\n")], "queued").await;
+    let _c1 = rig.push_commit("refs/heads/other", None, "c1").await;
+    let qpack = named_holder_of(&rig, &queued)
+        .await
+        .expect("a batch named the queued push's pack, one batch before its ref");
+    assert!(
+        rig.sc.git.ref_oid("refs/heads/queued").await.unwrap().is_none(),
+        "and the ref has not moved — this is the gap"
+    );
+
+    // The base rebuild, planned and packed in exactly that gap.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let now = super::now_unix();
+    let plan = fold::maybe_spawn(&mut rig.sc, tx, now).unwrap().expect("a base is planned");
+    assert!(matches!(plan, fold::Plan::Base { .. }), "{plan:?}");
+    assert!(plan.inputs().contains(&qpack), "the queued pack is one of the base's inputs");
+    let res = rx.recv().await.expect("the task reports");
+    assert!(res.error.is_none(), "the rebuild itself is fine: {:?}", res.error);
+
+    // THE COMMIT GOES FIRST. Everything the syncer can see right now
+    // says this pack holds nothing any ref reaches.
+    let named = fold::commit(&mut rig.sc, res, now).await.expect("the base commits");
+    assert!(named.is_some());
+    assert!(
+        rig.sc.cell().unwrap().snap.packs.contains(&qpack),
+        "a pack whose push has not landed YET must stay named: {:?}",
+        rig.sc.cell().unwrap().snap.packs
+    );
+
+    // ...and only now does the push land.
+    let reports = rig
+        .run(vec![push(
+            7,
+            vec![RefUpdate { name: "refs/heads/queued".into(), old_oid: zero(), new_oid: queued.clone() }],
+        )])
+        .await;
+    assert!(is_ok(&reports[0].results[0]), "{:?}", reports[0].results[0]);
+
+    // The proof that matters, and the one that fails when the rule is
+    // relaxed: a cold restore from the bucket alone is whole.
+    let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
+    restore::restore(&mut cold.sc).await.expect("a cold restore proves the repository");
+    assert_eq!(cold.sc.git.ref_oid("refs/heads/queued").await.unwrap(), Some(queued));
+    cold.sc.git.fsck_connectivity_all().await.expect("whole");
+}
+
+
+/// Which pack the SNAPSHOT names holds `oid`, if any. The question the
+/// pinning finding is about: not "is it on disk" but "does a restore
+/// download it".
+async fn named_holder_of(rig: &Rig, oid: &str) -> Option<String> {
+    let dir = rig.sc.cfg.repo.join("objects/pack");
+    let mut found = None;
+    for p in &rig.sc.cell().unwrap().snap.packs.clone() {
+        let idx = dir.join(p.trim_end_matches(".pack").to_string() + ".idx");
+        if rig.sc.git.pack_object_ids(&idx).await.unwrap().iter().any(|o| o == oid) {
+            found = Some(p.clone());
+        }
+    }
+    found
+}
+
+/// THE PRICE OF THE RULE THE TEST ABOVE BUYS (runcl, 2026-09-08), and a
+/// guard on anyone who tries to stop paying it.
+///
+/// The same shape with ONE dimension moved: the staged push is REFUSED
+/// instead of landing. Its pack is in the directory either way — git
+/// migrates the quarantine as soon as pre-receive passes, before the
+/// proc-receive hook that carries forge's answer — and a later batch
+/// names the directory, so a correctly refused push leaves objects the
+/// snapshot names and no ref can ever reach.
+///
+/// A base rebuild (`--all`) then drops them, and the supersede check is
+/// strict object coverage, so the input pack stays named. FOREVER. On
+/// runcl that was 45,664 of 79,159 snapshot-named bytes — 58% —
+/// downloaded by every restore, for three dead objects.
+///
+/// Keeping it named is nonetheless CORRECT, and that is the point of
+/// putting this test beside the one above: at the moment of the
+/// decision the two are the SAME OBSERVATION — a named pack holding
+/// objects no ref reaches — and one of them is a push about to land.
+/// TLC refutes every rule that tries to separate them
+/// (`ForgeSyncFoldReachableCoverage.cfg` violates
+/// `Inv_LandedPackComplete`; it is runcd with the arrow reversed).
+///
+/// So this asserts the SAFETY half — the pack stays named — and only
+/// MEASURES the cost. It is not a claim that the cost is desirable; it
+/// is a claim that reclaiming it by weakening coverage breaks the test
+/// above, and must be done somewhere no push can be in flight.
+#[tokio::test]
+async fn a_refused_pushs_dead_objects_pin_their_pack_and_coverage_keeps_it_named() {
+    let mut rig = Rig::new().await;
+    // Tiers first and no base yet: the amplification step needs a tier
+    // fold to happen BEFORE the collection, which is the runcl order.
+    rig.tiers_only();
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+
+    // A push git has already given the repository and forge is about to
+    // refuse. NOTE the rig's limits, because a plan was once written on
+    // the assumption that this shape is what a cluster produces:
+    // `stage_commit` packs with NO `--fix-thin` pass, so this pack holds
+    // only dead objects. A real `receive-pack` completes a thin pack
+    // with the delta bases the server already holds, which ARE
+    // reachable — measured on git 2.50.1, a one-line edit to a
+    // 4,000-line file leaves a 4-object residue pack of which 1 object
+    // is live. Any rule keyed on "no object here is reachable" fires in
+    // this test and not on that repository.
+    let dead = rig.stage_commit(None, &[("d.txt", "d\n")], "dead").await;
+    let reports = rig
+        .run(vec![push(
+            9,
+            vec![RefUpdate { name: "refs/heads/main".into(), old_oid: c0.clone(), new_oid: dead.clone() }],
+        )])
+        .await;
+    assert_eq!(
+        ng_reason(&reports[0].results[0]),
+        "non-fast-forward update to refs/heads/main",
+        // NOT arm A's shape, and an earlier version of this comment said
+        // it was. `dead` is a ROOT commit, so this is an unrelated-history
+        // force push. Arm A never force-pushes, and `judge` tests
+        // staleness BEFORE ancestry (batch.rs), so its 28 refusals were
+        // `stale info: fetch first`. The residue mechanism is the same
+        // either way; the CLASS is not, and a plan was mis-scoped off
+        // this sentence.
+        "an unrelated-history push, refused"
+    );
+    // A batch that accepts nothing spends no CAS, so the refusal alone
+    // names nothing. The NEXT push is what names the directory.
+    let c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+
+    let dir = rig.sc.cfg.repo.join("objects/pack");
+    assert!(
+        named_holder_of(&rig, &dead).await.is_some(),
+        "a batch named the refused push's pack — it names the DIRECTORY"
+    );
+    assert_eq!(
+        rig.sc.git.ref_oid("refs/heads/main").await.unwrap(),
+        Some(c1.clone()),
+        "and no ref moved onto the refused commit"
+    );
+
+    // THE AMPLIFICATION. A tier fold is a pure roll-up
+    // (`pack-objects --stdin-packs`) and must hold every object its
+    // inputs hold, so it carries the dead triple into a pack that is
+    // otherwise all live content. Three objects now ride a big pack.
+    rig.fold_once().await.expect("two equal packs fold");
+    let dpack = named_holder_of(&rig, &dead)
+        .await
+        .expect("the tier fold carried the dead objects into its roll-up");
+
+    // Now the collection. `--all` cannot reach the refused commit, and
+    // never will.
+    rig.sc.cfg.base_min_bytes = 0;
+    rig.sc.cfg.base_rebuild_min_secs = 0;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let now = super::now_unix();
+    let plan = fold::maybe_spawn(&mut rig.sc, tx, now).unwrap().expect("a base is planned");
+    assert!(matches!(plan, fold::Plan::Base { .. }), "{plan:?}");
+    assert!(plan.inputs().contains(&dpack), "the refused push's pack is one of the base's inputs");
+    let res = rx.recv().await.expect("the task reports");
+    assert!(res.error.is_none(), "the rebuild itself is fine: {:?}", res.error);
+    let base_name = res.pack.clone();
+
+    let named = fold::commit(&mut rig.sc, res, now).await.expect("the base commits");
+    assert!(named.is_some());
+    let after = rig.sc.cell().unwrap().snap.packs.clone();
+
+    // THE FINDING. The roll-up is not to blame and the commit is not
+    // to blame: coverage is doing exactly what runcd bought it for.
+    assert!(
+        after.contains(&dpack),
+        "the pack holding only dead objects stays named — coverage cannot tell it from the \
+         queued push in the test above: {after:?}"
+    );
+
+    // ...and the price, measured rather than asserted: everything in
+    // that pack except the dead objects is already in the base.
+    let bidx = dir.join(base_name.trim_end_matches(".pack").to_string() + ".idx");
+    let didx = dir.join(dpack.trim_end_matches(".pack").to_string() + ".idx");
+    let held: std::collections::HashSet<String> =
+        rig.sc.git.pack_object_ids(&bidx).await.unwrap().into_iter().collect();
+    let pinned = rig.sc.git.pack_object_ids(&didx).await.unwrap();
+    let uncovered: Vec<&String> = pinned.iter().filter(|o| !held.contains(*o)).collect();
+    assert!(
+        uncovered.contains(&&dead),
+        "the refused commit is what the base could not reach: {uncovered:?}"
+    );
+    assert!(
+        uncovered.len() * 2 < pinned.len(),
+        "a pack is pinned by a MINORITY of its objects — {} of {} — which is what makes the \
+         redundancy worth naming: on runcl it was 3 of 263, twice over",
+        uncovered.len(),
+        pinned.len()
+    );
+
+    // And it is a COST, not a defect: the bucket still restores whole.
+    let mut cold = Rig::with_store(rig.store.clone(), "cold").await;
+    restore::restore(&mut cold.sc).await.expect("a cold restore proves the repository");
+    assert_eq!(cold.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(c1));
+    cold.sc.git.fsck_connectivity_all().await.expect("whole");
+    assert!(
+        cold.sc.git.has_object(&dead).await.unwrap(),
+        "and the restore downloaded the dead objects too — that is the whole cost"
+    );
+}
+
+
 /// A batch beside a fold (design §3.5). The fold's upload is slow and a
 /// push lands while it is in flight: the batch runs on the loop with
 /// the fold's task beside it, never sees the scratch — its snapshot
