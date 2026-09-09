@@ -681,8 +681,18 @@ impl MetadataServer {
         // prints every interval with the gate on — a printed zero is
         // evidence, an absent line is not.
         self.state_mgr.start_deleg_reporter();
-        warn!("FLINT-PNFS-MDS STARTING WITH DEBUG LOGGING");
-        warn!("MDS SERVER BINARY VERSION: DEBUG BUILD");
+        // TRUTHFUL, NOT CONSTANT. Both of these were unconditional
+        // `warn!`s, so a --release binary announced itself as a DEBUG
+        // BUILD on every start, in the log an operator reads to find
+        // out what is running. Same family as the image-tag provenance
+        // drift: a line that asserts something about the artefact
+        // without consulting it. `debug_assertions` is off in release,
+        // which is the actual question being answered.
+        if cfg!(debug_assertions) {
+            warn!("MDS SERVER BINARY VERSION: DEBUG BUILD (assertions on)");
+        } else {
+            info!("MDS server binary: release build");
+        }
         info!("╔════════════════════════════════════════════════════╗");
         info!("║   Flint pNFS Metadata Server (MDS) - RUNNING      ║");
         info!("╚════════════════════════════════════════════════════╝");

@@ -1,0 +1,67 @@
+# ARM C — pjdfstest with the S3 TIER ON, 2026-09-09
+#
+# docs/plans/posix-fidelity-measurement-plan.md named this arm on
+# 2026-08-28 and it had never been built. `FLINT_TIER_CAPTURE` appeared
+# in no rig, no script and no make target — only in the source that
+# reads it and the docs that describe the gap.
+#
+# WHY IT MATTERS: every compliance number this repo has recorded was
+# taken with `capture::enabled()` FALSE. LINK was never refused and no
+# object was ever written. Those numbers are the FLOOR for flint-lite,
+# not a measurement of it — and flint-lite IS the tier.
+#
+# Rig: lima flint-nfs-client, aarch64, kernel 6.8. ONE binary
+# (aarch64-musl release of flint-pnfs-mds at origin/main), ONE wrapper
+# carrying the tier credentials, used by BOTH arms — so the arms differ
+# in the CONFIG ALONE. Backend: MinIO, which PASSES the hub's
+# conditional-write conformance gate (an open question until now: it is
+# why `probe_version_surface` exists).
+#
+# ── result ──────────────────────────────────────────────────────────
+#                       tier OFF   tier ON     delta
+#   flint-only            614        727       +113   (+18%)
+#   files                  64         66         +2
+#     link                 81        146        +65
+#     rename               93        123        +30
+#     unlink               62         80        +18
+#     chown               182        182          0
+#     open                 83         83          0
+#     chmod                25         25          0
+#     mknod                25         25          0
+#     mkfifo               13         13          0
+#   knfsd control         108        108          0
+#
+# FALSIFIABILITY LEG PASSES. The plan required `link` to fail with the
+# tier on or the arm is VOID: +65 link assertions is the
+# LINK_SUPPORT=false refusal arriving. S3 cannot encode a hard link, so
+# the hub advertises false and refuses LINK with NFS4ERR_NOTSUPP.
+#
+# THE RUN CARRIES ITS OWN INTERNAL CONTROL, which is why n=1 per arm is
+# reportable: FIVE categories are identical TO THE DIGIT across the two
+# runs (chown 182, open 83, chmod 25, mknod 25, mkfifo 13). chown does
+# not land on 182 twice by chance. The three that moved are exactly the
+# operations the tier changes; the permission-shaped tests, which it
+# does not touch, did not move at all.
+#
+# THE GATE FAILED AT 727 vs A 645 CEILING, correctly: the ceiling was
+# recorded against a posture nobody ships. The tier-off arm also came in
+# at 614, THIRTY-ONE BELOW its own ceiling — so the recorded baseline is
+# stale in both directions.
+#
+# ── the trap this arm nearly fell into ──────────────────────────────
+# The first cut put `tier:` at the TOP LEVEL of the config. `tier` is a
+# field of MdsConfig, not PnfsConfig, so it belongs under `mds:` — an
+# unknown top-level key is DROPPED SILENTLY and the hub starts with no
+# tier at all. The only tell was the shutdown line "drained; no tier to
+# flush". Had that run gone the distance it would have produced numbers
+# matching the control and read as "the tier changes nothing".
+#
+# The premise is now checked directly rather than inferred from the
+# numbers: the bucket showed the epoch RE-CLAIMED at 13:33:46 and the
+# manifest growing while the suite ran.
+#
+# ── what is still not measured ──────────────────────────────────────
+# Arm D, round-trip fidelity (D1 evict/hydrate, D2 manifest DR, D3 sweep
+# DR — expected-worst). pjdfstest STRUCTURALLY cannot ask it: it
+# creates, asserts and removes inside one test body, so there is no seam
+# for a flush barrier.
