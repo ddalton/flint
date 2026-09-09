@@ -50,6 +50,11 @@ pub struct PushRequest {
     /// honoured HERE, nothing honours it, and a client that asked for
     /// all-or-nothing gets neither the guarantee nor an error.
     pub atomic: bool,
+    /// DIRECTION 5: the packs `pre-receive` recorded for this push.
+    /// Empty when the hook recorded nothing (an older hook, a ref-only
+    /// push, or no quarantine), which the listing treats as "no
+    /// information" and never as "this push brought no pack".
+    pub packs: Vec<String>,
     pub commands: Vec<RefUpdate>,
     /// New oids whose objects this process created and which are
     /// therefore LOOSE on disk, not in any pack.
@@ -198,6 +203,10 @@ pub async fn run_batch(
 
     let mut reports: Vec<PushReport> = Vec::new();
     let mut accepted: Vec<RefUpdate> = Vec::new();
+    // DIRECTION 5: which pushes something was ACCEPTED from. A push
+    // every command of which was refused contributes no pack to name —
+    // its pack on disk is precisely the residue the finding is about.
+    let mut accepted_ids: BTreeSet<u64> = BTreeSet::new();
     // Objects the SERVER created this batch (merge commits and their
     // trees). They are loose, and a pack-only upload would leave the
     // bucket holding a ref whose commit is in no pack.
@@ -300,6 +309,12 @@ pub async fn run_batch(
                 })
                 .collect();
         }
+        // AFTER the atomic rollback above, which can take a push back
+        // to having contributed nothing: asking before it would name
+        // the pack of a push that was refused whole.
+        if accepted.len() > accepted_at {
+            accepted_ids.insert(push.id);
+        }
         reports.push(PushReport { id: push.id, results });
     }
 
@@ -311,6 +326,15 @@ pub async fn run_batch(
     }
 
     // Pack what the server itself created, before anything is uploaded.
+    //
+    // DIRECTION 5 NEEDS THIS NAME. The pack `pack_new_objects` writes
+    // holds commits the SERVER built (a `refs/for` merge), so it belongs
+    // to no push and appears in no quarantine — the accepted set would
+    // not contain it, and naming only the accepted set would drop it.
+    // That is F14 exactly: a snapshot naming a ref whose parent reached
+    // no pack, intact on disk and unrecoverable from S3. The return
+    // value used to be discarded.
+    let mut server_pack: Option<String> = None;
     if !merge_tips.is_empty() {
         // EXCLUDE ONLY WHAT THE BUCKET PROVABLY HOLDS.
         //
@@ -337,7 +361,7 @@ pub async fn run_batch(
             .cloned()
             .filter(|r| !merge_tips.iter().any(|t| t == r))
             .collect();
-        sc.git.pack_new_objects(&merge_tips, &excludes).await?;
+        server_pack = sc.git.pack_new_objects(&merge_tips, &excludes).await?;
         sc.hold.tick(1);
     }
 
@@ -349,6 +373,49 @@ pub async fn run_batch(
     // disk: a retained pack re-listed here would be re-named and
     // re-uploaded (fold.rs).
     let local_packs = sc.listed_packs()?;
+    // ── DIRECTION 5: the set this batch will NAME ────────────────────
+    //
+    // `local_packs` is the DIRECTORY. Because git migrates a push's
+    // pack when `pre-receive` passes — before `proc-receive` carries
+    // forge's verdict — the directory also holds the packs of pushes
+    // forge REFUSED, and naming them pins them forever under strict
+    // coverage supersede.
+    //
+    // The decided form, matching the model's `AcceptedListing`:
+    //
+    //     (snapshot.packs \ retained) ∪ {accepted pushes' packs}
+    //                                 ∪ {the pack the server built}
+    //
+    // and it is a SUPERSET of what the snapshot already names, so this
+    // can only decline to name packs that arrived since the last CAS.
+    //
+    // FALLING BACK IS THE SAFE DIRECTION. If no push in this batch
+    // recorded a pack, the hook told us nothing (an older hook, no
+    // quarantine) and we name the directory as before: naming too much
+    // costs bytes, naming too little loses objects.
+    let recorded: BTreeSet<&String> =
+        pushes.iter().filter(|p| accepted_ids.contains(&p.id)).flat_map(|p| p.packs.iter()).collect();
+    let use_accepted = sc.cfg.name_accepted_set && !recorded.is_empty();
+    let named_set: Vec<String> = if use_accepted {
+        let on_disk: BTreeSet<&String> = local_packs.iter().collect();
+        let mut keep: BTreeSet<String> = cell.snap.packs.iter().cloned().collect();
+        // Retention keeps a superseded pack on disk without naming it;
+        // re-naming one would re-upload it and refresh its age, the
+        // collision every "keep the old packs a while" fix has.
+        if !sc.retained.is_empty() {
+            let held: BTreeSet<&String> = sc.retained.iter().map(|r| &r.name).collect();
+            keep.retain(|p| !held.contains(p));
+        }
+        // Only what is actually on disk can be uploaded, and only what
+        // this batch accepted may be added.
+        keep.extend(recorded.iter().filter(|p| on_disk.contains(**p)).map(|p| (*p).clone()));
+        if let Some(f) = &server_pack {
+            keep.insert(f.clone());
+        }
+        keep.into_iter().collect()
+    } else {
+        local_packs.clone()
+    };
     let known: BTreeSet<&String> = cell.snap.packs.iter().collect();
     let epoch = sc.lease()?.epoch;
     // Pack siblings are independent, immutable, content-named keys
@@ -366,7 +433,7 @@ pub async fn run_batch(
     // generation is named by no snapshot and the next batch re-uploads.
     let fanout = sc.cfg.fanout.max(1);
     let mut pending: Vec<(String, std::path::PathBuf)> = Vec::new();
-    for pack in &local_packs {
+    for pack in &named_set {
         if known.contains(pack) {
             continue;
         }
@@ -400,7 +467,9 @@ pub async fn run_batch(
             next.refs.insert(u.name.clone(), u.new_oid.clone());
         }
     }
-    next.packs = local_packs;
+    // Named LAST, and named exactly what step 4 uploaded — a pack this
+    // snapshot names that no CAS uploaded is the F14 shape.
+    next.packs = named_set;
     carry_pending(sc, &mut next);
     // X15: before the CAS, and only when this batch would make a state
     // unreachable (a delete or a non-fast-forward move), keep an

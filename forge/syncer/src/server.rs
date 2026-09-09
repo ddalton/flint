@@ -237,6 +237,20 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
     publish(&shared, &sc, Phase::Importing);
     let restored = restore::restore(&mut sc).await?;
     eprintln!("flint-forge: restored {}", restored.line());
+    // DIRECTION 4, the collector, HERE AND NOWHERE ELSE. The lease is
+    // already held (claimed above) and `Phase::Serving` is not published
+    // until below, so this is the `Importing -> Serving` window the
+    // model proves the unlink safe in — and only in: the same run with
+    // `ReclaimWhileServing = TRUE` loses `Inv_AckedIsDurable` in 72
+    // seconds. `AtRest::before_serving()` is what carries that fact into
+    // the type system instead of leaving it to this comment.
+    let reclaimed = restore::reclaim_at_rest(&mut sc, restore::AtRest::before_serving()).await?;
+    if reclaimed.dropped > 0 {
+        eprintln!(
+            "flint-forge: reclaim dropped {} pack(s), {} B, wholly covered by the packs kept",
+            reclaimed.dropped, reclaimed.bytes
+        );
+    }
     let branch = sc.cfg.default_branch.clone();
     restore::set_default_branch(&sc, &branch).await?;
     // The bundle advertisement lives in the repository's local config,
@@ -392,6 +406,13 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                                     // client asked for anything, so
                                     // there is no contract to keep.
                                     atomic: false,
+                                    // Server-originated: no client, no
+                                    // quarantine, so no pack to record.
+                                    // An empty list makes the batch
+                                    // fall back to naming the
+                                    // directory, which is the safe way
+                                    // to be wrong.
+                                    packs: vec![],
                                     commands: dead, server_created: vec![] };
                                 if let Err(e) =
                                     batch::run_batch(&mut sc, vec![push], &policy).await
@@ -454,6 +475,11 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                                     // command's fate; there is one
                                     // command, so atomicity is moot.
                                     atomic: false,
+                                    // The commit is built HERE, not
+                                    // pushed, so it arrived in no
+                                    // quarantine and there is nothing
+                                    // to record.
+                                    packs: vec![],
                                     // THE COMMIT IS LOOSE. Nothing else
                                     // will pack it, and a ref published
                                     // without its objects makes the next
@@ -982,6 +1008,7 @@ mod collect_tests {
         let (reply, _rx) = tokio::sync::oneshot::channel();
         Incoming {
             request: uds::HookRequest {
+                packs: vec![],
                 principal: "tester".into(),
                 options: vec![],
                 atomic: false,

@@ -148,12 +148,12 @@ impl Rig {
 /// on the rig, so a test can build one while the rig is borrowed for
 /// the batch it is about to run.
 fn push(id: u64, cmds: Vec<RefUpdate>) -> PushRequest {
-    PushRequest { id, principal: "tester".into(), options: vec![], atomic: false, commands: cmds, server_created: vec![] }
+    PushRequest { id, principal: "tester".into(), options: vec![], atomic: false, packs: vec![], commands: cmds, server_created: vec![] }
 }
 
 /// `git push --atomic`: every command lands or none does.
 fn atomic_push(id: u64, cmds: Vec<RefUpdate>) -> PushRequest {
-    PushRequest { id, principal: "tester".into(), options: vec![], atomic: true, commands: cmds, server_created: vec![] }
+    PushRequest { id, principal: "tester".into(), options: vec![], atomic: true, packs: vec![], commands: cmds, server_created: vec![] }
 }
 
 fn zero() -> String {
@@ -6256,4 +6256,90 @@ fn coalescing_keeps_where_a_ref_started_and_where_it_ended() {
     let one = batch::coalesce_per_ref(&[u("refs/heads/x", "0", "1")]);
     assert_eq!(one.len(), 1);
     assert_eq!((one[0].old_oid.as_str(), one[0].new_oid.as_str()), ("0", "1"));
+}
+
+/// DIRECTION 4 — the collector, and its control.
+///
+/// Builds a repository whose snapshot names three packs, two of which
+/// are WHOLLY COVERED by the third, then asks the reclaim to collect
+/// them. The control is the same setup with the flag off: without it,
+/// "two packs went away" is also what a bug that unlinks indiscriminately
+/// looks like.
+async fn d4_rig(reclaim: bool) -> (Rig, restore::ReclaimReport, Vec<String>) {
+    let mut rig = Rig::new().await;
+    rig.sc.cfg.reclaim_at_rest = reclaim;
+    rig.start().await;
+
+    let c1 = rig.push_commit("refs/heads/main", None, "c1").await;
+    let c2 = rig.push_commit("refs/heads/main", Some(&c1), "c2").await;
+
+    // A third pack holding EVERYTHING reachable: no excludes, so
+    // `pack-objects` writes the whole history. The two push packs are
+    // now dead weight — every reachable object they hold, this one
+    // holds too — which is exactly the shape the reclaim collects.
+    rig.sc
+        .git
+        .pack_new_objects(std::slice::from_ref(&c2), &[])
+        .await
+        .expect("covering pack");
+
+    // Name all three, as a batch with the directory rule would.
+    let all = rig.sc.git.local_packs().expect("local packs");
+    assert_eq!(all.len(), 3, "the setup must produce three packs");
+    let cell = rig.sc.cell().expect("cell").clone();
+    let mut next = cell.snap.clone();
+    next.packs = all.clone();
+    let epoch = rig.sc.lease().expect("lease").epoch;
+    let writer = rig.sc.holder_id.clone();
+    let new_cell =
+        snapshot::cas(rig.sc.store.as_ref(), &rig.sc.cfg, &cell, next, epoch, &writer)
+            .await
+            .expect("cas");
+    rig.sc.cell = Some(new_cell);
+
+    let report = restore::reclaim_at_rest(&mut rig.sc, restore::AtRest::before_serving())
+        .await
+        .expect("reclaim");
+    (rig, report, all)
+}
+
+#[tokio::test]
+async fn direction_4_collects_a_wholly_covered_pack_and_unlinks_it() {
+    let (rig, report, all) = d4_rig(true).await;
+
+    assert_eq!(report.dropped, 2, "both covered packs should have been collected");
+    assert!(report.bytes > 0, "a collected pack cannot be zero bytes");
+
+    let named = &rig.sc.cell().expect("cell").snap.packs;
+    assert_eq!(named.len(), 1, "the snapshot should name only the coverer, got {named:?}");
+
+    // UNLINKED, not retained. The retain form is the refuted one: a
+    // retained pack is excluded from the listing forever, so a retry
+    // reusing its name lands with its objects unnamed.
+    let dir = rig.sc.cfg.repo.join("objects/pack");
+    let gone: Vec<&String> = all.iter().filter(|p| !named.contains(p)).collect();
+    assert_eq!(gone.len(), 2);
+    for p in &gone {
+        assert!(!dir.join(p).exists(), "{p} was dropped from the snapshot but is still on disk");
+    }
+    assert!(rig.sc.retained.is_empty(), "the reclaim must UNLINK, never retain");
+
+    // And the repository still stands: every ref resolves and the
+    // connectivity is whole from the packs that remain.
+    let out = rig.sc.git.must(&["fsck", "--connectivity-only", "--no-progress"], None).await;
+    assert!(out.is_ok(), "fsck failed after the reclaim: {out:?}");
+}
+
+#[tokio::test]
+async fn direction_4_collects_nothing_when_it_is_off() {
+    let (rig, report, all) = d4_rig(false).await;
+
+    assert_eq!(report.dropped, 0, "the control arm must collect nothing");
+    assert_eq!(report.bytes, 0);
+    let named = &rig.sc.cell().expect("cell").snap.packs;
+    assert_eq!(named.len(), 3, "the control arm must still name all three packs");
+    let dir = rig.sc.cfg.repo.join("objects/pack");
+    for p in &all {
+        assert!(dir.join(p).exists(), "the control arm unlinked {p}");
+    }
 }

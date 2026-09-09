@@ -1355,3 +1355,152 @@ async fn measure_the_zero_work_reclaim_against_a_real_base_cadence() {
         );
     }
 }
+
+/// One arm of the direction-5 A/B: what the snapshot NAMES after a
+/// fixed sequence of wholly-refused pushes.
+struct D5Arm {
+    named: u64,
+    redundant: u64,
+    packs: usize,
+    refs: std::collections::BTreeMap<String, String>,
+    /// What LANDED, in a form two independent runs can be compared by.
+    /// A commit oid cannot: it carries a timestamp, so the same content
+    /// pushed twice hashes differently and comparing oids across arms
+    /// fails for a reason that has nothing to do with the rule. A TREE
+    /// is content only.
+    tip_tree: String,
+    /// How much history landed — the same deterministic push sequence
+    /// must leave the same depth whichever way packs were named.
+    depth: usize,
+    /// The named set ALONE reconstructs every ref and passes
+    /// `fsck --connectivity-only`. This is the safety oracle: naming
+    /// fewer packs is only an improvement if nothing needed went with
+    /// them.
+    intact: bool,
+}
+
+async fn d5_arm(name_accepted_set: bool) -> D5Arm {
+    let policy = Policy { protected: vec!["refs/heads/locked".into()], ..Policy::default() };
+    let rig = Rig::start_tuned(policy, true, move |c| {
+        // Identical to the measurement rig, so the two arms differ in
+        // the ONE field under test and in nothing else.
+        c.fold_factor = 2;
+        c.fold_min_bytes = 0;
+        c.base_min_bytes = 0;
+        c.base_rebuild_min_secs = 0;
+        c.name_accepted_set = name_accepted_set;
+    })
+    .await;
+
+    let big = |mark: &str| -> String {
+        (0..4000)
+            .map(|i| if i == 2000 { format!("line {i} {mark}\n") } else { format!("line {i}\n") })
+            .collect::<String>()
+    };
+    rig.commit("big.txt", &big("base"));
+    assert!(rig.push(&["--quiet", "origin", "HEAD:refs/heads/main"]).0);
+    let base = must(&rig.client, &["rev-parse", "HEAD"]).trim().to_string();
+    let parent = rig.client.parent().unwrap().to_path_buf();
+
+    // WHOLLY-REFUSED pushes, of the class that leaves residue: a
+    // non-fast-forward is refused at PROC-receive, by which point git
+    // has already migrated the pack out of quarantine. A policy
+    // refusal would not do — `pre-receive` refuses it and git discards
+    // the whole quarantine, which is why arm P leaves nothing.
+    for i in 0..3 {
+        let c = parent.join(format!("d5nff{i}"));
+        must(&parent, &["clone", "--quiet", rig.repo.to_str().unwrap(), &format!("d5nff{i}")]);
+        must(&c, &["config", "user.email", "t@example.invalid"]);
+        must(&c, &["config", "user.name", "t"]);
+        must(&c, &["reset", "--quiet", "--hard", &base]);
+        std::fs::write(c.join("big.txt"), big(&format!("d5nff{i}"))).unwrap();
+        must(&c, &["add", "big.txt"]);
+        must(&c, &["commit", "--quiet", "-m", "nff"]);
+        rig.commit("big.txt", &big(&format!("d5main{i}")));
+        assert!(rig.push(&["--quiet", "origin", "HEAD:refs/heads/main"]).0);
+        let out = git(&c, &["push", "--force", "--quiet", "origin", "HEAD:refs/heads/main"]);
+        let text = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(!out.status.success(), "arm {name_accepted_set}: push {i} must be refused: {text}");
+        assert!(text.contains("non-fast-forward"), "arm {name_accepted_set}: wrong class: {text}");
+    }
+
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let snap = rig.snapshot().await;
+    let dir = rig.repo.join("objects/pack");
+    let scratch = parent.join(format!("d5scratch-{name_accepted_set}"));
+
+    let mut named = 0u64;
+    let mut redundant = 0u64;
+    for p in &snap.packs {
+        let b = pack_bytes(&dir, p);
+        named += b;
+        if is_redundant(&scratch, &dir, &snap.packs, p, &snap.refs) {
+            redundant += b;
+        }
+    }
+    // The oracle: drop NOTHING and ask whether the named set stands on
+    // its own. `is_redundant` builds a bare repo from `all \ drop`, so a
+    // `drop` that matches no pack asks exactly that question.
+    let intact = is_redundant(&scratch, &dir, &snap.packs, "__drop_nothing__", &snap.refs);
+
+    let tip = snap.refs.get("refs/heads/main").cloned().unwrap_or_default();
+    let tip_tree = must(&rig.repo, &["rev-parse", &format!("{tip}^{{tree}}")]).trim().to_string();
+    let depth: usize =
+        must(&rig.repo, &["rev-list", "--count", &tip]).trim().parse().expect("rev-list --count");
+
+    D5Arm { named, redundant, packs: snap.packs.len(), refs: snap.refs.clone(), tip_tree, depth, intact }
+}
+
+/// DIRECTION 5, BUILT — the same workload with the rule off and on.
+///
+/// The arms differ in EXACTLY ONE config field. The corpus, the push
+/// sequence and the whole ladder are identical, so a difference in
+/// named bytes is the rule and nothing else.
+#[tokio::test(flavor = "multi_thread")]
+async fn direction_5_built_names_less_and_still_reconstructs_every_ref() {
+    let off = d5_arm(false).await;
+    let on = d5_arm(true).await;
+
+    eprintln!("\n=== direction 5, built ===");
+    eprintln!("  OFF (name the directory): {} pack(s), {} B named, {} B redundant",
+              off.packs, off.named, off.redundant);
+    eprintln!("  ON  (name the accepted):  {} pack(s), {} B named, {} B redundant",
+              on.packs, on.named, on.redundant);
+
+    // 1. SAFETY, and it comes first because it is the assertion that
+    //    matters: the rule changes which packs are NAMED and must not
+    //    change what LANDED. A "fix" that also loses a ref is not a fix.
+    // 1. SAFETY, and it comes first because it is the assertion that
+    //    matters: the rule changes which packs are NAMED and must not
+    //    change what LANDED.
+    //
+    //    Compared by REF NAME, TREE and DEPTH, never by commit oid. The
+    //    first cut of this compared `refs` directly and failed on two
+    //    arms that had both behaved perfectly: a commit oid carries a
+    //    timestamp, so two independent runs of the same content never
+    //    agree. The assertion was wrong, not the code.
+    let names: Vec<&String> = off.refs.keys().collect();
+    let on_names: Vec<&String> = on.refs.keys().collect();
+    assert_eq!(names, on_names, "the rule changed WHICH refs landed");
+    assert_eq!(off.tip_tree, on.tip_tree, "the rule changed the CONTENT that landed");
+    assert_eq!(off.depth, on.depth, "the rule changed how much history landed");
+
+    // 2. Both named sets must stand alone. This is what says the
+    //    reduction removed only dead weight — without it, "names fewer
+    //    bytes" is also what losing objects looks like.
+    assert!(off.intact, "control arm: the named set cannot reconstruct its own refs");
+    assert!(on.intact, "direction 5 named a set that cannot reconstruct its own refs");
+
+    // 3. The reduction itself. Every one of these pushes was refused
+    //    WHOLE, so direction 5 should decline to name their packs.
+    assert!(
+        on.named < off.named,
+        "direction 5 named {} B, the directory rule named {} B — no reduction",
+        on.named, off.named
+    );
+    assert!(
+        on.packs < off.packs,
+        "direction 5 named {} pack(s) and the directory rule {} — no pack was declined",
+        on.packs, off.packs
+    );
+}

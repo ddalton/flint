@@ -256,6 +256,65 @@ pub struct ForgeConfig {
     /// itself carries no binaries. `None` = git's default, which is
     /// what the rigs and the local spike use.
     pub hooks_path: Option<String>,
+    /// DIRECTION 5 (`FLINT_FORGE_NAME_ACCEPTED_SET`, default off).
+    ///
+    /// Name the packs of pushes something was ACCEPTED from, instead of
+    /// naming whatever is in `objects/pack`. The two differ because git
+    /// migrates a push's pack out of quarantine when `pre-receive`
+    /// passes — BEFORE `proc-receive` carries forge's verdict — so with
+    /// `receive.unpackLimit = 1` a REFUSED push still leaves a pack on
+    /// disk, and step 5 naming the directory names it. Supersede is
+    /// strict object COVERAGE, so those dead objects then pin a live
+    /// pack permanently, at any repository size.
+    ///
+    /// This is the architectural half of the fix: forge's durable set
+    /// stops being DERIVED by observing a directory git owns and
+    /// becomes DECIDED from what forge accepted. `fold::commit` has
+    /// always been decided in this sense — it names
+    /// `(snapshot.packs \ S) ∪ {F}` — so this makes the batch agree
+    /// with the fold rather than inventing a new rule.
+    ///
+    /// Modelled `ForgeSyncNameAcceptedSet` (HOLDS, 25,203,710 distinct)
+    /// and `ForgeSyncNameAcceptedSetRetry` (HOLDS, 26,867,483 — the
+    /// counts DIFFER, so the retry behaviours are real). Losing the
+    /// push→pack mapping is `ForgeSyncForgetPushPack`, which violates
+    /// `Inv_LandedPackComplete` in one second.
+    ///
+    /// It REDUCES, it does not eliminate: a MIXED push puts accepted
+    /// and refused objects in ONE pack, which must still be named.
+    /// Measured to remove 78-81% of the residue.
+    pub name_accepted_set: bool,
+    /// DIRECTION 4 (`FLINT_FORGE_RECLAIM_AT_REST`, default off).
+    ///
+    /// THE COLLECTOR. Direction 5 lowers the slope; this empties the
+    /// bin. At restore — after the snapshot is read and BEFORE the
+    /// syncer serves — drop every named pack whose every REACHABLE
+    /// object another kept pack already holds, and UNLINK it.
+    ///
+    /// TWO THINGS ABOUT IT ARE LOAD-BEARING AND NEITHER IS OBVIOUS.
+    ///
+    /// It must UNLINK, not RETAIN. The retain form is REFUTED: the
+    /// quiescent window stops pushes ARRIVING, not the client RETRYING
+    /// afterwards, and since pack names are many-to-one a retry reuses
+    /// the name of the pack the reclaim retained —
+    /// `Listing == localPacks \ retained` then excludes it forever and
+    /// the push lands with its objects unnamed
+    /// (`ForgeSyncReclaimAtRestore`, `ForgeSyncReclaimBySet`, both
+    /// violate in ~4 min). Retention exists for readers mid-clone, and
+    /// in this window there are none.
+    ///
+    /// It must happen IN THE WINDOW. `ForgeSyncReclaimUnlinks` HOLDS
+    /// (86,039,237 distinct, depth 62, 1h33). The control
+    /// `ForgeSyncReclaimUnlinksServing` differs in EXACTLY ONE constant
+    /// and violates `Inv_AckedIsDurable` in 1min 12s: outside the
+    /// window, unlinking destroys a pack an ACKED push needed. So the
+    /// green says "safe THERE", never "unlinking is safe" — which is
+    /// why the call takes an `AtRest` witness rather than a comment.
+    ///
+    /// It builds and uploads NOTHING: the coverer is the KEPT SET, not
+    /// a fresh pack. Measured to collect 100% of the redundant bytes at
+    /// every base cadence including the shipped 3600s.
+    pub reclaim_at_rest: bool,
     /// What `HEAD` points at in a repository nobody has pushed to.
     ///
     /// Passed to `git init --initial-branch` rather than left to git's
@@ -302,6 +361,8 @@ impl ForgeConfig {
             fanout: 4,
             default_branch: "main".into(),
             hooks_path: None,
+            name_accepted_set: false,
+            reclaim_at_rest: false,
         }
     }
 

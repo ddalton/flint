@@ -338,3 +338,159 @@ pub async fn set_default_branch(sc: &Syncer, branch: &str) -> ForgeResult<()> {
 
 /// Re-exported for the serving loop's convenience.
 pub use gitcmd::RefUpdate;
+
+/// PROOF THAT THE CALLER IS IN THE `Importing -> Serving` WINDOW.
+///
+/// `reclaim_at_rest` unlinks packs, and the model is unambiguous that
+/// WHERE it runs is what makes it safe: `ForgeSyncReclaimUnlinks` HOLDS
+/// at 86,039,237 distinct states, and its control
+/// `ForgeSyncReclaimUnlinksServing` — the same run with
+/// `ReclaimWhileServing = TRUE`, one constant moved — violates
+/// `Inv_AckedIsDurable` in 1min 12s, because outside the window
+/// unlinking destroys a pack an ACKED push still needed.
+///
+/// A comment saying "only call this before serving" is exactly the kind
+/// of instruction a later refactor steps over. This type makes the
+/// placement an argument the caller has to produce: `before_serving()`
+/// is the only way to get one, and it is named so that constructing it
+/// anywhere else reads as the mistake it would be.
+pub struct AtRest(());
+
+impl AtRest {
+    /// Minted ONLY between `restore` and `Phase::Serving`, where the
+    /// lease is already held and no push is being served.
+    pub(crate) fn before_serving() -> Self {
+        AtRest(())
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ReclaimReport {
+    pub dropped: usize,
+    pub bytes: u64,
+}
+
+/// DIRECTION 4 — the COLLECTOR, and the half direction 5 cannot do.
+///
+/// Direction 5 stops NAMING the packs of pushes forge refused, which
+/// lowers the slope; it cannot remove what is already named, and what
+/// it keeps (a MIXED push shares one pack with accepted objects) grows
+/// linearly with nothing to collect it. This is the collector: a named
+/// pack whose every REACHABLE object another KEPT pack also holds is
+/// dead weight, and dropping it costs a reachability read and one CAS.
+/// It builds no pack and uploads nothing.
+///
+/// THE CAS COMES BEFORE THE UNLINK. The other order can leave the
+/// snapshot naming a pack that is gone from disk. This order can only
+/// leave a pack on disk the snapshot does not name — which the reconcile
+/// step above already unlinks on the next restore, so a crash between
+/// the two heals itself.
+pub async fn reclaim_at_rest(sc: &mut Syncer, _window: AtRest) -> ForgeResult<ReclaimReport> {
+    let mut report = ReclaimReport::default();
+    if !sc.cfg.reclaim_at_rest {
+        return Ok(report);
+    }
+    let cell = sc.cell()?.clone();
+    let named: Vec<String> = cell.snap.packs.clone();
+    if named.len() < 2 {
+        // One pack cannot be covered by another, and zero is nothing.
+        return Ok(report);
+    }
+    let tips: Vec<String> = cell.snap.refs.values().cloned().collect();
+    let reach: std::collections::HashSet<String> =
+        sc.git.reachable_from(&tips).await?.into_iter().collect();
+
+    // What each pack holds THAT IS STILL REACHABLE. Unreachable objects
+    // are exactly the residue and must not keep a pack alive — that is
+    // the whole finding. Read from the `.idx`, so this costs the index
+    // and never the pack.
+    let pack_dir = sc.cfg.repo.join("objects/pack");
+    let mut live: std::collections::BTreeMap<String, std::collections::HashSet<String>> =
+        Default::default();
+    let mut size: std::collections::BTreeMap<String, u64> = Default::default();
+    for p in &named {
+        let stem = p.trim_end_matches(".pack");
+        let idx = pack_dir.join(format!("{stem}.idx"));
+        if !idx.exists() {
+            // A pack whose index is absent is one this process cannot
+            // reason about. Treat it as holding everything — i.e. never
+            // drop it, and never let it license dropping another.
+            return Ok(report);
+        }
+        let ids = sc.git.pack_object_ids(&idx).await?;
+        live.insert(p.clone(), ids.into_iter().filter(|o| reach.contains(o)).collect());
+        let bytes = std::fs::metadata(pack_dir.join(p)).map(|m| m.len());
+        match bytes {
+            Ok(b) => {
+                size.insert(p.clone(), b);
+            }
+            // A named pack that is not on disk is a state this function
+            // must not guess about: it returns rather than treating a
+            // missing file as a zero-byte one.
+            Err(_) => return Ok(report),
+        }
+    }
+
+    // GREEDY, and it must re-test against what is still KEPT: two packs
+    // that cover each other are both individually droppable but not
+    // both together, and testing against the original set would drop
+    // the pair and strand every object they shared.
+    let mut kept: Vec<String> = named.clone();
+    let mut drop: Vec<String> = Vec::new();
+    loop {
+        let victim = kept
+            .iter()
+            .find(|p| live[*p].iter().all(|o| kept.iter().any(|q| q != *p && live[q].contains(o))))
+            .cloned();
+        match victim {
+            Some(v) => {
+                kept.retain(|x| x != &v);
+                report.bytes += size[&v];
+                drop.push(v);
+            }
+            None => break,
+        }
+    }
+    if drop.is_empty() {
+        return Ok(report);
+    }
+
+    // THE BELT OVER THE GREEDY'S BRACES. The loop's invariant already
+    // says every reachable object an evicted pack held is in a kept
+    // one; this asserts it over the FINAL set rather than trusting the
+    // induction, because the cost of being wrong is an unrecoverable
+    // repository and the cost of the check is a set walk.
+    let covered: std::collections::HashSet<&String> =
+        kept.iter().flat_map(|p| live[p].iter()).collect();
+    for p in &drop {
+        for o in &live[p] {
+            if !covered.contains(o) {
+                return Err(ForgeError::State(format!(
+                    "reclaim refused: dropping {p} would strand reachable object {o}"
+                )));
+            }
+        }
+    }
+
+    let epoch = sc.lease()?.epoch;
+    let writer = sc.holder_id.clone();
+    let mut next = cell.snap.clone();
+    next.packs.retain(|p| !drop.contains(p));
+    let new_cell =
+        snapshot::cas(sc.store.as_ref(), &sc.cfg, &cell, next, epoch, &writer).await?;
+    sc.cell = Some(new_cell);
+
+    // Only now, and NOT into `retained`: a retained pack is excluded
+    // from the listing forever, so a retry reusing its name (pack names
+    // are many-to-one) would land with its objects unnamed. That is the
+    // refuted form of this direction.
+    for p in &drop {
+        let stem = p.trim_end_matches(".pack").to_string();
+        for ext in [".idx", ".rev", ".bitmap", ".keep", ".pack"] {
+            let _ = std::fs::remove_file(pack_dir.join(format!("{stem}{ext}")));
+        }
+        report.dropped += 1;
+        eprintln!("flint-forge: reclaim unlinked {p}, wholly covered by the packs kept");
+    }
+    Ok(report)
+}

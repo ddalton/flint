@@ -41,6 +41,17 @@ pub struct HookRequest {
     /// either honour it or not accept it — see `PushRequest::atomic`.
     #[serde(default)]
     pub atomic: bool,
+    /// DIRECTION 5: the pack(s) this push brought, as `pre-receive`
+    /// saw them in `$GIT_QUARANTINE_PATH` — the one moment they are
+    /// unambiguously identifiable, because the quarantine holds this
+    /// push's objects and nothing else.
+    ///
+    /// `#[serde(default)]` so a hook binary older than the syncer
+    /// still parses; an empty list means "recorded nothing", and the
+    /// batch falls back to naming the directory rather than naming
+    /// less than it must.
+    #[serde(default)]
+    pub packs: Vec<String>,
     pub commands: Vec<RefUpdate>,
 }
 
@@ -133,6 +144,7 @@ pub fn to_push(id: u64, req: HookRequest) -> PushRequest {
         principal: req.principal,
         options: req.options,
         atomic: req.atomic,
+        packs: req.packs,
         commands: req.commands,
         // A pushed ref's objects arrive inside a pack `index-pack`
         // already wrote, so nothing here is loose.

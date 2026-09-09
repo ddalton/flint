@@ -29,6 +29,8 @@
 //!   FLINT_FORGE_UNDO_WINDOW_SECS / UNDO_MAX_POINTS  how long a force-pushed state stays recoverable, and how many
 //!                                  points a sweep reads (604800 / 64; 0 = undo off)
 //!   FLINT_FORGE_FANOUT           pack PUTs / ranged GETs in flight (default 4)
+//!   FLINT_FORGE_NAME_ACCEPTED_SET  name only ACCEPTED pushes' packs (default off)
+//!   FLINT_FORGE_RECLAIM_AT_REST    drop packs wholly covered, at restore (default off)
 //!   FLINT_FORGE_DEFAULT_BRANCH   HEAD for an empty repository (main)
 //!   FLINT_FORGE_HOOKS_PATH       core.hooksPath (the hooks ship in the
 //!                                git image, not in the repository)
@@ -192,6 +194,18 @@ async fn serve() {
     cfg.prewarm_resync_secs = env_u64("FLINT_FORGE_PREWARM_RESYNC_SECS", 300);
     cfg.fanout = env_u64("FLINT_FORGE_FANOUT", 4).max(1) as usize;
     cfg.project_id = std::env::var("FLINT_FORGE_PROJECT_ID").ok().filter(|p| !p.is_empty());
+    // DIRECTION 5, default OFF. On, the batch names the packs of pushes
+    // it ACCEPTED rather than whatever is in `objects/pack` — see
+    // `ForgeConfig::name_accepted_set`.
+    cfg.name_accepted_set = matches!(
+        std::env::var("FLINT_FORGE_NAME_ACCEPTED_SET").unwrap_or_default().as_str(),
+        "1" | "true" | "yes" | "on"
+    );
+    // DIRECTION 4, default OFF — see `ForgeConfig::reclaim_at_rest`.
+    cfg.reclaim_at_rest = matches!(
+        std::env::var("FLINT_FORGE_RECLAIM_AT_REST").unwrap_or_default().as_str(),
+        "1" | "true" | "yes" | "on"
+    );
     cfg.default_branch =
         std::env::var("FLINT_FORGE_DEFAULT_BRANCH").unwrap_or_else(|_| "main".into());
     cfg.hooks_path = std::env::var("FLINT_FORGE_HOOKS_PATH").ok().filter(|p| !p.is_empty());
