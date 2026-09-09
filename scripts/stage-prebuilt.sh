@@ -264,12 +264,36 @@ done
 # time, which does not move in a lean-scoped release. If it disagrees,
 # the binary was built from a different tree — the exact failure an
 # mtime cannot see.
+#
+# IT READS A LITE BINARY, so it can only run in a scope that stages one.
+# `flint-lite-operator` is in $BINS under `lean` and `all` and under no
+# other scope, and `strings` on the file a forge- or s3csi-scoped run
+# does not have FAILS — which under `set -euo pipefail` killed this
+# script at the assignment, rc=1, with no message, immediately after it
+# had printed a ✓ for every binary it had just staged correctly. The
+# staging tree was left behind complete (the refusal path below, whose
+# whole job is to leave nothing, was never reached), so a forge release
+# saw a failure that looked exactly like a success. Every forge-scoped
+# stage has exited 1 since the scope was added.
+#
+# The `|| true` is the same bug one step in: `grep` finds nothing in a
+# binary built from the wrong tree, the pipeline is non-zero, and the
+# script dies HERE — so the "WRONG BUILD … pins '<none>'" branch, which
+# exists for exactly that case, could never be reached either.
+case "$SCOPE" in lean|all) pin_scope=1 ;; *) pin_scope=0 ;; esac
 want_pin=$(awk '/^appVersion:/ {gsub(/"/,"",$2); print $2}' \
            "$here/../flint-lite-chart/Chart.yaml")
-if [ -n "$want_pin" ] && [ "$stale" = "0" ]; then
+if [ -n "$want_pin" ] && [ "$stale" = "0" ] && [ "$pin_scope" = 1 ]; then
     for arch in amd64 arm64; do
+        # Absence is a REFUSAL, never a silent exit: this is the check
+        # that catches a fresh timestamp on a stale checkout, and a
+        # missing file must not be the way it stops running.
+        if [ ! -f "$dest/$arch/flint-lite-operator" ]; then
+            echo "  ✗ MISSING $arch/flint-lite-operator — the pin check cannot run" >&2
+            stale=1; continue
+        fi
         got=$(strings "$dest/$arch/flint-lite-operator" 2>/dev/null \
-              | grep -oE 'dilipdalton/flint-pnfs:[0-9.]+' | sort -u | head -1)
+              | grep -oE 'dilipdalton/flint-pnfs:[0-9.]+' | sort -u | head -1 || true)
         if [ "$got" != "dilipdalton/flint-pnfs:$want_pin" ]; then
             echo "  ✗ WRONG BUILD $arch/flint-lite-operator pins '${got:-<none>}'," >&2
             echo "                the chart's appVersion is $want_pin" >&2
