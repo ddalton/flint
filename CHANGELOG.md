@@ -81,6 +81,69 @@ covered by the stability guarantee.
   rather than conservative. Nothing has been measured over a long
   duration either; the drills are minutes long.
 
+### Fixed — flint lite: an object the bucket does not hold hung every reader forever
+
+- **Found by the first drill ever to point the S3 tier at real S3.**
+  Every tier drill in the tree — `tier-drill`, `tier-chaos`,
+  `tier-scale`, the L3 chart e2e — runs against MinIO, and
+  `tier-drill.sh` hardcodes it ("aws CLI pinned to the drill's MinIO —
+  never the ambient AWS world"). Deliberate, and its side effect was
+  that the backend the product is named for had never been under it.
+- **The symptom:** delete one file's backing object, read it back, and
+  the read never returns. The hub saw the 404 and retried it —
+  `adopt HEAD: not found: head: 404 NotFound — retrying in 30s`, attempt
+  9 and climbing — while the client parked on `NFS4ERR_DELAY` and the
+  kernel retried that silently. A deleted object, an expired lifecycle
+  rule, or a migration that moved the prefix wedged every reader of that
+  file for the life of the mount.
+- **The cause is a conflation.** A chunk fetch routes both
+  `PreconditionFailed` (the etag moved — someone republished) and
+  `NotFound` into the foreign-overwrite adopt, because both mean "what
+  you remembered is not what is there". `NotFound` has a second reading
+  the adopt cannot act on — there is no object at all — and the HEAD
+  inside the adopt is what separates them. It threw that away into a
+  `format!`; the demand lane has no attempt ceiling by design, because a
+  slow store must not cost a reader its data, so a definitive 404
+  retried forever.
+- **`Verdict::Gone`**, on the principle the code already stated for the
+  other impossible case: `Blocked` exists because "DELAY would be a
+  promise the volume cannot keep", and an object that is not in the
+  bucket is the same kind of promise. Readers get `NFS4ERR_IO`.
+- **Ten call sites, not one.** Every content lane spelled the
+  verdict-to-error mapping itself — an `if let Blocked(_)` for NOSPC
+  falling through to an unconditional `WouldBlock` for DELAY — a shape
+  that silently absorbs any arm added later. `Gone` went straight
+  through all ten into exactly the DELAY the hang was made of. They are
+  exhaustive matches against one `evicted_error()` now, so a future arm
+  is a compile error at one site rather than a hang at ten.
+- Verified on the wire on the same cluster: the file whose object was
+  deleted returns an error instead of hanging, the file whose object is
+  intact still hydrates byte-identically, and the hub reports
+  `ABANDONED after 1 attempt(s)`.
+- **Known limit, deliberate:** the absence record is not re-evaluated
+  per request — re-deciding would put a HEAD on the read path to re-ask
+  a question only an operator can change. An object restored from a
+  version is picked up by a hub restart, or by the file being rewritten
+  or removed.
+
+### Verified — flint lite: the S3 tier against real AWS S3, for the first time
+
+- Conditional-write conformance **verified against AWS**, and it gates
+  startup: the hub refuses to boot on a store that does not enforce
+  `If-Match`, which is what keeps the epoch lease and 412 arbitration
+  from silently degrading to last-writer-wins.
+- Flush to bucket at full size with the manifest riding the barrier;
+  restart under a live mount re-claims the epoch by self-recognition
+  with no takeover wait and rereads byte-identically; and **DR from the
+  bucket alone** — PVC destroyed, chart reinstalled — restores the
+  namespace and hydrates on read, byte-identical.
+- **The RPO, measured:** `fsync` returns on the PVC, *not* the bucket. A
+  file written once and left alone reached S3 in **20 s**
+  (`tickSecs` 10 + `quiesceSecs` 10); a continuously written file is
+  capped by `flushFloorSecs` 60. The floor is economics — the design's
+  own gate priced uncapped per-`fsync` PUTs at $6,480/mo.
+- Artefact: `tests/lima/lite-tier-real-s3-runco-20260909.txt`.
+
 ### Fixed — release tooling: the forge scope of `stage-prebuilt.sh` had never once succeeded
 
 - Under `set -euo pipefail` it died mute inside a `$(...)` at a pin
