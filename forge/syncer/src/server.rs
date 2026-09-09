@@ -245,11 +245,24 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
     // seconds. `AtRest::before_serving()` is what carries that fact into
     // the type system instead of leaving it to this comment.
     let reclaimed = restore::reclaim_at_rest(&mut sc, restore::AtRest::before_serving()).await?;
-    if reclaimed.dropped > 0 {
-        eprintln!(
-            "flint-forge: reclaim dropped {} pack(s), {} B, wholly covered by the packs kept",
-            reclaimed.dropped, reclaimed.bytes
-        );
+    // SAY WHAT IT COST AND WHETHER IT REASONED. This walk is on the wake
+    // path, so its cost is user-visible latency, and its price is one
+    // `show-index` fork per named pack — a number an operator can only
+    // act on if it is reported. `declined` separates "walked and found
+    // nothing" from "could not reason about this repository": two of
+    // those declines (no `.idx`, not on disk) are conditions worth
+    // seeing, and both used to be the same silent empty report.
+    if sc.cfg.reclaim_at_rest {
+        match reclaimed.declined {
+            Some(why) => eprintln!(
+                "flint-forge: reclaim declined — {why} ({} named pack(s))",
+                reclaimed.considered
+            ),
+            None => eprintln!(
+                "flint-forge: reclaim examined {} pack(s) in {} ms, dropped {} ({} B)",
+                reclaimed.considered, reclaimed.elapsed_ms, reclaimed.dropped, reclaimed.bytes
+            ),
+        }
     }
     let branch = sc.cfg.default_branch.clone();
     restore::set_default_branch(&sc, &branch).await?;

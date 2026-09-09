@@ -6421,6 +6421,43 @@ async fn direction_4_collects_nothing_when_it_is_off() {
     }
 }
 
+/// A DECLINE AND A COMPLETE WALK ARE DIFFERENT STATES, and the empty
+/// report used to be both. `reclaim_at_rest` has five early returns and
+/// every one of them yielded `ReclaimReport::default()` — the same value
+/// a full walk yields when nothing is collectable. So "dropped 0" could
+/// mean "this repository is tidy" or "I could not reason about it", and
+/// neither the operator's log line nor a test could tell which.
+///
+/// The control is the pair: the SAME assertion run against a rig that
+/// really does walk. If `declined` were always `None` the first half
+/// would pass on its own and mean nothing.
+#[tokio::test]
+async fn a_reclaim_that_declines_is_distinguishable_from_one_that_found_nothing() {
+    // A repository with ONE named pack: nothing can cover it, so the
+    // function declines rather than walking.
+    let mut rig = Rig::new().await;
+    rig.sc.cfg.reclaim_at_rest = true;
+    rig.start().await;
+    rig.push_commit("refs/heads/main", None, "c1").await;
+    let one = restore::reclaim_at_rest(&mut rig.sc, restore::AtRest::before_serving())
+        .await
+        .expect("reclaim");
+    assert_eq!(one.dropped, 0);
+    assert_eq!(
+        one.declined,
+        Some("fewer than two named packs"),
+        "a decline must NAME itself, not return a legal-looking zero"
+    );
+
+    // THE OTHER ARM: the d4 rig walks three packs to a verdict. Same
+    // `dropped`-shaped report, opposite meaning.
+    let (_rig, report, all) = d4_rig(true).await;
+    assert_eq!(all.len(), 3);
+    assert_eq!(report.declined, None, "this rig reasons; it must not report a decline");
+    assert_eq!(report.considered, 3, "it examined every named pack");
+    assert!(report.dropped > 0, "and it collected — otherwise the arms are not opposite");
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // THE COLLECTOR'S COST ON THE WAKE PATH
 //

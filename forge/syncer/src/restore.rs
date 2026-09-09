@@ -368,6 +368,21 @@ impl AtRest {
 pub struct ReclaimReport {
     pub dropped: usize,
     pub bytes: u64,
+    /// Named packs actually EXAMINED. This exists because the empty
+    /// report conflated two different states: `dropped == 0` after a
+    /// complete walk that found nothing to collect, and `dropped == 0`
+    /// because the function declined to reason at all. Every one of the
+    /// early returns below yields a legal-looking zero, so neither an
+    /// operator's log line nor a test could tell them apart.
+    pub considered: usize,
+    /// What the walk cost. It runs before `Phase::Serving`, so this is
+    /// wake latency, and it is dominated by ONE `show-index` fork per
+    /// named pack (~12.9 ms each on darwin/arm64,
+    /// `forge/e2e/results/d4-wake-cost-20260909-local.log`).
+    pub elapsed_ms: u64,
+    /// Why it did not reason, when it did not. `None` means it ran to a
+    /// verdict — which may still be "nothing to collect".
+    pub declined: Option<&'static str>,
 }
 
 /// DIRECTION 4 — the COLLECTOR, and the half direction 5 cannot do.
@@ -386,14 +401,24 @@ pub struct ReclaimReport {
 /// step above already unlinks on the next restore, so a crash between
 /// the two heals itself.
 pub async fn reclaim_at_rest(sc: &mut Syncer, _window: AtRest) -> ForgeResult<ReclaimReport> {
+    let t0 = std::time::Instant::now();
+    let mut report = reclaim_inner(sc).await?;
+    report.elapsed_ms = t0.elapsed().as_millis() as u64;
+    Ok(report)
+}
+
+async fn reclaim_inner(sc: &mut Syncer) -> ForgeResult<ReclaimReport> {
     let mut report = ReclaimReport::default();
     if !sc.cfg.reclaim_at_rest {
+        report.declined = Some("the rule is off");
         return Ok(report);
     }
     let cell = sc.cell()?.clone();
     let named: Vec<String> = cell.snap.packs.clone();
+    report.considered = named.len();
     if named.len() < 2 {
         // One pack cannot be covered by another, and zero is nothing.
+        report.declined = Some("fewer than two named packs");
         return Ok(report);
     }
     let tips: Vec<String> = cell.snap.refs.values().cloned().collect();
@@ -415,6 +440,7 @@ pub async fn reclaim_at_rest(sc: &mut Syncer, _window: AtRest) -> ForgeResult<Re
             // A pack whose index is absent is one this process cannot
             // reason about. Treat it as holding everything — i.e. never
             // drop it, and never let it license dropping another.
+            report.declined = Some("a named pack has no .idx");
             return Ok(report);
         }
         let ids = sc.git.pack_object_ids(&idx).await?;
@@ -427,7 +453,10 @@ pub async fn reclaim_at_rest(sc: &mut Syncer, _window: AtRest) -> ForgeResult<Re
             // A named pack that is not on disk is a state this function
             // must not guess about: it returns rather than treating a
             // missing file as a zero-byte one.
-            Err(_) => return Ok(report),
+            Err(_) => {
+                report.declined = Some("a named pack is not on disk");
+                return Ok(report);
+            }
         }
     }
 
@@ -435,11 +464,33 @@ pub async fn reclaim_at_rest(sc: &mut Syncer, _window: AtRest) -> ForgeResult<Re
     // that cover each other are both individually droppable but not
     // both together, and testing against the original set would drop
     // the pair and strand every object they shared.
+    //
+    // THE SCAN ORDER DECIDES HOW MUCH IS COLLECTED, and the first cut
+    // took whatever order the pack hashes happened to sort in. A
+    // roll-up covers the small packs it was built from, and those small
+    // packs TOGETHER cover the roll-up — so every one of them is
+    // individually droppable, and whichever is reached first wins.
+    // Dropping the roll-up is legal, frees one pack, and then blocks
+    // the two it would have licensed: 3 of 12 runs of
+    // `direction_4_collects_a_wholly_covered_pack_and_unlinks_it`
+    // collected 1 instead of 2, on a coin flip over pack names.
+    //
+    // Ascending live-object count drops the SUBSUMED packs first and
+    // keeps the licensor, which leaves fewer packs — and fewer packs is
+    // exactly what the wake path pays for, one `show-index` fork each
+    // (~12.9 ms, `d4-wake-cost-20260909-local.log`). The tiebreak on
+    // name makes it deterministic, so a repository reclaims the same
+    // way on every wake instead of differently each time — which is
+    // also what makes "the third restart changed nothing" mean
+    // convergence rather than luck.
+    let mut order: Vec<String> = named.clone();
+    order.sort_by(|a, b| live[a].len().cmp(&live[b].len()).then_with(|| a.cmp(b)));
     let mut kept: Vec<String> = named.clone();
     let mut drop: Vec<String> = Vec::new();
     loop {
-        let victim = kept
+        let victim = order
             .iter()
+            .filter(|p| kept.contains(p))
             .find(|p| live[*p].iter().all(|o| kept.iter().any(|q| q != *p && live[q].contains(o))))
             .cloned();
         match victim {
