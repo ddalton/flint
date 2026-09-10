@@ -194,15 +194,23 @@ def build():
         p.text(9.10, 5.28 + i * 0.178, 4.20, line, size=7.2,
                color=SUB if "#" not in line else MUTE, mono=True)
 
-    # ---- the worker and the bucket ---------------------------------------
+    # ---- the worker, its namespace, and the bucket ------------------------
+    # The worker is a POD, and the question every reader asks next is
+    # which namespace it is in. Drawing it loose on the page invited the
+    # answer "the tenant's". It is not, and the boundary says so.
+    d.zone(p, 14.00, 2.15, 3.20, 3.15, "flint-workers",
+           sub="a system namespace — one for the whole cluster")
     d.node(p, "rect", 14.10, 2.85, 3.00, 1.10, "mount-s3  ·  the worker",
            "unprivileged, one per PUBLISHED VOLUME, serving the descriptor "
            "the node plugin already mounted",
            fill=d.WORK_F, line=d.WORK_L, line_weight=0.016, title_size=10.0,
            body_size=7.2)
     p.text(14.10, 4.12, 3.00,
-           "in a system namespace, never the tenant's", size=7.2, color=MUTE,
-           halign=1)
+           "NOT team-a. The tenant cannot exec into it — and the worker is "
+           "what holds the credential. Labelled chert.us/tenant-namespace so "
+           "you can still find it: kubectl -n flint-workers get pods -l "
+           "chert.us/tenant-namespace=team-a",
+           size=7.2, color=MUTE, halign=1)
 
     d.node(p, "cloud", 17.50, 2.15, 4.40, 3.15, "", "", fill=d.CLOUD_F,
            line=d.CLOUD_L, line_weight=0.012)
@@ -217,6 +225,24 @@ def build():
            "no .flint/. What lands is your tree, as objects.",
            size=7.2, color=MUTE, halign=1)
 
+    # ---- who creates the worker ------------------------------------------
+    # The answer is "the node plugin", and the plugin is in a THIRD
+    # namespace. Three boundaries, one node: that is the whole shape.
+    d.zone(p, 14.00, 5.70, 3.20, 1.95, "flint-system",
+           sub="the driver's own namespace")
+    d.node(p, "rect", 14.20, 6.32, 2.80, 1.05,
+           "s3.csi.chert.us  ·  the node plugin",
+           "a DaemonSet. It CREATES the worker pod, then mounts and hands "
+           "over the fd", fill=d.SERV_F, line=d.SERV_L, line_weight=0.014,
+           title_size=9.6, body_size=7.2)
+    p.text(14.20, 7.44, 2.80,
+           "pinned with nodeName — the scheduler never sees it",
+           size=7.2, color=MUTE, halign=1)
+
+    p.arrow([(15.60, 5.70), (15.60, 5.35)], color=CTL, weight=W, dashed=True)
+    d.flabel(p, 14.42, 5.50, "creates the pod, then deletes it", CTL, w=2.2,
+             size=7.2)
+
     # ---- the flows -------------------------------------------------------
     p.arrow([(3.84, spine), (4.94, spine)], color=FLOW, weight=WT)
     d.flabel(p, 4.17, spine - 0.25, "NFS", w=0.58, size=7.4)
@@ -224,9 +250,10 @@ def build():
     # no line arrows across the pod: the block arrow IS that flow
 
     p.arrow([(13.01, spine), (14.10, spine)], color=FLOW, weight=WT)
-    # BETWEEN the zone edge (13.45) and the worker (14.10). A vertical
-    # edge spans the zone's whole height, so no y clears it — only x can
-    d.flabel(p, 13.78, spine - 0.25, "FUSE", w=0.58, size=7.4)
+    # BETWEEN two zone edges now — the tenant's (13.45) and flint-workers'
+    # (14.00). A vertical edge spans a zone's whole height, so no y clears
+    # either one; the label lives in the 0.55 of open page between them.
+    d.flabel(p, 13.72, spine - 0.25, "FUSE", w=0.44, size=7.4)
 
     p.arrow([(17.10, spine), (18.00, spine)], color=DUR, weight=WT)
     d.flabel(p, 17.55, spine - 0.25, "PUT", DUR, w=0.62, size=7.4)
@@ -286,6 +313,24 @@ def build():
         "the namespace, and the pod simply never starts.",
 
         "IT USED TO BE A LABEL, and anyone who set this up before v1.45.0 will look for one. Until then a mutating webhook watched for flint.io/passthrough-mount on the pod — objectSelector, key Exists — and the label’s VALUE named the CR, exactly as the volumeAttributes value does now. What it injected was a PRIVILEGED native sidecar, and that privilege was not reducible: /dev/fuse alone would take CAP_SYS_ADMIN and a hostPath device, but the mount has to REACH the app container, which needs mountPropagation: Bidirectional, which the API server permits only on a privileged container. So a namespace enforcing PodSecurity baseline or restricted REJECTED the mutated pod — correctly. `fcac038f` replaced both sidecar-injection webhooks (passthrough’s and lean’s) with the node DaemonSet, because spec.volumes[*].csi is on the restricted allow-list. The information you supply did not change; its carrier did.",
+
+        "THE WORKER IS A POD, AND IT IS NOT IN YOUR NAMESPACE. It lives in "
+        "flint-workers — one system namespace for the whole cluster, not one "
+        "per tenant — created by the node plugin during NodePublishVolume, "
+        "pinned to this node with nodeName so the scheduler never places it, "
+        "and owned by the Node object so a vanished node garbage-collects "
+        "it. Three reasons it is not in team-a: the worker is what holds the "
+        "credential, and anyone who can exec into pods in their own "
+        "namespace could read it; PodSecurity is enforced differently, since "
+        "flint-workers must be labelled privileged (the lean tree needs "
+        "hostPath, forbidden under baseline) while your namespace stays "
+        "restricted; and the plugin's own RBAC is a Role in flint-workers "
+        "ALONE — pods create/get/list/watch/delete there and nowhere else, "
+        "with a ValidatingAdmissionPolicy that further pins spec.nodeName to "
+        "the node making the call, so a compromised node agent cannot place "
+        "a pod anywhere but on itself. You can still find yours: "
+        "chert.us/tenant-namespace and chert.us/tenant-pod are labels on the "
+        "worker.",
 
         "THE POD NAMES A CR; THE CR NAMES THE BUCKET. That indirection is "
         "the security property worth drawing, because it is what makes the "
