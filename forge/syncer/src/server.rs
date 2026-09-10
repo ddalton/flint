@@ -142,13 +142,67 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
         let git = sc.git.clone();
         let tx = file_tx.clone();
         let shared = shared.clone();
+        let hold = sc.hold.clone();
+        let prefix = sc.cfg.prefix.clone();
         tokio::spawn(async move {
-            if let Err(e) = super::filehttp::serve(&fa, git, tx, shared).await {
+            if let Err(e) = super::filehttp::serve(&fa, git, tx, shared, hold, prefix).await {
                 eprintln!("flint-forge: file API on {} stopped: {e}", fa.addr);
             }
         });
     }
     drop(file_tx);
+
+    // ── the repository, before the door ──────────────────────────────
+    // `init_bare` is what sets `receive.procReceiveRefs = refs/` and
+    // `core.hooksPath` — the two settings that route a push through
+    // forge instead of through plain git. It ran from the restore and
+    // from the prewarm pass, and from nowhere else, so a standby with
+    // prewarm off had a repository forge had never configured. It is
+    // idempotent (it checks `rev-parse --git-dir` first), and the
+    // restore still calls it.
+    //
+    // Not fatal: a repository this cannot create is one the restore
+    // will fail on in a moment, with a better message and the phase to
+    // put it in.
+    {
+        let branch = sc.cfg.default_branch.clone();
+        let hooks = sc.cfg.hooks_path.clone();
+        if let Err(e) = sc.git.init_bare(&branch, hooks.as_deref()).await {
+            eprintln!("flint-forge: the repository could not be prepared before the claim: {e}");
+        }
+    }
+
+    // ── the door, before the claim ───────────────────────────────────
+    // It used to be spawned after the claim AND after the restore, so a
+    // push at a server that was not the writer found no socket and the
+    // client was told "the repository server is not accepting writes
+    // (No such file or directory (os error 2))" — a true sentence that
+    // names nothing. Worse, whether a client got even that depended on
+    // the repository's git config existing, which on a parked syncer
+    // only the PREWARM pass wrote (`follow.rs`): with prewarm off, plain
+    // git accepted the push and the developer was told it landed.
+    //
+    // Listening from here costs nothing — `Hold` refuses every push
+    // until the serving loop calls `open_door()` — and it makes the
+    // refusal a stated one that names the posture and the prefix.
+    //
+    // AFTER the repository, never before. `push_chain`'s rig waits for
+    // this socket and then clones the repository, because the socket
+    // used to appear only after the restore had made one. Binding it
+    // first turned that into a race the rig lost — and the rig was
+    // right to break: nothing should answer for a repository that does
+    // not exist yet.
+    let (tx, mut rx) = mpsc::channel::<Incoming>(256);
+    {
+        let socket = opts.socket.clone();
+        let hold = sc.hold.clone();
+        let prefix = sc.cfg.prefix.clone();
+        tokio::spawn(async move {
+            if let Err(e) = uds::serve(&socket, tx, hold, prefix).await {
+                eprintln!("flint-forge: hook socket stopped: {e}");
+            }
+        });
+    }
 
     // ── claim ────────────────────────────────────────────────────────
     publish(&shared, &sc, Phase::ClaimingEpoch);
@@ -297,15 +351,10 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
     // The fold task beside the loop reports on this channel; the loop
     // owns the receiver so the select below borrows nothing of `sc`.
     let (fold_tx, mut fold_rx) = mpsc::channel::<fold::FoldResult>(4);
-    let (tx, mut rx) = mpsc::channel::<Incoming>(256);
-    {
-        let socket = opts.socket.clone();
-        tokio::spawn(async move {
-            if let Err(e) = uds::serve(&socket, tx).await {
-                eprintln!("flint-forge: hook socket stopped: {e}");
-            }
-        });
-    }
+    // The door has been listening since before the claim; from here it
+    // stops refusing and starts forwarding, because there is finally a
+    // loop on the other end of `rx`.
+    sc.hold.open_door();
 
     // Housekeeping — bundles and the branch pruner — runs on its own
     // slower timer. Both are cheap to decline, but declining them at

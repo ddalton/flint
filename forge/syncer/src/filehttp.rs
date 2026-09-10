@@ -93,7 +93,10 @@ struct Ctx {
     git: Git,
     opts: FileApiOpts,
     writes: tokio::sync::mpsc::Sender<FileWrite>,
+    #[allow(dead_code)]
     shared: Shared,
+    hold: std::sync::Arc<super::Hold>,
+    prefix: String,
 }
 
 fn json_error(status: u16, reason: &str, message: &str) -> (u16, String, Vec<u8>) {
@@ -112,6 +115,8 @@ pub async fn serve(
     git: Git,
     writes: tokio::sync::mpsc::Sender<FileWrite>,
     shared: Shared,
+    hold: std::sync::Arc<super::Hold>,
+    prefix: String,
 ) -> ForgeResult<()> {
     // Bind with a bounded retry. A pod restarting onto the same port
     // can meet the old socket still closing, and a door that gave up on
@@ -150,7 +155,7 @@ pub async fn serve(
             *g = Some(actual.clone());
         }
     }
-    let ctx = Arc::new(Ctx { git, opts: opts.clone(), writes, shared });
+    let ctx = Arc::new(Ctx { git, opts: opts.clone(), writes, shared, hold, prefix });
     loop {
         // An accept error is transient — a descriptor limit, a client
         // that vanished between SYN and accept. Returning here would
@@ -292,17 +297,17 @@ async fn handle<R: tokio::io::AsyncRead + Unpin>(
         .to_string();
 
     // ── readiness ─────────────────────────────────────────────────
-    {
-        let phase = ctx.shared.lock().map(|f| f.phase).unwrap_or(super::status::Phase::Starting);
-        if !matches!(phase, super::status::Phase::Serving) {
-            let mut r = json_error(
-                503,
-                "not-serving",
-                &format!("the repository is not serving yet (phase: {phase:?})"),
-            );
-            r.1 = "application/json".into();
-            return Ok(r);
-        }
+    // NOT `phase == Serving`. `run_pushes` publishes `Phase::Pushing`
+    // around the WHOLE batch — the upload included — and restores
+    // `Serving` after (`server.rs`), so a gate on the phase refused
+    // every file-API request that arrived while a git push was in
+    // flight. On a 1 GiB push that is ~17 s of 503s (P7), for a
+    // repository that was serving perfectly. The door asks the posture
+    // instead, which is the same question the hook's door asks.
+    if let Some(why) = ctx.hold.door_refusal(&ctx.prefix) {
+        let mut r = json_error(503, "not-serving", &why);
+        r.1 = "application/json".into();
+        return Ok(r);
     }
 
     if let Some(n) = over_cap {

@@ -478,6 +478,17 @@ pub struct Hold {
     /// `upload-pack` would serve stale refs indefinitely. A `watch`, so
     /// the serving loop wakes on it from whatever it is awaiting.
     fenced: tokio::sync::watch::Sender<Option<String>>,
+    /// Set by the serving loop the moment it begins draining the hook
+    /// channel, and never cleared — a fence exits the process rather
+    /// than reopening the door.
+    ///
+    /// This exists because the door cannot ask the PHASE. `Phase::
+    /// Serving` is not "this server is up": the steady state moves
+    /// through `Pushing` and `Sweeping` while perfectly healthy, so a
+    /// door gated on the phase would refuse pushes during ordinary
+    /// operation. What the door actually needs to know is narrower and
+    /// has no phase: is there a loop on the other end of the channel.
+    open: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -502,6 +513,39 @@ impl Hold {
             last_renew_unix: std::sync::atomic::AtomicU64::new(0),
             last_renew_at: std::sync::Mutex::new(None),
             fenced,
+            open: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// The serving loop is draining the hook channel from here on.
+    pub fn open_door(&self) {
+        self.open.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// What the door should tell a client, or `None` to let the push
+    /// through. Ordered by what the operator most needs to hear: a
+    /// deposal names itself, a standby names the prefix it is standing
+    /// by for, and a restore says to come back.
+    ///
+    /// `prefix` is passed rather than held because `Hold` is shared
+    /// with the renewer and the batch, neither of which knows one.
+    pub fn door_refusal(&self, prefix: &str) -> Option<String> {
+        if let Some(why) = self.fenced() {
+            return Some(format!("this server was deposed and cannot publish: {why}"));
+        }
+        if self.open.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        if self.lease().is_some() {
+            Some(format!(
+                "the repository is restoring {prefix} and is not accepting writes yet — retry"
+            ))
+        } else {
+            Some(format!(
+                "another server holds {prefix}; this process is a standby and cannot \
+                 publish — push to the repository's own endpoint, or wait \
+                 for it to take over"
+            ))
         }
     }
     pub fn lease(&self) -> Option<EpochLease> {

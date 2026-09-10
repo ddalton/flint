@@ -904,3 +904,80 @@ async fn a_file_api_commit_is_packed_and_not_merely_loose() {
          the next restore will refuse the ref that names it"
     );
 }
+
+/// A request that arrives while the loop is running a batch must not be
+/// told the repository is not serving.
+///
+/// `run_pushes` publishes `Phase::Pushing` around the WHOLE batch — the
+/// upload included — and restores `Serving` after it. The readiness
+/// gate matched `Phase::Serving` exactly, so every file-API request
+/// that landed inside that window got a 503 `not-serving` from a
+/// repository that was serving perfectly. P7 measures a 1 GiB pack at
+/// 17 s; that is 17 s of refusals for one push.
+///
+/// The gate asks the POSTURE now (`Hold::door_refusal`), which is the
+/// same question the hook's door asks and has no phase in it.
+///
+/// ANTI-VACUITY: the reads are interleaved with writes that really do
+/// drive the loop through `Pushing`, and the test asserts BOTH that no
+/// read was refused AND that the writes actually landed — a rig whose
+/// writes all failed would sail through the first assertion alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reads_are_not_refused_while_the_loop_is_running_a_batch() {
+    let rig = Arc::new(Rig::start_with_git(true).await);
+    let (ok, out) = rig.git_push("seed.txt", "seed\n");
+    assert!(ok, "the seed push must land: {out}");
+
+    // GIT pushes, not file-API writes. Only the hook arm goes through
+    // `run_pushes`, which is what publishes `Phase::Pushing`; the file
+    // arm publishes `Serving` and nothing else. The first shape of this
+    // test drove the loop with file-API writes and therefore never
+    // opened the window at all — it passed with the phase gate put back.
+    let writing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+    let pushes = {
+        let rig = rig.clone();
+        let writing = writing.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut landed = 0;
+            for i in 0..8 {
+                let (ok, _) = rig.git_push(&format!("busy-{i}.txt"), &"x".repeat(40_000));
+                if ok {
+                    landed += 1;
+                }
+            }
+            writing.store(false, std::sync::atomic::Ordering::SeqCst);
+            landed
+        })
+    };
+
+    let reads = {
+        let rig = rig.clone();
+        let writing = writing.clone();
+        tokio::spawn(async move {
+            let mut refused: Vec<String> = Vec::new();
+            let mut seen = 0u32;
+            // No sleep: the window is short, and a polite poller steps
+            // over it.
+            while writing.load(std::sync::atomic::Ordering::SeqCst) {
+                let r = rig.get("/").await;
+                seen += 1;
+                if r.status == 503 {
+                    refused.push(r.text());
+                }
+            }
+            (refused, seen)
+        })
+    };
+
+    let landed = pushes.await.expect("join");
+    let (refused, seen) = reads.await.expect("join");
+    assert!(landed >= 6, "the pushes must really have driven the loop: {landed}/8 landed");
+    assert!(seen > 50, "the reads must have overlapped the pushes; only {seen} ran");
+    assert!(
+        refused.is_empty(),
+        "{} of {seen} read(s) were refused while a push was running; first: {}",
+        refused.len(),
+        refused.first().map(String::as_str).unwrap_or("")
+    );
+}

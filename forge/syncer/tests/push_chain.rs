@@ -185,13 +185,34 @@ impl Rig {
     fn push_as(&self, principal: Option<&str>, args: &[&str]) -> (bool, String) {
         let mut argv = vec!["push"];
         argv.extend_from_slice(args);
-        let out = git_as(&self.client, &argv, principal);
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        (out.status.success(), text)
+        // Retry ONLY the startup refusal, and only for a second.
+        //
+        // This rig used to treat the hook socket's appearance as
+        // readiness, which worked by accident: the socket was bound
+        // after the claim AND the restore, so by the time it existed
+        // the repository was serving. The door binds before the claim
+        // now — that is the point of it, so a push at a server that is
+        // not the writer gets a stated refusal instead of `ENOENT` —
+        // and the socket stopped meaning "ready". What it means is
+        // "someone will answer", and the answer during a restore is
+        // this one, which tells the client in as many words to retry.
+        //
+        // Scoped to that exact sentence deliberately: a rig that
+        // retried every refusal would turn the policy legs green
+        // whatever the policy did.
+        for _ in 0..100 {
+            let out = git_as(&self.client, &argv, principal);
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            if out.status.success() || !text.contains("is not accepting writes yet") {
+                return (out.status.success(), text);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        (false, "the repository never finished restoring".into())
     }
 
     async fn snapshot(&self) -> flint_forge::snapshot::Snapshot {

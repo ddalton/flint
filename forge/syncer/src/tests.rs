@@ -6609,3 +6609,146 @@ async fn d4_scale_ladder() {
     }
     println!();
 }
+
+// ── the door's posture ───────────────────────────────────────────────
+// The door used to be a socket that did not exist yet, so "not the
+// writer" reached the client as `No such file or directory (os error
+// 2)`. These pin the three things it says instead, and — the part that
+// matters — they go through `uds::serve` and a real socket rather than
+// calling `door_refusal` directly, because the defect was never in the
+// predicate. It was that nothing asked it.
+
+/// Drive one push at a real socket and return what the hook would have
+/// relayed to git. `tx` is the serving loop's end: a test that wants
+/// the push to LAND owns the receiver, and one that expects a refusal
+/// asserts the loop was never reached.
+async fn ask_the_door(
+    hold: Arc<super::Hold>,
+    tx: tokio::sync::mpsc::Sender<super::uds::Incoming>,
+) -> (tempfile::TempDir, super::uds::HookResponse) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sock = dir.path().join("syncer.sock");
+    {
+        let sock = sock.clone();
+        tokio::spawn(async move {
+            let _ = super::uds::serve(&sock, tx, hold, PREFIX.to_string()).await;
+        });
+    }
+    for _ in 0..200 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let request = super::uds::HookRequest {
+        principal: "driller".into(),
+        options: vec![],
+        atomic: false,
+        packs: vec![],
+        commands: vec![RefUpdate {
+            name: "refs/heads/main".into(),
+            old_oid: "0".repeat(40),
+            new_oid: "1".repeat(40),
+        }],
+    };
+    // Bounded, because the interesting FAILURE of a door that should
+    // have refused is that it forwards the push to a loop that is not
+    // there — and an unbounded `ask` turns that into a hang rather than
+    // a failed assertion. Verified: with `door_refusal` stubbed to
+    // `None` these tests time out here instead of running forever.
+    let s = sock.clone();
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || super::uds::ask(&s, &request)),
+    )
+    .await
+    .expect("the door answered within 5s — a silent door is a failure, not a wait")
+    .expect("join")
+    .expect("the door answered");
+    (dir, resp)
+}
+
+fn only_ng(resp: &super::uds::HookResponse) -> String {
+    assert_eq!(resp.results.len(), 1, "one command in, one result out");
+    match &resp.results[0] {
+        CommandResult::Ng { name, reason } => {
+            assert_eq!(name, "refs/heads/main", "the refusal rides the ref it refused");
+            reason.clone()
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_standby_door_refuses_by_name_and_says_which_prefix() {
+    let hold = Arc::new(super::Hold::new());
+    // Nobody drains this; reaching the loop would be the bug.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let (_d, resp) = ask_the_door(hold, tx).await;
+    let why = only_ng(&resp);
+    assert!(why.contains("standby"), "the posture is named: {why}");
+    assert!(why.contains(PREFIX), "the prefix is named: {why}");
+    assert!(
+        !why.contains("No such file"),
+        "the client is not told about a missing file any more: {why}"
+    );
+    assert!(rx.try_recv().is_err(), "a standby must not forward the push to a loop");
+}
+
+#[tokio::test]
+async fn a_restoring_door_says_to_retry_rather_than_naming_a_standby() {
+    let hold = Arc::new(super::Hold::new());
+    hold.set_lease(flint_store::EpochLease {
+        holder_id: "forge-test-a".into(),
+        epoch: 1,
+        token: "t".into(),
+    });
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    let (_d, resp) = ask_the_door(hold, tx).await;
+    let why = only_ng(&resp);
+    assert!(why.contains("restoring"), "a claimed-but-not-serving door says so: {why}");
+    assert!(why.contains("retry"), "and tells the client what to do: {why}");
+}
+
+#[tokio::test]
+async fn a_deposed_door_names_the_deposal() {
+    let hold = Arc::new(super::Hold::new());
+    hold.open_door();
+    let _ = hold.fence("deposed at renew: 412".to_string());
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let (_d, resp) = ask_the_door(hold, tx).await;
+    let why = only_ng(&resp);
+    assert!(why.contains("deposed"), "a fence outranks an open door: {why}");
+    assert!(rx.try_recv().is_err(), "a deposed server must not forward the push");
+}
+
+/// THE POSITIVE CONTROL, and it runs through the same socket, the same
+/// `serve`, the same `handle`. Without it every test above would pass
+/// against a door that refuses unconditionally.
+#[tokio::test]
+async fn an_open_door_forwards_the_push_to_the_serving_loop() {
+    let hold = Arc::new(super::Hold::new());
+    hold.open_door();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<super::uds::Incoming>(4);
+    // Stand in for the serving loop: take the push and report it Ok.
+    let loop_task = tokio::spawn(async move {
+        let inc = rx.recv().await.expect("the door forwarded a push");
+        let name = inc.request.commands[0].name.clone();
+        let _ = inc.reply.send(super::uds::HookResponse {
+            results: vec![CommandResult::Ok {
+                name,
+                alt_ref: None,
+                old_oid: None,
+                new_oid: None,
+            }],
+        });
+        true
+    });
+    let (_d, resp) = ask_the_door(hold, tx).await;
+    assert!(
+        matches!(&resp.results[0], CommandResult::Ok { .. }),
+        "an open door lets the push through: {:?}",
+        resp.results[0]
+    );
+    assert!(loop_task.await.expect("join"), "the loop really received it");
+}

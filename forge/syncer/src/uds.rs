@@ -74,7 +74,19 @@ pub struct Incoming {
 /// error here: the client's push has already failed, and the batch
 /// that was running for it still completed or still fenced. The
 /// syncer's correctness never depends on anyone hearing the answer.
-pub async fn serve(socket: &Path, tx: mpsc::Sender<Incoming>) -> ForgeResult<()> {
+/// `hold` and `prefix` are what turns an absent socket into a stated
+/// refusal. Before this took them the listener was spawned only after
+/// the claim and the restore, so a push at a server that was not the
+/// writer met `ECONNREFUSED`/`ENOENT` and the client was told "No such
+/// file or directory (os error 2)" — true, and it names nothing an
+/// operator can act on. The door answers now, and says which posture
+/// refused.
+pub async fn serve(
+    socket: &Path,
+    tx: mpsc::Sender<Incoming>,
+    hold: std::sync::Arc<super::Hold>,
+    prefix: String,
+) -> ForgeResult<()> {
     if socket.exists() {
         std::fs::remove_file(socket)?;
     }
@@ -85,21 +97,41 @@ pub async fn serve(socket: &Path, tx: mpsc::Sender<Incoming>) -> ForgeResult<()>
     loop {
         let (stream, _) = listener.accept().await?;
         let tx = tx.clone();
+        let hold = hold.clone();
+        let prefix = prefix.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(stream, tx).await {
+            if let Err(e) = handle(stream, tx, &hold, &prefix).await {
                 eprintln!("flint-forge: hook connection: {e}");
             }
         });
     }
 }
 
-async fn handle(stream: tokio::net::UnixStream, tx: mpsc::Sender<Incoming>) -> ForgeResult<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
+async fn handle(
+    stream: tokio::net::UnixStream,
+    tx: mpsc::Sender<Incoming>,
+    hold: &super::Hold,
+    prefix: &str,
+) -> ForgeResult<()> {
+    use tokio::io::{AsyncBufReadExt, BufReader as TokioBufReader};
     let (r, mut w) = stream.into_split();
     let mut lines = TokioBufReader::new(r).lines();
     let Some(line) = lines.next_line().await? else { return Ok(()) };
     let request: HookRequest = serde_json::from_str(&line)
         .map_err(|e| ForgeError::State(format!("hook sent an unparseable request: {e}")))?;
+
+    // The refusal goes on every COMMAND, not on stderr: `git push`
+    // prints an `ng` line per branch, and a reason only on stderr is
+    // the one an operator scrolls past. `hook.rs` relays these verbatim.
+    if let Some(why) = hold.door_refusal(prefix) {
+        let results = request
+            .commands
+            .iter()
+            .map(|c| CommandResult::Ng { name: c.name.clone(), reason: why.clone() })
+            .collect::<Vec<_>>();
+        return write_response(&mut w, &HookResponse { results }).await;
+    }
+
     let (reply, wait) = oneshot::channel();
     tx.send(Incoming { request, reply })
         .await
@@ -107,7 +139,15 @@ async fn handle(stream: tokio::net::UnixStream, tx: mpsc::Sender<Incoming>) -> F
     let response = wait
         .await
         .map_err(|_| ForgeError::State("the serving loop dropped this push".into()))?;
-    let mut body = serde_json::to_vec(&response)
+    write_response(&mut w, &response).await
+}
+
+async fn write_response<W>(w: &mut W, response: &HookResponse) -> ForgeResult<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    let mut body = serde_json::to_vec(response)
         .map_err(|e| ForgeError::State(format!("report will not serialise: {e}")))?;
     body.push(b'\n');
     w.write_all(&body).await?;

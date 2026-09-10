@@ -1,4 +1,4 @@
-# Composition drills (C1–C7)
+# Composition drills (C1–C8)
 
 Every other drill in `forge/e2e/` tests forge against itself. These
 test what happens when **two products meet on one bucket** — forge and
@@ -18,7 +18,7 @@ for lean — so nothing contends, nothing 412s, and nothing is logged.
 ## Running
 
 ```sh
-bash forge/e2e/composition/run-all.sh          # all seven
+bash forge/e2e/composition/run-all.sh          # all eight
 bash forge/e2e/composition/c3-foreign-write.sh # one
 DOWN=1 bash forge/e2e/composition/run-all.sh   # and stop MinIO after
 ```
@@ -29,6 +29,33 @@ Needs Docker, `git`, and the two binaries:
 cargo build --manifest-path forge/syncer/Cargo.toml --features s3
 cargo build --manifest-path lean/sidecar/Cargo.toml --features s3 --bin flint-sync
 ```
+
+## C8 is forge against forge
+
+`c8-two-forges.sh` puts TWO forge syncers on one prefix and pushes at
+both doors at once. The shipped topology refuses to build that state —
+the operator's `arbitrate` refuses a second `FlintRepo` over one
+subtree by name, and the Deployment is `Recreate` with replicas in
+{0,1} — so what the drill models is the one route left: a forge
+OUTSIDE that operator's view, in another cluster or run by hand, on the
+same bucket and prefix.
+
+F16 proved the lease on the wire against real S3, and every push it
+makes goes at the HOLDER. C8 asks the other half: what does a client
+get when its push lands on the standby, and does the bucket end up
+holding exactly what the clients were told it holds? Its oracle is not
+either server's opinion — both are stopped, and a third syncer restores
+into an EMPTY repository from S3 alone. That ref set must equal the
+acked set exactly: nothing lost, nothing invented.
+
+Its controls are the interesting part. D3 runs the same concurrent
+generator with the two servers on DIFFERENT prefixes, where both
+genuinely hold — both must ack, or "the standby acked nothing" is a
+statement about the harness. D1's refusal is INCONCLUSIVE unless the
+same push shape landed at the holder first. And D7a exists to name what
+the standby's refusal actually rests on: not the process, but
+`receive.procReceiveRefs` and `core.hooksPath` in its config file,
+which only `init_bare` writes.
 
 ## C6 and C7 are not composition drills
 

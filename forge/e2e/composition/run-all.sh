@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run every composition drill (C1-C7) and summarise.
+# Run every composition drill (C1-C8) and summarise.
 #
 #   bash forge/e2e/composition/run-all.sh          # run them
 #   DOWN=1 bash forge/e2e/composition/run-all.sh   # ...then stop MinIO
@@ -13,11 +13,17 @@ cd "$(dirname "$0")/../../.."
 d=forge/e2e/composition
 tp=0; tf=0; tk=0
 for drill in c1-shared-prefix c2-export-contention c3-foreign-write \
-             c4-three-readers c5-cited-delete c6-undo c7-prewarm; do
+             c4-three-readers c5-cited-delete c6-undo c7-prewarm \
+             c8-two-forges; do
   printf '\n\n######## %s ########\n' "$drill"
   out=$(bash "$d/$drill.sh" 2>&1 | grep -v 'Terminated: 15\|Killed: 9')
   printf '%s\n' "$out"
-  line=$(printf '%s' "$out" | grep -E '^[A-Z0-9]+: [0-9]+ passed' | tail -1)
+  # NOT '^[A-Z0-9]+:' — `c6-undo` and `c7-prewarm` name their verdicts
+  # in lower case with a hyphen, so that pattern matched neither and
+  # both drills contributed 0 passed and 0 FAILED to the total. A suite
+  # that reports green about drills it never counted is the failure
+  # this file exists to prevent.
+  line=$(printf '%s' "$out" | grep -E '^[A-Za-z0-9_-]+: [0-9]+ passed' | tail -1)
   p=$(printf '%s' "$line" | sed 's/.*: \([0-9]*\) passed.*/\1/')
   f=$(printf '%s' "$line" | sed 's/.*passed, \([0-9]*\) failed.*/\1/')
   k=$(printf '%s' "$line" | sed -n 's/.*failed, \([0-9]*\) accepted.*/\1/p')
