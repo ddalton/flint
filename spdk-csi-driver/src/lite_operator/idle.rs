@@ -220,6 +220,25 @@ pub mod clock {
         (ahead > 0).then_some(ahead as u64)
     }
 
+    /// Is a request still LIVE — made within one threshold of now?
+    ///
+    /// The one question both the ladder and the front door ask of
+    /// `chert.us/requested-at`, shared so the two cannot answer it
+    /// differently. It exists because a `FlintRepo` never has the
+    /// stamp cleared (X24): "the key is present" stays true for the
+    /// rest of the repository's life and says nothing about whether
+    /// anybody wants it now. A future stamp clamps to age 0 and is
+    /// live, which is `requested_age_secs`' rule for ordinary skew;
+    /// one further ahead than a whole threshold is caught by
+    /// `implausible_request` before this is ever asked.
+    pub fn request_is_live(
+        anns: &BTreeMap<String, String>,
+        now: chrono::DateTime<chrono::Utc>,
+        suspend_after_secs: u64,
+    ) -> bool {
+        requested_age_secs(anns, now).is_some_and(|age| age < suspend_after_secs)
+    }
+
     /// A stamp too far ahead to be skew, given this threshold.
     pub fn implausible_request(
         suspend_after_secs: Option<u64>,
@@ -336,10 +355,26 @@ pub fn decide(cfg: Option<&IdleSpec>, input: Inputs<'_>) -> Decision {
         return Decision::Stay;
     }
 
-    let wake_requested = input
-        .share
-        .annotations()
-        .contains_key(ANN_REQUESTED_AT);
+    // X24's reading, applied here as defence rather than repair. Lite
+    // CLEARS the stamp when it reaches `Active`, so presence normally
+    // does mean "someone asked and we have not honoured it yet" — but
+    // that soundness rests on an invariant enforced in three places and
+    // broken in one: the reprovision completion returns to `Active`
+    // without clearing, and reprovision short-circuits BEFORE any
+    // idleness evaluation, so a stamp armed while the share was down
+    // can survive a disk rebuild into the running state. Forge shipped
+    // the unguarded reading and every repository woke itself one pass
+    // after every park. Asking whether the request is still LIVE costs
+    // nothing — the door re-arms on every request while a share is down
+    // (`proxy.rs`, no presence guard), so a real waiter cannot be
+    // stranded by it — and it makes the rung correct whatever the
+    // invariant does next.
+    let wake_requested = match cfg.and_then(|c| c.suspend_after_secs) {
+        Some(after) => clock::request_is_live(input.share.annotations(), input.now, after),
+        // No suspend rung configured: nothing here can say how old is
+        // too old, so presence stands — which is also today's rule.
+        None => input.share.annotations().contains_key(ANN_REQUESTED_AT),
+    };
     let request_age = requested_age_secs(share, input.now);
 
     // Down, and someone asked for it back.
@@ -545,6 +580,114 @@ mod tests {
             Inputs { share: &s, now: now(), hub_quiet: Ok(()), sessions_live: None },
         );
         assert_eq!(d, Decision::Stay);
+    }
+
+    /// THE INVARIANT THAT MAKES PRESENCE SOUND, pinned at the source.
+    ///
+    /// `decide` may read `chert.us/requested-at` by presence only
+    /// because every path that reaches `Active` clears it. That is not
+    /// enforced by any type — it is a `bool` argument at each call site,
+    /// and one of them (the reprovision completion) passed `false` for
+    /// as long as the path has existed. A stamp that survives into the
+    /// running state ages past the threshold and is still there when the
+    /// share suspends, which is the state forge flapped on forever.
+    ///
+    /// So: every `set_idle_state(..., IdleState::Active, ...)` must ask
+    /// for the clear. A source walk rather than a behaviour test because
+    /// the failure is a literal at a call site, and there is no client
+    /// here to drive the three async paths that reach it.
+    #[test]
+    fn every_path_back_to_active_clears_the_wake_stamp() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/lite_operator/reconcile.rs");
+        let text = std::fs::read_to_string(&src).expect("reconcile.rs must be readable");
+
+        // Normalise whitespace so a rustfmt line break cannot hide a
+        // call site from this check.
+        let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        // Key on the CALL, not on the enum name: `IdleState::Active`
+        // also appears in match arms and in test fixtures, and a walk
+        // that counts those is measuring the wrong thing.
+        let mut sites = 0;
+        let mut offenders = Vec::new();
+        for (i, _) in flat.match_indices("set_idle_state(") {
+            let rest = &flat[i..];
+            let call = &rest[..rest.find(')').unwrap_or(rest.len())];
+            if !call.contains("IdleState::Active,") {
+                continue;
+            }
+            sites += 1;
+            if !call.trim_end().ends_with("true") {
+                offenders.push(call.to_string());
+            }
+        }
+
+        // ANTI-VACUITY. A rename, a refactor or a bad pattern would make
+        // this test find nothing and pass forever, which is exactly how
+        // the original defect survived every green run.
+        assert!(
+            sites >= 2,
+            "the walk found {sites} `set_idle_state(.., Active, ..)` call sites; it must find \
+             every one of them, so a walk that finds fewer than two is broken, not clean"
+        );
+        assert!(
+            offenders.is_empty(),
+            "a path returns to Active WITHOUT clearing the wake stamp, which is the invariant \
+             `decide`'s presence reading rests on: {offenders:?}"
+        );
+    }
+
+    /// X24's shape, asked of lite.
+    ///
+    /// `decide` reads `chert.us/requested-at` by PRESENCE for a share
+    /// that is down. That is only sound under an invariant — every path
+    /// that reaches `Active` clears the stamp — and the invariant is
+    /// not held by construction: the main ladder clears it (`next ==
+    /// Active`) and `verify_and_hibernate` clears it, but the
+    /// REPROVISION completion (`reconcile.rs`, `set_idle_state(…,
+    /// Active, false)`) does not. Reprovision also runs BEFORE any
+    /// idleness evaluation, so a wake request that arrives during a
+    /// disk rebuild is never honoured by `decide` — it simply survives
+    /// into the running state, ages past the threshold, and is still
+    /// there when the share suspends.
+    ///
+    /// A stamp older than a whole threshold is not a request anybody is
+    /// still waiting on; forge shipped exactly this reading and every
+    /// repository woke itself one pass after every park. Asking for
+    /// FRESHNESS instead of presence makes the rung correct without
+    /// depending on an invariant enforced in three places and broken in
+    /// one. The door re-arms on each request while a share is down, so
+    /// a genuine waiter is never stranded by it.
+    #[test]
+    fn a_suspended_share_does_not_wake_on_a_stamp_older_than_its_own_threshold() {
+        let cfg = idle(Some(900), None);
+
+        // Down, carrying a stamp four hours old against a 900s window.
+        let stale = share(&[
+            (ANN_IDLE_STATE, "Suspended"),
+            (ANN_REQUESTED_AT, "2026-08-19T08:00:00Z"),
+        ]);
+        let d = decide(
+            Some(&cfg),
+            Inputs { share: &stale, now: now(), hub_quiet: Ok(()), sessions_live: None },
+        );
+        assert!(
+            matches!(d, Decision::Hold(_)),
+            "a stamp four hours past a 900s threshold is not a standing request, got {d:?}"
+        );
+
+        // THE CONTROL, one dimension away: same state, same key
+        // present, a stamp one minute old. That IS someone waiting.
+        let fresh = share(&[
+            (ANN_IDLE_STATE, "Suspended"),
+            (ANN_REQUESTED_AT, "2026-08-19T11:59:00Z"),
+        ]);
+        let d = decide(
+            Some(&cfg),
+            Inputs { share: &fresh, now: now(), hub_quiet: Ok(()), sessions_live: None },
+        );
+        assert_eq!(d, Decision::Wake, "a fresh request must still wake it");
     }
 
     /// The two signals must AND. Each alone is a known blind spot: an

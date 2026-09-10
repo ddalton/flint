@@ -34,6 +34,13 @@ spdk-csi-driver/src/csi.v1.rs
 # proof that the sequence-window bug was real, and a fix without its red
 # run is an assertion.
 !tests/krb5/results/*.log
+# And the idle ladders. The lite control arm's TWO distinct idle-since
+# values are the only durable proof that its flap was real: that flap
+# ERASES ITS OWN EVIDENCE -- the bogus wake clears the stamp that caused
+# it -- so the share looks healthy at rest and every resting-state
+# assertion in that run passed. A fix without the transition count is an
+# assertion.
+!tests/regression/results/*.log
 
 # Temporary files
 *.tmp

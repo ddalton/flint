@@ -161,8 +161,16 @@ pub struct ShareView {
     pub api_condition: Option<(bool, String, String)>,
     /// Who won the bucket subtree, when this share lost it.
     pub conflict_with: Option<String>,
-    /// True once the wake annotation is present — the gateway does not
-    /// need to re-arm a share someone already asked for.
+    /// Someone has asked for this recently, so the gateway need not
+    /// re-arm it.
+    ///
+    /// Read differently by the two construction sites, on purpose. A
+    /// SHARE is presence — lite's operator clears the stamp once the
+    /// request has been honoured, so a present stamp is always a live
+    /// one. A REPOSITORY is freshness — forge's operator keeps the
+    /// stamp as the door's heartbeat and never clears it, so presence
+    /// there says only that this repository was woken once, ever
+    /// (X24).
     pub wake_requested: bool,
     /// The binding for a derived token, or why there is none.
     pub endpoint_s3: String,
@@ -220,12 +228,30 @@ impl ShareView {
             file_api_enabled: repo.spec.file_api.as_ref().map(|f| f.enabled) == Some(true),
             refused: st.and_then(|s| s.refused.clone()).filter(|r| !r.trim().is_empty()),
             server_id: st.and_then(|s| s.server_id.clone()),
+            // X24. For a REPOSITORY this is "is a request still
+            // LIVE", not "has one ever been made". Nothing clears
+            // `chert.us/requested-at` from a `FlintRepo`, so presence
+            // stays true for the rest of its life — and since this
+            // field's only job is to suppress a re-arm, presence would
+            // mean the door never re-arms a repository it once woke.
+            // Against an operator that requires a live request, that is
+            // a repository which can never be woken again. The clock is
+            // read here because the only consumer asks this at the
+            // moment it is about to arm; the threshold is the
+            // repository's own, so door and operator answer with one
+            // rule and one number.
             wake_requested: repo
-                .metadata
-                .annotations
+                .spec
+                .idle
                 .as_ref()
-                .map(|a| a.contains_key(ANN_REQUESTED_AT))
-                .unwrap_or(false),
+                .and_then(|i| i.suspend_after_secs)
+                .is_some_and(|after| {
+                    crate::lite_operator::idle::clock::request_is_live(
+                        repo.annotations(),
+                        chrono::Utc::now(),
+                        after,
+                    )
+                }),
             bucket: Some(repo.spec.bucket.clone()),
             key_prefix: Some(repo.spec.key_prefix.clone()),
             endpoint_s3: repo.spec.endpoint.clone().unwrap_or_default(),
@@ -1619,6 +1645,51 @@ mod tests {
                        "gitEndpoint": "http://svc.tenant.svc.cluster.local:8080/proj.git",
                        "apiEndpoint": "http://svc.tenant.svc.cluster.local:9850"}
         }))
+    }
+
+    /// A parked repository carrying a wake stamp of a given age.
+    fn parked_repo(stamp: &str) -> FlintRepo {
+        repo_json(serde_json::json!({
+            "apiVersion": "chert.us/v1alpha1", "kind": "FlintRepo",
+            "metadata": {"name": "proj", "namespace": "tenant",
+                         "annotations": {"chert.us/requested-at": stamp}},
+            "spec": {"projectId": "proj", "bucket": "b", "keyPrefix": "tenant/proj/",
+                     "idle": {"suspendAfterSecs": 600}},
+            "status": {"phase": "IdleSuspended"}
+        }))
+    }
+
+    /// X24, the door's half.
+    ///
+    /// `wake_requested` is the "someone already asked, do not re-arm"
+    /// guard. Nothing ever clears `chert.us/requested-at` from a
+    /// `FlintRepo`, so reading it as PRESENCE means the leftover stamp
+    /// from the last wake suppresses the arm for the rest of the
+    /// repository's life. Paired with an operator that wakes on
+    /// presence it merely flaps; paired with an operator that requires
+    /// a LIVE request it is worse — nothing re-stamps, so a parked
+    /// repository can never be woken again. Both halves have to read
+    /// the annotation the same way.
+    ///
+    /// One dimension moves: the stamp's age. The threshold, the phase
+    /// and the presence of the key are identical in both arms.
+    #[test]
+    fn a_stale_wake_stamp_is_not_a_standing_request_on_a_repository() {
+        let hour_old = (chrono::Utc::now() - chrono::Duration::seconds(3600))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let just_now = (chrono::Utc::now() - chrono::Duration::seconds(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        assert!(
+            !ShareView::of_repo(&parked_repo(&hour_old)).wake_requested,
+            "a stamp an hour past a 600s threshold is not a standing request — the door must \
+             re-arm, or this repository never wakes again"
+        );
+        assert!(
+            ShareView::of_repo(&parked_repo(&just_now)).wake_requested,
+            "a stamp one second old IS a standing request — re-arming it would patch the CR \
+             once per request in a clone storm"
+        );
     }
 
     /// THE DEFECT design §7.2 NAMED.

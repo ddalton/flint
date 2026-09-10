@@ -2050,7 +2050,17 @@ async fn drive_reprovision(
 
     // Gone. Back to Active — the next pass renders a fresh claim at the
     // new size and starts the hub, which imports from the bucket.
-    set_idle_state(ctx, share, &ns, IdleState::Active, false).await?;
+    //
+    // CLEARS THE WAKE STAMP, like every other path to `Active`. The
+    // stamp is cleared on reaching Active precisely so the next idle
+    // window starts from the hub's own clock rather than a stale
+    // heartbeat, and this path used to be the one exception —
+    // reprovision short-circuits before any idleness evaluation, so a
+    // stamp armed while the share was down survives the rebuild, ages
+    // past the threshold, and is still sitting there when the share
+    // next suspends. Nothing is lost by clearing it: the share is
+    // coming up on this very pass, which is what the request wanted.
+    set_idle_state(ctx, share, &ns, IdleState::Active, true).await?;
     let note = format!(
         "disk rebuilt at {} — the hub is starting and will import from the bucket. Every \
          client must remount: the serverId is new.",

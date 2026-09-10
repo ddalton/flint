@@ -1,0 +1,137 @@
+X24 — the idle ladder's stale wake stamp. runcp, 2026-09-10, real S3 (flint-forge-runcp-1789052507).
+Cluster: 3 x i4i.large, all spot, us-west-1. k8s v1.34.11.
+
+THE A/B. Two images built from ONE working tree, differing only in the two lines
+X24 names — forge_operator/idle.rs's suspended branch, and lite_gateway/resolve.rs's
+of_repo wake_requested. The images are demonstrably different builds:
+  fixed   dilipdalton/flint-forge-operator@sha256:342f9d919afaa7dccdf3976261b0bc770ed3bb1bf2d584bc79764458ba8bd51b
+  control dilipdalton/flint-forge-operator@sha256:d8bd22c9b2f1f1986c0def2784a0a78a9220133e7e47442b066d561bd3f52757
+Both arms run the same drill, on the same cluster, against the same bucket.
+
+════════ CONTROL ARM (the two lines reverted) ════════
+== L0: a repository with the ladder armed, and one push to date ==
+  PASS  seeded main through the door (a push, so the syncer's own clock starts here)
+== L1: the probes report a LIVE repository (the control arm) ==
+  PASS  the pod probe counts the live pod: 1
+  PASS  the replica probe reads 1
+  PASS  the ladder reads Active (absent, which IS Active)
+== L2: park #1, on a repository the door has NEVER woken ==
+  PASS  no wake stamp exists yet — park #1 and park #2 differ in exactly that
+  PASS  park #1: replicas 0, no pods (phase IdleSuspended)
+== L3: a clone wakes it, and THE DOOR arms the stamp ==
+  PASS  a git clone through a parked repository completed in 7s
+  PASS  and it is a FRESH pod (a601e49b-def1-493b-b9de-3b21d1bbace5 -> 5d05ed0e-e711-422d-94b2-45ecb2fb0efc) — a real restore
+  PASS  the DOOR armed the wake stamp: 2026-09-10T15:16:31Z (nothing in this script writes it)
+== L4: it goes quiet again and parks a SECOND time ==
+  FAIL  it never parked a second time within 360s — with the stamp now present this is
+       the other face of the same defect: a repository that can never sleep again
+  RESULT  PASS=9 FAIL=1 INCONCLUSIVE=0
+rc=1
+
+The drill says 'never parked a second time'. The operator's own log says something
+sharper: it parked REPEATEDLY, for under a second each time, on a 66 s cycle —
+which is why a 5 s sampler reports it as never parking at all.
+
+   1 2026-09-10T15:21:17 Ready
+   1 2026-09-10T15:21:32 Ready
+   1 2026-09-10T15:21:47 Ready
+   1 2026-09-10T15:22:03 Ready
+   1 2026-09-10T15:22:03 IdleSuspended
+   3 2026-09-10T15:22:03 Pending
+   2 2026-09-10T15:22:08 Pending
+   2 2026-09-10T15:22:09 Ready
+   1 2026-09-10T15:22:24 Ready
+   1 2026-09-10T15:22:39 Ready
+   1 2026-09-10T15:22:54 Ready
+   1 2026-09-10T15:23:09 Ready
+   1 2026-09-10T15:23:09 IdleSuspended
+   2 2026-09-10T15:23:09 Pending
+
+The same signature on f17fix, a repository built under the FIXED operator and then
+handed to the control one — same repository, same state, only the operator swapped:
+[2m2026-09-10T15:09:42.876345Z[0m [32m INFO[0m [1mreconciling object[0m[1m{[0m[3mobject.ref[0m[2m=[0mFlintRepo.v1alpha1.chert.us/f17fix.agents [3mobject.reason[0m[2m=[0mrelated object updated: Deployment.v1.apps/forge-f17fix.agents[1m}[0m[2m:[0m [2mflint_forge_operator[0m[2m:[0m reconciled [3mrepo[0m[2m=[0magents/f17fix [3mphase[0m[2m=[0mPending
+[2m2026-09-10T15:09:43.099792Z[0m [32m INFO[0m [1mreconciling object[0m[1m{[0m[3mobject.ref[0m[2m=[0mFlintRepo.v1alpha1.chert.us/f17fix.agents [3mobject.reason[0m[2m=[0mrelated object updated: Deployment.v1.apps/forge-f17fix.agents[1m}[0m[2m:[0m [2mflint_forge_operator[0m[2m:[0m reconciled [3mrepo[0m[2m=[0magents/f17fix [3mphase[0m[2m=[0mPending
+[2m2026-09-10T15:09:43.286718Z[0m [32m INFO[0m [1mreconciling object[0m[1m{[0m[3mobject.ref[0m[2m=[0mFlintRepo.v1alpha1.chert.us/f17fix.agents [3mobject.reason[0m[2m=[0mrelated object updated: Deployment.v1.apps/forge-f17fix.agents[1m}[0m[2m:[0m [2mflint_forge_operator[0m[2m:[0m reconciled [3mrepo[0m[2m=[0magents/f17fix [3mphase[0m[2m=[0mPending
+[2m2026-09-10T15:09:43.482747Z[0m [32m INFO[0m [1mreconciling object[0m[1m{[0m[3mobject.ref[0m[2m=[0mFlintRepo.v1alpha1.chert.us/f17fix.agents [3mobject.reason[0m[2m=[0mrelated object updated: Deployment.v1.apps/forge-f17fix.agents[1m}[0m[2m:[0m [2mflint_forge_operator[0m[2m:[0m reconciled [3mrepo[0m[2m=[0magents/f17fix [3mphase[0m[2m=[0mPending
+[2m2026-09-10T15:09:43.664109Z[0m [32m INFO[0m [1mreconciling object[0m[1m{[0m[3mobject.ref[0m[2m=[0mFlintRepo.v1alpha1.chert.us/f17fix.agents [3mobject.reason[0m[2m=[0mrelated object updated: Deployment.v1.apps/forge-f17fix.agents[1m}[0m[2m:[0m [2mflint_forge_operator[0m[2m:[0m reconciled [3mrepo[0m[2m=[0magents/f17fix [3mphase[0m[2m=[0mPending
+[2m2026-09-10T15:09:43.835008Z[0m [32m INFO[0m [1mreconciling object[0m[1m{[0m[3mobject.ref[0m[2m=[0mFlintRepo.v1alpha1.chert.us/f17fix.agents [3mobject.reason[0m[2m=[0mrelated object updated: Deployment.v1.apps/forge-f17fix.agents[1m}[0m[2m:[0m [2mflint_forge_operator[0m[2m:[0m reconciled [3mrepo[0m[2m=[0magents/f17fix [3mphase[0m[2m=[0mPending
+[2m2026-09-10T15:09:43.916808Z[0m [32m INFO[0m [1mreconciling object[0m[1m{[0m[3mobject.ref[0m[2m=[0mFlintRepo.v1alpha1.chert.us/f17fix.agents [3mobject.reason[0m[2m=[0mrelated object updated: Deployment.v1.apps/forge-f17fix.agents[1m}[0m[2m:[0m [2mflint_forge_operator[0m[2m:[0m reconciled [3mrepo[0m[2m=[0magents/f17fix [3mphase[0m[2m=[0mPending
+
+════════ FIXED ARM ════════
+== L0: a repository with the ladder armed, and one push to date ==
+  PASS  seeded main through the door (a push, so the syncer's own clock starts here)
+== L1: the probes report a LIVE repository (the control arm) ==
+  PASS  the pod probe counts the live pod: 1
+  PASS  the replica probe reads 1
+  PASS  the ladder reads Active (absent, which IS Active)
+== L2: park #1, on a repository the door has NEVER woken ==
+  PASS  no wake stamp exists yet — park #1 and park #2 differ in exactly that
+  PASS  park #1: replicas 0, no pods (phase IdleSuspended)
+== L3: a clone wakes it, and THE DOOR arms the stamp ==
+  PASS  a git clone through a parked repository completed in 7s
+  PASS  and it is a FRESH pod (4e952d59-65b9-4a3e-9358-064661875e81 -> 360fe633-11f9-477e-801a-c3146accf6af) — a real restore
+  PASS  the DOOR armed the wake stamp: 2026-09-10T15:25:55Z (nothing in this script writes it)
+== L4: it goes quiet again and parks a SECOND time ==
+  PASS  park #2: replicas 0, no pods (phase IdleSuspended)
+== L5: and it STAYS parked (90s, sampled AND clock-checked) ==
+  ....  idle-since at the start of the hold: 2026-09-10T15:27:02Z
+  PASS  idle-since is unchanged across the hold (2026-09-10T15:27:02Z) — no ladder move was missed between samples
+  PASS  the park held for 90s across 18 samples
+== L6: a second wake, so L5 did not pass on a wedged ladder ==
+  PASS  a second clone woke it again in 8s
+  PASS  on another fresh pod (360fe633-11f9-477e-801a-c3146accf6af -> e4613d52-6ae4-4480-9f63-7efcc54bcfc8)
+  PASS  and the content survived both round trips
+  RESULT  PASS=15 FAIL=0 INCONCLUSIVE=0
+rc=0
+
+════════ THE COUPLING TEST ════════
+A FIXED operator behind a CONTROL door. This cannot occur in production — both
+binaries ship in one image — which is exactly why it has to be built by hand to be
+shown. It is the answer to "why did both halves have to land in one commit":
+the door declines to re-arm a stamp that is already there, the operator refuses to
+honour a stale one, and the repository is unwakeable by anybody.
+One dimension moves, the door's image; the before and after controls are steps 1 and 3.
+
+── waiting for the repository to park while carrying a stamp ──
+ok: parked, carrying the stale stamp 2026-09-10T15:29:14Z
+── step 2: swap the DOOR to the control image (operator stays fixed) ──
+ok: the clone could NOT wake it (181s), replicas=0 pods=0
+ok: and the stamp never moved (2026-09-10T15:29:14Z) — the door declined to re-arm
+── step 3: put the fixed door back (the after control) ──
+ok: the same clone woke it in 6s once the door could re-arm
+ok: stamp 2026-09-10T15:29:14Z -> 2026-09-10T15:33:58Z
+rc=0
+
+════════ FIXED ARM, FINAL — with the door-half assertion ════════
+L6 now pins the state the door's half is about: parked, CARRYING the stamp the door
+wrote at L3, that stamp older than the threshold (being older is what let it park).
+The wake is not enough on its own — the stamp's VALUE has to move, and that movement
+IS the re-arm. The coupling test above is what that assertion costs when it fails.
+
+== L0: a repository with the ladder armed, and one push to date ==
+  PASS  seeded main through the door (a push, so the syncer's own clock starts here)
+== L1: the probes report a LIVE repository (the control arm) ==
+  PASS  the pod probe counts the live pod: 1
+  PASS  the replica probe reads 1
+  PASS  the ladder reads Active (absent, which IS Active)
+== L2: park #1, on a repository the door has NEVER woken ==
+  PASS  no wake stamp exists yet — park #1 and park #2 differ in exactly that
+  PASS  park #1: replicas 0, no pods (phase IdleSuspended)
+== L3: a clone wakes it, and THE DOOR arms the stamp ==
+  PASS  a git clone through a parked repository completed in 7s
+  PASS  and it is a FRESH pod (597caeab-44c8-493f-9c3f-882f0e233f3b -> 60f37329-7e7c-4d42-a170-651ba6cc7641) — a real restore
+  PASS  the DOOR armed the wake stamp: 2026-09-10T15:36:14Z (nothing in this script writes it)
+== L4: it goes quiet again and parks a SECOND time ==
+  PASS  park #2: replicas 0, no pods (phase IdleSuspended)
+== L5: and it STAYS parked (90s, sampled AND clock-checked) ==
+  ....  idle-since at the start of the hold: 2026-09-10T15:37:21Z
+  PASS  idle-since is unchanged across the hold (2026-09-10T15:37:21Z) — no ladder move was missed between samples
+  PASS  the park held for 90s across 18 samples
+== L6: a second wake, so L5 did not pass on a wedged ladder ==
+  PASS  it parked while CARRYING a stamp (2026-09-10T15:36:14Z) — unlike park #1, which had none
+  PASS  a second clone woke it again in 7s
+  PASS  on another fresh pod (60f37329-7e7c-4d42-a170-651ba6cc7641 -> 967acde9-1eea-4b00-889b-13cf2c8b55a2)
+  PASS  and the content survived both round trips
+  PASS  the DOOR RE-ARMED a stale stamp: 2026-09-10T15:36:14Z -> 2026-09-10T15:39:34Z
+  RESULT  PASS=17 FAIL=0 INCONCLUSIVE=0
+rc=0

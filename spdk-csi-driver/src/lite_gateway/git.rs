@@ -602,6 +602,13 @@ pub(super) async fn wait_for_ready(
             }
             Decision::Refuse(r) => return Err(from_refusal(&r)),
             Decision::Wake => {
+                // `wake_requested` is freshness for a repository, not
+                // presence (X24) — so this skips the patch only while
+                // someone else's request is still live, which is
+                // exactly when the operator would also count it. The
+                // guard is the storm brake: a thousand clones arriving
+                // at a parked repository must not be a thousand CR
+                // patches.
                 if !armed && !view.wake_requested {
                     arm_wake(client, &view).await;
                     armed = true;

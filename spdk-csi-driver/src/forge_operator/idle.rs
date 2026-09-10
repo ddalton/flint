@@ -111,14 +111,27 @@ pub fn decide(input: Inputs<'_>) -> Decision {
         return Decision::Stay;
     }
 
-    let wake_requested = anns.contains_key(ANN_REQUESTED_AT);
     let after = repo.spec.idle.as_ref().and_then(|i| i.suspend_after_secs);
 
     if state == IdleState::Suspended {
-        if wake_requested {
-            return Decision::Wake;
-        }
-        return Decision::Hold("idle and unrequested".to_string());
+        // X24. Nothing ever clears the stamp from a `FlintRepo` —
+        // `reconcile` keeps it deliberately, as the door's heartbeat —
+        // so a parked repository is ALWAYS carrying one here: the very
+        // stamp that let it suspend, which is by definition older than
+        // its threshold. Asking whether the KEY IS PRESENT reads that
+        // as a standing request and wakes it on the pass right after
+        // every suspend, forever, rebuilding the `emptyDir` and paying
+        // a full restore once per threshold. The question is the same
+        // one the running branch below asks: is a request still LIVE?
+        return match after {
+            Some(after) if clock::request_is_live(anns, input.now, after) => Decision::Wake,
+            Some(_) => Decision::Hold("idle and unrequested".to_string()),
+            // The ladder was turned off while this repository was
+            // parked. Absent is OFF, and OFF cannot mean "stays down
+            // with no way back" — with no threshold nothing else in
+            // this function would ever raise it again.
+            None => Decision::Wake,
+        };
     }
 
     // Running. Should it come down?
@@ -145,9 +158,7 @@ pub fn decide(input: Inputs<'_>) -> Decision {
     // counts as stale — a repository the door has never brokered is
     // exactly the abandoned case, and requiring a heartbeat that will
     // never come would pin it awake forever.
-    let requested_recently =
-        clock::requested_age_secs(anns, input.now).map(|age| age < after).unwrap_or(false);
-    if requested_recently {
+    if clock::request_is_live(anns, input.now, after) {
         return Decision::Stay;
     }
 
@@ -292,6 +303,88 @@ mod tests {
 
         let quiet = repo(Some(600), &[(ANN_IDLE_STATE, "Suspended")]);
         assert!(matches!(decide_with(&quiet, Ok(())), Decision::Hold(_)));
+    }
+
+    /// X24, and the state EVERY real suspend leaves behind.
+    ///
+    /// The stamp is never cleared — `reconcile` says so in as many
+    /// words ("deliberately NOT cleared: it is the door's heartbeat")
+    /// — so one pass after a suspend the repository is `Suspended`
+    /// with a stamp older than its own threshold, because a stamp
+    /// older than the threshold is precisely what let it suspend.
+    /// Reading the KEY'S PRESENCE as a standing request wakes it again
+    /// on the very next pass.
+    ///
+    /// This pair moves ONE dimension — the stamp's AGE — with the
+    /// state and the presence of the key held fixed. The pair above it
+    /// moves age AND presence together (one second old, versus no
+    /// stamp at all), which is why it passes under either rule and
+    /// could never have caught this.
+    #[test]
+    fn a_suspended_repository_does_not_wake_on_its_own_stale_stamp() {
+        let stale = repo(
+            Some(600),
+            &[(ANN_IDLE_STATE, "Suspended"), (ANN_REQUESTED_AT, "2026-09-04T11:00:00Z")],
+        );
+        match decide_with(&stale, Ok(())) {
+            Decision::Hold(_) => {}
+            other => panic!("a stamp an hour old is not a request: {other:?}"),
+        }
+
+        // The control, one dimension away: same state, same key
+        // present, stamp one second old. This one IS a request.
+        let fresh = repo(
+            Some(600),
+            &[(ANN_IDLE_STATE, "Suspended"), (ANN_REQUESTED_AT, "2026-09-04T11:59:59Z")],
+        );
+        assert_eq!(decide_with(&fresh, Ok(())), Decision::Wake);
+    }
+
+    /// Turning the ladder OFF on a repository that is already parked
+    /// must raise it, and this is a deliberate second change that came
+    /// with X24's fix. The threshold is the only thing that can decide
+    /// a request is live, so with `after` gone a `Hold` here would
+    /// mean "down forever, with no field an operator could set to
+    /// bring it back" — the old presence rule hid that behind a stamp
+    /// which happened to be there.
+    #[test]
+    fn turning_the_ladder_off_while_parked_raises_the_repository() {
+        let parked_off = repo(None, &[(ANN_IDLE_STATE, "Suspended")]);
+        assert_eq!(decide_with(&parked_off, Ok(())), Decision::Wake);
+
+        // Control: OFF is still OFF everywhere else — a RUNNING
+        // repository with no ladder is not touched.
+        let running_off = repo(None, &[]);
+        assert_eq!(decide_with(&running_off, Ok(())), Decision::Stay);
+    }
+
+    /// The loop itself, in one function: decide, apply exactly what the
+    /// reconciler would patch, decide again.
+    ///
+    /// `Suspend` followed by `Wake` is a repository that scales to zero
+    /// and comes straight back — destroying its `emptyDir` and paying a
+    /// full restore — once per threshold, forever. Both live runs
+    /// stopped after one park, and F13 deletes the annotation by hand
+    /// before its wake, so nothing has ever executed this sequence.
+    #[test]
+    fn a_suspend_is_not_immediately_undone_by_the_stamp_that_caused_it() {
+        let mut r = repo(Some(600), &[(ANN_REQUESTED_AT, "2026-09-04T11:00:00Z")]);
+        assert_eq!(decide_with(&r, Ok(())), Decision::Suspend, "the setup must actually suspend");
+
+        // What `reconcile::reconcile` patches on a Suspend: the ladder's
+        // position, and NOT the stamp.
+        r.metadata
+            .annotations
+            .as_mut()
+            .expect("the fixture carries annotations")
+            .insert(ANN_IDLE_STATE.to_string(), IdleState::Suspended.as_str().to_string());
+
+        match decide_with(&r, Ok(())) {
+            Decision::Wake => panic!(
+                "the pass right after a suspend re-woke the repository on the stamp that made                  it suspend — this is the flap"
+            ),
+            _ => {}
+        }
     }
 
     /// An admin's decision is not reversed by a request. The CR reports

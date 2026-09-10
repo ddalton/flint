@@ -1,0 +1,104 @@
+X24 in LITE — a wake stamp that outlives its request. runcq, 2026-09-10.
+Cluster: 3 x i4i.large, all spot, us-west-1, k8s v1.34.11. Tier-off share on local-path:
+the suspend rung needs no bucket (rpoClean gates HIBERNATE, not suspend), so the drill
+has no object store, no credential and no IAM between the assertion and the mechanism.
+
+THE PATH, and it needs no race. chert.us/requested-at is the ladder's documented input —
+operator-kind-e2e leg 11 says 'whatever wants this share awake stamps it... deliberately
+NOT any particular caller's contract'. So a client may stamp a share that is ALREADY UP,
+which is what an ensure-live front door does. Nothing clears it: the clear runs on the
+TRANSITION into Active and a running share never makes that transition. The stamp ages,
+the share suspends carrying it, and decide()'s down-branch read the key's PRESENCE.
+
+  fixed   dilipdalton/flint-lite-operator@sha256:078f4d617b5c7162d327ac2184406fd9804a8f032b3b4e8adda05225e69d1693
+  control dilipdalton/flint-lite-operator@sha256:43448615ec4b639c90d552e37aab908c57cddcaf49856d53c61a4fa00dca2eff
+Two builds of ONE tree, differing only in idle.rs's down-branch reading and
+reconcile.rs's reprovision clear. Every operator pod was drained onto the arm's image
+before each run: with two replicas the LEADER is what decides.
+
+════════ FIXED ARM ════════
+== L0: a tier-off share with the suspend rung armed ==
+./tests/regression/lite-ladder-cycles.sh: line 70: [PollFailed]: command not found
+  PASS  the share is Ready
+== L1: the probes report a LIVE share (the control arm) ==
+  PASS  the pod probe counts the live pod: 1
+  PASS  the replica probe reads 1
+  PASS  the ladder reads Active (absent, which IS Active)
+== L2: a client stamps a share that is ALREADY RUNNING ==
+  PASS  stamped while running: 2026-09-10T16:29:22Z
+  PASS  and it stays up while the stamp is fresh (signal one holds it)
+== L3: the client stops asking; the stamp goes stale and it parks ==
+  PASS  parked: replicas 0, no pods (phase IdleSuspended)
+  PASS  and it parked CARRYING the stale stamp (2026-09-10T16:29:22Z) — the state under test
+== L4: and it STAYS parked (90s, sampled AND clock-checked) ==
+  ....  idle-since at the start of the hold: 2026-09-10T16:31:17Z
+  PASS  idle-since is unchanged across the hold (2026-09-10T16:31:17Z) — no ladder move was missed between samples
+  PASS  the park held for 90s across 18 samples
+== L5: a FRESH request still wakes it, and the wake clears the stamp ==
+  PASS  a fresh stamp woke it — the hold above was not a wedged ladder
+  PASS  and the wake CLEARED the stamp — the invariant presence-reading rests on
+  RESULT  PASS=12 FAIL=0 INCONCLUSIVE=0
+rc=0
+
+════════ CONTROL ARM (both lite lines reverted to the shipped code) ════════
+== L0: a tier-off share with the suspend rung armed ==
+  PASS  the share is Ready
+== L1: the probes report a LIVE share (the control arm) ==
+  PASS  the pod probe counts the live pod: 1
+  PASS  the replica probe reads 1
+  PASS  the ladder reads Active (absent, which IS Active)
+== L2: a client stamps a share that is ALREADY RUNNING ==
+  PASS  stamped while running: 2026-09-10T16:39:45Z
+  PASS  and it stays up while the stamp is fresh (signal one holds it)
+== L3: the client stops asking; the stamp goes stale and it parks ==
+  PASS  parked: replicas 0, no pods (phase IdleSuspended)
+  INCONCLUSIVE  the stamp is gone at park time, so the hold below tests nothing about it
+== L4: and it STAYS parked (90s, sampled AND clock-checked) ==
+  ....  idle-since at the start of the hold: 2026-09-10T16:42:21Z
+  PASS  idle-since is unchanged across the hold (2026-09-10T16:42:21Z) — no ladder move was missed between samples
+  PASS  the park held for 90s across 18 samples
+./tests/regression/lite-ladder-cycles.sh: line 166: 17521 Terminated: 15          ( while :; do
+    isince >> "$MOVES"; echo >> "$MOVES"; sleep 2;
+done )
+  ....  ladder moves observed from the stamp onward: 2 distinct idle-since value(s) over 87 samples
+  FAIL  THE LADDER MOVED 2 TIMES between the stamp and the end of the hold. A share that
+       parks, is woken by the stale stamp that PARKED it, and parks again reads as settled
+       afterwards precisely because the bogus wake consumed the stamp:
+       2026-09-10T16:41:00Z 2026-09-10T16:42:21Z 
+== L5: a FRESH request still wakes it, and the wake clears the stamp ==
+  PASS  a fresh stamp woke it — the hold above was not a wedged ladder
+  PASS  and the wake CLEARED the stamp — the invariant presence-reading rests on
+  RESULT  PASS=11 FAIL=1 INCONCLUSIVE=1
+rc=1
+
+READ THE THREE VERDICTS IN THAT RUN TOGETHER. 'idle-since is unchanged across the
+hold' PASSED and 'the park held for 90s' PASSED — both true, and both irrelevant,
+because by the time the hold began the flap was over and the stamp that caused it had
+been consumed by the bogus wake. Only the transition COUNT saw it. Lite's defect
+erases its own evidence; forge's does not, which is why the same drill shape had to be
+built differently for the two products.
+
+════════ FIXED ARM, FINAL ════════
+== L0: a tier-off share with the suspend rung armed ==
+  PASS  the share is Ready
+== L1: the probes report a LIVE share (the control arm) ==
+  PASS  the pod probe counts the live pod: 1
+  PASS  the replica probe reads 1
+  PASS  the ladder reads Active (absent, which IS Active)
+== L2: a client stamps a share that is ALREADY RUNNING ==
+  PASS  stamped while running: 2026-09-10T16:45:40Z
+  PASS  and it stays up while the stamp is fresh (signal one holds it)
+== L3: the client stops asking; the stamp goes stale and it parks ==
+  PASS  parked: replicas 0, no pods (phase IdleSuspended)
+  PASS  and it parked CARRYING the stale stamp (2026-09-10T16:45:40Z) — the state under test
+== L4: and it STAYS parked (90s, sampled AND clock-checked) ==
+  ....  idle-since at the start of the hold: 2026-09-10T16:47:33Z
+  PASS  idle-since is unchanged across the hold (2026-09-10T16:47:33Z) — no ladder move was missed between samples
+  PASS  the park held for 90s across 18 samples
+  ....  ladder moves observed from the stamp onward: 1 distinct idle-since value(s) over 49 samples
+  PASS  the ladder moved ONCE — it parked and stayed parked
+== L5: a FRESH request still wakes it, and the wake clears the stamp ==
+  PASS  a fresh stamp woke it — the hold above was not a wedged ladder
+  PASS  and the wake CLEARED the stamp — the invariant presence-reading rests on
+  RESULT  PASS=13 FAIL=0 INCONCLUSIVE=0
+rc=0
