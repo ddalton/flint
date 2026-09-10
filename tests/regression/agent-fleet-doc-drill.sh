@@ -888,7 +888,12 @@ say "L5: a REST write is visible on an ALREADY-ESTABLISHED mount"
   done
   ag "cat /workspace/versioned.txt" >/dev/null    # agent has now cached it
   printf 'v2-overwritten\n' >/tmp/doc-v2.txt
+  # `If-Match: *` — "whatever is there now". An overwrite must name
+  # something since the file API began refusing unconditioned ones with
+  # 428, and this leg is about CACHE EXPIRY on the mounted agent, not
+  # about which version it replaces.
   gw PUT "/v1/projects/$PROJECT/volumes/data/files/content?path=/versioned.txt" \
+     -H 'If-Match: *' \
      -H 'Content-Type: application/octet-stream' --data-binary @/tmp/doc-v2.txt >/dev/null
   SAW2=""; T0=$(date +%s)
   for _ in $(seq 1 90); do

@@ -1196,6 +1196,32 @@ async fn handle_upload(
         );
     }
 
+    // AN OVERWRITE MUST NAME WHAT IT READ.
+    //
+    // Without this, two callers that each read v1 and then PUT both
+    // succeed and the second silently wins — the lost update. The fresh
+    // stat below is not a substitute: it protects this request's own
+    // window, not the caller's read. flint-forge's file API already
+    // refuses the same shape with the same code (`fileapi.rs::judge`,
+    // `PreconditionRequired`), and these two surfaces are meant to be
+    // one shape.
+    //
+    // CREATING stays unconditioned: 428 is for replacing a file, never
+    // for writing a path that is not there.
+    if expect.is_none() && !must_be_absent {
+        match fs.stat(&path).await {
+            Ok(_) => {
+                return plain(
+                    StatusCode::PRECONDITION_REQUIRED,
+                    "the file already exists; send If-Match with the version you read, \
+                     or If-None-Match: * to create only if absent",
+                )
+            }
+            Err(FsError::Nfs(Nfs4Status::NoEnt)) => {}
+            Err(e) => return err_reply(&e),
+        }
+    }
+
     // The create-if-absent arm is a check with a window, and says so.
     // NFS has no operation that fails a compound BECAUSE a name
     // resolved, so unlike If-Match this one cannot ride along with the
@@ -1311,6 +1337,37 @@ async fn handle_delete(
         Ok(p) => p,
         Err(m) => return plain(StatusCode::BAD_REQUEST, &m),
     };
+
+    // A DELETE MUST NAME WHAT IT READ, for the same reason a PUT must
+    // and with more at stake: an overwrite replaces content, a delete
+    // destroys it. flint-forge refuses the identical shape — its
+    // `plan_delete` runs the same `judge`, which answers
+    // PreconditionRequired for (exists, no If-Match) — and forge's own
+    // note says why MOVE is deliberately NOT held to this: PUT and
+    // DELETE destroy content, a rename does not, so the content moves
+    // with the name whatever it has become. lite matches that split.
+    //
+    // Scoped to FILES on purpose. A directory carries no content
+    // version to name, and a non-empty one is refused outright with 409
+    // — turning that into a 428 would demand a precondition for a
+    // deletion that is never going to happen, which reads as "retry
+    // with a header" for a request no header can rescue.
+    //
+    // An absent path stays a plain 404: there is nothing to name.
+    if expect.is_none() {
+        match fs.stat(&path).await {
+            Ok(e) if e.kind == "file" => {
+                return plain(
+                    StatusCode::PRECONDITION_REQUIRED,
+                    "the file exists; send If-Match with the version you read",
+                )
+            }
+            Ok(_) => {}
+            Err(FsError::Nfs(Nfs4Status::NoEnt)) => {}
+            Err(e) => return err_reply(&e),
+        }
+    }
+
     match fs.remove_checked(&path, expect).await {
         Ok(()) => note(StatusCode::OK, "removed"),
         Err(e) => mutate_err_reply(&e, expect.is_some()),
@@ -1478,6 +1535,7 @@ mod tests {
                     .method("DELETE")
                     .path("/files/content?path=/d/g.bin")
                     .header("authorization", bearer())
+                    .header("if-match", "*")
                     .reply(&api)
                     .await,
                 "removed",
@@ -2007,11 +2065,13 @@ mod tests {
         assert!(temp.path().join("project/renamed.txt").exists());
         assert!(!temp.path().join("project/notes.txt").exists());
 
-        // DELETE /files/content
+        // DELETE /files/content — `*` because this leg is about the
+        // endpoint round-tripping, not about which version it removes.
         let res = warp::test::request()
             .method("DELETE")
             .path("/files/content?path=/project/renamed.txt")
             .header("authorization", bearer())
+            .header("if-match", "*")
             .reply(&api)
             .await;
         assert_eq!(res.status(), 200);
@@ -2219,10 +2279,14 @@ mod tests {
         let (api, _fs, temp) = harness().await;
         std::fs::write(temp.path().join("x.bin"), b"old contents here").unwrap();
 
+        // `*` is "whatever is there now": this test is about the
+        // atomicity of the replacement, not about which version it
+        // replaces, and an overwrite must still name something.
         let res = warp::test::request()
             .method("PUT")
             .path("/files/content?path=/x.bin")
             .header("authorization", bearer())
+            .header("if-match", "*")
             .body(b"new".to_vec())
             .reply(&api)
             .await;
@@ -2696,7 +2760,7 @@ mod tests {
 
         // After a write the same tag no longer matches, so the caller
         // gets the new bytes rather than a stale 304.
-        assert_eq!(put(&api, "/doc.txt", b"world!", None, None).await.status(), 201);
+        assert_eq!(put(&api, "/doc.txt", b"world!", Some(&tag), None).await.status(), 201);
         let third = warp::test::request()
             .method("GET")
             .path("/files/content?path=/doc.txt")
@@ -2831,19 +2895,58 @@ mod tests {
         assert!(!temp.path().join("moved.txt").exists());
     }
 
-    /// Unconditional requests must behave exactly as they did before
-    /// preconditions existed — every existing caller sends no headers.
+    /// CREATING is unconditional; REPLACING is not.
+    ///
+    /// This test used to assert the opposite of its second line — that
+    /// "unconditional requests behave exactly as they did before
+    /// preconditions existed, because every existing caller sends no
+    /// headers". That compatibility promise was made when preconditions
+    /// were introduced as an opt-in, and it is what left the lost update
+    /// open: two callers that each read v1 and then PUT both got 201 and
+    /// the second silently won. Reversed deliberately once it was
+    /// established that no consumer depends on the blind overwrite;
+    /// flint-forge's file API has always refused this shape with the
+    /// same 428, and the two surfaces are meant to be one shape.
+    ///
+    /// DELETE was reversed the same way and later, for the same reason
+    /// with more at stake: an overwrite replaces content, a delete
+    /// destroys it, and lite took a blind one long after it had stopped
+    /// taking a blind overwrite. forge's `plan_delete` runs the same
+    /// `judge` and has always answered PreconditionRequired here. MOVE
+    /// is deliberately NOT held to it, in both surfaces: a rename
+    /// destroys nothing, the content travels with the name.
     #[tokio::test]
     async fn requests_without_preconditions_are_unchanged() {
         let (api, _fs, temp) = harness().await;
-        assert_eq!(put(&api, "/doc.txt", b"one", None, None).await.status(), 201);
-        assert_eq!(put(&api, "/doc.txt", b"two", None, None).await.status(), 201);
+        // A path that is not there needs no precondition.
+        let created = put(&api, "/doc.txt", b"one", None, None).await;
+        assert_eq!(created.status(), 201);
+        let tag = etag_of(&created);
+        // The same path a second time does — this is the lost update.
+        assert_eq!(
+            put(&api, "/doc.txt", b"two", None, None).await.status(),
+            428,
+            "a blind overwrite must be refused, not performed"
+        );
+        assert_eq!(std::fs::read(temp.path().join("doc.txt")).unwrap(), b"one".to_vec());
+        assert_eq!(put(&api, "/doc.txt", b"two", Some(&tag), None).await.status(), 201);
         assert_eq!(std::fs::read(temp.path().join("doc.txt")).unwrap(), b"two".to_vec());
+
+        // A blind delete of a file that IS there is now refused.
+        let del = warp::test::request()
+            .method("DELETE")
+            .path("/files/content?path=/doc.txt")
+            .header("authorization", bearer())
+            .reply(&api)
+            .await;
+        assert_eq!(del.status(), 428, "an unconditioned delete must be refused");
+        assert!(temp.path().join("doc.txt").exists(), "and the file must survive it");
 
         let del = warp::test::request()
             .method("DELETE")
             .path("/files/content?path=/doc.txt")
             .header("authorization", bearer())
+            .header("if-match", "*")
             .reply(&api)
             .await;
         assert_eq!(del.status(), 200);
@@ -3127,7 +3230,9 @@ mod tests {
     #[tokio::test]
     async fn the_tag_is_stable_across_reads_and_moves_on_a_write() {
         let (api, _fs, _t) = harness().await;
-        assert_eq!(put(&api, "/doc.txt", b"one", None, None).await.status(), 201);
+        let created = put(&api, "/doc.txt", b"one", None, None).await;
+        assert_eq!(created.status(), 201);
+        let created_tag = etag_of(&created);
 
         let read_tag = || async {
             etag_of(
@@ -3143,7 +3248,7 @@ mod tests {
         assert_eq!(first, read_tag().await, "the tag churned across two plain reads");
         assert_eq!(first, read_tag().await);
 
-        assert_eq!(put(&api, "/doc.txt", b"two", None, None).await.status(), 201);
+        assert_eq!(put(&api, "/doc.txt", b"two", Some(&created_tag), None).await.status(), 201);
         assert_ne!(first, read_tag().await, "the tag survived a write that changed the file");
     }
 
@@ -3398,7 +3503,16 @@ mod tests {
                             .fetch_max(body.len(), std::sync::atomic::Ordering::SeqCst);
                         let mut next = body;
                         next.push(b'x');
-                        let tag = conditional.then_some(tag);
+                        // The control arm used to send NO precondition.
+                        // An overwrite must now name something, so it
+                        // sends `*`: "the file must exist, but I do not
+                        // say which version". That is still the no-guard
+                        // arm in the sense this leg measures — what
+                        // `If-Match` buys is naming a VERSION, and `*`
+                        // names none. `lost_plain > 0` below is the
+                        // control on the control: if `*` ever became a
+                        // real guard, that assert fires.
+                        let tag = if conditional { Some(tag) } else { Some("*".to_string()) };
                         let res = put(&api, &path, &next, tag.as_deref(), None).await;
                         match res.status().as_u16() {
                             201 => break,
@@ -3496,7 +3610,9 @@ mod tests {
                     // A body unique to this (writer, round).
                     let body = format!("w{w}-r{r}").into_bytes();
                     loop {
-                        let res = put(&api, "/churn.bin", &body, None, None).await;
+                        // `*` keeps the churn maximal while still
+                        // naming something, which an overwrite must.
+                        let res = put(&api, "/churn.bin", &body, Some("*"), None).await;
                         match res.status().as_u16() {
                             201 => break,
                             503 => continue,
