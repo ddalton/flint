@@ -1577,15 +1577,22 @@ fi
 # THE DRAIN. --force because the rig's tenants are bare pods; the workers
 # do not need it (their Node ownerReference makes them managed). Nothing
 # refuses an eviction here, so a drain that hangs would be a real defect.
-before=$($K -n $WNS get pods --no-headers 2>/dev/null | grep -c . || true)
-note "draining $NODE with $before worker(s) resident"
+# SCOPED TO THE NODE BEING DRAINED. Counting $WNS cluster-wide is the
+# same number on kind, where there is one node, and a FALSE FAILURE on
+# real nodes: a worker is pinned to its tenant's node, so one serving a
+# live tenant on ANOTHER node is the product working, not residue. Seen
+# on runcr 2026-09-10: the drain of runcr-aws-1 completed and this
+# reported "1 worker pod(s) still resident" for s3w-6a6cf60ca7d8e25d,
+# which was on runcr-aws-2 serving a Running s3-tenants/reader-elsewhere.
+before=$($K -n $WNS get pods --no-headers --field-selector spec.nodeName="$NODE" 2>/dev/null | grep -c . || true)
+note "draining $NODE with $before worker(s) resident ON IT"
 if $K drain "$NODE" --ignore-daemonsets --delete-emptydir-data --force --timeout=420s >/tmp/s16-drain.log 2>&1; then
     ok "the drain COMPLETED — the hooks delayed each worker without blocking the drain"
 else
     bad "drain did not complete in 420s: $(tail -2 /tmp/s16-drain.log | tr -d '\n' | cut -c1-140)"
 fi
-left=$($K -n $WNS get pods --no-headers 2>/dev/null | grep -c . || true)
-[ "${left:-0}" = "0" ] && ok "no worker pods remain after the drain" || bad "$left worker pod(s) still resident after a completed drain"
+left=$($K -n $WNS get pods --no-headers --field-selector spec.nodeName="$NODE" 2>/dev/null | grep -c . || true)
+[ "${left:-0}" = "0" ] && ok "no worker pods remain on $NODE after the drain" || bad "$left worker pod(s) still resident ON $NODE after a completed drain"
 stale=$(onnode "grep -c 'plugins/s3.csi.chert.us/volumes' /proc/mounts")
 [ "${stale:-0}" = "0" ] && ok "no plugin-dir mount is orphaned on the node" || bad "$stale plugin-dir mount(s) left on the node after the drain"
 $K uncordon "$NODE" >/dev/null 2>&1 && note "node uncordoned"
