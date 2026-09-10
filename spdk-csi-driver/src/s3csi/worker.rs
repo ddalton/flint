@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, ContainerStatus, EmptyDirVolumeSource, EnvVar, ExecAction, HostPathVolumeSource, Lifecycle,
+    Capabilities, Container, ContainerPort, ContainerStatus, EmptyDirVolumeSource, EnvVar, ExecAction,
+    HostPathVolumeSource, Lifecycle,
     LifecycleHandler, Pod, PodSecurityContext,
     PodSpec, ResourceRequirements, SeccompProfile, SecurityContext, Toleration, Volume, VolumeMount,
 };
@@ -35,6 +36,19 @@ pub const LABEL_VOLUME_HASH: &str = "chert.us/volume-hash";
 pub const LABEL_NODE: &str = "chert.us/node";
 pub const LABEL_MODE: &str = "chert.us/mode";
 pub const LABEL_TENANT_NS: &str = "chert.us/tenant-namespace";
+/// D15's scrape target selects on this, and the chart's PodMonitor and
+/// NetworkPolicy both name it. It used to be the pod label a tenant put
+/// on itself to opt into webhook injection; when delivery moved to this
+/// plugin (`fcac038f`) the label went with the webhook and nothing
+/// replaced it, so the PodMonitor selected NOTHING and every lean
+/// workspace stopped being scraped — silently, because a selector that
+/// matches no pod is indistinguishable from a fleet at rest.
+pub const LABEL_LEAN_WORKSPACE: &str = "chert.us/lean-workspace";
+/// The PodMonitor scrapes BY NAME, deliberately: the port is a
+/// per-workspace CR knob, so a number here would scrape only the
+/// workspaces that kept the default. A name only works if the container
+/// DECLARES it, which is the second half of the same defect.
+pub const METRICS_PORT_NAME: &str = "metrics";
 pub const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
 pub const ANN_VOLUME_ID: &str = "chert.us/volume-id";
 pub const ANN_TENANT_POD: &str = "chert.us/tenant-pod";
@@ -104,6 +118,19 @@ pub fn build_pod(i: &WorkerInputs) -> Pod {
         (LABEL_TENANT_NS.to_string(), i.tenant.namespace.clone()),
     ]);
     labels.insert("app.kubernetes.io/name".into(), "flint-s3-worker".into());
+
+    // Both halves come from the CR's own knobs, and only when it asked
+    // for them: `spec.metrics.enabled` is false by default (D15 is
+    // opt-in), and a worker that was not asked to serve /metrics must
+    // not advertise a port it is not listening on.
+    let metrics_port = if lean && i.env.get("FLINT_SYNC_METRICS").map(String::as_str) == Some("true") {
+        i.env.get("FLINT_SYNC_METRICS_PORT").and_then(|p| p.parse::<i32>().ok())
+    } else {
+        None
+    };
+    if metrics_port.is_some() {
+        labels.insert(LABEL_LEAN_WORKSPACE.to_string(), i.cr.to_string());
+    }
     let annotations = BTreeMap::from([
         (ANN_VOLUME_ID.to_string(), i.volume_id.to_string()),
         (ANN_TENANT_POD.to_string(), format!("{}/{}", i.tenant.namespace, i.tenant.pod)),
@@ -192,6 +219,14 @@ pub fn build_pod(i: &WorkerInputs) -> Pod {
         command: Some(vec![WORKER_BIN.into()]),
         lifecycle: Some(lifecycle),
         env: Some(env),
+        ports: metrics_port.map(|p| {
+            vec![ContainerPort {
+                name: Some(METRICS_PORT_NAME.into()),
+                container_port: p,
+                protocol: Some("TCP".into()),
+                ..Default::default()
+            }]
+        }),
         volume_mounts: Some(mounts),
         resources: i.resources.clone(),
         termination_message_policy: Some("FallbackToLogsOnError".into()),
@@ -525,6 +560,53 @@ mod tests {
 
     fn tenant() -> TenantRef {
         TenantRef { namespace: "team-a".into(), pod: "agent".into(), pod_uid: "puid".into(), service_account: "trainer".into() }
+    }
+
+    /// THE SCRAPE TARGET MUST CARRY WHAT THE SCRAPER SELECTS. The chart
+    /// ships a PodMonitor selecting `chert.us/lean-workspace` Exists and
+    /// scraping `port: metrics` by name; before this, `build_pod` set
+    /// neither, so the PodMonitor matched no pod and could not have
+    /// scraped one if it had. Nothing failed — a selector matching zero
+    /// pods looks exactly like a fleet with no workspaces running.
+    ///
+    /// The three legs are one claim each, and the middle one is the
+    /// control: metrics OFF must produce NEITHER, or the test would pass
+    /// on a build_pod that stamped them unconditionally.
+    #[test]
+    fn a_lean_worker_carries_what_the_podmonitor_selects_and_scrapes() {
+        let t = tenant();
+
+        let mut on = inputs("lean", &t, Some("/var/lib/flint/ws".into()));
+        on.env.insert("FLINT_SYNC_METRICS".into(), "true".into());
+        on.env.insert("FLINT_SYNC_METRICS_PORT".into(), "9847".into());
+        let pod = build_pod(&on);
+        let labels = pod.metadata.labels.as_ref().unwrap();
+        assert_eq!(
+            labels.get(LABEL_LEAN_WORKSPACE).map(String::as_str),
+            Some("datasets"),
+            "the PodMonitor selects this label; without it the workspace is invisible"
+        );
+        let ports = pod.spec.as_ref().unwrap().containers[0].ports.as_ref().expect("a declared port");
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].name.as_deref(), Some(METRICS_PORT_NAME));
+        assert_eq!(ports[0].container_port, 9847, "the CR's port, not the chart default");
+
+        // metrics OFF: neither half, because a port advertised on a
+        // worker that is not listening is worse than no port at all.
+        let mut off = inputs("lean", &t, Some("/var/lib/flint/ws".into()));
+        off.env.insert("FLINT_SYNC_METRICS".into(), "false".into());
+        off.env.insert("FLINT_SYNC_METRICS_PORT".into(), "9847".into());
+        let pod = build_pod(&off);
+        assert!(pod.metadata.labels.as_ref().unwrap().get(LABEL_LEAN_WORKSPACE).is_none());
+        assert!(pod.spec.as_ref().unwrap().containers[0].ports.is_none());
+
+        // passthrough serves no /metrics at all, whatever the env says.
+        let mut pt = inputs("passthrough", &t, None);
+        pt.env.insert("FLINT_SYNC_METRICS".into(), "true".into());
+        pt.env.insert("FLINT_SYNC_METRICS_PORT".into(), "9847".into());
+        let pod = build_pod(&pt);
+        assert!(pod.metadata.labels.as_ref().unwrap().get(LABEL_LEAN_WORKSPACE).is_none());
+        assert!(pod.spec.as_ref().unwrap().containers[0].ports.is_none());
     }
 
     #[test]

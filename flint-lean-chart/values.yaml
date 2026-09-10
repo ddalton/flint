@@ -92,9 +92,13 @@ metrics:
     enabled: false
     interval: 30s
     labels: {}
-  # Namespaces to render the metrics NetworkPolicy into — the ones your
-  # agent pods run in, NOT this release's namespace. Empty ⇒ no policy
-  # is created and the port is reachable from anywhere the CNI allows.
+  # Namespaces to render the metrics NetworkPolicy into: the ones your
+  # flint WORKERS run in — `flint-workers` unless the node plugin was
+  # given FLINT_S3CSI_WORKER_NAMESPACE — and NOT your agent pods'
+  # namespaces, which is what this said before fcac038f moved the
+  # metrics endpoint off the injected sidecar and onto the worker pod.
+  # Empty ⇒ no policy is created and the port is reachable from anywhere
+  # the CNI allows.
   networkPolicyNamespaces: []
   monitoringNamespace: monitoring
 

@@ -1,8 +1,15 @@
 {{- if .Values.metrics.podMonitor.enabled }}
-# D15's scrape target. Selects the INJECTED sidecar by the label the
-# webhook requires on every opted-in pod, so a workspace joins
-# monitoring by being a workspace — there is nothing per-workspace to
-# install.
+# D15's scrape target. Selects the WORKER pod — the one the
+# s3.csi.chert.us node plugin creates per published volume — by the
+# chert.us/lean-workspace label the plugin stamps on it whenever the CR
+# asked for metrics. A workspace joins monitoring by being a workspace;
+# there is nothing per-workspace to install.
+#
+# Both halves of that are load-bearing and both were missing between
+# fcac038f and this: the label used to be put on the TENANT pod by the
+# tenant, to opt into webhook injection, and the metrics endpoint used to
+# live in the injected sidecar. Delivery moved to the node plugin and
+# neither followed, so this selected nothing at all.
 #
 # Requires the Prometheus Operator CRDs; the flag is off by default
 # because a PodMonitor on a cluster without them fails the whole
@@ -38,10 +45,13 @@ spec:
 # layer. Ingress to the metrics port is allowed ONLY from the
 # monitoring namespace.
 #
-# One policy per workspace namespace, because NetworkPolicy is
-# namespaced and the chart installs into flint-system. A workspace in a
-# namespace absent from this list is unreachable by the scraper (fail
-# closed) rather than open to the cluster.
+# One policy per WORKER namespace — `flint-workers` unless the node
+# plugin was given FLINT_S3CSI_WORKER_NAMESPACE — because NetworkPolicy
+# is namespaced, the chart installs into flint-system, and since
+# fcac038f the metrics endpoint is on the worker pod rather than on a
+# sidecar in the tenant's. Naming the tenant namespaces here selects
+# nothing and protects nothing. A worker namespace absent from this list
+# is unreachable by the scraper (fail closed) rather than open.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
