@@ -1,5 +1,25 @@
 # Multi-volume hubs + fork-from-barrier — the agentic-harness topology
 
+> **Read `docs/plans/flint-lite-multivolume-design.md` (2026-09-09) first.**
+> That is the current cut; this file is its input, not its rival, and the two
+> disagree in specific places.
+>
+> **Still standing here:** the topology argument, the two-level lease, and the
+> ultracode review record (2026-08-18, 8/8 confirmed, F1–F8) — the recut cites
+> those BY FINDING NUMBER and treats them as authoritative.
+>
+> **Overtaken there:** the separate-product framing (lite turned out to have no
+> deployed installs and no external users, which removes the basis for not
+> modifying lite); one bucket serving many workspaces (§4 of the recut makes a
+> bucket PER workspace the common case, inverting an assumption this file makes
+> throughout); and §3's "consumers mount their **local** hub", since the recut's
+> common case is agents on other clusters mounting a hub directly. The
+> hub-to-hub non-communication rule in that same §3 survives untouched.
+>
+> This pointer is here because six of eight findings in a 14-agent review of the
+> recut died attacking claims from THIS file, read at this path as though it were
+> current. A reviewer pointed at a stale copy measures nothing.
+
 Status: **design sketch v2 — RESHAPED after ultracode review** (2026-08-18).
 Step 0 — the two-level-lease TLA+ module (`formal/FlintTierSession.tla`,
 7 gate runs, gate 165→172) — is DONE; no code exists yet. The ultracode

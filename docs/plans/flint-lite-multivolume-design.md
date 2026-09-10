@@ -76,7 +76,7 @@ Three more reasons, in the order they tend to decide it:
 - **It voids the zero-footprint consumer.** §3's promise is that stock
   kernel clients mount subtrees with no client-side feature at all; the
   prior doc sells consumers as "zero footprint, zero credentials"
-  (`multi-volume-hub-design.md:65`). A tunnel puts a client on every
+  (`multi-volume-hub-design.md:85`). A tunnel puts a client on every
   consuming node, to be installed, authorized, renewed and monitored —
   and consumer-side footprint is the expensive kind, because it is the
   side you do not control.
@@ -320,7 +320,7 @@ optional rather than structural.
 prior doc's §3 reads: "One hub (or several) per cluster. Consumers mount
 their **local** hub over in-cluster NFS… **No hub ever addresses another
 hub**", with S3 as the complete inter-cluster channel
-(`multi-volume-hub-design.md:65-73`). That is a *hub-to-hub*
+(`multi-volume-hub-design.md:85-93`). That is a *hub-to-hub*
 non-communication rule, and it survives untouched — nothing here makes
 one hub address another. But its first sentence assumes **local**
 consumer mounts, and §1's common case is the opposite: agents on other
