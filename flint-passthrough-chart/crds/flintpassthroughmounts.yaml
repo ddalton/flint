@@ -3,17 +3,22 @@
 # There is no controller behind this CR and no status: nothing about a
 # passthrough mount converges. (Nothing here can repair a mount either:
 # if the mounter crashes, containers already running in the pod are
-# stranded on a dead FUSE connection and the pod must be recreated.) The mutating webhook reads it once, at
-# pod admission, and turns it into a sidecar. That is the whole
-# lifecycle.
+# stranded on a dead FUSE connection and the pod must be recreated.)
+# The s3.csi.chert.us node plugin reads it at NodePublishVolume, when
+# kubelet schedules a pod whose inline csi: volume names it in
+# volumeAttributes as `chert.us/mount`. That is the whole lifecycle.
+# There is no webhook and no label: before v1.45.0 a mutating webhook
+# injected a privileged sidecar for the pod label
+# flint.io/passthrough-mount, and fcac038f replaced it with the node
+# DaemonSet.
 #
 # NOTE ON UPGRADES: Helm applies crds/ on INSTALL ONLY and never on
 # upgrade. If a later chart version adds a field here, apply this file
 # by hand:
 #   kubectl apply -f flint-passthrough-chart/crds/flintpassthroughmounts.yaml
-# The webhook refuses a spec it cannot parse rather than defaulting it,
-# so a stale CRD shows up as a denied pod naming the field — not as a
-# mount with a silently wrong shape.
+# The node plugin refuses a spec it cannot parse rather than defaulting
+# it, so a stale CRD shows up as a FailedMount naming the field — not
+# as a mount with a silently wrong shape.
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
@@ -89,7 +94,7 @@ spec:
                 # rename, no append — and the first sign of it would be
                 # a workload failing at 3am. Declared-and-refused turns
                 # that into `kubectl apply` naming the field. The
-                # webhook's deny_unknown_fields is the second gate, for
+                # plugin's deny_unknown_fields is the second gate, for
                 # a CR stored while an older CRD was installed.
                 driver:
                   type: string
@@ -174,9 +179,9 @@ spec:
                   description: >-
                     CSI delivery (s3.csi.chert.us): which ServiceAccounts in
                     this namespace may mount the CR. ABSENT = DENY under
-                    CSI — list them, or ["*"] for any SA in the namespace
-                    (the webhook delivery's trust level, made explicit).
-                    The webhook delivery ignores this field.
+                    CSI — list them, or ["*"] for any SA in the namespace,
+                    which is the old webhook delivery's trust level made
+                    explicit. There is no other delivery: absent is DENY.
                   properties:
                     serviceAccounts:
                       type: array
@@ -203,7 +208,7 @@ spec:
               # No `additionalProperties: false` here — a structural
               # schema forbids it alongside `properties`, and it would
               # be redundant: the API server PRUNES unknown fields
-              # before storage. The webhook additionally parses with
+              # before storage. The node plugin additionally parses with
               # serde's deny_unknown_fields, which is what catches a CR
               # written while an older CRD was installed.
           required: [spec]

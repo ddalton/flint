@@ -4,14 +4,16 @@
 //! bucket/prefix address, a durability profile, and budgets. There is
 //! deliberately NO Deployment/PVC/Service in its wake — an idle lean
 //! workspace is bucket objects and nothing else (the scale-to-zero
-//! argument). Pods opt in to injection with the label
-//! `chert.us/lean-workspace: <name>`.
+//! argument). A pod asks for a workspace by NAMING THE CR in an inline
+//! CSI volume — `driver: s3.csi.chert.us`, `volumeAttributes:
+//! { chert.us/workspace: <name> }` — and kubelet's NodePublishVolume is
+//! what delivers the tree. Before v1.45.0 a mutating webhook injected a
+//! sidecar for pods carrying the label `chert.us/lean-workspace`; that
+//! webhook and its label are gone (`fcac038f`).
 
 use kube::{CustomResource, KubeSchema};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-pub const INJECT_LABEL: &str = "chert.us/lean-workspace";
 
 #[derive(CustomResource, KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[kube(
@@ -62,7 +64,7 @@ pub struct FlintLeanWorkspaceSpec {
 
     /// CSI delivery (`s3.csi.chert.us`, docs/plans/csi-node-mount-design.md):
     /// which ServiceAccounts in this namespace may mount the workspace.
-    /// ABSENT = DENY under CSI; the webhook delivery ignores it.
+    /// ABSENT = DENY — never "any pod in this namespace".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumers: Option<crate::s3csi::policy::Consumers>,
     /// CSI delivery: how the syncer gets its credential (design §4.4).
@@ -105,7 +107,8 @@ pub struct FlintLeanWorkspaceSpec {
     ///
     /// Under the CSI delivery this is a sparse ext4 image loop-mounted
     /// at the tree, so an overrun is ENOSPC in the app's own write; it
-    /// was an emptyDir sizeLimit under the webhooks, which is where the
+    /// was an emptyDir sizeLimit under the sidecar-injection webhook flint
+    /// used before v1.45.0, which is where the
     /// name comes from. Sparse: it costs what is written, not what is
     /// declared, so the ceilings on a node may sum to more than the
     /// node's disk. It bounds one workspace's blast radius; it is not a
@@ -159,8 +162,8 @@ pub struct FlintLeanWorkspaceSpec {
     ///   (5) `visibilityLagBoundSecs` is REQUIRED.
     ///
     /// CHANGING THIS ON A LIVE WORKSPACE REQUIRES POD RECREATION: the
-    /// sidecar's config is env stamped at pod creation by the webhook
-    /// and there is no re-read path. Recreation destroys the emptyDir
+    /// worker's config is stamped in as environment when the node plugin
+    /// creates it, and there is no re-read path. Recreation destroys the emptyDir
     /// pending record, which turns the whole uncited window into
     /// recovery candidates — the gated→cadence escape hatch is
     /// therefore an operator procedure, not an edit.

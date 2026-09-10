@@ -72,10 +72,10 @@ pub fn drain_need_secs(spec: &FlintLeanWorkspaceSpec) -> u64 {
     base + DRAIN_RETRY_SECS + DRAIN_SLACK_SECS
 }
 
-/// The grace period the webhook stamps on an injected pod. Never below
-/// the 30 s the pod would otherwise inherit — the hazard D10 names is
-/// that today's injected sidecar sets NO `terminationGracePeriodSeconds`
-/// at all, so every workspace drains inside a number nobody chose.
+/// The grace period stamped on the worker pod. Never below the 30 s the
+/// pod would otherwise inherit — the hazard D10 names is a worker that
+/// sets NO `terminationGracePeriodSeconds` at all, so every workspace
+/// drains inside a number nobody chose.
 pub fn derived_grace_secs(spec: &FlintLeanWorkspaceSpec) -> u64 {
     drain_need_secs(spec).max(30)
 }
@@ -500,9 +500,9 @@ mod tests {
         );
     }
 
-    /// The derived grace is what the webhook stamps, and it must never
+    /// The derived grace is what the worker pod carries, and it must never
     /// be below the 30 s a pod inherits when nobody sets it — the exact
-    /// hazard D10 names in today's injected sidecar.
+    /// hazard D10 names.
     #[test]
     fn derived_grace_never_drops_below_the_inherited_default() {
         let tiny = spec(serde_json::json!({"floorSecs": 1}));

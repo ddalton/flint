@@ -265,9 +265,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // The mutating webhook: enabled when the chart names our Service.
-    // Cert material lives in a Secret (replicas share it); the
-    // registration (caBundle included) is server-side-applied here.
+    // The controller, and nothing else. There is no webhook to register:
+    // delivery moved to the s3.csi.chert.us node plugin in fcac038f, and
+    // the cert Secret, the Service and the registration went with it.
     let workspaces: Api<FlintLeanWorkspace> = match std::env::var("FLINT_LEAN_OP_NAMESPACE") {
         Ok(ns) => Api::namespaced(client.clone(), &ns),
         Err(_) => Api::all(client.clone()),

@@ -6,7 +6,8 @@
 //! bucket state, takes no claim, keeps no manifest and holds no lease.
 //! The whole product is "an S3 prefix appears as a directory in this
 //! pod", so the CR is the argument list for a `mount-s3` command and
-//! the webhook is the only reader. Anything that needs a control loop
+//! the `s3.csi.chert.us` node plugin is the only reader. Anything that
+//! needs a control loop
 //! belongs in flint-lean, not here.
 //!
 //! THERE IS ONE MOUNTER, ON PURPOSE. Mountpoint for S3, always: fast
@@ -18,7 +19,7 @@
 //! A pod that wants `git`, `pip install` or sqlite wants flint-lean,
 //! whose publish boundary is the thing that makes those safe.
 //!
-//! The type is plain serde over the CR's `spec` object (the webhook
+//! The type is plain serde over the CR's `spec` object (the node plugin
 //! fetches the CR as a `DynamicObject`), so the CRD schema in
 //! `flint-passthrough-chart/crds/` is the single source of truth for
 //! validation the API server performs, and [`MountSpec::validate`] is
@@ -76,7 +77,7 @@ pub struct MountSpec {
     #[serde(default)]
     pub image: Option<String>,
     /// CSI delivery: which ServiceAccounts in this namespace may mount
-    /// the CR. ABSENT = DENY under `s3.csi.chert.us`; the webhook ignores it.
+    /// the CR. ABSENT = DENY — never "any pod in this namespace".
     #[serde(default)]
     pub consumers: Option<crate::s3csi::policy::Consumers>,
     /// CSI delivery: how the worker gets its credential (design §4.4).
@@ -190,7 +191,7 @@ mod tests {
     /// drifting — and drift is silent in both directions:
     ///
     /// - a struct field the CRD does not declare is PRUNED by the API
-    ///   server before the webhook ever sees it: a knob that exists in
+    ///   server before the node plugin ever sees it: a knob that exists in
     ///   the CR the user wrote and does nothing;
     /// - a CRD property the struct does not have is stored and then
     ///   hits `deny_unknown_fields`, denying every pod that opts into

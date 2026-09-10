@@ -77,8 +77,8 @@ spec:
                     (5) `visibilityLagBoundSecs` is REQUIRED.
 
                   CHANGING THIS ON A LIVE WORKSPACE REQUIRES POD RECREATION: the
-                  sidecar's config is env stamped at pod creation by the webhook
-                  and there is no re-read path. Recreation destroys the emptyDir
+                  worker's config is stamped in as environment when the node plugin
+                  creates it, and there is no re-read path. Recreation destroys the emptyDir
                   pending record, which turns the whole uncited window into
                   recovery candidates — the gated→cadence escape hatch is
                   therefore an operator procedure, not an edit.
@@ -92,7 +92,7 @@ spec:
                 description: |-
                   CSI delivery (`s3.csi.chert.us`, docs/plans/csi-node-mount-design.md):
                   which ServiceAccounts in this namespace may mount the workspace.
-                  ABSENT = DENY under CSI; the webhook delivery ignores it.
+                  ABSENT = DENY — never "any pod in this namespace".
                 nullable: true
                 properties:
                   serviceAccounts:
@@ -296,7 +296,8 @@ spec:
 
                   Under the CSI delivery this is a sparse ext4 image loop-mounted
                   at the tree, so an overrun is ENOSPC in the app's own write; it
-                  was an emptyDir sizeLimit under the webhooks, which is where the
+                  was an emptyDir sizeLimit under the sidecar-injection webhook flint
+                  used before v1.45.0, which is where the
                   name comes from. Sparse: it costs what is written, not what is
                   declared, so the ceilings on a node may sum to more than the
                   node's disk. It bounds one workspace's blast radius; it is not a
