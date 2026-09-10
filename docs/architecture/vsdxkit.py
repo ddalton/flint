@@ -362,6 +362,22 @@ def document_paths(**_):
     return [{"pts": [(0, 0), (1, 0)] + wave}]
 
 
+def block_arrow_paths(head=0.28, shaft=0.56, **_):
+    """A right-pointing block arrow: the MOVEMENT drawn as a shape.
+
+    For the place where the thing between two components is not a
+    component but an ACT — a copy, a drain, a restore. A rectangle there
+    names a box that does not exist; this names what happens. `head` is
+    the head's share of the width and `shaft` the shaft's share of the
+    height, so the text a caller puts inside clears the point only while
+    it stays inside the shaft: keep it to one or two short lines.
+    """
+    t = (1.0 - shaft) / 2.0
+    x = 1.0 - head
+    return [{"pts": [(0, t), (x, t), (x, 0), (1, 0.5), (x, 1), (x, 1 - t),
+                     (0, 1 - t)]}]
+
+
 def ellipse_paths(**_):
     return [{"ellipse": (0.5, 0.5, 0.5, 0.5)}]
 
@@ -407,6 +423,7 @@ SYMBOLS = {
     "parallelogram": parallelogram_paths, "cylinder": cylinder_paths,
     "box3d": box3d_paths, "datastore": datastore_paths,
     "document": document_paths, "ellipse": ellipse_paths,
+    "block_arrow": block_arrow_paths,
     "circle": ellipse_paths, "actor": actor_paths, "cloud": cloud_paths,
 }
 
@@ -504,7 +521,8 @@ class Page:
         st = dict(_BOX_DEFAULTS)
         st.update(kw)
         shape_kw = {k: st.pop(k) for k in ("notch", "cap", "depth", "skew",
-                                           "bumps") if k in st}
+                                           "bumps", "head", "shaft")
+                    if k in st}
         try:
             paths = SYMBOLS[kind](**shape_kw)
         except KeyError:

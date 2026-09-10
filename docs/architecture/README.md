@@ -23,11 +23,42 @@ abbreviation on the page.
 | `lite/flint-lite-dataflow.pdf` | `python3 lite/lite-dataflow.py --pdf --emf` |
 | `lean/flint-lean-dataflow.pdf` | `python3 lean/lean-dataflow.py --pdf --emf` |
 | `passthrough/flint-passthrough-dataflow.pdf` | `python3 passthrough/passthrough-dataflow.py --pdf --emf` |
+| `migration/flint-migration-dataflow.pdf` | `python3 migration/migration-dataflow.py --pdf --emf` |
 
 Each script writes a `.vsdx` (editable in Visio), a `.pdf` (via Chrome), and with
 `--emf` a metafile for pasting into Office. They are drawn with `vsdxkit.py`, and the
-three non-forge ones share `dataflowkit.py`: the role palette, the four arrow classes,
+four non-forge ones share `dataflowkit.py`: the role palette, the four arrow classes,
 the numbered-step strip, the glossary grid, and the gates.
+
+The fifth is not a front end but a **use case**: `migration/` draws a workload whose
+data is on an NFS share it already mounts, moving that data into a bucket through a
+passthrough mount, with ordinary code in the pod doing the copy. It is drawn with the
+same kit deliberately, so a reader who has seen the four recognises every shape.
+
+It exists because the question behind it is usually asked in the wrong shape — *what
+label do I put on the pod so the driver injects the mount?* There is no label and no
+webhook. `chert.us/mount` is domain-prefixed like a label but it is a KEY in
+`volumeAttributes` on an inline `csi:` volume, and the mount is made when kubelet calls
+`NodePublishVolume` at schedule time. Nothing mutates the pod. The poster draws that,
+and draws the indirection that goes with it: the pod names a **CR**, and the CR names
+the bucket — `bucket`, `keyPrefix`, `endpoint`, `region`, `image` and credentials are
+refused BY NAME from a pod's `volumeAttributes` (`s3csi/attrs.rs`), because those
+attributes are attacker-controlled input to a privileged process.
+
+### The five as one book
+
+`flint-dataflow-posters.pdf` is all five in one file — lite, passthrough, lean, forge,
+then the migration use case — each page kept at its own size, since they differ and
+scaling to a common sheet would shrink 7.5 pt body text to illegible:
+
+```sh
+pdfunite lite/flint-lite-dataflow.pdf passthrough/flint-passthrough-dataflow.pdf \
+         lean/flint-lean-dataflow.pdf forge/flint-forge-dataflow.pdf \
+         migration/flint-migration-dataflow.pdf flint-dataflow-posters.pdf
+```
+
+Verify it with `pdfinfo -f 1 -l 5`: five pages, and each page's size is a fingerprint
+of which poster it is, so the sizes are how you check the ORDER as well as the count.
 
 **The gates are the point, and they are not advisory.** Before anything is written each
 script runs seven checks: `check()` (text that overflows its box, a shape off the page),
