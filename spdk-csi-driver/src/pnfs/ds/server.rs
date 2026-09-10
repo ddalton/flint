@@ -164,7 +164,7 @@ impl DataServer {
         // session/compound layer is fully constructed in new() before
         // serve() runs, so "accepting" implies "serving" and a
         // tcpSocket readinessProbe on this port is truthful.
-        let addr = format!("{}:{}", self.config.bind.address, self.config.bind.port);
+        let addr = crate::netaddr::join(&self.config.bind.address, self.config.bind.port);
         let listener = TcpListener::bind(&addr)
             .await
             .map_err(crate::pnfs::Error::Io)?;
@@ -950,12 +950,16 @@ impl DataServer {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|s| {
-                // rsplit_once covers `host:port`; a bare hostname (no
-                // colon) or one with a non-numeric tail gets the bind
-                // port appended.
-                match s.rsplit_once(':') {
-                    Some((_, p)) if p.parse::<u16>().is_ok() => s.to_string(),
-                    _ => format!("{}:{}", s, bind_port),
+                // A bare hostname, or one whose tail is not a port,
+                // gets the bind port appended. The check must be
+                // bracket-aware: `rsplit_once(':')` on a bare IPv6
+                // literal finds `1` in `fd00::1` and calls it a port,
+                // so the address was kept as-is and shipped with no
+                // port at all.
+                if crate::netaddr::has_port(s) {
+                    s.to_string()
+                } else {
+                    crate::netaddr::join(s, bind_port)
                 }
             })
             .collect()
@@ -966,7 +970,7 @@ impl DataServer {
     /// heartbeat thread to repair; it must not block registration with
     /// the healthy ones.
     async fn register_with_mds(&self) -> Result<()> {
-        let endpoint = format!("{}:{}", self.advertise_address(), self.config.bind.port);
+        let endpoint = crate::netaddr::join(&self.advertise_address(), self.config.bind.port);
         let extra_endpoints = self.extra_advertise_addresses();
         info!("📡 Registering with endpoint: {} extra(multipath)={:?} (FLINT_DS_ADVERTISE_ADDR={:?}, POD_IP={:?})",
               endpoint,
@@ -1206,7 +1210,7 @@ impl DataServer {
                     );
                     
                     // Attempt re-registration (use advertise_address, not bind.address!)
-                    let endpoint = format!("{}:{}", advertise_address, bind_port);
+                    let endpoint = crate::netaddr::join(&advertise_address, bind_port);
                     match client.register(
                         device_id.clone(),
                         endpoint.clone(),
@@ -1330,7 +1334,7 @@ impl DataServer {
             );
         }
         let addr: std::net::SocketAddr =
-            match format!("{}:{}", self.config.bind.address, port).parse() {
+            match crate::netaddr::join(&self.config.bind.address, port).parse() {
                 Ok(a) => a,
                 Err(e) => {
                     error!("❌ bad DsControl bind address: {}", e);

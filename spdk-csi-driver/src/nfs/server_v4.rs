@@ -205,7 +205,11 @@ impl NfsServer {
 
     /// Start the NFSv4.2 server (TCP only - NFSv4 doesn't use UDP)
     pub async fn serve(&self) -> std::io::Result<()> {
-        let addr = format!("{}:{}", self.config.bind_addr, self.config.bind_port);
+        // `--bind-addr ::` is how one asks for a dual-stack listener,
+        // and `format!` turned it into `:::2049`, which no socket-address
+        // parser accepts — so the one spelling that would have served
+        // both families was the one that could not start.
+        let addr = crate::netaddr::join(&self.config.bind_addr, self.config.bind_port);
 
         // §10 observability. Started here rather than in the
         // constructor so it belongs to the serving runtime and not to

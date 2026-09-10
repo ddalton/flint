@@ -3868,7 +3868,13 @@ impl CompoundDispatcher {
         
         match pnfs.getdeviceinfo(args) {
             Ok(result) => {
-                let dev_addr_encoded = Self::encode_device_addr(&result.device_addr);
+                let dev_addr_encoded = match Self::encode_device_addr(&result.device_addr) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        warn!("❌ GETDEVICEINFO: device address will not encode: {}", e);
+                        return OperationResult::GetDeviceInfo(Nfs4Status::ServerFault, None);
+                    }
+                };
                 debug!("✅ GETDEVICEINFO successful");
                 // Files layout: no notifications offered. A files DS
                 // device's contents change by RECALL, not by cache
@@ -4660,7 +4666,18 @@ impl CompoundDispatcher {
     /// that DS's multipath addresses — the kernel opens a trunked
     /// transport per extra address (`rpc_clnt_add_xprt`), which is the
     /// server-side lever for single-client throughput.
-    fn encode_device_addr(addr: &crate::pnfs::mds::operations::DeviceAddr4) -> Bytes {
+    ///
+    /// Fallible because `endpoint_to_uaddr` is. An endpoint that will
+    /// not resolve to the IPv4 octets a universal address requires used
+    /// to be encoded VERBATIM, which is the worst of the three options:
+    /// `host:port` is a well-formed XDR string, so the client accepts
+    /// the device, caches it, and only discovers the address is
+    /// nonsense when a READ against that DS goes nowhere. Failing the
+    /// GETDEVICEINFO says the same thing at the point where it is still
+    /// attributable.
+    fn encode_device_addr(
+        addr: &crate::pnfs::mds::operations::DeviceAddr4,
+    ) -> Result<Bytes, String> {
         use crate::nfs::xdr::XdrEncoder;
         use crate::pnfs::protocol::endpoint_to_uaddr;
 
@@ -4681,7 +4698,8 @@ impl CompoundDispatcher {
                 // netaddr4: netid + universal address
                 // ("10.42.214.18:2049" → "10.42.214.18.8.1").
                 encoder.encode_string(&addr.netid);
-                let uaddr = endpoint_to_uaddr(ep).unwrap_or_else(|_| ep.clone());
+                let uaddr = endpoint_to_uaddr(ep)
+                    .map_err(|e| format!("DS[{i}] endpoint {ep}: {e}"))?;
                 encoder.encode_string(&uaddr);
             }
             debug!("   DS[{}]: {:?}", i, ds_addrs);
@@ -4693,7 +4711,7 @@ impl CompoundDispatcher {
             n,
             result.len()
         );
-        result
+        Ok(result)
     }
 }
 
@@ -5760,7 +5778,8 @@ mod tests {
                 vec!["10.0.0.2:2049".to_string()],
             ],
         };
-        let body = CompoundDispatcher::encode_device_addr(&addr);
+        let body = CompoundDispatcher::encode_device_addr(&addr)
+            .expect("IPv4 literals must encode");
         let mut d = XdrDecoder::new(body);
 
         // stripe_indices: exactly one index per DS, in order.
@@ -5780,6 +5799,43 @@ mod tests {
         assert_eq!(d.decode_u32().unwrap(), 1); // DS[1] multipath count
         assert_eq!(d.decode_string().unwrap(), "tcp");
         assert_eq!(d.decode_string().unwrap(), "10.0.0.2.8.1");
+    }
+
+    /// An endpoint that cannot become a universal address must FAIL the
+    /// encode, not be written through as itself.
+    ///
+    /// The old fallback (`unwrap_or_else(|_| ep.clone())`) put
+    /// `host:port` on the wire where a uaddr belongs. That is not a
+    /// malformed reply the client rejects — it is a well-formed
+    /// netaddr4 carrying a string that is not an address, so the client
+    /// takes the device, caches it, and the fault surfaces later as I/O
+    /// that goes nowhere, attributed to the wrong thing.
+    ///
+    /// The second half is the control: the SAME shape with a resolvable
+    /// literal still encodes, so this test fails for the reason it
+    /// names rather than because the encoder stopped working.
+    #[test]
+    fn a_device_address_that_will_not_encode_is_an_error_not_a_string() {
+        let bad = crate::pnfs::mds::operations::DeviceAddr4 {
+            netid: "tcp".to_string(),
+            // .invalid is reserved by RFC 2606 and never resolves.
+            ds_list: vec![vec!["nonexistent.invalid:2049".to_string()]],
+        };
+        let err = CompoundDispatcher::encode_device_addr(&bad)
+            .expect_err("an unresolvable DS endpoint must not encode");
+        assert!(
+            err.contains("nonexistent.invalid"),
+            "the error must name the endpoint that caused it: {err}"
+        );
+
+        let good = crate::pnfs::mds::operations::DeviceAddr4 {
+            netid: "tcp".to_string(),
+            ds_list: vec![vec!["10.0.0.2:2049".to_string()]],
+        };
+        assert!(
+            CompoundDispatcher::encode_device_addr(&good).is_ok(),
+            "control: a resolvable literal must still encode"
+        );
     }
 
     /// A PnfsOperations that answers only the two questions the I/O

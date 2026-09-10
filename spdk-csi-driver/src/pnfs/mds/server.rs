@@ -904,8 +904,11 @@ impl MetadataServer {
         // Start gRPC control server in background (for DS registration)
         self.start_grpc_server();
 
-        // Start TCP server (for NFS client connections)
-        let addr = format!("{}:{}", self.config.bind.address, self.config.bind.port);
+        // Start TCP server (for NFS client connections).
+        // `bind.address: "::"` is how a hub is asked to serve both
+        // families from one socket (Linux, bindv6only=0); `format!`
+        // made that `:::2049`, which does not parse.
+        let addr = crate::netaddr::join(&self.config.bind.address, self.config.bind.port);
         self.serve_tcp(&addr).await
     }
 
@@ -1663,7 +1666,7 @@ impl MetadataServer {
                 .ok()
                 .and_then(|v| v.parse::<u16>().ok())
                 .unwrap_or(50051);
-            let grpc_addr = format!("{}:{}", bind_addr, grpc_port)
+            let grpc_addr = crate::netaddr::join(&bind_addr, grpc_port)
                 .parse()
                 .expect("Invalid gRPC address");
 

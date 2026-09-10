@@ -44,6 +44,26 @@ pub fn needs_brackets(host: &str) -> bool {
     host.contains(':') && !host.starts_with('[')
 }
 
+/// Does this string already carry a `:port` suffix?
+///
+/// Bracket-aware, and that is the whole point: the last colon of a BARE
+/// IPv6 literal belongs to the address, so `"fd00::1".rsplit_once(':')`
+/// hands back `("fd00:", "1")` — and `1` parses as a port. A naive
+/// check therefore concludes the address is already complete and the
+/// real port is silently dropped, producing an endpoint that names a
+/// host and no service.
+pub fn has_port(s: &str) -> bool {
+    let tail = match s.rfind(']') {
+        // Bracketed: only what follows the bracket can be a port.
+        Some(b) => &s[b + 1..],
+        // Unbracketed with more than one colon is a bare IPv6 literal;
+        // every colon is part of the address.
+        None if s.matches(':').count() > 1 => return false,
+        None => s,
+    };
+    tail.rsplit_once(':').is_some_and(|(_, p)| p.parse::<u16>().is_ok())
+}
+
 /// Does this address (host or `host:port`) name the IPv6 wildcard —
 /// `::`, `[::]`, or either with a port? Used to report whether a hub is
 /// listening dual-stack, which on Linux (`net.ipv6.bindv6only=0`, the
@@ -107,6 +127,27 @@ mod tests {
     fn scoped_link_local_still_gets_brackets() {
         assert!("fe80::1%eth0".parse::<std::net::Ipv6Addr>().is_err());
         assert_eq!(join("fe80::1%eth0", 2049), "[fe80::1%eth0]:2049");
+    }
+
+    /// The bug this replaced: `rsplit_once(':')` on a bare IPv6
+    /// literal finds a "port" that parses, so the caller kept the
+    /// address as-is and the real port never got appended.
+    #[test]
+    fn has_port_is_not_fooled_by_an_ipv6_literal() {
+        // The naive check, shown failing on the same input.
+        let naive = |s: &str| s.rsplit_once(':').is_some_and(|(_, p)| p.parse::<u16>().is_ok());
+        assert!(naive("fd00::1"), "the naive check calls this complete...");
+        assert!(!has_port("fd00::1"), "...and it is not: there is no port here");
+
+        assert!(!has_port("::1"));
+        assert!(!has_port("2001:db8::1"));
+        assert!(!has_port("[fd00::1]"));
+        assert!(!has_port("10.0.0.1"));
+        assert!(!has_port("host.example"));
+
+        assert!(has_port("[fd00::1]:2049"));
+        assert!(has_port("10.0.0.1:2049"));
+        assert!(has_port("host.example:2049"));
     }
 
     #[test]

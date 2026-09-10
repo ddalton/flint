@@ -402,7 +402,7 @@ async fn discover_node_agents(kube_client: &Client, namespace: &str) -> Result<H
                 status.pod_ip
             ) {
                 let node_agent_port = std::env::var("NODE_AGENT_PORT").unwrap_or("9081".to_string());
-                let agent_url = format!("http://{}:{}", pod_ip, node_agent_port);
+                let agent_url = format!("http://{}", crate::netaddr::join(&pod_ip, &node_agent_port));
                 println!("🔍 [NODE_DISCOVERY] Found node agent for {}: {}", node_name, agent_url);
                 node_agents.insert(node_name, agent_url);
             }

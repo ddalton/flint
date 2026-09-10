@@ -1,0 +1,76 @@
+X25 netaddr / dual-stack drill — cluster runcr, 2026-09-10
+  3x i4i.large all-spot (CP included), us-west-1, k8s v1.34.11, amd64
+  fixed   image digest sha256:6f11a5413b266f1083ebd09587d19100cf313e628da29da57f2df85dd4edb250
+  control image digest sha256:c71b8b003e569c83b3cb00049bcfc9dd01ff798daecdf5fbb08a9dcc6b2f1d35
+  binaries: control mds sha ebfec05b578a / fixed mds sha a83a66411f56 (content marker '] endpoint ': 0 vs 1)
+
+ENVIRONMENTAL CONTROL (before any leg): a plain python socket bound to '::'
+inside a pod on these nodes accepted an IPv4 connection —
+  if_inet6 present: True / IPV6_V6ONLY default: 0 / ACCEPTED-FROM: ::ffff:127.0.0.1 / DUALSTACK-OK
+so the rig can do dual-stack independent of the code under test.
+
+════════════════════════════════════════════════════════════════
+X25 netaddr drill
+  fixed:   dilipdalton/flint-pnfs:x25-fixed-69ae50e
+  control: dilipdalton/flint-pnfs:x25-control-69ae50e
+  started: 2026-09-10T19:25:22Z
+════════════════════════════════════════════════════════════════
+
+═══ L0 — the two images must be DIFFERENT artifacts ═══
+  fixed   imageID: docker.io/dilipdalton/flint-pnfs@sha256:6f11a5413b266f1083ebd09587d19100cf313e628da29da57f2df85dd4edb250
+  control imageID: docker.io/dilipdalton/flint-pnfs@sha256:c71b8b003e569c83b3cb00049bcfc9dd01ff798daecdf5fbb08a9dcc6b2f1d35
+  ✅ L0 the arms are distinct artifacts by digest
+
+═══ L1 — flint-pnfs:x25-fixed-69ae50e with bind.address="::" (expect: serves) ═══
+  listeners on port 2049: tcp6=1 tcp4=0
+  ✅ L1 the hub came up
+  ✅ L1 the listener is on tcp6 — one socket, both families
+  ✅ L1 an IPv4 kernel client mounted and 64MB round-tripped
+
+═══ L2 — flint-pnfs:x25-control-69ae50e with bind.address="::" (expect: serves) ═══
+  listeners on port 2049: tcp6=1 tcp4=0
+  ✅ L2 the hub came up
+  ✅ L2 the listener is on tcp6 — one socket, both families
+  ✅ L2 an IPv4 kernel client mounted and 64MB round-tripped
+
+═══ L3 — flint-pnfs:x25-fixed-69ae50e with bind.address="0.0.0.0" (expect: serves) ═══
+  listeners on port 2049: tcp6=0 tcp4=
+  ✅ L3 the hub came up
+  ✅ L3 an IPv4 kernel client mounted and 64MB round-tripped
+
+═══ L4 — flint-pnfs:x25-control-69ae50e with bind.address="0.0.0.0" (expect: serves) ═══
+  listeners on port 2049: tcp6=0 tcp4=
+  ✅ L4 the hub came up
+  ✅ L4 an IPv4 kernel client mounted and 64MB round-tripped
+
+═══ L5 — GETDEVICEINFO with an unresolvable DS (expect server log: names-it) ═══
+  LAYOUTGET granted: 1    GETDEVICEINFO refusals named: 1
+      | [2m2026-09-10T19:27:27.773951Z[0m [33m WARN[0m ❌ GETDEVICEINFO: device address will not encode: DS[0] endpoint no-such-ds.invalid:2049: Failed to resolve no-such-ds.invalid: failed to lookup addre
+  ✅ L5 the refusal is raised and names the endpoint
+
+═══ L6 — GETDEVICEINFO with an unresolvable DS (expect server log: silent) ═══
+  LAYOUTGET granted: 1    GETDEVICEINFO refusals named: 0
+  ✅ L6 the control says NOTHING about it — the silence the fix removes
+
+═══ L7a — mode:mds, bind "::" — does the gRPC control plane SURVIVE? (expect: survives) ═══
+  pod phase=Running restarts=0   (Kubernetes is content either way)
+  claims in the log: 1
+  panics:            0
+  listening sockets: 00000000000000000000000000000000:0801 00000000000000000000000000000000:C383 
+  ✅ L7a the control plane is listening on 50051
+
+═══ L7b — mode:mds, bind "::" — does the gRPC control plane SURVIVE? (expect: dies) ═══
+  pod phase=Running restarts=0   (Kubernetes is content either way)
+  claims in the log: 1
+  panics:            1
+  listening sockets: 00000000000000000000000000000000:0801 
+  ✅ L7b the control plane is GONE while the pod reports Running/0 restarts — the defect
+
+═══ RESULT ═══
+  pass=15  fail=0  inconclusive=0
+  finished: 2026-09-10T19:27:49Z
+
+  NOT COVERED BY THIS DRILL (the tooling has no dual-stack knob):
+    - lite_operator::reconcile::address_of bracketing an IPv6 LoadBalancer ingress
+    - the pod_ip URL sites (driver.rs, controller_operator.rs, dashboard)
+    Both need IPv6 addresses to exist in the cluster. Unit tests only.

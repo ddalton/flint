@@ -393,7 +393,10 @@ async fn get_rpc_url_for_node(
         if pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(node_name) {
             if let Some(pod_ip) = pod.status.as_ref().and_then(|s| s.pod_ip.as_deref()) {
                 let node_agent_port = std::env::var("NODE_AGENT_PORT").unwrap_or("9081".to_string());
-                return Ok(format!("http://{}:{}/api/spdk/rpc", pod_ip, node_agent_port));
+                return Ok(format!(
+                    "http://{}/api/spdk/rpc",
+                    crate::netaddr::join(pod_ip, &node_agent_port)
+                ));
             }
         }
     }

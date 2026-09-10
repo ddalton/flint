@@ -689,7 +689,13 @@ pub fn address_of(svc: &Service, namespace: &str, advertise: Option<&str>) -> Op
                 .first()?
                 .clone();
             let host = ing.hostname.or(ing.ip)?;
-            Some(format!("{host}:{port}"))
+            // The CRD's CEL rule polices a user-supplied
+            // `advertiseAddress` for brackets (crd.rs) and never sees
+            // this one, which is the path that can actually produce an
+            // IPv6 literal without being asked: a LoadBalancer whose
+            // ingress carries `.ip` rather than `.hostname`. Consumers
+            // mount `status.address` verbatim.
+            Some(crate::netaddr::join(&host, port))
         }
         _ => Some(format!("{name}.{namespace}.svc.cluster.local:{port}")),
     }
@@ -3482,6 +3488,54 @@ mod tests {
         assert_eq!(
             address_of(&lb, "ws", None).as_deref(),
             Some("a.elb.amazonaws.com:2049")
+        );
+
+        // A LoadBalancer with no hostname falls through to `.ip`, and
+        // that address can be IPv6. `format!("{host}:{port}")` produced
+        // `2001:db8::1:2049`, which no socket-address parser accepts —
+        // and this is the DERIVED path, so the CRD's CEL rule never
+        // saw it. Consumers mount this string verbatim.
+        let v6 = svc(
+            "LoadBalancer",
+            Some(ServiceStatus {
+                load_balancer: Some(LoadBalancerStatus {
+                    ingress: Some(vec![LoadBalancerIngress {
+                        ip: Some("2001:db8::1".into()),
+                        ..Default::default()
+                    }]),
+                }),
+                ..Default::default()
+            }),
+        );
+        let got = address_of(&v6, "ws", None).expect("an ingress ip is an address");
+        assert_eq!(got, "[2001:db8::1]:2049");
+        // The point of the brackets, not just their presence: what we
+        // publish has to survive the parse a consumer will do.
+        assert!(
+            got.parse::<std::net::SocketAddr>().is_ok(),
+            "status.address must parse as a socket address: {got}"
+        );
+
+        // An IPv4 ingress is untouched — one dimension moved.
+        let v4 = svc(
+            "LoadBalancer",
+            Some(ServiceStatus {
+                load_balancer: Some(LoadBalancerStatus {
+                    ingress: Some(vec![LoadBalancerIngress {
+                        ip: Some("10.0.4.7".into()),
+                        ..Default::default()
+                    }]),
+                }),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(address_of(&v4, "ws", None).as_deref(), Some("10.0.4.7:2049"));
+
+        // And an explicit advertiseAddress still wins verbatim,
+        // brackets and all — it is already CEL-validated.
+        assert_eq!(
+            address_of(&v6, "ws", Some("[fd00::2]:2049")).as_deref(),
+            Some("[fd00::2]:2049")
         );
     }
 

@@ -382,12 +382,10 @@ pub async fn poll_raw(
     port: i32,
     timeout: Duration,
 ) -> Result<(String, String), String> {
-    let url = if pod_ip.contains(':') {
-        // IPv6 literals need brackets.
-        format!("http://[{pod_ip}]:{port}/status")
-    } else {
-        format!("http://{pod_ip}:{port}/status")
-    };
+    // This site had the bracketing inline and correct; it now shares
+    // the one copy so a fix reaches every caller rather than the one
+    // whose author happened to think of it.
+    let url = format!("http://{}/status", crate::netaddr::join(pod_ip, port));
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .build()
