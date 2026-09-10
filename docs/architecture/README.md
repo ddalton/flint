@@ -10,6 +10,94 @@ Start with **`flint-front-ends-architecture.pdf`** (13 pages, A3 landscape).
 
 The forge front end has its own document under **`forge/`** — `forge/flint-forge-architecture.pdf` (8 pages, A3 landscape): the components on three planes (data plane, durable path, control plane), the push transaction and its theorems, the lease, the operator and the door, the boundaries and every campaign, and the prior art with a verdict. It is drawn with this deck's kit (`forge/forge-diagrams.py` imports `diagrams.py`) and built by `forge/build.sh` with the same checks.
 
+## The one-page data-flow posters
+
+Beside the deck there is one **data-flow poster per front end** — a single sheet you
+can put on a wall: the components that matter, the arrows between them, a label on
+each arrow rather than a paragraph in each box, four notes, and a glossary of every
+abbreviation on the page.
+
+| poster | build it with |
+|---|---|
+| `forge/flint-forge-dataflow.pdf` | `python3 forge/forge-dataflow.py --pdf --emf` |
+| `lite/flint-lite-dataflow.pdf` | `python3 lite/lite-dataflow.py --pdf --emf` |
+| `lean/flint-lean-dataflow.pdf` | `python3 lean/lean-dataflow.py --pdf --emf` |
+| `passthrough/flint-passthrough-dataflow.pdf` | `python3 passthrough/passthrough-dataflow.py --pdf --emf` |
+
+Each script writes a `.vsdx` (editable in Visio), a `.pdf` (via Chrome), and with
+`--emf` a metafile for pasting into Office. They are drawn with `vsdxkit.py`, and the
+three non-forge ones share `dataflowkit.py`: the role palette, the four arrow classes,
+the numbered-step strip, the glossary grid, and the gates.
+
+**The gates are the point, and they are not advisory.** Before anything is written each
+script runs seven checks: `check()` (text that overflows its box, a shape off the page),
+`overlap_report()` (two components on top of one another), `label_overlap_report()`
+(two arrow labels on top of one another — the second silently eats the first),
+`label_on_line_report()` (a label an arrow is drawn straight through), and two in
+`dataflowkit`: `ink_collision_report()`, `edge_strike_report()` and
+`arrow_through_text_report()`. Every one of these
+is invisible in the `.vsdx` and obvious in print, so a poster with any of them exits
+non-zero. Run the script and read the count: `N shapes, 0 problems`.
+
+The last three exist because the first four have a blind spot, and it cost a round of
+"looks fine at 78 dpi". `overlap_report` skips anything marked `ok_overlap`, and every
+caption is; `label_overlap_report` only sees boxes marked `is_label`. So a caption laid
+across another caption, or a caption a zone's own dashed border is drawn through, was
+reported by nothing at all — twelve of the latter were on the four posters at once —
+and `label_on_line_report` has the same gap on the other axis: it tests only boxes made
+by `flabel`, so an arrow drawn through a container's foot label or a free caption was
+also unreported.
+Both new checks measure the **ink**, not the fitbox: a text box carries 0.04" of top
+margin and 0.06" of bottom pad, so two stacked caption lines always "overlap" without a
+glyph touching, and the first version of the check drowned in that. `edge_strike_report`
+also tests **rectangles only** — a `Poly` (cloud, hexagon, cylinder, box3d) is drawn
+well inside its bounding box, and testing its bbox reports strikes that do not exist.
+
+A clean run proves nothing until the checker has been shown to fail: inject a collision
+(move one caption onto its neighbour, or onto a zone's edge) and confirm the count goes
+to 1.
+
+**Two instances, drawn as two instances — on all four.** Forge shows one door in front
+of two repository pods, each with its own emptyDir, lease and prefix. Lite shows two
+hubs, each with its own `:2049` Service and its own prefix, and a consumer node that
+mounts both. Lean shows two workspaces, and passthrough two mounts, each with its own
+worker pod (one per *published volume*), its own credential and its own bucket. That
+contrast has to be *drawn* — a caption saying "there would be a second one" is not the
+same picture — and drawing it is what makes each poster say plainly what is SHARED (the
+node plugin, one per node; the broker, one Deployment; forge's door; lite's and lean's
+gateways) versus what is per-instance (everything else).
+
+**A shared component has to FAN OUT in the drawing.** Saying "shared" in a caption does
+not answer "then where is the second one?" — a reader counts boxes. So every shared
+door has two arrows leaving it, to both instances, and says so in its own title:
+"the door — ONE door, EVERY repository", "flint-hub-gateway — ONE door in front of
+EVERY hub's file API", "flint-lean-gateway — ONE, for every workspace",
+"flint-s3-broker — ONE Deployment". One box with one arrow reads as one instance no
+matter what the prose underneath it says.
+
+**How a UI is powered is a different answer per front end, and each poster says which.**
+Passthrough needs nothing built — the bucket is the API, and a UI lists and GETs the
+same keys the mount presents, bringing its own credential (the broker will not issue
+one; its grants are bound to a pod-uid registration the node plugin made). Lean cannot
+do that, because its durable state has a manifest: `flint-lean-gateway` talks to the
+BUCKET rather than to the pod — PUT the object, append an inbox entry, never edit the
+manifest — and the syncer adopts the inbox at its next barrier. Lite's file API is
+proxied to the hub itself. Three different shapes, and drawing one of them for all
+three would be wrong three ways.
+
+**And lite's asymmetry is internal, which the poster has to show too.** Its file API
+*can* be fronted — `flint-hub-gateway` resolves a project id to its share, wakes it if
+parked and proxies six file routes, so a fleet reaches every share through one endpoint
+and one credential. Its mount cannot: NFS needs a routable address per hub. Drawing only
+the direct `:8080` hop would have implied a per-hub REST endpoint, which is exactly what
+the operator refuses to render.
+
+The four are meant to be read as a set, so the palette is by ROLE — a store looks like
+a store in all four — and the arrow classes are the same colours everywhere: data
+plane, durable path, control plane, and one class per poster for the thing that front
+end alone has (forge's presigned bypass, lite's second door, lean's boundary verbs,
+passthrough's one privileged act).
+
 ## What is source, and what is built
 
 | file | |

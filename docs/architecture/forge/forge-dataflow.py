@@ -9,7 +9,7 @@ deserves — a cylinder for a store, a hexagon for a gateway, a 3-D box
 for the server, a data-flow store for the cache, an actor for the human,
 a cloud for somebody else's boundary.
 
-Run:  python3 forge-dataflow.py [outdir] [--preview] [--pdf]
+Run:  python3 forge-dataflow.py [outdir] [--preview] [--pdf] [--emf]
 """
 
 import os
@@ -17,6 +17,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import vsdxkit as k
+import vsdxemf as emf
+import dataflowkit as dfk
 
 # reuse the sibling's Chrome plumbing rather than a second copy of it
 _here = os.path.dirname(os.path.abspath(__file__))
@@ -138,16 +140,17 @@ def build():
     p.text(0.5, 0.34, 9.0, "flint-forge", size=9.5, color=MUTE, bold=True)
     p.text(0.5, 0.6, 21.4, "Data flow", size=20, color=INK, bold=True)
     p.text(0.5, 1.06, 21.4,
-           "Stock git serves every byte. One syncer beside it is the only "
-           "process that can write S3.", size=10, color=SUB)
+           "Stock git serves every byte. ONE stateless door fronts every "
+           "repository; one syncer beside each is the only process that can "
+           "write S3.", size=10, color=SUB)
 
     spine = 3.4
 
     # ---- boundaries ---------------------------------------------------
     zone(p, 0.5, 2.5, 3.3, 4.4, "consumer cluster")
-    zone(p, 3.95, 1.85, 11.6, 6.4, "flint hub cluster")
-    zone(p, 8.0, 1.95, 7.45, 6.1, "forge pod — one per repository")
-    node(p, "cloud", 15.7, 2.35, 5.95, 5.4, "", "", fill=CLOUD_F,
+    zone(p, 3.95, 1.85, 11.6, 8.5, "flint hub cluster")
+    zone(p, 8.0, 1.95, 7.45, 6.1, "forge pod — repo A")
+    node(p, "cloud", 15.7, 2.35, 5.95, 7.8, "", "", fill=CLOUD_F,
          line=CLOUD_L, line_weight=0.012)
     p.text(15.9, 2.82, 5.55, "S3-compatible object storage", size=10.5,
            color="#8A6A1E", bold=True, halign=1)
@@ -155,7 +158,7 @@ def build():
     # TWO containers, and their labels sit at the FOOT of each box: a
     # label at the top pushes the component that matters off the spine
     for cx, cw, cname in ((8.15, 4.05, "container:  git-http"),
-                          (12.45, 2.6, "container:  syncer")):
+                          (12.45, 2.35, "container:  syncer")):
         p.box(cx, 2.4, cw, 4.4, "", "", fill="#FFFFFF", line="#B9C0C8",
               dashed=True, rounding=0.1, line_weight=0.009)
         p.text(cx, 6.45, cw, cname, size=9, color="#5A646F", bold=True,
@@ -178,12 +181,12 @@ def build():
 
     # ---- the door and the two verifiers -------------------------------
     node(p, "hexagon", 4.35, 2.55, 2.95, 1.7, "the door",
-         "authenticate\nauthorise · route · wake",
+         "ONE door, EVERY repository\nauthenticate · authorise · route · wake",
          fill=DOOR_F, line=DOOR_L, line_weight=0.014, notch=0.16)
     node(p, "hexagon", 4.05, 4.75, 1.85, 1.2, "kube-apiserver",
          "TokenReview\ncached ≤ 60 s", fill="#EEF1F5", line=MUTE,
          title_size=8.8, body_size=7.4, notch=0.13)
-    node(p, "hexagon", 6.1, 4.75, 1.85, 1.2, "issuer JWKS",
+    node(p, "hexagon", 6.1, 4.75, 1.6, 1.2, "issuer JWKS",
          "verify offline\nverdicts never cached", fill="#E8E4F4",
          line="#7A6BB5", title_size=8.8, body_size=7.4, notch=0.13)
     node(p, "hexagon", 4.35, 6.5, 2.95, 1.4, "operator",
@@ -197,9 +200,9 @@ def build():
     node(p, "circle", 9.4, 4.6, 1.5, 1.45, "proc-receive", "the seam",
          fill="#FFF0DF", line=GIT_L, line_weight=0.014, title_size=9.2,
          body_size=7.4)
-    p.text(8.3, 6.12, 3.75,
-           "a git HOOK — a process receive-pack spawns per push, in this "
-           "container. Same binary as the syncer.", size=7.2, color=MUTE,
+    p.text(9.35, 6.12, 2.55,
+           "a git HOOK — a process receive-pack spawns per push. Same "
+           "binary as the syncer.", size=7.2, color=MUTE,
            halign=1)
     node(p, "circle", 12.95, 2.5, 1.8, 1.8, "syncer", "the only\nwriter",
          fill=SYNC_F, line=SYNC_L, line_weight=0.017, title_size=11)
@@ -208,6 +211,28 @@ def build():
          "the bare repo — objects/pack, refs, HEAD  ·  mounted in BOTH "
          "containers  ·  dies with the pod",
          fill=CACHE_F, line=CACHE_L, title_size=9.5, line_weight=0.013)
+
+    # the SECOND repository — the door's whole point, and the line
+    # flint-lite cannot draw
+    zone(p, 8.0, 8.45, 7.45, 1.9, "forge pod — repo B", color="#8A929B")
+    p.text(8.18, 8.79, 7.1,
+           "the same three parts, the same image — its own emptyDir, its own "
+           "lease, its own snapshot, its own prefix. Each Service is HEADLESS "
+           "with no external address.", size=7.4, color=MUTE)
+
+    node(p, "box3d", 8.25, 9.30, 2.55, 0.72, "git",
+         "http-backend · hooks", fill=GIT_F, line=GIT_L, line_weight=0.012,
+         depth=0.07, title_size=9.4, body_size=7.2)
+    node(p, "datastore", 11.05, 9.30, 2.30, 0.72, "emptyDir  /repo",
+         "the cache", fill=CACHE_F, line=CACHE_L, line_weight=0.012,
+         title_size=9.0, body_size=7.2)
+    node(p, "circle", 13.60, 9.20, 1.55, 0.92, "syncer", "one writer",
+         fill=SYNC_F, line=SYNC_L, line_weight=0.014, title_size=9.4,
+         body_size=7.2)
+    p.arrow([(10.82, 9.66), (11.05, 9.66)], color=FLOW, weight=W,
+            begin_arrow=k.ARROW_FILLED)
+    p.arrow([(13.37, 9.66), (13.60, 9.66)], color=DUR, weight=W,
+            begin_arrow=k.ARROW_FILLED)
 
     # ---- the stores ----------------------------------------------------
     node(p, "cylinder", 16.7, 3.3, 3.95, 0.95, "packs",
@@ -219,16 +244,22 @@ def build():
     node(p, "cylinder", 16.7, 5.7, 3.95, 0.95, "epoch",
          "the single-writer lease", fill=S3_F, line=S3_L,
          line_weight=0.013, cap=0.3)
+    p.text(16.7, 6.95, 3.95, "…all of it under repo A's prefix", size=7.4,
+           color=MUTE, halign=1)
+    node(p, "cylinder", 16.7, 8.85, 3.95, 1.0, "repo B's prefix",
+         "its own packs, snapshot and epoch — DISJOINT. The door routes; "
+         "nothing between the two is shared",
+         fill=S3_F, line=S3_L, line_weight=0.013, cap=0.3, body_size=7.4)
 
     # ---- the flows -----------------------------------------------------
     # 1 · a client to the door
     p.arrow([(2.72, spine), (4.35, spine)], color=FLOW, weight=WT)
-    flabel(p, 3.5, spine - 0.2, "push · clone")
+    flabel(p, 3.35, spine - 0.2, "push · clone")
 
     # 1b · the file API, in at the same door
     p.arrow([(2.72, 5.37), (3.25, 5.37), (3.25, 4.62), (5.2, 4.62),
              (5.2, 4.25)], color=FLOW, weight=W)
-    flabel(p, 4.15, 4.44, "GET / PUT a path", w=1.55, size=7.4)
+    flabel(p, 4.45, 4.44, "GET / PUT a path", w=1.0, size=7.4)
 
     # 2 · the fork: the door routes on the token's `iss`
     p.arrow([(5.82, 4.25), (5.82, 4.42), (4.97, 4.42), (4.97, 4.75)],
@@ -241,6 +272,14 @@ def build():
     # 3 · the door to git
     p.arrow([(7.3, spine), (8.4, spine)], color=FLOW, weight=WT)
     flabel(p, 7.8, spine - 0.2, "CGI", w=0.7)
+
+    # 3b · the same door, a different repository — routed, not duplicated
+    p.arrow([(7.90, spine), (7.90, 9.66), (8.25, 9.66)], color=FLOW,
+            weight=WT)
+    flabel(p, 9.55, 8.26, "the SAME door, routed on the repository name",
+           w=3.0, size=7.4)
+    p.arrow([(15.13, 9.35), (16.7, 9.35)], color=DUR, weight=WT,
+            begin_arrow=k.ARROW_FILLED)
 
     # 4 · git hands the hook the commands
     p.arrow([(10.15, 4.225), (10.15, 4.6)], color=FLOW, weight=W)
@@ -257,25 +296,25 @@ def build():
     flabel(p, 8.50, 5.35, "objects", w=0.85)
 
     # 7 · the restore rebuilds the cache from the bucket
-    p.arrow([(13.85, 4.3), (13.85, 7.0)], color=DUR, weight=W, dashed=True)
-    flabel(p, 14.50, 5.70, "restore", DUR, w=1.1)
+    p.arrow([(14.35, 4.3), (14.35, 7.0)], color=DUR, weight=W, dashed=True)
+    flabel(p, 13.55, 5.70, "restore", DUR, w=1.1)
 
     # 8 · the syncer and the three stores — radial, so nothing elbows
     p.arrow([(14.72, 3.6), (16.7, 3.775)], color=DUR, weight=WT,
             begin_arrow=k.ARROW_FILLED)
-    flabel(p, 15.50, 3.40, "PUT · GET", DUR, w=1.3)
+    flabel(p, 15.12, 3.40, "PUT · GET", DUR, w=1.3)
     p.arrow([(14.6, 4.0), (16.7, 4.975)], color=DUR, weight=WT,
             begin_arrow=k.ARROW_FILLED)
-    flabel(p, 15.65, 4.04, "CAS · read", DUR, w=1.4)
+    flabel(p, 15.12, 3.83, "CAS · read", DUR, w=1.4)
     p.arrow([(14.35, 4.25), (16.7, 6.175)], color=DUR, weight=W,
             begin_arrow=k.ARROW_FILLED)
-    flabel(p, 15.65, 6.00, "renew · poll", DUR, w=1.2)
+    flabel(p, 15.12, 6.00, "renew · poll", DUR, w=1.2)
 
     # 9 · the control plane, which reads no object
     p.arrow([(7.3, 6.95), (8.0, 6.95)], color=CTL, weight=W, dashed=True)
     p.arrow([(8.0, 7.35), (7.3, 7.35)], color=CTL, weight=W, dashed=True)
-    flabel(p, 7.65, 6.77, "reconcile", CTL, w=1.2, size=7.4)
-    flabel(p, 7.65, 7.53, "/status", CTL, w=1.0, size=7.4)
+    flabel(p, 7.57, 6.77, "reconcile", CTL, w=0.62, size=7.4)
+    flabel(p, 7.57, 7.53, "/status", CTL, w=0.55, size=7.4)
 
     # 10 · the bytes that never enter the pod
     p.arrow([(2.2, 2.92), (2.2, 1.62), (21.35, 1.62), (21.35, 3.775),
@@ -284,26 +323,46 @@ def build():
            BYPASS, w=4.4)
 
     # ---- the notes the picture cannot carry ----------------------------
-    y = 8.55
-    p.text(0.55, y, 21.3,
-           "TWO CREDENTIAL KINDS, SERVED AT ONCE. The door routes on the "
+    y = 10.75
+    notes = [
+        "ONE DOOR, MANY REPOSITORIES — and this is exactly where forge and "
+        "flint-lite differ. The door holds no repository state: it verifies "
+        "the token, resolves the repository named in the URL to its "
+        "FlintRepo, routes to that repository's pod and wakes it if it is "
+        "parked — so a thousand repositories are ONE endpoint, one DNS name "
+        "and one credential shape to every client. A lite hub cannot be "
+        "fronted that way, because the hub IS the tree: one process, one "
+        "prefix, dialled directly at the address its own Service "
+        "advertises. A second lite volume is a second pod, a second Service "
+        "and a second mount at the consumer. And the door is not only a "
+        "router: where the operator renders the NetworkPolicy, it is the "
+        "ONLY peer admitted to a repository pod's git port — which is what "
+        "makes X-Remote-User mean anything. Where that policy is NOT "
+        "rendered, reaching the port IS the authorisation — and the "
+        "operator raises PrincipalsUnenforced against that repository "
+        "rather than leaving it unsaid. Either way a client that bypasses "
+        "the door is already outside the trust model, so the door is a "
+        "COMPLETE oracle of who pushed and when — which is what the idle "
+        "ladder counts. A lite hub has no such place.",
+        "TWO CREDENTIAL KINDS, SERVED AT ONCE. The door routes on the "
            "token's iss: a pod's ServiceAccount token goes to TokenReview at "
            "the apiserver, an issuer-minted JWT to offline signature "
            "verification against the cached JWKS. A JWT's sub — a person — "
            "becomes the principal for spec.consumers, for the branch policy, "
-           "and as the commit author.", size=8.6, color=SUB)
-    p.text(0.55, y + 0.28, 21.3,
-           "AND THE DOOR REFUSES TO START if the cluster's ServiceAccount "
+           "and as the commit author.",
+        "AND THE DOOR REFUSES TO START if the cluster's ServiceAccount "
            "issuer and the configured JWT issuer are the same string: every "
            "pod token would then route to the offline verifier, which cannot "
-           "know a pod was deleted.", size=8.6, color=SUB)
-    p.text(0.55, y + 0.56, 21.3,
-           "ONE CAS ON THE SNAPSHOT is the transaction boundary. Told “ok” "
+           "know a pod was deleted.",
+        "ONE CAS ON THE SNAPSHOT is the transaction boundary. Told “ok” "
            "means that object moved; a 412 on it is a fence, not a retry.",
-           size=8.6, color=SUB)
+    ]
+    for note in notes:
+        box = p.text(0.55, y, 21.3, note, size=8.6, color=SUB)
+        y += box.h + 0.10
 
     # ---- legend --------------------------------------------------------
-    y += 1.05
+    y += 0.22
     items = [("data plane — every byte of a clone or push", FLOW, False),
              ("durable path — the only writer of the bucket", DUR, False),
              ("control plane — never reads an object", CTL, True),
@@ -322,10 +381,19 @@ def build():
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     outdir = args[0] if args else _here
-    doc, _ = build()
+    doc, page = build()
+    page.trim()          # the page is as tall as the drawing, no taller
 
+    # the three INK gates live in dataflowkit, and this page is held to
+    # them too — five captions struck by a box's own outline and two
+    # struck by an arrow were found HERE by them, and the four above
+    # report none of those: a caption is `ok_overlap`, and only a
+    # `flabel` box is `is_label`.
     problems = (doc.check() + doc.overlap_report()
-                + doc.label_overlap_report() + doc.label_on_line_report())
+                + doc.label_overlap_report() + doc.label_on_line_report()
+                + dfk.ink_collision_report(page)
+                + dfk.edge_strike_report(page)
+                + dfk.arrow_through_text_report(page))
     for msg in problems:
         print(msg)
     print("%d shapes, %d problems" % (len(doc.pages[0].shapes), len(problems)))
@@ -333,6 +401,12 @@ def main():
     out = os.path.join(outdir, "flint-forge-dataflow.vsdx")
     doc.save(out)
     print("wrote", out)
+
+    if "--emf" in sys.argv:
+        for path in emf.save_emf(doc, os.path.join(outdir,
+                                                   "flint-forge-dataflow")):
+            problems += ["%s: %s" % (path, m) for m in emf.validate_emf(path)]
+            print("wrote", path)
 
     if "--preview" in sys.argv or "--pdf" in sys.argv:
         svgs = doc.save_svg(os.path.join(outdir, "dataflow-preview"))

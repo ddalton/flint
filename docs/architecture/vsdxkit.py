@@ -861,7 +861,17 @@ class Document:
 # ---------------------------------------------------------------------
 # SVG preview — the same shape list, so the layout can be looked at
 # ---------------------------------------------------------------------
-def _svg_text(s, px_in):
+def text_runs(s):
+    """Where each line of a box's text sits, in inches.
+
+    THE one place text is laid out. Both back ends — the SVG preview and
+    the EMF export — consume this, so the picture you look at and the
+    picture you hand to Office cannot drift apart.
+
+    Returns dicts of anchor x, BASELINE y, the string, its point size
+    and colour, whether it is bold or monospaced, and which end of the
+    text the anchor x refers to.
+    """
     st = s.st
     th = len(s.title_lines) * (st["title_size"] / 72.0) * _LINE_SPACING
     bh = len(s.body_lines) * (st["body_size"] / 72.0) * _LINE_SPACING
@@ -883,24 +893,31 @@ def _svg_text(s, px_in):
     for lines, size, color, bold, mono in (
             (s.title_lines, st["title_size"], st["title_color"],
              st["title_bold"], st["title_mono"]),
-            (s.body_lines, st["body_size"], st["body_color"], False, st["mono"])):
+            (s.body_lines, st["body_size"], st["body_color"], False,
+             st["mono"])):
         lh = (size / 72.0) * _LINE_SPACING
         for ln in lines:
             if ln:
-                # xml:space is required, or SVG collapses the leading
-                # spaces that align every key map on these pages — and
-                # the preview would libel a file that is actually fine.
-                out.append(
-                    "<text xml:space='preserve' x='%.2f' y='%.2f' "
-                    "font-family=\"%s\" font-size='%.2f' "
-                    "fill='%s' text-anchor='%s'%s>%s</text>" % (
-                        tx * px_in, (cur + lh * 0.80) * px_in,
-                        "Consolas, Menlo, monospace" if mono
-                        else "Segoe UI, Helvetica, Arial, sans-serif",
-                        size * px_in / 72.0, color, anchor,
-                        " font-weight='600'" if bold else "", escape(ln)))
+                out.append(dict(x=tx, y=cur + lh * 0.80, text=ln, size=size,
+                                color=color, bold=bold, mono=mono,
+                                anchor=anchor))
             cur += lh
     return out
+
+
+def _svg_text(s, px_in):
+    # xml:space is required, or SVG collapses the leading spaces that
+    # align every key map on these pages — and the preview would libel a
+    # file that is actually fine.
+    return ["<text xml:space='preserve' x='%.2f' y='%.2f' "
+            "font-family=\"%s\" font-size='%.2f' fill='%s' "
+            "text-anchor='%s'%s>%s</text>"
+            % (r["x"] * px_in, r["y"] * px_in,
+               "Consolas, Menlo, monospace" if r["mono"]
+               else "Segoe UI, Helvetica, Arial, sans-serif",
+               r["size"] * px_in / 72.0, r["color"], r["anchor"],
+               " font-weight='600'" if r["bold"] else "", escape(r["text"]))
+            for r in text_runs(s)]
 
 
 def _page_svg(page, px_in=96.0):

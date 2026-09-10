@@ -8,7 +8,8 @@ pktline,hook}.rs and spdk-csi-driver/src/forge_operator/.
 Every box's height is DERIVED from its text by `vsdxkit.Stack`, and each
 enclosure is resized to its contents once they are placed, so the page
 carries neither an overflowing label nor dead white space. Run with no
-arguments to write the .vsdx and the gate's report; --preview also
+arguments to write the .vsdx and the gate's report; --emf writes
+an EMF per page for Office; --preview also
 writes an SVG per page, and --pdf renders those to one PDF, which is
 how the result is LOOKED at without Visio. A non-zero exit means the
 gate found something.
@@ -22,6 +23,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import vsdxkit as k
+import vsdxemf as emf
 
 # ---------------------------------------------------------------- palette
 INK, SUB, MUTE = "#14181D", "#3D4650", "#6B7683"
@@ -1333,6 +1335,12 @@ def main():
     out = os.path.join(outdir, "flint-forge.vsdx")
     doc.save(out)
     print("wrote", out)
+
+    if "--emf" in sys.argv:
+        # a metafile holds ONE picture, so five pages are five files
+        for path in emf.save_emf(doc, os.path.join(outdir, "flint-forge")):
+            problems += ["%s: %s" % (path, m) for m in emf.validate_emf(path)]
+            print("wrote", path)
 
     want_pdf = "--pdf" in sys.argv
     if "--preview" in sys.argv or want_pdf:
