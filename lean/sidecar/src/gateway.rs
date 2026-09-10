@@ -206,11 +206,30 @@ pub fn routes(
         .and(warp::path!("lean" / "v1" / String / "files" / ..))
         .and(warp::path::tail())
         .and(warp::header::optional::<String>("x-flint-author"))
+        .and(warp::header::optional::<String>("if-match"))
+        .and(warp::header::optional::<String>("if-none-match"))
         .and(warp::body::content_length_limit(core.max_put_bytes))
         .and(warp::body::bytes())
-        .then(|_auth, core: Arc<GatewayCore>, ws: String, tail: warp::path::Tail, author, body| {
-            handle_files_put(core, ws, tail.as_str().to_string(), author, body)
-        });
+        .then(
+            |_auth,
+             core: Arc<GatewayCore>,
+             ws: String,
+             tail: warp::path::Tail,
+             author,
+             if_match,
+             if_none_match,
+             body| {
+                handle_files_put(
+                    core,
+                    ws,
+                    tail.as_str().to_string(),
+                    author,
+                    if_match,
+                    if_none_match,
+                    body,
+                )
+            },
+        );
 
     let files_get = warp::get()
         .and(authed.clone())
@@ -314,11 +333,100 @@ async fn recover_auth(
 
 // ── handlers ─────────────────────────────────────────────────────────
 
+/// What the caller's preconditions demand of the object as it stands.
+///
+/// The taxonomy is forge's (`forge/syncer/src/fileapi.rs`), deliberately:
+/// its file API and this one are supposed to be one shape, so a client
+/// that speaks to a forge repository speaks to a lean workspace without
+/// knowing which it has. The one case worth naming is
+/// `PreconditionRequired` — an overwrite that carries no `If-Match` is
+/// REFUSED rather than performed, because the gateway's own fresh HEAD
+/// closes only its HEAD-to-PUT window and gives the CALLER nothing: two
+/// browsers that each read v1 and then write would both succeed, and the
+/// second would silently win.
+enum Precheck {
+    /// Proceed. Carries the etag to condition the PUT on, or `None` for
+    /// a create (`If-None-Match: *`).
+    Go(Option<String>),
+    Reply(warp::reply::Response),
+}
+
+fn judge_preconditions(
+    current: Option<&str>,
+    if_match: Option<&str>,
+    if_none_match: Option<&str>,
+) -> Precheck {
+    let tag = |v: &str| v.trim().trim_matches('"').to_string();
+    let none_match_star = match if_none_match.map(|v| tag(v)) {
+        None => false,
+        Some(v) if v == "*" => true,
+        // `If-None-Match: "<tag>"` on a write asks "unless it is still
+        // exactly this", which needs its own arm to evaluate honestly.
+        // Refusing beats accepting and checking something else.
+        Some(_) => {
+            return Precheck::Reply(err_reply(
+                StatusCode::BAD_REQUEST,
+                "bad-precondition",
+                "If-None-Match on a write is supported only as `*` (create if absent)".into(),
+            ))
+        }
+    };
+    let matched = if_match.map(|v| tag(v));
+    if matched.is_some() && none_match_star {
+        return Precheck::Reply(err_reply(
+            StatusCode::BAD_REQUEST,
+            "bad-precondition",
+            "If-Match and If-None-Match: * cannot both hold on one request".into(),
+        ));
+    }
+    match (current, matched) {
+        // The whole point: an overwrite must name what it read.
+        (Some(_), None) if !none_match_star => Precheck::Reply(err_reply(
+            StatusCode::PRECONDITION_REQUIRED,
+            "precondition-required",
+            "the file already exists; send If-Match with the version you read".into(),
+        )),
+        (Some(cur), None) => Precheck::Reply(changed(cur)),
+        // BOTH sides are normalised. S3 hands back a QUOTED entity-tag
+        // and that is exactly what `GET` puts on its `etag` header, so a
+        // caller echoing the header back sends quotes — comparing a
+        // stripped caller tag against an unstripped stored one 412s
+        // every honest writer. It did, on the first run of the test
+        // below.
+        (Some(cur), Some(t)) if t == "*" || t == tag(cur) => Precheck::Go(Some(cur.to_string())),
+        (Some(cur), Some(_)) => Precheck::Reply(changed(cur)),
+        // `If-Match` on a path that is not there is a stale caller: it
+        // read a file that has since been deleted. `*` included — RFC
+        // 9110 §13.1.1 makes it a demand that a representation exist.
+        (None, Some(_)) => Precheck::Reply(changed("")),
+        (None, None) => Precheck::Go(None),
+    }
+}
+
+/// 412 with the etag the caller should have sent, on the header as well
+/// as in the message: a UI retries from the header, a human reads the
+/// message.
+fn changed(current: &str) -> warp::reply::Response {
+    let mut res = err_reply(
+        StatusCode::PRECONDITION_FAILED,
+        "file-changed",
+        "the file changed since you read it; re-read it and try again".into(),
+    );
+    if !current.is_empty() {
+        if let Ok(v) = warp::http::HeaderValue::from_str(current) {
+            res.headers_mut().insert("etag", v);
+        }
+    }
+    res
+}
+
 async fn handle_files_put(
     core: Arc<GatewayCore>,
     ws: String,
     path: String,
     author: Option<String>,
+    if_match: Option<String>,
+    if_none_match: Option<String>,
     body: Bytes,
 ) -> warp::reply::Response {
     let Some(cfg) = core.cfg(&ws) else {
@@ -353,13 +461,28 @@ async fn handle_files_put(
 
     // Object FIRST (fresh read → conditional PUT), inbox entry second.
     let key = cfg.file_key(&path);
-    let (cond, prev_gen) = match core.store.head(&key).await {
+    let (current, prev_gen) = match core.store.head(&key).await {
         Ok(meta) => {
             let g = GenerationStamps::from_meta(&meta.meta).map(|s| s.generation).unwrap_or(0);
-            (PutCondition::IfMatch(meta.etag), g)
+            (Some(meta.etag), g)
         }
-        Err(StoreError::NotFound(_)) => (PutCondition::IfNoneMatchAny, 0),
+        Err(StoreError::NotFound(_)) => (None, 0),
         Err(e) => return err_reply(StatusCode::BAD_GATEWAY, "store", e.to_string()),
+    };
+
+    // The CALLER's precondition, judged against what is there now. The
+    // conditional PUT below still carries the freshly-read etag, which
+    // is what closes the window between this HEAD and that PUT — but it
+    // is no longer the ONLY guard, and that is the point of this check:
+    // a stale caller is told 412 here rather than winning.
+    let cond = match judge_preconditions(
+        current.as_deref(),
+        if_match.as_deref(),
+        if_none_match.as_deref(),
+    ) {
+        Precheck::Reply(res) => return res,
+        Precheck::Go(Some(etag)) => PutCondition::IfMatch(etag),
+        Precheck::Go(None) => PutCondition::IfNoneMatchAny,
     };
     let crc = crc64_nvme(&body);
     let author = author.unwrap_or_else(|| "ui".into());
@@ -373,6 +496,10 @@ async fn handle_files_put(
     let meta = match core.store.put_whole(&key, body, &cond, &stamps, crc).await {
         Ok(m) => m,
         Err(StoreError::PreconditionFailed(_)) => {
+            // NOT `file-changed`: the caller's precondition held when it
+            // was judged, and the object moved inside the HEAD-to-PUT
+            // window. Retrying the same request can succeed, which is
+            // the opposite of the advice a 412 carries.
             return err_reply(
                 StatusCode::CONFLICT,
                 "concurrent-write",

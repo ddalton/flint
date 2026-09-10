@@ -878,6 +878,105 @@ async fn gateway_put_refused_while_window_open() {
 
 /// P5's teeth: the manifest CAS verb validates the claimed epoch
 /// against the cell PER REQUEST — a deposed epoch is 403 even with a
+/// THE LOST UPDATE, and the arm that now refuses it.
+///
+/// Two browsers each read v1 and then write. Before preconditions were
+/// accepted, both PUTs succeeded — the gateway took a FRESH head of its
+/// own immediately before writing, so the second one's `If-Match` was
+/// against v2 and matched, and it silently overwrote the first. That is
+/// the whole reason this arm exists, and `b_overwrites_a` is the leg
+/// that fails if `judge_preconditions` is removed.
+#[tokio::test]
+async fn gateway_put_refuses_an_unconditioned_or_stale_overwrite() {
+    let store = Arc::new(MemoryStore::new());
+    let routes = super::gateway::routes(gw_core(&store));
+    let path = "/lean/v1/proj1/files/shared.md";
+
+    // Create: no precondition needed for a path that is not there.
+    let res = gw_req().method("PUT").path(path).body("v1").reply(&routes).await;
+    assert_eq!(res.status(), 200, "{:?}", res.body());
+    let v1: String = serde_json::from_slice::<serde_json::Value>(&res.body())
+        .unwrap()["etag"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // An overwrite that names nothing is REFUSED, not performed.
+    let res = gw_req().method("PUT").path(path).body("blind").reply(&routes).await;
+    assert_eq!(res.status(), 428, "an unconditioned overwrite must be refused");
+
+    // Browser A writes from v1 and wins.
+    let res =
+        gw_req().method("PUT").path(path).header("if-match", &v1).body("from-A").reply(&routes).await;
+    assert_eq!(res.status(), 200);
+    let v2: String = serde_json::from_slice::<serde_json::Value>(&res.body())
+        .unwrap()["etag"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(v1, v2);
+
+    // Browser B still holds v1. THE LOST UPDATE: this used to be a 200.
+    let b_overwrites_a =
+        gw_req().method("PUT").path(path).header("if-match", &v1).body("from-B").reply(&routes).await;
+    assert_eq!(b_overwrites_a.status(), 412, "a stale writer must be told, not obeyed");
+    assert_eq!(
+        b_overwrites_a.headers().get("etag").unwrap().to_str().unwrap(),
+        v2,
+        "412 carries the etag the caller should have sent"
+    );
+
+    // A's bytes are still there — B did not win.
+    let res = gw_req().method("GET").path(path).reply(&routes).await;
+    assert_eq!(&res.body()[..], b"from-A");
+
+    // `*` means "whatever is there now", and is honoured.
+    let res =
+        gw_req().method("PUT").path(path).header("if-match", "*").body("forced").reply(&routes).await;
+    assert_eq!(res.status(), 200);
+
+    // create-if-absent on a path that exists is a 412, not a clobber.
+    let res = gw_req()
+        .method("PUT")
+        .path(path)
+        .header("if-none-match", "*")
+        .body("x")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 412);
+
+    // A stale caller writing a path that has since gone.
+    let res = gw_req()
+        .method("PUT")
+        .path("/lean/v1/proj1/files/never.md")
+        .header("if-match", "\"deadbeef\"")
+        .body("x")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 412);
+
+    // create-if-absent on an absent path creates.
+    let res = gw_req()
+        .method("PUT")
+        .path("/lean/v1/proj1/files/fresh.md")
+        .header("if-none-match", "*")
+        .body("x")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 200);
+
+    // Both preconditions at once is a caller error, not a guess.
+    let res = gw_req()
+        .method("PUT")
+        .path(path)
+        .header("if-match", "*")
+        .header("if-none-match", "*")
+        .body("x")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 400);
+}
+
 /// correct CAS token (the LeanEpochOnlyHolds arm, now enforced).
 #[tokio::test]
 async fn gateway_manifest_cas_rejects_stale_epoch() {
