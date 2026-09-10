@@ -1343,7 +1343,7 @@ impl MetadataServer {
         // truncated back to the stub (partials never serve) or, if
         // provably complete, committed.
         self.status.set_phase(super::status::HubPhase::Reconciling);
-        let er = crate::tier::evict::reconcile(&self.backend).await;
+        let er = crate::tier::evict::reconcile(&self.backend, &self.export_path).await;
         if er.finished > 0 || er.rolled_back > 0 || er.hydrations_reset > 0 {
             warn!(
                 "🪣 tier evict reconcile: {} half-eviction(s) finished, {} rolled back, \

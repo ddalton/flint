@@ -1791,7 +1791,7 @@ async fn read_whole(path: &Path) -> Result<Bytes, String> {
 ///
 /// Last writer wins on a hard-linked inode: any live name reaches the
 /// same bytes, which is all the reconciler needs.
-fn live_inode_paths(
+pub(crate) fn live_inode_paths(
     root: &std::path::Path,
 ) -> std::io::Result<std::collections::HashMap<u64, std::path::PathBuf>> {
     use std::os::unix::fs::MetadataExt;

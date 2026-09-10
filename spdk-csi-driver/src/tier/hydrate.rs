@@ -1523,7 +1523,7 @@ mod tests {
         r.backend.tier_set_hydrating(dev, ino, Some(1)).await.unwrap();
         std::fs::write(&f, b"partial garbage from a dead restore").unwrap();
 
-        let report = evict::reconcile(&r.backend).await;
+        let report = evict::reconcile(&r.backend, &r.root).await;
         assert_eq!(report.hydrations_reset, 1, "partial bytes must reset to the stub");
         assert_eq!(std::fs::metadata(&f).unwrap().len(), 0);
         assert!(evict::is_evicted(dev, ino), "still evicted — bucket remains truth");
@@ -1550,7 +1550,7 @@ mod tests {
         r.backend.tier_set_hydrating(dev, ino, Some(1)).await.unwrap();
         std::fs::write(&f, &content).unwrap();
 
-        let report = evict::reconcile(&r.backend).await;
+        let report = evict::reconcile(&r.backend, &r.root).await;
         assert_eq!(report.hydrations_finished, 1, "verified-complete restore must COMMIT");
         assert_eq!(std::fs::read(&f).unwrap(), content, "bytes kept");
         assert!(!evict::is_evicted(dev, ino));

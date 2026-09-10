@@ -675,15 +675,133 @@ pub struct ReconcileReport {
     /// are garbage (the bucket is the truth): truncated back to the
     /// stub, flag cleared, still evicted.
     pub hydrations_reset: usize,
-    /// Rows whose path no longer resolves to their identity — kept,
-    /// warned (step 12's hygiene owns them).
+    /// Rows whose recorded name went stale but whose INODE is still
+    /// reachable under another name — re-pointed at it, marker kept.
+    pub rehomed: usize,
+    /// Rows whose path no longer resolves to their identity AND whose
+    /// inode has no other name under the export — kept, warned
+    /// (step 12's hygiene owns them).
     pub orphaned: usize,
+}
+
+/// Another name for `(dev, ino)` under the export, if one exists.
+///
+/// The recorded name is the reconciler's ONLY handle on the file, and
+/// it goes stale in two ways that are not the inode dying:
+///
+///   * a hard-linked pair lost the name the row was written under —
+///     `identity::note_remove(_, links_remaining > 0)` deliberately
+///     keeps the bucket object precisely so the survivor stays
+///     servable; and
+///   * a RENAME landed but the process died before its event drained.
+///
+/// Both leave an inode that is still reachable and still evicted. With
+/// no repair it is also MARKERLESS, and that is not a cosmetic loss:
+/// `is_evicted` is the read path's only gate (`ioops`), there is no
+/// durable fallback, and `hydrate` never reads `EVICTED_XATTR` as an
+/// authority — it only removes it. The client reads the released stub
+/// and sees a 0-byte file under NFS4_OK, permanently, while the bucket
+/// still holds the bytes.
+///
+/// `flush` already re-points this same row, but only when the DEVICE
+/// drifted (`dev != live_dev`); a same-device stale path never trips
+/// that gate.
+///
+/// The walk is O(tree), so it is built once, lazily, on the first row
+/// that needs it — the common boot needs none.
+#[cfg(unix)]
+async fn rehomed_name(
+    export_root: &Path,
+    live: &mut Option<std::collections::HashMap<u64, std::path::PathBuf>>,
+    row: &TierEvictedRow,
+) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let (dev, ino) = (row.dev, row.ino);
+    if live.is_none() {
+        let root = export_root.to_path_buf();
+        *live = Some(
+            match tokio::task::spawn_blocking(move || {
+                crate::tier::flush::live_inode_paths(&root)
+            })
+            .await
+            {
+                Ok(Ok(map)) => map,
+                _ => {
+                    warn!(
+                        "tier evict reconcile: the export walk failed — stale-path rows \
+                         cannot be re-pointed this boot and stay orphaned (they read as \
+                         ZERO BYTES); retried at next startup"
+                    );
+                    std::collections::HashMap::new()
+                }
+            },
+        );
+    }
+    let found = live.as_ref().and_then(|m| m.get(&ino)).cloned()?;
+    // Re-check IDENTITY, never trust the name. The map is keyed by ino
+    // alone, and a name is a thing a client can move between the walk
+    // and this stat — the same rule `truncate_in_place` enforces.
+    let got = found.symlink_metadata().ok().map(|m| (m.dev(), m.ino()));
+    if got != Some((dev, ino)) {
+        return None;
+    }
+
+    // ── the inode-REUSE guard ────────────────────────────────────────
+    // A matching (dev, ino) is NOT proof this is the same file. If every
+    // name for the old inode was unlinked and the `Removed` event was
+    // lost to a crash before its drain — the same window
+    // `flush::tests::a_dirty_row_for_a_truly_vanished_inode_is_dropped_not_retried`
+    // models — ext4 hands that ino to the next file created, and its
+    // (dev, ino) matches EXACTLY. Re-pointing onto it would serve the
+    // dead file's bucket object under the new file's name: silent
+    // cross-file corruption, strictly worse than the orphan this repair
+    // exists to fix.
+    //
+    // The stub's own stamp is the discriminator. `evict` and
+    // `import::stage_stub` both write `<generation>:<etag>` onto every
+    // stub they create; a freshly created file carries nothing.
+    //
+    // This is corroboration of IDENTITY, not authority for the marker's
+    // CONTENTS — `hydrate` still refuses to read the xattr as that, and
+    // must, since it is best-effort at the write end. That same
+    // best-effort-ness is why a missing or mismatched stamp means
+    // "cannot prove it" and we decline: the row stays orphaned, exactly
+    // as it did before this repair. Declining costs a repair; accepting
+    // wrongly costs a client the wrong file's bytes.
+    let want = format!("{}:{}", row.generation, row.etag);
+    match get_xattr(&found, EVICTED_XATTR) {
+        Some(v) if v == want.as_bytes() => Some(found),
+        other => {
+            warn!(
+                "tier evict reconcile: ({}, {}) has a live name at {} but its stub stamp \
+                 does not corroborate ({:?} != {:?}) — NOT re-pointing; an unlinked inode \
+                 whose number was reused looks exactly like this",
+                dev,
+                ino,
+                found.display(),
+                other.as_ref().map(|v| String::from_utf8_lossy(v).into_owned()),
+                want
+            );
+            None
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn rehomed_name(
+    _export_root: &Path,
+    _live: &mut Option<std::collections::HashMap<u64, std::path::PathBuf>>,
+    _row: &TierEvictedRow,
+) -> Option<std::path::PathBuf> {
+    None
 }
 
 /// Runs at startup (before the listener binds): load every marker row,
 /// finishing or rolling back half-evictions. The consult map is
 /// rebuilt from scratch — the rows are the truth.
-pub async fn reconcile(backend: &Arc<dyn StateBackend>) -> ReconcileReport {
+///
+/// `export_root` is needed only for the stale-path repair above.
+pub async fn reconcile(backend: &Arc<dyn StateBackend>, export_root: &Path) -> ReconcileReport {
     let mut report = ReconcileReport::default();
     let rows = match backend.tier_list_evicted().await {
         Ok(r) => r,
@@ -696,15 +814,59 @@ pub async fn reconcile(backend: &Arc<dyn StateBackend>) -> ReconcileReport {
     // arms below insert/forget per row — while in the test universe a
     // clear would wipe markers belonging to OTHER backends (the
     // one-backend production assumption doesn't hold there).
+    // Built lazily by `rehomed_name`, shared across rows.
+    let mut live: Option<std::collections::HashMap<u64, std::path::PathBuf>> = None;
     for row in rows {
-        let path = std::path::PathBuf::from(&row.path);
+        let mut path = std::path::PathBuf::from(&row.path);
         #[cfg(unix)]
-        let resolved = path.symlink_metadata().ok().map(|m| {
+        let stat = |p: &std::path::Path| {
             use std::os::unix::fs::MetadataExt;
-            (m.dev(), m.ino(), m.len())
-        });
+            p.symlink_metadata().ok().map(|m| (m.dev(), m.ino(), m.len()))
+        };
         #[cfg(not(unix))]
-        let resolved: Option<(u64, u64, u64)> = None;
+        let stat = |_p: &std::path::Path| -> Option<(u64, u64, u64)> { None };
+        let mut resolved = stat(&path);
+
+        // The recorded name no longer names this inode — but the inode
+        // itself may still be reachable. Repair the handle BEFORE the
+        // match, so every arm below sees a live path and none of them
+        // needs to know this happened.
+        if !matches!(resolved, Some((d, i, _)) if d == row.dev && i == row.ino) {
+            if let Some(found) = rehomed_name(export_root, &mut live, &row).await {
+                let repointed = TierEvictedRow {
+                    path: found.to_string_lossy().into_owned(),
+                    ..row.clone()
+                };
+                match backend.tier_put_evicted(&repointed).await {
+                    Ok(()) => {
+                        info!(
+                            "tier evict reconcile: marker for ({}, {}) re-pointed {} → {} \
+                             — the recorded name went away, the inode did not",
+                            row.dev,
+                            row.ino,
+                            row.path,
+                            found.display()
+                        );
+                        path = found;
+                        resolved = stat(&path);
+                        report.rehomed += 1;
+                    }
+                    Err(e) => {
+                        // Do NOT adopt the new path in RAM without the
+                        // durable row agreeing: a restart would send
+                        // the next reconcile back at the dead name.
+                        warn!(
+                            "tier evict reconcile: cannot persist the re-point of ({}, {}) \
+                             to {}: {} — left orphaned, retried at next startup",
+                            row.dev,
+                            row.ino,
+                            found.display(),
+                            e
+                        );
+                    }
+                }
+            }
+        }
         let meta_of = |row: &TierEvictedRow| EvictedMeta {
             size: row.size,
             key: row.key.clone(),
@@ -881,6 +1043,50 @@ pub(crate) fn set_xattr(path: &Path, name: &str, value: &[u8]) -> std::io::Resul
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn set_xattr(_path: &Path, _name: &str, _value: &[u8]) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn get_xattr(path: &Path, name: &str) -> Option<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+    let p = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let n = std::ffi::CString::new(name).ok()?;
+    let mut buf = vec![0u8; 256];
+    let rc = unsafe {
+        libc::getxattr(p.as_ptr(), n.as_ptr(), buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+    };
+    if rc < 0 {
+        return None;
+    }
+    buf.truncate(rc as usize);
+    Some(buf)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn get_xattr(path: &Path, name: &str) -> Option<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+    let p = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let n = std::ffi::CString::new(name).ok()?;
+    let mut buf = vec![0u8; 256];
+    let rc = unsafe {
+        libc::getxattr(
+            p.as_ptr(),
+            n.as_ptr(),
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len(),
+            0,
+            0,
+        )
+    };
+    if rc < 0 {
+        return None;
+    }
+    buf.truncate(rc as usize);
+    Some(buf)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn get_xattr(_path: &Path, _name: &str) -> Option<Vec<u8>> {
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -1346,7 +1552,7 @@ mod tests {
         forget(dev, ino); // process death wipes RAM
 
         // "Restart": reconcile from the durable rows.
-        let report = reconcile(&r.backend).await;
+        let report = reconcile(&r.backend, &r.root).await;
         assert_eq!(report.finished, 1, "the half-eviction must be FINISHED");
         assert_eq!(std::fs::metadata(&f).unwrap().len(), 0);
         assert!(is_evicted(dev, ino));
@@ -1380,11 +1586,270 @@ mod tests {
             .await
             .unwrap();
 
-        let report = reconcile(&r.backend).await;
+        let report = reconcile(&r.backend, &r.root).await;
         assert_eq!(report.rolled_back, 1, "diverged half-eviction must ROLL BACK");
         assert_eq!(std::fs::read(&f).unwrap(), b"local truth wins!");
         assert!(r.backend.tier_list_evicted().await.unwrap().is_empty());
         assert!(!is_evicted(dev, ino));
+    }
+
+    /// The EVICT lane has no re-point repair, and the FLUSH lane does.
+    ///
+    /// `flush` grew one in the 2026-08-28 wave: a dirty row whose
+    /// recorded name is unlinked gets re-pointed at a surviving hard
+    /// link (`flush::tests::
+    /// a_dirty_multilink_inode_survives_losing_the_name_it_was_dirtied_through`).
+    /// `reconcile`'s "path no longer names this identity" arm does not
+    /// — it keeps the row, counts it `orphaned`, and re-points nothing.
+    /// `hydrate` cannot cover for it either: it never reads
+    /// `EVICTED_XATTR` as an authority, only removes it.
+    ///
+    /// So after a restart the surviving name is an inode the read path
+    /// holds no marker for, and its local bytes are the released stub.
+    /// The assertion is on the OBSERVATION a client makes — the logical
+    /// size GETATTR serves — not merely on the marker map, because a
+    /// 16-byte file answering 0 under NFS4_OK is the whole harm.
+    ///
+    /// Reachability: `identity::note_remove(_, links_remaining = 1)`
+    /// deliberately keeps the bucket object when one of several names
+    /// goes away, precisely so the survivor stays servable. This test
+    /// asks whether it actually is.
+    ///
+    /// The control arm is the same eviction with ONE name and nothing
+    /// removed. Without it this test would pass just as well against a
+    /// `reconcile` that carried no marker at all.
+    #[tokio::test]
+    async fn reconcile_carries_an_evicted_marker_onto_a_surviving_hard_link() {
+        let r = rig();
+
+        // ── CONTROL: one name, nothing unlinked. Only the restart.
+        let (cdev, cino, ckey) = published_file(&r, "control.bin", b"sixteen bytes!!!").await;
+        let cf = r.root.join("control.bin");
+        assert!(
+            matches!(
+                evict_file(&r.backend, &store_of(&r), &cf, &ckey, NO_WRITERS).await,
+                EvictOutcome::Evicted { .. }
+            ),
+            "control: the file must actually evict, or nothing below is being tested"
+        );
+        // A restart: the RAM marker map is empty, the durable rows are not.
+        forget(cdev, cino);
+        assert!(!is_evicted(cdev, cino), "control: the restart cleared RAM");
+        let creport = reconcile(&r.backend, &r.root).await;
+        assert!(
+            is_evicted(cdev, cino),
+            "CONTROL: an untouched evicted file must come back marked after reconcile"
+        );
+        assert_eq!(
+            logical_size(cdev, cino),
+            Some(16),
+            "CONTROL: GETATTR serves the logical size, not the released stub"
+        );
+        assert_eq!(creport.orphaned, 0, "CONTROL: nothing orphaned");
+
+        // ── CONTROL B: a hard-linked pair, evicted, restarted — and
+        //    NOTHING removed. Isolates the trigger: if this failed too,
+        //    the defect would be "reconcile cannot carry a multi-link
+        //    inode at all", not "it cannot survive losing the recorded
+        //    name". It must PASS, so that the only dimension separating
+        //    it from the arm below is the unlink.
+        let (bdev, bino, bkey) = published_file(&r, "pair-a.bin", b"sixteen bytes!!!").await;
+        let pair_a = r.root.join("pair-a.bin");
+        let pair_b = r.root.join("pair-b.bin");
+        std::fs::hard_link(&pair_a, &pair_b).unwrap();
+        assert_eq!(ident(&pair_b), (bdev, bino), "control B precondition: one inode, two names");
+        assert!(
+            matches!(
+                evict_file(&r.backend, &store_of(&r), &pair_a, &bkey, NO_WRITERS).await,
+                EvictOutcome::Evicted { .. }
+            ),
+            "control B: the shared inode must evict"
+        );
+        forget(bdev, bino);
+        let breport = reconcile(&r.backend, &r.root).await;
+        assert!(
+            is_evicted(bdev, bino),
+            "CONTROL B: a hard-linked pair with BOTH names present must survive reconcile \
+             (orphaned={})",
+            breport.orphaned
+        );
+        assert_eq!(
+            logical_size(bdev, bino),
+            Some(16),
+            "CONTROL B: and GETATTR still serves the logical size"
+        );
+
+        // ── THE ARM: identical to CONTROL B, except the name the row was
+        //    recorded under is unlinked. ONE dimension moves.
+        let (dev, ino, key) = published_file(&r, "primary.bin", b"sixteen bytes!!!").await;
+        let primary = r.root.join("primary.bin");
+        let survivor = r.root.join("survivor.bin");
+        std::fs::hard_link(&primary, &survivor).unwrap();
+        // Not vacuous: on a filesystem that silently COPIED, the
+        // survivor would be a different inode and every assertion below
+        // would pass for a reason that has nothing to do with links.
+        assert_eq!(ident(&survivor), (dev, ino), "precondition: ONE inode, two names");
+
+        assert!(
+            matches!(
+                evict_file(&r.backend, &store_of(&r), &primary, &key, NO_WRITERS).await,
+                EvictOutcome::Evicted { .. }
+            ),
+            "precondition: the shared inode must evict"
+        );
+        assert_eq!(
+            std::fs::metadata(&survivor).unwrap().len(),
+            0,
+            "precondition: the shared inode's bytes are released — served raw, it is zeros"
+        );
+
+        // The recorded name goes; the inode does not.
+        std::fs::remove_file(&primary).unwrap();
+        assert!(survivor.exists(), "precondition: the inode still answers to a name");
+
+        forget(dev, ino);
+        let report = reconcile(&r.backend, &r.root).await;
+
+        assert!(
+            is_evicted(dev, ino),
+            "THE GAP: reconcile resolved the row's recorded name, found it gone, and \
+             dropped the marker instead of re-pointing at the surviving hard link \
+             (orphaned={})",
+            report.orphaned
+        );
+        assert_eq!(
+            logical_size(dev, ino),
+            Some(16),
+            "and so a client reading through the surviving name sees a 16-byte file \
+             report size 0 under NFS4_OK"
+        );
+    }
+
+    /// The re-point repair must NOT fire on a reused inode number.
+    ///
+    /// If every name for an evicted inode was unlinked and the `Removed`
+    /// event was lost to a crash before its drain, the row survives
+    /// pointing at a dead name — and ext4 hands that ino to the next
+    /// file created. Its `(dev, ino)` then matches the row EXACTLY, so
+    /// the identity re-check alone cannot tell them apart. Re-pointing
+    /// would serve the dead file's bucket object under the new file's
+    /// name.
+    ///
+    /// The scenario is built directly rather than by provoking real
+    /// inode reuse, which is not deterministic across filesystems: a row
+    /// is written whose identity IS the impostor's and whose recorded
+    /// path does not exist. That is precisely the state reuse produces.
+    ///
+    /// Its control is
+    /// `reconcile_carries_an_evicted_marker_onto_a_surviving_hard_link`,
+    /// which asserts a GENUINE stub is re-pointed — without that pair,
+    /// a guard that simply refused every re-point would pass this test.
+    #[tokio::test]
+    async fn a_reused_inode_number_is_not_mistaken_for_a_renamed_stub() {
+        let r = rig();
+
+        // An ordinary file. Never evicted, never stubbed, no stamp.
+        let impostor = r.root.join("impostor.bin");
+        std::fs::write(&impostor, b"the new file's own bytes").unwrap();
+        let (dev, ino) = ident(&impostor);
+
+        // The row the lost-Removed-event crash leaves behind, now
+        // carrying the impostor's identity because the number was reused.
+        let ghost = TierEvictedRow {
+            dev,
+            ino,
+            key: "t/long-dead.bin".into(),
+            generation: 7,
+            etag: "e-7".into(),
+            crc64_b64: "AAAAAAAAAAA=".into(),
+            size: 4096,
+            path: r.root.join("long-dead.bin").to_string_lossy().into_owned(),
+            evicted_unix: 1,
+            hydrating_unix: None,
+        };
+        r.backend.tier_put_evicted(&ghost).await.unwrap();
+        assert!(
+            !r.root.join("long-dead.bin").exists(),
+            "precondition: the recorded name is gone, as after the unlink"
+        );
+        forget(dev, ino);
+
+        let report = reconcile(&r.backend, &r.root).await;
+
+        assert_eq!(
+            report.rehomed, 0,
+            "a reused inode number must NOT be adopted as a renamed stub"
+        );
+        assert!(
+            !is_evicted(dev, ino),
+            "THE CORRUPTION: the impostor was marked evicted, so a READ of it would serve \
+             the dead file's bucket object instead of its own bytes"
+        );
+        assert_eq!(
+            std::fs::read(&impostor).unwrap(),
+            b"the new file's own bytes",
+            "and its own bytes are untouched"
+        );
+        assert_eq!(report.orphaned, 1, "the row stays orphaned, as it did before the repair");
+    }
+
+    /// The other door into the same repair: a RENAME whose event was lost.
+    ///
+    /// `note_rename` queues the path change and `drain` applies it; a crash
+    /// between them leaves the durable row naming a path that no longer
+    /// exists while the inode sits, evicted, under its new name. That is the
+    /// identical end state the hard-link case reaches, by a different route
+    /// — and the fix was CLAIMED to cover it, which is not the same as
+    /// having been shown to.
+    ///
+    /// It also pins the reuse guard from the opposite side. An inode carries
+    /// its xattrs through a rename, so the stamp still corroborates and the
+    /// repair must PROCEED. Paired with
+    /// `a_reused_inode_number_is_not_mistaken_for_a_renamed_stub`, which must
+    /// REFUSE, the two fix the guard in both directions; either alone would
+    /// pass against a guard stuck open or stuck shut.
+    #[tokio::test]
+    async fn a_rename_whose_event_was_lost_is_repaired_at_reconcile() {
+        let r = rig();
+        let (dev, ino, key) = published_file(&r, "before.bin", b"sixteen bytes!!!").await;
+        let before = r.root.join("before.bin");
+        assert!(
+            matches!(
+                evict_file(&r.backend, &store_of(&r), &before, &key, NO_WRITERS).await,
+                EvictOutcome::Evicted { .. }
+            ),
+            "precondition: the file must actually evict"
+        );
+
+        // The rename lands on disk; the event never drains. Deliberately no
+        // `tier_apply_rename` — that omission IS the crash window.
+        let after = r.root.join("after.bin");
+        std::fs::rename(&before, &after).unwrap();
+        assert_eq!(ident(&after), (dev, ino), "precondition: rename keeps the inode");
+        assert!(!before.exists(), "precondition: the recorded name is gone");
+
+        forget(dev, ino); // the restart
+        let report = reconcile(&r.backend, &r.root).await;
+
+        assert_eq!(report.rehomed, 1, "the row must be re-pointed at the surviving name");
+        assert_eq!(report.orphaned, 0, "and not written off as orphaned");
+        assert!(is_evicted(dev, ino), "the marker must be live again");
+        assert_eq!(
+            logical_size(dev, ino),
+            Some(16),
+            "so GETATTR serves the logical size, not the released stub"
+        );
+        let rows = r.backend.tier_list_evicted().await.unwrap();
+        let row = rows
+            .iter()
+            .find(|x| x.dev == dev && x.ino == ino)
+            .expect("the row must survive the repair");
+        assert_eq!(
+            row.path,
+            after.to_string_lossy().into_owned(),
+            "and the durable row must name the NEW path — otherwise the next restart \
+             walks the tree all over again"
+        );
     }
 
     #[tokio::test]

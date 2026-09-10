@@ -1528,7 +1528,7 @@ mod tests {
         assert!(!intent.exists(), "intent note must clear on completion");
 
         // Markers load exactly the way start_tier does it.
-        let er = evict::reconcile(&backend_b).await;
+        let er = evict::reconcile(&backend_b, &root_b).await;
         assert_eq!(er.loaded, 2, "{:?}", er);
 
         // ── POSIX fidelity vs the manifest ───────────────────────────
