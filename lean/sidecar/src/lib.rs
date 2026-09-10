@@ -290,6 +290,31 @@ pub struct LeanConfig {
     /// its size, so small-file trees still run the full width.
     pub fetch_inflight_max_bytes: u64,
 
+    /// Materialise an object this size or larger as PARALLEL RANGES
+    /// rather than one whole-object GET. `0` disables it, which is the
+    /// default until a live drill says otherwise — this is a
+    /// performance change to the agent-blocking path and the repo's
+    /// rule is that a default moves on measurement, not on plausibility.
+    ///
+    /// Two costs of `get_whole` are paid together and this is what
+    /// removes both: one object is one TCP stream, so a multi-GiB
+    /// checkpoint runs at single-connection throughput no matter how
+    /// wide the fan-out; and the body is held whole in RAM before it
+    /// reaches disk, which is the product `fetch_inflight_max_bytes`
+    /// exists to bound. Ranges write at their offset as they land, so
+    /// peak RSS per object becomes `range_get_chunk_bytes x
+    /// range_get_parallelism` instead of the object's size.
+    pub range_get_min_bytes: u64,
+    /// Bytes per range request. Large enough that per-request overhead
+    /// is noise against S3's first-byte latency; small enough that a
+    /// retried range is cheap.
+    pub range_get_chunk_bytes: u64,
+    /// Ranges in flight FOR ONE OBJECT. The checkout's byte semaphore
+    /// still bounds the whole window, so this multiplies concurrency
+    /// only where the fan-out has run out of objects to work on — which
+    /// is exactly the tail this exists to shorten.
+    pub range_get_parallelism: usize,
+
     // --- boundary verbs (plan docs/plans/flint-lean-boundary-verbs-plan.md) ---
     /// Citation policy. Default `hybrid` ≡ today's behavior when the
     /// agent never touches a sentinel.
@@ -342,6 +367,9 @@ impl LeanConfig {
             fanout: 32,
             project_id: None,
             fetch_inflight_max_bytes: 512 * 1024 * 1024,
+            range_get_min_bytes: 0,
+            range_get_chunk_bytes: 16 * 1024 * 1024,
+            range_get_parallelism: 4,
             boundary_mode: BoundaryMode::Hybrid,
             sentinel_mode: SentinelMode::Auto,
             sentinel_min_interval_secs: 5,

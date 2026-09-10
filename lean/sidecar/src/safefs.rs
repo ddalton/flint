@@ -84,6 +84,107 @@ pub(crate) fn write_via_tmp_fast(
     write_via_tmp_opts(path, tmp, bytes, mode, false)
 }
 
+/// The RANGED sibling of `write_via_tmp_fast`: the caller streams an
+/// object in at offsets instead of handing over one finished buffer.
+///
+/// Same no-per-file-fsync rule — a materialisation is made durable by
+/// `sync_tree` before the marker or baseline that vouches for it — and
+/// the same exclusive-temp discipline, so a stale temp from a killed
+/// checkout is refused rather than appended to. The rename still makes
+/// the visible file atomic: a reader sees the whole object or no
+/// object, never a half-filled one, which is the property the ranged
+/// write must not lose.
+pub(crate) struct RangedTmp {
+    file: std::fs::File,
+    tmp: std::path::PathBuf,
+    path: std::path::PathBuf,
+    /// Bytes actually written, so `commit` can refuse a short object
+    /// rather than renaming a file with a hole in it.
+    written: std::cell::Cell<u64>,
+    expect: u64,
+}
+
+impl RangedTmp {
+    pub(crate) fn create(
+        path: &Path,
+        tmp: &Path,
+        size: u64,
+        mode: Option<u32>,
+    ) -> LeanResult<RangedTmp> {
+        match std::fs::remove_file(tmp) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(refuse(tmp, &format!("stale temp file is not removable: {e}"))),
+        }
+        let f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(tmp)
+            .map_err(|e| refuse(tmp, &format!("temp file is not exclusively creatable: {e}")))?;
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(mode))
+                .map_err(|e| refuse(tmp, &format!("mode: {e}")))?;
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        Ok(RangedTmp {
+            file: f,
+            tmp: tmp.to_path_buf(),
+            path: path.to_path_buf(),
+            written: std::cell::Cell::new(0),
+            expect: size,
+        })
+    }
+
+    /// Write one range at its offset. Ranges may land in any order —
+    /// that is the whole point — so this is a positional write and
+    /// never a seek the concurrent siblings could race.
+    pub(crate) fn write_at(&self, offset: u64, bytes: &[u8]) -> LeanResult<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            self.file
+                .write_all_at(bytes, offset)
+                .map_err(|e| refuse(&self.tmp, &format!("write at {offset}: {e}")))?;
+        }
+        #[cfg(not(unix))]
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = &self.file;
+            f.seek(SeekFrom::Start(offset))
+                .map_err(|e| refuse(&self.tmp, &format!("seek to {offset}: {e}")))?;
+            f.write_all(bytes)
+                .map_err(|e| refuse(&self.tmp, &format!("write at {offset}: {e}")))?;
+        }
+        self.written.set(self.written.get() + bytes.len() as u64);
+        Ok(())
+    }
+
+    /// Rename into place. Refuses unless every expected byte arrived:
+    /// a rename here is what makes the object visible, and a hole in a
+    /// materialised file reads to the next scan as the agent's own
+    /// truncation and publishes back over the good version.
+    pub(crate) fn commit(self) -> LeanResult<()> {
+        if self.written.get() != self.expect {
+            let _ = std::fs::remove_file(&self.tmp);
+            return Err(LeanError::State(format!(
+                "ranged materialisation of {} wrote {} of {} bytes — refusing to rename a \
+                 file with a hole in it",
+                self.path.display(),
+                self.written.get(),
+                self.expect
+            )));
+        }
+        drop(self.file);
+        std::fs::rename(&self.tmp, &self.path).map_err(|e| {
+            let _ = std::fs::remove_file(&self.tmp);
+            refuse(&self.path, &format!("rename from temp: {e}"))
+        })
+    }
+}
+
 /// Flush every dirty page of the filesystem holding `dir` to stable
 /// storage. Linux `syncfs(2)`; elsewhere an fsync of the directory,
 /// which is the best the platform offers. Called before the checkout

@@ -40,6 +40,131 @@ pub struct CheckoutReport {
     pub manifest_secs: f64,
     pub fetch_secs: f64,
     pub commit_secs: f64,
+    /// Objects materialised through the RANGED path. On a cluster
+    /// nothing else can tell "ranging did not help" from "ranging did
+    /// not run" — the knob is a threshold and a threshold that never
+    /// fires reads exactly like an optimisation that does not work.
+    pub ranged: usize,
+}
+
+/// Materialise one object as PARALLEL RANGES, writing each at its
+/// offset as it lands.
+///
+/// Returns `Ok(None)` when the caller should fall through to the
+/// whole-object arm — either because ranging does not apply, or because
+/// the store answered with one of the two POLICY-BEARING errors. That
+/// second case is deliberate: `PreconditionFailed` and `NotFound` mean
+/// three different things here depending on `pinned` and `sole_writer`,
+/// and all three refusals are written once, in the whole-object arm
+/// below. Re-deciding them here would put the same policy in two
+/// places, which is how the two drift apart. The cost is one wasted
+/// request on a path that is already an incident.
+///
+/// Every other error propagates after the per-range retries: a transport
+/// failure is a failure, not a quiet fallback that would hide a broken
+/// network behind a slower code path.
+async fn fetch_ranged(
+    store: &std::sync::Arc<dyn flint_store::ObjectStore>,
+    key: &str,
+    etag: &str,
+    size: u64,
+    target: &std::path::Path,
+    tmp: &std::path::Path,
+    mode: Option<u32>,
+    chunk_bytes: u64,
+    parallelism: usize,
+) -> LeanResult<Option<u64>> {
+    use futures::stream::StreamExt;
+
+    /// A range that failed for a reason the caller must distinguish.
+    enum RangeFail {
+        /// 412/404 — the whole-object arm owns this policy.
+        Fallback,
+        Fatal(LeanError),
+    }
+
+    const RANGE_RETRIES: u32 = 3;
+    let chunk_bytes = chunk_bytes.max(1);
+    let mut parts: Vec<(u64, u64)> = Vec::new();
+    let mut at = 0u64;
+    while at < size {
+        let len = chunk_bytes.min(size - at);
+        parts.push((at, len));
+        at += len;
+    }
+    if parts.len() < 2 {
+        // One range is one whole GET with extra steps.
+        return Ok(None);
+    }
+
+    let sink = super::safefs::RangedTmp::create(target, tmp, size, mode)?;
+    let mut ranges = futures::stream::iter(parts.into_iter().map(|(off, len)| {
+        let store = store.clone();
+        let key = key.to_string();
+        let etag = etag.to_string();
+        async move {
+            let mut attempt: u32 = 0;
+            loop {
+                // EVERY range carries the same If-Match, which is what
+                // makes the assembled file one object rather than a
+                // splice of two: a write between range 3 and range 4
+                // fails range 4 instead of silently interleaving
+                // generations.
+                match store.get_range(&key, off, len, &etag).await {
+                    Ok(b) => return Ok((off, b)),
+                    Err(StoreError::PreconditionFailed(_)) | Err(StoreError::NotFound(_)) => {
+                        return Err(RangeFail::Fallback)
+                    }
+                    Err(_) if attempt < RANGE_RETRIES => {
+                        attempt += 1;
+                        // The retry is per RANGE: a cut connection at
+                        // range N of a multi-GiB object must not throw
+                        // away N ranges of progress.
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            300 * u64::from(attempt),
+                        ))
+                        .await;
+                    }
+                    Err(e) => {
+                        return Err(RangeFail::Fatal(LeanError::State(format!(
+                            "get_range {key} at {off}+{len} after {RANGE_RETRIES} retries: {e}"
+                        ))))
+                    }
+                }
+            }
+        }
+    }))
+    .buffer_unordered(parallelism.max(1));
+
+    let mut bytes = 0u64;
+    while let Some(next) = ranges.next().await {
+        match next {
+            Ok((off, b)) => {
+                if b.is_empty() {
+                    drop(ranges);
+                    let _ = std::fs::remove_file(tmp);
+                    return Err(LeanError::State(format!(
+                        "get_range {key} at {off} returned an empty range before the object's \
+                         end — refusing a hole"
+                    )));
+                }
+                bytes += b.len() as u64;
+                sink.write_at(off, &b)?;
+            }
+            Err(RangeFail::Fallback) => {
+                drop(ranges);
+                let _ = std::fs::remove_file(tmp);
+                return Ok(None);
+            }
+            Err(RangeFail::Fatal(e)) => {
+                drop(ranges);
+                let _ = std::fs::remove_file(tmp);
+                return Err(e);
+            }
+        }
+    }
+    sink.commit()?;
+    Ok(Some(bytes))
 }
 
 /// CRC-64/NVME of a local file, in the same base64 form the manifest
@@ -102,6 +227,8 @@ impl Sidecar {
         // measured the sequential loop at ~1,000-2,000 files/s and
         // 3.3 s/GiB; fan-out multiplies directly against both).
         struct Fetched {
+            /// Took the ranged path (report-only).
+            ranged: bool,
             path: String,
             be: Option<BaselineEntry>,
             skipped: bool,
@@ -144,6 +271,9 @@ impl Sidecar {
             // stranger. Adopting it would copy bytes no manifest cites
             // into this tree, silently — drill C4.
             let sole_writer = m.sole_writer;
+            let range_min = this.cfg.range_get_min_bytes;
+            let range_chunk = this.cfg.range_get_chunk_bytes;
+            let range_par = this.cfg.range_get_parallelism;
             stream::iter(admission.into_iter().map(|(path, entry)| {
                 let store = this.store.clone();
                 let root = this.cfg.root.clone();
@@ -166,6 +296,7 @@ impl Sidecar {
                         Ok(t) => t,
                         Err(e) => {
                             return Ok(Fetched {
+                                ranged: false,
                                 path: path.clone(),
                                 be: None,
                                 skipped: true,
@@ -210,6 +341,7 @@ impl Sidecar {
                             };
                         if same {
                             return Ok(Fetched {
+                                ranged: false,
                                 path: path.clone(),
                                 be: Some(BaselineEntry {
                                     etag: entry.etag.clone(),
@@ -225,6 +357,55 @@ impl Sidecar {
                         }
                         // Fall through and re-materialize.
                     }
+                    // RANGED FIRST, when the object is big enough to
+                    // pay for it and the citation is a plain etag. A
+                    // pinned entry naming a VERSION is excluded: the
+                    // store's ranged read is guarded by If-Match, which
+                    // attests the object's identity but does not
+                    // ADDRESS a noncurrent version, so ranging a pinned
+                    // citation could only read the current object —
+                    // exactly what D13 forbids. Those stay whole.
+                    let ranged_bytes = if range_min > 0
+                        && entry.size >= range_min
+                        && !(pinned && entry.version_id.is_some())
+                    {
+                        let tmp = target.with_file_name(format!(
+                            "{}.flint-sync-tmp",
+                            target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+                        ));
+                        fetch_ranged(
+                            &store,
+                            &entry.key,
+                            &entry.etag,
+                            entry.size,
+                            &target,
+                            &tmp,
+                            Some(entry.mode),
+                            range_chunk,
+                            range_par,
+                        )
+                        .await?
+                    } else {
+                        None
+                    };
+                    if let Some(n) = ranged_bytes {
+                        let st = std::fs::metadata(&local)?;
+                        return Ok(Fetched {
+                            ranged: true,
+                            path: path.clone(),
+                            be: Some(BaselineEntry {
+                                etag: entry.etag.clone(),
+                                generation: entry.generation,
+                                size: st.len(),
+                                mtime_unix: mtime_of(&st),
+                                version_id: None,
+                            }),
+                            skipped: false,
+                            bytes: n,
+                            refused: None,
+                        });
+                    }
+
                     // D13, the reader rule. Under a GATED citation the
                     // manifest is stamped `pinned_reads` and every
                     // entry names the version it cites: readers resolve
@@ -325,6 +506,7 @@ impl Sidecar {
                     write_file_atomic(&target, &body, Some(entry.mode))?;
                     let st = std::fs::metadata(&local)?;
                     Ok(Fetched {
+                        ranged: false,
                         path: path.clone(),
                         be: Some(BaselineEntry {
                             etag: meta.etag.clone(),
@@ -357,6 +539,9 @@ impl Sidecar {
                 })?;
                 report.refused += 1;
                 continue;
+            }
+            if f.ranged {
+                report.ranged += 1;
             }
             if f.skipped {
                 report.skipped_present += 1;

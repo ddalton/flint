@@ -29,6 +29,10 @@
 //!   FLINT_SYNC_FLOOR_SECS         publish cadence floor (default 60)
 //!   FLINT_SYNC_MAX_BYTES/_FILES   checkout budgets (0 = unlimited)
 //!   FLINT_SYNC_FANOUT             concurrent fetches/uploads (default 32)
+//!   FLINT_SYNC_RANGE_GET_MIN_MB   materialise objects >= this as parallel
+//!                                 ranges (default 0 = off)
+//!   FLINT_SYNC_RANGE_GET_CHUNK_MB bytes per range (default 16)
+//!   FLINT_SYNC_RANGE_GET_PARALLELISM ranges in flight per object (default 4)
 //!   FLINT_SYNC_FETCH_INFLIGHT_MB  checkout bytes in flight (default 512)
 //!   FLINT_SYNC_SOLE_WRITER        "true" marks every manifest this
 //!                                 sidecar installs as a PUBLISHED
@@ -136,6 +140,10 @@ async fn main() {
     cfg.project_id = std::env::var("FLINT_SYNC_PROJECT_ID").ok().filter(|p| !p.is_empty());
     cfg.fetch_inflight_max_bytes =
         env_u64("FLINT_SYNC_FETCH_INFLIGHT_MB", 512).max(1) * 1024 * 1024;
+    // 0 = off, which is the shipped default until a drill moves it.
+    cfg.range_get_min_bytes = env_u64("FLINT_SYNC_RANGE_GET_MIN_MB", 0) * 1024 * 1024;
+    cfg.range_get_chunk_bytes = env_u64("FLINT_SYNC_RANGE_GET_CHUNK_MB", 16).max(1) * 1024 * 1024;
+    cfg.range_get_parallelism = env_u64("FLINT_SYNC_RANGE_GET_PARALLELISM", 4).max(1) as usize;
     if let Ok(m) = std::env::var("FLINT_SYNC_BOUNDARY_MODE") {
         match BoundaryMode::parse(&m) {
             Some(bm) => cfg.boundary_mode = bm,
@@ -337,9 +345,13 @@ async fn claim_then(sc: &mut Sidecar, step: Step) -> Result<(), LeanError> {
                     "flint-sync: checkout — {} materialized, {} present, live-tree={}",
                     r.materialized, r.skipped_present, r.resumed_live_tree
                 );
+                // BYTES on the same line as the phases, deliberately:
+                // an A/B of the fetch window compares two wall clocks,
+                // and an arm that "wins" by materialising fewer bytes
+                // is the failure mode a timing-only line cannot show.
                 eprintln!(
-                    "flint-sync: phase manifest={:.3}s fetch={:.3}s commit={:.3}s",
-                    r.manifest_secs, r.fetch_secs, r.commit_secs
+                    "flint-sync: phase manifest={:.3}s fetch={:.3}s commit={:.3}s bytes={} ranged={}",
+                    r.manifest_secs, r.fetch_secs, r.commit_secs, r.bytes, r.ranged
                 );
             }
             Step::Barrier => {

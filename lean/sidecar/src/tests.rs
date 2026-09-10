@@ -8423,3 +8423,81 @@ fn the_drain_attestation_is_written_by_the_drain_and_cleared_at_startup() {
     assert!(!st.drained_path().exists());
     st.clear_drained().unwrap(); // idempotent: absent is not an error
 }
+
+// ── ranged checkout (range_get_min_bytes) ────────────────────────────
+
+/// A big object materialises byte-identically through the RANGED path,
+/// and actually ran in parallel.
+///
+/// The assertion that matters is `peak_get_range_in_flight() > 1`.
+/// Byte-identity alone would pass with the ranged path silently
+/// falling back to one whole GET — which is exactly the failure this
+/// knob would have: a config that reads well, changes nothing, and
+/// measures as "no improvement" on a cluster nobody wants to rerun.
+#[tokio::test]
+async fn ranged_checkout_is_byte_identical_and_parallel() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+
+    // 5 MiB of non-uniform bytes: a run of one value would hide an
+    // offset that wrote the right length in the wrong place.
+    let big: Vec<u8> = (0..5 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    std::fs::write(dir_a.path().join("weights.bin"), &big).unwrap();
+    write(dir_a.path(), "small.txt", "not ranged");
+    a.run_barrier().await.unwrap();
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    b.cfg.range_get_min_bytes = 1024 * 1024;
+    b.cfg.range_get_chunk_bytes = 512 * 1024; // 10 ranges over 5 MiB
+    b.cfg.range_get_parallelism = 4;
+    store.reset_peak_get_range_in_flight();
+    // A zero-latency store cannot show concurrency: each future is
+    // ready on its first poll, so `buffer_unordered` never holds more
+    // than one. The delay is what makes the overlap observable — and
+    // without it this assertion would fail against a CORRECT
+    // implementation, which is worse than not asserting at all.
+    store.inject_get_range_delay_ms(5);
+
+    let cr = b.checkout().await.unwrap();
+    assert_eq!(cr.materialized, 2);
+    assert_eq!(
+        std::fs::read(dir_b.path().join("weights.bin")).unwrap(),
+        big,
+        "ranged materialisation must be byte-identical"
+    );
+    assert_eq!(read(dir_b.path(), "small.txt").unwrap(), "not ranged");
+    let peak = store.peak_get_range_in_flight();
+    assert!(peak > 1, "ranges must overlap; peak in flight was {peak}");
+}
+
+/// The control arm: with the knob off, the ranged path must not run at
+/// all. Without this, the test above proves only that SOMETHING
+/// fetched the bytes.
+#[tokio::test]
+async fn ranged_checkout_off_by_default_uses_no_ranges() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    let big: Vec<u8> = (0..5 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    std::fs::write(dir_a.path().join("weights.bin"), &big).unwrap();
+    a.run_barrier().await.unwrap();
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    assert_eq!(b.cfg.range_get_min_bytes, 0, "the default must be OFF");
+    store.reset_peak_get_range_in_flight();
+    let cr = b.checkout().await.unwrap();
+    assert_eq!(cr.materialized, 1);
+    assert_eq!(std::fs::read(dir_b.path().join("weights.bin")).unwrap(), big);
+    assert_eq!(
+        store.peak_get_range_in_flight(),
+        0,
+        "the whole-object arm must issue no ranged reads"
+    );
+}
