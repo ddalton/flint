@@ -111,6 +111,8 @@ def build():
                 "tenant pod — no sidecar, no label, no webhook, no credential")
     d.zone(p, 0.5, 6.05, 5.15, 1.30,
            "another tenant namespace — a different CR, a different bucket")
+    d.zone(p, 7.42, 2.00, 3.83, 5.35, "flint-workers",
+           sub="a system namespace — neither tenant's. Both workers are here")
     d.node(p, "cloud", 13.20, 2.05, 8.70, 6.25, "", "", fill=d.CLOUD_F,
            line=d.CLOUD_L, line_weight=0.012)
     p.text(14.00, 2.45, 7.10, "S3-compatible object storage", size=10.5,
@@ -173,13 +175,15 @@ def build():
            "tooling already owns, and leave it as it was.",
            size=7.6, color=SUB, halign=1)
 
-    d.node(p, "document", 11.40, 4.60, 0.90, 0.90, "", "", fill=d.CLIENT_F,
+    # Right of the flint-workers boundary (11.25) and left of the cloud
+    # (13.20): the browser is in neither, which is the point of it.
+    d.node(p, "document", 11.85, 4.60, 0.90, 0.90, "", "", fill=d.CLIENT_F,
            line=d.CLIENT_L, line_weight=0.013)
-    p.text(10.60, 5.56, 2.50, "browser / UI", size=9.6, color=INK, bold=True,
+    p.text(11.35, 5.56, 1.90, "browser / UI", size=9.6, color=INK, bold=True,
            halign=1)
-    p.text(10.40, 5.76, 2.90, "the SAME objects, the SAME API", size=7.2,
+    p.text(11.35, 5.78, 1.90, "the SAME objects, the SAME API", size=7.2,
            color=MUTE, halign=1)
-    p.text(10.40, 5.94, 2.90, "its OWN credential — never the broker's",
+    p.text(11.35, 6.08, 1.90, "its OWN credential — never the broker's",
            size=7.2, color=MUTE, halign=1)
 
     d.node(p, "cylinder", 15.15, 6.415, 4.80, 0.85, "another bucket",
@@ -198,22 +202,24 @@ def build():
     p.arrow([(11.20, spine), (15.15, spine)], color=DUR, weight=WT,
             begin_arrow=k.ARROW_FILLED)
     d.flabel(p, 12.15, spine - 0.24, "GET · PUT · LIST", DUR, w=1.5)
-    d.flabel(p, 12.15, spine + 0.23, "per operation · no RPO, nothing is buffered", MUTE, w=2.6, size=7.2)
+    d.flabel(p, 12.22, spine + 0.23,
+             "per operation · no RPO, nothing is buffered", MUTE, w=1.80,
+             size=7.2)
 
     p.arrow([(5.42, 6.84), (7.60, 6.84)], color=FLOW, weight=WT,
             begin_arrow=k.ARROW_FILLED)
     p.arrow([(11.20, 6.84), (15.15, 6.84)], color=DUR, weight=WT,
             begin_arrow=k.ARROW_FILLED)
-    p.arrow([(12.30, 5.05), (13.60, 5.05), (13.60, 3.60), (15.15, 3.60)],
+    p.arrow([(12.75, 5.05), (13.60, 5.05), (13.60, 3.60), (15.15, 3.60)],
             color=DUR, weight=WT)
 
     # ---- how the mount gets there: CSI, and no webhook --------------------
     p.box(0.5, 7.60, 12.50, 1.95, "", "", fill="#FBFCFD", line=d.ZONE_L,
           dashed=True, rounding=0.14, line_weight=0.009)
     p.text(0.72, 7.72, 12.1,
-           "s3.csi.chert.us  —  the node DaemonSet: the mount happens BEFORE "
-           "the mounter runs, and there is NO webhook", size=10, color=INK,
-           bold=True)
+           "s3.csi.chert.us  —  the node DaemonSet, in flint-system: the "
+           "mount happens BEFORE the mounter runs, and there is NO webhook",
+           size=10, color=INK, bold=True)
     p.text(0.72, 7.96, 12.1,
            "One privileged process per node, holding no S3 credential and no "
            "Secrets RBAC. kubelet calls NodePublishVolume with a pod-bound "
@@ -240,11 +246,13 @@ def build():
           body_size=7.4, body_color=SUB)
     p.box(7.60, 9.80, 6.90, 1.15,
           "privilege did not disappear — it was CONCENTRATED",
-          "the node plugin (privileged, one per node, no S3 credential, no "
-          "Secrets RBAC) · the workers (non-root, all caps dropped, "
-          "read-only rootfs, no SA token) · the broker (the only standing "
-          "credential, every issuance audit-logged). None of the three is in "
-          "a tenant namespace.",
+          "the node plugin (flint-system: privileged, one per node, no S3 "
+          "credential, no Secrets RBAC) · the workers (flint-workers: "
+          "non-root, all caps dropped, read-only rootfs, no SA token) · the "
+          "broker (flint-system: the only standing credential, every "
+          "issuance audit-logged). None of the three is in a tenant "
+          "namespace, and the plugin may create pods in flint-workers "
+          "ALONE — pinned to its own node by admission policy.",
           fill=d.OPER_F, line=d.OPER_L, line_weight=0.012, title_size=9.6,
           body_size=7.4, body_color=SUB)
     p.box(14.70, 9.80, 7.20, 1.15,
