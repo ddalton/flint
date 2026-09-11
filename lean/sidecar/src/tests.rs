@@ -8817,3 +8817,254 @@ async fn ranged_checkout_explicitly_disabled_uses_no_ranges() {
     );
     assert_eq!(cr.ranged, 0);
 }
+
+// ---------------------------------------------------------------------
+// Scoped checkout (docs/plans/flint-lean-scoped-read-design.md, phase 2)
+// ---------------------------------------------------------------------
+
+/// Publishes a tree with a clear in-scope / out-of-scope split: two
+/// small files under `inputs/` and six 4 KiB files under `outputs/`.
+/// The size asymmetry is deliberate — it is what lets the budget arms
+/// below move exactly one dimension.
+async fn scoped_fixture(store: &Arc<MemoryStore>) -> tempfile::TempDir {
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "inputs/wanted.txt", "the file the agent edits");
+    write(dir_a.path(), "inputs/also.txt", "and this one");
+    for i in 0..6 {
+        write(dir_a.path(), &format!("outputs/big-{i}.bin"), &"x".repeat(4096));
+    }
+    a.run_barrier().await.unwrap();
+    dir_a
+}
+
+#[tokio::test]
+async fn a_scoped_checkout_materialises_only_the_admitted_set() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    let cr = b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
+
+    assert_eq!(cr.materialized, 2, "only the admitted citations");
+    assert_eq!(cr.out_of_scope, 6, "and the declined count says the scope DID something");
+    assert_eq!(cr.scope.as_deref(), Some(&["inputs".to_string()][..]));
+    assert!(read(dir_b.path(), "inputs/wanted.txt").is_some());
+    assert!(
+        read(dir_b.path(), "outputs/big-0.bin").is_none(),
+        "an out-of-scope citation must not reach the tree"
+    );
+
+    // The citation set is the safety property: `classify` derives
+    // deletions by iterating exactly these keys.
+    let base = b.state.load_baseline().unwrap();
+    assert_eq!(
+        base.entries.keys().cloned().collect::<Vec<_>>(),
+        vec!["inputs/also.txt".to_string(), "inputs/wanted.txt".to_string()],
+        "an unadmitted path must never be cited"
+    );
+    assert_eq!(b.state.load_scope().unwrap().as_deref(), Some(&["inputs".to_string()][..]));
+}
+
+#[tokio::test]
+async fn what_a_scoped_checkout_never_materialised_it_can_never_delete() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
+    assert!(claim_until_held(&mut b, 12).await, "quiet polls exhausted ⇒ takeover");
+
+    // TWO barriers: the deletion rule needs absence to survive two
+    // consecutive scans, so one barrier could pass for the wrong reason.
+    let r1 = b.run_barrier().await.unwrap();
+    let r2 = b.run_barrier().await.unwrap();
+    assert!(r1.deleted.is_empty() && r2.deleted.is_empty(), "{:?} {:?}", r1.deleted, r2.deleted);
+
+    let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(
+        m.entries.len(),
+        8,
+        "the six unadmitted citations survive a scoped workspace's barriers: {:?}",
+        m.entries.keys().collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn a_scoped_checkout_budget_is_computed_over_the_admitted_set() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+
+    // One budget, between the admitted bytes (~60) and the whole tree
+    // (~24 KiB). The two arms differ in the SCOPE and nothing else.
+    let dir_whole = tempfile::tempdir().unwrap();
+    let mut whole = sidecar(&store, dir_whole.path()).await;
+    whole.cfg.max_bytes = 1024;
+    let err = whole.checkout().await.expect_err("the whole tree is over this budget");
+    assert!(matches!(err, LeanError::Budget(_)), "{err}");
+
+    let dir_scoped = tempfile::tempdir().unwrap();
+    let mut scoped = sidecar(&store, dir_scoped.path()).await;
+    scoped.cfg.max_bytes = 1024;
+    let cr = scoped
+        .checkout_scoped(Some(vec!["inputs".into()]))
+        .await
+        .expect("a budget is a promise about what THIS checkout writes");
+    assert_eq!(cr.materialized, 2);
+}
+
+#[tokio::test]
+async fn an_all_rejected_checkout_scope_is_refused_not_widened() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    let err = b
+        .checkout_scoped(Some(vec!["../escape".into(), "./here".into()]))
+        .await
+        .expect_err("every entry malformed ⇒ an EMPTY scope ⇒ the whole manifest");
+    assert!(format!("{err}").contains("WHOLE MANIFEST"), "{err}");
+    assert!(
+        read(dir_b.path(), "outputs/big-0.bin").is_none(),
+        "the refusal must happen BEFORE the first byte"
+    );
+    assert!(!b.state.marker_present(), "and must not open the agent-start gate");
+}
+
+#[tokio::test]
+async fn a_live_tree_refuses_a_checkout_whose_scope_disagrees() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+
+    // Direction 1, the dangerous one: a caller that asks for the whole
+    // tree and resumes a 2-file workspace would believe it holds 8.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
+    let err = b.checkout().await.expect_err("scoped tree, unscoped request");
+    let msg = format!("{err}");
+    assert!(msg.contains("UNSCOPED"), "the error must name BOTH sets: {msg}");
+    assert!(msg.contains("inputs"), "the error must name BOTH sets: {msg}");
+
+    // Direction 2: a whole tree, then a scoped request.
+    let dir_c = tempfile::tempdir().unwrap();
+    let mut c = sidecar(&store, dir_c.path()).await;
+    c.checkout().await.unwrap();
+    let err = c
+        .checkout_scoped(Some(vec!["inputs".into()]))
+        .await
+        .expect_err("unscoped tree, scoped request");
+    assert!(format!("{err}").contains("cannot change the admitted set"), "{err}");
+
+    // And the matching request still resumes.
+    let r = b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
+    assert!(r.resumed_live_tree);
+}
+
+#[tokio::test]
+async fn a_scoped_checkout_leaves_the_merge_base_whole() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
+
+    let base = b.state.load_baseline().unwrap();
+    assert_eq!(base.entries.len(), 2, "the CITATIONS are scoped");
+    assert_eq!(
+        base.inst_base.len(),
+        8,
+        "the MERGE BASE is not: {:?}",
+        base.inst_base.keys().collect::<Vec<_>>()
+    );
+}
+
+/// The positive control for the rule above, and the reason it is a rule
+/// rather than a preference: narrow the merge base to match the scope
+/// and the very next whole-tree sync pulls everything the scope
+/// declined. Arms differ in `inst_base` alone.
+#[tokio::test]
+async fn a_narrowed_merge_base_makes_every_unadmitted_citation_foreign() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+
+    // Arm A — as shipped: inst_base whole.
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    a.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
+    a.sync().await.unwrap();
+    assert!(
+        read(dir_a.path(), "outputs/big-0.bin").is_none(),
+        "a whole-tree sync must leave the declined citations declined"
+    );
+
+    // Arm B — inst_base narrowed to the scope, and NOTHING else changed.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
+    {
+        let mut base = b.state.load_baseline().unwrap();
+        base.inst_base.retain(|p, _| p.starts_with("inputs/"));
+        b.state.save_baseline(&base).unwrap();
+    }
+    b.sync().await.unwrap();
+    assert!(
+        read(dir_b.path(), "outputs/big-0.bin").is_some(),
+        "THE CLIFF: absent from the merge base reads as CHANGED \
+         (manifest.rs `unwrap_or(true)`, sync.rs `unwrap_or(false)`), so every \
+         declined citation comes back one sync later"
+    );
+    let base = b.state.load_baseline().unwrap();
+    assert_eq!(base.entries.len(), 8, "and the scope is gone entirely");
+}
+
+#[tokio::test]
+async fn an_unreadable_scope_is_not_read_as_unscoped() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
+        return;
+    }
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
+
+    // The PARENT, not the file. A mode-0o000 file still `stat`s fine —
+    // `exists()` needs search permission on the directory, not read on
+    // the file — so chmod'ing the file leaves both implementations
+    // erroring and the test passes without pinning anything. An
+    // unreadable DIRECTORY is what separates them: `exists()` answers
+    // false and would return "unscoped".
+    let sd = b.cfg.state_dir();
+    std::fs::set_permissions(&sd, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    let got = b.state.load_scope();
+    std::fs::set_permissions(&sd, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let err = got.expect_err("EACCES must not read as 'unscoped'");
+    assert!(format!("{err}").contains("refusing to"), "{err}");
+}
+
+#[tokio::test]
+async fn a_whole_tree_checkout_clears_a_stale_scope() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+
+    // A scoped checkout that crashed before its marker: the scope is on
+    // disk, the gate never opened. The whole-tree checkout that replaces
+    // it must not inherit a claim it did not make.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    b.state.save_scope(Some(&["inputs".to_string()])).unwrap();
+    assert!(!b.state.marker_present());
+
+    let cr = b.checkout().await.unwrap();
+    assert_eq!(cr.materialized, 8, "the whole manifest, not the stale scope's share");
+    assert_eq!(b.state.load_scope().unwrap(), None, "and the stale scope is GONE");
+}

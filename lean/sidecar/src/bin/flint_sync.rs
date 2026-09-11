@@ -28,6 +28,14 @@
 //!   FLINT_SYNC_ENDPOINT  S3 endpoint override (MinIO/proxy rigs)
 //!   FLINT_SYNC_FLOOR_SECS         publish cadence floor (default 60)
 //!   FLINT_SYNC_MAX_BYTES/_FILES   checkout budgets (0 = unlimited)
+//!   FLINT_SYNC_CHECKOUT_SCOPE     comma list of path prefixes; checkout
+//!                                 materialises ONLY what they cover.
+//!                                 Unset = the whole manifest. A scope
+//!                                 whose every entry is malformed is
+//!                                 REFUSED, never widened. The admitted
+//!                                 set is not frozen: a path the remote
+//!                                 changes arrives through the inbox and
+//!                                 is then owned like any other.
 //!   FLINT_SYNC_FANOUT             concurrent fetches/uploads (default 32)
 //!   FLINT_SYNC_RANGE_GET_MIN_MB   materialise objects >= this as parallel
 //!                                 ranges (default 8; 0 = off)
@@ -110,6 +118,20 @@ fn log_retry(sc: &Sidecar, e: &LeanError, fallback: &str) {
          Renewals have STOPPED: a challenger that can still reach the store \
          may depose this live writer."
     );
+}
+
+/// A comma list, trimmed, empties dropped. Returns `None` when the
+/// variable is unset or holds only separators — `Some(vec![])` would be
+/// an empty scope, and `checkout_scoped` refuses that rather than let it
+/// mean "everything".
+fn env_list(name: &str) -> Option<Vec<String>> {
+    let raw = std::env::var(name).ok()?;
+    let v: Vec<String> =
+        raw.split(',').map(|e| e.trim().to_string()).filter(|e| !e.is_empty()).collect();
+    if v.is_empty() {
+        return None;
+    }
+    Some(v)
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
@@ -348,11 +370,21 @@ async fn claim_then(sc: &mut Sidecar, step: Step) -> Result<(), LeanError> {
     let out = async {
         match step {
             Step::Checkout => {
-                let r = sc.checkout().await?;
+                let r = sc.checkout_scoped(env_list("FLINT_SYNC_CHECKOUT_SCOPE")).await?;
                 eprintln!(
                     "flint-sync: checkout — {} materialized, {} present, live-tree={}",
                     r.materialized, r.skipped_present, r.resumed_live_tree
                 );
+                if let Some(sc) = &r.scope {
+                    // The declined count, not just the scope: a scope
+                    // that admits everything reads exactly like no
+                    // scope, and "it was configured" is not evidence
+                    // that it did anything.
+                    eprintln!(
+                        "flint-sync: checkout SCOPED to {:?} — {} citations declined",
+                        sc, r.out_of_scope
+                    );
+                }
                 // BYTES on the same line as the phases, deliberately:
                 // an A/B of the fetch window compares two wall clocks,
                 // and an arm that "wins" by materialising fewer bytes
@@ -441,7 +473,7 @@ async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
             posture.reason.as_deref().unwrap_or("unknown")
         );
     }
-    sc.checkout().await?;
+    sc.checkout_scoped(env_list("FLINT_SYNC_CHECKOUT_SCOPE")).await?;
     // RE-RUN the preflight rather than republishing the pre-checkout
     // snapshot (review: U25). Two of the preflight's inputs are written
     // BY checkout — `baseline.inst_base` wholesale, and the posture file

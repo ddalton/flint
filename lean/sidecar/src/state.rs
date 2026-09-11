@@ -128,6 +128,15 @@ const MARKER: &str = "checkout-complete";
 pub const DRAINED: &str = "drained.json";
 const LOCK: &str = "lock";
 const BASELINE: &str = "baseline.json";
+/// The admitted set of a SCOPED checkout. Deliberately its own
+/// document rather than a field on `Baseline`: the baseline is
+/// rewritten by every barrier, every sync and every consume, and a
+/// scope that rides along is one `Baseline::default()` away from
+/// silently widening a workspace to the whole tree. This file is
+/// written once, by checkout, and thereafter only read. Absent means
+/// UNSCOPED — the only encoding of "no restriction", since an empty
+/// admitted set is refused before it can be written.
+const SCOPE: &str = "scope.json";
 const INCARNATION: &str = "incarnation.json";
 const INTENT: &str = "intent.json";
 const CONFLICTS: &str = "conflicts.jsonl";
@@ -220,6 +229,50 @@ impl SidecarState {
         let bytes =
             serde_json::to_vec(b).map_err(|e| LeanError::State(format!("baseline: {e}")))?;
         write_atomic(&self.dir.join(BASELINE), &bytes)
+    }
+
+    /// What this workspace was admitted to hold, or `None` for an
+    /// unscoped (whole-manifest) checkout.
+    ///
+    /// `fs::read` directly, with NO `exists()` pre-check: `exists()`
+    /// answers false for EACCES and EIO alike, and an unreadable scope
+    /// answered as "unscoped" is the same class of bug as an unreadable
+    /// path answered as "deleted" (`barrier.rs`, 14b3637c). Only
+    /// NotFound means absent.
+    pub fn load_scope(&self) -> LeanResult<Option<Vec<String>>> {
+        let p = self.dir.join(SCOPE);
+        let bytes = match fs::read(&p) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(LeanError::State(format!(
+                    "cannot read the checkout scope at {}: {e} — refusing to \
+                     guess what this workspace is holding",
+                    p.display()
+                )))
+            }
+        };
+        serde_json::from_slice(&bytes).map_err(|e| LeanError::State(format!("scope: {e}")))
+    }
+
+    /// `Some` writes the admitted set; `None` REMOVES the document.
+    /// Removing matters: a scoped checkout that crashed before its
+    /// marker leaves a scope behind, and the whole-tree checkout that
+    /// replaces it must not inherit a claim it did not make.
+    pub fn save_scope(&self, scope: Option<&[String]>) -> LeanResult<()> {
+        let p = self.dir.join(SCOPE);
+        match scope {
+            Some(entries) => {
+                let bytes = serde_json::to_vec(entries)
+                    .map_err(|e| LeanError::State(format!("scope: {e}")))?;
+                write_atomic(&p, &bytes)
+            }
+            None => match fs::remove_file(&p) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(LeanError::State(format!("clear {SCOPE}: {e}"))),
+            },
+        }
     }
 
     pub fn load_incarnation(&self) -> LeanResult<Option<Incarnation>> {

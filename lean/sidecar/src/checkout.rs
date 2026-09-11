@@ -40,6 +40,13 @@ pub struct CheckoutReport {
     pub manifest_secs: f64,
     pub fetch_secs: f64,
     pub commit_secs: f64,
+    /// The admitted set this checkout was scoped to, or `None` for the
+    /// whole manifest.
+    pub scope: Option<Vec<String>>,
+    /// Citations the scope DECLINED. Zero for an unscoped checkout, and
+    /// the number that says a scope did anything at all: a scope that
+    /// admits everything reads exactly like no scope.
+    pub out_of_scope: usize,
     /// Objects materialised through the RANGED path. On a cluster
     /// nothing else can tell "ranging did not help" from "ranging did
     /// not run" — the knob is a threshold and a threshold that never
@@ -197,6 +204,16 @@ fn local_crc64_b64(path: &std::path::Path) -> Option<String> {
         /// containment): left cited, surfaced as a conflict.
         refused: Option<String>,
     }
+
+/// Names a scope for a human in an error: the whole manifest, or the
+/// entries themselves. The entries matter — "a different scope" sends
+/// the reader to go and diff two things they cannot see.
+fn describe_scope(s: Option<&[String]>) -> String {
+    match s {
+        None => "UNSCOPED (the whole manifest)".to_string(),
+        Some(e) => format!("scoped to {:?}", e),
+    }
+}
 
 impl Sidecar {
     /// Materialize an ADMITTED SET under a bounded fan-out window:
@@ -498,9 +515,75 @@ impl Sidecar {
     /// crashes (resume skips present paths); refuses over budget
     /// BEFORE the first byte.
     pub async fn checkout(&mut self) -> LeanResult<CheckoutReport> {
+        self.checkout_scoped(None).await
+    }
+
+    /// Materialize only the citations an explicit scope admits.
+    ///
+    /// The safety argument is `classify` (`scan.rs`), which derives
+    /// deletions by iterating `baseline.entries.keys()`: a path this
+    /// checkout never materialized is never cited, so it can never be
+    /// classified absent and can never have its object DELETEd. That is
+    /// why no scope filter is needed in the barrier, the sync or the
+    /// delete sites — the admission filter here IS the whole argument,
+    /// and four copies of a rule are four places for it to drift.
+    ///
+    /// What a scoped workspace does NOT get is a frozen held set. A path
+    /// outside the scope that changes REMOTELY arrives through the inbox
+    /// and enters the baseline, and from then on it is owned like any
+    /// other — probe P1/P3 of 2026-09-11 measured both halves. There is
+    /// no verb to shed it again, and no verb to ask for a path the
+    /// remote never touched. Scoping a checkout is therefore a bet that
+    /// the admitted set is the set the agent needs for its whole life.
+    pub async fn checkout_scoped(
+        &mut self,
+        scope: Option<Vec<String>>,
+    ) -> LeanResult<CheckoutReport> {
+        // Validated BEFORE the live-tree row, because a malformed scope
+        // is a configuration error whether or not this tree is already
+        // up, and the one thing it must never do is quietly widen.
+        // `Scope::new` silently drops entries that are too long, past
+        // MAX_SCOPE_ENTRIES, or contain `.`/`..`; three malformed paths
+        // normalize to an EMPTY scope, and an empty scope reads
+        // everywhere as "no restriction" = the whole manifest. Same rule
+        // and same shape as `sync_scoped`.
+        let scope = match scope {
+            None => None,
+            Some(raw) => {
+                let s = super::sync::Scope::new(&raw);
+                if s.is_empty() {
+                    return Err(LeanError::State(format!(
+                        "checkout scope named {} entr{} and NONE survived validation — \
+                         refusing, because an empty scope widens to the WHOLE MANIFEST",
+                        raw.len(),
+                        if raw.len() == 1 { "y" } else { "ies" }
+                    )));
+                }
+                Some(s)
+            }
+        };
+        let requested: Option<Vec<String>> = scope.as_ref().map(|s| s.entries().to_vec());
+
         let mut report = CheckoutReport::default();
+        report.scope = requested.clone();
         if self.state.marker_present() {
-            // The live-tree row: never re-materialize.
+            // The live-tree row: never re-materialize. But a live tree
+            // holds what it holds, and `checkout` cannot change that —
+            // so a caller whose scope disagrees with the one on disk
+            // gets an error, never a success naming a set it did not
+            // get. The dangerous direction is the quiet one: a caller
+            // that asks for the whole tree and resumes a 3-file
+            // workspace believes it is holding 2001 paths.
+            let held = self.state.load_scope()?;
+            if held != requested {
+                return Err(LeanError::State(format!(
+                    "this workspace is already checked out {}, and the request asks for \
+                     {} — checkout cannot change the admitted set of a live tree, and \
+                     resuming it would return success for a set you did not get",
+                    describe_scope(held.as_deref()),
+                    describe_scope(requested.as_deref()),
+                )));
+            }
             report.resumed_live_tree = true;
             return Ok(report);
         }
@@ -514,28 +597,34 @@ impl Sidecar {
             None => (Default::default(), None),
         };
 
+        // ADMISSION FIRST, budgets second. The order is load-bearing:
+        // a budget is a promise about what THIS checkout will write, and
+        // a 3-file scoped checkout summed over the whole 2001-file
+        // manifest is refused for bytes it was never going to fetch.
+        let admission: Vec<(&String, &super::manifest::LeanEntry)> = match &scope {
+            None => m.entries.iter().collect(),
+            Some(s) => m.entries.iter().filter(|(p, _)| s.covers(p)).collect(),
+        };
+        report.out_of_scope = m.entries.len() - admission.len();
+
         // Budgets: refuse before materializing anything.
-        let total_bytes: u64 = m.entries.values().map(|e| e.size).sum();
+        let total_bytes: u64 = admission.iter().map(|(_, e)| e.size).sum();
         if self.cfg.max_bytes > 0 && total_bytes > self.cfg.max_bytes {
             return Err(LeanError::Budget(format!(
                 "checkout is {} bytes; budget {}",
                 total_bytes, self.cfg.max_bytes
             )));
         }
-        if self.cfg.max_files > 0 && m.entries.len() as u64 > self.cfg.max_files {
+        if self.cfg.max_files > 0 && admission.len() as u64 > self.cfg.max_files {
             return Err(LeanError::Budget(format!(
                 "checkout is {} files; budget {}",
-                m.entries.len(),
+                admission.len(),
                 self.cfg.max_files
             )));
         }
 
         let mut present: BTreeSet<String> = BTreeSet::new();
         let t_fetch = std::time::Instant::now();
-        // Whole-manifest admission: every citation. The budget
-        // refusals above already ran over exactly this set.
-        let admission: Vec<(&String, &super::manifest::LeanEntry)> =
-            m.entries.iter().collect();
         // A mirror's publisher is the only party entitled to write it,
         // so an object off its citation was moved by a stranger.
         // Adopting it would copy bytes no manifest cites into this
@@ -573,6 +662,14 @@ impl Sidecar {
 
         baseline.seq = m.seq;
         baseline.manifest_etag = metag;
+        // THE WHOLE MANIFEST, scope or no scope. `manifest.rs` reads an
+        // entry absent from the merge base as CHANGED
+        // (`base.get(p).map(..).unwrap_or(true)`), so an `inst_base`
+        // narrowed to the admitted set makes every unadmitted citation
+        // read as foreign, queue into the inbox, and land in the tree at
+        // the next barrier — a scoped checkout that downloads everything
+        // one barrier later. The constraint is not a refinement: the
+        // fast path and the safe path are the same line.
         baseline.inst_base = m.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect();
         baseline.prev_scan = present;
         // Every materialised file reaches stable storage BEFORE the
@@ -582,6 +679,14 @@ impl Sidecar {
         // edit and publish it over the good version.
         self.state.sync_tree()?;
         self.state.save_baseline(&baseline)?;
+        // Before the marker, always — including the `None` case, which
+        // REMOVES any scope a crashed predecessor left behind. The
+        // marker is the agent-start gate; a scope that landed after it
+        // would leave a window in which an agent is cleared to run
+        // against a tree whose admitted set is not yet durable, and a
+        // crash there yields a workspace holding three files that
+        // claims, by the absence of any scope, to hold all of them.
+        self.state.save_scope(requested.as_deref())?;
         // D11: the capability marker and the gauges exist BEFORE the
         // agent-start gate opens, so the first thing the agent does can
         // be to read them. `run` writes capabilities around checkout
