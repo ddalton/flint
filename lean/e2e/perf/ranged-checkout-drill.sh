@@ -88,6 +88,17 @@ mkdir -p results "$DRILL_ROOT"
 #   mixed   1 x 4 GiB + 2k x 16 KiB   the shape a real checkpoint tree has
 WORKLOADS="big small mixed"
 
+# SEED INTO A FRESH BUCKET, or clear $DRILL_PREFIX first.
+#
+# This is the only rig here that writes to a FIXED key space
+# (`$DRILL_PREFIX/$w`); the publish rigs mint a unique prefix per run. A
+# fresh workspace has an empty baseline, so every upload goes out under
+# `PutCondition::IfNoneMatchAny` — and an object already sitting at that
+# key is NOT overwritten, it is PARKED (`UploadOutcome::Parked`,
+# barrier.rs). The seed then exits cleanly while the manifest still cites
+# the PREVIOUS run's bytes, and every arm afterwards measures a tree
+# nobody intended. That reads as a drill result, not as a broken seed,
+# which is why it is written here rather than left to be rediscovered.
 seed_workload() { # <name>
   local w="$1" dir="$DRILL_ROOT/seed-$w"
   rm -rf "$dir"; mkdir -p "$dir"
