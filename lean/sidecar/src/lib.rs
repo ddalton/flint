@@ -42,6 +42,7 @@ pub mod barrier;
 pub mod checkout;
 pub mod chunk;
 pub mod control;
+pub mod drafts;
 pub mod gated;
 pub mod gateway;
 pub mod gauges;
@@ -456,6 +457,37 @@ impl LeanConfig {
     }
     pub fn conflict_key(&self, uuid: &str, path: &str) -> String {
         format!("{}/{}/conflicts/{}/{}", self.prefix, LEAN_DIR, uuid, path)
+    }
+
+    /// A per-user DRAFT: a durable edit that has NOT been published.
+    ///
+    /// Under `LEAN_DIR`, which is the whole safety argument: that
+    /// namespace is never scanned, never checked out, never cited by a
+    /// manifest, and never swept (both sweeps are prefix-scoped —
+    /// `manifest::sweep_generations` to `manifests/`, `sweep_chunks` to
+    /// `chunks/`). So a draft is durable in the bucket while being
+    /// invisible to `classify`, to `checkout`, to every other user, and
+    /// to the agent — which is exactly what "saved but not published"
+    /// has to mean.
+    ///
+    /// Body and meta live under DISJOINT subtrees rather than sharing
+    /// one with a suffix: with `drafts/<u>/<path>.meta` a file legally
+    /// named `notes.meta` would have its BODY at the key that is
+    /// `notes`'s META, and one user's draft would silently read as
+    /// another draft's base etag.
+    pub fn draft_body_key(&self, user: &str, path: &str) -> String {
+        format!("{}/{}/drafts/{}/body/{}", self.prefix, LEAN_DIR, user, path)
+    }
+    /// The draft's base: which version of `files/<path>` it was edited
+    /// against. Written AFTER the body, so the only crash residue is a
+    /// body with no meta — an INCOMPLETE draft, which `promote` refuses
+    /// by name rather than publishing against a base it had to guess.
+    pub fn draft_meta_key(&self, user: &str, path: &str) -> String {
+        format!("{}/{}/drafts/{}/meta/{}", self.prefix, LEAN_DIR, user, path)
+    }
+    /// Listing prefix for one user's draft metas (the resume view).
+    pub fn draft_meta_prefix(&self, user: &str) -> String {
+        format!("{}/{}/drafts/{}/meta/", self.prefix, LEAN_DIR, user)
     }
     pub fn state_dir(&self) -> PathBuf {
         self.root.join(STATE_DIR)

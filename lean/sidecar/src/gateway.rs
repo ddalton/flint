@@ -18,6 +18,17 @@
 //!   window from the CELL — the statelessness contract).
 //! - `GET  /files/{path}`  — read via the manifest citation, falling
 //!   back to an uncited-but-tracked inbox entry.
+//! - `PUT  /drafts/{user}/{path}` — save a DURABLE UNPUBLISHED edit
+//!   (`drafts.rs`). Unlike `PUT /files`, nothing about this is live:
+//!   the bytes sit under the reserved namespace where no scan, no
+//!   checkout, no manifest and no sweep can see them.
+//! - `GET  /drafts/{user}` — the resume view, each row flagged `stale`
+//!   when the file has moved since the draft was taken.
+//! - `GET  /drafts/{user}/{path}` — the saved bytes.
+//! - `POST /drafts/{user}/{path}` — PROMOTE: publish the draft,
+//!   conditioned on the base it recorded. POST is the verb and there is
+//!   no `/promote` suffix — see the router note.
+//! - `DELETE /drafts/{user}/{path}` — discard.
 //! - `GET  /snapshot`      — {manifest, manifest_etag, inbox}: the
 //!   sync verb's one-stop read.
 //! - `GET  /status`        — seq/window/inbox depth/epoch cell: the
@@ -31,6 +42,12 @@
 //! - `POST /window/clear`  {epoch, queued: [entry]}
 //! - `POST /inbox/drop`    {epoch, consumed: [entry]}
 //! - `POST /manifest`      {manifest, expected_etag?, epoch, flush_uuid}
+//!
+//! NOT a verb, deliberately: there is no gateway-triggered `rescope`.
+//! A rescope UNLINKS local files by scope, so honouring one on a
+//! remote's say-so would upgrade what a leaked bearer can do to
+//! "delete across a running agent's tree, under a scope I choose" —
+//! D14's argument against performing a remote `sync`, with more force.
 //!
 //! v1 deliberate limits (recorded, not hidden): HITL writes are
 //! whole-object ≤ the configured cap (multipart via the gateway is
@@ -65,7 +82,7 @@ pub struct GatewayCore {
 }
 
 impl GatewayCore {
-    fn cfg(&self, ws: &str) -> Option<LeanConfig> {
+    pub(crate) fn cfg(&self, ws: &str) -> Option<LeanConfig> {
         // The gateway never touches a local tree; the root is unused.
         self.workspaces.get(ws).map(|p| LeanConfig::new(p, "/nonexistent"))
     }
@@ -77,7 +94,7 @@ struct ErrorBody {
     message: String,
 }
 
-fn err_reply(status: StatusCode, error: &str, message: String) -> warp::reply::Response {
+pub(crate) fn err_reply(status: StatusCode, error: &str, message: String) -> warp::reply::Response {
     let mut res = warp::reply::with_status(
         warp::reply::json(&ErrorBody { error: error.into(), message }),
         status,
@@ -90,7 +107,7 @@ fn err_reply(status: StatusCode, error: &str, message: String) -> warp::reply::R
     res
 }
 
-fn ok_json<T: Serialize>(v: &T) -> warp::reply::Response {
+pub(crate) fn ok_json<T: Serialize>(v: &T) -> warp::reply::Response {
     warp::reply::json(v).into_response()
 }
 
@@ -107,7 +124,7 @@ fn token_ok(expected: &str, header: Option<&str>) -> bool {
 
 /// Workspace-relative path hygiene: no traversal, no absolute, no
 /// reserved namespaces, no empty segments.
-fn path_ok(path: &str) -> bool {
+pub(crate) fn path_ok(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
         && !path.split('/').any(|seg| {
@@ -171,12 +188,22 @@ struct ManifestCasReq {
 }
 
 #[derive(Serialize)]
-struct EtagResp {
-    etag: String,
+pub(crate) struct EtagResp {
+    pub(crate) etag: String,
 }
 
 // ── the router ───────────────────────────────────────────────────────
 
+/// Every route is `.boxed()` as it is built, and that is a COMPILE-TIME
+/// requirement, not tidiness. warp composes filters in the type system:
+/// each `.or()` wraps the pair in `Or<A, B>` and each `.then()` adds an
+/// opaque future, so an unboxed chain's type grows combinatorially in
+/// the number of routes. At 8 routes this crate's lib compiled in
+/// minutes; adding the five draft routes took ONE rustc invocation on
+/// `lib.rs` past 31 minutes at 100% CPU — all of it in type checking,
+/// with no error and no end in sight. Boxing erases the type at each
+/// step, so the chain composes `BoxedFilter` with `BoxedFilter` and the
+/// cost is linear. Add a route WITH its `.boxed()`.
 pub fn routes(
     core: Arc<GatewayCore>,
 ) -> warp::filters::BoxedFilter<(warp::reply::Response,)> {
@@ -229,7 +256,7 @@ pub fn routes(
                     body,
                 )
             },
-        );
+        ).boxed();
 
     let files_get = warp::get()
         .and(authed.clone())
@@ -238,40 +265,131 @@ pub fn routes(
         .and(warp::path::tail())
         .then(|_auth, core: Arc<GatewayCore>, ws: String, tail: warp::path::Tail| {
             handle_files_get(core, ws, tail.as_str().to_string())
-        });
+        }).boxed();
+
+    // ── drafts (`drafts.rs`) ─────────────────────────────────────────
+    //
+    // Method-keyed, with the workspace path in the tail and NO verb
+    // suffix. A `POST .../drafts/{u}/{path}/promote` would be genuinely
+    // ambiguous — a file legally named `promote` makes
+    // `notes/promote` both "promote the draft of notes" and "the draft
+    // of notes/promote" — and there is no disambiguation that does not
+    // reserve a filename. POST-is-promote reserves nothing.
+    let draft_list = warp::get()
+        .and(authed.clone())
+        .and(with_core.clone())
+        .and(warp::path!("lean" / "v1" / String / "drafts" / String))
+        .then(|_auth, core: Arc<GatewayCore>, ws: String, user: String| {
+            super::drafts::handle_draft_list(core, ws, user)
+        }).boxed();
+
+    let draft_put = warp::put()
+        .and(authed.clone())
+        .and(with_core.clone())
+        .and(warp::path!("lean" / "v1" / String / "drafts" / String / ..))
+        .and(warp::path::tail())
+        .and(warp::header::optional::<String>("x-flint-author"))
+        .and(warp::header::optional::<String>("x-flint-base-etag"))
+        .and(warp::body::content_length_limit(core.max_put_bytes))
+        .and(warp::body::bytes())
+        .then(
+            |_auth,
+             core: Arc<GatewayCore>,
+             ws: String,
+             user: String,
+             tail: warp::path::Tail,
+             author,
+             base_etag,
+             body| {
+                super::drafts::handle_draft_put(
+                    core,
+                    ws,
+                    user,
+                    tail.as_str().to_string(),
+                    author,
+                    base_etag,
+                    body,
+                )
+            },
+        ).boxed();
+
+    let draft_get = warp::get()
+        .and(authed.clone())
+        .and(with_core.clone())
+        .and(warp::path!("lean" / "v1" / String / "drafts" / String / ..))
+        .and(warp::path::tail())
+        .then(
+            |_auth, core: Arc<GatewayCore>, ws: String, user: String, tail: warp::path::Tail| {
+                super::drafts::handle_draft_get(core, ws, user, tail.as_str().to_string())
+            },
+        ).boxed();
+
+    let draft_delete = warp::delete()
+        .and(authed.clone())
+        .and(with_core.clone())
+        .and(warp::path!("lean" / "v1" / String / "drafts" / String / ..))
+        .and(warp::path::tail())
+        .then(
+            |_auth, core: Arc<GatewayCore>, ws: String, user: String, tail: warp::path::Tail| {
+                super::drafts::handle_draft_delete(core, ws, user, tail.as_str().to_string())
+            },
+        ).boxed();
+
+    let draft_promote = warp::post()
+        .and(authed.clone())
+        .and(with_core.clone())
+        .and(warp::path!("lean" / "v1" / String / "drafts" / String / ..))
+        .and(warp::path::tail())
+        .and(warp::header::optional::<String>("x-flint-author"))
+        .then(
+            |_auth,
+             core: Arc<GatewayCore>,
+             ws: String,
+             user: String,
+             tail: warp::path::Tail,
+             author| {
+                super::drafts::handle_draft_promote(
+                    core,
+                    ws,
+                    user,
+                    tail.as_str().to_string(),
+                    author,
+                )
+            },
+        ).boxed();
 
     let snapshot = warp::get()
         .and(authed.clone())
         .and(with_core.clone())
         .and(warp::path!("lean" / "v1" / String / "snapshot"))
-        .then(handle_snapshot_authed);
+        .then(handle_snapshot_authed).boxed();
 
     let status = warp::get()
         .and(authed.clone())
         .and(with_core.clone())
         .and(warp::path!("lean" / "v1" / String / "status"))
-        .then(handle_status_authed);
+        .then(handle_status_authed).boxed();
 
     let window_open = warp::post()
         .and(authed.clone())
         .and(with_core.clone())
         .and(warp::path!("lean" / "v1" / String / "window" / "open"))
         .and(warp::body::json::<WindowOpenReq>())
-        .then(handle_window_open);
+        .then(handle_window_open).boxed();
 
     let window_clear = warp::post()
         .and(authed.clone())
         .and(with_core.clone())
         .and(warp::path!("lean" / "v1" / String / "window" / "clear"))
         .and(warp::body::json::<WindowClearReq>())
-        .then(handle_window_clear);
+        .then(handle_window_clear).boxed();
 
     let inbox_drop = warp::post()
         .and(authed.clone())
         .and(with_core.clone())
         .and(warp::path!("lean" / "v1" / String / "inbox" / "drop"))
         .and(warp::body::json::<InboxDropReq>())
-        .then(handle_inbox_drop);
+        .then(handle_inbox_drop).boxed();
 
     // §2.5's gateway door. Two verbs, deliberately asymmetric: a
     // boundary is PERFORMED by the sidecar, a sync is CARRIED to the
@@ -281,28 +399,37 @@ pub fn routes(
         .and(with_core.clone())
         .and(warp::path!("lean" / "v1" / String / "boundary"))
         .and(warp::header::optional::<String>("x-flint-author"))
-        .then(handle_boundary_request);
+        .then(handle_boundary_request).boxed();
 
     let sync_req = warp::post()
         .and(authed.clone())
         .and(with_core.clone())
         .and(warp::path!("lean" / "v1" / String / "sync-request"))
         .and(warp::header::optional::<String>("x-flint-author"))
-        .then(handle_sync_request);
+        .then(handle_sync_request).boxed();
 
     let manifest_cas = warp::post()
         .and(authed.clone())
         .and(with_core.clone())
         .and(warp::path!("lean" / "v1" / String / "manifest"))
         .and(warp::body::json::<ManifestCasReq>())
-        .then(handle_manifest_cas);
+        .then(handle_manifest_cas).boxed();
 
     let healthz = warp::get()
         .and(warp::path!("healthz"))
-        .map(|| warp::reply::with_status("ok", StatusCode::OK).into_response());
+        .map(|| warp::reply::with_status("ok", StatusCode::OK).into_response())
+        .boxed();
 
     files_put
         .or(files_get).unify()
+        // The exact-match list route goes BEFORE the tail routes: a
+        // tail filter matches `/drafts/{u}` with an EMPTY tail, which
+        // `path_ok` then refuses as a bad path instead of listing.
+        .or(draft_list).unify()
+        .or(draft_put).unify()
+        .or(draft_get).unify()
+        .or(draft_delete).unify()
+        .or(draft_promote).unify()
         .or(snapshot).unify()
         .or(status).unify()
         .or(window_open).unify()
@@ -351,12 +478,27 @@ enum Precheck {
     Reply(warp::reply::Response),
 }
 
+/// The ONE entity-tag normalisation rule in this crate.
+///
+/// `pub(crate)` and not a closure because `drafts.rs` needs the same
+/// rule, and the first version of that module wrote its own — stripping
+/// the caller's quotes and then comparing the result against the
+/// store's UNSTRIPPED etag, so every promote read as stale. Two rules
+/// that must agree are one rule waiting to drift; this is the rule.
+///
+/// Normalise for COMPARISON only. What gets handed to `PutCondition`
+/// is always the STORE's own form — see the `Precheck::Go(Some(cur))`
+/// arm below, which passes `cur`, never the caller's tag.
+pub(crate) fn normalize_etag(v: &str) -> String {
+    v.trim().trim_matches('"').to_string()
+}
+
 fn judge_preconditions(
     current: Option<&str>,
     if_match: Option<&str>,
     if_none_match: Option<&str>,
 ) -> Precheck {
-    let tag = |v: &str| v.trim().trim_matches('"').to_string();
+    let tag = |v: &str| normalize_etag(v);
     let none_match_star = match if_none_match.map(|v| tag(v)) {
         None => false,
         Some(v) if v == "*" => true,

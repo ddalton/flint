@@ -9436,3 +9436,665 @@ async fn a_compose_that_reports_no_checksum_refuses_instead_of_citing() {
         "a refused publish must leave no citation"
     );
 }
+
+// ---------------------------------------------------------------------
+// Drafts (`drafts.rs`): a durable edit that is NOT published
+// ---------------------------------------------------------------------
+
+/// A published tree plus a live gateway. Returns (dir, routes) — the
+/// dir must be kept alive or the tempdir unlinks under the sidecar.
+async fn draft_fixture(
+    store: &Arc<MemoryStore>,
+) -> (tempfile::TempDir, Sidecar, warp::filters::BoxedFilter<(warp::reply::Response,)>) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "inputs/wanted.txt", "published v1");
+    write(dir.path(), "outputs/report.bin", "out v1");
+    sc.run_barrier().await.unwrap();
+    let routes = super::gateway::routes(gw_core(store));
+    (dir, sc, routes)
+}
+
+async fn current_etag(store: &Arc<MemoryStore>, cfg: &LeanConfig, path: &str) -> String {
+    store.head(&cfg.file_key(path)).await.unwrap().etag
+}
+
+async fn save_draft(
+    routes: &warp::filters::BoxedFilter<(warp::reply::Response,)>,
+    user: &str,
+    path: &str,
+    base: Option<&str>,
+    body: &str,
+) -> warp::http::Response<bytes::Bytes> {
+    let mut req = gw_req()
+        .method("PUT")
+        .path(&format!("/lean/v1/proj1/drafts/{user}/{path}"))
+        .body(body.to_string());
+    if let Some(b) = base {
+        req = req.header("x-flint-base-etag", b);
+    }
+    req.reply(routes).await
+}
+
+/// The whole promise, in one test: a saved draft is durable in the
+/// BUCKET and invisible everywhere else. Not in the agent's tree, not
+/// in the manifest, and not in the published object — which is what
+/// separates a draft from `PUT /files/{path}`, whose bytes are live the
+/// instant it returns.
+#[tokio::test]
+async fn a_saved_draft_is_durable_in_s3_and_invisible_until_promoted() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir, mut sc, routes) = draft_fixture(&store).await;
+    let base = current_etag(&store, &sc.cfg, "inputs/wanted.txt").await;
+
+    let res = save_draft(&routes, "alice", "inputs/wanted.txt", Some(&base), "alice's edit").await;
+    assert_eq!(res.status(), 200, "{:?}", res.body());
+
+    // Durable: both objects are in the bucket.
+    let body_key = sc.cfg.draft_body_key("alice", "inputs/wanted.txt");
+    let meta_key = sc.cfg.draft_meta_key("alice", "inputs/wanted.txt");
+    assert!(store.head(&body_key).await.is_ok(), "the draft body must be in the bucket");
+    assert!(store.head(&meta_key).await.is_ok(), "the draft meta must be in the bucket");
+
+    // Invisible: two barriers (the deletion rule needs two scans, so one
+    // could pass for the wrong reason) change nothing about the file.
+    sc.run_barrier().await.unwrap();
+    sc.run_barrier().await.unwrap();
+    assert_eq!(read(dir.path(), "inputs/wanted.txt").as_deref(), Some("published v1"));
+    assert_eq!(
+        current_etag(&store, &sc.cfg, "inputs/wanted.txt").await,
+        base,
+        "a draft must not move the published object"
+    );
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries["inputs/wanted.txt"].etag, base, "a draft must not move the citation");
+    assert!(
+        !m.entries.keys().any(|k| k.contains("drafts")),
+        "a draft must never be cited: {:?}",
+        m.entries.keys().collect::<Vec<_>>()
+    );
+
+    // And it reads back, with the base it was taken against.
+    let res = gw_req()
+        .method("GET")
+        .path("/lean/v1/proj1/drafts/alice/inputs/wanted.txt")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(&res.body()[..], b"alice's edit");
+    assert_eq!(res.headers()["x-flint-base-etag"].to_str().unwrap(), base);
+}
+
+/// Promote is the publish: it lands at the live key, the inbox tracks
+/// it, the barrier cites it and the agent gets the bytes — and the
+/// draft is gone afterwards, so a second promote cannot republish it.
+#[tokio::test]
+async fn promote_publishes_the_draft_and_the_barrier_cites_it() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir, mut sc, routes) = draft_fixture(&store).await;
+    let base = current_etag(&store, &sc.cfg, "inputs/wanted.txt").await;
+    save_draft(&routes, "alice", "inputs/wanted.txt", Some(&base), "alice's edit").await;
+
+    let res = gw_req()
+        .method("POST")
+        .path("/lean/v1/proj1/drafts/alice/inputs/wanted.txt")
+        .header("x-flint-author", "alice")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 200, "{:?}", res.body());
+
+    // The bytes are LIVE at the real key immediately — read the object
+    // directly to see it, because the gateway's own read path will not
+    // serve them yet.
+    let (_, live) = store.get_whole(&sc.cfg.file_key("inputs/wanted.txt"), None).await.unwrap();
+    assert_eq!(&live[..], b"alice's edit", "promote must publish at the live key at once");
+
+    // `GET /files/{path}` answers 409 `moved` until the barrier
+    // re-cites: `handle_files_get` prefers the manifest CITATION over
+    // the inbox fallback and then GETs guarded on it, so a write over
+    // an already-cited path is unreadable through that door in the
+    // window between the write and the citation.
+    //
+    // THE CONTROL, and the reason this is not a drafts defect: the
+    // ordinary HITL door does the identical thing to a second path in
+    // the same fixture. If promote had introduced this, the control
+    // would read 200.
+    let res = gw_req().method("GET").path("/lean/v1/proj1/files/inputs/wanted.txt").reply(&routes).await;
+    assert_eq!(res.status(), 409, "{:?}", res.body());
+
+    let b = current_etag(&store, &sc.cfg, "outputs/report.bin").await;
+    let res = gw_req()
+        .method("PUT")
+        .path("/lean/v1/proj1/files/outputs/report.bin")
+        .header("if-match", &b)
+        .body("plain HITL overwrite")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 200, "{:?}", res.body());
+    let res = gw_req().method("GET").path("/lean/v1/proj1/files/outputs/report.bin").reply(&routes).await;
+    assert_eq!(
+        res.status(),
+        409,
+        "the plain HITL door must answer the same, or the 409 above is promote's fault"
+    );
+
+    // The barrier consumes both entries and cites them; the read door
+    // opens again.
+    let r = sc.run_barrier().await.unwrap();
+    assert_eq!(r.consumed, 2, "promote must land an inbox entry like any HITL write");
+    let res = gw_req().method("GET").path("/lean/v1/proj1/files/inputs/wanted.txt").reply(&routes).await;
+    assert_eq!(res.status(), 200, "{:?}", res.body());
+    assert_eq!(&res.body()[..], b"alice's edit");
+    assert_eq!(read(dir.path(), "inputs/wanted.txt").as_deref(), Some("alice's edit"));
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+    assert_ne!(m.entries["inputs/wanted.txt"].etag, base);
+
+    // The draft is consumed: nothing left to promote twice.
+    let res = gw_req().method("GET").path("/lean/v1/proj1/drafts/alice").reply(&routes).await;
+    let list: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
+    assert_eq!(list["drafts"].as_array().unwrap().len(), 0, "{list}");
+}
+
+/// THE TWO-USER CASE, and the reason the base etag is recorded rather
+/// than enforced at save time.
+///
+/// Alice opens v1 and drafts. Bob publishes v2. Alice comes back —
+/// possibly days later, from a browser that has forgotten everything —
+/// and promotes. That must refuse, must name the version it found, and
+/// must KEEP alice's work: a refusal that discarded the draft would
+/// destroy exactly what the feature exists to protect.
+#[tokio::test]
+async fn a_sibling_publish_refuses_the_promote_and_keeps_the_draft() {
+    let store = Arc::new(MemoryStore::new());
+    let (_dir, sc, routes) = draft_fixture(&store).await;
+    let base = current_etag(&store, &sc.cfg, "inputs/wanted.txt").await;
+    save_draft(&routes, "alice", "inputs/wanted.txt", Some(&base), "alice's edit").await;
+
+    // Bob publishes through the ordinary HITL door.
+    let res = gw_req()
+        .method("PUT")
+        .path("/lean/v1/proj1/files/inputs/wanted.txt")
+        .header("x-flint-author", "bob")
+        .header("if-match", &base)
+        .body("bob's edit")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 200, "{:?}", res.body());
+    let bob = current_etag(&store, &sc.cfg, "inputs/wanted.txt").await;
+    assert_ne!(bob, base);
+
+    let res = gw_req()
+        .method("POST")
+        .path("/lean/v1/proj1/drafts/alice/inputs/wanted.txt")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 409, "{:?}", res.body());
+    let body: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
+    assert_eq!(body["error"], "draft-stale", "{body}");
+    assert_eq!(
+        res.headers()["x-flint-current-etag"].to_str().unwrap(),
+        bob,
+        "the refusal must name what it found, or the caller cannot reconcile"
+    );
+
+    // Bob's bytes stand.
+    assert_eq!(current_etag(&store, &sc.cfg, "inputs/wanted.txt").await, bob);
+    // And alice's work is STILL THERE.
+    let res = gw_req()
+        .method("GET")
+        .path("/lean/v1/proj1/drafts/alice/inputs/wanted.txt")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 200, "a refused promote must never discard the draft");
+    assert_eq!(&res.body()[..], b"alice's edit");
+}
+
+/// A draft whose base says "this file did not exist" promotes as a
+/// CREATE, and is refused if the file appeared meanwhile. This is also
+/// the fail-closed arm for a caller that simply forgot the header:
+/// absent base ⇒ create-if-absent ⇒ an existing file refuses, rather
+/// than being clobbered by a write that named nothing.
+#[tokio::test]
+async fn a_draft_with_no_base_creates_and_refuses_to_clobber() {
+    let store = Arc::new(MemoryStore::new());
+    let (_dir, sc, routes) = draft_fixture(&store).await;
+
+    save_draft(&routes, "alice", "inputs/brand-new.txt", None, "new file").await;
+    let res = gw_req()
+        .method("POST")
+        .path("/lean/v1/proj1/drafts/alice/inputs/brand-new.txt")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 200, "a create-shaped draft must publish: {:?}", res.body());
+
+    // The mutation arm: the same shape over a file that DOES exist.
+    save_draft(&routes, "alice", "inputs/wanted.txt", None, "clobber attempt").await;
+    let before = current_etag(&store, &sc.cfg, "inputs/wanted.txt").await;
+    let res = gw_req()
+        .method("POST")
+        .path("/lean/v1/proj1/drafts/alice/inputs/wanted.txt")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 409, "{:?}", res.body());
+    assert_eq!(
+        current_etag(&store, &sc.cfg, "inputs/wanted.txt").await,
+        before,
+        "a baseless draft must never overwrite an existing file"
+    );
+}
+
+/// The crash residue between the two PUTs is a body with no meta. It is
+/// READABLE — the bytes are the user's work — but it must not promote,
+/// because promoting it would have to guess a base, and each guess is
+/// wrong in exactly the case the other is right.
+#[tokio::test]
+async fn an_incomplete_draft_reads_but_refuses_to_promote() {
+    let store = Arc::new(MemoryStore::new());
+    let (_dir, sc, routes) = draft_fixture(&store).await;
+    let base = current_etag(&store, &sc.cfg, "inputs/wanted.txt").await;
+    save_draft(&routes, "alice", "inputs/wanted.txt", Some(&base), "alice's edit").await;
+
+    // Simulate the crash: the meta never landed.
+    store.delete(&sc.cfg.draft_meta_key("alice", "inputs/wanted.txt")).await.unwrap();
+
+    let res = gw_req()
+        .method("GET")
+        .path("/lean/v1/proj1/drafts/alice/inputs/wanted.txt")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 200, "the bytes are still the user's work");
+    assert!(res.headers().contains_key("x-flint-draft-incomplete"), "and the caller is told");
+
+    let res = gw_req()
+        .method("POST")
+        .path("/lean/v1/proj1/drafts/alice/inputs/wanted.txt")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 404, "{:?}", res.body());
+    assert_eq!(
+        current_etag(&store, &sc.cfg, "inputs/wanted.txt").await,
+        base,
+        "an incomplete draft must publish nothing"
+    );
+}
+
+/// Promote IS a HITL write, so it takes the HITL discipline: refused
+/// while a barrier window is live, admitted once the window clears.
+/// Without the arm that clears it, a test asserting only the 409 would
+/// pass against a promote that ALWAYS refuses.
+#[tokio::test]
+async fn a_promote_is_refused_while_the_barrier_window_is_open() {
+    let store = Arc::new(MemoryStore::new());
+    let (_dir, sc, routes) = draft_fixture(&store).await;
+    let base = current_etag(&store, &sc.cfg, "inputs/wanted.txt").await;
+    save_draft(&routes, "alice", "inputs/wanted.txt", Some(&base), "alice's edit").await;
+
+    inbox::open_window(store.as_ref(), &sc.cfg, 1, now_unix() + 120).await.unwrap();
+    let res = gw_req()
+        .method("POST")
+        .path("/lean/v1/proj1/drafts/alice/inputs/wanted.txt")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 409);
+    assert!(res.headers().contains_key("retry-after"));
+    assert_eq!(
+        current_etag(&store, &sc.cfg, "inputs/wanted.txt").await,
+        base,
+        "a windowed refusal must publish nothing"
+    );
+
+    inbox::clear_window(store.as_ref(), &sc.cfg, 1, &[]).await.unwrap();
+    let res = gw_req()
+        .method("POST")
+        .path("/lean/v1/proj1/drafts/alice/inputs/wanted.txt")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 200, "the window must not wedge promote forever: {:?}", res.body());
+}
+
+/// The arm that justifies the UNCONDITIONAL save. A second tab re-saves
+/// between the first tab's read of the meta and its copy; the first
+/// tab's promote must not publish bytes it never saw. It fails on the
+/// COPY SOURCE guard — `draft-moved`, distinct from `draft-stale`,
+/// because the fix is different: retry, rather than reconcile.
+#[tokio::test]
+async fn a_promote_racing_a_re_save_publishes_neither_silently() {
+    let store = Arc::new(MemoryStore::new());
+    let (_dir, sc, routes) = draft_fixture(&store).await;
+    let base = current_etag(&store, &sc.cfg, "inputs/wanted.txt").await;
+    save_draft(&routes, "alice", "inputs/wanted.txt", Some(&base), "tab one").await;
+
+    // The meta as tab one read it, then tab two re-saves under it.
+    let meta_key = sc.cfg.draft_meta_key("alice", "inputs/wanted.txt");
+    let (_, stale_meta) = store.get_whole(&meta_key, None).await.unwrap();
+    save_draft(&routes, "alice", "inputs/wanted.txt", Some(&base), "tab two").await;
+
+    // Put tab one's meta back: now the recorded body_etag names bytes
+    // the body no longer has — exactly the race, deterministically.
+    let crc = crc64_nvme(&stale_meta);
+    store
+        .put_whole(
+            &meta_key,
+            stale_meta,
+            &PutCondition::Unconditional,
+            &GenerationStamps {
+                generation: 0,
+                epoch: 0,
+                flush_uuid: "test-restage".into(),
+                boundary_source: None,
+                posix: None,
+            },
+            crc,
+        )
+        .await
+        .unwrap();
+
+    let res = gw_req()
+        .method("POST")
+        .path("/lean/v1/proj1/drafts/alice/inputs/wanted.txt")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 409, "{:?}", res.body());
+    let body: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
+    assert_eq!(body["error"], "draft-moved", "{body}");
+    assert_eq!(
+        current_etag(&store, &sc.cfg, "inputs/wanted.txt").await,
+        base,
+        "a racing promote must publish nothing at all"
+    );
+}
+
+/// Two users, one path: separate drafts, separate listings. And the
+/// control for the DISJOINT-SUBTREE key layout — a file legally named
+/// `notes.meta` must not collide with `notes`'s metadata, which is
+/// exactly what a `<path>.meta` suffix scheme would have done.
+#[tokio::test]
+async fn drafts_are_per_user_and_a_dotmeta_filename_does_not_collide() {
+    let store = Arc::new(MemoryStore::new());
+    let (_dir, _sc, routes) = draft_fixture(&store).await;
+
+    save_draft(&routes, "alice", "notes", None, "alice on notes").await;
+    save_draft(&routes, "bob", "notes", None, "bob on notes").await;
+    save_draft(&routes, "alice", "notes.meta", None, "a file that is NOT metadata").await;
+
+    for (user, path, want) in [
+        ("alice", "notes", "alice on notes"),
+        ("bob", "notes", "bob on notes"),
+        ("alice", "notes.meta", "a file that is NOT metadata"),
+    ] {
+        let res = gw_req()
+            .method("GET")
+            .path(&format!("/lean/v1/proj1/drafts/{user}/{path}"))
+            .reply(&routes)
+            .await;
+        assert_eq!(res.status(), 200, "{user}/{path}");
+        assert_eq!(&res.body()[..], want.as_bytes(), "{user}/{path}");
+    }
+
+    let res = gw_req().method("GET").path("/lean/v1/proj1/drafts/bob").reply(&routes).await;
+    let list: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
+    let paths: Vec<&str> =
+        list["drafts"].as_array().unwrap().iter().map(|d| d["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, vec!["notes"], "one user's listing must not carry another's: {list}");
+}
+
+/// The resume view a user comes back to: which of these can still be
+/// published? Both arms, so a `stale` hardwired either way fails.
+#[tokio::test]
+async fn the_resume_view_marks_exactly_the_stale_draft() {
+    let store = Arc::new(MemoryStore::new());
+    let (_dir, sc, routes) = draft_fixture(&store).await;
+    let a = current_etag(&store, &sc.cfg, "inputs/wanted.txt").await;
+    let b = current_etag(&store, &sc.cfg, "outputs/report.bin").await;
+    save_draft(&routes, "alice", "inputs/wanted.txt", Some(&a), "edit a").await;
+    save_draft(&routes, "alice", "outputs/report.bin", Some(&b), "edit b").await;
+
+    // Only ONE of the two moves underneath.
+    gw_req()
+        .method("PUT")
+        .path("/lean/v1/proj1/files/inputs/wanted.txt")
+        .header("if-match", &a)
+        .body("sibling wrote")
+        .reply(&routes)
+        .await;
+
+    let res = gw_req().method("GET").path("/lean/v1/proj1/drafts/alice").reply(&routes).await;
+    let list: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
+    let rows = list["drafts"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{list}");
+    for r in rows {
+        let stale = r["stale"].as_bool().unwrap();
+        match r["path"].as_str().unwrap() {
+            "inputs/wanted.txt" => assert!(stale, "the moved one must read stale: {list}"),
+            "outputs/report.bin" => assert!(!stale, "the untouched one must not: {list}"),
+            p => panic!("unexpected {p}"),
+        }
+    }
+}
+
+/// Drafts sit under `LEAN_DIR`, and the ONLY reason that is safe is
+/// that both sweeps are prefix-scoped. If either ever widens to the
+/// namespace root, every unpublished draft in the fleet is collected
+/// silently.
+///
+/// The control is an object the sweep DOES take, planted in the same
+/// namespace: an unreferenced chunk, with the grace set to zero so it
+/// is collectable now. One dimension moves — which subtree the object
+/// sits in — and the sweep must take one and leave the other. Without
+/// that arm a sweep that collected NOTHING would pass this test.
+#[tokio::test]
+async fn neither_sweep_collects_a_draft() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir, mut sc, routes) = draft_fixture(&store).await;
+    save_draft(&routes, "alice", "inputs/wanted.txt", None, "alice's edit").await;
+    let body_key = sc.cfg.draft_body_key("alice", "inputs/wanted.txt");
+    let meta_key = sc.cfg.draft_meta_key("alice", "inputs/wanted.txt");
+
+    // Churn, so the sweeps have a real workspace to reason about.
+    for i in 0..3 {
+        write(dir.path(), &format!("churn-{i}.txt"), &format!("v{i}"));
+        sc.run_barrier().await.unwrap();
+    }
+
+    // The control: an orphan chunk, immediately collectable.
+    sc.cfg.orphan_grace_secs = 0;
+    let orphan = format!("{}/{}/chunks/deadbeefdeadbeef", sc.cfg.prefix, super::LEAN_DIR);
+    let bytes = Bytes::from_static(b"not referenced by any pointer");
+    let crc = crc64_nvme(&bytes);
+    store
+        .put_whole(
+            &orphan,
+            bytes,
+            &PutCondition::Unconditional,
+            &GenerationStamps {
+                generation: 0,
+                epoch: 0,
+                flush_uuid: "test-orphan".into(),
+                boundary_source: None,
+                posix: None,
+            },
+            crc,
+        )
+        .await
+        .unwrap();
+
+    manifest::sweep_generations(store.as_ref(), &sc.cfg).await.unwrap();
+    let taken = manifest::sweep_chunks(store.as_ref(), &sc.cfg).await.unwrap();
+
+    assert!(taken > 0, "the control was not collected — this test proves nothing");
+    assert!(store.head(&orphan).await.is_err(), "the control must be gone");
+    assert!(store.head(&body_key).await.is_ok(), "a sweep collected the draft BODY");
+    assert!(store.head(&meta_key).await.is_ok(), "a sweep collected the draft META");
+}
+
+/// Discard. Meta first, so the window leaves the one incomplete shape
+/// the rest of the module already handles.
+#[tokio::test]
+async fn a_discarded_draft_leaves_nothing_behind() {
+    let store = Arc::new(MemoryStore::new());
+    let (_dir, sc, routes) = draft_fixture(&store).await;
+    save_draft(&routes, "alice", "inputs/wanted.txt", None, "alice's edit").await;
+
+    let res = gw_req()
+        .method("DELETE")
+        .path("/lean/v1/proj1/drafts/alice/inputs/wanted.txt")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 204);
+    assert!(store.head(&sc.cfg.draft_body_key("alice", "inputs/wanted.txt")).await.is_err());
+    assert!(store.head(&sc.cfg.draft_meta_key("alice", "inputs/wanted.txt")).await.is_err());
+
+    let res = gw_req()
+        .method("POST")
+        .path("/lean/v1/proj1/drafts/alice/inputs/wanted.txt")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 404, "a discarded draft must not promote");
+}
+
+/// Path and user hygiene: the draft door reserves exactly what the
+/// files door reserves, and a user id may not be a path segment of its
+/// own — `drafts/../..` must not address another workspace's keys.
+#[tokio::test]
+async fn the_draft_door_refuses_reserved_paths_and_bad_users() {
+    let store = Arc::new(MemoryStore::new());
+    let (_dir, _sc, routes) = draft_fixture(&store).await;
+
+    for bad in ["../../etc/passwd", ".flint/lean/manifest", ".flint-sync/baseline.json"] {
+        let res = save_draft(&routes, "alice", bad, None, "x").await;
+        assert_eq!(res.status(), 400, "draft path {bad:?} must be refused");
+    }
+    for bad in ["..", "."] {
+        let res = save_draft(&routes, bad, "a.txt", None, "x").await;
+        assert_eq!(res.status(), 400, "user {bad:?} must be refused");
+    }
+    let res = warp::test::request()
+        .method("PUT")
+        .path("/lean/v1/proj1/drafts/alice/a.txt")
+        .body("x")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 401, "the draft door is behind the same bearer");
+}
+
+/// Gated mode withholds the AGENT's mid-logical-change bytes. It does
+/// NOT withhold a human's coherent whole-object write, and `lane_inner`
+/// says so in as many words. A promoted draft is therefore adopted by
+/// the gated upload lane exactly like any other HITL write — pinned
+/// here so "gated" is never later read as "drafts are held too".
+#[tokio::test]
+async fn a_promote_is_adopted_by_the_gated_upload_lane() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "inputs/wanted.txt", "published v1");
+    a.run_barrier().await.unwrap();
+
+    let routes = super::gateway::routes(gw_core(&store));
+    let base = current_etag(&store, &a.cfg, "inputs/wanted.txt").await;
+    save_draft(&routes, "alice", "inputs/wanted.txt", Some(&base), "alice's edit").await;
+    let res = gw_req()
+        .method("POST")
+        .path("/lean/v1/proj1/drafts/alice/inputs/wanted.txt")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 200, "{:?}", res.body());
+
+    gated(&mut a);
+    let out = a.upload_lane().await.unwrap();
+    assert_eq!(out.consumed, 1, "the gated lane must consume a promoted draft");
+    assert_eq!(
+        read(dir.path(), "inputs/wanted.txt").as_deref(),
+        Some("alice's edit"),
+        "a promoted draft must reach the agent's tree under gated mode too"
+    );
+}
+
+// ── drafts × scoped checkout ─────────────────────────────────────────
+
+/// An unpromoted draft of an OUT-OF-SCOPE path changes nothing about a
+/// scoped workspace. This is the property that actually holds, and the
+/// one worth guarding: a draft is not a citation, so it cannot widen an
+/// admitted set.
+#[tokio::test]
+async fn an_unpromoted_draft_never_widens_a_scoped_workspace() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let routes = super::gateway::routes(gw_core(&store));
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
+    assert!(claim_until_held(&mut b, 12).await);
+    let admitted: Vec<String> = b.state.load_baseline().unwrap().entries.keys().cloned().collect();
+
+    save_draft(&routes, "alice", "outputs/big-0.bin", None, "drafted out of scope").await;
+
+    // Two barriers: absence must survive two scans, so one could pass
+    // for the wrong reason.
+    let r1 = b.run_barrier().await.unwrap();
+    let r2 = b.run_barrier().await.unwrap();
+    assert!(r1.deleted.is_empty() && r2.deleted.is_empty(), "{:?} {:?}", r1.deleted, r2.deleted);
+    assert_eq!(r1.consumed, 0, "an unpromoted draft is not an inbox entry");
+    assert!(read(dir_b.path(), "outputs/big-0.bin").is_none(), "a draft must not materialise");
+    assert_eq!(
+        b.state.load_baseline().unwrap().entries.keys().cloned().collect::<Vec<_>>(),
+        admitted,
+        "a draft must not widen the admitted set"
+    );
+    assert_eq!(b.state.load_scope().unwrap().as_deref(), Some(&["inputs".to_string()][..]));
+}
+
+/// The complement, and an HONEST one: PROMOTING an out-of-scope draft
+/// DOES widen a scoped workspace's held set.
+///
+/// Not a defect of drafts — promote lands an ordinary inbox entry, and
+/// merge → inbox → consume is the DESIGNED destination for out-of-scope
+/// foreign changes (`sync.rs:13-22`). The gateway is stateless and
+/// reads only the bucket, while the scope is LOCAL to the pod
+/// (`scope.json`), so the gateway could not filter on it even if that
+/// were wanted. Promote is a fourth mouth on the door the inbox already
+/// is, and the consequence is the one probe P3 confirmed: once a path
+/// is in the baseline, removing it locally publishes the object DELETE.
+///
+/// This test exists so the behaviour is PINNED rather than rediscovered.
+#[tokio::test]
+async fn promoting_an_out_of_scope_draft_widens_the_held_set() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let routes = super::gateway::routes(gw_core(&store));
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
+    assert!(claim_until_held(&mut b, 12).await);
+    assert!(!b.state.load_baseline().unwrap().entries.contains_key("outputs/big-0.bin"));
+
+    let base = current_etag(&store, &b.cfg, "outputs/big-0.bin").await;
+    save_draft(&routes, "alice", "outputs/big-0.bin", Some(&base), "promoted out of scope").await;
+    let res = gw_req()
+        .method("POST")
+        .path("/lean/v1/proj1/drafts/alice/outputs/big-0.bin")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 200, "{:?}", res.body());
+
+    let r = b.run_barrier().await.unwrap();
+    assert_eq!(r.consumed, 1);
+    assert_eq!(
+        read(dir_b.path(), "outputs/big-0.bin").as_deref(),
+        Some("promoted out of scope"),
+        "consume materialises an out-of-scope promote — the documented widening"
+    );
+    assert!(
+        b.state.load_baseline().unwrap().entries.contains_key("outputs/big-0.bin"),
+        "and it is now CITED, which is what makes the widening load-bearing"
+    );
+    // The scope RECORD is untouched: what drifts is the held set, not
+    // the declaration. That asymmetry is the design's, not a bug here.
+    assert_eq!(b.state.load_scope().unwrap().as_deref(), Some(&["inputs".to_string()][..]));
+}
