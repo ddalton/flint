@@ -953,21 +953,20 @@ impl Sidecar {
         generation: u64,
         epoch: u64,
     ) -> LeanResult<UploadOutcome> {
-        use std::io::Read;
-        // Streaming CRC pass.
-        let mut crc = flint_store::Crc64Nvme::new();
-        {
-            let mut f = std::fs::File::open(local_path)?;
-            let mut buf = vec![0u8; 4 << 20];
-            loop {
-                let n = f.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                crc.update(&buf[..n]);
-            }
-        }
-        let crc = crc.finalize();
+        // NO PRE-PASS. The store accumulates the full-object CRC from
+        // the parts as it reads them for upload, so this file is read
+        // ONCE. It used to be read TWICE — a streaming hash of the whole
+        // file, and then again part by part — which on the 2026-09-10
+        // door drill was roughly 11 s of the `mixed` workload's 24.3 s,
+        // all of it at the disk's read ceiling and none of it on the
+        // wire.
+        //
+        // That pre-pass was not laziness: asking the store to accumulate
+        // used to pin its part uploads to a sequential loop, because a
+        // CRC-64 taken out of order is a different number. `crc64_combine`
+        // removed the choice — parts are hashed independently and folded
+        // in part order — so the single read and the parallel upload are
+        // no longer alternatives.
 
         // Part grid: within [min_part_size, ...], at most max_parts,
         // contiguous from 0.
@@ -995,10 +994,24 @@ impl Sidecar {
             base_etag: None,
             condition,
             stamps: stamps.clone(),
-            crc64: Some(crc),
+            crc64: None,
         };
         match self.store.compose_generation(&spec).await {
             Ok(meta) => {
+                // The store computed it; refuse to cite bytes nothing
+                // vouched for rather than invent a number for the
+                // manifest. A backend that returns no checksum has not
+                // validated the publish server-side either.
+                let crc = meta
+                    .crc64_b64
+                    .as_deref()
+                    .and_then(flint_store::crc64_from_b64)
+                    .ok_or_else(|| {
+                        LeanError::State(format!(
+                            "compose of {key} returned no full-object checksum — refusing to \
+                             cite bytes nothing vouched for"
+                        ))
+                    })?;
                 Ok(UploadOutcome::published(
                     path, key.to_string(), meta.etag, crc, scanned, generation, epoch,
                     meta.version_id,
@@ -1010,6 +1023,11 @@ impl Sidecar {
                 Ok(UploadOutcome::Deferred)
             }
             Err(StoreError::PreconditionFailed(_)) => {
+                // The AdoptOwn recognizer compares OUR bytes' checksum
+                // against what landed, and without the pre-pass we do
+                // not have one — so the file is read HERE, on the rare
+                // recovery path, instead of on every publish.
+                let crc = file_crc(local_path)?;
                 let head = self.store.head(key).await?;
                 let head_stamps = GenerationStamps::from_meta(&head.meta);
                 let own = head_stamps
@@ -1191,6 +1209,25 @@ fn local_dirty(local: &Path, base: Option<&BaselineEntry>) -> bool {
         (Ok(_), None) => true,                     // local exists, never published
         (Ok(m), Some(b)) => m.len() != b.size || mtime_of(&m) != b.mtime_unix,
     }
+}
+
+/// Full-object CRC-64/NVME of a local file, streamed.
+///
+/// Reached only by the 412 recovery path: the ordinary publish gets its
+/// checksum from the store, which computes one while uploading.
+fn file_crc(local_path: &Path) -> LeanResult<u64> {
+    use std::io::Read;
+    let mut crc = flint_store::Crc64Nvme::new();
+    let mut f = std::fs::File::open(local_path)?;
+    let mut buf = vec![0u8; 4 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        crc.update(&buf[..n]);
+    }
+    Ok(crc.finalize())
 }
 
 pub(super) fn mtime_of(m: &std::fs::Metadata) -> i64 {

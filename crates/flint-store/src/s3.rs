@@ -1208,6 +1208,49 @@ impl S3Store {
             .build())
     }
 
+    /// One part of a compose: read-or-copy, upload, and (when the store
+    /// is computing the checksum) that part's OWN CRC over its OWN
+    /// bytes. Independent of every other part by construction, which is
+    /// what lets the caller run these concurrently.
+    async fn compose_one_part(
+        &self,
+        spec: &ComposeSpec<'_>,
+        upload_id: &str,
+        part_number: i32,
+        p: &PartSource,
+        accumulate: bool,
+    ) -> StoreResult<(i32, CompletedPart, Option<u64>, u64)> {
+        match p {
+            PartSource::Local { offset, len } => {
+                let bytes = read_local(spec.local_path, *offset, *len).await?;
+                // Hashed on a blocking thread while this part's PUT is
+                // in flight, so hashing costs the upload nothing on the
+                // wire.
+                let hashing = if accumulate {
+                    let b = bytes.clone();
+                    Some(tokio::task::spawn_blocking(move || crc64_nvme(&b)))
+                } else {
+                    None
+                };
+                let cp = self.put_local_part(spec, upload_id, part_number, bytes).await?;
+                let crc = match hashing {
+                    Some(h) => Some(h.await.map_err(|e| {
+                        StoreError::Other(format!("compose: checksum did not join: {e}"))
+                    })?),
+                    None => None,
+                };
+                spec.note_progress(*len);
+                Ok((part_number, cp, crc, *len))
+            }
+            PartSource::BaseCopy { offset, len } => {
+                let cp =
+                    self.put_copy_part(spec, upload_id, part_number, *offset, *len).await?;
+                spec.note_progress(*len);
+                Ok((part_number, cp, None, *len))
+            }
+        }
+    }
+
     /// One `UploadPartCopy` of a range of the base generation.
     async fn put_copy_part(
         &self,
@@ -1268,61 +1311,34 @@ impl S3Store {
             expect = off + len;
         }
 
-        // The full-object checksum, accumulated from the parts as they
+        // The full-object checksum, computed from the parts as they
         // are read when the caller did not bring one.
-        let mut acc: Option<Crc64Nvme> = match spec.crc64 {
-            Some(_) => None,
-            None => Some(Crc64Nvme::new()),
-        };
-        if acc.is_some() && spec.parts.iter().any(|p| matches!(p, PartSource::BaseCopy { .. })) {
+        let accumulate = spec.crc64.is_none();
+        if accumulate && spec.parts.iter().any(|p| matches!(p, PartSource::BaseCopy { .. })) {
             return Err(StoreError::Other(
                 "compose: the checksum cannot be accumulated over a copied part; supply crc64".into(),
             ));
         }
 
-        // A caller that asks the store to ACCUMULATE the checksum is
-        // pinned to the sequential loop whatever `part_parallelism`
-        // says: that accumulation reads parts in order, and a CRC-64
-        // taken out of order is a different number. forge pushes with
-        // `crc64: None`, so it is unreachable from the parallel arm by
-        // CONSTRUCTION rather than by configuration.
-        let par = if acc.is_some() { 1 } else { self.part_parallelism.max(1) };
+        // Accumulating NO LONGER pins this to the sequential loop. Each
+        // part's CRC is taken over that part's own bytes, independently,
+        // and the full-object value is FOLDED from them in part order by
+        // `crc64_combine` — so a checksum the store computes itself is
+        // now compatible with uploading parts concurrently. It used to
+        // cost one or the other, and both callers paid: forge took the
+        // single read and a sequential upload, lean took the parallel
+        // upload and a whole extra pass over the file before it.
+        let par = self.part_parallelism.max(1);
 
-        let completed: Vec<CompletedPart> = if par <= 1 {
-            let mut completed: Vec<CompletedPart> = Vec::with_capacity(spec.parts.len());
+        // (part number, completed part, that part's own CRC, its length)
+        let mut done: Vec<(i32, CompletedPart, Option<u64>, u64)> = if par <= 1 {
+            let mut out = Vec::with_capacity(spec.parts.len());
             for (i, p) in spec.parts.iter().enumerate() {
-                let part_number = (i + 1) as i32;
-                match p {
-                    PartSource::Local { offset, len } => {
-                        let bytes = read_local(spec.local_path, *offset, *len).await?;
-                        // Hashed on a blocking thread while this part's
-                        // PUT is in flight, so hashing costs the upload
-                        // nothing on the wire.
-                        let hashing = acc.take().map(|mut c| {
-                            let b = bytes.clone();
-                            tokio::task::spawn_blocking(move || {
-                                c.update(&b);
-                                c
-                            })
-                        });
-                        completed
-                            .push(self.put_local_part(spec, upload_id, part_number, bytes).await?);
-                        if let Some(h) = hashing {
-                            acc = Some(h.await.map_err(|e| {
-                                StoreError::Other(format!("compose: checksum did not join: {e}"))
-                            })?);
-                        }
-                        spec.note_progress(*len);
-                    }
-                    PartSource::BaseCopy { offset, len } => {
-                        completed.push(
-                            self.put_copy_part(spec, upload_id, part_number, *offset, *len).await?,
-                        );
-                        spec.note_progress(*len);
-                    }
-                }
+                out.push(
+                    self.compose_one_part(spec, upload_id, (i + 1) as i32, p, accumulate).await?,
+                );
             }
-            completed
+            out
         } else {
             use futures::stream::StreamExt;
             // Every part is independent by construction: the list carries
@@ -1335,45 +1351,40 @@ impl S3Store {
             // "implementation of `FnOnce` is not general enough".
             let mut futs = Vec::with_capacity(spec.parts.len());
             for (i, p) in spec.parts.iter().enumerate() {
-                let part_number = (i + 1) as i32;
-                futs.push(async move {
-                    let cp = match p {
-                        PartSource::Local { offset, len } => {
-                            let bytes = read_local(spec.local_path, *offset, *len).await?;
-                            let cp =
-                                self.put_local_part(spec, upload_id, part_number, bytes).await?;
-                            spec.note_progress(*len);
-                            cp
-                        }
-                        PartSource::BaseCopy { offset, len } => {
-                            let cp = self
-                                .put_copy_part(spec, upload_id, part_number, *offset, *len)
-                                .await?;
-                            spec.note_progress(*len);
-                            cp
-                        }
-                    };
-                    Ok::<(i32, CompletedPart), StoreError>((part_number, cp))
-                });
+                futs.push(self.compose_one_part(spec, upload_id, (i + 1) as i32, p, accumulate));
             }
-            let mut done: Vec<(i32, CompletedPart)> = futures::stream::iter(futs)
+            futures::stream::iter(futs)
                 .buffer_unordered(par)
                 .collect::<Vec<_>>()
                 .await
                 .into_iter()
-                .collect::<StoreResult<Vec<_>>>()?;
-            // CompleteMultipartUpload takes parts in ASCENDING part
-            // number. `buffer_unordered` yields in COMPLETION order, so
-            // without this sort the part list is a shuffle of the
-            // object — which S3 rejects, and which a backend that
-            // tolerated it would assemble wrong.
-            done.sort_by_key(|(n, _)| *n);
-            done.into_iter().map(|(_, cp)| cp).collect()
+                .collect::<StoreResult<Vec<_>>>()?
         };
+        // CompleteMultipartUpload takes parts in ASCENDING part number,
+        // and the fold below depends on the same order for a different
+        // reason: `crc64_combine` composes A-then-B, so a shuffled grid
+        // yields the checksum of a different object. `buffer_unordered`
+        // yields in COMPLETION order, so this sort serves both.
+        done.sort_by_key(|(n, _, _, _)| *n);
 
-        let crc = match (spec.crc64, acc) {
+        // Fold left to right. `crc64_combine(acc, part, part_len)` is
+        // the CRC of the concatenation, so folding over a CONTIGUOUS
+        // grid is the full-object CRC — the contiguity check above is
+        // what makes that true, not an assumption.
+        let mut folded: Option<u64> = None;
+        for (_, _, c, len) in &done {
+            if let Some(c) = *c {
+                folded = Some(match folded {
+                    None => c,
+                    Some(prev) => crc64_combine(prev, c, *len),
+                });
+            }
+        }
+        let completed: Vec<CompletedPart> = done.into_iter().map(|(_, cp, _, _)| cp).collect();
+
+        let crc = match (spec.crc64, folded) {
             (Some(c), _) => c,
-            (None, Some(a)) => a.finalize(),
+            (None, Some(a)) => a,
             (None, None) => {
                 return Err(StoreError::Other("compose: no checksum to complete with".into()))
             }

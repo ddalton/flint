@@ -145,6 +145,80 @@ impl Crc64Nvme {
     }
 }
 
+/// One column of the GF(2) operator applied to a register.
+fn gf2_times(mat: &[u64; 64], mut v: u64) -> u64 {
+    let mut sum = 0u64;
+    let mut i = 0usize;
+    while v != 0 {
+        if v & 1 == 1 {
+            sum ^= mat[i];
+        }
+        v >>= 1;
+        i += 1;
+    }
+    sum
+}
+
+/// `out` becomes the operator that applies `mat` twice.
+fn gf2_square(out: &mut [u64; 64], mat: &[u64; 64]) {
+    for n in 0..64 {
+        out[n] = gf2_times(mat, mat[n]);
+    }
+}
+
+/// CRC-64/NVME of `A || B`, from the CRCs of `A` and `B` and the LENGTH
+/// of `B`. Bytes are never re-read.
+///
+/// This exists so a full-object checksum can be assembled from parts
+/// computed INDEPENDENTLY — and therefore concurrently. Without it a
+/// caller that wants the store to compute the checksum has to hand it
+/// the parts in order, one at a time, because a CRC taken out of order
+/// is a different number; the alternative was a whole extra pass over
+/// the file before the upload. Now it is neither.
+///
+/// The identity it rests on: for a reflected CRC whose init and xorout
+/// are both all-ones, appending `n` zero bytes is a LINEAR operator `Z`
+/// on the register, and `F(A||B) = Z_n(F(A)) ^ F(B)` — the init and
+/// xorout terms cancel because `Z(X) ^ Z(I) = Z(X ^ I) = Z(0) = 0`.
+/// Structure follows zlib's `crc32_combine`, widened to 64 bits.
+pub fn crc64_combine(crc_a: u64, crc_b: u64, len_b: u64) -> u64 {
+    if len_b == 0 {
+        return crc_a;
+    }
+    let mut odd = [0u64; 64];
+    let mut even = [0u64; 64];
+    // One zero BIT.
+    odd[0] = CRC64_NVME_POLY;
+    let mut row = 1u64;
+    for n in 1..64 {
+        odd[n] = row;
+        row <<= 1;
+    }
+    gf2_square(&mut even, &odd); // two bits
+    gf2_square(&mut odd, &even); // four bits
+    let mut crc = crc_a;
+    let mut len = len_b;
+    loop {
+        gf2_square(&mut even, &odd); // eight bits == one zero BYTE
+        if len & 1 == 1 {
+            crc = gf2_times(&even, crc);
+        }
+        len >>= 1;
+        if len == 0 {
+            break;
+        }
+        gf2_square(&mut odd, &even);
+        if len & 1 == 1 {
+            crc = gf2_times(&odd, crc);
+        }
+        len >>= 1;
+        if len == 0 {
+            break;
+        }
+    }
+    crc ^ crc_b
+}
+
 /// One-shot convenience.
 pub fn crc64_nvme(data: &[u8]) -> u64 {
     let mut c = Crc64Nvme::new();
@@ -985,5 +1059,93 @@ mod tests {
         old.remove(PosixStamps::META_UID);
         let parsed = GenerationStamps::from_meta(&old).expect("identity stamps intact");
         assert_eq!(parsed.posix, None);
+    }
+}
+
+#[cfg(test)]
+mod combine_tests {
+    use super::{crc64_combine, crc64_nvme};
+
+    /// The one-shot CRC over the concatenation is the oracle. Nothing
+    /// here asserts a hand-computed constant: the existing
+    /// implementation is the ground truth, and `combine` either agrees
+    /// with it on every split or it is wrong.
+    #[test]
+    fn combining_two_parts_equals_hashing_the_whole() {
+        // Non-uniform bytes: a run of one value would hide an operator
+        // that shifted by the wrong number of positions.
+        let whole: Vec<u8> = (0..4096u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        for split in [0usize, 1, 2, 3, 7, 8, 9, 255, 256, 257, 1023, 2048, 4095, 4096] {
+            let (a, b) = whole.split_at(split);
+            assert_eq!(
+                crc64_combine(crc64_nvme(a), crc64_nvme(b), b.len() as u64),
+                crc64_nvme(&whole),
+                "split at {split}"
+            );
+        }
+    }
+
+    #[test]
+    fn combining_many_parts_folds_left_to_right() {
+        let whole: Vec<u8> = (0..10_000u32).map(|i| (i ^ (i >> 5)) as u8).collect();
+        // An 8 MiB-style grid in miniature: unequal parts, last one short.
+        let sizes = [1usize, 999, 4096, 1, 4903]; // sums to exactly 10_000
+        let mut off = 0usize;
+        let mut acc: Option<(u64, u64)> = None; // (crc, len)
+        for sz in sizes {
+            let part = &whole[off..off + sz];
+            let c = crc64_nvme(part);
+            acc = Some(match acc {
+                None => (c, sz as u64),
+                Some((pc, plen)) => (crc64_combine(pc, c, sz as u64), plen + sz as u64),
+            });
+            off += sz;
+        }
+        let (crc, len) = acc.unwrap();
+        assert_eq!(len, whole.len() as u64, "the grid must cover the object");
+        assert_eq!(crc, crc64_nvme(&whole), "folded parts must equal one pass");
+    }
+
+    #[test]
+    fn an_empty_tail_changes_nothing() {
+        let a = b"some bytes";
+        assert_eq!(crc64_combine(crc64_nvme(a), crc64_nvme(b""), 0), crc64_nvme(a));
+    }
+}
+
+#[cfg(test)]
+mod fold_order_tests {
+    use super::{crc64_combine, crc64_nvme};
+
+    /// The compose path sorts parts by number BEFORE folding, and this
+    /// is why: `crc64_combine` composes A-then-B, so a grid folded in
+    /// completion order rather than part order yields the checksum of a
+    /// DIFFERENT object. Without this test the sort reads as being only
+    /// about what CompleteMultipartUpload accepts.
+    #[test]
+    fn folding_out_of_order_yields_a_different_object() {
+        let a = b"first-part-bytes";
+        let b = b"second";
+        let c = b"third-part!";
+        let whole = [&a[..], &b[..], &c[..]].concat();
+
+        let fold = |parts: &[&[u8]]| {
+            let mut acc: Option<u64> = None;
+            for p in parts {
+                let x = crc64_nvme(p);
+                acc = Some(match acc {
+                    None => x,
+                    Some(prev) => crc64_combine(prev, x, p.len() as u64),
+                });
+            }
+            acc.unwrap()
+        };
+
+        assert_eq!(fold(&[a, b, c]), crc64_nvme(&whole), "part order IS the object");
+        assert_ne!(
+            fold(&[b, a, c]),
+            crc64_nvme(&whole),
+            "a shuffled fold must NOT coincidentally agree, or the sort proves nothing"
+        );
     }
 }

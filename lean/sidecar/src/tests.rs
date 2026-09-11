@@ -9255,3 +9255,184 @@ fn a_shortened_conflict_log_never_reports_an_empty_ack() {
         "a shortened log must not yield an empty conflict set"
     );
 }
+
+/// A backend whose compose succeeds but reports no full-object
+/// checksum — a proxy that strips the header, or a backend that never
+/// validated the publish server-side. The manifest entry needs a
+/// `crc64_b64`, and inventing one would cite bytes nothing vouched for.
+struct ComposeWithoutChecksum(Arc<MemoryStore>);
+
+#[async_trait::async_trait]
+impl ObjectStore for ComposeWithoutChecksum {
+    async fn copy_object(
+        &self,
+        src_key: &str,
+        src_if_match: Option<&str>,
+        dst_key: &str,
+        condition: &PutCondition,
+        stamps: &GenerationStamps,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.copy_object(src_key, src_if_match, dst_key, condition, stamps).await
+    }
+    async fn put_whole(
+        &self,
+        key: &str,
+        body: Bytes,
+        cond: &PutCondition,
+        stamps: &GenerationStamps,
+        crc: u64,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.put_whole(key, body, cond, stamps, crc).await
+    }
+    async fn compose_generation(
+        &self,
+        spec: &flint_store::ComposeSpec<'_>,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        let mut m = self.0.compose_generation(spec).await?;
+        m.crc64_b64 = None;
+        Ok(m)
+    }
+    async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.head(key).await
+    }
+    async fn get_whole(
+        &self,
+        key: &str,
+        if_match: Option<&str>,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.0.get_whole(key, if_match).await
+    }
+    async fn get_range(
+        &self,
+        key: &str,
+        off: u64,
+        len: u64,
+        if_match: &str,
+    ) -> flint_store::StoreResult<Bytes> {
+        self.0.get_range(key, off, len, if_match).await
+    }
+    fn min_part_size(&self) -> u64 {
+        self.0.min_part_size()
+    }
+    fn max_parts(&self) -> usize {
+        self.0.max_parts()
+    }
+    async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
+        let mut out = self.0.list(prefix).await?;
+        for o in out.iter_mut() {
+            o.last_modified_unix = Some(0);
+        }
+        Ok(out)
+    }
+    async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
+        self.0.delete(key).await
+    }
+    async fn head_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.head_version(key, v).await
+    }
+    async fn get_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.0.get_version(key, v).await
+    }
+    async fn delete_version(&self, key: &str, v: &str) -> flint_store::StoreResult<()> {
+        self.0.delete_version(key, v).await
+    }
+    async fn list_versions(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::ListedVersion>> {
+        self.0.list_versions(prefix).await
+    }
+    async fn list_uploads(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::PendingUpload>> {
+        self.0.list_uploads(prefix).await
+    }
+    async fn abort_upload(&self, key: &str, id: &str) -> flint_store::StoreResult<()> {
+        self.0.abort_upload(key, id).await
+    }
+    async fn bootstrap(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<flint_store::BootstrapReport> {
+        self.0.bootstrap(prefix).await
+    }
+    async fn epoch_read(
+        &self,
+        key: &str,
+    ) -> flint_store::StoreResult<Option<flint_store::EpochState>> {
+        self.0.epoch_read(key).await
+    }
+    async fn epoch_acquire(
+        &self,
+        key: &str,
+        holder: &str,
+        observed: Option<&flint_store::EpochState>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.0.epoch_acquire(key, holder, observed).await
+    }
+    async fn epoch_renew(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+        echo: Option<&str>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.0.epoch_renew(key, lease, echo).await
+    }
+    async fn epoch_release(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+    ) -> flint_store::StoreResult<()> {
+        self.0.epoch_release(key, lease).await
+    }
+}
+
+#[tokio::test]
+async fn a_compose_that_reports_no_checksum_refuses_instead_of_citing() {
+    let mem = Arc::new(MemoryStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(ComposeWithoutChecksum(mem.clone()));
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = {
+        let mut c = cfg_for(dir.path());
+        // Force the compose path without a 64 MiB fixture.
+        c.whole_put_max = 4096;
+        c
+    };
+    let state = SidecarState::open(cfg.state_dir()).unwrap();
+    let mut a = Sidecar {
+        store,
+        cfg,
+        state,
+        lease: None,
+        noted_not_regular: Default::default(),
+    };
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    // Over the threshold, so it goes through `upload_compose`.
+    std::fs::write(dir.path().join("big.bin"), vec![7u8; 20_000]).unwrap();
+
+    let err = a
+        .run_barrier()
+        .await
+        .expect_err("a publish with no checksum must refuse, not cite");
+    assert!(
+        format!("{err}").contains("refusing to cite bytes nothing vouched for"),
+        "{err}"
+    );
+    // Nothing cited: the manifest must not name a path this barrier
+    // could not vouch for.
+    let m = manifest::load(mem.as_ref(), &a.cfg).await.unwrap();
+    assert!(
+        m.map(|l| l.manifest.entries.is_empty()).unwrap_or(true),
+        "a refused publish must leave no citation"
+    );
+}
