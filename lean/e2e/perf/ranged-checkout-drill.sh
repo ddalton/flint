@@ -119,8 +119,34 @@ seed_workload() { # <name>
   # urandom, not zeros: a compressible seed measures the store's
   # compression, not the network.
   echo "seeded $w: $(du -sh "$dir" | cut -f1)"
-  FLINT_SYNC_ROOT="$dir" FLINT_SYNC_BUCKET="$DRILL_BUCKET" \
-    FLINT_SYNC_PREFIX="$DRILL_PREFIX/$w" "$FLINT_SYNC_BIN" barrier
+  # The seed is GUARDED, not merely documented. A comment cannot catch a
+  # failure whose whole character is that it passes: a key already
+  # occupied is PARKED rather than overwritten, the barrier exits 0, and
+  # the manifest keeps citing the previous run's bytes. Every arm then
+  # measures a tree nobody intended and reports it as a result.
+  #
+  # `parked` is the exact signal. It is already on the barrier's own
+  # phase line, so this costs a capture and two seds.
+  local out parked up
+  out=$(FLINT_SYNC_ROOT="$dir" FLINT_SYNC_BUCKET="$DRILL_BUCKET" \
+        FLINT_SYNC_PREFIX="$DRILL_PREFIX/$w" "$FLINT_SYNC_BIN" barrier 2>&1)
+  echo "$out"
+  parked=$(sed -n 's/.*parked=\([0-9]*\).*/\1/p' <<<"$out" | head -1)
+  up=$(sed -n 's/.*up=\([0-9]*\).*/\1/p' <<<"$out" | head -1)
+  # Default to the FAILING value when the line could not be parsed. An
+  # unparsed guard that defaults to "fine" is not a guard.
+  if [ "${parked:-1}" != "0" ]; then
+    echo "SEED GUARD FAIL [$w]: barrier parked ${parked:-?} file(s) — this prefix" \
+         "already holds objects, so the seed did NOT overwrite them and the" \
+         "manifest still cites the PREVIOUS run. Seed into a fresh bucket, or" \
+         "clear s3://$DRILL_BUCKET/$DRILL_PREFIX/$w first." >&2
+    return 1
+  fi
+  if [ "${up:-0}" -eq 0 ]; then
+    echo "SEED GUARD FAIL [$w]: barrier uploaded 0 files — nothing was seeded," \
+         "and every arm after this would measure an empty or stale tree." >&2
+    return 1
+  fi
 }
 
 # ── one measured checkout ────────────────────────────────────────────
