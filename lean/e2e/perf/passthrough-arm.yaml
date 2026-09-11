@@ -1,0 +1,129 @@
+# The passthrough arm of the ranged-checkout drill.
+#
+# Reads the SAME BYTES the lean arms read: flint-lean writes its tree at
+# <prefix>/files/<path>, so a passthrough mount aimed at
+# ranged-drill/<workload>/files sees exactly the objects a lean checkout
+# materialises. Same bucket, same region, same node — the only thing
+# that differs is the door.
+#
+# identity: ambient, deliberately. The broker on this cluster holds
+# MinIO credentials from another session's install; ambient uses the
+# node's instance profile, which carries a policy scoped to this one
+# bucket. Fewer moving parts, and nothing of the other session's to
+# break.
+#
+# readOnly: true on every mount. This arm never writes, and a
+# passthrough mount that CAN write is one `cat >` away from editing the
+# thing the lean arms are being timed against.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: perf-drill
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: reader
+  namespace: perf-drill
+---
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata:
+  name: big
+  namespace: perf-drill
+spec:
+  bucket: flint-lean-ranged-20260910
+  keyPrefix: ranged-drill/big/files
+  region: us-west-1
+  readOnly: true
+  uid: 1001
+  gid: 1001
+  consumers:
+    serviceAccounts: [reader]
+  identity:
+    mode: ambient
+---
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata:
+  name: small
+  namespace: perf-drill
+spec:
+  bucket: flint-lean-ranged-20260910
+  keyPrefix: ranged-drill/small/files
+  region: us-west-1
+  readOnly: true
+  uid: 1001
+  gid: 1001
+  consumers:
+    serviceAccounts: [reader]
+  identity:
+    mode: ambient
+---
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata:
+  name: mixed
+  namespace: perf-drill
+spec:
+  bucket: flint-lean-ranged-20260910
+  keyPrefix: ranged-drill/mixed/files
+  region: us-west-1
+  readOnly: true
+  uid: 1001
+  gid: 1001
+  consumers:
+    serviceAccounts: [reader]
+  identity:
+    mode: ambient
+---
+# One pod, three mounts, pinned to the SAME NODE the lean arms ran on.
+# A different node would be a different NIC, a different neighbour set
+# and a different page cache — none of which this drill is varying.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: reader
+  namespace: perf-drill
+spec:
+  nodeName: runcr-aws-2
+  serviceAccountName: reader
+  restartPolicy: Never
+  securityContext:
+    runAsUser: 1001
+    runAsGroup: 1001
+    runAsNonRoot: true
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: reader
+      image: busybox:1.36
+      command: ["sleep", "100000000"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
+        readOnlyRootFilesystem: true
+      volumeMounts:
+        - { name: big,   mountPath: /mnt/big,   readOnly: true }
+        - { name: small, mountPath: /mnt/small, readOnly: true }
+        - { name: mixed, mountPath: /mnt/mixed, readOnly: true }
+        - { name: scratch, mountPath: /scratch }
+  volumes:
+    - name: scratch
+      emptyDir: { medium: Memory, sizeLimit: 64Mi }
+    - name: big
+      csi:
+        driver: s3.csi.chert.us
+        readOnly: true
+        volumeAttributes: { chert.us/mount: big }
+    - name: small
+      csi:
+        driver: s3.csi.chert.us
+        readOnly: true
+        volumeAttributes: { chert.us/mount: small }
+    - name: mixed
+      csi:
+        driver: s3.csi.chert.us
+        readOnly: true
+        volumeAttributes: { chert.us/mount: mixed }
