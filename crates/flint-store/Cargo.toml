@@ -11,7 +11,7 @@ edition = "2021"
 default = []
 # The real S3 backend (aws-sdk). OFF by default so test loops that only
 # need the memory double never build the AWS SDK.
-s3 = ["dep:aws-config", "dep:aws-sdk-s3", "dep:tracing"]
+s3 = ["dep:aws-config", "dep:aws-sdk-s3", "dep:tracing", "dep:futures"]
 
 [dependencies]
 async-trait = "0.1"
@@ -26,6 +26,10 @@ uuid = { version = "1.0", features = ["v4"] }
 aws-config = { version = "1.10.1", default-features = false, features = ["rustls", "rt-tokio", "credentials-process"], optional = true }
 aws-sdk-s3 = { version = "1.141.0", default-features = false, features = ["rustls", "rt-tokio"], optional = true }
 tracing = { version = "0.1", optional = true }
+# Only the S3 backend composes parts concurrently; the memory double
+# never needs this, and the feature gate above keeps it out of test
+# loops that only build the double.
+futures = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3.0"

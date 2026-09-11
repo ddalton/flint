@@ -8573,30 +8573,92 @@ async fn ranged_checkout_is_byte_identical_and_parallel() {
     assert!(peak > 1, "ranges must overlap; peak in flight was {peak}");
 }
 
-/// The control arm: with the knob off, the ranged path must not run at
-/// all. Without this, the test above proves only that SOMETHING
-/// fetched the bytes.
+/// The default is ON, and these two are a PAIR. Either one alone
+/// passes for the wrong reason: the first would still pass if ranging
+/// ran unconditionally and the threshold were dead, and the second
+/// would still pass if the ranged path had been deleted outright. They
+/// use the same tree and the same file sizes and differ in exactly one
+/// thing — `range_get_min_bytes` — so between them the only surviving
+/// explanation is that the threshold decides.
+///
+/// `weights.bin` must exceed the default CHUNK (16 MiB), not merely the
+/// default threshold (8 MiB): `fetch_ranged` returns `None` for a single
+/// part, because "one range is one whole GET with extra steps". So an
+/// object in [8, 16) MiB passes the threshold and takes the whole-object
+/// path anyway, which makes the EFFECTIVE default threshold 16 MiB. A
+/// 9 MiB file here asserted the ranged path and got the whole-object one
+/// — the test was wrong, not the code. 20 MiB gives two ranges.
+/// `small.txt` stays far below both, so one checkout exercises both sides.
+fn ranged_default_tree() -> Vec<u8> {
+    // Non-uniform bytes: a run of one value would hide an offset that
+    // wrote the right length in the wrong place.
+    (0..20 * 1024 * 1024).map(|i| (i % 251) as u8).collect()
+}
+
 #[tokio::test]
-async fn ranged_checkout_off_by_default_uses_no_ranges() {
+async fn ranged_checkout_on_by_default_uses_ranges() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
     let mut a = sidecar(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
-    let big: Vec<u8> = (0..5 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let big = ranged_default_tree();
     std::fs::write(dir_a.path().join("weights.bin"), &big).unwrap();
+    write(dir_a.path(), "small.txt", "under the threshold");
     a.run_barrier().await.unwrap();
 
     let dir_b = tempfile::tempdir().unwrap();
     let mut b = sidecar(&store, dir_b.path()).await;
-    assert_eq!(b.cfg.range_get_min_bytes, 0, "the default must be OFF");
+    assert_eq!(
+        b.cfg.range_get_min_bytes,
+        8 * 1024 * 1024,
+        "the shipped default moved to 8 MiB on the 2026-09-10 runcr drill"
+    );
     store.reset_peak_get_range_in_flight();
     let cr = b.checkout().await.unwrap();
-    assert_eq!(cr.materialized, 1);
-    assert_eq!(std::fs::read(dir_b.path().join("weights.bin")).unwrap(), big);
+    assert_eq!(cr.materialized, 2);
+    assert_eq!(
+        std::fs::read(dir_b.path().join("weights.bin")).unwrap(),
+        big,
+        "the DEFAULT path must be byte-identical, not merely fast"
+    );
+    assert_eq!(read(dir_b.path(), "small.txt").unwrap(), "under the threshold");
+    assert!(
+        store.peak_get_range_in_flight() > 0,
+        "an object over the default threshold must take the ranged path"
+    );
+    assert_eq!(cr.ranged, 1, "exactly the over-threshold object, not both");
+}
+
+/// The other arm SHUT: with the knob explicitly off, the ranged path
+/// must not run at all — on the same bytes the test above ranged.
+#[tokio::test]
+async fn ranged_checkout_explicitly_disabled_uses_no_ranges() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = sidecar(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    let big = ranged_default_tree();
+    std::fs::write(dir_a.path().join("weights.bin"), &big).unwrap();
+    write(dir_a.path(), "small.txt", "under the threshold");
+    a.run_barrier().await.unwrap();
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir_b.path()).await;
+    b.cfg.range_get_min_bytes = 0;
+    store.reset_peak_get_range_in_flight();
+    let cr = b.checkout().await.unwrap();
+    assert_eq!(cr.materialized, 2);
+    assert_eq!(
+        std::fs::read(dir_b.path().join("weights.bin")).unwrap(),
+        big,
+        "the whole-object arm must materialise the same bytes"
+    );
     assert_eq!(
         store.peak_get_range_in_flight(),
         0,
         "the whole-object arm must issue no ranged reads"
     );
+    assert_eq!(cr.ranged, 0);
 }

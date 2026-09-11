@@ -30,10 +30,12 @@
 //!   FLINT_SYNC_MAX_BYTES/_FILES   checkout budgets (0 = unlimited)
 //!   FLINT_SYNC_FANOUT             concurrent fetches/uploads (default 32)
 //!   FLINT_SYNC_RANGE_GET_MIN_MB   materialise objects >= this as parallel
-//!                                 ranges (default 0 = off)
+//!                                 ranges (default 8; 0 = off)
 //!   FLINT_SYNC_RANGE_GET_CHUNK_MB bytes per range (default 16)
 //!   FLINT_SYNC_RANGE_GET_PARALLELISM ranges in flight per object (default 4)
 //!   FLINT_SYNC_FETCH_INFLIGHT_MB  checkout bytes in flight (default 512)
+//!   FLINT_SYNC_UPLOAD_PART_PARALLELISM  parts of ONE object uploaded
+//!                                 concurrently on publish (default 1)
 //!   FLINT_SYNC_SOLE_WRITER        "true" marks every manifest this
 //!                                 sidecar installs as a PUBLISHED
 //!                                 mirror: readers then refuse an
@@ -122,8 +124,14 @@ async fn main() {
     let root = env_req("FLINT_SYNC_ROOT");
     let endpoint = std::env::var("FLINT_SYNC_ENDPOINT").ok();
 
+    // Parts of ONE object uploaded concurrently. `fanout` already
+    // spreads uploads ACROSS objects, so this only moves a tree whose
+    // critical path is a single large object — which is the shape a
+    // checkpoint actually has. Default 1 = today's sequential loop; the
+    // default moves on measurement, not on plausibility.
+    let part_par = env_u64("FLINT_SYNC_UPLOAD_PART_PARALLELISM", 1).max(1) as usize;
     let store = match S3Store::connect(bucket, endpoint).await {
-        Ok(s) => Arc::new(s) as Arc<dyn ObjectStore>,
+        Ok(s) => Arc::new(s.with_part_parallelism(part_par)) as Arc<dyn ObjectStore>,
         Err(e) => {
             eprintln!("flint-sync: store connect: {e}");
             std::process::exit(1);
@@ -141,7 +149,7 @@ async fn main() {
     cfg.fetch_inflight_max_bytes =
         env_u64("FLINT_SYNC_FETCH_INFLIGHT_MB", 512).max(1) * 1024 * 1024;
     // 0 = off, which is the shipped default until a drill moves it.
-    cfg.range_get_min_bytes = env_u64("FLINT_SYNC_RANGE_GET_MIN_MB", 0) * 1024 * 1024;
+    cfg.range_get_min_bytes = env_u64("FLINT_SYNC_RANGE_GET_MIN_MB", 8) * 1024 * 1024;
     cfg.range_get_chunk_bytes = env_u64("FLINT_SYNC_RANGE_GET_CHUNK_MB", 16).max(1) * 1024 * 1024;
     cfg.range_get_parallelism = env_u64("FLINT_SYNC_RANGE_GET_PARALLELISM", 4).max(1) as usize;
     if let Ok(m) = std::env::var("FLINT_SYNC_BOUNDARY_MODE") {

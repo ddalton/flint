@@ -291,10 +291,31 @@ pub struct LeanConfig {
     pub fetch_inflight_max_bytes: u64,
 
     /// Materialise an object this size or larger as PARALLEL RANGES
-    /// rather than one whole-object GET. `0` disables it, which is the
-    /// default until a live drill says otherwise — this is a
-    /// performance change to the agent-blocking path and the repo's
-    /// rule is that a default moves on measurement, not on plausibility.
+    /// rather than one whole-object GET. `0` disables it.
+    ///
+    /// Defaults to 8 MiB on the measurement that the repo's rule asked
+    /// for — runcr, i4i.large spot, us-west-1, one AZ, n=3, arms
+    /// interleaved per rep, RANGES not means:
+    ///
+    ///   6 x 1 GiB          71.33-71.88 s  ->  21.24-23.96 s
+    ///   4 GiB + 2k x 16 K  57.02-57.83 s  ->  15.30-18.30 s
+    ///   20k x 8 KiB        16.92-19.44 s  ->  16.40-17.39 s
+    ///
+    /// The third row is the one that justifies a THRESHOLD rather than
+    /// ranging everything: every object there is under it, the ranged
+    /// path never fires, and the arms agree. Before this, the shipped
+    /// path lost a cold 6 GiB checkout to a plain `aws s3 cp` of the
+    /// same prefix on the same node (21.7 s); it now ties it.
+    ///
+    /// Ranging also LOWERS peak RSS for a large object — see below — so
+    /// this default costs memory nothing and returns some.
+    ///
+    /// NOTE the interaction with `range_get_chunk_bytes`: a single part
+    /// is "one whole GET with extra steps" and `fetch_ranged` declines
+    /// it, so an object in [`range_get_min_bytes`, `range_get_chunk_bytes`)
+    /// passes this threshold and still takes the whole-object path. With
+    /// the defaults below the EFFECTIVE threshold is therefore 16 MiB,
+    /// not 8.
     ///
     /// Two costs of `get_whole` are paid together and this is what
     /// removes both: one object is one TCP stream, so a multi-GiB
@@ -367,7 +388,7 @@ impl LeanConfig {
             fanout: 32,
             project_id: None,
             fetch_inflight_max_bytes: 512 * 1024 * 1024,
-            range_get_min_bytes: 0,
+            range_get_min_bytes: 8 * 1024 * 1024,
             range_get_chunk_bytes: 16 * 1024 * 1024,
             range_get_parallelism: 4,
             boundary_mode: BoundaryMode::Hybrid,

@@ -32,6 +32,22 @@ pub struct S3Store {
     /// Used only by [`ObjectStore::presign_put`]; see `connect`.
     presign_client: aws_sdk_s3::Client,
     bucket: String,
+    /// Parts of ONE object uploaded concurrently by `compose_generation`.
+    /// `1` is the historical behaviour: a strictly sequential loop.
+    ///
+    /// Honoured ONLY when the caller supplied `ComposeSpec::crc64`. When
+    /// the store must accumulate the full-object checksum it reads parts
+    /// in order and a CRC-64 accumulated out of order is a different
+    /// number — so forge's one-pass push (`crc64: None`) keeps the
+    /// sequential path untouched no matter what this says.
+    ///
+    /// Measured on runcr 2026-09-10 (i4i.large, us-west-1, n=3): lean's
+    /// barrier of 6 x 1 GiB took 36.05-37.30 s against 19.43-19.46 s for
+    /// a 32-way `aws s3 cp` of the same bytes on the same node, and of
+    /// 4 GiB + 2k files 61.09-61.46 s against 18.99-20.13 s. The gap is
+    /// this loop: `fanout` spreads work ACROSS objects, so a tree whose
+    /// critical path is one large object gets no concurrency at all.
+    part_parallelism: usize,
 }
 
 impl S3Store {
@@ -99,7 +115,14 @@ impl S3Store {
         let presign_client = aws_sdk_s3::Client::from_conf(pb.build());
 
         let client = aws_sdk_s3::Client::from_conf(b.build());
-        Ok(S3Store { client, presign_client, bucket })
+        Ok(S3Store { client, presign_client, bucket, part_parallelism: 1 })
+    }
+
+    /// Upload this many parts of one object concurrently (see the field).
+    /// Clamped to at least 1; `1` restores the sequential loop.
+    pub fn with_part_parallelism(mut self, n: usize) -> Self {
+        self.part_parallelism = n.max(1);
+        self
     }
 
     pub fn bucket(&self) -> &str {
@@ -1030,28 +1053,82 @@ impl ObjectStore for S3Store {
 }
 
 impl S3Store {
+    /// One `UploadPart` of local bytes. Factored out so the sequential
+    /// and parallel arms of `compose_parts_and_complete` issue the SAME
+    /// request — two copies of this would be two places to fix the next
+    /// time a header changes, and only one of them would get fixed.
+    async fn put_local_part(
+        &self,
+        spec: &ComposeSpec<'_>,
+        upload_id: &str,
+        part_number: i32,
+        bytes: Bytes,
+    ) -> StoreResult<CompletedPart> {
+        let resp = self
+            .client
+            .upload_part()
+            .bucket(&self.bucket)
+            .key(spec.key)
+            .upload_id(upload_id)
+            .part_number(part_number)
+            .checksum_algorithm(ChecksumAlgorithm::Crc64Nvme)
+            .body(ByteStream::from(bytes))
+            .send()
+            .await
+            .map_err(|e| map_err("upload_part", e))?;
+        Ok(CompletedPart::builder()
+            .part_number(part_number)
+            .set_e_tag(resp.e_tag().map(|s| s.to_string()))
+            .set_checksum_crc64_nvme(resp.checksum_crc64_nvme().map(|s| s.to_string()))
+            .build())
+    }
+
+    /// One `UploadPartCopy` of a range of the base generation.
+    async fn put_copy_part(
+        &self,
+        spec: &ComposeSpec<'_>,
+        upload_id: &str,
+        part_number: i32,
+        offset: u64,
+        len: u64,
+    ) -> StoreResult<CompletedPart> {
+        let base_etag = spec
+            .base_etag
+            .as_deref()
+            .ok_or_else(|| StoreError::Other("compose: BaseCopy without base_etag".into()))?;
+        let resp = self
+            .client
+            .upload_part_copy()
+            .bucket(&self.bucket)
+            .key(spec.key)
+            .upload_id(upload_id)
+            .part_number(part_number)
+            .copy_source(self.copy_source(spec.base_key.unwrap_or(spec.key)))
+            .copy_source_if_match(base_etag)
+            .copy_source_range(format!("bytes={}-{}", offset, offset + len - 1))
+            .send()
+            .await
+            .map_err(|e| map_err("upload_part_copy", e))?;
+        let cp = resp.copy_part_result();
+        Ok(CompletedPart::builder()
+            .part_number(part_number)
+            .set_e_tag(cp.and_then(|c| c.e_tag()).map(|s| s.to_string()))
+            .set_checksum_crc64_nvme(cp.and_then(|c| c.checksum_crc64_nvme()).map(|s| s.to_string()))
+            .build())
+    }
+
     async fn compose_parts_and_complete(
         &self,
         spec: &ComposeSpec<'_>,
         upload_id: &str,
     ) -> StoreResult<ObjectMeta> {
-        let mut completed: Vec<CompletedPart> = Vec::with_capacity(spec.parts.len());
+        // Contiguity is validated over the WHOLE list BEFORE any part
+        // moves. It used to be checked inside the upload loop, which was
+        // fine while that loop was sequential — a parallel one would
+        // already have bytes on the wire by the time part 7 turned out
+        // to start at the wrong offset.
         let mut expect = 0u64;
-        // The full-object checksum, accumulated from the parts as they
-        // are read when the caller did not bring one. Each part is
-        // hashed on a blocking thread while that part's PUT is in
-        // flight, so the hashing costs the upload nothing on the wire.
-        let mut acc: Option<Crc64Nvme> = match spec.crc64 {
-            Some(_) => None,
-            None => Some(Crc64Nvme::new()),
-        };
-        if acc.is_some() && spec.parts.iter().any(|p| matches!(p, PartSource::BaseCopy { .. })) {
-            return Err(StoreError::Other(
-                "compose: the checksum cannot be accumulated over a copied part; supply crc64".into(),
-            ));
-        }
         for (i, p) in spec.parts.iter().enumerate() {
-            let part_number = (i + 1) as i32;
             let (off, len) = match p {
                 PartSource::Local { offset, len } | PartSource::BaseCopy { offset, len } => {
                     (*offset, *len)
@@ -1064,75 +1141,110 @@ impl S3Store {
                 )));
             }
             expect = off + len;
-            match p {
-                PartSource::Local { offset, len } => {
-                    let bytes = read_local(spec.local_path, *offset, *len).await?;
-                    let hashing = acc.take().map(|mut c| {
-                        let b = bytes.clone();
-                        tokio::task::spawn_blocking(move || {
-                            c.update(&b);
-                            c
-                        })
-                    });
-                    let resp = self
-                        .client
-                        .upload_part()
-                        .bucket(&self.bucket)
-                        .key(spec.key)
-                        .upload_id(upload_id)
-                        .part_number(part_number)
-                        .checksum_algorithm(ChecksumAlgorithm::Crc64Nvme)
-                        .body(ByteStream::from(bytes))
-                        .send()
-                        .await
-                        .map_err(|e| map_err("upload_part", e))?;
-                    completed.push(
-                        CompletedPart::builder()
-                            .part_number(part_number)
-                            .set_e_tag(resp.e_tag().map(|s| s.to_string()))
-                            .set_checksum_crc64_nvme(
-                                resp.checksum_crc64_nvme().map(|s| s.to_string()),
-                            )
-                            .build(),
-                    );
-                    if let Some(h) = hashing {
-                        acc = Some(h.await.map_err(|e| {
-                            StoreError::Other(format!("compose: checksum did not join: {e}"))
-                        })?);
+        }
+
+        // The full-object checksum, accumulated from the parts as they
+        // are read when the caller did not bring one.
+        let mut acc: Option<Crc64Nvme> = match spec.crc64 {
+            Some(_) => None,
+            None => Some(Crc64Nvme::new()),
+        };
+        if acc.is_some() && spec.parts.iter().any(|p| matches!(p, PartSource::BaseCopy { .. })) {
+            return Err(StoreError::Other(
+                "compose: the checksum cannot be accumulated over a copied part; supply crc64".into(),
+            ));
+        }
+
+        // A caller that asks the store to ACCUMULATE the checksum is
+        // pinned to the sequential loop whatever `part_parallelism`
+        // says: that accumulation reads parts in order, and a CRC-64
+        // taken out of order is a different number. forge pushes with
+        // `crc64: None`, so it is unreachable from the parallel arm by
+        // CONSTRUCTION rather than by configuration.
+        let par = if acc.is_some() { 1 } else { self.part_parallelism.max(1) };
+
+        let completed: Vec<CompletedPart> = if par <= 1 {
+            let mut completed: Vec<CompletedPart> = Vec::with_capacity(spec.parts.len());
+            for (i, p) in spec.parts.iter().enumerate() {
+                let part_number = (i + 1) as i32;
+                match p {
+                    PartSource::Local { offset, len } => {
+                        let bytes = read_local(spec.local_path, *offset, *len).await?;
+                        // Hashed on a blocking thread while this part's
+                        // PUT is in flight, so hashing costs the upload
+                        // nothing on the wire.
+                        let hashing = acc.take().map(|mut c| {
+                            let b = bytes.clone();
+                            tokio::task::spawn_blocking(move || {
+                                c.update(&b);
+                                c
+                            })
+                        });
+                        completed
+                            .push(self.put_local_part(spec, upload_id, part_number, bytes).await?);
+                        if let Some(h) = hashing {
+                            acc = Some(h.await.map_err(|e| {
+                                StoreError::Other(format!("compose: checksum did not join: {e}"))
+                            })?);
+                        }
+                        spec.note_progress(*len);
+                    }
+                    PartSource::BaseCopy { offset, len } => {
+                        completed.push(
+                            self.put_copy_part(spec, upload_id, part_number, *offset, *len).await?,
+                        );
+                        spec.note_progress(*len);
                     }
                 }
-                PartSource::BaseCopy { offset, len } => {
-                    let base_etag = spec.base_etag.as_deref().ok_or_else(|| {
-                        StoreError::Other("compose: BaseCopy without base_etag".into())
-                    })?;
-                    let resp = self
-                        .client
-                        .upload_part_copy()
-                        .bucket(&self.bucket)
-                        .key(spec.key)
-                        .upload_id(upload_id)
-                        .part_number(part_number)
-                        .copy_source(self.copy_source(spec.base_key.unwrap_or(spec.key)))
-                        .copy_source_if_match(base_etag)
-                        .copy_source_range(format!("bytes={}-{}", offset, offset + len - 1))
-                        .send()
-                        .await
-                        .map_err(|e| map_err("upload_part_copy", e))?;
-                    let cp = resp.copy_part_result();
-                    completed.push(
-                        CompletedPart::builder()
-                            .part_number(part_number)
-                            .set_e_tag(cp.and_then(|c| c.e_tag()).map(|s| s.to_string()))
-                            .set_checksum_crc64_nvme(
-                                cp.and_then(|c| c.checksum_crc64_nvme())
-                                    .map(|s| s.to_string()),
-                            )
-                            .build(),
-                    );
-                }
             }
-            spec.note_progress(len);
-        }
+            completed
+        } else {
+            use futures::stream::StreamExt;
+            // Every part is independent by construction: the list carries
+            // explicit offsets and lengths, and the contiguity check above
+            // already ran over all of them.
+            // The futures are built by a LOOP, not by `.map(|..| async
+            // move ..)`. As a closure this has to be higher-ranked over
+            // the borrow of `PartSource` and is not, which rustc reports
+            // from the trait method as the famously unhelpful
+            // "implementation of `FnOnce` is not general enough".
+            let mut futs = Vec::with_capacity(spec.parts.len());
+            for (i, p) in spec.parts.iter().enumerate() {
+                let part_number = (i + 1) as i32;
+                futs.push(async move {
+                    let cp = match p {
+                        PartSource::Local { offset, len } => {
+                            let bytes = read_local(spec.local_path, *offset, *len).await?;
+                            let cp =
+                                self.put_local_part(spec, upload_id, part_number, bytes).await?;
+                            spec.note_progress(*len);
+                            cp
+                        }
+                        PartSource::BaseCopy { offset, len } => {
+                            let cp = self
+                                .put_copy_part(spec, upload_id, part_number, *offset, *len)
+                                .await?;
+                            spec.note_progress(*len);
+                            cp
+                        }
+                    };
+                    Ok::<(i32, CompletedPart), StoreError>((part_number, cp))
+                });
+            }
+            let mut done: Vec<(i32, CompletedPart)> = futures::stream::iter(futs)
+                .buffer_unordered(par)
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<StoreResult<Vec<_>>>()?;
+            // CompleteMultipartUpload takes parts in ASCENDING part
+            // number. `buffer_unordered` yields in COMPLETION order, so
+            // without this sort the part list is a shuffle of the
+            // object — which S3 rejects, and which a backend that
+            // tolerated it would assemble wrong.
+            done.sort_by_key(|(n, _)| *n);
+            done.into_iter().map(|(_, cp)| cp).collect()
+        };
 
         let crc = match (spec.crc64, acc) {
             (Some(c), _) => c,
