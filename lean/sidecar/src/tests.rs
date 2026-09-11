@@ -3376,6 +3376,16 @@ struct VersionStripping(Arc<MemoryStore>);
 
 #[async_trait::async_trait]
 impl ObjectStore for VersionStripping {
+    async fn copy_object(
+        &self,
+        src_key: &str,
+        src_if_match: Option<&str>,
+        dst_key: &str,
+        condition: &PutCondition,
+        stamps: &GenerationStamps,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.copy_object(src_key, src_if_match, dst_key, condition, stamps).await
+    }
     async fn put_whole(
         &self,
         key: &str,
@@ -6809,6 +6819,16 @@ impl AuthRefusing {
 
 #[async_trait::async_trait]
 impl ObjectStore for AuthRefusing {
+    async fn copy_object(
+        &self,
+        src_key: &str,
+        src_if_match: Option<&str>,
+        dst_key: &str,
+        condition: &PutCondition,
+        stamps: &GenerationStamps,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.copy_object(src_key, src_if_match, dst_key, condition, stamps).await
+    }
     async fn put_whole(
         &self,
         key: &str,
@@ -7404,6 +7424,16 @@ struct SweepMidRead {
 
 #[async_trait::async_trait]
 impl ObjectStore for SweepMidRead {
+    async fn copy_object(
+        &self,
+        src_key: &str,
+        src_if_match: Option<&str>,
+        dst_key: &str,
+        condition: &PutCondition,
+        stamps: &GenerationStamps,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.copy_object(src_key, src_if_match, dst_key, condition, stamps).await
+    }
     async fn put_whole(
         &self,
         key: &str,
@@ -7810,6 +7840,16 @@ struct PublishOnList {
 
 #[async_trait::async_trait]
 impl ObjectStore for PublishOnList {
+    async fn copy_object(
+        &self,
+        src_key: &str,
+        src_if_match: Option<&str>,
+        dst_key: &str,
+        condition: &PutCondition,
+        stamps: &GenerationStamps,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.copy_object(src_key, src_if_match, dst_key, condition, stamps).await
+    }
     async fn put_whole(
         &self,
         key: &str,
@@ -8096,6 +8136,16 @@ struct StaleListing {
 
 #[async_trait::async_trait]
 impl ObjectStore for StaleListing {
+    async fn copy_object(
+        &self,
+        src_key: &str,
+        src_if_match: Option<&str>,
+        dst_key: &str,
+        condition: &PutCondition,
+        stamps: &GenerationStamps,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.copy_object(src_key, src_if_match, dst_key, condition, stamps).await
+    }
     async fn put_whole(
         &self,
         key: &str,
@@ -8370,6 +8420,16 @@ struct DeposeOnNthPut {
 
 #[async_trait::async_trait]
 impl ObjectStore for DeposeOnNthPut {
+    async fn copy_object(
+        &self,
+        src_key: &str,
+        src_if_match: Option<&str>,
+        dst_key: &str,
+        condition: &PutCondition,
+        stamps: &GenerationStamps,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.copy_object(src_key, src_if_match, dst_key, condition, stamps).await
+    }
     async fn put_whole(
         &self,
         key: &str,

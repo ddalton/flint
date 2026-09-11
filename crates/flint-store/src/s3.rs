@@ -19,7 +19,7 @@ use aws_sdk_s3::types::{
     AbortIncompleteMultipartUpload, BucketLifecycleConfiguration, BucketVersioningStatus,
     ChecksumAlgorithm, ChecksumType, CompletedMultipartUpload, CompletedPart,
     ExpirationStatus, LifecycleRule, LifecycleRuleFilter,
-    NoncurrentVersionExpiration,
+    MetadataDirective, NoncurrentVersionExpiration,
 };
 use tracing::{info, warn};
 
@@ -32,6 +32,12 @@ pub struct S3Store {
     /// Used only by [`ObjectStore::presign_put`]; see `connect`.
     presign_client: aws_sdk_s3::Client,
     bucket: String,
+    /// The single-request ceiling for [`ObjectStore::copy_object`].
+    /// S3's `CopyObject` tops out at 5 GiB; above it the copy goes
+    /// through the MPU + `UploadPartCopy` path. Settable so a test can
+    /// drive the MPU arm without a 5 GiB fixture — a threshold that only
+    /// the fixture can cross is a threshold nothing exercises.
+    copy_whole_max: u64,
     /// Parts of ONE object uploaded concurrently by `compose_generation`.
     /// `1` is the historical behaviour: a strictly sequential loop.
     ///
@@ -115,13 +121,27 @@ impl S3Store {
         let presign_client = aws_sdk_s3::Client::from_conf(pb.build());
 
         let client = aws_sdk_s3::Client::from_conf(b.build());
-        Ok(S3Store { client, presign_client, bucket, part_parallelism: 1 })
+        Ok(S3Store {
+            client,
+            presign_client,
+            bucket,
+            part_parallelism: 1,
+            // S3's documented CopyObject ceiling.
+            copy_whole_max: 5 * 1024 * 1024 * 1024,
+        })
     }
 
     /// Upload this many parts of one object concurrently (see the field).
     /// Clamped to at least 1; `1` restores the sequential loop.
     pub fn with_part_parallelism(mut self, n: usize) -> Self {
         self.part_parallelism = n.max(1);
+        self
+    }
+
+    /// Lower the single-request copy ceiling (see the field). Tests use
+    /// it to reach the MPU arm without a multi-gigabyte object.
+    pub fn with_copy_whole_max(mut self, n: u64) -> Self {
+        self.copy_whole_max = n;
         self
     }
 
@@ -355,6 +375,111 @@ impl ObjectStore for S3Store {
             // the conformance probe REFUSES rather than degrading into.
             version_id: resp.version_id().map(|v| v.to_string()),
         })
+    }
+
+    async fn copy_object(
+        &self,
+        src_key: &str,
+        src_if_match: Option<&str>,
+        dst_key: &str,
+        condition: &PutCondition,
+        stamps: &GenerationStamps,
+    ) -> StoreResult<ObjectMeta> {
+        // HEAD the source for its SIZE and its CRC. The size picks the
+        // transport; the CRC is the destination's, unchanged, because a
+        // copy cannot alter bytes and a checksum describes bytes.
+        let src = self.head(src_key).await?;
+        if let Some(want) = src_if_match {
+            if src.etag != want {
+                return Err(StoreError::PreconditionFailed(format!(
+                    "copy source {src_key} is at {}, not {want}",
+                    src.etag
+                )));
+            }
+        }
+        // Belt AND braces, deliberately: the check above judges what the
+        // caller read, and `copy_source_if_match` closes the window
+        // between this HEAD and the copy. Same shape as the gateway's
+        // HEAD-then-conditional-PUT.
+        let guard = src_if_match.map(|s| s.to_string()).or_else(|| Some(src.etag.clone()));
+
+        if src.size <= self.copy_whole_max {
+            let mut req = self
+                .client
+                .copy_object()
+                .bucket(&self.bucket)
+                .key(dst_key)
+                .copy_source(self.copy_source(src_key))
+                // REPLACE, never COPY: the source's user metadata carries
+                // ITS generation, epoch and flush_uuid, and a destination
+                // wearing them files one object's publish history under
+                // another object's key.
+                .metadata_directive(MetadataDirective::Replace)
+                .set_metadata(Some(Self::stamps_meta(stamps)))
+                .checksum_algorithm(ChecksumAlgorithm::Crc64Nvme);
+            if let Some(g) = &guard {
+                req = req.copy_source_if_match(g);
+            }
+            req = match condition {
+                PutCondition::IfMatch(etag) => req.if_match(etag),
+                PutCondition::IfNoneMatchAny => req.if_none_match("*"),
+                PutCondition::Unconditional => req,
+            };
+            let resp = req.send().await.map_err(|e| map_err("copy_object", e))?;
+            let r = resp.copy_object_result();
+            return Ok(ObjectMeta {
+                etag: r.and_then(|c| c.e_tag()).unwrap_or_default().to_string(),
+                size: src.size,
+                // The source's, and it must be: identical bytes. When
+                // the backend echoes one, prefer it — a disagreement is
+                // the backend telling us the copy is not what we think.
+                crc64_b64: r
+                    .and_then(|c| c.checksum_crc64_nvme())
+                    .map(|s| s.to_string())
+                    .or(src.crc64_b64),
+                meta: Self::stamps_meta(stamps),
+                last_modified_unix: None,
+                storage_class: None,
+                version_id: resp.version_id().map(|v| v.to_string()),
+            });
+        }
+
+        // Over the single-request ceiling: the same MPU the flusher
+        // uses, every part a server-side range copy. This is the FIRST
+        // caller of `ComposeSpec::base_key` — the field has existed for
+        // the A7 re-key flush and nothing has ever set it.
+        let part = self.min_part_size().max(1);
+        let mut parts = vec![];
+        let mut off = 0u64;
+        while off < src.size {
+            let len = part.min(src.size - off);
+            parts.push(PartSource::BaseCopy { offset: off, len });
+            off += len;
+        }
+        let crc = src
+            .crc64_b64
+            .as_deref()
+            .and_then(crc64_from_b64)
+            .ok_or_else(|| {
+                StoreError::Other(format!(
+                    "copy {src_key}: the source carries no CRC-64, and a copied part cannot \
+                     have one accumulated from it — refusing to publish {dst_key} unchecked"
+                ))
+            })?;
+        let spec = ComposeSpec {
+            key: dst_key,
+            // Unused: every part is a BaseCopy, so nothing is read
+            // locally. Named so a future Local part fails loudly.
+            local_path: std::path::Path::new("/nonexistent/copy-object-reads-nothing-locally"),
+            parts,
+            base_key: Some(src_key),
+            base_etag: guard,
+            condition: condition.clone(),
+            stamps: stamps.clone(),
+            crc64: Some(crc),
+            progress: None,
+        };
+        self.compose_generation(&spec).await
     }
 
     async fn compose_generation(&self, spec: &ComposeSpec<'_>) -> StoreResult<ObjectMeta> {

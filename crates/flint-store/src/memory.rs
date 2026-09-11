@@ -629,6 +629,56 @@ impl ObjectStore for MemoryStore {
         Ok(m)
     }
 
+    async fn copy_object(
+        &self,
+        src_key: &str,
+        src_if_match: Option<&str>,
+        dst_key: &str,
+        condition: &PutCondition,
+        stamps: &GenerationStamps,
+    ) -> StoreResult<ObjectMeta> {
+        self.bump("copy_object");
+        let mut inner = self.inner.lock().unwrap();
+        let src = inner
+            .current(src_key)
+            .ok_or_else(|| StoreError::NotFound(src_key.to_string()))?;
+        // The SOURCE guard. A 412 here is not the destination's: the
+        // object the caller read has been overwritten, and copying the
+        // replacement would move bytes nobody asked for.
+        if let Some(want) = src_if_match {
+            if src.etag != want {
+                return Err(StoreError::PreconditionFailed(format!(
+                    "copy source {src_key} is at {} , not {want}",
+                    src.etag
+                )));
+            }
+        }
+        let bytes = src.bytes.clone();
+        // The CRC travels with the BYTES — they are the same bytes. The
+        // stamps do NOT: a copy is a new publish under a new key, and
+        // wearing the source's generation would file one object's
+        // history under another's name. A double that copied the source
+        // meta wholesale would pass a test the real store fails.
+        let crc64 = src.crc64;
+        Self::check_condition(inner.current(dst_key), condition)?;
+        let obj = StoredObject {
+            etag: put_etag(&bytes),
+            crc64,
+            meta: stamps.to_meta().into_iter().collect(),
+            last_modified_unix: now_unix(),
+            bytes,
+            version_id: String::new(),
+            deleted: false,
+        };
+        let vid = inner.push(dst_key, obj);
+        let mut m = inner.current(dst_key).expect("just pushed").to_meta();
+        m.version_id = Some(vid);
+        if self.strip_version_ids.load(Ordering::SeqCst) {
+            m.version_id = None;
+        }
+        Ok(m)
+    }
+
     async fn compose_generation(&self, spec: &ComposeSpec<'_>) -> StoreResult<ObjectMeta> {
         self.bump("compose_generation");
         if spec.parts.is_empty() {
@@ -1440,5 +1490,153 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, StoreError::Other(ref m) if m.contains("copied part")), "{err:?}");
         assert!(s.list_uploads("h").await.unwrap().is_empty(), "nothing pending after a refusal");
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+    use crate::{crc64_from_b64, crc64_to_b64};
+
+    fn stamps(g: u64) -> GenerationStamps {
+        GenerationStamps {
+            generation: g,
+            epoch: 7,
+            flush_uuid: format!("flush-{g}"),
+            boundary_source: None,
+            posix: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_copy_carries_the_bytes_and_the_checksum_but_not_the_stamps() {
+        let s = MemoryStore::new();
+        let body = Bytes::from_static(b"the bytes that move");
+        let src = s
+            .put_whole("a.txt", body.clone(), &PutCondition::IfNoneMatchAny, &stamps(3), crc64_nvme(&body))
+            .await
+            .unwrap();
+
+        let dst = s
+            .copy_object("a.txt", Some(&src.etag), "b.txt", &PutCondition::IfNoneMatchAny, &stamps(1))
+            .await
+            .unwrap();
+
+        let (meta, got) = s.get_whole("b.txt", None).await.unwrap();
+        assert_eq!(got, body, "a copy is byte-identical or it is not a copy");
+        assert_eq!(
+            dst.crc64_b64, src.crc64_b64,
+            "identical bytes have an identical checksum — a copy cannot change one"
+        );
+        // THE trap this test exists for: the destination must not wear
+        // the source's publish history.
+        assert_eq!(
+            meta.meta.get("flint-gen").map(String::as_str),
+            Some("1"),
+            "the destination's generation is its OWN, not the source's 3: {:?}",
+            meta.meta
+        );
+        assert_eq!(
+            meta.meta.get(GenerationStamps::META_FLUSH_UUID).map(String::as_str),
+            Some("flush-1"),
+            "and its flush_uuid names the publish that WROTE IT, not flush-3: {:?}",
+            meta.meta
+        );
+        // The source is untouched — copy, not move.
+        assert!(s.head("a.txt").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_copy_refuses_when_the_source_moved_under_it() {
+        let s = MemoryStore::new();
+        let v1 = Bytes::from_static(b"version one");
+        let src = s
+            .put_whole("a.txt", v1, &PutCondition::IfNoneMatchAny, &stamps(1), crc64_nvme(b"version one"))
+            .await
+            .unwrap();
+        let v2 = Bytes::from_static(b"version two");
+        s.put_whole("a.txt", v2, &PutCondition::IfMatch(src.etag.clone()), &stamps(2), crc64_nvme(b"version two"))
+            .await
+            .unwrap();
+
+        let err = s
+            .copy_object("a.txt", Some(&src.etag), "b.txt", &PutCondition::IfNoneMatchAny, &stamps(1))
+            .await
+            .expect_err("copying an object that moved copies something the caller never read");
+        assert!(matches!(err, StoreError::PreconditionFailed(_)), "{err:?}");
+        assert!(matches!(s.head("b.txt").await, Err(StoreError::NotFound(_))), "and nothing landed");
+    }
+
+    #[tokio::test]
+    async fn a_copy_honours_the_destination_precondition() {
+        let s = MemoryStore::new();
+        let a = Bytes::from_static(b"aaaa");
+        s.put_whole("a.txt", a, &PutCondition::IfNoneMatchAny, &stamps(1), crc64_nvme(b"aaaa"))
+            .await
+            .unwrap();
+        let b = Bytes::from_static(b"bbbb");
+        let existing = s
+            .put_whole("b.txt", b.clone(), &PutCondition::IfNoneMatchAny, &stamps(1), crc64_nvme(b"bbbb"))
+            .await
+            .unwrap();
+
+        let err = s
+            .copy_object("a.txt", None, "b.txt", &PutCondition::IfNoneMatchAny, &stamps(2))
+            .await
+            .expect_err("a rename must not silently clobber its destination");
+        assert!(matches!(err, StoreError::PreconditionFailed(_)), "{err:?}");
+        let (_, still) = s.get_whole("b.txt", Some(&existing.etag)).await.unwrap();
+        assert_eq!(still, b, "the destination is untouched by a refused copy");
+    }
+
+    /// `ComposeSpec::base_key` has existed for the A7 re-key flush and
+    /// `base_key: Some(..)` appears NOWHERE in this repository — not in
+    /// production, not in a test. `copy_object`'s MPU arm is its first
+    /// caller, so this is the branch's first coverage.
+    #[tokio::test]
+    async fn a_compose_can_copy_ranges_from_a_different_key() {
+        let s = MemoryStore::new();
+        let body = Bytes::from_static(b"AAAABBBB");
+        let src = s
+            .put_whole("old/name", body.clone(), &PutCondition::IfNoneMatchAny, &stamps(1), crc64_nvme(&body))
+            .await
+            .unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let spec = ComposeSpec {
+            progress: None,
+            key: "new/name",
+            // Never read: every part is a BaseCopy.
+            local_path: &dir.path().join("nothing-here"),
+            parts: vec![PartSource::BaseCopy { offset: 0, len: 8 }],
+            base_key: Some("old/name"),
+            base_etag: Some(src.etag.clone()),
+            condition: PutCondition::IfNoneMatchAny,
+            stamps: stamps(1),
+            crc64: Some(crc64_nvme(&body)),
+        };
+        let m = s.compose_generation(&spec).await.unwrap();
+        let (_, got) = s.get_whole("new/name", Some(&m.etag)).await.unwrap();
+        assert_eq!(got, body, "the ranges came from the OTHER key");
+        assert!(s.head("old/name").await.is_ok(), "and the source survives");
+    }
+
+    #[test]
+    fn crc64_b64_round_trips_and_refuses_what_is_not_one() {
+        for v in [0u64, 1, u64::MAX, 0x0123_4567_89ab_cdef] {
+            assert_eq!(crc64_from_b64(&crc64_to_b64(v)), Some(v), "round trip {v:#x}");
+        }
+        // A caller handed `None` has something other than a CRC-64, and
+        // guessing a number would validate a publish against a checksum
+        // nobody computed.
+        // "AAAAAAAAAAA" is the discriminating case: 11 significant
+        // characters decode to exactly 8 bytes, so the byte-count check
+        // alone ACCEPTS it. Only the canonical-form check rejects it —
+        // without that case the padding guard is a line no control can
+        // move, which is how dead defensive code survives.
+        for bad in ["", "AAAA", "not-base64!!", "AAAAAAAAAAAA", "AAAAAAAAAAA", "AAAAAAAAAAAAAAA="] {
+            assert_eq!(crc64_from_b64(bad), None, "{bad:?} is not a canonical CRC-64");
+        }
+        assert_eq!(crc64_from_b64("AAAAAAAAAAA="), Some(0), "the canonical form IS accepted");
     }
 }

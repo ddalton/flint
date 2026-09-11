@@ -168,19 +168,36 @@ object operations. Another reason for one product per prefix.
 
 ## 7. Prerequisite: a cross-key server-side copy
 
-flint-store has none. `PartSource::BaseCopy` is same-key by
-construction. Without it a UI renames a 10 GB file by downloading and
-re-uploading it, which is worse than the agent path it is meant to
-improve on.
+CORRECTION (2026-09-11, on building it): flint-store did not have
+"none" — it had a cross-key path nobody could reach. `ComposeSpec`
+carries `base_key`, used at `s3.rs` and `memory.rs` as
+`spec.base_key.unwrap_or(spec.key)`, written for the A7 re-key flush.
+**`base_key: Some(..)` appeared NOWHERE in the repository** — not in
+production, not in a test — so the branch had never executed. The
+statement to keep is the narrower one: there was no WHOLE-OBJECT copy,
+and the range-copy path that existed was dead code.
 
-Add `copy_object(src_key, dst_key)` to the `ObjectStore` trait plus the
-memory double: `CopyObject` under 5 GiB, MPU with `UploadPartCopy`
-above. `copy_source()` and `copy_source_allowed()` already exist on the
-S3 store for the compose path.
+`PartSource::BaseCopy` is same-key by construction otherwise. Without a
+copy, a UI renames a 10 GB file by downloading and re-uploading it,
+which is worse than the agent path it is meant to improve on.
 
-This is **separable and pays for itself twice** — it is also the fix for
-the agent-side `mv` re-upload in §2.1. Land it alone, before anything
-else here.
+**SHIPPED.** `copy_object(src_key, src_if_match, dst_key, condition,
+stamps)` on the `ObjectStore` trait, both backends and all seven test
+doubles: `CopyObject` under a settable 5 GiB ceiling, MPU with
+`UploadPartCopy` above — and that MPU arm is the FIRST caller of
+`base_key`, so the dead branch now has a caller and a test.
+
+Two rules the implementations agree on, because a double that gets them
+wrong passes a test the real store fails:
+
+- the destination's CRC **is** the source's — identical bytes, and a
+  checksum that changed means the bytes did;
+- the destination's **stamps are not** — `generation`, `epoch` and
+  `flush_uuid` describe a publish, and inheriting them files one
+  object's history under another object's key.
+
+It was **separable and paid for itself twice** — it is also the fix for
+the agent-side `mv` re-upload in §2.1, and it landed alone.
 
 A rename's destination must carry its own `GenerationStamps` and a
 `crc64_b64` that describes the bytes: a copy that inherits the source's

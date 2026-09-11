@@ -152,6 +152,40 @@ pub fn crc64_nvme(data: &[u8]) -> u64 {
     c.finalize()
 }
 
+/// The inverse of [`crc64_to_b64`]. `None` for anything that is not a
+/// 12-character base64 encoding of exactly 8 bytes — a caller that gets
+/// `None` has been handed something other than a CRC-64, and guessing a
+/// number for it would validate a publish against a checksum nobody
+/// computed.
+pub fn crc64_from_b64(s: &str) -> Option<u64> {
+    const AL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let s = s.trim();
+    if s.len() != 12 || !s.ends_with('=') {
+        return None;
+    }
+    let mut acc: u32 = 0;
+    let mut bits = 0u32;
+    let mut out: Vec<u8> = Vec::with_capacity(8);
+    for c in s.bytes() {
+        if c == b'=' {
+            break;
+        }
+        let v = AL.iter().position(|&a| a == c)? as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    if out.len() != 8 {
+        return None;
+    }
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&out);
+    Some(u64::from_be_bytes(b))
+}
+
 /// S3's wire form: base64 of the checksum's 8 big-endian bytes.
 pub fn crc64_to_b64(crc: u64) -> String {
     const AL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -582,6 +616,37 @@ pub trait ObjectStore: Send + Sync {
     /// server-side clean copies. MUST abort its partial assembly on
     /// every failure path (A9) — an error return means nothing is left
     /// pending under the key by this call.
+    /// Server-side copy of a WHOLE object to a DIFFERENT key.
+    ///
+    /// Exists because a key IS a path in every layout this crate serves,
+    /// so moving a file moves bytes. Without it a rename is a download
+    /// and a re-upload, and `PartSource::BaseCopy` cannot stand in: it
+    /// copies ranges from the SAME key by construction, so a destination
+    /// that has no generation of its own has nothing to copy from.
+    ///
+    /// Two rules the implementations must agree on, and the memory
+    /// double must model or it will pass a test the real store fails:
+    ///
+    /// - the destination's full-object CRC **is** the source's. A copy
+    ///   is byte-identical; a checksum that changed means the bytes did.
+    /// - the destination's **stamps are not** the source's. `generation`,
+    ///   `epoch` and `flush_uuid` describe a publish, and inheriting them
+    ///   files one object's history under another object's key — a
+    ///   reader asking "which flush wrote this?" would be told about a
+    ///   flush that wrote something else.
+    ///
+    /// `src_if_match` guards the SOURCE: copying an object that moved
+    /// since the caller read it copies something the caller never saw.
+    /// `condition` guards the DESTINATION, exactly as on `put_whole`.
+    async fn copy_object(
+        &self,
+        src_key: &str,
+        src_if_match: Option<&str>,
+        dst_key: &str,
+        condition: &PutCondition,
+        stamps: &GenerationStamps,
+    ) -> StoreResult<ObjectMeta>;
+
     async fn compose_generation(&self, spec: &ComposeSpec<'_>) -> StoreResult<ObjectMeta>;
 
     async fn head(&self, key: &str) -> StoreResult<ObjectMeta>;
