@@ -10098,3 +10098,306 @@ async fn promoting_an_out_of_scope_draft_widens_the_held_set() {
     // the declaration. That asymmetry is the design's, not a bug here.
     assert_eq!(b.state.load_scope().unwrap().as_deref(), Some(&["inputs".to_string()][..]));
 }
+
+// ---------------------------------------------------------------------
+// The narrow / widen verb (scoped-read design §4, phase 4)
+// ---------------------------------------------------------------------
+
+/// A whole-tree workspace over `scoped_fixture`'s published tree: two
+/// files under `inputs/`, six under `outputs/`, all held and all cited.
+async fn rescope_fixture(store: &Arc<MemoryStore>) -> (tempfile::TempDir, Sidecar) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = sidecar(store, dir.path()).await;
+    b.checkout().await.unwrap();
+    assert!(claim_until_held(&mut b, 12).await, "quiet polls exhausted ⇒ takeover");
+    assert_eq!(b.state.load_baseline().unwrap().entries.len(), 8);
+    (dir, b)
+}
+
+/// THE HEADLINE. A narrow removes six files from the tree and the held
+/// set, and publishes NOT ONE deletion — across two barriers, because
+/// the deletion rule needs absence to survive two consecutive scans and
+/// one barrier could pass for the wrong reason.
+#[tokio::test]
+async fn a_narrow_unwatches_without_publishing_a_single_deletion() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let (dir, mut b) = rescope_fixture(&store).await;
+
+    let r = b.rescope(Some(vec!["inputs".into()])).await.unwrap();
+    assert_eq!(r.uncited, 6, "six citations should have left the held set");
+    assert_eq!(r.unlinked, 6, "and six files the tree");
+    assert!(r.kept_dirty.is_empty());
+
+    assert!(read(dir.path(), "outputs/big-0.bin").is_none(), "the narrow did not unlink");
+    assert!(read(dir.path(), "inputs/wanted.txt").is_some(), "the narrow took an admitted path");
+    assert_eq!(b.state.load_scope().unwrap().as_deref(), Some(&["inputs".to_string()][..]));
+
+    let r1 = b.run_barrier().await.unwrap();
+    let r2 = b.run_barrier().await.unwrap();
+    assert!(r1.deleted.is_empty() && r2.deleted.is_empty(), "{:?} {:?}", r1.deleted, r2.deleted);
+
+    // The bucket still holds everything, and still CITES everything.
+    let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries.len(), 8, "a narrow published a deletion: {:?}", m.entries.keys());
+}
+
+/// ANTI-VACUITY for the leg above, and the design's first mutation
+/// check made into a test: the same six files removed WITHOUT the
+/// uncite must publish their deletions. If this passes silently, the
+/// two-scan delete rule is not biting and "no deletions" above proves
+/// nothing.
+#[tokio::test]
+async fn the_same_unlink_without_the_uncite_publishes_deletions() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let (dir, mut b) = rescope_fixture(&store).await;
+
+    for i in 0..6 {
+        std::fs::remove_file(dir.path().join(format!("outputs/big-{i}.bin"))).unwrap();
+    }
+
+    let r1 = b.run_barrier().await.unwrap();
+    let r2 = b.run_barrier().await.unwrap();
+    assert!(r1.deleted.is_empty(), "first absence is not delete-eligible: {:?}", r1.deleted);
+    assert_eq!(r2.deleted.len(), 6, "the delete rule did not bite: {:?}", r2.deleted);
+
+    let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries.len(), 2, "the bucket should have lost six objects here");
+}
+
+/// Widen: a scope that grows fetches what it newly admits, and cites it.
+#[tokio::test]
+async fn a_widen_materialises_and_cites_what_it_newly_admits() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let (dir, mut b) = rescope_fixture(&store).await;
+
+    b.rescope(Some(vec!["inputs".into()])).await.unwrap();
+    assert!(read(dir.path(), "outputs/big-0.bin").is_none());
+
+    let r = b.rescope(Some(vec!["inputs".into(), "outputs".into()])).await.unwrap();
+    assert_eq!(r.materialized, 6, "widen did not fetch the newly admitted set");
+    assert_eq!(r.already_held, 2, "and must not refetch what it already holds");
+    assert_eq!(r.uncited, 0);
+    assert!(read(dir.path(), "outputs/big-0.bin").is_some(), "widen did not materialise");
+    assert_eq!(b.state.load_baseline().unwrap().entries.len(), 8);
+
+    // And the widened tree is quiet: nothing reads as a local add.
+    let r1 = b.run_barrier().await.unwrap();
+    assert!(r1.uploaded.is_empty(), "widen re-uploaded its own fetch: {:?}", r1.uploaded);
+}
+
+/// C2, the one hard constraint, at the new call site. `inst_base` stays
+/// the WHOLE manifest after a narrow — narrow it with the held set and
+/// every unadmitted citation reads as foreign one merge later and the
+/// whole tree comes back.
+#[tokio::test]
+async fn a_narrow_leaves_the_merge_base_whole() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let (_dir, mut b) = rescope_fixture(&store).await;
+
+    b.rescope(Some(vec!["inputs".into()])).await.unwrap();
+    let base = b.state.load_baseline().unwrap();
+    assert_eq!(base.entries.len(), 2, "the HELD set narrows");
+    assert_eq!(base.inst_base.len(), 8, "the MERGE BASE does not");
+    assert!(base.inst_base.contains_key("outputs/big-0.bin"));
+    assert!(!base.entries.contains_key("outputs/big-0.bin"));
+    assert!(!base.prev_scan.contains("outputs/big-0.bin"), "prev_scan must drop with entries");
+}
+
+/// The design's SECOND mutation check: a crash between the intent and
+/// the unlink must CONVERGE, never delete. The barrier replays before
+/// it scans, so the half-applied state is gone before `classify` can
+/// read it as an absence.
+#[tokio::test]
+async fn a_crash_between_the_intent_and_the_unlink_converges() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let (dir, mut b) = rescope_fixture(&store).await;
+
+    // The crash: intent durable, nothing applied.
+    b.state
+        .save_scope_intent(&super::state::ScopeIntent {
+            target: Some(vec!["inputs".into()]),
+            drop: (0..6).map(|i| format!("outputs/big-{i}.bin")).collect(),
+        })
+        .unwrap();
+    assert!(read(dir.path(), "outputs/big-0.bin").is_some(), "nothing applied yet");
+
+    let r1 = b.run_barrier().await.unwrap();
+    assert!(r1.rescope_replayed, "the barrier ran over a half-applied rescope");
+    assert!(r1.deleted.is_empty(), "{:?}", r1.deleted);
+    let r2 = b.run_barrier().await.unwrap();
+    assert!(!r2.rescope_replayed, "the replay must clear its own intent");
+    assert!(r2.deleted.is_empty(), "{:?}", r2.deleted);
+
+    assert!(read(dir.path(), "outputs/big-0.bin").is_none(), "the replay did not finish the job");
+    let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries.len(), 8, "converging cost the bucket objects");
+}
+
+/// The design's THIRD mutation check: a crash between the uncite and
+/// the unlink must not RE-CITE. The files are still on disk with no
+/// citation, which `classify` reads as six local additions — and
+/// without the replay the next barrier uploads them and cites them all
+/// back, silently undoing the narrow.
+#[tokio::test]
+async fn a_crash_between_the_uncite_and_the_unlink_does_not_re_cite() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let (dir, mut b) = rescope_fixture(&store).await;
+
+    // The crash: intent durable, citations dropped, files still there.
+    b.state
+        .save_scope_intent(&super::state::ScopeIntent {
+            target: Some(vec!["inputs".into()]),
+            drop: (0..6).map(|i| format!("outputs/big-{i}.bin")).collect(),
+        })
+        .unwrap();
+    let mut base = b.state.load_baseline().unwrap();
+    for i in 0..6 {
+        let p = format!("outputs/big-{i}.bin");
+        base.entries.remove(&p);
+        base.prev_scan.remove(&p);
+    }
+    b.state.save_baseline(&base).unwrap();
+    assert!(read(dir.path(), "outputs/big-0.bin").is_some(), "the files are still on disk");
+
+    let r1 = b.run_barrier().await.unwrap();
+    assert!(r1.rescope_replayed);
+    assert!(
+        r1.uploaded.is_empty(),
+        "the barrier re-cited what the narrow dropped: {:?}",
+        r1.uploaded
+    );
+    assert!(read(dir.path(), "outputs/big-0.bin").is_none());
+    assert_eq!(
+        b.state.load_baseline().unwrap().entries.len(),
+        2,
+        "the narrow was undone by its own recovery"
+    );
+}
+
+/// A narrow may unwatch a file; it may never discard an edit. The DOOR
+/// is strict — it refuses and names the paths, and the old scope stands
+/// untouched.
+#[tokio::test]
+async fn a_rescope_refuses_to_drop_a_path_with_unpublished_changes() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let (dir, mut b) = rescope_fixture(&store).await;
+
+    write(dir.path(), "outputs/big-0.bin", "the user's unpublished edit");
+    let err = b.rescope(Some(vec!["inputs".into()])).await.unwrap_err();
+    match err {
+        LeanError::State(m) => assert!(m.contains("outputs/big-0.bin"), "{m}"),
+        e => panic!("wrong error: {e:?}"),
+    }
+
+    assert!(b.state.load_scope().unwrap().is_none(), "a refused rescope changed the scope");
+    assert!(b.state.load_scope_intent().unwrap().is_none(), "a refused rescope left an intent");
+    assert_eq!(
+        read(dir.path(), "outputs/big-0.bin").as_deref(),
+        Some("the user's unpublished edit"),
+        "a refused rescope touched the tree"
+    );
+    // Anti-vacuity: the SAME rescope goes through once the edit is gone.
+    b.run_barrier().await.unwrap();
+    b.rescope(Some(vec!["inputs".into()])).await.unwrap();
+}
+
+/// The REPLAY cannot be as strict as the door: if it refused a dirty
+/// path it would wedge, because the intent gates every barrier and the
+/// only thing that clears it is a successful apply. So a replay KEEPS
+/// the dirty path — cited, on disk, with a conflict record — and
+/// converges.
+#[tokio::test]
+async fn a_replay_keeps_a_dirty_path_instead_of_wedging_the_barrier() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let (dir, mut b) = rescope_fixture(&store).await;
+
+    b.state
+        .save_scope_intent(&super::state::ScopeIntent {
+            target: Some(vec!["inputs".into()]),
+            drop: (0..6).map(|i| format!("outputs/big-{i}.bin")).collect(),
+        })
+        .unwrap();
+    write(dir.path(), "outputs/big-0.bin", "edited after the intent landed");
+
+    let r1 = b.run_barrier().await.unwrap();
+    assert!(r1.rescope_replayed);
+    assert!(b.state.load_scope_intent().unwrap().is_none(), "the replay did not converge");
+
+    // Kept: still on disk, still cited, and the edit is intact.
+    assert_eq!(
+        read(dir.path(), "outputs/big-0.bin").as_deref(),
+        Some("edited after the intent landed")
+    );
+    assert!(b.state.load_baseline().unwrap().entries.contains_key("outputs/big-0.bin"));
+    assert!(read(dir.path(), "outputs/big-1.bin").is_none(), "the clean ones still left");
+    assert!(
+        b.state
+            .load_conflicts()
+            .unwrap()
+            .iter()
+            .any(|c| c.path == "outputs/big-0.bin" && c.kind == "rescope-kept-locally-dirty"),
+        "a kept path must be surfaced, not silently retained"
+    );
+}
+
+/// An all-rejected scope is REFUSED, never read as the whole tree —
+/// the same fail-closed rule `sync.rs` needed after a typo escalated to
+/// maximum privilege there.
+#[tokio::test]
+async fn an_all_rejected_rescope_is_refused_not_widened() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let (_dir, mut b) = rescope_fixture(&store).await;
+
+    b.rescope(Some(vec!["inputs".into()])).await.unwrap();
+    let err = b.rescope(Some(vec!["../escape".into(), "./here".into()])).await.unwrap_err();
+    assert!(matches!(err, LeanError::State(_)), "{err:?}");
+    assert_eq!(
+        b.state.load_scope().unwrap().as_deref(),
+        Some(&["inputs".to_string()][..]),
+        "a refused rescope widened the workspace"
+    );
+    assert_eq!(b.state.load_baseline().unwrap().entries.len(), 2);
+}
+
+/// Rescope is an operation on a LIVE tree. Without a checkout there is
+/// no held set to narrow and no marker to vouch for one.
+#[tokio::test]
+async fn a_rescope_before_any_checkout_is_refused() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = sidecar(&store, dir.path()).await;
+
+    let err = b.rescope(Some(vec!["inputs".into()])).await.unwrap_err();
+    match err {
+        LeanError::State(m) => assert!(m.contains("checkout"), "{m}"),
+        e => panic!("wrong error: {e:?}"),
+    }
+}
+
+/// Widening to the whole tree is `None`, and it must REMOVE the scope
+/// document rather than leaving a stale claim behind.
+#[tokio::test]
+async fn a_rescope_to_none_holds_everything_and_clears_the_scope() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let (dir, mut b) = rescope_fixture(&store).await;
+
+    b.rescope(Some(vec!["inputs".into()])).await.unwrap();
+    assert_eq!(b.state.load_baseline().unwrap().entries.len(), 2);
+
+    let r = b.rescope(None).await.unwrap();
+    assert_eq!(r.materialized, 6);
+    assert!(b.state.load_scope().unwrap().is_none(), "the scope document must be REMOVED");
+    assert_eq!(b.state.load_baseline().unwrap().entries.len(), 8);
+    assert!(read(dir.path(), "outputs/big-5.bin").is_some());
+}

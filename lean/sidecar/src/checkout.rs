@@ -702,3 +702,257 @@ impl Sidecar {
         Ok(report)
     }
 }
+
+// ── the narrow / widen verb (scoped-read design §4) ──────────────────
+
+#[derive(Debug, Default)]
+pub struct RescopeReport {
+    /// The scope this workspace now holds. `None` = the whole tree.
+    pub target: Option<Vec<String>>,
+    /// Citations removed from the held set — the NARROW half.
+    pub uncited: usize,
+    /// Files removed from the tree. Normally equal to `uncited`; lower
+    /// when a path was already gone.
+    pub unlinked: usize,
+    /// Newly admitted citations fetched — the WIDEN half.
+    pub materialized: usize,
+    pub bytes: u64,
+    /// Admitted and already held: the scope grew over paths the
+    /// workspace had. Zero work, and the number that tells a widen that
+    /// did nothing from a widen that had nothing to do.
+    pub already_held: usize,
+    /// Paths that should have left the held set but carry unpublished
+    /// local changes. KEPT, cited, on disk, with a conflict record —
+    /// a narrow may unwatch a file, never discard an edit.
+    pub kept_dirty: Vec<String>,
+    /// This call finished a rescope a crash had left half-applied.
+    pub replayed: bool,
+}
+
+impl Sidecar {
+    /// Move the workspace to `target`: stop holding what it no longer
+    /// admits, and fetch what it newly does.
+    ///
+    /// ## Why this cannot be `rm` plus a scope edit
+    ///
+    /// `classify` reads exactly the two states a narrow passes through:
+    /// present-in-scan-absent-from-baseline is an **upload**, and
+    /// present-in-baseline-absent-from-scan-and-`prev_scan` is a
+    /// **delete**. So unlink-then-uncite crashes into publishing
+    /// deletions, and uncite-then-unlink crashes into re-uploading
+    /// identical bytes and re-citing everything just dropped. Neither
+    /// order is safe alone. The invariant, stated for the model:
+    /// **a narrow is an unwatch, never an absence.**
+    ///
+    /// What makes it safe is the INTENT, not the order: the target is
+    /// durable before the first mutation and cleared after the last,
+    /// `run_barrier` replays any intent it finds before it does
+    /// anything else, and the replay is idempotent. The order within
+    /// still matters for the window where the intent itself is lost —
+    /// uncite first, so the failure mode is a file that gets
+    /// re-uploaded rather than one that gets DELETED from the bucket.
+    ///
+    /// ## Why the verb takes a SET
+    ///
+    /// `manifest::load` fetches the pointer and every chunk regardless
+    /// of scope, so the floor is one whole-manifest load per call.
+    /// A per-path verb would pay that floor per path.
+    pub async fn rescope(&mut self, target: Option<Vec<String>>) -> LeanResult<RescopeReport> {
+        if let Some(raw) = &target {
+            // An all-rejected scope is REFUSED, never widened to the
+            // whole tree — `Scope::new` silently drops malformed
+            // entries, and `sync.rs` already shipped the bug where that
+            // turned a typo into maximum privilege.
+            if super::sync::Scope::new(raw).is_empty() {
+                return Err(LeanError::State(format!(
+                    "every entry of the requested scope was rejected ({raw:?}); refusing to \
+                     read that as the whole tree"
+                )));
+            }
+        }
+        if !self.state.marker_present() {
+            return Err(LeanError::State(
+                "rescope needs a checked-out workspace — run checkout first".into(),
+            ));
+        }
+
+        // The strict check belongs at the DOOR, before anything is
+        // written: a caller asking to drop a path it has unpublished
+        // edits to gets told, and the old scope stands untouched. The
+        // replay below cannot be this strict — it must converge — so it
+        // keeps such paths instead. Two postures, deliberately.
+        let leaving = self.paths_leaving(&target)?;
+        let dirty = self.dirty_among(&leaving)?;
+        if !dirty.is_empty() {
+            return Err(LeanError::State(format!(
+                "these paths would leave the scope but have unpublished local changes: {:?} — \
+                 publish or discard them first",
+                dirty
+            )));
+        }
+
+        let intent = super::state::ScopeIntent { target, drop: leaving };
+        self.state.save_scope_intent(&intent)?;
+        self.apply_scope_intent(&intent).await
+    }
+
+    /// Finish a rescope a crash left half-applied. `None` when there is
+    /// none in flight. Idempotent: running it twice is running it once.
+    pub async fn replay_scope_intent(&mut self) -> LeanResult<Option<RescopeReport>> {
+        let Some(intent) = self.state.load_scope_intent()? else { return Ok(None) };
+        let mut report = self.apply_scope_intent(&intent).await?;
+        report.replayed = true;
+        Ok(Some(report))
+    }
+
+    /// Which held paths the target scope would stop admitting.
+    fn paths_leaving(&self, target: &Option<Vec<String>>) -> LeanResult<Vec<String>> {
+        let baseline = self.state.load_baseline()?;
+        let scope = target.as_ref().map(|r| super::sync::Scope::new(r));
+        Ok(baseline
+            .entries
+            .keys()
+            .filter(|p| scope.as_ref().map(|s| !s.covers(p)).unwrap_or(false))
+            .cloned()
+            .collect())
+    }
+
+    /// Which of `paths` carry local changes the bucket has not seen.
+    /// The same three states `sync` calls dirty, for the same reason.
+    fn dirty_among(&self, paths: &[String]) -> LeanResult<Vec<String>> {
+        if paths.is_empty() {
+            return Ok(vec![]);
+        }
+        let baseline = self.state.load_baseline()?;
+        let scanned = super::scan::scan(&self.cfg.root)?;
+        let c = super::scan::classify(&scanned, &baseline);
+        Ok(paths
+            .iter()
+            .filter(|p| {
+                c.uploads.contains(*p) || c.deletes.contains(*p) || c.first_absence.contains(*p)
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn apply_scope_intent(
+        &mut self,
+        intent: &super::state::ScopeIntent,
+    ) -> LeanResult<RescopeReport> {
+        let target = intent.target.clone();
+        let mut report = RescopeReport { target: target.clone(), ..Default::default() };
+        let scope = target.as_ref().map(|r| super::sync::Scope::new(r));
+        let covered = |p: &str| scope.as_ref().map(|s| s.covers(p)).unwrap_or(true);
+
+        // §4.4's floor: the whole manifest, scope or no scope.
+        let loaded = manifest::load(self.store.as_ref(), &self.cfg).await?;
+        let (m, metag) = match loaded {
+            Some(l) => (l.manifest, Some(l.etag)),
+            None => (Default::default(), None),
+        };
+
+        let mut baseline = self.state.load_baseline()?;
+        // THE RECORDED set, never re-derived — see `ScopeIntent::drop`.
+        // Re-deriving from the baseline loses the whole set the moment
+        // the uncite lands; re-deriving from the tree cannot tell a
+        // leftover from a file the agent created.
+        let leaving: Vec<String> = intent.drop.clone();
+        // Converging posture: a dirty path is KEPT rather than dropped,
+        // so a replay can never be stuck refusing forever.
+        //
+        // A path already uncited by a crashed run reads as dirty here
+        // (present in scan, absent from the baseline ⇒ `uploads`), and
+        // keeping it would undo the very step that crashed. So dirt is
+        // judged against what the path IS: still cited and modified, or
+        // not cited at all and therefore already half-dropped.
+        let still_cited: Vec<String> =
+            leaving.iter().filter(|p| baseline.entries.contains_key(*p)).cloned().collect();
+        let dirty = self.dirty_among(&still_cited)?;
+        for p in &dirty {
+            self.state.append_conflict(&super::state::ConflictRecord {
+                path: p.clone(),
+                foreign_etag: String::new(),
+                preserved_key: None,
+                kind: "rescope-kept-locally-dirty".into(),
+                at_unix: super::now_unix(),
+            })?;
+        }
+        report.kept_dirty = dirty.clone();
+        let drop_set: Vec<String> =
+            leaving.into_iter().filter(|p| !dirty.contains(p)).collect();
+
+        // UNCITE FIRST, and durably, before a single file leaves the
+        // tree. Both halves must happen, and the intent guarantees
+        // they will; this order decides only which way a lost intent
+        // fails — toward a file that reads as a local add (re-uploaded,
+        // recoverable) rather than one that reads as a local delete
+        // (published as a DELETE, not recoverable).
+        for p in &drop_set {
+            baseline.entries.remove(p);
+            baseline.prev_scan.remove(p);
+        }
+        report.uncited = drop_set.len();
+        self.state.save_baseline(&baseline)?;
+
+        for p in &drop_set {
+            let local = self.cfg.root.join(p);
+            // The same containment the barrier demands: a citation is
+            // not a licence to unlink whatever a path resolves to.
+            if contained_path(&self.cfg.root, p).is_err() {
+                continue;
+            }
+            match std::fs::remove_file(&local) {
+                Ok(()) => report.unlinked += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(LeanError::Io(e)),
+            }
+        }
+
+        // WIDEN: admitted citations this workspace does not hold.
+        let add: Vec<(&String, &super::manifest::LeanEntry)> =
+            m.entries.iter().filter(|(p, _)| covered(p) && !baseline.entries.contains_key(*p)).collect();
+        report.already_held =
+            m.entries.keys().filter(|p| covered(p) && baseline.entries.contains_key(*p)).count();
+        if !add.is_empty() {
+            let results = self.materialize(add, m.pinned_reads, m.sole_writer).await;
+            for r in results {
+                let f = r?;
+                if let Some(why) = f.refused {
+                    self.state.append_conflict(&super::state::ConflictRecord {
+                        path: f.path.clone(),
+                        foreign_etag: String::new(),
+                        preserved_key: None,
+                        kind: format!("rescope-refused: {why}"),
+                        at_unix: super::now_unix(),
+                    })?;
+                    continue;
+                }
+                if !f.skipped {
+                    report.materialized += 1;
+                    report.bytes += f.bytes;
+                }
+                baseline.prev_scan.insert(f.path.clone());
+                if let Some(be) = f.be {
+                    baseline.entries.insert(f.path, be);
+                }
+            }
+        }
+
+        baseline.seq = m.seq;
+        baseline.manifest_etag = metag;
+        // C2, unchanged and non-negotiable: the merge base is the WHOLE
+        // manifest. Narrow it with the held set and every unadmitted
+        // citation reads as foreign at the next merge, queues into the
+        // inbox, and lands in the tree one barrier later — a narrow
+        // that downloads everything it just dropped.
+        baseline.inst_base = m.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect();
+
+        self.state.sync_tree()?;
+        self.state.save_baseline(&baseline)?;
+        self.state.save_scope(target.as_deref())?;
+        // LAST. While this document exists the workspace is mid-rescope
+        // and `run_barrier` will replay before doing anything else.
+        self.state.clear_scope_intent()?;
+        Ok(report)
+    }
+}

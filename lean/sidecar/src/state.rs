@@ -54,6 +54,27 @@ pub struct Baseline {
     pub prev_scan: BTreeSet<String>,
 }
 
+/// A rescope in flight (scoped-read design §4.3). `target` is the scope
+/// the workspace is moving TO; `None` means the whole tree.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScopeIntent {
+    pub target: Option<Vec<String>>,
+    /// The paths this rescope is removing from the held set, recorded
+    /// BEFORE the first mutation.
+    ///
+    /// Load-bearing, and the mutation check that found it: replay
+    /// cannot RE-DERIVE this set. Once a path is out of
+    /// `baseline.entries` it is indistinguishable from a file the agent
+    /// just created — same scan row, same absence from the baseline —
+    /// and the two have opposite correct answers: unlink the leftover,
+    /// KEEP the agent's new file. Deriving the drop set from the
+    /// baseline made a crash between the uncite and the unlink leave
+    /// six uncited files on disk forever; deriving it from the tree
+    /// would delete the agent's work instead.
+    #[serde(default)]
+    pub drop: Vec<String>,
+}
+
 /// The pod-incarnation identity + lease bookkeeping ({last_token,
 /// quiet_polls} persist so container restarts RESUME the takeover
 /// observation instead of resetting it — plan §2.1).
@@ -137,6 +158,21 @@ const BASELINE: &str = "baseline.json";
 /// UNSCOPED — the only encoding of "no restriction", since an empty
 /// admitted set is refused before it can be written.
 const SCOPE: &str = "scope.json";
+
+/// A rescope IN FLIGHT: the target scope, written before the first
+/// mutation and removed only after the last (scoped-read design §4.3).
+///
+/// Its own document and not a field on `scope.json`, because the two
+/// answer different questions — `scope.json` is what this workspace
+/// holds, this is what it is on its way to holding — and a crash must
+/// leave both answers readable.
+///
+/// `null` is a LEGAL target (the whole tree), so absence of the file
+/// means "no rescope in flight", never "unscoped". That is why the
+/// document wraps the target in a struct instead of being a bare
+/// `Option<Vec<String>>`: a bare `null` on disk and a missing file
+/// would deserialize to the same thing.
+const SCOPE_INTENT: &str = "scope-intent.json";
 const INCARNATION: &str = "incarnation.json";
 const INTENT: &str = "intent.json";
 const CONFLICTS: &str = "conflicts.jsonl";
@@ -289,6 +325,42 @@ impl SidecarState {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(e) => Err(LeanError::State(format!("clear {SCOPE}: {e}"))),
             },
+        }
+    }
+
+    /// Read a rescope in flight. `None` = none in flight.
+    pub fn load_scope_intent(&self) -> LeanResult<Option<ScopeIntent>> {
+        let p = self.dir.join(SCOPE_INTENT);
+        let bytes = match fs::read(&p) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(LeanError::State(format!(
+                    "cannot read the rescope intent at {}: {e} — refusing to run a barrier \
+                     over a half-applied scope",
+                    p.display()
+                )))
+            }
+        };
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| LeanError::State(format!("scope intent: {e}")))
+    }
+
+    pub fn save_scope_intent(&self, intent: &ScopeIntent) -> LeanResult<()> {
+        let bytes = serde_json::to_vec(intent)
+            .map_err(|e| LeanError::State(format!("scope intent: {e}")))?;
+        write_atomic(&self.dir.join(SCOPE_INTENT), &bytes)
+    }
+
+    /// Cleared LAST, after the new scope is durable. Clearing it first
+    /// would turn a crash into a workspace whose scope says one thing
+    /// and whose held set says another, with nothing left to replay.
+    pub fn clear_scope_intent(&self) -> LeanResult<()> {
+        match fs::remove_file(self.dir.join(SCOPE_INTENT)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(LeanError::State(format!("clear {SCOPE_INTENT}: {e}"))),
         }
     }
 

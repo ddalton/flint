@@ -61,6 +61,11 @@ pub struct BarrierReport {
     /// First-absence paths a DECLARED boundary confirmed gone by direct
     /// lstat and published as ordinary deletes (`confirm_absences`).
     pub absences_confirmed: usize,
+    /// This barrier finished a rescope a crash had left half-applied
+    /// before it did anything else. Reported so a run that looks like
+    /// an ordinary barrier can be told from one that had to converge a
+    /// workspace first.
+    pub rescope_replayed: bool,
 }
 
 /// Upload waves per chunk. The chunk is `fanout * this`, so a wave
@@ -503,6 +508,23 @@ impl Sidecar {
     async fn barrier_inner(&mut self, declared: bool, source: &str) -> LeanResult<BarrierReport> {
         let epoch = self.lease_epoch()?;
         let mut report = BarrierReport::default();
+
+        // STEP 0: finish any rescope a crash left half-applied, before
+        // the scan reads the tree (scoped-read design §4.3). This is the
+        // gate that makes the narrow verb safe at all: a half-applied
+        // narrow is a tree whose files and whose citations disagree, and
+        // `classify` reads that disagreement as an upload or as a
+        // DELETE depending on which half landed. Replay is idempotent,
+        // so the cost on the normal path is one `stat` of a file that
+        // is not there.
+        if let Some(r) = self.replay_scope_intent().await? {
+            report.rescope_replayed = true;
+            eprintln!(
+                "flint-sync: finished an interrupted rescope before the barrier \
+                 (uncited {}, unlinked {}, materialised {})",
+                r.uncited, r.unlinked, r.materialized
+            );
+        }
 
         // Cooperative deposal check BEFORE any write (a thawed
         // straggler fences here instead of landing data PUTs). This

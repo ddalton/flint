@@ -134,10 +134,12 @@ Two, both of which exist because the alternative is a silent widening:
   predicate at call sites if and when a defect argues for it; four
   copies of a rule is four places for it to drift.
 
-## 4. The narrow / widen verb — NOT approved work
+## 4. The narrow / widen verb — SHIPPED
 
-Recorded here because the cost of *not* having it is the part of this
-design most likely to be misunderstood.
+Approved by the user 2026-09-11 and built as `Sidecar::rescope`
+(`checkout.rs`), with the CLI surface `flint-sync rescope <paths…> |
+--all`. §4.1–4.4 below are the design as written before the build; §4.5
+records what building it changed.
 
 ### 4.1 The workspace widens anyway, just not under your control
 
@@ -196,6 +198,93 @@ feature and it should land alone, with no semantics attached.
 chunk**, regardless of scope. Scoping the read does not scope the
 manifest load. So widen's floor is one whole-manifest load per call, and
 the verb must therefore take a **set**, never a path.
+
+### 4.5 What the build changed
+
+**The intent carries the DROP SET, not just the target.** §4.3 said
+"persist the target scope as intent, replay on startup" and called the
+replay idempotent. It is not, with only the target: replay re-derived
+the set to unlink from `baseline.entries`, and after the uncite those
+entries are gone — so a crash between the uncite and the unlink left
+six uncited files on disk forever, and the replay reported
+`uncited 0, unlinked 0`. The design's own third mutation check caught
+it on the first run.
+
+Deriving it from the TREE instead is worse, and the reason is the same
+indistinguishability §4.2 is about: a present, uncited, out-of-scope
+path is either a leftover from a crashed narrow or **a file the agent
+just created**, the two have opposite correct answers, and no existing
+state tells them apart. So `ScopeIntent` records `{target, drop}`, and
+`drop` is read back verbatim — never recomputed.
+
+**Two postures, deliberately.** The DOOR (`rescope`) refuses when a
+path leaving the scope has unpublished local changes, names them, and
+leaves the old scope untouched — nothing is written, so the caller can
+publish and retry. The REPLAY cannot be that strict: the intent gates
+every barrier and only a successful apply clears it, so a refusing
+replay would wedge the workspace. It KEEPS such a path — cited, on
+disk, with a `rescope-kept-locally-dirty` conflict record — and
+converges. A narrow may unwatch a file; it may never discard an edit.
+
+Dirt is judged only over paths that are STILL CITED. A path a crashed
+run already uncited reads as dirty by the ordinary rule (present in
+scan, absent from the baseline ⇒ `uploads`), and keeping it would undo
+the very step that crashed.
+
+**The barrier replays at step 0**, before the scan, not at startup.
+A half-applied narrow is a tree whose files and citations disagree, and
+`classify` reads that disagreement as an upload or as a DELETE
+depending on which half landed — so the window has to close before the
+scan, not before the process. Cost on the normal path is one `stat` of
+a file that is not there. `BarrierReport::rescope_replayed` says when it
+fired.
+
+**Order within the apply still matters**, for the window where the
+intent itself is lost: uncite first, so the failure mode is a file that
+reads as a local add (re-uploaded, recoverable) rather than one that
+reads as a local delete (published as a DELETE, not recoverable).
+
+**Mutual exclusion came free, and not from the boundary-verb surface.**
+§4.3 argued for riding `Verb` to inherit it. `SidecarState::open` takes
+an exclusive `flock` on the state dir, so `flint-sync rescope` against a
+tree a `run` loop holds is already refused by name. The CLI surface
+needed no new locking.
+
+### 4.6 What is NOT built
+
+- **No agent-facing sentinel.** A third `Verb` variant + `.flint/rescope`
+  is still the way an agent asks for one, and it is unbuilt. Today the
+  verb is reachable from the CLI only.
+- **No gateway verb, and this one is a REFUSAL rather than a gap.**
+  D14's argument against performing a remote's `sync` applies to a
+  rescope with more force: a rescope unlinks local files by scope, so
+  honouring one on a remote's say-so would upgrade what a leaked
+  gateway bearer can do to "delete across a running agent's tree, at my
+  timing, under a scope I choose". If the UI needs to pull a file in, it
+  must be CARRIED to the agent as advisory news, exactly as
+  `sync-request` is — never performed.
+- **Phase 5's CRD field**, unchanged: still not there.
+- **The TLA+ Narrow action.** `LeanSubtree.tla` has no `Narrow`, no
+  §4.2 invariant, and no cfg that fails on the naive version. The three
+  mutation checks below stand in for it and are NOT a substitute — §8's
+  open question, whether the `baseline`/`instBase` split can express a
+  scope at all, is still open.
+
+### 4.7 The mutation checks, run
+
+Each drops one line and the named test must fail:
+
+| mutation | test that must die | result |
+|---|---|---|
+| drop `baseline.entries.remove(p)` | `a_narrow_unwatches_without_publishing_a_single_deletion` | FAILED ✓ |
+| drop the barrier's step-0 replay | `a_crash_between_the_intent_and_the_unlink_converges` | FAILED ✓ |
+| re-derive the drop set from the baseline | `a_crash_between_the_uncite_and_the_unlink_does_not_re_cite` | FAILED ✓ |
+
+Plus the anti-vacuity arm the first one needs:
+`the_same_unlink_without_the_uncite_publishes_deletions` removes the
+same six files WITHOUT the uncite and asserts the barrier publishes
+six deletions. Without it, "a narrow published no deletions" would pass
+against a delete rule that never bites.
 
 ## 5. Performance
 

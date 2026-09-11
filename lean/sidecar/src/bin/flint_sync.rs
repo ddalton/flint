@@ -313,11 +313,32 @@ async fn main() {
         "barrier" => claim_then(&mut sc, Step::Barrier).await,
         "sync" => claim_then(&mut sc, Step::Sync).await,
         "recover-staged" => claim_then(&mut sc, Step::RecoverStaged).await,
+        // `rescope <a> <b> ...` narrows/widens to exactly that set;
+        // `rescope --all` goes back to the whole tree. Spelled out
+        // rather than "no arguments means everything", because the
+        // whole-tree case is the DESTRUCTIVE-looking one to get by
+        // accident: a bare `rescope` would silently refetch a
+        // deliberately-scoped workspace's entire manifest.
+        "rescope" => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            let target = if rest == ["--all"] {
+                None
+            } else if rest.is_empty() {
+                eprintln!(
+                    "flint-sync: rescope needs a scope (`rescope inputs docs/spec.md`) or \
+                     `--all` for the whole tree"
+                );
+                std::process::exit(2);
+            } else {
+                Some(rest)
+            };
+            claim_then(&mut sc, Step::Rescope(target)).await
+        }
         "run" => run_loop(&mut sc).await,
         other => {
             eprintln!(
                 "flint-sync: unknown subcommand {other:?} \
-                 (checkout|barrier|sync|status|ctl|recover-staged|run|probe-copy)"
+                 (checkout|barrier|sync|rescope|status|ctl|recover-staged|run|probe-copy)"
             );
             std::process::exit(2);
         }
@@ -366,6 +387,9 @@ enum Step {
     Barrier,
     Sync,
     RecoverStaged,
+    /// The narrow/widen verb. `None` is the whole tree; an empty
+    /// argument list therefore cannot mean "narrow to nothing".
+    Rescope(Option<Vec<String>>),
 }
 
 async fn claim(sc: &mut Sidecar) -> Result<(), LeanError> {
@@ -431,6 +455,25 @@ async fn claim_then(sc: &mut Sidecar, step: Step) -> Result<(), LeanError> {
                     "flint-sync: phase manifest={:.3}s fetch={:.3}s commit={:.3}s bytes={} ranged={}",
                     r.manifest_secs, r.fetch_secs, r.commit_secs, r.bytes, r.ranged
                 );
+            }
+            Step::Rescope(target) => {
+                let r = sc.rescope(target).await?;
+                eprintln!(
+                    "flint-sync: rescope to {:?} — uncited {}, unlinked {}, materialised {} \
+                     ({} bytes), already held {}",
+                    r.target, r.uncited, r.unlinked, r.materialized, r.bytes, r.already_held
+                );
+                // A kept path is the one outcome a caller must not miss:
+                // the scope now says one thing and the held set holds
+                // more, and the reason is an edit only they can resolve.
+                if !r.kept_dirty.is_empty() {
+                    eprintln!(
+                        "flint-sync: rescope KEPT {} path(s) with unpublished changes: {:?} — \
+                         publish them, then rescope again to drop them",
+                        r.kept_dirty.len(),
+                        r.kept_dirty
+                    );
+                }
             }
             Step::Barrier => {
                 let r = sc.run_barrier().await?;
