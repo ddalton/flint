@@ -975,6 +975,13 @@ code=$(gw PUT "/v1/projects/$PROJECT/volumes/data/files/content?path=/$PC" \
   -H 'Content-Type: application/octet-stream' --data-binary @/tmp/doc-pc2.txt)
 if [ "$code" = "428" ]; then
   pass "an unconditioned REPLACE is refused with 428 — a blind overwrite cannot lose an update"
+elif [ "$MODE" = cluster ]; then
+  # PUBLISHED IS NOT CURRENT. MODE=cluster installs the SHIPPED image on
+  # purpose, and the mandate is newer than every published tag — 1.35.0
+  # is the default here and four releases predate it. A bare "the guide
+  # is wrong" would send a reader looking for a regression that is
+  # really a pin, so name the image in the message.
+  bad "an unconditioned replace answered $code, wanted 428 — HUBIMG=$HUBIMG PREDATES the mandate, so the guide documents behaviour this image does not have. Re-run with HUBIMG=<an image built after 90e4426b> to test the claim itself"
 else
   bad "an unconditioned replace answered $code, wanted 428 — a lost update is possible and the guide is wrong"
 fi
@@ -982,6 +989,8 @@ fi
 code=$(gw DELETE "/v1/projects/$PROJECT/volumes/data/files/content?path=/$PC")
 if [ "$code" = "428" ]; then
   pass "an unconditioned DELETE of an existing file is refused with 428 — a blind delete destroys content"
+elif [ "$MODE" = cluster ]; then
+  bad "an unconditioned delete answered $code, wanted 428 — HUBIMG=$HUBIMG predates the mandate (see above)"
 else
   bad "an unconditioned delete answered $code, wanted 428"
 fi

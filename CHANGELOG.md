@@ -77,7 +77,12 @@ covered by the stability guarantee.
   428/412/409/404, and states what `If-Match: *` costs.
   `docs/flint-lite-operator.md` and `docs/flint-hub-gateway.md` marked
   the header optional in the same bracket notation as `Range`; both now
-  say required.
+  say required. The guide also says WHICH RELEASE, because published is
+  not current: the mandate is newer than every shipped tag, so
+  `flint-pnfs:1.49.0` and earlier still accept the unconditioned
+  overwrite. `MODE=cluster` installs the published image on purpose and
+  defaults to 1.35.0, so L5b names `HUBIMG` in its failure rather than
+  sending a reader after a regression that is really a pin.
 - **`agent-fleet-doc-drill.sh` gained L5b**, which asserts the mandate
   the guide now documents: a blind replace and a blind delete are `428`,
   the same requests under `If-Match: *` succeed, and the path is `404`

@@ -430,6 +430,13 @@ the file already exists; send If-Match with the version you read,
 or If-None-Match: * to create only if absent
 ```
 
+**Which release:** the mandate is newer than every published image at
+the time of writing — `flint-pnfs:1.49.0` and earlier accept the
+unconditioned overwrite silently, and lose the update. If you are
+pinning an image, that is the line to check; if you are following this
+guide against the latest chart, write as though the mandate is there,
+because code written for it is correct on both.
+
 That is deliberate, and it is the single thing most likely to surprise
 you when you move from a first run to a second. Without it, two callers
 that each read v1 and then `PUT` both succeed and the second silently
