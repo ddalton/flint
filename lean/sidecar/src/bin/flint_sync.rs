@@ -18,6 +18,7 @@
 //!              diagnose a workspace whose sidecar is dead or deposed,
 //!              and claiming would depose the very sidecar under
 //!              diagnosis.
+//!   probe-copy verify the cross-key copy surface against THIS bucket
 //!   run        claim → checkout → barrier loop (floorSecs) → drain on
 //!              SIGTERM → clean lease release
 //!
@@ -42,6 +43,9 @@
 //!   FLINT_SYNC_RANGE_GET_CHUNK_MB bytes per range (default 16)
 //!   FLINT_SYNC_RANGE_GET_PARALLELISM ranges in flight per object (default 4)
 //!   FLINT_SYNC_FETCH_INFLIGHT_MB  checkout bytes in flight (default 512)
+//!   FLINT_SYNC_COPY_WHOLE_MAX_MB   single-request ceiling for a cross-key
+//!                                 copy (default 5120; above it, MPU +
+//!                                 UploadPartCopy)
 //!   FLINT_SYNC_UPLOAD_PART_PARALLELISM  parts of ONE object uploaded
 //!                                 concurrently on publish (default 1)
 //!   FLINT_SYNC_SOLE_WRITER        "true" marks every manifest this
@@ -152,8 +156,15 @@ async fn main() {
     // checkpoint actually has. Default 1 = today's sequential loop; the
     // default moves on measurement, not on plausibility.
     let part_par = env_u64("FLINT_SYNC_UPLOAD_PART_PARALLELISM", 1).max(1) as usize;
+    // The single-request copy ceiling, in MiB. Exists so a drill can
+    // drive the MPU + UploadPartCopy arm without a 5 GiB fixture: that
+    // arm has never executed anywhere, and an arm only a 5 GiB object
+    // can reach is an arm nothing reaches.
+    let copy_whole_max = env_u64("FLINT_SYNC_COPY_WHOLE_MAX_MB", 5 * 1024) * 1024 * 1024;
     let store = match S3Store::connect(bucket, endpoint).await {
-        Ok(s) => Arc::new(s.with_part_parallelism(part_par)) as Arc<dyn ObjectStore>,
+        Ok(s) => Arc::new(
+            s.with_part_parallelism(part_par).with_copy_whole_max(copy_whole_max),
+        ) as Arc<dyn ObjectStore>,
         Err(e) => {
             eprintln!("flint-sync: store connect: {e}");
             std::process::exit(1);
@@ -270,6 +281,24 @@ async fn main() {
     };
     let mut sc = Sidecar { store, cfg, state, lease: None, noted_not_regular: Default::default() };
 
+    // Conformance probes: they take NO lease and touch no tree, so they
+    // run before the claim. A probe that had to depose a live sidecar to
+    // answer "does this bucket support X?" would be unusable on exactly
+    // the workspaces anyone wants the answer for.
+    if cmd == "probe-copy" {
+        let key = format!("{}/{}/probe-copy", sc.cfg.prefix, flint_lean::LEAN_DIR);
+        match flint_store::probe::probe_cross_key_copy(sc.store.as_ref(), &key).await {
+            Ok(()) => {
+                eprintln!("flint-sync: probe-copy PASS ({key})");
+                return;
+            }
+            Err(e) => {
+                eprintln!("flint-sync: probe-copy FAIL: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let result = match cmd.as_str() {
         "checkout" => claim_then(&mut sc, Step::Checkout).await,
         "barrier" => claim_then(&mut sc, Step::Barrier).await,
@@ -279,7 +308,7 @@ async fn main() {
         other => {
             eprintln!(
                 "flint-sync: unknown subcommand {other:?} \
-                 (checkout|barrier|sync|status|ctl|recover-staged|run)"
+                 (checkout|barrier|sync|status|ctl|recover-staged|run|probe-copy)"
             );
             std::process::exit(2);
         }

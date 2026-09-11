@@ -208,6 +208,125 @@ pub async fn probe_conditional_writes(store: &dyn ObjectStore, key: &str) -> Res
     Ok(())
 }
 
+/// The cross-key copy surface (`copy_object`). Run against a REAL
+/// bucket; the memory double cannot tell you whether `CopyObject`
+/// honours `x-amz-copy-source-if-match`, whether `MetadataDirective:
+/// REPLACE` actually replaces, or whether the MPU arm's
+/// `UploadPartCopy` assembles what we think.
+///
+/// `key` is a PREFIX: the probe writes `<key>.src` and `<key>.dst` and
+/// removes both. As with the other probes, distinct keys per principal.
+///
+/// `force_mpu_over` lets a caller drive the MPU arm without a 5 GiB
+/// object by lowering the store's single-request ceiling first — the
+/// arm that has never executed anywhere is exactly the one a probe
+/// should reach.
+pub async fn probe_cross_key_copy(store: &dyn ObjectStore, key: &str) -> Result<(), String> {
+    let src = format!("{key}.src");
+    let dst = format!("{key}.dst");
+    let body = Bytes::from_static(b"cross-key copy probe payload, non-uniform: \x01\x02\x03");
+    let src_crc = crc64_nvme(&body);
+    let stamps = |g: u64, f: &str| GenerationStamps {
+        generation: g,
+        epoch: 0,
+        flush_uuid: f.into(),
+        boundary_source: None,
+        posix: None,
+    };
+
+    // Clean start: a leftover from a torn probe must not fail the
+    // If-None-Match writes below (the leftover-object lesson the
+    // conditional-writes probe already learned).
+    let _ = store.delete(&src).await;
+    let _ = store.delete(&dst).await;
+
+    let s = store
+        .put_whole(&src, body.clone(), &PutCondition::IfNoneMatchAny, &stamps(9, "probe-src"), src_crc)
+        .await
+        .map_err(|e| format!("seed the copy source: {e}"))?;
+
+    // 1. A stale source guard must REFUSE. Nothing may land.
+    match store
+        .copy_object(&src, Some("\"not-the-etag\""), &dst, &PutCondition::IfNoneMatchAny, &stamps(1, "probe-stale"))
+        .await
+    {
+        Err(StoreError::PreconditionFailed(_)) => {}
+        Ok(_) => {
+            let _ = store.delete(&dst).await;
+            let _ = store.delete(&src).await;
+            return Err("copy with a STALE source etag succeeded — the copy-source guard is \
+                        not enforced, so a rename can move bytes the caller never read"
+                .into());
+        }
+        Err(e) => {
+            let _ = store.delete(&src).await;
+            return Err(format!("copy with a stale source etag failed with the wrong error: {e}"));
+        }
+    }
+    if store.head(&dst).await.is_ok() {
+        let _ = store.delete(&dst).await;
+        let _ = store.delete(&src).await;
+        return Err("a REFUSED copy still landed an object at the destination".into());
+    }
+
+    // 2. The real copy.
+    let d = store
+        .copy_object(&src, Some(&s.etag), &dst, &PutCondition::IfNoneMatchAny, &stamps(1, "probe-dst"))
+        .await
+        .map_err(|e| format!("copy {src} -> {dst}: {e}"))?;
+
+    // 3. Bytes identical, checksum identical.
+    let (dmeta, got) = store.get_whole(&dst, None).await.map_err(|e| format!("read back {dst}: {e}"))?;
+    if got != body {
+        return Err(format!("the copy is not byte-identical: {} bytes vs {}", got.len(), body.len()));
+    }
+    if crc64_nvme(&got) != src_crc {
+        return Err("the copy's CONTENT checksum differs from the source's".into());
+    }
+    if d.crc64_b64 != s.crc64_b64 {
+        return Err(format!(
+            "the copy REPORTS a different checksum than the source: {:?} vs {:?} — identical \
+             bytes cannot have different CRCs, so one of the two is not describing its object",
+            d.crc64_b64, s.crc64_b64
+        ));
+    }
+
+    // 4. Stamps are the DESTINATION's. This is the one a double cannot
+    //    check: `MetadataDirective::REPLACE` is a server behaviour.
+    let gen = dmeta.meta.get(GenerationStamps::META_GEN).cloned().unwrap_or_default();
+    let flush = dmeta.meta.get(GenerationStamps::META_FLUSH_UUID).cloned().unwrap_or_default();
+    if gen != "1" || flush != "probe-dst" {
+        return Err(format!(
+            "the copy inherited the SOURCE's stamps (gen={gen:?} flush={flush:?}, wanted \
+             gen=\"1\" flush=\"probe-dst\") — MetadataDirective did not replace, so one \
+             object's publish history is filed under another object's key"
+        ));
+    }
+
+    // 5. The source survives: a copy, not a move.
+    if store.head(&src).await.is_err() {
+        return Err("the SOURCE is gone after a copy".into());
+    }
+
+    // 6. An occupied destination under If-None-Match must refuse.
+    match store
+        .copy_object(&src, Some(&s.etag), &dst, &PutCondition::IfNoneMatchAny, &stamps(2, "probe-clobber"))
+        .await
+    {
+        Err(StoreError::PreconditionFailed(_)) => {}
+        Ok(_) => {
+            return Err("a copy CLOBBERED an existing destination under If-None-Match — a \
+                        rename would silently overwrite whatever it landed on"
+                .into())
+        }
+        Err(e) => return Err(format!("copy onto an occupied destination: wrong error: {e}")),
+    }
+
+    let _ = store.delete(&dst).await;
+    let _ = store.delete(&src).await;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +382,102 @@ mod tests {
             .expect("seed the leftover");
 
         probe_conditional_writes(&store, key).await.expect("must still probe correctly");
+    }
+
+    /// The probe must PASS a conformant store...
+    #[tokio::test]
+    async fn cross_key_copy_probe_passes_on_a_conformant_store() {
+        let store = crate::memory::MemoryStore::new();
+        probe_cross_key_copy(&store, "probe/copy").await.expect("the double is conformant");
+    }
+
+    /// ...and must FAIL a store that gets the one thing wrong that a
+    /// memory double can never catch on its own: `MetadataDirective`.
+    /// A probe nothing can fail is a probe that proves nothing.
+    #[tokio::test]
+    async fn cross_key_copy_probe_catches_inherited_stamps() {
+        use crate::{
+            BootstrapReport, ComposeSpec, EpochLease, EpochState, ListedObject, ObjectMeta,
+            PendingUpload, StoreResult,
+        };
+        struct InheritsStamps(crate::memory::MemoryStore);
+        #[async_trait::async_trait]
+        impl ObjectStore for InheritsStamps {
+            async fn copy_object(
+                &self,
+                src_key: &str,
+                src_if_match: Option<&str>,
+                dst_key: &str,
+                condition: &PutCondition,
+                _stamps: &GenerationStamps,
+            ) -> crate::StoreResult<crate::ObjectMeta> {
+                // `MetadataDirective: COPY`: the destination wears the
+                // SOURCE's generation and flush_uuid.
+                let src = self.0.head(src_key).await?;
+                let inherited =
+                    GenerationStamps::from_meta(&src.meta).unwrap_or(GenerationStamps {
+                        generation: 0,
+                        epoch: 0,
+                        flush_uuid: String::new(),
+                        boundary_source: None,
+                        posix: None,
+                    });
+                self.0.copy_object(src_key, src_if_match, dst_key, condition, &inherited).await
+            }
+            async fn put_whole( &self, key: &str, body: Bytes, condition: &PutCondition, stamps: &GenerationStamps, crc64: u64, ) -> StoreResult<ObjectMeta> {
+                self.0.put_whole(key, body, condition, stamps, crc64).await
+            }
+            async fn compose_generation(&self, spec: &ComposeSpec<'_>) -> StoreResult<ObjectMeta> {
+                self.0.compose_generation(spec).await
+            }
+            async fn head(&self, key: &str) -> StoreResult<ObjectMeta> {
+                self.0.head(key).await
+            }
+            async fn get_whole(&self, key: &str, if_match: Option<&str>) -> StoreResult<(ObjectMeta, Bytes)> {
+                self.0.get_whole(key, if_match).await
+            }
+            async fn get_range( &self, key: &str, offset: u64, len: u64, if_match: &str, ) -> StoreResult<Bytes> {
+                self.0.get_range(key, offset, len, if_match).await
+            }
+            async fn list(&self, prefix: &str) -> StoreResult<Vec<ListedObject>> {
+                self.0.list(prefix).await
+            }
+            async fn delete(&self, key: &str) -> StoreResult<()> {
+                self.0.delete(key).await
+            }
+            async fn list_uploads(&self, prefix: &str) -> StoreResult<Vec<PendingUpload>> {
+                self.0.list_uploads(prefix).await
+            }
+            async fn abort_upload(&self, key: &str, upload_id: &str) -> StoreResult<()> {
+                self.0.abort_upload(key, upload_id).await
+            }
+            async fn bootstrap(&self, prefix: &str) -> StoreResult<BootstrapReport> {
+                self.0.bootstrap(prefix).await
+            }
+            async fn epoch_read(&self, key: &str) -> StoreResult<Option<EpochState>> {
+                self.0.epoch_read(key).await
+            }
+            async fn epoch_acquire( &self, key: &str, holder_id: &str, supersede: Option<&EpochState>, ) -> StoreResult<EpochLease> {
+                self.0.epoch_acquire(key, holder_id, supersede).await
+            }
+            async fn epoch_renew( &self, key: &str, lease: &EpochLease, echo: Option<&str>, ) -> StoreResult<EpochLease> {
+                self.0.epoch_renew(key, lease, echo).await
+            }
+            async fn epoch_release(&self, key: &str, lease: &EpochLease) -> StoreResult<()> {
+                self.0.epoch_release(key, lease).await
+            }
+            fn min_part_size(&self) -> u64 {
+                self.0.min_part_size()
+            }
+            fn max_parts(&self) -> usize {
+                self.0.max_parts()
+            }
+        }
+
+        let store = InheritsStamps(crate::memory::MemoryStore::new());
+        let err = probe_cross_key_copy(&store, "probe/copy")
+            .await
+            .expect_err("inherited stamps must be caught");
+        assert!(err.contains("inherited the SOURCE's stamps"), "{err}");
     }
 }

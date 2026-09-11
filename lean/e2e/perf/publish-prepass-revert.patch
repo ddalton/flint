@@ -1,0 +1,156 @@
+commit cb96e06d9016226319e5494852d2950597a6f6d7
+Author: Dilip Dalton <dilipdalton@hotmail.com>
+Date:   Fri Sep 11 09:51:42 2026 -0700
+
+    store+lean: the publish read every file TWICE, and the fix that was "impossible" wasn't
+    
+    lean's compose hashed the whole file, then handed the same file to the
+    store to read again part by part. On the 2026-09-10 door drill that
+    pre-pass was roughly 11 s of the `mixed` workload's 24.3 s — all of it
+    at the disk's read ceiling, none of it on the wire.
+    
+    `ComposeSpec::crc64: None` already asked the store to accumulate while
+    uploading, and forge used it. lean could not, because of a constraint I
+    wrote into this crate earlier today: accumulating pins the upload to a
+    sequential loop, "a CRC-64 taken out of order is a different number", so
+    `par = if acc.is_some() { 1 }`. True of a streaming accumulator. Not
+    true of CRC-64.
+    
+    `crc64_combine(a, b, len_b)` gives the CRC of `A||B` from the two CRCs
+    and B's length, no bytes re-read. For a reflected CRC whose init and
+    xorout are both all-ones the init terms cancel — `Z(X) ^ Z(I) = Z(X ^ I)
+    = Z(0) = 0` — leaving `F(A||B) = Z_n(F(A)) ^ F(B)`; structure follows
+    zlib's `crc32_combine` widened to 64 bits. So parts are hashed
+    INDEPENDENTLY and folded in part order, and both compose arms now share
+    one checksum path instead of two that could disagree.
+    
+    The `par` gate is gone. lean gets the single read AND the parallel
+    upload; forge gets the parallel upload it was excluded from by
+    construction. Neither had to choose.
+    
+    The sort before the fold is now load-bearing twice over — S3 wants
+    ascending part numbers, and `crc64_combine` composes A-then-B, so a grid
+    folded in completion order is the checksum of a different object.
+    `folding_out_of_order_yields_a_different_object` asserts the shuffle
+    does NOT coincidentally agree, because a sort nothing can move is a sort
+    nobody will keep.
+    
+    Without the pre-pass lean has no checksum of its own, so the 412
+    AdoptOwn recognizer reads the file on that rare path instead, and a
+    compose that returns no checksum now REFUSES: `a_compose_that_reports_
+    no_checksum_refuses_instead_of_citing` drives a backend that strips the
+    header and asserts nothing is cited. Inventing a number there would cite
+    bytes nothing vouched for.
+    
+    The many-part test first failed on its own arithmetic — the grid summed
+    to 9001 of 10000 — caught by the "the grid must cover the object"
+    assertion put there for exactly that. Four mutations, each failing its
+    test. flint-store 25 passed, flint-lean 173 passed.
+    
+    Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_01PVx6vFhNXscJCa6xM4X7EN
+
+diff --git a/lean/sidecar/src/barrier.rs b/lean/sidecar/src/barrier.rs
+index 23e954c1..0d4218f8 100644
+--- a/lean/sidecar/src/barrier.rs
++++ b/lean/sidecar/src/barrier.rs
+@@ -953,21 +953,20 @@ impl Sidecar {
+         generation: u64,
+         epoch: u64,
+     ) -> LeanResult<UploadOutcome> {
+-        use std::io::Read;
+-        // Streaming CRC pass.
+-        let mut crc = flint_store::Crc64Nvme::new();
+-        {
+-            let mut f = std::fs::File::open(local_path)?;
+-            let mut buf = vec![0u8; 4 << 20];
+-            loop {
+-                let n = f.read(&mut buf)?;
+-                if n == 0 {
+-                    break;
+-                }
+-                crc.update(&buf[..n]);
+-            }
+-        }
+-        let crc = crc.finalize();
++        // NO PRE-PASS. The store accumulates the full-object CRC from
++        // the parts as it reads them for upload, so this file is read
++        // ONCE. It used to be read TWICE — a streaming hash of the whole
++        // file, and then again part by part — which on the 2026-09-10
++        // door drill was roughly 11 s of the `mixed` workload's 24.3 s,
++        // all of it at the disk's read ceiling and none of it on the
++        // wire.
++        //
++        // That pre-pass was not laziness: asking the store to accumulate
++        // used to pin its part uploads to a sequential loop, because a
++        // CRC-64 taken out of order is a different number. `crc64_combine`
++        // removed the choice — parts are hashed independently and folded
++        // in part order — so the single read and the parallel upload are
++        // no longer alternatives.
+ 
+         // Part grid: within [min_part_size, ...], at most max_parts,
+         // contiguous from 0.
+@@ -995,10 +994,24 @@ impl Sidecar {
+             base_etag: None,
+             condition,
+             stamps: stamps.clone(),
+-            crc64: Some(crc),
++            crc64: None,
+         };
+         match self.store.compose_generation(&spec).await {
+             Ok(meta) => {
++                // The store computed it; refuse to cite bytes nothing
++                // vouched for rather than invent a number for the
++                // manifest. A backend that returns no checksum has not
++                // validated the publish server-side either.
++                let crc = meta
++                    .crc64_b64
++                    .as_deref()
++                    .and_then(flint_store::crc64_from_b64)
++                    .ok_or_else(|| {
++                        LeanError::State(format!(
++                            "compose of {key} returned no full-object checksum — refusing to \
++                             cite bytes nothing vouched for"
++                        ))
++                    })?;
+                 Ok(UploadOutcome::published(
+                     path, key.to_string(), meta.etag, crc, scanned, generation, epoch,
+                     meta.version_id,
+@@ -1010,6 +1023,11 @@ impl Sidecar {
+                 Ok(UploadOutcome::Deferred)
+             }
+             Err(StoreError::PreconditionFailed(_)) => {
++                // The AdoptOwn recognizer compares OUR bytes' checksum
++                // against what landed, and without the pre-pass we do
++                // not have one — so the file is read HERE, on the rare
++                // recovery path, instead of on every publish.
++                let crc = file_crc(local_path)?;
+                 let head = self.store.head(key).await?;
+                 let head_stamps = GenerationStamps::from_meta(&head.meta);
+                 let own = head_stamps
+@@ -1193,6 +1211,25 @@ fn local_dirty(local: &Path, base: Option<&BaselineEntry>) -> bool {
+     }
+ }
+ 
++/// Full-object CRC-64/NVME of a local file, streamed.
++///
++/// Reached only by the 412 recovery path: the ordinary publish gets its
++/// checksum from the store, which computes one while uploading.
++fn file_crc(local_path: &Path) -> LeanResult<u64> {
++    use std::io::Read;
++    let mut crc = flint_store::Crc64Nvme::new();
++    let mut f = std::fs::File::open(local_path)?;
++    let mut buf = vec![0u8; 4 << 20];
++    loop {
++        let n = f.read(&mut buf)?;
++        if n == 0 {
++            break;
++        }
++        crc.update(&buf[..n]);
++    }
++    Ok(crc.finalize())
++}
++
+ pub(super) fn mtime_of(m: &std::fs::Metadata) -> i64 {
+     m.modified()
+         .ok()
