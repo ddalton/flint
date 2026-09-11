@@ -267,6 +267,25 @@ impl SentinelBudget {
 }
 
 /// Why a standing pending sentinel is not being honored right now.
+/// The records a sync produced, given how many the log held before it.
+///
+/// `skip(before)` alone is only sound while the log GREW. A rotation
+/// during the sync can SHORTEN it, and skipping past a shorter list
+/// reports NO conflicts for a sync that produced some — the one answer
+/// this ack must never give. Over-reporting the survivors is the safe
+/// direction: an ack naming a conflict that predates the sync costs a
+/// reader a second look, an ack naming none costs them the conflict.
+pub(crate) fn conflicts_since(
+    before: usize,
+    after: Vec<ConflictRecord>,
+) -> Vec<ConflictRecord> {
+    if after.len() >= before {
+        after[before..].to_vec()
+    } else {
+        after
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Due {
     /// Honor it on this tick.
@@ -918,8 +937,7 @@ impl Sidecar {
         self.verify_not_deposed_pub().await?;
         let before = self.state.load_conflicts()?.len();
         let report = self.sync_scoped(pending.scope.clone()).await?;
-        let conflicts: Vec<ConflictRecord> =
-            self.state.load_conflicts()?.into_iter().skip(before).collect();
+        let conflicts = conflicts_since(before, self.state.load_conflicts()?);
         // A sync publishes no bytes: it costs no budget units, only the
         // min-interval (which it shares with publish).
         self.charge_budget(0)?;

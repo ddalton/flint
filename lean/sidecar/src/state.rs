@@ -140,6 +140,23 @@ const SCOPE: &str = "scope.json";
 const INCARNATION: &str = "incarnation.json";
 const INTENT: &str = "intent.json";
 const CONFLICTS: &str = "conflicts.jsonl";
+/// The rotated generation. `load_conflicts` reads it FIRST, so the
+/// sequence a reader sees is unbroken across a rotation — which matters
+/// because `honor_sync` takes the count before a sync and `skip`s it
+/// after, and a rotation that SHORTENED the list would make it skip past
+/// the very records the sync just produced.
+const CONFLICTS_PREV: &str = "conflicts.1.jsonl";
+/// How many records were dropped when a SECOND rotation overwrote the
+/// first. Truncation that nobody can count is truncation that reads as
+/// "there were no more".
+const CONFLICTS_DROPPED: &str = "conflicts.dropped";
+/// Rotate past this. The file is append-only and `load_conflicts` parses
+/// it WHOLE — twice per sync honor, again per status read and per
+/// scrape (U23) — so an unbounded file is an unbounded parse on a hot
+/// path, and a standing condition (a UI autosaving over a path the agent
+/// holds dirty) appends on every barrier. Two generations bound the
+/// resident set at ~2 MiB, which is thousands of records.
+const CONFLICTS_MAX_BYTES: u64 = 1 << 20;
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> LeanResult<()> {
     // The state dir lives in the same app-writable emptyDir.
@@ -330,29 +347,79 @@ impl SidecarState {
         use std::io::Write;
         let line =
             serde_json::to_string(c).map_err(|e| LeanError::State(format!("conflict: {e}")))?;
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.dir.join(CONFLICTS))?;
+        let live = self.dir.join(CONFLICTS);
+        let mut f = fs::OpenOptions::new().create(true).append(true).open(&live)?;
         writeln!(f, "{line}")?;
+        // Size off the handle we just wrote through — no extra stat of
+        // the path, and no line count, which would make every append
+        // O(records).
+        let len = f.metadata()?.len();
+        drop(f);
+        if len > CONFLICTS_MAX_BYTES {
+            self.rotate_conflicts()?;
+        }
         Ok(())
     }
 
-    pub fn load_conflicts(&self) -> LeanResult<Vec<ConflictRecord>> {
-        let p = self.dir.join(CONFLICTS);
-        if !p.exists() {
-            return Ok(vec![]);
+    /// Rotate live -> `.1`, counting whatever the previous `.1` held so
+    /// the loss is a NUMBER rather than a silence. Best effort: a
+    /// rotation that fails leaves a large file, which is a performance
+    /// problem; losing the record we just appended would be a
+    /// correctness one.
+    fn rotate_conflicts(&self) -> LeanResult<()> {
+        let live = self.dir.join(CONFLICTS);
+        let prev = self.dir.join(CONFLICTS_PREV);
+        // Only read the outgoing generation at ROTATION time — rare by
+        // construction, since it takes CONFLICTS_MAX_BYTES to get here.
+        if let Ok(text) = fs::read_to_string(&prev) {
+            let dropped = text.lines().filter(|l| !l.trim().is_empty()).count() as u64;
+            let total = self.conflicts_dropped()? + dropped;
+            write_atomic(&self.dir.join(CONFLICTS_DROPPED), total.to_string().as_bytes())?;
         }
-        let text = fs::read_to_string(&p)?;
+        fs::rename(&live, &prev)?;
+        Ok(())
+    }
+
+    /// Records lost to rotation. A caller rendering conflicts owes the
+    /// user this number: a truncated list that does not say it was
+    /// truncated reads as a complete one.
+    pub fn conflicts_dropped(&self) -> LeanResult<u64> {
+        match fs::read_to_string(self.dir.join(CONFLICTS_DROPPED)) {
+            Ok(s) => Ok(s.trim().parse().unwrap_or(0)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(LeanError::State(format!("{CONFLICTS_DROPPED}: {e}"))),
+        }
+    }
+
+    /// The rotated generation first, then the live one: oldest to
+    /// newest, unbroken across a single rotation.
+    pub fn load_conflicts(&self) -> LeanResult<Vec<ConflictRecord>> {
         let mut out = vec![];
-        for line in text.lines() {
-            if line.trim().is_empty() {
-                continue;
+        for name in [CONFLICTS_PREV, CONFLICTS] {
+            let p = self.dir.join(name);
+            // `fs::read_to_string` directly: `exists()` answers false
+            // for EACCES and EIO alike, and a conflict log that reads as
+            // EMPTY because it is unreadable is the same shape of bug as
+            // an unreadable path reading as deleted.
+            let text = match fs::read_to_string(&p) {
+                Ok(t) => t,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(LeanError::State(format!(
+                        "cannot read {name}: {e} — refusing to report an unreadable \
+                         conflict log as an empty one"
+                    )))
+                }
+            };
+            for line in text.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                out.push(
+                    serde_json::from_str(line)
+                        .map_err(|e| LeanError::State(format!("conflict line: {e}")))?,
+                );
             }
-            out.push(
-                serde_json::from_str(line)
-                    .map_err(|e| LeanError::State(format!("conflict line: {e}")))?,
-            );
         }
         Ok(out)
     }

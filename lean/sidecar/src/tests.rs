@@ -9068,3 +9068,130 @@ async fn a_whole_tree_checkout_clears_a_stale_scope() {
     assert_eq!(cr.materialized, 8, "the whole manifest, not the stale scope's share");
     assert_eq!(b.state.load_scope().unwrap(), None, "and the stale scope is GONE");
 }
+
+// ---------------------------------------------------------------------
+// The conflict log is bounded (state.rs rotation)
+// ---------------------------------------------------------------------
+
+/// ~1 KiB per record, so a rotation costs ~1050 appends rather than
+/// ~10,000. The padding is in the path because that is the field a real
+/// standing condition varies.
+fn bulky_conflict(i: usize) -> super::state::ConflictRecord {
+    super::state::ConflictRecord {
+        path: format!("{}/{}", "p".repeat(900), i),
+        foreign_etag: format!("\"etag-{i}\""),
+        preserved_key: None,
+        kind: "test-bulk".into(),
+        at_unix: 1_700_000_000 + i as u64,
+    }
+}
+
+#[tokio::test]
+async fn the_conflict_log_rotates_instead_of_growing_without_bound() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let a = sidecar(&store, dir.path()).await;
+
+    for i in 0..2000 {
+        a.state.append_conflict(&bulky_conflict(i)).unwrap();
+    }
+    let sd = a.cfg.state_dir();
+    let live = std::fs::metadata(sd.join("conflicts.jsonl")).unwrap().len();
+    assert!(
+        std::fs::metadata(sd.join("conflicts.1.jsonl")).is_ok(),
+        "past the cap the live log must have rotated"
+    );
+    assert!(live <= 1 << 20, "the LIVE log is what gets parsed on every read: {live}");
+
+    // Nothing lost yet: one rotation keeps both generations.
+    let all = a.state.load_conflicts().unwrap();
+    assert_eq!(all.len(), 2000, "a single rotation loses nothing");
+    assert_eq!(a.state.conflicts_dropped().unwrap(), 0);
+    // Oldest first, across the rotation boundary.
+    assert_eq!(all[0].at_unix, 1_700_000_000);
+    assert_eq!(all[1999].at_unix, 1_700_000_000 + 1999);
+}
+
+#[tokio::test]
+async fn a_rotation_never_shortens_what_a_reader_has_already_counted() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let a = sidecar(&store, dir.path()).await;
+
+    // `honor_sync` counts before a sync and skips that many after. The
+    // count must never go DOWN across one rotation, or it skips past
+    // the records the sync just produced.
+    let mut prev = 0usize;
+    let mut saw_rotation = false;
+    for i in 0..2000 {
+        a.state.append_conflict(&bulky_conflict(i)).unwrap();
+        let n = a.state.load_conflicts().unwrap().len();
+        assert!(n >= prev, "the log SHRANK at append {i}: {prev} -> {n}");
+        if std::fs::metadata(a.cfg.state_dir().join("conflicts.1.jsonl")).is_ok() {
+            saw_rotation = true;
+        }
+        prev = n;
+    }
+    assert!(saw_rotation, "the run must actually cross a rotation or it proves nothing");
+}
+
+#[tokio::test]
+async fn a_second_rotation_reports_what_it_dropped() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let a = sidecar(&store, dir.path()).await;
+
+    for i in 0..4000 {
+        a.state.append_conflict(&bulky_conflict(i)).unwrap();
+    }
+    let dropped = a.state.conflicts_dropped().unwrap();
+    let held = a.state.load_conflicts().unwrap().len();
+    assert!(dropped > 0, "a second rotation DID drop records; the count must say so");
+    assert_eq!(
+        dropped as usize + held,
+        4000,
+        "dropped + held must account for every record: {dropped} + {held}"
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_conflict_log_is_not_reported_as_empty() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let a = sidecar(&store, dir.path()).await;
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
+        return;
+    }
+    a.state.append_conflict(&bulky_conflict(1)).unwrap();
+
+    // The PARENT: a mode-0o000 file still stats, so `exists()` and
+    // `read_to_string` would both error and the test would pin nothing.
+    let sd = a.cfg.state_dir();
+    std::fs::set_permissions(&sd, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    let got = a.state.load_conflicts();
+    std::fs::set_permissions(&sd, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let err = got.expect_err("an unreadable log must not read as 'no conflicts'");
+    assert!(format!("{err}").contains("refusing to report"), "{err}");
+}
+
+#[test]
+fn a_shortened_conflict_log_never_reports_an_empty_ack() {
+    use super::sentinel::conflicts_since;
+    let rec = |i: usize| bulky_conflict(i);
+
+    // The ordinary case: the log grew, take the tail.
+    let grew = vec![rec(0), rec(1), rec(2)];
+    assert_eq!(conflicts_since(1, grew.clone()).len(), 2);
+    assert_eq!(conflicts_since(3, grew.clone()).len(), 0, "grew by nothing");
+
+    // The rotation case: the log SHRANK under us. Reporting the
+    // survivors over-reports; skipping reports NOTHING, which is the
+    // answer that hides a conflict.
+    let shrank = vec![rec(7), rec(8)];
+    assert_eq!(
+        conflicts_since(5, shrank.clone()).len(),
+        2,
+        "a shortened log must not yield an empty conflict set"
+    );
+}
