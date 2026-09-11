@@ -1,0 +1,288 @@
+diff --git a/lean/sidecar/src/tests.rs b/lean/sidecar/src/tests.rs
+index 92ff400a..b5ba8794 100644
+--- a/lean/sidecar/src/tests.rs
++++ b/lean/sidecar/src/tests.rs
+@@ -8662,3 +8662,283 @@ async fn ranged_checkout_explicitly_disabled_uses_no_ranges() {
+     );
+     assert_eq!(cr.ranged, 0);
+ }
++
++// ===================== PROBE (temporary, falsification) =====================
++
++/// PROBE: a SCOPED baseline (entries scoped, inst_base FULL — exactly
++/// what the proposed scoped checkout produces per checkout.rs:554/560)
++/// meeting a WHOLE-TREE `sync()`.
++#[tokio::test]
++async fn probe_scoped_baseline_vs_whole_tree_sync() {
++    let store = Arc::new(MemoryStore::new());
++    let dir_a = tempfile::tempdir().unwrap();
++    let mut a = sidecar(&store, dir_a.path()).await;
++    assert!(claim_until_held(&mut a, 3).await);
++    a.checkout().await.unwrap();
++    write(dir_a.path(), "inputs/a.txt", "v1");
++    write(dir_a.path(), "outputs/b.txt", "v1");
++    write(dir_a.path(), "outputs/c.txt", "v1");
++    write(dir_a.path(), "outputs/d.txt", "v1");
++    a.run_barrier().await.unwrap();
++
++    // --- simulate a SCOPED checkout of `inputs/` -------------------
++    // entries + prev_scan scoped; inst_base left FULL (checkout.rs:560).
++    {
++        let mut b = a.state.load_baseline().unwrap();
++        b.entries.retain(|p, _| p.starts_with("inputs/"));
++        b.prev_scan.retain(|p| p.starts_with("inputs/"));
++        a.state.save_baseline(&b).unwrap();
++        for p in ["outputs/b.txt", "outputs/c.txt", "outputs/d.txt"] {
++            std::fs::remove_file(dir_a.path().join(p)).unwrap();
++        }
++        let b = a.state.load_baseline().unwrap();
++        eprintln!("PROBE scoped baseline: entries={:?}", b.entries.keys().collect::<Vec<_>>());
++        eprintln!("PROBE scoped baseline: inst_base={:?}", b.inst_base.keys().collect::<Vec<_>>());
++    }
++
++    // --- a sibling changes ONE out-of-scope path and DELETES another -
++    let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
++    let mut theirs = loaded.manifest.clone();
++    theirs.seq += 1;
++    {
++        let path = "outputs/b.txt";
++        let key = a.cfg.file_key(path);
++        let body = Bytes::from_static(b"foreign b v2");
++        let crc = crc64_nvme(&body);
++        let cur = store.head(&key).await.unwrap();
++        let meta = store
++            .put_whole(
++                &key,
++                body,
++                &PutCondition::IfMatch(cur.etag),
++                &GenerationStamps {
++                    generation: 2,
++                    epoch: 0,
++                    flush_uuid: "sibling".into(),
++                    boundary_source: None,
++                    posix: None,
++                },
++                crc,
++            )
++            .await
++            .unwrap();
++        let e = theirs.entries.get_mut(path).unwrap();
++        e.etag = meta.etag.clone();
++        e.crc64_b64 = meta.crc64_b64.clone();
++        e.size = meta.size;
++        e.generation = 2;
++    }
++    theirs.entries.remove("outputs/d.txt");
++    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.handle()), 0, "sibling")
++        .await
++        .unwrap();
++
++    // --- the whole-tree sync verb (CLI `sync`, UDS Sync, scope-less
++    //     sentinel) ------------------------------------------------
++    let r = a.sync().await.unwrap();
++    eprintln!("PROBE report: {}", serde_json::to_string(&r).unwrap());
++    for p in ["inputs/a.txt", "outputs/b.txt", "outputs/c.txt", "outputs/d.txt"] {
++        eprintln!("PROBE on-disk {p}: {:?}", read(dir_a.path(), p));
++    }
++    let b = a.state.load_baseline().unwrap();
++    eprintln!("PROBE after entries={:?}", b.entries.keys().collect::<Vec<_>>());
++    eprintln!("PROBE after prev_scan={:?}", b.prev_scan.iter().collect::<Vec<_>>());
++    eprintln!("PROBE after inst_base={:?}", b.inst_base.keys().collect::<Vec<_>>());
++    eprintln!("PROBE after seq={} metag={:?}", b.seq, b.manifest_etag);
++
++    // PREDICTION (the hazard): the out-of-scope CHANGED path is
++    // re-materialised; the out-of-scope UNCHANGED path is not.
++    assert_eq!(
++        read(dir_a.path(), "outputs/b.txt").as_deref(),
++        Some("foreign b v2"),
++        "PREDICTION FALSIFIED: sync did NOT re-materialise the out-of-scope changed path"
++    );
++    assert_eq!(
++        read(dir_a.path(), "outputs/c.txt"),
++        None,
++        "PREDICTION FALSIFIED: sync re-materialised an UNCHANGED out-of-scope path too"
++    );
++}
++
++/// PROBE 2: out-of-scope paths that ARE on disk but absent from a scoped
++/// `baseline.entries` — does whole-tree sync delete them, clobber them,
++/// or protect them?
++#[tokio::test]
++async fn probe_scoped_baseline_out_of_scope_local_files() {
++    let store = Arc::new(MemoryStore::new());
++    let dir_a = tempfile::tempdir().unwrap();
++    let mut a = sidecar(&store, dir_a.path()).await;
++    assert!(claim_until_held(&mut a, 3).await);
++    a.checkout().await.unwrap();
++    write(dir_a.path(), "inputs/a.txt", "v1");
++    write(dir_a.path(), "outputs/killme.txt", "v1");
++    write(dir_a.path(), "outputs/clobber.txt", "v1");
++    a.run_barrier().await.unwrap();
++
++    // scoped checkout of `inputs/`: entries+prev_scan scoped, inst_base FULL.
++    {
++        let mut b = a.state.load_baseline().unwrap();
++        b.entries.retain(|p, _| p.starts_with("inputs/"));
++        b.prev_scan.retain(|p| p.starts_with("inputs/"));
++        a.state.save_baseline(&b).unwrap();
++    }
++    // ...but the two out-of-scope files are STILL ON DISK, untracked
++    // (agent-authored work, or residue of an earlier full checkout in
++    // the same emptyDir). Distinct local content.
++    write(dir_a.path(), "outputs/killme.txt", "AGENT WORK killme");
++    write(dir_a.path(), "outputs/clobber.txt", "AGENT WORK clobber");
++
++    // sibling: DELETE one, CHANGE the other.
++    let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
++    let mut theirs = loaded.manifest.clone();
++    theirs.seq += 1;
++    theirs.entries.remove("outputs/killme.txt");
++    {
++        let path = "outputs/clobber.txt";
++        let key = a.cfg.file_key(path);
++        let body = Bytes::from_static(b"foreign clobber v2");
++        let crc = crc64_nvme(&body);
++        let cur = store.head(&key).await.unwrap();
++        let meta = store
++            .put_whole(
++                &key,
++                body,
++                &PutCondition::IfMatch(cur.etag),
++                &GenerationStamps {
++                    generation: 2,
++                    epoch: 0,
++                    flush_uuid: "sibling".into(),
++                    boundary_source: None,
++                    posix: None,
++                },
++                crc,
++            )
++            .await
++            .unwrap();
++        let e = theirs.entries.get_mut(path).unwrap();
++        e.etag = meta.etag.clone();
++        e.crc64_b64 = meta.crc64_b64.clone();
++        e.size = meta.size;
++        e.generation = 2;
++    }
++    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.handle()), 0, "sibling")
++        .await
++        .unwrap();
++
++    let r = a.sync().await.unwrap();
++    eprintln!("PROBE2 report: {}", serde_json::to_string(&r).unwrap());
++    eprintln!("PROBE2 killme:  {:?}", read(dir_a.path(), "outputs/killme.txt"));
++    eprintln!("PROBE2 clobber: {:?}", read(dir_a.path(), "outputs/clobber.txt"));
++    let cf = a.state.load_conflicts().unwrap();
++    eprintln!("PROBE2 conflicts: {:?}", cf.iter().map(|c| (&c.path, &c.kind)).collect::<Vec<_>>());
++    let b = a.state.load_baseline().unwrap();
++    eprintln!("PROBE2 after entries={:?}", b.entries.keys().collect::<Vec<_>>());
++    eprintln!("PROBE2 after inst_base={:?}", b.inst_base.keys().collect::<Vec<_>>());
++}
++
++// ── FALSIFICATION PROBES (scoped-checkout proposal, inbox area) ───────
++// Temporary. Delete with the rest of this block.
++
++/// The barrier's own merge queues every out-of-scope foreign change into
++/// the inbox (`clear_window(..., &queue)`), and `consume_inbox` has no
++/// scope test of any kind: it MATERIALISES the path, adopts it CLEAN
++/// into `baseline.entries` AND `baseline.prev_scan`, and from that
++/// moment the workspace owns it. One `rm` of a file the agent never
++/// asked for publishes the delete and GC removes the object.
++#[tokio::test]
++async fn probe_inbox_widens_scope_then_deletes_the_object() {
++    let store = Arc::new(MemoryStore::new());
++    let dir = tempfile::tempdir().unwrap();
++    let mut a = sidecar(&store, dir.path()).await;
++    assert!(claim_until_held(&mut a, 3).await);
++    a.checkout().await.unwrap();
++
++    // A path that lives in the manifest, in a region a scoped checkout
++    // would NOT hold.
++    write(dir.path(), "other/big.bin", "somebody elses data");
++    a.run_barrier().await.unwrap();
++    let key = a.cfg.file_key("other/big.bin");
++    assert!(store.head(&key).await.is_ok(), "fixture: the object exists");
++
++    // Put the workspace in exactly the state a SCOPED checkout leaves:
++    // the path is cited by the manifest and present in `inst_base`
++    // (proposal point 3), but absent from `baseline.entries`, from
++    // `prev_scan`, and from the tree.
++    std::fs::remove_file(dir.path().join("other/big.bin")).unwrap();
++    let mut b = a.state.load_baseline().unwrap();
++    b.entries.remove("other/big.bin");
++    b.prev_scan.remove("other/big.bin");
++    assert!(b.inst_base.contains_key("other/big.bin"), "fixture: still the merge base");
++    a.state.save_baseline(&b).unwrap();
++
++    // A foreign write to the out-of-scope path lands an inbox entry —
++    // the same shape `clear_window` queues for a merge-preserved entry.
++    hitl_write(&store, &a.cfg, "other/big.bin", "v2 from elsewhere", "ui").await.unwrap();
++
++    let r = a.run_barrier().await.unwrap();
++    assert_eq!(r.consumed, 1);
++    assert_eq!(
++        read(dir.path(), "other/big.bin").as_deref(),
++        Some("v2 from elsewhere"),
++        "PROBE 1: consume materialised an out-of-scope path — the scope did not hold"
++    );
++    let b = a.state.load_baseline().unwrap();
++    assert!(b.entries.contains_key("other/big.bin"), "PROBE 2: baseline widened");
++    assert!(b.prev_scan.contains("other/big.bin"), "PROBE 3: prev_scan widened");
++
++    // The agent removes the file it never asked for.
++    std::fs::remove_file(dir.path().join("other/big.bin")).unwrap();
++    let r1 = a.run_barrier().await.unwrap();
++    let r2 = a.run_barrier().await.unwrap();
++    eprintln!("PROBE first_absence={:?} then deleted={:?}", r1.first_absence, r2.deleted);
++    assert!(
++        r2.deleted.contains(&"other/big.bin".to_string()),
++        "PROBE 4: the delete published"
++    );
++    assert!(
++        matches!(store.head(&key).await, Err(flint_store::StoreError::NotFound(_))),
++        "PROBE 5: the object another writer put there is GONE from the bucket"
++    );
++    let cs = a.state.load_conflicts().unwrap();
++    assert!(
++        !cs.iter().any(|c| c.path == "other/big.bin" && c.preserved_key.is_some()),
++        "PROBE 6: and nothing preserved a copy"
++    );
++}
++
++/// Any write error inside `write_file_atomic_in` — ENOSPC, EACCES, EIO —
++/// is recorded as `consume-refused-containment` and the entry is
++/// CONSUMED, i.e. dropped from the cell. Nothing ever re-offers it.
++#[tokio::test]
++async fn probe_a_transient_write_error_permanently_drops_an_inbox_entry() {
++    use std::os::unix::fs::PermissionsExt;
++    let store = Arc::new(MemoryStore::new());
++    let dir = tempfile::tempdir().unwrap();
++    let mut a = sidecar(&store, dir.path()).await;
++    assert!(claim_until_held(&mut a, 3).await);
++    a.checkout().await.unwrap();
++
++    std::fs::create_dir_all(dir.path().join("ro")).unwrap();
++    hitl_write(&store, &a.cfg, "ro/x.txt", "a human's upload", "alice").await.unwrap();
++    std::fs::set_permissions(dir.path().join("ro"), std::fs::Permissions::from_mode(0o555))
++        .unwrap();
++
++    let r = a.run_barrier().await.unwrap();
++    std::fs::set_permissions(dir.path().join("ro"), std::fs::Permissions::from_mode(0o755))
++        .unwrap();
++    let cs = a.state.load_conflicts().unwrap();
++    eprintln!("PROBE conflicts={:?} consumed={}", cs, r.consumed);
++    assert!(
++        cs.iter().any(|c| c.path == "ro/x.txt" && c.kind.starts_with("consume-refused-containment")),
++        "PROBE 7: an EACCES was classified as a containment refusal"
++    );
++    let ib = inbox::load(store.as_ref(), &a.cfg).await.unwrap();
++    assert!(
++        !ib.doc.entries.iter().any(|e| e.path == "ro/x.txt"),
++        "PROBE 8: the entry was DROPPED from the cell"
++    );
++    // Nothing re-delivers it.
++    a.run_barrier().await.unwrap();
++    a.run_barrier().await.unwrap();
++    assert!(read(dir.path(), "ro/x.txt").is_none(), "PROBE 9: never re-offered");
++}
