@@ -287,6 +287,15 @@ async fn main() {
     // the workspaces anyone wants the answer for.
     if cmd == "probe-copy" {
         let key = format!("{}/{}/probe-copy", sc.cfg.prefix, flint_lean::LEAN_DIR);
+        // Say which ARM this run exercises. The probe's payload is a few
+        // dozen bytes, so any ceiling above zero takes the single-request
+        // CopyObject path — and a run that reported PASS while silently
+        // repeating the arm you already tested is worse than no run.
+        eprintln!(
+            "flint-sync: probe-copy ceiling={} bytes -> the {} arm",
+            copy_whole_max,
+            if copy_whole_max == 0 { "MPU + UploadPartCopy" } else { "CopyObject (payload is tiny)" }
+        );
         match flint_store::probe::probe_cross_key_copy(sc.store.as_ref(), &key).await {
             Ok(()) => {
                 eprintln!("flint-sync: probe-copy PASS ({key})");

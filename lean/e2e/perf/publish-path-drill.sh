@@ -100,9 +100,22 @@ fi
 # previous run's objects and the checkout it feeds is not cold. Refuse
 # rather than measure a warm tree that looks cold.
 seed() {
-  local name=$1 dir="$ROOT/$name"
-  if [ -d "$dir" ] && [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
+  local name=$1
+  # SEPARATE statements: bash expands every word of a `local`
+  # command before performing any of its assignments, so
+  # `local name=$1 dir="$ROOT/$name"` expands $name in the OUTER
+  # scope — unbound under `set -u`, and silently empty without it.
+  local dir="$ROOT/$name"
+  if [ "${SKIP_SEED:-0}" != 1 ] && [ -d "$dir" ] && [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
     say "FATAL: $dir is not empty — a reused tree is not a cold one"; exit 2
+  fi
+  if [ "${SKIP_SEED:-0}" = 1 ]; then
+    # Verify rather than create: the guard's job is to refuse a tree
+    # that is not what this run thinks it is, and that is a CHECK, not a
+    # side effect of writing one.
+    if [ ! -d "$dir" ]; then say "FATAL: SKIP_SEED but $dir is absent"; exit 2; fi
+    find "$dir" -type f -printf '%s\n' | awk '{n+=$1} END {print n+0}'
+    return 0
   fi
   mkdir -p "$dir"
   case "$name" in
@@ -130,9 +143,30 @@ seed() {
 # below would compare 0 against 0 and pass. A poller keeps the last
 # readable snapshot; the counter is monotonic, so the last one is the
 # total.
+# Drop the page cache before a timed run.
+#
+# WITHOUT THIS THE PRIMARY ORACLE IS A LIE. `read_bytes` counts bytes
+# fetched from the BLOCK DEVICE, so a file the seed just wrote — or that
+# the pre-pass just read — comes back from page cache and counts ZERO.
+# The control arm's second read would be free, both arms would report the
+# same read_bytes, and the guard would announce "the arms did not differ"
+# about two binaries that differ exactly as intended.
+#
+# It also makes the CLOCK honest for the case that matters: a tree that
+# fits in 15 GiB of RAM is not the tree anyone deploys lean for, and a
+# publish whose re-read is a memcpy is not the publish this change was
+# made for.
+drop_caches() {
+  sync
+  echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || {
+    say "  WARNING: could not drop caches — read_bytes is NOT trustworthy"
+  }
+}
+
 timed() {
   local label=$1; shift
   local t0 t1 rb
+  drop_caches
   t0=$(date +%s.%N)
   "$@" > "$OUT/$label.out" 2> "$OUT/$label.err" &
   local pid=$!
@@ -145,9 +179,17 @@ timed() {
   kill $poller 2>/dev/null || true; wait $poller 2>/dev/null || true
   t1=$(date +%s.%N)
   if [ $rc -ne 0 ]; then say "  $label FAILED rc=$rc (see $OUT/$label.err)"; return $rc; fi
-  rb=$(awk '/^read_bytes:/ {print $2}' "$OUT/$label.io" 2>/dev/null || echo 0)
+  # `rchar`, NOT `read_bytes`. read_bytes counts what came off the BLOCK
+  # DEVICE, and the pre-pass's second read is served from page cache — so
+  # on a box whose tree fits in RAM both arms report 1x and the guard
+  # announces "the arms did not differ" about two binaries that differ
+  # exactly as designed. Measured on runcs: read_bytes 6.458e9 vs 6.458e9
+  # (ratio 1.00) while rchar was 6.44e9 vs 12.89e9 (ratio 2.00).
+  # rchar counts bytes returned by read(2) regardless of where they came
+  # from, which is the question — "did the code read the file twice?"
+  rb=$(awk '/^rchar:/ {print $2}' "$OUT/$label.io" 2>/dev/null || echo 0)
   printf '%s\t%s\t%s\n' "$label" "$(echo "$t1 - $t0" | bc)" "$rb" >> "$OUT/results.tsv"
-  say "  $label  $(echo "$t1 - $t0" | bc)s  read_bytes=$rb"
+  say "  $label  $(echo "$t1 - $t0" | bc)s  rchar=$rb"
 }
 
 env_common() {
@@ -156,8 +198,12 @@ env_common() {
 }
 
 # ── L1: the single read ──────────────────────────────────────────────
+# $3 is the EXPECTED rchar ratio: 2 where the compose path runs, 1 for
+# the null control. Without it the guard prints "GUARD FAILED" at the one
+# workload whose whole purpose is NOT to move — and a guard that cries
+# wolf on its own control arm is a guard people learn to ignore.
 leg1() {
-  local wl=$1 bytes=$2
+  local wl=$1 bytes=$2 want=${3:-2}
   for rep in $(seq 1 "$REPS"); do
     for arm in single prepass; do        # INTERLEAVED, not batched
       local dir="$ROOT/$wl" pfx="$PREFIX/l1/$wl/$arm/$rep"
@@ -172,13 +218,21 @@ leg1() {
   local s p
   s=$(awk -v w="l1-$wl-single" '$1 ~ w {n+=$3; c++} END {print (c? n/c : 0)}' "$OUT/results.tsv")
   p=$(awk -v w="l1-$wl-prepass" '$1 ~ w {n+=$3; c++} END {print (c? n/c : 0)}' "$OUT/results.tsv")
-  say "L1/$wl read_bytes: single=$s prepass=$p tree=$bytes"
-  awk -v s="$s" -v p="$p" -v b="$bytes" 'BEGIN{
+  say "L1/$wl rchar: single=$s prepass=$p tree=$bytes"
+  awk -v s="$s" -v p="$p" -v b="$bytes" -v want="$want" 'BEGIN{
     if (b==0 || s==0) {print "  INCONCLUSIVE: no read accounting"; exit}
     r = p/s
-    printf "  prepass/single read ratio = %.2f\n", r
-    if (r < 1.5) print "  *** GUARD FAILED: the arms did not differ in bytes read."
-    else         print "  guard OK: the control arm really does read the file twice."
+    printf "  prepass/single rchar ratio = %.2f (expected %.0f)\n", r, want
+    if (want >= 2) {
+      if (r < 1.5) print "  *** GUARD FAILED: the control arm did NOT read the file twice."
+      else         print "  guard OK: the control reads twice, the shipped path once."
+    } else {
+      # The NULL control. Files at or under whole_put_max never reach
+      # `upload_compose`, so this workload must be IDENTICAL on both
+      # arms. Movement here means the run is measuring the weather.
+      if (r > 1.2) print "  *** GUARD FAILED: the NULL control MOVED — L1 is weather, not a result."
+      else         print "  guard OK: the null control did not move, so the other arms mean something."
+    }
   }'
 }
 
@@ -290,7 +344,7 @@ say "seeded: big=$B_BIG mixed=$B_MIXED small=$B_SMALL"
 
 leg1 big   "$B_BIG"
 leg1 mixed "$B_MIXED"
-leg1 small "$B_SMALL"    # the NULL control: this one must NOT move
+leg1 small "$B_SMALL" 1  # the NULL control: expected ratio 1, must NOT move
 leg2
 leg2_control
 leg3
