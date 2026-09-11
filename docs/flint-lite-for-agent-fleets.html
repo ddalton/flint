@@ -326,10 +326,11 @@ kubectl -n workspaces create secret generic flint-api-token --from-literal=token
 POST   /v1/projects/{id}/wake                 <span class="cm">→ address, keepaliveSecs, mountWarning</span>
 GET    /v1/projects/{id}/files?path=&amp;recursive=&amp;cursor=
 GET    /v1/projects/{id}/files/content?path=  <span class="cm">[Range, If-None-Match]</span>
-PUT    /v1/projects/{id}/files/content?path=  <span class="cm">[If-Match, If-None-Match]</span>
-DELETE /v1/projects/{id}/files/content?path=  <span class="cm">[If-Match]</span>
+PUT    /v1/projects/{id}/files/content?path=  <span class="cm">[If-Match REQUIRED to replace]</span>
+DELETE /v1/projects/{id}/files/content?path=  <span class="cm">[If-Match REQUIRED]</span>
 POST   /v1/projects/{id}/files/folder | /files/move</code></pre>
 <p>One <code>Authorization: Bearer</code> header. Every object carries an <code>ETag</code>: read it, edit, write back under <code>If-Match</code>, and a competing write answers <code>412</code> instead of silently losing your edit. Bodies <b>stream</b> in both directions — memory does not scale with file size. There is <b>no route to <code>/status</code></b>, of any shape.</p>
+<p><b>Creating needs no precondition; replacing or deleting does.</b> An unconditioned <code>PUT</code> over a path that already exists, or an unconditioned <code>DELETE</code> of a file, is refused with <b><code>428 Precondition Required</code></b> — the server cannot tell an intentional overwrite from a caller who never saw the current version, so it refuses to guess. An absent path on <code>DELETE</code> stays a plain <code>404</code>. <code>If-Match: *</code> means &ldquo;whatever is there now, but it must exist&rdquo;: right for a single-writer deploy replacing its own artefact, wrong on a user&rsquo;s behalf, because it re-admits the lost update. &ldquo;Create or replace, either way&rdquo; is two requests — <code>PUT</code> unconditioned, and on <code>428</code> re-issue under <code>If-Match: *</code>.</p>
 <h2>5 &nbsp; Read through a mounted PVC</h2>
 
 <figure>

@@ -36,8 +36,8 @@ POST   /v1/projects/{id}[/volumes/{vol}]/wake         bring it up, and keep it u
 
 GET    /v1/projects/{id}[/volumes/{vol}]/files?path=&recursive=&cursor=&limit=
 GET    /v1/projects/{id}[/volumes/{vol}]/files/content?path=   [Range, If-None-Match]
-PUT    /v1/projects/{id}[/volumes/{vol}]/files/content?path=   [If-Match, If-None-Match]
-DELETE /v1/projects/{id}[/volumes/{vol}]/files/content?path=   [If-Match]
+PUT    /v1/projects/{id}[/volumes/{vol}]/files/content?path=   [If-Match REQUIRED to replace]
+DELETE /v1/projects/{id}[/volumes/{vol}]/files/content?path=   [If-Match REQUIRED]
 POST   /v1/projects/{id}[/volumes/{vol}]/files/folder          {"path": "..."}
 POST   /v1/projects/{id}[/volumes/{vol}]/files/move            [If-Match]
 
@@ -47,7 +47,9 @@ GET    /readyz      unauthenticated, 503 until the share cache has listed
 
 The request and response semantics are the hub's, unchanged: same
 listing shape, same `ETag`/`If-Match` compare-and-swap (v1.30.0), same
-`Range` support, same `Retry-After` on a 503. Read
+`Range` support, same `Retry-After` on a 503 — and the same refusal, so
+an unconditioned replace or delete gets `428` through the proxy exactly
+as it does at the hub. Read
 `docs/flint-lite-operator.md` for the file API itself.
 
 **There is no route to `/status`, of any shape.** The hub serves an

@@ -418,6 +418,16 @@ code=""; SEED_T0=$(date +%s); SEED_WHY=""
 for _ in $(seq 1 36); do
   code=$(gw PUT "/v1/projects/$PA/files/content?path=/r.bin" -H 'Content-Type: application/octet-stream' -H 'Expect:' -T /tmp/wl-r.bin)
   case "$code" in 200|201|204) break ;; esac
+  # 428 means a PREVIOUS attempt LANDED and we never saw its answer —
+  # the hub refuses an unconditioned overwrite of a file that exists.
+  # Retrying the same request can now only ever answer 428 again, so
+  # without this the loop burns its full 36 attempts and reports a seed
+  # failure for a seed that succeeded. Re-issue naming "whatever is
+  # there now": this is a fixture and the only writer is us.
+  if [ "$code" = "428" ]; then
+    code=$(gw PUT "/v1/projects/$PA/files/content?path=/r.bin" -H 'If-Match: *' -H 'Content-Type: application/octet-stream' -H 'Expect:' -T /tmp/wl-r.bin)
+    case "$code" in 200|201|204) note "the seed had already landed; re-issued under If-Match: *"; break ;; esac
+  fi
   SEED_WHY=$(python3 -c 'import json,sys
 try: print(json.load(open("/tmp/wl-body.bin")).get("error",""))
 except Exception: print("")' 2>/dev/null)
@@ -456,7 +466,13 @@ case "$code" in 200|201|204) pass "move into the new folder (HTTP $code)" ;; *) 
 code=$(gw GET "/v1/projects/$PA/files?path=/d1&recursive=false")
 grep -q 'r.bin' /tmp/wl-body.bin 2>/dev/null && pass "listing /d1 shows the moved file" \
   || { note "$(head -c 200 /tmp/wl-body.bin)"; bad "listing /d1 does not show the moved file (HTTP $code)"; }
-code=$(gw DELETE "/v1/projects/$PA/files/content?path=/d1/r.bin")
+# `If-Match: *` — the hub refuses an unconditioned DELETE of an
+# EXISTING file with 428, and the listing leg above has just asserted
+# this one is there. The header also makes the delete stronger than it
+# was: it now names "a file exists here" as a precondition instead of
+# assuming it, which is the same thing the anti-vacuity check below is
+# for.
+code=$(gw DELETE "/v1/projects/$PA/files/content?path=/d1/r.bin" -H 'If-Match: *')
 DELETED=""
 case "$code" in 200|204) DELETED=1 ;; *) bad "delete failed (HTTP $code)" ;; esac
 code=$(gw GET "/v1/projects/$PA/files/content?path=/d1/r.bin")

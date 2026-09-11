@@ -227,7 +227,14 @@ else fail "the directory did not cross cleanly"; fi
 
 # ── LEG 5 — a delete through one door is a delete in the other ───────
 say "[leg 5] deleting over REST removes it from the mount"
-DEL=$(inpod "$API -o /dev/null -w '%{http_code}' -X DELETE 'http://$POD_IP:8080/files/content?path=from-nfs.bin'")
+# `If-Match: *` — "whatever is there now". The hub refuses an
+# unconditioned DELETE of a file that EXISTS with 428 (a blind delete
+# destroys content), and this file provably exists: leg 2 wrote it over
+# the mount and read it back through this same door. Without the header
+# the leg fails on 428 and blames the wrong thing — its message would
+# read "deleted over REST but still visible on the mount" for a file
+# that was never deleted at all.
+DEL=$(inpod "$API -o /dev/null -w '%{http_code}' -X DELETE -H 'If-Match: *' 'http://$POD_IP:8080/files/content?path=from-nfs.bin'")
 GONE=$(inpod "test -e /mnt/share/from-nfs.bin && echo STILL_THERE || echo gone")
 echo "  DELETE $DEL   on the mount: $GONE"
 if [ "$DEL" = "200" ] && [ "$GONE" = "gone" ]; then pass "the delete crossed"; else fail "deleted over REST but still visible on the mount"; fi

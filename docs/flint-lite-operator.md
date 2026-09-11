@@ -505,15 +505,28 @@ the same project gets written from two browser tabs, from a retried
 upload, and from an agent, all at once. Three obligations follow, and
 they are contract, not advice:
 
-- **Send `If-Match` on every write you make on a user's behalf, and
-  handle `412` by re-reading rather than retrying the write.** Take the
-  tag from the `etag` on the listing entry or the download — a listing
-  carries one per file, so a browse gives you everything you need
-  without a stat per file. A `412` means the file changed under your
-  user since they read it; retrying the same body destroys whatever
-  arrived in between, which is precisely what the tag exists to
-  prevent. Without `If-Match` both writers get `201` and one edit is
-  discarded silently.
+- **`If-Match` is REQUIRED on every write that replaces content and on
+  every `DELETE`; handle `412` by re-reading rather than retrying the
+  write.** The server enforces this rather than trusting callers to:
+  a `PUT` over a path that already exists, or a `DELETE` of a file,
+  carrying no `If-Match` is refused with **`428 Precondition
+  Required`**. Creating is still unconditioned — `428` is for replacing
+  a file, never for writing a path that is not there — and an absent
+  path on `DELETE` stays a plain `404`. Take the tag from the `etag` on
+  the listing entry or the download; a listing carries one per file, so
+  a browse gives you everything you need without a stat per file. A
+  `412` means the file changed under your user since they read it;
+  retrying the same body destroys whatever arrived in between, which is
+  precisely what the tag exists to prevent.
+
+  `If-Match: *` — "whatever is there now, but it must exist" — is
+  provided for single-writer tooling replacing its own artefact. It
+  satisfies the mandate without naming a version, so it re-admits the
+  lost update; never send it on a user's behalf. "Create or replace,
+  I do not care which" is two requests: `PUT` unconditioned, and on
+  `428` re-issue under `If-Match: *`. There is deliberately no single
+  header for it, because one would be indistinguishable from the blind
+  overwrite the mandate exists to refuse.
 - **Use `If-None-Match: *` for create, and do not trust it to
   serialise a race.** It is checked with a stat, not inside the
   compound, because NFS has no operation that fails a compound
@@ -720,8 +733,8 @@ Six endpoints, all requiring `Authorization: Bearer <token>`:
 |---|---|
 | GET | `/files?path=&recursive=&limit=&cursor=` |
 | GET | `/files/content?path=` (Range, `If-None-Match`) |
-| PUT | `/files/content?path=` (`application/octet-stream`, `If-Match`, `If-None-Match: *`) |
-| DELETE | `/files/content?path=` (`If-Match`) |
+| PUT | `/files/content?path=` (`application/octet-stream`, `If-Match` **required to replace**, `If-None-Match: *`) |
+| DELETE | `/files/content?path=` (`If-Match` **required**) |
 | POST | `/files/folder` — `{"path": "/a/b"}` |
 | POST | `/files/move` — `{"from": "/a", "to": "/b"}` (`If-Match`, on `from`) |
 

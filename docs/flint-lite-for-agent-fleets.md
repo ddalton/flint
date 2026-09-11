@@ -403,13 +403,15 @@ POST   /v1/projects/{id}/wake                 -> see below
 
 GET    /v1/projects/{id}/files?path=&recursive=&cursor=&limit=
 GET    /v1/projects/{id}/files/content?path=  [Range, If-None-Match]
-PUT    /v1/projects/{id}/files/content?path=  [If-Match, If-None-Match]
-DELETE /v1/projects/{id}/files/content?path=  [If-Match]
+PUT    /v1/projects/{id}/files/content?path=  [If-Match REQUIRED to replace]
+DELETE /v1/projects/{id}/files/content?path=  [If-Match REQUIRED]
 POST   /v1/projects/{id}/files/folder         {"path": "..."}
 POST   /v1/projects/{id}/files/move           [If-Match]
 ```
 
 One `Authorization: Bearer` header, the gateway token from step 1.
+
+Creating a file needs no precondition:
 
 ```bash
 curl -X PUT \
@@ -419,9 +421,24 @@ curl -X PUT \
   "$GW/v1/projects/proj-a/files/content?path=/models/model.safetensors"
 ```
 
-Every object carries an `ETag`. Read it, edit, and write back under
-`If-Match` and a competing write answers `412` instead of silently
-losing your edit:
+**Replacing or deleting one does.** Send that same request a second
+time, against the path you just wrote, and it is refused:
+
+```
+428 Precondition Required
+the file already exists; send If-Match with the version you read,
+or If-None-Match: * to create only if absent
+```
+
+That is deliberate, and it is the single thing most likely to surprise
+you when you move from a first run to a second. Without it, two callers
+that each read v1 and then `PUT` both succeed and the second silently
+wins — the lost update. The server cannot tell that apart from an
+intentional overwrite, so it refuses to guess: **every write that
+replaces content, and every `DELETE`, must name what it read.**
+
+So read the `ETag`, edit, and write back under `If-Match`. A competing
+write now answers `412` instead of eating your edit:
 
 ```bash
 ETAG=$(curl -sI -H "Authorization: Bearer $GATEWAY_TOKEN" \
@@ -431,7 +448,32 @@ ETAG=$(curl -sI -H "Authorization: Bearer $GATEWAY_TOKEN" \
 curl -X PUT -H "Authorization: Bearer $GATEWAY_TOKEN" \
   -H "If-Match: $ETAG" --data-binary @notes.md \
   "$GW/v1/projects/proj-a/files/content?path=/notes.md"
+
+curl -X DELETE -H "Authorization: Bearer $GATEWAY_TOKEN" \
+  -H "If-Match: $ETAG" \
+  "$GW/v1/projects/proj-a/files/content?path=/notes.md"
 ```
+
+The four answers you need to handle:
+
+| code | means |
+|------|-------|
+| `428` | you sent no `If-Match` and the file exists — re-read it and name the version |
+| `412` | you named a version that is no longer current — someone else wrote; re-read and merge |
+| `409` | the write raced another one mid-flight, or a directory is not empty |
+| `404` | on `DELETE`, there was nothing there; an absent path is never a `428` |
+
+`If-Match: *` means "whatever is there now, but it must exist". It
+is the right header for a **fixture or a seed with exactly one
+writer** — a deploy script replacing its own artifact — and the wrong
+one for anything acting on a user's behalf, because it re-introduces
+exactly the lost update the `428` exists to stop. `If-None-Match: *`
+is the mirror: create, and fail if the path is taken.
+
+If your tooling needs "create or replace, I do not care which", that is
+two requests now: `PUT` unconditioned, and on `428` re-issue under
+`If-Match: *`. There is no single header for it, because a header that
+meant it would be indistinguishable from the blind overwrite.
 
 Each endpoint is an NFS compound dispatched **in-process through the
 hub's own dispatcher**, not a second reader of the export directory. So

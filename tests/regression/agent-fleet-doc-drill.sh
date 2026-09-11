@@ -42,6 +42,13 @@
 #   L5  A REST write is visible on an already-established mount.
 #       This is the two-door coherence claim, and it is the one most
 #       likely to be quietly wrong: the kernel caches attributes.
+#   L5b The guide's precondition mandate: creating needs no header,
+#       replacing and deleting require `If-Match`, and the refusal is
+#       428. FALSE IF: a blind replace succeeds (the lost update is
+#       back) — or if `If-Match: *` is ALSO refused, which would make
+#       the mandate an outage rather than a precondition. The CREATE is
+#       the control arm: "refuses the overwrite" is also what a server
+#       that refuses every unconditioned write looks like.
 #   L6  An evicted file reads back through the MOUNT transparently and
 #       byte-identically.
 #       FALSE IF: the reader gets a body of zeros, an error, or the
@@ -327,6 +334,33 @@ gw() {
     pf_gw
     code=$(curl -s -o /tmp/doc-body.txt -w '%{http_code}' -X "$method" \
       -H "Authorization: Bearer $GW_TOKEN" "$@" "http://127.0.0.1:$PF_GW$path")
+  fi
+  echo "$code"
+}
+
+# SEEDING, UNDER THE PRECONDITION MANDATE.
+#
+# The hub refuses an unconditioned PUT over a file that ALREADY EXISTS
+# with 428 — a blind overwrite is a lost update — while a CREATE stays
+# unconditioned. A drill that seeds a fixed path is therefore fine on a
+# clean slate and broken on the second run, and the two modes differ:
+# kind deletes and recreates its cluster and its MinIO every run, so
+# every seed there is a create; MODE=cluster reuses the caller's real
+# BUCKET, and the fresh hub hydrates the PREVIOUS run's objects straight
+# back under the same keys. Without this the drill fails on its own
+# fixture and reports it as a product failure.
+#
+# "Whatever is there now" is the honest header for a fixture: the drill
+# is the only writer of these paths and does not care which version it
+# replaces. It is NOT the right header for real callers, and the guide
+# says so — they name the version they read.
+seed_put() {
+  local path="$1"; shift
+  local code
+  code=$(gw PUT "$path" "$@")
+  if [ "$code" = "428" ]; then
+    note "seed path already present from an earlier run; re-issuing under If-Match: *"
+    code=$(gw PUT "$path" -H 'If-Match: *' "$@")
   fi
   echo "$code"
 }
@@ -853,7 +887,7 @@ say "L5: a REST write is visible on an ALREADY-ESTABLISHED mount"
   # the harness writes over REST while an agent has the tree mounted.
   BODY="rest-write-$(date +%s)"
   printf '%s\n' "$BODY" >/tmp/doc-rest.txt
-  code=$(gw PUT "/v1/projects/$PROJECT/volumes/data/files/content?path=/rest-written.txt" \
+  code=$(seed_put "/v1/projects/$PROJECT/volumes/data/files/content?path=/rest-written.txt" \
     -H 'Content-Type: application/octet-stream' --data-binary @/tmp/doc-rest.txt)
   case "$code" in
     200|201|204) ;;
@@ -880,7 +914,7 @@ say "L5: a REST write is visible on an ALREADY-ESTABLISHED mount"
   # overwrite needs the FILE's attribute cache to expire, which is the
   # case a guide is most likely to get wrong.
   printf 'v1\n' >/tmp/doc-v1.txt
-  gw PUT "/v1/projects/$PROJECT/volumes/data/files/content?path=/versioned.txt" \
+  seed_put "/v1/projects/$PROJECT/volumes/data/files/content?path=/versioned.txt" \
      -H 'Content-Type: application/octet-stream' --data-binary @/tmp/doc-v1.txt >/dev/null
   for _ in $(seq 1 30); do
     [ "$(ag "cat /workspace/versioned.txt 2>/dev/null" | grep -c v1)" -gt 0 ] && break
@@ -909,6 +943,68 @@ say "L5: a REST write is visible on an ALREADY-ESTABLISHED mount"
   fi
 fi
 
+# ══ L5b ══════════════════════════════════════════════════════════════
+say "L5b: the guide's precondition mandate — a blind replace and a blind delete are REFUSED"
+# THE CLAIM: the guide now tells readers that creating needs no
+# precondition, that replacing or deleting requires If-Match, and that
+# the refusal is 428. Nothing tested that until this leg, and the gap
+# was not theoretical: the mandate shipped in the hub while two other
+# drills still sent blind deletes, and the failure they produced named
+# the wrong component ("still visible on the mount" for a file that was
+# never deleted).
+#
+# FALSE IF: an unconditioned replace succeeds — the lost update the
+# whole mechanism exists to stop is back, silently.
+#
+# THE CONTROL ARM IS THE CREATE. "Refuses the overwrite" is also what a
+# server that refuses EVERY unconditioned write looks like, and that
+# server would make the guide's first example wrong. Both arms are
+# asserted here, and the create is asserted FIRST so that a 428 on it
+# fails as itself rather than poisoning the arm below.
+PC=pc-$(date +%s).txt
+printf 'one\n' >/tmp/doc-pc.txt
+code=$(gw PUT "/v1/projects/$PROJECT/volumes/data/files/content?path=/$PC" \
+  -H 'Content-Type: application/octet-stream' --data-binary @/tmp/doc-pc.txt)
+case "$code" in
+  200|201|204) pass "CONTROL: an unconditioned PUT to an ABSENT path is accepted ($code) — creating needs no precondition" ;;
+  *) bad "an unconditioned CREATE answered $code — the guide's first example does not work: $(cat /tmp/doc-body.txt)" ;;
+esac
+
+printf 'two\n' >/tmp/doc-pc2.txt
+code=$(gw PUT "/v1/projects/$PROJECT/volumes/data/files/content?path=/$PC" \
+  -H 'Content-Type: application/octet-stream' --data-binary @/tmp/doc-pc2.txt)
+if [ "$code" = "428" ]; then
+  pass "an unconditioned REPLACE is refused with 428 — a blind overwrite cannot lose an update"
+else
+  bad "an unconditioned replace answered $code, wanted 428 — a lost update is possible and the guide is wrong"
+fi
+
+code=$(gw DELETE "/v1/projects/$PROJECT/volumes/data/files/content?path=/$PC")
+if [ "$code" = "428" ]; then
+  pass "an unconditioned DELETE of an existing file is refused with 428 — a blind delete destroys content"
+else
+  bad "an unconditioned delete answered $code, wanted 428"
+fi
+
+# ANTI-VACUITY: 428 on everything would also produce the two passes
+# above. `If-Match: *` must actually get the work done, and the file
+# must actually be gone afterwards — otherwise the mandate is not a
+# precondition, it is an outage.
+code=$(gw PUT "/v1/projects/$PROJECT/volumes/data/files/content?path=/$PC" \
+  -H 'If-Match: *' -H 'Content-Type: application/octet-stream' --data-binary @/tmp/doc-pc2.txt)
+case "$code" in
+  200|201|204) pass "the same replace under If-Match: * is accepted ($code)" ;;
+  *) bad "If-Match: * was refused on a replace ($code) — the refusal above is an outage, not a precondition" ;;
+esac
+code=$(gw DELETE "/v1/projects/$PROJECT/volumes/data/files/content?path=/$PC" -H 'If-Match: *')
+case "$code" in 200|204) ;; *) bad "If-Match: * was refused on a delete ($code)" ;; esac
+code=$(gw GET "/v1/projects/$PROJECT/volumes/data/files/content?path=/$PC")
+if [ "$code" = "404" ]; then
+  pass "after the conditioned delete the path is 404 — the delete did the work, and an ABSENT path is a plain 404, never a 428"
+else
+  bad "a deleted path answered $code, wanted 404 — the delete leg above may be vacuous"
+fi
+
 # ══ L6 ═══════════════════════════════════════════════════════════════
 say "L6: an evicted file hydrates from S3 through the MOUNT, byte-identical (${COLD_MB} MiB)"
 # Seed through REST, let it publish, force eviction, then read it back
@@ -931,10 +1027,18 @@ if [ "$MODE" = cluster ]; then
         -H 'Authorization: Bearer $GW_TOKEN' -H 'Content-Type: application/octet-stream' -H 'Expect:' \
         -T /tmp/p.bin \
         'http://flint-lite-operator-gateway.$OPNS.svc:8090/v1/projects/$PROJECT/volumes/cold/files/content?path=/cold.bin');
-      curl -s -o /dev/null -X PUT -H 'Authorization: Bearer $GW_TOKEN' \
+      if [ \"\$C\" = 428 ]; then C=\$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
+        -H 'Authorization: Bearer $GW_TOKEN' -H 'Content-Type: application/octet-stream' -H 'Expect:' \
+        -H 'If-Match: *' -T /tmp/p.bin \
+        'http://flint-lite-operator-gateway.$OPNS.svc:8090/v1/projects/$PROJECT/volumes/cold/files/content?path=/cold.bin'); fi;
+      D=\$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'Authorization: Bearer $GW_TOKEN' \
         -H 'Content-Type: application/octet-stream' -H 'Expect:' \
         --data-binary \"\$S\" \
-        'http://flint-lite-operator-gateway.$OPNS.svc:8090/v1/projects/$PROJECT/volumes/data/files/content?path=/cold.sha256';
+        'http://flint-lite-operator-gateway.$OPNS.svc:8090/v1/projects/$PROJECT/volumes/data/files/content?path=/cold.sha256');
+      if [ \"\$D\" = 428 ]; then curl -s -o /dev/null -X PUT -H 'Authorization: Bearer $GW_TOKEN' \
+        -H 'Content-Type: application/octet-stream' -H 'Expect:' -H 'If-Match: *' \
+        --data-binary \"\$S\" \
+        'http://flint-lite-operator-gateway.$OPNS.svc:8090/v1/projects/$PROJECT/volumes/data/files/content?path=/cold.sha256'; fi;
       echo RESULT code=\$C sum=\$S" >/dev/null 2>&1
   for _ in $(seq 1 90); do
     sph=$(kubectl -n "$NS" get pod seeder -o jsonpath='{.status.phase}' 2>/dev/null)

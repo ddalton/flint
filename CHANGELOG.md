@@ -12,6 +12,80 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING (lite file API): a write that replaces content, and every
+  `DELETE` of a file, must now carry `If-Match`.** An unconditioned
+  `PUT` over a path that already exists, or an unconditioned `DELETE` of
+  a file, is refused with **`428 Precondition Required`**. Creating is
+  unchanged and still needs no header — `428` is for replacing a file,
+  never for writing a path that is not there — and an absent path on
+  `DELETE` stays a plain `404`. Without this, two callers that each read
+  v1 and then `PUT` both succeed and the second silently wins; the
+  server cannot tell that apart from an intentional overwrite, so it
+  refuses to guess. This matches flint-forge's file API, which already
+  answers `PreconditionRequired` for the same shape, and the two
+  surfaces are meant to be one shape. `MOVE` is deliberately exempt on
+  both sides: `PUT` and `DELETE` destroy content, a rename does not.
+
+  **Describe it to callers as detection, never as exclusion.** `If-Match`
+  becomes a `VERIFY` inside the mutating NFS compound, but a COMPOUND is
+  not atomic: two writers can both pass their VERIFY before either lands
+  its RENAME. Measured on eight writers appending to one file, 200
+  writes, the unconditioned control loses 168-174 every time and
+  `If-Match` loses 32-66 idle and 90-102 under CPU load — a 5x
+  improvement falling to under 2x, never a guarantee.
+
+  **Migrating.** Read the `etag` from a listing entry or a download and
+  send it back. For single-writer tooling replacing its own artefact,
+  `If-Match: *` means "whatever is there now, but it must exist" — it
+  satisfies the mandate without naming a version, so it re-admits the
+  lost update and must never be sent on a user's behalf. "Create or
+  replace, I do not care which" is now two requests: `PUT`
+  unconditioned, and on `428` re-issue under `If-Match: *`. There is
+  deliberately no single header for it, because one would be
+  indistinguishable from the blind overwrite.
+
+### Fixed
+
+- **The mandate above shipped without its callers, and two drills broke
+  on a clean run.** `two-doors-kind.sh` leg 5 and `agent-workload-drill.sh`
+  both sent an unconditioned `DELETE` of a file they had just proven was
+  there, so both now meet `428`. The `two-doors` failure is the
+  instructive one: its assertion reported *"deleted over REST but still
+  visible on the mount"* — a message that blames cross-door coherence
+  for a file that was never deleted at all. A refusal that arrives where
+  no caller expects one gets attributed to whatever the assertion
+  happens to be about.
+- **Seeding a fixed path stopped being idempotent, which broke re-runs
+  rather than first runs.** `MODE=cluster` drills reuse the caller's real
+  bucket, and a fresh hub hydrates the previous run's objects back under
+  the same keys — so the second run's seed is no longer a create. The
+  seeds in `agent-fleet-doc-drill.sh` (host-side and in the in-cluster
+  seeder) and `hub-lifecycle-drill.sh` now fall back to `If-Match: *` on
+  `428`. `agent-workload-drill.sh`'s seed retry loop had the sharper
+  version of the same bug: `428` was not in its success set, so a retry
+  after a partial success could only ever answer `428` again — burning
+  all 36 attempts and reporting a seed failure for a seed that had
+  landed.
+- **`docs/flint-lite-for-agent-fleets.md` still taught the old contract**
+  — an unconditioned `PUT` as *the* way to write, with `If-Match`
+  introduced afterwards as an optional upgrade that buys you `412`
+  instead of a silent loss. A reader following it literally would write
+  once and get an undocumented `428` on their next deploy. The guide now
+  separates create from replace, shows the refusal, tabulates
+  428/412/409/404, and states what `If-Match: *` costs.
+  `docs/flint-lite-operator.md` and `docs/flint-hub-gateway.md` marked
+  the header optional in the same bracket notation as `Range`; both now
+  say required.
+- **`agent-fleet-doc-drill.sh` gained L5b**, which asserts the mandate
+  the guide now documents: a blind replace and a blind delete are `428`,
+  the same requests under `If-Match: *` succeed, and the path is `404`
+  afterwards. The **create is the control arm** — "refuses the
+  overwrite" is also what a server refusing *every* unconditioned write
+  looks like, and that server would make the guide's first example
+  wrong.
+
 ## [1.49.0] - 2026-09-09
 
 **NO NEW CODE. This is the release that puts the code into the images.**

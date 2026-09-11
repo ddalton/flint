@@ -275,6 +275,19 @@ WANT=$(shasum -a 256 /tmp/lc-payload.bin 2>/dev/null | awk '{print $1}')
 [ -n "$WANT" ] || WANT=$(sha256sum /tmp/lc-payload.bin | awk '{print $1}')
 code=$(gw PUT "/v1/projects/$PROJECT/files/content?path=/payload.bin" \
   -H 'Content-Type: application/octet-stream' -H 'Expect:' -T /tmp/lc-payload.bin)
+# 428 = this path survives from an earlier run. The hub refuses an
+# unconditioned PUT over a file that EXISTS (a blind overwrite is a lost
+# update); a create stays unconditioned. This drill runs against the
+# caller's REAL bucket and seeds a FIXED key, so a fresh hub hydrates
+# the previous run's payload.bin straight back and the seed stops being
+# a create. The fixture has exactly one writer and does not care which
+# version it replaces — which is why `*` is right here and wrong for a
+# real caller, who names the version it read.
+if [ "$code" = "428" ]; then
+  note "payload.bin survives from an earlier run; re-seeding under If-Match: *"
+  code=$(gw PUT "/v1/projects/$PROJECT/files/content?path=/payload.bin" \
+    -H 'If-Match: *' -H 'Content-Type: application/octet-stream' -H 'Expect:' -T /tmp/lc-payload.bin)
+fi
 case "$code" in 200|201|204) ;; *) fail "seeding failed (HTTP $code): $(head -c 200 /tmp/lc-body.bin)" ;; esac
 PUB=""
 for _ in $(seq 1 60); do
