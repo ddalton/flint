@@ -264,11 +264,71 @@ needed no new locking.
   must be CARRIED to the agent as advisory news, exactly as
   `sync-request` is — never performed.
 - **Phase 5's CRD field**, unchanged: still not there.
-- **The TLA+ Narrow action.** `LeanSubtree.tla` has no `Narrow`, no
-  §4.2 invariant, and no cfg that fails on the naive version. The three
-  mutation checks below stand in for it and are NOT a substitute — §8's
-  open question, whether the `baseline`/`instBase` split can express a
-  scope at all, is still open.
+- ~~The TLA+ Narrow action.~~ **BUILT — see §4.8.**
+
+
+### 4.8 The model tranche — and the half of the rule it CANNOT check
+
+Added to `LeanSubtree.tla`: `prevScan` and `scope` as fields of the `sc`
+record (so no existing `UNCHANGED` tuple moved), the constants
+`TwoScanDelete` / `MaxNarrows` / `NarrowAtomic` / `NarrowUnlinkFirst`,
+a `Narrow` action, `Inv_NarrowNeverDeletes`, `Inv_NarrowNeverRecites`,
+`ProbeNarrow`, and four cfgs wired into `check.sh` — **83 runs, was
+79**. (The prose count in that file said "fifty-five" and its printed
+denominator said 79, so the gate had been reporting `83/79 green`: a
+line nobody reads as wrong. The total is now ASSERTED, and the
+assertion was watched to fail on a deliberately short run.) All four new constants are FALSE/0 in every pre-existing cfg — 67
+files gained four lines each and NOTHING else, so earlier state spaces
+are preserved by construction. Turning `TwoScanDelete` on globally would
+SHRINK every earlier run's delete space, and a pinned mutation that
+stops finding its counterexample is the failure this harness exists to
+prevent.
+
+**The model earned its green by catching both wrong narrows first:**
+
+| run | required | result |
+|---|---|---|
+| `LeanNarrowUnlinkFirst` | `Inv_NarrowNeverDeletes` violated | violated ✓ |
+| `LeanNarrowUncieFirst` | `Inv_NarrowNeverRecites` violated | violated ✓ |
+| `LeanProbeNarrow` | `ProbeNarrow` violated (the action fires) | violated ✓ |
+| `LeanNarrowHolds` | green | **green, 10,179 distinct states** |
+
+**THE LIMIT, MEASURED — do not read the green run as more than it is.**
+The shipped rule has three conjuncts: a narrow removes the path from
+`entries`, from `prev_scan`, and from the tree in one step. **The model
+checks two of them.** `Dirty(s)` is `local[p] # baseline[p]`, so
+`baseline[p] := 0` alone already makes the path undirty and `prevScan`
+cannot change any classification. Deleting the `prevScan` removal from
+the atomic arm leaves `LeanNarrowHolds` **green over 10,823 distinct
+states**. In `scan.rs` the two are separate structures and `classify`
+consults both, so the code carries a conjunct this abstraction
+collapses.
+
+The model is therefore WEAKER than the code here. That is the safe
+direction for a miss and the wrong direction for a claim, which is why
+it is written at the line itself and not only here.
+
+### 4.9 §8's question, answered — and my first answer was too strong
+
+§8 asked whether the `baseline`/`instBase` split can express a scope at
+all. Reading the variable declarations, the answer looked like a flat
+no: `prevScan` did not exist anywhere in 2,040 lines, and `baseline` is
+a TOTAL function `[Paths -> Nat]` whose `0` conflates *never held*,
+*held but absent*, and *dropped by a narrow*.
+
+**Building it showed that was overstated.** The conflation is benign
+for this invariant precisely because `Dirty` compares `local` to
+`baseline`: a correctly narrowed path is `0 = 0` and therefore in
+neither the upload nor the delete set, while each naive order leaves
+exactly one side at `0` and is caught. So the split DOES carry a scope
+well enough to check the narrow's atomicity — and it does NOT carry
+enough to check the `prev_scan` conjunct, which needed `prevScan` added
+and still cannot be made load-bearing without changing `Dirty` itself.
+
+The precise answer: **two of the rule's three conjuncts are
+machine-checked; the third is carried by the code and by
+`a_narrow_leaves_the_merge_base_whole` plus the three Rust mutation
+checks in §4.7, and by nothing in TLA+.**
 
 ### 4.7 The mutation checks, run
 

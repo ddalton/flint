@@ -12,7 +12,8 @@ SyncScanFirst SyncScope ScopedInstBase GatedCitation AtomicCitation \
 GCKeepsCurrent CiteDropsInflightHitl BackstopEnabled MineIsNotForeign \
 MaxTouches \
 SentinelEnabled FoldPending AckFromInstall RefuseOnFence FastPathGuards \
-AckHonest LaneCancelsStaged GatedRepair StampBoundarySource"
+AckHonest LaneCancelsStaged GatedRepair StampBoundarySource \
+TwoScanDelete MaxNarrows NarrowAtomic NarrowUnlinkFirst"
 
 emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   local name=$1 invs=$2; shift 2
@@ -47,6 +48,16 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   # shipped behaviour after the drill found the bucket and the ack naming
   # two different clocks for one boundary.
   local c_StampBoundarySource=TRUE
+  # tranche 4: the NARROW verb (scoped-read design §4).  All four FALSE/0
+  # in every pre-existing cfg, so their state spaces are preserved by
+  # construction: MaxNarrows=0 makes the action unreachable and the new sc
+  # fields stay at Init, and TwoScanDelete=FALSE keeps the one-scan delete
+  # rule those cfgs were written against.  Turning the two-scan rule on
+  # globally would SHRINK every earlier run's delete space, and a pinned
+  # mutation that stops finding its counterexample is the failure this
+  # harness exists to prevent.
+  local c_TwoScanDelete=FALSE c_MaxNarrows=0
+  local c_NarrowAtomic=TRUE c_NarrowUnlinkFirst=FALSE
   local kv
   for kv in "$@"; do eval "c_${kv%%=*}=${kv#*=}"; done
   {
@@ -476,3 +487,36 @@ emit LeanProbeScopedGated "ProbeScopedDeferral" $SCOPEGATED
 # must still be caught when a citation lane is also advancing it.
 emit LeanScopedGatedWholeBase "Inv_NoForeignLost" \
   $SCOPEGATED ScopedInstBase=FALSE
+
+# ---- tranche 4: the NARROW verb x the barrier (scoped-read design §4) ------
+#
+# WORLD NOTE. The narrow's two failure modes are read by `classify`, so the
+# world has to contain a barrier that actually classifies: MaxBarriers>=2,
+# because the unlink-first arm needs ONE scan to make the path delete-
+# eligible under the two-scan rule and a SECOND to run the GC. A one-barrier
+# world would let the unlink-first mutation come back green — over a world
+# its bug cannot reach.
+#
+# TwoScanDelete=TRUE here and nowhere else: this is the first tranche to
+# model `prev_scan` at all, and the narrow invariant is the only claim that
+# depends on it.
+NARROWWORLD="TwoScanDelete=TRUE MaxNarrows=1 MaxHitl=0 MaxGen=3 MaxSeq=6 \
+MaxBarriers=2 MaxCrashes=0 MaxRestarts=0 AllowStall=FALSE"
+
+emit LeanNarrowHolds \
+  "TypeOK,Inv_HITLDurable,Inv_NoDangling,Inv_NoResurrection,\
+Inv_NarrowNeverDeletes,Inv_NarrowNeverRecites" \
+  $NARROWWORLD
+# Anti-vacuity: if Narrow is unreachable in this world the holds run above
+# is green over nothing. Probes the ACTION via a ghost only Narrow writes.
+emit LeanProbeNarrow "ProbeNarrow" $NARROWWORLD
+# §4.2's first naive order: unlink the file, leave the citation. The next
+# scan reads present-in-baseline/absent-from-scan-and-prevScan as a DELETE
+# and the GC publishes it — the workspace takes the bucket's copy with it.
+emit LeanNarrowUnlinkFirst "Inv_NarrowNeverDeletes" \
+  $NARROWWORLD NarrowAtomic=FALSE NarrowUnlinkFirst=TRUE
+# §4.2's second naive order: uncite the path, leave the file. The next scan
+# reads present-in-scan/absent-from-baseline as a local ADD, uploads it and
+# re-cites it — the barrier silently undoes the narrow.
+emit LeanNarrowUncieFirst "Inv_NarrowNeverRecites" \
+  $NARROWWORLD NarrowAtomic=FALSE NarrowUnlinkFirst=FALSE

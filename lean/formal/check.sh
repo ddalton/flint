@@ -6,7 +6,8 @@
 # DELIBERATELY SEPARATE from scripts/check-tla.sh (flint's 196-run gate):
 # lean is a separate system.  Same harness discipline, its own runs.
 #
-# Fifty-five runs, ALL required:
+# Eighty-three runs, ALL required (asserted at the bottom, not just
+# printed — this prose count had drifted to "fifty-five"):
 #   - strict runs must complete with every listed invariant green;
 #   - mutation runs must FIND their designated counterexample — a model
 #     that cannot rediscover its bug classes proves nothing;
@@ -125,6 +126,15 @@ mutation_run $M LeanScopedSyncWholeBase.cfg "a scoped sync advancing the WHOLE m
   "Invariant Inv_NoForeignLost is violated"
 mutation_run $M LeanProbeScopedDeferral.cfg "probe: a scoped sync actually defers an out-of-scope remote change" \
   "Invariant ProbeScopedDeferral is violated"
+
+# ---- tranche 4: the NARROW verb (scoped-read design §4) --------------------
+strict_run $M LeanNarrowHolds.cfg "narrow: a narrow is an UNWATCH — the dropped path keeps its object and is never re-cited"
+mutation_run $M LeanNarrowUnlinkFirst.cfg "unlink-then-uncite: the surviving citation makes the path delete-eligible and the GC publishes it" \
+  "Invariant Inv_NarrowNeverDeletes is violated"
+mutation_run $M LeanNarrowUncieFirst.cfg "uncite-then-unlink: the surviving file reads as a local ADD and the barrier re-cites everything just dropped" \
+  "Invariant Inv_NarrowNeverRecites is violated"
+mutation_run $M LeanProbeNarrow.cfg "probe: the narrow verb actually fires" \
+  "Invariant ProbeNarrow is violated"
 
 # ---- tranche 3, product 2: gated citation x version GC x the backstop -----
 strict_run $M LeanGatedHolds.cfg "gated advance: cited versions live, the reaper never takes live bytes, boundaries are all-or-nothing"
@@ -247,4 +257,17 @@ mutation_run $M2 LeanChunkMergeProbeBoth.cfg "probe: both writers actually wrote
   "Invariant Probe_BothWrote is violated"
 
 echo
-echo "lean formal gate: $PASS/79 runs green"
+# The expected total is ASSERTED, not printed: a hardcoded denominator
+# that drifts below the real run count turns "83/79 green" into a line
+# nobody reads as wrong. It had drifted to 79 against 79 real runs
+# before this tranche; the prose count at the top of this file had
+# drifted further still, to "Fifty-five".
+EXPECT=83
+echo
+if [ "$PASS" -ne "$EXPECT" ]; then
+  echo "lean formal gate: $PASS runs green but $EXPECT were declared — a run was"
+  echo "added or removed without updating EXPECT, so the gate is no longer"
+  echo "counting what it claims to count."
+  exit 1
+fi
+echo "lean formal gate: $PASS/$EXPECT runs green"

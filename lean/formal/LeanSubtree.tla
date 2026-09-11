@@ -196,6 +196,24 @@ CONSTANTS
                        \* tell cited from uncited, so it runs a clock
                        \* against live cited data (D8's inversion, and
                        \* §2.4.3's abandoned-mid-stage endgame).
+  TwoScanDelete,       \* TRUE = a path is delete-eligible only if it was
+                       \* also present at the PREVIOUS scan — the shipped
+                       \* two-consecutive-scans rule (`scan.rs` classify).
+                       \* FALSE in every PRE-EXISTING cfg, deliberately:
+                       \* this tranche is the first to model `prev_scan`
+                       \* at all, and turning it on globally would shrink
+                       \* every earlier run's delete space and let a
+                       \* pinned mutation stop finding its counterexample.
+  MaxNarrows,          \* bound on Narrow actions (0 disables the verb).
+  NarrowAtomic,        \* TRUE = the SHIPPED rule: a narrow removes the
+                       \* path from the baseline, from `prevScan` and
+                       \* from the tree in ONE step.  FALSE selects a
+                       \* naive arm via NarrowUnlinkFirst.
+  NarrowUnlinkFirst,   \* only under ~NarrowAtomic.  TRUE = unlink and
+                       \* leave the citation (classify reads a DELETE);
+                       \* FALSE = uncite and leave the file (classify
+                       \* reads an UPLOAD).  Both are the naive orders
+                       \* §4.2 says are each destructive on their own.
   StampBoundarySource  \* TRUE = every install stamps the manifest with
                        \* the SAME clock its ack will name.  FALSE = the
                        \* mutation, and it is what shipped: the barrier
@@ -439,7 +457,11 @@ Deposed(s)  == cellEpoch > sc[s].epoch
 Running(s)  == sc[s].st = "running"
 Dirty(s)    == {p \in Paths : sc[s].local[p] # sc[s].baseline[p]}
 USet(s)     == {p \in Dirty(s) : sc[s].local[p] # 0}
-DSet(s)     == {p \in Dirty(s) : sc[s].local[p] = 0}
+\* The two-consecutive-scans rule.  Under ~TwoScanDelete this is the
+\* one-scan rule every pre-existing cfg was written against, so their
+\* state spaces are unchanged by construction.
+DSet(s)     == {p \in Dirty(s) : sc[s].local[p] = 0
+                                 /\ (~TwoScanDelete \/ p \in sc[s].prevScan)}
 CitedGens   == {manifest[p] : p \in Paths} \ {0}
 UploadsDone(s) == sc[s].scanU \subseteq (sc[s].upDone \cup sc[s].parked)
 
@@ -469,6 +491,7 @@ Init ==
        [st |-> "unstarted", pc |-> "idle", epoch |-> 0, expSeq |-> 0,
         installed |-> FALSE,
         local |-> [p \in Paths |-> 0], baseline |-> [p \in Paths |-> 0],
+        scope |-> Paths, prevScan |-> {},
         instBase |-> [p \in Paths |-> 0],
         instSnap |-> [p \in Paths |-> 0], instSeq |-> 0,
         known |-> {}, scanU |-> {}, scanD |-> {},
@@ -497,7 +520,8 @@ Init ==
            fastHonor |-> FALSE, ackEarly |-> FALSE,
            ackIncoherent |-> FALSE, fencedOkAck |-> FALSE,
            srcMismatch |-> FALSE,
-           partialAcks |-> 0, declaredDrops |-> 0]
+           partialAcks |-> 0, declaredDrops |-> 0,
+           narrows |-> 0, narrowed |-> {}, narrowRecited |-> {}]
 
 ------------------------------------------------------------------------------
 (* Lifecycle *)
@@ -509,6 +533,8 @@ StartA ==
        !["A"].st = "running", !["A"].epoch = 1, !["A"].expSeq = manSeq,
        !["A"].local = [p \in Paths |-> manifest[p]],
        !["A"].baseline = [p \in Paths |-> manifest[p]],
+       !["A"].prevScan = IF TwoScanDelete
+                            THEN {q \in Paths : manifest[q] # 0} ELSE {},
        !["A"].instBase = [p \in Paths |-> manifest[p]],
        !["A"].known = CitedGens]
   /\ UNCHANGED <<manSeq, manSrc, manifest, objects, inbox, window,
@@ -658,6 +684,8 @@ CheckoutB ==
   /\ sc' = [sc EXCEPT !["B"].st = "running", !["B"].expSeq = manSeq,
        !["B"].local = [p \in Paths |-> manifest[p]],
        !["B"].baseline = [p \in Paths |-> manifest[p]],
+       !["B"].prevScan = IF TwoScanDelete
+                            THEN {q \in Paths : manifest[q] # 0} ELSE {},
        !["B"].instBase = [p \in Paths |-> manifest[p]],
        !["B"].known = CitedGens]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
@@ -670,7 +698,12 @@ AgentWrite(s, p) ==
   /\ Running(s) /\ gh.nextGen <= MaxGen
   /\ sc' = [sc EXCEPT ![s].local[p] = gh.nextGen,
                       ![s].known = @ \cup {gh.nextGen}]
-  /\ gh' = [gh EXCEPT !.nextGen = @ + 1]
+  \* Re-creating a narrowed path is the FEATURE (`sync.rs:13-22` names
+  \* merge -> inbox -> consume as the designed destination for
+  \* out-of-scope changes), so it leaves the narrow ledger — otherwise
+  \* Inv_NarrowNeverRecites would fire on legitimate widening and the
+  \* invariant would be unsound rather than strong.
+  /\ gh' = [gh EXCEPT !.nextGen = @ + 1, !.narrowed = @ \ {p}]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts>>
 
@@ -679,6 +712,57 @@ AgentDelete(s, p) ==
   /\ sc' = [sc EXCEPT ![s].local[p] = 0]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, hitlAcked, conflicts, gh>>
+
+------------------------------------------------------------------------------
+(* The NARROW verb (scoped-read design §4).                                *)
+
+(* §4.2, as a machine-checkable claim.  `classify` reads exactly two
+   states a narrow must pass through:
+
+     present in scan, absent from baseline          -> UPLOAD
+     present in baseline, absent from scan+prevScan -> DELETE
+
+   so unlink-then-uncite crashes into publishing deletions, and
+   uncite-then-unlink crashes into re-uploading identical bytes and
+   re-citing everything just dropped.  NEITHER ORDER IS SAFE ALONE.
+
+   The action drops one CLEAN, HELD path from the scope.  Clean because
+   the shipped door refuses a narrow over a path with unpublished
+   changes; held because dropping what was never held is a no-op.       *)
+Narrow(s) ==
+  /\ Running(s) /\ sc[s].pc = "idle"
+  /\ gh.narrows < MaxNarrows
+  /\ \E p \in sc[s].scope :
+       /\ sc[s].baseline[p] # 0
+       /\ sc[s].local[p] = sc[s].baseline[p]
+       /\ sc' = [sc EXCEPT
+            ![s].scope    = @ \ {p},
+            \* Unlink: the tree half.  Skipped by the uncite-first arm.
+            ![s].local    = IF NarrowAtomic \/ NarrowUnlinkFirst
+                              THEN [sc[s].local EXCEPT ![p] = 0]
+                              ELSE sc[s].local,
+            \* Uncite: the held-set half.  Skipped by the unlink-first arm.
+            ![s].baseline = IF NarrowAtomic \/ ~NarrowUnlinkFirst
+                              THEN [sc[s].baseline EXCEPT ![p] = 0]
+                              ELSE sc[s].baseline,
+            \* prev_scan goes WITH the citation, never after it.
+            \*
+            \* THIS HALF IS NOT CHECKED HERE, AND THE GREEN RUN MUST NOT
+            \* BE READ AS IF IT WERE.  `Dirty(s)` is `local[p] #
+            \* baseline[p]`, so setting `baseline[p] = 0` alone already
+            \* makes the path undirty and `prevScan` cannot change any
+            \* classification.  MEASURED: deleting this line leaves
+            \* LeanNarrowHolds green over 10,823 distinct states (vs
+            \* 10,179 with it).  In `scan.rs` the two ARE separate
+            \* structures and `classify` consults both, so the shipped
+            \* rule has a conjunct this abstraction collapses.  Kept
+            \* because the code needs it; recorded because the model is
+            \* WEAKER than the code here, which is the safe direction for
+            \* a miss and the wrong direction for a claim.
+            ![s].prevScan = IF NarrowAtomic THEN @ \ {p} ELSE @]
+       /\ gh' = [gh EXCEPT !.narrows = @ + 1, !.narrowed = @ \cup {p}]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+                 window, hitlAcked, conflicts>>
 
 ------------------------------------------------------------------------------
 (* The gateway, abstracted to its bucket effects *)
@@ -771,6 +855,19 @@ Scan(s) ==
        ![s].scanU = USet(s), ![s].scanD = DSet(s),
        ![s].lastDirty = IF SyncEnabled THEN USet(s) \cup DSet(s) ELSE {},
        ![s].scanGen = [p \in Paths |-> sc[s].local[p]],
+       \* `prev_scan = scanned.keys()`.  Read UNPRIMED above by DSet, so
+       \* this scan classifies against the PREVIOUS walk and leaves its
+       \* own behind — the whole content of "two consecutive scans".
+       \*
+       \* Gated on TwoScanDelete so it stays `{}` in every pre-existing
+       \* cfg. Writing it unconditionally would add a varying component
+       \* to `sc` and GROW all 55 earlier runs' state spaces — which
+       \* costs wall clock for nothing and, worse, quietly falsifies the
+       \* "earlier state spaces are preserved by construction" claim the
+       \* rest of this harness is built on.
+       ![s].prevScan = IF TwoScanDelete
+                         THEN {q \in Paths : sc[s].local[q] # 0}
+                         ELSE @,
        \* The pending set survived a lane pass: the durability/visibility
        \* split actually ACCUMULATED across ticks, which is the claim
        \* ProbeCitationInstalled has to make non-vacuous.
@@ -808,7 +905,7 @@ Upload(s, p) ==
        THEN \* If-Match passes: the PUT lands
          /\ objects' = [objects EXCEPT ![p] = want]
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
-         /\ gh' = [gh EXCEPT !.deposedPuts =
+         /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup ({p} \cap gh.narrowed), !.deposedPuts =
                      @ + (IF Deposed(s) THEN 1 ELSE 0)]
          /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox,
                         window, hitlAcked, conflicts>>
@@ -817,7 +914,7 @@ Upload(s, p) ==
             \* adopt (my own crashed/torn earlier PUT, or content already
             \* integrated).  AdoptOwn convergence.
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
-         /\ gh' = [gh EXCEPT !.adoptOwn = @ + 1]
+         /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup ({p} \cap gh.narrowed), !.adoptOwn = @ + 1]
          /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
                         inbox, window, hitlAcked, conflicts>>
        ELSE IF ConflictSurfacing
@@ -1763,6 +1860,7 @@ BaseNext ==
   \/ \E s \in Sidecars, p \in Paths :
        AgentWrite(s, p) \/ AgentDelete(s, p) \/ Upload(s, p)
        \/ GCDelete(s, p)
+  \/ \E s \in Sidecars : Narrow(s)
   \/ \E p \in Paths : HitlWrite(p)
   \/ HitlRefused
   \/ \E s \in Sidecars :
@@ -1789,6 +1887,26 @@ TypeOK ==
   /\ versions \in [Paths -> SUBSET Gens]
   /\ stage \in [Sidecars -> [Paths -> Gens]]
   /\ stageBase \in [Sidecars -> [Paths -> Gens]]
+  /\ \A s \in Sidecars : sc[s].scope \subseteq Paths /\ sc[s].prevScan \subseteq Paths
+
+\* §4.2: A NARROW IS AN UNWATCH, NEVER AN ABSENCE.  No path a narrow
+\* dropped may lose its object — a workspace that stops holding a file
+\* must not take the bucket's copy with it.  This is what the
+\* unlink-first arm violates: the citation survives the unlink, the
+\* next scan classifies the path delete-eligible, and GC publishes it.
+Inv_NarrowNeverDeletes == \A p \in gh.narrowed : objects[p] # 0
+
+\* The other half.  A narrowed path must not be re-uploaded and
+\* re-cited, which is what the uncite-first arm does: the file survives
+\* the uncite, the next scan reads present-and-not-in-baseline as a
+\* local ADD, and the barrier silently undoes the narrow.  A path the
+\* agent legitimately re-creates leaves `gh.narrowed` at AgentWrite, so
+\* this never fires on widening.
+Inv_NarrowNeverRecites == gh.narrowRecited = {}
+
+\* Non-vacuity: the verb actually fires.  Probed via a ghost only
+\* Narrow writes — probe the ACTION, never the situation.
+ProbeNarrow == gh.narrows = 0
 
 \* An acked HITL write is never silently lost: its bytes are never
 \* destroyed by a writer that did not legitimately learn them, and no
