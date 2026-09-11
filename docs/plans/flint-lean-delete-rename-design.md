@@ -228,6 +228,110 @@ The way to make that safe is not documentation. **The library must
 expose no function that deletes a cited object.** If the dangerous thing
 is not expressible through the API, it does not need a rule.
 
+## 9a. The conflict has to reach a human who closed the browser
+
+The refusals in §4 and §6 are useless if nobody learns of them. A user
+saves, closes the tab, and the conflict happens minutes later inside a
+barrier. No HTTP response can carry it — that is inherent to §1, not a
+gap in the design.
+
+**Start from what is already true: nothing is lost.** In `consume-dirty`
+the agent's local version wins, but `preserve_conflict_copy` runs FIRST
+and the comment says why — *"a conflict record must keep both versions
+recoverable"*. The foreign bytes ARE the user's write, and they land at
+`{prefix}/.flint/lean/conflicts/{uuid}/{path}`. So the message is never
+"your work is gone", it is "your version is here", and a missed
+notification is an annoyance rather than a loss. Every decision below
+follows from wanting to keep that true.
+
+**What is missing is three small things.**
+
+1. **`ConflictRecord` carries no author.** It is `{path, foreign_etag,
+   preserved_key, kind, at_unix}`. Publish that and you still cannot say
+   WHOSE change lost. `entry.author` is already in scope at the
+   `consume-dirty` site — a one-field addition, and without it the
+   feature cannot route.
+2. **The records are in the wrong place.** `conflicts.jsonl` lives in
+   the sidecar's pod-local state dir and `gateway.rs` has ZERO
+   references to it. It becomes a cell in the bucket, the same shape as
+   the inbox: one CAS'd document, the sidecar the only writer, gateway
+   and library as readers, with an acknowledge verb.
+3. **Nothing else is needed to correlate.** `foreign_etag` IS the etag
+   the caller's PUT returned, so `(path, foreign_etag)` matches a
+   caller's own outstanding-write row exactly. No correlation id to
+   invent.
+
+**The division of labour.** Lean's job ends at making the event
+durable, attributable and addressable. Delivering it to a human — email,
+Slack, a badge at next login — belongs to the calling service, which
+already knows the author, their preferences, and whether they are
+connected. Lean should not grow a notification system.
+
+**What a caller owes.** Persist its own outstanding writes —
+`(workspace, path, etag, author, at)` — and reconcile on next load:
+cited at your etag means delivered; in the inbox at your etag means
+queued; neither means look in the conflicts cell.
+
+## 9b. Retention, because today BOTH of these grow forever
+
+The barrier runs two reapers. `sweep_chunks` lists
+`{prefix}/{LEAN_DIR}/chunks/`; `sweep_generations` lists `manifests/`.
+**Nothing lists `conflicts/`.** And `append_conflict` opens the jsonl
+with `.append(true)` and writes a line — no cap, no rotation, and
+`load_conflicts` re-parses the whole file on every call.
+
+**This is the EASY collection case.** A chunk may be referenced by
+several generations, which is why `sweep_chunks` needed four
+model-established rules and six mutation configs. A conflict copy is
+referenced by exactly ONE record. Record gone ⇒ copy is garbage. One
+mark-and-sweep at barrier time beside the other two, on the same
+best-effort terms: list `conflicts/`, subtract the `preserved_key`s of
+live records, delete the difference — which collects acknowledged copies
+and crash-orphans in the same pass.
+
+**Ordering: record first, then object.** A crash between leaves an
+orphaned copy, collected by the next sweep. The other order leaves a
+live record whose `preserved_key` 404s — the UI offers "view your
+version" and hands the user an error about the thing it promised was
+safe. That is the dangling-citation shape D8 already has rules about.
+Same principle as object-first-inbox-second: leave an extra thing, never
+a missing one.
+
+**Three ways a record dies, and the third is the one that bounds
+growth:**
+
+1. **Acknowledged** — the user discarded or applied. Immediate.
+2. **Aged out** — a TTL, because most conflicts are never acknowledged;
+   the user simply never returns. It must be a STATED number the UI can
+   show: "your version is kept for N days."
+3. **Superseded** — a conflict copy is made PER WRITE, not per barrier,
+   so an auto-saving editor against a file the agent holds dirty
+   produces one copy per save, potentially of a large file. That is the
+   real growth scenario, and the crate already answers it in
+   `gateway_append`: *"A newer write to the same path supersedes the
+   queued one."* The conflicts cell does the same on `(path, author)` —
+   the older copy is that user's own earlier draft, which their later
+   save already replaced.
+
+Plus a hard cap on the cell, oldest evicted, as the inbox backlog is
+capped. `ObjectMeta.size` is known at preserve time, so the record
+should carry `bytes` and the cap should be a BYTE budget as well as a
+count: one 10 GiB checkpoint conflict matters more than ten thousand
+small ones.
+
+**A bucket lifecycle rule is a BACKSTOP, never the mechanism.** It is
+out-of-band from the record, so as the primary it produces exactly the
+dangling `preserved_key` ruled out above. Set LONGER than the record TTL
+— records 30 days, lifecycle 45 — it covers the one case the sweep
+cannot: a workspace whose sidecar never comes back, where no barrier
+ever runs. Not available on every endpoint, so it cannot be relied on.
+
+**Standalone, ships regardless:** `conflicts.jsonl` needs a cap and
+rotation whether or not any of this lands. Append-only, fully re-parsed
+on each read, and filled by the same auto-save path. Bounded by the
+pod's lifetime rather than permanent, so it is the smaller half — and a
+few lines.
+
 ## 10. Phases, each with the control that makes it mean something
 
 **Phase A — cross-key copy (§7), alone.** Control: a copied 6 GiB object
@@ -257,6 +361,18 @@ path refused identically through the HTTP route and the library
 function, driven from ONE table of cases. Two code paths agreeing
 because they share the predicate is the point; a second table would
 let them drift and still pass.
+
+**Phase D2 — the conflicts cell, its author field and its reaper
+(§9a, §9b).** A PREREQUISITE for B and C rather than a follow-on: the
+locally-dirty refusal has nowhere to surface without it, and "we refused
+your delete" is otherwise silence. Controls: (1) a conflict raised by
+author X is readable through the library and names X — mutation: drop
+the author field and watch the routing assertion fail; (2) the sweep
+collects an acknowledged copy AND a crash-orphan in one pass, and
+collects NEITHER a copy a live record still cites — the third is the one
+that matters, so mutate the subtraction and watch a live `preserved_key`
+404; (3) a second conflict for the same `(path, author)` leaves ONE
+record and ONE copy.
 
 **Phase E — the formal side.** `LeanSubtree.tla` gains a declared
 removal. The invariant is that a declared removal never deletes an
