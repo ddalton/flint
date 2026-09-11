@@ -838,6 +838,115 @@ async fn gateway_hitl_put_consumed_and_cited_by_barrier() {
     assert_eq!(res.status(), 200);
 }
 
+/// A consume whose WRITE fails is transient, and must not be recorded as
+/// a containment refusal nor dropped from the cell.
+///
+/// Containment is already decided before this point (`check_contained`),
+/// so the error reaching the write is an I/O one — ENOSPC, EACCES, EIO.
+/// The old arm labelled it `consume-refused-containment` and pushed the
+/// entry to `consumed`, so a full disk silently and permanently lost a
+/// foreign write: the bytes stay in the bucket, the workspace never
+/// adopts them, and nothing re-offers the entry.
+///
+/// A pre-existing DIRECTORY at the target path induces exactly that
+/// split — the parent resolves, so containment passes, and the rename
+/// then fails. The load-bearing assertion is the RETRY: remove the
+/// obstruction, run one more barrier, and the file must land. That is
+/// what proves the entry survived, and it is the half a label check
+/// alone would miss.
+#[tokio::test]
+async fn a_failed_consume_write_is_retried_not_silently_dropped() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+
+    // The obstruction must leave the path locally ABSENT, or consume
+    // takes the locally-dirty branch and never reaches the write at all.
+    // A directory AT the path looks present and yields `consume-dirty` —
+    // that was this test's first draft, and it exercised nothing. A
+    // read-only PARENT keeps `ro/file.txt` absent while the write fails.
+    if unsafe { libc::geteuid() } == 0 {
+        // root ignores the mode bits, so the write would succeed and the
+        // test would pass having tested nothing. Skipping loudly beats
+        // a green run that proves the opposite of what it claims.
+        eprintln!("SKIPPED: running as root, a read-only dir cannot induce EACCES");
+        return;
+    }
+    let ro = dir.path().join("ro");
+    std::fs::create_dir(&ro).unwrap();
+    std::fs::set_permissions(&ro, std::os::unix::fs::PermissionsExt::from_mode(0o555)).unwrap();
+
+    let routes = super::gateway::routes(gw_core(&store));
+    let res = gw_req()
+        .method("PUT")
+        .path("/lean/v1/proj1/files/ro/file.txt")
+        .header("x-flint-author", "dilip")
+        .body("foreign bytes that must not be lost")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 200, "{:?}", res.body());
+
+    // The barrier must not wedge on it.
+    sc.run_barrier().await.unwrap();
+
+    let conflicts = sc.state.load_conflicts().unwrap();
+    assert!(
+        conflicts.iter().any(|c| c.path == "ro/file.txt" && c.kind.starts_with("consume-write-failed")),
+        "a write failure must be surfaced as itself, not as containment: {conflicts:?}"
+    );
+    assert!(
+        !conflicts.iter().any(|c| c.path == "ro/file.txt" && c.kind.starts_with("consume-refused-containment")),
+        "containment was already checked upstream; a full disk is not a planted symlink"
+    );
+
+    // THE CONTROL: clear the obstruction, and the retained entry must be
+    // re-offered and land. If the entry had been consumed, this barrier
+    // would do nothing and the file would never appear.
+    std::fs::set_permissions(&ro, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    sc.run_barrier().await.unwrap();
+    assert_eq!(
+        read(dir.path(), "ro/file.txt").unwrap(),
+        "foreign bytes that must not be lost",
+        "the entry must have survived in the cell and been retried"
+    );
+}
+
+/// A scope whose every entry is rejected must be REFUSED, never widened.
+///
+/// `Scope::new` silently drops entries that are over-long, past
+/// MAX_SCOPE_ENTRIES, or contain `.`/`..`. When all of them go, the
+/// scope was `None` and `in_scope`'s `.unwrap_or(true)` turned that into
+/// the WHOLE TREE — and a whole-tree sync deletes local files for
+/// remotely-deleted paths. So the failure mode of a typo was maximum
+/// privilege. An error must not return a legal value.
+#[tokio::test]
+async fn an_all_rejected_sync_scope_is_refused_not_widened_to_the_whole_tree() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = sidecar(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+
+    // Every entry malformed: `..` and `.` components are dropped by
+    // `Scope::new`, so the surviving scope is empty.
+    let err = sc
+        .sync_scoped(Some(vec!["../escape".into(), "./here".into()]))
+        .await
+        .expect_err("an all-rejected scope must not silently become the whole tree");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("NONE survived validation"),
+        "the refusal must say WHY, so a typo is not read as a sync bug: {msg}"
+    );
+
+    // THE OTHER ARM SHUT: a well-formed scope still works. Without this,
+    // the test above would pass just as well if scoped sync were broken
+    // outright.
+    sc.sync_scoped(Some(vec!["inputs".into()])).await.expect("a valid scope must still sync");
+}
+
 /// The window gate: a PUT during a live barrier window is refused with
 /// Retry-After; an expired window admits (the dead-sidecar unwedge).
 #[tokio::test]

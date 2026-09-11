@@ -29,7 +29,7 @@ use flint_store::{crc64_nvme, crc64_to_b64, GenerationStamps, PosixStamps, Store
 
 use super::barrier::{mtime_of, write_file_atomic_in};
 use super::state::{BaselineEntry, ConflictRecord};
-use super::{inbox, manifest, now_unix, scan, LeanResult, Sidecar};
+use super::{inbox, manifest, now_unix, scan, LeanError, LeanResult, Sidecar};
 
 #[derive(Debug, Default, Serialize)]
 pub struct SyncReport {
@@ -95,7 +95,30 @@ impl Sidecar {
     }
 
     pub async fn sync_scoped(&mut self, scope: Option<Vec<String>>) -> LeanResult<SyncReport> {
-        let scope = scope.map(|s| Scope::new(&s)).filter(|s| !s.is_empty());
+        // An all-rejected scope is REFUSED, never widened. `Scope::new`
+        // silently drops entries that are too long, past
+        // MAX_SCOPE_ENTRIES, or contain `.`/`..` — so a caller naming
+        // three malformed paths used to get `None`, and `in_scope`'s
+        // `.unwrap_or(true)` turned that into the WHOLE TREE. A
+        // whole-tree sync re-derives against the remote manifest and
+        // DELETES local files for remotely-deleted paths, so the failure
+        // mode of a typo was maximum privilege. An error must not
+        // return a legal value.
+        let scope = match scope {
+            None => None,
+            Some(raw) => {
+                let s = Scope::new(&raw);
+                if s.is_empty() {
+                    return Err(LeanError::State(format!(
+                        "sync scope named {} entr{} and NONE survived validation — \
+                         refusing, because an empty scope widens to the WHOLE TREE",
+                        raw.len(),
+                        if raw.len() == 1 { "y" } else { "ies" }
+                    )));
+                }
+                Some(s)
+            }
+        };
         let in_scope = |path: &str| scope.as_ref().map(|s| s.covers(path)).unwrap_or(true);
         let mut report = SyncReport::default();
         report.scope = scope.as_ref().map(|s| s.entries().to_vec());

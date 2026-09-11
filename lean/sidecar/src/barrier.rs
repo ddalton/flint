@@ -213,19 +213,47 @@ impl Sidecar {
                         other => other,
                     })?;
                 let mode = PosixStamps::from_meta(&meta.meta).map(|p| p.mode);
-                if let Err(e) = write_file_atomic_in(&self.cfg.root, &entry.path, &body, mode) {
-                    // A refused containment (planted symlink, reserved
-                    // namespace) is a SURFACED skip, never a wedge: one
-                    // hostile path must not stop the workspace
-                    // publishing. The foreign bytes stay in the bucket.
+                // CONTAINMENT and I/O are split, because the answers are
+                // opposite. Containment was already decided above by
+                // `check_contained`, so a refusal reaching here is a
+                // path that only became unsafe once parents were
+                // created — still a permanent property of the path, so
+                // it is surfaced and DROPPED, exactly as above.
+                //
+                // Everything else — ENOSPC, EACCES, EIO, a read-only
+                // filesystem — is TRANSIENT, and dropping the entry for
+                // one is silent permanent loss: the foreign bytes stay
+                // in the bucket, the workspace never adopts them, and
+                // nothing ever re-offers the entry. It used to be
+                // recorded as `consume-refused-containment`, which sent
+                // whoever read it looking for a hostile path that was
+                // never there. A full disk is not a planted symlink.
+                let target = match contained_path(&self.cfg.root, &entry.path) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        self.state.append_conflict(&ConflictRecord {
+                            path: entry.path.clone(),
+                            foreign_etag: entry.etag.clone(),
+                            preserved_key: None,
+                            kind: format!("consume-refused-containment: {e}"),
+                            at_unix: now_unix(),
+                        })?;
+                        consumed.push(entry.clone());
+                        continue;
+                    }
+                };
+                if let Err(e) = write_file_atomic(&target, &body, mode) {
+                    // NOT consumed: the entry stays in the cell so the
+                    // next barrier retries it. A visible conflict record
+                    // that repeats is a far better failure than one
+                    // silent drop.
                     self.state.append_conflict(&ConflictRecord {
                         path: entry.path.clone(),
                         foreign_etag: entry.etag.clone(),
                         preserved_key: None,
-                        kind: format!("consume-refused-containment: {e}"),
+                        kind: format!("consume-write-failed (will retry): {e}"),
                         at_unix: now_unix(),
                     })?;
-                    consumed.push(entry.clone());
                     continue;
                 }
                 let st = std::fs::metadata(&local_path)?;
