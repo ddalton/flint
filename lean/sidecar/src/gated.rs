@@ -405,7 +405,7 @@ impl Sidecar {
         let scanned = scan::scan(&self.cfg.root)?;
         let mut classified = scan::classify(&scanned, &baseline);
         if declared {
-            report.absences_confirmed = self.confirm_absences(&mut classified);
+            report.absences_confirmed = self.confirm_absences(&mut classified)?;
         }
         report.first_absence = classified.first_absence.iter().cloned().collect();
         let mut stage = self.load_stage()?;

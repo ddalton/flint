@@ -371,13 +371,32 @@ impl Sidecar {
     /// second observation costs one syscall per transiently-absent
     /// path — never a second full pass. The cadence path is unchanged
     /// and still waits for the second walk.
-    pub(crate) fn confirm_absences(&self, classified: &mut scan::Classified) -> usize {
+    pub(crate) fn confirm_absences(&self, classified: &mut scan::Classified) -> LeanResult<usize> {
         if classified.first_absence.is_empty() {
-            return 0;
+            return Ok(0);
         }
         let mut confirmed = 0;
         for path in std::mem::take(&mut classified.first_absence) {
-            if std::fs::symlink_metadata(self.cfg.root.join(&path)).is_err() {
+            // ONLY NotFound is absence. Every other errno — EACCES on a
+            // parent, EIO, EMFILE, ELOOP — used to read as "the agent
+            // deleted it", and this is the oracle that PUBLISHES the
+            // delete and then DELETES THE OBJECT. An unreadable file is
+            // the one case where guessing is unrecoverable, so it fails
+            // CLOSED, exactly as the walk does at `scan.rs`'s
+            // `symlink_metadata(&path)?`. Two call sites, one syscall:
+            // they must not have opposite error policies.
+            let gone = match std::fs::symlink_metadata(self.cfg.root.join(&path)) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+                Err(e) => {
+                    classified.first_absence.insert(path.clone());
+                    return Err(LeanError::State(format!(
+                        "cannot confirm the absence of {path:?}: {e} — refusing to publish \
+                         a deletion on an unreadable path"
+                    )));
+                }
+                Ok(_) => false,
+            };
+            if gone {
                 classified.deletes.insert(path);
                 confirmed += 1;
             } else {
@@ -386,7 +405,7 @@ impl Sidecar {
                 classified.first_absence.insert(path);
             }
         }
-        confirmed
+        Ok(confirmed)
     }
 
     /// Renew the lease if it has gone stale MID-BARRIER, and hand back
@@ -502,7 +521,7 @@ impl Sidecar {
         let scanned = scan::scan(&self.cfg.root)?;
         let mut classified = scan::classify(&scanned, &baseline);
         if declared {
-            report.absences_confirmed = self.confirm_absences(&mut classified);
+            report.absences_confirmed = self.confirm_absences(&mut classified)?;
         }
         report.first_absence = classified.first_absence.iter().cloned().collect();
 

@@ -4112,6 +4112,52 @@ async fn only_a_declared_barrier_confirms_a_first_absence() {
 /// missed but that is on disk at confirmation time is not deleted. The
 /// confirmation is an lstat precisely because it cannot be fooled by
 /// the walk race the rule names.
+/// An UNREADABLE path is not a deleted one.
+///
+/// `confirm_absences` is the oracle that promotes a first absence to a
+/// published deletion, and a published deletion DELETES THE OBJECT. It
+/// used to ask `symlink_metadata(...).is_err()`, so EACCES on a parent
+/// directory, EIO, EMFILE or ELOOP all read as "the agent deleted it".
+/// The walk asks the same syscall with `?` and fails closed; two call
+/// sites of one syscall must not have opposite error policies, and the
+/// one that can destroy data is not the one to guess in.
+#[tokio::test]
+async fn an_unreadable_path_is_not_confirmed_as_deleted() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let a = sidecar(&store, dir.path()).await;
+
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
+        return;
+    }
+    // `locked/f.txt` exists, but `locked` is unreadable — so the lstat
+    // fails with EACCES rather than NotFound.
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("f.txt"), b"still here").unwrap();
+    std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+
+    let mut classified = super::scan::Classified::default();
+    classified.first_absence.insert("locked/f.txt".into());
+
+    let err = a
+        .confirm_absences(&mut classified)
+        .expect_err("an unreadable path must not confirm a deletion");
+    assert!(
+        format!("{err}").contains("refusing to publish a deletion"),
+        "the refusal must say what it refused: {err}"
+    );
+    assert!(
+        classified.deletes.is_empty(),
+        "NOTHING may be queued for deletion off an errno that is not NotFound: {:?}",
+        classified.deletes
+    );
+
+    // Restore so the tempdir can be cleaned up.
+    std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+}
+
 #[tokio::test]
 async fn the_confirmation_never_deletes_a_path_the_walk_merely_missed() {
     let store = Arc::new(MemoryStore::new());
@@ -4125,7 +4171,7 @@ async fn the_confirmation_never_deletes_a_path_the_walk_merely_missed() {
     classified.first_absence.insert("renamed.txt".into());
     classified.first_absence.insert("truly-gone.txt".into());
 
-    let confirmed = a.confirm_absences(&mut classified);
+    let confirmed = a.confirm_absences(&mut classified).unwrap();
     assert_eq!(confirmed, 1);
     assert_eq!(
         classified.deletes.iter().cloned().collect::<Vec<_>>(),
