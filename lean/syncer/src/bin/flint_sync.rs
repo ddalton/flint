@@ -22,6 +22,10 @@
 //!              and claiming would depose the very syncer under
 //!              diagnosis.
 //!   probe-copy verify the cross-key copy surface against THIS bucket
+//!   probe-conditional  verify that If-Match / If-None-Match are ENFORCED
+//!              by THIS store (a store that ignores them turns every
+//!              manifest CAS into last-writer-wins, silently)
+//!   probe-versions     verify the object-version surface gated mode needs
 //!   run        claim → checkout → barrier loop (floorSecs) → drain on
 //!              SIGTERM → clean lease release
 //!
@@ -311,6 +315,33 @@ async fn main() {
             }
             Err(e) => {
                 eprintln!("flint-sync: probe-copy FAIL: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if cmd == "probe-conditional" {
+        let key = format!("{}/{}/probe-conditional", sc.cfg.prefix, flint_lean::LEAN_DIR);
+        match flint_store::probe::probe_conditional_writes(sc.store.as_ref(), &key).await {
+            Ok(()) => {
+                eprintln!("flint-sync: probe-conditional PASS ({key})");
+                return;
+            }
+            Err(e) => {
+                eprintln!("flint-sync: probe-conditional FAIL: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if cmd == "probe-versions" {
+        let key = format!("{}/{}/probe-versions", sc.cfg.prefix, flint_lean::LEAN_DIR);
+        match flint_store::probe::probe_version_surface(sc.store.as_ref(), &key).await {
+            Ok(()) => {
+                eprintln!("flint-sync: probe-versions PASS ({key})");
+                return;
+            }
+            Err(e) => {
+                eprintln!("flint-sync: probe-versions FAIL: {e}");
                 std::process::exit(1);
             }
         }

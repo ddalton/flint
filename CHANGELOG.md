@@ -82,6 +82,18 @@ covered by the stability guarantee.
   written before this change do not load; lean is not yet adopted, so
   there is no migration.
 
+- **lean: `flint-sync probe-conditional` and `probe-versions`.** The
+  two `flint-store` conformance probes that only the hub could run are
+  verbs now, beside `probe-copy`: a store that ignores `If-Match` turns
+  every manifest CAS into last-writer-wins silently, and the verb is
+  how a deployment against a new backend finds out before it matters.
+  Probed against Apache Ozone 2.2.1 the same day
+  (`lean/e2e/perf/results/ozone-probe-2026-09-12.md`): conditional
+  PUT/GET enforced, no versioning, no checksum validated or returned
+  (a wrong CRC32 is accepted), both copy arms refuse; the lean flow —
+  publish, fresh checkout, foreign overwrite, sync, HITL through the
+  gateway — runs end to end with the manifest CRC carrying integrity.
+
 - **lean: a parent-directory race was a silent hole.** With fetches
   running in parallel, two siblings race to create the same missing
   parent; the loser's `EEXIST` was reported as a containment REFUSAL,
