@@ -54,6 +54,15 @@ pub struct S3Store {
     /// this loop: `fanout` spreads work ACROSS objects, so a tree whose
     /// critical path is one large object gets no concurrency at all.
     part_parallelism: usize,
+    /// The raw read path (`rawread.rs`), when `with_raw_reads(true)`:
+    /// every GET and HEAD goes through it; every write stays on the
+    /// SDK client above.
+    raw: Option<crate::rawread::RawReader>,
+    /// What the raw reader needs from the SDK's config: the SAME
+    /// credential chain (cached by the SDK), the region, the endpoint.
+    creds: Option<aws_credential_types::provider::SharedCredentialsProvider>,
+    region: String,
+    endpoint: Option<String>,
 }
 
 impl S3Store {
@@ -88,6 +97,9 @@ impl S3Store {
                 .build(),
         );
         let endpoint_for_presign = endpoint.clone();
+        let endpoint_for_raw = endpoint.clone();
+        let creds = base.credentials_provider();
+        let region = base.region().map(|r| r.to_string()).unwrap_or_else(|| "us-east-1".into());
         if let Some(ep) = endpoint {
             // Custom endpoints (MinIO/localstack) need path-style —
             // virtual-hosted addressing would resolve the bucket as a
@@ -125,10 +137,43 @@ impl S3Store {
             client,
             presign_client,
             bucket,
+            raw: None,
+            creds,
+            region,
+            endpoint: endpoint_for_raw,
             part_parallelism: 1,
             // S3's documented CopyObject ceiling.
             copy_whole_max: 5 * 1024 * 1024 * 1024,
         })
+    }
+
+    /// Route every GET and HEAD through the raw HTTP/1.1 read path
+    /// (`rawread.rs`): SigV4-signed by hand with the SDK's own
+    /// credential chain, pooled keep-alive connections, no SDK
+    /// per-request machinery. Writes are untouched. `false` is the SDK
+    /// path exactly as before.
+    pub fn with_raw_reads(mut self, on: bool) -> StoreResult<Self> {
+        self.raw = if on {
+            let creds = self.creds.clone().ok_or_else(|| {
+                StoreError::Other("raw reads: the SDK config carries no credential provider".into())
+            })?;
+            Some(crate::rawread::RawReader::new(
+                &self.bucket,
+                &self.region,
+                self.endpoint.as_deref(),
+                creds,
+                crate::rawread::RawReadOptions::default(),
+            )?)
+        } else {
+            None
+        };
+        Ok(self)
+    }
+
+    /// Requests the raw read path has sent, retries included; 0 when
+    /// it is off. A rig's counter.
+    pub fn raw_read_attempts(&self) -> u64 {
+        self.raw.as_ref().map(|r| r.attempts()).unwrap_or(0)
     }
 
     /// Upload this many parts of one object concurrently (see the field).
@@ -194,7 +239,7 @@ where
 ///
 /// `None` means "no specific contract applies" and the caller wraps it
 /// in `Other` with the full SDK debug text attached.
-fn classify(status: u16, code: &str, msg: String) -> Option<StoreError> {
+pub(crate) fn classify(status: u16, code: &str, msg: String) -> Option<StoreError> {
     Some(match (status, code) {
         (412, _) => StoreError::PreconditionFailed(msg),
         (409, "ConditionalRequestConflict") => StoreError::Conflict(msg),
@@ -528,6 +573,9 @@ impl ObjectStore for S3Store {
     }
 
     async fn head(&self, key: &str) -> StoreResult<ObjectMeta> {
+        if let Some(raw) = &self.raw {
+            return raw.head(key, None).await;
+        }
         let resp = self
             .client
             .head_object()
@@ -591,6 +639,9 @@ impl ObjectStore for S3Store {
         key: &str,
         if_match: Option<&str>,
     ) -> StoreResult<(ObjectMeta, Bytes)> {
+        if let Some(raw) = &self.raw {
+            return raw.get_whole(key, if_match, None).await;
+        }
         let mut req = self
             .client
             .get_object()
@@ -626,6 +677,19 @@ impl ObjectStore for S3Store {
         len: u64,
         if_match: &str,
     ) -> StoreResult<Bytes> {
+        if let Some(raw) = &self.raw {
+            let segs = raw.get_range_segments(key, offset, len, if_match).await?;
+            return Ok(match segs.len() {
+                1 => segs.into_iter().next().unwrap_or_default(),
+                _ => {
+                    let mut all = bytes::BytesMut::with_capacity(segs.iter().map(|s| s.len()).sum());
+                    for s in &segs {
+                        bytes::BufMut::put_slice(&mut all, s);
+                    }
+                    all.freeze()
+                }
+            });
+        }
         // RFC 9110 ranges are INCLUSIVE on both ends.
         let range = format!("bytes={}-{}", offset, offset + len - 1);
         let resp = self
@@ -657,6 +721,9 @@ impl ObjectStore for S3Store {
         len: u64,
         if_match: &str,
     ) -> StoreResult<Vec<Bytes>> {
+        if let Some(raw) = &self.raw {
+            return raw.get_range_segments(key, offset, len, if_match).await;
+        }
         let range = format!("bytes={}-{}", offset, offset + len - 1);
         let resp = self
             .client
@@ -711,6 +778,9 @@ impl ObjectStore for S3Store {
     }
 
     async fn head_version(&self, key: &str, version_id: &str) -> StoreResult<ObjectMeta> {
+        if let Some(raw) = &self.raw {
+            return raw.head(key, Some(version_id)).await;
+        }
         let resp = self
             .client
             .head_object()
@@ -733,6 +803,9 @@ impl ObjectStore for S3Store {
     }
 
     async fn get_version(&self, key: &str, version_id: &str) -> StoreResult<(ObjectMeta, Bytes)> {
+        if let Some(raw) = &self.raw {
+            return raw.get_whole(key, None, Some(version_id)).await;
+        }
         let resp = self
             .client
             .get_object()

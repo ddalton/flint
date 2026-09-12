@@ -39,6 +39,8 @@ pub mod memory;
 pub mod probe;
 #[cfg(feature = "s3")]
 pub mod s3;
+#[cfg(feature = "s3")]
+pub mod rawread;
 
 use async_trait::async_trait;
 use bytes::Bytes;

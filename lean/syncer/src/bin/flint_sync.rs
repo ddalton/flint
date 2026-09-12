@@ -34,6 +34,10 @@
 //!   FLINT_SYNC_PREFIX    (required) subtree key prefix
 //!   FLINT_SYNC_ROOT      (required) workspace root
 //!   FLINT_SYNC_ENDPOINT  S3 endpoint override (MinIO/proxy rigs)
+//!   FLINT_SYNC_RAW_READS "true" routes every GET/HEAD through the raw
+//!                        HTTP/1.1 read path (flint-store `rawread.rs`):
+//!                        SigV4 by hand, pooled keep-alive, no SDK
+//!                        per-request machinery. Writes stay on the SDK.
 //!   FLINT_SYNC_FLOOR_SECS         publish cadence floor (default 60)
 //!   FLINT_SYNC_MAX_BYTES/_FILES   checkout budgets (0 = unlimited)
 //!   FLINT_SYNC_CHECKOUT_SCOPE     comma list of path prefixes; checkout
@@ -163,10 +167,21 @@ async fn main() {
     // arm has never executed anywhere, and an arm only a 5 GiB object
     // can reach is an arm nothing reaches.
     let copy_whole_max = env_u64("FLINT_SYNC_COPY_WHOLE_MAX_MB", 5 * 1024) * 1024 * 1024;
+    let raw_reads = std::env::var("FLINT_SYNC_RAW_READS")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
     let store = match S3Store::connect(bucket, endpoint).await {
-        Ok(s) => Arc::new(
-            s.with_part_parallelism(part_par).with_copy_whole_max(copy_whole_max),
-        ) as Arc<dyn ObjectStore>,
+        Ok(s) => match s
+            .with_part_parallelism(part_par)
+            .with_copy_whole_max(copy_whole_max)
+            .with_raw_reads(raw_reads)
+        {
+            Ok(s) => Arc::new(s) as Arc<dyn ObjectStore>,
+            Err(e) => {
+                eprintln!("flint-sync: raw reads: {e}");
+                std::process::exit(1);
+            }
+        },
         Err(e) => {
             eprintln!("flint-sync: store connect: {e}");
             std::process::exit(1);

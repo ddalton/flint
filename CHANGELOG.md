@@ -82,6 +82,27 @@ covered by the stability guarantee.
   written before this change do not load; lean is not yet adopted, so
   there is no migration.
 
+- **lean: a raw HTTP read path, `FLINT_SYNC_RAW_READS` / CRD
+  `rawReads`.** Every GET and HEAD can go through `flint-store`'s
+  `rawread.rs` — pooled HTTP/1.1 keep-alive, SigV4 by hand with the
+  SDK's own cached credential chain, the SDK's timeouts, retry budget
+  and error table reproduced — instead of the SDK's per-request
+  machinery, which the loopback rig measured at ~165 µs of CPU per
+  8 KiB object against ~50 µs for a bare client. Writes stay on the SDK.
+  Integrity does not depend on the client: every reader verifies each
+  fetch against the manifest's CRC-64. Off by default; ten tests
+  against an in-process server with six mutation controls; measured on
+  the loopback rig and on real S3
+  (`lean/e2e/perf/results/raw-read-path-2026-09-12.md`).
+  Loopback, 20k × 8 KiB: 1.5-1.7x the files/s at 76-98 µs of process
+  CPU per file against the SDK path's 130-161. Real S3 with TLS on a
+  4-vCPU node: equal at fanout 128 (latency-bound), +15-25% at 256,
+  +42-56% at 512 (11.8-12.2k files/s vs 7.8-8.3k) at 244-274 µs/file
+  vs 385-429; the ranged big-file arm is unchanged. Byte-identical
+  trees on both rigs. The cluster found the one defect the tests
+  could not: the SDK's bare credential chain is IMDS on EC2 and was
+  asked per request; a single-flight cache fixed it.
+
 - **lean: `flint-sync probe-conditional` and `probe-versions`.** The
   two `flint-store` conformance probes that only the hub could run are
   verbs now, beside `probe-copy`: a store that ignores `If-Match` turns

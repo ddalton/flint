@@ -11,7 +11,14 @@ edition = "2021"
 default = []
 # The real S3 backend (aws-sdk). OFF by default so test loops that only
 # need the memory double never build the AWS SDK.
-s3 = ["dep:aws-config", "dep:aws-sdk-s3", "dep:tracing", "dep:futures"]
+s3 = [
+    "dep:aws-config", "dep:aws-sdk-s3", "dep:tracing", "dep:futures",
+    # The raw read path (`rawread.rs`): hyper + rustls + SigV4, no SDK
+    # per-request machinery. Same TLS provider as the SDK (aws-lc-rs).
+    "dep:hyper", "dep:hyper-util", "dep:hyper-rustls", "dep:rustls", "dep:http",
+    "dep:http-body-util", "dep:httpdate", "dep:aws-sigv4", "dep:aws-credential-types",
+    "dep:aws-smithy-runtime-api",
+]
 
 [dependencies]
 async-trait = "0.1"
@@ -26,6 +33,16 @@ uuid = { version = "1.0", features = ["v4"] }
 aws-config = { version = "1.10.1", default-features = false, features = ["rustls", "rt-tokio", "credentials-process"], optional = true }
 aws-sdk-s3 = { version = "1.141.0", default-features = false, features = ["rustls", "rt-tokio"], optional = true }
 tracing = { version = "0.1", optional = true }
+hyper = { version = "1", default-features = false, features = ["client", "http1"], optional = true }
+hyper-util = { version = "0.1", default-features = false, features = ["client", "client-legacy", "http1", "tokio"], optional = true }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "native-tokio", "tls12", "aws-lc-rs", "logging"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "tls12", "std", "logging"], optional = true }
+http = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+httpdate = { version = "1", optional = true }
+aws-sigv4 = { version = "1", default-features = false, features = ["http1", "sign-http"], optional = true }
+aws-credential-types = { version = "1", optional = true }
+aws-smithy-runtime-api = { version = "1", optional = true }
 # Only the S3 backend composes parts concurrently; the memory double
 # never needs this, and the feature gate above keeps it out of test
 # loops that only build the double.
@@ -34,3 +51,6 @@ futures = { version = "0.3", optional = true }
 [dev-dependencies]
 tempfile = "3.0"
 tokio = { version = "1.0", features = ["full", "test-util"] }
+# The raw reader's test server (hyper 1 server side).
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "tokio", "http1"] }

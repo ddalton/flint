@@ -111,6 +111,14 @@ pub struct FlintLeanWorkspaceSpec {
     #[serde(default = "default_fetch_drivers")]
     pub fetch_drivers: u64,
 
+    /// Route every GET and HEAD through the syncer's raw HTTP/1.1 read
+    /// path (SigV4 by hand, pooled keep-alive connections, none of the
+    /// SDK's per-request machinery) instead of the AWS SDK. Writes
+    /// always use the SDK. Integrity does not depend on the client:
+    /// every reader verifies each fetch against the manifest's CRC-64.
+    #[serde(default)]
+    pub raw_reads: bool,
+
     /// Ceiling on the workspace tree, GiB. 0 = no limit.
     ///
     /// Under the CSI delivery this is a sparse ext4 image loop-mounted
