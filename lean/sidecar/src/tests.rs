@@ -10403,3 +10403,352 @@ async fn a_rescope_to_none_holds_everything_and_clears_the_scope() {
     assert_eq!(b.state.load_baseline().unwrap().entries.len(), 8);
     assert!(read(dir.path(), "outputs/big-5.bin").is_some());
 }
+
+// ── the publish fence is the PUBLISHER's, not the reader's ───────────
+
+/// A checkout runs to completion with another syncer's lease standing,
+/// and leaves that lease exactly where it found it.
+///
+/// This is the whole change of 2026-09-11, and it is asserted through
+/// `verbs::run_verb` — the single door `bin/flint_sync.rs` sends every
+/// one-shot verb through, ROUTING included — rather than through
+/// `checkout_scoped`, which never claimed anything and so could never
+/// have failed. Flip `Step::Checkout` in `installs_nothing_in_the_\
+/// bucket` and this leg goes red.
+///
+/// The TIMEOUT is the assertion, not a safety net. `claim` polls a
+/// standing foreign lease every 10 seconds and supersedes only after
+/// six observations in which the holder's token has not advanced, so
+/// the previous behaviour on this fixture was to sit here for a minute
+/// and then DEPOSE a live publisher. Route this verb back through
+/// `claim_then` and the two seconds run out: that is the control, and
+/// it fails on the exact line this test exists to pin.
+#[tokio::test]
+async fn a_checkout_does_not_wait_out_a_standing_lease() {
+    let store = Arc::new(MemoryStore::new());
+
+    // The publisher: holds the epoch, and keeps holding it.
+    let pdir = tempfile::tempdir().unwrap();
+    let mut publisher = sidecar(&store, pdir.path()).await;
+    assert!(claim_until_held(&mut publisher, 3).await);
+    publisher.checkout().await.unwrap();
+    write(pdir.path(), "README.md", "the real readme");
+    write(pdir.path(), "src/main.rs", "fn main() {}");
+    publisher.run_barrier().await.unwrap();
+    let held = publisher.lease.clone().expect("the publisher holds a lease");
+
+    // The reader: a different pod, a different tree, no lease.
+    let rdir = tempfile::tempdir().unwrap();
+    let mut reader = sidecar(&store, rdir.path()).await;
+    let done = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        super::verbs::run_verb(&mut reader, super::verbs::Step::Checkout),
+    )
+    .await;
+    match done {
+        Err(_) => panic!(
+            "the checkout verb waited on the publisher's lease — it has no business \
+             holding the publish fence"
+        ),
+        Ok(r) => r.expect("the checkout itself must succeed"),
+    }
+    assert_eq!(read(rdir.path(), "README.md").unwrap(), "the real readme");
+    assert_eq!(read(rdir.path(), "src/main.rs").unwrap(), "fn main() {}");
+
+    // And the publisher is still the publisher. A reader that took the
+    // fence would have bumped the epoch out from under it, which is the
+    // failure this verb used to produce after sixty seconds rather than
+    // instead of hanging.
+    let cell = store.epoch_read(&reader.cfg.epoch_key()).await.unwrap().expect("the cell stands");
+    assert_eq!(cell.holder_id, held.holder_id, "the reader deposed the publisher");
+    assert_eq!(cell.epoch, held.epoch, "the reader moved the epoch");
+    assert!(!cell.released, "the reader released someone else's lease");
+    assert!(reader.lease.is_none(), "the reader came away holding a lease");
+}
+
+/// The PREMISE of the leg above: a checkout installs nothing in the
+/// bucket, so the fence that decides who may install is not its to
+/// hold.
+///
+/// Stated as a count rather than as prose because prose does not fail.
+/// If a future checkout writes so much as a marker object, this leg
+/// goes red and says that the lease-free posture no longer follows —
+/// which is the conversation worth having at that moment, and one that
+/// a comment in `verbs.rs` would not start.
+#[tokio::test]
+async fn a_checkout_issues_no_write_to_the_bucket() {
+    let store = Arc::new(MemoryStore::new());
+    let pdir = tempfile::tempdir().unwrap();
+    let mut publisher = sidecar(&store, pdir.path()).await;
+    assert!(claim_until_held(&mut publisher, 3).await);
+    publisher.checkout().await.unwrap();
+    for i in 0..8 {
+        write(pdir.path(), &format!("f{i}.txt"), &format!("body {i}"));
+    }
+    publisher.run_barrier().await.unwrap();
+
+    let rdir = tempfile::tempdir().unwrap();
+    let mut reader = sidecar(&store, rdir.path()).await;
+    store.reset_op_counts();
+    super::verbs::run_verb(&mut reader, super::verbs::Step::Checkout).await.unwrap();
+    let ops = store.op_counts();
+
+    // Every verb on this trait that can change a byte of the bucket.
+    for op in [
+        "put_whole",
+        "delete",
+        "delete_version",
+        "copy_object",
+        "compose_generation",
+        "epoch_acquire",
+        "epoch_renew",
+        "epoch_release",
+        "abort_upload",
+    ] {
+        assert_eq!(
+            ops.get(op).copied().unwrap_or(0),
+            0,
+            "checkout called {op} — it is no longer a read, and `read_only_then` is no \
+             longer justified. Full shape: {ops:?}"
+        );
+    }
+    // The control on the control: an assertion over an empty map passes
+    // for the wrong reason.
+    assert!(ops.values().sum::<u64>() > 0, "the checkout made no requests at all: {ops:?}");
+    assert_eq!(reader.state.load_baseline().unwrap().entries.len(), 8);
+}
+
+/// A backend that PUBLISHES in the middle of a checkout: the first time
+/// the reader asks for the cited file, a new generation of that file
+/// and a manifest one seq ahead land first, and the reader's `If-Match`
+/// then cannot be satisfied.
+///
+/// It has to live in the backend for the same reason `SweepMidRead`
+/// does — the window is between the manifest GET and the object GET,
+/// and no sequence of calls from a test body reaches inside it.
+struct PublishMidCheckout {
+    inner: Arc<MemoryStore>,
+    cfg: LeanConfig,
+    trigger_key: String,
+    trigger_path: String,
+    fired: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for PublishMidCheckout {
+    async fn get_whole(
+        &self,
+        key: &str,
+        if_match: Option<&str>,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        if key == self.trigger_key
+            && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            // What a publisher does, in the order a publisher does it:
+            // the object, then the manifest that cites it.
+            let loaded = manifest::load(self.inner.as_ref(), &self.cfg)
+                .await
+                .expect("the publisher reads the standing manifest")
+                .expect("there is one");
+            let body = Bytes::from_static(b"the publisher's next generation");
+            let crc = crc64_nvme(&body);
+            let stamps = GenerationStamps {
+                generation: 1,
+                epoch: 1,
+                flush_uuid: "the-publisher".into(),
+                boundary_source: None,
+                posix: None,
+            };
+            let meta = self
+                .inner
+                .put_whole(&self.trigger_key, body, &PutCondition::Unconditional, &stamps, crc)
+                .await?;
+            let mut m = loaded.manifest.clone();
+            m.seq += 1;
+            m.entries.get_mut(&self.trigger_path).expect("the path is cited").etag = meta.etag;
+            manifest::cas_write(
+                self.inner.as_ref(),
+                &self.cfg,
+                &m,
+                Some(&loaded.handle()),
+                1,
+                "the-publisher",
+            )
+            .await
+            .expect("the publish lands");
+        }
+        self.inner.get_whole(key, if_match).await
+    }
+
+    // ── everything below is delegation ──
+    async fn copy_object(
+        &self,
+        src_key: &str,
+        src_if_match: Option<&str>,
+        dst_key: &str,
+        condition: &PutCondition,
+        stamps: &GenerationStamps,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.copy_object(src_key, src_if_match, dst_key, condition, stamps).await
+    }
+    async fn put_whole(
+        &self,
+        key: &str,
+        body: Bytes,
+        cond: &PutCondition,
+        stamps: &GenerationStamps,
+        crc: u64,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.put_whole(key, body, cond, stamps, crc).await
+    }
+    async fn compose_generation(
+        &self,
+        spec: &flint_store::ComposeSpec<'_>,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.compose_generation(spec).await
+    }
+    async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head(key).await
+    }
+    async fn get_range(
+        &self,
+        key: &str,
+        off: u64,
+        len: u64,
+        if_match: &str,
+    ) -> flint_store::StoreResult<Bytes> {
+        self.inner.get_range(key, off, len, if_match).await
+    }
+    fn min_part_size(&self) -> u64 {
+        self.inner.min_part_size()
+    }
+    fn max_parts(&self) -> usize {
+        self.inner.max_parts()
+    }
+    async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
+        self.inner.list(prefix).await
+    }
+    async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete(key).await
+    }
+    async fn head_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head_version(key, v).await
+    }
+    async fn get_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.inner.get_version(key, v).await
+    }
+    async fn delete_version(&self, key: &str, v: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete_version(key, v).await
+    }
+    async fn list_versions(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::ListedVersion>> {
+        self.inner.list_versions(prefix).await
+    }
+    async fn list_uploads(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::PendingUpload>> {
+        self.inner.list_uploads(prefix).await
+    }
+    async fn abort_upload(&self, key: &str, id: &str) -> flint_store::StoreResult<()> {
+        self.inner.abort_upload(key, id).await
+    }
+    async fn bootstrap(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<flint_store::BootstrapReport> {
+        self.inner.bootstrap(prefix).await
+    }
+    async fn epoch_read(
+        &self,
+        key: &str,
+    ) -> flint_store::StoreResult<Option<flint_store::EpochState>> {
+        self.inner.epoch_read(key).await
+    }
+    async fn epoch_acquire(
+        &self,
+        key: &str,
+        holder: &str,
+        observed: Option<&flint_store::EpochState>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.inner.epoch_acquire(key, holder, observed).await
+    }
+    async fn epoch_renew(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+        echo: Option<&str>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.inner.epoch_renew(key, lease, echo).await
+    }
+    async fn epoch_release(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+    ) -> flint_store::StoreResult<()> {
+        self.inner.epoch_release(key, lease).await
+    }
+}
+
+/// A reader that loses a race with its OWN publisher is told that, not
+/// told a stranger wrote the bucket.
+///
+/// Dropping the claim from `checkout` made this window reachable for
+/// the first time, and the message waiting in it was
+/// `a_published_workspace_refuses_a_foreign_write_instead_of_adopting_it`'s
+/// — "something other than its publisher wrote that object", pointing
+/// an operator at a second writer that does not exist. That leg is this
+/// one's control: same refusal, same fixture shape, and the ONE thing
+/// that differs is whether the manifest pointer moved.
+#[tokio::test]
+async fn a_publish_that_lands_mid_checkout_names_the_publisher_not_a_stranger() {
+    let inner = Arc::new(MemoryStore::new());
+    let pdir = tempfile::tempdir().unwrap();
+    let mut publisher = sidecar(&inner, pdir.path()).await;
+    publisher.cfg.sole_writer = true;
+    assert!(claim_until_held(&mut publisher, 3).await);
+    publisher.checkout().await.unwrap();
+    write(pdir.path(), "README.md", "generation one");
+    publisher.run_barrier().await.unwrap();
+
+    let rdir = tempfile::tempdir().unwrap();
+    let mut reader = sidecar(&inner, rdir.path()).await;
+    let racing = Arc::new(PublishMidCheckout {
+        inner: inner.clone(),
+        cfg: reader.cfg.clone(),
+        trigger_key: reader.cfg.file_key("README.md"),
+        trigger_path: "README.md".to_string(),
+        fired: std::sync::atomic::AtomicBool::new(false),
+    });
+    reader.store = racing as Arc<dyn ObjectStore>;
+
+    let err = reader.checkout().await.expect_err("the citation it loaded is one generation stale");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("its publisher published while the checkout was running"),
+        "the reader was not told who moved it: {msg}"
+    );
+    assert!(msg.contains("seq 1") && msg.contains("seq 2"), "name both generations: {msg}");
+    assert!(
+        msg.contains("Re-run checkout"),
+        "a reader one generation behind has a remedy; say it: {msg}"
+    );
+    // The stranger accusation is still in there, quoted and labelled as
+    // the thing it is NOT — dropping it would lose the only evidence of
+    // which refusal actually fired.
+    assert!(msg.contains("SOLE WRITER"), "the underlying refusal must survive: {msg}");
+    assert!(
+        read(rdir.path(), "README.md").is_none(),
+        "it materialized a file it could not verify"
+    );
+}

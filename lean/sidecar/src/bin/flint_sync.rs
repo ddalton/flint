@@ -4,7 +4,10 @@
 //! publishes on the flush floor; preStop drains.
 //!
 //! Subcommands:
-//!   checkout   materialize the workspace (restart-matrix aware), exit
+//!   checkout   materialize the workspace (restart-matrix aware), exit.
+//!              Takes NO lease: it installs nothing in the bucket, so
+//!              the publish fence is not its to hold, and holding it
+//!              only made concurrent readers serialise on one cell.
 //!   barrier    one publish barrier, exit
 //!   sync       the HITL sync verb (scan-first), exit
 //!   recover-staged  re-cite durable-but-uncited work as one flagged
@@ -73,8 +76,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use flint_lean::lease::{self, ClaimOutcome};
 use flint_lean::state::SidecarState;
+use flint_lean::lease;
+use flint_lean::verbs;
 use flint_lean::{BoundaryMode, LeanConfig, LeanError, Sidecar, SentinelMode};
 use flint_store::s3::S3Store;
 use flint_store::ObjectStore;
@@ -125,19 +129,6 @@ fn log_retry(sc: &Sidecar, e: &LeanError, fallback: &str) {
     );
 }
 
-/// A comma list, trimmed, empties dropped. Returns `None` when the
-/// variable is unset or holds only separators — `Some(vec![])` would be
-/// an empty scope, and `checkout_scoped` refuses that rather than let it
-/// mean "everything".
-fn env_list(name: &str) -> Option<Vec<String>> {
-    let raw = std::env::var(name).ok()?;
-    let v: Vec<String> =
-        raw.split(',').map(|e| e.trim().to_string()).filter(|e| !e.is_empty()).collect();
-    if v.is_empty() {
-        return None;
-    }
-    Some(v)
-}
 
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
@@ -314,10 +305,10 @@ async fn main() {
     }
 
     let result = match cmd.as_str() {
-        "checkout" => claim_then(&mut sc, Step::Checkout).await,
-        "barrier" => claim_then(&mut sc, Step::Barrier).await,
-        "sync" => claim_then(&mut sc, Step::Sync).await,
-        "recover-staged" => claim_then(&mut sc, Step::RecoverStaged).await,
+        "checkout" => verbs::run_verb(&mut sc, verbs::Step::Checkout).await,
+        "barrier" => verbs::run_verb(&mut sc, verbs::Step::Barrier).await,
+        "sync" => verbs::run_verb(&mut sc, verbs::Step::Sync).await,
+        "recover-staged" => verbs::run_verb(&mut sc, verbs::Step::RecoverStaged).await,
         // `rescope <a> <b> ...` narrows/widens to exactly that set;
         // `rescope --all` goes back to the whole tree. Spelled out
         // rather than "no arguments means everything", because the
@@ -337,7 +328,7 @@ async fn main() {
             } else {
                 Some(rest)
             };
-            claim_then(&mut sc, Step::Rescope(target)).await
+            verbs::run_verb(&mut sc, verbs::Step::Rescope(target)).await
         }
         "run" => run_loop(&mut sc).await,
         other => {
@@ -387,149 +378,9 @@ async fn ctl_call(
     })
 }
 
-enum Step {
-    Checkout,
-    Barrier,
-    Sync,
-    RecoverStaged,
-    /// The narrow/widen verb. `None` is the whole tree; an empty
-    /// argument list therefore cannot mean "narrow to nothing".
-    Rescope(Option<Vec<String>>),
-}
-
-async fn claim(sc: &mut Sidecar) -> Result<(), LeanError> {
-    // Before the first claim step: is this prefix ours to claim at all?
-    lease::verify_claim(sc).await?;
-    lease::warn_if_prefix_is_shared(sc).await;
-    let mut answered_owed = false;
-    loop {
-        match lease::claim_step(sc).await? {
-            ClaimOutcome::Claimed(lease) => {
-                eprintln!("flint-sync: holding epoch {}", lease.epoch);
-                return Ok(());
-            }
-            ClaimOutcome::Waiting { quiet_polls } => {
-                if !answered_owed {
-                    answered_owed = true;
-                    match sc.refuse_what_this_incarnation_can_never_honor().await {
-                        Ok(true) => eprintln!(
-                            "flint-sync: a foreign holder stands and this incarnation owes an \
-                             ack it can never honor — refused-fenced written, marker fenced"
-                        ),
-                        Ok(false) => {}
-                        Err(e) => {
-                            // Never let this block the claim: a fresh
-                            // pod must still take over.
-                            answered_owed = false;
-                            eprintln!("flint-sync: could not settle owed acks while waiting: {e}");
-                        }
-                    }
-                }
-                eprintln!("flint-sync: waiting on the standing lease (quiet {quiet_polls}/6)");
-                tokio::time::sleep(Duration::from_secs(10)).await;
-            }
-        }
-    }
-}
-
-async fn claim_then(sc: &mut Sidecar, step: Step) -> Result<(), LeanError> {
-    claim(sc).await?;
-    let out = async {
-        match step {
-            Step::Checkout => {
-                let r = sc.checkout_scoped(env_list("FLINT_SYNC_CHECKOUT_SCOPE")).await?;
-                eprintln!(
-                    "flint-sync: checkout — {} materialized, {} present, live-tree={}",
-                    r.materialized, r.skipped_present, r.resumed_live_tree
-                );
-                if let Some(sc) = &r.scope {
-                    // The declined count, not just the scope: a scope
-                    // that admits everything reads exactly like no
-                    // scope, and "it was configured" is not evidence
-                    // that it did anything.
-                    eprintln!(
-                        "flint-sync: checkout SCOPED to {:?} — {} citations declined",
-                        sc, r.out_of_scope
-                    );
-                }
-                // BYTES on the same line as the phases, deliberately:
-                // an A/B of the fetch window compares two wall clocks,
-                // and an arm that "wins" by materialising fewer bytes
-                // is the failure mode a timing-only line cannot show.
-                eprintln!(
-                    "flint-sync: phase manifest={:.3}s fetch={:.3}s commit={:.3}s bytes={} ranged={}",
-                    r.manifest_secs, r.fetch_secs, r.commit_secs, r.bytes, r.ranged
-                );
-            }
-            Step::Rescope(target) => {
-                let r = sc.rescope(target).await?;
-                eprintln!(
-                    "flint-sync: rescope to {:?} — uncited {}, unlinked {}, materialised {} \
-                     ({} bytes), already held {}",
-                    r.target, r.uncited, r.unlinked, r.materialized, r.bytes, r.already_held
-                );
-                // A kept path is the one outcome a caller must not miss:
-                // the scope now says one thing and the held set holds
-                // more, and the reason is an edit only they can resolve.
-                if !r.kept_dirty.is_empty() {
-                    eprintln!(
-                        "flint-sync: rescope KEPT {} path(s) with unpublished changes: {:?} — \
-                         publish them, then rescope again to drop them",
-                        r.kept_dirty.len(),
-                        r.kept_dirty
-                    );
-                }
-            }
-            Step::Barrier => {
-                let r = sc.run_barrier().await?;
-                eprintln!(
-                    "flint-sync: barrier seq={:?} up={} del={} parked={} consumed={}",
-                    r.seq,
-                    r.uploaded.len(),
-                    r.deleted.len(),
-                    r.parked.len(),
-                    r.consumed
-                );
-            }
-            Step::Sync => {
-                let r = sc.sync().await?;
-                println!("{}", serde_json::to_string_pretty(&r).unwrap());
-            }
-            Step::RecoverStaged => {
-                let r = sc.recover_staged().await?;
-                eprintln!(
-                    "flint-sync: recover-staged seq={:?} recited={} dangling={} unrecoverable={}",
-                    r.seq,
-                    r.recited.len(),
-                    r.dangling.len(),
-                    r.unrecoverable.len()
-                );
-                for p in &r.recited {
-                    eprintln!("flint-sync:   recited {p}");
-                }
-                // Named loudly: no verb can fix these — the retention
-                // backstop reaped the cited version and no newer
-                // generation survives.
-                for p in &r.unrecoverable {
-                    eprintln!("flint-sync:   UNRECOVERABLE {p}");
-                }
-                if !r.unrecoverable.is_empty() {
-                    return Err(LeanError::State(format!(
-                        "{} path(s) have no surviving version to cite",
-                        r.unrecoverable.len()
-                    )));
-                }
-            }
-        }
-        Ok(())
-    }
-    .await;
-    let _ = lease::release(sc).await;
-    out
-}
 
 async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
-    claim(sc).await?;
+    verbs::claim(sc).await?;
     // This incarnation owes its own drain attestation; one left by an
     // earlier life of this tree must not vouch for it.
     if let Err(e) = sc.state.clear_drained() {
@@ -559,7 +410,7 @@ async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
             posture.reason.as_deref().unwrap_or("unknown")
         );
     }
-    sc.checkout_scoped(env_list("FLINT_SYNC_CHECKOUT_SCOPE")).await?;
+    sc.checkout_scoped(verbs::env_list("FLINT_SYNC_CHECKOUT_SCOPE")).await?;
     // RE-RUN the preflight rather than republishing the pre-checkout
     // snapshot (review: U25). Two of the preflight's inputs are written
     // BY checkout — `baseline.inst_base` wholesale, and the posture file

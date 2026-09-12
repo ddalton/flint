@@ -653,6 +653,43 @@ impl Sidecar {
     /// no verb to shed it again, and no verb to ask for a path the
     /// remote never touched. Scoping a checkout is therefore a bet that
     /// the admitted set is the set the agent needs for its whole life.
+    /// Name the right culprit when a fetch could not be served.
+    ///
+    /// Three of `materialize`'s refusals — the SOLE WRITER 412, the
+    /// pinned 412, and the cited-object-is-gone 404 — read the same
+    /// evidence ("this object is not what the manifest said") and
+    /// accuse a stranger of writing the bucket. There is a second
+    /// explanation, and after 2026-09-11 it is the LIKELIER one:
+    /// `checkout` no longer holds the epoch, so the workspace's own
+    /// publisher may have published a new generation between the
+    /// manifest we loaded and the object we asked for. A reader is then
+    /// citing a manifest one generation stale, and every word of
+    /// "something other than its publisher wrote that object" is false.
+    ///
+    /// One GET of the pointer tells them apart, and it is paid only on
+    /// a path that is already returning an error. A pointer that has
+    /// not moved leaves the original refusal exactly as written — the
+    /// stranger accusation is still the right one, and softening it for
+    /// every caller to buy this would be the worse trade.
+    async fn say_who_moved_it(&self, read_seq: u64, e: LeanError) -> LeanError {
+        let now = match manifest::load_pointer(self.store.as_ref(), &self.cfg).await {
+            Ok(Some(p)) => p.pointer.seq,
+            // No pointer, or we cannot read one. Either way we have
+            // learned nothing, so we must not overwrite what we know.
+            Ok(None) | Err(_) => return e,
+        };
+        if now <= read_seq {
+            return e;
+        }
+        LeanError::State(format!(
+            "this checkout read manifest seq {read_seq} and the workspace is now at \
+             seq {now}: its publisher published while the checkout was running, so \
+             the citation it was still fetching is one generation stale. Re-run \
+             checkout. (The underlying refusal, which names a stranger and in this \
+             case means nothing of the kind: {e})"
+        ))
+    }
+
     pub async fn checkout_scoped(
         &mut self,
         scope: Option<Vec<String>>,
@@ -751,7 +788,10 @@ impl Sidecar {
         report.fetch_secs = t_fetch.elapsed().as_secs_f64();
         let t_commit = std::time::Instant::now();
         for r in results {
-            let f = r?;
+            let f = match r {
+                Ok(f) => f,
+                Err(e) => return Err(self.say_who_moved_it(m.seq, e).await),
+            };
             if let Some(why) = f.refused {
                 self.state.append_conflict(&super::state::ConflictRecord {
                     path: f.path.clone(),

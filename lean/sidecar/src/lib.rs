@@ -57,6 +57,7 @@ pub mod sentinel;
 pub mod state;
 pub mod sync;
 pub mod uds;
+pub mod verbs;
 
 #[cfg(test)]
 mod tests;
