@@ -1,0 +1,68 @@
+# The lean subtree model, checked on every change to it.
+#
+# WHAT THIS CLAIMS, AND WHAT IT DOES NOT. It claims the model still
+# CHECKS OUT: every strict run holds, and every must-fail mutation still
+# fails. It does NOT claim the model still describes the code. Nothing
+# automated can: the dangerous drift is the Rust changing until the
+# abstraction no longer matches it, with the .tla file untouched and
+# perfectly green — and this project has recorded the abstraction BEING
+# the bug more than once. Read a green badge as "internally sound",
+# never as "true".
+#
+# WHY IT IS WORTH RUNNING ANYWAY. This is not a documentation model. The
+# gate is 83 TLC runs and most are MUST-FAIL: the script breaks the spec
+# deliberately and requires TLC to catch it, so a model that has decayed
+# into vacuity goes red rather than green.
+#
+# SPLIT FROM THE HUB GATE ON PURPOSE. GitHub path filters are
+# WORKFLOW-level, not job-level, so a single workflow holding both jobs
+# ran the hub's 250-run gate on every lean-only edit. Two files is the
+# only way to give each gate the trigger it actually wants.
+name: formal-lean
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lean/formal/**'
+      - '.github/workflows/formal-lean.yml'
+  pull_request:
+    paths:
+      - 'lean/formal/**'
+      - '.github/workflows/formal-lean.yml'
+  workflow_dispatch:
+
+jobs:
+  # Measured 2026-09-12 on a 4-core workstation: 9m30s wall, 431% CPU —
+  # it parallelises, so a 4-vCPU runner is the right size. On push
+  # because that is affordable, and because a gate is only useful if it
+  # answers while the change is still in front of you.
+  lean-model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      # The script fetches tla2tools.jar itself on first use. Cache it so
+      # a re-run does not re-download 20 MB of a pinned release.
+      - uses: actions/cache@v4
+        with:
+          path: .tla2tools.jar
+          key: tla2tools-1.7.4
+      - name: lean formal gate
+        working-directory: lean/formal
+        env:
+          TLA_TOOLS_JAR: ${{ github.workspace }}/.tla2tools.jar
+        run: bash check.sh
+      - name: the gate must have RUN something
+        working-directory: lean/formal
+        # Anti-vacuity, the same guard store-tests carries: a check.sh
+        # that looped zero times exits 0 and looks exactly like 83 green
+        # runs.
+        run: |
+          n=$(ls *.cfg | wc -l)
+          echo "cfgs present: $n"
+          test "$n" -ge 40 || { echo "::error::only $n cfgs — the model set did not check out"; exit 1; }

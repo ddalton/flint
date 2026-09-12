@@ -484,7 +484,14 @@ fi
 # every run whether it passes or fails (a failing run's cost matters too),
 # and summarised at the end, sorted. Override the location with
 # TLA_PROFILE_FILE; set TLA_PROFILE=0 to skip the summary.
-PROFILE_FILE=${TLA_PROFILE_FILE:-$(mktemp -t tlaprofile)}
+# `mktemp -t <prefix>` is BSD-only: macOS appends its own suffix, GNU
+# coreutils REFUSES a template with fewer than three trailing X's
+# ("too few X's in template"). Under `set -euo pipefail` that killed
+# this script at startup, in under a second, before TLC ran once — so
+# the whole hub gate was macOS-only and nobody could tell, because the
+# only machine it ran on was a macOS workstation. An explicit template
+# is accepted identically by both.
+PROFILE_FILE=${TLA_PROFILE_FILE:-$(mktemp "${TMPDIR:-/tmp}/tlaprofile.XXXXXX")}
 export PROFILE_FILE
 : > "$PROFILE_FILE"
 

@@ -5,7 +5,8 @@
 image:https://github.com/ddalton/flint/actions/workflows/rust-ci.yml/badge.svg?branch=main[rust-ci,link=https://github.com/ddalton/flint/actions/workflows/rust-ci.yml]
 image:https://github.com/ddalton/flint/actions/workflows/dashboard-ci.yml/badge.svg?branch=main[dashboard-ci,link=https://github.com/ddalton/flint/actions/workflows/dashboard-ci.yml]
 image:https://github.com/ddalton/flint/actions/workflows/dashboard-api-spec.yml/badge.svg?branch=main[dashboard-api-spec,link=https://github.com/ddalton/flint/actions/workflows/dashboard-api-spec.yml]
-image:https://github.com/ddalton/flint/actions/workflows/formal.yml/badge.svg?branch=main[formal,link=https://github.com/ddalton/flint/actions/workflows/formal.yml]
+image:https://github.com/ddalton/flint/actions/workflows/formal-lean.yml/badge.svg?branch=main[formal-lean,link=https://github.com/ddalton/flint/actions/workflows/formal-lean.yml]
+image:https://github.com/ddalton/flint/actions/workflows/formal-hub.yml/badge.svg?branch=main[formal-hub,link=https://github.com/ddalton/flint/actions/workflows/formal-hub.yml]
 
 // `?branch=main` is deliberate. Without it a badge reports the most
 // recent run of the workflow on ANY ref, so a red run from a fork's
@@ -18,7 +19,10 @@ image:https://github.com/ddalton/flint/actions/workflows/formal.yml/badge.svg?br
 // flint-store crate, flint-lean, flint-forge, and the cross-uid
 // authorization drill against a real kernel NFS mount.
 //
-// `formal` is the TLA+ gate. A green badge there says the models still
+// `formal-lean` and `formal-hub` are the TLA+ gates, split because
+// GitHub path filters are WORKFLOW-level: one file holding both ran the
+// hub's 250-run gate on every lean-only edit. A green badge there says
+// the models still
 // CHECK OUT — every strict run holds and every must-fail mutation still
 // fails. It does NOT say the models still describe the code; nothing
 // automated can, and reading it that way is how an abstraction becomes
